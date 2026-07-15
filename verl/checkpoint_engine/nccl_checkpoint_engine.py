@@ -221,14 +221,18 @@ class NCCLCheckpointEngine(CheckpointEngine):
                 assert self.world_size == world_size, (
                     f"world_size {world_size} is not equal to self.world_size {self.world_size}"
                 )
-
-            if self.rank > 0:
-                self._connect_zmq_client(master_metadata)
             collective.barrier(self.group_name)
 
-        # Bound the first-rendezvous init so a hung sync fails fast with a clear
-        # error instead of hanging forever (verl issue #6967).
+        # Bound the NCCL group init + first barrier (the calls that can hang) so a
+        # stalled sync fails fast with a clear error instead of hanging forever
+        # (verl issue #6967).
         run_group_init_with_timeout(_do_init, group_name=self.group_name)
+
+        # Connect the ZeroMQ SUB socket on the caller thread, NOT inside the
+        # timeout worker: pyzmq sockets are not thread-safe and this socket is
+        # used later from other threads.
+        if rank > 0:
+            self._connect_zmq_client(master_metadata)
 
         logger.info(f"init_process_group rank: {self.rank}, world_size: {self.world_size}")
 
