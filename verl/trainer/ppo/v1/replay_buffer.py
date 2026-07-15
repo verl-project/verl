@@ -30,7 +30,10 @@ VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS = int(os.getenv("VERL_REPLAY_BUFFER_DE
 
 
 def _accumulate_drop_metrics(acc: dict, new: dict, dropped: int) -> None:
-    """Merge one poll iteration's drop metrics into ``acc`` in place."""
+    """Merge one poll iteration's staleness-drop metrics into ``acc`` in place.
+
+    ``dropped`` weights the staleness mean so it stays a true per-sample average across iterations.
+    """
     count_key = next((k for k in new if k.endswith("/dropped_samples")), None)
     prev_total = acc.get(count_key, 0) if count_key else 0
 
@@ -44,6 +47,9 @@ def _accumulate_drop_metrics(acc: dict, new: dict, dropped: int) -> None:
             acc[key] = max(acc.get(key, value), value)
         elif key.endswith("/dropped_samples_staleness/min"):
             acc[key] = min(acc.get(key, value), value)
+        else:
+            # DAPO/failure counters are simple sums.
+            acc[key] = acc.get(key, 0) + value
 
 
 # TODO: Pass custom sampler to TransferQueue:
@@ -78,7 +84,22 @@ class ReplayBuffer:
     - running: all sessions of the prompt are running.
     - finished: all sessions of the prompt are finished without error.
     - failure: all sessions of the prompt are finished, but at least one session failed.
-    Only prompt with status `finished` or `failure`, its trajectories can be sampled by replay buffer.
+    Only prompts with status `finished` or `failure` enter terminal-group handling.
+
+    ### [Terminal-group handling matrix]
+    ``drop`` means off-policy staleness dropping; ``DAPO`` means filtering groups whose configured reward
+    metric is identical across all trajectories. The matrix applies to the training partition:
+
+    | trainer mode | drop | DAPO | failure |
+    | --- | --- | --- | --- |
+    | sync | Keep; no refill. | Drop ``k``; submit ``2k``; wait; trim surplus. | Keep/sample; no refill. |
+    | async | Drop ``k``; refill ``k``. | Drop ``k``; refill ``k``. | Drop ``k``; refill ``k``. |
+
+    DAPO filtering requires its metric to be available before a prompt becomes ``finished``. This is the
+    async reward-computation path used by rule-based rewards (or a reward model with its own resource pool),
+    regardless of whether the trainer itself is sync or async. A colocated reward model computes rewards only
+    after ``sample`` returns and therefore cannot use this filtering path.
+    ``algorithm.filter_groups.max_num_gen_batches`` is not enforced by this v1 path.
 
     Args:
         trainer_mode (str): Trainer mode.
@@ -87,8 +108,9 @@ class ReplayBuffer:
         max_off_policy_strategy (str): How to handle trajectory that exceeds the maximum number of model versions.
         sampler_kwargs (dict): Additional kwargs for the custom sampler.
         poll_interval (float, optional): Poll interval in seconds. Defaults to 2.0.
-        refill_fn (callable, optional): Function to submits fresh prompts for generation to replace stale groups dropped
-            by the ``drop`` strategy (trainer-injected)
+        refill_fn (callable, optional): Trainer-injected function that submits an exact number of fresh prompts.
+        filter_groups_metric (str, optional): DAPO group-filtering metric read from each trajectory's
+            ``extra_fields.reward_extra_info``. ``None`` disables DAPO filtering.
     """
 
     def __init__(
@@ -100,6 +122,7 @@ class ReplayBuffer:
         sampler_kwargs: DictConfig,
         poll_interval: float = 2.0,
         refill_fn=None,
+        filter_groups_metric: str | None = None,
     ):
         self.trainer_mode = trainer_mode
         self.trainer_config = trainer_config
@@ -108,6 +131,7 @@ class ReplayBuffer:
         self.sampler_kwargs = sampler_kwargs
         self.poll_interval = poll_interval
         self.refill_fn = refill_fn
+        self.filter_groups_metric = filter_groups_metric
 
         assert isinstance(self.max_off_policy_threshold, int) and self.max_off_policy_threshold > 0, (
             f"Invalid max off policy threshold: {self.max_off_policy_threshold}, must be an integer greater than 0"
@@ -115,6 +139,8 @@ class ReplayBuffer:
         assert self.max_off_policy_strategy in ["drop", "wait"], (
             f"Invalid max off policy strategy: {self.max_off_policy_strategy}, must be one of ['drop', 'wait']"
         )
+        if self.filter_groups_metric is not None and self.refill_fn is None:
+            raise ValueError("DAPO group filtering requires refill_fn")
 
         # partition_id => {key: tag}
         self.partitions: dict[str, dict[str, dict]] = defaultdict(dict)
@@ -161,20 +187,101 @@ class ReplayBuffer:
                         partition[key] = {}
                     partition[key].update(tag)
 
-    def _sampleable_terminal_keys(self, global_steps: int, partition_id: str) -> set[str]:
-        """Terminal prompts eligible for selection in the current metadata snapshot."""
-        terminal_keys = self.finished_keys[partition_id] | self.failure_keys[partition_id]
-        if self.max_off_policy_strategy != "drop":
-            return terminal_keys
+    @staticmethod
+    def _metrics_prefix(partition_id: str) -> str:
+        return "training" if partition_id == "train" else "validation"
 
+    def _sync_dapo_enabled(self, partition_id: str) -> bool:
+        return self.trainer_mode == "sync" and partition_id != "val" and self.filter_groups_metric is not None
+
+    def _traj_keys_of(self, partition_id: str, uids: set[str]) -> list[str]:
+        """Trajectory keys "{uid}_..." belonging to the given prompt uids (kv_clear does not cascade)."""
+        return [key for key in self.partitions[partition_id] if key.split("_")[0] in uids]
+
+    def _clear_groups(self, partition_id: str, uids: set[str]) -> None:
+        """Remove the given prompt groups (prompt keys + their trajectory keys) from TransferQueue."""
+        tq.kv_clear(partition_id=partition_id, keys=list(uids) + self._traj_keys_of(partition_id, uids))
+
+    def _stale_terminal_keys(self, global_steps: int, partition_id: str) -> set[str]:
+        """Stale terminal prompts dropped only by async trainers using the ``drop`` strategy."""
+        if partition_id == "val" or self.trainer_mode == "sync" or self.max_off_policy_strategy != "drop":
+            return set()
         prompt_global_steps = self.prompt_global_steps[partition_id]
+        terminal_keys = self.finished_keys[partition_id] | self.failure_keys[partition_id]
         return {
             uid
             for uid in terminal_keys
-            if global_steps - prompt_global_steps.get(uid, global_steps) + 1 <= self.max_off_policy_threshold
+            if global_steps - prompt_global_steps.get(uid, global_steps) + 1 > self.max_off_policy_threshold
         }
 
-    def _has_enough_samples(self, global_steps: int, partition_id: str, batch_size: int) -> bool:
+    def _dapo_filtered_keys(self, partition_id: str) -> set[str]:
+        """Finished groups whose configured DAPO metric is identical across all trajectories."""
+        if partition_id == "val" or self.filter_groups_metric is None:
+            return set()
+
+        finished_uids = self.finished_keys[partition_id]
+        trajectory_keys = [key for key in self.partitions[partition_id] if key.split("_")[0] in finished_uids]
+        metrics_by_uid: dict[str, list[float]] = defaultdict(list)
+        missing_metric_uids = finished_uids - {key.split("_")[0] for key in trajectory_keys}
+
+        if trajectory_keys:
+            data = tq.kv_batch_get(
+                keys=trajectory_keys,
+                partition_id=partition_id,
+                select_fields=["extra_fields"],
+            )
+            extra_fields_list = data["extra_fields"].tolist()
+        else:
+            extra_fields_list = []
+
+        for key, extra_fields in zip(trajectory_keys, extra_fields_list, strict=True):
+            uid = key.split("_")[0]
+            extra_fields = getattr(extra_fields, "data", extra_fields)
+            reward_extra_info = extra_fields.get("reward_extra_info", {}) if isinstance(extra_fields, dict) else {}
+            if self.filter_groups_metric not in reward_extra_info:
+                missing_metric_uids.add(uid)
+            else:
+                metrics_by_uid[uid].append(float(reward_extra_info[self.filter_groups_metric]))
+
+        if missing_metric_uids:
+            raise RuntimeError(
+                f"Finished groups are missing DAPO metric {self.filter_groups_metric!r}: "
+                f"{sorted(missing_metric_uids)[:5]}"
+            )
+
+        return {uid for uid, values in metrics_by_uid.items() if len(values) > 1 and float(np.std(values)) == 0.0}
+
+    def _terminal_drop_reasons(self, global_steps: int, partition_id: str) -> tuple[set[str], set[str], set[str]]:
+        """Return stale, DAPO-filtered, and failed groups for this metadata snapshot.
+
+        The sets may overlap. Callers clear and refill their union, so one prompt is never handled twice.
+        """
+        if partition_id == "val":
+            return set(), set(), set()
+
+        stale_uids = self._stale_terminal_keys(global_steps, partition_id)
+        dapo_uids = self._dapo_filtered_keys(partition_id)
+        failed_uids = set() if self.trainer_mode == "sync" else set(self.failure_keys[partition_id])
+        return stale_uids, dapo_uids, failed_uids
+
+    def _sampleable_terminal_keys(
+        self,
+        global_steps: int,
+        partition_id: str,
+        drop_reasons: tuple[set[str], set[str], set[str]] | None = None,
+    ) -> set[str]:
+        terminal_uids = self.finished_keys[partition_id] | self.failure_keys[partition_id]
+        if drop_reasons is None:
+            drop_reasons = self._terminal_drop_reasons(global_steps, partition_id)
+        return terminal_uids - set().union(*drop_reasons)
+
+    def _has_enough_samples(
+        self,
+        global_steps: int,
+        partition_id: str,
+        batch_size: int,
+        sampleable_keys: set[str] | None = None,
+    ) -> bool:
         # For wait strategy, we need to wait all trajectories that reach threshold to finish
         if self.max_off_policy_strategy == "wait":
             for key in self.pending_keys[partition_id] | self.running_keys[partition_id]:
@@ -182,47 +289,50 @@ class ReplayBuffer:
                 if (global_steps - prompt_global_steps + 1) >= self.max_off_policy_threshold:
                     return False
 
-        return len(self._sampleable_terminal_keys(global_steps, partition_id)) >= batch_size
+        if sampleable_keys is None:
+            sampleable_keys = self._sampleable_terminal_keys(global_steps, partition_id)
+        return len(sampleable_keys) >= batch_size
 
-    def _drop_stale_finished(self, global_steps: int, partition_id: str) -> tuple[int, dict]:
-        """Drop terminal (finished/failure) prompts whose version span exceeds the threshold."""
-        # TODO: drop strategy only takes effect after the whole group is finished, which may be too late.
-        if self.max_off_policy_strategy != "drop":
-            return 0, {}
+    def _drop_terminal_groups(
+        self,
+        global_steps: int,
+        partition_id: str,
+        drop_reasons: tuple[set[str], set[str], set[str]] | None = None,
+    ) -> tuple[set[str], int, int, dict]:
+        """Clear terminal groups rejected by any active policy exactly once."""
+        if drop_reasons is None:
+            drop_reasons = self._terminal_drop_reasons(global_steps, partition_id)
+        stale_uids, dapo_uids, failed_uids = drop_reasons
+        dropped_uids = stale_uids | dapo_uids | failed_uids
+        if not dropped_uids:
+            return set(), 0, 0, {}
 
-        prompt_global_steps = self.prompt_global_steps[partition_id]
-        terminal_uids = self.finished_keys[partition_id] | self.failure_keys[partition_id]
-        stale_uids = terminal_uids - self._sampleable_terminal_keys(global_steps, partition_id)
+        prefix = self._metrics_prefix(partition_id)
+        metrics: dict = {}
+        if stale_uids:
+            prompt_global_steps = self.prompt_global_steps[partition_id]
+            spans = np.array(
+                [global_steps - prompt_global_steps.get(uid, global_steps) + 1 for uid in stale_uids],
+                dtype=float,
+            )
+            metrics.update(
+                {
+                    f"{prefix}/off_policy/dropped_samples": len(stale_uids),
+                    f"{prefix}/off_policy/dropped_samples_staleness/mean": spans.mean(),
+                    f"{prefix}/off_policy/dropped_samples_staleness/max": spans.max(),
+                    f"{prefix}/off_policy/dropped_samples_staleness/min": spans.min(),
+                }
+            )
+        if dapo_uids:
+            metrics[f"{prefix}/filter_groups/dropped_samples"] = len(dapo_uids)
+        if failed_uids:
+            metrics[f"{prefix}/rollout_failure/dropped_samples"] = len(failed_uids)
 
-        if not stale_uids:
-            return 0, {}
-
-        stale_spans = [global_steps - prompt_global_steps.get(uid, global_steps) + 1 for uid in stale_uids]
-
-        # Clear prompt keys and their trajectory keys "{uid}_..." (kv_clear does not cascade).
-        traj_keys = [key for key in self.partitions[partition_id] if key.split("_")[0] in stale_uids]
-        tq.kv_clear(partition_id=partition_id, keys=list(stale_uids) + traj_keys)
-
-        staleness = np.array(stale_spans, dtype=float)
-        # TODO: use logger here
-        print(
-            f"[drop] partition={partition_id} global_steps={global_steps} "
-            f"threshold={self.max_off_policy_threshold} num_dropped={len(stale_uids)} "
-            f"span(min/mean/max)={staleness.min():.0f}/{staleness.mean():.2f}/{staleness.max():.0f}",
-            flush=True,
-        )
-
-        prefix = "training" if partition_id == "train" else "validation"
-        metrics = {
-            f"{prefix}/off_policy/dropped_samples": len(stale_uids),
-            f"{prefix}/off_policy/dropped_samples_staleness/mean": staleness.mean(),
-            f"{prefix}/off_policy/dropped_samples_staleness/max": staleness.max(),
-            f"{prefix}/off_policy/dropped_samples_staleness/min": staleness.min(),
-        }
-        return len(stale_uids), metrics
+        self._clear_groups(partition_id, dropped_uids)
+        return dropped_uids, len(stale_uids), len(dapo_uids), metrics
 
     @SkipManager.annotate_tq(role="rollout_tq", phase="sample")
-    def sample(self, global_steps: int, partition_id: str, batch_size: int) -> KVBatchMeta:
+    def sample(self, global_steps: int, partition_id: str, batch_size: int) -> tuple[KVBatchMeta, dict]:
         """Sample a batch of data from the replay buffer.
 
         NOTE: user can customize sampling strategy by setting:
@@ -240,7 +350,6 @@ class ReplayBuffer:
             KVBatchMeta: A batch of data.
             dict: Auxiliary metrics.
         """
-        # TODO: failure samples dropping and refilling
         last_debug_time = time.time()
         drop_metrics: dict = {}
         selected_prompt_uids: list[str] = []
@@ -251,21 +360,46 @@ class ReplayBuffer:
             # Drop, gating, and selection below must all use this snapshot.
             self._sync_metadata_from_transfer_queue()
 
-            dropped, metrics = self._drop_stale_finished(global_steps, partition_id)
-            if dropped > 0:
-                _accumulate_drop_metrics(drop_metrics, metrics, dropped)
-                if self.refill_fn is not None:
-                    self.refill_fn(dropped)
+            # Sync DAPO is round-based: do not inspect/select a partial 2k refill, otherwise early
+            # completions recreate the long-tail problem that over-generation is intended to avoid.
+            if self._sync_dapo_enabled(partition_id) and (
+                self.pending_keys[partition_id] or self.running_keys[partition_id]
+            ):
+                time.sleep(self.poll_interval)
                 continue
 
-            if self._has_enough_samples(global_steps, partition_id, batch_size):
+            drop_reasons = self._terminal_drop_reasons(global_steps, partition_id)
+            dropped_uids, stale_count, dapo_count, metrics = self._drop_terminal_groups(
+                global_steps, partition_id, drop_reasons
+            )
+            if dropped_uids:
+                _accumulate_drop_metrics(drop_metrics, metrics, stale_count)
+
+                # Async has a buffer and replaces every rejected group exactly. Sync only rejects DAPO
+                # groups and deliberately over-generates 2x to avoid a new generation tail.
+                refill_count = len(dropped_uids) if self.trainer_mode != "sync" else 2 * dapo_count
+                if refill_count > 0 and self.refill_fn is not None:
+                    self.refill_fn(refill_count)
+                continue
+
+            sampleable_keys = self._sampleable_terminal_keys(global_steps, partition_id, drop_reasons)
+            if self._has_enough_samples(global_steps, partition_id, batch_size, sampleable_keys):
                 prompt_global_steps_snapshot = dict(self.prompt_global_steps[partition_id])
                 partition_snapshot = dict(self.partitions[partition_id])
                 sampleable_keys = sorted(
-                    self._sampleable_terminal_keys(global_steps, partition_id),
+                    sampleable_keys,
                     key=lambda key: prompt_global_steps_snapshot.get(key, 0),
                 )
                 selected_prompt_uids = sampleable_keys[:batch_size]
+
+                # Legacy sync DAPO truncates an over-generated batch. Clearing the equivalent TQ
+                # surplus keeps sync mode bufferless instead of carrying extra groups into later steps.
+                if self._sync_dapo_enabled(partition_id):
+                    surplus_uids = set(sampleable_keys[batch_size:])
+                    if surplus_uids:
+                        self._clear_groups(partition_id, surplus_uids)
+                        key = f"{self._metrics_prefix(partition_id)}/filter_groups/dropped_surplus_samples"
+                        drop_metrics[key] = drop_metrics.get(key, 0) + len(surplus_uids)
                 break
 
             time.sleep(self.poll_interval)
@@ -278,7 +412,7 @@ class ReplayBuffer:
                 )
                 last_debug_time = time.time()
 
-        if self.max_off_policy_strategy == "drop":
+        if self.trainer_mode != "sync" and self.max_off_policy_strategy == "drop":
             selected_spans = [
                 global_steps - prompt_global_steps_snapshot.get(uid, global_steps) + 1 for uid in selected_prompt_uids
             ]

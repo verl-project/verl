@@ -14,9 +14,8 @@
 """Unit tests for :class:`verl.trainer.ppo.v1.replay_buffer.ReplayBuffer`.
 
 The tests run against a real (CPU-only) TransferQueue instance. ``ReplayBuffer``
-is fully synchronous: :meth:`ReplayBuffer.sample` blocks the calling thread,
-re-polling TransferQueue every ``poll_interval`` seconds until enough terminal
-(``finished``/``failure``) prompts are available, then returns a
+is a blocking consumer: :meth:`ReplayBuffer.sample` re-polls TransferQueue every
+``poll_interval`` seconds until enough eligible terminal prompts are available, then returns a
 ``(KVBatchMeta, metrics)`` tuple.
 
 To exercise the blocking consumer without deadlocking the test, the *producer*
@@ -37,7 +36,7 @@ measures a trajectory's staleness (number of model versions it spans) directly a
 ``(global_steps - prompt_global_steps + 1)`` and supports two strategies once a
 trajectory crosses ``max_off_policy_threshold``:
 
-- ``drop``: train eagerly, dropping any sampled trajectory strictly above the
+- ``drop`` (async trainers): train eagerly, dropping any sampled trajectory strictly above the
   threshold (``staleness > threshold``) and reporting drop metrics.
 - ``wait``: never drop -- block sampling while any in-flight (pending/running)
   prompt has reached the threshold (``staleness >= threshold``).
@@ -78,6 +77,8 @@ def _make_rb(
     max_off_policy_strategy: str = "drop",
     poll_interval: float = POLL_INTERVAL,
     refill_fn=None,
+    trainer_mode: str = "sync",
+    filter_groups_metric: str | None = None,
 ) -> ReplayBuffer:
     """Construct a ReplayBuffer with test-friendly defaults.
 
@@ -86,13 +87,14 @@ def _make_rb(
     trajectories. ``refill_fn`` mirrors the trainer-injected drop-and-refill hook.
     """
     return ReplayBuffer(
-        trainer_mode="sync",
+        trainer_mode=trainer_mode,
         trainer_config={},
         max_off_policy_threshold=max_off_policy_threshold,
         max_off_policy_strategy=max_off_policy_strategy,
         sampler_kwargs={},
         poll_interval=poll_interval,
         refill_fn=refill_fn,
+        filter_groups_metric=filter_groups_metric,
     )
 
 
@@ -101,17 +103,25 @@ class FakeRefiller:
     prompts into TransferQueue so the blocking ``sample`` can progress. Records calls for asserts.
     """
 
-    def __init__(self, partition_id: str, global_steps: int, sessions: int = 1):
+    def __init__(self, partition_id: str, global_steps: int, sessions: int = 1, rewards: list[float] | None = None):
         self.partition_id = partition_id
         self.global_steps = global_steps
         self.sessions = sessions
+        # When set, refilled groups carry these per-session rewards so they survive zero-variance filtering.
+        self.rewards = rewards
         self.calls: list[int] = []
         self.produced_uids: list[str] = []
 
     def __call__(self, num_prompts: int) -> int:
         self.calls.append(num_prompts)
         specs = [
-            PromptSpec(uid=_uid(), status="finished", sessions=self.sessions, global_steps=self.global_steps)
+            PromptSpec(
+                uid=_uid(),
+                status="finished",
+                sessions=self.sessions,
+                global_steps=self.global_steps,
+                rewards=self.rewards,
+            )
             for _ in range(num_prompts)
         ]
         # Synchronous produce (already-terminal) so the sample loop sees them on its next poll.
@@ -152,12 +162,16 @@ def _set_prompt_status(partition_id: str, uid: str, status: str, global_steps: i
 @dataclass
 class PromptSpec:
     """One GRPO group to produce: ``sessions`` trajectories followed by a terminal
-    prompt status (``finished``/``failure``/``running``/``pending``)."""
+    prompt status (``finished``/``failure``/``running``/``pending``).
+
+    ``rewards``, when given, provides the DAPO filtering metric for each session.
+    """
 
     uid: str
     status: str
     sessions: int = 1
     global_steps: int = 0
+    rewards: list[float] | None = None
     trajectory_keys: list[str] = field(default_factory=list)
 
 
@@ -189,11 +203,15 @@ class RolloutProducer(threading.Thread):
             for spec in self.specs:
                 for session_id in range(spec.sessions):
                     key = _trajectory_key(spec.uid, session_id)
+                    fields = {"input_ids": torch.tensor([1, 2, 3])}
+                    tag = {"is_prompt": False, "seq_len": 3, "global_steps": spec.global_steps}
+                    if spec.rewards is not None:
+                        fields["extra_fields"] = {"reward_extra_info": {"acc": float(spec.rewards[session_id])}}
                     tq.kv_put(
                         key=key,
                         partition_id=self.partition_id,
-                        fields={"input_ids": torch.tensor([1, 2, 3])},
-                        tag={"is_prompt": False, "seq_len": 3, "global_steps": spec.global_steps},
+                        fields=fields,
+                        tag=tag,
                     )
                     spec.trajectory_keys.append(key)
                 tq.kv_put(
@@ -347,7 +365,7 @@ def test_sync_metadata_records_prompt_global_steps(tq_init, partition_id):
 
 def test_has_enough_samples_drop_ignores_inflight():
     """drop ignores in-flight prompts when deciding whether enough samples are available."""
-    rb = _make_rb(max_off_policy_strategy="drop", max_off_policy_threshold=2)
+    rb = _make_rb(trainer_mode="colocate_async", max_off_policy_strategy="drop", max_off_policy_threshold=2)
     pid = "p"
     rb.finished_keys[pid] |= {"a", "b"}
     # A very stale in-flight prompt must not influence the drop gate.
@@ -360,7 +378,7 @@ def test_has_enough_samples_drop_ignores_inflight():
 
 def test_has_enough_samples_drop_counts_only_fresh_terminal():
     """Stale terminal prompts do not satisfy the drop strategy's sample-count gate."""
-    rb = _make_rb(max_off_policy_strategy="drop", max_off_policy_threshold=1)
+    rb = _make_rb(trainer_mode="colocate_async", max_off_policy_strategy="drop", max_off_policy_threshold=1)
     pid = "p"
     rb.finished_keys[pid] |= {"stale", "fresh"}
     rb.prompt_global_steps[pid] = {"stale": 0, "fresh": 5}
@@ -628,7 +646,12 @@ def test_drop_refills_stale_groups_and_reports_metrics(tq_init, partition_id):
     _produce(partition_id, [stale, boundary, fresh]).join_and_check()
 
     refiller = FakeRefiller(partition_id, global_steps=5)
-    rb = _make_rb(max_off_policy_strategy="drop", max_off_policy_threshold=2, refill_fn=refiller)
+    rb = _make_rb(
+        trainer_mode="colocate_async",
+        max_off_policy_strategy="drop",
+        max_off_policy_threshold=2,
+        refill_fn=refiller,
+    )
     try:
         batch, metrics = rb.sample(global_steps=5, partition_id=partition_id, batch_size=3)
 
@@ -661,7 +684,7 @@ def test_drop_keeps_all_within_threshold_without_metrics(tq_init, partition_id):
     specs = [PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=5) for _ in range(2)]
     _produce(partition_id, specs).join_and_check()
 
-    rb = _make_rb(max_off_policy_strategy="drop", max_off_policy_threshold=2)
+    rb = _make_rb(trainer_mode="colocate_async", max_off_policy_strategy="drop", max_off_policy_threshold=2)
     try:
         batch, metrics = rb.sample(global_steps=5, partition_id=partition_id, batch_size=2)
 
@@ -682,7 +705,12 @@ def test_drop_uses_version_based_staleness(tq_init, partition_id):
     _produce(partition_id, [stale, fresh]).join_and_check()
 
     refiller = FakeRefiller(partition_id, global_steps=10)
-    rb = _make_rb(max_off_policy_strategy="drop", max_off_policy_threshold=8, refill_fn=refiller)
+    rb = _make_rb(
+        trainer_mode="colocate_async",
+        max_off_policy_strategy="drop",
+        max_off_policy_threshold=8,
+        refill_fn=refiller,
+    )
     try:
         batch, metrics = rb.sample(global_steps=10, partition_id=partition_id, batch_size=2)
 
@@ -707,7 +735,12 @@ def test_drop_refills_over_multiple_iterations(tq_init, partition_id):
     _produce(partition_id, stale).join_and_check()
 
     refiller = FakeRefiller(partition_id, global_steps=3)
-    rb = _make_rb(max_off_policy_strategy="drop", max_off_policy_threshold=1, refill_fn=refiller)
+    rb = _make_rb(
+        trainer_mode="colocate_async",
+        max_off_policy_strategy="drop",
+        max_off_policy_threshold=1,
+        refill_fn=refiller,
+    )
     try:
         batch, metrics = rb.sample(global_steps=3, partition_id=partition_id, batch_size=3)
 
@@ -745,6 +778,7 @@ def test_drop_uses_one_snapshot_per_poll_iteration(tq_init, partition_id):
         return refiller(num_prompts)
 
     rb = _make_rb(
+        trainer_mode="colocate_async",
         max_off_policy_strategy="drop",
         max_off_policy_threshold=1,
         refill_fn=finish_during_first_refill,
@@ -769,7 +803,12 @@ def test_drop_without_refill_fn_drops_without_replacing(tq_init, partition_id):
     fresh = [PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=5) for _ in range(2)]
     _produce(partition_id, [stale] + fresh).join_and_check()
 
-    rb = _make_rb(max_off_policy_strategy="drop", max_off_policy_threshold=2, refill_fn=None)
+    rb = _make_rb(
+        trainer_mode="colocate_async",
+        max_off_policy_strategy="drop",
+        max_off_policy_threshold=2,
+        refill_fn=None,
+    )
     consumer = SampleConsumer(rb, partition_id, batch_size=2, global_steps=5)
     try:
         consumer.start()
@@ -851,5 +890,117 @@ def test_wait_does_not_block_when_inflight_is_fresh(tq_init, partition_id):
 
         assert _uids_of(batch.keys) == {spec.uid for spec in finished}
         assert metrics == {}
+    finally:
+        _clear_partition(partition_id)
+
+
+# --------------------------------------------------------------------------- #
+# mode matrix: stale drop, DAPO, and rollout failure.
+# --------------------------------------------------------------------------- #
+
+
+def test_init_rejects_dapo_without_refill_fn():
+    with pytest.raises(ValueError, match="requires refill_fn"):
+        _make_rb(filter_groups_metric="acc", refill_fn=None)
+
+
+def test_sync_does_not_drop_stale_groups(tq_init, partition_id):
+    stale = PromptSpec(uid=_uid(), status="finished", global_steps=0)
+    fresh = PromptSpec(uid=_uid(), status="finished", global_steps=5)
+    _produce(partition_id, [stale, fresh]).join_and_check()
+
+    rb = _make_rb(max_off_policy_strategy="drop", max_off_policy_threshold=1)
+    try:
+        batch, metrics = rb.sample(global_steps=5, partition_id=partition_id, batch_size=2)
+        assert _uids_of(batch.keys) == {stale.uid, fresh.uid}
+        assert metrics == {}
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_async_failure_refills_exact_missing_count(tq_init, partition_id):
+    finished = PromptSpec(uid=_uid(), status="finished")
+    failure = PromptSpec(uid=_uid(), status="failure")
+    _produce(partition_id, [finished, failure]).join_and_check()
+
+    refiller = FakeRefiller(partition_id, global_steps=1)
+    rb = _make_rb(trainer_mode="colocate_async", refill_fn=refiller)
+    try:
+        batch, metrics = rb.sample(global_steps=1, partition_id=partition_id, batch_size=2)
+        sampled_uids = _uids_of(batch.keys)
+        assert failure.uid not in sampled_uids
+        assert finished.uid in sampled_uids
+        assert refiller.calls == [1]
+        assert metrics["validation/rollout_failure/dropped_samples"] == 1
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_async_dapo_refills_exact_missing_count(tq_init, partition_id):
+    all_same = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[1.0, 1.0])
+    mixed = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[0.0, 1.0])
+    _produce(partition_id, [all_same, mixed]).join_and_check()
+
+    refiller = FakeRefiller(partition_id, global_steps=1, sessions=2, rewards=[0.0, 1.0])
+    rb = _make_rb(
+        trainer_mode="colocate_async",
+        refill_fn=refiller,
+        filter_groups_metric="acc",
+    )
+    try:
+        batch, metrics = rb.sample(global_steps=1, partition_id=partition_id, batch_size=2)
+        sampled_uids = _uids_of(batch.keys)
+        assert all_same.uid not in sampled_uids
+        assert mixed.uid in sampled_uids
+        assert refiller.calls == [1]
+        assert metrics["validation/filter_groups/dropped_samples"] == 1
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_sync_dapo_refills_twice_and_clears_surplus(tq_init, partition_id):
+    all_same = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[0.0, 0.0])
+    mixed = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[0.0, 1.0])
+    _produce(partition_id, [all_same, mixed]).join_and_check()
+
+    refiller = FakeRefiller(partition_id, global_steps=1, sessions=2, rewards=[0.0, 1.0])
+    rb = _make_rb(refill_fn=refiller, filter_groups_metric="acc")
+    try:
+        batch, metrics = rb.sample(global_steps=1, partition_id=partition_id, batch_size=2)
+        sampled_uids = _uids_of(batch.keys)
+        refill_uids = set(refiller.produced_uids)
+
+        assert all_same.uid not in sampled_uids
+        assert mixed.uid in sampled_uids
+        assert refiller.calls == [2]
+        assert len(sampled_uids & refill_uids) == 1
+        assert metrics["validation/filter_groups/dropped_samples"] == 1
+        assert metrics["validation/filter_groups/dropped_surplus_samples"] == 1
+
+        surplus_uid = (refill_uids - sampled_uids).pop()
+        remaining = tq.kv_list(partition_id=partition_id).get(partition_id, {})
+        assert surplus_uid not in remaining
+        assert _trajectory_key(surplus_uid, 0) not in remaining
+        assert _trajectory_key(surplus_uid, 1) not in remaining
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_overlapping_async_drop_reasons_refill_once(tq_init, partition_id):
+    stale_failure = PromptSpec(uid=_uid(), status="failure", global_steps=0)
+    _produce(partition_id, [stale_failure]).join_and_check()
+
+    refiller = FakeRefiller(partition_id, global_steps=5)
+    rb = _make_rb(
+        trainer_mode="colocate_async",
+        max_off_policy_strategy="drop",
+        max_off_policy_threshold=1,
+        refill_fn=refiller,
+    )
+    try:
+        _, metrics = rb.sample(global_steps=5, partition_id=partition_id, batch_size=1)
+        assert refiller.calls == [1]
+        assert metrics["validation/off_policy/dropped_samples"] == 1
+        assert metrics["validation/rollout_failure/dropped_samples"] == 1
     finally:
         _clear_partition(partition_id)

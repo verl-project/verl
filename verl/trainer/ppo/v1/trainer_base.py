@@ -151,7 +151,8 @@ class PPOTrainer(ABC):
         if custom_sampler is not None and custom_sampler.get("path") and custom_sampler.get("name"):
             sampler_cls = load_extern_type(custom_sampler.path, custom_sampler.name)
 
-        return sampler_cls(
+        filter_groups_metric = self._resolve_filter_groups_metric()
+        replay_buffer_kwargs = dict(
             trainer_mode=self.trainer_mode,
             trainer_config=self.config.trainer.v1.get(self.trainer_mode, {}),
             max_off_policy_threshold=sampler_config.max_off_policy_threshold,
@@ -159,6 +160,31 @@ class PPOTrainer(ABC):
             sampler_kwargs=sampler_config.sampler_kwargs,
             refill_fn=self._add_prompts_to_generate,
         )
+        # Preserve the existing constructor contract for external samplers; custom implementations own
+        # their filtering semantics and can consume algorithm.filter_groups through their own config.
+        if sampler_cls is ReplayBuffer:
+            replay_buffer_kwargs["filter_groups_metric"] = filter_groups_metric
+        return sampler_cls(**replay_buffer_kwargs)
+
+    def _resolve_filter_groups_metric(self) -> str | None:
+        """Resolve DAPO's group metric and verify that rollout computes it before sampling."""
+        filter_groups = self.config.algorithm.get("filter_groups", None)
+        filter_enabled = bool(filter_groups is not None and filter_groups.get("enable", False))
+        if not filter_enabled:
+            return None
+
+        filter_metric = filter_groups.get("metric", None)
+        if not filter_metric:
+            raise ValueError("algorithm.filter_groups.metric must be set when group filtering is enabled")
+
+        reward_model = self.config.reward.reward_model
+        streaming_reward_path = not reward_model.enable or reward_model.enable_resource_pool
+        assert streaming_reward_path, (
+            "algorithm.filter_groups requires the reward metric at sampling time: use rule-based reward or "
+            "reward.reward_model.enable_resource_pool=True. A colocated reward model computes rewards only "
+            "after replay-buffer sampling."
+        )
+        return str(filter_metric)
 
     def init(self):
         """Initialize all components of the trainer.
@@ -586,17 +612,22 @@ class PPOTrainer(ABC):
             max_samples=self.config.data.get("val_max_samples", -1),
         )
 
-        # Async drop refills an arbitrary number of dropped prompts, which must divide gen_batch_size,
-        # so force gen_batch_size=1.
-        if self.trainer_mode != "sync" and self.config.trainer.v1.sampler.max_off_policy_strategy == "drop":
+        # Async may refill an arbitrary number of stale/DAPO/failure groups. Sync DAPO refills 2x an
+        # arbitrary filtered count. Whole-dataloader-chunk submission therefore requires gen_batch_size=1
+        # in exactly those modes; ordinary sync training can keep gen_batch_size=train_batch_size.
+        filter_groups = self.config.algorithm.get("filter_groups", None)
+        dapo_enabled = bool(filter_groups is not None and filter_groups.get("enable", False))
+        requires_exact_refill = self.trainer_mode != "sync" or dapo_enabled
+        if requires_exact_refill:
             user_gen_batch_size = self.config.data.get("gen_batch_size", None)
+            refill_mode = "async drop/DAPO/failure" if self.trainer_mode != "sync" else "sync DAPO"
             if user_gen_batch_size not in (None, 1):
                 logger.warning(
-                    f"data.gen_batch_size={user_gen_batch_size} is overridden to 1: the async 'drop' "
-                    f"off-policy strategy refills an arbitrary number of prompts, which requires gen_batch_size=1."
+                    f"data.gen_batch_size={user_gen_batch_size} is overridden to 1: {refill_mode} "
+                    "refills an arbitrary number of prompts."
                 )
             elif user_gen_batch_size is None:
-                logger.info("data.gen_batch_size defaulted to 1 for the async 'drop' off-policy strategy.")
+                logger.info(f"data.gen_batch_size defaulted to 1 for {refill_mode}.")
             with open_dict(self.config):
                 self.config.data.gen_batch_size = 1
 
