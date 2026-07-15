@@ -9,8 +9,8 @@ set -x
 # the sparsity ratio while staying bit-exact (per-flush checksum verified).
 #
 # Enable it with two flags (see the last two lines of the python command):
-#   actor_rollout_ref.rollout.checkpoint_engine.backend=delta
-#   +actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.delta.encoding=indices
+#   actor_rollout_ref.rollout.checkpoint_engine.backend=delta_sharded
+#   +actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.delta_sharded.encoding=indices
 #
 # Requirements / scope: disaggregated (hybrid_engine=False) + SGLang rollout in
 # BF16. Encoding is "indices" (int32 absolute positions) or "deltas" (uint16 gap).
@@ -63,8 +63,8 @@ python3 -m verl.experimental.one_step_off_policy.main_ppo \
     actor_rollout_ref.rollout.n=5 \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
-    actor_rollout_ref.rollout.checkpoint_engine.backend=delta \
-    +actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.delta.encoding=indices \
+    actor_rollout_ref.rollout.checkpoint_engine.backend=delta_sharded \
+    +actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.delta_sharded.encoding=indices \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=False \

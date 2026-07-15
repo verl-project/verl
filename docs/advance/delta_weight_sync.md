@@ -79,7 +79,7 @@ Other shard dimensions than ``Shard(0)`` are not supported and raise.
 
 ## Usage
 
-A runnable example is ``verl/experimental/one_step_off_policy/shell/grpo_0.6b_gsm8k_fsdp2_sglang_delta_2_6.sh`` —
+A runnable example is ``verl/experimental/one_step_off_policy/shell/grpo_0.6b_gsm8k_fsdp2_sglang_delta_sharded_2_6.sh`` —
 the SGLang 2+6 disaggregated GRPO recipe with ``backend=delta_sharded``.
 
 Current scope: disaggregated (``hybrid_engine=False``) + SGLang rollout in BF16, FSDP1/FSDP2 training engines.

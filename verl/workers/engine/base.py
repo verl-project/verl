@@ -169,7 +169,7 @@ class BaseEngine:
 
         The per-item schema is engine-specific: implementations yield the local shard
         plus enough placement metadata for the consumer to map shard-local positions
-        back to the full parameter (see the FSDP and Megatron engine implementations).
+        back to the full parameter (see the FSDP engine implementation).
 
         Returns:
             Generator: A generator that yields per-parameter local shards with placement metadata.
