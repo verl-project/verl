@@ -30,7 +30,7 @@ from typing import Literal
 
 import torch
 
-DeltaEncodingName = Literal["indices", "deltas"]
+DeltaEncodingName = Literal["indices"]
 
 
 # ---------- diff ----------------------------------------------------------

@@ -29,7 +29,7 @@ Wire contract (what the delta checkpoint engine sends per flush):
   ``{"encoding", "params": [DeltaParam-dict...], "checksum"}``.
 * ``__positions__`` — uint8 blob of packed positions (per-param slices are
   byte offsets ``pos_start:pos_end``; ``indices`` packs little-endian int32
-  absolute positions, ``deltas`` packs uint16/uint32 gaps per ``pos_width``).
+  absolute positions).
 * ``__values__``  — the changed values in the flush's (uniform) dtype;
   per-param slices are element offsets ``val_start:val_end``.
 
@@ -127,14 +127,6 @@ def _decode_one(encoding: str, positions: torch.Tensor, values: torch.Tensor, p:
     if encoding == "indices":
         # pos_start is always int32-aligned (each entry packs nnz * 4 bytes).
         idx = pos_b.view(torch.int32).to(torch.int64)
-    elif encoding == "deltas":
-        w = int(p["pos_width"])
-        bv = pos_b.view(-1, w).to(torch.int64)
-        if w == 2:
-            gaps = bv[:, 0] | (bv[:, 1] << 8)
-        else:
-            gaps = bv[:, 0] | (bv[:, 1] << 8) | (bv[:, 2] << 16) | (bv[:, 3] << 24)
-        idx = (gaps + 1).cumsum(dim=0) - 1
     else:
         raise ValueError(f"unsupported delta encoding: {encoding!r}")
 

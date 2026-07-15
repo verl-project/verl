@@ -218,6 +218,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
 
     def __init__(self, *args, encoding: str = "indices", batch_gather: int = 32, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        assert encoding == "indices", f"delta_sharded ships only the 'indices' position encoding; got {encoding!r}"
         self.encoding = encoding
         self._shard_snap: dict[str, torch.Tensor] = {}  # name -> pinned-CPU shard snapshot
         self._shard_seeded = False
