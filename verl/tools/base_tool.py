@@ -35,7 +35,7 @@ class BaseTool:
 
     def __init__(self, config: dict, tool_schema: OpenAIFunctionToolSchema):
         self.config = config
-        self.tool_schema = tool_schema or self.get_openai_tool_schema()
+        self.tool_schema = tool_schema
         assert self.tool_schema is not None, "Tool schema is not set!"
         self.name = self.tool_schema.function.name
         print(json.dumps(self.tool_schema.model_dump(exclude_unset=True, exclude_none=True), indent=2))
