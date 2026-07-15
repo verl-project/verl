@@ -128,6 +128,20 @@ class PPOTrainerSeparateAsync(PPOTrainer):
             # wake up all replicas to update weights
             self.standalone_checkpoint_manager.update_weights(self.global_steps)
 
+    def _get_n_gpus_for_throughput(self) -> int:
+        """Include standalone rollout GPUs in the throughput denominator.
+
+        The standalone rollout runs on GPUs that are not part of the trainer
+        resource pool, so ``resource_pool_manager.get_n_gpus()`` alone
+        undercounts the total hardware footprint.
+        """
+        trainer_gpus = self.resource_pool_manager.get_n_gpus()
+        rollout_gpus = (
+            self.config.actor_rollout_ref.rollout.n_gpus_per_node
+            * self.config.actor_rollout_ref.rollout.nnodes
+        )
+        return trainer_gpus + rollout_gpus
+
     def switch_to_rollout(self):
         # TODO: disable auto offload in config and offload according to the switch strategy
         self.checkpoint_manager.update_weights(self.global_steps)

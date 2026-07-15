@@ -536,6 +536,15 @@ class PPOTrainer(ABC):
 
     # ------------------------------ common methods ------------------------------
 
+    def _get_n_gpus_for_throughput(self) -> int:
+        """Return the total number of GPUs used for throughput normalization.
+
+        By default this is the trainer-side GPU count from the resource pool
+        manager.  Modes that use additional dedicated GPUs (e.g. separate-async
+        standalone rollout) should override this to include them.
+        """
+        return self.resource_pool_manager.get_n_gpus()
+
     def _init_tokenizer(self):
         """Initialize tokenizer."""
         # Download the checkpoint from HDFS to the local machine.
@@ -1574,7 +1583,7 @@ class PPOTrainer(ABC):
         )
         metrics.update(compute_data_metrics(batch=metrics_batch, use_critic=self.use_critic))
         metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
-        n_gpus = self.resource_pool_manager.get_n_gpus()
+        n_gpus = self._get_n_gpus_for_throughput()
         metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
         gradient_norm = metrics.get("actor/grad_norm", None)
         metrics.update(compute_variance_proxy_metrics(batch=metrics_batch, gradient_norm=gradient_norm))
