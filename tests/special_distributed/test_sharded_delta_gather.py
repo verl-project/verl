@@ -1,17 +1,31 @@
+# Copyright 2025 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Validate verl.checkpoint_engine.delta_sync.sparse_gather against the full-gather diff.
 
 torchrun --nproc_per_node=4 tests/special_distributed/test_sharded_delta_gather.py
 """
+
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Replicate, Shard, distribute_tensor
 
-from verl.workers.engine.spec import ShardSpec, derive_placement
 from verl.checkpoint_engine.delta_sync.sparse_gather import (
     gather_v_to_rank0,
     shard_delta_indices,
 )
+from verl.workers.engine.spec import ShardSpec, derive_placement
 
 
 def _run_case(shape, placements, mesh, dev, rank, si):
@@ -31,7 +45,8 @@ def _run_case(shape, placements, mesh, dev, rank, si):
     # --- sharded path (real module) ---
     off, contributes, _pg = derive_placement(ShardSpec.from_param(dt_new))
     loc_new = dt_new.to_local().reshape(-1)
-    loc_old, off2, _ = local_shard_view(dt_old)
+    loc_old = dt_old.to_local().reshape(-1)
+    off2, _, _ = derive_placement(ShardSpec.from_param(dt_old))
     assert off == off2
     if contributes:
         gidx, gval = shard_delta_indices(loc_new, loc_old, off)
@@ -55,8 +70,10 @@ def _run_case(shape, placements, mesh, dev, rank, si):
     val_ok = torch.equal(sh_val[so].view(torch.int16), b_val[bo].view(torch.int16))
     ok = idx_ok and val_ok and (sh_idx.numel() == b_idx.numel())
     tag = "x".join(p.__class__.__name__[0] for p in placements)
-    print(f"[shape={shape} mesh={tuple(mesh.shape)} {tag}] nnz sharded={sh_idx.numel()} "
-          f"full={b_idx.numel()} idx={idx_ok} val={val_ok} -> {'PASS' if ok else 'FAIL'}")
+    print(
+        f"[shape={shape} mesh={tuple(mesh.shape)} {tag}] nnz sharded={sh_idx.numel()} "
+        f"full={b_idx.numel()} idx={idx_ok} val={val_ok} -> {'PASS' if ok else 'FAIL'}"
+    )
     return ok
 
 

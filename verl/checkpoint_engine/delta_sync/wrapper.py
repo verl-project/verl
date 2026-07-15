@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Generator, Iterable
 
 import torch
 
@@ -61,7 +60,4 @@ class DeltaFlush:
 
     @property
     def wire_bytes(self) -> int:
-        return (
-            self.positions_cpu.numel()
-            + self.values_gpu.numel() * self.values_gpu.element_size()
-        )
+        return self.positions_cpu.numel() + self.values_gpu.numel() * self.values_gpu.element_size()

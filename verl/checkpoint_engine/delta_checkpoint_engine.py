@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Generator
 from unittest.mock import patch
 
 import ray.util.collective as collective
@@ -43,17 +42,19 @@ import zmq
 with patch("importlib.metadata.distributions", return_value=[]):
     import cupy as cp
 
-from .delta_sync.encode import DeltaParam, checksum as _checksum
+from verl.workers.engine.spec import derive_placement
+
+from .base import CheckpointEngineRegistry
+from .delta_sync.encode import DeltaParam
+from .delta_sync.encode import checksum as _checksum
 from .delta_sync.sparse_gather import (
     gather_dense_to_rank0,
+    gather_shards_to_rank0,
     gather_v_batched_to_rank0,
     gather_v_to_rank0,
     shard_delta_indices,
 )
-from verl.workers.engine.spec import derive_placement
 from .delta_sync.wrapper import DeltaFlush
-
-from .base import CheckpointEngineRegistry
 from .nccl_checkpoint_engine import MasterMetadata, NCCLCheckpointEngine
 
 logger = logging.getLogger(__name__)
@@ -238,7 +239,6 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
         # three collectives per parameter). 0/1 disables grouping.
         self.batch_gather = int(batch_gather)
 
-
     def _placement(self, name, spec):
         """Derive (and cache) this rank's placement facts from the declarative spec."""
         got = self._placements.get(name)
@@ -267,9 +267,16 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
             idx_pieces.append(idx.to(torch.int32))
             val_pieces.append(val)
             params.append(
-                DeltaParam(name=name, dtype=dtype_str, shape=list(shape),
-                           pos_start=pos_off, pos_end=pos_off + nnz * 4, pos_width=4,
-                           val_start=val_off, val_end=val_off + nnz)
+                DeltaParam(
+                    name=name,
+                    dtype=dtype_str,
+                    shape=list(shape),
+                    pos_start=pos_off,
+                    pos_end=pos_off + nnz * 4,
+                    pos_width=4,
+                    val_start=val_off,
+                    val_end=val_off + nnz,
+                )
             )
             pos_off += nnz * 4
             val_off += nnz
@@ -281,8 +288,9 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
             else torch.empty(0, dtype=torch.uint8, device=values_gpu.device)
         )
         cks = _checksum(positions_u8, values_gpu)
-        return DeltaFlush(encoding=self.encoding, params=params,
-                          positions_cpu=positions_u8, values_gpu=values_gpu, checksum=cks)
+        return DeltaFlush(
+            encoding=self.encoding, params=params, positions_cpu=positions_u8, values_gpu=values_gpu, checksum=cks
+        )
 
     def _send_dense_seed(self, weights, global_steps=None):
         """First sync: assemble and broadcast the raw weights, bucketed, positions-free.
@@ -318,9 +326,16 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
             for name, dtype_str, full_shape, flat in bucket:
                 n = int(flat.numel())
                 params.append(
-                    DeltaParam(name=name, dtype=dtype_str, shape=list(full_shape),
-                               pos_start=0, pos_end=0, pos_width=4,
-                               val_start=val_off, val_end=val_off + n)
+                    DeltaParam(
+                        name=name,
+                        dtype=dtype_str,
+                        shape=list(full_shape),
+                        pos_start=0,
+                        pos_end=0,
+                        pos_width=4,
+                        val_start=val_off,
+                        val_end=val_off + n,
+                    )
                 )
                 val_off += n
             values = torch.cat([flat for *_, flat in bucket])
@@ -375,7 +390,9 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
             self._publish_terminal(True)
         logger.info(
             "delta-sharded send v=%s DENSE-SEED flushes=%d elems=%d",
-            global_steps, n_flushes, total_elems,
+            global_steps,
+            n_flushes,
+            total_elems,
         )
         if not total_elems:
             return None
@@ -457,7 +474,9 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
             counts = torch.tensor([int(g[4].numel()) for g in group], dtype=torch.int64, device=dev)
             gathered = gather_v_batched_to_rank0(idx_concat, val_concat, counts, group=pg)
             if is_r0 and gathered is not None:
-                for (name, dtype_str, full_shape, full_numel, _gi, _gv, _pg), (aidx, aval) in zip(group, gathered):
+                for (name, dtype_str, full_shape, full_numel, _gi, _gv, _pg), (aidx, aval) in zip(
+                    group, gathered, strict=False
+                ):
                     _consume(name, dtype_str, full_shape, full_numel, aidx, aval)
             group = []
 
@@ -474,7 +493,9 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
             counts = torch.tensor([int(g[5].numel()) for g in nan_group], dtype=torch.int64, device=dev)
             gathered = gather_v_batched_to_rank0(idx_concat, val_concat, counts, group=pg, grouped=True)
             if is_r0 and gathered is not None:
-                for (name, local_dtype, _pg, spec, shard_shape, _gi, _gv), per_rank in zip(nan_group, gathered):
+                for (name, local_dtype, _pg, spec, shard_shape, _gi, _gv), per_rank in zip(
+                    nan_group, gathered, strict=False
+                ):
                     shard_list = []
                     for gi, gv in per_rank:
                         buf = torch.full(shard_shape, float("nan"), dtype=local_dtype, device=dev)
@@ -487,8 +508,14 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
                         if pos.numel():
                             # total_elems is added inside _consume too; compensate
                             total_elems -= int(fl.numel())
-                            _consume(hf_name, str(fl.dtype).replace("torch.", ""),
-                                     tuple(hf_tensor.shape), int(fl.numel()), pos, fl[pos])
+                            _consume(
+                                hf_name,
+                                str(fl.dtype).replace("torch.", ""),
+                                tuple(hf_tensor.shape),
+                                int(fl.numel()),
+                                pos,
+                                fl[pos],
+                            )
             nan_group = []
 
         for name, local, spec in weights:
@@ -524,16 +551,16 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
             if batch_k > 1:
                 if group and group[-1][6] is not pg:
                     _flush_group()
-                group.append((name, str(local.dtype).replace("torch.", ""),
-                              spec.full_shape, full_numel, gidx, gval, pg))
+                group.append(
+                    (name, str(local.dtype).replace("torch.", ""), spec.full_shape, full_numel, gidx, gval, pg)
+                )
                 if len(group) >= batch_k:
                     _flush_group()
                 continue
 
             aidx, aval = gather_v_to_rank0(gidx, gval, group=pg)
             if is_r0 and aidx is not None:
-                _consume(name, str(local.dtype).replace("torch.", ""),
-                         spec.full_shape, full_numel, aidx, aval)
+                _consume(name, str(local.dtype).replace("torch.", ""), spec.full_shape, full_numel, aidx, aval)
         _flush_group()
         _flush_nan_group()
 
@@ -547,7 +574,9 @@ class DeltaShardedCheckpointEngine(DeltaCheckpointEngine):
             self._publish_terminal(first)
         logger.info(
             "delta-sharded send v=%s %s flushes=%d (streamed)",
-            global_steps, "FULL" if first else "delta", n_flushes,
+            global_steps,
+            "FULL" if first else "delta",
+            n_flushes,
         )
         if not total_elems:
             return None

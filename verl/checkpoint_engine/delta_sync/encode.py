@@ -25,19 +25,15 @@ Values are sent verbatim in the parameter's dtype regardless of encoding.
 
 from __future__ import annotations
 
-import itertools
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
 from typing import Literal
 
-import numpy as np
 import torch
-
 
 DeltaEncodingName = Literal["indices", "deltas"]
 
 
 # ---------- diff ----------------------------------------------------------
-
 
 
 @dataclass

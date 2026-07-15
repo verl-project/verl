@@ -335,7 +335,9 @@ class CheckpointEngineWorker(Worker):
     async def update_weights(self, global_steps: int = None):
         weights = self.checkpoint_engine.receive_weights(global_steps=global_steps)
         await self.server_adapter.update_weights(
-            weights, global_steps=global_steps, wire_format=getattr(self.checkpoint_engine, "wire_format", "named_tensors")
+            weights,
+            global_steps=global_steps,
+            wire_format=getattr(self.checkpoint_engine, "wire_format", "named_tensors"),
         )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)

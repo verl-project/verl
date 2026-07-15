@@ -29,11 +29,8 @@ from __future__ import annotations
 
 import torch
 import torch.distributed as dist
-from torch.distributed.tensor import DTensor
-from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
 
 _DTYPE_INT = {1: torch.uint8, 2: torch.int16, 4: torch.int32, 8: torch.int64}
-
 
 
 def shard_delta_indices(
@@ -79,8 +76,11 @@ def gather_v_to_rank0(
     counts = torch.cat(counts).cpu().tolist()  # one D2H sync instead of `world`
     max_n = max(counts) if counts else 0
     if max_n == 0:
-        return (torch.empty(0, dtype=torch.int64, device=dev),
-                torch.empty(0, dtype=local_val.dtype, device=dev)) if rank == 0 else (None, None)
+        return (
+            (torch.empty(0, dtype=torch.int64, device=dev), torch.empty(0, dtype=local_val.dtype, device=dev))
+            if rank == 0
+            else (None, None)
+        )
 
     idx_pad = torch.zeros(max_n, dtype=torch.int64, device=dev)
     val_pad = torch.zeros(max_n, dtype=local_val.dtype, device=dev)
@@ -157,18 +157,21 @@ def gather_v_batched_to_rank0(
     for i in range(k):
         if grouped:
             # keep the per-rank boundary: [(idx_r, val_r) for every rank in the group]
-            out.append([
-                (idx_list[r][offs[r][i] : offs[r][i + 1]], val_list[r][offs[r][i] : offs[r][i + 1]])
-                for r in range(world)
-            ])
+            out.append(
+                [
+                    (idx_list[r][offs[r][i] : offs[r][i + 1]], val_list[r][offs[r][i] : offs[r][i + 1]])
+                    for r in range(world)
+                ]
+            )
             continue
         idx_pieces = [idx_list[r][offs[r][i] : offs[r][i + 1]] for r in range(world) if counts_cpu[r][i]]
         val_pieces = [val_list[r][offs[r][i] : offs[r][i + 1]] for r in range(world) if counts_cpu[r][i]]
         if idx_pieces:
             out.append((torch.cat(idx_pieces), torch.cat(val_pieces)))
         else:
-            out.append((torch.empty(0, dtype=torch.int64, device=dev),
-                        torch.empty(0, dtype=val_concat.dtype, device=dev)))
+            out.append(
+                (torch.empty(0, dtype=torch.int64, device=dev), torch.empty(0, dtype=val_concat.dtype, device=dev))
+            )
     return out
 
 
@@ -237,8 +240,14 @@ def gather_v_grouped_to_rank0(
     max_n = max(counts) if counts else 0
 
     if max_n == 0:
-        return [(torch.empty(0, dtype=torch.int64, device=dev),
-                 torch.empty(0, dtype=local_val.dtype, device=dev)) for _ in range(world)] if rank == 0 else None
+        return (
+            [
+                (torch.empty(0, dtype=torch.int64, device=dev), torch.empty(0, dtype=local_val.dtype, device=dev))
+                for _ in range(world)
+            ]
+            if rank == 0
+            else None
+        )
 
     idx_pad = torch.zeros(max_n, dtype=torch.int64, device=dev)
     val_pad = torch.zeros(max_n, dtype=local_val.dtype, device=dev)

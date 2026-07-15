@@ -65,9 +65,16 @@ def _sparse_indices_flush(old_named, new_named):
         idx_pieces.append(idx.to(torch.int32))
         val_pieces.append(fn[idx])
         params.append(
-            DeltaParam(name=name, dtype=str(new.dtype).replace("torch.", ""), shape=list(new.shape),
-                       pos_start=pos_off, pos_end=pos_off + nnz * 4, pos_width=4,
-                       val_start=val_off, val_end=val_off + nnz)
+            DeltaParam(
+                name=name,
+                dtype=str(new.dtype).replace("torch.", ""),
+                shape=list(new.shape),
+                pos_start=pos_off,
+                pos_end=pos_off + nnz * 4,
+                pos_width=4,
+                val_start=val_off,
+                val_end=val_off + nnz,
+            )
         )
         pos_off += nnz * 4
         val_off += nnz
@@ -149,17 +156,23 @@ def test_dense_flush_applies_full_tensors():
     params, pieces, val_off = [], [], 0
     for name, t in named:
         flat = t.contiguous().view(-1)
-        params.append({
-            "name": name, "dtype": str(t.dtype).replace("torch.", ""), "shape": list(t.shape),
-            "pos_start": 0, "pos_end": 0, "pos_width": 4,
-            "val_start": val_off, "val_end": val_off + flat.numel(),
-        })
+        params.append(
+            {
+                "name": name,
+                "dtype": str(t.dtype).replace("torch.", ""),
+                "shape": list(t.shape),
+                "pos_start": 0,
+                "pos_end": 0,
+                "pos_width": 4,
+                "val_start": val_off,
+                "val_end": val_off + flat.numel(),
+            }
+        )
         pieces.append(flat)
         val_off += flat.numel()
     values = torch.cat(pieces)
 
-    spec = {"encoding": "dense", "params": params,
-            "checksum": int(checksum(torch.empty(0, dtype=torch.uint8), values))}
+    spec = {"encoding": "dense", "params": params, "checksum": int(checksum(torch.empty(0, dtype=torch.uint8), values))}
     spec_t = torch.frombuffer(bytearray(json.dumps(spec).encode()), dtype=torch.uint8)
     apply_delta(model, [("__delta_spec__", spec_t), ("__values__", values)])
 

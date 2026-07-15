@@ -55,7 +55,7 @@ class ShardSpec:
     to_hf: Optional[Callable[[list[torch.Tensor]], list[tuple[str, torch.Tensor]]]] = None
 
     @classmethod
-    def from_param(cls, param: torch.Tensor) -> "ShardSpec":
+    def from_param(cls, param: torch.Tensor) -> ShardSpec:
         if isinstance(param, DTensor):
             return cls(full_shape=tuple(param.shape), mesh=param.device_mesh, placements=tuple(param.placements))
         return cls(full_shape=tuple(param.shape))

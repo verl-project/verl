@@ -43,8 +43,10 @@ def test_shard_delta_indices_matches_bytewise_diff(dtype):
     assert torch.equal(gidx.sort().values, (changed + offset).sort().values)
     order = torch.argsort(gidx)
     got_pos = (gidx[order] - offset).to(torch.int64)
-    assert torch.equal(gval[order].view(torch.int16 if dtype == torch.bfloat16 else torch.int32),
-                       new[got_pos].view(torch.int16 if dtype == torch.bfloat16 else torch.int32))
+    assert torch.equal(
+        gval[order].view(torch.int16 if dtype == torch.bfloat16 else torch.int32),
+        new[got_pos].view(torch.int16 if dtype == torch.bfloat16 else torch.int32),
+    )
 
 
 def test_shard_delta_indices_no_change_is_empty():
@@ -80,7 +82,7 @@ def test_spec_to_hf_pure_permutation():
     spec = ShardSpec(full_shape=(6, 4), to_hf=to_hf)
     nan_shards = [torch.full_like(sh, float("nan")) for sh in shards]
     nan_shards[1][3] = 42.0
-    (_, rebuilt), = spec.to_hf(nan_shards)
+    ((_, rebuilt),) = spec.to_hf(nan_shards)
     fl = rebuilt.reshape(-1)
     pos = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
     assert pos.tolist() == [8 + 3] and fl[pos[0]] == 42.0

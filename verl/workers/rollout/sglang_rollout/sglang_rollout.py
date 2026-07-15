@@ -423,9 +423,7 @@ class ServerAdapter(BaseRollout):
             for group in zip(*gathered, strict=True)
         ]
         req = UpdateWeightsFromTensorReqInput(
-            serialized_named_tensors=[
-                MultiprocessingSerializer.serialize(named_tensors) for _ in range(tp_size)
-            ],
+            serialized_named_tensors=[MultiprocessingSerializer.serialize(named_tensors) for _ in range(tp_size)],
             load_format=LOADER_FQN,
             flush_cache=flush_cache,
         )
