@@ -361,6 +361,13 @@ class vLLMColocateWorkerExtension:
             logger.info(f"vLLM load weights, loaded_params: {len(weights)}")
         else:
             param_updates, buffer_updates, named_buffers = split_buffer_updates(self.model_runner.model, weights)
+            # Strip .base_layer suffix added by replace_lora_wrapper on the trainer
+            # side. vLLM's model.load_weights() expects standard parameter names
+            # (e.g. blocks.0.attn.qkv.weight), not PeftModel-style names
+            # (e.g. blocks.0.attn.qkv.base_layer.weight). The base-layer
+            # naming is only meaningful for the LoRA adapter path above.
+            if param_updates:
+                param_updates = [(n.replace(".base_layer", ""), t) for n, t in param_updates]
             # Add the FP8 related logic here as sharding manager has been deprecated.
             # Check if FP8 quantization is enabled and apply appropriate weight loading
             if is_fp8_model(self.model_runner.vllm_config):
