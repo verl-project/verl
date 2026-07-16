@@ -494,7 +494,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                     shard_list = []
                     for gi, gv in per_rank:
                         buf = torch.full(shard_shape, float("nan"), dtype=local_dtype, device=dev)
-                        buf.view(-1)[gi] = gv
+                        buf.view(-1)[gi.to(torch.int64)] = gv  # index ops need Long
                         shard_list.append(buf)
                     for hf_name, hf_tensor in spec.to_hf(shard_list):
                         fl = hf_tensor.reshape(-1)
@@ -534,13 +534,17 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                 # NaN-sentinel rebuild through the trainer's converter on rank 0.
                 if nan_group and nan_group[0][2] is not pg:
                     _flush_nan_group()
-                nan_group.append((name, local.dtype, pg, spec, tuple(local.shape), lidx, lval))
+                # shard-local coordinates are bounded by the shard's numel, so the
+                # full-tensor <2^31 assert in _assemble_flush covers them too.
+                nan_group.append((name, local.dtype, pg, spec, tuple(local.shape), lidx.to(torch.int32), lval))
                 if len(nan_group) >= max(batch_k, 1):
                     _flush_nan_group()
                 continue
 
             # placement profile: translate rank-locally, gather without boundaries.
-            gidx = (lidx + offset) if lidx.numel() else lidx
+            # int32 halves the gather's position bytes; the wire is int32 anyway and
+            # the per-parameter <2^31 assert in _assemble_flush covers the range.
+            gidx = ((lidx + offset) if lidx.numel() else lidx).to(torch.int32)
             gval = lval
             full_numel = _prodshape(spec.full_shape)
             if batch_k > 1:

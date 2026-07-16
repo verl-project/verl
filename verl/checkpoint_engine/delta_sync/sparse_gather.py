@@ -129,19 +129,19 @@ def gather_v_batched_to_rank0(
     if max_n == 0:
         if rank != 0:
             return None
-        empty_i = torch.empty(0, dtype=torch.int64, device=dev)
+        empty_i = torch.empty(0, dtype=idx_concat.dtype, device=dev)
         empty_v = torch.empty(0, dtype=val_concat.dtype, device=dev)
         if grouped:
             return [[(empty_i, empty_v) for _ in range(world)] for _ in range(k)]
         return [(empty_i, empty_v) for _ in range(k)]
 
-    idx_pad = torch.zeros(max_n, dtype=torch.int64, device=dev)
+    idx_pad = torch.zeros(max_n, dtype=idx_concat.dtype, device=dev)
     val_pad = torch.zeros(max_n, dtype=val_concat.dtype, device=dev)
     n = int(idx_concat.numel())
     idx_pad[:n] = idx_concat
     val_pad[:n] = val_concat
 
-    idx_list = [torch.zeros(max_n, dtype=torch.int64, device=dev) for _ in range(world)] if rank == 0 else None
+    idx_list = [torch.zeros(max_n, dtype=idx_pad.dtype, device=dev) for _ in range(world)] if rank == 0 else None
     val_list = [torch.zeros(max_n, dtype=val_concat.dtype, device=dev) for _ in range(world)] if rank == 0 else None
     dist.gather(idx_pad, idx_list, dst=dst, group=group)
     dist.gather(val_pad, val_list, dst=dst, group=group)
@@ -170,7 +170,7 @@ def gather_v_batched_to_rank0(
             out.append((torch.cat(idx_pieces), torch.cat(val_pieces)))
         else:
             out.append(
-                (torch.empty(0, dtype=torch.int64, device=dev), torch.empty(0, dtype=val_concat.dtype, device=dev))
+                (torch.empty(0, dtype=idx_concat.dtype, device=dev), torch.empty(0, dtype=val_concat.dtype, device=dev))
             )
     return out
 
@@ -242,19 +242,19 @@ def gather_v_grouped_to_rank0(
     if max_n == 0:
         return (
             [
-                (torch.empty(0, dtype=torch.int64, device=dev), torch.empty(0, dtype=local_val.dtype, device=dev))
+                (torch.empty(0, dtype=local_idx.dtype, device=dev), torch.empty(0, dtype=local_val.dtype, device=dev))
                 for _ in range(world)
             ]
             if rank == 0
             else None
         )
 
-    idx_pad = torch.zeros(max_n, dtype=torch.int64, device=dev)
+    idx_pad = torch.zeros(max_n, dtype=local_idx.dtype, device=dev)
     val_pad = torch.zeros(max_n, dtype=local_val.dtype, device=dev)
     idx_pad[:n] = local_idx
     val_pad[:n] = local_val
 
-    idx_list = [torch.zeros(max_n, dtype=torch.int64, device=dev) for _ in range(world)] if rank == 0 else None
+    idx_list = [torch.zeros(max_n, dtype=idx_pad.dtype, device=dev) for _ in range(world)] if rank == 0 else None
     val_list = [torch.zeros(max_n, dtype=local_val.dtype, device=dev) for _ in range(world)] if rank == 0 else None
     dist.gather(idx_pad, idx_list, dst=0, group=group)
     dist.gather(val_pad, val_list, dst=0, group=group)
