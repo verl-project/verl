@@ -446,6 +446,10 @@ class vLLMHttpServer:
             cmds[server_args.subparser].validate(server_args)
 
         # 3. launch server
+        from verl.utils.vllm.npu_vllm_patch import apply_npu_vllm_patches
+
+        apply_npu_vllm_patches()
+
         if self.node_rank == 0:
             await self.run_server(server_args)
         else:
