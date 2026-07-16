@@ -67,32 +67,32 @@ def test_timing_and_sum_metrics_accumulate():
     assert out["some/total_tokens"] == pytest.approx(30.0)
 
 
-def test_dropped_samples_are_summed_across_iterations():
-    # Per-iteration off-policy drop counts must accumulate, not average.
+def test_evicted_samples_are_summed_across_iterations():
+    # Per-iteration off-policy eviction counts must accumulate, not average.
     agg = MetricsAggregator()
-    agg.add_step_metrics({"training/off_policy/dropped_samples": 2})
-    agg.add_step_metrics({"training/off_policy/dropped_samples": 3})
-    assert agg.get_aggregated_metrics()["training/off_policy/dropped_samples"] == pytest.approx(5.0)
+    agg.add_step_metrics({"training/off_policy/evicted_samples": 2})
+    agg.add_step_metrics({"training/off_policy/evicted_samples": 3})
+    assert agg.get_aggregated_metrics()["training/off_policy/evicted_samples"] == pytest.approx(5.0)
 
 
-def test_dropped_samples_staleness_mean_uses_dropped_count_weight():
-    # Dropped-sample staleness is averaged over dropped samples, not over kept batch size.
+def test_evicted_samples_staleness_mean_uses_evicted_count_weight():
+    # Evicted-sample staleness is averaged over evicted samples, not over kept batch size.
     agg = MetricsAggregator()
     agg.add_step_metrics(
         {
-            "training/off_policy/dropped_samples": 1,
-            "training/off_policy/dropped_samples_staleness/mean": 10.0,
+            "training/off_policy/evicted_samples": 1,
+            "training/off_policy/evicted_samples_staleness/mean": 10.0,
         },
         sample_count=100,
     )
     agg.add_step_metrics(
         {
-            "training/off_policy/dropped_samples": 3,
-            "training/off_policy/dropped_samples_staleness/mean": 2.0,
+            "training/off_policy/evicted_samples": 3,
+            "training/off_policy/evicted_samples_staleness/mean": 2.0,
         },
         sample_count=1,
     )
-    assert agg.get_aggregated_metrics()["training/off_policy/dropped_samples_staleness/mean"] == pytest.approx(4.0)
+    assert agg.get_aggregated_metrics()["training/off_policy/evicted_samples_staleness/mean"] == pytest.approx(4.0)
 
 
 def test_last_metric_keeps_final_value():

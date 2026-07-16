@@ -29,26 +29,23 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS = int(os.getenv("VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS", "60"))
 
 
-def _accumulate_drop_metrics(acc: dict, new: dict, dropped: int) -> None:
-    """Merge one poll iteration's staleness-drop metrics into ``acc`` in place.
+def _accumulate_eviction_metrics(acc: dict, new: dict, stale_count: int) -> None:
+    """Merge one poll iteration's eviction metrics into ``acc`` in place.
 
-    ``dropped`` weights the staleness mean so it stays a true per-sample average across iterations.
+    ``stale_count`` weights the staleness mean so it stays a true per-sample average across iterations.
     """
-    count_key = next((k for k in new if k.endswith("/dropped_samples")), None)
-    prev_total = acc.get(count_key, 0) if count_key else 0
+    stale_count_key = next((k for k in new if k.endswith("/off_policy/evicted_samples")), None)
+    prev_stale_total = acc.get(stale_count_key, 0) if stale_count_key else 0
 
     for key, value in new.items():
-        if key.endswith("/dropped_samples"):
-            acc[key] = acc.get(key, 0) + value
-        elif key.endswith("/dropped_samples_staleness/mean"):
-            denom = prev_total + dropped
-            acc[key] = (acc.get(key, 0.0) * prev_total + value * dropped) / denom if denom else value
-        elif key.endswith("/dropped_samples_staleness/max"):
+        if key.endswith("/evicted_samples_staleness/mean"):
+            denom = prev_stale_total + stale_count
+            acc[key] = (acc.get(key, 0.0) * prev_stale_total + value * stale_count) / denom if denom else value
+        elif key.endswith("/evicted_samples_staleness/max"):
             acc[key] = max(acc.get(key, value), value)
-        elif key.endswith("/dropped_samples_staleness/min"):
+        elif key.endswith("/evicted_samples_staleness/min"):
             acc[key] = min(acc.get(key, value), value)
         else:
-            # DAPO/failure counters are simple sums.
             acc[key] = acc.get(key, 0) + value
 
 
@@ -86,18 +83,18 @@ class ReplayBuffer:
     - failure: all sessions of the prompt are finished, but at least one session failed.
     Only prompts with status `finished` or `failure` enter terminal-group handling.
 
-    ### [Terminal-group handling matrix]
+    ### [Terminal-group eviction/refill matrix]
     ``drop`` means off-policy staleness dropping, which is only for async trainers.
     ``DAPO`` means filtering groups whose configured reward metric is identical across all trajectories,
              for async reward-computation path.
     ``failure`` is the group status described above.
-    The matrix applies to the training partition, in which ``k`` is the number of prompts to drop.
-    Validation samples all terminal groups as-is and never drops or refills them.
+    The matrix applies to the training partition, in which ``k`` is the number of prompts to evict.
+    Validation samples all terminal groups as-is and never evicts or refills them.
 
     |   trainer mode   |   drop   |               DAPO               |  failure |
     | ---------------- | -------- | -------------------------------- | -------- |
-    |       sync       |   NO-OP  |     Drop ``k``; refill ``2k``    |   NO-OP  |
-    |      async       |        All the same: Drop ``k``; refill ``k``.         |
+    |       sync       |   NO-OP  |    Evict ``k``; refill ``2k``    |   NO-OP  |
+    |      async       |       All the same: Evict ``k``; refill ``k``.         |
 
     In sync mode, DAPO is opt-in and trades generation time for training stability; refilling ``2k``
     balances retry rounds against over-generation. Failure groups retain the standard sync behavior and remain
@@ -229,7 +226,7 @@ class ReplayBuffer:
                 partition_id=partition_id,
                 select_fields=["extra_fields"],
             )
-            extra_fields_list = data["extra_fields"].tolist()
+            extra_fields_list = list(data["extra_fields"])
         else:
             extra_fields_list = []
 
@@ -250,7 +247,7 @@ class ReplayBuffer:
 
         return {uid for uid, values in metrics_by_uid.items() if len(values) > 1 and float(np.std(values)) == 0.0}
 
-    def _terminal_drop_reasons(self, global_steps: int, partition_id: str) -> tuple[set[str], set[str], set[str]]:
+    def _terminal_eviction_reasons(self, global_steps: int, partition_id: str) -> tuple[set[str], set[str], set[str]]:
         """Return stale, DAPO-filtered, and failed groups for this metadata snapshot.
 
         The sets may overlap. Callers clear and refill their union, so one prompt is never handled twice.
@@ -267,12 +264,12 @@ class ReplayBuffer:
         self,
         global_steps: int,
         partition_id: str,
-        drop_reasons: tuple[set[str], set[str], set[str]] | None = None,
+        eviction_reasons: tuple[set[str], set[str], set[str]] | None = None,
     ) -> set[str]:
         terminal_uids = self.finished_keys[partition_id] | self.failure_keys[partition_id]
-        if drop_reasons is None:
-            drop_reasons = self._terminal_drop_reasons(global_steps, partition_id)
-        return terminal_uids - set().union(*drop_reasons)
+        if eviction_reasons is None:
+            eviction_reasons = self._terminal_eviction_reasons(global_steps, partition_id)
+        return terminal_uids - set().union(*eviction_reasons)
 
     def _has_enough_samples(
         self,
@@ -292,18 +289,18 @@ class ReplayBuffer:
             sampleable_keys = self._sampleable_terminal_keys(global_steps, partition_id)
         return len(sampleable_keys) >= batch_size
 
-    def _drop_terminal_groups(
+    def _evict_terminal_groups(
         self,
         global_steps: int,
         partition_id: str,
-        drop_reasons: tuple[set[str], set[str], set[str]] | None = None,
+        eviction_reasons: tuple[set[str], set[str], set[str]] | None = None,
     ) -> tuple[set[str], int, int, dict]:
-        """Clear terminal groups rejected by any active policy exactly once."""
-        if drop_reasons is None:
-            drop_reasons = self._terminal_drop_reasons(global_steps, partition_id)
-        stale_uids, dapo_uids, failed_uids = drop_reasons
-        dropped_uids = stale_uids | dapo_uids | failed_uids
-        if not dropped_uids:
+        """Evict terminal groups selected by any active policy exactly once."""
+        if eviction_reasons is None:
+            eviction_reasons = self._terminal_eviction_reasons(global_steps, partition_id)
+        stale_uids, dapo_uids, failed_uids = eviction_reasons
+        evicted_uids = stale_uids | dapo_uids | failed_uids
+        if not evicted_uids:
             return set(), 0, 0, {}
 
         prefix = self._metrics_prefix(partition_id)
@@ -316,19 +313,19 @@ class ReplayBuffer:
             )
             metrics.update(
                 {
-                    f"{prefix}/off_policy/dropped_samples": len(stale_uids),
-                    f"{prefix}/off_policy/dropped_samples_staleness/mean": spans.mean(),
-                    f"{prefix}/off_policy/dropped_samples_staleness/max": spans.max(),
-                    f"{prefix}/off_policy/dropped_samples_staleness/min": spans.min(),
+                    f"{prefix}/off_policy/evicted_samples": len(stale_uids),
+                    f"{prefix}/off_policy/evicted_samples_staleness/mean": spans.mean(),
+                    f"{prefix}/off_policy/evicted_samples_staleness/max": spans.max(),
+                    f"{prefix}/off_policy/evicted_samples_staleness/min": spans.min(),
                 }
             )
         if dapo_uids:
-            metrics[f"{prefix}/filter_groups/dropped_samples"] = len(dapo_uids)
+            metrics[f"{prefix}/filter_groups/evicted_samples"] = len(dapo_uids)
         if failed_uids:
-            metrics[f"{prefix}/rollout_failure/dropped_samples"] = len(failed_uids)
+            metrics[f"{prefix}/rollout_failure/evicted_samples"] = len(failed_uids)
 
-        self._clear_groups(partition_id, dropped_uids)
-        return dropped_uids, len(stale_uids), len(dapo_uids), metrics
+        self._clear_groups(partition_id, evicted_uids)
+        return evicted_uids, len(stale_uids), len(dapo_uids), metrics
 
     @SkipManager.annotate_tq(role="rollout_tq", phase="sample")
     def sample(self, global_steps: int, partition_id: str, batch_size: int) -> tuple[KVBatchMeta, dict]:
@@ -350,13 +347,13 @@ class ReplayBuffer:
             dict: Auxiliary metrics.
         """
         last_debug_time = time.time()
-        drop_metrics: dict = {}
+        eviction_metrics: dict = {}
         selected_prompt_uids: list[str] = []
         partition_snapshot: dict[str, dict] = {}
         prompt_global_steps_snapshot: dict[str, int] = {}
 
         while True:
-            # Drop, gating, and selection below must all use this snapshot.
+            # Eviction, gating, and selection below must all use this snapshot.
             self._sync_metadata_from_transfer_queue()
 
             if self._sync_dapo_enabled(partition_id) and (
@@ -365,21 +362,21 @@ class ReplayBuffer:
                 time.sleep(self.poll_interval)
                 continue
 
-            drop_reasons = self._terminal_drop_reasons(global_steps, partition_id)
-            dropped_uids, stale_count, dapo_count, metrics = self._drop_terminal_groups(
-                global_steps, partition_id, drop_reasons
+            eviction_reasons = self._terminal_eviction_reasons(global_steps, partition_id)
+            evicted_uids, stale_count, dapo_count, metrics = self._evict_terminal_groups(
+                global_steps, partition_id, eviction_reasons
             )
-            if dropped_uids:
-                _accumulate_drop_metrics(drop_metrics, metrics, stale_count)
+            if evicted_uids:
+                _accumulate_eviction_metrics(eviction_metrics, metrics, stale_count)
 
-                # Only sync dapo refills double of the dropped samples to balance between the retry
+                # Only sync dapo refills double the evicted groups to balance between the retry
                 # times and batch size.
-                refill_count = len(dropped_uids) if self.trainer_mode != "sync" else 2 * dapo_count
+                refill_count = len(evicted_uids) if self.trainer_mode != "sync" else 2 * dapo_count
                 if refill_count > 0 and self.refill_fn is not None:
                     self.refill_fn(refill_count)
                 continue
 
-            sampleable_keys = self._sampleable_terminal_keys(global_steps, partition_id, drop_reasons)
+            sampleable_keys = self._sampleable_terminal_keys(global_steps, partition_id, eviction_reasons)
             if self._has_enough_samples(global_steps, partition_id, batch_size, sampleable_keys):
                 prompt_global_steps_snapshot = dict(self.prompt_global_steps[partition_id])
                 partition_snapshot = dict(self.partitions[partition_id])
@@ -395,8 +392,8 @@ class ReplayBuffer:
                     surplus_uids = set(sampleable_keys[batch_size:])
                     if surplus_uids:
                         self._clear_groups(partition_id, surplus_uids)
-                        key = f"{self._metrics_prefix(partition_id)}/filter_groups/dropped_surplus_samples"
-                        drop_metrics[key] = drop_metrics.get(key, 0) + len(surplus_uids)
+                        key = f"{self._metrics_prefix(partition_id)}/filter_groups/discarded_surplus_samples"
+                        eviction_metrics[key] = eviction_metrics.get(key, 0) + len(surplus_uids)
                 break
 
             time.sleep(self.poll_interval)
@@ -429,4 +426,4 @@ class ReplayBuffer:
                 tags.append(tag)
 
         batch = KVBatchMeta(partition_id=partition_id, keys=keys, tags=tags)
-        return batch, drop_metrics
+        return batch, eviction_metrics

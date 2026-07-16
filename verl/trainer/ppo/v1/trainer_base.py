@@ -620,14 +620,10 @@ class PPOTrainer(ABC):
         requires_exact_refill = self.trainer_mode != "sync" or dapo_enabled
         if requires_exact_refill:
             user_gen_batch_size = self.config.data.get("gen_batch_size", None)
-            refill_mode = "async drop/DAPO/failure" if self.trainer_mode != "sync" else "sync DAPO"
             if user_gen_batch_size not in (None, 1):
-                logger.warning(
-                    f"data.gen_batch_size={user_gen_batch_size} is overridden to 1: {refill_mode} "
-                    "refills an arbitrary number of prompts."
-                )
+                logger.warning(f"data.gen_batch_size={user_gen_batch_size} is overridden to 1.")
             elif user_gen_batch_size is None:
-                logger.info(f"data.gen_batch_size defaulted to 1 for {refill_mode}.")
+                logger.info("data.gen_batch_size defaulted to 1.")
             with open_dict(self.config):
                 self.config.data.gen_batch_size = 1
 

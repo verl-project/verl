@@ -37,8 +37,8 @@ class MetricsAggregator:
     def _init_aggregation_rules(self) -> dict[str, list[str]]:
         return {
             "sum": [
-                "training/off_policy/dropped_samples",
-                "validation/off_policy/dropped_samples",
+                "training/off_policy/evicted_samples",
+                "validation/off_policy/evicted_samples",
             ],
             "last": [
                 "training/global_step",
@@ -61,13 +61,13 @@ class MetricsAggregator:
 
     def _get_metric_weight(self, metric_name: str, metrics: dict[str, Any], sample_count: int) -> int:
         """Return the sample weight used when reducing per-iteration average metrics."""
-        if metric_name.endswith("/off_policy/dropped_samples_staleness/mean"):
+        if metric_name.endswith("/off_policy/evicted_samples_staleness/mean"):
             prefix = metric_name.rsplit("_staleness/mean", 1)[0]
-            dropped_samples = metrics.get(prefix, sample_count)
-            if isinstance(dropped_samples, torch.Tensor):
-                return int(dropped_samples.item()) if dropped_samples.numel() == 1 else sample_count
-            if isinstance(dropped_samples, int | float | np.number):
-                return int(dropped_samples)
+            evicted_samples = metrics.get(prefix, sample_count)
+            if isinstance(evicted_samples, torch.Tensor):
+                return int(evicted_samples.item()) if evicted_samples.numel() == 1 else sample_count
+            if isinstance(evicted_samples, int | float | np.number):
+                return int(evicted_samples)
         return sample_count
 
     def _get_aggregation_type(self, metric_name: str) -> str:

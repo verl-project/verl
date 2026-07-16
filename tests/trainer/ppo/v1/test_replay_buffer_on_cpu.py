@@ -670,10 +670,10 @@ def test_drop_refills_stale_groups_and_reports_metrics(tq_init, partition_id):
         assert refiller.calls == [1]
 
         # partition_id is a random test id (not "train") -> "validation" prefix.
-        assert metrics["validation/off_policy/dropped_samples"] == 1
-        assert metrics["validation/off_policy/dropped_samples_staleness/mean"] == 6
-        assert metrics["validation/off_policy/dropped_samples_staleness/max"] == 6
-        assert metrics["validation/off_policy/dropped_samples_staleness/min"] == 6
+        assert metrics["validation/off_policy/evicted_samples"] == 1
+        assert metrics["validation/off_policy/evicted_samples_staleness/mean"] == 6
+        assert metrics["validation/off_policy/evicted_samples_staleness/max"] == 6
+        assert metrics["validation/off_policy/evicted_samples_staleness/min"] == 6
     finally:
         _clear_partition(partition_id)
 
@@ -720,8 +720,8 @@ def test_drop_uses_version_based_staleness(tq_init, partition_id):
         assert stale.uid not in sampled_uids
         assert fresh.uid in sampled_uids
         assert refiller.calls == [1]
-        assert metrics["validation/off_policy/dropped_samples"] == 1
-        assert metrics["validation/off_policy/dropped_samples_staleness/mean"] == 11
+        assert metrics["validation/off_policy/evicted_samples"] == 1
+        assert metrics["validation/off_policy/evicted_samples_staleness/mean"] == 11
     finally:
         _clear_partition(partition_id)
 
@@ -752,10 +752,10 @@ def test_drop_refills_over_multiple_iterations(tq_init, partition_id):
         assert sum(refiller.calls) == 3
         # Staleness of every dropped group was (3 - 0 + 1) = 4.
         prefix = "validation"
-        assert metrics[f"{prefix}/off_policy/dropped_samples"] == 3
-        assert metrics[f"{prefix}/off_policy/dropped_samples_staleness/mean"] == 4
-        assert metrics[f"{prefix}/off_policy/dropped_samples_staleness/max"] == 4
-        assert metrics[f"{prefix}/off_policy/dropped_samples_staleness/min"] == 4
+        assert metrics[f"{prefix}/off_policy/evicted_samples"] == 3
+        assert metrics[f"{prefix}/off_policy/evicted_samples_staleness/mean"] == 4
+        assert metrics[f"{prefix}/off_policy/evicted_samples_staleness/max"] == 4
+        assert metrics[f"{prefix}/off_policy/evicted_samples_staleness/min"] == 4
     finally:
         _clear_partition(partition_id)
 
@@ -791,7 +791,7 @@ def test_drop_uses_one_snapshot_per_poll_iteration(tq_init, partition_id):
         assert not (sampled_uids & {stale_finished.uid, stale_running.uid})
         assert sampled_uids <= set(refiller.produced_uids)
         assert refiller.calls == [1, 1]
-        assert metrics["validation/off_policy/dropped_samples"] == 2
+        assert metrics["validation/off_policy/evicted_samples"] == 2
     finally:
         _clear_partition(partition_id)
 
@@ -955,7 +955,7 @@ def test_async_failure_refills_exact_missing_count(tq_init, partition_id):
         assert failure.uid not in sampled_uids
         assert finished.uid in sampled_uids
         assert refiller.calls == [1]
-        assert metrics["validation/rollout_failure/dropped_samples"] == 1
+        assert metrics["validation/rollout_failure/evicted_samples"] == 1
     finally:
         _clear_partition(partition_id)
 
@@ -977,7 +977,7 @@ def test_async_dapo_refills_exact_missing_count(tq_init, partition_id):
         assert all_same.uid not in sampled_uids
         assert mixed.uid in sampled_uids
         assert refiller.calls == [1]
-        assert metrics["validation/filter_groups/dropped_samples"] == 1
+        assert metrics["validation/filter_groups/evicted_samples"] == 1
     finally:
         _clear_partition(partition_id)
 
@@ -998,8 +998,8 @@ def test_sync_dapo_refills_twice_and_clears_surplus(tq_init, partition_id):
         assert mixed.uid in sampled_uids
         assert refiller.calls == [2]
         assert len(sampled_uids & refill_uids) == 1
-        assert metrics["validation/filter_groups/dropped_samples"] == 1
-        assert metrics["validation/filter_groups/dropped_surplus_samples"] == 1
+        assert metrics["validation/filter_groups/evicted_samples"] == 1
+        assert metrics["validation/filter_groups/discarded_surplus_samples"] == 1
 
         surplus_uid = (refill_uids - sampled_uids).pop()
         remaining = tq.kv_list(partition_id=partition_id).get(partition_id, {})
@@ -1010,21 +1010,22 @@ def test_sync_dapo_refills_twice_and_clears_surplus(tq_init, partition_id):
         _clear_partition(partition_id)
 
 
-def test_overlapping_async_drop_reasons_refill_once(tq_init, partition_id):
-    stale_failure = PromptSpec(uid=_uid(), status="failure", global_steps=0)
-    _produce(partition_id, [stale_failure]).join_and_check()
+def test_overlapping_async_eviction_reasons_refill_once(tq_init, partition_id):
+    stale_dapo = PromptSpec(uid=_uid(), status="finished", sessions=2, global_steps=0, rewards=[1.0, 1.0])
+    _produce(partition_id, [stale_dapo]).join_and_check()
 
-    refiller = FakeRefiller(partition_id, global_steps=5)
+    refiller = FakeRefiller(partition_id, global_steps=5, sessions=2, rewards=[0.0, 1.0])
     rb = _make_rb(
         trainer_mode="colocate_async",
         max_off_policy_strategy="drop",
         max_off_policy_threshold=1,
         refill_fn=refiller,
+        filter_groups_metric="acc",
     )
     try:
         _, metrics = rb.sample(global_steps=5, partition_id=partition_id, batch_size=1)
         assert refiller.calls == [1]
-        assert metrics["validation/off_policy/dropped_samples"] == 1
-        assert metrics["validation/rollout_failure/dropped_samples"] == 1
+        assert metrics["validation/off_policy/evicted_samples"] == 1
+        assert metrics["validation/filter_groups/evicted_samples"] == 1
     finally:
         _clear_partition(partition_id)
