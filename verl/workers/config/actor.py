@@ -24,6 +24,7 @@ from verl.utils.qat import QATConfig
 
 from .checkpoint import McoreCheckpointConfig, MindSpeedCheckpointConfig
 from .engine import (
+    AutomodelEngineConfig,
     FSDPEngineConfig,
     McoreEngineConfig,
     MindSpeedEngineConfig,
@@ -39,6 +40,7 @@ __all__ = [
     "ActorConfig",
     "FSDPActorConfig",
     "McoreActorConfig",
+    "AutomodelActorConfig",
     "VeOmniActorConfig",
     "QATConfig",
     "TorchTitanActorConfig",
@@ -367,6 +369,26 @@ class VeOmniActorConfig(ActorConfig):
                 "configuration for MoE routing replay. Set "
                 "actor.use_remove_padding=True or router_replay.mode='disabled'."
             )
+
+
+@dataclass
+class AutomodelActorConfig(ActorConfig):
+    """Configuration for Automodel (nemo_automodel) actor models.
+
+    Args:
+        strategy (str): Training strategy set to 'automodel'.
+        automodel (AutomodelEngineConfig): Automodel engine settings (FSDP2/EP/TP/CP).
+    """
+
+    strategy: str = "automodel"
+    automodel: AutomodelEngineConfig = field(default_factory=AutomodelEngineConfig)
+    use_remove_padding: bool = False
+    use_rollout_log_probs: bool = False
+
+    def __post_init__(self):
+        """Validate Automodel actor configuration parameters."""
+        super().__post_init__()
+        self.engine = self.automodel
 
 
 @dataclass

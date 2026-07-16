@@ -1,0 +1,18 @@
+# automodel actor config, inheriting from trainer/config/actor/actor.yaml
+defaults:
+  # automodel optimizer config
+  - ../optim@optim: automodel
+
+  # automodel engine config
+  - ../engine@automodel: automodel
+
+  - actor
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+_target_: verl.workers.config.AutomodelActorConfig
+
+strategy: automodel
+
+use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}

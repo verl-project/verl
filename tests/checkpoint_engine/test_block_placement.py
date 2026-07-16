@@ -67,7 +67,7 @@ def test_translate_matches_full_coordinates(full_shape, grid):
     full = torch.randn(full_shape)
     flat = full.reshape(-1)
     for place in _blocks_for_grid(full_shape, grid):
-        slices = tuple(slice(o, o + sz) for o, sz in zip(place.global_offset, place.local_shape))
+        slices = tuple(slice(o, o + sz) for o, sz in zip(place.global_offset, place.local_shape, strict=False))
         local = full[slices].contiguous().reshape(-1)
         lidx = torch.arange(local.numel(), dtype=torch.int64)
         gidx = translate_flat_indices(lidx, place)
@@ -79,7 +79,7 @@ def test_translate_sparse_subset():
     torch.manual_seed(1)
     full = torch.randn(full_shape)
     place = BlockPlacement((2, 2, 6), (4, 2, 0), full_shape)
-    slices = tuple(slice(o, o + sz) for o, sz in zip(place.global_offset, place.local_shape))
+    slices = tuple(slice(o, o + sz) for o, sz in zip(place.global_offset, place.local_shape, strict=False))
     local = full[slices].contiguous().reshape(-1)
     lidx = torch.tensor([0, 5, 11, 23], dtype=torch.int64)
     gidx = translate_flat_indices(lidx, place)
@@ -121,12 +121,10 @@ def test_block_nan_rebuild_matches_full_convert_then_diff():
     # ep=4 x ep_shard=2 grid of blocks, like the (Shard(0), Shard(1)) expert mesh
     full_nan = torch.full(full_shape, float("nan"), dtype=old.dtype)
     for place in _blocks_for_grid(full_shape, {0: 4, 1: 2}):
-        slices = tuple(slice(o, o + sz) for o, sz in zip(place.global_offset, place.local_shape))
+        slices = tuple(slice(o, o + sz) for o, sz in zip(place.global_offset, place.local_shape, strict=False))
         lo = old[slices].contiguous().reshape(-1)
         ln = new[slices].contiguous().reshape(-1)
-        changed = (
-            (lo.view(torch.uint8).view(lo.numel(), -1) != ln.view(torch.uint8).view(ln.numel(), -1)).any(dim=-1)
-        )
+        changed = (lo.view(torch.uint8).view(lo.numel(), -1) != ln.view(torch.uint8).view(ln.numel(), -1)).any(dim=-1)
         lidx = changed.nonzero(as_tuple=False).view(-1)
         buf = torch.full((lo.numel(),), float("nan"), dtype=old.dtype)
         buf[lidx] = ln[lidx]

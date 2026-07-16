@@ -23,6 +23,7 @@ from verl.utils.profiler import ProfilerConfig
 
 from .checkpoint import McoreCheckpointConfig, MindSpeedCheckpointConfig
 from .engine import (
+    AutomodelEngineConfig,
     FSDPEngineConfig,
     McoreEngineConfig,
     MindSpeedEngineConfig,
@@ -39,6 +40,7 @@ __all__ = [
     "TorchTitanCriticConfig",
     "FSDPCriticModelCfg",
     "MindSpeedCriticConfig",
+    "AutomodelCriticConfig",
     "VeOmniCriticConfig",
 ]
 
@@ -303,6 +305,27 @@ class MindSpeedCriticConfig(CriticConfig):
     def validate(self, n_gpus: int, train_batch_size: int):
         """Validate mindspeed critic configuration with runtime parameters."""
         super().validate(n_gpus, train_batch_size)
+
+
+@dataclass
+class AutomodelCriticConfig(CriticConfig):
+    """Configuration for Automodel (nemo_automodel) critic model training.
+
+    Mirrors AutomodelActorConfig for the critic role.
+
+    Args:
+        strategy (str): Training strategy set to 'automodel'.
+        automodel (AutomodelEngineConfig): Automodel engine configuration.
+    """
+
+    strategy: str = "automodel"
+    automodel: AutomodelEngineConfig = field(default_factory=AutomodelEngineConfig)
+    grad_clip: float = 1.0
+
+    def __post_init__(self):
+        """Set engine to Automodel config."""
+        super().__post_init__()
+        self.engine = self.automodel
 
 
 @dataclass
