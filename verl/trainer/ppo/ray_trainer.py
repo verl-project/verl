@@ -1753,6 +1753,28 @@ class RayPPOTrainer:
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
+                # early stopping
+                early_stop_patience = self.config.trainer.get("early_stop_patience", 0)
+                if early_stop_patience > 0:
+                    reward = metrics.get("critic/rewards/mean", None)
+                    if reward is not None:
+                        if not hasattr(self, "_best_reward"):
+                            self._best_reward = reward
+                            self._patience_counter = 0
+                        if reward > self._best_reward:
+                            self._best_reward = reward
+                            self._patience_counter = 0
+                        else:
+                            self._patience_counter += 1
+                        if self._patience_counter >= early_stop_patience:
+                            pprint(
+                                f"Early stopping triggered after {self.global_steps} steps "
+                                f"(best reward {self._best_reward:.4f}, "
+                                f"no improvement for {early_stop_patience} steps)"
+                            )
+                            self.total_training_steps = self.global_steps
+                            is_last_step = True
+
                 progress_bar.update(1)
                 self.global_steps += 1
                 SkipManager.set_step(self.global_steps)
