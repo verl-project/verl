@@ -589,3 +589,52 @@ class ValidationGenerationsLogger:
         self.writer.add_text("val/generations", text_content, step)
         # Flush to ensure data is written
         self.writer.flush()
+
+
+@dataclasses.dataclass
+class DapoFilteredRewardTableLogger:
+    """Accumulating wandb table of DAPO-filtered (no-signal) group counts per reward value.
+
+    One row per training step; each column is a distinct metric value observed among the
+    zero-variance groups that DAPO evicts, and each cell is how many groups collapsed to that
+    value at that step. Columns grow as new values appear (missing cells backfilled with 0),
+    so the table stays readable when the reward set is discrete (e.g. {0.0, 1.0}).
+
+    Intentionally wandb-only: this "value distribution over time" view is a table, which other
+    tracking backends do not render usefully. Non-wandb backends are silently skipped.
+    """
+
+    project_name: str = None
+    experiment_name: str = None
+
+    def log(self, loggers, reward_counts: dict, step: int):
+        """reward_counts maps metric value -> count for this step (already merged across mini-batches)."""
+        if "wandb" in loggers:
+            self._log_to_wandb(reward_counts, step)
+
+    def _log_to_wandb(self, reward_counts: dict, step: int):
+        import wandb
+
+        if wandb.run is None:
+            return
+
+        # Persist raw rows so the table can be rebuilt as the column set (observed values) grows.
+        if not hasattr(self, "_rows"):
+            self._rows: list[dict] = []
+            self._value_columns: list[float] = []
+
+        row = {float(value): int(count) for value, count in reward_counts.items()}
+        self._rows.append({"step": step, "counts": row})
+        for value in row:
+            if value not in self._value_columns:
+                self._value_columns.append(value)
+
+        sorted_values = sorted(self._value_columns)
+        columns = ["step"] + [f"reward={value:g}" for value in sorted_values]
+        # Rebuild the table each call: wandb tables are immutable once logged (wandb issue #2981).
+        table = wandb.Table(columns=columns)
+        for entry in self._rows:
+            counts = entry["counts"]
+            table.add_data(entry["step"], *[counts.get(value, 0) for value in sorted_values])
+
+        wandb.log({"training/filter_groups/filtered_reward_counts": table}, step=step)

@@ -982,6 +982,110 @@ def test_async_dapo_refills_exact_missing_count(tq_init, partition_id):
         _clear_partition(partition_id)
 
 
+def test_terminal_eviction_reasons_returns_dapo_counts(tq_init, partition_id):
+    """Contract: the reasons tuple carries (stale, dapo, failed, dapo_counts) with a Counter last."""
+    from collections import Counter
+
+    all_zero = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[0.0, 0.0])
+    all_one = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[1.0, 1.0])
+    mixed = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[0.0, 1.0])
+    _produce(partition_id, [all_zero, all_one, mixed]).join_and_check()
+
+    rb = _make_rb(trainer_mode="colocate_async", filter_groups_metric="acc")
+    try:
+        rb._sync_metadata_from_transfer_queue()
+        reasons = rb._terminal_eviction_reasons(global_steps=0, partition_id=partition_id)
+
+        assert len(reasons) == 4
+        _stale, dapo_uids, _failed, dapo_counts = reasons
+        assert isinstance(dapo_counts, Counter)
+        assert dapo_uids == {all_zero.uid, all_one.uid}
+        assert dict(dapo_counts) == {0.0: 1, 1.0: 1}
+
+        # Validation partition never filters: empty sets and an empty Counter.
+        val_reasons = rb._terminal_eviction_reasons(global_steps=0, partition_id="val")
+        assert len(val_reasons) == 4
+        assert val_reasons[:3] == (set(), set(), set())
+        assert val_reasons[3] == Counter()
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_terminal_eviction_reasons_has_no_cross_call_hidden_state(tq_init, partition_id):
+    """Guard against carrying the DAPO breakdown via hidden instance state.
+
+    The breakdown must travel inside the reasons tuple, not on ``self``. If it were stashed on the
+    instance, a second ``_terminal_eviction_reasons`` call (here for the ``val`` partition) between
+    production and consumption would overwrite it and the following eviction would read the wrong (or
+    empty) breakdown. This interleaves such a call and asserts the train snapshot is unaffected.
+    """
+    all_zero = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[0.0, 0.0])
+    all_one = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[1.0, 1.0])
+    _produce(partition_id, [all_zero, all_one]).join_and_check()
+
+    rb = _make_rb(trainer_mode="colocate_async", filter_groups_metric="acc")
+    try:
+        rb._sync_metadata_from_transfer_queue()
+        train_reasons = rb._terminal_eviction_reasons(global_steps=0, partition_id=partition_id)
+        # Interleave an unrelated call that the old stash-based code would let clobber shared state.
+        rb._terminal_eviction_reasons(global_steps=0, partition_id="val")
+
+        # Evicting with the train snapshot must still yield the correct breakdown.
+        _evicted, _stale_count, dapo_count, metrics = rb._evict_terminal_groups(
+            global_steps=0, partition_id=partition_id, eviction_reasons=train_reasons
+        )
+        from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY
+
+        assert dapo_count == 2
+        assert metrics[DAPO_FILTERED_REWARD_COUNTS_KEY] == {0.0: 1, 1.0: 1}
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_accumulate_eviction_metrics_merges_filtered_reward_counts():
+    """The dict-valued DAPO diagnostic accumulates additively across poll iterations."""
+    from verl.trainer.ppo.v1.replay_buffer import (
+        DAPO_FILTERED_REWARD_COUNTS_KEY,
+        _accumulate_eviction_metrics,
+    )
+
+    acc: dict = {}
+    _accumulate_eviction_metrics(
+        acc,
+        {DAPO_FILTERED_REWARD_COUNTS_KEY: {0.0: 3, 1.0: 1}, "training/filter_groups/evicted_samples": 4},
+        stale_count=0,
+    )
+    _accumulate_eviction_metrics(
+        acc,
+        {DAPO_FILTERED_REWARD_COUNTS_KEY: {0.0: 2}, "training/filter_groups/evicted_samples": 2},
+        stale_count=0,
+    )
+
+    assert acc[DAPO_FILTERED_REWARD_COUNTS_KEY] == {0.0: 5, 1.0: 1}
+    assert acc["training/filter_groups/evicted_samples"] == 6
+
+
+def test_dapo_reports_filtered_reward_value_breakdown(tq_init, partition_id):
+    """The DAPO diagnostic maps each no-signal group's shared metric value to a count."""
+    from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY
+
+    # Two groups collapse to acc=0.0, one to acc=1.0; one mixed group survives filtering.
+    all_zero_a = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[0.0, 0.0])
+    all_zero_b = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[0.0, 0.0])
+    all_one = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[1.0, 1.0])
+    mixed = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[0.0, 1.0])
+    _produce(partition_id, [all_zero_a, all_zero_b, all_one, mixed]).join_and_check()
+
+    refiller = FakeRefiller(partition_id, global_steps=1, sessions=2, rewards=[0.0, 1.0])
+    rb = _make_rb(trainer_mode="colocate_async", refill_fn=refiller, filter_groups_metric="acc")
+    try:
+        _batch, metrics = rb.sample(global_steps=1, partition_id=partition_id, batch_size=1)
+        assert metrics["validation/filter_groups/evicted_samples"] == 3
+        assert metrics[DAPO_FILTERED_REWARD_COUNTS_KEY] == {0.0: 2, 1.0: 1}
+    finally:
+        _clear_partition(partition_id)
+
+
 def test_sync_dapo_refills_twice_and_clears_surplus(tq_init, partition_id):
     all_same = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[0.0, 0.0])
     mixed = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[0.0, 1.0])

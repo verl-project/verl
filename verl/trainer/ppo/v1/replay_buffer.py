@@ -14,7 +14,7 @@
 import logging
 import os
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 import numpy as np
 import transfer_queue as tq
@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS = int(os.getenv("VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS", "60"))
+
+DAPO_FILTERED_REWARD_COUNTS_KEY = "_dapo_filtered_reward_counts"
 
 
 def _accumulate_eviction_metrics(acc: dict, new: dict, stale_count: int) -> None:
@@ -45,6 +47,11 @@ def _accumulate_eviction_metrics(acc: dict, new: dict, stale_count: int) -> None
             acc[key] = max(acc.get(key, value), value)
         elif key.endswith("/evicted_samples_staleness/min"):
             acc[key] = min(acc.get(key, value), value)
+        elif key == DAPO_FILTERED_REWARD_COUNTS_KEY:
+            # Dict-valued diagnostic: merge {metric_value: count} across poll iterations.
+            merged = Counter(acc.get(key, {}))
+            merged.update(value)
+            acc[key] = dict(merged)
         else:
             acc[key] = acc.get(key, 0) + value
 
@@ -210,10 +217,15 @@ class ReplayBuffer:
             if global_steps - prompt_global_steps.get(uid, global_steps) + 1 > self.max_off_policy_threshold
         }
 
-    def _dapo_filtered_keys(self, partition_id: str) -> set[str]:
-        """Finished groups whose configured DAPO metric is identical across all trajectories."""
+    def _dapo_filtered_keys(self, partition_id: str) -> tuple[set[str], Counter]:
+        """Finished groups whose configured DAPO metric is identical across all trajectories.
+
+        Returns the filtered uids and a ``{shared_metric_value: group_count}`` breakdown built in the
+        same scope, so the diagnostic (which reward level the no-signal groups collapse to) travels
+        with the uids through the return value instead of via hidden instance state.
+        """
         if partition_id == "val" or self.filter_groups_metric is None:
-            return set()
+            return set(), Counter()
 
         finished_uids = self.finished_keys[partition_id]
         trajectory_keys = [key for key in self.partitions[partition_id] if key.split("_")[0] in finished_uids]
@@ -245,31 +257,40 @@ class ReplayBuffer:
                 f"{sorted(missing_metric_uids)[:5]}"
             )
 
-        return {uid for uid, values in metrics_by_uid.items() if len(values) > 1 and float(np.std(values)) == 0.0}
+        filtered_uids = {
+            uid for uid, values in metrics_by_uid.items() if len(values) > 1 and float(np.std(values)) == 0.0
+        }
+        filtered_counts = Counter(float(metrics_by_uid[uid][0]) for uid in filtered_uids)
+        return filtered_uids, filtered_counts
 
-    def _terminal_eviction_reasons(self, global_steps: int, partition_id: str) -> tuple[set[str], set[str], set[str]]:
-        """Return stale, DAPO-filtered, and failed groups for this metadata snapshot.
+    def _terminal_eviction_reasons(
+        self, global_steps: int, partition_id: str
+    ) -> tuple[set[str], set[str], set[str], Counter]:
+        """Return stale, DAPO-filtered, and failed groups (plus the DAPO value->count breakdown).
 
-        The sets may overlap. Callers clear and refill their union, so one prompt is never handled twice.
+        The three sets may overlap. Callers clear and refill their union, so one prompt is never handled
+        twice. ``dapo_counts`` is the {shared_metric_value: group_count} diagnostic for ``dapo_uids``; it
+        rides along in the return value so no hidden state is needed between production and consumption.
         """
         if partition_id == "val":
-            return set(), set(), set()
+            return set(), set(), set(), Counter()
 
         stale_uids = self._stale_terminal_keys(global_steps, partition_id)
-        dapo_uids = self._dapo_filtered_keys(partition_id)
+        dapo_uids, dapo_counts = self._dapo_filtered_keys(partition_id)
         failed_uids = set() if self.trainer_mode == "sync" else set(self.failure_keys[partition_id])
-        return stale_uids, dapo_uids, failed_uids
+        return stale_uids, dapo_uids, failed_uids, dapo_counts
 
     def _sampleable_terminal_keys(
         self,
         global_steps: int,
         partition_id: str,
-        eviction_reasons: tuple[set[str], set[str], set[str]] | None = None,
+        eviction_reasons: tuple[set[str], set[str], set[str], Counter] | None = None,
     ) -> set[str]:
         terminal_uids = self.finished_keys[partition_id] | self.failure_keys[partition_id]
         if eviction_reasons is None:
             eviction_reasons = self._terminal_eviction_reasons(global_steps, partition_id)
-        return terminal_uids - set().union(*eviction_reasons)
+        stale_uids, dapo_uids, failed_uids, _dapo_counts = eviction_reasons
+        return terminal_uids - (stale_uids | dapo_uids | failed_uids)
 
     def _has_enough_samples(
         self,
@@ -293,12 +314,12 @@ class ReplayBuffer:
         self,
         global_steps: int,
         partition_id: str,
-        eviction_reasons: tuple[set[str], set[str], set[str]] | None = None,
+        eviction_reasons: tuple[set[str], set[str], set[str], Counter] | None = None,
     ) -> tuple[set[str], int, int, dict]:
         """Evict terminal groups selected by any active policy exactly once."""
         if eviction_reasons is None:
             eviction_reasons = self._terminal_eviction_reasons(global_steps, partition_id)
-        stale_uids, dapo_uids, failed_uids = eviction_reasons
+        stale_uids, dapo_uids, failed_uids, dapo_counts = eviction_reasons
         evicted_uids = stale_uids | dapo_uids | failed_uids
         if not evicted_uids:
             return set(), 0, 0, {}
@@ -321,6 +342,8 @@ class ReplayBuffer:
             )
         if dapo_uids:
             metrics[f"{prefix}/filter_groups/evicted_samples"] = len(dapo_uids)
+            # Non-scalar diagnostic: how many filtered (no-signal) groups collapsed to each metric value.
+            metrics[DAPO_FILTERED_REWARD_COUNTS_KEY] = dict(dapo_counts)
         if failed_uids:
             metrics[f"{prefix}/rollout_failure/evicted_samples"] = len(failed_uids)
 
