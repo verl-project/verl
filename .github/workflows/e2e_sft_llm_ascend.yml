@@ -104,6 +104,12 @@ jobs:
       - name: Check final pip list
         run: |
           pip list
+      - name: Clone Megatron Bridge
+        run: |
+          git clone --depth 1 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+          cd Megatron-Bridge
+          git fetch --depth 1 origin de93536e9028ecf1e4dc28608dc80f336dcdfe59
+          git checkout de93536e9028ecf1e4dc28608dc80f336dcdfe59
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
@@ -113,26 +119,32 @@ jobs:
       - name: Running GSM8K E2E training tests on 8 NPUs with rmpad using function rm
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           bash tests/special_e2e/sft/run_sft.sh
       - name: Running GSM8K E2E training tests on 8 NPUs w/o rmpad using function rm
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           RM_PAD=False bash tests/special_e2e/sft/run_sft.sh
       - name: Running GSM8K E2E training tests on 8 NPUs with sequence parallism
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           SP_SIZE=2 bash tests/special_e2e/sft/run_sft.sh
       - name: Running GSM8K E2E training tests with LoRA
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           LORA_RANK=32 bash tests/special_e2e/sft/run_sft.sh
       - name: Run GSM8K E2E training and resume tests resuming from the checkpoint manager
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           LORA_RANK=32 RESUME_MODE=auto TOTAL_TRAIN_STEP=2 bash tests/special_e2e/sft/run_sft.sh
       - name: Running GSM8K E2E training tests with multiturn and various configs and compare results
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           rm -rf ~/verl/test/log
           mkdir -p ~/verl/test/log
           export VERL_FILE_LOGGER_ROOT=~/verl/test/log

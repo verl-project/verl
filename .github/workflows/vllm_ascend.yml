@@ -103,6 +103,12 @@ jobs:
       - name: Check final pip list
         run: |
           pip list
+      - name: Clone Megatron Bridge
+        run: |
+          git clone --depth 1 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+          cd Megatron-Bridge
+          git fetch --depth 1 origin de93536e9028ecf1e4dc28608dc80f336dcdfe59
+          git checkout de93536e9028ecf1e4dc28608dc80f336dcdfe59
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
@@ -112,13 +118,16 @@ jobs:
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
       - name: Test the latest vLLM Rollout async with agent loop with seed 0(non deter)
         run: |
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           export HCCL_HOST_SOCKET_PORT_RANGE=auto
           export HCCL_NPU_SOCKET_PORT_RANGE=auto
           export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
           ROLLOUT_NAME=vllm pytest -svvv tests/experimental/agent_loop
       - name: Test vllm server abort functionality
         run: |
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s
       - name: Test bucketed weight transfer
         run: |
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           pytest -svvv tests/utils/test_bucketed_weight_transfer.py

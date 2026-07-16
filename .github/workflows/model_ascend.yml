@@ -80,6 +80,12 @@ jobs:
       - name: Check initial pip list from image
         run: |
           pip list
+      - name: Clone Megatron Bridge
+        run: |
+          git clone --depth 1 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+          cd Megatron-Bridge
+          git fetch --depth 1 origin de93536e9028ecf1e4dc28608dc80f336dcdfe59
+          git checkout de93536e9028ecf1e4dc28608dc80f336dcdfe59
       - name: Checkout verl-project/verl repo
         uses: actions/checkout@v4
         with:
@@ -96,15 +102,19 @@ jobs:
           ln -s /root/.cache/models ~/models
       - name: Running rmpad model tests on 8 NPUs
         run: |
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           pytest -s tests/models/test_transformer.py
       - name: Running FSDP rmpad model tests on 8 NPUs
         run: |
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           STRATEGY=fsdp torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
       - name: Running transformers ulysses tests on 8 NPUs
         run: |
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
       - name: Run distributed test
         run: |
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           bash tests/special_distributed/run_all.sh
 
   # TODO: Move this back to model_rmpad once FSDP2 is stable.
@@ -133,13 +143,21 @@ jobs:
       - name: Check final pip list
         run: |
           pip3 list
+      - name: Clone Megatron Bridge
+        run: |
+          git clone --depth 1 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+          cd Megatron-Bridge
+          git fetch --depth 1 origin de93536e9028ecf1e4dc28608dc80f336dcdfe59
+          git checkout de93536e9028ecf1e4dc28608dc80f336dcdfe59
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
       - name: Running FSDP2 rmpad model tests on 8 NPUs
         run: |
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           STRATEGY=fsdp2 torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
       - name: Running model_engine_ascend
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           VANILLA_MBRIDGE=True pytest tests/models/test_engine.py

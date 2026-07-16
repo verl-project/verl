@@ -124,6 +124,12 @@ jobs:
       - name: Check final pip list
         run: |
           uv pip list
+      - name: Clone Megatron Bridge
+        run: |
+          git clone --depth 1 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+          cd Megatron-Bridge
+          git fetch --depth 1 origin de93536e9028ecf1e4dc28608dc80f336dcdfe59
+          git checkout de93536e9028ecf1e4dc28608dc80f336dcdfe59
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
@@ -133,6 +139,7 @@ jobs:
       - name: Running the E2E test with fully_async_policy algorithm (FSDP2)
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           bash tests/special_e2e/run_fully_async_policy.sh
 
   # Test Megatron strategy
@@ -179,6 +186,12 @@ jobs:
       - name: Check final pip list
         run: |
           uv pip list
+      - name: Clone Megatron Bridge
+        run: |
+          git clone --depth 1 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+          cd Megatron-Bridge
+          git fetch --depth 1 origin de93536e9028ecf1e4dc28608dc80f336dcdfe59
+          git checkout de93536e9028ecf1e4dc28608dc80f336dcdfe59
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
@@ -188,4 +201,5 @@ jobs:
       - name: Running the E2E test with fully_async_policy algorithm (Megatron)
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           VANILLA_MBRIDGE=True bash tests/special_e2e/run_fully_async_policy.sh

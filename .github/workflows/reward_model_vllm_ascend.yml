@@ -89,24 +89,35 @@ jobs:
       - name: Check final pip list
         run: |
           pip list
+      - name: Clone Megatron Bridge
+        run: |
+          git clone --depth 1 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+          cd Megatron-Bridge
+          git fetch --depth 1 origin de93536e9028ecf1e4dc28608dc80f336dcdfe59
+          git checkout de93536e9028ecf1e4dc28608dc80f336dcdfe59
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
       - name: Prepare gsm8k dataset
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k --local_dir ${HOME}/data/gsm8k
       - name: Running vllm generative reward model tests on 8 NPUs
         run: |
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_reward_model_genrm.py
       - name: Running vllm discriminative reward model tests on 8 NPUs
         run: |
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_reward_model_disrm.py
       - name: Running vllm agent loop with reward manager tests on 8 NPUs
         run: |
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_agent_reward_loop_standalone.py
       - name: Running vllm agent loop with reward model colocate tests on 8 NPUs
         run: |
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           export HCCL_HOST_SOCKET_PORT_RANGE=auto
           export HCCL_NPU_SOCKET_PORT_RANGE=auto
           ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_agent_reward_loop_colocate.py

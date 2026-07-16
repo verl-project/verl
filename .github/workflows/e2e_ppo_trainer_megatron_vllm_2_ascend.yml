@@ -117,6 +117,12 @@ jobs:
       - name: Check final pip list
         run: |
           pip list
+      - name: Clone Megatron Bridge
+        run: |
+          git clone --depth 1 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+          cd Megatron-Bridge
+          git fetch --depth 1 origin de93536e9028ecf1e4dc28608dc80f336dcdfe59
+          git checkout de93536e9028ecf1e4dc28608dc80f336dcdfe59
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
@@ -127,33 +133,41 @@ jobs:
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm with validation and saving (DDP_SIZE=2, FSDP_SIZE=4)
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 SAVE_HF_MODEL=True FSDP_SIZE=4 USE_KL=True VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-ddp-size2-fsdp-size4" bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Test merging DDP+FSDP checkpoints (Qwen Actor)
         run: |
           exp_name="qwen2.5-0.5b-function-reward-minimal-ddp-size2-fsdp-size4"
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           python -m verl.model_merger test --backend fsdp --local_dir checkpoints/verl-test/${exp_name}/global_step_1/actor --test_hf_dir checkpoints/verl-test/${exp_name}/global_step_1/actor/huggingface
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm with validation and saving (FSDP2)
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 SAVE_HF_MODEL=True VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-fsdp2-size8" STRATEGY=fsdp2 bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Test merging FSDP2 checkpoints (Qwen Actor)
         run: |
           exp_name="qwen2.5-0.5b-function-reward-minimal-fsdp2-size8"
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           python -m verl.model_merger test --backend fsdp --local_dir checkpoints/verl-test/${exp_name}/global_step_1/actor --test_hf_dir checkpoints/verl-test/${exp_name}/global_step_1/actor/huggingface
       - name: Running GSM8K E2E without rmpad using function rm
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           RM_PAD=False bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm (GRPO)
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           CUSTOM_REWARD_FN=True ADV_ESTIMATOR=grpo USE_KL=True bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with grpo lora using function rm with use_shm and layered_summon
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True TOTAL_TRAIN_STEPS=1 SAVE_FREQ=1 FSDP_SIZE=4 VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal" bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Test GRPO LoRA checkpoints merging function
         run: |
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           export EXP_NAME="qwen2.5-0.5b-function-reward-minimal"
           ls checkpoints/verl-test/${EXP_NAME}/global_step_1/actor
           cat checkpoints/verl-test/${EXP_NAME}/global_step_1/actor/huggingface/config.json
@@ -161,6 +175,7 @@ jobs:
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with grpo lora using function rm with use_shm and layered_summon with fsdp2
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True STRATEGY=fsdp2 bash tests/special_e2e/ppo_trainer/run_function_reward.sh
 
   e2e_ppo_trainer_fsdp-qwen2_5vl-3b_ascend:
@@ -194,6 +209,12 @@ jobs:
       - name: Check final pip list
         run: |
           pip list
+      - name: Clone Megatron Bridge
+        run: |
+          git clone --depth 1 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+          cd Megatron-Bridge
+          git fetch --depth 1 origin de93536e9028ecf1e4dc28608dc80f336dcdfe59
+          git checkout de93536e9028ecf1e4dc28608dc80f336dcdfe59
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
@@ -204,6 +225,7 @@ jobs:
       - name: Running GEO3K VLM GRPO E2E training tests on 8 L20 GPUs with rmpad using function rm
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
             MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
@@ -213,6 +235,7 @@ jobs:
       - name: Running GEO3K VLM PPO E2E training tests on 8 L20 GPUs with rmpad using function rm
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
             MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
@@ -222,6 +245,7 @@ jobs:
       - name: Running GEO3K VLM GRPO E2E lora training tests on 8 L20 GPUs with rmpad using function rm
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
             MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \

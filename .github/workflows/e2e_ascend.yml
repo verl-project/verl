@@ -107,17 +107,25 @@ jobs:
       - name: Check final pip list
         run: |
           uv pip list
+      - name: Clone Megatron Bridge
+        run: |
+          git clone --depth 1 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+          cd Megatron-Bridge
+          git fetch --depth 1 origin de93536e9028ecf1e4dc28608dc80f336dcdfe59
+          git checkout de93536e9028ecf1e4dc28608dc80f336dcdfe59
       - name: Preprocess gsm8k dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
       - name: Running gsm8k e2e training tests with PPO on ASCEND NPU (FSDP backend)
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           bash tests/special_npu/run_qwen3_06b_ppo.sh
           rm -rf $HOME/ckpts
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (FSDP backend)
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           bash tests/special_npu/run_qwen3_8b_grpo_profiling.sh
           python3 "tests/utils/test_check_profiler_output.py" --profiler_dir="./profiler_data-dis" --device="npu"
           rm -rf ./profiler_data-dis
@@ -125,12 +133,14 @@ jobs:
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend)
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           USE_DIST_CKPT=True bash tests/special_npu/run_qwen3_06b_grpo_mindspeed.sh
           rm -rf $HOME/dist_ckpt/qwen3_06b_grpo_mindspeed
           rm -rf $HOME/ckpts
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeed backend, MoE Model)
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           USE_DIST_CKPT=True USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen3moe_minimal.json DUMMY_MODEL_PATH=$HOME/dist_ckpt/qwen3_30b_grpo_mindspeed bash tests/special_npu/run_qwen3_30b_grpo_mindspeed.sh
 
   engine_mindspeed_llm_rl_job:
@@ -188,6 +198,7 @@ jobs:
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeedLLM backend)
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           export PYTHONPATH=$PYTHONPATH:/Megatron-LM
           export PYTHONPATH=$PYTHONPATH:/MindSpeed
           export PYTHONPATH=$PYTHONPATH:/MindSpeed-LLM
@@ -196,6 +207,7 @@ jobs:
       - name: Running gsm8k e2e training tests with GRPO on ASCEND NPU (MindSpeedLLM backend, MoE Model)
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           export PYTHONPATH=$PYTHONPATH:/Megatron-LM
           export PYTHONPATH=$PYTHONPATH:/MindSpeed
           export PYTHONPATH=$PYTHONPATH:/MindSpeed-LLM
@@ -235,11 +247,18 @@ jobs:
       - name: Check final pip list
         run: |
           pip list
+      - name: Clone Megatron Bridge
+        run: |
+          git clone --depth 1 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+          cd Megatron-Bridge
+          git fetch --depth 1 origin de93536e9028ecf1e4dc28608dc80f336dcdfe59
+          git checkout de93536e9028ecf1e4dc28608dc80f336dcdfe59
       - name: Preprocess geo3k dataset
         run: |
           python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
       - name: Running geo3k e2e training tests with GRPO on ASCEND NPU
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 bash tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh
           rm -rf $HOME/ckpts
