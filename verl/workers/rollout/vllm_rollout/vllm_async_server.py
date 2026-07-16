@@ -227,6 +227,15 @@ class vLLMHttpServer:
         """
         return self._kv_events_endpoints
 
+    def get_rollout_config(self):
+        """Get the RolloutConfig (e.g. max_num_seqs, max_model_len).
+
+        Lets external routers fetch server-side config (vLLM doesn't expose
+        these on /metrics) via the same handler-getter pattern as
+        ``get_server_address``.
+        """
+        return self.config
+
     @property
     def lora_as_adapter(self) -> bool:
         return (

@@ -27,7 +27,7 @@ from verl.protocol import DataProto
 from verl.tools.base_tool import BaseTool, OpenAIFunctionToolSchema
 from verl.tools.schemas import ToolResponse
 from verl.utils import hf_tokenizer
-from verl.workers.rollout.router import GlobalRequestLoadBalancer
+from verl.workers.rollout.router.global_balancer import GlobalRequestLoadBalancer
 
 
 @pytest.fixture

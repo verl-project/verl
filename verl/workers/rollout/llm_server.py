@@ -405,7 +405,7 @@ class LLMServerManager:
         from verl.workers.rollout.router import get_router_handle
 
         self.global_load_balancer = get_router_handle(
-            servers=dict(zip[tuple[str, Any]](self.server_addresses, self.server_handles, strict=True)),
+            servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
             rollout_config=self.rollout_config,
         )
 

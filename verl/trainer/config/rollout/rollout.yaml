@@ -1,4 +1,11 @@
 
+# Select the rollout request router. Loaded into the ``router_config`` node via
+# the ``router@router_config`` hydra package directive.
+# - global_sticky_inflight → built-in sticky-session + in-flight balancer (default)
+# - kvcaware               → KV-cache- + load-aware router (see router/kvcaware.yaml)
+defaults:
+  - router@router_config: global_sticky_inflight
+
 # Target class for this configuration
 _target_: verl.workers.config.RolloutConfig
 

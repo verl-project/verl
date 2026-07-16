@@ -275,6 +275,10 @@ class RolloutConfig(BaseConfig):
 
     router_strategy: str = "global_sticky_inflight"
 
+    # KV-cache-aware router config, composed by Hydra via
+    # ``rollout/router@actor_rollout_ref.rollout.router_config=kvcaware``.
+    router_config: Optional[dict] = None
+
     def __post_init__(self):
         """Validate the rollout config"""
         # Deprecation warning for mode field - only async mode is supported

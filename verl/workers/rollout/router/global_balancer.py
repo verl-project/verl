@@ -1,4 +1,4 @@
-# Copyright 2025 Bytedance Ltd. and/or its affiliates
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,12 +14,12 @@
 
 import logging
 import os
-from typing import Any, Callable, Protocol
+from typing import Optional
 
 import ray
 from cachetools import LRUCache
 
-from verl.workers.config import RolloutConfig
+from .base import LoadBalancerRegistry
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -27,69 +27,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 DEFAULT_ROUTING_CACHE_SIZE = 10000
 
 
-class RequestLoadBalancer(Protocol):
-    """Protocol for rollout inference load balancers.
-
-    All strategies must satisfy this interface via structural subtyping.
-    """
-
-    def acquire_server(self, request_id: str, prompt_ids: list[int] | None = None) -> tuple[str, Any]:
-        """Acquire a server for the given request.
-
-        Args:
-            request_id: Request identifier for sticky session routing.
-            prompt_ids: Prompt token ids for content-aware routing.
-
-        Returns:
-            A ``(server_id, actor_handle)`` tuple.
-
-        Raises:
-            RuntimeError: If no servers are available in the pool.
-        """
-        ...
-
-    def release_server(self, server_id: str) -> None:
-        """Release a server after a request completes.
-
-        Args:
-            server_id: Identifier of the server to release.
-        """
-        ...
-
-    def add_servers(self, servers: dict[str, Any]) -> None:
-        """Bulk-add servers to the load balancer pool.
-
-        Args:
-            servers: Mapping from ``server_id`` to ``actor_handle``.
-        """
-        ...
-
-    def remove_servers(self, server_ids: list[str]) -> None:
-        """Bulk-remove servers from the load balancer pool.
-
-        Args:
-            server_ids: List of server identifiers to remove.
-        """
-        ...
-
-    def get_all_servers(self) -> list[str]:
-        """List all active server IDs.
-
-        Returns:
-            List of server identifier strings.
-        """
-        ...
-
-    def get_status(self) -> dict:
-        """Return current load balancer state for debugging.
-
-        Returns:
-            A dictionary with ``servers``, ``total_inflight``,
-            and ``active_servers`` keys.
-        """
-        ...
-
-
+@LoadBalancerRegistry.register("global_sticky_inflight")
 @ray.remote
 class GlobalRequestLoadBalancer:
     """Global sticky-session + in-flight load balancer shared by all AgentLoopWorkers.
@@ -113,11 +51,14 @@ class GlobalRequestLoadBalancer:
     def __init__(
         self,
         servers: dict[str, ray.actor.ActorHandle],
-        max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE,
-        full_determinism: bool = False,
+        config: Optional[dict] = None,
     ):
         # Allow empty initial servers: in dynamic-resource-scheduling mode all
         # replicas are hybrid and will be registered later via add_servers().
+
+        config = config or {}
+        max_cache_size = config.get("max_cache_size", DEFAULT_ROUTING_CACHE_SIZE)
+        full_determinism = config.get("full_determinism", False)
 
         self._servers: dict[str, ray.actor.ActorHandle] = dict(servers)
         self._inflight_requests: dict[str, int] = {sid: 0 for sid in servers}
@@ -232,55 +173,3 @@ class GlobalRequestLoadBalancer:
             "active_servers": len(self._inflight_requests),
             "registered_handles": list(self._servers.keys()),
         }
-
-
-class LoadBalancerRegistry:
-    """Registry for load-balancer strategy factory functions.
-    Strategies are registered by name and looked up via :meth:`get`.
-    """
-
-    _registry: dict[str, Callable[..., Any]] = {}
-
-    @classmethod
-    def register(cls, name: str, factory: Callable[..., Any]) -> None:
-        """Register a load-balancer strategy factory function."""
-        if name in cls._registry:
-            raise ValueError(f"Load balancer '{name}' is already registered. Existing factory: {cls._registry[name]}")
-
-        cls._registry[name] = factory
-        logger.info("Registered load balancer strategy: %s", name)
-
-    @classmethod
-    def get(cls, name: str) -> Callable[..., Any]:
-        """Look up a registered factory by name."""
-        if name not in cls._registry:
-            raise ValueError(f"Unknown load balancer strategy: '{name}'. Available strategies: {cls.list_strategies()}")
-        return cls._registry[name]
-
-    @classmethod
-    def list_strategies(cls) -> list[str]:
-        """List all registered strategy names."""
-        return sorted(cls._registry.keys())
-
-
-def _create_global_sticky_inflight(
-    servers: dict[str, Any],
-    rollout_config: RolloutConfig,
-):
-    """Factory for the default sticky-session + least-inflight strategy."""
-
-    return GlobalRequestLoadBalancer.remote(
-        servers=servers,
-        max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
-        full_determinism=getattr(rollout_config, "full_determinism", False),
-    )
-
-
-LoadBalancerRegistry.register("global_sticky_inflight", _create_global_sticky_inflight)
-
-
-def get_router_handle(servers: dict[str, Any], rollout_config: RolloutConfig) -> Any:
-    """Create a load balancer instance from router configuration."""
-    strategy = rollout_config.get("router_strategy", "global_sticky_inflight")
-    factory = LoadBalancerRegistry.get(strategy)
-    return factory(servers=servers, rollout_config=rollout_config)

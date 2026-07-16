@@ -19,10 +19,8 @@ import pytest
 import ray
 
 from verl.workers.config.rollout import RolloutConfig
-from verl.workers.rollout.router import (
-    LoadBalancerRegistry,
-    get_router_handle,
-)
+from verl.workers.rollout.router import get_router_handle
+from verl.workers.rollout.router.base import LoadBalancerRegistry
 
 
 @ray.remote
@@ -91,31 +89,41 @@ class TestRequestLoadBalancer:
 class TestLoadBalancerRegistry:
     def test_register_new_strategy(self):
         name = "test_register_new_strategy"
-        factory = lambda servers, config: None  # noqa: E731
+
+        @LoadBalancerRegistry.register(name)
+        class _MockBalancer:
+            pass
+
         try:
-            LoadBalancerRegistry.register(name, factory)
-            assert LoadBalancerRegistry.get(name) is factory
+            assert LoadBalancerRegistry.get_cls(name) is _MockBalancer
         finally:
             LoadBalancerRegistry._registry.pop(name, None)
 
     def test_register_duplicate_raises(self):
         name = "test_register_duplicate_raises"
-        LoadBalancerRegistry.register(name, lambda: None)
+
+        @LoadBalancerRegistry.register(name)
+        class _MockBalancer1:
+            pass
+
         try:
             with pytest.raises(ValueError, match="already registered"):
-                LoadBalancerRegistry.register(name, lambda: None)
+
+                @LoadBalancerRegistry.register(name)
+                class _MockBalancer2:
+                    pass
         finally:
             LoadBalancerRegistry._registry.pop(name, None)
 
     def test_get_unknown_strategy_raises(self):
         with pytest.raises(ValueError, match="Unknown load balancer strategy"):
-            LoadBalancerRegistry.get("nonexistent_strategy_xyz_123")
+            LoadBalancerRegistry.get_cls("nonexistent_strategy_xyz_123")
 
-    def test_get_returns_callable_for_builtins(self):
+    def test_get_returns_class_for_builtins(self):
         """Only 'global_sticky_inflight' is registered as a built-in strategy."""
         for strategy in ("global_sticky_inflight",):
-            factory = LoadBalancerRegistry.get(strategy)
-            assert callable(factory)
+            cls = LoadBalancerRegistry.get_cls(strategy)
+            assert isinstance(cls, type) or hasattr(cls, "remote")
 
     def test_list_strategies_is_sorted(self):
         strategies = LoadBalancerRegistry.list_strategies()
@@ -124,7 +132,11 @@ class TestLoadBalancerRegistry:
 
     def test_list_strategies_includes_runtime_registration(self):
         name = "test_list_strategies_includes_runtime"
-        LoadBalancerRegistry.register(name, lambda: None)
+
+        @LoadBalancerRegistry.register(name)
+        class _MockBalancer:
+            pass
+
         try:
             assert name in LoadBalancerRegistry.list_strategies()
         finally:
