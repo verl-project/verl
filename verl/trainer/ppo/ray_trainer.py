@@ -404,7 +404,7 @@ class RayPPOTrainer:
 
         self.train_dataloader = StatefulDataLoader(
             dataset=self.train_dataset,
-            batch_size=self.config.data.get("gen_batch_size", self.config.data.train_batch_size),
+            batch_size=self.config.data.get("gen_batch_size", None) or self.config.data.train_batch_size,
             num_workers=num_workers,
             drop_last=True,
             collate_fn=collate_fn,

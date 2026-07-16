@@ -33,7 +33,12 @@ def _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size: int = 4):
     parallel_state.get_context_parallel_world_size = lambda: 1
     parallel_state.get_context_parallel_rank = lambda: 0
     parallel_state.get_tensor_model_parallel_world_size = lambda: tp_size
-    packed_seq_params.PackedSeqParams = type("PackedSeqParams", (), {})
+
+    class PackedSeqParams:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    packed_seq_params.PackedSeqParams = PackedSeqParams
 
     core.parallel_state = parallel_state
     megatron.core = core
@@ -125,3 +130,20 @@ def test_preprocess_bshd_engine_preserves_topk_dense_dim_on_gpu(monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("Requires CUDA")
     _check_topk_preprocess(monkeypatch, torch.device("cuda"))
+
+
+def test_preprocess_thd_engine_pads_to_minimum_rows(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1)
+    input_ids = _nested_tensor([torch.arange(100, dtype=torch.long)])
+
+    local_ids, packed_seq_params, local_positions = mcore_util.preprocess_thd_engine(
+        input_ids,
+        min_local_rows=128,
+    )
+
+    assert local_ids.shape == (1, 128)
+    assert packed_seq_params.cu_seqlens_q_padded.tolist() == [0, 128]
+    torch.testing.assert_close(local_ids[0, :100], torch.arange(100, dtype=torch.long))
+    torch.testing.assert_close(local_ids[0, 100:], torch.zeros(28, dtype=torch.long))
+    torch.testing.assert_close(local_positions[0, :100], torch.arange(100, dtype=torch.long))
+    torch.testing.assert_close(local_positions[0, 100:], torch.zeros(28, dtype=torch.long))

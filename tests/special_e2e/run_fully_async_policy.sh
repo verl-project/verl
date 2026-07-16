@@ -144,7 +144,7 @@ common_params=(
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}"
     async_training.use_trainer_do_validate=${use_trainer_do_validate}
     actor_rollout_ref.rollout.checkpoint_engine.backend='nccl'
-    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=512
     skip.async_rollout.enable=${SKIP_ENABLE}
     skip.async_rollout.dump_dir=${SKIP_DUMP_DIR}
     skip.async_rollout.steps=${SKIP_STEPS}
@@ -177,7 +177,7 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
         common_params+=(
             # Todo The checkpoint_engine.backend should be unified to nccl
             # actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
-            actor_rollout_ref.rollout.gpu_memory_utilization=0.70
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.50
         )
         actor_offload=True
     fi

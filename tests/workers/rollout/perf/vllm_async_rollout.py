@@ -94,7 +94,7 @@ def initialize(config, backend) -> tuple[AgentLoopManager | RayWorkerGroup, Stat
     )
     dataloader = StatefulDataLoader(
         dataset=dataset,
-        batch_size=config.data.get("gen_batch_size", config.data.train_batch_size),
+        batch_size=config.data.get("gen_batch_size", None) or config.data.train_batch_size,
         num_workers=config.data.get("dataloader_num_workers", 8),
         drop_last=True,
         collate_fn=default_collate_fn,

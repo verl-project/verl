@@ -15,6 +15,7 @@
 import functools
 from typing import Callable, Optional
 
+from ..tracking import RLInsightLogger
 from .config import ProfilerConfig
 
 
@@ -89,6 +90,7 @@ class DistProfiler:
         if tool_config is None:
             tool_config = config.tool_config
 
+        self.rank = rank
         self.config = config
         self.tool_config = tool_config
 
@@ -191,25 +193,26 @@ class DistProfiler:
             @functools.wraps(func)
             def wrapper(self_instance, *args, **kwargs_inner):
                 profiler = getattr(self_instance, "profiler", None)
-                if (
-                    not profiler
-                    or not profiler.check_enable()
-                    or not profiler.check_this_step()
-                    or not profiler.check_this_rank()
-                ):
+                if profiler is None:
                     return func(self_instance, *args, **kwargs_inner)
 
-                impl = profiler._impl
-                if hasattr(impl, "annotate"):
-                    try:
-                        actual_decorator = impl.annotate(
-                            message=message, color=color, domain=domain, category=category, **kwargs_outer
-                        )
-
-                        return actual_decorator(func)(self_instance, *args, **kwargs_inner)
-                    except Exception:
+                with RLInsightLogger.trace_state(
+                    kwargs_outer.get("role", func.__qualname__), state_lane_id=f"rank_{profiler.rank}"
+                ):
+                    if not profiler.check_enable() or not profiler.check_this_step() or not profiler.check_this_rank():
                         return func(self_instance, *args, **kwargs_inner)
-                return func(self_instance, *args, **kwargs_inner)
+
+                    impl = profiler._impl
+                    if hasattr(impl, "annotate"):
+                        try:
+                            actual_decorator = impl.annotate(
+                                message=message, color=color, domain=domain, category=category, **kwargs_outer
+                            )
+
+                            return actual_decorator(func)(self_instance, *args, **kwargs_inner)
+                        except Exception:
+                            return func(self_instance, *args, **kwargs_inner)
+                    return func(self_instance, *args, **kwargs_inner)
 
             return wrapper
 

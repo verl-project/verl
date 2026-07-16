@@ -1,6 +1,6 @@
 # 模型评测
 
-Last updated: 05/14/2026.
+Last updated: 07/14/2026.
 
 不同模型步骤一致，仅以Qwen3-30B为例列举
 
@@ -30,7 +30,7 @@ rm math.zip
 
 如果模型权重不是hf格式,需要先转换为hf格式,再进行评估
 
-此处参照verl原生[转换方法](verl/docs/advance/checkpoint.rst)
+此处参照verl原生[转换方法](../../../../docs/advance/checkpoint.rst)
 
 ## 4.vllm推理评测
 
