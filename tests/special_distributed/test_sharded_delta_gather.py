@@ -22,7 +22,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Replicate, Shard, distribute_tensor
 
 from verl.checkpoint_engine.delta_sync.sparse_gather import (
-    gather_v_to_rank0,
+    gather_v_batched_to_rank0,
     shard_delta_indices,
 )
 from verl.workers.engine.spec import ShardSpec, derive_placement
@@ -53,7 +53,8 @@ def _run_case(shape, placements, mesh, dev, rank, si):
     else:
         gidx = torch.empty(0, dtype=torch.int64, device=dev)
         gval = torch.empty(0, dtype=loc_new.dtype, device=dev)
-    sh_idx, sh_val = gather_v_to_rank0(gidx, gval)
+    counts = torch.tensor([int(gidx.numel())], dtype=torch.int64, device=gidx.device)
+    ((sh_idx, sh_val),) = gather_v_batched_to_rank0(gidx, gval, counts)
 
     # --- baseline: full gather + diff ---
     fo = dt_old.full_tensor().reshape(-1)

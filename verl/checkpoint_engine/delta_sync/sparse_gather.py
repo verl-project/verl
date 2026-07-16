@@ -54,51 +54,6 @@ def shard_delta_indices(
     return global_idx, values
 
 
-def gather_v_to_rank0(
-    local_idx: torch.Tensor,
-    local_val: torch.Tensor,
-    group=None,
-) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
-    """Gather variable-length (idx, val) from every rank to rank 0 (pad-to-max ``dist.gather``).
-
-    Returns (idx, val) on rank 0 (concatenated, padding stripped) and (None, None) elsewhere.
-    The counts are exchanged with a fixed-size all_gather; the payloads then ride a single
-    padded gather to rank 0 -- so nothing all-gathers the full tensor.
-    """
-    rank = dist.get_rank(group)
-    world = dist.get_world_size(group)
-    dev = local_idx.device
-
-    n = int(local_idx.numel())
-    cnt = torch.tensor([n], dtype=torch.long, device=dev)
-    counts = [torch.zeros(1, dtype=torch.long, device=dev) for _ in range(world)]
-    dist.all_gather(counts, cnt, group=group)
-    counts = torch.cat(counts).cpu().tolist()  # one D2H sync instead of `world`
-    max_n = max(counts) if counts else 0
-    if max_n == 0:
-        return (
-            (torch.empty(0, dtype=torch.int64, device=dev), torch.empty(0, dtype=local_val.dtype, device=dev))
-            if rank == 0
-            else (None, None)
-        )
-
-    idx_pad = torch.zeros(max_n, dtype=torch.int64, device=dev)
-    val_pad = torch.zeros(max_n, dtype=local_val.dtype, device=dev)
-    idx_pad[:n] = local_idx
-    val_pad[:n] = local_val
-
-    idx_list = [torch.zeros(max_n, dtype=torch.int64, device=dev) for _ in range(world)] if rank == 0 else None
-    val_list = [torch.zeros(max_n, dtype=local_val.dtype, device=dev) for _ in range(world)] if rank == 0 else None
-    dist.gather(idx_pad, idx_list, dst=0, group=group)
-    dist.gather(val_pad, val_list, dst=0, group=group)
-
-    if rank != 0:
-        return None, None
-    idx = torch.cat([idx_list[r][: counts[r]] for r in range(world)])
-    val = torch.cat([val_list[r][: counts[r]] for r in range(world)])
-    return idx, val
-
-
 def gather_v_batched_to_rank0(
     idx_concat: torch.Tensor,
     val_concat: torch.Tensor,
@@ -106,7 +61,7 @@ def gather_v_batched_to_rank0(
     group=None,
     grouped: bool = False,
 ) -> list | None:
-    """Batched :func:`gather_v_to_rank0`: one collective round for K parameters.
+    """Variable-length sparse gather, batched: one collective round for K parameters.
 
     Each rank passes its K per-parameter deltas concatenated (``idx_concat``,
     ``val_concat``) plus the per-parameter length vector ``counts`` ([K] int64).
@@ -221,7 +176,7 @@ def gather_v_grouped_to_rank0(
     local_val: torch.Tensor,
     group=None,
 ) -> list[tuple[torch.Tensor, torch.Tensor]] | None:
-    """Like :func:`gather_v_to_rank0`, but returns the payloads *per rank* instead of concatenated.
+    """Variable-length sparse gather that keeps the payloads *per rank* instead of concatenating.
 
     Returns, on rank 0, a list ``[(idx_r, val_r) for r in range(world)]`` of each rank's sparse
     ``(local-shard-position, value)`` pairs (padding stripped); ``None`` on the other ranks. Keeping

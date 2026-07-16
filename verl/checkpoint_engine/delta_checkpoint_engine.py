@@ -51,7 +51,6 @@ from .delta_sync.sparse_gather import (
     gather_dense_to_rank0,
     gather_shards_to_rank0,
     gather_v_batched_to_rank0,
-    gather_v_to_rank0,
     shard_delta_indices,
 )
 from .delta_sync.wrapper import DeltaFlush
@@ -225,7 +224,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         self._placements: dict[str, tuple] = {}  # name -> (flat_offset, contributes, group)
         # Gather the per-param sparse deltas in groups of this many parameters
         # (one count-matrix all_gather + two padded gathers per group instead of
-        # three collectives per parameter). 0/1 disables grouping.
+        # three collectives per parameter).
         self.batch_gather = int(batch_gather)
 
     def _placement(self, name, spec):
@@ -547,19 +546,11 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             gidx = ((lidx + offset) if lidx.numel() else lidx).to(torch.int32)
             gval = lval
             full_numel = _prodshape(spec.full_shape)
-            if batch_k > 1:
-                if group and group[-1][6] is not pg:
-                    _flush_group()
-                group.append(
-                    (name, str(local.dtype).replace("torch.", ""), spec.full_shape, full_numel, gidx, gval, pg)
-                )
-                if len(group) >= batch_k:
-                    _flush_group()
-                continue
-
-            aidx, aval = gather_v_to_rank0(gidx, gval, group=pg)
-            if is_r0 and aidx is not None:
-                _consume(name, str(local.dtype).replace("torch.", ""), spec.full_shape, full_numel, aidx, aval)
+            if group and group[-1][6] is not pg:
+                _flush_group()
+            group.append((name, str(local.dtype).replace("torch.", ""), spec.full_shape, full_numel, gidx, gval, pg))
+            if len(group) >= max(batch_k, 1):
+                _flush_group()
         _flush_group()
         _flush_nan_group()
 
