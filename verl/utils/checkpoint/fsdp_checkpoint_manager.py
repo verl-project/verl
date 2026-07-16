@@ -135,6 +135,10 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         )
         return lora_meta_path
 
+    def _has_lora(self) -> bool:
+        unwrap = getattr(self.model, "_fsdp_wrapped_module", self.model)
+        return hasattr(unwrap, "peft_config")
+
     def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load=False):
         """
         Load an FSDP checkpoint for this rank.
@@ -175,8 +179,16 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 remote_model_path = os.path.join(local_path, f"model_world_size_{self.world_size}_rank_{self.rank}.pt")
                 local_model_path = copy_to_local(remote_model_path)
                 model_state_dict = torch.load(local_model_path, weights_only=False)
-                self.model.load_state_dict(model_state_dict)
-                log_with_rank(f"Loaded model from {remote_model_path}", rank=self.rank, logger=logger)
+                if self.is_lora_only_state_dict(model_state_dict):
+                    self.model.load_state_dict(model_state_dict, strict=False)
+                    log_with_rank(
+                        f"Loaded LoRA-only checkpoint ({len(model_state_dict)} keys) from {remote_model_path}",
+                        rank=self.rank,
+                        logger=logger,
+                    )
+                else:
+                    self.model.load_state_dict(model_state_dict)
+                    log_with_rank(f"Loaded model from {remote_model_path}", rank=self.rank, logger=logger)
 
             if self.should_load_optimizer:
                 remote_optim_path = os.path.join(local_path, f"optim_world_size_{self.world_size}_rank_{self.rank}.pt")
@@ -267,6 +279,22 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
                 if self.should_save_model:
                     model_state_dict = self.model.state_dict()
+                    if self.should_save_lora_only and self._has_lora():
+                        n_total = len(model_state_dict)
+                        model_state_dict = {
+                            k: v
+                            for k, v in model_state_dict.items()
+                            if "lora_" in k or ".adapter_" in k
+                        }
+                        lora_mib = (
+                            sum(v.numel() * v.element_size() for v in model_state_dict.values()) / 1024**2
+                        )
+                        log_with_rank(
+                            f"LoRA-only save: {len(model_state_dict)}/{n_total} params ({lora_mib:.1f} MiB)",
+                            rank=self.rank,
+                            logger=logger,
+                            log_only_rank_0=True,
+                        )
                     torch.save(model_state_dict, model_path)
                     log_with_rank(f"Saved model to {os.path.abspath(model_path)}", rank=self.rank, logger=logger)
 
