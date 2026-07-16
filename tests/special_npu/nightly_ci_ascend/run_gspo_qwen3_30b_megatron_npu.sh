@@ -117,7 +117,7 @@ REF=(
     actor_rollout_ref.ref.megatron.expert_tensor_parallel_size=${actor_etp}
     actor_rollout_ref.ref.megatron.param_offload=True
     actor_rollout_ref.ref.megatron.use_mbridge=True
-    actor_rollout_ref.ref.megatron.vanilla_mbridge=True \
+    actor_rollout_ref.ref.megatron.vanilla_mbridge=True
 )
 
 TRAINER=(

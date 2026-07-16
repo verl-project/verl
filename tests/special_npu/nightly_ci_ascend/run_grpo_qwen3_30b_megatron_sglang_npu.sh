@@ -162,7 +162,7 @@ REF_CONFIG=(
     # Model Weights Management
     actor_rollout_ref.ref.megatron.use_dist_checkpointing=False
     actor_rollout_ref.ref.megatron.use_mbridge=True
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=True
+    actor_rollout_ref.ref.megatron.vanilla_mbridge=True
 )
 
 ROLLOUT_CONFIG=(
