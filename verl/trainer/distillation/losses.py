@@ -126,8 +126,13 @@ def compute_topk_loss(
     data: TensorDict,
     student_logits: torch.Tensor,
     data_format: str,
+    student_logits_temperature: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Compute the topk loss in logit processor.
+
+    ``student_logits_temperature`` is the sampling-temperature factor the engine already divided
+    ``student_logits`` by; it is forwarded to the backend so the distillation can undo it and operate
+    on RAW logits (see ``fsdp.losses.compute_forward_kl_topk``). None when the engine did not scale.
 
     Returns:
     - distillation_losses: (bsz, seqlen/cp_size)
@@ -153,6 +158,7 @@ def compute_topk_loss(
         teacher_topk_ids=data["teacher_ids"],
         config=distillation_config,
         data_format=data_format,
+        student_logits_temperature=student_logits_temperature,
     )
 
     expected_shape = student_logits.shape[:2]
@@ -170,6 +176,7 @@ def distillation_ppo_loss(
     dp_group=None,
     student_logits: torch.Tensor = None,
     data_format: str = "thd",
+    student_logits_temperature: Optional[torch.Tensor] = None,
 ):
     """Loss function used both for logit processor and final policy loss.
     - student_logits is not None, compute the topk loss in logit processor.
@@ -194,6 +201,8 @@ def distillation_ppo_loss(
           - teacher_ids: (bsz, seqlen, topk)
         student_logits: (bsz, seqlen/cp_size, vocab_size/tp_size).
         data_format: "thd" or "bshd", models not support THD format, e.g GPT-OSS, Qwen3.5
+        student_logits_temperature: sampling-temperature undo factor passed by the engine logits
+          processor; forwarded to ``compute_topk_loss`` so the distillation runs on RAW logits.
 
     Returns:
     - student_logits is not None, return the topk loss tensor (bsz, seqlen/cp_size).
@@ -202,7 +211,9 @@ def distillation_ppo_loss(
 
     # Called as logits processor
     if student_logits is not None:
-        return compute_topk_loss(config, distillation_config, data, student_logits, data_format)
+        return compute_topk_loss(
+            config, distillation_config, data, student_logits, data_format, student_logits_temperature
+        )
 
     # Called as final policy loss
     distillation_loss_config = distillation_config.distillation_loss
@@ -356,7 +367,11 @@ def compute_forward_kl_topk(
     }
 
     # Due to use of top-k, student and teacher distributions don't sum to 1 -> divergences can be negative.
-    distillation_losses = distillation_losses.clamp_min(0.0)
+    # Reference OPSD (siyan-zhao/OPSD) does NOT floor the per-token loss: with per-vocab clip_tau the
+    # per-position sum is allowed to go negative, keeping gradient on tokens where the student already
+    # over-covers the teacher. Gate the floor so we can reproduce that behavior (clamp_negative_to_zero=False).
+    if getattr(distillation_config.distillation_loss, "clamp_negative_to_zero", True):
+        distillation_losses = distillation_losses.clamp_min(0.0)
 
     return distillation_losses, distillation_metrics
 

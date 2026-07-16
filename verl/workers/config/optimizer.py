@@ -120,7 +120,7 @@ class FSDPOptimizerConfig(OptimizerConfig):
                 "`warmup_style` is deprecated, use `lr_scheduler_type` instead.", DeprecationWarning, stacklevel=2
             )
             self.lr_scheduler_type = self.warmup_style
-        assert self.lr_scheduler_type in ["constant", "cosine"]
+        assert self.lr_scheduler_type in ["constant", "cosine", "linear"]
         return super().__post_init__()
 
 

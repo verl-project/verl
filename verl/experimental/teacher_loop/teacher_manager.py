@@ -25,6 +25,7 @@ from verl.workers.config import (
     DistillationConfig,
     DistillationLossConfig,
     DistillationTeacherModelConfig,
+    SelfDistillationConfig,
 )
 from verl.workers.rollout.llm_server import LLMServerClient
 
@@ -75,6 +76,72 @@ def _pad_teacher_outputs(
     )
 
 
+def build_privileged_sequence(
+    response_ids: list[int],
+    sample_kwargs: dict[str, Any],
+    self_distillation_config: "SelfDistillationConfig",
+    tokenizer: Any,
+) -> tuple[list[int], int]:
+    """(OPSD S1) Build the privileged teacher sequence [teacher_prompt, ŷ].
+
+    Matching the reference impl (siyan-zhao/OPSD), the teacher prompt is a *proper chat
+    turn* rebuilt from the raw problem x and reference solution y* via the chat template
+    — NOT y* appended after the student's already-templated prompt (which would place the
+    solution after the assistant generation marker and break the chat structure).
+
+    Resolves the problem and solution from ``sample_kwargs`` via the (dotted) ``problem_key``
+    and ``reference_key``. The solution is truncated to ``max_reference_length`` tokens so the
+    teacher context stays within the window sized in DistillationTeacherModelConfig.
+
+    Returns (priv_sequence_ids, priv_prefix_len) where priv_prefix_len == len(teacher_prompt).
+    """
+    cfg = self_distillation_config
+
+    def _resolve(key: str) -> str:
+        val: Any = sample_kwargs
+        for part in key.split("."):
+            val = val[part] if isinstance(val, dict) else getattr(val, part)
+        return val.item() if hasattr(val, "item") else str(val)
+
+    problem = _resolve(cfg.problem_key)
+    solution = _resolve(cfg.reference_key)
+    # Bound the reference solution to its token budget (the teacher context is sized for this).
+    solution = tokenizer.decode(tokenizer.encode(solution, add_special_tokens=False)[: cfg.max_reference_length])
+    teacher_user_message = cfg.teacher_template.format(problem=problem, solution=solution)
+    teacher_prompt_ids = tokenizer.apply_chat_template(
+        [{"role": "user", "content": teacher_user_message}],
+        tokenize=True,
+        add_generation_prompt=True,
+        enable_thinking=cfg.teacher_thinking,
+    )
+    return list(teacher_prompt_ids) + list(response_ids), len(teacher_prompt_ids)
+
+
+def remap_privileged_to_student_layout(
+    priv_ids: torch.Tensor,
+    priv_logprobs: torch.Tensor,
+    prompt_len: int,
+    resp_len: int,
+    priv_prefix_len: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """(OPSD S2) Re-map a privileged-sequence teacher tensor onto the student [x, ŷ] layout.
+
+    The privileged forward runs over [teacher_prompt, ŷ] (priv_prefix_len + resp_len rows).
+    We emit a (prompt_len + resp_len)-row tensor in the SAME [prompt-rows ; response-rows]
+    convention as AsyncTeacherLLMServerManager.compute_teacher_logprobs_single: the prompt
+    rows are filler (taken from the privileged-prefix head; the teacher prompt differs from
+    the student prompt, but these positions are masked out by response_mask downstream and
+    never enter the loss), and the response rows are the teacher's ŷ log-probs under the
+    privileged context, i.e. priv[priv_prefix_len : priv_prefix_len + resp_len]. So
+    _pad_teacher_outputs and the downstream causal alignment stay byte-for-byte identical to
+    OPD — no off-by-one to track. Works for both 1-D (topk-disabled) and 2-D (topk) tensors.
+    """
+    x_ids, x_lp = priv_ids[:prompt_len], priv_logprobs[:prompt_len]
+    resp_slice = slice(priv_prefix_len, priv_prefix_len + resp_len)
+    y_ids, y_lp = priv_ids[resp_slice], priv_logprobs[resp_slice]
+    return torch.cat([x_ids, y_ids], dim=0), torch.cat([x_lp, y_lp], dim=0)
+
+
 class AsyncTeacherLLMServerManager:
     """Teacher-specific async client used for distillation logprob computation."""
 
@@ -82,9 +149,13 @@ class AsyncTeacherLLMServerManager:
         self,
         config: DictConfig,
         teacher_client: dict[str, LLMServerClient],
+        tokenizer: Any = None,
     ):
         self.distillation_config: DistillationConfig = omega_conf_to_dataclass(config.distillation)
         self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
+        self.self_distillation_config = self.distillation_config.self_distillation
+        # tokenizer is only needed for OPSD (encoding the y*+bridge privileged context).
+        self.tokenizer = tokenizer
         self.teacher_key: str = self.distillation_config.teacher_key
 
         self.teacher_model_configs: dict[str, DistillationTeacherModelConfig] = self.distillation_config.teacher_models
@@ -139,3 +210,36 @@ class AsyncTeacherLLMServerManager:
         teacher_logprobs = torch.tensor(teacher_output.extra_fields["prompt_logprobs"])
         assert teacher_ids.shape[0] == teacher_logprobs.shape[0] == len(sequence_ids)
         return teacher_ids, teacher_logprobs
+
+    async def compute_self_distill_logprobs_single(
+        self,
+        prompt_ids: list[int],
+        response_ids: list[int],
+        sample_kwargs: dict[str, Any],
+        multi_modal_data: Optional[dict[str, Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        routing_key: Optional[str] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """OPSD frozen self-distillation: the teacher (theta_0 on the OPD pool) evaluates the
+        privileged context [x, y*, bridge, ŷ], and the result is remapped onto the student
+        [x, ŷ] layout. Reuses the plain-OPD forward verbatim; only the input sequence and the
+        output layout differ. Returns the same (teacher_ids, teacher_logprobs) contract as
+        ``compute_teacher_logprobs_single``.
+        """
+        assert self.tokenizer is not None, "OPSD self-distillation requires a tokenizer."
+        priv_sequence_ids, priv_prefix_len = build_privileged_sequence(
+            response_ids, sample_kwargs, self.self_distillation_config, self.tokenizer
+        )
+        priv_ids, priv_logprobs = await self.compute_teacher_logprobs_single(
+            sequence_ids=priv_sequence_ids,
+            multi_modal_data=multi_modal_data,
+            mm_processor_kwargs=mm_processor_kwargs,
+            routing_key=routing_key,
+        )
+        return remap_privileged_to_student_layout(
+            priv_ids,
+            priv_logprobs,
+            prompt_len=len(prompt_ids),
+            resp_len=len(response_ids),
+            priv_prefix_len=priv_prefix_len,
+        )
