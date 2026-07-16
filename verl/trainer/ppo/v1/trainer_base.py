@@ -20,6 +20,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from functools import partial
 from pprint import pprint
 from typing import Any, Optional
@@ -83,6 +84,11 @@ from verl.utils.debug.metrics import calculate_debug_metrics
 from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import load_extern_type
 from verl.utils.metric import reduce_metrics
+from verl.utils.profiler import (
+    close_gpu_stall_diagnostics_on_exit,
+    gpu_stall_diagnostics_phase,
+    start_gpu_stall_diagnostics,
+)
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.skip import SkipManager
@@ -123,6 +129,8 @@ class PPOTrainer(ABC):
     Args:
         config: DictConfig from yaml config file.
     """
+
+    _gpu_stall_step_end_phase = "weight_sync_and_wake_or_resume"
 
     def __init__(self, config: DictConfig):
         self.config = config
@@ -321,6 +329,7 @@ class PPOTrainer(ABC):
         """Get the handles of reward loop workers."""
         return self.reward_loop_manager.reward_loop_worker_handles
 
+    @close_gpu_stall_diagnostics_on_exit
     def fit(self, agent_loop_manager: AgentLoopManager):
         """Fit the trainer with the agent loop manager.
 
@@ -328,6 +337,16 @@ class PPOTrainer(ABC):
             agent_loop_manager: The agent loop manager to generate sequences.
         """
         self.agent_loop_manager = agent_loop_manager
+
+        # ``fit`` runs in the single TaskRunnerV1 controller actor after Ray,
+        # workers, checkpoint engines, and the agent-loop manager are ready.
+        self._gpu_stall_diagnostics = None
+        diagnostics_config = self.config.global_profiler.get("gpu_stall_diagnostics", None)
+        if diagnostics_config is not None and getattr(diagnostics_config, "enable", False):
+            try:
+                self._gpu_stall_diagnostics = start_gpu_stall_diagnostics(diagnostics_config)
+            except Exception as error:
+                logger.warning("GPU stall diagnostics disabled: could not initialize coordinator: %s", error)
 
         # initialize SkipManager for V1 rollout skip support
         SkipManager.init(self.config)
@@ -377,24 +396,35 @@ class PPOTrainer(ABC):
             is_last_step = self.global_steps >= self.total_training_steps
             metrics = {}
             self.timing_raw = {}
+            diagnostics = self._gpu_stall_diagnostics
 
             # 1. perform rollout and actor/critic training
-            with marked_timer("step", self.timing_raw):
-                self.on_step_begin()
+            training_step_context = (
+                gpu_stall_diagnostics_phase(diagnostics, "training_step", metrics)
+                if diagnostics is not None
+                else nullcontext()
+            )
+            with training_step_context:
+                with marked_timer("step", self.timing_raw):
+                    self.on_step_begin()
 
-                self._start_profiling()
-                batch = self.step(metrics, self.timing_raw)
-                self._stop_profiling()
+                    self._start_profiling()
+                    batch = self.step(metrics, self.timing_raw)
+                    self._stop_profiling()
 
-                # 2. save checkpoint
-                if self.config.trainer.save_freq > 0 and (
-                    is_last_step or self.global_steps % self.config.trainer.save_freq == 0
-                ):
-                    with marked_timer("save_checkpoint", self.timing_raw, color="green"):
-                        self._save_checkpoint()
+                    # 2. save checkpoint
+                    if self.config.trainer.save_freq > 0 and (
+                        is_last_step or self.global_steps % self.config.trainer.save_freq == 0
+                    ):
+                        with marked_timer("save_checkpoint", self.timing_raw, color="green"):
+                            self._save_checkpoint()
 
-                self.on_step_end()
-                metrics.update(self._consume_sync_metrics())
+                    if diagnostics is None:
+                        self.on_step_end()
+                    else:
+                        with gpu_stall_diagnostics_phase(diagnostics, self._gpu_stall_step_end_phase, metrics):
+                            self.on_step_end()
+                    metrics.update(self._consume_sync_metrics())
 
             # 4. validate
             if self.config.trainer.test_freq > 0 and (
@@ -464,17 +494,31 @@ class PPOTrainer(ABC):
 
     def _step_once(self, metrics: dict, timing_raw: dict, sample_batch_size: int) -> KVBatchMeta:
         """Run a single local update: sample one mini-batch and perform the full PPO pipeline once."""
+        diagnostics = getattr(self, "_gpu_stall_diagnostics", None)
+
         # 1. sample batch from replay buffer
         with marked_timer("gen", timing_raw, color="red"):
             self.on_sample_begin()
-            batch, off_policy_metrics = self.replay_buffer.sample(
-                global_steps=self.global_steps,
-                partition_id="train",
-                batch_size=sample_batch_size,
-            )
+            if diagnostics is None:
+                batch, off_policy_metrics = self.replay_buffer.sample(
+                    global_steps=self.global_steps,
+                    partition_id="train",
+                    batch_size=sample_batch_size,
+                )
+            else:
+                with gpu_stall_diagnostics_phase(diagnostics, "rollout_wait", metrics):
+                    batch, off_policy_metrics = self.replay_buffer.sample(
+                        global_steps=self.global_steps,
+                        partition_id="train",
+                        batch_size=sample_batch_size,
+                    )
             metrics.update(off_policy_metrics)
             batch.extra_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
-            self.on_sample_end()
+            if diagnostics is None:
+                self.on_sample_end()
+            else:
+                with gpu_stall_diagnostics_phase(diagnostics, "rollout_release_or_switch", metrics):
+                    self.on_sample_end()
 
         # 2. [OPTIONAL] compute reward score with colocated reward model
         if self.reward_loop_manager.reward_loop_worker_handles is None:
@@ -510,7 +554,11 @@ class PPOTrainer(ABC):
         # 9. update actor
         if self.config.trainer.critic_warmup <= self.global_steps:
             with marked_timer("update_actor", timing_raw, color="red"):
-                batch = self._update_actor(batch, metrics=metrics)
+                if diagnostics is None:
+                    batch = self._update_actor(batch, metrics=metrics)
+                else:
+                    with gpu_stall_diagnostics_phase(diagnostics, "actor_update", metrics):
+                        batch = self._update_actor(batch, metrics=metrics)
 
         return batch
 

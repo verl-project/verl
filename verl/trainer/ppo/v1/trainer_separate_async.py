@@ -41,6 +41,8 @@ class PPOTrainerSeparateAsync(PPOTrainer):
     2. Partial rollout is enabled.
     """
 
+    _gpu_stall_step_end_phase = "standalone_rollout_weight_sync"
+
     def __init__(self, config: DictConfig):
         train_batch_size = config.data.train_batch_size
         ppo_mini_batch_size = config.actor_rollout_ref.actor.ppo_mini_batch_size
