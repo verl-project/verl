@@ -682,7 +682,10 @@ class PPOTrainer:
             lora_rank = self.config.actor_rollout_ref.model.get("lora_rank", 0)
         self.ref_in_actor = lora_rank > 0 or self.config.actor_rollout_ref.model.get("lora_adapter_path") is not None
         if self.use_reference_policy:
-            self.ref_policy_wg = all_wg[str(Role.ActorRolloutRef)]
+            if self.ref_in_actor:
+                self.ref_policy_wg = self.actor_rollout_wg
+            else:
+                self.ref_policy_wg = all_wg[str(Role.ActorRolloutRef)]
 
         # 7. initialize reward loop manager
         resource_pool = (
