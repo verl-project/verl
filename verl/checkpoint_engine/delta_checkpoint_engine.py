@@ -253,6 +253,12 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         pos_off = val_off = 0
         for name, dtype_str, shape, idx, val in per_param:
             nnz = int(idx.numel())
+            # positions ride the wire as int32 (pos_width=4); a parameter bigger than
+            # 2^31 elements would silently wrap, so fail loud instead. DeltaParam
+            # carries pos_width for a future 8-byte escalation if a model needs it.
+            assert _prodshape(shape) < (1 << 31), (
+                f"{name}: {_prodshape(shape)} elements exceeds the int32 position encoding"
+            )
             idx_pieces.append(idx.to(torch.int32))
             val_pieces.append(val)
             params.append(
