@@ -98,7 +98,8 @@ class BroadcastOperation:
         # while the broadcast is still running. ray doesn't expose the internal
         # stream it used, so we can't wait on it more surgically -- block the whole
         # device instead.
-        torch.cuda.synchronize()
+        device = self.bucket.device if isinstance(self.bucket, torch.Tensor) else self.bucket.device.id
+        torch.cuda.synchronize(device)
 
         # or we could also try waiting on only the default stream, but that would be a hack:
         # ray's NCCL pool streams are created with non_blocking=False, so CUDA's legacy
