@@ -138,6 +138,7 @@ ROLLOUT=(
     +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes="[4,12,24,48,64]"
     ++actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.enable_cpu_binding=True
     ++actor_rollout_ref.rollout.engine_kwargs.vllm.async_scheduling=True
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
 )
 
 TRAINER=(
