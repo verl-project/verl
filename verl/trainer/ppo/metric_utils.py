@@ -207,7 +207,12 @@ def _compute_rollout_moe_load_counts(
     response_mask: torch.Tensor | None,
     num_experts: int | None,
 ) -> torch.Tensor | None:
-    """Count routed experts in response tokens as [num_layers, num_experts]."""
+    """Count routed experts in response tokens as [num_layers, num_experts].
+
+    Each sequence's last valid response position is excluded: that token is
+    sampled but never fed back through the model, so it carries no routing
+    record (its slot is filler, not data).
+    """
     if routed_experts is None or response_mask is None or num_experts is None or num_experts <= 0:
         return None
     if routed_experts.dim() != 4:
@@ -230,6 +235,17 @@ def _compute_rollout_moe_load_counts(
 
     response_routed_experts = routed_experts[:, -response_len:]
     response_mask = response_mask.to(device=response_routed_experts.device, dtype=torch.bool)
+    # The final response token is sampled but never fed back through the model,
+    # so it has no routing record; its slot holds filler from batch assembly
+    # (zeros, see AgentLoopWorker._postprocess). Counting it would credit
+    # expert 0 with num_layers * topk phantom assignments per sequence, so drop
+    # each sequence's last valid position. This is the metrics counterpart of
+    # build_r3_replay_mask, which skips the same row on the replay side.
+    positions = torch.arange(response_len, device=response_mask.device)
+    last_valid = torch.where(response_mask, positions, positions.new_full((), -1)).amax(dim=-1)
+    has_valid = last_valid >= 0
+    response_mask = response_mask.clone()
+    response_mask[has_valid.nonzero(as_tuple=True)[0], last_valid[has_valid]] = False
     selected = response_routed_experts[response_mask]
     selected = selected.detach().to(device="cpu", dtype=torch.long)
     if selected.numel() == 0:
