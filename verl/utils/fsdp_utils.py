@@ -747,7 +747,10 @@ def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool
                         for name, param in lora_params.items()
                     }
                 else:
-                    for name, param in peft_model.base_model.model.named_parameters():
+                    for name, param in itertools.chain(
+                        peft_model.base_model.model.named_parameters(),
+                        peft_model.base_model.model.named_buffers(),
+                    ):
                         if any(x in name for x in ["_flat_param", "lora_"]):
                             continue
                         name = name.replace("_fsdp_wrapped_module.", "").replace(".base_layer", "")
@@ -761,7 +764,10 @@ def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool
         if base_sync_done:
             lora_params = get_peft_model_state_dict(peft_model)
         else:
-            for name, param in peft_model.base_model.model.named_parameters():
+            for name, param in itertools.chain(
+                peft_model.base_model.model.named_parameters(),
+                peft_model.base_model.model.named_buffers(),
+            ):
                 if any(x in name for x in ["_flat_param", "lora_"]):
                     continue
                 name = name.replace("_fsdp_wrapped_module.", "").replace(".base_layer", "")
