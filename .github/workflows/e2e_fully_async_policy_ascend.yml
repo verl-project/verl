@@ -126,8 +126,8 @@ jobs:
           uv pip list
       - name: Clone Megatron Bridge
         run: |
-          git clone --depth 1 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
-          cd Megatron-Bridge
+          git clone --depth 1 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git /Megatron-Bridge
+          cd /Megatron-Bridge
           git fetch --depth 1 origin de93536e9028ecf1e4dc28608dc80f336dcdfe59
           git checkout de93536e9028ecf1e4dc28608dc80f336dcdfe59
       - name: Prepare weights
@@ -188,8 +188,8 @@ jobs:
           uv pip list
       - name: Clone Megatron Bridge
         run: |
-          git clone --depth 1 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
-          cd Megatron-Bridge
+          git clone --depth 1 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git /Megatron-Bridge
+          cd /Megatron-Bridge
           git fetch --depth 1 origin de93536e9028ecf1e4dc28608dc80f336dcdfe59
           git checkout de93536e9028ecf1e4dc28608dc80f336dcdfe59
       - name: Prepare weights
