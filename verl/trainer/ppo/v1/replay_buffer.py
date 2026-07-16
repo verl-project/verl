@@ -96,7 +96,7 @@ class ReplayBuffer:
              for async reward-computation path.
     ``failure`` is the group status described above.
     The matrix applies to the training partition, in which ``k`` is the number of prompts to evict.
-    Validation samples all terminal groups as-is and never evicts or refills them.
+    Validation treats all terminal groups as sampleable
 
     |   trainer mode   |   drop   |               DAPO               |  failure |
     | ---------------- | -------- | -------------------------------- | -------- |
@@ -106,7 +106,7 @@ class ReplayBuffer:
     In sync mode, DAPO is opt-in and trades generation time for training stability; refilling ``2k``
     balances retry rounds against over-generation. Failure groups retain the standard sync behavior and remain
     sampleable, avoiding refill-induced tail latency by default.
-    In async mode, ``warmup_batches`` absorbs refill latency, so all three paths refill exactly ``k`` prompts.
+    In async mode, ``num_warmup_batches`` absorbs retry cost, so all three paths refill exactly ``k`` prompts.
     ``algorithm.filter_groups.max_num_gen_batches`` is intentionally ignored; refill continues until enough groups
     are sampleable.
 
