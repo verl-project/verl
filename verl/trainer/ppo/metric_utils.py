@@ -225,6 +225,8 @@ def _compute_rollout_moe_load_counts(
         return None
 
     response_len = response_mask.shape[1]
+    if response_len == 0:
+        return None
     if routed_experts.shape[1] < response_len:
         logger.warning(
             "routed_experts sequence length %s is shorter than response length %s",
@@ -244,8 +246,8 @@ def _compute_rollout_moe_load_counts(
     positions = torch.arange(response_len, device=response_mask.device)
     last_valid = torch.where(response_mask, positions, positions.new_full((), -1)).amax(dim=-1)
     has_valid = last_valid >= 0
-    response_mask = response_mask.clone()
-    response_mask[has_valid.nonzero(as_tuple=True)[0], last_valid[has_valid]] = False
+    is_last_valid = (positions.unsqueeze(0) == last_valid.unsqueeze(1)) & has_valid.unsqueeze(1)
+    response_mask = response_mask & ~is_last_valid
     selected = response_routed_experts[response_mask]
     selected = selected.detach().to(device="cpu", dtype=torch.long)
     if selected.numel() == 0:

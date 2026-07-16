@@ -131,6 +131,15 @@ def test_rollout_moe_load_balance_metrics_single_token_response_yields_nothing()
     assert compute_rollout_moe_load_balance_metrics(routed_experts, response_mask, num_experts=4) == {}
 
 
+def test_rollout_moe_load_balance_metrics_zero_width_response_mask_yields_nothing():
+    # A zero-width response mask must not crash (amax over an empty dim, and
+    # routed_experts[:, -0:] would silently select the whole tensor).
+    routed_experts = torch.zeros(1, 3, 1, 1, dtype=torch.long)
+    response_mask = torch.zeros(1, 0, dtype=torch.bool)
+
+    assert compute_rollout_moe_load_balance_metrics(routed_experts, response_mask, num_experts=4) == {}
+
+
 def test_rollout_moe_load_balance_accumulator_spans_updates():
     accumulator = RolloutMoELoadBalanceMetricsAccumulator()
     # one real record plus the trailing filler slot of the final sampled token
