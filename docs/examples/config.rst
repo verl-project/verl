@@ -629,6 +629,10 @@ Trainer
   checkpoints after loading them. Default is False.
 - ``trainer.ray_wait_register_center_timeout``: The timeout for waiting
   for the ray register center to be ready. Default is 300 seconds.
+- ``trainer.early_stop_patience``: Number of consecutive steps without
+  ``critic/rewards/mean`` improvement before training terminates early.
+  Default is ``0`` (disabled). When set > 0, training stops after patience
+  is exhausted, triggering normal checkpoint saving and cleanup.
 
 
 This figure illustrates how the configurations affect the training.
