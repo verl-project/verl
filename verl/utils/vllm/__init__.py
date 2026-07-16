@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+import .npu_vllm_patch
 from .utils import TensorLoRARequest, VLLMHijack, is_version_ge
 
 # The contents of vllm/patch.py should not be imported here, because the contents of
