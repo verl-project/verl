@@ -57,9 +57,13 @@ def _check_vllm_version_for_sleep_level():
         return False
     return vs.parse(current_version) >= vs.parse(minver)
 
-_MOE_EXPAND_ARCHITECTURE_WHITELIST = frozenset({
-    "Qwen3MoeForCausalLM",
-})
+
+_MOE_EXPAND_ARCHITECTURE_WHITELIST = frozenset(
+    {
+        "Qwen3MoeForCausalLM",
+    }
+)
+
 
 def _should_expand_vllm_moe_params(architectures: Optional[list[str]] = None) -> bool:
     current_version = get_version("vllm")
@@ -78,6 +82,7 @@ def _should_expand_vllm_moe_params(architectures: Optional[list[str]] = None) ->
         return False
 
     return architectures[0] in _MOE_EXPAND_ARCHITECTURE_WHITELIST
+
 
 async def _iter_vllm_compatible_moe_params(weights):
     """Expand Transformers 5 packed MoE expert tensors to vLLM checkpoint keys.
