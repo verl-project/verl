@@ -146,6 +146,8 @@ class ReplayBuffer:
         assert self.max_off_policy_strategy in ["drop", "wait"], (
             f"Invalid max off policy strategy: {self.max_off_policy_strategy}, must be one of ['drop', 'wait']"
         )
+        if self.filter_groups_metric is not None and self.refill_fn is None:
+            raise ValueError("Group filtering (filter_groups_metric) requires refill_fn to replace evicted groups")
         # partition_id => {key: tag}
         self.partitions: dict[str, dict[str, dict]] = defaultdict(dict)
         self.pending_keys: dict[str, set] = defaultdict(set)
@@ -429,7 +431,7 @@ class ReplayBuffer:
                 )
                 last_debug_time = time.time()
 
-        if self.trainer_mode != "sync" and self.max_off_policy_strategy == "drop":
+        if partition_id != "val" and self.trainer_mode != "sync" and self.max_off_policy_strategy == "drop":
             selected_spans = [
                 global_steps - prompt_global_steps_snapshot.get(uid, global_steps) + 1 for uid in selected_prompt_uids
             ]

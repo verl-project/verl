@@ -991,7 +991,8 @@ def test_terminal_eviction_reasons_returns_dapo_counts(tq_init, partition_id):
     mixed = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[0.0, 1.0])
     _produce(partition_id, [all_zero, all_one, mixed]).join_and_check()
 
-    rb = _make_rb(trainer_mode="colocate_async", filter_groups_metric="acc")
+    # DAPO filtering requires a refill hook; this test drives internals directly so a no-op suffices.
+    rb = _make_rb(trainer_mode="colocate_async", filter_groups_metric="acc", refill_fn=lambda _n: None)
     try:
         rb._sync_metadata_from_transfer_queue()
         reasons = rb._terminal_eviction_reasons(global_steps=0, partition_id=partition_id)
@@ -1023,7 +1024,8 @@ def test_terminal_eviction_reasons_has_no_cross_call_hidden_state(tq_init, parti
     all_one = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[1.0, 1.0])
     _produce(partition_id, [all_zero, all_one]).join_and_check()
 
-    rb = _make_rb(trainer_mode="colocate_async", filter_groups_metric="acc")
+    # DAPO filtering requires a refill hook; this test drives internals directly so a no-op suffices.
+    rb = _make_rb(trainer_mode="colocate_async", filter_groups_metric="acc", refill_fn=lambda _n: None)
     try:
         rb._sync_metadata_from_transfer_queue()
         train_reasons = rb._terminal_eviction_reasons(global_steps=0, partition_id=partition_id)
