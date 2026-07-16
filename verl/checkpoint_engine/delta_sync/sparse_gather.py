@@ -171,6 +171,53 @@ def gather_dense_to_rank0(
     return full
 
 
+def gather_dense_blocks_to_rank0(
+    local_val: torch.Tensor,
+    place,
+    group=None,
+) -> torch.Tensor | None:
+    """Assemble a full flat parameter on rank 0 from per-rank hyper-rectangular blocks.
+
+    Block-placement counterpart of :func:`gather_dense_to_rank0`: each rank's shard
+    is one block ``full[o0:o0+l0, ...]`` described by ``place`` (a
+    ``BlockPlacement``), not a contiguous flat range. Each rank ships
+    ``(local_shape, global_offset)`` in a fixed-size meta all_gather, then the
+    values ride one padded gather; rank 0 slice-assigns every block into the full
+    tensor. Returns the flat full tensor on rank 0, ``None`` elsewhere.
+    """
+    rank = dist.get_rank(group)
+    world = dist.get_world_size(group)
+    dst = dist.get_global_rank(group, 0) if group is not None else 0
+    dev = local_val.device
+    ndim = len(place.full_shape)
+
+    n = int(local_val.numel())
+    meta = torch.tensor([n, *place.local_shape, *place.global_offset], dtype=torch.long, device=dev)
+    metas = [torch.zeros(1 + 2 * ndim, dtype=torch.long, device=dev) for _ in range(world)]
+    dist.all_gather(metas, meta, group=group)
+    metas_cpu = torch.stack(metas).cpu().tolist()
+    counts = [int(m[0]) for m in metas_cpu]
+    max_n = max(counts) if counts else 0
+    if max_n == 0:
+        return torch.empty(0, dtype=local_val.dtype, device=dev) if rank == 0 else None
+
+    val_pad = torch.zeros(max_n, dtype=local_val.dtype, device=dev)
+    val_pad[:n] = local_val
+    val_list = [torch.zeros(max_n, dtype=local_val.dtype, device=dev) for _ in range(world)] if rank == 0 else None
+    dist.gather(val_pad, val_list, dst=dst, group=group)
+    if rank != 0:
+        return None
+    full = torch.empty(place.full_shape, dtype=local_val.dtype, device=dev)
+    for r in range(world):
+        if not counts[r]:
+            continue
+        lshape = [int(x) for x in metas_cpu[r][1 : 1 + ndim]]
+        goff = [int(x) for x in metas_cpu[r][1 + ndim : 1 + 2 * ndim]]
+        slices = tuple(slice(o, o + sz) for o, sz in zip(goff, lshape, strict=False))
+        full[slices] = val_list[r][: counts[r]].view(lshape)
+    return full.reshape(-1)
+
+
 def gather_v_grouped_to_rank0(
     local_idx: torch.Tensor,
     local_val: torch.Tensor,

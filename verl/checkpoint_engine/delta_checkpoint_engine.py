@@ -42,12 +42,13 @@ import zmq
 with patch("importlib.metadata.distributions", return_value=[]):
     import cupy as cp
 
-from verl.workers.engine.spec import derive_placement
+from verl.workers.engine.spec import BlockPlacement, derive_placement, translate_flat_indices
 
 from .base import CheckpointEngineRegistry
 from .delta_sync.encode import DeltaFlush, DeltaParam
 from .delta_sync.encode import checksum as _checksum
 from .delta_sync.sparse_gather import (
+    gather_dense_blocks_to_rank0,
     gather_dense_to_rank0,
     gather_shards_to_rank0,
     gather_v_batched_to_rank0,
@@ -353,19 +354,30 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             snap.copy_(local, non_blocking=True)
             self._shard_snap[name] = snap
 
-            offset, contributes, pg = self._placement(name, spec)
+            place, contributes, pg = self._placement(name, spec)
             shard = local if contributes else torch.empty(0, dtype=local.dtype, device=local.device)
             if spec.to_hf is None:
                 # the spec's placements map the shard straight into the full tensor
                 if pg is None:
                     if is_r0 and contributes:
                         _bucket_dense(name, local.view(spec.full_shape))
+                elif isinstance(place, BlockPlacement):
+                    full = gather_dense_blocks_to_rank0(shard, place, group=pg)
+                    if is_r0 and full is not None:
+                        _bucket_dense(name, full.view(spec.full_shape))
                 else:
                     full = gather_dense_to_rank0(
-                        shard, offset if contributes else 0, _prodshape(spec.full_shape), group=pg
+                        shard, place if contributes else 0, _prodshape(spec.full_shape), group=pg
                     )
                     if is_r0 and full is not None:
                         _bucket_dense(name, full.view(spec.full_shape))
+            elif isinstance(place, BlockPlacement):
+                # block converter profile: assemble the full logical tensor from
+                # per-rank blocks, then convert -- to_hf receives ``[full]``.
+                full = gather_dense_blocks_to_rank0(shard, place, group=pg)
+                if is_r0 and full is not None:
+                    for hf_name, hf_tensor in spec.to_hf([full]):
+                        _bucket_dense(hf_name, hf_tensor)
             else:
                 # converter profile (e.g. Megatron): rebuild dense shards via to_hf
                 shards = gather_shards_to_rank0(shard, group=pg)
@@ -475,45 +487,89 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
 
         nan_group: list = []  # rebuild-profile params batched per gather_group
 
+        def _consume_hf(hf_name, hf_tensor):
+            nonlocal total_elems
+            fl = hf_tensor.reshape(-1)
+            total_elems += int(fl.numel())
+            pos = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
+            if pos.numel():
+                # total_elems is added inside _consume too; compensate
+                total_elems -= int(fl.numel())
+                _consume(
+                    hf_name,
+                    str(fl.dtype).replace("torch.", ""),
+                    tuple(hf_tensor.shape),
+                    int(fl.numel()),
+                    pos,
+                    fl[pos],
+                )
+
         def _flush_nan_group():
             nonlocal nan_group, total_elems
             if not nan_group:
                 return
             pg = nan_group[0][2]
             dev = nan_group[0][5].device
+            is_block = isinstance(nan_group[0][7], BlockPlacement)
+            assert all(isinstance(g[7], BlockPlacement) == is_block for g in nan_group), (
+                "a converter gather group must be uniformly block- or flat-placed"
+            )
             idx_concat = torch.cat([g[5] for g in nan_group])
             val_concat = torch.cat([g[6] for g in nan_group])
             counts = torch.tensor([int(g[5].numel()) for g in nan_group], dtype=torch.int64, device=dev)
             gathered = gather_v_batched_to_rank0(idx_concat, val_concat, counts, group=pg, grouped=True)
+
+            blocks = None
+            if is_block:
+                # every rank ships its per-param (local_shape, global_offset); rank 0
+                # needs them to place each rank's NaN-rebuilt block into the full tensor.
+                import torch.distributed as dist
+
+                maxd = max(len(g[7].full_shape) for g in nan_group)
+                meta = torch.zeros(len(nan_group), 1 + 2 * maxd, dtype=torch.int64, device=dev)
+                for i, g in enumerate(nan_group):
+                    pl = g[7]
+                    d = len(pl.full_shape)
+                    meta[i, 0] = d
+                    meta[i, 1 : 1 + d] = torch.tensor(pl.local_shape, dtype=torch.int64)
+                    meta[i, 1 + d : 1 + 2 * d] = torch.tensor(pl.global_offset, dtype=torch.int64)
+                world = dist.get_world_size(pg)
+                metas = [torch.zeros_like(meta) for _ in range(world)]
+                dist.all_gather(metas, meta, group=pg)
+                blocks = [m.cpu().tolist() for m in metas]  # [world][K][1+2*maxd]
+
             if is_r0 and gathered is not None:
-                for (name, local_dtype, _pg, spec, shard_shape, _gi, _gv), per_rank in zip(
-                    nan_group, gathered, strict=False
+                for k, ((name, local_dtype, _pg, spec, shard_shape, _gi, _gv, place), per_rank) in enumerate(
+                    zip(nan_group, gathered, strict=False)
                 ):
-                    shard_list = []
-                    for gi, gv in per_rank:
-                        buf = torch.full(shard_shape, float("nan"), dtype=local_dtype, device=dev)
-                        buf.view(-1)[gi.to(torch.int64)] = gv  # index ops need Long
-                        shard_list.append(buf)
-                    for hf_name, hf_tensor in spec.to_hf(shard_list):
-                        fl = hf_tensor.reshape(-1)
-                        total_elems += int(fl.numel())
-                        pos = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
-                        if pos.numel():
-                            # total_elems is added inside _consume too; compensate
-                            total_elems -= int(fl.numel())
-                            _consume(
-                                hf_name,
-                                str(fl.dtype).replace("torch.", ""),
-                                tuple(hf_tensor.shape),
-                                int(fl.numel()),
-                                pos,
-                                fl[pos],
-                            )
+                    if is_block:
+                        # block converter profile: rebuild the FULL logical tensor with NaN
+                        # sentinels (per-rank slice assignment), then hand ``[full]`` to to_hf.
+                        full = torch.full(spec.full_shape, float("nan"), dtype=local_dtype, device=dev)
+                        for r, (gi, gv) in enumerate(per_rank):
+                            m = blocks[r][k]
+                            d = int(m[0])
+                            lshape = [int(x) for x in m[1 : 1 + d]]
+                            goff = [int(x) for x in m[1 + d : 1 + 2 * d]]
+                            buf = torch.full((_prodshape(lshape),), float("nan"), dtype=local_dtype, device=dev)
+                            buf[gi.to(torch.int64)] = gv  # index ops need Long
+                            slices = tuple(slice(o, o + sz) for o, sz in zip(goff, lshape, strict=False))
+                            full[slices] = buf.view(lshape)
+                        for hf_name, hf_tensor in spec.to_hf([full.reshape(-1)]):
+                            _consume_hf(hf_name, hf_tensor)
+                    else:
+                        shard_list = []
+                        for gi, gv in per_rank:
+                            buf = torch.full(shard_shape, float("nan"), dtype=local_dtype, device=dev)
+                            buf.view(-1)[gi.to(torch.int64)] = gv  # index ops need Long
+                            shard_list.append(buf)
+                        for hf_name, hf_tensor in spec.to_hf(shard_list):
+                            _consume_hf(hf_name, hf_tensor)
             nan_group = []
 
         for name, local, spec in weights:
             local = local.detach().contiguous().view(-1)
-            offset, contributes, pg = self._placement(name, spec)
+            place, contributes, pg = self._placement(name, spec)
             snap = self._shard_snap.get(name)
             if snap is None or snap.numel() != local.numel():
                 snap = torch.empty_like(local, device="cpu", pin_memory=True)
@@ -534,7 +590,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                     _flush_nan_group()
                 # shard-local coordinates are bounded by the shard's numel, so the
                 # full-tensor <2^31 assert in _assemble_flush covers them too.
-                nan_group.append((name, local.dtype, pg, spec, tuple(local.shape), lidx.to(torch.int32), lval))
+                nan_group.append((name, local.dtype, pg, spec, tuple(local.shape), lidx.to(torch.int32), lval, place))
                 if len(nan_group) >= max(batch_k, 1):
                     _flush_nan_group()
                 continue
@@ -542,7 +598,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             # placement profile: translate rank-locally, gather without boundaries.
             # int32 halves the gather's position bytes; the wire is int32 anyway and
             # the per-parameter <2^31 assert in _assemble_flush covers the range.
-            gidx = ((lidx + offset) if lidx.numel() else lidx).to(torch.int32)
+            gidx = (translate_flat_indices(lidx, place) if lidx.numel() else lidx).to(torch.int32)
             gval = lval
             full_numel = _prodshape(spec.full_shape)
             if group and group[-1][6] is not pg:

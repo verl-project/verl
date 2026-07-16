@@ -39,7 +39,7 @@ import torch
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
 
-__all__ = ["ShardSpec", "derive_placement"]
+__all__ = ["BlockPlacement", "ShardSpec", "derive_placement", "translate_flat_indices"]
 
 
 @dataclass
@@ -68,17 +68,75 @@ def _prod(xs) -> int:
     return n
 
 
+def _row_major_strides(shape) -> tuple:
+    strides, acc = [], 1
+    for d in reversed([int(x) for x in shape]):
+        strides.append(acc)
+        acc *= d
+    return tuple(reversed(strides))
+
+
+@dataclass(frozen=True)
+class BlockPlacement:
+    """This rank's local shard is one hyper-rectangular block of the full tensor:
+    ``full[o0:o0+l0, o1:o1+l1, ...]`` with ``local_shape=(l0, l1, ...)`` and
+    ``global_offset=(o0, o1, ...)``. Produced by :func:`derive_placement` whenever
+    the block is not a contiguous range of the flat full tensor (e.g. ``Shard(1)``,
+    or EP x FSDP ``(Shard(0), Shard(1))``); the flat-contiguous case stays a plain
+    ``int`` offset so the existing fast path is untouched."""
+
+    local_shape: tuple
+    global_offset: tuple
+    full_shape: tuple
+
+    @property
+    def local_strides(self) -> tuple:
+        return _row_major_strides(self.local_shape)
+
+    @property
+    def full_strides(self) -> tuple:
+        return _row_major_strides(self.full_shape)
+
+
+def translate_flat_indices(lidx: torch.Tensor, place) -> torch.Tensor:
+    """Map shard-local flat positions to full-tensor flat positions.
+
+    ``place`` is what :func:`derive_placement` returned: an ``int`` when the local
+    shard is a contiguous flat range (translate = add), else a :class:`BlockPlacement`
+    (mixed-radix decompose by the local shape, add the per-dim offset, recompose with
+    the full-tensor strides -- a few divmods on the nnz tensor, no collectives).
+    """
+    if isinstance(place, int):
+        return lidx + place if place else lidx
+    out = torch.zeros_like(lidx)
+    rem = lidx
+    for lstride, off, fstride in zip(place.local_strides, place.global_offset, place.full_strides, strict=False):
+        coord = torch.div(rem, lstride, rounding_mode="floor")
+        rem = rem - coord * lstride
+        out = out + (coord + int(off)) * fstride
+    return out
+
+
 def derive_placement(spec: ShardSpec):
-    """Derive ``(flat_offset, contributes, gather_group)`` for THIS rank from the spec.
+    """Derive ``(place, contributes, gather_group)`` for THIS rank from the spec.
 
-    * unsharded (``mesh is None``): offset 0; only global rank 0 contributes; no group
+    ``place`` feeds :func:`translate_flat_indices`:
+
+    * unsharded (``mesh is None``): ``0``; only global rank 0 contributes; no group
       (the local tensor is already the full parameter).
-    * ``Shard(0)`` over one mesh dim (+ any number of ``Replicate`` dims): the flat
-      offset comes from ``compute_local_shape_and_global_offset`` (pure math, no
-      collective); only ranks at coordinate 0 of every Replicate dim contribute; the
-      gather group is the Shard dim's subgroup.
+    * flat-contiguous block (``Shard(0)`` over one mesh dim + any number of
+      ``Replicate`` dims -- the FSDP2 default): a plain ``int`` flat offset from
+      ``compute_local_shape_and_global_offset`` (pure math, no collective); only
+      ranks at coordinate 0 of every Replicate dim contribute; the gather group is
+      the Shard dim's subgroup.
+    * any other single block (``Shard(k)``, or several Shard dims, e.g. automodel's
+      EP x FSDP ``(Shard(0), Shard(1))`` expert mesh): a :class:`BlockPlacement`;
+      with more than one Shard dim every rank holds a distinct block, the gather
+      group spans the whole mesh (created once and cached by the engine's caller),
+      and Replicate dims are not supported alongside multiple Shard dims.
 
-    Other shard dims raise -- same scope as the export that produces the spec.
+    ``_StridedShard`` placements (interleaved local tensors, from some HSDP/TP
+    orderings) are rejected: the local tensor is not a single block.
     """
     import torch.distributed as dist
 
@@ -86,13 +144,13 @@ def derive_placement(spec: ShardSpec):
         return 0, (dist.get_rank() == 0 if dist.is_initialized() else True), None
 
     placements = spec.placements
-    shard_dims = [d for d, p in enumerate(placements) if p.is_shard()]
-    for d in shard_dims:
-        if placements[d].dim != 0:
+    for p in placements:
+        if type(p).__name__ == "_StridedShard":
             raise NotImplementedError(
-                f"sharded delta only supports Shard(0) (FSDP2 default); got placements={placements}"
+                f"sharded delta does not support _StridedShard (local tensor is not one block); "
+                f"got placements={placements}"
             )
-    assert len(shard_dims) <= 1, f"at most one Shard dim is supported; got placements={placements}"
+    shard_dims = [d for d, p in enumerate(placements) if p.is_shard()]
 
     coord = spec.mesh.get_coordinate()
     contributes = True
@@ -106,8 +164,40 @@ def derive_placement(spec: ShardSpec):
         # replicated across every mesh dim: full tensor on each rank, no gather
         return 0, contributes, None
 
-    _, global_offset = compute_local_shape_and_global_offset(spec.full_shape, spec.mesh, list(placements))
-    inner = _prod(spec.full_shape[1:])
-    offset = int(global_offset[0]) * inner
-    group = spec.mesh.get_group(mesh_dim=shard_dims[0])
-    return offset, contributes, group
+    local_shape, global_offset = compute_local_shape_and_global_offset(spec.full_shape, spec.mesh, list(placements))
+
+    if len(shard_dims) == 1:
+        group = spec.mesh.get_group(mesh_dim=shard_dims[0])
+        tdim = placements[shard_dims[0]].dim
+        if tdim == 0:
+            # flat-contiguous: rows [o0, o0+l0) of the flat tensor
+            return int(global_offset[0]) * _prod(spec.full_shape[1:]), contributes, group
+        return BlockPlacement(tuple(local_shape), tuple(global_offset), tuple(spec.full_shape)), contributes, group
+
+    # several Shard dims: every rank owns a distinct block; gather spans the whole mesh.
+    assert all(p.is_shard() for p in placements), (
+        f"Replicate dims are not supported alongside multiple Shard dims; got placements={placements}"
+    )
+    group = _flattened_mesh_group(spec.mesh)
+    return BlockPlacement(tuple(local_shape), tuple(global_offset), tuple(spec.full_shape)), contributes, group
+
+
+_FLAT_GROUPS: dict = {}
+
+
+def _flattened_mesh_group(mesh):
+    """One process group spanning every rank of ``mesh``, created once per mesh.
+
+    ``dist.new_group`` must be called by all processes in the same order; every
+    trainer rank walks the export in an identical order, so the cache stays in
+    lockstep. The group's rank 0 is the mesh's smallest global rank, which keeps
+    the gathered result on the engine master whenever it is part of the mesh.
+    """
+    import torch.distributed as dist
+
+    ranks = tuple(sorted(int(r) for r in mesh.mesh.flatten().tolist()))
+    got = _FLAT_GROUPS.get(ranks)
+    if got is None:
+        got = dist.new_group(list(ranks))
+        _FLAT_GROUPS[ranks] = got
+    return got
