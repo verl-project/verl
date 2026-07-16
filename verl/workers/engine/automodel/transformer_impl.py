@@ -420,6 +420,63 @@ class AutomodelEngine(BaseEngine):
         if self._is_offload_optimizer and self.optimizer is not None:
             offload_automodel_optimizer(self.optimizer)
 
+    def get_per_tensor_param_shard(self, **kwargs):
+        """Yield each rank's *local* shard with its declarative :class:`ShardSpec` --
+        consumed by the ``delta_sharded`` checkpoint engine, which diffs on shards
+        and gathers only the changes.
+
+        Dense (non-expert) params pass their DTensor placement through verbatim
+        (FSDP2 ``Shard(0)``: existing flat fast path). Grouped-expert params
+        (``experts.gate_and_up_projs`` / ``experts.down_projs``) live on the 2-D
+        ``(ep, ep_shard)`` MoE mesh as ``(Shard(0), Shard(1))``; their spec carries a
+        ``to_hf`` closure over the model's HF state-dict adapter (a pure permutation:
+        per-expert slice + gate/up split + transpose), so the engine's block
+        converter profile rebuilds the fused tensor and emits per-expert HF names.
+        Requires ``backend_config.enable_hf_state_dict_adapter=true`` for MoE.
+        """
+        load_automodel_model_to_gpu(self.module)
+        params = self.module.state_dict()
+        params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
+
+        device = get_device_id()
+        adapter = getattr(self.module, "state_dict_adapter", None)
+
+        from ..spec import ShardSpec
+
+        def _expert_to_hf(fqn, full_shape):
+            def to_hf(shards):
+                # Block profile (ep_shard > 1) hands [full]; the flat Shard(0)
+                # profile (ep_shard == 1: experts split only across ep ranks)
+                # hands per-rank flat shards in group rank order, whose
+                # concatenation IS the full flat tensor (row split).
+                full_flat = shards[0] if len(shards) == 1 else torch.cat([sh.reshape(-1) for sh in shards])
+                return adapter.convert_single_tensor_to_hf(fqn, full_flat.view(full_shape))
+
+            return to_hf
+
+        def _gen():
+            for name, param in params.items():
+                is_grouped_expert = name.endswith((".gate_and_up_projs", ".down_projs")) and ".experts" in name
+                spec = ShardSpec.from_param(param)
+                if is_grouped_expert:
+                    assert adapter is not None, (
+                        "grouped-expert export needs the model's HF state-dict adapter; "
+                        "set backend_config.enable_hf_state_dict_adapter=true"
+                    )
+                    spec = ShardSpec(
+                        full_shape=spec.full_shape,
+                        mesh=spec.mesh,
+                        placements=spec.placements,
+                        to_hf=_expert_to_hf(name, spec.full_shape),
+                    )
+                p = param.to(device, non_blocking=True)
+                if p.is_floating_point():
+                    p = p.to(torch.bfloat16, non_blocking=True)
+                local = p.to_local() if hasattr(p, "to_local") else p
+                yield name, local.reshape(-1), spec
+
+        return _gen(), None
+
     def get_per_tensor_param(self, **kwargs):
         load_automodel_model_to_gpu(self.module)
 
