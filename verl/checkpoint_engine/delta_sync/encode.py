@@ -11,16 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Position+value encoding and bucketing for delta sync.
+"""On-wire schema for delta sync: per-parameter manifest, flush container, checksum.
 
-Both encodings share one on-wire layout (a uint8 positions blob plus a
-parameter-dtype values tensor with a per-parameter manifest); decoders
-dispatch on metadata.
-
-* ``indices`` -- int32 absolute positions (4 bytes / nnz)
-* ``deltas``  -- uint16 gap-deltas with uint32 per-parameter fallback
-
-Values are sent verbatim in the parameter's dtype regardless of encoding.
+One layout: a uint8 positions blob (``indices`` encoding -- int32 absolute
+positions, 4 bytes / nnz) plus a parameter-dtype values tensor, described by a
+per-parameter manifest. Values are sent verbatim in the parameter's dtype.
 """
 
 from __future__ import annotations
@@ -66,3 +61,31 @@ def checksum(positions: torch.Tensor, values: torch.Tensor) -> int:
 
 
 # ---------- encode --------------------------------------------------------
+
+
+@dataclass
+class DeltaFlush:
+    """One ready-to-dispatch flush.
+
+    * ``positions_cpu`` is a uint8 positions blob. Despite the name it lives on
+      the GPU in the sharded engine (the wire broadcasts from the GPU, so a
+      host round-trip would be pure overhead).
+    * ``values_gpu`` stays on the GPU until the checkpoint engine broadcasts it
+      over NCCL.
+    * ``params`` carries the per-parameter manifest the receiver needs to
+      decode the blob (sent alongside the data over the zmq side-channel).
+    """
+
+    encoding: DeltaEncodingName
+    params: list[DeltaParam]
+    positions_cpu: torch.Tensor
+    values_gpu: torch.Tensor
+    checksum: int
+
+    @property
+    def nnz(self) -> int:
+        return self.values_gpu.numel()
+
+    @property
+    def wire_bytes(self) -> int:
+        return self.positions_cpu.numel() + self.values_gpu.numel() * self.values_gpu.element_size()

@@ -45,7 +45,7 @@ with patch("importlib.metadata.distributions", return_value=[]):
 from verl.workers.engine.spec import derive_placement
 
 from .base import CheckpointEngineRegistry
-from .delta_sync.encode import DeltaParam
+from .delta_sync.encode import DeltaFlush, DeltaParam
 from .delta_sync.encode import checksum as _checksum
 from .delta_sync.sparse_gather import (
     gather_dense_to_rank0,
@@ -53,7 +53,6 @@ from .delta_sync.sparse_gather import (
     gather_v_batched_to_rank0,
     shard_delta_indices,
 )
-from .delta_sync.wrapper import DeltaFlush
 from .nccl_checkpoint_engine import MasterMetadata, NCCLCheckpointEngine
 
 logger = logging.getLogger(__name__)
