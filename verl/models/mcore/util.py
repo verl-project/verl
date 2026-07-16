@@ -743,12 +743,15 @@ def postprocess_bshd_engine(
 
     return output_new_tensor
 
+
 def _is_mbridge_available():
     try:
         import importlib.util
+
         return importlib.util.find_spec("mbridge") is not None
     except Exception:
         return False
+
 
 def build_vlm_attn_mask_thd(input_ids: torch.Tensor, pad_token_id: int = None):
     input_ids_rmpad = input_ids.to_padded_tensor(pad_token_id)
