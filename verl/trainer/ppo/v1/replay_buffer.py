@@ -107,6 +107,8 @@ class ReplayBuffer:
     balances retry rounds against over-generation. Failure groups retain the standard sync behavior and remain
     sampleable, avoiding refill-induced tail latency by default.
     In async mode, ``warmup_batches`` absorbs refill latency, so all three paths refill exactly ``k`` prompts.
+    ``algorithm.filter_groups.max_num_gen_batches`` is intentionally ignored; refill continues until enough groups
+    are sampleable.
 
     Args:
         trainer_mode (str): Trainer mode.
