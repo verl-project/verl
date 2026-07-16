@@ -146,11 +146,14 @@ def _masked_copy():
     orig_copy = torch.Tensor.copy_
 
     def masked_copy_(self, src, *args, **kwargs):
+        # Sync-free masked overwrite: boolean advanced indexing (and a
+        # ``mask.all()`` early-out) would force a device->host sync per
+        # parameter -- ruinous for MoE flushes carrying >10k per-expert
+        # entries. ``torch.where`` keeps everything on-stream; a NaN-free
+        # (dense) source degenerates to a plain copy.
         if isinstance(src, torch.Tensor) and src.is_floating_point() and self.shape == src.shape:
-            mask = ~torch.isnan(src)
-            if not bool(mask.all()):
-                self[mask] = src[mask].to(self.dtype)
-                return self
+            cast = src.to(self.dtype)
+            return orig_copy(self, torch.where(torch.isnan(cast), self, cast))
         return orig_copy(self, src, *args, **kwargs)
 
     torch.Tensor.copy_ = masked_copy_
