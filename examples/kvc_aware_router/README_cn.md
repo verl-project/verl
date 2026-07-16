@@ -157,9 +157,10 @@ bash examples/kvc_aware_router/run_infer.sh /path/to/Qwen3-4B \
 # 带 MooncakeStoreConnector（跨副本 KV 共享，需先起 mooncake_master）
 bash examples/kvc_aware_router/run_infer.sh /path/to/Qwen3-4B --enable-mooncake
 
-# 带外部 KVCAware router
+# KVCAware router 始终启用（parallel_infer.py 内硬编码）。
+# Ascend（vllm-ascend）后端 —— 选 MooncakeConnectorStoreV1 + mem 0.8：
 bash examples/kvc_aware_router/run_infer.sh /path/to/Qwen3-4B \
-    --router-strategy kvcaware
+    --device ascend --enable-mooncake
 ```
 
 位置参数：
@@ -183,9 +184,9 @@ bash examples/kvc_aware_router/run_infer.sh /path/to/Qwen3-4B \
 | `--response-length` | `8192` | response 长度 |
 | `--max-model-len` | 空=引擎默认 | 模型上下文长度 |
 | `--n` | `1` | 每 prompt rollout 数（全量用 4） |
-| `--enable-mooncake` | 关 | 附加 MooncakeStoreConnector（跨副本 KV 共享） |
+| `--enable-mooncake` | 关 | 附加 mooncake connector（跨副本 KV 共享） |
 | `--mooncake-config-path` | `mooncake_config.json` | mooncake 配置路径（配合 `--enable-mooncake`） |
-| `--router-strategy` | `null` | 路由策略：`null`=global_sticky_inflight，`kvcaware`=KV感知 |
+| `--device` | `gpu` | 后端：`gpu`→MooncakeStoreConnector、mem 0.9；`ascend`→MooncakeConnectorStoreV1、mem 0.8 |
 
 > `CUDA_VISIBLE_DEVICES` 在 run_infer.sh 调用前通过 shell 环境设（如 `CUDA_VISIBLE_DEVICES=6,7 bash run_infer.sh ...`）。concurrency 在 agent_config yaml 中配置。
 

@@ -49,6 +49,7 @@ class KVCAwareBalancer:
         if not servers:
             raise ValueError("servers must be non-empty")
         self._config = KVCAwareConfig.from_config(config)
+        logger.info(f"KVCAwareBalancer, config={self._config}")
         self._strategies: list[tuple[Any, float]] = [
             (StrategyRegistry.get(type(cfg)).from_config(cfg), cfg.weight) for cfg in self._config.strategies
         ]

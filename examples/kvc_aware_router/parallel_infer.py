@@ -67,7 +67,7 @@ def init_config(args: argparse.Namespace) -> DictConfig:
     rollout.name = args.engine
     rollout.n = args.n
     rollout.tensor_model_parallel_size = args.tensor_parallel_size
-    rollout.gpu_memory_utilization = 0.9
+    rollout.gpu_memory_utilization = 0.8
     rollout.max_num_seqs = args.max_num_seqs
     if args.max_model_len is not None:
         rollout.max_model_len = args.max_model_len
@@ -83,13 +83,15 @@ def init_config(args: argparse.Namespace) -> DictConfig:
     config.data.max_prompt_length = args.prompt_length
     config.data.max_response_length = args.response_length
 
-    # vLLM engine kwargs: MFU metric (always on) + optional MooncakeStoreConnector / kv-events.
+    # vLLM engine kwargs: MFU metric (always on) + optional mooncake connector / kv-events.
     vllm_kwargs: dict = {"enable_mfu_metrics": True}
     if args.enable_mooncake:
-        # MooncakeStoreConnector for cross-replica KV sharing (vLLM GPU build);
-        # config via MOONCAKE_CONFIG_PATH env, not extra_config.
+        # Cross-replica KV sharing via mooncake (config via MOONCAKE_CONFIG_PATH env, not
+        # extra_config). The connector class differs by backend: GPU build uses
+        # "MooncakeStoreConnector"; vllm-ascend uses "MooncakeConnectorStoreV1".
+        mooncake_connector = "MooncakeConnectorStoreV1" if args.device == "ascend" else "MooncakeStoreConnector"
         vllm_kwargs["kv_transfer_config"] = {
-            "kv_connector": "MooncakeStoreConnector",
+            "kv_connector": mooncake_connector,
             "kv_role": "kv_both",
             "kv_connector_extra_config": {},
         }
@@ -256,6 +258,13 @@ def main():
         default="vllm",
         choices=["vllm", "sglang"],
         help="Inference engine backend (e.g., vllm or sglang).",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="gpu",
+        choices=["gpu", "ascend"],
+        help="Target backend: 'gpu' or 'ascend'",
     )
     parser.add_argument("--num-workers", type=int, default=1, help="Number of agent rollout workers.")
     parser.add_argument("--nnodes", type=int, default=1, help="Number of nodes to run the job.")

@@ -129,9 +129,10 @@ bash examples/kvc_aware_router/run_infer.sh /path/to/Qwen3-4B \
 # With MooncakeStoreConnector (cross-replica KV sharing; requires mooncake_master)
 bash examples/kvc_aware_router/run_infer.sh /path/to/Qwen3-4B --enable-mooncake
 
-# With KVCAware router
+# The KVCAware router is always used (hardcoded in parallel_infer.py).
+# Ascend (vllm-ascend) backend — selects MooncakeConnectorStoreV1 + mem util 0.8:
 bash examples/kvc_aware_router/run_infer.sh /path/to/Qwen3-4B \
-    --router-strategy kvcaware
+    --device ascend --enable-mooncake
 ```
 
 Positional args:
@@ -155,9 +156,9 @@ Key CLI args (forwarded to `parallel_infer.py`, see `--help` for all):
 | `--response-length` | `8192` | Response length |
 | `--max-model-len` | unset | Model context length (unset = engine default) |
 | `--n` | `1` | Rollouts per prompt (use 4 for full runs) |
-| `--enable-mooncake` | off | Attach MooncakeStoreConnector (cross-replica KV sharing) |
+| `--enable-mooncake` | off | Attach mooncake connector (cross-replica KV sharing) |
 | `--mooncake-config-path` | `mooncake_config.json` | Mooncake config path (with `--enable-mooncake`) |
-| `--router-strategy` | `null` | Rollout router: `null` = global_sticky_inflight, `kvcaware` = KV-aware |
+| `--device` | `gpu` | Backend: `gpu` → MooncakeStoreConnector, mem 0.9; `ascend` → MooncakeConnectorStoreV1, mem 0.8 |
 
 > Set `CUDA_VISIBLE_DEVICES` before calling run_infer.sh (e.g. `CUDA_VISIBLE_DEVICES=6,7 bash run_infer.sh ...`). Concurrency is configured in the agent_config YAML.
 
