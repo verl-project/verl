@@ -32,10 +32,12 @@ _ngpus = torch.cuda.device_count()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rebuild_group", [False, True])
+@pytest.mark.parametrize("clone_on_side_stream", [False, True])
 @pytest.mark.parametrize("num_trainer, num_rollout", [(2, _ngpus - 2)])
 @auto_await
 async def test_nccl_checkpoint_engine(
     rebuild_group,
+    clone_on_side_stream,
     num_trainer,
     num_rollout,
     num_nodes=1,
@@ -70,7 +72,9 @@ async def test_nccl_checkpoint_engine(
     trainer_pool, rollout_pool = split_resource_pool(resource_pool, [num_trainer, num_rollout])
     actor_wg = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
     actor_wg.reset()
-    rollout, replicas = await create_rollout_worker_group(rollout_pool, model_config, rollout_config, check_allclose)
+    rollout, replicas = await create_rollout_worker_group(
+        rollout_pool, model_config, rollout_config, check_allclose, clone_on_side_stream
+    )
 
     # create checkpoint engine manager
     checkpoint_manager = CheckpointEngineManager(config=checkpoint_engine_config, actor_wg=actor_wg, replicas=replicas)
@@ -191,6 +195,7 @@ async def test_kimi_checkpoint_engine(
 if __name__ == "__main__":
     test_nccl_checkpoint_engine(
         rebuild_group=False,
+        clone_on_side_stream=False,
         num_trainer=2,
         num_rollout=30,
         num_nodes=4,

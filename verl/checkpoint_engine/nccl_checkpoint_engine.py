@@ -89,8 +89,30 @@ class BroadcastOperation:
         # broadcast tensor via NCCL
         collective.broadcast(self.bucket, src_rank=0, group_name=self.group_name)
 
+        # ray.util.collective enqueues the NCCL kernel on its own internal stream pool
+        # and returns as soon as it's enqueued, not once it has actually finished on
+        # the GPU. It also never calls `bucket.record_stream(...)` for this path, so
+        # the caching allocator has no idea `bucket` is still being read/written by
+        # that stream. Without this synchronize, `wait_for_complete()` below would
+        # only prove the kernel was queued, letting callers reuse or free `bucket`
+        # while the broadcast is still running. ray doesn't expose the internal
+        # stream it used, so we can't wait on it more surgically -- block the whole
+        # device instead.
+        torch.cuda.synchronize()
+
+        # or we could also try waiting on only the default stream, but that would be a hack:
+        # ray's NCCL pool streams are created with non_blocking=False, so CUDA's legacy
+        # default-stream rule (default stream blocks on events on all blocking streams)
+        # happens to order an event recorded here after the broadcast kernel. Relies on 
+        # that ray internal, not a public guarantee.
+        #
+        # event = torch.cuda.Event()
+        # event.record()
+        # event.synchronize()  # blocking wait, e.g. before freeing the buffer
+
     async def wait_for_complete(self) -> dict[str, TensorMeta]:
-        """Wait for the broadcast operation to complete.
+        """Wait for the broadcast operation to complete, including the NCCL kernel
+        actually finishing on the GPU (not just being enqueued).
 
         Returns:
             dict[str, TensorMeta]: The bucket meta after broadcast.
