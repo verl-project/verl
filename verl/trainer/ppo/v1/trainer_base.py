@@ -18,7 +18,7 @@ import math
 import os
 import uuid
 from abc import ABC, abstractmethod
-from collections import Counter, defaultdict
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pprint import pprint
@@ -496,20 +496,6 @@ class PPOTrainer(ABC):
         metrics.update(metrics_aggregator.get_aggregated_metrics())
         return KVBatchMeta(partition_id=combined_partition_id, keys=combined_keys, tags=combined_tags)
 
-    @staticmethod
-    def _merge_dapo_filtered_reward_counts(metrics: dict, off_policy_metrics: dict) -> None:
-        """Additively merge the dict-valued DAPO diagnostic so per-step mini-batches accumulate.
-
-        ``metrics.update`` would overwrite it; both sides hold {metric_value: count} for the same step.
-        """
-        new_counts = off_policy_metrics.get(DAPO_FILTERED_REWARD_COUNTS_KEY)
-        if not new_counts:
-            return
-        merged = Counter(metrics.get(DAPO_FILTERED_REWARD_COUNTS_KEY, {}))
-        merged.update(new_counts)
-        # Keep it out of the subsequent update() overwrite by writing the merged result on both dicts.
-        off_policy_metrics[DAPO_FILTERED_REWARD_COUNTS_KEY] = dict(merged)
-
     def _step_once(self, metrics: dict, timing_raw: dict, sample_batch_size: int) -> KVBatchMeta:
         """Run a single local update: sample one mini-batch and perform the full PPO pipeline once."""
         # 1. sample batch from replay buffer
@@ -520,7 +506,6 @@ class PPOTrainer(ABC):
                 partition_id="train",
                 batch_size=sample_batch_size,
             )
-            self._merge_dapo_filtered_reward_counts(metrics, off_policy_metrics)
             metrics.update(off_policy_metrics)
             batch.extra_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
             self.on_sample_end()
