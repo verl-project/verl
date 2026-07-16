@@ -19,7 +19,8 @@ Unified combined score (one pass, no fast/slow branching):
     S_cache = w_gpu·gpu_hit + w_cpu·cpu_hit + w_ssd·ssd_hit   (weights sum to 1)
     S_load  = 1 - load                                         (bigger = less loaded)
     load    = a·kv + b·min(1, running/max_num_seqs) + c·min(1, waiting/max_num_seqs)
-              (a+b+c=1; default 0.4/0.3/0.3; bigger = more loaded)
+              + d·min(1, inflight/max_num_seqs)
+              (a+b+c+d=1; default 0.4/0.2/0.1/0.3; bigger = more loaded)
 
 Overload (used only by the sticky short-circuit): ``load > load_threshold``
 (default 0.9). Combined scoring never consults overload.
@@ -60,7 +61,7 @@ def _strat(**kwargs) -> KVCacheAwareStrategy:
         layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
         collector_names=["vllm_zmq"],
         weight=1.0,
-        load_weights=(0.4, 0.3, 0.3),
+        load_weights=(0.4, 0.2, 0.1, 0.3),
     )
     defaults.update(kwargs)
     strat = KVCacheAwareStrategy(**defaults)
@@ -85,6 +86,7 @@ class FakeRouteDataProvider:
       kv_cache_usage_perc  – KV cache usage ratio (default 1.0)
       num_requests_running – requests in flight (default 0)
       num_requests_waiting – requests in the queue (default 0)
+      inflight_count       – in-flight acquire/release counter (default 0)
       gpu_hit_pct          – GPU prefix cache hit percent 0-100 (default 0)
       tiers                – dict mapping tier name to hit rate (default {})
     """
@@ -107,6 +109,8 @@ class FakeRouteDataProvider:
             return entry.get("num_requests_running", 0)
         if key == MetricKey.NUM_REQUESTS_WAITING:
             return entry.get("num_requests_waiting", 0)
+        if key == MetricKey.INFLIGHT_COUNT:
+            return entry.get("inflight_count", 0)
         return entry.get(key, 0.0)
 
     def get_metrics(self, replica_id: str) -> dict:
@@ -115,6 +119,7 @@ class FakeRouteDataProvider:
             MetricKey.KV_CACHE_USAGE_PERC: entry.get("kv_cache_usage_perc", 1.0),
             MetricKey.NUM_REQUESTS_RUNNING: entry.get("num_requests_running", 0),
             MetricKey.NUM_REQUESTS_WAITING: entry.get("num_requests_waiting", 0),
+            MetricKey.INFLIGHT_COUNT: entry.get("inflight_count", 0),
         }
 
     def get_layer_prefix_hit_rate(self, replica_id: str, prompt_ids: list[int], layer: str) -> float:
@@ -226,9 +231,9 @@ class TestKVCAwareCombinedScore:
         """
         Feature: a saturated replica (load>0.9) gets the FULL formula (no zeroing);
         its s_load≈0 drags the score down despite high cache.
-        Description: "loaded" kv=1,r=64,w=1000 (load≈0.98); "light" kv=0.2,r=0 (load=0.08)
+        Description: "loaded" kv=1,r=64,w=1000,inflight=64 (load=1.0); "light" kv=0.2,r=0 (load=0.08)
         Expectation: light outranks loaded; loaded score still reflects its cache term (not zeroed)
-          loaded: waiting clamped (1000/64→1.0) → load=0.4+0.3+0.3=1.0→s_load=0; s_cache=0.63;
+          loaded: waiting/inflight clamped (1000/64→1.0, 64/64→1.0) → load=0.4+0.2+0.1+0.3=1.0→s_load=0; s_cache=0.63;
                   score=0.7·0.63+0.3·0=0.441  (cache term 0.441 present despite saturation)
           light:  load=0.08→s_load=0.92; s_cache=0.35; score=0.7·0.35+0.3·0.92=0.521
         """
@@ -239,6 +244,7 @@ class TestKVCAwareCombinedScore:
                     "kv_cache_usage_perc": 1.0,
                     "num_requests_running": 64,
                     "num_requests_waiting": 1000,
+                    "inflight_count": 64,
                     "gpu_hit_pct": 90,
                     "tiers": {"cpu": 0.0, "ssd": 0.0},
                 },
@@ -255,7 +261,7 @@ class TestKVCAwareCombinedScore:
         assert scores == pytest.approx([0.441, 0.521], abs=1e-4)
         assert scores[1] > scores[0]  # high load penalizes below light
         # loaded's score equals the full formula — cache term (0.441) is NOT zeroed
-        # load=1.0 (waiting clamped) → s_load=0 → score = 0.7·0.63 + 0.3·0 = 0.441
+        # load=1.0 (waiting + inflight clamped) → s_load=0 → score = 0.7·0.63 + 0.3·0 = 0.441
         assert scores[0] == pytest.approx(0.7 * 0.63 + 0.3 * 0.0, abs=1e-4)
 
     def test_no_cache_pure_load(self):
@@ -300,7 +306,7 @@ class TestKVCAwareLoad:
         Expectation: scores decrease as kv rises
           idle:   load=0    → s_load=1.0  → score=0.30
           mid:    load=0.2  → s_load=0.8  → score=0.24
-          loaded: load=0.7  → s_load=0.3  → score=0.09   (kv=1,running=64: load=0.4+0.3=0.7)
+          loaded: load=0.6  → s_load=0.4  → score=0.12   (kv=1,running=64: load=0.4+0.2=0.6)
         """
         strat = _strat()
         provider = FakeRouteDataProvider(
@@ -329,7 +335,7 @@ class TestKVCAwareLoad:
             }
         )
         scores = strat.score(PROMPT_IDS, provider, _replicas("idle", "mid", "loaded"))
-        assert scores == pytest.approx([0.30, 0.24, 0.09])
+        assert scores == pytest.approx([0.30, 0.24, 0.12])
         assert scores[0] > scores[1] > scores[2]
 
     def test_running_increases_load(self):
@@ -338,8 +344,8 @@ class TestKVCAwareLoad:
         Description: kv=0.5 fixed; running 0 / 32 / 64; no cache
         Expectation: scores decrease as running rises
           r=0:  load=0.2        → s_load=0.80 → score=0.24
-          r=32: load=0.2+0.15=0.35 → s_load=0.65 → score=0.195
-          r=64: load=0.2+0.30=0.50 → s_load=0.50 → score=0.15
+          r=32: load=0.2+0.1=0.3  → s_load=0.70 → score=0.21
+          r=64: load=0.2+0.2=0.4  → s_load=0.60 → score=0.18
         """
         strat = _strat()
         provider = FakeRouteDataProvider(
@@ -368,7 +374,7 @@ class TestKVCAwareLoad:
             }
         )
         scores = strat.score(PROMPT_IDS, provider, _replicas("r0", "r32", "r64"))
-        assert scores == pytest.approx([0.24, 0.195, 0.15])
+        assert scores == pytest.approx([0.24, 0.21, 0.18])
         assert scores[0] > scores[1] > scores[2]
 
     def test_waiting_increases_load(self):
@@ -377,7 +383,7 @@ class TestKVCAwareLoad:
         Description: kv=0,running=0; waiting 0 vs 10; no cache
         Expectation: waiting replica scores lower
           w=0:  load=0 → s_load=1.0 → score=0.30
-          w=10: load=0.3·(10/64)=0.0469 → s_load=0.9531 → score=0.2859
+          w=10: load=0.1·(10/64)=0.015625 → s_load=0.984375 → score=0.2953
         """
         strat = _strat()
         provider = FakeRouteDataProvider(
@@ -399,7 +405,7 @@ class TestKVCAwareLoad:
             }
         )
         scores = strat.score(PROMPT_IDS, provider, _replicas("w0", "w10"))
-        assert scores == pytest.approx([0.30, 0.3 * (1 - 0.3 * (10 / 64))])
+        assert scores == pytest.approx([0.30, 0.3 * (1 - 0.1 * (10 / 64))])
         assert scores[0] > scores[1]
 
     def test_missing_metrics_defaults_to_high_load(self):
@@ -599,7 +605,7 @@ class TestKVCAwareConstruction:
             {"layer_weights": {"gpu": 0.7, "cpu": 0.3}},
             {"load_weights": (0.5, 0.3)},
             {"load_weights": (0.5, 0.5, 0.5)},
-            {"load_weights": (-0.1, 0.6, 0.5)},
+            {"load_weights": (-0.1, 0.6, 0.5, 0.0)},
         ],
     )
     def test_invalid_construction_raises(self, kwargs):
@@ -751,7 +757,7 @@ class TestFromConfig:
         assert strat.load_threshold == pytest.approx(0.85)
         assert strat.layer_weights == {"gpu": 0.6, "cpu": 0.3, "ssd": 0.1}
         assert strat._max_num_seqs is None  # not set until set_capacity()
-        assert strat.load_weights == (0.4, 0.3, 0.3)
+        assert strat.load_weights == (0.4, 0.2, 0.1, 0.3)
 
     def test_from_config_scores_match_direct(self):
         from verl.workers.rollout.router.kvcaware.config.strategy import KVCAwareStrategyConfig
@@ -797,7 +803,10 @@ class TestStickyShortCircuit:
     """Sticky replica wins when bound + present + not overloaded; else fall through.
 
     Overload now means ``load > load_threshold`` (default 0.9) — i.e. the bound
-    replica is genuinely saturated (kv≈1, running≈max_num_seqs, big backlog).
+    replica is genuinely saturated (kv≈1, running≈max_num_seqs, big backlog). With
+    the default four-term load weights (0.4/0.2/0.1/0.3) the kv+running+waiting
+    terms cap at 0.7, so the inflight term (weight 0.3) must be >0 to push load
+    past 0.9; the "saturated" cases below therefore feed inflight=max_num_seqs.
     """
 
     def _provider(self, sticky=None, **per_replica):
@@ -807,12 +816,17 @@ class TestStickyShortCircuit:
     # ── is_overloaded ──────────────────────────────────────────────────────
     def test_is_overloaded_true_when_saturated(self):
         """Feature: is_overloaded True when load > load_threshold (0.9).
-        Description: kv=1.0, running=64 (mns), waiting=1000 → load≈0.98 > 0.9
+        Description: kv=1.0, running=64 (mns), waiting=1000, inflight=64 → load=1.0 > 0.9
         Expectation: overloaded
         """
         strat = _strat(load_threshold=0.9)
         provider = self._provider(
-            rep_a={"kv_cache_usage_perc": 1.0, "num_requests_running": 64, "num_requests_waiting": 1000}
+            rep_a={
+                "kv_cache_usage_perc": 1.0,
+                "num_requests_running": 64,
+                "num_requests_waiting": 1000,
+                "inflight_count": 64,
+            }
         )
         assert strat.is_overloaded(provider, ReplicaInfo("rep_a")) is True
 
@@ -846,7 +860,7 @@ class TestStickyShortCircuit:
 
     def test_sticky_hit_overloaded_falls_back_to_combined(self):
         """Feature: bound but saturated (load>0.9) → no short-circuit, combined scoring.
-        Description: sticky binds r1→rep_b; rep_b saturated (kv=1,r=64,w=1000);
+        Description: sticky binds r1→rep_b; rep_b saturated (kv=1,r=64,w=1000,inflight=64 → load=1.0);
         rep_a light with gpu hit.
         Expectation: rep_a wins (combined), not the saturated sticky rep_b
         """
@@ -858,6 +872,7 @@ class TestStickyShortCircuit:
                 "kv_cache_usage_perc": 1.0,
                 "num_requests_running": 64,
                 "num_requests_waiting": 1000,
+                "inflight_count": 64,
                 "gpu_hit_pct": 0,
             },
         )
@@ -911,34 +926,38 @@ class TestStickyShortCircuit:
 # --------------------------------------------------------------------------- #
 class TestLoadNormalized:
     def test_idle_replica_is_zero(self):
-        assert load_normalized(0.0, 0, 0, max_num_seqs=64) == pytest.approx(0.0)
+        assert load_normalized(0.0, 0, 0, 0, max_num_seqs=64) == pytest.approx(0.0)
 
     def test_kv_only_contribution(self):
-        assert load_normalized(0.5, 0, 0, max_num_seqs=64) == pytest.approx(0.2)
+        assert load_normalized(0.5, 0, 0, 0, max_num_seqs=64) == pytest.approx(0.2)
 
     def test_running_and_kv(self):
-        assert load_normalized(0.5, 32, 0, max_num_seqs=64) == pytest.approx(0.35)
+        assert load_normalized(0.5, 32, 0, 0, max_num_seqs=64) == pytest.approx(0.3)
 
     def test_running_clamped_to_one(self):
-        assert load_normalized(0.8, 128, 0, max_num_seqs=64) == pytest.approx(0.62)
+        assert load_normalized(0.8, 128, 0, 0, max_num_seqs=64) == pytest.approx(0.52)
 
     def test_waiting_term(self):
-        assert load_normalized(0.0, 0, 10, max_num_seqs=64) == pytest.approx(0.3 * (10 / 64))
+        assert load_normalized(0.0, 0, 10, 0, max_num_seqs=64) == pytest.approx(0.1 * (10 / 64))
+
+    def test_inflight_term(self):
+        # inflight=32 with default weight 0.3 → 0.3 * (32/64) = 0.15
+        assert load_normalized(0.0, 0, 0, 32, max_num_seqs=64) == pytest.approx(0.15)
 
     def test_custom_weights_change_load(self):
-        load = load_normalized(0.5, 32, 0, max_num_seqs=64, weights=(0.6, 0.2, 0.2))
+        load = load_normalized(0.5, 32, 0, 0, max_num_seqs=64, weights=(0.6, 0.2, 0.2, 0.0))
         assert load == pytest.approx(0.4)
         assert load != pytest.approx(0.35)
 
     def test_near_saturated_exceeds_threshold(self):
-        load = load_normalized(1.0, 64, 1000, max_num_seqs=64)
+        load = load_normalized(1.0, 64, 1000, 64, max_num_seqs=64)
         assert load > 0.9
         assert load <= 1.0
 
 
 class TestDefaultWeights:
     def test_default_weights_tuple(self):
-        assert DEFAULT_LOAD_WEIGHTS == (0.4, 0.3, 0.3)
+        assert DEFAULT_LOAD_WEIGHTS == (0.4, 0.2, 0.1, 0.3)
         assert sum(DEFAULT_LOAD_WEIGHTS) == pytest.approx(1.0)
 
 
@@ -962,7 +981,7 @@ class TestFallbackModes:
             sticky={"r1": "rep_a"},
         )
         ranking = route([(strat, 1.0)], PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), "r1")
-        assert ranking[0] == "rep_a"  # sticky wins despite load≈1.0
+        assert ranking[0] == "rep_a"  # sticky wins despite load≈0.7 (overload check disabled)
 
     def test_miss_routes_to_least_inflight(self):
         """slow_cut=least-inflight: pick the replica with the fewest in-flight requests."""

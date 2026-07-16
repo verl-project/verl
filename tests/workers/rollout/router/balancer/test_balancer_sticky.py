@@ -38,12 +38,15 @@ pytestmark = [pytest.mark.ut, pytest.mark.cpu]
 
 
 def _kv_metrics(per_replica: dict[str, dict]) -> dict[str, dict]:
-    """Normalize {sid: {kv, running, waiting}} into MetricKey-keyed dicts.
+    """Normalize {sid: {kv, running, waiting, inflight}} into MetricKey-keyed dicts.
 
-    Defaults: kv=0.3, running=0, waiting=0 (light load). NOTE: ``kv`` here sets
-    ``KV_CACHE_USAGE_PERC``; the load formula actually uses ``kv_cache_load``
-    (retained_blocks/num_gpu_blocks), which tests drive via ``add_kv_blocks`` +
-    ``NUM_GPU_BLOCKS`` when they need overload.
+    Defaults: kv=0.3, running=0, waiting=0, inflight=0 (light load). NOTE: ``kv``
+    here sets ``KV_CACHE_USAGE_PERC``; the load formula actually uses
+    ``kv_cache_load`` (retained_blocks/num_gpu_blocks), which tests drive via
+    ``add_kv_blocks`` + ``NUM_GPU_BLOCKS`` when they need overload. ``inflight``
+    maps to ``INFLIGHT_COUNT`` — the load formula's 4th term (weight 0.3); with
+    inflight=0 the kv+running+waiting ceiling is 0.7, so it must be >0 to push
+    load past ``load_threshold`` (0.9).
     """
     out = {}
     for sid, m in per_replica.items():
@@ -51,6 +54,7 @@ def _kv_metrics(per_replica: dict[str, dict]) -> dict[str, dict]:
             MetricKey.KV_CACHE_USAGE_PERC: m.get("kv", 0.3),
             MetricKey.NUM_REQUESTS_RUNNING: m.get("running", 0),
             MetricKey.NUM_REQUESTS_WAITING: m.get("waiting", 0),
+            MetricKey.INFLIGHT_COUNT: m.get("inflight", 0),
         }
     return out
 
@@ -84,9 +88,13 @@ class TestStickyEndToEnd:
 
     def test_overloaded_sticky_falls_back_to_healthy(self):
         """Feature: bound replica becomes saturated (load>0.9) → rebind to a healthy one.
-        Description: turn1 binds r1→s0; then s0 saturated (kv_load=1.0 via
-        retained=10/num_gpu_blocks=10, running=64, waiting=1000 → load=1.0),
-        s1 healthy (kv_load=0 → load=0).
+        Description: turn1 binds r1→s0; then s0 saturated so load exceeds
+        ``load_threshold`` (0.9). load = 0.4·kv_load + 0.2·running/max +
+        0.1·waiting/max + 0.3·inflight/max with ``max_num_seqs=64``; to push past
+        0.9 every weighted term must contribute — in particular inflight (weight
+        0.3) must be >0, since with inflight=0 the kv+running+waiting ceiling is
+        0.7. Here s0: kv_load=1.0 (retained=10/num_gpu_blocks=10), running=64,
+        waiting=1000, inflight=64 → load=1.0; s1 healthy (kv_load=0 → load=0).
         Expectation: turn2 routes to s1 (not the saturated s0), and rebinds r1→s1
         """
         balancer = self._make_balancer(
@@ -94,9 +102,12 @@ class TestStickyEndToEnd:
             _kv_metrics({"s0": {}, "s1": {}}),
         )
         sid1, _ = balancer.acquire_server("r1", [1, 2])
-        # saturate s0: kv_load=1.0 (retained/num_gpu_blocks) + running/waiting maxed
+        # saturate s0: kv_load=1.0 (retained/num_gpu_blocks) + running/waiting/
+        # inflight all maxed so load (0.4·kv+0.2·run+0.1·wait+0.3·inflight) = 1.0
         balancer._store.refresh_metrics(
-            _kv_metrics({"s0": {"kv": 1.0, "running": 64, "waiting": 1000}, "s1": {"kv": 0.3}})
+            _kv_metrics(
+                {"s0": {"kv": 1.0, "running": 64, "waiting": 1000, "inflight": 64}, "s1": {"kv": 0.3}}
+            )
         )
         balancer._store.add_kv_blocks("s0", [f"b{i}" for i in range(10)])
         balancer._store.refresh_metrics({"s0": {MetricKey.NUM_GPU_BLOCKS: 10}})

@@ -31,22 +31,31 @@ logger = get_router_logger("kvc-aware-strategy")
 
 STICKY_TOP_SCORE = 1e9
 
-DEFAULT_LOAD_WEIGHTS: tuple[float, float, float] = (0.4, 0.3, 0.3)
+DEFAULT_LOAD_WEIGHTS: tuple[float, float, float, float] = (0.4, 0.2, 0.1, 0.3)
 
 
 def load_normalized(
     kv_usage: float,
     running: int | float,
     waiting: int | float,
+    inflight: int | float,
     *,
     max_num_seqs: int,
-    weights: tuple[float, float, float] = DEFAULT_LOAD_WEIGHTS,
+    weights: tuple[float, float, float, float] = DEFAULT_LOAD_WEIGHTS,
 ) -> float:
-    """load = a·kv_usage + b·running/max_num_seqs + c·waiting/max_num_seqs (∈ [0,1], bigger = more loaded)."""
-    a, b, c = weights
+    """load = a·kv_usage + b·running/max + c·waiting/max + d·inflight/max (∈ [0,1], bigger = more loaded).
+
+    ``inflight`` (the Balancer's own acquire/release counter, maintained
+    synchronously) is the only term that is non-zero at cold start — the other
+    three come from async-polled vLLM metrics, which are still 0 before the
+    first poll lands. Its weight (``d``) keeps the first wave of requests from
+    collapsing onto ``pool[0]`` when the polled terms are tied at 0.
+    """
+    a, b, c, d = weights
     running_usage = min(1.0, float(running) / float(max_num_seqs))
     waiting_usage = min(1.0, float(waiting) / float(max_num_seqs))
-    return a * float(kv_usage) + b * running_usage + c * waiting_usage
+    inflight_usage = min(1.0, float(inflight) / float(max_num_seqs))
+    return a * float(kv_usage) + b * running_usage + c * waiting_usage + d * inflight_usage
 
 
 class StrategyError(Exception):
@@ -66,7 +75,7 @@ class KVCacheAwareStrategy:
         weight: float,
         memory_overload_filter: bool = True,
         slow_cut: SlowCut | str = SlowCut.PREFIX_LOAD_AWARE,
-        load_weights: tuple[float, float, float] = DEFAULT_LOAD_WEIGHTS,
+        load_weights: tuple[float, float, float, float] = DEFAULT_LOAD_WEIGHTS,
     ) -> None:
         if not 0 <= alpha <= 1:
             raise StrategyError(f"alpha must be in [0, 1], got {alpha}")
@@ -87,8 +96,8 @@ class KVCacheAwareStrategy:
             slow_cut = SlowCut(slow_cut)
         except ValueError as exc:
             raise StrategyError(f"slow_cut must be one of {[m.value for m in SlowCut]}, got {slow_cut!r}") from exc
-        if len(load_weights) != 3 or any(w < 0 for w in load_weights):
-            raise StrategyError(f"load_weights must be 3 non-negative values, got {load_weights}")
+        if len(load_weights) != 4 or any(w < 0 for w in load_weights):
+            raise StrategyError(f"load_weights must be 4 non-negative values, got {load_weights}")
         if abs(sum(load_weights) - 1.0) > 1e-6:
             raise StrategyError(f"load_weights must sum to 1.0, got {sum(load_weights)}")
 
@@ -128,10 +137,23 @@ class KVCacheAwareStrategy:
             slow_cut=cfg.slow_cut,
         )
 
-    def _compute_load(self, kv_usage: float, running: int | float, waiting: int | float) -> float:
+    def _compute_load(
+        self,
+        kv_usage: float,
+        running: int | float,
+        waiting: int | float,
+        inflight: int | float = 0,
+    ) -> float:
         if self._max_num_seqs is None:
             raise StrategyError("set_capacity() must be called before routing")
-        return load_normalized(kv_usage, running, waiting, max_num_seqs=self._max_num_seqs, weights=self.load_weights)
+        return load_normalized(
+            kv_usage,
+            running,
+            waiting,
+            inflight,
+            max_num_seqs=self._max_num_seqs,
+            weights=self.load_weights,
+        )
 
     def is_overloaded(
         self,
@@ -148,7 +170,8 @@ class KVCacheAwareStrategy:
         kv_usage = store.kv_cache_load(replica.replica_id)
         running = m.get(MetricKey.NUM_REQUESTS_RUNNING, 0)
         waiting = m.get(MetricKey.NUM_REQUESTS_WAITING, 0)
-        return self._compute_load(kv_usage, running, waiting) > self.load_threshold
+        inflight = m.get(MetricKey.INFLIGHT_COUNT, 0)
+        return self._compute_load(kv_usage, running, waiting, inflight) > self.load_threshold
 
     def _sticky_shortcut(
         self,
@@ -213,15 +236,16 @@ class KVCacheAwareStrategy:
             kv_usage = store.kv_cache_load(replica.replica_id)
             running = m.get(MetricKey.NUM_REQUESTS_RUNNING, 0)
             waiting = m.get(MetricKey.NUM_REQUESTS_WAITING, 0)
-            load = self._compute_load(kv_usage, running, waiting)
+            inflight = m.get(MetricKey.INFLIGHT_COUNT, 0)
+            load = self._compute_load(kv_usage, running, waiting, inflight)
             s_load = 1.0 - load
             s_cache, gpu_hit = self._cache_score(store, replica, effective_prompt_ids)
             score = self.alpha * s_cache + (1 - self.alpha) * s_load
             result.append(score)
             logger.info(
                 f"score(): replica={replica.replica_id} kv={kv_usage:.3f} running={running} waiting={waiting} "
-                f"→ load={load:.4f} s_load={s_load:.4f} | gpu_hit={gpu_hit:.2f} s_cache={s_cache:.4f} "
-                f"({self.alpha:.2f}·cache + {1 - self.alpha:.2f}·load) → score={score:.4f}"
+                f"inflight={inflight} → load={load:.4f} s_load={s_load:.4f} | gpu_hit={gpu_hit:.2f} "
+                f"s_cache={s_cache:.4f} ({self.alpha:.2f}·cache + {1 - self.alpha:.2f}·load) → score={score:.4f}"
             )
         scores_str = ", ".join(f"{r.replica_id}={result[i]:.4f}" for i, r in enumerate(replicas))
         logger.info(f"score(): COMBINED scores: {scores_str}")
