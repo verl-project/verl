@@ -71,7 +71,6 @@ class TestBaseCheckpointManagerLoraOnly:
 
     @staticmethod
     def _make_manager(checkpoint_config):
-        import torch.distributed
 
         class MockModel:
             pass
@@ -94,6 +93,7 @@ class TestFSDPCheckpointManagerLoraOnly:
     @pytest.fixture(autouse=True)
     def _patch_dist(self, monkeypatch):
         import torch.distributed
+
         monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
         monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 1)
 
@@ -117,9 +117,7 @@ class TestFSDPCheckpointManagerLoraOnly:
 
     def test_has_lora_false(self):
         model = _FakeFSDPModel(has_lora=False)
-        mgr = self._make_fsdp_manager(
-            checkpoint_config={"save_lora_only": True}, model=model
-        )
+        mgr = self._make_fsdp_manager(checkpoint_config={"save_lora_only": True}, model=model)
         assert mgr._has_lora() is False
 
     def test_save_lora_only_filters_state_dict(self, tmp_path):
@@ -134,6 +132,7 @@ class TestFSDPCheckpointManagerLoraOnly:
 
         saved_path = save_dir / "model_world_size_1_rank_0.pt"
         import torch
+
         state_dict = torch.load(saved_path, weights_only=False)
         for key in state_dict:
             assert "lora_" in key or ".adapter_" in key, "Unexpected base key: {}".format(key)
@@ -151,6 +150,7 @@ class TestFSDPCheckpointManagerLoraOnly:
 
         saved_path = save_dir / "model_world_size_1_rank_0.pt"
         import torch
+
         state_dict = torch.load(saved_path, weights_only=False)
         assert "base.weight" in state_dict
         assert "lora_A.weight" in state_dict
@@ -167,12 +167,12 @@ class TestFSDPCheckpointManagerLoraOnly:
 
         saved_path = save_dir / "model_world_size_1_rank_0.pt"
         import torch
+
         state_dict = torch.load(saved_path, weights_only=False)
         assert "base.weight" in state_dict
         assert "lora_A.weight" in state_dict
 
     def test_load_lora_only_checkpoint_merges(self, tmp_path):
-        import torch
 
         model_before = _FakeFSDPModel(has_lora=True)
         model_before._fsdp_wrapped_module.base_weight.data.fill_(1.0)
@@ -197,7 +197,6 @@ class TestFSDPCheckpointManagerLoraOnly:
         assert model_after._fsdp_wrapped_module.lora_A_weight.item() == 0.5
 
     def test_load_full_checkpoint_still_works(self, tmp_path):
-        import torch
 
         model = _FakeFSDPModel(has_lora=True)
         model._fsdp_wrapped_module.base_weight.data.fill_(42.0)
@@ -223,7 +222,6 @@ class _FakeFSDPModel:
     """A fake FSDP-wrapped model that mimics the interface used by FSDPCheckpointManager."""
 
     def __init__(self, has_lora=True):
-        import torch
         self._fsdp_wrapped_module = _FakePEFTModel(has_lora=has_lora)
 
     def state_dict(self):
@@ -241,6 +239,7 @@ class _FakePEFTModel:
 
     def __init__(self, has_lora=True):
         import torch
+
         self.base_weight = torch.nn.Parameter(torch.tensor(1.0))
         self.lora_A_weight = torch.nn.Parameter(torch.tensor(0.5))
         self.lora_B_weight = torch.nn.Parameter(torch.tensor(0.3))
@@ -248,11 +247,7 @@ class _FakePEFTModel:
         self.can_generate = lambda: False
 
         if has_lora:
-            self.peft_config = {
-                "default": type("Cfg", (), {
-                    "r": 8, "lora_alpha": 16, "task_type": "CAUSAL_LM"
-                })()
-            }
+            self.peft_config = {"default": type("Cfg", (), {"r": 8, "lora_alpha": 16, "task_type": "CAUSAL_LM"})()}
 
     def state_dict(self):
         d = {

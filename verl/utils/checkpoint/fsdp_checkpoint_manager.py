@@ -287,9 +287,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                     if self.should_save_lora_only and self._has_lora():
                         n_total = len(model_state_dict)
                         model_state_dict = {
-                            k: v
-                            for k, v in model_state_dict.items()
-                            if "lora_" in k or ".adapter_" in k
+                            k: v for k, v in model_state_dict.items() if "lora_" in k or ".adapter_" in k
                         }
                         if not model_state_dict:
                             raise ValueError(
