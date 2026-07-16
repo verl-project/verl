@@ -180,7 +180,12 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 local_model_path = copy_to_local(remote_model_path)
                 model_state_dict = torch.load(local_model_path, weights_only=False)
                 if self.is_lora_only_state_dict(model_state_dict):
-                    self.model.load_state_dict(model_state_dict, strict=False)
+                    result = self.model.load_state_dict(model_state_dict, strict=False)
+                    if result.unexpected_keys:
+                        raise ValueError(
+                            f"Failed to load LoRA-only checkpoint: unexpected keys {result.unexpected_keys}. "
+                            f"Ensure the model has the correct LoRA adapters configured."
+                        )
                     log_with_rank(
                         f"Loaded LoRA-only checkpoint ({len(model_state_dict)} keys) from {remote_model_path}",
                         rank=self.rank,
@@ -286,9 +291,20 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                             for k, v in model_state_dict.items()
                             if "lora_" in k or ".adapter_" in k
                         }
-                        lora_mib = (
-                            sum(v.numel() * v.element_size() for v in model_state_dict.values()) / 1024**2
-                        )
+                        if not model_state_dict:
+                            raise ValueError(
+                                f"save_lora_only is True and the model has a peft_config, "
+                                f"but no LoRA/adapter parameters were found in the state dict. "
+                                f"Total params checked: {n_total}."
+                            )
+                        lora_bytes = 0
+                        for v in model_state_dict.values():
+                            if hasattr(v, "numel") and hasattr(v, "element_size"):
+                                lora_bytes += v.numel() * v.element_size()
+                            elif hasattr(v, "local_shards"):
+                                for shard in v.local_shards():
+                                    lora_bytes += shard.tensor.numel() * shard.tensor.element_size()
+                        lora_mib = lora_bytes / 1024**2
                         log_with_rank(
                             f"LoRA-only save: {len(model_state_dict)}/{n_total} params ({lora_mib:.1f} MiB)",
                             rank=self.rank,
