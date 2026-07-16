@@ -349,10 +349,18 @@ def _load_trtllm():
     return TRTLLMReplica
 
 
+# TODO(@zw0610): lazy-init each option for `RolloutReplicaRegistry`. For most
+# cases there will be only 1 rollout backend used, but importing all of them
+# eagerly could surface dependency conflicts (e.g. pulling in vLLM + SGLang +
+# TRT-LLM simultaneously). The `_load_*` callables above already defer imports
+# to call-time; the registration calls below could be moved into a per-backend
+# `register_<name>()` helper that the user calls explicitly at startup.
 # Register built-in types
 RolloutReplicaRegistry.register("vllm", _load_vllm)
 RolloutReplicaRegistry.register("sglang", _load_sglang)
 RolloutReplicaRegistry.register("trtllm", _load_trtllm)
+# Out-of-tree rollout backends (e.g. "arctic") register themselves via the
+# VERL_USE_EXTERNAL_MODULES hook; see arctic_platform/integrations/verl.
 
 
 # Original function for backward compatibility

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+import inspect
 from typing import Callable, Optional
 
 from ..memory_utils import MemorySnapshotSampler, enable_memory_visualize
@@ -161,6 +162,15 @@ class DistProfiler:
         **kwargs_outer,
     ) -> Callable:
         def decorator(func):
+            if inspect.iscoroutinefunction(func):
+
+                @functools.wraps(func)
+                async def async_wrapper(self_instance, *args, **kwargs_inner):
+                    # Nested profiler annotate paths assume sync callables; async methods run uninstrumented.
+                    return await func(self_instance, *args, **kwargs_inner)
+
+                return async_wrapper
+
             @functools.wraps(func)
             def wrapper(self_instance, *args, **kwargs_inner):
                 profiler = getattr(self_instance, "profiler", None)
