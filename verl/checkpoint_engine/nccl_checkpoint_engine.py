@@ -103,7 +103,7 @@ class BroadcastOperation:
         # or we could also try waiting on only the default stream, but that would be a hack:
         # ray's NCCL pool streams are created with non_blocking=False, so CUDA's legacy
         # default-stream rule (default stream blocks on events on all blocking streams)
-        # happens to order an event recorded here after the broadcast kernel. Relies on 
+        # happens to order an event recorded here after the broadcast kernel. Relies on
         # that ray internal, not a public guarantee.
         #
         # event = torch.cuda.Event()
