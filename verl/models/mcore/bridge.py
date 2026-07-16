@@ -16,10 +16,38 @@
 try:
     from megatron.bridge import AutoBridge
     from megatron.bridge.training.utils.train_utils import LinearForLastLayer, freeze_moe_router, make_value_model
-except ImportError:
-    # `pip install verl[mcore]` or
-    print("Megatron-Bridge package not found. Please install Megatron-Bridge with `pip install megatron-bridge`")
-    raise
+except ImportError as e:
+    from importlib.metadata import PackageNotFoundError, version
+
+    _PIN = "0.5.0"
+    _CMD = f"`pip install --no-deps megatron-bridge=={_PIN}`"
+    try:
+        _installed = version("megatron-bridge")
+    except PackageNotFoundError:
+        _installed = None
+    if _installed is None:
+        msg = (
+            f"Megatron-Bridge is not installed. For stacks matching verl's stable Dockerfiles, "
+            f"install with {_CMD} (--no-deps is required so pip does not reinstall "
+            "megatron-core/transformer-engine/torch over your container build). "
+            "If you are on a published tag predating that pin "
+            "(e.g. verlai/verl:sgl0512.dev2 or vllm023.dev1), see docker/README.md for the "
+            "CI-proven install command instead of assuming this pin."
+        )
+    elif _installed == _PIN:
+        msg = (
+            f"Megatron-Bridge {_installed} (verl's Dockerfile pin) is installed, but the import "
+            f"failed: {e}. This usually means megatron-core or transformer-engine is missing or "
+            "mismatched - check your Megatron-LM install matches the image/Dockerfile stack."
+        )
+    else:
+        msg = (
+            f"Megatron-Bridge {_installed} is installed but the import failed: {e} - {_installed} "
+            f"is likely too old or incomplete for verl (e.g. 0.3.1 lacks LinearForLastLayer). "
+            f"On a current stable-Dockerfile stack reinstall with {_CMD}; on stale published "
+            "tags see docker/README.md."
+        )
+    raise ImportError(msg) from e
 
 __all__ = [
     "AutoBridge",

@@ -86,6 +86,32 @@ pip3 install -e .[sglang]
 
 ## Release History
 
+### Megatron-Bridge on published tags (issue #7071)
+
+Stable Dockerfiles pin `megatron-bridge==0.5.0` with `--no-deps` (and install
+Megatron-LM / `megatron-core` separately). Some published Hub tags predate that
+pin (for example `verlai/verl:sgl0512.dev2` and `vllm023.dev1`) and do **not**
+include Megatron-Bridge.
+
+If you hit `ModuleNotFoundError: megatron.bridge` on a stale published tag, use
+the CI-proven install (matches the megatron e2e workflow at merge time; do not
+omit `--no-deps`):
+
+```sh
+pip install --ignore-requires-python --no-deps --no-build-isolation \
+  "git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@e2cfe7e"
+```
+
+Do **not** install `megatron-bridge==0.3.1` (incomplete for verl; missing
+`LinearForLastLayer` and related symbols). Do **not** run unpinned
+`pip install megatron-bridge` without `--no-deps` inside a container — pip may
+reinstall megatron-core / transformer-engine / torch over the image stack.
+
+New image builds from the stable Dockerfiles should use
+`pip install --no-deps megatron-bridge==0.5.0` together with the Dockerfile's
+Megatron-LM / mcore pin. The preferred long-term fix is a maintainer rebuild and
+republish of the GPU tags with the pin baked in.
+
 - 2026/03/10: update vllm stable image to vllm==0.17.0; update sglang stable image to sglang==0.5.9
 - 2026/01/17: update vllm stable image to torch==2.9.1, cudnn==9.16, deepep==1.2.1
 - 2025/12/23: update vllm stable image to vllm==0.12.0; update sglang stable image to sglang==0.5.6
