@@ -245,8 +245,8 @@ class _FakeFSDPModel:
     def state_dict(self):
         return self._fsdp_wrapped_module.state_dict()
 
-    def load_state_dict(self, state_dict, assign=False):
-        return self._fsdp_wrapped_module.load_state_dict(state_dict, assign=assign)
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        return self._fsdp_wrapped_module.load_state_dict(state_dict, strict=strict, assign=assign)
 
     def named_buffers(self):
         return {}.items()
@@ -281,7 +281,7 @@ class _FakePEFTModel:
             d["base_model.model.lora_B.lora_B.weight"] = self.lora_B_weight
         return d
 
-    def load_state_dict(self, state_dict, assign=False):
+    def load_state_dict(self, state_dict, strict=True, assign=False):
         for key, tensor in state_dict.items():
             if "base.weight" in key or key == "base.weight":
                 self.base_weight.data.copy_(tensor)

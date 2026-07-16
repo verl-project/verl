@@ -181,9 +181,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 local_model_path = copy_to_local(remote_model_path)
                 model_state_dict = torch.load(local_model_path, weights_only=False)
                 if self.is_lora_only_state_dict(model_state_dict):
-                    current_sd = self.model.state_dict()
-                    current_sd.update(model_state_dict)
-                    self.model.load_state_dict(current_sd)
+                    self.model.load_state_dict(model_state_dict, strict=False)
                     log_with_rank(
                         f"Loaded LoRA-only checkpoint ({len(model_state_dict)} keys) from {remote_model_path}",
                         rank=self.rank,
