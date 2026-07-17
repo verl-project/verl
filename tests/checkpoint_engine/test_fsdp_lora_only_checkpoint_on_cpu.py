@@ -14,9 +14,14 @@
 
 """Unit tests for save_lora_only checkpoint support in FSDPCheckpointManager."""
 
+from collections import namedtuple
+
 import pytest
 
 from verl.utils.checkpoint.checkpoint_manager import BaseCheckpointManager
+
+# Return type mimicking torch.nn.Module.load_state_dict with strict=False
+_LoadStateDictResult = namedtuple("_LoadStateDictResult", ["missing_keys", "unexpected_keys"])
 
 
 class TestBaseCheckpointManagerLoraOnly:
@@ -243,7 +248,10 @@ class _FakeFSDPModel:
         return self._fsdp_wrapped_module.state_dict()
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
-        return self._fsdp_wrapped_module.load_state_dict(state_dict, strict=strict, assign=assign)
+        result = self._fsdp_wrapped_module.load_state_dict(state_dict, strict=strict, assign=assign)
+        if result is None:
+            return _LoadStateDictResult(missing_keys=[], unexpected_keys=[])
+        return result
 
     def named_buffers(self):
         return {}.items()
@@ -276,6 +284,7 @@ class _FakePEFTModel:
         return d
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
+        unexpected_keys = []
         for key, tensor in state_dict.items():
             if "base.weight" in key or key == "base.weight":
                 self.base_weight.data.copy_(tensor)
@@ -283,3 +292,6 @@ class _FakePEFTModel:
                 self.lora_A_weight.data.copy_(tensor)
             elif "lora_B" in key:
                 self.lora_B_weight.data.copy_(tensor)
+            else:
+                unexpected_keys.append(key)
+        return _LoadStateDictResult(missing_keys=[], unexpected_keys=unexpected_keys)

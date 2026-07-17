@@ -181,7 +181,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 model_state_dict = torch.load(local_model_path, weights_only=False)
                 if self.is_lora_only_state_dict(model_state_dict):
                     result = self.model.load_state_dict(model_state_dict, strict=False)
-                    if result.unexpected_keys:
+                    if result is not None and result.unexpected_keys:
                         raise ValueError(
                             f"Failed to load LoRA-only checkpoint: unexpected keys {result.unexpected_keys}. "
                             f"Ensure the model has the correct LoRA adapters configured."
