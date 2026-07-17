@@ -19,7 +19,7 @@ import gc
 import logging
 import os
 import warnings
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from inspect import signature
 from typing import Callable, ContextManager, Optional
 
@@ -640,6 +640,27 @@ class FSDPEngine(BaseEngine):
     def get_context_parallel_group(self):
         raise NotImplementedError
 
+    @contextmanager
+    def _gradient_sync_context(self, *, is_last_micro_batch: bool):
+        """Skip FSDP gradient communication on non-final accumulation steps."""
+        use_no_sync = getattr(self.engine_config, "use_no_sync_for_gradient_accumulation", False)
+        if not use_no_sync or is_last_micro_batch:
+            yield
+            return
+
+        version = fsdp_version(self.module)
+        if version == 1:
+            with self.module.no_sync():
+                yield
+        elif version == 2:
+            self.module.set_requires_gradient_sync(False)
+            try:
+                yield
+            finally:
+                self.module.set_requires_gradient_sync(True)
+        else:
+            yield
+
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> list[TensorDict]:
         # note that the global_batch_size should include data on all the dp
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
@@ -664,8 +685,13 @@ class FSDPEngine(BaseEngine):
         # and _build_fsdp_module, so self.scaler may not be set.
         scaler = getattr(self, "scaler", None)
 
-        for micro_batch in micro_batches:
-            with ctx:
+        for micro_batch_idx, micro_batch in enumerate(micro_batches):
+            sync_ctx = (
+                nullcontext()
+                if forward_only
+                else self._gradient_sync_context(is_last_micro_batch=micro_batch_idx == len(micro_batches) - 1)
+            )
+            with ctx, sync_ctx:
                 loss, meta_info = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
 
                 if not forward_only:

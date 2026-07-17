@@ -35,6 +35,11 @@ model_dtype: fp32
 # Whether to use original parameters in fsdp. Only avaiable in fsdp1
 use_orig_params: false
 
+# Skip gradient synchronization for all but the last micro-batch.
+# This reduces FSDP communication during gradient accumulation at the cost of
+# higher peak memory from temporarily retaining unsharded gradients.
+use_no_sync_for_gradient_accumulation: false
+
 # Random seed for reproducibility.
 seed: 42
 

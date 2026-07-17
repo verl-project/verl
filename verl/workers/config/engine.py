@@ -243,6 +243,8 @@ class FSDPEngineConfig(EngineConfig):
         forward_prefetch (bool): Whether to prefetch parameters for next forward pass, default False
         model_dtype (str): Model data type used to initialize the transformers model. default "fp32"
         use_orig_params (bool): Whether to use original parameters when initialize FSDP1, default False
+        use_no_sync_for_gradient_accumulation (bool): Whether to skip gradient synchronization for all but the
+            last micro-batch. This reduces communication at the cost of higher peak memory, default False.
         seed (int): Random seed for reproducibility.
         full_determinism (bool): If true, enable_full_determinism is called to ensure reproducible results
             in distributed training. Important: this will negatively impact performance, so only use it for
@@ -263,6 +265,7 @@ class FSDPEngineConfig(EngineConfig):
     forward_prefetch: bool = False
     model_dtype: str = "fp32"
     use_orig_params: bool = False
+    use_no_sync_for_gradient_accumulation: bool = False
     mixed_precision: Optional[dict[str, Any]] = None
     ulysses_sequence_parallel_size: int = 1
     entropy_from_logits_with_chunking: bool = False
