@@ -17,6 +17,7 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
 import torch
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -242,3 +243,246 @@ def test_vllm_update_weights_syncs_buffers_to_mtp_drafter():
     expected = torch.tensor([5, 6, 7, 8], dtype=torch.float32)
     torch.testing.assert_close(main_model.model.layers[0].e_score_correction_bias, expected)
     torch.testing.assert_close(drafter_model.model.layers[0].e_score_correction_bias, expected)
+
+
+def _run_with_fake_modules(fakes, fn):
+    saved = {name: sys.modules.get(name) for name in fakes}
+    try:
+        sys.modules.update(fakes)
+        return fn()
+    finally:
+        for name, previous in saved.items():
+            if previous is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
+
+
+def _make_weight_reload_fakes(events, device_type="npu", initialize_error=None, reload_api_available=True):
+    class _FakeBucketedWeightReceiver:
+        def __init__(self, **kwargs):
+            events.append("receiver:init")
+
+        def receive_weights(self, on_bucket_received):
+            on_bucket_received([("model.layers.0.linear.weight", torch.ones(4, 4))])
+
+    fake_vllm = types.ModuleType("vllm")
+    fake_platforms = types.ModuleType("vllm.platforms")
+    fake_platforms.current_platform = types.SimpleNamespace(device_type=device_type)
+    fake_model_executor = types.ModuleType("vllm.model_executor")
+    fake_model_loader = types.ModuleType("vllm.model_executor.model_loader")
+    fake_reload = types.ModuleType("vllm.model_executor.model_loader.reload")
+    fake_loader_utils = types.ModuleType("vllm.model_executor.model_loader.utils")
+    fake_bucket_transfer = types.ModuleType("verl.workers.rollout.vllm_rollout.bucketed_weight_transfer")
+
+    fake_vllm.platforms = fake_platforms
+    fake_vllm.model_executor = fake_model_executor
+    fake_model_executor.model_loader = fake_model_loader
+    fake_model_loader.reload = fake_reload
+    fake_model_loader.utils = fake_loader_utils
+    fake_bucket_transfer.BucketedWeightReceiver = _FakeBucketedWeightReceiver
+
+    def _initialize(model):
+        events.append(f"initialize:{model._test_reload_name}")
+        if initialize_error is not None:
+            raise initialize_error
+
+    def _finalize(model, model_config):
+        events.append(f"finalize:{model._test_reload_name}")
+
+    if reload_api_available:
+        fake_reload.initialize_layerwise_reload = _initialize
+        fake_reload.finalize_layerwise_reload = _finalize
+    fake_loader_utils.process_weights_after_loading = lambda model, model_config, device: events.append(
+        f"postprocess:{model._test_reload_name}"
+    )
+
+    return {
+        "vllm": fake_vllm,
+        "vllm.platforms": fake_platforms,
+        "vllm.model_executor": fake_model_executor,
+        "vllm.model_executor.model_loader": fake_model_loader,
+        "vllm.model_executor.model_loader.reload": fake_reload,
+        "vllm.model_executor.model_loader.utils": fake_loader_utils,
+        "verl.workers.rollout.vllm_rollout.bucketed_weight_transfer": fake_bucket_transfer,
+    }
+
+
+def _build_weight_reload_worker(target, drafter=None, draft_model_config="draft_config", enforce_eager=False):
+    class _SpecConfig:
+        method = "mtp"
+
+        def __init__(self, model_config):
+            self.draft_model_config = model_config
+
+    class _Drafter:
+        def __init__(self, model):
+            self.model = model
+
+    speculative_config = _SpecConfig(draft_model_config) if drafter is not None else None
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    worker.model_runner = _FakeModelRunner(target, speculative_config=speculative_config)
+    worker.model_runner.vllm_config.model_config = types.SimpleNamespace(enforce_eager=enforce_eager)
+    target._test_reload_name = "target"
+    if drafter is not None:
+        worker.model_runner.drafter = _Drafter(drafter)
+        drafter._test_reload_name = "drafter"
+    worker.device = torch.device("cpu")
+    worker.local_rank = 0
+    worker._is_qat_model = False
+    worker._is_modelopt_qat = False
+    worker._get_zmq_handle = lambda: "ipc://cpu-test"
+    worker.prepare_model_for_native_layerwise_reload = lambda model: None
+    return worker
+
+
+@pytest.mark.parametrize("enforce_eager", [False, True], ids=["graph", "eager"])
+def test_npu_mtp_reload_lifecycle_is_independent_of_execution_mode(enforce_eager):
+    events = []
+    target = _ToyModel()
+    drafter = _ToyModel()
+    target.load_weights = lambda weights: events.append("load:target")
+    drafter.load_weights = lambda weights: events.append("load:drafter")
+    worker = _build_weight_reload_worker(target, drafter, enforce_eager=enforce_eager)
+    worker.prepare_model_for_native_layerwise_reload = lambda model: events.append(f"prepare:{model._test_reload_name}")
+
+    fakes = _make_weight_reload_fakes(events)
+    _run_with_fake_modules(fakes, worker.update_weights_from_ipc)
+
+    assert events == [
+        "prepare:target",
+        "prepare:drafter",
+        "initialize:target",
+        "initialize:drafter",
+        "receiver:init",
+        "load:target",
+        "load:drafter",
+        "finalize:target",
+        "finalize:drafter",
+    ]
+
+
+def test_cuda_mtp_reload_keeps_direct_weight_loading():
+    events = []
+    target = _ToyModel()
+    drafter = _ToyModel()
+    target.load_weights = lambda weights: events.append("load:target")
+    drafter.load_weights = lambda weights: events.append("load:drafter")
+    worker = _build_weight_reload_worker(target, drafter)
+    worker._native_npu_reload_failure = "a previous NPU-only failure"
+    worker._uses_native_npu_mtp_reload = lambda *_args: pytest.fail("entered NPU-only dispatch")
+
+    fakes = _make_weight_reload_fakes(events, device_type="cuda")
+    _run_with_fake_modules(fakes, worker.update_weights_from_ipc)
+
+    assert events == [
+        "receiver:init",
+        "load:target",
+        "load:drafter",
+        "postprocess:target",
+        "postprocess:drafter",
+    ]
+
+
+@pytest.mark.parametrize("enforce_eager", [False, True], ids=["graph", "eager"])
+def test_non_mtp_npu_reload_keeps_direct_weight_loading(enforce_eager):
+    events = []
+    target = _ToyModel()
+    target.load_weights = lambda weights: events.append("load:target")
+    worker = _build_weight_reload_worker(target, enforce_eager=enforce_eager)
+
+    fakes = _make_weight_reload_fakes(events)
+    _run_with_fake_modules(fakes, worker.update_weights_from_ipc)
+
+    assert events == ["receiver:init", "load:target", "postprocess:target"]
+
+
+def test_npu_mtp_reload_validates_draft_config_before_mutation():
+    events = []
+    worker = _build_weight_reload_worker(_ToyModel(), _ToyModel(), draft_model_config=None)
+    worker.prepare_model_for_native_layerwise_reload = lambda model: events.append("prepare")
+
+    fakes = _make_weight_reload_fakes(events)
+    with pytest.raises(RuntimeError, match="draft_model_config is missing"):
+        _run_with_fake_modules(fakes, worker.update_weights_from_ipc)
+
+    assert events == []
+
+
+def test_npu_mtp_reload_requires_backend_prepare_hook_before_mutation():
+    events = []
+    worker = _build_weight_reload_worker(_ToyModel(), _ToyModel())
+    worker.prepare_model_for_native_layerwise_reload = None
+
+    fakes = _make_weight_reload_fakes(events)
+    with pytest.raises(RuntimeError, match="prepare_model_for_native_layerwise_reload"):
+        _run_with_fake_modules(fakes, worker.update_weights_from_ipc)
+
+    assert events == []
+
+
+def test_npu_mtp_reload_requires_public_vllm_api_before_mutation():
+    events = []
+    worker = _build_weight_reload_worker(_ToyModel(), _ToyModel())
+
+    fakes = _make_weight_reload_fakes(events, reload_api_available=False)
+    with pytest.raises(RuntimeError, match="public layerwise reload API"):
+        _run_with_fake_modules(fakes, worker.update_weights_from_ipc)
+
+    assert events == []
+
+
+def test_npu_mtp_reload_failure_makes_worker_fail_stop():
+    events = []
+    failure = RuntimeError("initialize failed")
+    worker = _build_weight_reload_worker(_ToyModel(), _ToyModel())
+
+    fakes = _make_weight_reload_fakes(events, initialize_error=failure)
+    with pytest.raises(RuntimeError, match="initialize failed") as exc_info:
+        _run_with_fake_modules(fakes, worker.update_weights_from_ipc)
+
+    assert exc_info.value is failure
+    assert events == ["initialize:target"]
+
+    with pytest.raises(RuntimeError, match="Recreate the worker"):
+        _run_with_fake_modules(fakes, worker.update_weights_from_ipc)
+
+    assert events == ["initialize:target"]
+
+
+@pytest.mark.parametrize(
+    "has_drafter,use_standard_weight_load,is_qat_model,is_modelopt_qat,expected",
+    [
+        pytest.param(True, True, False, False, True, id="standard-mtp"),
+        pytest.param(False, True, False, False, False, id="non-mtp"),
+        pytest.param(True, False, False, False, False, id="non-standard-mtp"),
+        pytest.param(True, True, True, False, False, id="qat-mtp"),
+        pytest.param(True, True, False, True, False, id="modelopt-mtp"),
+    ],
+)
+def test_native_npu_mtp_reload_selector_is_narrow(
+    has_drafter, use_standard_weight_load, is_qat_model, is_modelopt_qat, expected
+):
+    drafter = _ToyModel() if has_drafter else None
+    worker = _build_weight_reload_worker(_ToyModel(), drafter)
+    worker._is_qat_model = is_qat_model
+    worker._is_modelopt_qat = is_modelopt_qat
+
+    assert worker._uses_native_npu_mtp_reload(use_standard_weight_load) is expected
+
+
+def test_native_layerwise_loader_owns_reused_receiver_buffer():
+    model = _ToyModel()
+    retained_weights = []
+    model.load_weights = lambda weights: retained_weights.extend(weights)
+    reused_buffer = torch.tensor([1.0])
+
+    vLLMColocateWorkerExtension._load_weights_with_native_layerwise([model], [("first.weight", reused_buffer.view(1))])
+    reused_buffer.fill_(2.0)
+    vLLMColocateWorkerExtension._load_weights_with_native_layerwise([model], [("second.weight", reused_buffer.view(1))])
+    reused_buffer.fill_(3.0)
+
+    assert [name for name, _ in retained_weights] == ["first.weight", "second.weight"]
+    torch.testing.assert_close(retained_weights[0][1], torch.tensor([1.0]))
+    torch.testing.assert_close(retained_weights[1][1], torch.tensor([2.0]))
+    assert retained_weights[0][1].untyped_storage().data_ptr() != reused_buffer.untyped_storage().data_ptr()

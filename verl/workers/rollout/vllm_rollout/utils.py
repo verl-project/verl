@@ -241,6 +241,37 @@ class vLLMColocateWorkerExtension:
             if draft_cfg is not None:
                 yield self._get_drafter_model(), draft_cfg
 
+    def _get_native_npu_reload_models_with_config(self):
+        """Return the validated target/drafter pairs for native NPU reload."""
+        target_model = self.model_runner.model
+        models_with_config = [(target_model, self.model_runner.vllm_config.model_config)]
+
+        if self._use_mtp_drafter_weight_sync():
+            draft_config = self._get_draft_model_config()
+            if draft_config is None:
+                raise RuntimeError(
+                    "Cannot reload NPU MTP weights because speculative_config.draft_model_config is missing."
+                )
+            drafter_model = self._get_drafter_model()
+            if drafter_model is not target_model:
+                models_with_config.append((drafter_model, draft_config))
+
+        return models_with_config
+
+    def _uses_native_npu_mtp_reload(self, use_standard_weight_load: bool) -> bool:
+        """Return whether standard NPU MTP weights require native reload."""
+        if not use_standard_weight_load or self._is_qat_model or self._is_modelopt_qat:
+            return False
+        return self._use_mtp_drafter_weight_sync()
+
+    def _raise_if_native_npu_reload_failed(self):
+        failure = getattr(self, "_native_npu_reload_failure", None)
+        if failure is not None:
+            raise RuntimeError(
+                "This NPU rollout worker cannot reload weights after a native MTP reload failed. "
+                f"Recreate the worker before retrying. Previous error: {failure}"
+            )
+
     def monkey_patch_model(self, vocab_size: int, banned_token_ids: Optional[list[int]] = None):
         for model in self._iter_all_models():
             # patch compute_logits to avoid sampling OOV and other illegal tokens
@@ -248,13 +279,70 @@ class vLLMColocateWorkerExtension:
             # patch weight loader to support MoE model
             patch_vllm_moe_model_weight_loader(model)
 
+    @staticmethod
+    def _load_weights_with_native_layerwise(models, weights):
+        """Load an owned IPC bucket into every model in the native lifecycle."""
+        # The receiver reuses its communication buffer after this callback.
+        # Native layerwise loaders may retain tensors until a later bucket or
+        # finalization, so transfer ownership before invoking model loaders.
+        owned_weights = [(name, tensor.clone()) for name, tensor in weights]
+        for model in models:
+            model.load_weights(owned_weights)
+
+    def _update_weights_from_ipc_with_native_npu_reload(self, receiver_cls, use_shm: bool):
+        """Reload the NPU MTP target and drafter through one native lifecycle."""
+        models_with_config = self._get_native_npu_reload_models_with_config()
+        models = [model for model, _ in models_with_config]
+
+        try:
+            from vllm.model_executor.model_loader.reload import (
+                finalize_layerwise_reload,
+                initialize_layerwise_reload,
+            )
+        except ImportError as error:
+            raise RuntimeError("NPU MTP weight reload requires vLLM's public layerwise reload API.") from error
+
+        prepare_model = getattr(self, "prepare_model_for_native_layerwise_reload", None)
+        if not callable(prepare_model):
+            raise RuntimeError(
+                "NPU MTP weight reload requires the backend worker method prepare_model_for_native_layerwise_reload()."
+            )
+
+        # Native reload is not transactional: once preparation starts, a
+        # failure can leave parameters partially initialized or updated.
+        try:
+            with torch.device(self.device):
+                for model in models:
+                    prepare_model(model)
+                for model in models:
+                    initialize_layerwise_reload(model)
+
+            receiver = receiver_cls(
+                zmq_handle=self._get_zmq_handle(),
+                device=self.device,
+                use_shm=use_shm,
+            )
+            receiver.receive_weights(
+                on_bucket_received=lambda weights: self._load_weights_with_native_layerwise(models, weights)
+            )
+
+            with torch.device(self.device):
+                for model, model_config in models_with_config:
+                    finalize_layerwise_reload(model, model_config)
+        except Exception as error:
+            self._native_npu_reload_failure = f"{type(error).__name__}: {error}"
+            raise
+
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
         from vllm.platforms import current_platform
 
         from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
 
-        if current_platform.device_type == "npu" and self.device is None:
+        is_npu_platform = current_platform.device_type == "npu"
+        if is_npu_platform:
+            self._raise_if_native_npu_reload_failed()
+        if is_npu_platform and self.device is None:
             self.device = torch.device(f"npu:{self.local_rank}")
 
         # In async mode, make sure the old lora is removed before adding the new one
@@ -264,6 +352,12 @@ class vLLMColocateWorkerExtension:
         use_standard_weight_load = not (peft_config and base_sync_done) and not is_fp8_model(
             self.model_runner.vllm_config
         )
+
+        # NPU MTP target and drafter must share the same layerwise lifecycle.
+        # The platform guard keeps all CUDA weight-loading paths unchanged.
+        if is_npu_platform and self._uses_native_npu_mtp_reload(use_standard_weight_load):
+            self._update_weights_from_ipc_with_native_npu_reload(BucketedWeightReceiver, use_shm)
+            return
 
         if self._is_qat_model:
             # QAT (compressed-tensors): Prepare for weight loading BEFORE receiving any buckets
