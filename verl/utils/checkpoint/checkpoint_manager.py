@@ -101,6 +101,8 @@ class BaseCheckpointManager:
     def should_save_lora_only(self) -> bool:
         if not self.checkpoint_config:
             return False
+        if isinstance(self.checkpoint_config, dict):
+            return self.checkpoint_config.get("save_lora_only", False)
         return getattr(self.checkpoint_config, "save_lora_only", False)
 
     @staticmethod
