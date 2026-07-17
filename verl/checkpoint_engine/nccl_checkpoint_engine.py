@@ -89,31 +89,9 @@ class BroadcastOperation:
         # broadcast tensor via NCCL
         collective.broadcast(self.bucket, src_rank=0, group_name=self.group_name)
 
-        # ray.util.collective enqueues the NCCL kernel on its own internal stream pool
-        # and returns as soon as it's enqueued, not once it has actually finished on
-        # the GPU. It also never calls `bucket.record_stream(...)` for this path, so
-        # the caching allocator has no idea `bucket` is still being read/written by
-        # that stream. Without this synchronize, `wait_for_complete()` below would
-        # only prove the kernel was queued, letting callers reuse or free `bucket`
-        # while the broadcast is still running. ray doesn't expose the internal
-        # stream it used, so we can't wait on it more surgically -- block the whole
-        # device instead.
-        device = self.bucket.device if isinstance(self.bucket, torch.Tensor) else self.bucket.device.id
-        torch.cuda.synchronize(device)
-
-        # or we could also try waiting on only the default stream, but that would be a hack:
-        # ray's NCCL pool streams are created with non_blocking=False, so CUDA's legacy
-        # default-stream rule (default stream blocks on events on all blocking streams)
-        # happens to order an event recorded here after the broadcast kernel. Relies on
-        # that ray internal, not a public guarantee.
-        #
-        # event = torch.cuda.Event()
-        # event.record()
-        # event.synchronize()  # blocking wait, e.g. before freeing the buffer
-
     async def wait_for_complete(self) -> dict[str, TensorMeta]:
-        """Wait for the broadcast operation to complete, including the NCCL kernel
-        actually finishing on the GPU (not just being enqueued).
+        """Wait for the broadcast operation to complete.
+        (This does not guarantee that the NCCL kernel has finished, only that it has been enqueued.)
 
         Returns:
             dict[str, TensorMeta]: The bucket meta after broadcast.
@@ -319,6 +297,12 @@ class NCCLCheckpointEngine(CheckpointEngine):
             topic=self.topic,
         )
         await broadcast_op.wait_for_complete()
+
+        # the wait_for_complete() function just waits for the NCCL kernel to be enqueued,
+        # not for the kernel to finish, hence we need to synchronize to make sure the
+        # buffer does not get freed before the kernel finishes.
+        torch.cuda.synchronize()
+
         logger.info(f"Rank {self.rank} send weights done, time cost: {time.time() - start_time:.2f}s")
 
     @torch.no_grad()
@@ -357,6 +341,11 @@ class NCCLCheckpointEngine(CheckpointEngine):
         metadata = await broadcast_op.wait_for_complete()
         total_bytes += self.bucket_size
         total_params += len(metadata["bucket_meta"])
+
+        # wait for the NCCL broadcast kernel to finish before we yield the tensors
+        # otherwise if the buffer is clone using a non-blocking copy, it may
+        # lead to data corruption
+        torch.cuda.synchronize()
 
         # swap send_buf and recv_buf
         send_buf, recv_buf = recv_buf, send_buf
