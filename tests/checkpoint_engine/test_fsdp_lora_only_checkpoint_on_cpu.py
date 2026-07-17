@@ -22,6 +22,14 @@ from verl.utils.checkpoint.checkpoint_manager import BaseCheckpointManager
 class TestBaseCheckpointManagerLoraOnly:
     """Tests for LoRA-only checkpoint properties on BaseCheckpointManager."""
 
+    @pytest.fixture(autouse=True)
+    def _patch_dist(self, monkeypatch):
+        import torch.distributed
+
+        monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
+        monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 1)
+        monkeypatch.setattr(torch.distributed, "barrier", lambda: None)
+
     def test_should_save_lora_only_default(self):
         mgr = self._make_manager(checkpoint_config=None)
         assert mgr.should_save_lora_only is False
@@ -96,6 +104,7 @@ class TestFSDPCheckpointManagerLoraOnly:
 
         monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
         monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 1)
+        monkeypatch.setattr(torch.distributed, "barrier", lambda: None)
 
     def _make_fsdp_manager(self, checkpoint_config, model=None):
         from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
