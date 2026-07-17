@@ -224,11 +224,19 @@ class TestFSDPCheckpointManagerLoraOnly:
         assert model_after._fsdp_wrapped_module.base_weight.item() == 42.0
 
 
+class _FakeConfig:
+    """Minimal config mock that supports save_pretrained."""
+
+    def save_pretrained(self, path):
+        pass
+
+
 class _FakeFSDPModel:
     """A fake FSDP-wrapped model that mimics the interface used by FSDPCheckpointManager."""
 
     def __init__(self, has_lora=True):
         self._fsdp_wrapped_module = _FakePEFTModel(has_lora=has_lora)
+        self.config = self._fsdp_wrapped_module.config
 
     def state_dict(self):
         return self._fsdp_wrapped_module.state_dict()
@@ -249,7 +257,7 @@ class _FakePEFTModel:
         self.base_weight = torch.nn.Parameter(torch.tensor(1.0))
         self.lora_A_weight = torch.nn.Parameter(torch.tensor(0.5))
         self.lora_B_weight = torch.nn.Parameter(torch.tensor(0.3))
-        self.config = None
+        self.config = _FakeConfig()
         self.can_generate = lambda: False
 
         if has_lora:
