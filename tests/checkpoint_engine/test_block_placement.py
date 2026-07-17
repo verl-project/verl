@@ -67,7 +67,7 @@ def test_translate_matches_full_coordinates(full_shape, grid):
     full = torch.randn(full_shape)
     flat = full.reshape(-1)
     for place in _blocks_for_grid(full_shape, grid):
-        slices = tuple(slice(o, o + sz) for o, sz in zip(place.global_offset, place.local_shape))
+        slices = tuple(slice(o, o + sz) for o, sz in zip(place.global_offset, place.local_shape, strict=False))
         local = full[slices].contiguous().reshape(-1)
         lidx = torch.arange(local.numel(), dtype=torch.int64)
         gidx = translate_flat_indices(lidx, place)
@@ -79,7 +79,7 @@ def test_translate_sparse_subset():
     torch.manual_seed(1)
     full = torch.randn(full_shape)
     place = BlockPlacement((2, 2, 6), (4, 2, 0), full_shape)
-    slices = tuple(slice(o, o + sz) for o, sz in zip(place.global_offset, place.local_shape))
+    slices = tuple(slice(o, o + sz) for o, sz in zip(place.global_offset, place.local_shape, strict=False))
     local = full[slices].contiguous().reshape(-1)
     lidx = torch.tensor([0, 5, 11, 23], dtype=torch.int64)
     gidx = translate_flat_indices(lidx, place)
@@ -121,12 +121,10 @@ def test_block_nan_rebuild_matches_full_convert_then_diff():
     # ep=4 x ep_shard=2 grid of blocks, like the (Shard(0), Shard(1)) expert mesh
     full_nan = torch.full(full_shape, float("nan"), dtype=old.dtype)
     for place in _blocks_for_grid(full_shape, {0: 4, 1: 2}):
-        slices = tuple(slice(o, o + sz) for o, sz in zip(place.global_offset, place.local_shape))
+        slices = tuple(slice(o, o + sz) for o, sz in zip(place.global_offset, place.local_shape, strict=False))
         lo = old[slices].contiguous().reshape(-1)
         ln = new[slices].contiguous().reshape(-1)
-        changed = (
-            (lo.view(torch.uint8).view(lo.numel(), -1) != ln.view(torch.uint8).view(ln.numel(), -1)).any(dim=-1)
-        )
+        changed = (lo.view(torch.uint8).view(lo.numel(), -1) != ln.view(torch.uint8).view(ln.numel(), -1)).any(dim=-1)
         lidx = changed.nonzero(as_tuple=False).view(-1)
         buf = torch.full((lo.numel(),), float("nan"), dtype=old.dtype)
         buf[lidx] = ln[lidx]
@@ -149,3 +147,89 @@ def test_block_nan_rebuild_matches_full_convert_then_diff():
         assert torch.equal(fl[pos], rn[pos]), f"{hf_name}: values diverge"
         seen += int(pos.numel())
     assert seen == 3
+
+
+def _veomni_style_to_hf(full_shape):
+    """Mimic the veomni expert closure: fused [n, 2I, H] gate_up -> per-expert
+    gate/up via chunk(dim=1) + per-expert slice + rename -- pure permutation,
+    mirroring verl.workers.engine.veomni.utils.default_moe_param_handler."""
+
+    def to_hf(shards):
+        full_flat = shards[0] if len(shards) == 1 else torch.cat([sh.reshape(-1) for sh in shards])
+        fused = full_flat.view(full_shape)
+        gate, up = fused.chunk(2, dim=1)
+        out = []
+        for i in range(full_shape[0]):
+            out.append((f"mlp.experts.{i}.gate_proj.weight", gate[i]))
+            out.append((f"mlp.experts.{i}.up_proj.weight", up[i]))
+        return out
+
+    return to_hf
+
+
+def test_explicit_place_block_rebuild_veomni_style():
+    """veomni experts: manual ep split on dim0 (outside DTensor) + Shard(1)-style
+    block on dim1. The exporter synthesizes BlockPlacement in a virtual full
+    tensor; verify the engine-style rebuild -> to_hf -> isnan scan equals the
+    reference per-expert delta."""
+    torch.manual_seed(3)
+    n_global, two_i, h = 8, 6, 4
+    ep, fsdp = 4, 2
+    n_local = n_global // ep
+    full_shape = (n_global, two_i, h)
+    to_hf = _veomni_style_to_hf(full_shape)
+
+    old = torch.randn(full_shape, dtype=torch.bfloat16)
+    new = old.clone()
+    new[1, 2, 3] += 1.0
+    new[5, 0, 0] -= 0.5
+
+    full_nan = torch.full(full_shape, float("nan"), dtype=old.dtype)
+    for ep_rank in range(ep):
+        for f_rank in range(fsdp):
+            # manual ep split on dim0, fsdp Shard(1) on the local block's dim1
+            d1 = two_i // fsdp
+            place = BlockPlacement(
+                (n_local, d1, h),
+                (ep_rank * n_local, f_rank * d1, 0),
+                full_shape,
+            )
+            slices = tuple(slice(o, o + sz) for o, sz in zip(place.global_offset, place.local_shape, strict=False))
+            lo = old[slices].contiguous().reshape(-1)
+            ln = new[slices].contiguous().reshape(-1)
+            changed = (lo.view(torch.uint8).view(lo.numel(), -1) != ln.view(torch.uint8).view(ln.numel(), -1)).any(
+                dim=-1
+            )
+            lidx = changed.nonzero(as_tuple=False).view(-1)
+            buf = torch.full((lo.numel(),), float("nan"), dtype=old.dtype)
+            buf[lidx] = ln[lidx]
+            full_nan[slices] = buf.view(place.local_shape)
+
+    seen = 0
+    ref_new = dict(to_hf([new.reshape(-1)]))
+    ref_old = dict(to_hf([old.reshape(-1)]))
+    for hf_name, hf_tensor in to_hf([full_nan.reshape(-1)]):
+        fl = hf_tensor.reshape(-1)
+        pos = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
+        rn, ro = ref_new[hf_name].reshape(-1), ref_old[hf_name].reshape(-1)
+        ref_changed = (
+            (rn.view(torch.uint8).view(rn.numel(), -1) != ro.view(torch.uint8).view(ro.numel(), -1))
+            .any(dim=-1)
+            .nonzero(as_tuple=False)
+            .view(-1)
+        )
+        assert torch.equal(pos, ref_changed), f"{hf_name}: positions diverge"
+        assert torch.equal(fl[pos], rn[pos]), f"{hf_name}: values diverge"
+        seen += int(pos.numel())
+    assert seen == 2
+
+
+def test_explicit_place_passthrough():
+    """ShardSpec.place / gather_group short-circuit derive_placement."""
+    from verl.workers.engine.spec import ShardSpec, derive_placement
+
+    block = BlockPlacement((2, 3), (4, 0), (8, 3))
+    sentinel = object()
+    spec = ShardSpec(full_shape=(8, 3), place=block, gather_group=sentinel)
+    place, contributes, group = derive_placement(spec)
+    assert place is block and contributes and group is sentinel

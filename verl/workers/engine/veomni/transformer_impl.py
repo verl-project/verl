@@ -576,6 +576,93 @@ class VeOmniEngine(FSDPEngine):
         if self._is_offload_optimizer:
             offload_veomni_optimizer(self.optimizer)
 
+    def get_per_tensor_param_shard(self, **kwargs):
+        """Yield each rank's *local* shard with its :class:`ShardSpec` -- consumed by
+        the ``delta_sharded`` checkpoint engine (diff on shards, gather only changes).
+
+        Dense params pass their FSDP DTensor placement through verbatim (flat
+        ``Shard(0)`` fast path). Grouped expert params are split twice: the expert
+        dim (0) is split *manually* across ``ep_group`` (outside DTensor), and the
+        local expert block is FSDP-sharded as a DTensor. That combination is not
+        expressible as DTensor placements, so the spec carries an explicit
+        :class:`BlockPlacement` in a virtual full tensor of all experts
+        (dim-0 offset = ``ep_rank * n_local_experts`` + the DTensor block offset)
+        with the world group as the gather group, and a ``to_hf`` closure over the
+        veomni MoE param handler (pure slice + rename: fused -> per-expert HF names).
+        """
+        import torch.distributed as dist
+
+        load_veomni_model_to_gpu(self.module)
+        params = self.module.state_dict()
+        params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
+
+        ps = parallel_state.get_parallel_state()
+        model_type = getattr(self.module.config, "model_type", "default")
+        process_func = MOE_PARAM_HANDERS.get(model_type, default_moe_param_handler)
+
+        from torch.distributed.tensor import DTensor
+        from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
+
+        from ..spec import BlockPlacement, ShardSpec
+
+        def _expert_to_hf(fqn, full_shape):
+            def to_hf(shards):
+                # block profile hands [full]; a flat Shard(0) degeneration would
+                # hand per-rank flat shards whose rank-order concat is the full.
+                full_flat = shards[0] if len(shards) == 1 else torch.cat([sh.reshape(-1) for sh in shards])
+                return list(process_func(fqn, full_flat.view(full_shape), ep_rank=0))
+
+            return to_hf
+
+        def _gen():
+            for name, param in params.items():
+                is_expert = (
+                    "mlp.experts." in name
+                    and any(p in name for p in ["down_proj", "gate_proj", "up_proj", "gate_up_proj"])
+                    and ps.ep_enabled
+                )
+                if param.is_floating_point() and param.dtype != torch.bfloat16:
+                    # mixed-precision keeps fp32 master weights; the wire (and the
+                    # rollout side) speak bf16, so cast before diffing.
+                    param = param.to(torch.bfloat16)
+                if not is_expert:
+                    spec = ShardSpec.from_param(param)
+                    local = param.to_local() if isinstance(param, DTensor) else param
+                    yield name, local.reshape(-1), spec
+                    continue
+
+                # local fused block: [n_local_experts, ...] (ep split already applied)
+                if isinstance(param, DTensor):
+                    lshape, goff = compute_local_shape_and_global_offset(
+                        param.shape, param.device_mesh, list(param.placements)
+                    )
+                    local = param.to_local()
+                else:
+                    lshape, goff = tuple(param.shape), (0,) * param.ndim
+                    local = param
+                n_local = int(param.shape[0])
+                full_shape = (n_local * ps.ep_size,) + tuple(param.shape[1:])
+                offset = (ps.ep_rank * n_local + int(goff[0]),) + tuple(int(o) for o in goff[1:])
+                block = BlockPlacement(tuple(int(x) for x in lshape), offset, full_shape)
+
+                # the blocks of one expert tensor are spread over ep x (block fsdp);
+                # v1 requires that to cover the whole trainer world so the world
+                # group doubles as the gather group (rank 0 == engine master).
+                mesh_world = param.device_mesh.size() if isinstance(param, DTensor) else 1
+                assert ps.ep_size * mesh_world == dist.get_world_size(), (
+                    f"expert blocks must tile the trainer world: ep={ps.ep_size} x "
+                    f"block mesh={mesh_world} != world={dist.get_world_size()}"
+                )
+                spec = ShardSpec(
+                    full_shape=full_shape,
+                    to_hf=_expert_to_hf(name, full_shape),
+                    place=block,
+                    gather_group=dist.group.WORLD,
+                )
+                yield name, local.reshape(-1), spec
+
+        return _gen(), None
+
     def get_per_tensor_param(self, **kwargs):
         load_veomni_model_to_gpu(self.module)
 

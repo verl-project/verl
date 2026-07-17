@@ -53,6 +53,14 @@ class ShardSpec:
     placements: Optional[tuple] = None
     # Reserved (Megatron follow-up): pure-permutation shards -> [(hf_name, hf_tensor)].
     to_hf: Optional[Callable[[list[torch.Tensor]], list[tuple[str, torch.Tensor]]]] = None
+    # Explicit placement override for trainers whose sharding is not fully captured
+    # by DTensor placements (e.g. veomni's manual expert-dim split): ``place`` is an
+    # int flat offset or a BlockPlacement in a *virtual* full tensor, and
+    # ``gather_group`` is the ProcessGroup covering every rank that holds a block
+    # (pass a real group object -- the engine treats ``None`` as "unsharded").
+    # Every rank is assumed to contribute.
+    place: Optional[object] = None
+    gather_group: Optional[object] = None
 
     @classmethod
     def from_param(cls, param: torch.Tensor) -> ShardSpec:
@@ -139,6 +147,9 @@ def derive_placement(spec: ShardSpec):
     orderings) are rejected: the local tensor is not a single block.
     """
     import torch.distributed as dist
+
+    if spec.place is not None:
+        return spec.place, True, spec.gather_group
 
     if spec.mesh is None:
         return 0, (dist.get_rank() == 0 if dist.is_initialized() else True), None
