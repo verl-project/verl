@@ -237,6 +237,7 @@ class _FakeFSDPModel:
     def __init__(self, has_lora=True):
         self._fsdp_wrapped_module = _FakePEFTModel(has_lora=has_lora)
         self.config = self._fsdp_wrapped_module.config
+        self.can_generate = self._fsdp_wrapped_module.can_generate
 
     def state_dict(self):
         return self._fsdp_wrapped_module.state_dict()
