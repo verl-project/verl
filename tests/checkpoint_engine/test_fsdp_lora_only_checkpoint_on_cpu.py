@@ -79,7 +79,6 @@ class TestBaseCheckpointManagerLoraOnly:
 
     @staticmethod
     def _make_manager(checkpoint_config):
-
         class MockModel:
             pass
 
@@ -182,7 +181,6 @@ class TestFSDPCheckpointManagerLoraOnly:
         assert "lora_A.weight" in state_dict
 
     def test_load_lora_only_checkpoint_merges(self, tmp_path):
-
         model_before = _FakeFSDPModel(has_lora=True)
         model_before._fsdp_wrapped_module.base_weight.data.fill_(1.0)
 
@@ -206,7 +204,6 @@ class TestFSDPCheckpointManagerLoraOnly:
         assert model_after._fsdp_wrapped_module.lora_A_weight.item() == 0.5
 
     def test_load_full_checkpoint_still_works(self, tmp_path):
-
         model = _FakeFSDPModel(has_lora=True)
         model._fsdp_wrapped_module.base_weight.data.fill_(42.0)
         mgr = self._make_fsdp_manager(
