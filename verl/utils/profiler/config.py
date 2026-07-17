@@ -36,6 +36,51 @@ class NsightToolConfig(BaseConfig):
 
 
 @dataclass
+class TorchProfilerScheduleConfig(BaseConfig):
+    """Schedule for ``torch.profiler.schedule``.
+
+    Field names mirror the official ``torch.profiler.schedule`` API. The profiler
+    cycles through ``skip_first`` -> (``wait`` -> ``warmup`` -> ``active``) x ``repeat``.
+    Scheduling is only enabled when ``active > 0``; otherwise the profiler runs in
+    continuous mode (collect everything between start and stop).
+    """
+
+    # Number of steps to skip at the very beginning (not counted in the cycle).
+    skip_first: int = 0
+    # Number of steps to idle (no collection) at the start of each cycle.
+    wait: int = 0
+    # Number of steps to warm up (tracing on, data discarded) each cycle.
+    warmup: int = 0
+    # Number of steps to actively record each cycle. <= 0 disables scheduling.
+    active: int = 0
+    # Number of cycles to repeat. 0 means repeat until profiling stops.
+    repeat: int = 0
+    name: str = "torch_schedule"
+
+    def __post_init__(self) -> None:
+        """config validation logics go here"""
+        for field_name in ("skip_first", "wait", "warmup", "active", "repeat"):
+            value = getattr(self, field_name)
+            assert isinstance(value, int), f"{field_name} must be int, got {type(value)}"
+            assert value >= 0, f"{field_name} must be >= 0, got {value}"
+
+    @property
+    def enabled(self) -> bool:
+        """Scheduling only takes effect when at least one active step is requested."""
+        return self.active > 0
+
+    def to_torch_kwargs(self) -> dict:
+        """Return kwargs for ``torch.profiler.schedule``."""
+        return {
+            "skip_first": self.skip_first,
+            "wait": self.wait,
+            "warmup": self.warmup,
+            "active": self.active,
+            "repeat": self.repeat,
+        }
+
+
+@dataclass
 class TorchProfilerToolConfig(BaseConfig):
     """Torch profiler tool config."""
 
@@ -48,6 +93,9 @@ class TorchProfilerToolConfig(BaseConfig):
     # Stop collecting profiler data at this response-token index (exclusive).
     # None means collect until the end.
     profile_token_end: Optional[int] = None
+    # Optional torch.profiler.schedule (wait/warmup/active/repeat/skip_first).
+    # When set with active > 0, DistProfiler.step() drives the schedule per mini-batch.
+    schedule: Optional[TorchProfilerScheduleConfig] = None
     name: str = "torch"
 
     def __post_init__(self) -> None:

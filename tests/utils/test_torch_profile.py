@@ -17,14 +17,20 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from verl.utils.profiler.config import ProfilerConfig, TorchProfilerToolConfig
+from verl.utils.profiler.config import ProfilerConfig, TorchProfilerScheduleConfig, TorchProfilerToolConfig
+from verl.utils.profiler.profile import DistProfiler
 from verl.utils.profiler.torch_profile import Profiler, get_torch_profiler
 
 
 class TestTorchProfile(unittest.TestCase):
     def setUp(self):
-        # Reset Profiler class state
+        # Reset process-global Profiler class state so tests don't leak into each other.
         Profiler._define_count = 0
+        Profiler._active_prof = None
+
+    def tearDown(self):
+        Profiler._define_count = 0
+        Profiler._active_prof = None
 
     @patch("torch.profiler.profile")
     def test_get_torch_profiler(self, mock_profile):
@@ -83,6 +89,94 @@ class TestTorchProfile(unittest.TestCase):
 
         profiler.stop()
         mock_prof_instance.stop.assert_not_called()
+
+    @patch("torch.profiler.schedule")
+    @patch("torch.profiler.profile")
+    def test_get_torch_profiler_with_schedule(self, mock_profile, mock_schedule):
+        # When a schedule dict is provided, torch.profiler.schedule must be built and forwarded.
+        sentinel_schedule = object()
+        mock_schedule.return_value = sentinel_schedule
+        schedule = {"skip_first": 1, "wait": 2, "warmup": 1, "active": 3, "repeat": 2}
+
+        get_torch_profiler(contents=["cpu"], save_path="/tmp/test", rank=0, schedule=schedule)
+
+        mock_schedule.assert_called_once_with(**schedule)
+        _, kwargs = mock_profile.call_args
+        self.assertIs(kwargs["schedule"], sentinel_schedule)
+
+    @patch("torch.profiler.schedule")
+    @patch("torch.profiler.profile")
+    def test_get_torch_profiler_without_schedule(self, mock_profile, mock_schedule):
+        # Without a schedule, the profiler runs in continuous mode (no schedule kwarg).
+        get_torch_profiler(contents=["cpu"], save_path="/tmp/test", rank=0)
+
+        mock_schedule.assert_not_called()
+        _, kwargs = mock_profile.call_args
+        self.assertNotIn("schedule", kwargs)
+
+    @patch("verl.utils.profiler.torch_profile.get_torch_profiler")
+    def test_scheduled_profiler_lifecycle(self, mock_get_profiler):
+        mock_prof_instance = MagicMock()
+        mock_get_profiler.return_value = mock_prof_instance
+
+        schedule_cfg = TorchProfilerScheduleConfig(wait=1, warmup=1, active=2, repeat=1)
+        tool_config = TorchProfilerToolConfig(contents=["cpu"], discrete=False, schedule=schedule_cfg)
+        config = ProfilerConfig(save_path="/tmp/test", enable=True, tool_config=tool_config)
+        profiler = Profiler(rank=0, config=config, tool_config=tool_config)
+
+        # Start forwards the resolved schedule kwargs and records the active profiler.
+        profiler.start()
+        _, kwargs = mock_get_profiler.call_args
+        self.assertEqual(
+            kwargs["schedule"],
+            {"skip_first": 0, "wait": 1, "warmup": 1, "active": 2, "repeat": 1},
+        )
+        self.assertIs(Profiler._active_prof, mock_prof_instance)
+
+        # Each step advances the active torch profiler.
+        profiler.step()
+        profiler.step()
+        self.assertEqual(mock_prof_instance.step.call_count, 2)
+
+        # With a schedule, stop must NOT emit an extra implicit step (stepping is per mini-batch).
+        profiler.stop()
+        self.assertEqual(mock_prof_instance.step.call_count, 2)
+        mock_prof_instance.stop.assert_called_once()
+        self.assertIsNone(Profiler._active_prof)
+
+    def test_dist_profiler_step_noop_backend(self):
+        # A backend without scheduling support (no-op impl) must make step() a safe no-op.
+        config = ProfilerConfig(tool=None, enable=True, all_ranks=True, save_path="/tmp/test", tool_config=None)
+        dist_profiler = DistProfiler(rank=0, config=config)
+        self.assertIsNone(dist_profiler.step())
+
+    def test_dist_profiler_step_disabled(self):
+        # When disabled, step() must not touch the backend at all.
+        tool_config = TorchProfilerToolConfig(contents=["cpu"], discrete=False)
+        config = ProfilerConfig(
+            tool="torch", enable=False, all_ranks=True, save_path="/tmp/test", tool_config=tool_config
+        )
+        dist_profiler = DistProfiler(rank=0, config=config, tool_config=tool_config)
+        dist_profiler._impl = MagicMock()
+        self.assertIsNone(dist_profiler.step())
+        dist_profiler._impl.step.assert_not_called()
+
+    @patch("verl.utils.profiler.torch_profile.get_torch_profiler")
+    def test_dist_profiler_step_torch_delegates(self, mock_get_profiler):
+        mock_prof_instance = MagicMock()
+        mock_get_profiler.return_value = mock_prof_instance
+
+        tool_config = TorchProfilerToolConfig(contents=["cpu"], discrete=False)
+        config = ProfilerConfig(
+            tool="torch", enable=True, all_ranks=True, save_path="/tmp/test", tool_config=tool_config
+        )
+        dist_profiler = DistProfiler(rank=0, config=config, tool_config=tool_config)
+
+        dist_profiler.start()
+        dist_profiler.step()
+        mock_prof_instance.step.assert_called_once()
+
+        dist_profiler.stop()
 
 
 if __name__ == "__main__":

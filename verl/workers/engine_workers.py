@@ -301,6 +301,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 )
                 actor_output = self.train_batch(mini_batch_td)
                 output_lst.append(actor_output)
+                # Advance the profiler schedule once per mini-batch. No-op unless a
+                # torch profiler schedule (wait/warmup/active/repeat) is active.
+                self.profiler.step()
 
             if self.engine.is_mp_src_rank_with_outputs():
                 actor_output = [tu.get(output, "metrics") for output in output_lst]
@@ -487,6 +490,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             rr_mode = "disabled"
         self.enable_routing_replay = rr_mode != "disabled"
 
+        # Keep the raw (un-dataclassed) role profiler config so the inner actor
+        # TrainingWorker can build a matching DistProfiler in init_model. This lets
+        # train_mini_batch drive the (process-global) torch profiler schedule via
+        # profiler.step(), even though start/stop happen on this outer worker.
+        # NOTE: we must rebuild via the hydra path (omega_conf_to_dataclass without
+        # dataclass_type) so that tool_config entries are real dataclasses with
+        # attribute access; the dataclass_type=ProfilerConfig variant above yields a
+        # plain-dict tool_config that the inner torch profiler cannot consume.
+        self._omega_profiler_config = omega_profiler_config
+
         DistProfilerExtension.__init__(
             self, DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config)
         )
@@ -550,12 +563,21 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 omega_conf_to_dataclass(self.distillation_config) if self.distillation_enabled else None
             )
 
+            # Build the inner actor profiler config via the hydra path (same as SFT), so
+            # its tool_config entries are real dataclass instances the torch profiler can
+            # read. This gives the inner TrainingWorker a DistProfiler that shares the
+            # process-global torch profiler, so per-mini-batch profiler.step() works.
+            actor_profiler_config = (
+                omega_conf_to_dataclass(self._omega_profiler_config) if self._omega_profiler_config else None
+            )
+
             actor_training_config = TrainingWorkerConfig(
                 model_type=actor_config.model_config.get("model_type", "language_model"),
                 model_config=actor_config.model_config,
                 engine_config=actor_config.engine,
                 optimizer_config=actor_config.optim,
                 checkpoint_config=actor_config.checkpoint,
+                profiler_config=actor_profiler_config,
             )
 
             assert self.config.actor.use_dynamic_bsz == self.config.rollout.log_prob_use_dynamic_bsz

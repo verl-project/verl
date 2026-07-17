@@ -174,6 +174,21 @@ class DistProfiler:
             self._this_step = False
             return getattr(self._impl, "stop", lambda: None)()
 
+    def step(self):
+        """Advance the profiler schedule by one step, intended to be called per mini-batch.
+
+        Delegates to the backend `step` when the tool supports scheduling (currently the
+        torch profiler with a configured `wait/warmup/active/repeat` schedule); for all
+        other backends this is a no-op.
+
+        Gated on enable/rank only (not `this_step`): the training loop may run inside a
+        nested worker whose profiler was never explicitly started, while the underlying
+        torch profiler is process-global. The backend keeps `step` safe (no-op) whenever
+        no profiler is actively running.
+        """
+        if self.check_enable() and self.check_this_rank():
+            return getattr(self._impl, "step", lambda: None)()
+
     @classmethod
     def annotate(
         cls,
@@ -226,6 +241,9 @@ class _NoOpProfiler:
     def stop(self):
         return
 
+    def step(self):
+        return
+
 
 class DistProfilerExtension:
     """An extension class for DistProfiler that provides distributed profiling capabilities.
@@ -253,3 +271,8 @@ class DistProfilerExtension:
     def stop_profile(self) -> None:
         """Stop profiling for the current rank in the current training step."""
         self.profiler.stop()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def step_profile(self) -> None:
+        """Advance the profiler schedule by one step (typically once per mini-batch)."""
+        self.profiler.step()
