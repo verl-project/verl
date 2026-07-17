@@ -17,6 +17,7 @@ import inspect
 import json
 import logging
 import os
+import time
 import uuid
 from pprint import pprint
 from typing import Any, Callable, Optional
@@ -812,14 +813,14 @@ class vLLMHttpServer:
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip wake_up in standalone mode")
 
-    async def sleep(self):
+    async def sleep(self, reset_connector: bool = True):
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
 
         if self.rollout_mode == RolloutMode.HYBRID:
-            await self._sleep_hybrid()
+            await self._sleep_hybrid(reset_connector=reset_connector)
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            await self.engine.sleep(level=1)
+            await self.engine.sleep(level=1, reset_connector=reset_connector)
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
@@ -890,7 +891,12 @@ class vLLMHttpServer:
     async def wait_for_requests_to_drain(self):
         await self.engine.wait_for_requests_to_drain()
 
-    async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
+    async def abort_all_requests(
+        self,
+        reset_prefix_cache: bool = True,
+        checkpoint_kv: bool = False,
+        timeout_s: float = 30.0,
+    ) -> dict[str, Any]:
         """Abort all ongoing generation requests.
 
         On vLLM >= 0.12.0, uses AsyncLLM.pause_generation() to abort in-flight
@@ -909,26 +915,51 @@ class vLLMHttpServer:
             # Snapshot request IDs before pausing for reporting
             request_ids = list(self.engine.output_processor.request_states.keys())
 
-            # pause_generation with wait_for_inflight_requests=False will:
-            # 1. Set engine to paused state (blocks new generate calls)
-            # 2. Abort all in-flight requests
-            # 3. Wait for requests to drain
-            # 4. Clear prefix and mm caches if clear_cache=True.
-            #    EngineCore._reset_caches defaults reset_connector=True
-            #    on this path, so any attached external KV store (e.g.
-            #    MooncakeStoreConnector) is invalidated along with the
-            #    local prefix cache — RL-correct hard-reset at every
-            #    weight update boundary, no extra kwargs needed.
+            if checkpoint_kv:
+                print(
+                    "VERL_ABORT_KV_EVENT "
+                    + json.dumps(
+                        {
+                            "phase": "BARRIER_WAIT_START",
+                            "replica_id": self.replica_rank,
+                            "node_rank": self.node_rank,
+                            "request_count": len(request_ids),
+                            "timeout_s": timeout_s,
+                            "wall_ns": time.time_ns(),
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+            # pause_generation() waits for delayed-free connector work to finish.
             await self.engine.pause_generation(
+                mode="abort",
                 wait_for_inflight_requests=False,
-                clear_cache=reset_prefix_cache,
+                clear_cache=(reset_prefix_cache and not checkpoint_kv),
             )
+            if checkpoint_kv:
+                print(
+                    "VERL_ABORT_KV_EVENT "
+                    + json.dumps(
+                        {
+                            "phase": "BARRIER_VISIBLE",
+                            "replica_id": self.replica_rank,
+                            "node_rank": self.node_rank,
+                            "request_count": len(request_ids),
+                            "wall_ns": time.time_ns(),
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
 
             logger.info(f"Aborted {len(request_ids)} requests: {request_ids}")
             return {"aborted_count": len(request_ids), "request_ids": request_ids}
 
         except Exception as e:
             logger.error(f"Error aborting requests: {e}")
+            if checkpoint_kv:
+                raise
             return {"aborted_count": 0, "request_ids": [], "error": str(e)}
 
     async def resume_generation(self):
@@ -1131,7 +1162,7 @@ class vLLMHttpServer:
             return 1
         return 2
 
-    async def _sleep_hybrid(self):
+    async def _sleep_hybrid(self, reset_connector: bool = True):
         """HYBRID sleep: adapters and MTP need level=1; full weights need level=2.
 
         Uses engine.sleep() instead of engine.collective_rpc("sleep") to ensure
@@ -1140,7 +1171,7 @@ class vLLMHttpServer:
         leaving other DP shards' weights unreleased, which causes OOM during
         FSDP training backward when DP > 1.
         """
-        await self.engine.sleep(level=self._resolve_sleep_level())
+        await self.engine.sleep(level=self._resolve_sleep_level(), reset_connector=reset_connector)
         await self.engine.reset_encoder_cache()
 
 
@@ -1242,19 +1273,30 @@ class vLLMReplica(RolloutReplica):
             else f"{server_address}:{server_port}"
         )
 
-    async def sleep(self):
+    async def sleep(self, reset_connector: bool = True):
         """Sleep each rollout server."""
         # Drain DP engines for safe sleep.
         await self.servers[0].wait_for_requests_to_drain.remote()
-        await asyncio.gather(*[server.sleep.remote() for server in self.servers])
+        await asyncio.gather(
+            *[server.sleep.remote(reset_connector=reset_connector) for server in self.servers]
+        )
 
-    async def abort_all_requests(self) -> dict[str, Any]:
+    async def abort_all_requests(
+        self, checkpoint_kv: bool = False, timeout_s: float = 30.0
+    ) -> dict[str, Any]:
         """Abort all ongoing generation requests across all servers.
 
         Returns:
             dict[str, Any]: Combined abort results from all servers.
         """
-        results = await asyncio.gather(*[server.abort_all_requests.remote() for server in self.servers])
+        results = await asyncio.gather(
+            *[
+                server.abort_all_requests.remote(
+                    checkpoint_kv=checkpoint_kv, timeout_s=timeout_s
+                )
+                for server in self.servers
+            ]
+        )
 
         total_aborted = sum(r.get("aborted_count", 0) for r in results)
         all_request_ids = []

@@ -1196,6 +1196,12 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         """Return the worker group for hybrid replicas."""
         return self._hybrid_worker_group
 
+    async def begin_abort_kv_reuse_cycle(self, cycle_id: int) -> None:
+        await self.llm_server_manager.global_load_balancer.begin_abort_kv_reuse_cycle.remote(cycle_id)
+
+    async def mark_abort_kv_reuse_ready(self, cycle_id: int) -> None:
+        await self.llm_server_manager.global_load_balancer.mark_abort_kv_reuse_ready.remote(cycle_id)
+
     async def add_replicas(self, resource_ids: list[str]) -> int:
         n = await self.llm_server_manager.add_replicas(resource_ids)
         if n > 0:

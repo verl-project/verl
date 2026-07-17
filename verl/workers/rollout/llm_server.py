@@ -79,6 +79,25 @@ class GlobalRequestLoadBalancer:
         self._inflight_requests: dict[str, int] = {sid: 0 for sid in servers}
         self._request_id_to_server: LRUCache = LRUCache(maxsize=max_cache_size)
         self._full_determinism = full_determinism
+        self._abort_kv_reuse_event: asyncio.Event | None = None
+        self._abort_kv_reuse_cycle_id: int | None = None
+
+    def begin_abort_kv_reuse_cycle(self, cycle_id: int) -> None:
+        self._abort_kv_reuse_cycle_id = int(cycle_id)
+        self._abort_kv_reuse_event = asyncio.Event()
+
+    async def wait_abort_kv_reuse_ready(self) -> int | None:
+        event = self._abort_kv_reuse_event
+        cycle_id = self._abort_kv_reuse_cycle_id
+        if event is None or cycle_id is None:
+            return None
+        await event.wait()
+        return cycle_id
+
+    def mark_abort_kv_reuse_ready(self, cycle_id: int) -> None:
+        if self._abort_kv_reuse_event is None or self._abort_kv_reuse_cycle_id != int(cycle_id):
+            raise RuntimeError(f"abort KV reuse cycle {cycle_id} was not initialized")
+        self._abort_kv_reuse_event.set()
 
     def acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
         """Acquire a server for the given request (sticky + least-loaded).
@@ -453,6 +472,9 @@ class FullyAsyncLLMServerClient(LLMServerClient):
             if output.stop_reason not in ("aborted", "abort") or not should_retry:
                 break
 
+            abort_kv_cfg = self.config.actor_rollout_ref.rollout.get("abort_kv_reuse", {})
+            if bool(abort_kv_cfg.get("enabled", False)):
+                await self._load_balancer.wait_abort_kv_reuse_ready.remote()
             await asyncio.sleep(1)
 
         final_output.extra_fields["global_steps"] = global_steps

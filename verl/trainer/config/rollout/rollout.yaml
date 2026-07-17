@@ -60,6 +60,15 @@ cudagraph_capture_sizes: null
 # Whether to free engine KVCache after generation.
 free_cache_engine: True
 
+abort_kv_reuse:
+  enabled: false
+  timeout_s: 30.0
+  require_global_visibility: true
+  fallback: recompute
+
+# External KV backend used by abort_kv_reuse.
+kv_backend: null
+
 # TP size for rollout. Not effective for hf
 tensor_model_parallel_size: 2
 

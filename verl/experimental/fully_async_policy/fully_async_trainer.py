@@ -337,6 +337,12 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             num_standalone_replicas=num_standalone,
             num_hybrid_replicas=num_hybrid,
             policy=policy,
+            abort_kv_reuse_enabled=bool(
+                self.config.actor_rollout_ref.rollout.abort_kv_reuse.enabled
+            ),
+            abort_kv_reuse_timeout_s=float(
+                self.config.actor_rollout_ref.rollout.abort_kv_reuse.timeout_s
+            ),
         )
         print(
             f"[FullyAsyncTrainer] DynamicResourceController initialised "

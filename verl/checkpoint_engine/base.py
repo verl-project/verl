@@ -465,9 +465,12 @@ class CheckpointEngineManager:
         self.replicas = [r for r in self.replicas if r not in replicas_set]
 
     @auto_await
-    async def sleep_replicas(self):
+    async def sleep_replicas(self, reset_connector: bool = True):
         """Sleep all rollout replicas: free weight and kv_cache device memory."""
-        await asyncio.gather(*[r.sleep() for r in self.replicas])
+        if reset_connector:
+            await asyncio.gather(*[r.sleep() for r in self.replicas])
+        else:
+            await asyncio.gather(*[r.sleep(reset_connector=False) for r in self.replicas])
 
     @auto_await
     async def wake_up_replicas(self):
@@ -475,9 +478,14 @@ class CheckpointEngineManager:
         await asyncio.gather(*[r.wake_up() for r in self.replicas])
 
     @auto_await
-    async def abort_replicas(self):
+    async def abort_replicas(self, checkpoint_kv: bool = False, timeout_s: float = 30.0):
         """Abort all in-flight requests on every replica."""
-        await asyncio.gather(*[r.abort_all_requests() for r in self.replicas])
+        if checkpoint_kv:
+            await asyncio.gather(
+                *[r.abort_all_requests(checkpoint_kv=True, timeout_s=timeout_s) for r in self.replicas]
+            )
+        else:
+            await asyncio.gather(*[r.abort_all_requests() for r in self.replicas])
 
     @auto_await
     async def resume_generation_replicas(self):

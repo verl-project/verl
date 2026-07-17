@@ -142,6 +142,16 @@ class CheckpointEngineConfig(BaseConfig):
 
 
 @dataclass
+class AbortKVReuseConfig(BaseConfig):
+    """Checkpoint aborted rollout KV before a dynamic hybrid replica sleeps."""
+
+    enabled: bool = False
+    timeout_s: float = 30.0
+    require_global_visibility: bool = True
+    fallback: str = "recompute"
+
+
+@dataclass
 class RolloutConfig(BaseConfig):
     _mutable_fields = {
         "max_model_len",
@@ -188,6 +198,8 @@ class RolloutConfig(BaseConfig):
     enforce_eager: bool = False
     cudagraph_capture_sizes: Optional[list] = None
     free_cache_engine: bool = True
+    abort_kv_reuse: AbortKVReuseConfig = field(default_factory=AbortKVReuseConfig)
+    kv_backend: Optional[str] = None
     data_parallel_size: int = 1
     expert_parallel_size: int = 1
     tensor_model_parallel_size: int = 2
