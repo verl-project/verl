@@ -16,7 +16,18 @@ import sys
 import types
 from unittest.mock import MagicMock, patch
 
-from verl.utils.tracking import ValidationGenerationsLogger
+from verl.utils.tracking import Tracking, ValidationGenerationsLogger
+
+
+def test_tracking_finish_finalizes_wandb_once():
+    tracking = Tracking.__new__(Tracking)
+    tracking.logger = {"wandb": MagicMock()}
+    tracking._finished = False
+
+    tracking.finish(exit_code=1)
+    tracking.finish(exit_code=0)
+
+    tracking.logger["wandb"].finish.assert_called_once_with(exit_code=1)
 
 
 def test_validation_generations_logger_logs_trackio_traces():

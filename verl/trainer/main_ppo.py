@@ -141,13 +141,20 @@ class TaskRunnerV1:
 
         # initialize transfer queue
         tq.init(config.transfer_queue)
+        succeeded = False
         try:
             self.trainer = trainer_cls(config=config)
             self.trainer.init()
             self.init_agent_loop_manager()
             self.trainer.fit(self.agent_loop_manager)
+            succeeded = True
         finally:
-            tq.close()
+            try:
+                tracking = getattr(self.trainer, "logger", None)
+                if tracking is not None:
+                    tracking.finish(exit_code=0 if succeeded else 1)
+            finally:
+                tq.close()
 
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
