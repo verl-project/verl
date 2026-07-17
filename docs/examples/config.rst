@@ -348,6 +348,11 @@ Actor/Rollout/Reference Policy
 
   - ``load_contents``: The contents to load in the checkpoint, you can specify different checkpoint loading contents. By default, it is the same with ``save_checkpoint``.
 
+  - ``save_lora_only`` (bool, default ``False``): When ``True`` and the model has LoRA adapters,
+    only LoRA/adapter weights are saved instead of the full model state dict. On load, LoRA-only
+    checkpoints are auto-detected and merged into the base model via ``strict=False``.
+    Reduces checkpoint size dramatically (e.g. ~150 MiB vs ~54 GiB for a 27B model).
+
 **Reference Model**
 
 Reference model will be enabled when ``actor.use_kl_loss`` or/and ``algorithm.use_kl_in_reward`` is/are True.

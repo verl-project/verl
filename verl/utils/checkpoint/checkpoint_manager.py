@@ -98,6 +98,18 @@ class BaseCheckpointManager:
         return "hf_model" in self.checkpoint_save_contents
 
     @property
+    def should_save_lora_only(self) -> bool:
+        if not self.checkpoint_config:
+            return False
+        return getattr(self.checkpoint_config, "save_lora_only", False)
+
+    @staticmethod
+    def is_lora_only_state_dict(state_dict: dict) -> bool:
+        if not state_dict:
+            return False
+        return all("lora_" in k or ".adapter_" in k for k in state_dict)
+
+    @property
     def should_load_model(self) -> bool:
         """
         Returns True if 'model' is in checkpoint_load_contents, indicating the model state should be loaded.
