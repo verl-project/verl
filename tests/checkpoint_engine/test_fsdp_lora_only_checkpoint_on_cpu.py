@@ -144,7 +144,7 @@ class TestFSDPCheckpointManagerLoraOnly:
         state_dict = torch.load(saved_path, weights_only=False)
         for key in state_dict:
             assert "lora_" in key or ".adapter_" in key, "Unexpected base key: {}".format(key)
-        assert len(state_dict) == 2
+        assert len(state_dict) == 4
 
     def test_save_lora_only_no_lora_saves_full(self, tmp_path):
         model = _FakeFSDPModel(has_lora=False)
