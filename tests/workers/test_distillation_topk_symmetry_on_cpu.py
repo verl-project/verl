@@ -45,6 +45,7 @@ from verl.trainer.distillation.fsdp.losses import compute_forward_kl_topk as com
 from verl.trainer.distillation.losses import compute_forward_kl_topk as collect_forward_kl_topk_metrics
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
+from verl.utils.metric import materialize_metric_tensors
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
 
 _VOCAB_SIZE = 8
@@ -244,5 +245,15 @@ def test_forward_kl_topk_metric_aggregation_for_overlap_outputs():
         data=data,
     )
 
+    assert all(
+        torch.is_tensor(metrics[key]) and metrics[key].grad_fn is None
+        for key in (
+            "distillation/overlap_ratio",
+            "distillation/overlap_token_advantage",
+            "distillation/student_mass",
+            "distillation/teacher_mass",
+        )
+    )
+    materialize_metric_tensors(metrics)
     assert metrics["distillation/overlap_ratio"] == pytest.approx(0.75)
     assert metrics["distillation/overlap_token_advantage"] == pytest.approx(-0.3)

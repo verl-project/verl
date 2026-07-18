@@ -333,11 +333,11 @@ def compute_forward_kl_topk(
         # Diagnostics for tracking teacher/student top-k overlap in OPD, following
         # "Rethinking On-Policy Distillation of Large Language Models" (arXiv:2604.13016):
         # overlap ratio and average teacher-token KL contribution on overlapped tokens.
-        overlap_metrics["distillation/overlap_ratio"] = (valid_overlap_count.float().mean() / k).item()
+        overlap_metrics["distillation/overlap_ratio"] = (valid_overlap_count.float().mean() / k).detach()
         overlap_position_mask = response_mask_bool & (overlap_count > 0)
         if overlap_position_mask.any():
             overlap_metrics["distillation/overlap_token_advantage"] = (
-                overlap_token_advantage[overlap_position_mask].mean().item()
+                overlap_token_advantage[overlap_position_mask].mean().detach()
             )
         else:
             overlap_metrics["distillation/overlap_token_advantage"] = 0.0
@@ -346,10 +346,10 @@ def compute_forward_kl_topk(
     student_mass = student_mass[response_mask_bool]
     teacher_mass = teacher_mass[response_mask_bool]
     distillation_metrics = {
-        "distillation/student_mass": student_mass.mean().item(),
+        "distillation/student_mass": student_mass.mean().detach(),
         "distillation/student_mass_min": Metric(AggregationType.MIN, student_mass.min()),
         "distillation/student_mass_max": Metric(AggregationType.MAX, student_mass.max()),
-        "distillation/teacher_mass": teacher_mass.mean().item(),
+        "distillation/teacher_mass": teacher_mass.mean().detach(),
         "distillation/teacher_mass_min": Metric(AggregationType.MIN, teacher_mass.min()),
         "distillation/teacher_mass_max": Metric(AggregationType.MAX, teacher_mass.max()),
         **overlap_metrics,

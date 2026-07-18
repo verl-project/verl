@@ -69,6 +69,42 @@ NumericType = int, float, torch.Tensor, np.ndarray
 Numeric = int | float | torch.Tensor | np.ndarray
 
 
+def materialize_metric_tensors(metrics: dict[str, Any]) -> None:
+    """Batch-convert deferred scalar metric tensors to host values in place.
+
+    Raises:
+        ValueError: If a metric contains a non-scalar tensor.
+    """
+    tensor_refs: dict[
+        tuple[type[torch.Tensor], torch.device, torch.dtype],
+        list[tuple[dict | list, str | int, torch.Tensor]],
+    ] = {}
+
+    def collect(container: dict | list, key: str | int, value: Any) -> None:
+        if isinstance(value, Metric):
+            for index, metric_value in enumerate(value.values):
+                collect(value.values, index, metric_value)
+        elif isinstance(value, dict):
+            for child_key, child_value in value.items():
+                collect(value, child_key, child_value)
+        elif isinstance(value, list):
+            for index, child_value in enumerate(value):
+                collect(value, index, child_value)
+        elif isinstance(value, torch.Tensor):
+            if value.numel() != 1:
+                raise ValueError(f"Metric tensors must be scalar, got shape {tuple(value.shape)}")
+            group_key = (type(value), value.device, value.dtype)
+            tensor_refs.setdefault(group_key, []).append((container, key, value.detach()))
+
+    for metric_key, metric_value in metrics.items():
+        collect(metrics, metric_key, metric_value)
+
+    for refs in tensor_refs.values():
+        host_values = torch.stack([value for _, _, value in refs]).cpu().tolist()
+        for (container, key, _), host_value in zip(refs, host_values, strict=True):
+            container[key] = host_value
+
+
 class Metric:
     """
     A metric aggregator for collecting and aggregating numeric values.
@@ -107,7 +143,9 @@ class Metric:
         if isinstance(value, torch.Tensor):
             if value.numel() != 1:
                 raise ValueError("Only scalar tensors can be converted to float")
-            value = value.detach().item()
+            value = value.detach()
+            if value.device.type == "cpu":
+                value = value.item()
         if not isinstance(value, NumericType):
             raise ValueError(f"Unsupported value type: {type(value)}")
         self.values.append(value)
@@ -121,6 +159,7 @@ class Metric:
             self.append(value)
 
     def aggregate(self) -> float:
+        materialize_metric_tensors({"metric": self})
         return self._aggregate(self.values, self.aggregation)
 
     @classmethod
@@ -139,6 +178,7 @@ class Metric:
     def aggregate_dp(cls, metric_lists: list["Metric"]) -> float:
         if not metric_lists:
             raise ValueError("Cannot aggregate an empty list of metrics.")
+        materialize_metric_tensors({str(index): metric for index, metric in enumerate(metric_lists)})
         value_lists = [ml.values for ml in metric_lists]
         if not all(len(ls) == len(value_lists[0]) for ls in value_lists):
             raise ValueError(
