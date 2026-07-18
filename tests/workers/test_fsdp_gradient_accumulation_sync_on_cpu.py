@@ -12,12 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 from tensordict import TensorDict
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import ShardingStrategy, fully_shard
 
 from verl.workers.engine.fsdp import transformer_impl
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngine
@@ -141,3 +146,93 @@ def test_forward_backward_batch_syncs_only_final_micro_batch(monkeypatch):
     assert sync_states == [False, False, True]
     assert len(output) == 3
     assert all(micro_batch["loss"].grad is not None for micro_batch in micro_batches)
+
+
+def _build_distributed_model(strategy, mesh):
+    torch.manual_seed(2026)
+    model = torch.nn.Sequential(
+        torch.nn.Linear(4, 8),
+        torch.nn.GELU(),
+        torch.nn.Linear(8, 2),
+    )
+    if strategy == "fsdp":
+        return FSDP(
+            model,
+            device_id=torch.device("cpu"),
+            sharding_strategy=ShardingStrategy.FULL_SHARD,
+        )
+    fully_shard(model, mesh=mesh)
+    return model
+
+
+def _run_distributed_step(model, inputs, targets, strategy, defer_sync):
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.05)
+    optimizer.zero_grad(set_to_none=True)
+    for micro_batch_idx, (inputs_micro_batch, targets_micro_batch) in enumerate(zip(inputs, targets, strict=True)):
+        is_last_micro_batch = micro_batch_idx == len(inputs) - 1
+        if strategy == "fsdp":
+            sync_context = model.no_sync() if defer_sync and not is_last_micro_batch else nullcontext()
+            with sync_context:
+                output = model(inputs_micro_batch)
+                torch.nn.functional.mse_loss(output, targets_micro_batch, reduction="sum").backward()
+        else:
+            model.set_requires_gradient_sync(not defer_sync or is_last_micro_batch)
+            output = model(inputs_micro_batch)
+            torch.nn.functional.mse_loss(output, targets_micro_batch, reduction="sum").backward()
+    if strategy == "fsdp2":
+        model.set_requires_gradient_sync(True)
+    optimizer.step()
+
+    if strategy == "fsdp":
+        with FSDP.summon_full_params(model):
+            return [parameter.detach().clone() for parameter in model.parameters()]
+    return [parameter.full_tensor().detach().clone() for parameter in model.parameters()]
+
+
+def _distributed_equivalence_worker(rank, world_size, rendezvous_file):
+    dist.init_process_group(
+        backend="gloo",
+        init_method=f"file://{rendezvous_file}",
+        rank=rank,
+        world_size=world_size,
+    )
+    try:
+        mesh = init_device_mesh("cpu", (world_size,))
+        inputs = (torch.arange(16, dtype=torch.float32).view(4, 4) + rank) / 10
+        targets = torch.arange(8, dtype=torch.float32).view(4, 2) / 7
+        input_micro_batches = inputs.chunk(2)
+        target_micro_batches = targets.chunk(2)
+
+        for strategy in ("fsdp", "fsdp2"):
+            baseline = _build_distributed_model(strategy, mesh)
+            optimized = _build_distributed_model(strategy, mesh)
+            baseline_parameters = _run_distributed_step(
+                baseline,
+                input_micro_batches,
+                target_micro_batches,
+                strategy,
+                defer_sync=False,
+            )
+            optimized_parameters = _run_distributed_step(
+                optimized,
+                input_micro_batches,
+                target_micro_batches,
+                strategy,
+                defer_sync=True,
+            )
+
+            for baseline_parameter, optimized_parameter in zip(baseline_parameters, optimized_parameters, strict=True):
+                torch.testing.assert_close(baseline_parameter, optimized_parameter, rtol=1e-6, atol=1e-6)
+    finally:
+        dist.destroy_process_group()
+
+
+def test_distributed_accumulation_matches_per_micro_batch_sync(tmp_path):
+    world_size = 2
+    rendezvous_file = str(tmp_path / "fsdp_rdzv")
+    mp.spawn(
+        _distributed_equivalence_worker,
+        args=(world_size, rendezvous_file),
+        nprocs=world_size,
+        join=True,
+    )
