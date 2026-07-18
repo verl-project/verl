@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -168,19 +168,12 @@ def _build_distributed_model(strategy, mesh):
 def _run_distributed_step(model, inputs, targets, strategy, defer_sync):
     optimizer = torch.optim.SGD(model.parameters(), lr=0.05)
     optimizer.zero_grad(set_to_none=True)
+    engine = _make_engine(model, enabled=defer_sync)
     for micro_batch_idx, (inputs_micro_batch, targets_micro_batch) in enumerate(zip(inputs, targets, strict=True)):
         is_last_micro_batch = micro_batch_idx == len(inputs) - 1
-        if strategy == "fsdp":
-            sync_context = model.no_sync() if defer_sync and not is_last_micro_batch else nullcontext()
-            with sync_context:
-                output = model(inputs_micro_batch)
-                torch.nn.functional.mse_loss(output, targets_micro_batch, reduction="sum").backward()
-        else:
-            model.set_requires_gradient_sync(not defer_sync or is_last_micro_batch)
+        with engine._gradient_sync_context(is_last_micro_batch=is_last_micro_batch):
             output = model(inputs_micro_batch)
             torch.nn.functional.mse_loss(output, targets_micro_batch, reduction="sum").backward()
-    if strategy == "fsdp2":
-        model.set_requires_gradient_sync(True)
     optimizer.step()
 
     if strategy == "fsdp":
