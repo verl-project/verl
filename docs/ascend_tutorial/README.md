@@ -18,7 +18,7 @@ ascend_tutorial/
 ```
 ## 最新消息
 - [verl-ascend-recipe 建仓](https://github.com/verl-project/verl-ascend-recipe) - 新增昇腾recipe
-- [verl on Ascend 2026Q2 roadmap](https://github.com/verl-project/verl/issues/5526) - 2026Q2 RoadMap 已发布
+- [verl on Ascend 2026Q2 roadmap](https://github.com/verl-project/verl/issues/5526) - 2026Q2 roadmap 已发布
 
 ## 快速开始
 - [Docker 构建使用指南](./get_start/dockerfile_build_guidance.rst) - 构建并使用昇腾环境的 Docker 镜像  

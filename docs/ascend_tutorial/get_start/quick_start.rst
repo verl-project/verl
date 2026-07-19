@@ -1,7 +1,7 @@
 Ascend Quickstart
 =================
 
-**Last updated:** 05/13/2026.
+**Last updated:** 2026/05/13.
 
 关键更新
 --------
