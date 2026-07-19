@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import orjson
+from packaging.version import Version
 
 logger = logging.getLogger(__name__)
 
@@ -603,12 +604,10 @@ class ValidationGenerationsLogger:
 
 @dataclasses.dataclass
 class DapoFilteredRewardTableLogger:
-    """Accumulating wandb table of DAPO-filtered (no-signal) group counts per reward value.
+    """Wandb table of DAPO-filtered (no-signal) group counts per reward value.
 
-    One row per training step; each column is a distinct metric value observed among the
-    zero-variance groups that DAPO evicts, and each cell is how many groups collapsed to that
-    value at that step. Columns grow as new values appear (missing cells backfilled with 0),
-    so the table stays readable when the reward set is discrete (e.g. {0.0, 1.0}).
+    Each training step adds one row containing compact ``reward:count`` pairs. Wandb 0.20+
+    uploads rows incrementally; older versions rebuild the full table for compatibility.
 
     Intentionally wandb-only: this "value distribution over time" view is a table, which other
     tracking backends do not render usefully. Non-wandb backends are silently skipped.
@@ -628,23 +627,26 @@ class DapoFilteredRewardTableLogger:
         if wandb.run is None:
             return
 
-        # Persist raw rows so the table can be rebuilt as the column set (observed values) grows.
-        if not hasattr(self, "_rows"):
-            self._rows: list[dict] = []
-            self._value_columns: list[float] = []
-
         row = {float(value): int(count) for value, count in reward_counts.items()}
-        self._rows.append({"step": step, "counts": row})
-        for value in row:
-            if value not in self._value_columns:
-                self._value_columns.append(value)
+        counts_text = ", ".join(f"{value:g}:{row[value]}" for value in sorted(row))
+        columns = ["step", "reward_counts"]
 
-        sorted_values = sorted(self._value_columns)
-        columns = ["step"] + [f"reward={value:g}" for value in sorted_values]
-        # Rebuild the table each call: wandb tables are immutable once logged (wandb issue #2981).
-        table = wandb.Table(columns=columns)
-        for entry in self._rows:
-            counts = entry["counts"]
-            table.add_data(entry["step"], *[counts.get(value, 0) for value in sorted_values])
+        if not hasattr(self, "_use_incremental_table"):
+            self._use_incremental_table = Version(wandb.__version__) >= Version("0.20.0")
+            if self._use_incremental_table:
+                self._table = wandb.Table(columns=columns, log_mode="INCREMENTAL")
+            else:
+                self._rows = []
+                logger.warning(
+                    "wandb<0.20.0 does not support incremental tables; "
+                    "the DAPO filtered-reward table will re-upload its full history each step."
+                )
+
+        if self._use_incremental_table:
+            self._table.add_data(step, counts_text)
+            table = self._table
+        else:
+            self._rows.append([step, counts_text])
+            table = wandb.Table(columns=columns, data=list(self._rows))
 
         wandb.log({"training/filter_groups/filtered_reward_counts": table}, step=step)

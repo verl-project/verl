@@ -151,7 +151,6 @@ class PPOTrainer(ABC):
         if custom_sampler is not None and custom_sampler.get("path") and custom_sampler.get("name"):
             sampler_cls = load_extern_type(custom_sampler.path, custom_sampler.name)
 
-        filter_groups_metric = self._resolve_filter_groups_metric()
         replay_buffer_kwargs = dict(
             trainer_mode=self.trainer_mode,
             trainer_config=self.config.trainer.v1.get(self.trainer_mode, {}),
@@ -163,7 +162,7 @@ class PPOTrainer(ABC):
         # Preserve the existing constructor contract for external samplers; custom implementations own
         # their filtering semantics and can consume algorithm.filter_groups through their own config.
         if sampler_cls is ReplayBuffer:
-            replay_buffer_kwargs["filter_groups_metric"] = filter_groups_metric
+            replay_buffer_kwargs["filter_groups_metric"] = self._resolve_filter_groups_metric()
         return sampler_cls(**replay_buffer_kwargs)
 
     def _resolve_filter_groups_metric(self) -> str | None:
@@ -184,6 +183,13 @@ class PPOTrainer(ABC):
             "reward.reward_model.enable_resource_pool=True. A colocated reward model computes rewards only "
             "after replay-buffer sampling."
         )
+        max_num_gen_batches = filter_groups.get("max_num_gen_batches", 0)
+        if max_num_gen_batches > 0:
+            logger.warning(
+                "algorithm.filter_groups.max_num_gen_batches=%s is ignored by the built-in V1 ReplayBuffer; "
+                "refill continues until enough groups are sampleable.",
+                max_num_gen_batches,
+            )
         return str(filter_metric)
 
     def init(self):
