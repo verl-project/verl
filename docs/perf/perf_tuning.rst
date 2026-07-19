@@ -200,7 +200,7 @@ By default, every training micro-batch synchronizes gradients. When a PPO mini-b
 split into multiple micro-batches, enable
 ``actor_rollout_ref.actor.fsdp_config.use_no_sync_for_gradient_accumulation=True`` to
 synchronize only the final micro-batch before the optimizer step. The same option is
-available under ``critic.fsdp_config``.
+available under ``critic.fsdp``.
 
 With :math:`M` micro-batches per mini-batch, this reduces gradient synchronization from
 :math:`M` rounds to one round. It does not remove parameter all-gathers. The option applies
