@@ -15,6 +15,7 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import torch
 
 from verl.utils.metric import Metric
@@ -59,12 +60,52 @@ def _contains_tensor(value):
     return False
 
 
-def test_postprocess_batches_loss_and_metric_materialization_before_object_gather():
-    _DeferredScalar.reset_calls()
+def _make_worker():
     worker = object.__new__(TrainingWorker)
     worker.device_name = "cpu"
-    worker.engine = SimpleNamespace(get_data_parallel_group=lambda: object())
+    worker.engine = SimpleNamespace(get_data_parallel_group=lambda: None)
     worker.flops_counter = None
+    return worker
+
+
+@pytest.mark.parametrize(
+    "losses,expected",
+    [
+        (torch.tensor(3.0, requires_grad=True), 3.0),
+        (torch.tensor([1.0, 2.0]), 3.0),
+        ([torch.tensor(1.0, requires_grad=True), torch.tensor(2.0, requires_grad=True)], 3.0),
+        ((torch.tensor(1.0), torch.tensor(2.0)), 3.0),
+        ([1.0, 2.0], 3.0),
+        (3.0, 3.0),
+        ([], 0.0),
+    ],
+)
+def test_postprocess_accepts_single_and_batched_loss_values(losses, expected):
+    worker = _make_worker()
+    output = {"loss": losses, "metrics": {}, "model_output": {}}
+    device = SimpleNamespace(
+        max_memory_allocated=lambda: 0,
+        max_memory_reserved=lambda: 0,
+    )
+
+    with patch("verl.workers.engine_workers.get_torch_device", return_value=device):
+        result = worker._postprocess_output(
+            output,
+            global_token_num=None,
+            delta_time=1.0,
+            forward_only=False,
+            images_seqlens=None,
+        )
+
+    loss = result.get_non_tensor("metrics")["loss"]
+    assert loss == expected
+    assert not isinstance(loss, torch.Tensor)
+
+
+def test_postprocess_batches_loss_and_metric_materialization_before_object_gather():
+    _DeferredScalar.reset_calls()
+    worker = _make_worker()
+    worker.engine = SimpleNamespace(get_data_parallel_group=lambda: object())
     metric = Metric("mean")
     metric.extend([_DeferredScalar(3.0), _DeferredScalar(5.0)])
     output = {
