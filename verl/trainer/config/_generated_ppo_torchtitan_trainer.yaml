@@ -838,6 +838,10 @@ distillation:
 
     '
   privileged_insert_before: ''
+  privileged_mode: append
+  privileged_problem_key: extra_info.problem
+  privileged_user_template: ''
+  privileged_enable_thinking: true
 trainer:
   balance_batch: true
   total_epochs: 30

@@ -18,6 +18,7 @@ import pytest
 import torch
 
 from verl.trainer.distillation.privileged_context import (
+    build_privileged_chat_turn,
     build_privileged_sequence,
     resolve_privileged_solution,
     slice_privileged_teacher_to_student,
@@ -158,3 +159,53 @@ def test_privileged_slice_aligns_response_rows_after_padding():
     for j in range(resp_len):
         # absolute row prompt_width+j == the teacher's privileged score for response token j
         assert torch.equal(padded[prompt_width + j], teacher_ids[prompt_len + block_len + j])
+
+
+class _FakeChatTokenizer:
+    """Minimal stand-in exposing apply_chat_template: [BOS=1] + per-char ids +
+    assistant opener [7] when add_generation_prompt, recording call kwargs."""
+
+    def __init__(self):
+        self.last_kwargs = None
+
+    def apply_chat_template(self, messages, tokenize, add_generation_prompt, **kwargs):
+        self.last_kwargs = kwargs
+        assert tokenize and add_generation_prompt
+        assert messages[0]["role"] == "user"
+        ids = [1] + [ord(c) % 100 + 10 for c in messages[0]["content"]]
+        return ids + [7]
+
+
+def test_build_privileged_chat_turn_places_solution_in_user_turn():
+    tok = _FakeChatTokenizer()
+    seq = build_privileged_chat_turn(
+        tok,
+        problem="P",
+        solution="S",
+        response_ids=[9, 10],
+        user_template="q:{problem} a:{solution}",
+        chat_template_kwargs={"enable_thinking": True},
+    )
+    # templated prompt = BOS + content + assistant opener, then the response
+    expected_prompt = [1] + [ord(c) % 100 + 10 for c in "q:P a:S"] + [7]
+    assert seq == expected_prompt + [9, 10]
+    assert tok.last_kwargs == {"enable_thinking": True}
+
+
+def test_build_privileged_chat_turn_literal_braces_are_safe():
+    # {problem}/{solution} are replaced literally; \boxed{} etc. must survive
+    tok = _FakeChatTokenizer()
+    template = "solve {problem} using {solution}; answer in \\boxed{}"
+    seq = build_privileged_chat_turn(tok, "x+1=2", "x=1", [], template)
+    text = "solve x+1=2 using x=1; answer in \\boxed{}"
+    assert seq == [1] + [ord(c) % 100 + 10 for c in text] + [7]
+
+
+def test_reference_user_template_has_placeholders_and_reference_markers():
+    from verl.trainer.distillation.privileged_context import REFERENCE_USER_TEMPLATE
+
+    assert "{problem}" in REFERENCE_USER_TEMPLATE
+    assert "{solution}" in REFERENCE_USER_TEMPLATE
+    # anchors of the reference implementation's wording
+    assert "=== Reference Solution Begin ===" in REFERENCE_USER_TEMPLATE
+    assert REFERENCE_USER_TEMPLATE.endswith("\\boxed{}.")

@@ -283,10 +283,37 @@ class DistillationConfig(BaseConfig):
     # marker text in the prompt (e.g. the assistant-turn opener) instead of appending
     # it. Empty = append after the prompt.
     privileged_insert_before: str = ""
+    # How the teacher input is built. "append": splice prefix+solution+suffix into
+    # the student's templated prompt (token-level, fields above). "chat_turn":
+    # rebuild the teacher user message from the raw (problem, solution) pair via
+    # the chat template, matching the OPSD reference implementation -- required to
+    # reproduce the paper's runs token-for-token.
+    privileged_mode: str = "append"
+    # chat_turn only: non-tensor batch field with the raw problem statement
+    # (dotted). The dataset must carry the untemplated problem text.
+    privileged_problem_key: str = "extra_info.problem"
+    # chat_turn only: teacher user-message template with literal {problem} and
+    # {solution} placeholders. Empty = the reference implementation's wording
+    # (verl.trainer.distillation.privileged_context.REFERENCE_USER_TEMPLATE).
+    privileged_user_template: str = ""
+    # chat_turn only: value of the chat template's enable_thinking kwarg for the
+    # teacher prompt (the reference implementation defaults teacher_thinking=True).
+    privileged_enable_thinking: bool = True
     distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
 
     def __post_init__(self):
         if self.self_distillation:
+            if self.privileged_mode not in ("append", "chat_turn"):
+                raise ValueError(f"privileged_mode must be 'append' or 'chat_turn', got {self.privileged_mode!r}.")
+            if self.privileged_mode == "chat_turn":
+                if not self.privileged_problem_key:
+                    raise ValueError("privileged_mode='chat_turn' requires a non-empty privileged_problem_key.")
+                if self.privileged_user_template and not (
+                    "{problem}" in self.privileged_user_template and "{solution}" in self.privileged_user_template
+                ):
+                    raise ValueError(
+                        "privileged_user_template must contain the literal {problem} and {solution} placeholders."
+                    )
             if not self.enabled:
                 raise ValueError("self_distillation requires distillation.enabled=True.")
             if not self.privileged_solution_key:

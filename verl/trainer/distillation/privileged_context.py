@@ -24,6 +24,23 @@ so the rest of verl's on-policy-distillation pipeline is reused unchanged.
 
 import torch
 
+# The teacher user-message wording of the OPSD reference implementation
+# (siyan-zhao/OPSD, ``SelfDistillationDataCollator``), reproduced verbatim so a
+# ``chat_turn`` teacher matches it token-for-token. ``{problem}`` and
+# ``{solution}`` are literal placeholders (replaced, not ``str.format``-ed, so
+# things like ``\boxed{}`` in templates or solutions need no escaping).
+REFERENCE_USER_TEMPLATE = (
+    "Problem: {problem}\n\n"
+    "Here is a reference solution to this problem:\n"
+    "=== Reference Solution Begin ===\n{solution}\n=== Reference Solution End ===\n"
+    "\n\nAfter reading the reference solution above, make sure you truly understand "
+    "the reasoning behind each step — do not copy or paraphrase it. Now, using your "
+    "own words and independent reasoning, derive the same final answer to the problem above. "
+    "Think step by step, explore different approaches, and don't be afraid to backtrack "
+    "or reconsider if something doesn't work out:\n"
+    "\nPlease reason step by step, and put your final answer within \\boxed{}."
+)
+
 
 def resolve_privileged_solution(sample_kwargs: dict | None, key: str) -> str | None:
     """Resolve the ground-truth solution from a (possibly nested) sample field.
@@ -100,6 +117,49 @@ def build_privileged_sequence(
                 return prompt_ids[:i] + block + prompt_ids[i:] + response_ids
         # marker not found -> fall through to the default append
     return prompt_ids + block + response_ids
+
+
+def build_privileged_chat_turn(
+    tokenizer,
+    problem: str,
+    solution: str,
+    response_ids: list[int],
+    user_template: str = REFERENCE_USER_TEMPLATE,
+    chat_template_kwargs: dict | None = None,
+) -> list[int]:
+    """Build the OPSD teacher input as a proper chat turn (reference-impl style).
+
+    Instead of splicing the solution into the student's already-templated prompt
+    (``build_privileged_sequence``), rebuild the teacher's user message from the
+    raw ``(problem, solution)`` pair and run it through the chat template with
+    ``add_generation_prompt=True`` -- the privileged solution then lives inside
+    the *user* turn, exactly as in the OPSD reference implementation, and the
+    student's on-policy response follows the assistant-turn opener.
+
+    ``{problem}`` / ``{solution}`` in ``user_template`` are replaced literally
+    (no ``str.format``), so braces elsewhere in the template or solution are safe.
+
+    Args:
+        tokenizer: a tokenizer exposing ``apply_chat_template``.
+        problem: the raw problem statement (not the templated prompt).
+        solution: the ground-truth solution text.
+        response_ids: the student's on-policy response token ids.
+        user_template: teacher user-message template with literal ``{problem}``
+            and ``{solution}`` placeholders.
+        chat_template_kwargs: extra kwargs for ``apply_chat_template`` (e.g.
+            ``{"enable_thinking": True}`` for Qwen3 templates).
+
+    Returns:
+        The teacher input token ids: templated teacher prompt + response.
+    """
+    user_message = user_template.replace("{problem}", problem).replace("{solution}", solution)
+    prompt_ids = tokenizer.apply_chat_template(
+        [{"role": "user", "content": user_message}],
+        tokenize=True,
+        add_generation_prompt=True,
+        **(chat_template_kwargs or {}),
+    )
+    return list(prompt_ids) + list(response_ids)
 
 
 def slice_privileged_teacher_to_student(

@@ -29,3 +29,42 @@ def test_self_distillation_requires_enabled():
 
     with pytest.raises(ValueError):
         DistillationConfig(self_distillation=True)  # enabled defaults to False
+
+
+def test_privileged_mode_defaults_to_append():
+    c = DistillationConfig()
+    assert c.privileged_mode == "append"
+    assert c.privileged_problem_key == "extra_info.problem"
+    assert c.privileged_enable_thinking is True
+
+
+def test_privileged_mode_rejects_unknown_value():
+    import pytest
+
+    with pytest.raises(ValueError, match="privileged_mode"):
+        DistillationConfig(self_distillation=True, privileged_mode="banana")
+
+
+def test_chat_turn_requires_problem_key():
+    import pytest
+
+    with pytest.raises(ValueError, match="privileged_problem_key"):
+        DistillationConfig(self_distillation=True, privileged_mode="chat_turn", privileged_problem_key="")
+
+
+def test_chat_turn_template_must_have_placeholders():
+    import pytest
+
+    with pytest.raises(ValueError, match="placeholders"):
+        DistillationConfig(
+            self_distillation=True, privileged_mode="chat_turn", privileged_user_template="no placeholders here"
+        )
+
+
+def test_chat_turn_valid_fields_pass_field_checks():
+    import pytest
+
+    # With valid chat_turn fields the first failure is the enabled gate, proving
+    # the mode/problem-key/template checks all passed.
+    with pytest.raises(ValueError, match="enabled"):
+        DistillationConfig(self_distillation=True, privileged_mode="chat_turn")

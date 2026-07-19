@@ -126,3 +126,15 @@ privileged_suffix: "\n\nUsing this as a reference, derive the answer yourself. T
 # Optional: insert the solution before the last occurrence of this marker text in
 # the prompt (e.g. the assistant-turn opener) instead of appending. Empty = append.
 privileged_insert_before: ""
+# How the teacher input is built. "append": splice prefix+solution+suffix into the
+# student's templated prompt (fields above). "chat_turn": rebuild the teacher user
+# message from the raw (problem, solution) pair via the chat template, matching the
+# OPSD reference implementation token-for-token.
+privileged_mode: append
+# chat_turn only: non-tensor batch field with the raw (untemplated) problem text.
+privileged_problem_key: extra_info.problem
+# chat_turn only: teacher user-message template with literal {problem}/{solution}
+# placeholders. Empty = the reference implementation's wording.
+privileged_user_template: ""
+# chat_turn only: enable_thinking kwarg for the teacher chat template (Qwen3).
+privileged_enable_thinking: true
