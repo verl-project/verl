@@ -1,13 +1,13 @@
 Ascend Dockerfile Build Guidance
 ===================================
 
-Last updated：06/23/2026.
+Last updated: 06/23/2026.
 
 
 镜像获取与公开镜像地址
 --------------------------
 
-昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3 镜像，基于 `Dockerfile <../../../docker/ascend>`_ 构建，具体说明见 ``Dockerfile构建镜像脚本清单`` 。
+昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3 镜像，基于 `Dockerfile <../../../docker/ascend>`_ 构建，具体说明见 :ref:`Dockerfile构建镜像脚本清单 <ascend-dockerfile-list>`。
 
 每日构建镜像名格式：latest-{CANN版本}-{torch_npu版本}[-{适用产品信息}-{操作系统}]-{Python版本}[-{推理后端}-{其他字段}]
 
@@ -122,7 +122,7 @@ A3              8.5.2                vLLM          Qwen3.5        `Dockerfile.as
 
 **说明：**
 
-* 以 vLLM 的镜像为例，``Dockerfile.ascend_8.5.0_a2`` 为 Dockerfile 文件名，``verl-ascend:8.5.0-a2`` 中， verl-ascend 为自定义的镜像名称，8.5.0-a2 为自定义的镜像标签
+* 以 vLLM 的镜像为例，``Dockerfile.ascend_8.5.0_a2`` 为 Dockerfile 文件名，``verl-ascend:8.5.0-a2`` 中，verl-ascend 为自定义的镜像名称，8.5.0-a2 为自定义的镜像标签
 
 容器启动命令模板
 ----------------

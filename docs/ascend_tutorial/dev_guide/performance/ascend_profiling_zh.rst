@@ -11,7 +11,7 @@ Last updated: 07/13/2026.
 使用两级profile设置来控制数据采集
 
 - 全局采集控制：使用verl/trainer/config/ppo_trainer.yaml(FSDP)，或verl/trainer/config/ppo_megatron_trainer.yaml(MindSpeed)中的配置项控制采集的模式和步数。
-- 角色profile控制：通过每个角色中的配置项控制等参数。
+- 角色profile控制：通过每个角色中的配置项控制采集等参数。
 
 全局采集控制
 ~~~~~~~~~~~~
@@ -42,7 +42,7 @@ Last updated: 07/13/2026.
 
 通过每个角色的 ``profiler.tool_config.npu`` 中的参数控制具体采集行为：
 
--  level: 采集级别—选项有 level_none、level0、level1 和 level2
+-  level: 采集级别——选项有 level_none、level0、level1 和 level2
 
    -  level_none: 禁用所有基于级别的数据采集（关闭 profiler_level）。
    -  level0: 采集高级应用数据、底层NPU数据和NPU上的算子执行详情。在权衡数据量和分析能力后，level0是推荐的默认配置。
@@ -189,7 +189,7 @@ Last updated: 07/13/2026.
 
 **Fully Async Policy 模式说明**：
 
-1. 在 `Fully Async Policy <https://verl.readthedocs.io/en/latest/advance/fully_async.html>`_ 模式下，`global_profiler.steps` 代表每一轮`update_weights`后的`step`, 这点和同步模式下保持同步，而非单轮的`mini-batch step`.
+1. 在 `Fully Async Policy <https://verl.readthedocs.io/en/latest/advance/fully_async.html>`_ 模式下，`global_profiler.steps` 代表每一轮`update_weights`后的`step`，这点和同步模式下保持同步，而非单轮的`mini-batch step`。
 
 2. 因为复用AgentLoop采集能力，因此在 `Fully Async Policy <https://verl.readthedocs.io/en/latest/advance/fully_async.html>`_ 模式下的注意事项和AgentLoop相同。
 
@@ -198,7 +198,7 @@ Last updated: 07/13/2026.
 
 采集后的数据存放在用户设置的save_path下，可通过 `MindStudio Insight <https://www.hiascend.com/document/detail/zh/mindstudio/80RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html>`_ 工具进行可视化。
 
-另外在Linux环境下，MindStudio Insight工具提供了 [JupyterLab插件](https://www.hiascend.com/document/detail/zh/mindstudio/82RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0130.html) 形态，提供更直观和交互式强的操作界面。JupyterLab插件优势如下：
+另外在Linux环境下，MindStudio Insight工具提供了 `JupyterLab插件 <https://www.hiascend.com/document/detail/zh/mindstudio/82RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0130.html>`_ 形态，提供更直观和交互性强的操作界面。JupyterLab插件优势如下：
 
 - 无缝集成：支持在Jupyter环境中直接运行MindStudio Insight工具，无需切换平台，无需拷贝服务器上的数据，实现数据即采即用。
 - 快速启动：通过JupyterLab的命令行或图形界面，可快速启动MindStudio Insight工具。
@@ -232,8 +232,9 @@ Last updated: 07/13/2026.
 这种特性会导致全量 Profiling 产生海量且重复的算子记录。如下图所示：
 
 .. image:: https://raw.githubusercontent.com/mengchengTang/verl-data/master/verl_ascend_profiler.png
+   :alt: 全量 Profiling 产生海量重复算子记录示意图
 
-即使使用了 ``discrete`` 模式，单个阶段的性能数据文件仍可能达到数 TB，导致 **解析失败** 或 **可视化工具卡顿** 。
+即使使用了 ``discrete`` 模式，单个阶段的性能数据文件仍可能达到数 TB，导致 **解析失败** 或 **可视化工具卡顿**。
 
 解决方案：关键路径采样
 ~~~~~~~~~~~~~~~~~~~~~~

@@ -1,7 +1,7 @@
 Ascend Quickstart
 =================
 
-**Last updated:** 07/14/2026.
+**Last updated:** 2026/07/14.
 
 关键更新
 --------
@@ -56,7 +56,7 @@ Qwen3-0.6B GSM8K GRPO Quick Start
 
 权重需自行从huggingface上下载
 
-脚本中的默认读取权重路径为 ``~${HOME}/models/Qwen/Qwen3-0.6B``
+脚本中的默认读取权重路径为 ``~/models/Qwen/Qwen3-0.6B``
 
 建议将权重放在该路径下，或者修改脚本中MODEL_PATH指向本地路径
 
@@ -84,7 +84,7 @@ gsm8k原始数据集需自行从huggingface上下载
 
 首先进入verl路径： ``cd /your/path/verl``
 
-使能CANN环境: 如果您自定义了CANN的路径，请根据自定义路径修改以下使能命令
+使能CANN环境：如果您自定义了CANN的路径，请根据自定义路径修改以下使能命令
 
 .. code-block:: bash
 

@@ -202,7 +202,7 @@ Visualization
 
 Collected data is stored in the user-defined save_path and can be visualized using the `MindStudio Insight <https://www.hiascend.com/document/detail/zh/mindstudio/80RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html>`_ tool.
 
-Additionally, in a Linux environment, the MindStudio Insight tool is provided in the form of a [JupyterLab Plugin](https://www.hiascend.com/document/detail/zh/mindstudio/82RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0130.html), offering a more intuitive and highly interactive user interface. The advantages of the JupyterLab plugin are as follows:
+Additionally, in a Linux environment, the MindStudio Insight tool is provided in the form of a `JupyterLab Plugin <https://www.hiascend.com/document/detail/zh/mindstudio/82RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0130.html>`_, offering a more intuitive and highly interactive user interface. The advantages of the JupyterLab plugin are as follows:
 
 - Seamless integration: Supports running the MindStudio Insight tool directly within the Jupyter environment, eliminating the need to switch platforms or copy data from the server, enabling data to be collected and used immediately.
 - Fast startup: Allows MindStudio Insight to be launched quickly via the JupyterLab command line or graphical interface.

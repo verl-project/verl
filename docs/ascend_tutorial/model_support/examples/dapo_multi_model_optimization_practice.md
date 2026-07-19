@@ -6,10 +6,10 @@ Last updated: 07/03/2026.
 
 DAPO的论文可以参考：[DAPO](https://arxiv.org/pdf/2503.14476)，其中包含以下几个关键技术。
 
-* ​**Clip-Higher**​: 通过对重要性采样比的上限剪裁促进了系统的多样性并避免了熵坍缩（Entropy Collapse）。
-* ​**Dynamic Sampling**​: 提高了训练效率和稳定性。DAPO出了一种执行动态采样的策略，并过滤掉准确率等于1和0的提示组，从而保持批次间具有有效梯度的提示数量一致。
-* ​**Token-level Policy Gradient Loss**​: 在长链思维强化学习 (long-CoT RL) 场景中至关重要。
-* ​**Overlong Reward Shaping**​: 减少奖励噪声并稳定了训练。
+* **Clip-Higher**: 通过对重要性采样比的上限剪裁促进了系统的多样性并避免了熵坍缩（Entropy Collapse）。
+* **Dynamic Sampling**: 提高了训练效率和稳定性。DAPO提出了一种执行动态采样的策略，并过滤掉准确率等于1和0的提示组，从而保持批次间具有有效梯度的提示数量一致。
+* **Token-level Policy Gradient Loss**: 在长链思维强化学习 (long-CoT RL) 场景中至关重要。
+* **Overlong Reward Shaping**: 减少奖励噪声并稳定了训练。
 
 在verl中，可以进行如下设置，从而进行DAPO算法的运行。
 
@@ -52,7 +52,7 @@ actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode}
 
 ```bash
 reward_model.overlong_buffer.enable=${enable_overlong_buffer} # 启用超长缓冲区惩罚,开启对超长输出的惩罚机制
-reward_model.overlong_buffer.len=${overlong_buffer_len}  # 缓冲区长度,定义缓冲区的toke,最大惩罚强度
+reward_model.overlong_buffer.len=${overlong_buffer_len}  # 缓冲区长度,定义缓冲区的token,最大惩罚强度
 reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor}   #惩罚因子,最大惩罚强度
 ```
 
@@ -60,7 +60,7 @@ reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor}   #惩罚
 
 ## 硬件要求
 
-当前支持Atlas 800T A3 与 Atlas 900 A3 SuperPoD。完成跑完本次最佳实践需要 1 台 Atlas 900 A3 SuperPoD。关键软件版本可以参考：[Ascend Quickstart](https://github.com/verl-project/verl/blob/9d05508f/docs/ascend_tutorial/quick_start/ascend_quick_start.rst)
+当前支持Atlas 800T A3 与 Atlas 900 A3 SuperPoD。完成本次最佳实践需要 1 台 Atlas 900 A3 SuperPoD。关键软件版本可以参考：[Ascend Quickstart](https://github.com/verl-project/verl/blob/9d05508f/docs/ascend_tutorial/get_start/quick_start.rst)
 
 ## 安装基础环境
 
@@ -76,7 +76,7 @@ reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor}   #惩罚
 | vllm-ascend   | v0.18.0                                                    |
 | transformers  | 5.3.0                                                      |
 
-在本实践中, 我们通过指定 verl 的 commit id 以避免引入其他问题。注意：main 分支可能会因迭代重构导致 patch 出问题，如需稳定版本可切换至 `release/v0.8.0`。
+在本实践中，我们通过指定 verl 的 commit id 以避免引入其他问题。注意：main 分支可能会因迭代重构导致 patch 出问题，如需稳定版本可切换至 `release/v0.8.0`。
 
 ```bash
 cd verl
@@ -131,7 +131,7 @@ export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
 yum install jemalloc
 ```
 
-如果上述方法无法正常安装，可以通过源码编译安装 前往jemalloc官网下载最新稳定版本，官网地址:https://github.com/jemalloc/jemalloc/releases/
+如果上述方法无法正常安装，可以通过源码编译安装。前往jemalloc官网下载最新稳定版本，官网地址：https://github.com/jemalloc/jemalloc/releases/
 
 ```shell
 tar -xvf jemalloc-{version}.tar.bz2
@@ -143,9 +143,9 @@ make install
 
 ### 全局变量导入
 
-- 为了确保 Ray 进程能够正常回收内存，需要安装并使能 jemalloc 库进行内存管理，用于更好管理内存，避免长跑过程中内存 OOM。
+- 为了确保 Ray 进程能够正常回收内存，需要安装并使能 jemalloc 库进行内存管理，用于更好地管理内存，避免长跑过程中内存 OOM。
 
-```
+```bash
 # 根据实际安装路径设置 jemalloc 环境变量，例如安装路径为:/usr/local/lib/libjemalloc.so.2(可通过 find /usr -name libjemalloc.so.2 确认文件是否存在)
 export LD_PRELOAD=/usr/local/lib/libjemalloc.so.2
 ```
@@ -199,7 +199,7 @@ export VLLM_USE_V1=1
 export HCCL_CONNECT_TIMEOUT=5400
 export VLLM_ASCEND_ENABLE_NZ=0
 export LD_PRELOAD=/usr/local/lib/libjemalloc.so.2
-# Some models are optimized by vllm ascend. While in some case, e.g. rlhf training, 
+# Some models are optimized by vllm ascend. While in some case, e.g. rlhf training,
 # the optimized model may not be suitable. In this case, set this value to 0 to disable the optimized model.
 export USE_OPTIMIZED_MODEL=0
 export CPU_AFFINITY_CONF=2
@@ -224,7 +224,7 @@ export VLLM_USE_V1=1
 export HCCL_CONNECT_TIMEOUT=5400
 export VLLM_ASCEND_ENABLE_NZ=0
 export LD_PRELOAD=/usr/local/lib/libjemalloc.so.2
-# Some models are optimized by vllm ascend. While in some case, e.g. rlhf training, 
+# Some models are optimized by vllm ascend. While in some case, e.g. rlhf training,
 # the optimized model may not be suitable. In this case, set this value to 0 to disable the optimized model.
 export USE_OPTIMIZED_MODEL=0
 export CPU_AFFINITY_CONF=2
@@ -318,17 +318,17 @@ actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=${use_dynamic_bsz}
   当`use_dynamic_bsz=True`时，单 GPU 在一个微批次中能处理的最大 Token 数量
 
 ```bash
-actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${actor_ppo_max_token_len}  
-actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} 
+actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${actor_ppo_max_token_len}
+actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len}
 actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len}
 ```
 
 - **单个 GPU 微批次大小**
-  当`use_dynamic_bsz=True`时，框架会以该值为​初始批次大小​，再根据`ppo_max_token_len_per_gpu`向上 / 向下调整
+  当`use_dynamic_bsz=True`时，框架会以该值为初始批次大小，再根据`ppo_max_token_len_per_gpu`向上 / 向下调整
 
 ```bash
-actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 
-actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 
+actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2
+actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2
 actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2
 ```
 
@@ -337,8 +337,8 @@ actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2
 
 ```bash
 # 启用 FSDP2 框架
-actor_rollout_ref.actor.strategy=fsdp2 
-actor_rollout_ref.ref.strategy=fsdp2 
+actor_rollout_ref.actor.strategy=fsdp2
+actor_rollout_ref.ref.strategy=fsdp2
 critic.strategy=fsdp2
 
 # 仅用于 FSDP2：前向传播后重新分片以减少内存占用。
@@ -348,7 +348,7 @@ actor_rollout_ref.ref.fsdp_config.reshard_after_forward=True
 ```
 
 - **启用专家并行配置**
-  指定有多少个 GPU用于并行计算不同的专家网络
+  指定有多少个 GPU用于并行计算不同的专家网络。
 
 ```bash
 # MoE 架构 Actor 模型的专家并行配置

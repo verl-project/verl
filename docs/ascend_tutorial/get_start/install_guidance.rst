@@ -1,7 +1,7 @@
 Ascend Install Guidance
 =================
 
-Last updated: 05/20/2026.
+Last updated: 2026/05/20.
 
 关键更新
 --------
@@ -58,7 +58,7 @@ Atlas 800T A3
      - 训练引擎
    * - vLLM
      - FSDP/FSDP2/Megatron
-   * - SGlang
+   * - SGLang
      - FSDP/FSDP2/Megatron
 
 训练后端拓展
@@ -109,7 +109,7 @@ MindSpeed     ``core_r0.16.0``                        Megatron-LM 在昇腾 NPU 
 安装前准备（HDK & CANN）
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-CANN是NPU上的异构计算架构, 以下为arm平台A3安装指令，请参照如下指令下载HDK 和 CANN 并安装，
+CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参照如下指令下载HDK和CANN并安装，
 或者根据系统硬件型号从 `CANN社区 <https://www.hiascend.com/cann/download?versionId=723&ids=d803%2Ch0501%2Ch0601%2Ch0702>`_ 下载安装
 
 .. code:: bash
@@ -124,10 +124,10 @@ CANN是NPU上的异构计算架构, 以下为arm平台A3安装指令，请参照
    # 安装NPU驱动
    sudo yum install -y Atlas-A3-hdk-npu-driver-26.0.rc1
    # 安装Toolkit，可指定--install-path 自定义路径
-   sudo yum install Ascend-cann-toolkit-9.0.0
-   sudo yum install Ascend-cann-A3-ops-9.0.0
+   sudo yum install -y Ascend-cann-toolkit-9.0.0
+   sudo yum install -y Ascend-cann-A3-ops-9.0.0
    # 安装后验证
-   source /usr/local/Ascend/cann/set_env.sh
+   source /usr/local/Ascend/ascend-toolkit/set_env.sh
    python3 -c "import acl;print(acl.get_soc_name())"
 
 源码安装
@@ -175,7 +175,7 @@ MindSpeed     ``core_r0.16.0``                        Megatron-LM 在昇腾 NPU 
 安装前准备（HDK & CANN）
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-CANN是NPU上的异构计算架构, 以下为arm平台A3安装指令，请参照如下指令下载HDK 和 CANN 并安装，
+CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参照如下指令下载HDK和CANN并安装，
 或者根据系统硬件型号从 `CANN社区 <https://www.hiascend.com/cann/download?versionId=680&ids=d803%2Ch0501%2Ch0601%2Ch0702>`_ 下载安装
 
 .. code:: bash
@@ -193,7 +193,7 @@ CANN是NPU上的异构计算架构, 以下为arm平台A3安装指令，请参照
    sudo yum install -y Ascend-cann-toolkit-8.5.0
    sudo yum install -y Ascend-cann-A3-ops-8.5.0
    # 安装后验证
-   source /usr/local/Ascend/cann/set_env.sh
+   source /usr/local/Ascend/ascend-toolkit/set_env.sh
    python3 -c "import acl;print(acl.get_soc_name())"
 
 源码安装
@@ -258,9 +258,9 @@ MindSpeed-LLM 及相关依赖的源码安装指令：
    git clone --depth 1 --branch core_v0.12.1 https://github.com/NVIDIA/Megatron-LM.git
 
    # 配置环境变量
-   export PYTHONPATH=$PYTHONPATH:your path/Megatron-LM
-   export PYTHONPATH=$PYTHONPATH:your path/MindSpeed
-   export PYTHONPATH=$PYTHONPATH:your path/MindSpeed-LLM
+   export PYTHONPATH=$PYTHONPATH:/your/path/Megatron-LM
+   export PYTHONPATH=$PYTHONPATH:/your/path/MindSpeed
+   export PYTHONPATH=$PYTHONPATH:/your/path/MindSpeed-LLM
 
    # 安装 mbridge
    pip install mbridge
