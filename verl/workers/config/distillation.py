@@ -257,20 +257,66 @@ class DistillationConfig(BaseConfig):
     ```
     """
 
-    _mutable_fields = BaseConfig._mutable_fields | {"teacher_models", "n_gpus_per_node", "nnodes"}
+    _mutable_fields = BaseConfig._mutable_fields | {
+        "teacher_models",
+        "n_gpus_per_node",
+        "nnodes",
+        "teacher_execution",
+        "teacher_scoring_batch_size",
+        "teacher_max_consecutive_batches",
+        "teacher_max_wait_seconds",
+    }
 
     enabled: bool = False
+    # "rollout": score trajectories on dedicated vLLM/SGLang teacher resources.
+    # "trainer": score trajectories on the trainer's Megatron engine by swapping
+    # isomorphic teacher/student parameter snapshots between phases.
+    teacher_execution: str = "rollout"
     n_gpus_per_node: int = 0
     nnodes: int = 0
     teacher_models: dict[str, DistillationTeacherModelConfig] = field(default_factory=dict)
     teacher_key: str = "data_source"
+    teacher_scoring_batch_size: Optional[int] = None
+    teacher_max_consecutive_batches: int = 4
+    teacher_max_wait_seconds: float = 30.0
+    # nonrouter: every sample is forwarded by ALL teachers (no routing at forward
+    # time); the trainer later selects which teacher log_prob to use by `teacher_key`.
+    # Used for the nonrouter ablation that measures the overhead of always running
+    # both teachers versus routing each sample to a single teacher.
+    nonrouter: bool = False
     distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
 
     def __post_init__(self):
         if not self.enabled:
             return
 
+        if self.teacher_execution not in {"rollout", "trainer"}:
+            raise ValueError(
+                "distillation.teacher_execution must be either 'rollout' or 'trainer', "
+                f"got {self.teacher_execution!r}."
+            )
+
         self.teacher_models = self._resolve_teacher_models()
+        if self.teacher_execution == "trainer":
+            if self.distillation_loss.loss_settings.use_topk:
+                raise NotImplementedError(
+                    "Trainer-colocated distillation currently supports sampled-token losses "
+                    "(for example k1), but not forward_kl_topk."
+                )
+            if self.teacher_scoring_batch_size is not None and self.teacher_scoring_batch_size <= 0:
+                raise ValueError("distillation.teacher_scoring_batch_size must be greater than zero.")
+            # The scheduler-only fields below are unused in nonrouter fused mode (the
+            # ExclusiveTeacherScheduler is bypassed); skip their validation so stale
+            # CLI values do not break nonrouter runs.
+            if not self.nonrouter:
+                if self.teacher_max_consecutive_batches <= 0:
+                    raise ValueError("distillation.teacher_max_consecutive_batches must be greater than zero.")
+                if self.teacher_max_wait_seconds <= 0:
+                    raise ValueError("distillation.teacher_max_wait_seconds must be greater than zero.")
+            for teacher_model in self.teacher_models.values():
+                teacher_model.num_replicas = 0
+            return
+
         teacher_world_size_sum = 0
         for teacher_model in self.teacher_models.values():
             teacher_model.validate_and_prepare_for_distillation(
@@ -289,21 +335,24 @@ class DistillationConfig(BaseConfig):
     def _resolve_teacher_models(self) -> dict[str, DistillationTeacherModelConfig]:
         assert "teacher_model" in self.teacher_models
         if len(self.teacher_models) == 1:
-            # Single teacher occupies the entire teacher resource pool.
             teacher_model = self.teacher_models["teacher_model"]
-            inference = teacher_model.inference
-            per_replica = (
-                inference.tensor_model_parallel_size
-                * inference.data_parallel_size
-                * inference.pipeline_model_parallel_size
-            )
-            pool_size = self.n_gpus_per_node * self.nnodes
-            if pool_size % per_replica != 0:
-                raise ValueError(
-                    f"Single teacher's per_replica_world_size ({per_replica}) must divide the distillation "
-                    f"resource pool size ({self.n_gpus_per_node=} * {self.nnodes=} = {pool_size})."
+            if self.teacher_execution == "rollout":
+                # Single teacher occupies the entire teacher resource pool.
+                inference = teacher_model.inference
+                per_replica = (
+                    inference.tensor_model_parallel_size
+                    * inference.data_parallel_size
+                    * inference.pipeline_model_parallel_size
                 )
-            teacher_model.num_replicas = pool_size // per_replica
+                pool_size = self.n_gpus_per_node * self.nnodes
+                if pool_size % per_replica != 0:
+                    raise ValueError(
+                        f"Single teacher's per_replica_world_size ({per_replica}) must divide the distillation "
+                        f"resource pool size ({self.n_gpus_per_node=} * {self.nnodes=} = {pool_size})."
+                    )
+                teacher_model.num_replicas = pool_size // per_replica
+            else:
+                teacher_model.num_replicas = 0
             teacher_model.key = "default"
         else:
             # Multiple teachers: remove default single teacher config

@@ -125,7 +125,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
 
         self.checkpoint_manager = CheckpointEngineManager(
             config=omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine),
-            actor_wg=self.actor_rollout_wg,
+            trainer=self.actor_rollout_wg,
             replicas=self.llm_server_manager.get_replicas(),
         )
 
@@ -162,7 +162,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
 
             critic_cfg = TrainingWorkerConfig(
                 model_type="value_model",
-                model_config=self.orig_critic_cfg.model,
+                model_config=self.orig_critic_cfg.model_config,
                 engine_config=engine_config,
                 optimizer_config=self.orig_critic_cfg.optim,
                 checkpoint_config=self.orig_critic_cfg.checkpoint,
@@ -216,6 +216,12 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
                     OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
                 )
         wg_kwargs["device_name"] = self.device_name
+        # Support injecting extra env vars into training workers via trainer.worker_env config.
+        # This allows setting env vars (e.g. PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True)
+        # only for training workers without affecting rollout/SGLang server processes.
+        worker_env = OmegaConf.select(self.config.trainer, "worker_env")
+        if worker_env is not None:
+            wg_kwargs["worker_env"] = OmegaConf.to_container(worker_env, resolve=True)
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
@@ -508,6 +514,18 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
                 rollout_corr_config=rollout_corr_config,
                 policy_loss_config=self.config.actor_rollout_ref.actor.policy_loss,
             )
+            # Estimate entropy from rollout_log_probs: H ≈ -mean(log_prob) over response tokens
+            if "rollout_log_probs" in batch.batch and "response_mask" in batch.batch:
+                rollout_log_probs = batch.batch["rollout_log_probs"]
+                response_mask = batch.batch["response_mask"]
+                actor_config = self.config.actor_rollout_ref.actor
+                entropy_approx = agg_loss(
+                    loss_mat=-rollout_log_probs,
+                    loss_mask=response_mask,
+                    loss_agg_mode=actor_config.loss_agg_mode,
+                    loss_scale_factor=actor_config.loss_scale_factor,
+                )
+                metrics["actor/entropy"] = entropy_approx.detach().item()
         else:  # Recompute old_log_probs
             with marked_timer("old_log_prob", timing_raw, color="blue"):
                 old_log_prob, old_log_prob_mfu = self._compute_old_log_prob(batch)

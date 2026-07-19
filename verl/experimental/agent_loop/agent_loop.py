@@ -32,6 +32,8 @@ import logging
 import os
 import random
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
+from enum import IntEnum
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -41,7 +43,7 @@ import ray
 import torch
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
@@ -49,6 +51,8 @@ from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
 from verl.tools.tool_registry import load_all_tools
 from verl.trainer.distillation import is_distillation_enabled
+from verl.utils.chat_template import apply_chat_template, initialize_system_prompt
+from verl.utils.cat_logger import init_cat
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.model import compute_position_id_with_mask
@@ -64,18 +68,148 @@ from verl.utils.tokenizer import (
     get_processor_token_id,
     normalize_token_ids,
 )
-from verl.utils.tokenizer.chat_template import apply_chat_template, initialize_system_prompt, initialize_turn_separator
-from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
 from verl.workers.config import (
     HFModelConfig,
     RolloutConfig,
 )
 from verl.workers.rollout.llm_server import LLMServerClient
 
+AsyncLLMServerManager = LLMServerClient
+
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 DEFAULT_ROUTING_CACHE_SIZE = 10000
+
+
+class AgentError(IntEnum):
+    """Errors emitted by rlfactory-style agent loops."""
+
+    Success = 0
+    ToolCallFail = 1
+    RewardCallFail = 2
+    RewardRolloutFormatError = 3
+    RolloutTruncated = 4
+    RolloutFormatError = 5
+    RolloutMaxTurnReached = 6
+    PromptTooLong = 7
+
+    def __int__(self):
+        return self.value
+
+    def update(self, new_enum):
+        if self == AgentError.Success:
+            return new_enum
+        return self
+
+    def __bool__(self) -> bool:
+        return self.value == 0
+
+
+def agent_loop_metrics(data: DataProto):
+    """Extract rlfactory agent-loop metrics for trainer logging."""
+    metrics = {}
+
+    try:
+        for k, v in data.non_tensor_batch.items():
+            if k.startswith("rewardext_"):
+                name = k.replace("rewardext_", "")
+                v_float = v.astype(float)
+                filtered_v = v_float[~np.isnan(v_float)]
+                if filtered_v.size > 0:
+                    metrics[f"reward_extra/{name}"] = filtered_v.mean()
+    except Exception:
+        pass
+
+    if "error" in data.non_tensor_batch:
+        error = data.non_tensor_batch["error"]
+        for err in AgentError:
+            if err.value != 0:
+                error_count = np.sum(error == err)
+                metrics[f"error/{err.name}_rate"] = error_count / error.shape[0]
+        metrics["error/error_rate"] = np.sum(error != AgentError.Success) / error.shape[0]
+
+    def set_stat(d, prefix, arr):
+        if arr.size > 0:
+            d[f"{prefix}/mean"] = np.mean(arr)
+            d[f"{prefix}/max"] = np.max(arr)
+            d[f"{prefix}/min"] = np.min(arr)
+        return d
+
+    if "rollout_lengths" in data.non_tensor_batch:
+        rollout_flatten = np.concatenate(data.non_tensor_batch["rollout_lengths"])
+        rollout_sums = np.array([np.sum(sublist) for sublist in data.non_tensor_batch["rollout_lengths"]])
+        metrics = set_stat(metrics, "response_length/rollout_lengths_single_turn", rollout_flatten)
+        metrics = set_stat(metrics, "response_length/rollout_lengths_multi_turns", rollout_sums)
+
+    if "tool_lengths" in data.non_tensor_batch:
+        tool_flatten = np.concatenate(data.non_tensor_batch["tool_lengths"])
+        tool_sums = np.array([np.sum(sublist) for sublist in data.non_tensor_batch["tool_lengths"]])
+        metrics = set_stat(metrics, "response_length/tool_lengths_single_turn", tool_flatten)
+        metrics = set_stat(metrics, "response_length/tool_lengths_multi_turns", tool_sums)
+
+    if "think_lengths" in data.non_tensor_batch:
+        think_flatten = np.concatenate(data.non_tensor_batch["think_lengths"])
+        think_sums = np.array([np.sum(sublist) for sublist in data.non_tensor_batch["think_lengths"]])
+        metrics = set_stat(metrics, "response_length/think_length_single_turn", think_flatten)
+        metrics = set_stat(metrics, "response_length/think_length_multi_turns", think_sums)
+    return metrics
+
+
+def agent_loop_dump(data: DataProto, filename, tokenizer, print_to_stdout=False):
+    """Append failed rlfactory trajectories to a local debug file."""
+    error = data.non_tensor_batch["error"]
+    error_reason = data.non_tensor_batch.get("error_reason", np.array([""] * len(error), dtype=object))
+    num_turns = data.non_tensor_batch["__num_turns__"]
+    prompts = data.batch["prompts"]
+    responses = data.batch["responses"]
+    attn_mask = data.batch["attention_mask"]
+
+    print(f"saving error string to: {filename} ...")
+    string = ""
+    for err, reason, turns, prompt, response, mask in zip(
+        error, error_reason, num_turns, prompts, responses, attn_mask, strict=False
+    ):
+        if err in [AgentError.Success]:
+            continue
+
+        plen = sum(mask[: len(prompt)])
+        rlen = sum(mask[-len(response) :])
+
+        prompt_ids = prompt[-plen:]
+        response_ids = response[:rlen]
+
+        prompt_str = tokenizer.decode(prompt_ids, skip_special_tokens=False)
+        response_str = tokenizer.decode(response_ids, skip_special_tokens=False)
+
+        def add_turn_number(prompt_str, n_turns):
+            parts = prompt_str.split("<|im_start|>")
+            for n in range(len(parts)):
+                if n == 0:
+                    continue
+                parts[n] = f"\n(>>> start of turn {n + n_turns})<|im_start|>{parts[n]}"
+            return "".join(parts), len(parts) + n_turns
+
+        prompt_str, n_turns = add_turn_number(prompt_str, 0)
+        response_str, n_turns = add_turn_number(response_str, n_turns)
+
+        string += (
+            f"Failed: error: {err}, error reason: [{reason}],"
+            f"total number of turns: {turns}, length of response: {rlen}\n"
+        )
+        if err not in [AgentError.RewardRolloutFormatError]:
+            string += f">>>>>> prompt:\n {prompt_str}  \n>>>>>> response:\n {response_str}\n"
+        string += "END OF REPORT\n\n\n"
+
+    if print_to_stdout:
+        print("==================================================================================")
+        print("===================== AGENTLOOP DUMP QUERY WITH ERROR ============================")
+        print(string)
+        print("===================== AGENTLOOP DUMP QUERY WITH ERROR END  =======================")
+        print("==================================================================================")
+
+    with open(filename, "a") as f:
+        f.write(string)
 
 
 class AgentLoopMetrics(BaseModel):
@@ -85,6 +219,17 @@ class AgentLoopMetrics(BaseModel):
     tool_calls: float = 0.0
     compute_score: float = 0.0
     num_preempted: int = -1  # -1 means not available
+    reward_calls: float = 0.0
+    # Per-teacher forward time for this sample, keyed by teacher_key (nonrouter: all
+    # teachers; router: the single routed teacher). Empty when teacher forward is off
+    # (e.g. validate). Aggregated per step into timing_s/agent_loop/teacher_forward/<key>/*.
+    teacher_forward_times: dict[str, float] = Field(default_factory=dict)
+
+    def __setitem__(self, key, value):
+        setattr(self, key, value)
+
+    def __getitem__(self, key):
+        return getattr(self, key)
 
 
 class AgentLoopOutput(BaseModel):
@@ -225,34 +370,8 @@ class AgentLoopBase(ABC):
         self.data_config = data_config.config
         self.apply_chat_template_kwargs = self.data_config.get("apply_chat_template_kwargs", {})
         self.mm_processor_kwargs = self.data_config.get("mm_processor_kwargs", {})
-        self.continuous_token_builder = None
-        self.enable_continuous_token = False
-        continuous_token_config = self.data_config.continuous_token
-        if continuous_token_config.enable and self.processor is None:
-            model_config = self.config.actor_rollout_ref.model
-            self.continuous_token_builder = create_continuous_token_builder(
-                self.tokenizer,
-                model_family=continuous_token_config.model_family,
-                model_path=model_config.path,
-                tokenizer_name_or_path=model_config.tokenizer_path,
-                chat_template_kwargs=self.apply_chat_template_kwargs,
-            )
-            self.enable_continuous_token = True
-            # Continuous Token doesn't use the legacy removable system prompt.
-            self.system_prompt = None
-            # Continuous Token re-renders non-assistant turns from the full message list, so it does
-            # not need the incremental turn separator.
-            self.turn_separator = []
-        else:
-            if continuous_token_config.enable and self.processor is not None:
-                logger.warning(
-                    "Continuous Token is enabled but processor is set; falling back to legacy multimodal path."
-                )
-            processing_class = self.processor if self.processor is not None else self.tokenizer
-            self.system_prompt = initialize_system_prompt(processing_class, **self.apply_chat_template_kwargs)
-            # Turn separator dropped when the model stops at the assistant close token; restored at
-            # turn boundaries in ``ToolAgentLoop._handle_processing_tools_state``.
-            self.turn_separator = initialize_turn_separator(processing_class, **self.apply_chat_template_kwargs)
+        processing_class = self.processor if self.processor is not None else self.tokenizer
+        self.system_prompt = initialize_system_prompt(processing_class, **self.apply_chat_template_kwargs)
         self.loop = get_event_loop()
 
     def _get_mm_processor_kwargs(self, audio_data: Optional[list[Any]] = None) -> dict[str, Any]:
@@ -296,77 +415,6 @@ class AgentLoopBase(ABC):
                 multi_modal_data["audios"] = audios
 
         return multi_modal_data
-
-    async def ct_build_initial_tokens(
-        self,
-        messages: list[dict],
-        tools: list[dict] = None,
-    ) -> list[int]:
-        """Build the initial prompt token ids with Continuous Token."""
-        prompt_ids = await self.loop.run_in_executor(
-            None,
-            lambda: self.continuous_token_builder.build_initial_tokens(messages, tools=tools),
-        )
-        return self._cap_text_prompt_length(prompt_ids)
-
-    async def ct_merge_non_assistant_msg(
-        self,
-        previous_messages: list[dict],
-        updated_messages: list[dict],
-        runtime_token_ids: list[int],
-        response_mask: list[int],
-        response_logprobs: Optional[list[float]] = None,
-        tools: list[dict] = None,
-    ):
-        """Merge appended non-assistant messages into runtime tokens and metadata."""
-        merge_result = await self.loop.run_in_executor(
-            None,
-            lambda: self.continuous_token_builder.merge_non_assistant_tokens(
-                previous_messages,
-                updated_messages,
-                runtime_token_ids,
-                tools=tools,
-            ),
-        )
-        aligned_response_mask, aligned_response_logprobs = self.continuous_token_builder.align_response_metadata(
-            merge_result, response_mask, response_logprobs
-        )
-        return merge_result, aligned_response_mask, aligned_response_logprobs
-
-    async def ct_merge_assistant_token(
-        self,
-        runtime_token_ids: list[int],
-        assistant_token_ids: list[int],
-        response_mask: list[int],
-        response_logprobs: Optional[list[float]] = None,
-        assistant_logprobs: Optional[list[float]] = None,
-    ):
-        """Merge assistant-generated tokens and align response metadata."""
-        merge_result = await self.loop.run_in_executor(
-            None,
-            lambda: self.continuous_token_builder.merge_assistant_tokens(
-                runtime_token_ids,
-                assistant_token_ids,
-            ),
-        )
-        aligned_response_mask, aligned_response_logprobs = self.continuous_token_builder.align_response_metadata(
-            merge_result,
-            response_mask,
-            response_logprobs,
-            assistant_logprobs=assistant_logprobs,
-        )
-        return merge_result, aligned_response_mask, aligned_response_logprobs
-
-    def _cap_text_prompt_length(self, prompt_ids: list[int]) -> list[int]:
-        prompt_length = self.rollout_config.prompt_length
-        if len(prompt_ids) > prompt_length:
-            logger.warning(
-                "Prompt of %d tokens exceeds rollout.prompt_length=%d; left-truncating.",
-                len(prompt_ids),
-                prompt_length,
-            )
-            return prompt_ids[-prompt_length:]
-        return prompt_ids
 
     async def apply_chat_template(
         self,
@@ -447,7 +495,12 @@ class AgentLoopBase(ABC):
                     f"(e.g. ``total_pixels`` / ``max_pixels`` / fps / number of frames) or "
                     f"increase ``rollout.prompt_length``."
                 )
-            prompt_ids = self._cap_text_prompt_length(prompt_ids)
+            logger.warning(
+                "Prompt of %d tokens exceeds rollout.prompt_length=%d; left-truncating.",
+                len(prompt_ids),
+                prompt_length,
+            )
+            prompt_ids = prompt_ids[-prompt_length:]
 
         return prompt_ids
 
@@ -516,8 +569,12 @@ class AgentLoopWorker:
         self.mm_processor_kwargs = config.data.get("mm_processor_kwargs", {})
 
         # Online policy distillation
-        self.distillation_enabled = is_distillation_enabled(config.distillation)
-        if self.distillation_enabled:
+        self.distillation_enabled = is_distillation_enabled(config.get("distillation"))
+        self.teacher_execution = (
+            config.distillation.get("teacher_execution", "rollout") if self.distillation_enabled else "rollout"
+        )
+        self.rollout_teacher_enabled = self.distillation_enabled and self.teacher_execution == "rollout"
+        if self.rollout_teacher_enabled:
             from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
 
             self.teacher_key: str = config.distillation.teacher_key
@@ -554,6 +611,8 @@ class AgentLoopWorker:
             trace_config.get("token2text", False),
             trace_config.get("max_samples_per_step_per_worker", None),
         )
+        if init_cat(config):
+            logger.info("[AgentLoopWorker] Cat monitoring initialized.")
 
     def _get_mm_processor_kwargs(self, audio_data: Optional[list[Any]] = None) -> dict[str, Any]:
         """Return multimodal processor kwargs with audio sampling-rate defaults."""
@@ -640,9 +699,18 @@ class AgentLoopWorker:
         # Do not forward it to concrete agent loops, which may reject unknown kwargs.
         per_sample_do_sample = batch.non_tensor_batch.get("__do_sample__")
         tasks = []
+        custom_reward_function = OmegaConf.select(self.config, "reward.custom_reward_function") or self.config.get(
+            "custom_reward_function", None
+        )
+        reward_concurrency = custom_reward_function.get("request_concurrency", 8) if custom_reward_function else 1000
+        reward_semaphore = asyncio.Semaphore(reward_concurrency)
+        tool_max_concurrency = OmegaConf.select(self.config, "env.max_concurrency") or 1000
+        tool_call_semaphore = asyncio.Semaphore(tool_max_concurrency)
         for i in range(len(batch)):
             trace_this_sample = i in traced_indices
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items() if k != "__do_sample__"}
+            kwargs["semaphore"] = reward_semaphore
+            kwargs["tc_semaphore"] = tool_call_semaphore
             sample_sampling_params = dict(sampling_params)
             if not validate and per_sample_do_sample is not None and not bool(per_sample_do_sample[i]):
                 apply_greedy_sampling_params(sample_sampling_params)
@@ -702,14 +770,6 @@ class AgentLoopWorker:
         return_attention_mask: bool,
     ) -> dict[str, torch.Tensor]:
         """Right/left pad a flat list of token ids to a ``(1, max_length)`` tensor."""
-        # tokenizer.pad() with empty input returns dict with list values
-        # instead of tensors, which breaks downstream .dim() calls.
-        if not tokens:
-            pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else 0
-            result = {"input_ids": torch.full((1, max_length), pad_id, dtype=torch.long)}
-            if return_attention_mask:
-                result["attention_mask"] = torch.zeros((1, max_length), dtype=torch.long)
-            return result
         self.tokenizer.padding_side = padding_side
         padded = self.tokenizer.pad(
             {"input_ids": tokens},
@@ -905,8 +965,7 @@ class AgentLoopWorker:
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ) -> torch.Tensor:
         """Compute position ids for multi-modal inputs."""
-        # text-only OR non-M-RoPE multimodal (e.g. Gemma4) -> standard 1D positions
-        if self.processor is None or not hasattr(self.processor, "get_rope_index"):
+        if self.processor is None:
             return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
 
         multi_modal_kwargs = {
@@ -944,6 +1003,16 @@ class AgentLoopWorker:
         enable_async_reward = self.reward_loop_worker_handles is not None
 
         final_output = outputs[-1]
+        _SKIP_REWARD_ERRORS = {
+            AgentError.PromptTooLong,
+            AgentError.RewardCallFail,
+            AgentError.ToolCallFail,
+            AgentError.RewardRolloutFormatError,
+        }
+        sample_error = final_output.extra_fields.get("error", AgentError.Success)
+        if sample_error in _SKIP_REWARD_ERRORS:
+            return
+
         if final_output.reward_score is None and enable_async_reward:
             timing = {}
             with simple_timer("compute_score", timing):
@@ -985,20 +1054,29 @@ class AgentLoopWorker:
                     },
                     batch_size=n,
                 )
+                clean_kwargs = {
+                    k: v for k, v in kwargs.items() if k not in {"semaphore", "tc_semaphore"}
+                }
                 non_tensor_batch = {
-                    **{k: np.array([v] * n) for k, v in kwargs.items()},
+                    **{k: np.array([v] * n) for k, v in clean_kwargs.items()},
                     "__num_turns__": np.array([o.num_turns for o in outputs]),
                     "tool_extra_fields": np.array([o.extra_fields for o in outputs], dtype=object),
                     "prompt_len": np.array([len(o.prompt_ids) for o in outputs]),
                     "response_len": np.array([len(o.response_ids) for o in outputs]),
                 }
+                messages_from_extra = final_output.extra_fields.get("messages")
+                if messages_from_extra is not None:
+                    non_tensor_batch["messages"] = np.array([messages_from_extra] * n, dtype=object)
 
                 data = DataProto(
                     batch=batch,
                     non_tensor_batch=non_tensor_batch,
                 )
                 selected_reward_loop_worker_handle = random.choice(self.reward_loop_worker_handles)
-                result = await selected_reward_loop_worker_handle.compute_score.remote(data)
+                reward_semaphore = kwargs.get("semaphore", nullcontext())
+                with simple_timer("reward_calls", final_output.metrics):
+                    async with reward_semaphore:
+                        result = await selected_reward_loop_worker_handle.compute_score.remote(data)
                 final_output.reward_score = result["reward_score"]
                 final_output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
             final_output.metrics.compute_score = timing["compute_score"]
@@ -1012,14 +1090,14 @@ class AgentLoopWorker:
         sample_kwargs: Optional[dict[str, Any]] = None,
     ) -> None:
         """Compute teacher logprobs for single sample."""
-        if self.distillation_enabled and not validate:
+        if self.rollout_teacher_enabled and not validate:
             routing_key = None
             if sample_kwargs is not None:
                 routing_value = sample_kwargs.get(self.teacher_key)
                 if routing_value is not None:
                     # Non-tensor batch values arrive as 0-d numpy objects / arrays; normalize to Python.
                     routing_key = routing_value.item() if hasattr(routing_value, "item") else routing_value
-            teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
+            teacher_ids, teacher_logprobs, teacher_times = await self.teacher_server_manager.compute_teacher_logprobs_single(
                 sequence_ids=prompt_ids + response_ids,
                 multi_modal_data=output.multi_modal_data,
                 mm_processor_kwargs=output.mm_processor_kwargs,
@@ -1027,6 +1105,8 @@ class AgentLoopWorker:
             )
             output.extra_fields["teacher_ids"] = teacher_ids
             output.extra_fields["teacher_logprobs"] = teacher_logprobs
+            if teacher_times:
+                output.metrics.teacher_forward_times = teacher_times
 
     def _postprocess(
         self,
@@ -1065,11 +1145,12 @@ class AgentLoopWorker:
         )
 
         scores = [input.reward_score for input in inputs]
-        if all(score is not None for score in scores):
+        if any(score is not None for score in scores):
             prompt_length = prompt_ids.size(1)
             response_length = attention_mask[:, prompt_length:].sum(dim=1) - 1
             rm_scores = torch.zeros_like(response_mask, dtype=torch.float32)
-            rm_scores[torch.arange(response_mask.size(0)), response_length] = torch.tensor(scores, dtype=torch.float32)
+            valid_scores = torch.tensor([s if s is not None else 0.0 for s in scores], dtype=torch.float32)
+            rm_scores[torch.arange(response_mask.size(0)), response_length] = valid_scores
             batch["rm_scores"] = rm_scores
 
         non_tensor_batch = {
@@ -1080,9 +1161,9 @@ class AgentLoopWorker:
 
         # add reward_extra_info to non_tensor_batch
         reward_extra_infos = [input.extra_fields.get("reward_extra_info", {}) for input in inputs]
-        reward_extra_keys = list(reward_extra_infos[0].keys())
+        reward_extra_keys = list({k for info in reward_extra_infos for k in info.keys()})
         for key in reward_extra_keys:
-            non_tensor_batch[key] = np.array([info[key] for info in reward_extra_infos])
+            non_tensor_batch[key] = np.array([info.get(key, 0) for info in reward_extra_infos])
 
         # Add multi_modal_inputs to non_tensor_batch if any samples have them
         multi_modal_inputs_list = [input.multi_modal_inputs for input in inputs]
@@ -1212,12 +1293,6 @@ class AgentLoopManager:
         Returns:
             DataProto: Output batch.
         """
-        # Attach per-sample priority to the batch (like ``uid``) so each sample gets
-        # a globally-unique priority that flows to vLLM request scheduling. Assigned
-        # before chunking so chunks own disjoint ranges without per-worker offsets.
-        if "priority" not in prompts.non_tensor_batch:
-            prompts.non_tensor_batch["priority"] = np.arange(len(prompts), dtype=np.int64)
-
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         outputs = await asyncio.gather(
             *[
@@ -1225,6 +1300,13 @@ class AgentLoopManager:
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
         )
+        # Unify reward_extra_keys across all workers before concat to avoid meta_info conflict.
+        all_reward_extra_keys = list({
+            k for o in outputs for k in o.meta_info.get("reward_extra_keys", [])
+        })
+        for o in outputs:
+            if "reward_extra_keys" in o.meta_info:
+                o.meta_info["reward_extra_keys"] = all_reward_extra_keys
         output = DataProto.concat(outputs)
 
         # calculate performance metrics
@@ -1239,6 +1321,7 @@ class AgentLoopManager:
         t_generate_sequences = np.array([metric["generate_sequences"] for chunk in metrics for metric in chunk])
         t_tool_calls = np.array([metric["tool_calls"] for chunk in metrics for metric in chunk])
         t_compute_score = np.array([metric["compute_score"] for chunk in metrics for metric in chunk])
+        t_reward_calls = np.array([metric.get("reward_calls", 0.0) for chunk in metrics for metric in chunk])
         num_preempted = np.array([metric["num_preempted"] for chunk in metrics for metric in chunk])
         timing["agent_loop/num_preempted/min"] = num_preempted.min()
         timing["agent_loop/num_preempted/max"] = num_preempted.max()
@@ -1252,13 +1335,17 @@ class AgentLoopManager:
         timing["agent_loop/compute_score/min"] = t_compute_score.min()
         timing["agent_loop/compute_score/max"] = t_compute_score.max()
         timing["agent_loop/compute_score/mean"] = t_compute_score.mean()
+        timing["agent_loop/reward_calls/min"] = t_reward_calls.min()
+        timing["agent_loop/reward_calls/max"] = t_reward_calls.max()
+        timing["agent_loop/reward_calls/mean"] = t_reward_calls.mean()
 
         # batch sequence generation is bounded by the slowest sample
-        slowest = np.argmax(t_generate_sequences + t_tool_calls + t_compute_score)
+        slowest = np.argmax(t_generate_sequences + t_tool_calls + t_compute_score + t_reward_calls)
         prompt_length = output.batch["prompts"].shape[1]
         timing["agent_loop/slowest/generate_sequences"] = t_generate_sequences[slowest]
         timing["agent_loop/slowest/tool_calls"] = t_tool_calls[slowest]
         timing["agent_loop/slowest/compute_score"] = t_compute_score[slowest]
+        timing["agent_loop/slowest/reward_calls"] = t_reward_calls[slowest]
         timing["agent_loop/slowest/num_preempted"] = num_preempted[slowest]
 
         if "attention_mask" in output.batch:

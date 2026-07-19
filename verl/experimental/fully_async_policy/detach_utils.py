@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import concurrent.futures
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -19,6 +20,12 @@ from typing import Any
 
 import numpy as np
 import torch
+
+try:
+    import ray
+    import ray.exceptions
+except ImportError:
+    ray = None
 
 from verl import DataProto
 from verl.trainer.ppo.ray_trainer import compute_response_mask
@@ -63,8 +70,12 @@ def prepare_single_generation_data(batch_dict, config) -> DataProto:
         )
 
     # Setting selected agent, that supports partial
-    if not config.actor_rollout_ref.rollout.multi_turn.enable:
-        full_batch.non_tensor_batch["agent_name"] = np.array(["single_turn_agent"] * len(full_batch), dtype=object)
+    if "agent_name" not in full_batch.non_tensor_batch:
+        if config.actor_rollout_ref.rollout.multi_turn.enable:
+            default_agent_loop = config.actor_rollout_ref.rollout.agent.default_agent_loop
+        else:
+            default_agent_loop = "single_turn_agent"
+        full_batch.non_tensor_batch["agent_name"] = np.array([default_agent_loop] * len(full_batch), dtype=object)
 
     # Add global step count to generated data
     full_batch = full_batch.repeat(repeat_times=config.actor_rollout_ref.rollout.n, interleave=True)
@@ -78,6 +89,12 @@ def addition_process(output: DataProto):
     tool_calls_times_list = [item["tool_calls"] for item in metrics]
     output.non_tensor_batch["processing_times"] = processing_times_list
     output.non_tensor_batch["tool_calls_times"] = tool_calls_times_list
+    reward_calls_times_list = [item["reward_calls"] for item in metrics]
+    output.non_tensor_batch["reward_calls_times"] = reward_calls_times_list
+    # Per-teacher forward times (nonrouter: all teachers; router: the routed teacher).
+    # Empty dict when teacher forward is off. Aggregated per step in assemble_batch.
+    teacher_times_list = [item.get("teacher_forward_times", {}) for item in metrics]
+    output.non_tensor_batch["teacher_forward_times"] = np.array(teacher_times_list, dtype=object)
     return output
 
 
@@ -115,6 +132,19 @@ def assemble_batch_from_rollout_samples(
     for rs in rollout_samples:
         batch = addition_process(rs.full_batch)
         rollout_samples_batch.append(batch)
+
+    # Unify reward_extra_keys across all samples to avoid meta_info conflict in DataProto.concat.
+    # When some samples skip reward calls (e.g. filtered errors), their reward_extra_keys may be
+    # a subset of others. Take the union so all samples have the same key list before concat.
+    all_reward_extra_keys = list({
+        k
+        for b in rollout_samples_batch
+        for k in b.meta_info.get("reward_extra_keys", [])
+    })
+    for b in rollout_samples_batch:
+        if "reward_extra_keys" in b.meta_info:
+            b.meta_info["reward_extra_keys"] = all_reward_extra_keys
+
     final_batch = DataProto.concat(rollout_samples_batch)
 
     # Calculate response_mask (if not present)
@@ -130,15 +160,15 @@ def assemble_batch_from_rollout_samples(
 
     processing_times = final_batch.non_tensor_batch["processing_times"]
     tool_calls = final_batch.non_tensor_batch["tool_calls_times"]
+    reward_calls = final_batch.non_tensor_batch["reward_calls_times"]
     # Collect statistics
-    processing_time_stats = {
-        "processing_time/avg": np.mean(processing_times),
-        "processing_time/max": np.max(processing_times),
-        "processing_time/min": np.min(processing_times),
-        "processing_time/tp50": np.percentile(processing_times, 50),
-        "processing_time/tp99": np.percentile(processing_times, 99),
-        "processing_time/tp95": np.percentile(processing_times, 95),
-    }
+    processing_time_stats = {}
+    if len(processing_times) > 0:
+        processing_time_stats = {
+            "timing_s/agent_loop/generate_sequences/min": np.min(processing_times),
+            "timing_s/agent_loop/generate_sequences/max": np.max(processing_times),
+            "timing_s/agent_loop/generate_sequences/mean": np.mean(processing_times),
+        }
     tool_calls_stats = {}
     if len(tool_calls) > 0:
         tool_calls_stats = {
@@ -146,7 +176,33 @@ def assemble_batch_from_rollout_samples(
             "timing_s/agent_loop/tool_calls/min": np.min(tool_calls),
             "timing_s/agent_loop/tool_calls/mean": np.mean(tool_calls),
         }
-    processing_time_stats = {f"fully_async/{key}": value for key, value in processing_time_stats.items()}
+    reward_calls_stats = {}
+    if len(reward_calls) > 0:
+        reward_calls_stats = {
+            "timing_s/agent_loop/reward_calls/max": np.max(reward_calls),
+            "timing_s/agent_loop/reward_calls/min": np.min(reward_calls),
+            "timing_s/agent_loop/reward_calls/mean": np.mean(reward_calls),
+        }
+    # Per-teacher forward time aggregation (separate mode; teacher forward runs on the
+    # rollouter). total = cumulative across all trajectories in the batch.
+    teacher_forward_stats: dict[str, float] = {}
+    _tft = final_batch.non_tensor_batch.get("teacher_forward_times", None)
+    if _tft is not None and len(_tft) > 0:
+        _per_key: dict[str, list[float]] = {}
+        for _entry in _tft:
+            if not isinstance(_entry, dict):
+                continue
+            for _tk, _dt in _entry.items():
+                try:
+                    _per_key.setdefault(_tk, []).append(float(_dt))
+                except (TypeError, ValueError):
+                    continue
+        for _tk, _times in _per_key.items():
+            if not _times:
+                continue
+            teacher_forward_stats[f"timing_s/agent_loop/teacher_forward/{_tk}/total"] = float(np.sum(_times))
+            teacher_forward_stats[f"timing_s/agent_loop/teacher_forward/{_tk}/mean"] = float(np.mean(_times))
+            teacher_forward_stats[f"timing_s/agent_loop/teacher_forward/{_tk}/max"] = float(np.max(_times))
 
     param_version_start = final_batch.non_tensor_batch["min_global_steps"]
     param_version_end = final_batch.non_tensor_batch["max_global_steps"]
@@ -168,6 +224,8 @@ def assemble_batch_from_rollout_samples(
             **rollout_status,
             **partial_stats,
             **tool_calls_stats,
+            **reward_calls_stats,
+            **teacher_forward_stats,
         }
     )
 
@@ -199,9 +257,21 @@ class MetricsAggregator:
         return {
             # Time-Based metrics, can add metrics here
             "time_sum": ["perf/time_per_step"],
-            "min": ["timing_s/agent_loop/tool_calls/min"],
-            "avg": ["timing_s/agent_loop/tool_calls/mean"],
-            "max": ["timing_s/agent_loop/tool_calls/max"],
+            "min": [
+                "timing_s/agent_loop/tool_calls/min",
+                "timing_s/agent_loop/reward_calls/min",
+                "timing_s/agent_loop/generate_sequences/min",
+            ],
+            "avg": [
+                "timing_s/agent_loop/tool_calls/mean",
+                "timing_s/agent_loop/reward_calls/mean",
+                "timing_s/agent_loop/generate_sequences/mean",
+            ],
+            "max": [
+                "timing_s/agent_loop/tool_calls/max",
+                "timing_s/agent_loop/reward_calls/max",
+                "timing_s/agent_loop/generate_sequences/max",
+            ],
             "last": [
                 "fully_async/count/total_generated_samples",
                 "fully_async/count/stale_samples_processed",

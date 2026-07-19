@@ -49,6 +49,7 @@ class FullyAsyncTaskRunner:
         self._run_training_loop()
 
     def _initialize_components(self, config) -> None:
+        self.config = config
         print(f"[ASYNC MAIN] TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
         pprint(OmegaConf.to_container(config, resolve=True))
         OmegaConf.resolve(config)
@@ -111,6 +112,10 @@ class FullyAsyncTaskRunner:
 
         if config.trainer.get("val_before_train", True):
             ray.get(self.components["trainer"]._fit_validate.remote(True))
+
+        # Trainer-colocated OPD keeps the teacher resident while waiting for
+        # trajectories. Initial actor weight sync and validation must finish first.
+        ray.get(self.components["trainer"].prepare_fused_teacher.remote())
 
         print("[ASYNC MAIN] All components initialized successfully")
 
@@ -206,6 +211,15 @@ class FullyAsyncTaskRunner:
             raise
         finally:
             asyncio.run(self.components["message_queue_client"].clear_queue())
+            try:
+                from pathlib import Path
+                from verl.utils.reward_score.judge_api_client import _aggregate_and_cleanup_worker_logs
+                reward_log_base_dir = self.config.reward.custom_reward_function.get("reward_log_base_dir")
+                if reward_log_base_dir:
+                    for log_type in ["right", "error"]:
+                        _aggregate_and_cleanup_worker_logs(Path(reward_log_base_dir), log_type, force_current_hour=True)
+            except Exception as e:
+                print(f"[ASYNC MAIN] Failed to aggregate worker logs: {e}")
             print("[ASYNC MAIN] Training completed or interrupted")
 
 

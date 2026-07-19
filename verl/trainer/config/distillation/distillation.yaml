@@ -13,6 +13,17 @@ defaults:
 # Whether to enable distillation.
 enabled: false
 
+# Where teacher log probabilities are computed:
+# - rollout: dedicated vLLM/SGLang teacher resource pool
+# - trainer: isomorphic teacher/student snapshots share the trainer Megatron engine
+teacher_execution: rollout
+
+# Fused-node exclusive routing scheduler. The batch size counts RolloutSample
+# prompt groups, not individual response trajectories.
+teacher_scoring_batch_size: null
+teacher_max_consecutive_batches: 4
+teacher_max_wait_seconds: 30.0
+
 # distillation loss config
 distillation_loss:
 

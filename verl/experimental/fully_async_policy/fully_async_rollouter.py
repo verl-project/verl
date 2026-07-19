@@ -17,6 +17,7 @@ import logging
 import os
 import time
 from pprint import pformat
+from typing import Any, Optional
 
 import numpy as np
 import ray
@@ -33,21 +34,121 @@ from verl.experimental.fully_async_policy.message_queue import MessageQueueClien
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.protocol import DataProto
 from verl.single_controller.ray import RayResourcePool, RayWorkerGroup, ResourcePoolManager
-from verl.trainer.ppo.utils import (
-    create_rl_dataset,
-    create_rl_sampler,
-    need_reward_model,
-)
+from verl.trainer.ppo.utils import need_reward_model
+from verl.utils import normalize_token_ids
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.profiler import marked_timer
+from verl.utils.rollout_trace import rollout_trace_op
 from verl.utils.skip import SkipManager
 from verl.utils.tracking import ValidationGenerationsLogger
-from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient, LLMServerManager
-from verl.workers.rollout.replica import RolloutReplica
+from verl.workers.rollout.llm_server import LLMServerClient, LLMServerManager
+from verl.workers.rollout.replica import RolloutReplica, TokenOutput
 from verl.workers.rollout.utils import update_prometheus_config
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+class FullyAsyncLLMServerClient(LLMServerClient):
+    """FullyLLMServerClient supports resume generation on partial rollout, making rollout interruption
+    invisible to the AgentLoop.
+    """
+
+    @rollout_trace_op
+    async def generate(
+        self,
+        request_id,
+        *,
+        prompt_ids: list[int],
+        sampling_params: dict[str, Any],
+        image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
+        audio_data: Optional[list[Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
+    ) -> TokenOutput:
+        """Generate tokens from prompt ids.
+
+        Args:
+            request_id (str): request id for sticky session.
+            prompt_ids (List[int]): List of prompt token ids.
+            sampling_params (Dict[str, Any]): Sampling parameters for the chat completion.
+            image_data (Optional[List[Any]]): Image data for the chat completion.
+            video_data (Optional[List[Any]]): Video data for the chat completion.
+            audio_data (Optional[List[Any]]): Audio data for the chat completion.
+            mm_processor_kwargs (Optional[Dict[str, Any]]): Multimodal processor kwargs.
+
+        Returns:
+            TokenOutput: token output
+        """
+        prompt_ids = normalize_token_ids(prompt_ids)
+
+        limit_key = None
+        if "max_tokens" in sampling_params:
+            limit_key = "max_tokens"
+        elif "max_new_tokens" in sampling_params:
+            limit_key = "max_new_tokens"
+        original_max_tokens = sampling_params.get(limit_key) if limit_key else None
+
+        final_output = TokenOutput(
+            token_ids=[],
+            log_probs=[],
+            num_preempted=0,
+        )
+        min_global_steps, max_global_steps = None, None
+
+        while True:
+            # 1. generate tokens
+            output = await super().generate(
+                request_id=request_id,
+                prompt_ids=prompt_ids + final_output.token_ids,
+                sampling_params=sampling_params,
+                image_data=image_data,
+                video_data=video_data,
+                audio_data=audio_data,
+                mm_processor_kwargs=mm_processor_kwargs,
+            )
+
+            # 2. merge output into final_output
+            final_output.token_ids.extend(output.token_ids)
+            if output.log_probs is not None:
+                final_output.log_probs.extend(output.log_probs)
+            # On partial rollout resume the model version may differ, so keep
+            # existing routing and only append routing for newly generated tokens.
+            if output.routed_experts is not None and len(output.token_ids) > 0:
+                if final_output.routed_experts is None:
+                    final_output.routed_experts = output.routed_experts
+                else:
+                    final_output.routed_experts = torch.cat(
+                        [final_output.routed_experts, output.routed_experts[-len(output.token_ids) :]],
+                        dim=0,
+                    )
+            if output.num_preempted is not None:
+                final_output.num_preempted += output.num_preempted
+            final_output.stop_reason = output.stop_reason
+
+            # update model weights version
+            global_steps = output.extra_fields.get("global_steps", None)
+            if min_global_steps is None:
+                min_global_steps = global_steps
+            max_global_steps = global_steps
+
+            # 3. update max_new_tokens
+            if original_max_tokens is not None:
+                sampling_params[limit_key] = original_max_tokens - len(final_output.token_ids)
+                if len(final_output.token_ids) >= original_max_tokens:
+                    final_output.stop_reason = "length"
+                    break
+
+            # 4. check stop reason
+            if output.stop_reason not in ("aborted", "abort") or not self.config.async_training.partial_rollout:
+                break
+
+            await asyncio.sleep(1)
+
+        final_output.extra_fields["global_steps"] = global_steps
+        final_output.extra_fields["min_global_steps"] = min_global_steps
+        final_output.extra_fields["max_global_steps"] = max_global_steps
+        return final_output
 
 
 class FullyAsyncLLMServerManager(LLMServerManager):
@@ -345,6 +446,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         # ==================== fully async config ====================
 
         print("[FullyAsyncRollouter] Creating datasets...")
+        from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
         from verl.utils.dataset.rl_dataset import collate_fn
 
         train_dataset = create_rl_dataset(
@@ -438,7 +540,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 / (self.required_samples * self.config.async_training.trigger_parameter_sync_step)
             )
 
-            self.max_concurrent_samples = len(self.llm_server_manager.get_replicas()) * 16
+            self.max_concurrent_samples = len(self.llm_server_manager.get_replicas()) * 32
             self.max_concurrent_samples = min(self.max_concurrent_samples, self.max_required_samples)
             self.max_queue_size = self.max_required_samples
 
@@ -633,7 +735,11 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         from verl.trainer.ppo.utils import Role
 
         self.teacher_model_manager = None
-        if is_distillation_enabled(self.config.get("distillation")):
+        distillation_enabled = is_distillation_enabled(self.config.get("distillation"))
+        teacher_execution = (
+            self.config.distillation.get("teacher_execution", "rollout") if distillation_enabled else "rollout"
+        )
+        if distillation_enabled and teacher_execution == "rollout":
             from verl.experimental.teacher_loop import MultiTeacherModelManager
 
             resource_pool_spec = {}
@@ -715,22 +821,17 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
     # Add samples to the pending_queue
     async def _feed_samples(self):
         continuous_iterator = self._create_continuous_iterator()
-
         for epoch, batch_dict in continuous_iterator:
             # Similar to _prepare_generate_batch: Separate data
             full_batch = prepare_single_generation_data(batch_dict, self.config)
-
             sample_id = f"sample_{epoch}_{self.global_steps}"
-
             rollout_sample = RolloutSample(
                 full_batch=full_batch,
                 sample_id=sample_id,
                 epoch=epoch,
                 rollout_status={},
             )
-
             await self.pending_queue.put(rollout_sample)
-
             # Check if have reached the last step
             if self.global_steps >= self.total_rollout_steps:
                 print(
@@ -739,9 +840,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                     f"{self.global_steps} >= {self.total_rollout_steps}"
                 )
                 break
-
             self.global_steps += 1
-
         # End signal
         await self.pending_queue.put(None)
         print(f"[FullyAsyncRollouter][Feed] Sample addition is complete, {self.global_steps} samples have been added")
@@ -833,6 +932,26 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
     async def _process_single_sample_streaming(self, rollout_sample: RolloutSample):
         """Process a single sample streamingly"""
+        from verl.experimental.agent_loop.agent_loop import AgentError
+
+        routing_field = None
+        routing_values = None
+        distillation_config = self.config.get("distillation")
+        if (
+            distillation_config
+            and distillation_config.get("enabled", False)
+            and (
+                distillation_config.get("teacher_execution", "rollout") == "trainer"
+                or distillation_config.get("nonrouter", False)
+            )
+        ):
+            # Preserve the routing field (data_source) across generation: the agent
+            # loop worker returns a fresh DataProto without the input's non_tensor_batch.
+            # Fused (trainer) mode needs it for trainer-side routing; nonrouter separate
+            # mode needs it for trainer-side teacher-logprob selection by data_source.
+            routing_field = distillation_config.get("teacher_key", "data_source")
+            routing_values = rollout_sample.full_batch.non_tensor_batch.get(routing_field)
+
         # Calling asynchronous generation methods
         # Embed sample_id into prompts for skip management
         rollout_sample.full_batch.non_tensor_batch["uid"] = np.array(
@@ -840,11 +959,56 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         )
         ret = await self.async_rollout_manager.generate_sequences_single(rollout_sample.full_batch)
         rollout_sample.full_batch = ret
+        if routing_values is not None:
+            if len(routing_values) != len(rollout_sample.full_batch):
+                raise RuntimeError(
+                    f"Fused teacher routing field {routing_field!r} changed batch size during rollout: "
+                    f"{len(routing_values)} input values for {len(rollout_sample.full_batch)} outputs."
+                )
+            rollout_sample.full_batch.non_tensor_batch[routing_field] = np.asarray(routing_values).copy()
         # Re-set uid on output — agent loop worker returns a new DataProto without the input's non_tensor_batch
         rollout_sample.full_batch.non_tensor_batch["uid"] = np.array(
             [f"uid_{rollout_sample.sample_id}"] * len(rollout_sample.full_batch), dtype=object
         )
         rollout_sample.rollout_status = await self.get_statistics()
+
+        # Filter samples at group (sample) granularity.
+        # If invalid responses >= half of group size, drop the entire sample.
+        # If invalid responses < half of group size, pad with randomly selected valid responses
+        # to restore the full group size.
+        _FILTER_ERRORS = {
+            AgentError.PromptTooLong,
+            AgentError.RewardCallFail,
+        }
+        errors = rollout_sample.full_batch.non_tensor_batch.get("error", None)
+        if errors is not None:
+            group_size = len(errors)
+            valid_indices = [i for i, e in enumerate(errors) if e not in _FILTER_ERRORS]
+            invalid_count = group_size - len(valid_indices)
+
+            if invalid_count > group_size / 2:
+                # Too many invalid responses, drop the entire sample
+                hit_errors = [AgentError(e).name for e in errors if e in _FILTER_ERRORS]
+                print(f"[FullyAsyncRollouter] Dropping sample {rollout_sample.sample_id}: "
+                      f"{invalid_count}/{group_size} invalid, errors: {hit_errors}")
+                self.processed_sample_count += 1
+                self.global_steps -= 1
+                self.staleness_samples -= 1
+                return
+
+            if invalid_count > 0:
+                # Pad valid responses to restore full group size by randomly duplicating valid ones
+                hit_errors = [AgentError(e).name for e in errors if e in _FILTER_ERRORS]
+                pad_indices = valid_indices + list(
+                    np.random.choice(valid_indices, size=invalid_count, replace=True)
+                )
+                print(f"[FullyAsyncRollouter] Padding sample {rollout_sample.sample_id}: "
+                      f"{invalid_count}/{group_size} invalid, padded with valid responses, errors: {hit_errors}")
+                rollout_sample.full_batch = rollout_sample.full_batch[np.array(pad_indices)]
+                if "metrics" in rollout_sample.full_batch.meta_info:
+                    orig_metrics = rollout_sample.full_batch.meta_info["metrics"]
+                    rollout_sample.full_batch.meta_info["metrics"] = [orig_metrics[i] for i in pad_indices]
+
 
         success = await self.message_queue_client.put_sample(
             sample=ray.cloudpickle.dumps(rollout_sample),
