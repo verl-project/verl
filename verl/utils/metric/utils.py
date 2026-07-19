@@ -94,7 +94,7 @@ def materialize_metric_tensors(metrics: dict[str, Any]) -> None:
             if value.numel() != 1:
                 raise ValueError(f"Metric tensors must be scalar, got shape {tuple(value.shape)}")
             group_key = (type(value), value.device, value.dtype)
-            tensor_refs.setdefault(group_key, []).append((container, key, value.detach()))
+            tensor_refs.setdefault(group_key, []).append((container, key, value.detach().reshape(())))
 
     for metric_key, metric_value in metrics.items():
         collect(metrics, metric_key, metric_value)

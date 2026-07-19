@@ -189,6 +189,17 @@ class TestMetric(unittest.TestCase):
         self.assertEqual(metrics["fp32"].values, [1.0])
         self.assertEqual(metrics["fp64"].values, [2.0])
 
+    def test_materialize_metric_tensors_normalizes_single_element_shapes(self):
+        """Zero-dimensional and one-element metrics can share one transfer."""
+        metrics = {
+            "scalar": torch.tensor(1.0),
+            "singleton": torch.tensor([2.0]),
+        }
+
+        materialize_metric_tensors(metrics)
+
+        self.assertEqual(metrics, {"scalar": 1.0, "singleton": 2.0})
+
     def test_materialize_metric_tensors_rejects_non_scalar_tensor(self):
         """Object-bound metrics must not silently serialize tensor payloads."""
         with self.assertRaisesRegex(ValueError, r"must be scalar.*\(2,\)"):
