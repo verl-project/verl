@@ -56,15 +56,21 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
     input_ids_nested = torch.nested.nested_tensor_from_jagged(input_ids_rmpad.squeeze(-1), offsets=cu_seqlens)
 
     position_ids_list = []
+    num_pos_components = 0  # 0 means 1D position_ids, >0 means multi-component (e.g. 4 for Qwen3.5/Qwen2-VL)
     for i in range(attention_mask.shape[0]):
         curr_mask = attention_mask[i].bool()
         curr_pos_ids = position_ids[i]
         if curr_pos_ids.dim() == 1:  # (seq_len,)
             valid_ids = curr_pos_ids[curr_mask]
-        else:  # (4, seq_len)
-            valid_ids = curr_pos_ids[:, curr_mask]
+        else:  # (num_components, seq_len) — flatten to 1D for nested tensor compatibility
+            # 3D jagged nested tensors have broken unbind() and to_padded_tensor() in PyTorch
+            # (see pytorch/pytorch#153238), so we flatten to 1D and reshape back in prepare_model_inputs
+            num_pos_components = curr_pos_ids.shape[0]
+            valid_ids = curr_pos_ids[:, curr_mask].T.contiguous().flatten()  # (valid_len * num_components,)
         position_ids_list.append(valid_ids)
     position_ids_nested = torch.nested.as_nested_tensor(position_ids_list, layout=torch.jagged)
+    if num_pos_components > 0:
+        tu.assign_non_tensor_data(data, "num_pos_components", num_pos_components)
 
     data["input_ids"] = input_ids_nested
     data["position_ids"] = position_ids_nested
