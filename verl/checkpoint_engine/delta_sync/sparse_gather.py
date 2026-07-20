@@ -63,7 +63,7 @@ def gather_v_batched_to_rank0(
     idx_concat: torch.Tensor,
     val_concat: torch.Tensor,
     counts: torch.Tensor,
-    group=None,
+    group: dist.ProcessGroup | None = None,
     grouped: bool = False,
 ) -> list | None:
     """Variable-length sparse gather, batched: one collective round for K parameters.
@@ -139,7 +139,7 @@ def gather_dense_to_rank0(
     local_val: torch.Tensor,
     offset: int,
     full_numel: int,
-    group=None,
+    group: dist.ProcessGroup | None = None,
 ) -> torch.Tensor | None:
     """Assemble a full flat parameter on rank 0 from each rank's contiguous shard.
 
@@ -179,7 +179,7 @@ def gather_dense_to_rank0(
 def gather_dense_blocks_to_rank0(
     local_val: torch.Tensor,
     place: BlockPlacement,
-    group=None,
+    group: dist.ProcessGroup | None = None,
 ) -> torch.Tensor | None:
     """Assemble a full flat parameter on rank 0 from per-rank hyper-rectangular blocks.
 
@@ -226,7 +226,7 @@ def gather_dense_blocks_to_rank0(
 def gather_v_grouped_to_rank0(
     local_idx: torch.Tensor,
     local_val: torch.Tensor,
-    group=None,
+    group: dist.ProcessGroup | None = None,
 ) -> list[tuple[torch.Tensor, torch.Tensor]] | None:
     """Variable-length sparse gather that keeps the payloads *per rank* instead of concatenating.
 

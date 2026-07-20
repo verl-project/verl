@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from unittest.mock import patch
 
@@ -43,7 +44,7 @@ import zmq
 with patch("importlib.metadata.distributions", return_value=[]):
     import cupy as cp
 
-from verl.workers.engine.spec import BlockPlacement, derive_placement, translate_flat_indices
+from verl.workers.engine.spec import BlockPlacement, ShardSpec, derive_placement, translate_flat_indices
 
 from .base import CheckpointEngineRegistry
 from .delta_sync.encode import DeltaFlush, DeltaParam
@@ -96,12 +97,12 @@ class _RebuildEntry:
 
     name: str
     dtype: torch.dtype
-    pg: object
-    spec: object  # ShardSpec
+    pg: object  # gather ProcessGroup
+    spec: ShardSpec
     shard_shape: tuple
     idx: torch.Tensor
     val: torch.Tensor
-    place: object
+    place: int | BlockPlacement
 
 
 @dataclass(slots=True)
@@ -229,7 +230,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         self.socket.send_pyobj(meta)
 
     # ---- rollout worker side ----
-    def receive_weights(self, global_steps: int | None = None):
+    def receive_weights(self, global_steps: int | None = None) -> Iterator[tuple[list[tuple[str, torch.Tensor]], bool]]:
         """Yield the sparse flushes for the server adapter to apply in place.
 
         Each item is ``(named_tensors, is_last)``: the sentinel-encoded flush
@@ -286,8 +287,8 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         # three collectives per parameter).
         self.batch_gather = int(batch_gather)
 
-    def _placement(self, name, spec):
-        """Derive (and cache) this rank's placement facts from the declarative spec."""
+    def _placement(self, name: str, spec: ShardSpec) -> tuple[int | BlockPlacement, bool, object]:
+        """Derive (and cache) this rank's ``(place, contributes, gather_group)`` from the spec."""
         got = self._placements.get(name)
         if got is None:
             got = derive_placement(spec)
@@ -345,7 +346,11 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             encoding=self.encoding, params=params, positions_cpu=positions_u8, values_gpu=values_gpu, checksum=cks
         )
 
-    def _send_dense_seed(self, weights, global_steps=None):
+    def _send_dense_seed(
+        self,
+        weights: Generator[tuple[str, torch.Tensor, ShardSpec], None, None],
+        global_steps: int | None = None,
+    ) -> dict[str, float] | None:
         """First sync: assemble and broadcast the raw weights, bucketed, positions-free.
 
         Explicit dense semantics instead of the previous bitflip-forced full diff:
@@ -361,7 +366,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         total_elems = 0
         wire_bytes = 0
 
-        def _emit(is_last):
+        def _emit(is_last: bool) -> None:
             nonlocal pending, n_flushes, wire_bytes
             if pending is not None:
                 params, values = pending
@@ -370,7 +375,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                 wire_bytes += int(values.nbytes)
                 pending = None
 
-        def _seal():
+        def _seal() -> None:
             nonlocal bucket, bucket_bytes, pending
             if not bucket:
                 return
@@ -397,7 +402,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             bucket = []
             bucket_bytes = 0
 
-        def _bucket_dense(hf_name, tensor):
+        def _bucket_dense(hf_name: str, tensor: torch.Tensor) -> None:
             nonlocal total_elems, bucket_bytes
             flat = tensor.reshape(-1)
             total_elems += int(flat.numel())
@@ -470,7 +475,11 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             "checkpoint_engine/flushes": float(n_flushes),
         }
 
-    async def send_weights(self, weights, global_steps=None):
+    async def send_weights(
+        self,
+        weights: Generator[tuple[str, torch.Tensor, ShardSpec], None, None],
+        global_steps: int | None = None,
+    ) -> dict[str, float] | None:
         # All actor ranks participate (gather-v is collective); only torch rank 0 broadcasts.
         # rank 0 accumulates the gathered per-param deltas into bucket_size-sized flushes and streams
         # each one as soon as it fills (then frees it), so peak memory is ~2 buckets rather than the
@@ -488,14 +497,14 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         total_elems = 0
         wire_bytes = 0
 
-        def _emit(is_last):
+        def _emit(is_last: bool) -> None:
             nonlocal pending, n_flushes
             if pending is not None:
                 self._publish_flush(pending, first, is_last=is_last)
                 n_flushes += 1
                 pending = None
 
-        def _seal():
+        def _seal() -> None:
             nonlocal bucket, bucket_bytes, pending
             if not bucket:
                 return
@@ -507,7 +516,14 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         batch_k = self.batch_gather
         group: list[_GatherEntry] = []
 
-        def _consume(name, dtype_str, full_shape, full_numel, aidx, aval):
+        def _consume(
+            name: str,
+            dtype_str: str,
+            full_shape: tuple,
+            full_numel: int,
+            aidx: torch.Tensor | None,
+            aval: torch.Tensor | None,
+        ) -> None:
             nonlocal total_elems, changed_elems, wire_bytes, bucket_bytes
             total_elems += int(full_numel)
             if aidx is None or aidx.numel() == 0:
@@ -523,7 +539,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                 if bucket_bytes >= self.bucket_size:
                     _seal()
 
-        def _flush_group():
+        def _flush_group() -> None:
             nonlocal group
             if not group:
                 return
@@ -547,7 +563,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
 
         nan_group: list[_RebuildEntry] = []  # rebuild-profile params batched per gather_group
 
-        def _consume_hf(hf_name, hf_tensor):
+        def _consume_hf(hf_name: str, hf_tensor: torch.Tensor) -> None:
             nonlocal total_elems
             fl = hf_tensor.reshape(-1)
             total_elems += int(fl.numel())
@@ -564,7 +580,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                     fl[pos],
                 )
 
-        def _flush_nan_group():
+        def _flush_nan_group() -> None:
             nonlocal nan_group, total_elems
             if not nan_group:
                 return

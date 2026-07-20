@@ -14,8 +14,9 @@
 
 
 import logging
+from collections.abc import Generator
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence
 
 import torch
 import torch.distributed as dist
@@ -30,6 +31,9 @@ from veomni.optim import build_lr_scheduler, build_optimizer
 from veomni.utils.seqlen_pos_transform_utils import prepare_fa_kwargs_from_position_ids
 
 import verl.utils.torch_functional as verl_F
+
+if TYPE_CHECKING:
+    from verl.workers.engine.spec import ShardSpec
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -576,7 +580,7 @@ class VeOmniEngine(FSDPEngine):
         if self._is_offload_optimizer:
             offload_veomni_optimizer(self.optimizer)
 
-    def get_per_tensor_param_shard(self, **kwargs):
+    def get_per_tensor_param_shard(self, **kwargs) -> Generator[tuple[str, torch.Tensor, "ShardSpec"], None, None]:
         """Yield each rank's *local* shard with its :class:`ShardSpec` -- consumed by
         the ``delta_sharded`` checkpoint engine (diff on shards, gather only changes).
 

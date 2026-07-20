@@ -33,11 +33,15 @@ DTensor trainers and lands with the Megatron follow-up PR.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import torch
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
+
+if TYPE_CHECKING:
+    from torch.distributed import ProcessGroup
+    from torch.distributed.device_mesh import DeviceMesh
 
 __all__ = ["BlockPlacement", "ShardSpec", "derive_placement", "translate_flat_indices"]
 
@@ -49,7 +53,7 @@ class ShardSpec:
     # Logical (full) tensor shape; the distribution facts below refer to it.
     full_shape: tuple
     # Distribution: torch DeviceMesh + per-mesh-dim Placement. None = unsharded.
-    mesh: Optional[object] = None
+    mesh: Optional[DeviceMesh] = None
     placements: Optional[tuple] = None
     # Reserved (Megatron follow-up): pure-permutation shards -> [(hf_name, hf_tensor)].
     to_hf: Optional[Callable[[list[torch.Tensor]], list[tuple[str, torch.Tensor]]]] = None
@@ -59,8 +63,8 @@ class ShardSpec:
     # ``gather_group`` is the ProcessGroup covering every rank that holds a block
     # (pass a real group object -- the engine treats ``None`` as "unsharded").
     # Every rank is assumed to contribute.
-    place: Optional[object] = None
-    gather_group: Optional[object] = None
+    place: Optional[int | BlockPlacement] = None
+    gather_group: Optional[ProcessGroup] = None
 
     @classmethod
     def from_param(cls, param: torch.Tensor) -> ShardSpec:
@@ -69,14 +73,14 @@ class ShardSpec:
         return cls(full_shape=tuple(param.shape))
 
 
-def _prod(xs) -> int:
+def _prod(xs: tuple | list) -> int:
     n = 1
     for x in xs:
         n *= int(x)
     return n
 
 
-def _row_major_strides(shape) -> tuple:
+def _row_major_strides(shape: tuple | list) -> tuple:
     strides, acc = [], 1
     for d in reversed([int(x) for x in shape]):
         strides.append(acc)
@@ -120,7 +124,7 @@ class BlockPlacement:
         return int(self.global_offset[0]) * _prod(self.full_shape[1:]) if self.full_shape else 0
 
 
-def translate_flat_indices(lidx: torch.Tensor, place) -> torch.Tensor:
+def translate_flat_indices(lidx: torch.Tensor, place: int | BlockPlacement) -> torch.Tensor:
     """Map shard-local flat positions to full-tensor flat positions.
 
     ``place`` is what :func:`derive_placement` returned: an ``int`` for the
@@ -144,7 +148,7 @@ def translate_flat_indices(lidx: torch.Tensor, place) -> torch.Tensor:
     return out
 
 
-def derive_placement(spec: ShardSpec):
+def derive_placement(spec: ShardSpec) -> tuple[int | BlockPlacement, bool, Optional[ProcessGroup]]:
     """Derive ``(place, contributes, gather_group)`` for THIS rank from the spec.
 
     ``place`` feeds :func:`translate_flat_indices`:
@@ -208,10 +212,10 @@ def derive_placement(spec: ShardSpec):
     return BlockPlacement(tuple(local_shape), tuple(global_offset), tuple(spec.full_shape)), contributes, group
 
 
-_FLAT_GROUPS: dict = {}
+_FLAT_GROUPS: dict[tuple, ProcessGroup] = {}
 
 
-def _flattened_mesh_group(mesh):
+def _flattened_mesh_group(mesh: DeviceMesh) -> ProcessGroup:
     """One process group spanning every rank of ``mesh``, created once per mesh.
 
     ``dist.new_group`` must be called by all processes in the same order; every
