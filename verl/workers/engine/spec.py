@@ -88,10 +88,10 @@ def _row_major_strides(shape) -> tuple:
 class BlockPlacement:
     """This rank's local shard is one hyper-rectangular block of the full tensor:
     ``full[o0:o0+l0, o1:o1+l1, ...]`` with ``local_shape=(l0, l1, ...)`` and
-    ``global_offset=(o0, o1, ...)``. Produced by :func:`derive_placement` whenever
-    the block is not a contiguous range of the flat full tensor (e.g. ``Shard(1)``,
-    or EP x FSDP ``(Shard(0), Shard(1))``); the flat-contiguous case stays a plain
-    ``int`` offset so the existing fast path is untouched."""
+    ``global_offset=(o0, o1, ...)``. Produced by :func:`derive_placement` for every
+    sharded geometry, including the dim-0 cut (FSDP2 ``Shard(0)``): that block is
+    flat-contiguous, and :func:`translate_flat_indices` detects it via
+    ``is_flat_contiguous`` and keeps the single-add fast path."""
 
     local_shape: tuple
     global_offset: tuple
@@ -105,17 +105,36 @@ class BlockPlacement:
     def full_strides(self) -> tuple:
         return _row_major_strides(self.full_shape)
 
+    @property
+    def is_flat_contiguous(self) -> bool:
+        """True when the block is one contiguous flat range (only dim 0 is cut).
+
+        Then every trailing dim is whole, so the trailing offsets are all zero
+        and the block occupies flat positions ``[flat_offset, flat_offset+numel)``.
+        """
+        return all(int(lo) == int(fu) for lo, fu in zip(self.local_shape[1:], self.full_shape[1:], strict=False))
+
+    @property
+    def flat_offset(self) -> int:
+        """Flat start of the block; only meaningful when ``is_flat_contiguous``."""
+        return int(self.global_offset[0]) * _prod(self.full_shape[1:]) if self.full_shape else 0
+
 
 def translate_flat_indices(lidx: torch.Tensor, place) -> torch.Tensor:
     """Map shard-local flat positions to full-tensor flat positions.
 
-    ``place`` is what :func:`derive_placement` returned: an ``int`` when the local
-    shard is a contiguous flat range (translate = add), else a :class:`BlockPlacement`
-    (mixed-radix decompose by the local shape, add the per-dim offset, recompose with
-    the full-tensor strides -- a few divmods on the nnz tensor, no collectives).
+    ``place`` is what :func:`derive_placement` returned: an ``int`` for the
+    identity cases (unsharded / replicated / explicit exporter overrides, translate
+    = add), or a :class:`BlockPlacement`. A flat-contiguous block (only dim 0 cut,
+    e.g. FSDP2 ``Shard(0)``) keeps the single-add fast path; any other block does a
+    mixed-radix decompose by the local shape, adds the per-dim offset, and recomposes
+    with the full-tensor strides -- a few divmods on the nnz tensor, no collectives.
     """
     if isinstance(place, int):
         return lidx + place if place else lidx
+    if place.is_flat_contiguous:
+        off = place.flat_offset
+        return lidx + off if off else lidx
     out = torch.zeros_like(lidx)
     rem = lidx
     for lstride, off, fstride in zip(place.local_strides, place.global_offset, place.full_strides, strict=False):
@@ -130,18 +149,18 @@ def derive_placement(spec: ShardSpec):
 
     ``place`` feeds :func:`translate_flat_indices`:
 
-    * unsharded (``mesh is None``): ``0``; only global rank 0 contributes; no group
-      (the local tensor is already the full parameter).
-    * flat-contiguous block (``Shard(0)`` over one mesh dim + any number of
-      ``Replicate`` dims -- the FSDP2 default): a plain ``int`` flat offset from
-      ``compute_local_shape_and_global_offset`` (pure math, no collective); only
-      ranks at coordinate 0 of every Replicate dim contribute; the gather group is
-      the Shard dim's subgroup.
-    * any other single block (``Shard(k)``, or several Shard dims, e.g. automodel's
-      EP x FSDP ``(Shard(0), Shard(1))`` expert mesh): a :class:`BlockPlacement`;
-      with more than one Shard dim every rank holds a distinct block, the gather
-      group spans the whole mesh (created once and cached by the engine's caller),
-      and Replicate dims are not supported alongside multiple Shard dims.
+    * unsharded (``mesh is None``) or fully replicated: ``0``; no group (the local
+      tensor is already the full parameter). Explicit exporter overrides
+      (``spec.place``) may also be plain ``int`` offsets.
+    * any sharded geometry: a :class:`BlockPlacement` computed from
+      ``compute_local_shape_and_global_offset`` (pure math, no collective). For a
+      single Shard dim, only ranks at coordinate 0 of every Replicate dim
+      contribute and the gather group is the Shard dim's subgroup; the FSDP2
+      default ``Shard(0)`` yields a flat-contiguous block, which keeps the add
+      fast path in :func:`translate_flat_indices`. With several Shard dims (e.g.
+      automodel's EP x FSDP ``(Shard(0), Shard(1))`` expert mesh) every rank holds
+      a distinct block, the gather group spans the whole mesh (created once and
+      cached), and Replicate dims are not supported alongside them.
 
     ``_StridedShard`` placements (interleaved local tensors, from some HSDP/TP
     orderings) are rejected: the local tensor is not a single block.
@@ -179,10 +198,6 @@ def derive_placement(spec: ShardSpec):
 
     if len(shard_dims) == 1:
         group = spec.mesh.get_group(mesh_dim=shard_dims[0])
-        tdim = placements[shard_dims[0]].dim
-        if tdim == 0:
-            # flat-contiguous: rows [o0, o0+l0) of the flat tensor
-            return int(global_offset[0]) * _prod(spec.full_shape[1:]), contributes, group
         return BlockPlacement(tuple(local_shape), tuple(global_offset), tuple(spec.full_shape)), contributes, group
 
     # several Shard dims: every rank owns a distinct block; gather spans the whole mesh.

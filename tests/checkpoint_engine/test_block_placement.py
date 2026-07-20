@@ -233,3 +233,24 @@ def test_explicit_place_passthrough():
     spec = ShardSpec(full_shape=(8, 3), place=block, gather_group=sentinel)
     place, contributes, group = derive_placement(spec)
     assert place is block and contributes and group is sentinel
+
+
+def test_flat_contiguous_block_matches_int_fast_path():
+    """A dim-0 cut expressed as a BlockPlacement (the unified derive_placement
+    output for FSDP2 ``Shard(0)``) must translate exactly like the plain-int
+    offset it replaces, via the ``is_flat_contiguous`` add fast path."""
+    full_shape = (8, 4, 6)
+    rows_per_rank = 2
+    lidx = torch.tensor([0, 1, 7, 23, 47], dtype=torch.int64)
+    for r in range(4):
+        place = BlockPlacement((rows_per_rank, 4, 6), (r * rows_per_rank, 0, 0), full_shape)
+        assert place.is_flat_contiguous
+        int_off = r * rows_per_rank * 4 * 6
+        assert place.flat_offset == int_off
+        assert torch.equal(translate_flat_indices(lidx, place), translate_flat_indices(lidx, int_off))
+    # 1-D shard degenerates to the flat case too
+    p1 = BlockPlacement((3,), (9,), (12,))
+    assert p1.is_flat_contiguous and p1.flat_offset == 9
+    # a dim-1 cut is not flat-contiguous and must take the mixed-radix path
+    p2 = BlockPlacement((8, 2, 6), (0, 2, 0), full_shape)
+    assert not p2.is_flat_contiguous

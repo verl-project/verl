@@ -366,6 +366,8 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                     if is_r0 and full is not None:
                         _bucket_dense(name, full.view(spec.full_shape))
                 else:
+                    # plain-int place: only explicit exporter overrides land here
+                    # (derived sharded geometries are always BlockPlacement)
                     full = gather_dense_to_rank0(
                         shard, place if contributes else 0, _prodshape(spec.full_shape), group=pg
                     )
