@@ -21,7 +21,7 @@ pay off differently:
   tensors or a full-model snapshot, and the gather moves only changed elements. This removes the
   full-tensor all-gather and rank-0 staging costs that the plain ``nccl`` engine pays *regardless
   of network speed* — which is why ``delta_sharded`` beat the full broadcast at every size we
-  measured (0.5B through 72B, 1.3–3.1×), not just at the large end.
+  measured (0.5B through 235B, 1.3–21×), not just at the large end.
 
 This is why ``delta_sharded`` is the only delta backend we ship: an earlier full-gather variant
 (diff on a rank-0 full-model snapshot) was consistently slower than ``delta_sharded`` at every
@@ -98,23 +98,31 @@ Other shard dimensions than ``Shard(0)`` are not supported and raise.
 ## Measured results
 
 All numbers: H100 nodes, GSM8K GRPO, verl V1 ``separate_async`` (disaggregated trainer/rollout),
-FSDP2 + param/optimizer offload, SGLang rollout, per-step steady-state weight sync.
+SGLang rollout, per-step steady-state weight sync. The ``nccl`` baseline is current main
+(including the pinned-staging fix from #7005); param/optimizer offload is ON unless noted.
 
-| model (placement) | ``delta_sharded`` | ``nccl`` (full broadcast) | speedup | saved / step |
-|---|---|---|---|---|
-| Qwen2.5-7B (1+1 nodes, sustained over 200 steps) | **3.8 s** | 9.1 s | 2.4x | 5.2 s |
-| Qwen2.5-32B (2+2 nodes) | **12.5 s** | 23.2 s | 1.9x | 10.7 s |
-| Qwen2.5-72B (4+4 nodes, TP8) | **12.0 s** | 36.9 s | **3.1x** | **24.9 s** |
+| model (placement) | ``delta_sharded`` | ``nccl`` (full broadcast) | speedup |
+|---|---|---|---|
+| Qwen2.5-7B (1+1 nodes) | **3.9-4.9 s** | 5.5-6.0 s | ~1.3x |
+| Qwen2.5-32B (2+2 nodes) | **11.2-11.9 s** | 17.7-18.1 s | 1.55x |
+| Qwen2.5-32B (2+2 nodes, offload off) | **6.2 s** | 14.2 s | 2.3x |
+| Qwen2.5-72B (4+4 nodes, gen TP8, offload off) | **12.0-13.0 s** | 28.5-29.1 s | 2.3x |
+| Qwen3-30B-A3B (veomni ep8, 1+1 nodes, 50-step medians) | **7.1 s** | 32.2 s | **4.5x** |
+| Qwen3-235B-A22B (veomni ep8 x fsdp8, 8+2 nodes, gen TP16) | **11.4-14.9 s** | 246-266 s | **~21x** |
 
-The delta sync time stays essentially flat from 32B to 72B -- the sharded sparse gather amortizes
-over the larger trainer world -- while the full broadcast grows linearly with parameter bytes, so
-the advantage widens with scale. The per-step changed ratio is stable at ~1-3% of parameter bytes
-across sizes and stays there over long runs.
+The delta sync time stays essentially flat from 32B through 235B -- the sharded sparse gather
+amortizes over the larger trainer world -- while the full broadcast pays a full-model
+materialization that grows linearly with parameter bytes, so the advantage widens with scale
+and with MoE sparsity. The per-step changed ratio is ~1-3% of parameter bytes for dense models
+(0.02-0.05% for the 235B MoE early steps) and stays there over long runs.
 
 Correctness evidence (details in the PR):
 
 - **200-step GRPO equivalence at 7B** (delta vs nccl, 400 syncs): reward trajectories track
   phase-for-phase, final rewards within sampling noise, zero receiver checksum failures.
+- **50-step GRPO equivalence at 30B-A3B (veomni ep8)**: score trajectories rise in step
+  (0.646->0.719 delta vs 0.639->0.697 nccl), per-step gap at the independent-sampling
+  noise floor, zero checksum failures.
 - **Bit-exact round-trip**: perturb -> apply as delta -> revert -> apply as delta reproduces
   greedy generations byte-identically on every prompt.
 
