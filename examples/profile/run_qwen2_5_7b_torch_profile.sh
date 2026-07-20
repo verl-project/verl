@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
 # GRPO profiling (torch profiler, scheduled) | text | vLLM rollout | FSDP training | NVIDIA GPUs
 #
-# Captures PyTorch profiler chrome traces of the actor update loop. This example
-# demonstrates torch.profiler.schedule: instead of tracing every mini-batch, the
-# profiler advances one step per mini-batch (via profiler.step()) and only records
-# a wait/warmup/active window, repeated `repeat` times. Traces (.json.gz) are written
-# under global_profiler.save_path and can be opened in chrome://tracing or Perfetto.
+# Captures PyTorch profiler chrome traces of BOTH the actor update loop (training)
+# and the vLLM rollout engine (inference). Traces (.json.gz) are written under
+# global_profiler.save_path and can be opened in chrome://tracing or Perfetto:
+#   <save_path>/                              -> actor (training) traces
+#   <save_path>/agent_loop_rollout_replica_* -> rollout (inference) traces
 #
-# The schedule only applies to the training update loop (actor). Set
-# PROFILE_SCHEDULE_ACTIVE=0 to disable scheduling and collect the whole window
+# Training (actor) demonstrates torch.profiler.schedule: instead of tracing every
+# mini-batch, the profiler advances one step per mini-batch (via profiler.step())
+# and only records a wait/warmup/active window, repeated `repeat` times. Set
+# PROFILE_SCHEDULE_ACTIVE=0 to disable scheduling and trace the whole window
 # continuously instead.
+#
+# Inference (rollout) is profiled by vLLM's own engine-side torch profiler, which
+# ONLY runs in "discrete" mode and has no notion of torch.profiler.schedule/step().
+# It is therefore forced to discrete=True for the rollout (independent of the
+# actor's schedule) and captures the full generate_sequences window on each profiled
+# step. Set PROFILE_ROLLOUT=False to profile training only.
 
 set -xeuo pipefail
 
@@ -34,6 +42,14 @@ profile_schedule_wait=${PROFILE_SCHEDULE_WAIT:-0}
 profile_schedule_warmup=${PROFILE_SCHEDULE_WARMUP:-1}
 profile_schedule_active=${PROFILE_SCHEDULE_ACTIVE:-2}
 profile_schedule_repeat=${PROFILE_SCHEDULE_REPEAT:-1}
+
+# Inference (rollout) profiling. The vLLM engine profiler runs in discrete mode only,
+# so it ignores the schedule above and traces the whole generate_sequences window on
+# each profiled step. `ranks` here are rollout *replica* indices (not training ranks).
+# Optionally restrict to a response-token window (null = from first token / until end).
+profile_rollout=${PROFILE_ROLLOUT:-True}
+profile_rollout_token_start=${PROFILE_ROLLOUT_TOKEN_START:-null}
+profile_rollout_token_end=${PROFILE_ROLLOUT_TOKEN_END:-null}
 
 train_batch_size=${TRAIN_BATCH_SIZE:-32}
 ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-16}
@@ -108,6 +124,16 @@ ROLLOUT=(
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${ppo_max_token_len_per_gpu}
     actor_rollout_ref.rollout.enable_chunked_prefill=False
+    # Enable the torch profiler on the vLLM rollout engine (inference). This is
+    # collected by vLLM's engine-side profiler and REQUIRES discrete mode, so we
+    # force discrete=True here independently of the actor's schedule/discrete above.
+    actor_rollout_ref.rollout.profiler.enable=${profile_rollout}
+    actor_rollout_ref.rollout.profiler.ranks=${profile_ranks}
+    actor_rollout_ref.rollout.profiler.all_ranks=${profile_ranks_all}
+    actor_rollout_ref.rollout.profiler.tool_config.torch.discrete=True
+    actor_rollout_ref.rollout.profiler.tool_config.torch.contents=${profile_contents}
+    actor_rollout_ref.rollout.profiler.tool_config.torch.profile_token_start=${profile_rollout_token_start}
+    actor_rollout_ref.rollout.profiler.tool_config.torch.profile_token_end=${profile_rollout_token_end}
 )
 
 REF=(
