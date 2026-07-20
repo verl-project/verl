@@ -101,7 +101,7 @@ def _local_rollout_config(cfg: OmegaConf) -> RolloutSkipConfig:
 def _project_dump_root(dump_dir: Path, cfg: OmegaConf) -> Path:
     exp = cfg.trainer.experiment_name
     proj = cfg.trainer.project_name
-    gbs = cfg.data.gen_batch_size
+    gbs = cfg.data.gen_batch_size or cfg.data.train_batch_size
     n = int(OmegaConf.select(cfg, "actor_rollout_ref.rollout.n", default=0))
     inp = cfg.data.max_prompt_length
     out = cfg.data.max_response_length

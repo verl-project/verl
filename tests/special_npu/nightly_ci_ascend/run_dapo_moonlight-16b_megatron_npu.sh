@@ -132,6 +132,7 @@ python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.ref.megatron.param_offload=True \
     ++actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=fused \
     actor_rollout_ref.actor.megatron.use_mbridge=$USE_MBRIDGE \
+    actor_rollout_ref.actor.megatron.vanilla_mbridge=True \
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=$USE_DIST_CKPT \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${ACTOR_TP} \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${ACTOR_PP} \

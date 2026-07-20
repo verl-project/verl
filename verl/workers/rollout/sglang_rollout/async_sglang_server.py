@@ -47,6 +47,7 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_visible_devices_keyword
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_sglang_profiler_args
+from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_config
@@ -256,6 +257,16 @@ class SGLangHttpServer:
         engine_kwargs = self.config.get("engine_kwargs", {}).get("sglang", {}) or {}
         attention_backend = engine_kwargs.pop("attention_backend", None)
         mm_attention_backend = engine_kwargs.pop("mm_attention_backend", None)
+        # Delta checkpoint engines apply sparse weight updates in place through SGLang's
+        # custom-weight-loader hook; register the verl loader so the update requests'
+        # load_format resolves inside the TP workers.
+        custom_weight_loader = list(engine_kwargs.pop("custom_weight_loader", None) or [])
+        ce_backend = str((self.config.get("checkpoint_engine", None) or {}).get("backend", ""))
+        if ce_backend == "delta_sharded":
+            from verl.workers.rollout.sglang_rollout.delta_loader import LOADER_FQN
+
+            if LOADER_FQN not in custom_weight_loader:
+                custom_weight_loader.append(LOADER_FQN)
         if attention_backend is None:
             if torch.version.hip is not None:
                 attention_backend = "aiter"
@@ -306,6 +317,7 @@ class SGLangHttpServer:
             "json_model_override_args": json.dumps({"quantization_config": fp8_block_quant_kwargs})
             if quantization == "fp8"
             else json.dumps({}),
+            "custom_weight_loader": custom_weight_loader or None,
             **engine_kwargs,
         }
 
@@ -328,7 +340,7 @@ class SGLangHttpServer:
             )
             args["dist_init_addr"] = dist_init_addr
 
-        if self.config.prometheus.enable:
+        if self.config.prometheus.enable or RLInsightLogger.enabled():
             if self.config.prometheus.served_model_name:
                 # Extract model name from path if it's a full path
                 served_model_name = self.config.prometheus.served_model_name
@@ -342,8 +354,16 @@ class SGLangHttpServer:
 
         # enable_weights_cpu_backup is supported in sglang>=0.5.3
         if "enable_weights_cpu_backup" in [f.name for f in dataclasses.fields(ServerArgs)]:
+            # HYBRID mode also needs CPU weight backup so that:
+            #   1. sleep() can release GPU weights to free memory for the training engine.
+            #   2. naive update_weights() can call resume(tags=["weights"]) to reload weights
+            #      from CPU before applying the latest trainer weights via IPC.
+            # Without this, sleep() releases GPU memory but update_weights() cannot restore
+            # the weight buffers, causing OOM when training tries to use the freed memory.
             enable_weights_cpu_backup = (
-                True if self.rollout_mode == RolloutMode.COLOCATED or self.model_config.lora_rank > 0 else False
+                True
+                if self.rollout_mode in (RolloutMode.COLOCATED, RolloutMode.HYBRID) or self.model_config.lora_rank > 0
+                else False
             )
             args["enable_weights_cpu_backup"] = enable_weights_cpu_backup
 
@@ -612,7 +632,8 @@ class SGLangHttpServer:
         if self.model_config.lora_rank > 0:
             generate_request.lora_path = SGLANG_LORA_NAME
 
-        output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
+        with RLInsightLogger.trace_state("sglang_generate", state_lane_id=f"replica_{self.replica_rank}"):
+            output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
         meta_info = output.get("meta_info", {})
         finish_reason = meta_info.get("finish_reason")
         finish_reason = finish_reason["type"] if finish_reason else None
@@ -665,9 +686,11 @@ class SGLangHttpServer:
 
         # Re-key backend spec-decoding stats to the rollout-common names.
         if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
-            extra_fields["spec_num_draft_tokens"] = int(meta_info["spec_draft_token_num"])
-            extra_fields["spec_num_accepted_tokens"] = int(meta_info["spec_accept_token_num"])
-            extra_fields["spec_num_verify_steps"] = int(meta_info["spec_verify_ct"])
+            extra_fields["spec_num_draft_tokens"] = int(
+                meta_info.get("spec_draft_token_num", self.config.mtp.speculative_num_draft_tokens)
+            )
+            extra_fields["spec_num_accepted_tokens"] = int(meta_info.get("spec_accept_token_num", 0))
+            extra_fields["spec_num_verify_steps"] = int(meta_info.get("spec_verify_ct", 0))
 
         return TokenOutput(
             token_ids=token_ids,

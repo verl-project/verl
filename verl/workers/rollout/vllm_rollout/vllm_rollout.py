@@ -262,9 +262,16 @@ class ServerAdapter(BaseRollout):
 
     @torch.no_grad()
     async def update_weights(
-        self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs
+        self,
+        weights: Generator[tuple[str, torch.Tensor], None, None],
+        global_steps: int = None,
+        wire_format: str = "named_tensors",
+        **kwargs,
     ):
         """Update model weights via CUDA IPC (fallback to shared memory if IPC not supported) to inference workers."""
+        assert wire_format == "named_tensors", (
+            f"vLLM rollout only consumes full named tensors; got wire_format={wire_format!r}"
+        )
         start_time = time.time()
 
         future = await self._execute_method(

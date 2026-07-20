@@ -443,6 +443,7 @@ class PPOTrainer(ABC):
                         self._save_checkpoint()
 
                 self.on_step_end()
+                metrics.update(self._consume_sync_metrics())
 
             # 4. validate
             if self.config.trainer.test_freq > 0 and (
@@ -598,6 +599,13 @@ class PPOTrainer(ABC):
         """Called at the end of each training step."""
         return
 
+    def _consume_sync_metrics(self) -> dict:
+        """Weight-sync stats stashed by ``on_step_end`` (e.g. the delta engines'
+        changed ratio / wire payload), merged into this step's logged metrics."""
+        metrics = getattr(self, "_pending_sync_metrics", None) or {}
+        self._pending_sync_metrics = {}
+        return metrics
+
     def on_sample_begin(self):
         """Called at the beginning of sampling batch from replay buffer."""
         return
@@ -608,6 +616,15 @@ class PPOTrainer(ABC):
         return
 
     # ------------------------------ common methods ------------------------------
+
+    def _get_n_gpus_for_throughput(self) -> int:
+        """Return the total number of GPUs used for throughput normalization.
+
+        By default this is the trainer-side GPU count from the resource pool
+        manager.  Modes that use additional dedicated GPUs (e.g. separate-async
+        standalone rollout) should override this to include them.
+        """
+        return self.resource_pool_manager.get_n_gpus()
 
     def _init_tokenizer(self):
         """Initialize tokenizer."""
@@ -1749,7 +1766,7 @@ class PPOTrainer(ABC):
         )
         metrics.update(compute_data_metrics(batch=metrics_batch, use_critic=self.use_critic))
         metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
-        n_gpus = self.resource_pool_manager.get_n_gpus()
+        n_gpus = self._get_n_gpus_for_throughput()
         metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
         gradient_norm = metrics.get("actor/grad_norm", None)
         metrics.update(compute_variance_proxy_metrics(batch=metrics_batch, gradient_norm=gradient_norm))

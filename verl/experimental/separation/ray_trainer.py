@@ -642,7 +642,11 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         if self.config.trainer.critic_warmup <= self.global_steps:
             # update weights from trainer to rollout
             with marked_timer("update_weights", timing_raw, color="red"):
-                self.checkpoint_manager.update_weights(self.global_steps)
+                sync_metrics = self.checkpoint_manager.update_weights(self.global_steps)
+            # Engines may report per-sync stats (e.g. the delta backends' changed
+            # ratio / wire payload); surface them in this step's metrics.
+            if sync_metrics:
+                self.metrics.update(sync_metrics)
 
     def _fit_dump_data(self, batch: DataProto):
         timing_raw = self.timing_raw

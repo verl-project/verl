@@ -389,6 +389,12 @@ jobs:
       - name: Check final pip list
         run: |
           pip list
+      - name: Clone Megatron Bridge
+        run: |
+          git clone --depth 1 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git /Megatron-Bridge
+          cd /Megatron-Bridge
+          git fetch --depth 1 origin de93536e9028ecf1e4dc28608dc80f336dcdfe59
+          git checkout de93536e9028ecf1e4dc28608dc80f336dcdfe59
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
@@ -398,6 +404,7 @@ jobs:
       - name: Running nightlyCI_grpo_qwen3_5_2b_fsdp2_vllm_ascend
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_5_2b_fsdp2_npu.sh
 
 # Test quick start vllm fsdp2
@@ -647,7 +654,7 @@ jobs:
     runs-on: linux-aarch64-a3-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-9.0.0-a3-ubuntu22.04-py3.11-latest
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-a3-ubuntu22.04-py3.11-vllm
       options: >-
         --shm-size 16g
     env:
@@ -669,6 +676,12 @@ jobs:
       - name: Check final pip list
         run: |
           pip list
+      - name: Clone Megatron Bridge
+        run: |
+          git clone --depth 1 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git /Megatron-Bridge
+          cd /Megatron-Bridge
+          git fetch --depth 1 origin de93536e9028ecf1e4dc28608dc80f336dcdfe59
+          git checkout de93536e9028ecf1e4dc28608dc80f336dcdfe59
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
@@ -678,4 +691,5 @@ jobs:
       - name: Running nightlyCI_grpo-qwen3_5-35b-megatron-vllm_ascend
         run: |
           ray stop --force
+          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_5_35b_megatron_npu.sh

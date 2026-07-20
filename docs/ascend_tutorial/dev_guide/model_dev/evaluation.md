@@ -19,16 +19,16 @@ pip install -e .
 
 ~~~bash
 cd path/to/benchmark/ais_bench/datasets
-wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/math.zip
+wget https://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/math.zip
 unzip math.zip
 rm math.zip
 ~~~
 
 ## 3.权重转换
 
-当前verl已经支持mbridge直接保存hf格式模型权重,无需转换即可使用.
+当前verl已经支持mbridge直接保存hf格式模型权重，无需转换即可使用。
 
-如果模型权重不是hf格式,需要先转换为hf格式,再进行评估
+如果模型权重不是hf格式，需要先转换为hf格式，再进行评估。
 
 此处参照verl原生[转换方法](../../../../docs/advance/checkpoint.rst)
 
@@ -62,7 +62,7 @@ vllm serve /path/to/Qwen3-30B/ \
        --port 8080
 ~~~
 
-**修改aisbench推理配置启动vllm_client评测**
+**修改AISBench推理配置启动vllm_client评测**
 
 打开推理配置文件 benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat.py 
 

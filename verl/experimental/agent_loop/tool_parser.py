@@ -210,7 +210,9 @@ class Qwen3XMLToolParser(ToolParser):
 
     def _parse_xml_function_call(
         self, function_call_str: str, tools: Optional[list[OpenAIFunctionToolSchema]]
-    ) -> FunctionCall:
+    ) -> Optional[FunctionCall]:
+        tools = tools or []
+
         def get_arguments_config(func_name: str) -> dict:
             for config in tools:
                 if config.type == "function" and config.function.name == func_name:
@@ -295,15 +297,26 @@ class Qwen3XMLToolParser(ToolParser):
                     )
                 return param_value
 
-        # Extract function name
-        end_index = function_call_str.index(">")
+        # Extract function name. A truncated function header is not recoverable.
+        end_index = function_call_str.find(">")
+        if end_index == -1:
+            logger.warning(f"Skipping malformed function call without '>' separator: {function_call_str!r}")
+            return None
+
         function_name = function_call_str[:end_index]
         param_config = get_arguments_config(function_name)
         parameters = function_call_str[end_index + 1 :]
         param_dict = {}
         for match in self.tool_call_parameter_regex.findall(parameters):
             match_text = match[0] if match[0] else match[1]
-            idx = match_text.index(">")
+            idx = match_text.find(">")
+            if idx == -1:
+                logger.warning(
+                    f"Skipping malformed parameter without '>' separator in tool call for function "
+                    f"'{function_name}': {match_text!r}"
+                )
+                continue
+
             param_name = match_text[:idx]
             param_value = str(match_text[idx + 1 :])
             # Remove prefix and trailing \n
@@ -348,6 +361,7 @@ class Qwen3XMLToolParser(ToolParser):
             tool_calls = [
                 self._parse_xml_function_call(function_call_str, tools) for function_call_str in function_calls
             ]
+            tool_calls = [tool_call for tool_call in tool_calls if tool_call is not None]
 
             # Extract content before tool calls
             content_index = text.find(self.tool_call_start_token)

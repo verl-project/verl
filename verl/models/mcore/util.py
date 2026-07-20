@@ -563,7 +563,7 @@ def postprocess_thd_engine(
 def _build_npu_attn_mask(original_attention_mask: torch.Tensor) -> torch.Tensor:
     """Build attn_mask for torch_npu.npu_fusion_attention (B1SS / [B, 1, Sq, Skv])"""
     _, seq_len = original_attention_mask.shape
-    causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=original_attention_mask.device)).to(torch.bool)
+    causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=original_attention_mask.device, dtype=torch.bool))
     attn_mask = original_attention_mask.unsqueeze(-1) & original_attention_mask.unsqueeze(-2)
     attn_mask = attn_mask & causal_mask
     return (~attn_mask).unsqueeze(1).contiguous()

@@ -66,6 +66,27 @@ So the inner checkpoint structure of **FSDP** is like:
 
 All model shards, optimizers and extra states are stored together, in a sharded and distributed way.
 
+LoRA-only Checkpoints
+---------------------
+
+When the model is trained with LoRA adapters, set
+``checkpoint.save_lora_only = True`` to save only the adapter weights
+instead of the full model state dict. This reduces checkpoint size
+from ~54 GiB to ~150 MiB for a 27B model.
+
+- **Save**: Only parameter keys containing ``lora_`` or ``.adapter_`` are
+  kept; all base-model weights are excluded.
+- **Load**: The checkpoint manager detects LoRA-only checkpoints
+  automatically by checking whether all keys are adapter keys.
+  ``load_state_dict(strict=False)`` is used, followed by validation
+  that no unexpected keys exist.
+- **Backward compatibility**: Full checkpoints (all weights) are loaded
+  with ``strict=True`` as before; the presence of ``save_lora_only``
+  does not affect them.
+
+The LoRA-only checkpoint is written to the same ``model_*.pt`` shard
+file as a full checkpoint, so the directory layout is identical.
+
 While **Megatron** current checkpoint structure (layout schema v2) is:
 
 .. code::

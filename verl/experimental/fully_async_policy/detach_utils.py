@@ -179,7 +179,7 @@ def assemble_batch_from_rollout_samples(
 class MetricsAggregator:
     """Metrics aggregator, used to combine metrics from multiple training steps"""
 
-    def __init__(self, total_gpus: int):
+    def __init__(self, total_gpus: int, hybrid_gpus: int = 0, standalone_gpus: int = 0):
         # Store all values ​​for each metric
         self.metric_values: dict[str, list[float]] = defaultdict(list)
         # Store the number of samples at each step for weighted averaging
@@ -190,6 +190,14 @@ class MetricsAggregator:
         self.step_count = 0
         # total num gpus used
         self.total_gpus = total_gpus
+        # Number of GPUs that switch between rollout/train (hybrid, i.e. trainer-node GPUs
+        # co-hosting rollout replicas under dynamic resource scheduling) and the number of
+        # GPUs dedicated exclusively to rollout (standalone). Used to combine
+        # dynamic_resource/{train,rollout}_resource_utilization into a single
+        # dynamic_resource/resource_utilization metric — see
+        # _special_metrics_aggergate() for the formula.
+        self.hybrid_gpus = hybrid_gpus
+        self.standalone_gpus = standalone_gpus
 
         # Metric aggregation rule configuration
         self.aggregation_rules = self._init_aggregation_rules()
@@ -209,6 +217,15 @@ class MetricsAggregator:
                 "fully_async/count/current_param_version",
                 "fully_async/count/dropped_stale_samples",
                 "training/global_step",  # TODO change name to: total_step
+                # End-of-sync-cycle snapshot, not a per-micro-step quantity to average.
+                "dynamic_resource/mq_size",
+            ],
+            "sum": [
+                # Raw numerator/denominator seconds for dynamic_resource/train_resource_utilization.
+                # Summed across all micro-steps in a sync cycle; the ratio itself is computed once
+                # from the summed totals in _special_metrics_aggergate(), not averaged per-micro-step.
+                "dynamic_resource/train_compute_time_s",
+                "dynamic_resource/train_allocated_time_s",
             ],
         }
 
@@ -289,8 +306,20 @@ class MetricsAggregator:
             # Default average
             return sum(values) / len(values)
 
-    def get_aggregated_metrics(self) -> dict[str, Any]:
-        """aggregated metrics"""
+    def get_aggregated_metrics(self, rollout_resource_utilization: float | None = None) -> dict[str, Any]:
+        """aggregated metrics
+
+        Args:
+            rollout_resource_utilization: The rollout-resource utilization for the sync
+                cycle just finished (see FullyAsyncRollouter._compute_rollout_resource_utilization()).
+                It is computed on the rollouter side and returned out-of-band via
+                reset_staleness(), so it is injected here rather than flowing through
+                add_step_metrics(). It is only surfaced in the returned dict (as
+                "dynamic_resource/rollout_resource_utilization") once
+                dynamic_resource/train_resource_utilization is also available, so it and
+                "dynamic_resource/resource_utilization" start appearing together from the
+                same sync cycle onward — see _special_metrics_aggergate().
+        """
         t = time.time()
         if self.step_count == 0:
             return {}
@@ -302,13 +331,15 @@ class MetricsAggregator:
             aggregated[metric_name] = self._aggregate_single_metric(metric_name, values)
 
         # Aggregate special metrics
-        aggregated = self._special_metrics_aggergate(aggregated)
+        aggregated = self._special_metrics_aggergate(aggregated, rollout_resource_utilization)
 
         print(f"aggregated metrics done. cost {time.time() - t:.4f} seconds.")
 
         return aggregated
 
-    def _special_metrics_aggergate(self, aggregated: dict[str, Any]) -> dict[str, Any]:
+    def _special_metrics_aggergate(
+        self, aggregated: dict[str, Any], rollout_resource_utilization: float | None = None
+    ) -> dict[str, Any]:
         """calculate special metrics"""
 
         # global_seqlen/minmax_diff
@@ -325,6 +356,67 @@ class MetricsAggregator:
         # trainer/idle_ratio
         if "timing_s/gen" in aggregated.keys() and "timing_s/step" in aggregated.keys():
             aggregated["fully_async/trainer/idle_ratio"] = aggregated["timing_s/gen"] / aggregated["timing_s/step"]
+
+        # dynamic_resource/train_resource_utilization: ratio computed once from the
+        # sync-cycle-wide summed totals (NOT averaged per-micro-step), per the numerator/
+        # denominator definitions documented in FullyAsyncTrainer._record_train_resource_utilization().
+        REQUIRED_UTIL_KEYS = {"dynamic_resource/train_compute_time_s", "dynamic_resource/train_allocated_time_s"}
+        if REQUIRED_UTIL_KEYS.issubset(aggregated) and aggregated["dynamic_resource/train_allocated_time_s"] > 0:
+            aggregated["dynamic_resource/train_resource_utilization"] = (
+                aggregated["dynamic_resource/train_compute_time_s"]
+                / aggregated["dynamic_resource/train_allocated_time_s"]
+            )
+
+        # dynamic_resource/resource_utilization: cluster-wide utilization for this sync
+        # cycle, combining the hybrid (trainer-node) GPUs' time-split between rollout and
+        # train with the standalone (dedicated) rollout GPUs.
+        #
+        # Let a = self.hybrid_gpus, b = self.standalone_gpus, and x in [0, 1] be the
+        # fraction of this cycle's wall-clock time that the hybrid GPUs spent doing
+        # rollout (the rest, 1 - x, they spent training). x is estimated as the ratio of
+        # summed "wait_for_enough_samples" time (hybrid-rollout wall-clock time within the
+        # cycle) over the summed "step" time (total cycle wall-clock time):
+        #
+        #   x = timing_s/wait_for_enough_samples / timing_s/step
+        #
+        # "timing_s/wait_for_enough_samples" is only recorded when dynamic resource scheduling
+        # is enabled (see FullyAsyncTrainer.fit_step()). When it's disabled, hybrid GPUs
+        # never switch into rollout mode, i.e. x == 0 (100% of hybrid time is training) —
+        # so it's treated as 0.0 rather than skipping the metric entirely.
+        #
+        # Then, weighting each utilization by the GPU-seconds it was measured over:
+        #   - Hybrid GPUs spend (1 - x) * a GPU-time training at train_resource_utilization,
+        #     and x * a GPU-time doing rollout at rollout_resource_utilization.
+        #   - Standalone GPUs (b of them) spend all their time doing rollout at
+        #     rollout_resource_utilization.
+        #
+        #   resource_utilization = ((1 - x) * a * train_resource_utilization
+        #                            + (x * a + b) * rollout_resource_utilization) / (a + b)
+        #
+        # dynamic_resource/train_resource_utilization is only available once the aggregator
+        # has collected at least one micro-step's dynamic_resource/train_{compute,allocated}_time_s
+        # (see add_step_metrics()/_record_train_resource_utilization()) — this never holds on
+        # the very first sync cycle, since the sync-triggering micro-step's own values are
+        # only recorded *after* this method's caller (_fit_update_weights()) returns. To keep
+        # "dynamic_resource/rollout_resource_utilization" and "dynamic_resource/resource_utilization"
+        # appearing together (rather than the former appearing one cycle earlier), the former is
+        # only added to the output once the latter can also be computed.
+        total_gpus = self.hybrid_gpus + self.standalone_gpus
+        if (
+            "dynamic_resource/train_resource_utilization" in aggregated
+            and rollout_resource_utilization is not None
+            and total_gpus > 0
+            and aggregated.get("timing_s/step", 0.0) > 0
+        ):
+            aggregated["dynamic_resource/rollout_resource_utilization"] = rollout_resource_utilization
+            a = self.hybrid_gpus
+            b = self.standalone_gpus
+            wait_for_enough_samples_time = aggregated.get("timing_s/wait_for_enough_samples", 0.0)
+            x = min(1.0, max(0.0, wait_for_enough_samples_time / aggregated["timing_s/step"]))
+            train_util = aggregated["dynamic_resource/train_resource_utilization"]
+            aggregated["dynamic_resource/resource_utilization"] = (
+                (1 - x) * a * train_util + (x * a + b) * rollout_resource_utilization
+            ) / total_gpus
 
         return aggregated
 
