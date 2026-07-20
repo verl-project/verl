@@ -168,22 +168,34 @@ def test_partition_tensor_dict_matches_repeated_index_select():
     partitions = [[3, 1], torch.tensor([0, 2])]
 
     original_unbind = torch.Tensor.unbind
+    original_tolist = torch.Tensor.tolist
 
     def run_and_count_unbinds(fn):
         unbind_calls = []
+        tolist_calls = []
 
         def record_unbind(tensor, *args, **kwargs):
             unbind_calls.append(tensor)
             return original_unbind(tensor, *args, **kwargs)
 
-        with patch.object(torch.Tensor, "unbind", new=record_unbind):
-            output = fn()
-        return output, unbind_calls
+        def record_tolist(tensor, *args, **kwargs):
+            tolist_calls.append(tensor)
+            return original_tolist(tensor, *args, **kwargs)
 
-    actual, optimized_unbinds = run_and_count_unbinds(lambda: tu.partition_tensor_dict(batch, partitions))
-    expected, baseline_unbinds = run_and_count_unbinds(
+        with (
+            patch.object(torch.Tensor, "unbind", new=record_unbind),
+            patch.object(torch.Tensor, "tolist", new=record_tolist),
+        ):
+            output = fn()
+        return output, unbind_calls, tolist_calls
+
+    actual, optimized_unbinds, optimized_tolist = run_and_count_unbinds(
+        lambda: tu.partition_tensor_dict(batch, partitions)
+    )
+    expected, baseline_unbinds, _ = run_and_count_unbinds(
         lambda: [tu.index_select_tensor_dict(batch, partition) for partition in partitions]
     )
+    assert sum(tensor is partitions[1] for tensor in optimized_tolist) == 1
     for tensor in (input_ids, teacher_logprobs):
         optimized_count = sum(unbound is tensor for unbound in optimized_unbinds)
         baseline_count = sum(unbound is tensor for unbound in baseline_unbinds)
@@ -196,7 +208,15 @@ def test_partition_tensor_dict_matches_repeated_index_select():
         assert actual_partition["teacher_logprobs"]._ragged_idx == 1
 
 
-@pytest.mark.parametrize("partitions", [[[2, 0]], [[2, 0], [1, 3]]])
+@pytest.mark.parametrize(
+    "partitions",
+    [
+        [[2, 0]],
+        [[2, 0], [1, 3]],
+        [torch.tensor([2, 0])],
+        [torch.tensor([2, 0]), torch.tensor([1, 3])],
+    ],
+)
 def test_partition_tensor_dict_falls_back_without_reusable_nested_work(partitions):
     batch = TensorDict(
         {
@@ -206,13 +226,44 @@ def test_partition_tensor_dict_falls_back_without_reusable_nested_work(partition
         batch_size=[4],
     )
 
-    with patch.object(tu, "index_select_tensor_dict", wraps=tu.index_select_tensor_dict) as select:
+    tolist_calls = []
+    original_tolist = torch.Tensor.tolist
+
+    def record_tolist(tensor, *args, **kwargs):
+        tolist_calls.append(tensor)
+        return original_tolist(tensor, *args, **kwargs)
+
+    with (
+        patch.object(tu, "index_select_tensor_dict", wraps=tu.index_select_tensor_dict) as select,
+        patch.object(torch.Tensor, "tolist", new=record_tolist),
+    ):
         actual = tu.partition_tensor_dict(batch, partitions)
 
     assert select.call_count == len(partitions)
+    assert not any(unbound is partition for partition in partitions for unbound in tolist_calls)
     expected = [tu.index_select_tensor_dict(batch, partition) for partition in partitions]
     for actual_partition, expected_partition in zip(actual, expected, strict=True):
         tu.assert_tensordict_eq(actual_partition, expected_partition)
+
+
+def test_partition_tensor_dict_single_jagged_partition_avoids_host_conversion():
+    batch = TensorDict(
+        {"nested": tu.nested_tensor_from_tensor_list([torch.arange(2), torch.arange(3)])},
+        batch_size=[2],
+    )
+    partition = torch.tensor([1, 0])
+    original_tolist = torch.Tensor.tolist
+    tolist_calls = []
+
+    def record_tolist(tensor, *args, **kwargs):
+        tolist_calls.append(tensor)
+        return original_tolist(tensor, *args, **kwargs)
+
+    with patch.object(torch.Tensor, "tolist", new=record_tolist):
+        actual = tu.partition_tensor_dict(batch, [partition])
+
+    assert not any(tensor is partition for tensor in tolist_calls)
+    tu.assert_tensordict_eq(actual[0], tu.index_select_tensor_dict(batch, partition))
 
 
 def test_partition_tensor_dict_rejects_empty_partitions():

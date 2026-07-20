@@ -534,14 +534,15 @@ def partition_tensor_dict(batch: TensorDict, partitions: list[torch.Tensor | lis
     if len(normalized_partitions) <= 1 or not nested_tensors:
         return [index_select_tensor_dict(batch, partition) for partition in normalized_partitions]
 
+    partition_rows = [partition if isinstance(partition, list) else partition.tolist() for partition in partitions]
     non_nested_batch = batch.exclude(*nested_tensors)
     selected_batches = [index_select_tensor_dict(non_nested_batch, partition) for partition in normalized_partitions]
     for key, tensor in nested_tensors.items():
         tensor_rows = tensor.unbind()
         ragged_idx = getattr(tensor, "_ragged_idx", tensor.dim() - 1)
-        for selected_batch, partition in zip(selected_batches, normalized_partitions, strict=True):
+        for selected_batch, rows in zip(selected_batches, partition_rows, strict=True):
             selected_batch[key] = nested_tensor_from_tensor_list(
-                [tensor_rows[idx] for idx in partition], ragged_idx=ragged_idx
+                [tensor_rows[idx] for idx in rows], ragged_idx=ragged_idx
             )
     keys = list(batch.keys())
     return [selected_batch.select(*keys) for selected_batch in selected_batches]
