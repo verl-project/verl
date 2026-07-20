@@ -81,7 +81,12 @@ class DistProfiler:
     """
 
     def __init__(
-        self, rank: int, config: Optional[ProfilerConfig] = None, tool_config: Optional[object] = None, **kwargs
+        self,
+        rank: int,
+        config: Optional[ProfilerConfig] = None,
+        tool_config: Optional[object] = None,
+        save_file_prefix: Optional[str] = None,
+        **kwargs,
     ):
         # Default config
         if config is None:
@@ -93,6 +98,9 @@ class DistProfiler:
         self.rank = rank
         self.config = config
         self.tool_config = tool_config
+        # Optional label (typically the worker role, e.g. "actor"/"critic"/"ref") embedded
+        # in per-process trace filenames so results from different roles are distinguishable.
+        self.save_file_prefix = save_file_prefix
 
         self._impl = None
         self._tool = getattr(config, "tool", None)
@@ -129,7 +137,7 @@ class DistProfiler:
         elif self._tool == "torch":
             from .torch_profile import Profiler as _Torch
 
-            self._impl = _Torch(rank=rank, config=config, tool_config=tool_config)
+            self._impl = _Torch(rank=rank, config=config, tool_config=tool_config, save_file_prefix=save_file_prefix)
         elif self._tool == "torch_memory":
             from .torch_memory_profile import TorchMemoryProfiler
 

@@ -14,6 +14,7 @@
 
 import functools
 import os
+import re
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
@@ -21,6 +22,87 @@ import torch
 
 from .config import ProfilerConfig, TorchProfilerToolConfig
 from .profile import DistProfiler
+
+
+def get_dist_topology() -> dict:
+    """Best-effort snapshot of the current process's distributed topology.
+
+    Used to make per-process profiler trace files self-describing. The returned dict
+    may contain ``rank``/``world_size`` (from ``torch.distributed``) and the
+    ``tp``/``pp``/``dp``/``cp`` parallel ranks (from Megatron's ``parallel_state`` when
+    initialized). Every lookup is guarded, so this never raises and simply omits the
+    pieces that are unavailable (e.g. plain FSDP data parallelism only exposes rank).
+    """
+    info: dict = {}
+    try:
+        import torch.distributed as dist
+
+        if dist.is_available() and dist.is_initialized():
+            info["rank"] = dist.get_rank()
+            info["world_size"] = dist.get_world_size()
+    except Exception:
+        pass
+
+    try:
+        from megatron.core import parallel_state as mpu
+
+        if mpu.model_parallel_is_initialized():
+            info["tp"] = mpu.get_tensor_model_parallel_rank()
+            info["pp"] = mpu.get_pipeline_model_parallel_rank()
+            info["dp"] = mpu.get_data_parallel_rank()
+            try:
+                info["cp"] = mpu.get_context_parallel_rank()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return info
+
+
+def _sanitize_name_part(text: str) -> str:
+    """Make an arbitrary label safe to embed in a filename."""
+    return re.sub(r"[^0-9A-Za-z.=+-]+", "-", str(text)).strip("-")
+
+
+def build_trace_basename(
+    rank: int,
+    role: Optional[str] = None,
+    save_file_prefix: Optional[str] = None,
+    topology: Optional[dict] = None,
+) -> str:
+    """Build a descriptive, per-process trace filename stem.
+
+    Encodes -- when available -- the worker role (``save_file_prefix``, e.g. ``actor``),
+    the profiling scope role (``role``, e.g. ``e2e``), the global rank and world size,
+    and the tensor/pipeline/data/context parallel ranks, followed by pid and a
+    timestamp so that files written by different processes never collide.
+    """
+    topology = get_dist_topology() if topology is None else topology
+    current_time = datetime.now(tz=timezone.utc).astimezone()
+    timestamp = current_time.strftime("%Y%m%d%H%M%S%f")[:-3]
+    pid = os.getpid()
+
+    parts: list[str] = []
+    if save_file_prefix:
+        parts.append(_sanitize_name_part(save_file_prefix))
+    if role:
+        parts.append(_sanitize_name_part(role))
+
+    global_rank = topology.get("rank", rank)
+    world_size = topology.get("world_size")
+    rank_part = f"rank{global_rank}"
+    if world_size:
+        rank_part += f"-of-{world_size}"
+    parts.append(rank_part)
+
+    parallel_part = "-".join(f"{dim}{topology[dim]}" for dim in ("tp", "pp", "dp", "cp") if dim in topology)
+    if parallel_part:
+        parts.append(parallel_part)
+
+    parts.append(f"pid{pid}")
+    parts.append(timestamp)
+    return "_".join(parts)
 
 
 def get_torch_profiler(
@@ -38,9 +120,11 @@ def get_torch_profiler(
             map to ``activities``, ``shapes`` to ``record_shapes``, ``memory`` to
             ``profile_memory`` and ``stack`` to ``with_stack``.
         save_path: Directory (optionally suffixed by ``role``) to write chrome traces to.
-        role: Optional sub-directory / logical role name.
-        save_file_prefix: Optional filename prefix.
-        rank: Global rank, embedded in the trace filename.
+        role: Optional sub-directory / logical scope name, also embedded in the filename.
+        save_file_prefix: Optional filename prefix, typically the worker role (``actor``/
+            ``critic``/``ref``) so per-process traces are distinguishable.
+        rank: Global rank, embedded in the trace filename (a fallback when
+            ``torch.distributed`` is not initialized).
         schedule: Optional kwargs for ``torch.profiler.schedule``
             (``wait``/``warmup``/``active``/``repeat``/``skip_first``). When provided, the
             caller must drive ``prof.step()`` once per step to advance the schedule.
@@ -49,13 +133,7 @@ def get_torch_profiler(
 
     os.makedirs(save_dir, exist_ok=True)
 
-    current_time = datetime.now(tz=timezone.utc).astimezone()
-    timestamp = current_time.strftime("%Y%m%d%H%M%S%f")[:-3]
-    pid = os.getpid()
-
-    base_file_name = f"prof_rank-{rank}_{pid}_{timestamp}"
-    if save_file_prefix:
-        base_file_name = f"{save_file_prefix}_{base_file_name}"
+    base_file_name = build_trace_basename(rank=rank, role=role, save_file_prefix=save_file_prefix)
 
     # A scheduled profiler can fire on_trace_ready multiple times (one per active
     # cycle), so keep an invocation counter to avoid overwriting earlier cycles.

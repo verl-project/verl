@@ -120,7 +120,15 @@ class TrainingWorker(Worker, DistProfilerExtension):
             self.profiler_tool_config = None
 
         DistProfilerExtension.__init__(
-            self, DistProfiler(rank=self.rank, config=self.profiler_config, tool_config=self.profiler_tool_config)
+            self,
+            DistProfiler(
+                rank=self.rank,
+                config=self.profiler_config,
+                tool_config=self.profiler_tool_config,
+                # Embed the model role (e.g. language_model/value_model) in trace filenames
+                # so standalone (e.g. SFT) traces are self-describing per process.
+                save_file_prefix=getattr(self.config, "model_type", None),
+            ),
         )
 
         self.model_config.model_type = self.config.model_type
@@ -501,7 +509,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self._omega_profiler_config = omega_profiler_config
 
         DistProfilerExtension.__init__(
-            self, DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config)
+            self,
+            DistProfiler(
+                rank=self.rank,
+                config=profiler_config,
+                tool_config=tool_config,
+                # Embed the worker role (actor/rollout/ref/...) in trace filenames so
+                # per-process results are distinguishable across roles and ranks.
+                save_file_prefix=self.role,
+            ),
         )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)

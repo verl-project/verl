@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -19,7 +20,11 @@ import torch
 
 from verl.utils.profiler.config import ProfilerConfig, TorchProfilerScheduleConfig, TorchProfilerToolConfig
 from verl.utils.profiler.profile import DistProfiler
-from verl.utils.profiler.torch_profile import Profiler, get_torch_profiler
+from verl.utils.profiler.torch_profile import (
+    Profiler,
+    build_trace_basename,
+    get_torch_profiler,
+)
 
 
 class TestTorchProfile(unittest.TestCase):
@@ -143,6 +148,63 @@ class TestTorchProfile(unittest.TestCase):
         self.assertEqual(mock_prof_instance.step.call_count, 2)
         mock_prof_instance.stop.assert_called_once()
         self.assertIsNone(Profiler._active_prof)
+
+    def test_build_trace_basename_encodes_role_rank_and_parallelism(self):
+        # Filename stem must embed the worker role, scope role, rank/world size and the
+        # tp/pp/dp/cp parallel ranks so per-process traces are self-describing.
+        name = build_trace_basename(
+            rank=5,
+            role="e2e",
+            save_file_prefix="actor",
+            topology={"rank": 5, "world_size": 16, "tp": 1, "pp": 0, "dp": 2, "cp": 0},
+        )
+        self.assertTrue(name.startswith("actor_e2e_"))
+        self.assertIn("rank5-of-16", name)
+        self.assertIn("tp1-pp0-dp2-cp0", name)
+        self.assertIn(f"pid{os.getpid()}", name)
+
+    def test_build_trace_basename_distinguishes_roles_same_rank(self):
+        # The original scheme collided ref/critic at the same rank; the role prefix fixes it.
+        topo = {"rank": 5, "world_size": 16}
+        ref_name = build_trace_basename(rank=5, save_file_prefix="ref", topology=topo)
+        critic_name = build_trace_basename(rank=5, save_file_prefix="value_model", topology=topo)
+        self.assertTrue(ref_name.startswith("ref_rank5-of-16_"))
+        # Underscores in labels are normalized to hyphens (underscore is the field separator).
+        self.assertTrue(critic_name.startswith("value-model_rank5-of-16_"))
+        self.assertNotEqual(ref_name, critic_name)
+
+    def test_build_trace_basename_minimal_topology(self):
+        # With no distributed topology, fall back to the passed rank and omit parallel dims.
+        name = build_trace_basename(rank=3, topology={})
+        self.assertTrue(name.startswith("rank3_"))
+        self.assertNotIn("-of-", name)
+        for dim in ("tp", "pp", "dp", "cp"):
+            self.assertNotIn(f"{dim}0", name)
+
+    def test_build_trace_basename_sanitizes_labels(self):
+        # Slashes/spaces in labels must not leak into the filename.
+        name = build_trace_basename(rank=0, role="update actor", save_file_prefix="actor/rollout", topology={})
+        self.assertNotIn("/", name)
+        self.assertNotIn(" ", name)
+        self.assertIn("actor-rollout", name)
+        self.assertIn("update-actor", name)
+
+    @patch("verl.utils.profiler.torch_profile.get_torch_profiler")
+    def test_dist_profiler_forwards_save_file_prefix(self, mock_get_profiler):
+        # DistProfiler must forward save_file_prefix down to the torch backend so it
+        # ends up in the trace filename.
+        mock_get_profiler.return_value = MagicMock()
+        tool_config = TorchProfilerToolConfig(contents=["cpu"], discrete=False)
+        config = ProfilerConfig(
+            tool="torch", enable=True, all_ranks=True, save_path="/tmp/test", tool_config=tool_config
+        )
+        dist_profiler = DistProfiler(rank=0, config=config, tool_config=tool_config, save_file_prefix="actor")
+        self.assertEqual(dist_profiler._impl.save_file_prefix, "actor")
+
+        dist_profiler.start()
+        _, kwargs = mock_get_profiler.call_args
+        self.assertEqual(kwargs["save_file_prefix"], "actor")
+        dist_profiler.stop()
 
     def test_dist_profiler_step_noop_backend(self):
         # A backend without scheduling support (no-op impl) must make step() a safe no-op.

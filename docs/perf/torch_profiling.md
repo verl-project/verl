@@ -43,7 +43,6 @@ You can customize the PyTorch Profiler behavior using the following fields under
     *   **`active`**: Steps to actively record each cycle. Set `<= 0` (default) to disable scheduling.
     *   **`repeat`**: Number of cycles to record. `0` (default) repeats until profiling stops.
 
-    Each recorded cycle is written to its own trace file (subsequent cycles are suffixed with `_cycle<N>`). Backends other than `torch` ignore the schedule (stepping is a no-op).
 
 ## Examples
 
@@ -140,6 +139,24 @@ actor_rollout_ref:
 With the configuration above, within each profiled training step verl skips the first mini-batch, then runs two cycles of `wait(1) -> warmup(1) -> active(3)`, producing two trace files (the second suffixed with `_cycle1`). If a training step has fewer mini-batches than the schedule needs, only the mini-batches that were reached are recorded.
 
 `schedule` only applies to the training update loop (Actor RL update and SFT). It is a no-op for the rollout engine side, which uses `profile_token_start`/`profile_token_end` instead.
+
+## Output file naming
+
+Because profiling runs in every training process, each trace file is named so it can be
+attributed to a specific process without opening it. The stem is:
+
+```
+[<role>_][<scope>_]rank<r>[-of-<world>][_tp<..>-pp<..>-dp<..>-cp<..>]_pid<pid>_<timestamp>[_cycle<N>].json.gz
+```
+
+* **`role`**: the worker role (e.g. `actor`, `ref`, `value-model` for the critic), so results
+  from different roles at the same rank are distinguishable.
+* **`scope`**: the profiled region passed to `start_profile`/`annotate` (e.g. `e2e`); it is also
+  used as a sub-directory under `save_path`.
+* **`rank`/`world`**: the global `torch.distributed` rank and world size.
+* **`tp/pp/dp/cp`**: tensor/pipeline/data/context parallel ranks, included when Megatron's
+  parallel state is initialized (plain FSDP data parallelism only reports `rank`).
+* **`cycle<N>`**: added for the 2nd+ cycle of a scheduled run (see above).
 
 ## Visualization
 
