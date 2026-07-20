@@ -27,8 +27,13 @@ Other shard dims are strided in the flattened layout and raise NotImplementedErr
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 import torch.distributed as dist
+
+if TYPE_CHECKING:
+    from verl.workers.engine.spec import BlockPlacement
 
 _DTYPE_INT = {1: torch.uint8, 2: torch.int16, 4: torch.int32, 8: torch.int64}
 
@@ -173,7 +178,7 @@ def gather_dense_to_rank0(
 
 def gather_dense_blocks_to_rank0(
     local_val: torch.Tensor,
-    place,
+    place: BlockPlacement,
     group=None,
 ) -> torch.Tensor | None:
     """Assemble a full flat parameter on rank 0 from per-rank hyper-rectangular blocks.
