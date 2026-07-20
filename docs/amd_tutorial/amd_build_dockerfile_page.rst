@@ -1,4 +1,4 @@
-Getting started with AMD (ROCM Kernel)
+【Archived】Getting started with AMD (ROCM Kernel)
 =====================================================
 
 Last updated: 07/06/2025.

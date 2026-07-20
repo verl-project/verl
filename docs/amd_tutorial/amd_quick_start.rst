@@ -1,9 +1,9 @@
 Getting started with AMD ROCm
 =========================================
 
-Last updated: 05/17/2026.
+Last updated: 07/24/2026.
 
-Author: `Mingjie Lu <https://github.com/mingjielu>`_, `Xiaohong Kou <https://github.com/xiaohong42>`_, `Fuwei Yang <https://github.com/amd-fuweiy>`_
+Author: `Mingjie Lu <https://github.com/mingjielu>`_, `Xiaohong Kou <https://github.com/xiaohong42>`_, `Fuwei Yang <https://github.com/amd-fuweiy>`_, `Zhaodong Bing <https://github.com/aaab8b>`_
 
 Overview
 --------
@@ -15,21 +15,21 @@ verification, and training examples.
 Current software and hardware scope:
 
 - Runtime modes: fully supports **Fully Async** and **Colocate**.
-- Inference engine: **vLLM** validated; **SGLang** support is ongoing.
+- Inference engine: fully supports **vLLM** and **SGLang**.
 - Trainer backends: **FSDP**, **FSDP2** and **Megatron**.
 - GPU targets:
 
   - MI300X / MI325X (``gfx942``)
-  - MI355X (``gfx950``)
+  - MI350X / MI355X (``gfx950``)
 
 Software Baseline
 -----------------
 
 Use the following prebuilt image for tutorial and validation:
 
-- ``amdagi/verl-dev:rocm7.0.2_56_te2.10_vllm0.20_py312``
+- ``amdagi/verl-dev:rocm7.14_torch2.12_release_0724``
 
-The Docker build recipe remains unchanged:
+Or build from source:
 
 - `docker/rocm/Dockerfile.rocm <https://github.com/verl-project/verl/blob/main/docker/rocm/Dockerfile.rocm>`_
 
@@ -38,7 +38,7 @@ Host Prerequisites
 
 Before launching the container, ensure:
 
-1. AMD ROCm 7.0.2 host driver stack is installed and healthy.
+1. AMD ROCm 7.14 host driver stack is installed and healthy.
 2. Docker has access to ``/dev/kfd`` and ``/dev/dri``.
 3. Dataset and model storage paths are ready.
 
@@ -48,7 +48,7 @@ Launch Container
 .. code-block:: bash
 
     NAME=verl_release
-    DOCKER=amdagi/verl-dev:rocm7.0.2_56_te2.10_vllm0.20_py312
+    DOCKER=amdagi/verl-dev:rocm7.14_torch2.12_release_0724
 
     docker pull $DOCKER
 
@@ -87,50 +87,66 @@ Feature Support Matrix
    :header-rows: 1
 
    * - Category
-     - Status
      - Notes
    * - Runtime mode
-     - Fully supported
-     - Fully Async and Colocate are production-ready
+     - Fully Async, Colocate 
    * - Inference engine
-     - vLLM validated
-     - SGLang integration is ongoing
+     - vLLM, SGLang 
    * - Trainer backend
-     - Fully supported
-     - FSDP, Megatron
+     - FSDP, FSDP2, Megatron
    * - Hardware
-     - Fully supported
-     - MI300X / MI325X (gfx942), MI355X (gfx950)
+     - MI300X / MI325X (gfx942), MI350X/MI355X (gfx950)
 
 Example Workflow
 ----------------
 
-1) Colocate mode + FSDP (GRPO, Qwen3-8B)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. list-table:: 
+   :header-rows: 1
 
-For Qwen3-8B FSDP training, enable both parameter and optimizer offload to avoid OOM.
+   * - Runtime mode
+     - Inference engine
+     - Trainer backend
+     - Example scripts
+   * - Colocate
+     - vLLM
+     - FSDP
+     - `bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh <../../examples/grpo_trainer/run_qwen3_8b_fsdp.sh>`_
+   * - Colocate
+     - vLLM
+     - Megatron
+     - `bash examples/grpo_trainer/run_qwen3_5_35b_megatron.sh <../../examples/grpo_trainer/run_qwen3_5_35b_megatron.sh>`_
+   * - Fully Async
+     - vLLM
+     - FSDP2
+     -  `bash verl/experimental/fully_async_policy/shell/dapo_7b_math_fsdp2_4_4.sh <../../verl/experimental/fully_async_policy/shell/dapo_7b_math_fsdp2_4_4.sh>`_
+   * - Fully Async
+     - vLLM
+     - Megatron
+     -  `bash verl/experimental/fully_async_policy/shell/geo3k_qwen25vl_7b_megatron_4_4.sh <../../verl/experimental/fully_async_policy/shell/geo3k_qwen25vl_7b_megatron_4_4.sh>`_
+   * - Colocate
+     - SGLang
+     - FSDP
+     - `bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh <../../examples/grpo_trainer/run_qwen3_8b_fsdp.sh>`_ (vllm->sglang)
+   * - Colocate
+     - SGLang
+     - Megatron
+     - `bash examples/grpo_trainer/run_qwen3_8b_megatron.sh <../../examples/grpo_trainer/run_qwen3_8b_megatron.sh>`_ (vllm->sglang)
+   * - Fully Async
+     - SGLang
+     - FSDP2
+     -  `bash verl/experimental/fully_async_policy/shell/dapo_7b_math_fsdp2_4_4.sh <../../verl/experimental/fully_async_policy/shell/dapo_7b_math_fsdp2_4_4.sh>`_ (vllm->sglang)
+   * - Fully Async
+     - SGLang
+     - Megatron
+     -  `bash verl/experimental/fully_async_policy/shell/geo3k_qwen25vl_7b_megatron_4_4.sh <../../verl/experimental/fully_async_policy/shell/geo3k_qwen25vl_7b_megatron_4_4.sh>`_ (vllm->sglang)
+   
+   
 
-.. code-block:: bash
 
-    # Configure these in your launch script or Hydra overrides:
-    # actor_rollout_ref.actor.fsdp_config.param_offload=True
-    # actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
-    bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
+Known Issues
+----------------
+1. For qwen2.5-math-7b, update max_position_embeddings to 32768 in config.json after model download.
+2. ``PYTORCH_ALLOC_CONF=expandable_segments:True`` is set by default in ``Dockerfile.rocm`` to prevent out-of-memory (OOM). However, this setting may conflict with ``vllm_custom_all_reduce``, so we set ``vllm.disable_custom_all_reduce=True`` in ``config.yaml`` by default which will be removed in the future once ROCm resolves the conflict.
+3. ``attention_backend`` must be set to ``triton`` for SGLang.
+4. Several ROCm-specific pull requests for vLLM and SGLang are still pending upstream integration, so we currently incorporate the required patches directly within the Dockerfile. In the future, we intend to transition to stable, officially released versions.
 
-2) Colocate mode + Megatron (GRPO, Qwen3.5-35B)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. code-block:: bash
-
-    bash examples/grpo_trainer/run_qwen3_5-35b-megatron.sh
-
-3) Fully Async mode
-~~~~~~~~~~~~~~~~~~~
-
-``RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES`` and
-``RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES`` are no longer required in this release.
-
-.. code-block:: bash
-
-    # For qwen2.5-math-7b, update max_position_embeddings to 32768 in config.json after model download.
-    bash verl/experimental/fully_async_policy/shell/dapo_7b_math_fsdp2_4_4.sh

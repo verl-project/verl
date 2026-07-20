@@ -6,7 +6,7 @@ the ROCm software stack**. The NVIDIA images described in
 [`Dockerfile.rocm`](Dockerfile.rocm) instead.
 
 For an end-to-end walkthrough (build, run, and example PPO/GRPO commands), see
-the tutorial: [`docs/amd_tutorial/amd_build_dockerfile_page.rst`](../../docs/amd_tutorial/amd_build_dockerfile_page.rst).
+the tutorial: [`docs/amd_tutorial/amd_quick_start.rst`](../../docs/amd_tutorial/amd_quick_start.rst).
 
 > The other `Dockerfile.rocm*` / `Apptainerfile.rocm` files in this directory are
 > kept only as historical references for older verl releases (ROCm 6.x, pinned
@@ -26,39 +26,35 @@ Other architectures (e.g. `gfx90a` for MI200/MI250) can be built by overriding
 
 | Component | Version |
 | --------- | ------- |
-| ROCm | 7.0.2 |
+| ROCm | 7.14 |
 | Python | 3.12 |
-| PyTorch | 2.9.1 (ROCm 7.0.2 wheel) |
-| Triton | 3.5.1 |
-| vLLM | source @ `1ff9d3353` |
-| Flash Attention | ROCm fork (CK backend) @ `83f9e450` |
-| TransformerEngine | ROCm fork @ `386bd316` |
-| aiter | ROCm @ `45c428e54` |
-| Megatron-core | 0.16.0 |
-| Megatron-Bridge | 0.5.0 |
+| PyTorch | 2.12.0+rocm7.14 |
+| Triton | 3.7.0 |
+| vLLM | 0.22.1rc1 source @ `18d87a87d` |
+| SGLang | 0.5.15 source @ `0801cc05ed` |
+| Flash Attention | ROCm fork (CK backend) @ `v2.8.3` |
+| TransformerEngine |2.14.0 ROCm fork @ `e6ede467` |
+| aiter | ROCm @ `b5e03ed19` |
+| megatron-core | 0.18.0 |
+
 
 ## What the Image Contains
 
-Starting from a clean `ubuntu:22.04` base, `Dockerfile.rocm` installs:
+Starting from a base image  `rocm/primus:v26.4` , `Dockerfile.rocm` installs:
 
 **Prebuilt (downloaded), not compiled:**
-- ROCm 7.0.2 runtime + dev packages (via the `repo.radeon.com` apt repo)
-- `torch`, `apex`, `torchaudio`, `torchvision`, `triton` — prebuilt ROCm wheels
-  from `repo.radeon.com/rocm/manylinux/rocm-rel-7.0.2/`
+- ROCm 7.14 runtime + dev packages (via the `repo.radeon.com` apt repo)
+- `torch`, `apex`, `torchaudio`, `torchvision`, `triton` — prebuilt in base images.
+- Flash Attention, TransformerEngine (ROCm fork)
 
 **Built from source (pinned commits):**
-- Flash Attention (ROCm fork, CK backend)
-- TransformerEngine (ROCm fork)
 - vLLM
-- aiter
+- SGLang
 
 **Also installed:** `cupy-rocm`, `mbridge`, `megatron-core`, `megatron-bridge`,
 `transformers`, and the verl package itself.
 
-> Because Flash Attention / TransformerEngine / vLLM / aiter are compiled from
-> source for the selected GPU architectures, the first build is slow (often
-> 1-2+ hours). The image enables `ccache` (cached via a BuildKit cache mount)
-> so that subsequent rebuilds are faster.
+
 
 ## Building Locally
 
@@ -79,10 +75,9 @@ DOCKER_BUILDKIT=1 docker build \
 | Build arg | Default | Purpose |
 | --------- | ------- | ------- |
 | `GPU_ARCH` | `gfx942;gfx950` | GPU architectures to compile kernels for. Set to a single arch (e.g. `gfx942`) to roughly halve Flash Attention build time. |
-| `ROCM_VERSION` / `AMDGPU_VERSION` | `7.0.2` | ROCm / amdgpu apt repo version. Note: the prebuilt torch/triton/etc. wheel URLs in the Dockerfile are pinned to ROCm 7.0.2; changing this also requires updating those URLs. |
 | `PYTHON_VERSION` | `3.12` | Python version. Note: the prebuilt wheel URLs are pinned to the `cp312` ABI; changing this also requires updating those URLs. |
 | `MAX_JOBS` | `$(nproc)` | Parallel compile jobs. Lower it (e.g. `64`) if the vLLM build runs out of memory. |
-| `FA_TAG` / `TE_TAG` / `VLLM_TAG` / `AITER_TAG` | pinned | Source commits for the from-source components. |
+|`VLLM_TAG` / `AITER_TAG` | pinned | Source commits for the from-source components. |
 
 Example — build only for MI300 with a memory-safe job count:
 
@@ -95,6 +90,10 @@ DOCKER_BUILDKIT=1 docker build \
 ```
 
 ## Release History
+
+- 2026/07/20: ROCm 7.14 stack — torch==2.12.0, triton==3.7.0, vLLM @`18d87a87d`,   SGLang @`0801cc05ed`, 
+  Flash Attention (CK) @`v2.8.3`, TransformerEngine @`e6ede467`,
+  aiter @`b5e03ed19`, megatron-core==0.18.0; targets gfx942 / gfx950.
 
 - 2026/06/03: ROCm 7.0.2 stack — torch==2.9.1, triton==3.5.1, vLLM @`1ff9d3353`,
   Flash Attention (CK) @`83f9e450`, TransformerEngine @`386bd316`,
