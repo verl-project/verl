@@ -9,12 +9,14 @@ ARG TORCH_VERSION=2.11.0
 ARG TORCH_VISION_VERSION=0.26.0
 ARG TORCH_AUDIO_VERSION=2.11.0
 ARG TRANSFORMERS_VERSION=5.3.0
-ARG VLLM_VERSION=0.23.0
+ARG VLLM_VERSION=0.24.0
+ARG VLLM_OMNI_VERSION=0.24.0
 ARG TRL_VERSION=0.27.0
 ARG TRANSFORMER_ENGINE_VERSION=v2.15
 ARG FLASH_ATTENTION_VERSION=2.8.3
 ARG NSIGHT_VERSION=2025.6.1
 ARG MCORE_VERSION=core_v0.18.0
+ARG MEGATRON_BRIDGE_VERSION=0.5.0
 ARG VERL_VERSION=v0.7.1
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PIP_NO_CACHE_DIR=1
@@ -130,13 +132,8 @@ RUN apt-get update && \
 # PR's own changes, so it stays small and stable regardless of how the branch is rebased.
 #   #44483: illegal memory access during a partial wake_up (sleep mode).
 #   #45589: FlashInfer-TRTLLM MoE load OOM.
-RUN git clone https://github.com/vllm-project/vllm.git && cd vllm && \
-    git checkout v${VLLM_VERSION} && \
-    curl -fsSL https://github.com/vllm-project/vllm/pull/44483.diff -o /tmp/vllm-pr-44483.diff && \
-    git apply --3way --whitespace=nowarn /tmp/vllm-pr-44483.diff && \
-    curl -fsSL https://github.com/vllm-project/vllm/pull/45589.diff -o /tmp/vllm-pr-45589.diff && \
-    git apply --3way --whitespace=nowarn /tmp/vllm-pr-45589.diff && \
-    MAX_JOBS=256 pip install -e .
+RUN pip3 install --no-build-isolation vllm==${VLLM_VERSION} && \
+    pip3 install vllm-omni==0.24.0 -i https://pypi.org/simple/
 
 RUN pip3 install --no-deps trl==${TRL_VERSION}
 
@@ -146,7 +143,7 @@ RUN pip install transformers==${TRANSFORMERS_VERSION}
 
 RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git@main
 
-RUN pip install --no-deps megatron-bridge==0.5.0
+RUN pip install --no-deps megatron-bridge==${MEGATRON_BRIDGE_VERSION}
 
 RUN pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@${MCORE_VERSION}
 
