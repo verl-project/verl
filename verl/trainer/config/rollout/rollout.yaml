@@ -169,6 +169,21 @@ val_kwargs:
   # Whether to sample during training rollout. False uses greedy sampling.
   do_sample: False
 
+# Load balancer configuration for routing requests across inference replicas.
+router:
+
+  # Options: global_sticky_inflight (default), plugin_extension:
+  # - global_sticky_inflight: sticky session by request_id + least-inflight server selection.
+  # - plugin_extension: user-defined routing via external YAML (router_config_path).
+  router_strategy: global_sticky_inflight
+
+  # Path to an external YAML configuration file for the router strategy.
+  # Required when router_strategy == "plugin_extension".
+  # Example: "uni-agent/config/router.yaml"
+  # The YAML file must contain at minimum:
+  #   router_class: fully.qualified.ClassName
+  router_config_path: null
+
 # Multi-turn tool config.
 multi_turn:
 

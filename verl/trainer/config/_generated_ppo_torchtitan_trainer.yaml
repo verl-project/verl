@@ -284,6 +284,9 @@ actor_rollout_ref:
       temperature: 0
       'n': 1
       do_sample: false
+    router:
+      router_strategy: global_sticky_inflight
+      router_config_path: null
     multi_turn:
       _target_: verl.workers.config.MultiTurnConfig
       enable: false
