@@ -108,15 +108,18 @@ def load_veomni_optimizer(optimizer, device_id):
                         state[key] = value.to(device_id, non_blocking=True)
 
 
-def _map_moe_params_common(name, tensor, ep_rank):
-    num_experts_per_rank = tensor.size(0)
-    for i in range(num_experts_per_rank):
-        idx = ep_rank * num_experts_per_rank + i
+def _map_moe_params_common(name, tensor, expert_id_base):
+    for i in range(tensor.size(0)):
+        idx = expert_id_base + i
         new_key = name.replace("mlp.experts.", f"mlp.experts.{idx}.") + ".weight"
         yield new_key, tensor[i].to(get_device_id(), non_blocking=True)
 
 
-def default_moe_param_handler(name, tensor, ep_rank):
+def default_moe_param_handler(name, tensor, expert_id_base):
+    """Project a stacked expert tensor ``[k, ...]`` (dim 0 = a contiguous run of
+    experts) onto per-expert HF-named tensors. ``expert_id_base`` is the global
+    expert id of slice 0: an ep rank's local stack passes
+    ``ep_rank * experts_per_rank``; an already-global stack passes ``0``."""
     if "gate_up_proj" in name:
         gate, up = tensor.chunk(2, dim=1)
         params = {
@@ -127,8 +130,9 @@ def default_moe_param_handler(name, tensor, ep_rank):
         params = {name: tensor}
 
     for key, value in params.items():
-        yield from _map_moe_params_common(key, value, ep_rank)
+        yield from _map_moe_params_common(key, value, expert_id_base)
 
 
-# This is used to override the default mapping of MoE parameters
+# Overrides the default MoE parameter mapping per model_type. Handlers follow the
+# ``default_moe_param_handler`` contract: (name, stacked_tensor, expert_id_base).
 MOE_PARAM_HANDERS = {}

@@ -610,11 +610,22 @@ class VeOmniEngine(FSDPEngine):
         from ..spec import BlockPlacement, ShardSpec
 
         def _expert_to_hf(fqn, full_shape):
+            inner_shape = tuple(full_shape[1:])
+
             def to_hf(shards):
-                # block profile hands [full]; a flat Shard(0) degeneration would
-                # hand per-rank flat shards whose rank-order concat is the full.
-                full_flat = shards[0] if len(shards) == 1 else torch.cat([sh.reshape(-1) for sh in shards])
-                return list(process_func(fqn, full_flat.view(full_shape), ep_rank=0))
+                # Each element of ``shards`` is a contiguous run of experts along dim 0
+                # (the block profile hands ``[full]`` -- one run starting at expert 0;
+                # a flat Shard(0) degeneration hands rank-ordered per-rank runs). Feed
+                # every run straight to the handler with its starting global expert id;
+                # no concatenation, no full-stack materialization.
+                out = []
+                base = 0
+                for sh in shards:
+                    stack = sh.view(-1, *inner_shape)
+                    out.extend(process_func(fqn, stack, expert_id_base=base))
+                    base += stack.size(0)
+                assert base == full_shape[0], f"{fqn}: expert runs cover {base}/{full_shape[0]} experts"
+                return out
 
             return to_hf
 
@@ -693,11 +704,11 @@ class VeOmniEngine(FSDPEngine):
                     for src_ep_rank in range(ep_size):
                         tensor = unsharded_tensor if src_ep_rank == ep_rank else buffer
                         torch.distributed.broadcast(tensor, group_src=src_ep_rank, group=ps.ep_group)
-                        yield from process_func(name, tensor, ep_rank=src_ep_rank)
+                        yield from process_func(name, tensor, expert_id_base=src_ep_rank * tensor.size(0))
 
                 else:
                     if is_expert_layer:
-                        yield from process_func(name, unsharded_tensor, ep_rank=0)
+                        yield from process_func(name, unsharded_tensor, expert_id_base=0)
                     else:
                         yield name, unsharded_tensor
 
