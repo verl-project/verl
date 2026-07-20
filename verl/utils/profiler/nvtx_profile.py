@@ -137,6 +137,18 @@ class NsightSystemsProfiler(DistProfiler):
         if not self.discrete:
             get_platform().profiler_stop()
 
+    def step(self):
+        """No-op per-mini-batch step hook.
+
+        Nsight Systems profiling is controlled via start/stop and has no per-step schedule
+        to advance. It must still be defined here: without it, the dispatcher's
+        ``getattr(self._impl, "step", lambda: None)`` resolves to the inherited
+        ``DistProfiler.step`` (backend impls subclass ``DistProfiler`` but never run its
+        ``__init__``), which then reads dispatcher-only state such as ``_enable`` and raises
+        ``AttributeError``.
+        """
+        return
+
     def annotate(
         self,
         message: Optional[str] = None,
