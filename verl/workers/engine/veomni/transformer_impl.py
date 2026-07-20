@@ -629,13 +629,22 @@ class VeOmniEngine(FSDPEngine):
 
             return to_hf
 
+        def _is_ep_param(name, param):
+            # Structural check first: veomni's ParallelPlan.apply attaches
+            # ``spec_info`` (para_name="ep") to every expert-parallel-sliced param
+            # -- the sharding fact itself, not a naming convention. Params can lose
+            # the attribute across state_dict/key conversion, so fall back to the
+            # historical name match.
+            si = getattr(param, "spec_info", None)
+            if si is not None:
+                return si.para_name == "ep"
+            return "mlp.experts." in name and any(
+                p in name for p in ["down_proj", "gate_proj", "up_proj", "gate_up_proj"]
+            )
+
         def _gen():
             for name, param in params.items():
-                is_expert = (
-                    "mlp.experts." in name
-                    and any(p in name for p in ["down_proj", "gate_proj", "up_proj", "gate_up_proj"])
-                    and ps.ep_enabled
-                )
+                is_expert = ps.ep_enabled and _is_ep_param(name, param)
                 if param.is_floating_point() and param.dtype != torch.bfloat16:
                     # mixed-precision keeps fp32 master weights; the wire (and the
                     # rollout side) speak bf16, so cast before diffing.
