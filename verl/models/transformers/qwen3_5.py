@@ -278,9 +278,9 @@ def qwen3_5_gated_delta_net_forward(
                 if model_cu_seqlens_cpu is not None:
                     model_cu_seqlens_cpu = model_cu_seqlens_cpu + conv_prefix_len
                     model_cu_seqlens_cpu[0] = 0
-                mixed_qkv = _packed_causal_conv1d_fallback(
-                    self, mixed_qkv, model_cu_seqlens, model_cu_seqlens_cpu
-                )[..., conv_prefix_len:]
+                mixed_qkv = _packed_causal_conv1d_fallback(self, mixed_qkv, model_cu_seqlens, model_cu_seqlens_cpu)[
+                    ..., conv_prefix_len:
+                ]
             else:
                 mixed_qkv = _packed_causal_conv1d_fallback(self, mixed_qkv, model_cu_seqlens, model_cu_seqlens_cpu)
         else:

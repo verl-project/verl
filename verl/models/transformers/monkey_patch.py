@@ -514,8 +514,8 @@ def apply_monkey_patch(
         from verl.models.transformers.qwen3_5 import (
             fast_pos_embed_interpolate,
             forward_with_normal_backend,
-            qwen3_5_decoder_layer_forward,
             qwen3_5_base_forward,
+            qwen3_5_decoder_layer_forward,
             qwen3_5_gated_delta_net_forward,
         )
 
