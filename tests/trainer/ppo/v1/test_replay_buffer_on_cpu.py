@@ -79,6 +79,9 @@ def _make_rb(
     refill_fn=None,
     trainer_mode: str = "sync",
     filter_groups_metric: str | None = None,
+    train_batch_size: int = 2,
+    gen_batch_size: int = 1,
+    max_inflight_gen_batches: int = 1,
 ) -> ReplayBuffer:
     """Construct a ReplayBuffer with test-friendly defaults.
 
@@ -95,6 +98,9 @@ def _make_rb(
         poll_interval=poll_interval,
         refill_fn=refill_fn,
         filter_groups_metric=filter_groups_metric,
+        train_batch_size=train_batch_size,
+        gen_batch_size=gen_batch_size,
+        max_inflight_gen_batches=max_inflight_gen_batches,
     )
 
 
@@ -149,9 +155,8 @@ def _set_prompt_status(partition_id: str, uid: str, status: str, global_steps: i
     """Transition an existing prompt to a new status (e.g. running -> finished).
 
     Mirrors the rollout side flipping a GRPO group's status once it terminates.
-    The prompt key is rewritten in place; its trajectory values are untouched.
+    The prompt tag is updated in place; its trajectory values are untouched.
     """
-    tq.kv_clear(keys=[uid], partition_id=partition_id)
     tq.kv_put(
         key=uid,
         partition_id=partition_id,
@@ -296,6 +301,15 @@ def test_init_rejects_unknown_strategy():
     """max_off_policy_strategy must be one of {drop, wait}."""
     with pytest.raises(AssertionError, match="max off policy strategy"):
         _make_rb(max_off_policy_strategy="bogus")
+
+
+def test_init_rejects_non_positive_sync_dapo_inflight_limit():
+    with pytest.raises(ValueError, match="max_inflight_gen_batches"):
+        _make_rb(
+            refill_fn=lambda _n: None,
+            filter_groups_metric="acc",
+            max_inflight_gen_batches=0,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -1112,6 +1126,165 @@ def test_sync_dapo_refills_twice_and_clears_surplus(tq_init, partition_id):
         assert surplus_uid not in remaining
         assert _trajectory_key(surplus_uid, 0) not in remaining
         assert _trajectory_key(surplus_uid, 1) not in remaining
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_sync_dapo_does_not_refill_when_filtered_surplus_leaves_a_full_batch(tq_init, partition_id):
+    all_same = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[0.0, 0.0])
+    mixed = [PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[0.0, 1.0]) for _ in range(2)]
+    _produce(partition_id, [all_same, *mixed]).join_and_check()
+
+    refiller = FakeRefiller(partition_id, global_steps=1, sessions=2, rewards=[0.0, 1.0])
+    rb = _make_rb(
+        refill_fn=refiller,
+        filter_groups_metric="acc",
+        train_batch_size=3,
+    )
+    try:
+        batch, metrics = rb.sample(global_steps=1, partition_id=partition_id, batch_size=2)
+
+        assert _uids_of(batch.keys) == {spec.uid for spec in mixed}
+        assert refiller.calls == []
+        assert metrics["validation/filter_groups/evicted_samples"] == 1
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_sync_dapo_streams_refill_credit_with_bounded_inflight(tq_init, partition_id):
+    all_same = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[0.0, 0.0])
+    slow_valid = PromptSpec(uid=_uid(), status="running", sessions=2, rewards=[0.0, 1.0])
+    _produce(partition_id, [all_same, slow_valid]).join_and_check()
+
+    refiller = FakeRefiller(partition_id, global_steps=1, sessions=2, rewards=[0.0, 1.0])
+    rb = _make_rb(
+        max_off_policy_strategy="wait",
+        refill_fn=refiller,
+        filter_groups_metric="acc",
+        train_batch_size=2,
+        gen_batch_size=1,
+        max_inflight_gen_batches=1,
+    )
+    consumer = SampleConsumer(rb, partition_id, batch_size=2, global_steps=1)
+    try:
+        consumer.start()
+        deadline = time.time() + 5
+        while len(refiller.calls) < 2 and consumer.is_alive() and time.time() < deadline:
+            time.sleep(POLL_INTERVAL)
+
+        # One original prompt remains in flight, so the 2x credit is dispatched one slot at a time.
+        assert refiller.calls == [1, 1]
+        assert consumer.is_alive()
+
+        _set_prompt_status(partition_id, slow_valid.uid, "finished", global_steps=0)
+        batch = consumer.result_or_raise()
+
+        assert len(_uids_of(batch.keys)) == 2
+        assert all_same.uid not in _uids_of(batch.keys)
+        assert consumer.metrics is not None
+        assert consumer.metrics["validation/filter_groups/evicted_samples"] == 1
+        assert consumer.metrics["validation/filter_groups/discarded_surplus_samples"] == 1
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_sync_dapo_discards_unsent_credit_when_batch_fills(tq_init, partition_id):
+    all_same = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[0.0, 0.0])
+    slow_valid = PromptSpec(uid=_uid(), status="running", sessions=2, rewards=[0.0, 1.0])
+    _produce(partition_id, [all_same, slow_valid]).join_and_check()
+
+    refiller = FakeRefiller(partition_id, global_steps=1, sessions=2, rewards=[0.0, 1.0])
+
+    def refill_and_finish_original(num_prompts: int) -> int:
+        result = refiller(num_prompts)
+        _set_prompt_status(partition_id, slow_valid.uid, "finished", global_steps=0)
+        return result
+
+    rb = _make_rb(
+        refill_fn=refill_and_finish_original,
+        filter_groups_metric="acc",
+        train_batch_size=2,
+        gen_batch_size=1,
+        max_inflight_gen_batches=1,
+    )
+    try:
+        batch, metrics = rb.sample(global_steps=1, partition_id=partition_id, batch_size=2)
+
+        assert len(_uids_of(batch.keys)) == 2
+        assert all_same.uid not in _uids_of(batch.keys)
+        assert refiller.calls == [1]
+        assert metrics["validation/filter_groups/evicted_samples"] == 1
+        assert "validation/filter_groups/discarded_surplus_samples" not in metrics
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_sync_dapo_never_exceeds_inflight_limit(tq_init, partition_id):
+    all_same = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[0.0, 0.0])
+    original_running = PromptSpec(uid=_uid(), status="running", sessions=2, rewards=[0.0, 1.0])
+    _produce(partition_id, [all_same, original_running]).join_and_check()
+
+    refill_calls: list[int] = []
+    refill_specs: list[PromptSpec] = []
+
+    def delayed_refill(num_prompts: int) -> int:
+        specs = [
+            PromptSpec(uid=_uid(), status="running", sessions=2, global_steps=1, rewards=[0.0, 1.0])
+            for _ in range(num_prompts)
+        ]
+        _produce(partition_id, specs).join_and_check()
+        refill_specs.extend(specs)
+        refill_calls.append(num_prompts)
+        return num_prompts
+
+    def inflight_count() -> int:
+        prompt_tags = tq.kv_list(partition_id=partition_id).get(partition_id, {})
+        return sum(
+            tag.get("is_prompt", False) and tag.get("status") in {"pending", "running"} for tag in prompt_tags.values()
+        )
+
+    max_inflight_prompts = 2
+    rb = _make_rb(
+        refill_fn=delayed_refill,
+        filter_groups_metric="acc",
+        train_batch_size=2,
+        gen_batch_size=1,
+        max_inflight_gen_batches=1,
+    )
+    consumer = SampleConsumer(rb, partition_id, batch_size=2, global_steps=1)
+    try:
+        consumer.start()
+        deadline = time.time() + 5
+        while len(refill_calls) < 1 and consumer.is_alive() and time.time() < deadline:
+            assert inflight_count() <= max_inflight_prompts
+            time.sleep(POLL_INTERVAL)
+
+        assert refill_calls == [1]
+        deadline = time.time() + 2 * POLL_INTERVAL
+        while time.time() < deadline:
+            assert inflight_count() <= max_inflight_prompts
+            time.sleep(POLL_INTERVAL / 2)
+        assert refill_calls == [1]
+        assert inflight_count() == max_inflight_prompts
+
+        _set_prompt_status(partition_id, original_running.uid, "finished", global_steps=0)
+        deadline = time.time() + 5
+        while len(refill_calls) < 2 and consumer.is_alive() and time.time() < deadline:
+            assert inflight_count() <= max_inflight_prompts
+            time.sleep(POLL_INTERVAL)
+        assert refill_calls == [1, 1]
+        assert inflight_count() == max_inflight_prompts
+
+        for spec in refill_specs:
+            _set_prompt_status(partition_id, spec.uid, "finished", global_steps=1)
+        deadline = time.time() + 5
+        while consumer.is_alive() and time.time() < deadline:
+            assert inflight_count() <= max_inflight_prompts
+            time.sleep(POLL_INTERVAL)
+        batch = consumer.result_or_raise()
+
+        assert len(_uids_of(batch.keys)) == 2
+        assert all_same.uid not in _uids_of(batch.keys)
     finally:
         _clear_partition(partition_id)
 

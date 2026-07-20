@@ -34,33 +34,31 @@ class _CustomSampler:
 
 def _trainer_with_filter_groups(filter_groups: dict) -> _StubTrainer:
     trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.trainer_mode = "sync"
     trainer.config = OmegaConf.create(
         {
             "algorithm": {"filter_groups": filter_groups},
+            "data": {"train_batch_size": 64, "gen_batch_size": 8},
             "reward": {"reward_model": {"enable": False, "enable_resource_pool": False}},
+            "trainer": {
+                "v1": {
+                    "sync": {},
+                    "sampler": {
+                        "custom_sampler": None,
+                        "max_off_policy_threshold": 1,
+                        "max_off_policy_strategy": "drop",
+                        "sampler_kwargs": {},
+                    },
+                }
+            },
         }
     )
     return trainer
 
 
 def test_custom_sampler_skips_builtin_filter_groups_validation():
-    trainer = _StubTrainer.__new__(_StubTrainer)
-    trainer.trainer_mode = "sync"
-    trainer.config = OmegaConf.create(
-        {
-            "trainer": {
-                "v1": {
-                    "sync": {},
-                    "sampler": {
-                        "custom_sampler": {"path": "custom.py", "name": "CustomSampler"},
-                        "max_off_policy_threshold": 1,
-                        "max_off_policy_strategy": "drop",
-                        "sampler_kwargs": {},
-                    },
-                }
-            }
-        }
-    )
+    trainer = _trainer_with_filter_groups({"enable": True, "metric": "acc"})
+    trainer.config.trainer.v1.sampler.custom_sampler = {"path": "custom.py", "name": "CustomSampler"}
 
     with (
         patch("verl.trainer.ppo.v1.trainer_base.load_extern_type", return_value=_CustomSampler),
@@ -71,29 +69,38 @@ def test_custom_sampler_skips_builtin_filter_groups_validation():
     resolve_filter_groups_metric.assert_not_called()
     assert isinstance(sampler, _CustomSampler)
     assert "filter_groups_metric" not in sampler.kwargs
+    assert "train_batch_size" not in sampler.kwargs
+    assert "gen_batch_size" not in sampler.kwargs
+    assert "max_inflight_gen_batches" not in sampler.kwargs
 
 
-def test_builtin_filter_groups_warns_when_generation_limit_is_configured():
-    trainer = _trainer_with_filter_groups(
-        {"enable": True, "metric": "acc", "max_num_gen_batches": 10},
-    )
-
-    with patch("verl.trainer.ppo.v1.trainer_base.logger.warning") as warning:
-        metric = trainer._resolve_filter_groups_metric()
-
-    assert metric == "acc"
-    warning.assert_called_once_with(
-        "algorithm.filter_groups.max_num_gen_batches=%s is ignored by the built-in V1 ReplayBuffer; "
-        "refill continues until enough groups are sampleable.",
-        10,
-    )
-
-
-def test_builtin_filter_groups_does_not_warn_without_generation_limit():
+def test_builtin_filter_groups_uses_default_inflight_limit():
     trainer = _trainer_with_filter_groups({"enable": True, "metric": "acc"})
 
-    with patch("verl.trainer.ppo.v1.trainer_base.logger.warning") as warning:
-        metric = trainer._resolve_filter_groups_metric()
+    sampler = trainer._build_replay_buffer()
 
-    assert metric == "acc"
-    warning.assert_not_called()
+    assert sampler.filter_groups_metric == "acc"
+    assert sampler.train_batch_size == 64
+    assert sampler.gen_batch_size == 1
+    assert sampler.max_inflight_gen_batches == 1
+
+
+def test_builtin_filter_groups_forwards_configured_inflight_limit():
+    trainer = _trainer_with_filter_groups({"enable": True, "metric": "acc", "max_inflight_gen_batches": 3})
+
+    sampler = trainer._build_replay_buffer()
+
+    assert sampler.max_inflight_gen_batches == 3
+
+
+def test_builtin_filter_groups_warns_when_total_generation_limit_is_configured():
+    trainer = _trainer_with_filter_groups({"enable": True, "metric": "acc", "max_num_gen_batches": 10})
+
+    with patch("verl.trainer.ppo.v1.trainer_base.logger.warning") as warning:
+        trainer._build_replay_buffer()
+
+    warning.assert_called_once_with(
+        "algorithm.filter_groups.max_num_gen_batches=%s is ignored by the built-in V1 ReplayBuffer; "
+        "use max_inflight_gen_batches to bound concurrent Sync DAPO generation.",
+        10,
+    )

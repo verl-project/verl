@@ -162,7 +162,20 @@ class PPOTrainer(ABC):
         # Preserve the existing constructor contract for external samplers; custom implementations own
         # their filtering semantics and can consume algorithm.filter_groups through their own config.
         if sampler_cls is ReplayBuffer:
-            replay_buffer_kwargs["filter_groups_metric"] = self._resolve_filter_groups_metric()
+            filter_groups_metric = self._resolve_filter_groups_metric()
+            filter_groups = self.config.algorithm.get("filter_groups", None)
+            max_inflight_gen_batches = 1
+            if filter_groups_metric is not None:
+                max_inflight_gen_batches = filter_groups.get("max_inflight_gen_batches", 1)
+            train_batch_size = self.config.data.train_batch_size
+            replay_buffer_kwargs.update(
+                filter_groups_metric=filter_groups_metric,
+                train_batch_size=train_batch_size,
+                gen_batch_size=1
+                if filter_groups_metric is not None
+                else (self.config.data.get("gen_batch_size", None) or train_batch_size),
+                max_inflight_gen_batches=max_inflight_gen_batches,
+            )
         return sampler_cls(**replay_buffer_kwargs)
 
     def _resolve_filter_groups_metric(self) -> str | None:
@@ -187,7 +200,7 @@ class PPOTrainer(ABC):
         if max_num_gen_batches > 0:
             logger.warning(
                 "algorithm.filter_groups.max_num_gen_batches=%s is ignored by the built-in V1 ReplayBuffer; "
-                "refill continues until enough groups are sampleable.",
+                "use max_inflight_gen_batches to bound concurrent Sync DAPO generation.",
                 max_num_gen_batches,
             )
         return str(filter_metric)

@@ -103,12 +103,12 @@ class ReplayBuffer:
     |       sync       |   NO-OP  |    Evict ``k``; refill ``2k``    |   NO-OP  |
     |      async       |       All the same: Evict ``k``; refill ``k``.         |
 
-    In sync mode, DAPO is opt-in and trades generation time for training stability; refilling ``2k``
-    balances retry rounds against over-generation. Failure groups retain the standard sync behavior and remain
-    sampleable, avoiding refill-induced tail latency by default.
+    In sync mode, DAPO is opt-in and trades generation time for training stability. Each ``k`` evictions add
+    ``2k`` logical refill credits, but prompts are fetched only as bounded pending/running slots become available.
+    Terminal groups are filtered while other requests remain in flight. Once enough groups are sampleable, unsent
+    credits are discarded and already-dispatched requests are drained before returning the batch. Failure groups
+    retain the standard sync behavior and remain sampleable.
     In async mode, ``num_warmup_batches`` absorbs retry cost, so all three paths refill exactly ``k`` prompts.
-    ``algorithm.filter_groups.max_num_gen_batches`` is intentionally ignored; refill continues until enough groups
-    are sampleable.
 
     Args:
         trainer_mode (str): Trainer mode.
@@ -120,6 +120,9 @@ class ReplayBuffer:
         refill_fn (callable, optional): Trainer-injected function that submits an exact number of fresh prompts.
         filter_groups_metric (str, optional): DAPO group-filtering metric read from each trajectory's
             ``extra_fields.reward_extra_info``. ``None`` disables DAPO filtering.
+        train_batch_size (int, optional): Prompt count represented by one Sync DAPO in-flight batch.
+        gen_batch_size (int, optional): Dataloader fetch granularity for refill dispatches.
+        max_inflight_gen_batches (int): Maximum Sync DAPO prompt batches concurrently pending or running.
     """
 
     def __init__(
@@ -132,6 +135,9 @@ class ReplayBuffer:
         poll_interval: float = 2.0,
         refill_fn=None,
         filter_groups_metric: str | None = None,
+        train_batch_size: int | None = None,
+        gen_batch_size: int | None = None,
+        max_inflight_gen_batches: int = 1,
     ):
         self.trainer_mode = trainer_mode
         self.trainer_config = trainer_config
@@ -141,6 +147,9 @@ class ReplayBuffer:
         self.poll_interval = poll_interval
         self.refill_fn = refill_fn
         self.filter_groups_metric = filter_groups_metric
+        self.train_batch_size = train_batch_size
+        self.gen_batch_size = gen_batch_size
+        self.max_inflight_gen_batches = max_inflight_gen_batches
 
         assert isinstance(self.max_off_policy_threshold, int) and self.max_off_policy_threshold > 0, (
             f"Invalid max off policy threshold: {self.max_off_policy_threshold}, must be an integer greater than 0"
@@ -150,6 +159,9 @@ class ReplayBuffer:
         )
         if self.filter_groups_metric is not None and self.refill_fn is None:
             raise ValueError("Group filtering (filter_groups_metric) requires refill_fn to replace evicted groups")
+        if self.trainer_mode == "sync" and self.filter_groups_metric is not None:
+            if not isinstance(self.max_inflight_gen_batches, int) or self.max_inflight_gen_batches <= 0:
+                raise ValueError("max_inflight_gen_batches must be a positive integer")
         # partition_id => {key: tag}
         self.partitions: dict[str, dict[str, dict]] = defaultdict(dict)
         self.pending_keys: dict[str, set] = defaultdict(set)
@@ -378,16 +390,16 @@ class ReplayBuffer:
         selected_prompt_uids: list[str] = []
         partition_snapshot: dict[str, dict] = {}
         prompt_global_steps_snapshot: dict[str, int] = {}
+        sync_dapo = self._sync_dapo_enabled(partition_id)
+        refill_credit = 0
+        draining = False
+        max_inflight_prompts = 0
+        if sync_dapo:
+            max_inflight_prompts = self.max_inflight_gen_batches * self.train_batch_size
 
         while True:
             # Eviction, gating, and selection below must all use this snapshot.
             self._sync_metadata_from_transfer_queue()
-
-            if self._sync_dapo_enabled(partition_id) and (
-                self.pending_keys[partition_id] or self.running_keys[partition_id]
-            ):
-                time.sleep(self.poll_interval)
-                continue
 
             eviction_reasons = self._terminal_eviction_reasons(global_steps, partition_id)
             evicted_uids, stale_count, dapo_count, metrics = self._evict_terminal_groups(
@@ -395,16 +407,40 @@ class ReplayBuffer:
             )
             if evicted_uids:
                 _accumulate_eviction_metrics(eviction_metrics, metrics, stale_count)
-
-                # Only sync dapo refills double the evicted groups to balance between the retry
-                # times and batch size.
-                refill_count = len(evicted_uids) if self.trainer_mode != "sync" else 2 * dapo_count
-                if refill_count > 0 and self.refill_fn is not None:
-                    self.refill_fn(refill_count)
-                continue
+                if not sync_dapo:
+                    if self.refill_fn is not None:
+                        self.refill_fn(len(evicted_uids))
+                    continue
 
             sampleable_keys = self._sampleable_terminal_keys(global_steps, partition_id, eviction_reasons)
-            if self._has_enough_samples(global_steps, partition_id, batch_size, sampleable_keys):
+            has_enough_samples = (
+                len(sampleable_keys) >= batch_size
+                if sync_dapo
+                else self._has_enough_samples(global_steps, partition_id, batch_size, sampleable_keys)
+            )
+            inflight_count = len(self.pending_keys[partition_id]) + len(self.running_keys[partition_id])
+
+            if sync_dapo:
+                if has_enough_samples:
+                    # Stop speculative dispatch, then drain requests already running under this policy version.
+                    draining = True
+                    refill_credit = 0
+                elif not draining and dapo_count > 0:
+                    refill_credit += 2 * dapo_count
+
+                if not draining and refill_credit > 0:
+                    available_slots = max(0, max_inflight_prompts - inflight_count)
+                    dispatch_count = min(refill_credit, available_slots)
+                    assert self.gen_batch_size is not None
+                    dispatch_count -= dispatch_count % self.gen_batch_size
+                    if dispatch_count > 0:
+                        assert self.refill_fn is not None
+                        self.refill_fn(dispatch_count)
+                        refill_credit -= dispatch_count
+                        continue
+
+            can_select = has_enough_samples and (not sync_dapo or inflight_count == 0)
+            if can_select:
                 prompt_global_steps_snapshot = dict(self.prompt_global_steps[partition_id])
                 partition_snapshot = dict(self.partitions[partition_id])
                 sampleable_keys = sorted(
@@ -413,9 +449,8 @@ class ReplayBuffer:
                 )
                 selected_prompt_uids = sampleable_keys[:batch_size]
 
-                # Legacy sync DAPO truncates an over-generated batch. Clearing the equivalent TQ
-                # surplus keeps sync mode bufferless instead of carrying extra groups into later steps.
-                if self._sync_dapo_enabled(partition_id):
+                # Sync remains bufferless: all speculative requests are drained, then surplus is discarded.
+                if sync_dapo:
                     surplus_uids = set(sampleable_keys[batch_size:])
                     if surplus_uids:
                         self._clear_groups(partition_id, surplus_uids)

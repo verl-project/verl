@@ -49,11 +49,14 @@ class FilterGroupsConfig(BaseConfig):
         enable (bool): Whether to enable filter groups.
         metric (Optional[str]): Metric to use for filtering: "acc", "score", "seq_reward", "seq_final_reward", etc.
         max_num_gen_batches (int): Non-positive values mean no upper limit.
+        max_inflight_gen_batches (int): Maximum Sync DAPO prompt batches concurrently pending or running,
+            measured in ``data.train_batch_size`` units.
     """
 
     enable: bool = False
     metric: Optional[str] = None
     max_num_gen_batches: int = 0
+    max_inflight_gen_batches: int = 1
 
 
 @dataclass
