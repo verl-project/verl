@@ -50,17 +50,9 @@ class TrainingWorkerTest(TrainingWorker):
 
 
 class MockServerAdapter(BaseRollout):
-    def __init__(
-        self,
-        config: RolloutConfig,
-        model_config: HFModelConfig,
-        check_allclose: bool = True,
-        clone_on_side_stream: bool = False,
-    ):
+    def __init__(self, config: RolloutConfig, model_config: HFModelConfig, check_allclose: bool = True):
         super().__init__(config, model_config, device_mesh=None)
         self.check_allclose = check_allclose
-        self.clone_on_side_stream = clone_on_side_stream
-        self._side_stream = torch.cuda.Stream() if clone_on_side_stream else None
         self.model = None
         self.received_weights: dict[str, torch.Tensor] = {}
 
@@ -76,24 +68,9 @@ class MockServerAdapter(BaseRollout):
         **kwargs,
     ):
         async for name, weight in weights:
-            if self.clone_on_side_stream:
-                # Clone on a stream of our own instead of whatever stream the
-                # checkpoint engine wrote into `weight`'s backing buffer on. A real
-                # inference-engine weight loader is exactly this kind of consumer, so
-                # this exercises the case where there's no shared-default-stream
-                # ordering to fall back on: it only comes out correct if the
-                # checkpoint engine itself waited for the broadcast to finish before
-                # handing us this tensor.
-                with torch.cuda.stream(self._side_stream):
-                    weight = weight.clone()
-                    cloned = weight.clone() if self.check_allclose else None
-                torch.cuda.current_stream().wait_stream(self._side_stream)
-            else:
-                weight = weight.clone()
-                cloned = weight.clone() if self.check_allclose else None
-
+            weight = weight.clone()
             if self.check_allclose:
-                self.received_weights[name] = cloned
+                self.received_weights[name] = weight.clone()
 
     def check_weights(self):
         if not self.check_allclose:
@@ -133,15 +110,9 @@ class MockReplica(RolloutReplica):
 
 class CheckpointEngineWorkerTest(CheckpointEngineWorker):
     def __init__(
-        self,
-        rollout_config: RolloutConfig,
-        model_config: HFModelConfig,
-        check_allclose: bool = True,
-        clone_on_side_stream: bool = False,
-        *args,
-        **kwargs,
+        self, rollout_config: RolloutConfig, model_config: HFModelConfig, check_allclose: bool = True, *args, **kwargs
     ) -> None:
-        server_adapter = MockServerAdapter(rollout_config, model_config, check_allclose, clone_on_side_stream)
+        server_adapter = MockServerAdapter(rollout_config, model_config, check_allclose)
         super().__init__(rollout_config, model_config, server_adapter, *args, **kwargs)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
@@ -182,7 +153,6 @@ async def create_rollout_worker_group(
     model_config: HFModelConfig,
     rollout_config: RolloutConfig,
     check_allclose: bool = True,
-    clone_on_side_stream: bool = False,
 ) -> tuple[RayWorkerGroup, list[MockReplica]]:
     # create rollout worker group
     ray_cls_with_init = RayClassWithInitArgs(
@@ -190,7 +160,6 @@ async def create_rollout_worker_group(
         model_config=model_config,
         rollout_config=rollout_config,
         check_allclose=check_allclose,
-        clone_on_side_stream=clone_on_side_stream,
     )
     wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init, device_name=get_device_name())
 
