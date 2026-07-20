@@ -73,7 +73,7 @@ Last updated: 05/13/2026.
 
 **解决方案**：检查驱动安装状态和 ASCEND_RT_VISIBLE_DEVICES 设置
 
-### Q2: "KeyError: decoder.layers.0.self_attention.q_layernorm.weight"
+### Q2： "KeyError: decoder.layers.0.self_attention.q_layernorm.weight"
 
 **原因**：MindSpeed版本过低
 
@@ -188,11 +188,11 @@ Last updated: 05/13/2026.
 参考资料
 --------
 
-- `NPU 性能优化指南 <../perf/perf_tuning_on_ascend.rst>`_
-- `NPU 快速开始指南 <../start/install.rst>`_
+- `NPU 性能优化指南 <../dev_guide/performance/perf_tuning_on_ascend.rst>`_
+- `NPU 快速开始指南 <../get_start/quick_start.rst>`_
 - `NPU CI 指南 <../contribution_guide/ascend_ci_guide_zh.rst>`_
 - Ascend NPU 文档: https://www.hiascend.com/document
-- CANN 工具包文档： https://www.hiascend.com/software/cann
+- CANN 工具包文档: https://www.hiascend.com/software/cann
 
 获取更多帮助
 ------------

@@ -13,12 +13,17 @@
 # limitations under the License.
 
 
+from .npu_vllm_patch import apply_npu_vllm_patches
 from .utils import TensorLoRARequest, VLLMHijack, is_version_ge
 
 # The contents of vllm/patch.py should not be imported here, because the contents of
 # patch.py should be imported after the vllm LLM instance is created. Therefore,
 # wait until you actually start using it before importing the contents of
 # patch.py separately.
+
+# Apply NPU-specific vLLM patches when this module is imported.
+# Remove this when https://github.com/vllm-project/vllm-ascend/issues/5915 is fixed.
+apply_npu_vllm_patches()
 
 __all__ = [
     "TensorLoRARequest",

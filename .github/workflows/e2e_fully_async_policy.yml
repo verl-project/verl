@@ -133,7 +133,7 @@ jobs:
 
   # Test Megatron strategy
   e2e_fully_async_policy_megatron:
-    needs: setup
+    needs: [setup, e2e_fully_async_policy_fsdp2]
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 10 # Increase timeout for async training
     env:

@@ -2,7 +2,7 @@
 
 Last updated: 05/14/2026.
 
-### Table 1 RL Algorithms
+## Table 1 RL Algorithms
 
 | No. | model | algorithm | download link | actor.strategy | rollout.name | shell location | Usage Guide | hardware |
 |---|---------------------|------------|------|------------|-----------|------------------------------|------------|-----------------------------------|
@@ -43,9 +43,9 @@ Last updated: 05/14/2026.
 | 35 | Qwen3-VL-30B-A3B-Instruct | DAPO | [30B](https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct) | FSDP2 | vllm | [`link`](https://github.com/verl-project/verl-recipe/blob/main/dapo/run_dapo_qwen3_vl_30b_fsdp2_npu.sh) | - | Atlas 200T A2 Box16, Atlas 800T A3 |
 | 36 | Qwen3-VL-30B-A3B-Instruct | GRPO (fully_async) | [30B](https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct) | Megatron | vllm | [`link`](https://github.com/verl-project/verl/blob/main/verl/experimental/fully_async_policy/shell/geo3k_qwen3vl_30b_megatron_6_2_npu_async.sh) | - | Atlas 200T A2 Box16, Atlas 800T A3 |
 | 37 | Qwen3.5-27B | GRPO | [27B](https://huggingface.co/Qwen/Qwen3.5-27B) | FSDP2 | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_5_27b_fsdp.sh) | - | Atlas 900 A2 PODc, Atlas 200T A2 Box16, Atlas 800T A3 |
-| 38 | Qwen3.5-27B | GRPO | [27B](https://huggingface.co/Qwen/Qwen3.5-27B) | FSDP(MindSpeed-MM) | vllm | [`link`](https://github.com/verl-project/verl-ascend-recipe/tree/main/grpo_mindspeed_mm/run_qwen3_5-27b_npu.sh) | - | Atlas 200T A2 Box16, Atlas 800T A3 |
+| 38 | Qwen3.5-27B | GRPO | [27B](https://huggingface.co/Qwen/Qwen3.5-27B) | FSDP(MindSpeed-MM) | vllm | [`link`](https://github.com/verl-project/verl-ascend-recipe/blob/main/grpo_mindspeed_mm/run_qwen3_5-27b_npu.sh) | - | Atlas 200T A2 Box16, Atlas 800T A3 |
 | 39 | Qwen3.5-35B-A3B | GRPO | [35B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B) | FSDP2 | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_5_35b_fsdp.sh) | - | Atlas 200T A2 Box16, Atlas 800T A3 |
-| 40 | Qwen3.5-35B-A3B | GRPO | [35B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B) | FSDP2(MindSpeed-MM) | vllm | [`link`](https://github.com/verl-project/verl-ascend-recipe/tree/main/grpo_mindspeed_mm/run_qwen3_5-35b_npu.sh) | - | Atlas 200T A2 Box16, Atlas 800T A3 |
+| 40 | Qwen3.5-35B-A3B | GRPO | [35B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B) | FSDP2(MindSpeed-MM) | vllm | [`link`](https://github.com/verl-project/verl-ascend-recipe/blob/main/grpo_mindspeed_mm/run_qwen3_5-35b_npu.sh) | - | Atlas 200T A2 Box16, Atlas 800T A3 |
 | 41 | Qwen3.5-122B-A10B | GRPO | [122B](https://huggingface.co/Qwen/Qwen3.5-122B-A10B) | Megatron | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_5_122b_a10b_megatron.sh) | [`link`](examples/qwen3_5_megatron_npu.md) | Atlas 800T A3 |
 | 42 | Qwen3-Next-80B-A3B-Instruct | GRPO | [80B](https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct) | FSDP2 | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_next_80b_a3b_fsdp.sh) | - | Atlas 900 A2 PODc, Atlas 200T A2 Box16, Atlas 800T A3 |
 | 43 | DeepSeek-V3 | DAPO | [671B](https://huggingface.co/deepseek-ai/DeepSeek-V3-Base/) | Megatron | vllm | [`link`](https://github.com/verl-project/verl-ascend-recipe/blob/main/dapo/DeepSeek-V3/scripts/run_dapo_deepseekv3_671b_megatron_8k_npu.sh) | [`link`](https://github.com/verl-project/verl-ascend-recipe/blob/main/dapo/DeepSeek-V3/README.md) | Atlas 800T A3 |
@@ -53,7 +53,7 @@ Last updated: 05/14/2026.
 | 45 | Qwen3-30B-A3B | GRPO | [30B](https://huggingface.co/Qwen/Qwen3-30B-A3B) | VeOmni | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_30b_veomni.sh) | - | Atlas 800T A3 |
 | 46 | Qwen3-VL-30B-A3B-Instruct | GRPO | [30B](https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct) | VeOmni | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_vl_30b_moe_veomni.sh) | - | Atlas 800T A3 |
 
-### Table 2 SFT Algorithms
+## Table 2 SFT Algorithms
 
 | No. | model | algorithm | download link | actor.strategy | shell location | hardware |
 |-----|-------|-----------|---------------|----------------|----------------|----------|

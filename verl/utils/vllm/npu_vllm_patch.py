@@ -49,7 +49,14 @@ def patch_vllm013_rotary_emb():
     ApplyRotaryEmb.__init__ = vllm013_npu_rotary_embedding_init_impl
 
 
-if is_torch_npu_available(check_device=False):
+def apply_npu_vllm_patches() -> None:
+    """Apply NPU-specific vLLM patches for weight loading and rotary embedding.
+
+    Must be called before the vLLM engine is created.
+    """
+    if not is_torch_npu_available(check_device=False):
+        return
+
     import vllm
     from packaging import version
 
