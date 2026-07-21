@@ -636,44 +636,56 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
 
         nan_group: list[_RebuildEntry] = []  # rebuild-profile params batched per gather_group
         # sender-side scoped conversion queue: (pg, spec, dtype_str, counts, idx_concat, val_concat)
-        scoped_group: list = []
-        scoped_bytes = 0  # this rank's queued payload; bounds rank-0 gather buffers at high density
+        # Unified sender queues, ONE PER GATHER GROUP (entries keep the same slot-keyed
+        # shape everywhere; separate queues stop pg alternation from shattering batches):
+        # id(pg) -> [pg, entries, queued_bytes]; entry = (slots, dtype_str, counts, idx, val)
+        scoped_queues: dict = {}
 
-        def _flush_scoped() -> None:
-            """One gather round for the unified queue: every queued entry already
-            carries FINAL-coordinate payloads (identity specs: one slot = the param
-            itself; converter specs: the spec's hf_slots) -- rank 0 never converts,
-            it assembles slot-keyed pieces straight into flushes."""
-            nonlocal scoped_group, scoped_bytes
-            scoped_bytes = 0
-            if not scoped_group:
+        def _flush_scoped(q: list) -> None:
+            """One gather round for one group's queue: every entry already carries
+            FINAL-coordinate payloads (identity specs: one slot = the param itself;
+            converter specs: the spec's hf_slots) -- rank 0 never converts, it
+            assembles slot-keyed pieces straight into flushes."""
+            pg, entries, _qb = q
+            q[1], q[2] = [], 0
+            if not entries:
                 return
-            pg = scoped_group[0][0]
             if pg is None:
                 # unsharded/replicated params: rank 0's local delta already is global
                 if is_r0:
-                    for _pg, slots, dtype_str, counts, idx, val in scoped_group:
+                    for slots, dtype_str, counts, idx, val in entries:
                         off = 0
                         for (name, shape), c in zip(slots, counts.tolist(), strict=True):
                             _consume(
                                 name, dtype_str, tuple(shape), _prodshape(shape), idx[off : off + c], val[off : off + c]
                             )
                             off += c
-                scoped_group = []
                 return
-            dev = scoped_group[0][4].device
-            counts_concat = torch.cat([c for _, _, _, c, _, _ in scoped_group]).to(dev)
-            idx_concat = torch.cat([i for _, _, _, _, i, _ in scoped_group])
-            val_concat = torch.cat([v for _, _, _, _, _, v in scoped_group])
+            dev = entries[0][3].device
+            counts_concat = torch.cat([c for _, _, c, _, _ in entries]).to(dev)
+            idx_concat = torch.cat([i for _, _, _, i, _ in entries])
+            val_concat = torch.cat([v for _, _, _, _, v in entries])
             gathered = gather_v_batched_to_rank0(idx_concat, val_concat, counts_concat, group=pg)
             if is_r0 and gathered is not None:
                 slot_i = 0
-                for _pg, slots, dtype_str, counts, _i, _v in scoped_group:
+                for slots, dtype_str, counts, _i, _v in entries:
                     for name, shape in slots:
                         aidx, aval = gathered[slot_i]
                         slot_i += 1
                         _consume(name, dtype_str, tuple(shape), _prodshape(shape), aidx, aval)
-            scoped_group = []
+
+        def _enqueue_scoped(pg, slots, dtype_str, counts, idx, val) -> None:
+            q = scoped_queues.get(id(pg))
+            if q is None:
+                q = [pg, [], 0]
+                scoped_queues[id(pg)] = q
+            q[1].append((slots, dtype_str, counts, idx, val))
+            q[2] += int(idx.nbytes) + int(val.nbytes)
+            world = torch.distributed.get_world_size(pg) if pg is not None else 1
+            # flush on entry count OR payload bytes (rank-0 gather transient is
+            # world x the largest rank blob, hence the /world scaling)
+            if len(q[1]) >= max(batch_k, 1) or q[2] >= self.bucket_size // max(world, 1):
+                _flush_scoped(q)
 
         def _consume_hf(hf_name: str, hf_tensor: torch.Tensor) -> None:
             nonlocal total_elems
@@ -866,17 +878,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                 else:
                     my_idx = torch.empty(0, dtype=torch.int32, device=local.device)
                     my_val = torch.empty(0, dtype=local.dtype, device=local.device)
-                if scoped_group and scoped_group[0][0] is not pg:
-                    _flush_scoped()
-                scoped_group.append((pg, spec.hf_slots, str(local.dtype).replace("torch.", ""), counts, my_idx, my_val))
-                scoped_bytes += int(my_idx.nbytes) + int(my_val.nbytes)
-                # flush on param count OR payload bytes. Rank 0's padded gather buffers
-                # are world x the LARGEST rank blob, so the per-rank threshold must be
-                # divided by the group size to bound the rank-0 transient by bucket_size.
-                if len(scoped_group) >= max(batch_k, 1) or scoped_bytes >= self.bucket_size // max(
-                    torch.distributed.get_world_size(pg), 1
-                ):
-                    _flush_scoped()
+                _enqueue_scoped(pg, spec.hf_slots, str(local.dtype).replace("torch.", ""), counts, my_idx, my_val)
                 continue
 
             if spec.to_hf is not None:
@@ -900,17 +902,11 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             gidx = (translate_flat_indices(lidx, place) if lidx.numel() else lidx).to(torch.int32)
             counts = torch.zeros(1, dtype=torch.int64)
             counts[0] = int(gidx.numel())
-            if scoped_group and scoped_group[0][0] is not pg:
-                _flush_scoped()
-            scoped_group.append(
-                (pg, [(name, tuple(spec.full_shape))], str(local.dtype).replace("torch.", ""), counts, gidx, lval)
+            _enqueue_scoped(
+                pg, [(name, tuple(spec.full_shape))], str(local.dtype).replace("torch.", ""), counts, gidx, lval
             )
-            scoped_bytes += int(gidx.nbytes) + int(lval.nbytes)
-            if len(scoped_group) >= max(batch_k, 1) or scoped_bytes >= self.bucket_size // max(
-                torch.distributed.get_world_size(pg) if pg is not None else 1, 1
-            ):
-                _flush_scoped()
-        _flush_scoped()
+        for q in scoped_queues.values():
+            _flush_scoped(q)
         _flush_nan_group()
 
         self._shard_seeded = True
