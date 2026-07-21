@@ -199,3 +199,8 @@ def test_set_router_replay_data_reuses_cached_recorded_router_indices(monkeypatc
     assert torch.equal(routers[5].target_topk_idx, routed_experts[0, :, 1, :])
     assert routers[0].target_topk_idx is None
     assert routers[1].target_topk_idx is None
+
+
+def test_set_router_replay_data_rejects_missing_routes():
+    with pytest.raises(RuntimeError, match="requires routed_experts"):
+        rr_utils.set_router_replay_data(None, torch.ones(1, 1, dtype=torch.bool), _config())
