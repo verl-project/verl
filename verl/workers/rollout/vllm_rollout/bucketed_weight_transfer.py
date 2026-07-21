@@ -265,8 +265,7 @@ class BucketedWeightReceiver:
         Receive weights from sender and process each bucket via callback.
 
         Args:
-            on_bucket_received: Callback function called per bucket as
-                on_bucket_received(weights, is_last=metadata["is_last"]).
+            on_bucket_received: Callback function(weights: list[(name, tensor)]) called per bucket.
         """
         try:
             self._init_socket()
@@ -287,7 +286,7 @@ class BucketedWeightReceiver:
                     if self.use_shm:
                         tensor = tensor.to(self.device)
                     weights.append((name, tensor))
-                on_bucket_received(weights, is_last=metadata["is_last"])
+                on_bucket_received(weights)
                 get_torch_device().synchronize()
                 self.socket.send(b"")
                 del weights, tensor
@@ -304,10 +303,12 @@ class BucketedWeightReceiver:
 
             while True:
                 metadata = self.socket.recv_pyobj()
+                tensor = None
                 for name, meta in metadata["bucket_meta"].items():
                     shape, dtype, offset, handle = meta["shape"], meta["dtype"], meta["offset"], meta["handle"]
                     if handle is not None:
-                        yield name, rebuild_ipc(handle, self.device.index)
+                        tensor = rebuild_ipc(handle, self.device.index)
+                        yield name, tensor
                         continue
                     size = dtype.itemsize * shape.numel()
                     tensor = self.buffer[offset : offset + size].view(dtype=dtype).view(shape)
@@ -316,6 +317,7 @@ class BucketedWeightReceiver:
                     yield name, tensor
                 get_torch_device().synchronize()
                 self.socket.send(b"")
+                tensor = None
                 if metadata["is_last"]:
                     break
         finally:

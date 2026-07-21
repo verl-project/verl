@@ -80,16 +80,6 @@ def set_death_signal():
         os.kill(os.getpid(), signal.SIGKILL)
 
 
-def patch_vllm_layerwise_reload_skip_tensors():
-    """Skip derived runtime caches during vLLM layerwise reload."""
-    try:
-        from vllm.model_executor.model_loader.reload.meta import SKIP_TENSORS
-    except ImportError:
-        return
-
-    SKIP_TENSORS.add("cos_sin_cache")
-
-
 def get_device_uuid(device_id: int) -> str:
     from vllm.platforms import current_platform
 
@@ -170,7 +160,6 @@ class vLLMColocateWorkerExtension:
 
     def __new__(cls, **kwargs):
         set_death_signal()
-        patch_vllm_layerwise_reload_skip_tensors()
 
         if os.environ.get("VERL_FULL_DETERMINISM", "0") == "1":
             from verl.workers.engine.utils import enable_full_determinism
@@ -270,13 +259,6 @@ class vLLMColocateWorkerExtension:
         return mapped_names[0] if mapped_names else None
 
     @staticmethod
-    def _iter_model_weight_name_candidates(weight_name: str):
-        """Yield the incoming name and its stripped `.base_layer` variant, if any."""
-        yield weight_name
-        if ".base_layer." in weight_name:
-            yield remove_base_layer_from_name(weight_name)
-
-    @staticmethod
     def _is_leaf_weight_or_bias_name(weight_name: str) -> bool:
         leaf = weight_name.rsplit(".", 1)[-1]
         return leaf in {"weight", "bias"} or leaf.endswith(("_weight", "_bias"))
@@ -294,6 +276,20 @@ class vLLMColocateWorkerExtension:
         if cls._is_leaf_weight_or_bias_name(weight_name):
             return weight_name
         return remove_base_layer_from_name(weight_name)
+
+    @staticmethod
+    def _adapt_weight_names_for_model(model, weights):
+        """Strip ``.base_layer`` from sync names for models without LoRA wrappers.
+
+        Base-sync names are resolved against the main model's namespace, which is
+        LoRA-wrapped when the engine runs with ``enable_lora``; auxiliary models
+        such as the MTP drafter are never wrapped, so the wrapper segment must be
+        dropped before their ``load_weights`` (their fused-expert mapping would
+        otherwise produce names like ``experts.w13_base_layer.weight``).
+        """
+        if any(".base_layer." in name for name, _ in model.named_parameters(remove_duplicate=False)):
+            return weights
+        return [(name.replace(".base_layer.", "."), tensor) for name, tensor in weights]
 
     @staticmethod
     def _iter_packed_owner_weight_names(model, weight_name: str):
@@ -323,68 +319,44 @@ class vLLMColocateWorkerExtension:
         model,
         weight_name: str,
         *,
-        model_param_names: set[str],
-    ) -> tuple[str, bool]:
-        """Map an incoming sync name onto the live vLLM parameter namespace."""
+        model_weight_names: set[str],
+    ) -> str:
+        """Map an incoming sync name onto the live vLLM parameter or buffer namespace."""
 
         def _candidate_exists(candidate_name: str) -> bool:
             mapped_name = self._map_weight_name_for_vllm(model, candidate_name)
-            if mapped_name is not None and mapped_name in model_param_names:
+            if mapped_name is not None and mapped_name in model_weight_names:
                 return True
 
             for packed_name in self._iter_packed_owner_weight_names(model, candidate_name):
                 mapped_packed_name = self._map_weight_name_for_vllm(model, packed_name)
-                if mapped_packed_name is not None and mapped_packed_name in model_param_names:
+                if mapped_packed_name is not None and mapped_packed_name in model_weight_names:
                     return True
 
             return False
 
         stripped_name = self._strip_bridge_base_layer_from_expert_alias(weight_name)
         if stripped_name != weight_name:
-            return stripped_name, True
-
-        candidate_names = tuple(self._iter_model_weight_name_candidates(weight_name))
-
-        # First prefer names that already match the exposed vLLM parameter tree,
-        # including packed owners such as qkv_proj for incoming q_proj aliases.
-        for candidate_name in candidate_names:
-            if _candidate_exists(candidate_name):
-                return candidate_name, candidate_name != weight_name
+            return stripped_name
 
         # Only leaf parameters participate in the generic `.base_layer` toggle.
         # Non-leaf expert aliases are handled above and then delegated to vLLM.
-        for candidate_name in candidate_names:
-            if not self._is_leaf_weight_or_bias_name(candidate_name):
-                continue
+        if self._is_leaf_weight_or_bias_name(weight_name):
+            return resolve_base_layer_name(weight_name, exists=_candidate_exists)
 
-            resolved_name = resolve_base_layer_name(
-                candidate_name,
-                exists=_candidate_exists,
-            )
-            if resolved_name != candidate_name:
-                return resolved_name, candidate_name != weight_name
-
-        return weight_name, False
+        return weight_name
 
     def _iter_normalized_base_sync_weights(self, weights, clone_tensors: bool = False):
         model = self.model_runner.model
-        model_param_names = {name for name, _ in model.named_parameters(remove_duplicate=False)}
+        model_weight_names = {name for name, _ in model.named_parameters(remove_duplicate=False)}
+        model_weight_names.update(name for name, _ in model.named_buffers())
 
-        alias_rewrite_count = 0
-        added_count = 0
-        removed_count = 0
         for name, tensor in weights:
-            normalized_name, used_alias_rewrite = self._resolve_weight_name_for_vllm(
+            normalized_name = self._resolve_weight_name_for_vllm(
                 model,
                 name,
-                model_param_names=model_param_names,
+                model_weight_names=model_weight_names,
             )
-            if used_alias_rewrite:
-                alias_rewrite_count += 1
-            if ".base_layer." not in name and ".base_layer." in normalized_name:
-                added_count += 1
-            elif ".base_layer." in name and ".base_layer." not in normalized_name:
-                removed_count += 1
 
             if clone_tensors:
                 # vLLM layerwise reload may retain references to incoming tensors
@@ -394,31 +366,24 @@ class vLLMColocateWorkerExtension:
 
             yield normalized_name, tensor
 
-        if alias_rewrite_count or added_count or removed_count:
-            logger.info(
-                "Normalized base-sync weight names for vLLM: rewrote %d model-specific aliases, "
-                "added '.base_layer' to %d weights, and removed it from %d weights.",
-                alias_rewrite_count,
-                added_count,
-                removed_count,
-            )
-
-    def _normalize_base_sync_weight_names(
-        self,
-        weights: list[tuple[str, torch.Tensor]],
-    ) -> list[tuple[str, torch.Tensor]]:
-        return list(self._iter_normalized_base_sync_weights(weights))
-
     def _maybe_reload_standard_weights_from_ipc(self, receiver) -> bool:
-        reload_weights = getattr(self, "reload_weights", None)
-        if not callable(reload_weights):
+        from vllm.config import set_current_vllm_config
+
+        # vLLM's layerwise reload targets only the main model; the fallback also syncs the MTP drafter.
+        if self._use_mtp_drafter_weight_sync():
+            return False
+
+        # Platform workers without the layerwise reload API (e.g. vllm-ascend's
+        # NPUWorker) fall back to bucketed load_weights.
+        if not callable(getattr(self, "reload_weights", None)):
             return False
 
         logger.info("Loading standard weights via vLLM reload_weights (async)")
-        reload_weights(
-            weights_iterator=self._iter_normalized_base_sync_weights(receiver.iter_weights(), clone_tensors=True),
-            is_checkpoint_format=True,
-        )
+        with set_current_vllm_config(self.model_runner.vllm_config):
+            self.reload_weights(
+                weights_iterator=self._iter_normalized_base_sync_weights(receiver.iter_weights(), clone_tensors=True),
+                is_checkpoint_format=True,
+            )
         return True
 
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
@@ -428,81 +393,77 @@ class vLLMColocateWorkerExtension:
 
         from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
 
+        if current_platform.device_type == "npu" and self.device is None:
+            self.device = torch.device(f"npu:{self.local_rank}")
+
+        # In async mode, make sure the old lora is removed before adding the new one
+        if peft_config and base_sync_done:
+            self.remove_lora(VLLM_LORA_INT_ID)
+
+        use_standard_weight_load = not (peft_config and base_sync_done) and not is_fp8_model(
+            self.model_runner.vllm_config
+        )
+
+        if self._is_qat_model:
+            # QAT (compressed-tensors): Prepare for weight loading BEFORE receiving any buckets
+            from verl.utils.qat import prepare_qat_for_load_weights
+
+            for model in self._iter_all_models():
+                prepare_qat_for_load_weights(model, device=self.device)
+            logger.info("QAT: prepare_qat_for_load_weights completed")
+        elif self._is_modelopt_qat:
+            from verl.utils.modelopt.vllm_modelopt_patch import prepare_modelopt_for_weight_reload
+
+            prepare_modelopt_for_weight_reload(self.model_runner.model, device=self.device)
+            logger.info("ModelOpt: prepare_modelopt_for_weight_reload completed")
+        elif use_standard_weight_load:
+            # Re-apply here because async IPC weight sync can happen long after init and lose MoE weight_loader attrs.
+            for model in self._iter_all_models():
+                patch_vllm_moe_model_weight_loader(model)
+
+        assert self.device is not None
+        quant_reload_state = False
+        if is_fp8_model(self.model_runner.vllm_config) and not (peft_config and base_sync_done):
+            from verl.utils.vllm.vllm_fp8_utils import prepare_quanted_weights_for_loading
+
+            quant_reload_state = prepare_quanted_weights_for_loading(self.model_runner)
+
+        receiver = BucketedWeightReceiver(
+            zmq_handle=self._get_zmq_handle(),
+            device=self.device,
+            use_shm=use_shm,
+        )
+        lora_weights: dict[str, torch.Tensor] | None = {} if peft_config and base_sync_done else None
+        used_layerwise_reload = False
+
+        if use_standard_weight_load and not self._is_qat_model and not self._is_modelopt_qat:
+            used_layerwise_reload = self._maybe_reload_standard_weights_from_ipc(receiver)
+
+        if not used_layerwise_reload:
+
+            def on_bucket_received(weights: list[tuple[str, torch.Tensor]]) -> None:
+                # vLLM add_lora consumes one complete adapter tensor dict, so only
+                # the LoRA sync path needs to accumulate tensors across buckets.
+                if lora_weights is not None:
+                    lora_weights.update((name, tensor.clone()) for name, tensor in weights)
+                    return
+
+                self._update_weights(
+                    weights,
+                    peft_config=peft_config,
+                    base_sync_done=base_sync_done,
+                    quant_prepared=bool(quant_reload_state),
+                )
+
+            receiver.receive_weights(on_bucket_received=on_bucket_received)
+            if lora_weights is not None:
+                self._update_weights(
+                    list(lora_weights.items()),
+                    peft_config=peft_config,
+                    base_sync_done=base_sync_done,
+                )
+
         with set_current_vllm_config(self.model_runner.vllm_config):
-            if current_platform.device_type == "npu" and self.device is None:
-                self.device = torch.device(f"npu:{self.local_rank}")
-
-            # In async mode, make sure the old lora is removed before adding the new one
-            if peft_config and base_sync_done:
-                self.remove_lora(VLLM_LORA_INT_ID)
-
-            use_standard_weight_load = not (peft_config and base_sync_done) and not is_fp8_model(
-                self.model_runner.vllm_config
-            )
-
-            if self._is_qat_model:
-                # QAT (compressed-tensors): Prepare for weight loading BEFORE receiving any buckets
-                from verl.utils.qat import prepare_qat_for_load_weights
-
-                for model in self._iter_all_models():
-                    prepare_qat_for_load_weights(model, device=self.device)
-                logger.info("QAT: prepare_qat_for_load_weights completed")
-            elif self._is_modelopt_qat:
-                from verl.utils.modelopt.vllm_modelopt_patch import prepare_modelopt_for_weight_reload
-
-                prepare_modelopt_for_weight_reload(self.model_runner.model, device=self.device)
-                logger.info("ModelOpt: prepare_modelopt_for_weight_reload completed")
-            elif use_standard_weight_load:
-                # Re-apply here because async IPC weight sync can happen long after init
-                # and lose MoE weight_loader attrs.
-                for model in self._iter_all_models():
-                    patch_vllm_moe_model_weight_loader(model)
-
-            quant_reload_state = False
-            if is_fp8_model(self.model_runner.vllm_config) and not (peft_config and base_sync_done):
-                from verl.utils.vllm.vllm_fp8_utils import prepare_quanted_weights_for_loading
-
-                quant_reload_state = prepare_quanted_weights_for_loading(self.model_runner)
-
-            receiver = BucketedWeightReceiver(
-                zmq_handle=self._get_zmq_handle(),
-                device=self.device,
-                use_shm=use_shm,
-            )
-            lora_weights: dict[str, torch.Tensor] | None = {} if peft_config and base_sync_done else None
-            used_layerwise_reload = False
-
-            if use_standard_weight_load and not self._is_qat_model and not self._is_modelopt_qat:
-                used_layerwise_reload = self._maybe_reload_standard_weights_from_ipc(receiver)
-
-            if not used_layerwise_reload:
-
-                def on_bucket_received(
-                    weights: list[tuple[str, torch.Tensor]],
-                    *,
-                    is_last: bool,
-                ) -> None:
-                    # vLLM add_lora consumes one complete adapter tensor dict, so only
-                    # the LoRA sync path needs to accumulate tensors across buckets.
-                    if lora_weights is not None:
-                        lora_weights.update((name, tensor.clone()) for name, tensor in weights)
-                        if is_last:
-                            self._update_weights(
-                                list(lora_weights.items()),
-                                peft_config=peft_config,
-                                base_sync_done=base_sync_done,
-                            )
-                        return
-
-                    self._update_weights(
-                        weights,
-                        peft_config=peft_config,
-                        base_sync_done=base_sync_done,
-                        quant_prepared=bool(quant_reload_state),
-                    )
-
-                receiver.receive_weights(on_bucket_received=on_bucket_received)
-
             if self._is_qat_model:
                 # QAT (compressed-tensors): call process_weights_after_loading AFTER all buckets are received
                 from verl.utils.qat import manual_process_weights_after_loading
@@ -547,9 +508,7 @@ class vLLMColocateWorkerExtension:
         quant_prepared: bool = False,
     ):
         if peft_config and base_sync_done:
-            # Clone out of the receiver's reused IPC bucket buffer: add_lora keeps these tensors
-            # past this callback, so views into the freed/overwritten buffer crash later (#6454).
-            weights = {name: tensor.clone() for name, tensor in weights}
+            weights = dict(weights)
             lora_request = TensorLoRARequest(
                 lora_name=VLLM_LORA_NAME,
                 lora_int_id=VLLM_LORA_INT_ID,
@@ -560,6 +519,7 @@ class vLLMColocateWorkerExtension:
             self.add_lora(lora_request)
             logger.info(f"vLLM load weights, loaded_params: {len(weights)}")
         else:
+            weights = list(self._iter_normalized_base_sync_weights(weights))
             param_updates, buffer_updates, named_buffers = split_buffer_updates(self.model_runner.model, weights)
             # Add the FP8 related logic here as sharding manager has been deprecated.
             # Check if FP8 quantization is enabled and apply appropriate weight loading
@@ -572,17 +532,16 @@ class vLLMColocateWorkerExtension:
                 )
                 # Keep the draft model in sync when present.
                 if self._use_mtp_drafter_weight_sync() and param_updates:
-                    load_quanted_weights(param_updates, self.model_runner, is_drafter=True, **reload_kwargs)
+                    drafter_updates = self._adapt_weight_names_for_model(self._get_drafter_model(), param_updates)
+                    load_quanted_weights(drafter_updates, self.model_runner, is_drafter=True, **reload_kwargs)
                 loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
                 logger.info(
                     f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}, loaded_buffers: {loaded_buffers}"
                 )
             else:
-                weights = self._normalize_base_sync_weight_names(weights)
-                param_updates, buffer_updates, named_buffers = split_buffer_updates(self.model_runner.model, weights)
                 if param_updates:
                     for model in self._iter_all_models():
-                        model.load_weights(param_updates)
+                        model.load_weights(self._adapt_weight_names_for_model(model, param_updates))
                 loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
                 logger.info(
                     f"Loading standard weights (non-FP8, async), "

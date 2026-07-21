@@ -286,9 +286,11 @@ class ServerAdapter(BaseRollout):
             bucket_size_mb=bucket_size_mb,
             use_shm=self.use_shm,
         )
-        if _should_expand_vllm_moe_params() and not (
-            kwargs.get("peft_config") is not None and kwargs.get("base_sync_done", False)
-        ):
+        # With LoRA enabled (peft_config), vLLM wraps FusedMoE so the per-expert
+        # checkpoint keys no longer resolve (`experts.w13_weight` becomes
+        # `experts.base_layer.w13_weight`); only the packed `experts.gate_up_proj`
+        # / `experts.down_proj` load path is wrapper-aware, so keep tensors packed.
+        if _should_expand_vllm_moe_params() and kwargs.get("peft_config") is None:
             weights = _iter_vllm_compatible_moe_params(weights)
         await sender.async_send_weights(weights)
 

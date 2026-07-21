@@ -1685,10 +1685,15 @@ class PPOTrainer(ABC):
                 partition_id=batch.partition_id,
                 select_fields=["extra_fields"],
             )
-            extra_fields = spec_data["extra_fields"].tolist()
-            spec_drafts = [extra_field["spec_num_draft_tokens"] for extra_field in extra_fields]
-            spec_accepts = [extra_field["spec_num_accepted_tokens"] for extra_field in extra_fields]
-            spec_verifies = [extra_field["spec_num_verify_steps"] for extra_field in extra_fields]
+            extra_fields = spec_data.pop("extra_fields").tolist()
+            # The rollout omits the spec_* stats when the backend does not report
+            # per-request spec-decode stats; leave all three as None in that case.
+            if extra_fields and all(
+                isinstance(extra_field, dict) and "spec_num_draft_tokens" in extra_field for extra_field in extra_fields
+            ):
+                spec_drafts = [extra_field["spec_num_draft_tokens"] for extra_field in extra_fields]
+                spec_accepts = [extra_field["spec_num_accepted_tokens"] for extra_field in extra_fields]
+                spec_verifies = [extra_field["spec_num_verify_steps"] for extra_field in extra_fields]
 
         data = data.to_padded_tensor()
         data["token_level_scores"] = data["rm_scores"]

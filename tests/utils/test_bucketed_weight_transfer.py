@@ -18,8 +18,10 @@ and because CUDA IPC requires distinct processes.
 """
 
 import asyncio
+import gc
 import multiprocessing as mp
 import uuid
+import weakref
 
 import pytest
 import torch
@@ -147,22 +149,18 @@ def _receiver_fn(zmq_handle, use_shm, result_queue):
         use_shm=use_shm,
     )
     received = []
-
-    def on_bucket_received(weights, *, is_last):
-        del is_last
-        received.extend([(name, t.clone()) for name, t in weights])
-
-    receiver.receive_weights(on_bucket_received=on_bucket_received)
+    receiver.receive_weights(on_bucket_received=lambda w: received.extend([(name, t.clone()) for name, t in w]))
     # Only send lightweight metadata + checksum back through the queue
     summaries = [(name, t.dtype, tuple(t.shape), t.float().sum().item()) for name, t in received]
     result_queue.put(summaries)
 
 
-def test_iter_weights_rebuilds_direct_sent_weight(monkeypatch):
+def test_iter_weights_retains_direct_tensor_until_ack(monkeypatch):
     import verl.workers.rollout.vllm_rollout.bucketed_weight_transfer as bucketed_weight_transfer
     from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
 
-    rebuilt_tensor = torch.arange(6, dtype=torch.float32).view(2, 3)
+    rebuilt_ref = None
+    acknowledged = False
 
     class _FakeDevice:
         @staticmethod
@@ -178,16 +176,13 @@ def test_iter_weights_rebuilds_direct_sent_weight(monkeypatch):
             pass
 
     class _FakeSocket:
-        def __init__(self):
-            self.sent = 0
-
         def recv_pyobj(self):
             return {
                 "bucket_meta": {
                     "large.weight": {
                         "name": "large.weight",
-                        "shape": rebuilt_tensor.shape,
-                        "dtype": rebuilt_tensor.dtype,
+                        "shape": torch.Size([2, 3]),
+                        "dtype": torch.float32,
                         "offset": 0,
                         "handle": ("direct-ipc-handle",),
                     }
@@ -196,31 +191,38 @@ def test_iter_weights_rebuilds_direct_sent_weight(monkeypatch):
             }
 
         def send(self, payload):
+            nonlocal acknowledged
             assert payload == b""
-            self.sent += 1
+            gc.collect()
+            assert rebuilt_ref() is not None
+            acknowledged = True
 
         def close(self):
             pass
 
+    def _rebuild_ipc(_handle, _device_id):
+        nonlocal rebuilt_ref
+        tensor = torch.arange(6, dtype=torch.float32).view(2, 3)
+        rebuilt_ref = weakref.ref(tensor)
+        return tensor
+
     receiver = BucketedWeightReceiver("ipc:///tmp/unused.sock", device=torch.device("cpu"), use_shm=False)
     fake_socket = _FakeSocket()
-
-    def _init_socket():
-        receiver.socket = fake_socket
-
-    def _init_buffer():
-        receiver.buffer = torch.empty(0, dtype=torch.uint8)
-
-    monkeypatch.setattr(receiver, "_init_socket", _init_socket)
-    monkeypatch.setattr(receiver, "_init_buffer", _init_buffer)
-    monkeypatch.setattr(bucketed_weight_transfer, "rebuild_ipc", lambda _handle, _device_id: rebuilt_tensor)
+    monkeypatch.setattr(receiver, "_init_socket", lambda: setattr(receiver, "socket", fake_socket))
+    monkeypatch.setattr(receiver, "_init_buffer", lambda: setattr(receiver, "buffer", torch.empty(0)))
+    monkeypatch.setattr(bucketed_weight_transfer, "rebuild_ipc", _rebuild_ipc)
     monkeypatch.setattr(bucketed_weight_transfer, "get_torch_device", lambda: _FakeDevice)
 
-    received = list(receiver.iter_weights())
+    weights = receiver.iter_weights()
+    name, tensor = next(weights)
+    assert name == "large.weight"
+    torch.testing.assert_close(tensor, torch.arange(6, dtype=torch.float32).view(2, 3))
+    del tensor
 
-    assert fake_socket.sent == 1
-    assert received[0][0] == "large.weight"
-    torch.testing.assert_close(received[0][1], rebuilt_tensor)
+    with pytest.raises(StopIteration):
+        next(weights)
+
+    assert acknowledged
 
 
 # ---------------------------------------------------------------------------
