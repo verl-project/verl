@@ -27,9 +27,11 @@ class _FakeRouter:
     def __init__(self, recorded_topk_idx=None):
         self.recorded_topk_idx = recorded_topk_idx
         self.target_topk_idx = None
+        self.target_replay_mask = None
 
-    def set_target_indices(self, topk_indices):
+    def set_target_indices(self, topk_indices, replay_mask=None):
         self.target_topk_idx = topk_indices
+        self.target_replay_mask = replay_mask
 
 
 @pytest.fixture(autouse=True)
