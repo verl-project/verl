@@ -69,7 +69,7 @@ def _should_expand_vllm_moe_params() -> bool:
         return False
 
 
-async def _iter_vllm_compatible_moe_params(weights):
+async def _iter_vllm_compatible_moe_params(weights, model_type: str | None = None):
     """Expand Transformers 5 packed MoE expert tensors to vLLM checkpoint keys.
 
     Transformers 5 stores Qwen-style MoE experts as packed 3D parameters:
@@ -83,6 +83,13 @@ async def _iter_vllm_compatible_moe_params(weights):
     from verl.workers.rollout.utils import ensure_async_iterator
 
     async for name, tensor in ensure_async_iterator(weights):
+        # GPT-OSS checkpoint weights use packed 3D expert tensors directly.
+        # Splitting them into per-expert 2D tensors makes vLLM's GPT-OSS loader
+        # index a 2D tensor as 3D during TP slicing.
+        if model_type == "gpt_oss" and ".mlp.experts." in name and tensor.dim() == 3:
+            yield name, tensor
+            continue
+
         if name.endswith(".mlp.experts.gate_up_proj") and tensor.dim() == 3:
             gate, up = tensor.chunk(2, dim=1)
             base = name.removesuffix(".gate_up_proj")
@@ -291,7 +298,7 @@ class ServerAdapter(BaseRollout):
         # `experts.base_layer.w13_weight`); only the packed `experts.gate_up_proj`
         # / `experts.down_proj` load path is wrapper-aware, so keep tensors packed.
         if _should_expand_vllm_moe_params() and kwargs.get("peft_config") is None:
-            weights = _iter_vllm_compatible_moe_params(weights)
+            weights = _iter_vllm_compatible_moe_params(weights, self.model_config.hf_config.model_type)
         await sender.async_send_weights(weights)
 
         if future is not None:
