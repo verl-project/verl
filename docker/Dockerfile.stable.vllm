@@ -133,7 +133,7 @@ RUN apt-get update && \
 #   #44483: illegal memory access during a partial wake_up (sleep mode).
 #   #45589: FlashInfer-TRTLLM MoE load OOM.
 RUN pip3 install --no-build-isolation vllm==${VLLM_VERSION} && \
-    pip3 install vllm-omni==0.24.0 -i https://pypi.org/simple/
+    pip3 install vllm-omni==${VLLM_OMNI_VERSION} -i https://pypi.org/simple/
 
 RUN pip3 install --no-deps trl==${TRL_VERSION}
 
