@@ -27,6 +27,36 @@ This is why ``delta_sharded`` is the only delta backend we ship: an earlier full
 (diff on a rank-0 full-model snapshot) was consistently slower than ``delta_sharded`` at every
 size we measured, so it was dropped in favor of the sharded design.
 
+## Wire contract: what a rank sends to rank 0
+
+Steady state has ONE canonical shape. Per parameter, each rank contributes a triple
+``(counts[K], idx_concat int32, val_concat)`` where:
+
+- **K is the parameter's slot count**, fixed by a static slot table identical on every
+  rank. Identity params (dense DTensor, explicit blocks, unsharded) have ``K=1`` -- the
+  slot is the parameter itself. Slot-enumerable converter params (``spec.hf_slots``)
+  have one slot per converter output (e.g. a fused ``gate_up`` stack: ``K = E x 2``).
+- The k-th slice of ``idx``/``val`` holds **final HF coordinates inside slot k**: the
+  sender has already done all conversion; coordinate semantics never change after this
+  point. Rank 0's whole job is slot-keyed assembly: concatenate ranks' (disjoint)
+  pieces per slot, bucket, broadcast. No conversion, no rebuild, no layout knowledge.
+
+Invariants: (1) *alignment* -- every rank enumerates the same K and slot order, with
+``counts[k]=0`` for untouched slots, so the batched gather stays in lockstep; (2)
+*disjointness* -- per slot, different ranks' coordinate sets never overlap (block
+geometry guarantees it), so union == concatenation; (3) *bounds* -- a slot has fewer
+than 2^31 elements (int32 positions), and the batched gather internally splits a
+round into deterministic sub-rounds (derived from the all-gathered counts matrix, so
+every rank derives the same split) whenever the largest per-rank blob would exceed
+``bucket_size``. Flush triggers are count-only: they must be identical on every rank,
+and byte totals are not.
+
+Two explicit exemptions: converter params without an enumerable slot table (custom
+``MOE_PARAM_HANDERS``, the Megatron shard-list contract) fall back to shard-local
+payloads plus a rank-0 segmented NaN rebuild; and the dense seed for identity params
+ships values only (no positions), since the first sync covers every element. The seed
+for slot params is just the steady shape at full coverage.
+
 ## Design
 
 The ``delta_sharded`` backend plugs into the standard checkpoint-engine flow (``CheckpointEngineManager`` →
