@@ -490,9 +490,18 @@ class CheckpointEngineManager:
             global_steps: The global steps of the actor worker group.
         """
 
-        # 0. update weights for sync training with colocated actor and rollout
-        if self.backend == "naive":
+        # 0. Colocated shortcut: 'naive' and 'remote_backend' both delegate
+        # the transfer to the actor side (naive: verl actor -> rollout server;
+        # remote_backend: plugin owns the transfer, typically CUDA IPC).
+        if self.backend in ("naive", "remote_backend"):
             ray.get(self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
+            # Other rollout paths propagate ``global_steps`` inside their own
+            # ``RolloutReplica.update_weights``. Since we short-circuited that
+            # call, fan out here for replicas that implement it.
+            if self.backend == "remote_backend" and global_steps is not None:
+                fanout = [r.set_global_steps(global_steps) for r in self.replicas if hasattr(r, "set_global_steps")]
+                if fanout:
+                    await asyncio.gather(*fanout)
             return {}
 
         # 1. abort and save all unfinished requests for partial rollout

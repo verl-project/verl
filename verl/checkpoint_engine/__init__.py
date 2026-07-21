@@ -21,6 +21,9 @@ from .base import (
     TensorMeta,
 )
 
+# Eager: no optional deps and registration is a side-effect of import.
+from .remote_backend import RemoteBackendCheckpointEngine  # noqa: F401
+
 __all__ = [
     "CheckpointEngine",
     "CheckpointEngineRegistry",
@@ -28,6 +31,7 @@ __all__ = [
     "ColocatedCheckpointEngine",
     "CheckpointEngineManager",
     "CheckpointEngineWorker",
+    "RemoteBackendCheckpointEngine",
 ]
 
 try:
