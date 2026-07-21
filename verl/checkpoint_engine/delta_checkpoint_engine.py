@@ -665,14 +665,23 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                             gidx = torch.empty(0, dtype=torch.int64, device=dev)
                             gval = torch.empty(0, dtype=entry.dtype, device=dev)
                         n_rows = int(full_shape[0])
+                        if gidx.numel() == 0:
+                            # no rank changed a single element of this param: nothing to
+                            # rebuild or convert (rank-0-local fast path, no collectives)
+                            total_elems += _prodshape(full_shape)
+                            continue
                         for row0 in range(0, n_rows, seg_rows):
                             rows = min(seg_rows, n_rows - row0)
                             lo, hi = row0 * inner, (row0 + rows) * inner
                             a = int(torch.searchsorted(gidx, lo))
                             b = int(torch.searchsorted(gidx, hi))
+                            if b == a:
+                                # untouched segment: an all-NaN rebuild would convert to
+                                # all-NaN outputs and extract nothing -- skip it entirely
+                                total_elems += rows * inner
+                                continue
                             seg = torch.full((rows * inner,), float("nan"), dtype=entry.dtype, device=dev)
-                            if b > a:
-                                seg[gidx[a:b] - lo] = gval[a:b]
+                            seg[gidx[a:b] - lo] = gval[a:b]
                             for hf_name, hf_tensor in entry.spec.to_hf_chunk(row0, seg.view(rows, *full_shape[1:])):
                                 _consume_hf(hf_name, hf_tensor)
                             del seg
