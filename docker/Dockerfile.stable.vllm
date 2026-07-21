@@ -16,7 +16,7 @@ ARG TRANSFORMER_ENGINE_VERSION=v2.15
 ARG FLASH_ATTENTION_VERSION=2.8.3
 ARG NSIGHT_VERSION=2025.6.1
 ARG MCORE_VERSION=core_v0.18.0
-ARG MEGATRON_BRIDGE_VERSION=0.5.0
+ARG MEGATRON_BRIDGE_VERSION=0.5.1
 ARG TRANSFER_QUEUE_VERSION=0.1.8
 ARG VERL_VERSION=v0.7.1
 ARG DEBIAN_FRONTEND=noninteractive
@@ -158,6 +158,8 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 RUN pip install qwen-vl-utils==0.0.14
+
+RUN pip uninstall -y scipy
 
 RUN pip install git+https://github.com/verl-project/verl.git@${VERL_VERSION} && pip uninstall -y verl
 
