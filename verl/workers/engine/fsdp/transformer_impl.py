@@ -643,6 +643,7 @@ class FSDPEngine(BaseEngine):
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> list[TensorDict]:
         # note that the global_batch_size should include data on all the dp
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
+        return_model_output = tu.get_non_tensor_data(data=data, key="return_model_output", default=False)
 
         # compute num_tokens in global batch for loss normalization
         batch_num_tokens = data["loss_mask"].sum().to(get_device_id())
@@ -673,9 +674,11 @@ class FSDPEngine(BaseEngine):
                         scaler.scale(loss).backward()
                     else:
                         loss.backward()
-                    # Training discards model_output (train_batch pops it); keeping it accumulates
-                    # full-length nested tensors across the mini-batch (∝ ppo_mini_batch * rollout_n) → OOM.
-                    meta_info.pop("model_output", None)
+                    if not return_model_output:
+                        # Standard training discards model_output (train_batch pops it); keeping it accumulates
+                        # full-length nested tensors across the mini-batch (∝ ppo_mini_batch * rollout_n) → OOM.
+                        # Specialized callers such as Tinker may opt in when their response requires these outputs.
+                        meta_info.pop("model_output", None)
 
             output_lst.append(meta_info)
 
