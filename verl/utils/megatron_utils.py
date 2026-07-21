@@ -286,6 +286,7 @@ def get_hf_rope_theta(hf_config: PretrainedConfig) -> float:
     ``rope_parameters["rope_theta"]``, optionally nested per attention pattern when ``rope_parameters`` maps names
     to parameter dicts.
     """
+
     def _maybe_get_theta(config: Any) -> float | None:
         theta = getattr(config, "rope_theta", None)
         if theta is not None:
