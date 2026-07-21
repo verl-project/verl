@@ -16,12 +16,12 @@ import asyncio
 import logging
 import os
 
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from verl.single_controller.ray.base import RayResourcePool, split_resource_pool
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.ray_utils import auto_await
-from verl.workers.config import DistillationConfig, DistillationTeacherModelConfig, HFModelConfig
+from verl.workers.config import DistillationConfig, DistillationTeacherModelConfig
 from verl.workers.rollout.llm_server import LLMServerClient
 from verl.workers.rollout.replica import get_rollout_replica_class
 
@@ -75,7 +75,16 @@ class TeacherModelManager:
         gpus_per_node = self.distillation_config.n_gpus_per_node
         rollout_replica_class = get_rollout_replica_class(teacher_model_config.inference.name)
         rollout_config = teacher_model_config.inference
-        model_config = HFModelConfig(path=teacher_model_config.model_path)
+        # Keep the model path unresolved until the rollout server actor is
+        # placed. Each server backend converts this DictConfig to HFModelConfig
+        # in its own process, so HDFS models are copied into that node's local
+        # cache instead of the controller's local /tmp.
+        model_config = OmegaConf.create(
+            {
+                "_target_": "verl.workers.config.HFModelConfig",
+                "path": teacher_model_config.model_path,
+            }
+        )
         name_suffix = (teacher_model_config.key or "").replace("/", "_")
         self.rollout_replicas = [
             rollout_replica_class(
