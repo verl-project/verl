@@ -214,32 +214,19 @@ class Profiler(DistProfiler):
         self.save_path = self.config.save_path
         # Align with other profilers: read discrete mode, default to False for torch profiler
         self.discrete = getattr(self.tool_config, "discrete", False)
-        # Resolved torch.profiler.schedule kwargs for the active run (None => continuous).
-        self._schedule_kwargs = None
+        # Resolved once from config (None => continuous). Not cleared on stop.
+        self._schedule_kwargs = (
+            self.tool_config.schedule.to_torch_kwargs()
+            if self.tool_config.schedule and self.tool_config.schedule.enabled
+            else None
+        )
 
     def check(self):
         return self.prof is not None
 
-    def _resolve_schedule_kwargs(self) -> Optional[dict]:
-        """Build torch.profiler.schedule kwargs from tool_config, or None to disable."""
-        sched = getattr(self.tool_config, "schedule", None) if self.tool_config else None
-        if sched is None:
-            return None
-        active = int(getattr(sched, "active", 0) or 0)
-        if active <= 0:
-            return None
-        return {
-            "skip_first": int(getattr(sched, "skip_first", 0) or 0),
-            "wait": int(getattr(sched, "wait", 0) or 0),
-            "warmup": int(getattr(sched, "warmup", 0) or 0),
-            "active": active,
-            "repeat": int(getattr(sched, "repeat", 0) or 0),
-        }
-
     def start(self, **kwargs):
         role = kwargs.get("role", None)
         if not self.discrete and Profiler._define_count == 0:
-            self._schedule_kwargs = self._resolve_schedule_kwargs()
             self.prof = get_torch_profiler(
                 contents=self.contents,
                 save_path=self.save_path,
@@ -270,7 +257,6 @@ class Profiler(DistProfiler):
             print(f"[Profiler] stopped for rank {self.rank}")
             self.prof.stop()
             Profiler._active_prof = None
-            self._schedule_kwargs = None
             Profiler._define_count -= 1
 
     def annotate(self, message: Optional[str] = None, role: Optional[str] = None, **kwargs_outer) -> Callable:

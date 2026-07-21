@@ -65,6 +65,13 @@ Use parameters in each role's ``profiler.tool_config.npu`` to control specific c
 
 -  analysis: Whether to enable automatic data parsing.
 -  discrete: Whether to use discrete mode.
+-  schedule: Optional ``torch_npu.profiler.schedule`` config
+   (``skip_first``/``wait``/``warmup``/``active``/``repeat``).
+   Takes effect only when ``active > 0``; verl then advances the schedule via
+   ``profiler.step()`` once per mini-batch. When ``active <= 0``, the profiler
+   runs continuously between start and stop. This applies only to the training
+   update loop (Actor RL update / SFT); for rollout use
+   ``profile_token_start``/``profile_token_end`` instead.
 -  profile_token_start: Effective only for the rollout role; defines the start response-token index for rollout decoding collection. It is applied only when valid (0-based, ``profile_token_end > profile_token_start``, and the window is within response length).
 -  profile_token_end: Effective only for the rollout role; defines the stop response-token index (exclusive) for rollout decoding collection. It is applied only when valid (0-based, ``profile_token_end > profile_token_start``, and the window is within response length).
 
@@ -96,6 +103,34 @@ End-to-End Collection
                   npu:
                      discrete: True
                      contents: [npu, cpu]  # Control collection list, default cpu, npu; can configure memory, shapes, module, etc.
+
+Scheduled Collection (continuous mode)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For long update loops you usually don't need every mini-batch. Configure
+``schedule`` so verl records only a subset via ``wait/warmup/active/repeat``:
+
+.. code:: yaml
+
+      global_profiler:
+         tool: npu
+         steps: [1, 2, 5]
+         save_path: ./outputs/profile
+      actor_rollout_ref:
+         actor:
+            profiler:
+               enable: True
+               all_ranks: True
+               tool_config:
+                  npu:
+                     discrete: False  # schedule only applies in continuous mode
+                     contents: [npu, cpu]
+                     schedule:
+                        skip_first: 1  # ignore the very first mini-batch
+                        wait: 1        # then idle 1 mini-batch at the start of each cycle
+                        warmup: 1      # warm up 1 mini-batch (traced but discarded)
+                        active: 3      # record 3 mini-batches
+                        repeat: 2      # capture 2 such cycles, then stop collecting
 
 Separation of Training and Inference Phases
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

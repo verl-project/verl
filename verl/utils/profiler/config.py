@@ -37,12 +37,15 @@ class NsightToolConfig(BaseConfig):
 
 @dataclass
 class TorchProfilerScheduleConfig(BaseConfig):
-    """Schedule for ``torch.profiler.schedule``.
+    """Schedule for ``torch.profiler.schedule`` / ``torch_npu.profiler.schedule``.
 
-    Field names mirror the official ``torch.profiler.schedule`` API. The profiler
+    Field names mirror the official torch / torch_npu schedule APIs. The profiler
     cycles through ``skip_first`` -> (``wait`` -> ``warmup`` -> ``active``) x ``repeat``.
     Scheduling is only enabled when ``active > 0``; otherwise the profiler runs in
     continuous mode (collect everything between start and stop).
+
+    Shared by ``TorchProfilerToolConfig`` and ``NPUToolConfig`` because both backends
+    accept the same ``wait``/``warmup``/``active``/``repeat``/``skip_first`` kwargs.
     """
 
     # Number of steps to skip at the very beginning (not counted in the cycle).
@@ -70,7 +73,7 @@ class TorchProfilerScheduleConfig(BaseConfig):
         return self.active > 0
 
     def to_torch_kwargs(self) -> dict:
-        """Return kwargs for ``torch.profiler.schedule``."""
+        """Return kwargs for ``torch.profiler.schedule`` / ``torch_npu.profiler.schedule``."""
         return {
             "skip_first": self.skip_first,
             "wait": self.wait,
@@ -168,7 +171,7 @@ class PrecisionDebuggerToolConfig(BaseConfig):
 
 @dataclass
 class NPUToolConfig(NsightToolConfig):
-    """NPU profiler too; config."""
+    """NPU profiler tool config."""
 
     # options: npu, cpu, memory, shapes, module, stack
     contents: list[str] = field(default_factory=list)
@@ -184,6 +187,9 @@ class NPUToolConfig(NsightToolConfig):
     # Stop collecting profiler data at this response-token index (exclusive).
     # None means collect until the end.
     profile_token_end: Optional[int] = None
+    # Optional torch_npu.profiler.schedule (wait/warmup/active/repeat/skip_first).
+    # When set with active > 0, DistProfiler.step() drives the schedule per mini-batch.
+    schedule: Optional[TorchProfilerScheduleConfig] = None
 
     name: str = "npu"
 
