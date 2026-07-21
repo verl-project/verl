@@ -516,7 +516,9 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                             if val_pieces
                             else torch.empty(0, dtype=local.dtype, device=local.device)
                         )
-                        gathered = gather_v_batched_to_rank0(my_idx, my_val, counts.to(local.device), group=pg)
+                        gathered = gather_v_batched_to_rank0(
+                            my_idx, my_val, counts.to(local.device), group=pg, max_round_bytes=self.bucket_size
+                        )
                         if is_r0 and gathered is not None:
                             for k_i, (aidx, aval) in enumerate(gathered):
                                 sname, sshape = spec.hf_slots[row0 * slots_per_row + k_i]
@@ -665,7 +667,9 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             counts_concat = torch.cat([c for _, _, c, _, _ in entries]).to(dev)
             idx_concat = torch.cat([i for _, _, _, i, _ in entries])
             val_concat = torch.cat([v for _, _, _, _, v in entries])
-            gathered = gather_v_batched_to_rank0(idx_concat, val_concat, counts_concat, group=pg)
+            gathered = gather_v_batched_to_rank0(
+                idx_concat, val_concat, counts_concat, group=pg, max_round_bytes=self.bucket_size
+            )
             if is_r0 and gathered is not None:
                 slot_i = 0
                 for slots, dtype_str, counts, _i, _v in entries:
@@ -681,10 +685,11 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                 scoped_queues[id(pg)] = q
             q[1].append((slots, dtype_str, counts, idx, val))
             q[2] += int(idx.nbytes) + int(val.nbytes)
-            world = torch.distributed.get_world_size(pg) if pg is not None else 1
-            # flush on entry count OR payload bytes (rank-0 gather transient is
-            # world x the largest rank blob, hence the /world scaling)
-            if len(q[1]) >= max(batch_k, 1) or q[2] >= self.bucket_size // max(world, 1):
+            # count-only trigger: it is identical on every rank (byte triggers are NOT --
+            # each rank's payload differs -- and would desync the collective sequence).
+            # Byte bounding happens INSIDE the batched gather via max_round_bytes,
+            # decided from the all-gathered counts matrix that every rank sees.
+            if len(q[1]) >= max(batch_k, 1):
                 _flush_scoped(q)
 
         def _consume_hf(hf_name: str, hf_tensor: torch.Tensor) -> None:
@@ -717,7 +722,9 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             idx_concat = torch.cat([entry.idx for entry in nan_group])
             val_concat = torch.cat([entry.val for entry in nan_group])
             counts = torch.tensor([int(entry.idx.numel()) for entry in nan_group], dtype=torch.int64, device=dev)
-            gathered = gather_v_batched_to_rank0(idx_concat, val_concat, counts, group=pg, grouped=True)
+            gathered = gather_v_batched_to_rank0(
+                idx_concat, val_concat, counts, group=pg, grouped=True, max_round_bytes=self.bucket_size
+            )
 
             blocks = None
             if is_block:
