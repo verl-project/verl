@@ -175,6 +175,34 @@ def get_model(
     return model
 
 
+_HF_CONFIG_CHILD_NAMES = ("text_config", "thinker_config", "model_config", "language_config")
+
+
+def _iter_hf_config_tree(hf_config: PretrainedConfig):
+    config_queue = [hf_config]
+    seen = set()
+    while config_queue:
+        config = config_queue.pop(0)
+        if id(config) in seen:
+            continue
+        seen.add(id(config))
+        yield config
+
+        for child_name in _HF_CONFIG_CHILD_NAMES:
+            child_config = getattr(config, child_name, None)
+            if child_config is not None:
+                config_queue.append(child_config)
+
+
+def get_hf_config_attr(hf_config: PretrainedConfig, attr_name: str) -> Any:
+    """Find an attribute in a nested Hugging Face model configuration."""
+    for config in _iter_hf_config_tree(hf_config):
+        value = getattr(config, attr_name, None)
+        if value is not None:
+            return value
+    raise AttributeError(f"{type(hf_config).__name__} has no nested {attr_name}.")
+
+
 def get_hf_rope_theta(hf_config: PretrainedConfig) -> float:
     """Return RoPE base frequency theta.
 
@@ -182,24 +210,25 @@ def get_hf_rope_theta(hf_config: PretrainedConfig) -> float:
     ``rope_parameters["rope_theta"]``, optionally nested per attention pattern when ``rope_parameters`` maps names
     to parameter dicts.
     """
-    # For transformers <= 4.57.6
-    if hasattr(hf_config, "rope_theta"):
-        return hf_config.rope_theta
-    if hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "rope_theta"):
-        return hf_config.text_config.rope_theta
+    def _maybe_get_theta(config: Any) -> float | None:
+        theta = getattr(config, "rope_theta", None)
+        if theta is not None:
+            return theta
 
-    # For transformers >= 5.0.0, check rope_parameters dict (optionally nested) for rope_theta
-    rp = None
-    if hasattr(hf_config, "rope_parameters"):
-        rp = hf_config.rope_parameters
-    elif hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "rope_parameters"):
-        rp = hf_config.text_config.rope_parameters
-    if isinstance(rp, dict):
-        if "rope_theta" in rp:
-            return rp["rope_theta"]
-        for v in rp.values():
-            if isinstance(v, dict) and "rope_theta" in v:
-                return v["rope_theta"]
+        rope_parameters = getattr(config, "rope_parameters", None)
+        if isinstance(rope_parameters, dict):
+            if "rope_theta" in rope_parameters:
+                return rope_parameters["rope_theta"]
+            for value in rope_parameters.values():
+                if isinstance(value, dict) and "rope_theta" in value:
+                    return value["rope_theta"]
+        return None
+
+    for config in _iter_hf_config_tree(hf_config):
+        theta = _maybe_get_theta(config)
+        if theta is not None:
+            return theta
+
     raise AttributeError(
         f"{type(hf_config).__name__} has no rope_theta and no rope_parameters['rope_theta'] — "
         "cannot determine RoPE base."
@@ -243,9 +272,7 @@ def make_megatron_module(
         else:
             from verl.models.mcore.bridge import freeze_moe_router, make_value_model
 
-            hidden_size = (
-                hf_config.text_config.hidden_size if hasattr(hf_config, "text_config") else hf_config.hidden_size
-            )
+            hidden_size = get_hf_config_attr(hf_config, "hidden_size")
             value_model_hook = make_value_model(hidden_size, provider.sequence_parallel)
 
         post_model_creation_callbacks = []
@@ -254,7 +281,6 @@ def make_megatron_module(
         if override_model_config.get("moe_config", {}).get("freeze_moe_router", False):
             post_model_creation_callbacks.append(freeze_moe_router)
         if provider is not None:
-            from megatron.bridge.peft.utils import create_peft_hook, load_peft_adapter_checkpoint
             from megatron.bridge.training.utils.config_utils import create_ddp_config
 
             # When using PEFT with Megatron-Bridge, we must apply PEFT transformation
@@ -267,6 +293,8 @@ def make_megatron_module(
             # Register PEFT transformation as pre-wrap hook if peft_cls is specified
             # This must happen BEFORE DDP wrapping to avoid KeyError with frozen parameters
             if peft_cls is not None:
+                from megatron.bridge.peft.utils import create_peft_hook, load_peft_adapter_checkpoint
+
                 from verl.utils.megatron_peft_utils import print_adapter_info
 
                 provider.register_pre_wrap_hook(create_peft_hook(peft_cls, training=True))
