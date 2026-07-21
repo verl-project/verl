@@ -156,7 +156,6 @@ class TinkerTrainingWorker(TrainingWorker):
         delta_time = timer.last
 
         if self.engine.is_mp_src_rank_with_outputs():
-            output.pop("model_output")
             final_output = self._postprocess_output(
                 output,
                 global_token_num=global_token_num,
