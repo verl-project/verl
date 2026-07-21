@@ -30,6 +30,10 @@ defaults:
   - critic@critic: ${model_engine}_critic
   - model@critic.model: hf_model
 
+  # Remote backend (optional). Opt in with `remote_backend=<name>`; plugins
+  # ship `remote_backend/<name>.yaml` and expose it via `hydra.searchpath`.
+  - optional remote_backend@remote_backend: null
+
   # legacy reward impl config, for backward compatibility
   - legacy_reward_impl
 
