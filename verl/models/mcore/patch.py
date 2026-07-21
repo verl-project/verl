@@ -393,24 +393,26 @@ def apply_patch_mbridge():
 def apply_patch_megatron_v012_with_torch_v28_v29() -> None:
     # Error due to missing serialization_format in _write_item of megatron v012;
     # resolved by using megatron v013's implementation.
-    import inspect
-    import logging
-    import os
-    from pathlib import Path
-
     import megatron.core
     import torch
-    from megatron.core.dist_checkpointing.strategies.async_utils import _disable_gc
-    from megatron.core.dist_checkpointing.strategies.filesystem_async import _process_memory
     from packaging import version
-    from torch import multiprocessing as mp
-    from torch.distributed.checkpoint.filesystem import _write_item
 
     if (
         version.parse(torch.__version__).base_version not in ("2.8.0", "2.9.0")
         or version.parse(megatron.core.__version__).base_version != "0.12.1"
     ):
         return
+
+    # Only import private megatron internals when we know the exact version that has them.
+    import inspect
+    import logging
+    import os
+    from pathlib import Path
+
+    from megatron.core.dist_checkpointing.strategies.async_utils import _disable_gc
+    from megatron.core.dist_checkpointing.strategies.filesystem_async import _process_memory
+    from torch import multiprocessing as mp
+    from torch.distributed.checkpoint.filesystem import _write_item
 
     WriteBucket = tuple[Path, str, tuple[list, list]]
 
