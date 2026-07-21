@@ -91,7 +91,9 @@ class ReplayBuffer:
     Only prompts with status `finished` or `failure` enter terminal-group handling.
 
     ### [Terminal-group eviction/refill matrix]
-    ``drop`` means off-policy staleness dropping, which is only for async trainers.
+    ``drop`` means off-policy staleness dropping. Both off-policy strategies (``drop`` and the dropless
+    ``wait``, which blocks until stale in-flight prompts finish) are only for async trainers; sync sampling
+    is on-policy, so ``max_off_policy_strategy`` is a NO-OP there.
     ``DAPO`` means filtering groups whose configured reward metric is identical across all trajectories,
              for async reward-computation path.
     ``failure`` is the group status described above.
@@ -159,9 +161,7 @@ class ReplayBuffer:
         )
         if self.filter_groups_metric is not None and self.refill_fn is None:
             raise ValueError("Group filtering (filter_groups_metric) requires refill_fn to replace evicted groups")
-        if self.trainer_mode == "sync" and self.filter_groups_metric is not None:
-            if not isinstance(self.max_inflight_gen_batches, int) or self.max_inflight_gen_batches <= 0:
-                raise ValueError("max_inflight_gen_batches must be a positive integer")
+        self._validate_mode_config()
         # partition_id => {key: tag}
         self.partitions: dict[str, dict[str, dict]] = defaultdict(dict)
         self.pending_keys: dict[str, set] = defaultdict(set)
@@ -172,6 +172,11 @@ class ReplayBuffer:
         self.prompt_global_steps: dict[str, dict[str, int]] = defaultdict(dict)
         # Finished groups are immutable, so their DAPO classification can be reused across polling iterations.
         self._dapo_classification_cache: dict[str, dict[str, float | None]] = defaultdict(dict)
+
+    def _validate_mode_config(self) -> None:
+        if self.filter_groups_metric is not None:
+            if not isinstance(self.max_inflight_gen_batches, int) or self.max_inflight_gen_batches <= 0:
+                raise ValueError("max_inflight_gen_batches must be a positive integer")
 
     def _sync_metadata_from_transfer_queue(self):
         """Sync the metadata from TransferQueue."""
@@ -213,27 +218,12 @@ class ReplayBuffer:
     def _metrics_prefix(partition_id: str) -> str:
         return "training" if partition_id == "train" else "validation"
 
-    def _sync_dapo_enabled(self, partition_id: str) -> bool:
-        return self.trainer_mode == "sync" and partition_id != "val" and self.filter_groups_metric is not None
-
     def _clear_groups(self, partition_id: str, uids: set[str]) -> None:
         """Remove the given prompt groups (prompt keys + their trajectory keys) from TransferQueue."""
         tq.kv_clear(
             partition_id=partition_id,
             keys=list(uids) + [key for key in self.partitions[partition_id] if key.split("_")[0] in uids],
         )
-
-    def _stale_terminal_keys(self, global_steps: int, partition_id: str) -> set[str]:
-        """Stale terminal prompts dropped only by async trainers using the ``drop`` strategy."""
-        if partition_id == "val" or self.trainer_mode == "sync" or self.max_off_policy_strategy != "drop":
-            return set()
-        prompt_global_steps = self.prompt_global_steps[partition_id]
-        terminal_keys = self.finished_keys[partition_id]
-        return {
-            uid
-            for uid in terminal_keys
-            if global_steps - prompt_global_steps.get(uid, global_steps) + 1 > self.max_off_policy_threshold
-        }
 
     def _dapo_filtered_keys(self, partition_id: str) -> tuple[set[str], Counter]:
         """Finished groups whose configured DAPO metric is identical across all trajectories.
@@ -299,50 +289,25 @@ class ReplayBuffer:
         if partition_id == "val":
             return set(), set(), set(), Counter()
 
-        stale_uids = self._stale_terminal_keys(global_steps, partition_id)
         dapo_uids, dapo_counts = self._dapo_filtered_keys(partition_id)
-        failed_uids = set() if self.trainer_mode == "sync" else set(self.failure_keys[partition_id])
-        return stale_uids, dapo_uids, failed_uids, dapo_counts
+        return set(), dapo_uids, set(), dapo_counts
 
     def _sampleable_terminal_keys(
         self,
-        global_steps: int,
         partition_id: str,
-        eviction_reasons: tuple[set[str], set[str], set[str], Counter] | None = None,
+        eviction_reasons: tuple[set[str], set[str], set[str], Counter],
     ) -> set[str]:
         terminal_uids = self.finished_keys[partition_id] | self.failure_keys[partition_id]
-        if eviction_reasons is None:
-            eviction_reasons = self._terminal_eviction_reasons(global_steps, partition_id)
         stale_uids, dapo_uids, failed_uids, _dapo_counts = eviction_reasons
         return terminal_uids - (stale_uids | dapo_uids | failed_uids)
-
-    def _has_enough_samples(
-        self,
-        global_steps: int,
-        partition_id: str,
-        batch_size: int,
-        sampleable_keys: set[str] | None = None,
-    ) -> bool:
-        # For wait strategy, we need to wait all trajectories that reach threshold to finish
-        if self.max_off_policy_strategy == "wait":
-            for key in self.pending_keys[partition_id] | self.running_keys[partition_id]:
-                prompt_global_steps = self.prompt_global_steps[partition_id][key]
-                if (global_steps - prompt_global_steps + 1) >= self.max_off_policy_threshold:
-                    return False
-
-        if sampleable_keys is None:
-            sampleable_keys = self._sampleable_terminal_keys(global_steps, partition_id)
-        return len(sampleable_keys) >= batch_size
 
     def _evict_terminal_groups(
         self,
         global_steps: int,
         partition_id: str,
-        eviction_reasons: tuple[set[str], set[str], set[str], Counter] | None = None,
+        eviction_reasons: tuple[set[str], set[str], set[str], Counter],
     ) -> tuple[set[str], int, int, dict]:
         """Evict terminal groups selected by any active policy exactly once."""
-        if eviction_reasons is None:
-            eviction_reasons = self._terminal_eviction_reasons(global_steps, partition_id)
         stale_uids, dapo_uids, failed_uids, dapo_counts = eviction_reasons
         evicted_uids = stale_uids | dapo_uids | failed_uids
         if not evicted_uids:
@@ -374,9 +339,47 @@ class ReplayBuffer:
         self._clear_groups(partition_id, evicted_uids)
         return evicted_uids, len(stale_uids), len(dapo_uids), metrics
 
+    def _select_prompt_uids(
+        self, partition_id: str, sampleable_keys: set[str], batch_size: int
+    ) -> tuple[list[str], dict[str, dict], dict[str, int]]:
+        prompt_global_steps_snapshot = dict(self.prompt_global_steps[partition_id])
+        partition_snapshot = dict(self.partitions[partition_id])
+        ordered_keys = sorted(
+            sampleable_keys,
+            key=lambda key: prompt_global_steps_snapshot.get(key, 0),
+        )
+        return ordered_keys[:batch_size], partition_snapshot, prompt_global_steps_snapshot
+
+    def _materialize_batch(
+        self, partition_id: str, selected_prompt_uids: list[str], partition_snapshot: dict[str, dict]
+    ) -> KVBatchMeta:
+        tq.kv_clear(partition_id=partition_id, keys=selected_prompt_uids)
+
+        keys, tags = [], []
+        selected = set(selected_prompt_uids)
+        for key, tag in partition_snapshot.items():
+            uid = key.split("_")[0]
+            if uid in selected:
+                keys.append(key)
+                tags.append(tag)
+        return KVBatchMeta(partition_id=partition_id, keys=keys, tags=tags)
+
+    def _wait_for_next_poll(self, partition_id: str, last_debug_time: float) -> float:
+        time.sleep(self.poll_interval)
+        now = time.time()
+        if now - last_debug_time > VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS:
+            logger.info(
+                f"pending: {len(self.pending_keys[partition_id])}, "
+                f"running: {len(self.running_keys[partition_id])}, "
+                f"finished: {len(self.finished_keys[partition_id])}, "
+                f"failure: {len(self.failure_keys[partition_id])}"
+            )
+            return now
+        return last_debug_time
+
     @SkipManager.annotate_tq(role="rollout_tq", phase="sample")
     def sample(self, global_steps: int, partition_id: str, batch_size: int) -> tuple[KVBatchMeta, dict]:
-        """Sample a batch of data from the replay buffer.
+        """Sample a batch using synchronous rollout semantics.
 
         NOTE: user can customize sampling strategy by setting:
         ```bash
@@ -395,14 +398,11 @@ class ReplayBuffer:
         """
         last_debug_time = time.time()
         eviction_metrics: dict = {}
-        selected_prompt_uids: list[str] = []
-        partition_snapshot: dict[str, dict] = {}
-        prompt_global_steps_snapshot: dict[str, int] = {}
-        sync_dapo = self._sync_dapo_enabled(partition_id)
+        dapo_enabled = partition_id != "val" and self.filter_groups_metric is not None
         refill_credit = 0
         draining = False
         max_inflight_prompts = 0
-        if sync_dapo:
+        if dapo_enabled:
             max_inflight_prompts = self.max_inflight_gen_batches * self.train_batch_size
 
         while True:
@@ -415,20 +415,12 @@ class ReplayBuffer:
             )
             if evicted_uids:
                 _accumulate_eviction_metrics(eviction_metrics, metrics, stale_count)
-                if not sync_dapo:
-                    if self.refill_fn is not None:
-                        self.refill_fn(len(evicted_uids))
-                    continue
 
-            sampleable_keys = self._sampleable_terminal_keys(global_steps, partition_id, eviction_reasons)
-            has_enough_samples = (
-                len(sampleable_keys) >= batch_size
-                if sync_dapo
-                else self._has_enough_samples(global_steps, partition_id, batch_size, sampleable_keys)
-            )
+            sampleable_keys = self._sampleable_terminal_keys(partition_id, eviction_reasons)
+            has_enough_samples = len(sampleable_keys) >= batch_size
             inflight_count = len(self.pending_keys[partition_id]) + len(self.running_keys[partition_id])
 
-            if sync_dapo:
+            if dapo_enabled:
                 if has_enough_samples:
                     # Stop speculative dispatch, then drain requests already running under this policy version.
                     draining = True
@@ -447,36 +439,100 @@ class ReplayBuffer:
                         refill_credit -= dispatch_count
                         continue
 
-            can_select = has_enough_samples and (not sync_dapo or inflight_count == 0)
+            can_select = has_enough_samples and (not dapo_enabled or inflight_count == 0)
             if can_select:
-                prompt_global_steps_snapshot = dict(self.prompt_global_steps[partition_id])
-                partition_snapshot = dict(self.partitions[partition_id])
-                sampleable_keys = sorted(
-                    sampleable_keys,
-                    key=lambda key: prompt_global_steps_snapshot.get(key, 0),
+                selected_prompt_uids, partition_snapshot, _prompt_global_steps_snapshot = self._select_prompt_uids(
+                    partition_id, sampleable_keys, batch_size
                 )
-                selected_prompt_uids = sampleable_keys[:batch_size]
 
                 # Sync remains bufferless: all speculative requests are drained, then surplus is discarded.
-                if sync_dapo:
-                    surplus_uids = set(sampleable_keys[batch_size:])
+                if dapo_enabled:
+                    surplus_uids = sampleable_keys - set(selected_prompt_uids)
                     if surplus_uids:
                         self._clear_groups(partition_id, surplus_uids)
                         key = f"{self._metrics_prefix(partition_id)}/filter_groups/discarded_surplus_samples"
                         eviction_metrics[key] = eviction_metrics.get(key, 0) + len(surplus_uids)
                 break
 
-            time.sleep(self.poll_interval)
-            if time.time() - last_debug_time > VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS:
-                logger.info(
-                    f"pending: {len(self.pending_keys[partition_id])}, "
-                    f"running: {len(self.running_keys[partition_id])}, "
-                    f"finished: {len(self.finished_keys[partition_id])}, "
-                    f"failure: {len(self.failure_keys[partition_id])}"
-                )
-                last_debug_time = time.time()
+            last_debug_time = self._wait_for_next_poll(partition_id, last_debug_time)
 
-        if partition_id != "val" and self.trainer_mode != "sync" and self.max_off_policy_strategy == "drop":
+        return self._materialize_batch(partition_id, selected_prompt_uids, partition_snapshot), eviction_metrics
+
+
+class ReplayBufferAsync(ReplayBuffer):
+    """Async sampling policy over the shared TransferQueue and dynamic-filter implementation."""
+
+    def _validate_mode_config(self) -> None:
+        pass
+
+    def _stale_terminal_keys(self, global_steps: int, partition_id: str) -> set[str]:
+        if partition_id == "val" or self.max_off_policy_strategy != "drop":
+            return set()
+        prompt_global_steps = self.prompt_global_steps[partition_id]
+        terminal_keys = self.finished_keys[partition_id]
+        return {
+            uid
+            for uid in terminal_keys
+            if global_steps - prompt_global_steps.get(uid, global_steps) + 1 > self.max_off_policy_threshold
+        }
+
+    def _terminal_eviction_reasons(
+        self, global_steps: int, partition_id: str
+    ) -> tuple[set[str], set[str], set[str], Counter]:
+        if partition_id == "val":
+            return set(), set(), set(), Counter()
+
+        stale_uids = self._stale_terminal_keys(global_steps, partition_id)
+        dapo_uids, dapo_counts = self._dapo_filtered_keys(partition_id)
+        return stale_uids, dapo_uids, set(self.failure_keys[partition_id]), dapo_counts
+
+    def _has_enough_samples(
+        self,
+        global_steps: int,
+        partition_id: str,
+        batch_size: int,
+        sampleable_keys: set[str],
+    ) -> bool:
+        # Dropless off-policy control: block sampling while any in-flight prompt has reached the staleness
+        # threshold, so it can finish and be trained on instead of dropped.
+        if self.max_off_policy_strategy == "wait":
+            for key in self.pending_keys[partition_id] | self.running_keys[partition_id]:
+                prompt_global_steps = self.prompt_global_steps[partition_id][key]
+                if (global_steps - prompt_global_steps + 1) >= self.max_off_policy_threshold:
+                    return False
+
+        return len(sampleable_keys) >= batch_size
+
+    @SkipManager.annotate_tq(role="rollout_tq", phase="sample")
+    def sample(self, global_steps: int, partition_id: str, batch_size: int) -> tuple[KVBatchMeta, dict]:
+        """Sample a batch while evicting and replacing stale, DAPO-filtered, or failed groups."""
+        last_debug_time = time.time()
+        eviction_metrics: dict = {}
+
+        while True:
+            # Eviction and selection share one snapshot so newly terminal stale groups wait for the next eviction pass.
+            self._sync_metadata_from_transfer_queue()
+
+            eviction_reasons = self._terminal_eviction_reasons(global_steps, partition_id)
+            evicted_uids, stale_count, _dapo_count, metrics = self._evict_terminal_groups(
+                global_steps, partition_id, eviction_reasons
+            )
+            if evicted_uids:
+                _accumulate_eviction_metrics(eviction_metrics, metrics, stale_count)
+                if self.refill_fn is not None:
+                    self.refill_fn(len(evicted_uids))
+                continue
+
+            sampleable_keys = self._sampleable_terminal_keys(partition_id, eviction_reasons)
+            if self._has_enough_samples(global_steps, partition_id, batch_size, sampleable_keys):
+                selected_prompt_uids, partition_snapshot, prompt_global_steps_snapshot = self._select_prompt_uids(
+                    partition_id, sampleable_keys, batch_size
+                )
+                break
+
+            last_debug_time = self._wait_for_next_poll(partition_id, last_debug_time)
+
+        if partition_id != "val" and self.max_off_policy_strategy == "drop":
             selected_spans = [
                 global_steps - prompt_global_steps_snapshot.get(uid, global_steps) + 1 for uid in selected_prompt_uids
             ]
@@ -485,15 +541,4 @@ class ReplayBuffer:
                 f"threshold={self.max_off_policy_threshold}"
             )
 
-        tq.kv_clear(partition_id=partition_id, keys=selected_prompt_uids)
-
-        keys, tags = [], []
-        selected = set(selected_prompt_uids)
-        for key, tag in partition_snapshot.items():
-            uid = key.split("_")[0]
-            if uid in selected:
-                keys.append(key)
-                tags.append(tag)
-
-        batch = KVBatchMeta(partition_id=partition_id, keys=keys, tags=tags)
-        return batch, eviction_metrics
+        return self._materialize_batch(partition_id, selected_prompt_uids, partition_snapshot), eviction_metrics

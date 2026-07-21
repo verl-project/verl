@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 from omegaconf import OmegaConf
 
+from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer
 
 
@@ -32,9 +33,9 @@ class _CustomSampler:
         self.kwargs = kwargs
 
 
-def _trainer_with_filter_groups(filter_groups: dict) -> _StubTrainer:
+def _trainer_with_filter_groups(filter_groups: dict, trainer_mode: str = "sync") -> _StubTrainer:
     trainer = _StubTrainer.__new__(_StubTrainer)
-    trainer.trainer_mode = "sync"
+    trainer.trainer_mode = trainer_mode
     trainer.config = OmegaConf.create(
         {
             "algorithm": {"filter_groups": filter_groups},
@@ -42,7 +43,7 @@ def _trainer_with_filter_groups(filter_groups: dict) -> _StubTrainer:
             "reward": {"reward_model": {"enable": False, "enable_resource_pool": False}},
             "trainer": {
                 "v1": {
-                    "sync": {},
+                    trainer_mode: {},
                     "sampler": {
                         "custom_sampler": None,
                         "max_off_policy_threshold": 1,
@@ -54,6 +55,20 @@ def _trainer_with_filter_groups(filter_groups: dict) -> _StubTrainer:
         }
     )
     return trainer
+
+
+def test_builtin_sampler_class_follows_trainer_mode():
+    sync_sampler = _trainer_with_filter_groups({"enable": False}, trainer_mode="sync")._build_replay_buffer()
+    async_samplers = [
+        _trainer_with_filter_groups({"enable": True, "metric": "acc"}, trainer_mode=mode)._build_replay_buffer()
+        for mode in ("colocate_async", "separate_async")
+    ]
+
+    assert type(sync_sampler) is ReplayBuffer
+    assert all(type(sampler) is ReplayBufferAsync for sampler in async_samplers)
+    assert all(sampler.filter_groups_metric == "acc" for sampler in async_samplers)
+    assert all(sampler.train_batch_size is None for sampler in async_samplers)
+    assert all(sampler.gen_batch_size is None for sampler in async_samplers)
 
 
 def test_custom_sampler_skips_builtin_filter_groups_validation():

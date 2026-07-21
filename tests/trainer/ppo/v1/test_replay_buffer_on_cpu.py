@@ -38,8 +38,11 @@ trajectory crosses ``max_off_policy_threshold``:
 
 - ``drop`` (async trainers): train eagerly, dropping any sampled trajectory strictly above the
   threshold (``staleness > threshold``) and reporting drop metrics.
-- ``wait``: never drop -- block sampling while any in-flight (pending/running)
+- ``wait`` (async trainers): never drop -- block sampling while any in-flight (pending/running)
   prompt has reached the threshold (``staleness >= threshold``).
+
+Both strategies are off-policy control and therefore only apply to async trainers; sync sampling is
+on-policy, so ``max_off_policy_strategy`` is a NO-OP there.
 """
 
 import threading
@@ -52,7 +55,7 @@ import torch
 import transfer_queue as tq
 from transfer_queue import KVBatchMeta
 
-from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer
+from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
 
 # Small poll interval so the blocking consumer reacts to producer writes quickly.
 POLL_INTERVAL = 0.05
@@ -89,7 +92,8 @@ def _make_rb(
     the generic tests that ``sample`` at ``global_steps=0`` over freshly produced
     trajectories. ``refill_fn`` mirrors the trainer-injected drop-and-refill hook.
     """
-    return ReplayBuffer(
+    replay_buffer_cls = ReplayBuffer if trainer_mode == "sync" else ReplayBufferAsync
+    return replay_buffer_cls(
         trainer_mode=trainer_mode,
         trainer_config={},
         max_off_policy_threshold=max_off_policy_threshold,
@@ -312,6 +316,17 @@ def test_init_rejects_non_positive_sync_dapo_inflight_limit():
         )
 
 
+def test_async_dapo_ignores_sync_inflight_limit():
+    rb = _make_rb(
+        trainer_mode="colocate_async",
+        refill_fn=lambda _n: None,
+        filter_groups_metric="acc",
+        max_inflight_gen_batches=0,
+    )
+
+    assert type(rb) is ReplayBufferAsync
+
+
 # --------------------------------------------------------------------------- #
 # _sync_metadata_from_transfer_queue: classification of polled metadata.
 # --------------------------------------------------------------------------- #
@@ -386,8 +401,10 @@ def test_has_enough_samples_drop_ignores_inflight():
     rb.running_keys[pid] |= {"c"}
     rb.prompt_global_steps[pid]["c"] = 0
 
-    assert rb._has_enough_samples(1000, pid, batch_size=2) is True
-    assert rb._has_enough_samples(1000, pid, batch_size=3) is False
+    reasons = rb._terminal_eviction_reasons(1000, pid)
+    sampleable_keys = rb._sampleable_terminal_keys(pid, reasons)
+    assert rb._has_enough_samples(1000, pid, batch_size=2, sampleable_keys=sampleable_keys) is True
+    assert rb._has_enough_samples(1000, pid, batch_size=3, sampleable_keys=sampleable_keys) is False
 
 
 def test_has_enough_samples_drop_counts_only_fresh_terminal():
@@ -397,24 +414,44 @@ def test_has_enough_samples_drop_counts_only_fresh_terminal():
     rb.finished_keys[pid] |= {"stale", "fresh"}
     rb.prompt_global_steps[pid] = {"stale": 0, "fresh": 5}
 
-    assert rb._has_enough_samples(global_steps=5, partition_id=pid, batch_size=1) is True
-    assert rb._has_enough_samples(global_steps=5, partition_id=pid, batch_size=2) is False
+    reasons = rb._terminal_eviction_reasons(5, pid)
+    sampleable_keys = rb._sampleable_terminal_keys(pid, reasons)
+    assert rb._has_enough_samples(5, pid, batch_size=1, sampleable_keys=sampleable_keys) is True
+    assert rb._has_enough_samples(5, pid, batch_size=2, sampleable_keys=sampleable_keys) is False
 
 
 def test_has_enough_samples_wait_blocks_on_stale_inflight():
     """wait blocks while any in-flight prompt has reached the staleness threshold."""
-    rb = _make_rb(max_off_policy_strategy="wait", max_off_policy_threshold=2)
+    rb = _make_rb(trainer_mode="colocate_async", max_off_policy_strategy="wait", max_off_policy_threshold=2)
     pid = "p"
     rb.finished_keys[pid] |= {"a", "b"}
     rb.running_keys[pid] |= {"c"}
     rb.prompt_global_steps[pid]["c"] = 0
 
+    reasons = rb._terminal_eviction_reasons(1, pid)
+    sampleable_keys = rb._sampleable_terminal_keys(pid, reasons)
     # staleness = (g - 0 + 1); >= 2 (threshold) exactly at g == 1.
-    assert rb._has_enough_samples(global_steps=1, partition_id=pid, batch_size=2) is False
+    assert rb._has_enough_samples(1, pid, batch_size=2, sampleable_keys=sampleable_keys) is False
     # g == 0 -> staleness 1 < 2 -> in-flight is fresh, terminal count suffices.
-    assert rb._has_enough_samples(global_steps=0, partition_id=pid, batch_size=2) is True
+    assert rb._has_enough_samples(0, pid, batch_size=2, sampleable_keys=sampleable_keys) is True
     # wait still needs the terminal count even when nothing is stale.
-    assert rb._has_enough_samples(global_steps=0, partition_id=pid, batch_size=5) is False
+    assert rb._has_enough_samples(0, pid, batch_size=5, sampleable_keys=sampleable_keys) is False
+
+
+def test_has_enough_samples_sync_ignores_off_policy_wait():
+    """Sync sampling is on-policy: max_off_policy_strategy is a NO-OP, so a stale in-flight
+    prompt never blocks the gate (unlike the async wait strategy above)."""
+    rb = _make_rb(trainer_mode="sync", max_off_policy_strategy="wait", max_off_policy_threshold=2)
+    pid = "p"
+    rb.finished_keys[pid] |= {"a", "b"}
+    # A very stale in-flight prompt that would block async wait must be ignored in sync.
+    rb.running_keys[pid] |= {"c"}
+    rb.prompt_global_steps[pid]["c"] = 0
+
+    reasons = rb._terminal_eviction_reasons(1000, pid)
+    sampleable_keys = rb._sampleable_terminal_keys(pid, reasons)
+    assert rb._has_enough_samples(1000, pid, batch_size=2, sampleable_keys=sampleable_keys) is True
+    assert rb._has_enough_samples(1000, pid, batch_size=3, sampleable_keys=sampleable_keys) is False
 
 
 # --------------------------------------------------------------------------- #
@@ -850,7 +887,7 @@ def test_wait_blocks_until_stale_inflight_finishes(tq_init, partition_id):
     stale = PromptSpec(uid=_uid(), status="running", sessions=1, global_steps=0)
     _produce(partition_id, fresh + [stale]).join_and_check()
 
-    rb = _make_rb(max_off_policy_strategy="wait", max_off_policy_threshold=threshold)
+    rb = _make_rb(trainer_mode="colocate_async", max_off_policy_strategy="wait", max_off_policy_threshold=threshold)
     consumer = SampleConsumer(rb, partition_id, batch_size=2, global_steps=g)
     try:
         consumer.start()
@@ -879,7 +916,7 @@ def test_wait_keeps_stale_terminal_trajectories(tq_init, partition_id):
     stale = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=0)
     _produce(partition_id, [stale]).join_and_check()
 
-    rb = _make_rb(max_off_policy_strategy="wait", max_off_policy_threshold=2)
+    rb = _make_rb(trainer_mode="colocate_async", max_off_policy_strategy="wait", max_off_policy_threshold=2)
     try:
         batch, metrics = rb.sample(global_steps=100, partition_id=partition_id, batch_size=1)
 
@@ -898,7 +935,7 @@ def test_wait_does_not_block_when_inflight_is_fresh(tq_init, partition_id):
     inflight = PromptSpec(uid=_uid(), status="running", sessions=1, global_steps=g)
     _produce(partition_id, finished + [inflight]).join_and_check()
 
-    rb = _make_rb(max_off_policy_strategy="wait", max_off_policy_threshold=threshold)
+    rb = _make_rb(trainer_mode="colocate_async", max_off_policy_strategy="wait", max_off_policy_threshold=threshold)
     try:
         batch, metrics = rb.sample(global_steps=g, partition_id=partition_id, batch_size=2)
 
@@ -1232,8 +1269,8 @@ def test_sync_dapo_streams_refill_credit_with_bounded_inflight(tq_init, partitio
     _produce(partition_id, [all_same, slow_valid]).join_and_check()
 
     refiller = FakeRefiller(partition_id, global_steps=1, sessions=2, rewards=[0.0, 1.0])
+    # Sync DAPO is on-policy, so max_off_policy_strategy is irrelevant here; the default (drop) is a NO-OP.
     rb = _make_rb(
-        max_off_policy_strategy="wait",
         refill_fn=refiller,
         filter_groups_metric="acc",
         train_batch_size=2,

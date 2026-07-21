@@ -71,7 +71,7 @@ from verl.trainer.ppo.utils import (
     need_reference_policy,
     need_teacher_policy,
 )
-from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY, ReplayBuffer
+from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY, ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.utils import MetricsAggregator, compute_advantage_for_multi_trajectories
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils import tensordict_utils as tu
@@ -147,9 +147,13 @@ class PPOTrainer(ABC):
         """
         sampler_config = self.config.trainer.v1.sampler
         custom_sampler = sampler_config.get("custom_sampler", None)
-        sampler_cls = ReplayBuffer
-        if custom_sampler is not None and custom_sampler.get("path") and custom_sampler.get("name"):
+        has_custom_sampler = bool(
+            custom_sampler is not None and custom_sampler.get("path") and custom_sampler.get("name")
+        )
+        if has_custom_sampler:
             sampler_cls = load_extern_type(custom_sampler.path, custom_sampler.name)
+        else:
+            sampler_cls = ReplayBuffer if self.trainer_mode == "sync" else ReplayBufferAsync
 
         replay_buffer_kwargs = dict(
             trainer_mode=self.trainer_mode,
@@ -161,21 +165,22 @@ class PPOTrainer(ABC):
         )
         # Preserve the existing constructor contract for external samplers; custom implementations own
         # their filtering semantics and can consume algorithm.filter_groups through their own config.
-        if sampler_cls is ReplayBuffer:
+        if not has_custom_sampler:
             filter_groups_metric = self._resolve_filter_groups_metric()
-            filter_groups = self.config.algorithm.get("filter_groups", None)
-            max_inflight_gen_batches = 1
-            if filter_groups_metric is not None:
-                max_inflight_gen_batches = filter_groups.get("max_inflight_gen_batches", 1)
-            train_batch_size = self.config.data.train_batch_size
-            replay_buffer_kwargs.update(
-                filter_groups_metric=filter_groups_metric,
-                train_batch_size=train_batch_size,
-                gen_batch_size=1
-                if filter_groups_metric is not None
-                else (self.config.data.get("gen_batch_size", None) or train_batch_size),
-                max_inflight_gen_batches=max_inflight_gen_batches,
-            )
+            replay_buffer_kwargs.update(filter_groups_metric=filter_groups_metric)
+            if sampler_cls is ReplayBuffer:
+                filter_groups = self.config.algorithm.get("filter_groups", None)
+                max_inflight_gen_batches = 1
+                if filter_groups_metric is not None:
+                    max_inflight_gen_batches = filter_groups.get("max_inflight_gen_batches", 1)
+                train_batch_size = self.config.data.train_batch_size
+                replay_buffer_kwargs.update(
+                    train_batch_size=train_batch_size,
+                    gen_batch_size=1
+                    if filter_groups_metric is not None
+                    else (self.config.data.get("gen_batch_size", None) or train_batch_size),
+                    max_inflight_gen_batches=max_inflight_gen_batches,
+                )
         return sampler_cls(**replay_buffer_kwargs)
 
     def _resolve_filter_groups_metric(self) -> str | None:
