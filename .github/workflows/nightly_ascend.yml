@@ -589,7 +589,7 @@ jobs:
       - name: Install the current repository
         run: |
           uv pip install -r requirements-npu.txt && uv pip install -v -e .
-          uv pip install transformers==5.3.0
+          uv pip install transformers==5.5.3
       - name: Check initial pip list from image
         run: |
           uv pip list

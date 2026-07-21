@@ -2,7 +2,7 @@
 # This script is a demo for GRPO training of Qwen3.5-35B-A3B using VeOmniEngine.
 #
 # Environment:
-#   - transformers==5.3.0
+#   - transformers==5.5.3
 #   - sglang==0.5.9
 #   - flash-linear-attention==0.4.1
 #   - veomni==0.1.9a1
