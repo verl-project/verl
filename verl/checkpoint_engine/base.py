@@ -399,6 +399,16 @@ class CheckpointEngineManager:
         self.backend_cls = CheckpointEngineRegistry.get(config.backend)
         self.actor_wg = actor_wg
         self.replicas = replicas
+        self._p2p_rollout_metadata_initialized = False
+        if config.backend == "p2p":
+            from verl.checkpoint_engine.p2p.weight_checker import P2PWeightChecker
+
+            self._p2p_weight_checker = P2PWeightChecker(
+                enabled=config.check_weight_update_equal,
+                allow_quant_error=config.check_weight_update_allow_quant_error,
+            )
+        else:
+            self._p2p_weight_checker = None
 
     def build_process_group(self, rollout: RayWorkerGroup):
         """Build process group for actor worker group and rollout replicas."""
@@ -434,6 +444,7 @@ class CheckpointEngineManager:
             replicas: The list of rollout replicas to add.
         """
         self.replicas.extend(replicas)
+        self._invalidate_p2p_rollout_metadata()
 
     def remove_replicas(self, replicas: list[RolloutReplica]):
         """Remove rollout replicas from the manager for elastic scale down, will rebuild process group.
@@ -443,6 +454,11 @@ class CheckpointEngineManager:
         """
         replicas_set = set(replicas)
         self.replicas = [r for r in self.replicas if r not in replicas_set]
+        self._invalidate_p2p_rollout_metadata()
+
+    def _invalidate_p2p_rollout_metadata(self) -> None:
+        """Drop cached P2P rollout metadata so the next sync re-queries rollout engines."""
+        self._p2p_rollout_metadata_initialized = False
 
     @auto_await
     async def sleep_replicas(self):
@@ -483,6 +499,72 @@ class CheckpointEngineManager:
         await asyncio.gather(*[r.resume_kv_cache() for r in self.replicas])
 
     @auto_await
+    async def begin_weight_update_replicas(self, selector: str = "all") -> list[RolloutReplica]:
+        """Open one weight-update session per rollout replica.
+
+        SGLang's begin/end API is a replica-level transaction boundary. It must
+        not be opened independently by every CheckpointEngineWorker.
+        """
+        started_replicas = []
+        try:
+            for replica in self.replicas:
+                result = await replica.begin_weight_update(selector)
+                self._raise_for_weight_update_control_result("begin_weight_update", replica, result)
+                started_replicas.append(replica)
+        except Exception:
+            if started_replicas:
+                await self.end_weight_update_replicas(started_replicas)
+            raise
+        return started_replicas
+
+    @auto_await
+    async def end_weight_update_replicas(self, replicas: list[RolloutReplica] | None = None):
+        """Close weight-update sessions opened by begin_weight_update_replicas."""
+        target_replicas = self.replicas if replicas is None else replicas
+        results = await asyncio.gather(
+            *[replica.end_weight_update() for replica in target_replicas],
+            return_exceptions=True,
+        )
+
+        errors = []
+        for replica, result in zip(target_replicas, results, strict=True):
+            try:
+                self._raise_for_weight_update_control_result("end_weight_update", replica, result)
+            except Exception as exc:
+                errors.append(str(exc))
+        if errors:
+            raise RuntimeError("; ".join(errors))
+
+    @staticmethod
+    def _raise_for_weight_update_control_result(
+        endpoint: str, replica: RolloutReplica, result: dict[str, Any] | BaseException | None
+    ) -> None:
+        if isinstance(result, BaseException):
+            raise RuntimeError(
+                f"{endpoint} failed on rollout replica {getattr(replica, 'replica_rank', '?')}"
+            ) from result
+        if isinstance(result, dict) and result.get("success") is False:
+            message = result.get("message", "unknown error")
+            raise RuntimeError(
+                f"{endpoint} failed on rollout replica {getattr(replica, 'replica_rank', '?')}: {message}"
+            )
+
+    @auto_await
+    async def update_weight_version_replicas(self, weight_version: str):
+        results = await asyncio.gather(
+            *[replica.update_weight_version(weight_version, abort_all_requests=False) for replica in self.replicas],
+            return_exceptions=True,
+        )
+        errors = []
+        for replica, result in zip(self.replicas, results, strict=True):
+            try:
+                self._raise_for_weight_update_control_result("update_weight_version", replica, result)
+            except Exception as exc:
+                errors.append(str(exc))
+        if errors:
+            raise RuntimeError("; ".join(errors))
+
+    @auto_await
     async def update_weights(self, global_steps: int = None):
         """Update weights from actor worker group to rollout replicas.
 
@@ -493,6 +575,13 @@ class CheckpointEngineManager:
         # 0. update weights for sync training with colocated actor and rollout
         if self.backend == "naive":
             ray.get(self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
+            return {}
+
+        # P2P: trainer RDMA push + rollout control-plane lifecycle.
+        if self.backend == "p2p":
+            await self._p2p_weight_checker.setup(self.replicas)
+            await self._update_weights_p2p(global_steps=global_steps)
+            await self._p2p_weight_checker.compare(self.replicas)
             return {}
 
         # 1. abort and save all unfinished requests for partial rollout
@@ -511,11 +600,15 @@ class CheckpointEngineManager:
         # 4. build process group
         self.build_process_group(rollout)
 
-        # 5. update weights of all workers
-        results = ray.get(
-            actor_wg.update_weights(global_steps=global_steps, mode=self.backend)
-            + rollout.update_weights(global_steps=global_steps)
-        )
+        # 5. update weights of all workers inside one replica-level SGLang session
+        weight_update_replicas = await self.begin_weight_update_replicas()
+        try:
+            results = ray.get(
+                actor_wg.update_weights(global_steps=global_steps, mode=self.backend)
+                + rollout.update_weights(global_steps=global_steps)
+            )
+        finally:
+            await self.end_weight_update_replicas(weight_update_replicas)
         # The sender workers return the engine's per-sync metrics (empty for
         # backends that don't track any); merge and hand them to the trainer.
         sync_metrics: dict = {}
@@ -536,6 +629,39 @@ class CheckpointEngineManager:
         await self.resume_generation_replicas()
 
         return sync_metrics
+
+    @auto_await
+    async def _update_weights_p2p(self, global_steps: int | None = None) -> None:
+        """Run Miles-style P2P sync: one-time rollout metadata connect + trainer RDMA."""
+        from verl.checkpoint_engine.p2p.transfer_utils import (
+            collect_p2p_rollout_metadata,
+            resolve_rollout_model_path,
+        )
+
+        await self.abort_replicas()
+        await self.release_kv_cache_replicas()
+
+        weight_update_replicas = await self.begin_weight_update_replicas()
+        try:
+            if not self._p2p_rollout_metadata_initialized:
+                model_path = resolve_rollout_model_path(self.replicas[0].model_config)
+                rollout_metadata = await collect_p2p_rollout_metadata(
+                    self.replicas,
+                    model_path=model_path,
+                    engine_kwargs=self.config.engine_kwargs.get("p2p", {}),
+                )
+                self.actor_wg.init_p2p_rollout_metadata(rollout_metadata)
+                self._p2p_rollout_metadata_initialized = True
+
+            ray.get(self.actor_wg.update_weights(global_steps=global_steps, mode="p2p"))
+
+            weight_version = str(global_steps) if global_steps is not None else "0"
+            await self.update_weight_version_replicas(weight_version)
+        finally:
+            await self.end_weight_update_replicas(weight_update_replicas)
+
+        await self.resume_kv_cache_replicas()
+        await self.resume_generation_replicas()
 
 
 async def split_weight_chunks(

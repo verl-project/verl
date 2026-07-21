@@ -690,7 +690,7 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
             try:
                 async with self._get_session() as session:
                     if method.upper() == "GET":
-                        async with session.get(url, timeout=timeout) as response:
+                        async with session.get(url, params=payload or None, timeout=timeout) as response:
                             response.raise_for_status()
                             return await _read_async_response(response)
                     else:
@@ -772,6 +772,44 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
                 "load_format": load_format,
                 "flush_cache": flush_cache,
             },
+        )
+
+    async def get_remote_instance_transfer_engine_info(self, rank: int):
+        data = await self._make_async_request(
+            "remote_instance_transfer_engine_info",
+            {"rank": rank},
+            method="GET",
+            only_master=False,
+        )
+        return data["remote_instance_transfer_engine_info"]
+
+    async def get_parallelism_info(self, rank: int):
+        return await self._make_async_request(
+            "parallelism_config",
+            {"rank": rank},
+            method="GET",
+            only_master=False,
+        )
+
+    async def get_server_info(self) -> dict[str, Any]:
+        return await self._make_async_request("server_info", method="GET", only_master=False)
+
+    async def begin_weight_update(self, selector: str = "all") -> dict[str, Any]:
+        return await self._make_async_request("begin_weight_update", {"selector": selector})
+
+    async def end_weight_update(self) -> dict[str, Any]:
+        return await self._make_async_request("end_weight_update", {})
+
+    async def update_weight_version(self, weight_version: str, abort_all_requests: bool = True) -> dict[str, Any]:
+        return await self._make_async_request(
+            "update_weight_version",
+            {"new_version": str(weight_version), "abort_all_requests": abort_all_requests},
+        )
+
+    async def check_weights(self, action: str, allow_quant_error: bool = False) -> dict[str, Any]:
+        return await self._make_async_request(
+            "weights_checker",
+            {"action": action, "allow_quant_error": allow_quant_error},
         )
 
     async def load_lora_adapter_from_tensor(self, req):

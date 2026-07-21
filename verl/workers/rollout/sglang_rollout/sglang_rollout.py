@@ -19,7 +19,7 @@ import logging
 import multiprocessing as mp
 import os
 from dataclasses import asdict
-from typing import Generator
+from typing import Any, Generator
 
 import ray
 import sglang.srt.entrypoints.engine
@@ -287,6 +287,48 @@ class ServerAdapter(BaseRollout):
             else:
                 tags = ["kv_cache", "weights"]
             await self._engine.release_memory_occupation(tags=tags)
+
+    async def get_remote_instance_transfer_engine_info(self, rank: int):
+        await self._init_server_adapter()
+        if self._engine is None or not self._is_server_tp_leader():
+            return None
+        return await self._engine.get_remote_instance_transfer_engine_info(rank)
+
+    async def get_parallelism_info(self, rank: int):
+        await self._init_server_adapter()
+        if self._engine is None or not self._is_server_tp_leader():
+            return None
+        return await self._engine.get_parallelism_info(rank)
+
+    async def get_server_info(self) -> dict[str, Any]:
+        await self._init_server_adapter()
+        if self._engine is None or not self._is_server_tp_leader():
+            return {}
+        return await self._engine.get_server_info()
+
+    async def begin_weight_update(self, selector: str = "all") -> dict[str, Any]:
+        await self._init_server_adapter()
+        if self._engine is None or not self._is_server_tp_leader():
+            return {}
+        return await self._engine.begin_weight_update(selector)
+
+    async def end_weight_update(self) -> dict[str, Any]:
+        await self._init_server_adapter()
+        if self._engine is None or not self._is_server_tp_leader():
+            return {}
+        return await self._engine.end_weight_update()
+
+    async def update_weight_version(self, weight_version: str, abort_all_requests: bool = True) -> dict[str, Any]:
+        await self._init_server_adapter()
+        if self._engine is None or not self._is_server_tp_leader():
+            return {}
+        return await self._engine.update_weight_version(weight_version, abort_all_requests=abort_all_requests)
+
+    async def check_weights(self, action: str, allow_quant_error: bool = False) -> dict[str, Any]:
+        await self._init_server_adapter()
+        if self._engine is None or not self._is_server_tp_leader():
+            return {}
+        return await self._engine.check_weights(action, allow_quant_error=allow_quant_error)
 
     async def update_weights(
         self,

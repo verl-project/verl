@@ -71,3 +71,7 @@ try:
     __all__ += ["DeltaShardedCheckpointEngine"]
 except ImportError:
     DeltaShardedCheckpointEngine = None
+
+from .p2p.checkpoint_engine import P2PCheckpointEngine
+
+__all__ += ["P2PCheckpointEngine"]

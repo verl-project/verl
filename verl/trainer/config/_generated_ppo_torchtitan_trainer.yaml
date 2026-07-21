@@ -313,6 +313,8 @@ actor_rollout_ref:
       backend: naive
       update_weights_bucket_megabytes: 2048
       engine_kwargs: {}
+      check_weight_update_equal: false
+      check_weight_update_allow_quant_error: false
       custom_backend_module: null
     trace:
       _target_: verl.workers.config.TraceConfig
