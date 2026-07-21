@@ -254,3 +254,65 @@ def test_flat_contiguous_block_matches_int_fast_path():
     # a dim-1 cut is not flat-contiguous and must take the mixed-radix path
     p2 = BlockPlacement((8, 2, 6), (0, 2, 0), full_shape)
     assert not p2.is_flat_contiguous
+
+
+def test_explicit_place_block_rebuild_muon_shard0_layout():
+    """veomni muon_expert_zero_comm layout: the expert stack is split on dim 0
+    TWICE -- manually by ep, then FSDP ``Shard(0)`` inside each ep slice (vs the
+    standard ``Shard(1)``). The exporter's offset math
+    (``ep_rank * n_local + goff[0]``) must place these dim-0 sub-blocks
+    correctly; the NaN rebuild must be bit-equal to a full convert-then-diff."""
+    torch.manual_seed(4)
+    n_experts, dim, inter = 8, 4, 3
+    full_shape = (n_experts, dim, 2 * inter)
+    to_hf = _qwen3_style_to_hf(full_shape, inter)
+    ep, fsdp = 2, 2  # dim0 split ep x fsdp: each rank holds n_experts/(ep*fsdp) whole experts
+    n_local = n_experts // ep  # experts per ep rank (the DTensor's global dim 0)
+    rows = n_local // fsdp  # experts per (ep, fsdp) rank
+
+    old = torch.randn(full_shape, dtype=torch.bfloat16)
+    new = old.clone()
+    new[0, 1, 2] += 1.0
+    new[3, 0, 5] -= 0.5
+    new[5, 2, 1] += 2.0
+
+    full_nan = torch.full(full_shape, float("nan"), dtype=old.dtype)
+    for ep_rank in range(ep):
+        for fsdp_rank in range(fsdp):
+            # mimic the exporter: goff from Shard(0) over the ep-local stack,
+            # then lift by ep_rank * n_local
+            goff0 = fsdp_rank * rows
+            offset = (ep_rank * n_local + goff0, 0, 0)
+            lshape = (rows, dim, 2 * inter)
+            place = BlockPlacement(lshape, offset, full_shape)
+            assert place.is_flat_contiguous  # whole experts -> flat contiguous
+            slices = tuple(slice(o, o + sz) for o, sz in zip(offset, lshape, strict=False))
+            lo = old[slices].contiguous().reshape(-1)
+            ln = new[slices].contiguous().reshape(-1)
+            changed = (
+                (lo.view(torch.uint8).view(lo.numel(), -1) != ln.view(torch.uint8).view(ln.numel(), -1))
+                .any(dim=-1)
+                .nonzero(as_tuple=False)
+                .view(-1)
+            )
+            buf = torch.full((lo.numel(),), float("nan"), dtype=old.dtype)
+            buf[changed] = ln[changed]
+            full_nan[slices] = buf.view(lshape)
+
+    seen = 0
+    ref_new = dict(to_hf([new.reshape(-1)]))
+    ref_old = dict(to_hf([old.reshape(-1)]))
+    for hf_name, hf_tensor in to_hf([full_nan.reshape(-1)]):
+        fl = hf_tensor.reshape(-1)
+        pos = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
+        rn, ro = ref_new[hf_name].reshape(-1), ref_old[hf_name].reshape(-1)
+        ref_changed = (
+            (rn.view(torch.uint8).view(rn.numel(), -1) != ro.view(torch.uint8).view(ro.numel(), -1))
+            .any(dim=-1)
+            .nonzero(as_tuple=False)
+            .view(-1)
+        )
+        assert torch.equal(pos, ref_changed), f"{hf_name}: positions diverge"
+        assert torch.equal(fl[pos], rn[pos]), f"{hf_name}: values diverge"
+        seen += int(pos.numel())
+    assert seen == 3
