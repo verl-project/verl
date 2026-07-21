@@ -39,6 +39,7 @@ from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAc
 from verl.utils.megatron.router_replay_utils import (
     RouterReplayHelper,
     build_r3_replay_mask,
+    get_thd_sequence_parallel_padding_mask,
     merge_router_topk_indices,
     pp_gather,
     reorder_and_merge_vpp_layers,
@@ -749,7 +750,8 @@ class MegatronEngine(BaseEngine):
         if enable_routing_replay:
             # Set to REPLAY mode: for R3 mode or actor update phase in R2 mode
             RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
-            if forward_only and self.engine_config.router_replay.mode == "R2":
+            has_replay_routes = "routed_experts" in data.keys()
+            if forward_only and self.engine_config.router_replay.mode == "R2" and not has_replay_routes:
                 # In R2 mode, forward_only calls (e.g., compute_log_probs) need to record routing information
                 RouterReplay.set_global_router_replay_action(RouterReplayAction.RECORD)
 
@@ -1000,12 +1002,17 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
         if RouterReplayHelper.is_replay_forward_action(self.tf_config, vp_rank):
             layers_topk_idx = model_inputs["routed_experts"]
+            if layers_topk_idx is None:
+                raise RuntimeError(
+                    "router_replay REPLAY: micro_batch has no routed_experts. "
+                    "R2 compute_log_prob must record and preserve routes before actor update."
+                )
             replay_mask = None
             if self.engine_config.router_replay.mode == "R3":
                 replay_mask = build_r3_replay_mask(input_ids, batch["response_mask"])
             set_router_replay_data(
                 layers_topk_idx,
-                None,
+                attention_mask,
                 self.tf_config,
                 vp_rank,
                 replay_mask=replay_mask,
@@ -1079,23 +1086,30 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 "response_attention_mask": response_attention_mask,
             }
 
-            output = forward_fn(
-                model,
-                input_ids,
-                multi_modal_inputs,
-                logits_processor=logits_processor,
-                logits_processor_args=logits_processor_args,
-                vision_model=hasattr(self.model_config.hf_config, "vision_config"),
-                pad_token_id=self.model_config.tokenizer.pad_token_id,
-                data_format=data_format,
-                mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
-                local_cp_size=local_cp_size,
-                forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
-            )
+            record_padding_mask = None
+            if RouterReplayHelper.is_r2_record_action(self.tf_config, vp_rank):
+                record_padding_mask = get_thd_sequence_parallel_padding_mask(input_ids)
+            RouterReplay.set_global_record_padding_mask(record_padding_mask)
+            try:
+                output = forward_fn(
+                    model,
+                    input_ids,
+                    multi_modal_inputs,
+                    logits_processor=logits_processor,
+                    logits_processor_args=logits_processor_args,
+                    vision_model=hasattr(self.model_config.hf_config, "vision_config"),
+                    pad_token_id=self.model_config.tokenizer.pad_token_id,
+                    data_format=data_format,
+                    mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
+                    local_cp_size=local_cp_size,
+                    forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
+                )
+            finally:
+                RouterReplay.clear_global_record_padding_mask()
 
         # Router replay: record routing decisions for R2 mode
         if RouterReplayHelper.is_r2_record_action(self.tf_config, vp_rank):
-            merge_router_topk_indices(None, input_ids, self.mini_layer_topk_idx_list, self.tf_config, vp_rank)
+            merge_router_topk_indices(attention_mask, input_ids, self.mini_layer_topk_idx_list, self.tf_config, vp_rank)
 
         # Router replay: switch to backward replay mode for next backward pass
         if RouterReplayHelper.is_replay_forward_action(self.tf_config, vp_rank):
