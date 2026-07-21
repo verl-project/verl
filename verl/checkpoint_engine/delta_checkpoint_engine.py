@@ -50,6 +50,7 @@ from .base import CheckpointEngineRegistry
 from .delta_sync.encode import DeltaFlush, DeltaParam
 from .delta_sync.encode import checksum as _checksum
 from .delta_sync.sparse_gather import (
+    gather_dense_block_segments_to_rank0,
     gather_dense_blocks_to_rank0,
     gather_dense_to_rank0,
     gather_shards_to_rank0,
@@ -149,6 +150,12 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
     # sliced into multiple entries (the masked apply is sequential, so splitting
     # is transparent); 64M elements bounds the transient to ~512 MiB.
     MAX_ENTRY_ELEMS = 64 << 20
+
+    # Bound on the rank-0 rebuild transient for dim-0-separable converter params
+    # (``spec.to_hf_chunk``): the NaN rebuild and the dense seed assemble/convert in
+    # dim-0 segments of at most this many elements instead of materializing the full
+    # logical tensor (a Kimi-K2.5-scale fused expert stack is ~21 GB in bf16).
+    REBUILD_CHUNK_ELEMS = 64 << 20
 
     wire_format = "delta_flush"
 
@@ -439,12 +446,23 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                     if is_r0 and full is not None:
                         _bucket_dense(name, full.view(spec.full_shape))
             elif isinstance(place, BlockPlacement):
-                # block converter profile: assemble the full logical tensor from
-                # per-rank blocks, then convert -- to_hf receives ``[full]``.
-                full = gather_dense_blocks_to_rank0(shard, place, group=pg)
-                if is_r0 and full is not None:
-                    for hf_name, hf_tensor in spec.to_hf([full]):
-                        _bucket_dense(hf_name, hf_tensor)
+                if spec.to_hf_chunk is not None:
+                    # dim-0-separable converter: gather, assemble and convert in
+                    # bounded dim-0 segments -- the full logical tensor is never
+                    # materialized on any rank (see REBUILD_CHUNK_ELEMS).
+                    inner = max(_prodshape(spec.full_shape[1:]), 1)
+                    seg_rows = max(1, self.REBUILD_CHUNK_ELEMS // inner)
+                    for row0, seg in gather_dense_block_segments_to_rank0(shard, place, group=pg, seg_rows=seg_rows):
+                        for hf_name, hf_tensor in spec.to_hf_chunk(row0, seg):
+                            _bucket_dense(hf_name, hf_tensor)
+                        del seg
+                else:
+                    # block converter profile: assemble the full logical tensor from
+                    # per-rank blocks, then convert -- to_hf receives ``[full]``.
+                    full = gather_dense_blocks_to_rank0(shard, place, group=pg)
+                    if is_r0 and full is not None:
+                        for hf_name, hf_tensor in spec.to_hf([full]):
+                            _bucket_dense(hf_name, hf_tensor)
             else:
                 # converter profile (e.g. Megatron): rebuild dense shards via to_hf
                 shards = gather_shards_to_rank0(shard, group=pg)
@@ -616,7 +634,49 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
 
             if is_r0 and gathered is not None:
                 for k, (entry, per_rank) in enumerate(zip(nan_group, gathered, strict=False)):
-                    if is_block:
+                    if is_block and entry.spec.to_hf_chunk is not None:
+                        # dim-0-separable converter: translate every rank's shard-local
+                        # positions to full-tensor coordinates once, then rebuild and
+                        # convert in bounded dim-0 segments -- the full logical tensor
+                        # is never materialized (see REBUILD_CHUNK_ELEMS).
+                        full_shape = entry.spec.full_shape
+                        inner = max(_prodshape(full_shape[1:]), 1)
+                        seg_rows = max(1, self.REBUILD_CHUNK_ELEMS // inner)
+                        gidx_parts: list[torch.Tensor] = []
+                        gval_parts: list[torch.Tensor] = []
+                        for r, (gi, gv) in enumerate(per_rank):
+                            if gi.numel() == 0:
+                                continue
+                            m = blocks[r][k]
+                            d = int(m[0])
+                            pl = BlockPlacement(
+                                tuple(int(x) for x in m[1 : 1 + d]),
+                                tuple(int(x) for x in m[1 + d : 1 + 2 * d]),
+                                tuple(full_shape),
+                            )
+                            gidx_parts.append(translate_flat_indices(gi.to(torch.int64), pl))
+                            gval_parts.append(gv)
+                        if gidx_parts:
+                            gidx = torch.cat(gidx_parts)
+                            gval = torch.cat(gval_parts)
+                            order = torch.argsort(gidx)
+                            gidx, gval = gidx[order], gval[order]
+                        else:
+                            gidx = torch.empty(0, dtype=torch.int64, device=dev)
+                            gval = torch.empty(0, dtype=entry.dtype, device=dev)
+                        n_rows = int(full_shape[0])
+                        for row0 in range(0, n_rows, seg_rows):
+                            rows = min(seg_rows, n_rows - row0)
+                            lo, hi = row0 * inner, (row0 + rows) * inner
+                            a = int(torch.searchsorted(gidx, lo))
+                            b = int(torch.searchsorted(gidx, hi))
+                            seg = torch.full((rows * inner,), float("nan"), dtype=entry.dtype, device=dev)
+                            if b > a:
+                                seg[gidx[a:b] - lo] = gval[a:b]
+                            for hf_name, hf_tensor in entry.spec.to_hf_chunk(row0, seg.view(rows, *full_shape[1:])):
+                                _consume_hf(hf_name, hf_tensor)
+                            del seg
+                    elif is_block:
                         # block converter profile: rebuild the FULL logical tensor with NaN
                         # sentinels (per-rank slice assignment), then hand ``[full]`` to to_hf.
                         full = torch.full(entry.spec.full_shape, float("nan"), dtype=entry.dtype, device=dev)

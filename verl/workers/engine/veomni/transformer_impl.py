@@ -682,6 +682,9 @@ class VeOmniEngine(FSDPEngine):
                     to_hf=_expert_to_hf(name, full_shape),
                     place=block,
                     gather_group=dist.group.WORLD,
+                    # dim-0-separable: a segment is a run of whole experts starting at
+                    # global expert id ``start`` -- exactly the handler's contract.
+                    to_hf_chunk=lambda start, seg, _f=process_func, _n=name: list(_f(_n, seg, expert_id_base=start)),
                 )
                 yield name, local.reshape(-1), spec
 

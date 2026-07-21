@@ -316,3 +316,117 @@ def test_explicit_place_block_rebuild_muon_shard0_layout():
         assert torch.equal(fl[pos], rn[pos]), f"{hf_name}: values diverge"
         seen += int(pos.numel())
     assert seen == 3
+
+
+def _qwen3_style_to_hf_chunk(inter_dim):
+    """Segment-aware counterpart of _qwen3_style_to_hf: converts a dim-0 run of
+    whole experts starting at global expert id ``start``."""
+
+    def to_hf_chunk(start, seg):
+        out = []
+        for i in range(seg.shape[0]):
+            w = seg[i]
+            out.append((f"experts.{start + i}.gate_proj.weight", w[:, :inter_dim].transpose(0, 1)))
+            out.append((f"experts.{start + i}.up_proj.weight", w[:, inter_dim:].transpose(0, 1)))
+        return out
+
+    return to_hf_chunk
+
+
+@pytest.mark.parametrize("seg_rows", [1, 3, 8])
+def test_chunked_rebuild_matches_full_rebuild(seg_rows):
+    """The engine's segmented NaN rebuild (translate per-rank shard-local positions
+    to full coordinates, sort, scatter per dim-0 segment, convert per segment) must
+    extract exactly the same (hf_name, position, value) set as the full rebuild."""
+    torch.manual_seed(5)
+    n_experts, dim, inter = 8, 4, 3
+    full_shape = (n_experts, dim, 2 * inter)
+    inner = dim * 2 * inter
+    to_hf = _qwen3_style_to_hf(full_shape, inter)
+    to_hf_chunk = _qwen3_style_to_hf_chunk(inter)
+
+    old = torch.randn(full_shape, dtype=torch.bfloat16)
+    new = old.clone()
+    new[0, 1, 2] += 1.0
+    new[3, 0, 5] -= 0.5
+    new[5, 2, 1] += 2.0
+    new[7, 3, 0] += 0.25
+
+    # per-rank shard-local sparse deltas over an ep x ep_shard block grid
+    gidx_parts, gval_parts = [], []
+    full_nan = torch.full(full_shape, float("nan"), dtype=old.dtype)
+    for place in _blocks_for_grid(full_shape, {0: 4, 1: 2}):
+        slices = tuple(slice(o, o + sz) for o, sz in zip(place.global_offset, place.local_shape, strict=False))
+        lo_t = old[slices].contiguous().reshape(-1)
+        ln_t = new[slices].contiguous().reshape(-1)
+        changed = (
+            (lo_t.view(torch.uint8).view(lo_t.numel(), -1) != ln_t.view(torch.uint8).view(ln_t.numel(), -1))
+            .any(dim=-1)
+            .nonzero(as_tuple=False)
+            .view(-1)
+        )
+        gidx_parts.append(translate_flat_indices(changed, place))
+        gval_parts.append(ln_t[changed])
+        buf = torch.full((lo_t.numel(),), float("nan"), dtype=old.dtype)
+        buf[changed] = ln_t[changed]
+        full_nan[slices] = buf.view(place.local_shape)
+
+    gidx = torch.cat(gidx_parts)
+    gval = torch.cat(gval_parts)
+    order = torch.argsort(gidx)
+    gidx, gval = gidx[order], gval[order]
+
+    # reference: full rebuild -> convert -> extract
+    ref = {}
+    for hf_name, hf_tensor in to_hf([full_nan.reshape(-1)]):
+        fl = hf_tensor.reshape(-1)
+        pos = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
+        ref[hf_name] = (pos, fl[pos])
+
+    # chunked: segment scatter -> convert per segment -> extract
+    got = {}
+    for row0 in range(0, n_experts, seg_rows):
+        rows = min(seg_rows, n_experts - row0)
+        lo, hi = row0 * inner, (row0 + rows) * inner
+        a = int(torch.searchsorted(gidx, lo))
+        b = int(torch.searchsorted(gidx, hi))
+        seg = torch.full((rows * inner,), float("nan"), dtype=old.dtype)
+        if b > a:
+            seg[gidx[a:b] - lo] = gval[a:b]
+        for hf_name, hf_tensor in to_hf_chunk(row0, seg.view(rows, dim, 2 * inter)):
+            fl = hf_tensor.reshape(-1)
+            pos = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
+            if pos.numel() or hf_name in ref and ref[hf_name][0].numel():
+                got[hf_name] = (pos, fl[pos])
+
+    changed_names = {n for n, (p, _) in ref.items() if p.numel()}
+    assert changed_names == set(got.keys())
+    for name in changed_names:
+        assert torch.equal(got[name][0], ref[name][0]), f"{name}: positions diverge"
+        assert torch.equal(got[name][1], ref[name][1]), f"{name}: values diverge"
+
+
+def test_gather_dense_block_segments_world1():
+    """Single-process (world=1) mechanics of the segmented seed gather: the yielded
+    segments must reassemble the original tensor exactly."""
+    import os
+
+    import torch.distributed as dist
+
+    from verl.checkpoint_engine.delta_sync.sparse_gather import gather_dense_block_segments_to_rank0
+
+    if not dist.is_initialized():
+        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+        os.environ.setdefault("MASTER_PORT", "29511")
+        dist.init_process_group(backend="gloo", rank=0, world_size=1)
+
+    full_shape = (7, 3, 4)
+    full = torch.randn(full_shape, dtype=torch.float32)
+    place = BlockPlacement(full_shape, (0, 0, 0), full_shape)  # world=1: the block IS the full tensor
+    out = torch.empty_like(full)
+    seen_rows = 0
+    for row0, seg in gather_dense_block_segments_to_rank0(full.reshape(-1), place, group=None, seg_rows=2):
+        out[row0 : row0 + seg.shape[0]] = seg
+        seen_rows += seg.shape[0]
+    assert seen_rows == full_shape[0]
+    assert torch.equal(out, full)

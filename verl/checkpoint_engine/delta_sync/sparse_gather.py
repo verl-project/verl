@@ -299,3 +299,81 @@ def gather_shards_to_rank0(local_val: torch.Tensor, group=None) -> list[torch.Te
     if rank != 0:
         return None
     return [val_list[r][: counts[r]] for r in range(world)]
+
+
+def gather_dense_block_segments_to_rank0(
+    local_val: torch.Tensor,
+    place: BlockPlacement,
+    group: dist.ProcessGroup | None = None,
+    seg_rows: int = 1,
+):
+    """Segmented counterpart of :func:`gather_dense_blocks_to_rank0`.
+
+    Instead of assembling the whole logical tensor at once, walk dim 0 in
+    ``seg_rows``-row segments: every rank contributes only its block's overlap
+    with the current segment (one padded gather per segment), and rank 0
+    assembles and yields ``(row0, segment)`` with ``segment.shape ==
+    (rows, *full_shape[1:])``. Rank-0 peak memory is one segment plus its
+    per-segment gather buffers -- independent of the logical tensor size.
+
+    A generator with collectives inside: every rank must drain it (non-zero
+    ranks run the collectives during their first ``next()`` and yield nothing).
+    The segment schedule is a pure function of ``full_shape``/``seg_rows``, so
+    all ranks stay in lockstep.
+    """
+    import math
+
+    rank = dist.get_rank(group)
+    world = dist.get_world_size(group)
+    dst = dist.get_global_rank(group, 0) if group is not None else 0
+    dev = local_val.device
+    ndim = len(place.full_shape)
+
+    meta = torch.tensor([*place.local_shape, *place.global_offset], dtype=torch.long, device=dev)
+    metas = [torch.zeros(2 * ndim, dtype=torch.long, device=dev) for _ in range(world)]
+    dist.all_gather(metas, meta, group=group)
+    metas_cpu = [m.cpu().tolist() for m in metas]
+
+    n_rows = int(place.full_shape[0])
+    inner_full = tuple(int(x) for x in place.full_shape[1:])
+    my = metas_cpu[rank]
+    lview = local_val.view(tuple(int(x) for x in place.local_shape))
+
+    for row0 in range(0, n_rows, max(seg_rows, 1)):
+        rows = min(seg_rows, n_rows - row0)
+        counts = []
+        for m in metas_cpu:
+            l0, o0 = int(m[0]), int(m[ndim])
+            nr = max(0, min(o0 + l0, row0 + rows) - max(o0, row0))
+            counts.append(nr * math.prod(int(x) for x in m[1:ndim]) if ndim > 1 else nr)
+        max_n = max(counts)
+        if max_n == 0:
+            continue
+
+        l0, o0 = int(my[0]), int(my[ndim])
+        r_lo, r_hi = max(o0, row0), min(o0 + l0, row0 + rows)
+        piece = (
+            lview[r_lo - o0 : r_hi - o0].contiguous().reshape(-1)
+            if r_hi > r_lo
+            else torch.empty(0, dtype=local_val.dtype, device=dev)
+        )
+        pad = torch.zeros(max_n, dtype=local_val.dtype, device=dev)
+        pad[: piece.numel()] = piece
+        plist = [torch.zeros(max_n, dtype=local_val.dtype, device=dev) for _ in range(world)] if rank == 0 else None
+        dist.gather(pad, plist, dst=dst, group=group)
+        if rank != 0:
+            continue
+
+        seg = torch.empty((rows, *inner_full), dtype=local_val.dtype, device=dev)
+        for r in range(world):
+            if not counts[r]:
+                continue
+            m = metas_cpu[r]
+            lshape_r = [int(x) for x in m[:ndim]]
+            goff_r = [int(x) for x in m[ndim:]]
+            rr_lo = max(goff_r[0], row0)
+            rr_hi = min(goff_r[0] + lshape_r[0], row0 + rows)
+            nr = rr_hi - rr_lo
+            inner_slices = tuple(slice(goff_r[i], goff_r[i] + lshape_r[i]) for i in range(1, ndim))
+            seg[(slice(rr_lo - row0, rr_hi - row0), *inner_slices)] = plist[r][: counts[r]].view(nr, *lshape_r[1:])
+        yield row0, seg

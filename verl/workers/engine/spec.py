@@ -65,6 +65,13 @@ class ShardSpec:
     # Every rank is assumed to contribute.
     place: Optional[int | BlockPlacement] = None
     gather_group: Optional[ProcessGroup] = None
+    # Optional dim-0-separable converter: ``to_hf_chunk(dim0_start, segment)`` converts a
+    # contiguous dim-0 segment ``full[dim0_start : dim0_start + segment.shape[0]]`` of the
+    # logical tensor to ``[(hf_name, hf_tensor)]``. When set on a block-converter spec the
+    # engine rebuilds and converts in bounded dim-0 segments instead of materializing the
+    # whole logical tensor on rank 0 (e.g. a fused expert stack: each segment is a run of
+    # whole experts and the converter only needs the segment plus its starting expert id).
+    to_hf_chunk: Optional[Callable[[int, torch.Tensor], list[tuple[str, torch.Tensor]]]] = None
 
     @classmethod
     def from_param(cls, param: torch.Tensor) -> ShardSpec:
