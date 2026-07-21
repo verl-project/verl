@@ -996,6 +996,81 @@ def test_async_dapo_refills_exact_missing_count(tq_init, partition_id):
         _clear_partition(partition_id)
 
 
+def test_dapo_classification_cache_reuses_finished_groups(tq_init, partition_id, monkeypatch):
+    all_same = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[1.0, 1.0])
+    mixed = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[0.0, 1.0])
+    _produce(partition_id, [all_same, mixed]).join_and_check()
+
+    requested_keys: list[set[str]] = []
+    original_kv_batch_get = tq.kv_batch_get
+
+    def recording_kv_batch_get(*args, **kwargs):
+        requested_keys.append(set(kwargs["keys"]))
+        return original_kv_batch_get(*args, **kwargs)
+
+    monkeypatch.setattr(tq, "kv_batch_get", recording_kv_batch_get)
+    rb = _make_rb(filter_groups_metric="acc", refill_fn=lambda _n: None)
+    try:
+        rb._sync_metadata_from_transfer_queue()
+        first_result = rb._dapo_filtered_keys(partition_id)
+        second_result = rb._dapo_filtered_keys(partition_id)
+
+        assert first_result == second_result
+        assert first_result[0] == {all_same.uid}
+        assert dict(first_result[1]) == {1.0: 1}
+        assert requested_keys == [set(all_same.trajectory_keys + mixed.trajectory_keys)]
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_dapo_classification_cache_fetches_only_new_finished_groups(tq_init, partition_id, monkeypatch):
+    first = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[0.0, 1.0])
+    _produce(partition_id, [first]).join_and_check()
+
+    requested_keys: list[set[str]] = []
+    original_kv_batch_get = tq.kv_batch_get
+
+    def recording_kv_batch_get(*args, **kwargs):
+        requested_keys.append(set(kwargs["keys"]))
+        return original_kv_batch_get(*args, **kwargs)
+
+    monkeypatch.setattr(tq, "kv_batch_get", recording_kv_batch_get)
+    rb = _make_rb(filter_groups_metric="acc", refill_fn=lambda _n: None)
+    try:
+        rb._sync_metadata_from_transfer_queue()
+        assert rb._dapo_filtered_keys(partition_id)[0] == set()
+
+        second = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[0.0, 0.0])
+        _produce(partition_id, [second]).join_and_check()
+        rb._sync_metadata_from_transfer_queue()
+        filtered_uids, filtered_counts = rb._dapo_filtered_keys(partition_id)
+
+        assert filtered_uids == {second.uid}
+        assert dict(filtered_counts) == {0.0: 1}
+        assert requested_keys == [set(first.trajectory_keys), set(second.trajectory_keys)]
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_dapo_classification_cache_prunes_removed_groups(tq_init, partition_id):
+    all_same = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[1.0, 1.0])
+    _produce(partition_id, [all_same]).join_and_check()
+
+    rb = _make_rb(filter_groups_metric="acc", refill_fn=lambda _n: None)
+    try:
+        rb._sync_metadata_from_transfer_queue()
+        assert rb._dapo_filtered_keys(partition_id)[0] == {all_same.uid}
+
+        rb._clear_groups(partition_id, {all_same.uid})
+        rb._sync_metadata_from_transfer_queue()
+        filtered_uids, filtered_counts = rb._dapo_filtered_keys(partition_id)
+        assert filtered_uids == set()
+        assert not filtered_counts
+        assert rb._dapo_classification_cache[partition_id] == {}
+    finally:
+        _clear_partition(partition_id)
+
+
 def test_terminal_eviction_reasons_returns_dapo_counts(tq_init, partition_id):
     """Contract: the reasons tuple carries (stale, dapo, failed, dapo_counts) with a Counter last."""
     from collections import Counter

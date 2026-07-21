@@ -170,6 +170,8 @@ class ReplayBuffer:
         self.failure_keys: dict[str, set] = defaultdict(set)
         # partition_id => {prompt_key: global_steps}, used to prioritize older samples.
         self.prompt_global_steps: dict[str, dict[str, int]] = defaultdict(dict)
+        # Finished groups are immutable, so their DAPO classification can be reused across polling iterations.
+        self._dapo_classification_cache: dict[str, dict[str, float | None]] = defaultdict(dict)
 
     def _sync_metadata_from_transfer_queue(self):
         """Sync the metadata from TransferQueue."""
@@ -244,9 +246,14 @@ class ReplayBuffer:
             return set(), Counter()
 
         finished_uids = self.finished_keys[partition_id]
-        trajectory_keys = [key for key in self.partitions[partition_id] if key.split("_")[0] in finished_uids]
+        classification_cache = self._dapo_classification_cache[partition_id]
+        for uid in classification_cache.keys() - finished_uids:
+            del classification_cache[uid]
+
+        new_finished_uids = finished_uids - classification_cache.keys()
+        trajectory_keys = [key for key in self.partitions[partition_id] if key.split("_")[0] in new_finished_uids]
         metrics_by_uid: dict[str, list[float]] = defaultdict(list)
-        missing_metric_uids = finished_uids - {key.split("_")[0] for key in trajectory_keys}
+        missing_metric_uids = new_finished_uids - {key.split("_")[0] for key in trajectory_keys}
 
         if trajectory_keys:
             data = tq.kv_batch_get(
@@ -273,11 +280,12 @@ class ReplayBuffer:
                 f"{sorted(missing_metric_uids)[:5]}"
             )
 
-        filtered_uids = {
-            uid for uid, values in metrics_by_uid.items() if len(values) > 1 and float(np.std(values)) == 0.0
-        }
-        filtered_counts = Counter(float(metrics_by_uid[uid][0]) for uid in filtered_uids)
-        return filtered_uids, filtered_counts
+        for uid in new_finished_uids:
+            values = metrics_by_uid[uid]
+            classification_cache[uid] = float(values[0]) if len(values) > 1 and float(np.std(values)) == 0.0 else None
+
+        filtered_rewards = {uid: reward for uid, reward in classification_cache.items() if reward is not None}
+        return set(filtered_rewards), Counter(filtered_rewards.values())
 
     def _terminal_eviction_reasons(
         self, global_steps: int, partition_id: str
