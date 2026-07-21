@@ -145,6 +145,11 @@ class VeOmniEngine(FSDPEngine):
         self._is_offload_param = self.engine_config.param_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
         self._is_lora = self.model_config.lora_rank > 0
+        # When VeOmni parallelizes with enable_fsdp_offload, FSDP2 uses CPUOffloadPolicy and
+        # owns CPU<->accelerator placement. Manually calling model.to(device) then crashes
+        # state_dict() with a DTensor storage device mismatch (see #5995 / #6604, which fixed
+        # the FSDP engine; the VeOmni engine has the same paths and needs the same guard).
+        self._uses_fsdp2_cpu_offload_policy = self.engine_config.enable_fsdp_offload
 
         self.use_ulysses_sp = parallel_state.get_parallel_state().sp_enabled
         self.ulysses_sequence_parallel_size = self.engine_config.ulysses_parallel_size
@@ -545,7 +550,9 @@ class VeOmniEngine(FSDPEngine):
         Save VeOmni checkpoint, handling parameter offload as needed.
         """
         origin_module_device = next(self.module.parameters()).device.type
-        if self._is_offload_param or origin_module_device == "cpu":
+        if (self._is_offload_param or origin_module_device == "cpu") and not getattr(
+            self, "_uses_fsdp2_cpu_offload_policy", False
+        ):
             load_veomni_model_to_gpu(self.module)
 
         self.checkpoint_manager.save_checkpoint(
@@ -562,7 +569,7 @@ class VeOmniEngine(FSDPEngine):
         """
         Load VeOmni checkpoint, restoring parameters and optimizer state.
         """
-        if self._is_offload_param:
+        if self._is_offload_param and not getattr(self, "_uses_fsdp2_cpu_offload_policy", False):
             load_veomni_model_to_gpu(self.module)
 
         self.checkpoint_manager.load_checkpoint(
@@ -577,7 +584,12 @@ class VeOmniEngine(FSDPEngine):
             offload_veomni_optimizer(self.optimizer)
 
     def get_per_tensor_param(self, **kwargs):
-        load_veomni_model_to_gpu(self.module)
+        # FSDP2 CPUOffloadPolicy owns CPU<->accelerator placement; calling model.to(device)
+        # here leaves the module half-moved and crashes state_dict() below (#5995). The
+        # per-DTensor full_tensor() in param_generator() below still yields accelerator
+        # tensors, so the manual whole-model move is unnecessary under CPU offload.
+        if not getattr(self, "_uses_fsdp2_cpu_offload_policy", False):
+            load_veomni_model_to_gpu(self.module)
 
         params = self.module.state_dict()
         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
