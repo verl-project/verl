@@ -582,6 +582,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         nan_group: list[_RebuildEntry] = []  # rebuild-profile params batched per gather_group
         # sender-side scoped conversion queue: (pg, spec, dtype_str, counts, idx_concat, val_concat)
         scoped_group: list = []
+        scoped_bytes = 0  # this rank's queued payload; bounds rank-0 gather buffers at high density
 
         def _flush_scoped() -> None:
             nonlocal scoped_group
@@ -601,6 +602,8 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                         slot_i += 1
                         _consume(name, dtype_str, tuple(shape), _prodshape(shape), aidx, aval)
             scoped_group = []
+            nonlocal scoped_bytes
+            scoped_bytes = 0
 
         def _consume_hf(hf_name: str, hf_tensor: torch.Tensor) -> None:
             nonlocal total_elems
@@ -796,7 +799,11 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                 if scoped_group and scoped_group[0][0] is not pg:
                     _flush_scoped()
                 scoped_group.append((pg, spec, str(local.dtype).replace("torch.", ""), counts, my_idx, my_val))
-                if len(scoped_group) >= max(batch_k, 1):
+                scoped_bytes += int(my_idx.nbytes) + int(my_val.nbytes)
+                # flush on param count OR payload bytes: at high density a 32-param
+                # batch of near-dense entries would blow up rank-0's padded gather
+                # buffers (world x max blob), so bound the blob like a bucket.
+                if len(scoped_group) >= max(batch_k, 1) or scoped_bytes >= self.bucket_size:
                     _flush_scoped()
                 continue
 
