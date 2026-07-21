@@ -800,10 +800,12 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                     _flush_scoped()
                 scoped_group.append((pg, spec, str(local.dtype).replace("torch.", ""), counts, my_idx, my_val))
                 scoped_bytes += int(my_idx.nbytes) + int(my_val.nbytes)
-                # flush on param count OR payload bytes: at high density a 32-param
-                # batch of near-dense entries would blow up rank-0's padded gather
-                # buffers (world x max blob), so bound the blob like a bucket.
-                if len(scoped_group) >= max(batch_k, 1) or scoped_bytes >= self.bucket_size:
+                # flush on param count OR payload bytes. Rank 0's padded gather buffers
+                # are world x the LARGEST rank blob, so the per-rank threshold must be
+                # divided by the group size to bound the rank-0 transient by bucket_size.
+                if len(scoped_group) >= max(batch_k, 1) or scoped_bytes >= self.bucket_size // max(
+                    torch.distributed.get_world_size(pg), 1
+                ):
                     _flush_scoped()
                 continue
 
