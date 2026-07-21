@@ -609,6 +609,26 @@ class VeOmniEngine(FSDPEngine):
 
         from ..spec import BlockPlacement, ShardSpec
 
+        def _expert_hf_slots(fqn, full_shape):
+            """Full (hf_name, hf_shape) slot table for one fused expert param, in dim-0
+            order matching the default handler's per-segment output order. Only valid
+            for the default handler (custom MOE_PARAM_HANDERS may rename differently),
+            so the caller attaches it only when process_func is the default."""
+            n_experts = int(full_shape[0])
+            slots = []
+            if "gate_up_proj" in fqn:
+                inter = int(full_shape[1]) // 2
+                inner = (inter, *(int(x) for x in full_shape[2:]))
+                for i in range(n_experts):
+                    for proj in ("gate_proj", "up_proj"):
+                        nm = fqn.replace("gate_up_proj", proj)
+                        slots.append((nm.replace("mlp.experts.", f"mlp.experts.{i}.") + ".weight", inner))
+            else:
+                inner = tuple(int(x) for x in full_shape[1:])
+                for i in range(n_experts):
+                    slots.append((fqn.replace("mlp.experts.", f"mlp.experts.{i}.") + ".weight", inner))
+            return slots
+
         def _expert_to_hf(fqn, full_shape):
             inner_shape = tuple(full_shape[1:])
 
@@ -685,6 +705,11 @@ class VeOmniEngine(FSDPEngine):
                     # dim-0-separable: a segment is a run of whole experts starting at
                     # global expert id ``start`` -- exactly the handler's contract.
                     to_hf_chunk=lambda start, seg, _f=process_func, _n=name: list(_f(_n, seg, expert_id_base=start)),
+                    # slot table enables sender-side conversion; only the default
+                    # handler's naming is enumerable without running the converter.
+                    hf_slots=(
+                        _expert_hf_slots(name, full_shape) if process_func is default_moe_param_handler else None
+                    ),
                 )
                 yield name, local.reshape(-1), spec
 

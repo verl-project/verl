@@ -72,6 +72,13 @@ class ShardSpec:
     # whole logical tensor on rank 0 (e.g. a fused expert stack: each segment is a run of
     # whole experts and the converter only needs the segment plus its starting expert id).
     to_hf_chunk: Optional[Callable[[int, torch.Tensor], list[tuple[str, torch.Tensor]]]] = None
+    # Optional full slot enumeration for dim-0-separable converters: one
+    # ``(hf_name, hf_shape)`` per converter output, in dim-0 order and matching
+    # ``to_hf_chunk``'s per-segment output order. When present (together with
+    # ``to_hf_chunk``) the engine can convert on the SENDER side: every rank
+    # converts only its own touched dim-0 rows and ships final HF-coordinate
+    # entries keyed by slot index -- rank 0 does no conversion at all.
+    hf_slots: Optional[list[tuple[str, tuple]]] = None
 
     @classmethod
     def from_param(cls, param: torch.Tensor) -> ShardSpec:

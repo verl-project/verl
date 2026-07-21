@@ -580,6 +580,27 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             group = []
 
         nan_group: list[_RebuildEntry] = []  # rebuild-profile params batched per gather_group
+        # sender-side scoped conversion queue: (pg, spec, dtype_str, counts, idx_concat, val_concat)
+        scoped_group: list = []
+
+        def _flush_scoped() -> None:
+            nonlocal scoped_group
+            if not scoped_group:
+                return
+            pg = scoped_group[0][0]
+            dev = scoped_group[0][4].device
+            counts_concat = torch.cat([c for _, _, _, c, _, _ in scoped_group]).to(dev)
+            idx_concat = torch.cat([i for _, _, _, _, i, _ in scoped_group])
+            val_concat = torch.cat([v for _, _, _, _, _, v in scoped_group])
+            gathered = gather_v_batched_to_rank0(idx_concat, val_concat, counts_concat, group=pg)
+            if is_r0 and gathered is not None:
+                slot_i = 0
+                for _pg, spec, dtype_str, counts, _i, _v in scoped_group:
+                    for name, shape in spec.hf_slots:
+                        aidx, aval = gathered[slot_i]
+                        slot_i += 1
+                        _consume(name, dtype_str, tuple(shape), _prodshape(shape), aidx, aval)
+            scoped_group = []
 
         def _consume_hf(hf_name: str, hf_tensor: torch.Tensor) -> None:
             nonlocal total_elems
@@ -726,6 +747,59 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             snap.copy_(local, non_blocking=True)  # update snapshot to current shard
             self._shard_snap[name] = snap
 
+            if spec.to_hf is not None and isinstance(place, BlockPlacement) and spec.hf_slots is not None:
+                # SENDER-SIDE scoped conversion: this rank converts only its own
+                # touched dim-0 rows (NaN row window -> to_hf_chunk -> non-NaN
+                # extraction) and ships final HF-coordinate entries keyed by the
+                # spec's slot table; rank 0 does no conversion at all. Every rank
+                # enumerates the same slot list (zero counts when untouched), so
+                # the batched gather stays aligned across ranks.
+                full_shape = spec.full_shape
+                inner = max(_prodshape(full_shape[1:]), 1)
+                n_rows = int(full_shape[0])
+                K = len(spec.hf_slots)
+                slots_per_row = K // n_rows
+                counts = torch.zeros(K, dtype=torch.int64)
+                idx_pieces: list[torch.Tensor] = []
+                val_pieces: list[torch.Tensor] = []
+                if lidx.numel():
+                    g = translate_flat_indices(lidx, place)
+                    order = torch.argsort(g)
+                    g, gv = g[order], lval[order]
+                    rows = torch.div(g, inner, rounding_mode="floor")
+                    urows, rcounts = torch.unique_consecutive(rows, return_counts=True)
+                    pos = 0
+                    for r, cnt in zip(urows.tolist(), rcounts.tolist(), strict=False):
+                        sel_g = g[pos : pos + cnt]
+                        sel_v = gv[pos : pos + cnt]
+                        pos += cnt
+                        buf = torch.full((inner,), float("nan"), dtype=local.dtype, device=local.device)
+                        buf[sel_g - r * inner] = sel_v
+                        outs = spec.to_hf_chunk(int(r), buf.view(1, *full_shape[1:]))
+                        assert len(outs) == slots_per_row, (
+                            f"{name}: to_hf_chunk gave {len(outs)} outputs/row, slot table expects {slots_per_row}"
+                        )
+                        for s_i, (_hf_name, hf_tensor) in enumerate(outs):
+                            fl = hf_tensor.reshape(-1)
+                            p_ = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
+                            if p_.numel():
+                                counts[int(r) * slots_per_row + s_i] = p_.numel()
+                                idx_pieces.append(p_.to(torch.int32))
+                                val_pieces.append(fl[p_])
+                        del buf
+                if idx_pieces:
+                    my_idx = torch.cat(idx_pieces)
+                    my_val = torch.cat(val_pieces)
+                else:
+                    my_idx = torch.empty(0, dtype=torch.int32, device=local.device)
+                    my_val = torch.empty(0, dtype=local.dtype, device=local.device)
+                if scoped_group and scoped_group[0][0] is not pg:
+                    _flush_scoped()
+                scoped_group.append((pg, spec, str(local.dtype).replace("torch.", ""), counts, my_idx, my_val))
+                if len(scoped_group) >= max(batch_k, 1):
+                    _flush_scoped()
+                continue
+
             if spec.to_hf is not None:
                 # converter profile: boundary-preserving gather within the spec's group,
                 # NaN-sentinel rebuild through the trainer's converter on rank 0.
@@ -754,6 +828,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             if len(group) >= max(batch_k, 1):
                 _flush_group()
         _flush_group()
+        _flush_scoped()
         _flush_nan_group()
 
         self._shard_seeded = True

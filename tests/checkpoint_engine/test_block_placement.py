@@ -430,3 +430,90 @@ def test_gather_dense_block_segments_world1():
         seen_rows += seg.shape[0]
     assert seen_rows == full_shape[0]
     assert torch.equal(out, full)
+
+
+def test_scoped_sender_side_matches_rank0_rebuild():
+    """Sender-side scoped conversion (each simulated rank converts only its own
+    touched dim-0 rows via a NaN row window + to_hf_chunk, emitting slot-keyed
+    HF-coordinate entries) must produce exactly the union the rank-0 full
+    rebuild extracts."""
+    torch.manual_seed(6)
+    n_experts, dim, inter = 8, 4, 3
+    full_shape = (n_experts, dim, 2 * inter)
+    inner = dim * 2 * inter
+    to_hf = _qwen3_style_to_hf(full_shape, inter)
+    to_hf_chunk = _qwen3_style_to_hf_chunk(inter)
+    # slot table mirroring the exporter: per expert, gate then up
+    slots = []
+    for i in range(n_experts):
+        slots.append((f"experts.{i}.gate_proj.weight", (inter, dim)))
+        slots.append((f"experts.{i}.up_proj.weight", (inter, dim)))
+    S = 2
+
+    old = torch.randn(full_shape, dtype=torch.bfloat16)
+    new = old.clone()
+    new[0, 1, 2] += 1.0
+    new[3, 0, 5] -= 0.5
+    new[3, 2, 4] += 0.75
+    new[6, 2, 1] += 2.0
+
+    # reference: full NaN rebuild -> to_hf -> per-name extraction
+    full_nan = torch.full(full_shape, float("nan"), dtype=old.dtype)
+    per_rank_payload = []
+    for place in _blocks_for_grid(full_shape, {0: 4, 1: 2}):
+        slices = tuple(slice(o, o + sz) for o, sz in zip(place.global_offset, place.local_shape, strict=False))
+        lo_t = old[slices].contiguous().reshape(-1)
+        ln_t = new[slices].contiguous().reshape(-1)
+        changed = (
+            (lo_t.view(torch.uint8).view(lo_t.numel(), -1) != ln_t.view(torch.uint8).view(ln_t.numel(), -1))
+            .any(dim=-1)
+            .nonzero(as_tuple=False)
+            .view(-1)
+        )
+        buf = torch.full((lo_t.numel(),), float("nan"), dtype=old.dtype)
+        buf[changed] = ln_t[changed]
+        full_nan[slices] = buf.view(place.local_shape)
+        per_rank_payload.append((place, changed, ln_t[changed]))
+
+    ref = {}
+    for hf_name, hf_tensor in to_hf([full_nan.reshape(-1)]):
+        fl = hf_tensor.reshape(-1)
+        pos = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
+        if pos.numel():
+            ref[hf_name] = (pos, fl[pos])
+
+    # scoped sender-side: per rank, touched rows only -> slot-keyed entries; union by slot
+    got = {}
+    for place, lidx, lval in per_rank_payload:
+        if lidx.numel() == 0:
+            continue
+        g = translate_flat_indices(lidx, place)
+        order = torch.argsort(g)
+        g, gv = g[order], lval[order]
+        rows = torch.div(g, inner, rounding_mode="floor")
+        urows, rcounts = torch.unique_consecutive(rows, return_counts=True)
+        pos0 = 0
+        for r, cnt in zip(urows.tolist(), rcounts.tolist(), strict=False):
+            sel_g, sel_v = g[pos0 : pos0 + cnt], gv[pos0 : pos0 + cnt]
+            pos0 += cnt
+            buf = torch.full((inner,), float("nan"), dtype=old.dtype)
+            buf[sel_g - r * inner] = sel_v
+            outs = to_hf_chunk(int(r), buf.view(1, dim, 2 * inter))
+            assert len(outs) == S
+            for s_i, (hf_name, hf_tensor) in enumerate(outs):
+                fl = hf_tensor.reshape(-1)
+                p_ = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
+                if p_.numel():
+                    slot_name = slots[int(r) * S + s_i][0]
+                    assert slot_name == hf_name.replace(f"experts.{int(r)}.", f"experts.{int(r)}.")
+                    prev = got.get(hf_name, (torch.empty(0, dtype=torch.int64), torch.empty(0, dtype=old.dtype)))
+                    got[hf_name] = (torch.cat([prev[0], p_]), torch.cat([prev[1], fl[p_]]))
+
+    assert set(got.keys()) == set(ref.keys())
+    for name in ref:
+        gp, gv2 = got[name]
+        order = torch.argsort(gp)
+        gp, gv2 = gp[order], gv2[order]
+        assert gp.unique().numel() == gp.numel(), f"{name}: overlapping rank contributions"
+        assert torch.equal(gp, ref[name][0]), f"{name}: positions diverge"
+        assert torch.equal(gv2, ref[name][1]), f"{name}: values diverge"
