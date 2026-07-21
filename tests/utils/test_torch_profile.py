@@ -17,9 +17,11 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
+from omegaconf import OmegaConf
 
+from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.profiler.config import ProfilerConfig, TorchProfilerScheduleConfig, TorchProfilerToolConfig
-from verl.utils.profiler.profile import DistProfiler
+from verl.utils.profiler.profile import DistProfiler, _NoOpProfiler
 from verl.utils.profiler.torch_profile import (
     Profiler,
     build_trace_basename,
@@ -94,6 +96,102 @@ class TestTorchProfile(unittest.TestCase):
 
         profiler.stop()
         mock_prof_instance.stop.assert_not_called()
+
+    @patch("verl.utils.profiler.torch_profile.get_torch_profiler")
+    def test_discrete_annotate_stops_profiler_on_exception(self, mock_get_profiler):
+        # A stage raising inside a discrete-mode annotate must still stop the
+        # (process-global) torch profiler; otherwise it leaks, the next stage's
+        # start() fails with "Profiler is already enabled" and the process aborts.
+        mock_prof_instance = MagicMock()
+        mock_get_profiler.return_value = mock_prof_instance
+
+        tool_config = TorchProfilerToolConfig(contents=["cpu"], discrete=True)
+        config = ProfilerConfig(save_path="/tmp/test", enable=True, tool_config=tool_config)
+        profiler = Profiler(rank=0, config=config, tool_config=tool_config)
+
+        calls = {"n": 0}
+
+        @profiler.annotate(role="boom")
+        def boom():
+            calls["n"] += 1
+            raise RuntimeError("stage failed on purpose")
+
+        with self.assertRaises(RuntimeError):
+            boom()
+
+        # Profiler must be started and, crucially, stopped despite the exception,
+        # and the stage body must run exactly once (no re-execution).
+        mock_prof_instance.start.assert_called_once()
+        mock_prof_instance.stop.assert_called_once()
+        self.assertEqual(calls["n"], 1)
+
+    def test_dist_annotate_propagates_and_runs_func_once(self):
+        # DistProfiler.annotate must not swallow errors from the wrapped function
+        # nor re-run it (which would execute the stage twice). It only falls back
+        # when *setting up* backend profiling fails.
+        tool_config = TorchProfilerToolConfig(contents=["cpu"], discrete=True)
+        config = ProfilerConfig(
+            tool="torch", enable=True, all_ranks=True, save_path="/tmp/test", tool_config=tool_config
+        )
+
+        class PassthroughImpl:
+            def annotate(self, **kwargs):
+                def decorator(fn):
+                    return fn
+
+                return decorator
+
+        calls = {"n": 0}
+
+        class FakeWorker:
+            def __init__(self, profiler):
+                self.profiler = profiler
+                self.rank = 0
+
+            @DistProfiler.annotate(role="boom")
+            def boom(self):
+                calls["n"] += 1
+                raise RuntimeError("stage failed on purpose")
+
+        dp = DistProfiler(rank=0, config=config, tool_config=tool_config)
+        dp._impl = PassthroughImpl()
+        dp._this_step = True  # simulate an active profiled step
+
+        worker = FakeWorker(dp)
+        with self.assertRaises(RuntimeError):
+            worker.boom()
+        self.assertEqual(calls["n"], 1)
+
+    def test_dist_annotate_falls_back_when_setup_fails(self):
+        # If backend annotate setup raises, the function still runs (once), unprofiled.
+        tool_config = TorchProfilerToolConfig(contents=["cpu"], discrete=True)
+        config = ProfilerConfig(
+            tool="torch", enable=True, all_ranks=True, save_path="/tmp/test", tool_config=tool_config
+        )
+
+        class BadImpl:
+            def annotate(self, **kwargs):
+                raise RuntimeError("cannot set up profiling")
+
+        calls = {"n": 0}
+
+        class FakeWorker:
+            def __init__(self, profiler):
+                self.profiler = profiler
+                self.rank = 0
+
+            @DistProfiler.annotate(role="x")
+            def do_work(self):
+                calls["n"] += 1
+                return "ok"
+
+        dp = DistProfiler(rank=0, config=config, tool_config=tool_config)
+        dp._impl = BadImpl()
+        dp._this_step = True
+
+        worker = FakeWorker(dp)
+        self.assertEqual(worker.do_work(), "ok")
+        self.assertEqual(calls["n"], 1)
 
     @patch("torch.profiler.schedule")
     @patch("torch.profiler.profile")
@@ -239,6 +337,120 @@ class TestTorchProfile(unittest.TestCase):
         mock_prof_instance.step.assert_called_once()
 
         dist_profiler.stop()
+
+
+def _role_profiler_omegaconf(tool="torch", enable=True, discrete=False, contents=("cpu", "cuda")):
+    """Mimic a per-role ``profiler`` OmegaConf sub-tree (identical across ref/ref.yaml and
+    critic/critic.yaml).
+
+    The nested ``_target_`` entries are what the hydra instantiation path (omega_conf_to_dataclass
+    without an explicit dataclass_type) uses to build real dataclass tool configs, as opposed to the
+    plain dicts the torch profiler cannot consume.
+    """
+    return OmegaConf.create(
+        {
+            "_target_": "verl.utils.profiler.ProfilerConfig",
+            "tool": tool,
+            "enable": enable,
+            "all_ranks": False,
+            "ranks": [0],
+            "save_path": "/tmp/test_role_profile",
+            "tool_config": {
+                "torch": {
+                    "_target_": "verl.utils.profiler.config.TorchProfilerToolConfig",
+                    "contents": list(contents),
+                    "discrete": discrete,
+                    "schedule": {
+                        "_target_": "verl.utils.profiler.config.TorchProfilerScheduleConfig",
+                        "skip_first": 0,
+                        "wait": 0,
+                        "warmup": 0,
+                        "active": 0,
+                        "repeat": 0,
+                    },
+                },
+            },
+        }
+    )
+
+
+class TestRefWorkerProfilerConfig(unittest.TestCase):
+    """The reference model's inner TrainingWorker must receive a real, torch-consumable profiler
+    config (mirroring the actor), instead of silently running with a disabled no-op profiler.
+
+    ``ActorRolloutRefWorker.init_model`` now forwards the ref's own ``profiler`` config to the ref
+    ``TrainingWorkerConfig`` via ``omega_conf_to_dataclass(self.config.ref.get("profiler", {}))``.
+    These lock in that conversion path so a torch profiler config actually yields a torch backend on
+    the ref worker, while an absent config degrades to a no-op (the previous ref behavior).
+    """
+
+    def test_ref_profiler_config_builds_torch_backend(self):
+        # Exercise the exact conversion init_model performs on actor_rollout_ref.ref.profiler:
+        # omega_conf_to_dataclass(...) (no dataclass_type) must resolve the _target_ entries into
+        # real nested dataclasses the torch Profiler can consume via attribute access.
+        omega_cfg = _role_profiler_omegaconf(tool="torch", enable=True)
+        ref_profiler_config = omega_conf_to_dataclass(omega_cfg)
+
+        self.assertIsInstance(ref_profiler_config, ProfilerConfig)
+        self.assertTrue(ref_profiler_config.enable)
+        self.assertEqual(ref_profiler_config.tool, "torch")
+
+        # TrainingWorker.__init__ extracts the tool-specific config exactly like this; it must be a
+        # real dataclass (not a plain dict) for the torch Profiler to read .contents/.schedule.
+        tool_config = ref_profiler_config.tool_config.get(ref_profiler_config.tool)
+        self.assertIsInstance(tool_config, TorchProfilerToolConfig)
+        self.assertEqual(tool_config.contents, ["cpu", "cuda"])
+
+        dist_profiler = DistProfiler(
+            rank=0, config=ref_profiler_config, tool_config=tool_config, save_file_prefix="ref"
+        )
+        self.assertIsInstance(dist_profiler._impl, Profiler)
+        self.assertTrue(dist_profiler.check_enable())
+        self.assertTrue(dist_profiler.check_this_rank())
+
+    def test_absent_ref_profiler_config_is_disabled_noop(self):
+        # Contrast with the previous behavior: without a profiler_config the ref worker built a
+        # disabled no-op profiler, so the reference model was never profiled by its own worker.
+        dist_profiler = DistProfiler(rank=0, config=None)
+        self.assertIsInstance(dist_profiler._impl, _NoOpProfiler)
+        self.assertFalse(dist_profiler.check_enable())
+
+
+class TestCriticWorkerProfilerConfig(unittest.TestCase):
+    """The critic is a standalone TrainingWorker (no outer ActorRolloutRefWorker wrapper): the
+    trainer drives start_profile()/stop_profile() and the ``train_batch`` annotation directly on it.
+
+    ``RayPPOTrainer._init_workers`` (and the v1 / separation trainer variants) now forward
+    ``omega_conf_to_dataclass(self.config.critic.get("profiler", {}))`` into the critic
+    ``TrainingWorkerConfig``. Without it the critic's DistProfiler silently degraded to a no-op, so
+    the critic was never profiled by any backend. These lock in that wiring.
+    """
+
+    def test_critic_profiler_config_builds_torch_backend(self):
+        # critic/critic.yaml's profiler block is structurally identical to ref/ref.yaml; the trainer
+        # converts it the same way. It must yield a real torch backend on the standalone critic worker.
+        omega_cfg = _role_profiler_omegaconf(tool="torch", enable=True)
+        critic_profiler_config = omega_conf_to_dataclass(omega_cfg)
+
+        self.assertIsInstance(critic_profiler_config, ProfilerConfig)
+        tool_config = critic_profiler_config.tool_config.get(critic_profiler_config.tool)
+        self.assertIsInstance(tool_config, TorchProfilerToolConfig)
+
+        # The critic TrainingWorker uses model_type="value_model" as the trace filename prefix.
+        dist_profiler = DistProfiler(
+            rank=0, config=critic_profiler_config, tool_config=tool_config, save_file_prefix="value_model"
+        )
+        self.assertIsInstance(dist_profiler._impl, Profiler)
+        self.assertTrue(dist_profiler.check_enable())
+        self.assertTrue(dist_profiler.check_this_rank())
+        self.assertEqual(dist_profiler._impl.save_file_prefix, "value_model")
+
+    def test_absent_critic_profiler_config_is_disabled_noop(self):
+        # The previous behavior: the trainer built the critic TrainingWorkerConfig without a
+        # profiler_config, so DistProfiler(config=None) degraded to a disabled no-op.
+        dist_profiler = DistProfiler(rank=0, config=None)
+        self.assertIsInstance(dist_profiler._impl, _NoOpProfiler)
+        self.assertFalse(dist_profiler.check_enable())
 
 
 if __name__ == "__main__":

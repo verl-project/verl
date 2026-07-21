@@ -550,6 +550,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             ref_config.model_config = deepcopy(model_config)
             ref_config.model_config.mtp = MtpConfig(enable=False)
 
+            # Build the inner ref profiler config via the hydra path (same as the actor / SFT),
+            # so its tool_config entries are real dataclass instances the torch profiler can read.
+            # This puts the reference model's inner TrainingWorker on par with the actor's, so the
+            # torch profiler (and the nsys/npu backends) support the reference model too, instead
+            # of the ref silently running with a disabled no-op profiler.
+            ref_omega_profiler_config = self.config.ref.get("profiler", {})
+            ref_profiler_config = (
+                omega_conf_to_dataclass(ref_omega_profiler_config) if ref_omega_profiler_config else None
+            )
+
             # construct TrainingWorkerConfig
             ref_training_config = TrainingWorkerConfig(
                 model_type=ref_config.model_config.get("model_type", "language_model"),
@@ -557,6 +567,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 engine_config=ref_config.engine,
                 optimizer_config=ref_config.optim,
                 checkpoint_config=ref_config.checkpoint,
+                profiler_config=ref_profiler_config,
             )
 
             # assign engine configs

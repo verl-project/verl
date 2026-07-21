@@ -296,7 +296,11 @@ class Profiler(DistProfiler):
                     with torch.profiler.record_function(profile_name):
                         return func(*args, **kwargs_inner)
 
-                # In discrete mode, we start/stop profiler around the function
+                # In discrete mode, we start/stop profiler around the function.
+                # torch.profiler is process-global, so wrap the call in try/finally:
+                # if func raises, we must still stop the profiler. Otherwise it leaks
+                # and the next stage's prof.start() fails with "Profiler is already
+                # enabled on this thread", plus the process aborts at teardown.
                 prof = get_torch_profiler(
                     contents=self.contents,
                     save_path=self.save_path,
@@ -305,10 +309,11 @@ class Profiler(DistProfiler):
                     rank=self.rank,
                 )
                 prof.start()
-                with torch.profiler.record_function(profile_name):
-                    result = func(*args, **kwargs_inner)
-                prof.stop()
-                return result
+                try:
+                    with torch.profiler.record_function(profile_name):
+                        return func(*args, **kwargs_inner)
+                finally:
+                    prof.stop()
 
             return wrapper
 

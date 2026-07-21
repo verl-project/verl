@@ -810,12 +810,24 @@ class RayPPOTrainer:
             engine_config.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
             engine_config.max_token_len_per_gpu = critic_cfg.ppo_max_token_len_per_gpu
 
+            # Build the critic profiler config via the hydra path (same as the actor / ref / SFT),
+            # so its tool_config entries are real dataclass instances the torch/nsys/npu backends can
+            # read. The critic is a standalone TrainingWorker (no outer ActorRolloutRefWorker wrapper),
+            # and the trainer drives start_profile()/stop_profile() and train_batch annotation directly
+            # on it; without a profiler_config its DistProfiler silently degrades to a no-op, so the
+            # critic (update_critic / compute_values) was never profiled by any backend.
+            critic_omega_profiler_config = self.config.critic.get("profiler", {})
+            critic_profiler_config = (
+                omega_conf_to_dataclass(critic_omega_profiler_config) if critic_omega_profiler_config else None
+            )
+
             critic_cfg = TrainingWorkerConfig(
                 model_type="value_model",
                 model_config=orig_critic_cfg.model,
                 engine_config=engine_config,
                 optimizer_config=orig_critic_cfg.optim,
                 checkpoint_config=orig_critic_cfg.checkpoint,
+                profiler_config=critic_profiler_config,
                 extra_context=getattr(self, "_critic_extra_context", {}),
             )
 

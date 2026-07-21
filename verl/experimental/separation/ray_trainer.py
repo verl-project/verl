@@ -160,12 +160,20 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
             else:
                 raise NotImplementedError(f"Unknown strategy {self.orig_critic_cfg.strategy=}")
 
+            # Wire the critic profiler config via the hydra path (real dataclass tool_config), so the
+            # standalone critic TrainingWorker gets a working DistProfiler instead of a silent no-op.
+            critic_omega_profiler_config = self.config.critic.get("profiler", {})
+            critic_profiler_config = (
+                omega_conf_to_dataclass(critic_omega_profiler_config) if critic_omega_profiler_config else None
+            )
+
             critic_cfg = TrainingWorkerConfig(
                 model_type="value_model",
                 model_config=self.orig_critic_cfg.model,
                 engine_config=engine_config,
                 optimizer_config=self.orig_critic_cfg.optim,
                 checkpoint_config=self.orig_critic_cfg.checkpoint,
+                profiler_config=critic_profiler_config,
             )
 
             critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=critic_cfg)

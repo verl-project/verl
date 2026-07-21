@@ -231,10 +231,14 @@ class DistProfiler:
                             actual_decorator = impl.annotate(
                                 message=message, color=color, domain=domain, category=category, **kwargs_outer
                             )
-
-                            return actual_decorator(func)(self_instance, *args, **kwargs_inner)
+                            wrapped = actual_decorator(func)
                         except Exception:
-                            return func(self_instance, *args, **kwargs_inner)
+                            # Only fall back when *setting up* backend profiling fails.
+                            # Never guard the call to func itself here: doing so would
+                            # swallow real stage errors and re-run func (executing the
+                            # stage twice with duplicated side effects).
+                            wrapped = func
+                        return wrapped(self_instance, *args, **kwargs_inner)
                     return func(self_instance, *args, **kwargs_inner)
 
             return wrapper
