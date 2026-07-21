@@ -750,7 +750,11 @@ class MegatronEngine(BaseEngine):
         if enable_routing_replay:
             # Set to REPLAY mode: for R3 mode or actor update phase in R2 mode
             RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
-            has_replay_routes = "routed_experts" in data.keys()
+            # Agent-loop schemas can retain the optional key with a ``None``
+            # value. R2 must record routes in that case; treating key presence
+            # as replay data skips RECORD and leaves the subsequent update with
+            # no targets.
+            has_replay_routes = data.get("routed_experts", None) is not None
             if forward_only and self.engine_config.router_replay.mode == "R2" and not has_replay_routes:
                 # In R2 mode, forward_only calls (e.g., compute_log_probs) need to record routing information
                 RouterReplay.set_global_router_replay_action(RouterReplayAction.RECORD)

@@ -382,6 +382,11 @@ def set_router_replay_data(
     Returns:
         None: The function updates internal RouterReplay instances in-place.
     """
+    if layers_topk_idx is None:
+        raise RuntimeError(
+            "router_replay REPLAY requires routed_experts from the preceding RECORD forward."
+        )
+
     with torch.no_grad():
         fp8 = tf_config.fp8
         use_fp8_padding = fp8 in ["e4m3", "hybrid"]
