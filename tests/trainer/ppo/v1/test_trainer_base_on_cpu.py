@@ -12,13 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import Mock, call, patch
+from unittest.mock import patch
 
 from omegaconf import OmegaConf
 
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer
-from verl.trainer.ppo.v1.trainer_sync import PPOTrainerSync
 
 
 class _StubTrainer(PPOTrainer):
@@ -120,50 +119,3 @@ def test_builtin_filter_groups_warns_when_total_generation_limit_is_configured()
         "use max_inflight_gen_batches to bound concurrent Sync DAPO generation.",
         10,
     )
-
-
-def test_sync_on_sample_end_aborts_before_sleep():
-    trainer = PPOTrainerSync.__new__(PPOTrainerSync)
-    trainer.checkpoint_manager = Mock()
-    trainer.dapo_enabled = True
-
-    trainer.on_sample_end()
-
-    assert trainer.checkpoint_manager.mock_calls == [call.abort_replicas(), call.sleep_replicas()]
-
-
-def test_sync_on_sample_end_does_not_abort_without_dapo():
-    trainer = PPOTrainerSync.__new__(PPOTrainerSync)
-    trainer.checkpoint_manager = Mock()
-    trainer.dapo_enabled = False
-
-    trainer.on_sample_end()
-
-    assert trainer.checkpoint_manager.mock_calls == [call.sleep_replicas()]
-
-
-def test_sync_on_step_end_resumes_generation_after_dapo_abort():
-    trainer = PPOTrainerSync.__new__(PPOTrainerSync)
-    trainer.checkpoint_manager = Mock()
-    trainer.dapo_enabled = True
-    trainer.global_steps = 3
-    trainer.timing_raw = {}
-
-    trainer.on_step_end()
-
-    assert trainer.checkpoint_manager.mock_calls == [
-        call.update_weights(3),
-        call.resume_generation_replicas(),
-    ]
-
-
-def test_sync_on_step_end_does_not_resume_generation_without_dapo():
-    trainer = PPOTrainerSync.__new__(PPOTrainerSync)
-    trainer.checkpoint_manager = Mock()
-    trainer.dapo_enabled = False
-    trainer.global_steps = 3
-    trainer.timing_raw = {}
-
-    trainer.on_step_end()
-
-    assert trainer.checkpoint_manager.mock_calls == [call.update_weights(3)]

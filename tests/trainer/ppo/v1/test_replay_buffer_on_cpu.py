@@ -438,7 +438,7 @@ def test_has_enough_samples_wait_blocks_on_stale_inflight():
     assert rb._has_enough_samples(0, pid, batch_size=5, sampleable_keys=sampleable_keys) is False
 
 
-def test_has_enough_samples_sync_ignores_off_policy_wait():
+def test_sync_sampling_ignores_off_policy_wait(monkeypatch):
     """Sync sampling is on-policy: max_off_policy_strategy is a NO-OP, so a stale in-flight
     prompt never blocks the gate (unlike the async wait strategy above)."""
     rb = _make_rb(trainer_mode="sync", max_off_policy_strategy="wait", max_off_policy_threshold=2)
@@ -448,27 +448,12 @@ def test_has_enough_samples_sync_ignores_off_policy_wait():
     rb.running_keys[pid] |= {"c"}
     rb.prompt_global_steps[pid]["c"] = 0
 
-    reasons = rb._terminal_eviction_reasons(1000, pid)
-    sampleable_keys = rb._sampleable_terminal_keys(pid, reasons)
-    assert rb._has_enough_samples(1000, pid, batch_size=2, sampleable_keys=sampleable_keys) is True
-    assert rb._has_enough_samples(1000, pid, batch_size=3, sampleable_keys=sampleable_keys) is False
+    monkeypatch.setattr(rb, "_sync_metadata_from_transfer_queue", lambda: None)
+    monkeypatch.setattr(rb, "_materialize_batch", lambda _pid, uids, _snapshot: uids)
 
+    selected_uids, _ = rb.sample(global_steps=1000, partition_id=pid, batch_size=2)
 
-# --------------------------------------------------------------------------- #
-# Sync-DAPO surplus discard.
-# --------------------------------------------------------------------------- #
-
-
-def test_sampleable_excludes_discarded_uids():
-    rb = _make_rb()
-    pid = "p"
-    rb.finished_keys[pid] |= {"a", "b", "stale"}
-    rb._discarded_uids[pid].add("stale")
-
-    reasons = rb._terminal_eviction_reasons(0, pid)
-    sampleable_keys = rb._sampleable_terminal_keys(pid, reasons)
-    assert sampleable_keys == {"a", "b"}
-    assert "stale" not in sampleable_keys
+    assert set(selected_uids) == {"a", "b"}
 
 
 def test_clear_groups_updates_active_snapshot(monkeypatch):
@@ -481,7 +466,6 @@ def test_clear_groups_updates_active_snapshot(monkeypatch):
         status_keys[pid] |= {dropped_uid, kept_uid}
     rb.prompt_global_steps[pid] = {dropped_uid: 1, kept_uid: 2}
     rb._dapo_classification_cache[pid] = {dropped_uid: 0.0, kept_uid: None}
-    rb._discarded_uids[pid] |= {dropped_uid, kept_uid}
 
     cleared: list[set[str]] = []
     monkeypatch.setattr(tq, "kv_clear", lambda *, keys, partition_id: cleared.append(set(keys)))
@@ -494,38 +478,6 @@ def test_clear_groups_updates_active_snapshot(monkeypatch):
         assert status_keys[pid] == {kept_uid}
     assert rb.prompt_global_steps[pid] == {kept_uid: 2}
     assert rb._dapo_classification_cache[pid] == {kept_uid: None}
-    assert rb._discarded_uids[pid] == {kept_uid}
-
-
-def test_reap_discarded_clears_only_terminal_and_updates_blacklist(monkeypatch):
-    rb = _make_rb(filter_groups_metric="acc", refill_fn=lambda _n: None)
-    pid = "p"
-    rb.finished_keys[pid].add("done")
-    rb.running_keys[pid].add("flying")
-    rb._discarded_uids[pid] |= {"done", "flying"}
-
-    cleared_calls: list[set] = []
-    monkeypatch.setattr(tq, "kv_clear", lambda *, keys, partition_id: cleared_calls.append(set(keys)))
-
-    reaped = rb._reap_discarded(pid)
-
-    assert reaped == 1
-    assert cleared_calls == [{"done"}]
-    assert rb._discarded_uids[pid] == {"flying"}
-
-
-def test_reap_discarded_noop_when_nothing_terminal():
-    rb = _make_rb(filter_groups_metric="acc", refill_fn=lambda _n: None)
-    pid = "p"
-    rb.running_keys[pid].add("flying")
-    rb._discarded_uids[pid].add("flying")
-
-    cleared_calls: list[set] = []
-    rb._clear_groups = lambda partition_id, uids: cleared_calls.append(set(uids))
-
-    assert rb._reap_discarded(pid) == 0
-    assert cleared_calls == []
-    assert rb._discarded_uids[pid] == {"flying"}
 
 
 # --------------------------------------------------------------------------- #
@@ -1360,13 +1312,13 @@ def test_sync_dapo_streams_refill_credit_with_bounded_inflight(tq_init, partitio
 
         # One original prompt remains in flight, so the 2x credit is dispatched one slot at a time.
         assert refiller.calls == [1, 1]
+        assert consumer.is_alive()
 
-        # A full batch no longer waits for slow_valid.
+        _set_prompt_status(partition_id, slow_valid.uid, "finished", global_steps=0)
         batch = consumer.result_or_raise()
 
         assert len(_uids_of(batch.keys)) == 2
         assert all_same.uid not in _uids_of(batch.keys)
-        assert slow_valid.uid not in _uids_of(batch.keys)
         assert consumer.metrics is not None
         assert consumer.metrics["validation/filter_groups/evicted_samples"] == 1
         assert consumer.metrics["validation/filter_groups/discarded_surplus_samples"] == 1
@@ -1401,72 +1353,6 @@ def test_sync_dapo_discards_unsent_credit_when_batch_fills(tq_init, partition_id
         assert refiller.calls == [1]
         assert metrics["validation/filter_groups/evicted_samples"] == 1
         assert "validation/filter_groups/discarded_surplus_samples" not in metrics
-    finally:
-        _clear_partition(partition_id)
-
-
-def test_sync_dapo_does_not_wait_for_inflight_stragglers(tq_init, partition_id):
-    """A full batch does not wait for an in-flight straggler."""
-    valid = [
-        PromptSpec(uid=_uid(), status="finished", sessions=2, global_steps=1, rewards=[0.0, 1.0]) for _ in range(2)
-    ]
-    straggler = PromptSpec(uid=_uid(), status="running", sessions=2, global_steps=1, rewards=[0.0, 1.0])
-    _produce(partition_id, valid + [straggler]).join_and_check()
-
-    rb = _make_rb(
-        refill_fn=lambda _n: None,
-        filter_groups_metric="acc",
-        train_batch_size=2,
-        gen_batch_size=1,
-        max_inflight_gen_batches=2,
-    )
-    try:
-        batch, metrics = rb.sample(global_steps=1, partition_id=partition_id, batch_size=2)
-
-        selected = _uids_of(batch.keys)
-        assert selected == {spec.uid for spec in valid}
-        assert straggler.uid not in selected
-        assert metrics["validation/filter_groups/discarded_surplus_samples"] == 1
-        assert straggler.uid in rb._discarded_uids[partition_id]
-    finally:
-        _clear_partition(partition_id)
-
-
-def test_sync_dapo_discarded_straggler_is_reaped_and_never_resampled(tq_init, partition_id):
-    """A terminated straggler is reaped rather than resampled."""
-    valid1 = [
-        PromptSpec(uid=_uid(), status="finished", sessions=2, global_steps=1, rewards=[0.0, 1.0]) for _ in range(2)
-    ]
-    straggler = PromptSpec(uid=_uid(), status="running", sessions=2, global_steps=1, rewards=[0.0, 1.0])
-    _produce(partition_id, valid1 + [straggler]).join_and_check()
-
-    rb = _make_rb(
-        refill_fn=lambda _n: None,
-        filter_groups_metric="acc",
-        train_batch_size=2,
-        gen_batch_size=1,
-        max_inflight_gen_batches=2,
-    )
-    try:
-        batch1, _ = rb.sample(global_steps=1, partition_id=partition_id, batch_size=2)
-        assert straggler.uid not in _uids_of(batch1.keys)
-        assert straggler.uid in rb._discarded_uids[partition_id]
-
-        _set_prompt_status(partition_id, straggler.uid, "finished", global_steps=1)
-
-        valid2 = [
-            PromptSpec(uid=_uid(), status="finished", sessions=2, global_steps=2, rewards=[0.0, 1.0]) for _ in range(2)
-        ]
-        _produce(partition_id, valid2).join_and_check()
-
-        batch2, metrics2 = rb.sample(global_steps=2, partition_id=partition_id, batch_size=2)
-
-        assert _uids_of(batch2.keys) == {spec.uid for spec in valid2}
-        assert straggler.uid not in _uids_of(batch2.keys)
-        assert straggler.uid not in rb._discarded_uids[partition_id]
-        remaining = tq.kv_list(partition_id=partition_id).get(partition_id, {})
-        assert straggler.uid not in remaining
-        assert not any(key.split("_")[0] == straggler.uid for key in remaining)
     finally:
         _clear_partition(partition_id)
 
