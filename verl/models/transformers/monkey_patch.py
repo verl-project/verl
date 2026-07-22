@@ -525,6 +525,13 @@ def apply_monkey_patch(
         if ulysses_sp_size > 1:
             patch_vlm_for_ulysses_input_slicing(Qwen3_5TextModel)
             patch_vlm_for_ulysses_input_slicing(Qwen3_5MoeTextModel)
+    elif model.config.model_type in ["gemma4", "gemma4_text"]:
+        # Gemma4 alternates sliding (head_dim 256) and global (head_dim 512) attention. Flash caps
+        # head_dim at 256, so under a flash attn_implementation the global layers fall back to
+        # SDPA and the sliding layers keep the stock flash path. No-op under sdpa/eager.
+        from verl.models.transformers.gemma4 import apply_gemma4_flash_attention
+
+        apply_gemma4_flash_attention(model, ulysses_sp_size=ulysses_sp_size)
 
     if use_remove_padding or ulysses_sp_size > 1:
         if hasattr(module, "_flash_attention_forward"):  # transformers <= 4.47.1 or legacy models
