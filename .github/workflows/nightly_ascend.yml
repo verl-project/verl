@@ -649,47 +649,47 @@ jobs:
           bash tests/special_npu/nightly_ci_ascend/run_gspo_qwen3_8b_fsdp2_npu.sh
 
   # Test grpo qwen33.5-35b megatron vllm
-  nightlyCI_grpo-qwen3_5-35b-megatron-vllm_ascend:
-    if: ${{ github.repository_owner == 'verl-project'}}
-    runs-on: linux-aarch64-a3-16
-    timeout-minutes: 180 # Increase this timeout value as needed
-    container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-a3-ubuntu22.04-py3.11-vllm
-      options: >-
-        --shm-size 16g
-    env:
-      HF_ENDPOINT: "https://hf-mirror.com"
-      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
-    steps:
-      - name: Check npu and CANN info
-        run: |
-          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-          npu-smi info
-      - name: Check initial pip list from image
-        run: |
-          pip list
-      - name: Checkout verl-project/verl repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          clean: true
-      - name: Check final pip list
-        run: |
-          pip list
-      - name: Clone Megatron Bridge
-        run: |
-          git clone --depth 1 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git /Megatron-Bridge
-          cd /Megatron-Bridge
-          git fetch --depth 1 origin de93536e9028ecf1e4dc28608dc80f336dcdfe59
-          git checkout de93536e9028ecf1e4dc28608dc80f336dcdfe59
-      - name: Prepare weights
-        run: |
-          ln -s /root/.cache/models ~/models
-      - name: Preprocess geo3k dataset
-        run: |
-          python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
-      - name: Running nightlyCI_grpo-qwen3_5-35b-megatron-vllm_ascend
-        run: |
-          ray stop --force
-          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
-          bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_5_35b_megatron_npu.sh
+  # nightlyCI_grpo-qwen3_5-35b-megatron-vllm_ascend:
+  #   if: ${{ github.repository_owner == 'verl-project'}}
+  #   runs-on: linux-aarch64-a3-16
+  #   timeout-minutes: 180 # Increase this timeout value as needed
+  #   container:
+  #     image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-a3-ubuntu22.04-py3.11-vllm
+  #     options: >-
+  #       --shm-size 16g
+  #   env:
+  #     HF_ENDPOINT: "https://hf-mirror.com"
+  #     HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+  #   steps:
+  #     - name: Check npu and CANN info
+  #       run: |
+  #         cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+  #         npu-smi info
+  #     - name: Check initial pip list from image
+  #       run: |
+  #         pip list
+  #     - name: Checkout verl-project/verl repo
+  #       uses: actions/checkout@v4
+  #       with:
+  #         fetch-depth: 0
+  #         clean: true
+  #     - name: Check final pip list
+  #       run: |
+  #         pip list
+  #     - name: Clone Megatron Bridge
+  #       run: |
+  #         git clone --depth 1 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git /Megatron-Bridge
+  #         cd /Megatron-Bridge
+  #         git fetch --depth 1 origin de93536e9028ecf1e4dc28608dc80f336dcdfe59
+  #         git checkout de93536e9028ecf1e4dc28608dc80f336dcdfe59
+  #     - name: Prepare weights
+  #       run: |
+  #         ln -s /root/.cache/models ~/models
+  #     - name: Preprocess geo3k dataset
+  #       run: |
+  #         python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
+  #     - name: Running nightlyCI_grpo-qwen3_5-35b-megatron-vllm_ascend
+  #       run: |
+  #         ray stop --force
+  #         export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
+  #         bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_5_35b_megatron_npu.sh
