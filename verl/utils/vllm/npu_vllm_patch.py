@@ -32,6 +32,28 @@ def vllm_v013_weight_loader_method_wrapper(fn):
     return wrapper
 
 
+def _patch_legacy_fused_moe_weight_loader(fused_moe) -> bool:
+    """Install the NPU transpose wrapper on vLLM's legacy FusedMoE class.
+
+    Legacy vLLM releases expose ``FusedMoE`` as a class whose
+    ``weight_loader`` can be wrapped at class level. Modular vLLM releases
+    expose ``FusedMoE`` as a factory function, so this class-level patch is
+    not applicable. Loader and layout handling for constructed modules is
+    owned by their runtime and backend-specific weight-loading paths.
+    """
+    weight_loader = getattr(fused_moe, "weight_loader", None)
+    if not isinstance(fused_moe, type) or not callable(weight_loader):
+        return False
+
+    if getattr(weight_loader, "_verl_npu_weight_loader_patched", False):
+        return True
+
+    wrapped_weight_loader = vllm_v013_weight_loader_method_wrapper(weight_loader)
+    wrapped_weight_loader._verl_npu_weight_loader_patched = True
+    fused_moe.weight_loader = wrapped_weight_loader
+    return True
+
+
 def patch_vllm013_rotary_emb():
     from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 
@@ -66,10 +88,10 @@ def apply_npu_vllm_patches() -> None:
         from vllm.model_executor.layers.fused_moe import FusedMoE
 
         patch_vllm013_rotary_emb()
-        FusedMoE.weight_loader = vllm_v013_weight_loader_method_wrapper(FusedMoE.weight_loader)
+        _patch_legacy_fused_moe_weight_loader(FusedMoE)
     elif _VLLM_VERSION >= version.parse("0.18.0"):
         # Disable flash_attn in RotaryEmbedding (NPU) when VLLM >= 0.18
         from vllm.model_executor.layers.fused_moe import FusedMoE
 
         patch_vllm013_rotary_emb()
-        FusedMoE.weight_loader = vllm_v013_weight_loader_method_wrapper(FusedMoE.weight_loader)
+        _patch_legacy_fused_moe_weight_loader(FusedMoE)
