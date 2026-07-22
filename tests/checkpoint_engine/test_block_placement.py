@@ -406,32 +406,6 @@ def test_chunked_rebuild_matches_full_rebuild(seg_rows):
         assert torch.equal(got[name][1], ref[name][1]), f"{name}: values diverge"
 
 
-def test_gather_dense_block_segments_world1():
-    """Single-process (world=1) mechanics of the segmented seed gather: the yielded
-    segments must reassemble the original tensor exactly."""
-    import os
-
-    import torch.distributed as dist
-
-    from verl.checkpoint_engine.delta_sync.sparse_gather import gather_dense_block_segments_to_rank0
-
-    if not dist.is_initialized():
-        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-        os.environ.setdefault("MASTER_PORT", "29511")
-        dist.init_process_group(backend="gloo", rank=0, world_size=1)
-
-    full_shape = (7, 3, 4)
-    full = torch.randn(full_shape, dtype=torch.float32)
-    place = BlockPlacement(full_shape, (0, 0, 0), full_shape)  # world=1: the block IS the full tensor
-    out = torch.empty_like(full)
-    seen_rows = 0
-    for row0, seg in gather_dense_block_segments_to_rank0(full.reshape(-1), place, group=None, seg_rows=2):
-        out[row0 : row0 + seg.shape[0]] = seg
-        seen_rows += seg.shape[0]
-    assert seen_rows == full_shape[0]
-    assert torch.equal(out, full)
-
-
 def test_scoped_sender_side_matches_rank0_rebuild():
     """Sender-side scoped conversion (each simulated rank converts only its own
     touched dim-0 rows via a NaN row window + to_hf_chunk, emitting slot-keyed
