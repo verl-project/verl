@@ -170,7 +170,10 @@ a per-backend apply interface (vllm/trt-llm plugins) is planned.
 Planned extensions, in design order:
 
 - **Megatron-core trainers**: the same ``delta_sharded`` backend via a Megatron
-  ``get_per_tensor_param_shard`` export whose spec carries the native mcore→HF conversion as a
-  pure-permutation ``to_hf`` closure (implemented and validated in a stacked follow-up PR).
+  ``get_per_tensor_param_shard`` export. The native mcore→HF converters are whole-param
+  black boxes, outside the dim-0-separable ``to_hf_chunk`` contract; the path forward is
+  rewriting them per param family as ``to_hf_chunk`` + ``hf_slots`` — the main fusions
+  (interleaved qkv, gate_up concat) are row/block permutations and fit the contract, while
+  TP column splits are already expressible as a ``BlockPlacement`` dim-1 offset (see #7060).
 - **Quantized rollout (fp8 etc.)**: diff the quantized bytes (quantize-then-diff) so a low-precision
   rollout engine can consume deltas without a bf16 intermediate.

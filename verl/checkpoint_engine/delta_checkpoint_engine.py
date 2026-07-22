@@ -423,7 +423,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
 
             place, contributes, pg = self._placement(name, spec)
             shard = local if contributes else torch.empty(0, dtype=local.dtype, device=local.device)
-            if spec.to_hf is None:
+            if spec.to_hf_chunk is None:
                 # the spec's placements map the shard straight into the full tensor
                 if pg is None:
                     if is_r0 and contributes:
@@ -437,77 +437,66 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                         f"{name}: plain-int explicit placements are no longer supported by the "
                         "unified sender-side engine (attach a BlockPlacement instead)"
                     )
-            elif isinstance(place, BlockPlacement):
-                if spec.to_hf_chunk is not None and spec.hf_slots is not None:
-                    # SENDER-SIDE seed: every rank converts its own rows (full
-                    # coverage) segment by segment and ships slot-keyed sparse
-                    # entries -- no rank assembles or converts anyone else's data.
-                    # Segments bound both the NaN window and the per-round gather
-                    # blob (threshold scaled by group size).
-                    full_shape = spec.full_shape
-                    inner = max(_prodshape(full_shape[1:]), 1)
-                    n_rows = int(full_shape[0])
-                    slots_per_row = len(spec.hf_slots) // n_rows
-                    world = torch.distributed.get_world_size(pg) if pg is not None else 1
-                    seg_rows = max(1, self.REBUILD_CHUNK_ELEMS // max(inner * world, 1))
-                    dtype_str = str(local.dtype).replace("torch.", "")
-                    lview = local.view(tuple(int(x) for x in place.local_shape))
-                    o0, l0 = int(place.global_offset[0]), int(place.local_shape[0])
-                    inner_box = BlockPlacement(
-                        tuple(int(x) for x in place.local_shape[1:]),
-                        tuple(int(x) for x in place.global_offset[1:]),
-                        tuple(int(x) for x in full_shape[1:]),
+            elif isinstance(place, BlockPlacement) and spec.hf_slots is not None:
+                # SENDER-SIDE seed: every rank converts its own rows (full
+                # coverage) segment by segment and ships slot-keyed sparse
+                # entries -- no rank assembles or converts anyone else's data.
+                # Segments bound both the NaN window and the per-round gather
+                # blob (threshold scaled by group size).
+                full_shape = spec.full_shape
+                inner = max(_prodshape(full_shape[1:]), 1)
+                n_rows = int(full_shape[0])
+                slots_per_row = len(spec.hf_slots) // n_rows
+                world = torch.distributed.get_world_size(pg) if pg is not None else 1
+                seg_rows = max(1, self.REBUILD_CHUNK_ELEMS // max(inner * world, 1))
+                dtype_str = str(local.dtype).replace("torch.", "")
+                lview = local.view(tuple(int(x) for x in place.local_shape))
+                o0, l0 = int(place.global_offset[0]), int(place.local_shape[0])
+                inner_box = BlockPlacement(
+                    tuple(int(x) for x in place.local_shape[1:]),
+                    tuple(int(x) for x in place.global_offset[1:]),
+                    tuple(int(x) for x in full_shape[1:]),
+                )
+                row_numel = _prodshape(place.local_shape[1:])
+                iidx = translate_flat_indices(torch.arange(row_numel, device=local.device), inner_box)
+                if is_r0:
+                    total_elems += _prodshape(full_shape)
+                for row0 in range(0, n_rows, seg_rows):
+                    rows = min(seg_rows, n_rows - row0)
+                    r_lo, r_hi = max(o0, row0), min(o0 + l0, row0 + rows)
+                    counts = torch.zeros(rows * slots_per_row, dtype=torch.int64)
+                    idx_pieces: list[torch.Tensor] = []
+                    val_pieces: list[torch.Tensor] = []
+                    for r in range(r_lo, r_hi):
+                        buf = torch.full((inner,), float("nan"), dtype=local.dtype, device=local.device)
+                        buf[iidx] = lview[r - o0].reshape(-1)
+                        outs = spec.to_hf_chunk(r, buf.view(1, *full_shape[1:]))
+                        for s_i, (_hf_name, hf_tensor) in enumerate(outs):
+                            fl = hf_tensor.reshape(-1)
+                            pnz = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
+                            if pnz.numel():
+                                counts[(r - row0) * slots_per_row + s_i] = pnz.numel()
+                                idx_pieces.append(pnz.to(torch.int32))
+                                val_pieces.append(fl[pnz])
+                        del buf
+                    my_idx = (
+                        torch.cat(idx_pieces) if idx_pieces else torch.empty(0, dtype=torch.int32, device=local.device)
                     )
-                    row_numel = _prodshape(place.local_shape[1:])
-                    iidx = translate_flat_indices(torch.arange(row_numel, device=local.device), inner_box)
-                    if is_r0:
-                        total_elems += _prodshape(full_shape)
-                    for row0 in range(0, n_rows, seg_rows):
-                        rows = min(seg_rows, n_rows - row0)
-                        r_lo, r_hi = max(o0, row0), min(o0 + l0, row0 + rows)
-                        counts = torch.zeros(rows * slots_per_row, dtype=torch.int64)
-                        idx_pieces: list[torch.Tensor] = []
-                        val_pieces: list[torch.Tensor] = []
-                        for r in range(r_lo, r_hi):
-                            buf = torch.full((inner,), float("nan"), dtype=local.dtype, device=local.device)
-                            buf[iidx] = lview[r - o0].reshape(-1)
-                            outs = spec.to_hf_chunk(r, buf.view(1, *full_shape[1:]))
-                            for s_i, (_hf_name, hf_tensor) in enumerate(outs):
-                                fl = hf_tensor.reshape(-1)
-                                pnz = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
-                                if pnz.numel():
-                                    counts[(r - row0) * slots_per_row + s_i] = pnz.numel()
-                                    idx_pieces.append(pnz.to(torch.int32))
-                                    val_pieces.append(fl[pnz])
-                            del buf
-                        my_idx = (
-                            torch.cat(idx_pieces)
-                            if idx_pieces
-                            else torch.empty(0, dtype=torch.int32, device=local.device)
-                        )
-                        my_val = (
-                            torch.cat(val_pieces)
-                            if val_pieces
-                            else torch.empty(0, dtype=local.dtype, device=local.device)
-                        )
-                        gathered = gather_slot_entries_to_rank0(
-                            my_idx, my_val, counts.to(local.device), group=pg, max_round_bytes=self.bucket_size
-                        )
-                        if is_r0 and gathered is not None:
-                            for k_i, (aidx, aval) in enumerate(gathered):
-                                sname, sshape = spec.hf_slots[row0 * slots_per_row + k_i]
-                                _bucket_sparse(sname, dtype_str, sshape, aidx, aval)
-                else:
-                    raise NotImplementedError(
-                        f"{name}: converter specs without an enumerable slot table (hf_slots) are "
-                        "not supported by the unified sender-side engine; Megatron-style shard-list "
-                        "conversion needs a per-rank scatter map (see #7060)"
+                    my_val = (
+                        torch.cat(val_pieces) if val_pieces else torch.empty(0, dtype=local.dtype, device=local.device)
                     )
+                    gathered = gather_slot_entries_to_rank0(
+                        my_idx, my_val, counts.to(local.device), group=pg, max_round_bytes=self.bucket_size
+                    )
+                    if is_r0 and gathered is not None:
+                        for k_i, (aidx, aval) in enumerate(gathered):
+                            sname, sshape = spec.hf_slots[row0 * slots_per_row + k_i]
+                            _bucket_sparse(sname, dtype_str, sshape, aidx, aval)
             else:
                 raise NotImplementedError(
                     f"{name}: converter specs without an enumerable slot table (hf_slots) are "
-                    "not supported by the unified sender-side engine; Megatron-style shard-list "
-                    "conversion needs a per-rank scatter map (see #7060)"
+                    "not supported by the unified sender-side engine; rewrite the converter as a "
+                    "dim-0-separable to_hf_chunk + hf_slots (see #7060)"
                 )
 
         self._shard_seeded = True
@@ -671,7 +660,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             snap.copy_(local, non_blocking=True)  # update snapshot to current shard
             self._shard_snap[name] = snap
 
-            if spec.to_hf is not None and isinstance(place, BlockPlacement) and spec.hf_slots is not None:
+            if spec.to_hf_chunk is not None and isinstance(place, BlockPlacement) and spec.hf_slots is not None:
                 # SENDER-SIDE scoped conversion: this rank converts only its own
                 # touched dim-0 rows (NaN row window -> to_hf_chunk -> non-NaN
                 # extraction) and ships final HF-coordinate entries keyed by the
@@ -720,11 +709,11 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                 _enqueue_scoped(pg, spec.hf_slots, str(local.dtype).replace("torch.", ""), counts, my_idx, my_val)
                 continue
 
-            if spec.to_hf is not None:
+            if spec.to_hf_chunk is not None:
                 raise NotImplementedError(
                     f"{name}: converter specs without an enumerable slot table (hf_slots) are "
-                    "not supported by the unified sender-side engine; Megatron-style shard-list "
-                    "conversion needs a per-rank scatter map (see #7060)"
+                    "not supported by the unified sender-side engine; rewrite the converter as a "
+                    "dim-0-separable to_hf_chunk + hf_slots (see #7060)"
                 )
 
             # identity profile (dense DTensor / explicit blocks / unsharded): the

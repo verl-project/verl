@@ -591,8 +591,9 @@ class VeOmniEngine(FSDPEngine):
         expressible as DTensor placements, so the spec carries an explicit
         :class:`BlockPlacement` in a virtual full tensor of all experts
         (dim-0 offset = ``ep_rank * n_local_experts`` + the DTensor block offset)
-        with the world group as the gather group, and a ``to_hf`` closure over the
-        veomni MoE param handler (pure slice + rename: fused -> per-expert HF names).
+        with the world group as the gather group, and a ``to_hf_chunk`` closure over
+        the veomni MoE param handler (pure slice + rename: fused -> per-expert HF
+        names) plus its ``hf_slots`` output enumeration.
         """
         import torch.distributed as dist
 
@@ -628,26 +629,6 @@ class VeOmniEngine(FSDPEngine):
                 for i in range(n_experts):
                     slots.append((fqn.replace("mlp.experts.", f"mlp.experts.{i}.") + ".weight", inner))
             return slots
-
-        def _expert_to_hf(fqn, full_shape):
-            inner_shape = tuple(full_shape[1:])
-
-            def to_hf(shards):
-                # Each element of ``shards`` is a contiguous run of experts along dim 0
-                # (the block profile hands ``[full]`` -- one run starting at expert 0;
-                # a flat Shard(0) degeneration hands rank-ordered per-rank runs). Feed
-                # every run straight to the handler with its starting global expert id;
-                # no concatenation, no full-stack materialization.
-                out = []
-                base = 0
-                for sh in shards:
-                    stack = sh.view(-1, *inner_shape)
-                    out.extend(process_func(fqn, stack, expert_id_base=base))
-                    base += stack.size(0)
-                assert base == full_shape[0], f"{fqn}: expert runs cover {base}/{full_shape[0]} experts"
-                return out
-
-            return to_hf
 
         def _is_ep_param(name, param):
             # Structural check first: veomni's ParallelPlan.apply attaches
@@ -699,7 +680,6 @@ class VeOmniEngine(FSDPEngine):
                 )
                 spec = ShardSpec(
                     full_shape=full_shape,
-                    to_hf=_expert_to_hf(name, full_shape),
                     place=block,
                     gather_group=dist.group.WORLD,
                     # dim-0-separable: a segment is a run of whole experts starting at

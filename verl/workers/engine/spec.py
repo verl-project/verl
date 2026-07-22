@@ -24,10 +24,10 @@ DTensor-based trainers (FSDP, veomni, ...) pass ``param.device_mesh`` /
 ``param.placements`` verbatim; ``mesh=None`` means the local tensor already is
 the whole parameter (replicated / unsharded).
 
-``to_hf`` is reserved for trainers whose logical parameter differs from the HF
-tensor(s) (e.g. Megatron fused qkv): a pure-permutation callable mapping the
-gather group's dense shards to ``[(hf_name, hf_tensor)]``. It is None for
-DTensor trainers and lands with the Megatron follow-up PR.
+``to_hf_chunk`` + ``hf_slots`` describe trainers whose logical parameter differs
+from the HF tensor(s) (e.g. veomni's fused expert stacks): a dim-0-separable
+converter plus its static output enumeration. Both are None for identity params
+(local coordinates translate straight into HF coordinates).
 """
 
 from __future__ import annotations
@@ -55,8 +55,6 @@ class ShardSpec:
     # Distribution: torch DeviceMesh + per-mesh-dim Placement. None = unsharded.
     mesh: Optional[DeviceMesh] = None
     placements: Optional[tuple] = None
-    # Reserved (Megatron follow-up): pure-permutation shards -> [(hf_name, hf_tensor)].
-    to_hf: Optional[Callable[[list[torch.Tensor]], list[tuple[str, torch.Tensor]]]] = None
     # Explicit placement override for trainers whose sharding is not fully captured
     # by DTensor placements (e.g. veomni's manual expert-dim split): ``place`` is an
     # int flat offset or a BlockPlacement in a *virtual* full tensor, and
