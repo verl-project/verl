@@ -1,0 +1,5 @@
+vllm
+torch
+transformers
+datasets
+accelerate
