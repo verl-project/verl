@@ -14,7 +14,7 @@
 
 import pytest
 
-from verl.workers.config.optimizer import FSDPOptimizerConfig
+from verl.workers.config.optimizer import FSDPOptimizerConfig, McoreOptimizerConfig
 
 
 class TestFSDPOptimizerConfigCPU:
@@ -46,3 +46,43 @@ class TestFSDPOptimizerConfigCPU:
     def test_num_cycles_configuration(self, num_cycles):
         config = FSDPOptimizerConfig(num_cycles=num_cycles, lr=0.1)
         assert config.num_cycles == num_cycles
+
+
+class TestMcoreOptimizerConfigMuonCPU:
+    """The Muon (emerging optimizer) fields are pure config plumbing, so they are exercised on CPU."""
+
+    def test_default_optimizer_is_adam(self):
+        config = McoreOptimizerConfig(lr=0.1)
+        assert config.optimizer == "adam"
+
+    def test_muon_defaults_track_megatron(self):
+        config = McoreOptimizerConfig(lr=0.1)
+        # Defaults mirror Megatron-Core's OptimizerConfig Muon defaults.
+        assert config.use_layer_wise_distributed_optimizer is False
+        assert config.muon_momentum == 0.95
+        assert config.muon_nesterov is False
+        assert config.muon_split_qkv is True
+        assert config.muon_scale_mode == "spectral"
+        assert config.muon_coefficient_type == "quintic"
+        assert config.muon_num_ns_steps == 5
+        assert config.muon_tp_mode == "blockwise"
+        assert config.muon_fp32_matmul_prec == "medium"
+        assert config.muon_extra_scale_factor == 1.0
+        assert config.muon_scalar_optimizer == "adam"
+
+    def test_muon_overrides_are_carried(self):
+        config = McoreOptimizerConfig(
+            lr=0.1,
+            optimizer="muon",
+            muon_momentum=0.9,
+            muon_num_ns_steps=6,
+            muon_tp_mode="allgather",
+            muon_scalar_optimizer="lion",
+            use_layer_wise_distributed_optimizer=True,
+        )
+        assert config.optimizer == "muon"
+        assert config.muon_momentum == 0.9
+        assert config.muon_num_ns_steps == 6
+        assert config.muon_tp_mode == "allgather"
+        assert config.muon_scalar_optimizer == "lion"
+        assert config.use_layer_wise_distributed_optimizer is True
