@@ -87,6 +87,58 @@ class _DensePiece:
     flat: torch.Tensor
 
 
+class _FlushBucket:
+    """One-flush-lookahead bucket pipeline, shared by the steady loop and both
+    seed streams. Pieces accumulate until ``cap`` bytes; ``seal`` assembles them
+    into the single pending flush, first emitting the previous pending with
+    ``is_last=False`` (the lookahead: only the caller's finale knows which flush
+    is last and emits it with ``is_last=True``). ``assemble`` and ``publish``
+    carry the only real differences between the streams -- the wire format
+    (sparse indices flush vs values-only dense flush) and the flush counters."""
+
+    __slots__ = ("cap", "pieces", "nbytes", "pending", "_assemble", "_publish")
+
+    def __init__(self, cap: int, assemble, publish):
+        self.cap = int(cap)
+        self.pieces: list = []
+        self.nbytes = 0
+        self.pending = None
+        self._assemble = assemble
+        self._publish = publish
+
+    def add(self, piece, nbytes: int) -> None:
+        self.pieces.append(piece)
+        self.nbytes += int(nbytes)
+        if self.nbytes >= self.cap:
+            self.seal()
+
+    def seal(self) -> None:
+        if not self.pieces:
+            return
+        self.emit(is_last=False)
+        self.pending = self._assemble(self.pieces)
+        self.pieces, self.nbytes = [], 0
+
+    def emit(self, is_last: bool) -> None:
+        if self.pending is not None:
+            self._publish(self.pending, is_last)
+            self.pending = None
+
+
+def _add_sliced(bkt: _FlushBucket, name: str, dtype_str: str, shape, aidx: torch.Tensor, aval: torch.Tensor) -> None:
+    """Slice one param's (idx, val) delta into <= MAX_ENTRY_ELEMS pieces and bucket
+    them (bounds the receiver-side decode transient; the masked apply is sequential,
+    so splitting is transparent). Bucket bytes = actual wire bytes (int32 positions
+    + values)."""
+    max_elems = DeltaShardedCheckpointEngine.MAX_ENTRY_ELEMS
+    for s in range(0, aidx.numel(), max_elems):
+        e = min(s + max_elems, aidx.numel())
+        bkt.add(
+            _FlushPiece(name, dtype_str, list(shape), aidx[s:e], aval[s:e]),
+            (e - s) * (4 + aval.element_size()),
+        )
+
+
 @CheckpointEngineRegistry.register("delta_sharded")
 class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
     """Sparse delta weight sync over NCCL, diffed on each rank's local shard.
@@ -326,30 +378,14 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         bucket -- and the snapshot is populated as the stream goes.
         """
         is_r0 = self.is_master
-        bucket: list[_DensePiece] = []
-        bucket_bytes = 0
-        pending = None  # (params, values) awaiting emission (1-flush lookahead for is_last)
         n_flushes = 0
         total_elems = 0
         wire_bytes = 0
 
-        def _emit(is_last: bool) -> None:
-            nonlocal pending, n_flushes, wire_bytes
-            if pending is not None:
-                params, values = pending
-                self._publish_dense_flush(params, values, is_last=is_last)
-                n_flushes += 1
-                wire_bytes += int(values.nbytes)
-                pending = None
-
-        def _seal() -> None:
-            nonlocal bucket, bucket_bytes, pending
-            if not bucket:
-                return
-            _emit(is_last=False)
+        def _assemble_dense(pieces: list[_DensePiece]):
             params = []
             val_off = 0
-            for piece in bucket:
+            for piece in pieces:
                 n = int(piece.flat.numel())
                 params.append(
                     DeltaParam(
@@ -364,54 +400,39 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                     )
                 )
                 val_off += n
-            values = torch.cat([piece.flat for piece in bucket])
-            pending = (params, values)
-            bucket = []
-            bucket_bytes = 0
+            return params, torch.cat([piece.flat for piece in pieces])
 
-        def _bucket_dense(hf_name: str, tensor: torch.Tensor) -> None:
-            nonlocal total_elems, bucket_bytes
-            flat = tensor.reshape(-1)
-            total_elems += int(flat.numel())
-            bucket.append(_DensePiece(hf_name, str(flat.dtype).replace("torch.", ""), list(tensor.shape), flat))
-            bucket_bytes += int(flat.nbytes)
-            if bucket_bytes >= self.bucket_size:
-                _seal()
+        def _publish_dense(pending, is_last: bool) -> None:
+            nonlocal n_flushes, wire_bytes
+            params, values = pending
+            self._publish_dense_flush(params, values, is_last=is_last)
+            n_flushes += 1
+            wire_bytes += int(values.nbytes)
 
+        def _publish_sparse(flush, is_last: bool) -> None:
+            nonlocal n_flushes, wire_bytes
+            self._publish_flush(flush, True, is_last=is_last)
+            n_flushes += 1
+            wire_bytes += int(flush.values_gpu.nbytes) + int(flush.positions_cpu.numel())
+
+        dense = _FlushBucket(self.bucket_size, _assemble_dense, _publish_dense)
         # Sparse (indices-encoded) seed flushes for sender-side-converted slot params:
         # positions ride the wire for these params (a one-off ~3x on their bytes) so
         # every rank ships its own column stripes and nobody assembles anything.
-        sparse_bucket: list[_FlushPiece] = []
-        sparse_bytes = 0
-        sparse_pending = None
+        sparse = _FlushBucket(self.bucket_size, self._assemble_flush, _publish_sparse)
 
-        def _emit_sparse(is_last: bool) -> None:
-            nonlocal sparse_pending, n_flushes, wire_bytes
-            if sparse_pending is not None:
-                self._publish_flush(sparse_pending, True, is_last=is_last)
-                n_flushes += 1
-                wire_bytes += int(sparse_pending.values_gpu.nbytes) + int(sparse_pending.positions_cpu.numel())
-                sparse_pending = None
-
-        def _seal_sparse() -> None:
-            nonlocal sparse_bucket, sparse_bytes, sparse_pending
-            if not sparse_bucket:
-                return
-            _emit_sparse(is_last=False)
-            sparse_pending = self._assemble_flush(sparse_bucket)
-            sparse_bucket = []
-            sparse_bytes = 0
+        def _bucket_dense(hf_name: str, tensor: torch.Tensor) -> None:
+            nonlocal total_elems
+            flat = tensor.reshape(-1)
+            total_elems += int(flat.numel())
+            dense.add(
+                _DensePiece(hf_name, str(flat.dtype).replace("torch.", ""), list(tensor.shape), flat), flat.nbytes
+            )
 
         def _bucket_sparse(sname: str, dtype_str: str, sshape, aidx, aval) -> None:
-            nonlocal sparse_bytes
             if aidx is None or aidx.numel() == 0:
                 return
-            for st in range(0, aidx.numel(), self.MAX_ENTRY_ELEMS):
-                en = min(st + self.MAX_ENTRY_ELEMS, aidx.numel())
-                sparse_bucket.append(_FlushPiece(sname, dtype_str, list(sshape), aidx[st:en], aval[st:en]))
-                sparse_bytes += (en - st) * (4 + aval.element_size())
-                if sparse_bytes >= self.bucket_size:
-                    _seal_sparse()
+            _add_sliced(sparse, sname, dtype_str, sshape, aidx, aval)
 
         for name, local, spec in weights:
             local = local.detach().contiguous().view(-1)
@@ -502,13 +523,13 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         self._shard_seeded = True
         if not is_r0:
             return
-        _seal()
-        _seal_sparse()
-        if sparse_pending is not None:
-            _emit(is_last=False)
-            _emit_sparse(is_last=True)
-        elif pending is not None:
-            _emit(is_last=True)
+        dense.seal()
+        sparse.seal()
+        if sparse.pending is not None:
+            dense.emit(is_last=False)
+            sparse.emit(is_last=True)
+        elif dense.pending is not None:
+            dense.emit(is_last=True)
         else:
             self._publish_terminal(True)
         logger.info(
@@ -540,29 +561,17 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             return self._send_dense_seed(weights, global_steps)
         is_r0 = self.is_master
         first = False  # the dense first sync is handled by _send_dense_seed
-        bucket: list = []
-        bucket_bytes = 0
-        pending = None  # a DeltaFlush awaiting emission (1-flush lookahead so the last flush is is_last)
         n_flushes = 0
         changed_elems = 0
         total_elems = 0
         wire_bytes = 0
 
-        def _emit(is_last: bool) -> None:
-            nonlocal pending, n_flushes
-            if pending is not None:
-                self._publish_flush(pending, first, is_last=is_last)
-                n_flushes += 1
-                pending = None
+        def _publish_steady(flush, is_last: bool) -> None:
+            nonlocal n_flushes
+            self._publish_flush(flush, first, is_last=is_last)
+            n_flushes += 1
 
-        def _seal() -> None:
-            nonlocal bucket, bucket_bytes, pending
-            if not bucket:
-                return
-            _emit(is_last=False)  # another bucket follows, so the prior one is not the last
-            pending = self._assemble_flush(bucket)
-            bucket = []
-            bucket_bytes = 0
+        bkt = _FlushBucket(self.bucket_size, self._assemble_flush, _publish_steady)
 
         batch_k = self.batch_gather
 
@@ -574,20 +583,13 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             aidx: torch.Tensor | None,
             aval: torch.Tensor | None,
         ) -> None:
-            nonlocal total_elems, changed_elems, wire_bytes, bucket_bytes
+            nonlocal total_elems, changed_elems, wire_bytes
             total_elems += int(full_numel)
             if aidx is None or aidx.numel() == 0:
                 return
             changed_elems += int(aidx.numel())
             wire_bytes += int(aidx.numel()) * (4 + aval.element_size())
-            # Slice oversized per-param deltas so one entry never exceeds
-            # MAX_ENTRY_ELEMS (bounds the receiver-side decode transient).
-            for s in range(0, aidx.numel(), self.MAX_ENTRY_ELEMS):
-                e = min(s + self.MAX_ENTRY_ELEMS, aidx.numel())
-                bucket.append(_FlushPiece(name, dtype_str, list(full_shape), aidx[s:e], aval[s:e]))
-                bucket_bytes += (e - s) * 8 + (e - s) * aval.element_size()
-                if bucket_bytes >= self.bucket_size:
-                    _seal()
+            _add_sliced(bkt, name, dtype_str, full_shape, aidx, aval)
 
         # sender-side scoped conversion queue: (pg, spec, dtype_str, counts, idx_concat, val_concat)
         # Unified sender queues, ONE PER GATHER GROUP (entries keep the same slot-keyed
@@ -647,9 +649,14 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         for name, local, spec in weights:
             local = local.detach().contiguous().view(-1)
             place, contributes, pg = self._placement(name, spec)
-            snap = self._shard_snap.get(name)
-            if snap is None or snap.numel() != local.numel():
-                snap = torch.empty_like(local, device="cpu", pin_memory=True)
+            # The seed sync allocated every param's snapshot; a missing name or a
+            # numel drift means the rollout side was never seeded for this shard --
+            # diffing against a fresh (garbage) buffer would silently ship a bogus
+            # near-full delta, so fail loud instead.
+            snap = self._shard_snap[name]
+            assert snap.numel() == local.numel(), (
+                f"{name}: shard numel changed since seed ({snap.numel()} -> {local.numel()})"
+            )
             if contributes:
                 base = snap.to(local.device, non_blocking=True)
                 lidx, lval = shard_delta_indices(local, base, 0)  # shard-local coordinates
@@ -732,9 +739,9 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         self._shard_seeded = True
         if not is_r0:
             return
-        _seal()  # seal the final partial bucket into `pending`
-        if pending is not None:
-            _emit(is_last=True)
+        bkt.seal()  # seal the final partial bucket into the pending flush
+        if bkt.pending is not None:
+            bkt.emit(is_last=True)
         else:
             self._publish_terminal(first)
         logger.info(
