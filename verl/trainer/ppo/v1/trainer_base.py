@@ -501,9 +501,7 @@ class PPOTrainer(ABC):
         )
         sample_batch_size = train_batch_size // self.parameter_sync_step
 
-        # regular feed: stream one train batch worth of prompts for this step
-        with marked_timer("feed", timing_raw):
-            self._add_batch_to_generate()
+        self._add_batch_to_generate()
 
         metrics_aggregator = MetricsAggregator()
         combined_keys: list = []
