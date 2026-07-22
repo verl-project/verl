@@ -139,6 +139,73 @@ def _add_sliced(bkt: _FlushBucket, name: str, dtype_str: str, shape, aidx: torch
         )
 
 
+class _GatherQueue:
+    """Per-gather-group batching of slot-keyed queue entries
+    ``(slots, dtype_str, counts, idx, val)``. Entries carry FINAL-coordinate
+    payloads (identity specs: one slot = the param itself; converter specs: the
+    spec's hf_slots), so rank 0 never converts -- ``consume`` receives assembled
+    per-slot pieces straight from the gather.
+
+    One queue per ProcessGroup: separate queues stop pg alternation (dense fsdp
+    group vs expert world group per layer) from shattering batches. The flush
+    trigger is COUNT-ONLY: entry counts are identical on every rank while byte
+    totals are not, so a count trigger is the only one that keeps the collective
+    sequence identical across ranks (a per-rank byte trigger desyncs the gathers
+    and deadlocks NCCL). Byte bounding happens INSIDE the batched gather via
+    ``max_round_bytes``, decided from the all-gathered counts every rank sees."""
+
+    __slots__ = ("batch_k", "max_round_bytes", "is_r0", "_consume", "_queues")
+
+    def __init__(self, batch_k: int, max_round_bytes: int, is_r0: bool, consume):
+        self.batch_k = max(int(batch_k), 1)
+        self.max_round_bytes = int(max_round_bytes)
+        self.is_r0 = is_r0
+        self._consume = consume
+        self._queues: dict[int, tuple] = {}  # id(pg) -> (pg, [entries])
+
+    def put(self, pg, slots: list, dtype_str: str, counts: torch.Tensor, idx: torch.Tensor, val: torch.Tensor):
+        _pg, entries = self._queues.setdefault(id(pg), (pg, []))
+        entries.append((slots, dtype_str, counts, idx, val))
+        if len(entries) >= self.batch_k:
+            self._flush(pg, entries)
+
+    def flush_all(self) -> None:
+        for pg, entries in self._queues.values():
+            self._flush(pg, entries)
+
+    def _flush(self, pg, entries: list) -> None:
+        """One gather round for one group's queue."""
+        if not entries:
+            return
+        batch = list(entries)
+        entries.clear()
+        if pg is None:
+            # unsharded/replicated params: rank 0's local delta already is global
+            if self.is_r0:
+                for slots, dtype_str, counts, idx, val in batch:
+                    off = 0
+                    for (name, shape), c in zip(slots, counts.tolist(), strict=True):
+                        self._consume(
+                            name, dtype_str, tuple(shape), _prodshape(shape), idx[off : off + c], val[off : off + c]
+                        )
+                        off += c
+            return
+        dev = batch[0][3].device
+        counts_concat = torch.cat([c for _, _, c, _, _ in batch]).to(dev)
+        idx_concat = torch.cat([i for _, _, _, i, _ in batch])
+        val_concat = torch.cat([v for _, _, _, _, v in batch])
+        gathered = gather_slot_entries_to_rank0(
+            idx_concat, val_concat, counts_concat, group=pg, max_round_bytes=self.max_round_bytes
+        )
+        if self.is_r0 and gathered is not None:
+            slot_i = 0
+            for slots, dtype_str, _counts, _i, _v in batch:
+                for name, shape in slots:
+                    aidx, aval = gathered[slot_i]
+                    slot_i += 1
+                    self._consume(name, dtype_str, tuple(shape), _prodshape(shape), aidx, aval)
+
+
 @CheckpointEngineRegistry.register("delta_sharded")
 class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
     """Sparse delta weight sync over NCCL, diffed on each rank's local shard.
@@ -429,11 +496,6 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                 _DensePiece(hf_name, str(flat.dtype).replace("torch.", ""), list(tensor.shape), flat), flat.nbytes
             )
 
-        def _bucket_sparse(sname: str, dtype_str: str, sshape, aidx, aval) -> None:
-            if aidx is None or aidx.numel() == 0:
-                return
-            _add_sliced(sparse, sname, dtype_str, sshape, aidx, aval)
-
         for name, local, spec in weights:
             local = local.detach().contiguous().view(-1)
             snap = self._shard_snap.get(name)
@@ -512,7 +574,8 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                     if is_r0 and gathered is not None:
                         for k_i, (aidx, aval) in enumerate(gathered):
                             sname, sshape = spec.hf_slots[row0 * slots_per_row + k_i]
-                            _bucket_sparse(sname, dtype_str, sshape, aidx, aval)
+                            if aidx is not None and aidx.numel():
+                                _add_sliced(sparse, sname, dtype_str, sshape, aidx, aval)
             else:
                 raise NotImplementedError(
                     f"{name}: converter specs without an enumerable slot table (hf_slots) are "
@@ -546,6 +609,83 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             "checkpoint_engine/payload_mbytes": wire_bytes / (1 << 20),
             "checkpoint_engine/flushes": float(n_flushes),
         }
+
+    def _convert_block_delta(
+        self,
+        name: str,
+        spec: ShardSpec,
+        place: BlockPlacement,
+        lidx: torch.Tensor,
+        lval: torch.Tensor,
+        local: torch.Tensor,
+    ) -> tuple[list, str, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """SENDER-SIDE scoped conversion for one converter param: turn this rank's
+        shard-local delta into final HF-coordinate slot entries. Only the touched
+        dim-0 rows are converted (NaN row window -> ``to_hf_chunk`` -> non-NaN
+        extraction); rank 0 does no conversion at all. Every rank enumerates the
+        same slot list (zero counts when untouched), so the batched gather stays
+        aligned across ranks. Returns the queue entry ``(slots, dtype_str, counts,
+        idx_concat, val_concat)``."""
+        full_shape = spec.full_shape
+        inner = max(_prodshape(full_shape[1:]), 1)
+        n_rows = int(full_shape[0])
+        K = len(spec.hf_slots)
+        slots_per_row = K // n_rows
+        counts = torch.zeros(K, dtype=torch.int64)
+        idx_pieces: list[torch.Tensor] = []
+        val_pieces: list[torch.Tensor] = []
+        if lidx.numel():
+            g = translate_flat_indices(lidx, place)
+            order = torch.argsort(g)
+            g, gv = g[order], lval[order]
+            rows = torch.div(g, inner, rounding_mode="floor")
+            urows, rcounts = torch.unique_consecutive(rows, return_counts=True)
+            pos = 0
+            for r, cnt in zip(urows.tolist(), rcounts.tolist(), strict=False):
+                sel_g = g[pos : pos + cnt]
+                sel_v = gv[pos : pos + cnt]
+                pos += cnt
+                buf = torch.full((inner,), float("nan"), dtype=local.dtype, device=local.device)
+                buf[sel_g - r * inner] = sel_v
+                outs = spec.to_hf_chunk(int(r), buf.view(1, *full_shape[1:]))
+                assert len(outs) == slots_per_row, (
+                    f"{name}: to_hf_chunk gave {len(outs)} outputs/row, slot table expects {slots_per_row}"
+                )
+                for s_i, (_hf_name, hf_tensor) in enumerate(outs):
+                    fl = hf_tensor.reshape(-1)
+                    p_ = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
+                    if p_.numel():
+                        counts[int(r) * slots_per_row + s_i] = p_.numel()
+                        idx_pieces.append(p_.to(torch.int32))
+                        val_pieces.append(fl[p_])
+                del buf
+        if idx_pieces:
+            my_idx = torch.cat(idx_pieces)
+            my_val = torch.cat(val_pieces)
+        else:
+            my_idx = torch.empty(0, dtype=torch.int32, device=local.device)
+            my_val = torch.empty(0, dtype=local.dtype, device=local.device)
+        return spec.hf_slots, str(local.dtype).replace("torch.", ""), counts, my_idx, my_val
+
+    def _identity_delta(
+        self,
+        name: str,
+        spec: ShardSpec,
+        place: int | BlockPlacement,
+        lidx: torch.Tensor,
+        lval: torch.Tensor,
+        local: torch.Tensor,
+    ) -> tuple[list, str, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Identity profile (dense DTensor / explicit blocks / unsharded): the
+        param IS its own single slot -- translate the shard-local delta to
+        within-param coordinates and ride the same unified queue as converter
+        params. int32 positions: the wire is int32 anyway and ``_assemble_flush``
+        asserts the range. Returns the queue entry ``(slots, dtype_str, counts,
+        idx, val)``."""
+        gidx = (translate_flat_indices(lidx, place) if lidx.numel() else lidx).to(torch.int32)
+        counts = torch.zeros(1, dtype=torch.int64)
+        counts[0] = int(gidx.numel())
+        return [(name, tuple(spec.full_shape))], str(local.dtype).replace("torch.", ""), counts, gidx, lval
 
     async def send_weights(
         self,
@@ -591,60 +731,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             wire_bytes += int(aidx.numel()) * (4 + aval.element_size())
             _add_sliced(bkt, name, dtype_str, full_shape, aidx, aval)
 
-        # sender-side scoped conversion queue: (pg, spec, dtype_str, counts, idx_concat, val_concat)
-        # Unified sender queues, ONE PER GATHER GROUP (entries keep the same slot-keyed
-        # shape everywhere; separate queues stop pg alternation from shattering batches):
-        # id(pg) -> [pg, entries, queued_bytes]; entry = (slots, dtype_str, counts, idx, val)
-        scoped_queues: dict = {}
-
-        def _flush_scoped(q: list) -> None:
-            """One gather round for one group's queue: every entry already carries
-            FINAL-coordinate payloads (identity specs: one slot = the param itself;
-            converter specs: the spec's hf_slots) -- rank 0 never converts, it
-            assembles slot-keyed pieces straight into flushes."""
-            pg, entries, _qb = q
-            q[1], q[2] = [], 0
-            if not entries:
-                return
-            if pg is None:
-                # unsharded/replicated params: rank 0's local delta already is global
-                if is_r0:
-                    for slots, dtype_str, counts, idx, val in entries:
-                        off = 0
-                        for (name, shape), c in zip(slots, counts.tolist(), strict=True):
-                            _consume(
-                                name, dtype_str, tuple(shape), _prodshape(shape), idx[off : off + c], val[off : off + c]
-                            )
-                            off += c
-                return
-            dev = entries[0][3].device
-            counts_concat = torch.cat([c for _, _, c, _, _ in entries]).to(dev)
-            idx_concat = torch.cat([i for _, _, _, i, _ in entries])
-            val_concat = torch.cat([v for _, _, _, _, v in entries])
-            gathered = gather_slot_entries_to_rank0(
-                idx_concat, val_concat, counts_concat, group=pg, max_round_bytes=self.bucket_size
-            )
-            if is_r0 and gathered is not None:
-                slot_i = 0
-                for slots, dtype_str, counts, _i, _v in entries:
-                    for name, shape in slots:
-                        aidx, aval = gathered[slot_i]
-                        slot_i += 1
-                        _consume(name, dtype_str, tuple(shape), _prodshape(shape), aidx, aval)
-
-        def _enqueue_scoped(pg, slots, dtype_str, counts, idx, val) -> None:
-            q = scoped_queues.get(id(pg))
-            if q is None:
-                q = [pg, [], 0]
-                scoped_queues[id(pg)] = q
-            q[1].append((slots, dtype_str, counts, idx, val))
-            q[2] += int(idx.nbytes) + int(val.nbytes)
-            # count-only trigger: it is identical on every rank (byte triggers are NOT --
-            # each rank's payload differs -- and would desync the collective sequence).
-            # Byte bounding happens INSIDE the batched gather via max_round_bytes,
-            # decided from the all-gathered counts matrix that every rank sees.
-            if len(q[1]) >= max(batch_k, 1):
-                _flush_scoped(q)
+        gq = _GatherQueue(batch_k, self.bucket_size, is_r0, _consume)
 
         for name, local, spec in weights:
             local = local.detach().contiguous().view(-1)
@@ -668,73 +755,17 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             self._shard_snap[name] = snap
 
             if spec.to_hf_chunk is not None and isinstance(place, BlockPlacement) and spec.hf_slots is not None:
-                # SENDER-SIDE scoped conversion: this rank converts only its own
-                # touched dim-0 rows (NaN row window -> to_hf_chunk -> non-NaN
-                # extraction) and ships final HF-coordinate entries keyed by the
-                # spec's slot table; rank 0 does no conversion at all. Every rank
-                # enumerates the same slot list (zero counts when untouched), so
-                # the batched gather stays aligned across ranks.
-                full_shape = spec.full_shape
-                inner = max(_prodshape(full_shape[1:]), 1)
-                n_rows = int(full_shape[0])
-                K = len(spec.hf_slots)
-                slots_per_row = K // n_rows
-                counts = torch.zeros(K, dtype=torch.int64)
-                idx_pieces: list[torch.Tensor] = []
-                val_pieces: list[torch.Tensor] = []
-                if lidx.numel():
-                    g = translate_flat_indices(lidx, place)
-                    order = torch.argsort(g)
-                    g, gv = g[order], lval[order]
-                    rows = torch.div(g, inner, rounding_mode="floor")
-                    urows, rcounts = torch.unique_consecutive(rows, return_counts=True)
-                    pos = 0
-                    for r, cnt in zip(urows.tolist(), rcounts.tolist(), strict=False):
-                        sel_g = g[pos : pos + cnt]
-                        sel_v = gv[pos : pos + cnt]
-                        pos += cnt
-                        buf = torch.full((inner,), float("nan"), dtype=local.dtype, device=local.device)
-                        buf[sel_g - r * inner] = sel_v
-                        outs = spec.to_hf_chunk(int(r), buf.view(1, *full_shape[1:]))
-                        assert len(outs) == slots_per_row, (
-                            f"{name}: to_hf_chunk gave {len(outs)} outputs/row, slot table expects {slots_per_row}"
-                        )
-                        for s_i, (_hf_name, hf_tensor) in enumerate(outs):
-                            fl = hf_tensor.reshape(-1)
-                            p_ = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
-                            if p_.numel():
-                                counts[int(r) * slots_per_row + s_i] = p_.numel()
-                                idx_pieces.append(p_.to(torch.int32))
-                                val_pieces.append(fl[p_])
-                        del buf
-                if idx_pieces:
-                    my_idx = torch.cat(idx_pieces)
-                    my_val = torch.cat(val_pieces)
-                else:
-                    my_idx = torch.empty(0, dtype=torch.int32, device=local.device)
-                    my_val = torch.empty(0, dtype=local.dtype, device=local.device)
-                _enqueue_scoped(pg, spec.hf_slots, str(local.dtype).replace("torch.", ""), counts, my_idx, my_val)
-                continue
-
-            if spec.to_hf_chunk is not None:
+                entry = self._convert_block_delta(name, spec, place, lidx, lval, local)
+            elif spec.to_hf_chunk is not None:
                 raise NotImplementedError(
                     f"{name}: converter specs without an enumerable slot table (hf_slots) are "
                     "not supported by the unified sender-side engine; rewrite the converter as a "
                     "dim-0-separable to_hf_chunk + hf_slots (see #7060)"
                 )
-
-            # identity profile (dense DTensor / explicit blocks / unsharded): the
-            # param IS its own single slot -- translate to within-param coordinates
-            # and ride the same unified queue as converter params. int32 positions:
-            # the wire is int32 anyway and _assemble_flush asserts the range.
-            gidx = (translate_flat_indices(lidx, place) if lidx.numel() else lidx).to(torch.int32)
-            counts = torch.zeros(1, dtype=torch.int64)
-            counts[0] = int(gidx.numel())
-            _enqueue_scoped(
-                pg, [(name, tuple(spec.full_shape))], str(local.dtype).replace("torch.", ""), counts, gidx, lval
-            )
-        for q in scoped_queues.values():
-            _flush_scoped(q)
+            else:
+                entry = self._identity_delta(name, spec, place, lidx, lval, local)
+            gq.put(pg, *entry)
+        gq.flush_all()
 
         self._shard_seeded = True
         if not is_r0:
