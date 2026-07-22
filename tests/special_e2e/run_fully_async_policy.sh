@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
+# Megatron-LM is baked into the CI image but the vemlp runner / Ray workers do not inherit
+# the image's PYTHONPATH, so set it at runtime (main_ppo forwards it into the Ray runtime env).
+export PYTHONPATH="/workspace/Megatron-LM${PYTHONPATH:+:${PYTHONPATH}}"
+echo "PYTHONPATH=${PYTHONPATH}"
+
 # Test script for fully_async_policy E2E regression testing
 # This script runs fully async PPO training with both FSDP2 and Megatron backends
 # to ensure the asynchronous training mechanism works correctly

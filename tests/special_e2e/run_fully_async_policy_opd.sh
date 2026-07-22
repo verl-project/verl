@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
+# Megatron-LM is baked into the CI image but the vemlp runner / Ray workers do not inherit
+# the image's PYTHONPATH, so set it at runtime (main_ppo forwards it into the Ray runtime env).
+export PYTHONPATH="/workspace/Megatron-LM${PYTHONPATH:+:${PYTHONPATH}}"
+echo "PYTHONPATH=${PYTHONPATH}"
+
 # Workaround for NVIDIA driver bug (r560-r575) causing SIGSEGV in ncclCuMemHostEnable()
 # on PCIe machines without P2P access. See: https://github.com/NVIDIA/nccl/issues/1838
 export NCCL_CUMEM_ENABLE=0
