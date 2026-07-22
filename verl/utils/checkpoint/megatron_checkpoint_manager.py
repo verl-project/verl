@@ -1012,7 +1012,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                     log_only_rank_0=True,
                 )
             else:
-                self.bridge.save_hf_weights(self.model, hf_ckpt_path)
+                self.bridge.save_hf_weights(self.model, hf_ckpt_path, strict=self.checkpoint_config.strict)
 
     def _save_hf_config_and_tokenizer(self, local_path: str):
         """Rank-0 saves HF config, tokenizer, and generation config."""
