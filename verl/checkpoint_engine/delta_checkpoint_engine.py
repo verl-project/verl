@@ -799,7 +799,6 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             gq.put(pg, *entry)
         gq.flush_all()
 
-        self._shard_seeded = True
         if not is_r0:
             return
         bkt.seal()  # seal the final partial bucket into the pending flush
