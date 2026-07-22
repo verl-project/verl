@@ -25,6 +25,17 @@ actor_rollout_ref:
       lr_wsd_decay_style: exponential
       lr_wsd_decay_steps: null
       use_checkpoint_opt_param_scheduler: false
+      use_layer_wise_distributed_optimizer: false
+      muon_momentum: 0.95
+      muon_nesterov: false
+      muon_split_qkv: true
+      muon_scale_mode: spectral
+      muon_coefficient_type: quintic
+      muon_num_ns_steps: 5
+      muon_tp_mode: blockwise
+      muon_fp32_matmul_prec: medium
+      muon_extra_scale_factor: 1.0
+      muon_scalar_optimizer: adam
       override_optimizer_config: {}
     megatron:
       _target_: verl.workers.config.McoreEngineConfig
@@ -515,6 +526,17 @@ critic:
     lr_wsd_decay_style: exponential
     lr_wsd_decay_steps: null
     use_checkpoint_opt_param_scheduler: false
+    use_layer_wise_distributed_optimizer: false
+    muon_momentum: 0.95
+    muon_nesterov: false
+    muon_split_qkv: true
+    muon_scale_mode: spectral
+    muon_coefficient_type: quintic
+    muon_num_ns_steps: 5
+    muon_tp_mode: blockwise
+    muon_fp32_matmul_prec: medium
+    muon_extra_scale_factor: 1.0
+    muon_scalar_optimizer: adam
     override_optimizer_config: {}
   megatron:
     _target_: verl.workers.config.McoreEngineConfig

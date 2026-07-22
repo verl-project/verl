@@ -140,6 +140,26 @@ class McoreOptimizerConfig(OptimizerConfig):
         lr_wsd_decay_style (str): Weight-standard-deviation decay style: "constant", "exponential", or "cosine".
         lr_wsd_decay_steps (Optional[int]): Number of steps for weight-standard-deviation decay.
         use_checkpoint_opt_param_scheduler (bool): Whether to use checkpoint optimizer parameter scheduler.
+        optimizer (str): Optimizer algorithm; "adam"/"sgd" use Megatron's classic optimizers, while
+            "muon"/"adaptive_muon" route through Megatron-Core's emerging_optimizers path (which builds
+            the tensor-parallel-aware Muon optimizer). The ``muon_*`` fields below only take effect when
+            a Muon algorithm is selected and are ignored otherwise.
+        use_layer_wise_distributed_optimizer (bool): Wrap the emerging (Muon) optimizer with Megatron's
+            LayerWiseDistributedOptimizer. Only relevant for Muon; mirrors Megatron's
+            ``--use-layer-wise-distributed-optimizer``.
+        muon_momentum (float): Momentum of the internal SGD in Muon. Mirrors Megatron's ``--muon-momentum``.
+        muon_nesterov (bool): Use Nesterov-style momentum in Muon's internal SGD.
+        muon_split_qkv (bool): Split fused QKV parameters before the Muon update.
+        muon_scale_mode (str): Scale-factor mode for the Muon update (e.g. "spectral"/"unit_rms_norm").
+        muon_coefficient_type (str): Newton-Schulz coefficient type (e.g. "quintic"); valid values are
+            discovered from the installed ``emerging_optimizers`` package.
+        muon_num_ns_steps (int): Number of Newton-Schulz iteration steps.
+        muon_tp_mode (str): How the Newton-Schulz calculation is performed for tensor-parallel weights
+            (e.g. "blockwise").
+        muon_fp32_matmul_prec (str): Precision for Muon's fp32 matmul (e.g. "medium").
+        muon_extra_scale_factor (float): Additional scale factor applied to the Muon update.
+        muon_scalar_optimizer (str): Optimizer used for the non-matrix ("scalar") parameters
+            (embeddings, biases, norms) when Muon is selected; one of "adam"/"lion".
     """
 
     optimizer: str = "adam"
@@ -151,6 +171,21 @@ class McoreOptimizerConfig(OptimizerConfig):
     lr_wsd_decay_style: str = "exponential"
     lr_wsd_decay_steps: Optional[int] = None
     use_checkpoint_opt_param_scheduler: bool = False
+    # Muon (emerging optimizer) options. Only consumed when `optimizer` selects a Muon algorithm;
+    # each field mirrors the like-named field on Megatron-Core's OptimizerConfig and is passed through
+    # by `init_megatron_optim_config`. Defaults track Megatron-Core so leaving them unset reproduces
+    # Megatron's built-in Muon defaults.
+    use_layer_wise_distributed_optimizer: bool = False
+    muon_momentum: float = 0.95
+    muon_nesterov: bool = False
+    muon_split_qkv: bool = True
+    muon_scale_mode: str = "spectral"
+    muon_coefficient_type: str = "quintic"
+    muon_num_ns_steps: int = 5
+    muon_tp_mode: str = "blockwise"
+    muon_fp32_matmul_prec: str = "medium"
+    muon_extra_scale_factor: float = 1.0
+    muon_scalar_optimizer: str = "adam"
     override_optimizer_config: Optional[dict] = None
 
 
