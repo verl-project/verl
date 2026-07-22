@@ -772,7 +772,6 @@ def compute_gpg_outcome_advantage(
     index: np.ndarray,
     epsilon: float = 1e-6,
     f_norm: float = 1.0,
-    alpha: float = 1.0,
     config=None,
     **kwargs,
 ):
@@ -788,7 +787,6 @@ def compute_gpg_outcome_advantage(
             shape: (bs,)
         epsilon: (float)
         f_norm: (float)
-        alpha: (float)
         config: (dict) algorithm config
 
     Returns:
@@ -801,7 +799,6 @@ def compute_gpg_outcome_advantage(
 
     id2score = defaultdict(list)
     id2mean = {}
-    id2std = {}
 
     with torch.no_grad():
         bsz = scores.shape[0]
@@ -813,12 +810,11 @@ def compute_gpg_outcome_advantage(
 
         for idx in id2score:
             if len(id2score[idx]) == 1:
-                id2mean[idx] = torch.tensor(0.0)
-                id2std[idx] = torch.tensor(1.0)
+                # Keep singleton means device-agnostic.
+                id2mean[idx] = 0.0
             elif len(id2score[idx]) > 1:
                 scores_tensor = torch.stack(id2score[idx])
                 id2mean[idx] = torch.mean(scores_tensor)
-                id2std[idx] = torch.std(scores_tensor)
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
