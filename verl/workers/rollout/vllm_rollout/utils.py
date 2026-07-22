@@ -519,7 +519,6 @@ class vLLMColocateWorkerExtension:
                 if VLLM_SLEEP_LEVEL == 2 and is_npu_available:
                     _refresh_ascend_moe_comm_state_after_l2_wake()
 
-
     def _apply_buffer_updates_all_models(self, buffer_updates, main_named_buffers):
         """Apply buffer updates to the main model and any synced MTP drafter.
 
