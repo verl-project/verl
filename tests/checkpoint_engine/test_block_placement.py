@@ -316,3 +316,178 @@ def test_explicit_place_block_rebuild_muon_shard0_layout():
         assert torch.equal(fl[pos], rn[pos]), f"{hf_name}: values diverge"
         seen += int(pos.numel())
     assert seen == 3
+
+
+def _qwen3_style_to_hf_chunk(inter_dim):
+    """Segment-aware counterpart of _qwen3_style_to_hf: converts a dim-0 run of
+    whole experts starting at global expert id ``start``."""
+
+    def to_hf_chunk(start, seg):
+        out = []
+        for i in range(seg.shape[0]):
+            w = seg[i]
+            out.append((f"experts.{start + i}.gate_proj.weight", w[:, :inter_dim].transpose(0, 1)))
+            out.append((f"experts.{start + i}.up_proj.weight", w[:, inter_dim:].transpose(0, 1)))
+        return out
+
+    return to_hf_chunk
+
+
+@pytest.mark.parametrize("seg_rows", [1, 3, 8])
+def test_chunked_rebuild_matches_full_rebuild(seg_rows):
+    """The engine's segmented NaN rebuild (translate per-rank shard-local positions
+    to full coordinates, sort, scatter per dim-0 segment, convert per segment) must
+    extract exactly the same (hf_name, position, value) set as the full rebuild."""
+    torch.manual_seed(5)
+    n_experts, dim, inter = 8, 4, 3
+    full_shape = (n_experts, dim, 2 * inter)
+    inner = dim * 2 * inter
+    to_hf = _qwen3_style_to_hf(full_shape, inter)
+    to_hf_chunk = _qwen3_style_to_hf_chunk(inter)
+
+    old = torch.randn(full_shape, dtype=torch.bfloat16)
+    new = old.clone()
+    new[0, 1, 2] += 1.0
+    new[3, 0, 5] -= 0.5
+    new[5, 2, 1] += 2.0
+    new[7, 3, 0] += 0.25
+
+    # per-rank shard-local sparse deltas over an ep x ep_shard block grid
+    gidx_parts, gval_parts = [], []
+    full_nan = torch.full(full_shape, float("nan"), dtype=old.dtype)
+    for place in _blocks_for_grid(full_shape, {0: 4, 1: 2}):
+        slices = tuple(slice(o, o + sz) for o, sz in zip(place.global_offset, place.local_shape, strict=False))
+        lo_t = old[slices].contiguous().reshape(-1)
+        ln_t = new[slices].contiguous().reshape(-1)
+        changed = (
+            (lo_t.view(torch.uint8).view(lo_t.numel(), -1) != ln_t.view(torch.uint8).view(ln_t.numel(), -1))
+            .any(dim=-1)
+            .nonzero(as_tuple=False)
+            .view(-1)
+        )
+        gidx_parts.append(translate_flat_indices(changed, place))
+        gval_parts.append(ln_t[changed])
+        buf = torch.full((lo_t.numel(),), float("nan"), dtype=old.dtype)
+        buf[changed] = ln_t[changed]
+        full_nan[slices] = buf.view(place.local_shape)
+
+    gidx = torch.cat(gidx_parts)
+    gval = torch.cat(gval_parts)
+    order = torch.argsort(gidx)
+    gidx, gval = gidx[order], gval[order]
+
+    # reference: full rebuild -> convert -> extract
+    ref = {}
+    for hf_name, hf_tensor in to_hf([full_nan.reshape(-1)]):
+        fl = hf_tensor.reshape(-1)
+        pos = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
+        ref[hf_name] = (pos, fl[pos])
+
+    # chunked: segment scatter -> convert per segment -> extract
+    got = {}
+    for row0 in range(0, n_experts, seg_rows):
+        rows = min(seg_rows, n_experts - row0)
+        lo, hi = row0 * inner, (row0 + rows) * inner
+        a = int(torch.searchsorted(gidx, lo))
+        b = int(torch.searchsorted(gidx, hi))
+        seg = torch.full((rows * inner,), float("nan"), dtype=old.dtype)
+        if b > a:
+            seg[gidx[a:b] - lo] = gval[a:b]
+        for hf_name, hf_tensor in to_hf_chunk(row0, seg.view(rows, dim, 2 * inter)):
+            fl = hf_tensor.reshape(-1)
+            pos = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
+            if pos.numel() or hf_name in ref and ref[hf_name][0].numel():
+                got[hf_name] = (pos, fl[pos])
+
+    changed_names = {n for n, (p, _) in ref.items() if p.numel()}
+    assert changed_names == set(got.keys())
+    for name in changed_names:
+        assert torch.equal(got[name][0], ref[name][0]), f"{name}: positions diverge"
+        assert torch.equal(got[name][1], ref[name][1]), f"{name}: values diverge"
+
+
+def test_scoped_sender_side_matches_rank0_rebuild():
+    """Sender-side scoped conversion (each simulated rank converts only its own
+    touched dim-0 rows via a NaN row window + to_hf_chunk, emitting slot-keyed
+    HF-coordinate entries) must produce exactly the union the rank-0 full
+    rebuild extracts."""
+    torch.manual_seed(6)
+    n_experts, dim, inter = 8, 4, 3
+    full_shape = (n_experts, dim, 2 * inter)
+    inner = dim * 2 * inter
+    to_hf = _qwen3_style_to_hf(full_shape, inter)
+    to_hf_chunk = _qwen3_style_to_hf_chunk(inter)
+    # slot table mirroring the exporter: per expert, gate then up
+    slots = []
+    for i in range(n_experts):
+        slots.append((f"experts.{i}.gate_proj.weight", (inter, dim)))
+        slots.append((f"experts.{i}.up_proj.weight", (inter, dim)))
+    S = 2
+
+    old = torch.randn(full_shape, dtype=torch.bfloat16)
+    new = old.clone()
+    new[0, 1, 2] += 1.0
+    new[3, 0, 5] -= 0.5
+    new[3, 2, 4] += 0.75
+    new[6, 2, 1] += 2.0
+
+    # reference: full NaN rebuild -> to_hf -> per-name extraction
+    full_nan = torch.full(full_shape, float("nan"), dtype=old.dtype)
+    per_rank_payload = []
+    for place in _blocks_for_grid(full_shape, {0: 4, 1: 2}):
+        slices = tuple(slice(o, o + sz) for o, sz in zip(place.global_offset, place.local_shape, strict=False))
+        lo_t = old[slices].contiguous().reshape(-1)
+        ln_t = new[slices].contiguous().reshape(-1)
+        changed = (
+            (lo_t.view(torch.uint8).view(lo_t.numel(), -1) != ln_t.view(torch.uint8).view(ln_t.numel(), -1))
+            .any(dim=-1)
+            .nonzero(as_tuple=False)
+            .view(-1)
+        )
+        buf = torch.full((lo_t.numel(),), float("nan"), dtype=old.dtype)
+        buf[changed] = ln_t[changed]
+        full_nan[slices] = buf.view(place.local_shape)
+        per_rank_payload.append((place, changed, ln_t[changed]))
+
+    ref = {}
+    for hf_name, hf_tensor in to_hf([full_nan.reshape(-1)]):
+        fl = hf_tensor.reshape(-1)
+        pos = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
+        if pos.numel():
+            ref[hf_name] = (pos, fl[pos])
+
+    # scoped sender-side: per rank, touched rows only -> slot-keyed entries; union by slot
+    got = {}
+    for place, lidx, lval in per_rank_payload:
+        if lidx.numel() == 0:
+            continue
+        g = translate_flat_indices(lidx, place)
+        order = torch.argsort(g)
+        g, gv = g[order], lval[order]
+        rows = torch.div(g, inner, rounding_mode="floor")
+        urows, rcounts = torch.unique_consecutive(rows, return_counts=True)
+        pos0 = 0
+        for r, cnt in zip(urows.tolist(), rcounts.tolist(), strict=False):
+            sel_g, sel_v = g[pos0 : pos0 + cnt], gv[pos0 : pos0 + cnt]
+            pos0 += cnt
+            buf = torch.full((inner,), float("nan"), dtype=old.dtype)
+            buf[sel_g - r * inner] = sel_v
+            outs = to_hf_chunk(int(r), buf.view(1, dim, 2 * inter))
+            assert len(outs) == S
+            for s_i, (hf_name, hf_tensor) in enumerate(outs):
+                fl = hf_tensor.reshape(-1)
+                p_ = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
+                if p_.numel():
+                    slot_name = slots[int(r) * S + s_i][0]
+                    assert slot_name == hf_name.replace(f"experts.{int(r)}.", f"experts.{int(r)}.")
+                    prev = got.get(hf_name, (torch.empty(0, dtype=torch.int64), torch.empty(0, dtype=old.dtype)))
+                    got[hf_name] = (torch.cat([prev[0], p_]), torch.cat([prev[1], fl[p_]]))
+
+    assert set(got.keys()) == set(ref.keys())
+    for name in ref:
+        gp, gv2 = got[name]
+        order = torch.argsort(gp)
+        gp, gv2 = gp[order], gv2[order]
+        assert gp.unique().numel() == gp.numel(), f"{name}: overlapping rank contributions"
+        assert torch.equal(gp, ref[name][0]), f"{name}: positions diverge"
+        assert torch.equal(gv2, ref[name][1]), f"{name}: values diverge"

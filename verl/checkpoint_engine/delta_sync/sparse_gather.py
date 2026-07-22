@@ -59,12 +59,12 @@ def shard_delta_indices(
     return global_idx, values
 
 
-def gather_v_batched_to_rank0(
+def gather_slot_entries_to_rank0(
     idx_concat: torch.Tensor,
     val_concat: torch.Tensor,
     counts: torch.Tensor,
     group: dist.ProcessGroup | None = None,
-    grouped: bool = False,
+    max_round_bytes: int | None = None,
 ) -> list | None:
     """Variable-length sparse gather, batched: one collective round for K parameters.
 
@@ -84,6 +84,38 @@ def gather_v_batched_to_rank0(
     counts_all = [torch.zeros_like(counts) for _ in range(world)]
     dist.all_gather(counts_all, counts.to(dev), group=group)
     counts_cpu = torch.stack(counts_all).cpu().tolist()  # one D2H sync instead of `world`
+
+    if max_round_bytes is not None and k > 1:
+        # Deterministic sub-rounds: every rank sees the same counts matrix, so all
+        # ranks derive the SAME slot partition (no per-rank trigger asymmetry) and
+        # each padded round's largest blob stays within the byte budget.
+        per_elem = idx_concat.element_size() + val_concat.element_size()
+        budget = max(int(max_round_bytes) // per_elem, 1)  # elements per rank per round
+        cuts = [0]
+        run = [0] * world
+        for i in range(k):
+            run = [run[r] + counts_cpu[r][i] for r in range(world)]
+            if max(run) > budget and cuts[-1] != i:
+                cuts.append(i)
+                run = [counts_cpu[r][i] for r in range(world)]
+        cuts.append(k)
+        if len(cuts) > 2:
+            out_all: list = []
+            my_off = [0]
+            for i in range(k):
+                my_off.append(my_off[-1] + counts_cpu[rank][i])
+            for lo, hi in zip(cuts[:-1], cuts[1:], strict=False):
+                sub_counts = torch.tensor(counts_cpu[rank][lo:hi], dtype=torch.int64, device=dev)
+                sub = gather_slot_entries_to_rank0(
+                    idx_concat[my_off[lo] : my_off[hi]],
+                    val_concat[my_off[lo] : my_off[hi]],
+                    sub_counts,
+                    group=group,
+                )
+                if rank == 0:
+                    out_all.extend(sub)
+            return out_all if rank == 0 else None
+
     totals = [sum(c) for c in counts_cpu]
     max_n = max(totals) if totals else 0
     if max_n == 0:
@@ -91,8 +123,6 @@ def gather_v_batched_to_rank0(
             return None
         empty_i = torch.empty(0, dtype=idx_concat.dtype, device=dev)
         empty_v = torch.empty(0, dtype=val_concat.dtype, device=dev)
-        if grouped:
-            return [[(empty_i, empty_v) for _ in range(world)] for _ in range(k)]
         return [(empty_i, empty_v) for _ in range(k)]
 
     idx_pad = torch.zeros(max_n, dtype=idx_concat.dtype, device=dev)
@@ -115,15 +145,6 @@ def gather_v_batched_to_rank0(
             offs[r][i + 1] = offs[r][i] + counts_cpu[r][i]
     out = []
     for i in range(k):
-        if grouped:
-            # keep the per-rank boundary: [(idx_r, val_r) for every rank in the group]
-            out.append(
-                [
-                    (idx_list[r][offs[r][i] : offs[r][i + 1]], val_list[r][offs[r][i] : offs[r][i + 1]])
-                    for r in range(world)
-                ]
-            )
-            continue
         idx_pieces = [idx_list[r][offs[r][i] : offs[r][i + 1]] for r in range(world) if counts_cpu[r][i]]
         val_pieces = [val_list[r][offs[r][i] : offs[r][i + 1]] for r in range(world) if counts_cpu[r][i]]
         if idx_pieces:
@@ -135,48 +156,7 @@ def gather_v_batched_to_rank0(
     return out
 
 
-def gather_dense_to_rank0(
-    local_val: torch.Tensor,
-    offset: int,
-    full_numel: int,
-    group: dist.ProcessGroup | None = None,
-) -> torch.Tensor | None:
-    """Assemble a full flat parameter on rank 0 from each rank's contiguous shard.
-
-    Each rank contributes ``(offset, values)`` (empty on non-contributing ranks);
-    rank 0 places every shard at its flat offset. Only the values ride the wire --
-    no per-element indices -- so the dense first sync carries none of the sparse
-    encoding overhead and rank 0 peaks at one full parameter.
-    """
-    rank = dist.get_rank(group)
-    world = dist.get_world_size(group)
-    dev = local_val.device
-
-    n = int(local_val.numel())
-    meta = torch.tensor([n, offset], dtype=torch.long, device=dev)
-    metas = [torch.zeros(2, dtype=torch.long, device=dev) for _ in range(world)]
-    dist.all_gather(metas, meta, group=group)
-    metas_cpu = torch.stack(metas).cpu().tolist()  # one D2H sync instead of 2 * `world`
-    counts = [int(m[0]) for m in metas_cpu]
-    offsets = [int(m[1]) for m in metas_cpu]
-    max_n = max(counts) if counts else 0
-    if max_n == 0:
-        return torch.empty(0, dtype=local_val.dtype, device=dev) if rank == 0 else None
-
-    val_pad = torch.zeros(max_n, dtype=local_val.dtype, device=dev)
-    val_pad[:n] = local_val
-    val_list = [torch.zeros(max_n, dtype=local_val.dtype, device=dev) for _ in range(world)] if rank == 0 else None
-    dist.gather(val_pad, val_list, dst=0, group=group)
-    if rank != 0:
-        return None
-    full = torch.empty(full_numel, dtype=local_val.dtype, device=dev)
-    for r in range(world):
-        if counts[r]:
-            full[offsets[r] : offsets[r] + counts[r]] = val_list[r][: counts[r]]
-    return full
-
-
-def gather_dense_blocks_to_rank0(
+def assemble_dense_param_on_rank0(
     local_val: torch.Tensor,
     place: BlockPlacement,
     group: dist.ProcessGroup | None = None,
@@ -221,81 +201,3 @@ def gather_dense_blocks_to_rank0(
         slices = tuple(slice(o, o + sz) for o, sz in zip(goff, lshape, strict=False))
         full[slices] = val_list[r][: counts[r]].view(lshape)
     return full.reshape(-1)
-
-
-def gather_v_grouped_to_rank0(
-    local_idx: torch.Tensor,
-    local_val: torch.Tensor,
-    group: dist.ProcessGroup | None = None,
-) -> list[tuple[torch.Tensor, torch.Tensor]] | None:
-    """Variable-length sparse gather that keeps the payloads *per rank* instead of concatenating.
-
-    Returns, on rank 0, a list ``[(idx_r, val_r) for r in range(world)]`` of each rank's sparse
-    ``(local-shard-position, value)`` pairs (padding stripped); ``None`` on the other ranks. Keeping
-    the per-rank boundary lets rank 0 rebuild each rank's shard buffer and feed the *native*
-    ``_weight_merge_across_tp`` -- so no per-parameter global-position math is needed on our side.
-    """
-    rank = dist.get_rank(group)
-    world = dist.get_world_size(group)
-    dev = local_idx.device
-
-    n = int(local_idx.numel())
-    cnt = torch.tensor([n], dtype=torch.long, device=dev)
-    counts = [torch.zeros(1, dtype=torch.long, device=dev) for _ in range(world)]
-    dist.all_gather(counts, cnt, group=group)
-    counts = torch.cat(counts).cpu().tolist()  # one D2H sync instead of `world`
-    max_n = max(counts) if counts else 0
-
-    if max_n == 0:
-        return (
-            [
-                (torch.empty(0, dtype=local_idx.dtype, device=dev), torch.empty(0, dtype=local_val.dtype, device=dev))
-                for _ in range(world)
-            ]
-            if rank == 0
-            else None
-        )
-
-    idx_pad = torch.zeros(max_n, dtype=local_idx.dtype, device=dev)
-    val_pad = torch.zeros(max_n, dtype=local_val.dtype, device=dev)
-    idx_pad[:n] = local_idx
-    val_pad[:n] = local_val
-
-    idx_list = [torch.zeros(max_n, dtype=idx_pad.dtype, device=dev) for _ in range(world)] if rank == 0 else None
-    val_list = [torch.zeros(max_n, dtype=local_val.dtype, device=dev) for _ in range(world)] if rank == 0 else None
-    dist.gather(idx_pad, idx_list, dst=0, group=group)
-    dist.gather(val_pad, val_list, dst=0, group=group)
-
-    if rank != 0:
-        return None
-    return [(idx_list[r][: counts[r]], val_list[r][: counts[r]]) for r in range(world)]
-
-
-def gather_shards_to_rank0(local_val: torch.Tensor, group=None) -> list[torch.Tensor] | None:
-    """Gather each rank's dense flat shard to the group's rank 0, per-rank boundaries kept.
-
-    Returns ``[shard_r for r in range(group world)]`` on the group's rank 0 (None
-    elsewhere). Used by the rebuild-profile dense first sync, where rank 0 hands the
-    shard list to ``ShardSpec.rebuild_dense``.
-    """
-    rank = dist.get_rank(group)
-    world = dist.get_world_size(group)
-    dst = dist.get_global_rank(group, 0) if group is not None else 0
-    dev = local_val.device
-
-    n = int(local_val.numel())
-    cnt = torch.tensor([n], dtype=torch.long, device=dev)
-    counts = [torch.zeros(1, dtype=torch.long, device=dev) for _ in range(world)]
-    dist.all_gather(counts, cnt, group=group)
-    counts = torch.cat(counts).cpu().tolist()
-    max_n = max(counts) if counts else 0
-    if max_n == 0:
-        return [torch.empty(0, dtype=local_val.dtype, device=dev) for _ in range(world)] if rank == 0 else None
-
-    val_pad = torch.zeros(max_n, dtype=local_val.dtype, device=dev)
-    val_pad[:n] = local_val
-    val_list = [torch.zeros(max_n, dtype=local_val.dtype, device=dev) for _ in range(world)] if rank == 0 else None
-    dist.gather(val_pad, val_list, dst=dst, group=group)
-    if rank != 0:
-        return None
-    return [val_list[r][: counts[r]] for r in range(world)]

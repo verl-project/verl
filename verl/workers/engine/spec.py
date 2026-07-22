@@ -24,10 +24,10 @@ DTensor-based trainers (FSDP, veomni, ...) pass ``param.device_mesh`` /
 ``param.placements`` verbatim; ``mesh=None`` means the local tensor already is
 the whole parameter (replicated / unsharded).
 
-``to_hf`` is reserved for trainers whose logical parameter differs from the HF
-tensor(s) (e.g. Megatron fused qkv): a pure-permutation callable mapping the
-gather group's dense shards to ``[(hf_name, hf_tensor)]``. It is None for
-DTensor trainers and lands with the Megatron follow-up PR.
+``to_hf_chunk`` + ``hf_slots`` describe trainers whose logical parameter differs
+from the HF tensor(s) (e.g. veomni's fused expert stacks): a dim-0-separable
+converter plus its static output enumeration. Both are None for identity params
+(local coordinates translate straight into HF coordinates).
 """
 
 from __future__ import annotations
@@ -55,8 +55,6 @@ class ShardSpec:
     # Distribution: torch DeviceMesh + per-mesh-dim Placement. None = unsharded.
     mesh: Optional[DeviceMesh] = None
     placements: Optional[tuple] = None
-    # Reserved (Megatron follow-up): pure-permutation shards -> [(hf_name, hf_tensor)].
-    to_hf: Optional[Callable[[list[torch.Tensor]], list[tuple[str, torch.Tensor]]]] = None
     # Explicit placement override for trainers whose sharding is not fully captured
     # by DTensor placements (e.g. veomni's manual expert-dim split): ``place`` is an
     # int flat offset or a BlockPlacement in a *virtual* full tensor, and
@@ -65,6 +63,20 @@ class ShardSpec:
     # Every rank is assumed to contribute.
     place: Optional[int | BlockPlacement] = None
     gather_group: Optional[ProcessGroup] = None
+    # Optional dim-0-separable converter: ``to_hf_chunk(dim0_start, segment)`` converts a
+    # contiguous dim-0 segment ``full[dim0_start : dim0_start + segment.shape[0]]`` of the
+    # logical tensor to ``[(hf_name, hf_tensor)]``. When set on a block-converter spec the
+    # engine rebuilds and converts in bounded dim-0 segments instead of materializing the
+    # whole logical tensor on rank 0 (e.g. a fused expert stack: each segment is a run of
+    # whole experts and the converter only needs the segment plus its starting expert id).
+    to_hf_chunk: Optional[Callable[[int, torch.Tensor], list[tuple[str, torch.Tensor]]]] = None
+    # Optional full slot enumeration for dim-0-separable converters: one
+    # ``(hf_name, hf_shape)`` per converter output, in dim-0 order and matching
+    # ``to_hf_chunk``'s per-segment output order. When present (together with
+    # ``to_hf_chunk``) the engine can convert on the SENDER side: every rank
+    # converts only its own touched dim-0 rows and ships final HF-coordinate
+    # entries keyed by slot index -- rank 0 does no conversion at all.
+    hf_slots: Optional[list[tuple[str, tuple]]] = None
 
     @classmethod
     def from_param(cls, param: torch.Tensor) -> ShardSpec:

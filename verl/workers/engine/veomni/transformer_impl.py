@@ -591,8 +591,9 @@ class VeOmniEngine(FSDPEngine):
         expressible as DTensor placements, so the spec carries an explicit
         :class:`BlockPlacement` in a virtual full tensor of all experts
         (dim-0 offset = ``ep_rank * n_local_experts`` + the DTensor block offset)
-        with the world group as the gather group, and a ``to_hf`` closure over the
-        veomni MoE param handler (pure slice + rename: fused -> per-expert HF names).
+        with the world group as the gather group, and a ``to_hf_chunk`` closure over
+        the veomni MoE param handler (pure slice + rename: fused -> per-expert HF
+        names) plus its ``hf_slots`` output enumeration.
         """
         import torch.distributed as dist
 
@@ -609,25 +610,25 @@ class VeOmniEngine(FSDPEngine):
 
         from ..spec import BlockPlacement, ShardSpec
 
-        def _expert_to_hf(fqn, full_shape):
-            inner_shape = tuple(full_shape[1:])
-
-            def to_hf(shards):
-                # Each element of ``shards`` is a contiguous run of experts along dim 0
-                # (the block profile hands ``[full]`` -- one run starting at expert 0;
-                # a flat Shard(0) degeneration hands rank-ordered per-rank runs). Feed
-                # every run straight to the handler with its starting global expert id;
-                # no concatenation, no full-stack materialization.
-                out = []
-                base = 0
-                for sh in shards:
-                    stack = sh.view(-1, *inner_shape)
-                    out.extend(process_func(fqn, stack, expert_id_base=base))
-                    base += stack.size(0)
-                assert base == full_shape[0], f"{fqn}: expert runs cover {base}/{full_shape[0]} experts"
-                return out
-
-            return to_hf
+        def _expert_hf_slots(fqn, full_shape):
+            """Full (hf_name, hf_shape) slot table for one fused expert param, in dim-0
+            order matching the default handler's per-segment output order. Only valid
+            for the default handler (custom MOE_PARAM_HANDERS may rename differently),
+            so the caller attaches it only when process_func is the default."""
+            n_experts = int(full_shape[0])
+            slots = []
+            if "gate_up_proj" in fqn:
+                inter = int(full_shape[1]) // 2
+                inner = (inter, *(int(x) for x in full_shape[2:]))
+                for i in range(n_experts):
+                    for proj in ("gate_proj", "up_proj"):
+                        nm = fqn.replace("gate_up_proj", proj)
+                        slots.append((nm.replace("mlp.experts.", f"mlp.experts.{i}.") + ".weight", inner))
+            else:
+                inner = tuple(int(x) for x in full_shape[1:])
+                for i in range(n_experts):
+                    slots.append((fqn.replace("mlp.experts.", f"mlp.experts.{i}.") + ".weight", inner))
+            return slots
 
         def _is_ep_param(name, param):
             # Structural check first: veomni's ParallelPlan.apply attaches
@@ -679,9 +680,16 @@ class VeOmniEngine(FSDPEngine):
                 )
                 spec = ShardSpec(
                     full_shape=full_shape,
-                    to_hf=_expert_to_hf(name, full_shape),
                     place=block,
                     gather_group=dist.group.WORLD,
+                    # dim-0-separable: a segment is a run of whole experts starting at
+                    # global expert id ``start`` -- exactly the handler's contract.
+                    to_hf_chunk=lambda start, seg, _f=process_func, _n=name: list(_f(_n, seg, expert_id_base=start)),
+                    # slot table enables sender-side conversion; only the default
+                    # handler's naming is enumerable without running the converter.
+                    hf_slots=(
+                        _expert_hf_slots(name, full_shape) if process_func is default_moe_param_handler else None
+                    ),
                 )
                 yield name, local.reshape(-1), spec
 

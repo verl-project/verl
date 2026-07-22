@@ -68,21 +68,54 @@ def test_derive_placement_unsharded():
     assert offset == 0 and contributes is True and group is None
 
 
-def test_spec_to_hf_pure_permutation():
-    """A converter spec (Megatron-style) must preserve NaN sentinel positions --
-    the property the engine's sparse rebuild relies on."""
+def test_spec_to_hf_chunk_preserves_nan_sentinels():
+    """A dim-0-separable converter must preserve NaN sentinel positions -- the
+    property the engine's sender-side non-NaN extraction relies on."""
     from verl.workers.engine.spec import ShardSpec
 
-    full = torch.arange(24, dtype=torch.float32).view(6, 4)
-    shards = [sh.reshape(-1) for sh in full.chunk(3, dim=0)]
+    def to_hf_chunk(dim0_start, segment):
+        # pure slice + rename, one output per dim-0 row (identity permutation)
+        return [(f"w.{dim0_start + i}", segment[i]) for i in range(segment.shape[0])]
 
-    def to_hf(shard_list):
-        return [("w", torch.cat(shard_list).view(6, 4))]
-
-    spec = ShardSpec(full_shape=(6, 4), to_hf=to_hf)
-    nan_shards = [torch.full_like(sh, float("nan")) for sh in shards]
-    nan_shards[1][3] = 42.0
-    ((_, rebuilt),) = spec.to_hf(nan_shards)
-    fl = rebuilt.reshape(-1)
+    spec = ShardSpec(
+        full_shape=(6, 4),
+        to_hf_chunk=to_hf_chunk,
+        hf_slots=[(f"w.{i}", (4,)) for i in range(6)],
+    )
+    seg = torch.full((1, 4), float("nan"), dtype=torch.float32)
+    seg[0, 3] = 42.0
+    ((name, out),) = spec.to_hf_chunk(2, seg)
+    fl = out.reshape(-1)
     pos = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
-    assert pos.tolist() == [8 + 3] and fl[pos[0]] == 42.0
+    assert name == "w.2" and pos.tolist() == [3] and fl[pos[0]] == 42.0
+
+
+def test_gather_slot_entries_sub_rounds_world1():
+    """max_round_bytes splits the slot list into deterministic sub-rounds; the
+    reassembled output must equal the single-round result (world=1 mechanics)."""
+    import os
+
+    import torch.distributed as dist
+
+    from verl.checkpoint_engine.delta_sync.sparse_gather import gather_slot_entries_to_rank0
+
+    if not dist.is_initialized():
+        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+        os.environ.setdefault("MASTER_PORT", "29512")
+        dist.init_process_group(backend="gloo", rank=0, world_size=1)
+
+    torch.manual_seed(7)
+    k = 9
+    counts = torch.tensor([5, 0, 3, 7, 1, 0, 4, 2, 6], dtype=torch.int64)
+    n = int(counts.sum())
+    idx = torch.randint(0, 1000, (n,), dtype=torch.int32)
+    val = torch.randn(n, dtype=torch.bfloat16)
+
+    ref = gather_slot_entries_to_rank0(idx, val, counts)
+    per_elem = idx.element_size() + val.element_size()
+    for budget_elems in (1, 4, 8):
+        got = gather_slot_entries_to_rank0(idx, val, counts, max_round_bytes=budget_elems * per_elem)
+        assert len(got) == k
+        for (ri, rv), (gi, gv) in zip(ref, got, strict=True):
+            assert torch.equal(ri, gi)
+            assert torch.equal(rv, gv)

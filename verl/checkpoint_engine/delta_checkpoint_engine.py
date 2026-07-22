@@ -50,10 +50,8 @@ from .base import CheckpointEngineRegistry
 from .delta_sync.encode import DeltaFlush, DeltaParam
 from .delta_sync.encode import checksum as _checksum
 from .delta_sync.sparse_gather import (
-    gather_dense_blocks_to_rank0,
-    gather_dense_to_rank0,
-    gather_shards_to_rank0,
-    gather_v_batched_to_rank0,
+    assemble_dense_param_on_rank0,
+    gather_slot_entries_to_rank0,
     shard_delta_indices,
 )
 from .nccl_checkpoint_engine import MasterMetadata, NCCLCheckpointEngine
@@ -66,43 +64,6 @@ def _prodshape(shape) -> int:
     for x in shape:
         n *= int(x)
     return n
-
-
-@dataclass(slots=True)
-class _GatherEntry:
-    """One parameter's sparse delta queued for the next batched gather (placement profile).
-
-    ``idx`` is already translated to full-tensor flat coordinates (int32); entries
-    sharing the same ``pg`` are gathered in one collective round.
-    """
-
-    name: str
-    dtype_str: str
-    full_shape: tuple
-    full_numel: int
-    idx: torch.Tensor
-    val: torch.Tensor
-    pg: object  # gather group; None = unsharded (this rank's delta already is global)
-
-
-@dataclass(slots=True)
-class _RebuildEntry:
-    """One converter-profile parameter's shard-local delta awaiting gather + NaN rebuild.
-
-    ``idx`` stays in shard-local coordinates (int32); rank 0 rebuilds NaN-sentinel
-    buffers and hands them to ``spec.to_hf``. ``place`` selects the rebuild shape:
-    a ``BlockPlacement`` rebuilds the full logical tensor from per-rank blocks, a
-    plain int (the shard-list sentinel) rebuilds one buffer per rank.
-    """
-
-    name: str
-    dtype: torch.dtype
-    pg: object  # gather ProcessGroup
-    spec: ShardSpec
-    shard_shape: tuple
-    idx: torch.Tensor
-    val: torch.Tensor
-    place: int | BlockPlacement
 
 
 @dataclass(slots=True)
@@ -124,6 +85,125 @@ class _DensePiece:
     dtype_str: str
     shape: list
     flat: torch.Tensor
+
+
+class _FlushBucket:
+    """One-flush-lookahead bucket pipeline, shared by the steady loop and both
+    seed streams. Pieces accumulate until ``cap`` bytes; ``seal`` assembles them
+    into the single pending flush, first emitting the previous pending with
+    ``is_last=False`` (the lookahead: only the caller's finale knows which flush
+    is last and emits it with ``is_last=True``). ``assemble`` and ``publish``
+    carry the only real differences between the streams -- the wire format
+    (sparse indices flush vs values-only dense flush) and the flush counters."""
+
+    __slots__ = ("cap", "pieces", "nbytes", "pending", "_assemble", "_publish")
+
+    def __init__(self, cap: int, assemble, publish):
+        self.cap = int(cap)
+        self.pieces: list = []
+        self.nbytes = 0
+        self.pending = None
+        self._assemble = assemble
+        self._publish = publish
+
+    def add(self, piece, nbytes: int) -> None:
+        self.pieces.append(piece)
+        self.nbytes += int(nbytes)
+        if self.nbytes >= self.cap:
+            self.seal()
+
+    def seal(self) -> None:
+        if not self.pieces:
+            return
+        self.emit(is_last=False)
+        self.pending = self._assemble(self.pieces)
+        self.pieces, self.nbytes = [], 0
+
+    def emit(self, is_last: bool) -> None:
+        if self.pending is not None:
+            self._publish(self.pending, is_last)
+            self.pending = None
+
+
+def _add_sliced(bkt: _FlushBucket, name: str, dtype_str: str, shape, aidx: torch.Tensor, aval: torch.Tensor) -> None:
+    """Slice one param's (idx, val) delta into <= MAX_ENTRY_ELEMS pieces and bucket
+    them (bounds the receiver-side decode transient; the masked apply is sequential,
+    so splitting is transparent). Bucket bytes = actual wire bytes (int32 positions
+    + values)."""
+    max_elems = DeltaShardedCheckpointEngine.MAX_ENTRY_ELEMS
+    for s in range(0, aidx.numel(), max_elems):
+        e = min(s + max_elems, aidx.numel())
+        bkt.add(
+            _FlushPiece(name, dtype_str, list(shape), aidx[s:e], aval[s:e]),
+            (e - s) * (4 + aval.element_size()),
+        )
+
+
+class _GatherQueue:
+    """Per-gather-group batching of slot-keyed queue entries
+    ``(slots, dtype_str, counts, idx, val)``. Entries carry FINAL-coordinate
+    payloads (identity specs: one slot = the param itself; converter specs: the
+    spec's hf_slots), so rank 0 never converts -- ``consume`` receives assembled
+    per-slot pieces straight from the gather.
+
+    One queue per ProcessGroup: separate queues stop pg alternation (dense fsdp
+    group vs expert world group per layer) from shattering batches. The flush
+    trigger is COUNT-ONLY: entry counts are identical on every rank while byte
+    totals are not, so a count trigger is the only one that keeps the collective
+    sequence identical across ranks (a per-rank byte trigger desyncs the gathers
+    and deadlocks NCCL). Byte bounding happens INSIDE the batched gather via
+    ``max_round_bytes``, decided from the all-gathered counts every rank sees."""
+
+    __slots__ = ("batch_k", "max_round_bytes", "is_r0", "_consume", "_queues")
+
+    def __init__(self, batch_k: int, max_round_bytes: int, is_r0: bool, consume):
+        self.batch_k = max(int(batch_k), 1)
+        self.max_round_bytes = int(max_round_bytes)
+        self.is_r0 = is_r0
+        self._consume = consume
+        self._queues: dict[int, tuple] = {}  # id(pg) -> (pg, [entries])
+
+    def put(self, pg, slots: list, dtype_str: str, counts: torch.Tensor, idx: torch.Tensor, val: torch.Tensor):
+        _pg, entries = self._queues.setdefault(id(pg), (pg, []))
+        entries.append((slots, dtype_str, counts, idx, val))
+        if len(entries) >= self.batch_k:
+            self._flush(pg, entries)
+
+    def flush_all(self) -> None:
+        for pg, entries in self._queues.values():
+            self._flush(pg, entries)
+
+    def _flush(self, pg, entries: list) -> None:
+        """One gather round for one group's queue."""
+        if not entries:
+            return
+        batch = list(entries)
+        entries.clear()
+        if pg is None:
+            # unsharded/replicated params: rank 0's local delta already is global
+            if self.is_r0:
+                for slots, dtype_str, counts, idx, val in batch:
+                    off = 0
+                    for (name, shape), c in zip(slots, counts.tolist(), strict=True):
+                        self._consume(
+                            name, dtype_str, tuple(shape), _prodshape(shape), idx[off : off + c], val[off : off + c]
+                        )
+                        off += c
+            return
+        dev = batch[0][3].device
+        counts_concat = torch.cat([c for _, _, c, _, _ in batch]).to(dev)
+        idx_concat = torch.cat([i for _, _, _, i, _ in batch])
+        val_concat = torch.cat([v for _, _, _, _, v in batch])
+        gathered = gather_slot_entries_to_rank0(
+            idx_concat, val_concat, counts_concat, group=pg, max_round_bytes=self.max_round_bytes
+        )
+        if self.is_r0 and gathered is not None:
+            slot_i = 0
+            for slots, dtype_str, _counts, _i, _v in batch:
+                for name, shape in slots:
+                    aidx, aval = gathered[slot_i]
+                    slot_i += 1
+                    self._consume(name, dtype_str, tuple(shape), _prodshape(shape), aidx, aval)
 
 
 @CheckpointEngineRegistry.register("delta_sharded")
@@ -149,6 +229,12 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
     # sliced into multiple entries (the masked apply is sequential, so splitting
     # is transparent); 64M elements bounds the transient to ~512 MiB.
     MAX_ENTRY_ELEMS = 64 << 20
+
+    # Bound on the rank-0 rebuild transient for dim-0-separable converter params
+    # (``spec.to_hf_chunk``): the NaN rebuild and the dense seed assemble/convert in
+    # dim-0 segments of at most this many elements instead of materializing the full
+    # logical tensor (a Kimi-K2.5-scale fused expert stack is ~21 GB in bf16).
+    REBUILD_CHUNK_ELEMS = 64 << 20
 
     wire_format = "delta_flush"
 
@@ -359,30 +445,14 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         bucket -- and the snapshot is populated as the stream goes.
         """
         is_r0 = self.is_master
-        bucket: list[_DensePiece] = []
-        bucket_bytes = 0
-        pending = None  # (params, values) awaiting emission (1-flush lookahead for is_last)
         n_flushes = 0
         total_elems = 0
         wire_bytes = 0
 
-        def _emit(is_last: bool) -> None:
-            nonlocal pending, n_flushes, wire_bytes
-            if pending is not None:
-                params, values = pending
-                self._publish_dense_flush(params, values, is_last=is_last)
-                n_flushes += 1
-                wire_bytes += int(values.nbytes)
-                pending = None
-
-        def _seal() -> None:
-            nonlocal bucket, bucket_bytes, pending
-            if not bucket:
-                return
-            _emit(is_last=False)
+        def _assemble_dense(pieces: list[_DensePiece]):
             params = []
             val_off = 0
-            for piece in bucket:
+            for piece in pieces:
                 n = int(piece.flat.numel())
                 params.append(
                     DeltaParam(
@@ -397,19 +467,34 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                     )
                 )
                 val_off += n
-            values = torch.cat([piece.flat for piece in bucket])
-            pending = (params, values)
-            bucket = []
-            bucket_bytes = 0
+            return params, torch.cat([piece.flat for piece in pieces])
+
+        def _publish_dense(pending, is_last: bool) -> None:
+            nonlocal n_flushes, wire_bytes
+            params, values = pending
+            self._publish_dense_flush(params, values, is_last=is_last)
+            n_flushes += 1
+            wire_bytes += int(values.nbytes)
+
+        def _publish_sparse(flush, is_last: bool) -> None:
+            nonlocal n_flushes, wire_bytes
+            self._publish_flush(flush, True, is_last=is_last)
+            n_flushes += 1
+            wire_bytes += int(flush.values_gpu.nbytes) + int(flush.positions_cpu.numel())
+
+        dense = _FlushBucket(self.bucket_size, _assemble_dense, _publish_dense)
+        # Sparse (indices-encoded) seed flushes for sender-side-converted slot params:
+        # positions ride the wire for these params (a one-off ~3x on their bytes) so
+        # every rank ships its own column stripes and nobody assembles anything.
+        sparse = _FlushBucket(self.bucket_size, self._assemble_flush, _publish_sparse)
 
         def _bucket_dense(hf_name: str, tensor: torch.Tensor) -> None:
-            nonlocal total_elems, bucket_bytes
+            nonlocal total_elems
             flat = tensor.reshape(-1)
             total_elems += int(flat.numel())
-            bucket.append(_DensePiece(hf_name, str(flat.dtype).replace("torch.", ""), list(tensor.shape), flat))
-            bucket_bytes += int(flat.nbytes)
-            if bucket_bytes >= self.bucket_size:
-                _seal()
+            dense.add(
+                _DensePiece(hf_name, str(flat.dtype).replace("torch.", ""), list(tensor.shape), flat), flat.nbytes
+            )
 
         for name, local, spec in weights:
             local = local.detach().contiguous().view(-1)
@@ -421,43 +506,87 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
 
             place, contributes, pg = self._placement(name, spec)
             shard = local if contributes else torch.empty(0, dtype=local.dtype, device=local.device)
-            if spec.to_hf is None:
+            if spec.to_hf_chunk is None:
                 # the spec's placements map the shard straight into the full tensor
                 if pg is None:
                     if is_r0 and contributes:
                         _bucket_dense(name, local.view(spec.full_shape))
                 elif isinstance(place, BlockPlacement):
-                    full = gather_dense_blocks_to_rank0(shard, place, group=pg)
+                    full = assemble_dense_param_on_rank0(shard, place, group=pg)
                     if is_r0 and full is not None:
                         _bucket_dense(name, full.view(spec.full_shape))
                 else:
-                    # plain-int place: only explicit exporter overrides land here
-                    # (derived sharded geometries are always BlockPlacement)
-                    full = gather_dense_to_rank0(
-                        shard, place if contributes else 0, _prodshape(spec.full_shape), group=pg
+                    raise NotImplementedError(
+                        f"{name}: plain-int explicit placements are no longer supported by the "
+                        "unified sender-side engine (attach a BlockPlacement instead)"
                     )
-                    if is_r0 and full is not None:
-                        _bucket_dense(name, full.view(spec.full_shape))
-            elif isinstance(place, BlockPlacement):
-                # block converter profile: assemble the full logical tensor from
-                # per-rank blocks, then convert -- to_hf receives ``[full]``.
-                full = gather_dense_blocks_to_rank0(shard, place, group=pg)
-                if is_r0 and full is not None:
-                    for hf_name, hf_tensor in spec.to_hf([full]):
-                        _bucket_dense(hf_name, hf_tensor)
+            elif isinstance(place, BlockPlacement) and spec.hf_slots is not None:
+                # SENDER-SIDE seed: every rank converts its own rows (full
+                # coverage) segment by segment and ships slot-keyed sparse
+                # entries -- no rank assembles or converts anyone else's data.
+                # Segments bound both the NaN window and the per-round gather
+                # blob (threshold scaled by group size).
+                full_shape = spec.full_shape
+                inner = max(_prodshape(full_shape[1:]), 1)
+                n_rows = int(full_shape[0])
+                slots_per_row = len(spec.hf_slots) // n_rows
+                world = torch.distributed.get_world_size(pg) if pg is not None else 1
+                seg_rows = max(1, self.REBUILD_CHUNK_ELEMS // max(inner * world, 1))
+                dtype_str = str(local.dtype).replace("torch.", "")
+                lview = local.view(tuple(int(x) for x in place.local_shape))
+                o0, l0 = int(place.global_offset[0]), int(place.local_shape[0])
+                inner_box = BlockPlacement(
+                    tuple(int(x) for x in place.local_shape[1:]),
+                    tuple(int(x) for x in place.global_offset[1:]),
+                    tuple(int(x) for x in full_shape[1:]),
+                )
+                row_numel = _prodshape(place.local_shape[1:])
+                iidx = translate_flat_indices(torch.arange(row_numel, device=local.device), inner_box)
+                if is_r0:
+                    total_elems += _prodshape(full_shape)
+                for row0 in range(0, n_rows, seg_rows):
+                    rows = min(seg_rows, n_rows - row0)
+                    r_lo, r_hi = max(o0, row0), min(o0 + l0, row0 + rows)
+                    counts = torch.zeros(rows * slots_per_row, dtype=torch.int64)
+                    idx_pieces: list[torch.Tensor] = []
+                    val_pieces: list[torch.Tensor] = []
+                    for r in range(r_lo, r_hi):
+                        row_vals = lview[r - o0].reshape(-1)
+                        for s_i, pidx, pval in self._convert_row_slots(name, spec, r, iidx, row_vals, local):
+                            counts[(r - row0) * slots_per_row + s_i] = pidx.numel()
+                            idx_pieces.append(pidx)
+                            val_pieces.append(pval)
+                    my_idx = (
+                        torch.cat(idx_pieces) if idx_pieces else torch.empty(0, dtype=torch.int32, device=local.device)
+                    )
+                    my_val = (
+                        torch.cat(val_pieces) if val_pieces else torch.empty(0, dtype=local.dtype, device=local.device)
+                    )
+                    gathered = gather_slot_entries_to_rank0(
+                        my_idx, my_val, counts.to(local.device), group=pg, max_round_bytes=self.bucket_size
+                    )
+                    if is_r0 and gathered is not None:
+                        for k_i, (aidx, aval) in enumerate(gathered):
+                            sname, sshape = spec.hf_slots[row0 * slots_per_row + k_i]
+                            if aidx is not None and aidx.numel():
+                                _add_sliced(sparse, sname, dtype_str, sshape, aidx, aval)
             else:
-                # converter profile (e.g. Megatron): rebuild dense shards via to_hf
-                shards = gather_shards_to_rank0(shard, group=pg)
-                if is_r0 and shards is not None:
-                    for hf_name, hf_tensor in spec.to_hf(shards):
-                        _bucket_dense(hf_name, hf_tensor)
+                raise NotImplementedError(
+                    f"{name}: converter specs without an enumerable slot table (hf_slots) are "
+                    "not supported by the unified sender-side engine; rewrite the converter as a "
+                    "dim-0-separable to_hf_chunk + hf_slots (see #7060)"
+                )
 
         self._shard_seeded = True
         if not is_r0:
             return
-        _seal()
-        if pending is not None:
-            _emit(is_last=True)
+        dense.seal()
+        sparse.seal()
+        if sparse.pending is not None:
+            dense.emit(is_last=False)
+            sparse.emit(is_last=True)
+        elif dense.pending is not None:
+            dense.emit(is_last=True)
         else:
             self._publish_terminal(True)
         logger.info(
@@ -475,6 +604,107 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             "checkpoint_engine/flushes": float(n_flushes),
         }
 
+    def _convert_row_slots(
+        self,
+        name: str,
+        spec: ShardSpec,
+        r: int,
+        pos_in_row: torch.Tensor,
+        vals: torch.Tensor,
+        ref: torch.Tensor,
+    ) -> list[tuple[int, torch.Tensor, torch.Tensor]]:
+        """NaN-probe one dim-0 row through the spec's converter: scatter the row's
+        (within-row position, value) pairs into a NaN-filled row buffer, run
+        ``to_hf_chunk`` on it, and extract each output slot's surviving positions
+        and values (the converter is a pure permutation, so non-NaN survivors are
+        exactly the input pairs in final HF coordinates). Shared by the steady
+        loop (touched subset of a row) and the seed (every owned element of a
+        row). Returns ``[(slot_offset_in_row, idx_int32, val), ...]``, skipping
+        empty slots. ``ref`` supplies dtype/device."""
+        full_shape = spec.full_shape
+        inner = max(_prodshape(full_shape[1:]), 1)
+        slots_per_row = len(spec.hf_slots) // int(full_shape[0])
+        buf = torch.full((inner,), float("nan"), dtype=ref.dtype, device=ref.device)
+        buf[pos_in_row] = vals
+        outs = spec.to_hf_chunk(int(r), buf.view(1, *full_shape[1:]))
+        assert len(outs) == slots_per_row, (
+            f"{name}: to_hf_chunk gave {len(outs)} outputs/row, slot table expects {slots_per_row}"
+        )
+        res = []
+        for s_i, (_hf_name, hf_tensor) in enumerate(outs):
+            fl = hf_tensor.reshape(-1)
+            p_ = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
+            if p_.numel():
+                res.append((s_i, p_.to(torch.int32), fl[p_]))
+        return res
+
+    def _convert_block_delta(
+        self,
+        name: str,
+        spec: ShardSpec,
+        place: BlockPlacement,
+        lidx: torch.Tensor,
+        lval: torch.Tensor,
+        local: torch.Tensor,
+    ) -> tuple[list, str, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """SENDER-SIDE scoped conversion for one converter param: turn this rank's
+        shard-local delta into final HF-coordinate slot entries. Only the touched
+        dim-0 rows are converted (NaN row window -> ``to_hf_chunk`` -> non-NaN
+        extraction); rank 0 does no conversion at all. Every rank enumerates the
+        same slot list (zero counts when untouched), so the batched gather stays
+        aligned across ranks. Returns the queue entry ``(slots, dtype_str, counts,
+        idx_concat, val_concat)``."""
+        full_shape = spec.full_shape
+        inner = max(_prodshape(full_shape[1:]), 1)
+        n_rows = int(full_shape[0])
+        K = len(spec.hf_slots)
+        slots_per_row = K // n_rows
+        counts = torch.zeros(K, dtype=torch.int64)
+        idx_pieces: list[torch.Tensor] = []
+        val_pieces: list[torch.Tensor] = []
+        if lidx.numel():
+            g = translate_flat_indices(lidx, place)
+            order = torch.argsort(g)
+            g, gv = g[order], lval[order]
+            rows = torch.div(g, inner, rounding_mode="floor")
+            urows, rcounts = torch.unique_consecutive(rows, return_counts=True)
+            pos = 0
+            for r, cnt in zip(urows.tolist(), rcounts.tolist(), strict=False):
+                sel_g = g[pos : pos + cnt]
+                sel_v = gv[pos : pos + cnt]
+                pos += cnt
+                for s_i, pidx, pval in self._convert_row_slots(name, spec, r, sel_g - r * inner, sel_v, local):
+                    counts[int(r) * slots_per_row + s_i] = pidx.numel()
+                    idx_pieces.append(pidx)
+                    val_pieces.append(pval)
+        if idx_pieces:
+            my_idx = torch.cat(idx_pieces)
+            my_val = torch.cat(val_pieces)
+        else:
+            my_idx = torch.empty(0, dtype=torch.int32, device=local.device)
+            my_val = torch.empty(0, dtype=local.dtype, device=local.device)
+        return spec.hf_slots, str(local.dtype).replace("torch.", ""), counts, my_idx, my_val
+
+    def _identity_delta(
+        self,
+        name: str,
+        spec: ShardSpec,
+        place: int | BlockPlacement,
+        lidx: torch.Tensor,
+        lval: torch.Tensor,
+        local: torch.Tensor,
+    ) -> tuple[list, str, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Identity profile (dense DTensor / explicit blocks / unsharded): the
+        param IS its own single slot -- translate the shard-local delta to
+        within-param coordinates and ride the same unified queue as converter
+        params. int32 positions: the wire is int32 anyway and ``_assemble_flush``
+        asserts the range. Returns the queue entry ``(slots, dtype_str, counts,
+        idx, val)``."""
+        gidx = (translate_flat_indices(lidx, place) if lidx.numel() else lidx).to(torch.int32)
+        counts = torch.zeros(1, dtype=torch.int64)
+        counts[0] = int(gidx.numel())
+        return [(name, tuple(spec.full_shape))], str(local.dtype).replace("torch.", ""), counts, gidx, lval
+
     async def send_weights(
         self,
         weights: Generator[tuple[str, torch.Tensor, ShardSpec], None, None],
@@ -489,32 +719,19 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             return self._send_dense_seed(weights, global_steps)
         is_r0 = self.is_master
         first = False  # the dense first sync is handled by _send_dense_seed
-        bucket: list = []
-        bucket_bytes = 0
-        pending = None  # a DeltaFlush awaiting emission (1-flush lookahead so the last flush is is_last)
         n_flushes = 0
         changed_elems = 0
         total_elems = 0
         wire_bytes = 0
 
-        def _emit(is_last: bool) -> None:
-            nonlocal pending, n_flushes
-            if pending is not None:
-                self._publish_flush(pending, first, is_last=is_last)
-                n_flushes += 1
-                pending = None
+        def _publish_steady(flush, is_last: bool) -> None:
+            nonlocal n_flushes
+            self._publish_flush(flush, first, is_last=is_last)
+            n_flushes += 1
 
-        def _seal() -> None:
-            nonlocal bucket, bucket_bytes, pending
-            if not bucket:
-                return
-            _emit(is_last=False)  # another bucket follows, so the prior one is not the last
-            pending = self._assemble_flush(bucket)
-            bucket = []
-            bucket_bytes = 0
+        bkt = _FlushBucket(self.bucket_size, self._assemble_flush, _publish_steady)
 
         batch_k = self.batch_gather
-        group: list[_GatherEntry] = []
 
         def _consume(
             name: str,
@@ -524,129 +741,27 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             aidx: torch.Tensor | None,
             aval: torch.Tensor | None,
         ) -> None:
-            nonlocal total_elems, changed_elems, wire_bytes, bucket_bytes
+            nonlocal total_elems, changed_elems, wire_bytes
             total_elems += int(full_numel)
             if aidx is None or aidx.numel() == 0:
                 return
             changed_elems += int(aidx.numel())
             wire_bytes += int(aidx.numel()) * (4 + aval.element_size())
-            # Slice oversized per-param deltas so one entry never exceeds
-            # MAX_ENTRY_ELEMS (bounds the receiver-side decode transient).
-            for s in range(0, aidx.numel(), self.MAX_ENTRY_ELEMS):
-                e = min(s + self.MAX_ENTRY_ELEMS, aidx.numel())
-                bucket.append(_FlushPiece(name, dtype_str, list(full_shape), aidx[s:e], aval[s:e]))
-                bucket_bytes += (e - s) * 8 + (e - s) * aval.element_size()
-                if bucket_bytes >= self.bucket_size:
-                    _seal()
+            _add_sliced(bkt, name, dtype_str, full_shape, aidx, aval)
 
-        def _flush_group() -> None:
-            nonlocal group
-            if not group:
-                return
-            pg = group[0].pg
-            if pg is None:
-                # unsharded params: this rank's delta already is the global delta
-                if is_r0:
-                    for entry in group:
-                        _consume(entry.name, entry.dtype_str, entry.full_shape, entry.full_numel, entry.idx, entry.val)
-                group = []
-                return
-            dev = group[0].idx.device
-            idx_concat = torch.cat([entry.idx for entry in group])
-            val_concat = torch.cat([entry.val for entry in group])
-            counts = torch.tensor([int(entry.idx.numel()) for entry in group], dtype=torch.int64, device=dev)
-            gathered = gather_v_batched_to_rank0(idx_concat, val_concat, counts, group=pg)
-            if is_r0 and gathered is not None:
-                for entry, (aidx, aval) in zip(group, gathered, strict=False):
-                    _consume(entry.name, entry.dtype_str, entry.full_shape, entry.full_numel, aidx, aval)
-            group = []
-
-        nan_group: list[_RebuildEntry] = []  # rebuild-profile params batched per gather_group
-
-        def _consume_hf(hf_name: str, hf_tensor: torch.Tensor) -> None:
-            nonlocal total_elems
-            fl = hf_tensor.reshape(-1)
-            total_elems += int(fl.numel())
-            pos = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
-            if pos.numel():
-                # total_elems is added inside _consume too; compensate
-                total_elems -= int(fl.numel())
-                _consume(
-                    hf_name,
-                    str(fl.dtype).replace("torch.", ""),
-                    tuple(hf_tensor.shape),
-                    int(fl.numel()),
-                    pos,
-                    fl[pos],
-                )
-
-        def _flush_nan_group() -> None:
-            nonlocal nan_group, total_elems
-            if not nan_group:
-                return
-            pg = nan_group[0].pg
-            dev = nan_group[0].idx.device
-            is_block = isinstance(nan_group[0].place, BlockPlacement)
-            assert all(isinstance(entry.place, BlockPlacement) == is_block for entry in nan_group), (
-                "a converter gather group must be uniformly block- or flat-placed"
-            )
-            idx_concat = torch.cat([entry.idx for entry in nan_group])
-            val_concat = torch.cat([entry.val for entry in nan_group])
-            counts = torch.tensor([int(entry.idx.numel()) for entry in nan_group], dtype=torch.int64, device=dev)
-            gathered = gather_v_batched_to_rank0(idx_concat, val_concat, counts, group=pg, grouped=True)
-
-            blocks = None
-            if is_block:
-                # every rank ships its per-param (local_shape, global_offset); rank 0
-                # needs them to place each rank's NaN-rebuilt block into the full tensor.
-                import torch.distributed as dist
-
-                maxd = max(len(entry.place.full_shape) for entry in nan_group)
-                meta = torch.zeros(len(nan_group), 1 + 2 * maxd, dtype=torch.int64, device=dev)
-                for i, entry in enumerate(nan_group):
-                    pl = entry.place
-                    d = len(pl.full_shape)
-                    meta[i, 0] = d
-                    meta[i, 1 : 1 + d] = torch.tensor(pl.local_shape, dtype=torch.int64)
-                    meta[i, 1 + d : 1 + 2 * d] = torch.tensor(pl.global_offset, dtype=torch.int64)
-                world = dist.get_world_size(pg)
-                metas = [torch.zeros_like(meta) for _ in range(world)]
-                dist.all_gather(metas, meta, group=pg)
-                blocks = [m.cpu().tolist() for m in metas]  # [world][K][1+2*maxd]
-
-            if is_r0 and gathered is not None:
-                for k, (entry, per_rank) in enumerate(zip(nan_group, gathered, strict=False)):
-                    if is_block:
-                        # block converter profile: rebuild the FULL logical tensor with NaN
-                        # sentinels (per-rank slice assignment), then hand ``[full]`` to to_hf.
-                        full = torch.full(entry.spec.full_shape, float("nan"), dtype=entry.dtype, device=dev)
-                        for r, (gi, gv) in enumerate(per_rank):
-                            m = blocks[r][k]
-                            d = int(m[0])
-                            lshape = [int(x) for x in m[1 : 1 + d]]
-                            goff = [int(x) for x in m[1 + d : 1 + 2 * d]]
-                            buf = torch.full((_prodshape(lshape),), float("nan"), dtype=entry.dtype, device=dev)
-                            buf[gi.to(torch.int64)] = gv  # index ops need Long
-                            slices = tuple(slice(o, o + sz) for o, sz in zip(goff, lshape, strict=False))
-                            full[slices] = buf.view(lshape)
-                        for hf_name, hf_tensor in entry.spec.to_hf([full.reshape(-1)]):
-                            _consume_hf(hf_name, hf_tensor)
-                    else:
-                        shard_list = []
-                        for gi, gv in per_rank:
-                            buf = torch.full(entry.shard_shape, float("nan"), dtype=entry.dtype, device=dev)
-                            buf.view(-1)[gi.to(torch.int64)] = gv  # index ops need Long
-                            shard_list.append(buf)
-                        for hf_name, hf_tensor in entry.spec.to_hf(shard_list):
-                            _consume_hf(hf_name, hf_tensor)
-            nan_group = []
+        gq = _GatherQueue(batch_k, self.bucket_size, is_r0, _consume)
 
         for name, local, spec in weights:
             local = local.detach().contiguous().view(-1)
             place, contributes, pg = self._placement(name, spec)
-            snap = self._shard_snap.get(name)
-            if snap is None or snap.numel() != local.numel():
-                snap = torch.empty_like(local, device="cpu", pin_memory=True)
+            # The seed sync allocated every param's snapshot; a missing name or a
+            # numel drift means the rollout side was never seeded for this shard --
+            # diffing against a fresh (garbage) buffer would silently ship a bogus
+            # near-full delta, so fail loud instead.
+            snap = self._shard_snap[name]
+            assert snap.numel() == local.numel(), (
+                f"{name}: shard numel changed since seed ({snap.numel()} -> {local.numel()})"
+            )
             if contributes:
                 base = snap.to(local.device, non_blocking=True)
                 lidx, lval = shard_delta_indices(local, base, 0)  # shard-local coordinates
@@ -657,42 +772,25 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             snap.copy_(local, non_blocking=True)  # update snapshot to current shard
             self._shard_snap[name] = snap
 
-            if spec.to_hf is not None:
-                # converter profile: boundary-preserving gather within the spec's group,
-                # NaN-sentinel rebuild through the trainer's converter on rank 0.
-                if nan_group and nan_group[0].pg is not pg:
-                    _flush_nan_group()
-                # shard-local coordinates are bounded by the shard's numel, so the
-                # full-tensor <2^31 assert in _assemble_flush covers them too.
-                nan_group.append(
-                    _RebuildEntry(name, local.dtype, pg, spec, tuple(local.shape), lidx.to(torch.int32), lval, place)
+            if spec.to_hf_chunk is not None and isinstance(place, BlockPlacement) and spec.hf_slots is not None:
+                entry = self._convert_block_delta(name, spec, place, lidx, lval, local)
+            elif spec.to_hf_chunk is not None:
+                raise NotImplementedError(
+                    f"{name}: converter specs without an enumerable slot table (hf_slots) are "
+                    "not supported by the unified sender-side engine; rewrite the converter as a "
+                    "dim-0-separable to_hf_chunk + hf_slots (see #7060)"
                 )
-                if len(nan_group) >= max(batch_k, 1):
-                    _flush_nan_group()
-                continue
-
-            # placement profile: translate rank-locally, gather without boundaries.
-            # int32 halves the gather's position bytes; the wire is int32 anyway and
-            # the per-parameter <2^31 assert in _assemble_flush covers the range.
-            gidx = (translate_flat_indices(lidx, place) if lidx.numel() else lidx).to(torch.int32)
-            gval = lval
-            full_numel = _prodshape(spec.full_shape)
-            if group and group[-1].pg is not pg:
-                _flush_group()
-            group.append(
-                _GatherEntry(name, str(local.dtype).replace("torch.", ""), spec.full_shape, full_numel, gidx, gval, pg)
-            )
-            if len(group) >= max(batch_k, 1):
-                _flush_group()
-        _flush_group()
-        _flush_nan_group()
+            else:
+                entry = self._identity_delta(name, spec, place, lidx, lval, local)
+            gq.put(pg, *entry)
+        gq.flush_all()
 
         self._shard_seeded = True
         if not is_r0:
             return
-        _seal()  # seal the final partial bucket into `pending`
-        if pending is not None:
-            _emit(is_last=True)
+        bkt.seal()  # seal the final partial bucket into the pending flush
+        if bkt.pending is not None:
+            bkt.emit(is_last=True)
         else:
             self._publish_terminal(first)
         logger.info(
