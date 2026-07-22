@@ -27,6 +27,18 @@ decode chunk, independent of model size.
 
 The first sync broadcasts a full delta (every position) so a dummy-initialized
 rollout gets a correct base; subsequent syncs are sparse.
+
+Data ladder (sender side) -- the names in this file anchor to these stages::
+
+    param shard --diff--> local delta --_convert_to_hf / _convert_identity-->
+    queue ENTRY (slots, dtype, counts, idx, val) --_GatherQueue--> per-SLOT
+    delta on rank 0 --_bucket_*--> _FlushPiece/_ValuesPiece --_FlushBucket-->
+    FLUSH (DeltaFlush) --_publish_*--> wire
+
+Wire encodings: ``indexed`` (int32 positions + values; steady loop, and the
+seed's to-HF-converted params) vs ``values`` (values only, no positions; the
+seed's identity params). The wire meta tag for the latter is ``"dense"`` for
+protocol compatibility with the receiver's delta_loader.
 """
 
 from __future__ import annotations
@@ -78,8 +90,8 @@ class _FlushPiece:
 
 
 @dataclass(slots=True)
-class _DensePiece:
-    """One full dense parameter buffered for the seed sync's dense flush."""
+class _ValuesPiece:
+    """One whole parameter's flat values buffered for the seed sync's values-only flush."""
 
     name: str
     dtype_str: str
@@ -94,7 +106,7 @@ class _FlushBucket:
     ``is_last=False`` (the lookahead: only the caller's finale knows which flush
     is last and emits it with ``is_last=True``). ``assemble`` and ``publish``
     carry the only real differences between the streams -- the wire format
-    (sparse indices flush vs values-only dense flush) and the flush counters."""
+    (indexed flush vs values-only flush) and the flush counters."""
 
     __slots__ = ("cap", "pieces", "nbytes", "pending", "_assemble", "_publish")
 
@@ -125,7 +137,7 @@ class _FlushBucket:
             self.pending = None
 
 
-def _add_sliced(bkt: _FlushBucket, name: str, dtype_str: str, shape, aidx: torch.Tensor, aval: torch.Tensor) -> None:
+def _bucket_sliced(bkt: _FlushBucket, name: str, dtype_str: str, shape, aidx: torch.Tensor, aval: torch.Tensor) -> None:
     """Slice one param's (idx, val) delta into <= MAX_ENTRY_ELEMS pieces and bucket
     them (bounds the receiver-side decode transient; the masked apply is sequential,
     so splitting is transparent). Bucket bytes = actual wire bytes (int32 positions
@@ -231,7 +243,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
     MAX_ENTRY_ELEMS = 64 << 20
 
     # Bound on the rank-0 rebuild transient for dim-0-separable converter params
-    # (``spec.to_hf_chunk``): the NaN rebuild and the dense seed assemble/convert in
+    # (``spec.to_hf_chunk``): the NaN rebuild and the seed assemble/convert in
     # dim-0 segments of at most this many elements instead of materializing the full
     # logical tensor (a Kimi-K2.5-scale fused expert stack is ~21 GB in bf16).
     REBUILD_CHUNK_ELEMS = 64 << 20
@@ -283,8 +295,10 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         collective.broadcast(pos_cp, src_rank=0, group_name=self.group_name)
         collective.broadcast(val_cp, src_rank=0, group_name=self.group_name)
 
-    def _publish_dense_flush(self, params: list[DeltaParam], values: torch.Tensor, is_last: bool) -> None:
-        """Publish a dense (full-coverage, positions-free) flush -- used by the first sync."""
+    def _publish_values_flush(self, params: list[DeltaParam], values: torch.Tensor, is_last: bool) -> None:
+        """Publish a values-only (full-coverage, positions-free) flush -- used by the first
+        sync. The wire encoding tag stays ``"dense"`` -- it is protocol, shared with the
+        receiver's delta_loader decode."""
         values = values.contiguous()
         empty_pos = torch.empty(0, dtype=torch.uint8, device=values.device)
         meta = {
@@ -432,14 +446,14 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             encoding=self.encoding, params=params, positions_cpu=positions_u8, values_gpu=values_gpu, checksum=cks
         )
 
-    def _send_dense_seed(
+    def _send_seed(
         self,
         weights: Generator[tuple[str, torch.Tensor, ShardSpec], None, None],
         global_steps: int | None = None,
     ) -> dict[str, float] | None:
         """First sync: assemble and broadcast the raw weights, bucketed, positions-free.
 
-        Explicit dense semantics instead of the previous bitflip-forced full diff:
+        Explicit values-only semantics instead of the previous bitflip-forced full diff:
         no per-element indices on the wire (values only), no whole-parameter
         (idx, val) spike on rank 0 -- its peak is one assembled parameter plus a
         bucket -- and the snapshot is populated as the stream goes.
@@ -449,7 +463,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         total_elems = 0
         wire_bytes = 0
 
-        def _assemble_dense(pieces: list[_DensePiece]):
+        def _assemble_values(pieces: list[_ValuesPiece]):
             params = []
             val_off = 0
             for piece in pieces:
@@ -469,31 +483,31 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                 val_off += n
             return params, torch.cat([piece.flat for piece in pieces])
 
-        def _publish_dense(pending, is_last: bool) -> None:
+        def _publish_values(pending, is_last: bool) -> None:
             nonlocal n_flushes, wire_bytes
             params, values = pending
-            self._publish_dense_flush(params, values, is_last=is_last)
+            self._publish_values_flush(params, values, is_last=is_last)
             n_flushes += 1
             wire_bytes += int(values.nbytes)
 
-        def _publish_sparse(flush, is_last: bool) -> None:
+        def _publish_indexed(flush, is_last: bool) -> None:
             nonlocal n_flushes, wire_bytes
             self._publish_flush(flush, True, is_last=is_last)
             n_flushes += 1
             wire_bytes += int(flush.values_gpu.nbytes) + int(flush.positions_cpu.numel())
 
-        dense = _FlushBucket(self.bucket_size, _assemble_dense, _publish_dense)
+        values_bkt = _FlushBucket(self.bucket_size, _assemble_values, _publish_values)
         # Sparse (indices-encoded) seed flushes for sender-side-converted slot params:
         # positions ride the wire for these params (a one-off ~3x on their bytes) so
         # every rank ships its own column stripes and nobody assembles anything.
-        sparse = _FlushBucket(self.bucket_size, self._assemble_flush, _publish_sparse)
+        indexed_bkt = _FlushBucket(self.bucket_size, self._assemble_flush, _publish_indexed)
 
-        def _bucket_dense(hf_name: str, tensor: torch.Tensor) -> None:
+        def _bucket_values_param(hf_name: str, tensor: torch.Tensor) -> None:
             nonlocal total_elems
             flat = tensor.reshape(-1)
             total_elems += int(flat.numel())
-            dense.add(
-                _DensePiece(hf_name, str(flat.dtype).replace("torch.", ""), list(tensor.shape), flat), flat.nbytes
+            values_bkt.add(
+                _ValuesPiece(hf_name, str(flat.dtype).replace("torch.", ""), list(tensor.shape), flat), flat.nbytes
             )
 
         for name, local, spec in weights:
@@ -510,11 +524,11 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                 # the spec's placements map the shard straight into the full tensor
                 if pg is None:
                     if is_r0 and contributes:
-                        _bucket_dense(name, local.view(spec.full_shape))
+                        _bucket_values_param(name, local.view(spec.full_shape))
                 elif isinstance(place, BlockPlacement):
                     full = assemble_dense_param_on_rank0(shard, place, group=pg)
                     if is_r0 and full is not None:
-                        _bucket_dense(name, full.view(spec.full_shape))
+                        _bucket_values_param(name, full.view(spec.full_shape))
                 else:
                     raise NotImplementedError(
                         f"{name}: plain-int explicit placements are no longer supported by the "
@@ -522,7 +536,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                     )
             elif isinstance(place, BlockPlacement) and spec.hf_slots is not None:
                 # SENDER-SIDE seed: every rank converts its own rows (full
-                # coverage) segment by segment and ships slot-keyed sparse
+                # coverage) segment by segment and ships slot-keyed indexed_bkt
                 # entries -- no rank assembles or converts anyone else's data.
                 # Segments bound both the NaN window and the per-round gather
                 # blob (threshold scaled by group size).
@@ -552,7 +566,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                     val_pieces: list[torch.Tensor] = []
                     for r in range(r_lo, r_hi):
                         row_vals = lview[r - o0].reshape(-1)
-                        for s_i, pidx, pval in self._convert_row_slots(name, spec, r, iidx, row_vals, local):
+                        for s_i, pidx, pval in self._convert_row_to_hf(name, spec, r, iidx, row_vals, local):
                             counts[(r - row0) * slots_per_row + s_i] = pidx.numel()
                             idx_pieces.append(pidx)
                             val_pieces.append(pval)
@@ -569,7 +583,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                         for k_i, (aidx, aval) in enumerate(gathered):
                             sname, sshape = spec.hf_slots[row0 * slots_per_row + k_i]
                             if aidx is not None and aidx.numel():
-                                _add_sliced(sparse, sname, dtype_str, sshape, aidx, aval)
+                                _bucket_sliced(indexed_bkt, sname, dtype_str, sshape, aidx, aval)
             else:
                 raise NotImplementedError(
                     f"{name}: converter specs without an enumerable slot table (hf_slots) are "
@@ -580,17 +594,17 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         self._shard_seeded = True
         if not is_r0:
             return
-        dense.seal()
-        sparse.seal()
-        if sparse.pending is not None:
-            dense.emit(is_last=False)
-            sparse.emit(is_last=True)
-        elif dense.pending is not None:
-            dense.emit(is_last=True)
+        values_bkt.seal()
+        indexed_bkt.seal()
+        if indexed_bkt.pending is not None:
+            values_bkt.emit(is_last=False)
+            indexed_bkt.emit(is_last=True)
+        elif values_bkt.pending is not None:
+            values_bkt.emit(is_last=True)
         else:
             self._publish_terminal(True)
         logger.info(
-            "delta-sharded send v=%s DENSE-SEED flushes=%d elems=%d",
+            "delta-sharded send v=%s SEED flushes=%d elems=%d",
             global_steps,
             n_flushes,
             total_elems,
@@ -604,7 +618,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             "checkpoint_engine/flushes": float(n_flushes),
         }
 
-    def _convert_row_slots(
+    def _convert_row_to_hf(
         self,
         name: str,
         spec: ShardSpec,
@@ -638,7 +652,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                 res.append((s_i, p_.to(torch.int32), fl[p_]))
         return res
 
-    def _convert_block_delta(
+    def _convert_to_hf(
         self,
         name: str,
         spec: ShardSpec,
@@ -673,7 +687,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                 sel_g = g[pos : pos + cnt]
                 sel_v = gv[pos : pos + cnt]
                 pos += cnt
-                for s_i, pidx, pval in self._convert_row_slots(name, spec, r, sel_g - r * inner, sel_v, local):
+                for s_i, pidx, pval in self._convert_row_to_hf(name, spec, r, sel_g - r * inner, sel_v, local):
                     counts[int(r) * slots_per_row + s_i] = pidx.numel()
                     idx_pieces.append(pidx)
                     val_pieces.append(pval)
@@ -685,7 +699,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             my_val = torch.empty(0, dtype=local.dtype, device=local.device)
         return spec.hf_slots, str(local.dtype).replace("torch.", ""), counts, my_idx, my_val
 
-    def _identity_delta(
+    def _convert_identity(
         self,
         name: str,
         spec: ShardSpec,
@@ -694,7 +708,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         lval: torch.Tensor,
         local: torch.Tensor,
     ) -> tuple[list, str, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Identity profile (dense DTensor / explicit blocks / unsharded): the
+        """Identity profile (plain DTensor / explicit blocks / unsharded): the
         param IS its own single slot -- translate the shard-local delta to
         within-param coordinates and ride the same unified queue as converter
         params. int32 positions: the wire is int32 anyway and ``_assemble_flush``
@@ -716,9 +730,9 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         # whole model.
         assert self.rank <= 0, "Trainer workers other than rank 0 should not send weights."
         if not self._shard_seeded:
-            return self._send_dense_seed(weights, global_steps)
+            return self._send_seed(weights, global_steps)
         is_r0 = self.is_master
-        first = False  # the dense first sync is handled by _send_dense_seed
+        first = False  # the seed first sync is handled by _send_seed
         n_flushes = 0
         changed_elems = 0
         total_elems = 0
@@ -733,7 +747,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
 
         batch_k = self.batch_gather
 
-        def _consume(
+        def _bucket_slot_delta(
             name: str,
             dtype_str: str,
             full_shape: tuple,
@@ -747,9 +761,9 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                 return
             changed_elems += int(aidx.numel())
             wire_bytes += int(aidx.numel()) * (4 + aval.element_size())
-            _add_sliced(bkt, name, dtype_str, full_shape, aidx, aval)
+            _bucket_sliced(bkt, name, dtype_str, full_shape, aidx, aval)
 
-        gq = _GatherQueue(batch_k, self.bucket_size, is_r0, _consume)
+        gq = _GatherQueue(batch_k, self.bucket_size, is_r0, _bucket_slot_delta)
 
         for name, local, spec in weights:
             local = local.detach().contiguous().view(-1)
@@ -773,7 +787,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             self._shard_snap[name] = snap
 
             if spec.to_hf_chunk is not None and isinstance(place, BlockPlacement) and spec.hf_slots is not None:
-                entry = self._convert_block_delta(name, spec, place, lidx, lval, local)
+                entry = self._convert_to_hf(name, spec, place, lidx, lval, local)
             elif spec.to_hf_chunk is not None:
                 raise NotImplementedError(
                     f"{name}: converter specs without an enumerable slot table (hf_slots) are "
@@ -781,7 +795,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                     "dim-0-separable to_hf_chunk + hf_slots (see #7060)"
                 )
             else:
-                entry = self._identity_delta(name, spec, place, lidx, lval, local)
+                entry = self._convert_identity(name, spec, place, lidx, lval, local)
             gq.put(pg, *entry)
         gq.flush_all()
 
