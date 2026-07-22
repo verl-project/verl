@@ -88,8 +88,7 @@ def main():
     optimizer = get_megatron_optimizer(ddp_model, mcore_cfg)
     assert optimizer is not None
     inner_types = [
-        type(getattr(ch, "optimizer", ch)).__name__
-        for ch in getattr(optimizer, "chained_optimizers", [optimizer])
+        type(getattr(ch, "optimizer", ch)).__name__ for ch in getattr(optimizer, "chained_optimizers", [optimizer])
     ]
     print("[ok] get_megatron_optimizer -> inner optimizers:", inner_types)
     assert any("Muon" in t for t in inner_types), f"expected TensorParallelMuon, got {inner_types}"

@@ -8,8 +8,8 @@
 # It is deliberately parametrized by ${OPTIMIZER} so the exact same config can be run as a
 # Muon arm and an Adam(W) baseline arm for a fair loss comparison:
 #
-#   OPTIMIZER=muon  bash examples/sft/gsm8k/run_muon_megatron_sft.sh   # verl+Megatron Muon
-#   OPTIMIZER=adam  bash examples/sft/gsm8k/run_muon_megatron_sft.sh   # baseline (Megatron Adam == AdamW)
+#   OPTIMIZER=muon  bash examples/sft/gsm8k/run_muon_sft_megatron.sh   # verl+Megatron Muon
+#   OPTIMIZER=adam  bash examples/sft/gsm8k/run_muon_sft_megatron.sh   # baseline (Megatron Adam == AdamW)
 #
 # Everything else (model, data, batch size, lr schedule, steps) is identical between arms.
 # Loss is logged to console AND to a per-step JSONL file (trainer.logger includes "file"),
