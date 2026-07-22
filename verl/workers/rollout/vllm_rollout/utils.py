@@ -44,13 +44,13 @@ VLLM_LORA_PATH = "simon_lora_path"
 VLLM_ASCEND_REQUIRED_ENV_VARS = {"VLLM_ALL2ALL_BACKEND": "flashinfer_all2allv", "VLLM_ASCEND_ENABLE_NZ": "0"}
 
 
-def _refresh_ascend_moe_comm_state_after_l2_wake(model: torch.nn.Module) -> int:
+def _refresh_ascend_moe_comm_state_after_l2_wake() -> None:
     """Restore all2all ``expert_ids_per_ep_rank`` after vLLM L2 (discard) wake + IPC reload.
 
     L2 discards this persistent NPU tensor; IPC reload and buffer restore do not recreate it,
     so after wake it can hold garbage and route tokens to wrong local experts under EP>1.
+    Uses process-global ``_MoECommMethods`` (populated at MoE layer init), not the ``nn.Module``.
     """
-    actions = 0
     try:
         from vllm_ascend.ops.fused_moe.moe_comm_method import _MoECommMethods
 
@@ -63,19 +63,13 @@ def _refresh_ascend_moe_comm_state_after_l2_wake(model: torch.nn.Module) -> int:
             num_experts = getattr(dispatcher, "num_experts", 0)
             if ids is None or num_local <= 1 or num_experts <= 0:
                 continue
-            correct = torch.tensor(
-                [i % num_local for i in range(num_experts)],
-                dtype=ids.dtype,
-                device=ids.device,
-            )
+            correct = torch.arange(num_experts, dtype=ids.dtype, device=ids.device) % num_local
             if ids.shape == correct.shape:
                 ids.copy_(correct)
             else:
                 dispatcher.expert_ids_per_ep_rank = correct
-            actions += 1
     except Exception as exc:
         logger.warning("Failed to restore expert_ids_per_ep_rank after L2 wake: %s", exc)
-    return actions
 
 
 def _resolve_vllm_weight_sync_local_rank(worker_local_rank: int, parallel_config: Any) -> int:
@@ -523,7 +517,7 @@ class vLLMColocateWorkerExtension:
                 for model, model_config in self._iter_all_models_with_config():
                     process_weights_after_loading(model, model_config, self.device)
                 if VLLM_SLEEP_LEVEL == 2 and is_npu_available:
-                    _refresh_ascend_moe_comm_state_after_l2_wake(self.model_runner.model)
+                    _refresh_ascend_moe_comm_state_after_l2_wake()
 
 
     def _apply_buffer_updates_all_models(self, buffer_updates, main_named_buffers):
