@@ -44,34 +44,6 @@ VLLM_LORA_PATH = "simon_lora_path"
 VLLM_ASCEND_REQUIRED_ENV_VARS = {"VLLM_ALL2ALL_BACKEND": "flashinfer_all2allv", "VLLM_ASCEND_ENABLE_NZ": "0"}
 
 
-def _refresh_ascend_moe_comm_state_after_l2_wake() -> None:
-    """Restore all2all ``expert_ids_per_ep_rank`` after vLLM L2 (discard) wake + IPC reload.
-
-    L2 discards this persistent NPU tensor; IPC reload and buffer restore do not recreate it,
-    so after wake it can hold garbage and route tokens to wrong local experts under EP>1.
-    Uses process-global ``_MoECommMethods`` (populated at MoE layer init), not the ``nn.Module``.
-    """
-    try:
-        from vllm_ascend.ops.fused_moe.moe_comm_method import _MoECommMethods
-
-        for comm_method in list(_MoECommMethods.values()):
-            dispatcher = getattr(comm_method, "token_dispatcher", None)
-            if dispatcher is None:
-                continue
-            ids = getattr(dispatcher, "expert_ids_per_ep_rank", None)
-            num_local = getattr(dispatcher, "num_local_experts", 0)
-            num_experts = getattr(dispatcher, "num_experts", 0)
-            if ids is None or num_local <= 1 or num_experts <= 0:
-                continue
-            correct = torch.arange(num_experts, dtype=ids.dtype, device=ids.device) % num_local
-            if ids.shape == correct.shape:
-                ids.copy_(correct)
-            else:
-                dispatcher.expert_ids_per_ep_rank = correct
-    except Exception as exc:
-        logger.warning("Failed to restore expert_ids_per_ep_rank after L2 wake: %s", exc)
-
-
 def _resolve_vllm_weight_sync_local_rank(worker_local_rank: int, parallel_config: Any) -> int:
     worker_local_rank = int(worker_local_rank)
     if parallel_config is None:
@@ -517,6 +489,7 @@ class vLLMColocateWorkerExtension:
                 for model, model_config in self._iter_all_models_with_config():
                     process_weights_after_loading(model, model_config, self.device)
                 if VLLM_SLEEP_LEVEL == 2 and is_npu_available:
+                    from verl.utils.vllm.npu_vllm_patch import refresh_ascend_moe_comm_state_after_l2_wake
                     _refresh_ascend_moe_comm_state_after_l2_wake()
 
     def _apply_buffer_updates_all_models(self, buffer_updates, main_named_buffers):
