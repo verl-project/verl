@@ -88,14 +88,14 @@ def test_spec_to_hf_pure_permutation():
     assert pos.tolist() == [8 + 3] and fl[pos[0]] == 42.0
 
 
-def test_gather_v_batched_sub_rounds_world1():
+def test_gather_slot_entries_sub_rounds_world1():
     """max_round_bytes splits the slot list into deterministic sub-rounds; the
     reassembled output must equal the single-round result (world=1 mechanics)."""
     import os
 
     import torch.distributed as dist
 
-    from verl.checkpoint_engine.delta_sync.sparse_gather import gather_v_batched_to_rank0
+    from verl.checkpoint_engine.delta_sync.sparse_gather import gather_slot_entries_to_rank0
 
     if not dist.is_initialized():
         os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
@@ -109,10 +109,10 @@ def test_gather_v_batched_sub_rounds_world1():
     idx = torch.randint(0, 1000, (n,), dtype=torch.int32)
     val = torch.randn(n, dtype=torch.bfloat16)
 
-    ref = gather_v_batched_to_rank0(idx, val, counts)
+    ref = gather_slot_entries_to_rank0(idx, val, counts)
     per_elem = idx.element_size() + val.element_size()
     for budget_elems in (1, 4, 8):
-        got = gather_v_batched_to_rank0(idx, val, counts, max_round_bytes=budget_elems * per_elem)
+        got = gather_slot_entries_to_rank0(idx, val, counts, max_round_bytes=budget_elems * per_elem)
         assert len(got) == k
         for (ri, rv), (gi, gv) in zip(ref, got, strict=True):
             assert torch.equal(ri, gi)

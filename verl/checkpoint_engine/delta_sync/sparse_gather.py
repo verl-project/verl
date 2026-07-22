@@ -59,7 +59,7 @@ def shard_delta_indices(
     return global_idx, values
 
 
-def gather_v_batched_to_rank0(
+def gather_slot_entries_to_rank0(
     idx_concat: torch.Tensor,
     val_concat: torch.Tensor,
     counts: torch.Tensor,
@@ -106,7 +106,7 @@ def gather_v_batched_to_rank0(
                 my_off.append(my_off[-1] + counts_cpu[rank][i])
             for lo, hi in zip(cuts[:-1], cuts[1:], strict=False):
                 sub_counts = torch.tensor(counts_cpu[rank][lo:hi], dtype=torch.int64, device=dev)
-                sub = gather_v_batched_to_rank0(
+                sub = gather_slot_entries_to_rank0(
                     idx_concat[my_off[lo] : my_off[hi]],
                     val_concat[my_off[lo] : my_off[hi]],
                     sub_counts,
@@ -156,7 +156,7 @@ def gather_v_batched_to_rank0(
     return out
 
 
-def gather_dense_blocks_to_rank0(
+def assemble_dense_param_on_rank0(
     local_val: torch.Tensor,
     place: BlockPlacement,
     group: dist.ProcessGroup | None = None,

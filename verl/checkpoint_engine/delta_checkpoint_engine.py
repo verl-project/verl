@@ -50,8 +50,8 @@ from .base import CheckpointEngineRegistry
 from .delta_sync.encode import DeltaFlush, DeltaParam
 from .delta_sync.encode import checksum as _checksum
 from .delta_sync.sparse_gather import (
-    gather_dense_blocks_to_rank0,
-    gather_v_batched_to_rank0,
+    assemble_dense_param_on_rank0,
+    gather_slot_entries_to_rank0,
     shard_delta_indices,
 )
 from .nccl_checkpoint_engine import MasterMetadata, NCCLCheckpointEngine
@@ -429,7 +429,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                     if is_r0 and contributes:
                         _bucket_dense(name, local.view(spec.full_shape))
                 elif isinstance(place, BlockPlacement):
-                    full = gather_dense_blocks_to_rank0(shard, place, group=pg)
+                    full = assemble_dense_param_on_rank0(shard, place, group=pg)
                     if is_r0 and full is not None:
                         _bucket_dense(name, full.view(spec.full_shape))
                 else:
@@ -490,7 +490,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                             if val_pieces
                             else torch.empty(0, dtype=local.dtype, device=local.device)
                         )
-                        gathered = gather_v_batched_to_rank0(
+                        gathered = gather_slot_entries_to_rank0(
                             my_idx, my_val, counts.to(local.device), group=pg, max_round_bytes=self.bucket_size
                         )
                         if is_r0 and gathered is not None:
@@ -630,7 +630,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             counts_concat = torch.cat([c for _, _, c, _, _ in entries]).to(dev)
             idx_concat = torch.cat([i for _, _, _, i, _ in entries])
             val_concat = torch.cat([v for _, _, _, _, v in entries])
-            gathered = gather_v_batched_to_rank0(
+            gathered = gather_slot_entries_to_rank0(
                 idx_concat, val_concat, counts_concat, group=pg, max_round_bytes=self.bucket_size
             )
             if is_r0 and gathered is not None:
