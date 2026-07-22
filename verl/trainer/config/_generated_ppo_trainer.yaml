@@ -36,7 +36,6 @@ actor_rollout_ref:
       forward_prefetch: false
       model_dtype: fp32
       use_orig_params: false
-      use_no_sync_for_gradient_accumulation: false
       seed: 42
       full_determinism: false
       ulysses_sequence_parallel_size: 1
@@ -226,7 +225,6 @@ actor_rollout_ref:
       forward_prefetch: false
       model_dtype: fp32
       use_orig_params: false
-      use_no_sync_for_gradient_accumulation: false
       seed: 42
       full_determinism: false
       ulysses_sequence_parallel_size: 1
@@ -526,7 +524,6 @@ critic:
     forward_prefetch: false
     model_dtype: fp32
     use_orig_params: false
-    use_no_sync_for_gradient_accumulation: false
     seed: 42
     full_determinism: false
     ulysses_sequence_parallel_size: 1

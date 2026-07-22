@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from contextlib import contextmanager
-from types import SimpleNamespace
+from contextlib import contextmanager, nullcontext
 
 import pytest
 import torch
@@ -49,10 +48,9 @@ class _FSDP2Module:
         self.events.append(enabled)
 
 
-def _make_engine(module, *, enabled=True):
+def _make_engine(module):
     engine = object.__new__(FSDPEngine)
     engine.module = module
-    engine.engine_config = SimpleNamespace(use_no_sync_for_gradient_accumulation=enabled)
     return engine
 
 
@@ -81,25 +79,12 @@ def test_gradient_sync_context_restores_fsdp2_after_error(monkeypatch):
     assert module.events == [False, True]
 
 
-@pytest.mark.parametrize("enabled,is_last", [(False, False), (True, True)])
-def test_gradient_sync_context_keeps_sync_for_default_or_final_micro_batch(monkeypatch, enabled, is_last):
-    module = _FSDP2Module()
-    engine = _make_engine(module, enabled=enabled)
-    monkeypatch.setattr(transformer_impl, "fsdp_version", lambda _: 2)
-
-    with engine._gradient_sync_context(is_last_micro_batch=is_last):
-        module.events.append("backward")
-
-    assert module.events == ["backward"]
-
-
-def test_gradient_sync_context_defaults_to_sync_for_other_engine_configs(monkeypatch):
+def test_gradient_sync_context_keeps_sync_for_final_micro_batch(monkeypatch):
     module = _FSDP2Module()
     engine = _make_engine(module)
-    engine.engine_config = SimpleNamespace()
     monkeypatch.setattr(transformer_impl, "fsdp_version", lambda _: 2)
 
-    with engine._gradient_sync_context(is_last_micro_batch=False):
+    with engine._gradient_sync_context(is_last_micro_batch=True):
         module.events.append("backward")
 
     assert module.events == ["backward"]
@@ -168,10 +153,15 @@ def _build_distributed_model(strategy, mesh):
 def _run_distributed_step(model, inputs, targets, strategy, defer_sync):
     optimizer = torch.optim.SGD(model.parameters(), lr=0.05)
     optimizer.zero_grad(set_to_none=True)
-    engine = _make_engine(model, enabled=defer_sync)
+    engine = _make_engine(model)
     for micro_batch_idx, (inputs_micro_batch, targets_micro_batch) in enumerate(zip(inputs, targets, strict=True)):
-        is_last_micro_batch = micro_batch_idx == len(inputs) - 1
-        with engine._gradient_sync_context(is_last_micro_batch=is_last_micro_batch):
+        if defer_sync:
+            is_last_micro_batch = micro_batch_idx == len(inputs) - 1
+            sync_ctx = engine._gradient_sync_context(is_last_micro_batch=is_last_micro_batch)
+        else:
+            # Baseline: synchronize gradients on every micro-batch (pre-optimization behavior).
+            sync_ctx = nullcontext()
+        with sync_ctx:
             output = model(inputs_micro_batch)
             torch.nn.functional.mse_loss(output, targets_micro_batch, reduction="sum").backward()
     optimizer.step()

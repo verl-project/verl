@@ -196,22 +196,24 @@ During the training phase, users can enable forward prefetching in FSDP by setti
 Reduce FSDP gradient synchronization during gradient accumulation
 ------------------------------------------------------------------
 
-By default, every training micro-batch synchronizes gradients. When a PPO mini-batch is
-split into multiple micro-batches, enable
-``actor_rollout_ref.actor.fsdp_config.use_no_sync_for_gradient_accumulation=True`` to
-synchronize only the final micro-batch before the optimizer step. The same option is
-available under ``critic.fsdp``.
+When a PPO mini-batch is split into multiple micro-batches, the optimizer only
+steps after the final micro-batch, so gradients only need to be synchronized
+once per mini-batch. The FSDP engine automatically defers gradient
+synchronization on the non-final micro-batches and synchronizes only before the
+final backward. This applies to both the actor and the critic, and requires no
+configuration.
 
-With :math:`M` micro-batches per mini-batch, this reduces gradient synchronization from
-:math:`M` rounds to one round. It does not remove parameter all-gathers. The option applies
-to both FSDP1 (using ``no_sync``) and FSDP2 (using
-``set_requires_gradient_sync``).
+With :math:`M` micro-batches per mini-batch, this reduces gradient
+synchronization from :math:`M` rounds to one round. It does not remove parameter
+all-gathers. The optimization is implemented for both FSDP1 (using ``no_sync``)
+and FSDP2 (using ``set_requires_gradient_sync``), and the optimizer update is
+numerically identical to synchronizing every micro-batch.
 
-.. warning::
-    Delaying synchronization retains unsharded gradients until the final micro-batch and
-    therefore increases peak device memory. The option is disabled by default. Enable it
-    only when gradient accumulation uses more than one micro-batch, communication is a
-    measured bottleneck, and sufficient memory headroom is available.
+.. note::
+    Deferring synchronization retains unsharded gradients until the final
+    micro-batch, which slightly increases peak device memory during gradient
+    accumulation. Forward-only passes are unaffected and always keep the default
+    behavior.
 
 Migrating to FSDP2
 ----------------------

@@ -642,9 +642,16 @@ class FSDPEngine(BaseEngine):
 
     @contextmanager
     def _gradient_sync_context(self, *, is_last_micro_batch: bool):
-        """Skip FSDP gradient communication on non-final accumulation steps."""
-        use_no_sync = getattr(self.engine_config, "use_no_sync_for_gradient_accumulation", False)
-        if not use_no_sync or is_last_micro_batch:
+        """Skip FSDP gradient communication on non-final accumulation steps.
+
+        During gradient accumulation the optimizer only steps after the final
+        micro-batch, so gradients only need to be synchronized once per
+        mini-batch. Deferring synchronization on the non-final micro-batches
+        reduces FSDP gradient collectives from one reduce-scatter per
+        micro-batch to a single round, at the cost of temporarily retaining
+        unsharded gradients until the final backward.
+        """
+        if is_last_micro_batch:
             yield
             return
 
