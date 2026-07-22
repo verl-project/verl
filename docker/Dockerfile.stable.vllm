@@ -148,7 +148,11 @@ RUN pip install --no-deps git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
 
 RUN pip install --no-deps TransferQueue==${TRANSFER_QUEUE_VERSION}
 
-RUN pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@${MCORE_VERSION}
+RUN git clone https://github.com/NVIDIA/Megatron-LM.git /workspace/Megatron-LM && cd /workspace/Megatron-LM && \
+    git checkout ${MCORE_VERSION} && \
+    pip install --no-deps .
+
+ENV PYTHONPATH="/workspace/Megatron-LM:${PYTHONPATH}"
 
 RUN pip install torchcodec --index-url=https://download.pytorch.org/whl/cu130
 
