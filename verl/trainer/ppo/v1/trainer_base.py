@@ -667,6 +667,7 @@ class PPOTrainer(ABC):
         # in exactly those modes; ordinary sync training can keep gen_batch_size=train_batch_size.
         filter_groups = self.config.algorithm.get("filter_groups", None)
         dapo_enabled = bool(filter_groups is not None and filter_groups.get("enable", False))
+        self.dapo_enabled = dapo_enabled
         requires_exact_refill = self.trainer_mode != "sync" or dapo_enabled
         if requires_exact_refill:
             user_gen_batch_size = self.config.data.get("gen_batch_size", None)

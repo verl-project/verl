@@ -108,8 +108,8 @@ class ReplayBuffer:
     In sync mode, DAPO is opt-in and trades generation time for training stability. Each ``k`` evictions add
     ``2k`` logical refill credits, but prompts are fetched only as bounded pending/running slots become available.
     Terminal groups are filtered while other requests remain in flight. Once enough groups are sampleable, unsent
-    credits are discarded and already-dispatched requests are drained before returning the batch. Failure groups
-    retain the standard sync behavior and remain sampleable.
+    credits are discarded and the batch is selected immediately. Failure groups retain the standard sync behavior
+    and remain sampleable.
     In async mode, ``num_warmup_batches`` absorbs retry cost, so all three paths refill exactly ``k`` prompts.
 
     Args:
@@ -172,6 +172,8 @@ class ReplayBuffer:
         self.prompt_global_steps: dict[str, dict[str, int]] = defaultdict(dict)
         # Finished groups are immutable, so their DAPO classification can be reused across polling iterations.
         self._dapo_classification_cache: dict[str, dict[str, float | None]] = defaultdict(dict)
+        # Sync-DAPO surplus stays excluded until its producer reaches a terminal state.
+        self._discarded_uids: dict[str, set] = defaultdict(set)
 
     def _validate_mode_config(self) -> None:
         if self.filter_groups_metric is not None:
@@ -219,11 +221,33 @@ class ReplayBuffer:
         return "training" if partition_id == "train" else "validation"
 
     def _clear_groups(self, partition_id: str, uids: set[str]) -> None:
-        """Remove the given prompt groups (prompt keys + their trajectory keys) from TransferQueue."""
+        """Remove prompt groups from TransferQueue and the active metadata snapshot."""
+        if not uids:
+            return
+
+        trajectory_keys = {key for key in self.partitions[partition_id] if key.split("_")[0] in uids}
         tq.kv_clear(
             partition_id=partition_id,
-            keys=list(uids) + [key for key in self.partitions[partition_id] if key.split("_")[0] in uids],
+            keys=[*uids, *trajectory_keys],
         )
+
+        # Keep same-poll decisions consistent with tq.
+        for key in trajectory_keys:
+            del self.partitions[partition_id][key]
+        for status_keys in (self.pending_keys, self.running_keys, self.finished_keys, self.failure_keys):
+            status_keys[partition_id].difference_update(uids)
+        for uid in uids:
+            self.prompt_global_steps[partition_id].pop(uid, None)
+            self._dapo_classification_cache[partition_id].pop(uid, None)
+        self._discarded_uids[partition_id].difference_update(uids)
+
+    def _reap_discarded(self, partition_id: str) -> int:
+        """Clear discarded groups after their producers can no longer write them."""
+        discarded = self._discarded_uids[partition_id]
+        terminal = discarded & (self.finished_keys[partition_id] | self.failure_keys[partition_id])
+        if terminal:
+            self._clear_groups(partition_id, terminal)
+        return len(terminal)
 
     def _dapo_filtered_keys(self, partition_id: str) -> tuple[set[str], Counter]:
         """Finished groups whose configured DAPO metric is identical across all trajectories.
@@ -299,7 +323,8 @@ class ReplayBuffer:
     ) -> set[str]:
         terminal_uids = self.finished_keys[partition_id] | self.failure_keys[partition_id]
         stale_uids, dapo_uids, failed_uids, _dapo_counts = eviction_reasons
-        return terminal_uids - (stale_uids | dapo_uids | failed_uids)
+        # Finished stragglers remain excluded until reaped.
+        return terminal_uids - (stale_uids | dapo_uids | failed_uids | self._discarded_uids[partition_id])
 
     def _evict_terminal_groups(
         self,
@@ -408,6 +433,9 @@ class ReplayBuffer:
         while True:
             # Eviction, gating, and selection below must all use this snapshot.
             self._sync_metadata_from_transfer_queue()
+            # For dapo, clean up discarded groups
+            if dapo_enabled:
+                self._reap_discarded(partition_id)
 
             eviction_reasons = self._terminal_eviction_reasons(global_steps, partition_id)
             evicted_uids, stale_count, dapo_count, metrics = self._evict_terminal_groups(
@@ -418,17 +446,16 @@ class ReplayBuffer:
 
             sampleable_keys = self._sampleable_terminal_keys(partition_id, eviction_reasons)
             has_enough_samples = len(sampleable_keys) >= batch_size
-            inflight_count = len(self.pending_keys[partition_id]) + len(self.running_keys[partition_id])
 
             if dapo_enabled:
                 if has_enough_samples:
-                    # Stop speculative dispatch, then drain requests already running under this policy version.
                     draining = True
                     refill_credit = 0
                 elif not draining and dapo_count > 0:
                     refill_credit += 2 * dapo_count
 
                 if not draining and refill_credit > 0:
+                    inflight_count = len(self.pending_keys[partition_id]) + len(self.running_keys[partition_id])
                     available_slots = max(0, max_inflight_prompts - inflight_count)
                     dispatch_count = min(refill_credit, available_slots)
                     assert self.gen_batch_size is not None
@@ -439,19 +466,23 @@ class ReplayBuffer:
                         refill_credit -= dispatch_count
                         continue
 
-            can_select = has_enough_samples and (not dapo_enabled or inflight_count == 0)
-            if can_select:
+            # Sync DAPO discards surplus, so a full batch need not wait for stragglers.
+            if has_enough_samples:
                 selected_prompt_uids, partition_snapshot, _prompt_global_steps_snapshot = self._select_prompt_uids(
                     partition_id, sampleable_keys, batch_size
                 )
 
-                # Sync remains bufferless: all speculative requests are drained, then surplus is discarded.
                 if dapo_enabled:
-                    surplus_uids = sampleable_keys - set(selected_prompt_uids)
-                    if surplus_uids:
-                        self._clear_groups(partition_id, surplus_uids)
+                    selected = set(selected_prompt_uids)
+                    # Defer cleanup until producers stop writing trajectory keys.
+                    inflight_uids = (self.pending_keys[partition_id] | self.running_keys[partition_id]) - selected
+                    finished_surplus_uids = sampleable_keys - selected
+                    discarded_uids = inflight_uids | finished_surplus_uids
+                    if discarded_uids:
+                        self._discarded_uids[partition_id] |= discarded_uids
+                        self._reap_discarded(partition_id)
                         key = f"{self._metrics_prefix(partition_id)}/filter_groups/discarded_surplus_samples"
-                        eviction_metrics[key] = eviction_metrics.get(key, 0) + len(surplus_uids)
+                        eviction_metrics[key] = eviction_metrics.get(key, 0) + len(discarded_uids)
                 break
 
             last_debug_time = self._wait_for_next_poll(partition_id, last_debug_time)

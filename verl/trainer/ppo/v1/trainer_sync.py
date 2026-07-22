@@ -36,7 +36,12 @@ class PPOTrainerSync(PPOTrainer):
         with marked_timer("update_weights", self.timing_raw, color="red"):
             # wake up all replicas to update weights
             self.checkpoint_manager.update_weights(self.global_steps)
+            if self.dapo_enabled:
+                self.checkpoint_manager.resume_generation_replicas()
 
     def on_sample_end(self):
+        if self.dapo_enabled:
+            # Sync DAPO discards surplus instead of draining it.
+            self.checkpoint_manager.abort_replicas()
         # sleep all replicas to discard weights and kv cache
         self.checkpoint_manager.sleep_replicas()
