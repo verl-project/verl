@@ -125,6 +125,7 @@ jobs:
           pip3 install -r requirements-test.txt
           pip3 install -r requirements.txt
           pip3 install --no-deps -e .
+          pip install --no-deps transformers==5.5.3
           pip3 install "nvidia-modelopt>=0.37.0"
           pip3 install math-verify
       - name: Check final pip list
@@ -149,7 +150,6 @@ jobs:
         run: |
           rm -rf checkpoints
           pip3 install "nvidia-modelopt>=0.37.0"
-          pip3 install transformers==5.5.3
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron, use Megatron-Bridge LoRA e2e to pre-load and save (Deepseek)
         run: |
           ray stop --force
@@ -182,7 +182,7 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
-          pip3 install --no-deps TransferQueue==0.1.8
+          pip install --no-deps transformers==5.5.3
           pip3 install "nvidia-modelopt>=0.37.0"
           pip3 install math-verify
       - name: Check final pip list
