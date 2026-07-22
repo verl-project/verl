@@ -551,17 +551,11 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                     idx_pieces: list[torch.Tensor] = []
                     val_pieces: list[torch.Tensor] = []
                     for r in range(r_lo, r_hi):
-                        buf = torch.full((inner,), float("nan"), dtype=local.dtype, device=local.device)
-                        buf[iidx] = lview[r - o0].reshape(-1)
-                        outs = spec.to_hf_chunk(r, buf.view(1, *full_shape[1:]))
-                        for s_i, (_hf_name, hf_tensor) in enumerate(outs):
-                            fl = hf_tensor.reshape(-1)
-                            pnz = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
-                            if pnz.numel():
-                                counts[(r - row0) * slots_per_row + s_i] = pnz.numel()
-                                idx_pieces.append(pnz.to(torch.int32))
-                                val_pieces.append(fl[pnz])
-                        del buf
+                        row_vals = lview[r - o0].reshape(-1)
+                        for s_i, pidx, pval in self._convert_row_slots(name, spec, r, iidx, row_vals, local):
+                            counts[(r - row0) * slots_per_row + s_i] = pidx.numel()
+                            idx_pieces.append(pidx)
+                            val_pieces.append(pval)
                     my_idx = (
                         torch.cat(idx_pieces) if idx_pieces else torch.empty(0, dtype=torch.int32, device=local.device)
                     )
@@ -610,6 +604,40 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             "checkpoint_engine/flushes": float(n_flushes),
         }
 
+    def _convert_row_slots(
+        self,
+        name: str,
+        spec: ShardSpec,
+        r: int,
+        pos_in_row: torch.Tensor,
+        vals: torch.Tensor,
+        ref: torch.Tensor,
+    ) -> list[tuple[int, torch.Tensor, torch.Tensor]]:
+        """NaN-probe one dim-0 row through the spec's converter: scatter the row's
+        (within-row position, value) pairs into a NaN-filled row buffer, run
+        ``to_hf_chunk`` on it, and extract each output slot's surviving positions
+        and values (the converter is a pure permutation, so non-NaN survivors are
+        exactly the input pairs in final HF coordinates). Shared by the steady
+        loop (touched subset of a row) and the seed (every owned element of a
+        row). Returns ``[(slot_offset_in_row, idx_int32, val), ...]``, skipping
+        empty slots. ``ref`` supplies dtype/device."""
+        full_shape = spec.full_shape
+        inner = max(_prodshape(full_shape[1:]), 1)
+        slots_per_row = len(spec.hf_slots) // int(full_shape[0])
+        buf = torch.full((inner,), float("nan"), dtype=ref.dtype, device=ref.device)
+        buf[pos_in_row] = vals
+        outs = spec.to_hf_chunk(int(r), buf.view(1, *full_shape[1:]))
+        assert len(outs) == slots_per_row, (
+            f"{name}: to_hf_chunk gave {len(outs)} outputs/row, slot table expects {slots_per_row}"
+        )
+        res = []
+        for s_i, (_hf_name, hf_tensor) in enumerate(outs):
+            fl = hf_tensor.reshape(-1)
+            p_ = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
+            if p_.numel():
+                res.append((s_i, p_.to(torch.int32), fl[p_]))
+        return res
+
     def _convert_block_delta(
         self,
         name: str,
@@ -645,20 +673,10 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                 sel_g = g[pos : pos + cnt]
                 sel_v = gv[pos : pos + cnt]
                 pos += cnt
-                buf = torch.full((inner,), float("nan"), dtype=local.dtype, device=local.device)
-                buf[sel_g - r * inner] = sel_v
-                outs = spec.to_hf_chunk(int(r), buf.view(1, *full_shape[1:]))
-                assert len(outs) == slots_per_row, (
-                    f"{name}: to_hf_chunk gave {len(outs)} outputs/row, slot table expects {slots_per_row}"
-                )
-                for s_i, (_hf_name, hf_tensor) in enumerate(outs):
-                    fl = hf_tensor.reshape(-1)
-                    p_ = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
-                    if p_.numel():
-                        counts[int(r) * slots_per_row + s_i] = p_.numel()
-                        idx_pieces.append(p_.to(torch.int32))
-                        val_pieces.append(fl[p_])
-                del buf
+                for s_i, pidx, pval in self._convert_row_slots(name, spec, r, sel_g - r * inner, sel_v, local):
+                    counts[int(r) * slots_per_row + s_i] = pidx.numel()
+                    idx_pieces.append(pidx)
+                    val_pieces.append(pval)
         if idx_pieces:
             my_idx = torch.cat(idx_pieces)
             my_val = torch.cat(val_pieces)
