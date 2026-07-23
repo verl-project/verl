@@ -1218,11 +1218,11 @@ class AgentLoopManager:
         if "priority" not in prompts.non_tensor_batch:
             prompts.non_tensor_batch["priority"] = np.arange(len(prompts), dtype=np.int64)
 
-        chunkes = prompts.chunk(len(self.agent_loop_workers))
+        chunks = prompts.chunk(len(self.agent_loop_workers))
         outputs = await asyncio.gather(
             *[
                 worker.generate_sequences.remote(chunk)
-                for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
+                for worker, chunk in zip(self.agent_loop_workers, chunks, strict=True)
             ]
         )
         output = DataProto.concat(outputs)
