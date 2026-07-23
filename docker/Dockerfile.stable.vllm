@@ -15,7 +15,7 @@ ARG TRL_VERSION=0.27.0
 ARG TRANSFORMER_ENGINE_VERSION=v2.15
 ARG FLASH_ATTENTION_VERSION=2.8.3
 ARG NSIGHT_VERSION=2025.6.1
-ARG MEGATRON_BRIDGE_VERSION_OR_BRANCH=e2cfe7e
+ARG MEGATRON_BRIDGE_VERSION_OR_BRANCH=r0.5.0
 ARG MCORE_VERSION=core_v0.18.0
 ARG TRANSFER_QUEUE_VERSION=0.1.8
 ARG VERL_VERSION=v0.7.1
@@ -144,11 +144,9 @@ RUN pip install transformers==${TRANSFORMERS_VERSION}
 
 RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git@main
 
-RUN git clone https://github.com/NVIDIA-NeMo/Megatron-Bridge.git /workspace/Megatron-Bridge && \
-    cd /workspace/Megatron-Bridge && git checkout ${MEGATRON_BRIDGE_VERSION_OR_BRANCH} && \
-    git submodule update --init && \
-    pip install --no-deps . && \
-    cd 3rdparty/Megatron-LM && pip install --no-deps .
+RUN pip install --no-deps --no-build-isolation git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@${MEGATRON_BRIDGE_VERSION_OR_BRANCH}
+
+RUN pip install --no-deps --no-build-isolation git+https://github.com/NVIDIA/Megatron-LM.git@${MCORE_VERSION}
 
 ENV PYTHONPATH="/workspace/Megatron-Bridge/3rdparty/Megatron-LM:${PYTHONPATH}"
 
