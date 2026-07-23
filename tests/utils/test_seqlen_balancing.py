@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -20,6 +21,7 @@ from verl import DataProto
 from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 from verl.utils.model import create_random_mask
 from verl.utils.seqlen_balancing import (
+    balanced_chunk_range,
     ceildiv,
     get_reverse_idx,
     prepare_dynamic_batch,
@@ -276,3 +278,67 @@ def test_group_balanced_partitions_equal_size():
         for uid in uids_in_partition:
             uid_indices = [i for i, u in enumerate(uid_list) if u == uid]
             assert all(i in partition for i in uid_indices)
+
+
+def test_balanced_chunk_range():
+    # reporter's case: 9 items, 4 chunks -> sizes [3, 2, 2, 2], no empty chunk (issue #6786)
+    assert [balanced_chunk_range(9, 4, i) for i in range(4)] == [(0, 3), (3, 5), (5, 7), (7, 9)]
+
+    # divisible case unchanged vs the old ceil sizing: 8 items, 4 chunks -> [2, 2, 2, 2]
+    assert [balanced_chunk_range(8, 4, i) for i in range(4)] == [(0, 2), (2, 4), (4, 6), (6, 8)]
+
+    # remainder > 1: 10 items, 4 chunks -> [3, 3, 2, 2] (the first `rem` chunks get the extra item)
+    assert [balanced_chunk_range(10, 4, i) for i in range(4)] == [(0, 3), (3, 6), (6, 8), (8, 10)]
+
+    # boundary sizes: a single chunk gets everything; num_items == num_chunks -> every chunk size 1
+    assert balanced_chunk_range(9, 1, 0) == (0, 9)
+    assert [balanced_chunk_range(4, 4, i) for i in range(4)] == [(0, 1), (1, 2), (2, 3), (3, 4)]
+
+    # fewer items than chunks: graceful, only the unavoidable trailing chunks are empty
+    assert [balanced_chunk_range(2, 4, i) for i in range(4)] == [(0, 1), (1, 2), (2, 2), (2, 2)]
+
+    # empty input: no crash, every range empty
+    assert [balanced_chunk_range(0, 3, i) for i in range(3)] == [(0, 0), (0, 0), (0, 0)]
+
+    # invariants across many shapes: exact contiguous tiling, balanced sizes, no starved rank
+    for num_items in range(0, 33):
+        for num_chunks in range(1, 9):
+            ranges = [balanced_chunk_range(num_items, num_chunks, i) for i in range(num_chunks)]
+            covered = [i for start, end in ranges for i in range(start, end)]
+            assert covered == list(range(num_items))  # ordered, full coverage, no gaps or overlap
+            sizes = [end - start for start, end in ranges]
+            assert max(sizes) - min(sizes) <= 1  # balanced to within one item
+            if num_items >= num_chunks:
+                assert min(sizes) >= 1  # no rank starved (the bug in #6786)
+
+    # invalid arguments: bad num_chunks (<= 0) or out-of-range chunk_idx
+    for num_items, num_chunks, chunk_idx in [(9, 0, 0), (9, -1, 0), (9, 4, 4), (9, 4, -1)]:
+        with pytest.raises(ValueError):
+            balanced_chunk_range(num_items, num_chunks, chunk_idx)
+
+
+def test_dynamic_cp_split_distribution():
+    """Acceptance test for #6786 at the distribution level.
+
+    Mirrors how ``dynamic_cp_split_batch`` assigns sequences to ranks: each ``local_dp_rank`` takes
+    ``balanced_chunk_range(num_seqs, local_dp_size, local_dp_rank)``. (The function itself imports
+    ``megatron.core`` and runs per-rank on GPU, so the slicing logic is exercised here on CPU.)
+    """
+
+    def split_indices(num_seqs, local_dp_size):
+        return [list(range(*balanced_chunk_range(num_seqs, local_dp_size, r))) for r in range(local_dp_size)]
+
+    # reporter's scenario: 9 sequences over 4 ranks. Old ceil sizing left rank 3 empty ([3,3,3,0]);
+    # now every rank gets data.
+    per_rank = split_indices(9, 4)
+    assert per_rank == [[0, 1, 2], [3, 4], [5, 6], [7, 8]]
+    assert all(len(idx) > 0 for idx in per_rank)  # no starved rank
+
+    # for every reachable shape (num_seqs >= local_dp_size, since dynamic_cp_split_batch early-returns
+    # when num_seqs < dp_size), the ranks partition the sequences in order with no rank left empty.
+    # In-order, no-overlap partition is what lets dynamic_cp_merge_output concatenate by rank correctly.
+    for num_seqs in range(1, 33):
+        for local_dp_size in range(1, num_seqs + 1):
+            per_rank = split_indices(num_seqs, local_dp_size)
+            assert [i for idx in per_rank for i in idx] == list(range(num_seqs))
+            assert all(len(idx) > 0 for idx in per_rank)
