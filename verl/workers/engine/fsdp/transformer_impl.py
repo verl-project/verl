@@ -473,7 +473,8 @@ class FSDPEngine(BaseEngine):
     def _build_optimizer(self, module):
         from verl.workers.config.optimizer import build_optimizer
 
-        optimizer = build_optimizer(module.parameters(), self.optimizer_config)
+        trainable_params = [p for p in module.parameters() if p.requires_grad]
+        optimizer = build_optimizer(trainable_params, self.optimizer_config)
 
         return optimizer
 
@@ -574,6 +575,14 @@ class FSDPEngine(BaseEngine):
         # Apply LoRA adapters if low-rank adaptation is enabled
         if self._is_lora:
             module = self._build_lora_module(module)
+
+        # Freeze policy (after LoRA, before FSDP wrapping)
+        if self.model_config.freeze_module_pattern:
+            from verl.utils.freeze_utils import apply_freeze_to_module
+            apply_freeze_to_module(
+                module,
+                self.model_config.freeze_module_pattern,
+            )
 
         # Apply QAT before FSDP wrapping (training only)
         if self._qat_enabled and not self.engine_config.forward_only:
