@@ -884,6 +884,9 @@ class MegatronEngineWithLMHead(MegatronEngine):
         input_ids = batch["input_ids"]
         loss_mask = batch["loss_mask"].to(bool)
         multi_modal_inputs = extract_multi_modal_inputs(batch.get("multi_modal_inputs", []))
+        cu_seqlens = tu.get_non_tensor_data(batch, key="cu_seqlens", default=None)
+        if cu_seqlens is not None and not isinstance(cu_seqlens, torch.Tensor):
+            cu_seqlens = torch.as_tensor(cu_seqlens, device=input_ids.device)
 
         routed_experts = batch.get("routed_experts", None)
 
@@ -893,6 +896,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
             "loss_mask": loss_mask,
             "multi_modal_inputs": multi_modal_inputs,
             "routed_experts": routed_experts,
+            "cu_seqlens": cu_seqlens,
         }
 
     def prepare_model_outputs(self, output: dict, data: TensorDict):
@@ -984,6 +988,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         input_ids = model_inputs["input_ids"]
         attention_mask = model_inputs["attention_mask"]
         multi_modal_inputs = model_inputs["multi_modal_inputs"]
+        cu_seqlens = model_inputs["cu_seqlens"]
         local_cp_size = tu.get_non_tensor_data(data=batch, key="local_cp_size", default=None)
         loss_mask = model_inputs["loss_mask"]
 
@@ -1045,6 +1050,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 temperature=temperature_value,
                 calculate_entropy=calculate_entropy,
                 pad_token_id=self.model_config.tokenizer.pad_token_id,
+                cu_seqlens=cu_seqlens,
             )
         else:
             if not isinstance(temperature, torch.Tensor):
@@ -1091,6 +1097,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
                 local_cp_size=local_cp_size,
                 forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
+                cu_seqlens=cu_seqlens,
             )
 
         # Router replay: record routing decisions for R2 mode
@@ -1203,6 +1210,7 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
         model_inputs = self.prepare_model_inputs(batch)
         input_ids = model_inputs["input_ids"]
         multi_modal_inputs = model_inputs["multi_modal_inputs"]
+        cu_seqlens = model_inputs["cu_seqlens"]
 
         from verl.models.mcore import get_mcore_engine_forward_fn
 
@@ -1217,6 +1225,7 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
             pad_token_id=self.model_config.tokenizer.pad_token_id,
             data_format="thd" if self.engine_config.use_remove_padding else "bshd",
             forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
+            cu_seqlens=cu_seqlens,
         )
 
         return output, partial(postprocess_micro_batch_func, data=batch)

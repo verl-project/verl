@@ -274,6 +274,7 @@ def gptmodel_forward_model_engine(
     mtp_enable_train: bool = False,
     local_cp_size: Optional[int] = None,
     forced_max_seqlen: Optional[int] = None,
+    cu_seqlens: Optional[torch.Tensor] = None,
 ):
     """Default forward pass for GPT models with optional sequence packing."""
 
@@ -301,6 +302,7 @@ def gptmodel_forward_model_engine(
             pre_process=pre_process or (post_process and mtp_enable_train),
             use_fp8_padding=use_fp8_padding,
             local_cp_size=local_cp_size,
+            packed_cu_seqlens=cu_seqlens,
         )
         input_ids_rmpad = input_ids_rmpad.contiguous()
 
@@ -324,6 +326,7 @@ def gptmodel_forward_model_engine(
                     need_roll=True,
                     use_fp8_padding=use_fp8_padding,
                     local_cp_size=local_cp_size,
+                    packed_cu_seqlens=cu_seqlens,
                 )[0]
 
             model_kwargs["labels"] = args["label"].contiguous()
@@ -355,6 +358,7 @@ def gptmodel_forward_model_engine(
                     need_roll=(k == "label"),
                     use_fp8_padding=use_fp8_padding,
                     local_cp_size=local_cp_size,
+                    packed_cu_seqlens=cu_seqlens,
                 )[0]
                 for k, v in logits_processor_args.items()
             }
@@ -383,6 +387,8 @@ def gptmodel_forward_model_engine(
         so it is recommended to disable dynamic batch size and set batch size to 1
         """
         assert local_cp_size is None, "dynamic_CP is not supported for bshd format"
+        if cu_seqlens is not None:
+            raise ValueError("cu_seqlens packing metadata requires thd data_format in Megatron engine")
 
         input_ids_bshd, attention_mask_bshd, position_ids_bshd = preprocess_bshd_engine(
             input_ids,
