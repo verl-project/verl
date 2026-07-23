@@ -196,6 +196,12 @@ verl is fast with:
 
 .. toctree::
    :maxdepth: 1
+   :caption: Developer Guide
+
+   contributing/docker_image_build.md
+
+.. toctree::
+   :maxdepth: 1
    :caption: Development Notes
 
    sglang_multiturn/sandbox_fusion.rst
