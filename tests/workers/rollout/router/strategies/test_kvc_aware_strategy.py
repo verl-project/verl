@@ -40,7 +40,7 @@ from verl.workers.rollout.router.kvcaware.strategies.kvc_aware import (
     StrategyError,
 )
 from verl.workers.rollout.router.kvcaware.strategies.routing import RoutingStrategy
-from verl.workers.rollout.router.kvcaware.types import Layer, MetricKey, SlowCut
+from verl.workers.rollout.router.kvcaware.types import Layer, MetricKey, OverloadMode, SlowCut
 
 pytestmark = [pytest.mark.ut, pytest.mark.cpu]
 # --------------------------------------------------------------------------- #
@@ -66,7 +66,7 @@ def _strat(**kwargs) -> KVCacheAwareStrategy:
     )
     defaults.update(kwargs)
     strat = KVCacheAwareStrategy(**defaults)
-    strat.set_capacity(64)
+    strat.set_capacity(64, 1024)
     return strat
 
 
@@ -133,6 +133,13 @@ class FakeRouteDataProvider:
         # Unit tests key the load signal on kv_cache_usage_perc (no kv-events /
         # retained blocks simulated); mirror it so the load formula sees it.
         return self._data.get(replica_id, {}).get("kv_cache_usage_perc", 1.0)
+
+    def get_metric_node_ids(self) -> list[str]:
+        return list(self._data.keys())
+
+    def get_block_size(self) -> int | None:
+        # Block size is learned from KV events; tests default to vLLM's 16.
+        return 16
 
 
 class ConstantStrategy:
@@ -635,7 +642,7 @@ class TestSetCapacity:
             collector_names=["vllm_zmq"],
             weight=1.0,
         )
-        strat.set_capacity(16)
+        strat.set_capacity(16, 1024)
         assert strat._max_num_seqs == 16
 
     def test_set_capacity_rejects_zero(self):
@@ -647,7 +654,7 @@ class TestSetCapacity:
             weight=1.0,
         )
         with pytest.raises(StrategyError):
-            strat.set_capacity(0)
+            strat.set_capacity(0, 0)
 
     def test_set_capacity_rejects_negative(self):
         strat = KVCacheAwareStrategy(
@@ -658,7 +665,7 @@ class TestSetCapacity:
             weight=1.0,
         )
         with pytest.raises(StrategyError):
-            strat.set_capacity(-1)
+            strat.set_capacity(-1, -1)
 
     def test_compute_load_raises_before_set_capacity(self):
         strat = KVCacheAwareStrategy(
@@ -771,7 +778,7 @@ class TestFromConfig:
             collector_names=["vllm_zmq"],
         )
         strat_from_cfg = KVCacheAwareStrategy.from_config(cfg)
-        strat_from_cfg.set_capacity(64)
+        strat_from_cfg.set_capacity(64, 1024)
         # Align load_weights with from_config (which lands on DEFAULT_LOAD_WEIGHTS);
         # _strat()'s own baseline differs, so override here for apples-to-apples.
         strat_direct = _strat(load_weights=DEFAULT_LOAD_WEIGHTS)
@@ -1020,3 +1027,177 @@ class TestFallbackModes:
         )
         ranking = route([(strat, 1.0)], PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), "r1")
         assert ranking[0] == "rep_a"
+
+
+# --------------------------------------------------------------------------- #
+# Capacity-gated token routing (slow_cut=capacity-token-aware)
+# --------------------------------------------------------------------------- #
+class TestCapacityTokenAware:
+    """``slow_cut=capacity-token-aware``: a pure capacity gate excludes
+    physically-full replicas, then the largest post-prefill ``remaining`` wins.
+
+    cap = num_gpu_blocks × block_size. Tests use num_gpu_blocks=100 and the
+    fake provider's block_size=16 → cap=1600; the gate threshold is
+    ``cap × (1 - load_threshold)`` — at the default ``load_threshold=0.9``
+    that is 1600 × 0.1 = 160 free tokens.
+    """
+
+    def _cap_strat(self, **kwargs) -> KVCacheAwareStrategy:
+        kwargs.setdefault("slow_cut", SlowCut.CAPACITY_TOKEN_AWARE)
+        return _strat(**kwargs)
+
+    def test_picks_highest_remaining_when_all_eligible(self):
+        """All replicas above the gate → the one with the most free tokens wins."""
+        strat = self._cap_strat()
+        provider = FakeRouteDataProvider(
+            {
+                # avail = 1600·(1-kv); need = 3·(1-gpu_hit); both >> thresh=160.
+                "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.5},  # avail=800
+                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.2},  # avail=1280
+            },
+        )
+        scores = strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b"))
+        assert scores[1] == STICKY_TOP_SCORE  # rep_b: largest remaining
+        assert scores[0] == 0.0
+
+    def test_filters_out_full_replica_even_with_best_cache(self):
+        """Core anti-kidnapping: the best-cache replica is dropped when it is
+        physically full (avail below the gate), so a lower-cache replica wins."""
+        strat = self._cap_strat()
+        provider = FakeRouteDataProvider(
+            {
+                # rep_a: perfect cache but essentially full → avail=16 < thresh=160.
+                "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.99, "gpu_hit_pct": 100},
+                # rep_b: no cache but plenty of room → avail=800.
+                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.5, "gpu_hit_pct": 0},
+            },
+        )
+        ranking = route([(strat, 1.0)], PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), "r1")
+        assert ranking[0] == "rep_b"  # cache-rich rep_a filtered by the capacity gate
+
+    def test_returns_sticky_top_score_for_winner(self):
+        """Discrete output: winner=STICKY_TOP_SCORE, every other replica 0.0."""
+        strat = self._cap_strat()
+        provider = FakeRouteDataProvider(
+            {
+                "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.9},  # avail=160
+                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.1},  # avail=1440 (winner)
+                "rep_c": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.7},  # avail=480
+            },
+        )
+        scores = strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "rep_c"))
+        assert scores == [0.0, STICKY_TOP_SCORE, 0.0]
+
+    def test_cold_start_falls_back_to_inflight(self):
+        """kv_cache_usage_perc all ≈0 (metrics not polled yet) → least-inflight."""
+        strat = self._cap_strat()
+        provider = FakeRouteDataProvider(
+            {
+                "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.0, "inflight_tokens": 512},
+                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.0, "inflight_tokens": 128},
+            },
+        )
+        scores = strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b"))
+        assert scores[1] == STICKY_TOP_SCORE  # rep_b: fewest in-flight
+        assert scores[0] == 0.0
+
+    def test_missing_capacity_falls_back_to_inflight(self):
+        """No num_gpu_blocks (cap=0) → least-inflight regardless of kv usage."""
+        strat = self._cap_strat()
+        provider = FakeRouteDataProvider(
+            {
+                "rep_a": {"kv_cache_usage_perc": 0.5, "inflight_tokens": 128},
+                "rep_b": {"kv_cache_usage_perc": 0.5, "inflight_tokens": 512},
+            },
+        )
+        scores = strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b"))
+        assert scores[0] == STICKY_TOP_SCORE  # rep_a: fewest in-flight
+
+    def test_all_overloaded_picks_max_remaining(self):
+        """No replica clears the gate → fall back to max remaining (never errors)."""
+        strat = self._cap_strat()
+        provider = FakeRouteDataProvider(
+            {
+                # Both below thresh=160 but not cold (kv_perc >= 1e-2).
+                "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.99},  # avail=16
+                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.995},  # avail=8
+            },
+        )
+        scores = strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b"))
+        assert scores[0] == STICKY_TOP_SCORE  # rep_a: larger remaining among the overloaded
+
+    def test_capacity_gate_threshold_via_load_threshold(self):
+        """The gate threshold is ``cap × (1 - load_threshold)``. A marginal
+        replica is eligible under a low threshold but filtered under a high one.
+
+        cap=1600; rep_a avail=160, rep_b avail=800.
+        """
+        data = {
+            "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.9, "gpu_hit_pct": 100},
+            "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.5, "gpu_hit_pct": 0},
+        }
+        # Low threshold (thresh=1600·(1-0.99)=16): both eligible → rep_b wins on remaining.
+        low = self._cap_strat(load_threshold=0.99)
+        s_low = low.score(PROMPT_IDS, FakeRouteDataProvider(dict(data)), _replicas("rep_a", "rep_b"))
+        assert s_low[1] == STICKY_TOP_SCORE
+        # High threshold (thresh=1600·(1-0.85)=240): rep_a (avail=160) filtered, rep_b wins.
+        high = self._cap_strat(load_threshold=0.85)
+        s_high = high.score(PROMPT_IDS, FakeRouteDataProvider(dict(data)), _replicas("rep_a", "rep_b"))
+        assert s_high[1] == STICKY_TOP_SCORE
+        assert s_high[0] == 0.0  # rep_a filtered by the higher gate
+
+    def test_alpha_ignored(self):
+        """alpha does not affect capacity-token-aware (mirrors least-inflight)."""
+        provider_a = FakeRouteDataProvider(
+            {
+                "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.5, "gpu_hit_pct": 100},
+                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.2, "gpu_hit_pct": 0},
+            },
+        )
+        provider_b = FakeRouteDataProvider(
+            {
+                "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.5, "gpu_hit_pct": 100},
+                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.2, "gpu_hit_pct": 0},
+            },
+        )
+        s0 = self._cap_strat(alpha=0.0).score(PROMPT_IDS, provider_a, _replicas("rep_a", "rep_b"))
+        s1 = self._cap_strat(alpha=1.0).score(PROMPT_IDS, provider_b, _replicas("rep_a", "rep_b"))
+        assert s0 == s1  # winner independent of alpha
+
+    # ── is_overloaded (overload_mode=SIMPLE uses raw kv_perc > load_threshold) ──
+    def test_is_overloaded_true_when_kv_perc_above_threshold(self):
+        """overload_mode=SIMPLE: overload = ``kv_cache_usage_perc > load_threshold``.
+
+        Here kv_perc=0.95 > load_threshold=0.9 → overloaded. This is decoupled
+        from slow_cut (works with any routing mode).
+        """
+        strat = self._cap_strat(load_threshold=0.9, overload_mode=OverloadMode.KV_CACHE_USAGE_PERC)
+        provider = FakeRouteDataProvider({"rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.95}})
+        assert strat.is_overloaded(provider, ReplicaInfo("rep_a")) is True
+
+    def test_is_overloaded_false_when_kv_perc_below_threshold(self):
+        """kv_perc=0.5 <= load_threshold=0.9 → not overloaded."""
+        strat = self._cap_strat(load_threshold=0.9, overload_mode=OverloadMode.KV_CACHE_USAGE_PERC)
+        provider = FakeRouteDataProvider({"rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.5}})
+        assert strat.is_overloaded(provider, ReplicaInfo("rep_a")) is False
+
+    def test_is_overloaded_blended_uses_compute_load_not_kv_perc(self):
+        """overload_mode=BLENDED (default) decouples overload from slow_cut: even
+        under CAPACITY_TOKEN_AWARE, it uses the weighted load formula, NOT kv_perc.
+
+        kv_perc=0.95 (would be overloaded under SIMPLE), but running/waiting/inflight=0
+        → blended load = 0.4·0.95 + 0 = 0.38 < 0.9 → NOT overloaded.
+        """
+        strat = self._cap_strat(load_threshold=0.9, overload_mode=OverloadMode.KV_LOAD)
+        provider = FakeRouteDataProvider(
+            {
+                "rep_a": {
+                    "num_gpu_blocks": 100,
+                    "kv_cache_usage_perc": 0.95,
+                    "num_requests_running": 0,
+                    "inflight_count": 0,
+                    "inflight_tokens": 0,
+                }
+            }
+        )
+        assert strat.is_overloaded(provider, ReplicaInfo("rep_a")) is False

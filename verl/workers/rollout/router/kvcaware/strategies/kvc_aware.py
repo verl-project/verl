@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 from ..config.strategy import KVCAwareStrategyConfig
 from ..logging import get_router_logger
-from ..types import Layer, MetricKey, SlowCut
+from ..types import Layer, MetricKey, OverloadMode, SlowCut
 from .registry import StrategyRegistry
 
 if TYPE_CHECKING:
@@ -52,6 +52,7 @@ class KVCacheAwareStrategy:
         memory_overload_filter: bool = True,
         slow_cut: SlowCut | str = SlowCut.PREFIX_LOAD_AWARE,
         load_weights: tuple[float, float, float, float] = DEFAULT_LOAD_WEIGHTS,
+        overload_mode: OverloadMode | str = OverloadMode.KV_LOAD,
     ) -> None:
         if not 0 <= alpha <= 1:
             raise StrategyError(f"alpha must be in [0, 1], got {alpha}")
@@ -72,6 +73,12 @@ class KVCacheAwareStrategy:
             slow_cut = SlowCut(slow_cut)
         except ValueError as exc:
             raise StrategyError(f"slow_cut must be one of {[m.value for m in SlowCut]}, got {slow_cut!r}") from exc
+        try:
+            overload_mode = OverloadMode(overload_mode)
+        except ValueError as exc:
+            raise StrategyError(
+                f"overload_mode must be one of {[m.value for m in OverloadMode]}, got {overload_mode!r}"
+            ) from exc
         if len(load_weights) != 4 or any(w < 0 for w in load_weights):
             raise StrategyError(f"load_weights must be 4 non-negative values, got {load_weights}")
         if abs(sum(load_weights) - 1.0) > 1e-6:
@@ -85,19 +92,28 @@ class KVCacheAwareStrategy:
         self.memory_overload_filter = memory_overload_filter
         self.slow_cut = slow_cut
         self.load_weights = tuple(load_weights)
+        self.overload_mode = overload_mode
         self._max_num_seqs: int | None = None
+        self._max_num_batched_tokens: int | None = None
         logger.info(
             f"KVCacheAwareStrategy created: alpha={self.alpha:.2f}, "
             f"load_threshold={self.load_threshold:.2f}, load_weights={self.load_weights}, "
-            f"memory_overload_filter={self.memory_overload_filter}, slow_cut={self.slow_cut.value}"
+            f"memory_overload_filter={self.memory_overload_filter}, slow_cut={self.slow_cut.value}, "
+            f"overload_mode={self.overload_mode.value}"
         )
 
-    def set_capacity(self, max_num_seqs: int) -> None:
+    def set_capacity(self, max_num_seqs: int, max_num_batched_tokens: int) -> None:
         """Inject ``--max-num-seqs`` from the server handle's rollout config."""
         if not isinstance(max_num_seqs, int) or max_num_seqs <= 0:
             raise StrategyError(f"max_num_seqs must be a positive int, got {max_num_seqs}")
+        if not isinstance(max_num_batched_tokens, int) or max_num_batched_tokens <= 0:
+            raise StrategyError(f"max_num_batched_tokens must be a positive int, got {max_num_batched_tokens}")
         self._max_num_seqs = max_num_seqs
-        logger.info(f"KVCacheAwareStrategy capacity set: max_num_seqs={max_num_seqs}")
+        self._max_num_batched_tokens = max_num_batched_tokens
+        logger.info(
+            f"KVCacheAwareStrategy capacity set: max_num_seqs={max_num_seqs}"
+            f"max_num_batched_tokens={max_num_batched_tokens}"
+        )
 
     @classmethod
     def from_config(cls, cfg: KVCAwareStrategyConfig) -> KVCacheAwareStrategy:
@@ -111,6 +127,7 @@ class KVCacheAwareStrategy:
             weight=cfg.weight,
             memory_overload_filter=cfg.memory_overload_filter,
             slow_cut=cfg.slow_cut,
+            overload_mode=cfg.overload_mode,
         )
 
     def _compute_load(
@@ -151,16 +168,26 @@ class KVCacheAwareStrategy:
         returning session back to its bound replica. Combined scoring never
         consults overload.
         """
-        m = store.get_metrics(replica.replica_id)
-        kv_usage = store.kv_cache_load(replica.replica_id)
-        running = m.get(MetricKey.NUM_REQUESTS_RUNNING, 0)
-        waiting = m.get(MetricKey.NUM_REQUESTS_WAITING, 0)
-        inflight = m.get(MetricKey.INFLIGHT_COUNT, 0)
-        load = self._compute_load(kv_usage, running, waiting, inflight)
-        # Emit the load the sticky check used (one replica — the bound one) so the
-        # plot can show the overload-check load alongside the combined-score load.
-        logger.info(f"is-overload replica={replica.replica_id} load={load:.4f}")
-        return load > self.load_threshold
+        if self.overload_mode == OverloadMode.NONE:
+            return False
+        if self.overload_mode == OverloadMode.KV_CACHE_USAGE_PERC:
+            kv_perc = store.get_metric(replica.replica_id, MetricKey.KV_CACHE_USAGE_PERC) or 0.0
+            logger.info(f"is-overload replica={replica.replica_id} kv_perc={kv_perc:.4f}")
+            return kv_perc > self.load_threshold
+        if self.overload_mode == OverloadMode.KV_LOAD:
+            m = store.get_metrics(replica.replica_id)
+            kv_usage = store.kv_cache_load(replica.replica_id)
+            running = m.get(MetricKey.NUM_REQUESTS_RUNNING, 0)
+            waiting = m.get(MetricKey.NUM_REQUESTS_WAITING, 0)
+            inflight = m.get(MetricKey.INFLIGHT_COUNT, 0)
+            load = self._compute_load(kv_usage, running, waiting, inflight)
+            # Emit the load the sticky check used (one replica — the bound one) so the
+            # plot can show the overload-check load alongside the combined-score load.
+            logger.info(f"is-overload replica={replica.replica_id} kv_load={load:.4f}")
+            return load > self.load_threshold
+        raise ValueError(
+            f"There is no {self.overload_mode}, please set overload_mode in ['None', 'kv_cache_usage_perc', 'kv_load']"
+        )
 
     def _sticky_shortcut(
         self,
@@ -184,7 +211,7 @@ class KVCacheAwareStrategy:
             return None
         for idx, replica in enumerate(replicas):
             if replica.replica_id == sticky_id:
-                if self.memory_overload_filter and self.is_overloaded(store, replica):
+                if self.is_overloaded(store, replica):
                     logger.info(f"score(): STICKY replica={sticky_id} OVERLOADED → fallback")
                     return None
                 logger.info(f"score(): STICKY replica={sticky_id} HIT → short-circuit (top score)")
@@ -217,6 +244,8 @@ class KVCacheAwareStrategy:
             return shortcut
         if self.slow_cut == SlowCut.LEAST_INFLIGHT:
             return [-store.get_metric(r.replica_id, MetricKey.INFLIGHT_COUNT) for r in replicas]
+        if self.slow_cut == SlowCut.CAPACITY_TOKEN_AWARE:
+            return self._capacity_token_scores(store, replicas, prompt_ids or [])
         effective_prompt_ids = prompt_ids or []
 
         result = []
@@ -267,6 +296,96 @@ class KVCacheAwareStrategy:
         w = self.layer_weights
         s_cache = w[Layer.GPU] * gpu_hit + w[Layer.CPU] * cpu_hit + w[Layer.SSD] * ssd_hit
         return s_cache, gpu_hit
+
+    # ── Capacity-gated token routing (CAPACITY_TOKEN_AWARE) ───────────
+
+    def _total_token_capacity(self, store: DataStore) -> int:
+        """Per-replica KV-cache token capacity = ``num_gpu_blocks × block_size``.
+
+        ``num_gpu_blocks`` is a per-replica gauge (constant across replicas in
+        practice); ``block_size`` is learned from the first KV event (defaults
+        to 16 if not yet seen). Returns 0 when unavailable, in which case the
+        caller falls back to least-inflight.
+        """
+        for node_id in store.get_metric_node_ids():
+            nblk = store.get_metric(node_id, MetricKey.NUM_GPU_BLOCKS)
+            if nblk and nblk > 0:
+                block_size = store.get_block_size() or 16
+                return int(nblk) * int(block_size)
+        return 0
+
+    def _capacity_token_scores(
+        self,
+        store: DataStore,
+        replicas: list[ReplicaInfo],
+        prompt_ids: list[int],
+    ) -> list[float]:
+        """Capacity-gated token routing (discrete: winner=STICKY_TOP_SCORE, rest 0).
+
+        For each replica ``i``::
+
+            avail[i]     = cap × (1 - kv_cache_usage_perc[i])   # free tokens (no cache)
+            need[i]      = len(prompt_ids) × (1 - gpu_hit[i])    # prefill this req adds
+            remaining[i] = (avail[i] - need[i]) + (cap - infight_tokens).  # free tokens after assign
+            eligible[i]  = avail[i] >= cap × (1 - load_threshold)   # pure capacity gate
+
+        Pick ``argmax(eligible, remaining)``; cold start (``kv_cache_usage_perc`` all
+        ≈ 0) falls back to least-inflight;
+        """
+        n = len(replicas)
+        cap = self._total_token_capacity(store)
+        plen = len(prompt_ids) if prompt_ids else 0
+        rows: list[dict] = []
+        for replica in replicas:
+            kv_perc = store.get_metric(replica.replica_id, MetricKey.KV_CACHE_USAGE_PERC) or 0.0
+            inflight = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_COUNT) or 0
+            inflight_tokens = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_TOKENS) or 0
+            s_cache, gpu_hit = self._cache_score(store, replica, prompt_ids)
+            avail = cap * (1.0 - kv_perc)
+            need = plen * (1.0 - gpu_hit)
+            remaining = (avail - need) + (cap - inflight_tokens)
+            rows.append(
+                {
+                    "replica": replica,
+                    "kv_perc": kv_perc,
+                    "inflight": inflight,
+                    "inflight_tokens": inflight_tokens,
+                    "gpu_hit": gpu_hit,
+                    "s_cache": s_cache,
+                    "avail": avail,
+                    "need": need,
+                    "remaining": remaining,
+                }
+            )
+
+        thresh = cap * (1.0 - self.load_threshold)
+        eligible = [i for i in range(n) if rows[i]["avail"] >= thresh]
+        if not eligible:
+            top = max(range(n), key=lambda i: rows[i]["remaining"])
+            logger.info("score(): CAPACITY_TOKEN_AWARE no eligible → max remaining")
+        else:
+            top = max(eligible, key=lambda i: rows[i]["remaining"])
+
+        for i, row in enumerate(rows):
+            tag = " ← WINNER" if i == top else ""
+            logger.info(
+                f"score(): replica={row['replica'].replica_id} kv_perc={row['kv_perc']:.3f} "
+                f"gpu_hit={row['gpu_hit']:.3f} inflight={row['inflight']} "
+                f"avail={row['avail']:.0f} need={row['need']:.0f} "
+                f"max_num_batched_tokens={self._max_num_batched_tokens} inflight_tokens={row['inflight_tokens']:} "
+                f"remaining={row['remaining']:.0f}{tag}"
+            )
+        winner = rows[top]["replica"].replica_id
+        logger.info(
+            f"score(): CAPACITY_TOKEN_AWARE winner={winner} "
+            f"(kv_perc={rows[top]['kv_perc']:.3f}, remaining={rows[top]['remaining']:.0f})"
+        )
+        # Per-replica capacity signal for the plot (mirrors route-load in prefix-load-aware).
+        cap_loads = {row["replica"].replica_id: row["remaining"] for row in rows}
+        logger.info(f"route-capacity remaining={cap_loads}")
+        scores = [0.0] * n
+        scores[top] = STICKY_TOP_SCORE
+        return scores
 
 
 StrategyRegistry.register(KVCAwareStrategyConfig, KVCacheAwareStrategy)

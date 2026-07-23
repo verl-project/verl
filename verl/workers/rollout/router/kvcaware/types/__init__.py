@@ -16,6 +16,7 @@
 
 from .layer import Layer
 from .metric_spec import METRIC_SPECS, MetricKey
+from .overload_mode import OverloadMode
 from .slow_cut import SlowCut
 
-__all__ = ["Layer", "MetricKey", "METRIC_SPECS", "SlowCut"]
+__all__ = ["Layer", "MetricKey", "METRIC_SPECS", "OverloadMode", "SlowCut"]

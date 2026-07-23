@@ -34,10 +34,17 @@ acquire the request's input prompt length (``event.prompt_len``) is also
 forwarded as a ``PROMPT_LEN_SUM`` delta — the per-replica cumulative
 request-size signal the plot derives an average dispatched prompt length from.
 
+``INFLIGHT_TOKENS`` is the token-weighted sibling of the inflight gauge: acquire
+adds the request's ``prompt_len`` and release subtracts it. acquire/release run
+in the same ``generate()`` scope and see the same ``prompt_ids``, so the balancer
+forwards the identical ``prompt_len`` on both — the gauge is symmetric and needs
+no request→len bookkeeping in the store.
+
 Event → delta mapping:
-- ``on_acquire`` → ``INFLIGHT_COUNT``/``DISPATCHED_COUNT`` +1 and
-  ``PROMPT_LEN_SUM`` +``prompt_len``, carrying ``request_id``.
-- ``on_release`` → ``INFLIGHT_COUNT`` -1, ``COMPLETED_COUNT`` +1.
+- ``on_acquire`` → ``INFLIGHT_COUNT``/``DISPATCHED_COUNT`` +1,
+  ``INFLIGHT_TOKENS``/``PROMPT_LEN_SUM`` +``prompt_len``, carrying ``request_id``.
+- ``on_release`` → ``INFLIGHT_COUNT`` -1, ``INFLIGHT_TOKENS`` -``prompt_len``,
+  ``COMPLETED_COUNT`` +1.
 
 ``on_servers_removed`` is intentionally a no-op (returns ``None``): verl never
 removes servers and maintains ``_inflight_requests`` purely via symmetric
@@ -74,6 +81,7 @@ class InflightDecoder(Decoder):
                 node_id=event.replica_id,
                 metrics={
                     MetricKey.INFLIGHT_COUNT: 1,
+                    MetricKey.INFLIGHT_TOKENS: event.prompt_len,
                     MetricKey.DISPATCHED_COUNT: 1,
                     MetricKey.PROMPT_LEN_SUM: event.prompt_len,
                 },
@@ -83,7 +91,11 @@ class InflightDecoder(Decoder):
         if event.event == "on_release":
             return MetricsUpdate(
                 node_id=event.replica_id,
-                metrics={MetricKey.INFLIGHT_COUNT: -1, MetricKey.COMPLETED_COUNT: 1},
+                metrics={
+                    MetricKey.INFLIGHT_COUNT: -1,
+                    MetricKey.INFLIGHT_TOKENS: -event.prompt_len,
+                    MetricKey.COMPLETED_COUNT: 1,
+                },
                 is_delta=True,
             )
         return None

@@ -35,3 +35,4 @@ class SlowCut(str, Enum):
 
     PREFIX_LOAD_AWARE = "prefix-load-aware"  # S = α·S_cache + (1-α)·S_load
     LEAST_INFLIGHT = "least-inflight"  # -INFLIGHT_COUNT (verl GlobalRequestLoadBalancer-style)
+    CAPACITY_TOKEN_AWARE = "capacity-token-aware"  # token capacity gate + prefill increment (discrete)

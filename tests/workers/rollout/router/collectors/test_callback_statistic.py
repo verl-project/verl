@@ -91,6 +91,7 @@ class TestInflightDecoder:
         assert upd.node_id == "s0"
         assert upd.metrics == {
             MetricKey.INFLIGHT_COUNT: 1,
+            MetricKey.INFLIGHT_TOKENS: 0,  # no prompt forwarded → 0 token delta
             MetricKey.DISPATCHED_COUNT: 1,
             MetricKey.PROMPT_LEN_SUM: 0,  # no prompt forwarded → 0 length delta
         }
@@ -102,13 +103,24 @@ class TestInflightDecoder:
             StatisticEvent("on_acquire", request_id="r1", replica_id="s0", prompt_len=42), ""
         )
         assert upd.metrics[MetricKey.PROMPT_LEN_SUM] == 42  # len(prompt_ids) at dispatch
+        assert upd.metrics[MetricKey.INFLIGHT_TOKENS] == 42  # gauge +prompt_len on acquire
 
     def test_on_release_emits_inflight_minus_completed_delta(self):
-        upd = InflightDecoder().decode(StatisticEvent("on_release", replica_id="s0"), "")
+        upd = InflightDecoder().decode(StatisticEvent("on_release", replica_id="s0", prompt_len=42), "")
         assert isinstance(upd, MetricsUpdate)
-        assert upd.metrics == {MetricKey.INFLIGHT_COUNT: -1, MetricKey.COMPLETED_COUNT: 1}
+        assert upd.metrics == {
+            MetricKey.INFLIGHT_COUNT: -1,
+            MetricKey.INFLIGHT_TOKENS: -42,  # gauge -prompt_len, mirrors the acquire
+            MetricKey.COMPLETED_COUNT: 1,
+        }
         assert upd.is_delta is True
         assert upd.request_id is None  # on_release carries no request_id
+
+    def test_on_release_without_prompt_len_leaves_token_gauge_unchanged(self):
+        # Callers that don't track prompt_len release with the default 0, so the
+        # token gauge simply isn't decremented (no spurious negative drift).
+        upd = InflightDecoder().decode(StatisticEvent("on_release", replica_id="s0"), "")
+        assert upd.metrics[MetricKey.INFLIGHT_TOKENS] == 0
 
     def test_on_servers_removed_is_noop(self):
         # Faithful to verl: removal must NOT zero the counter — release
@@ -161,12 +173,12 @@ class TestCallbackTransport:
         assert all(len(lst) == 1 for lst in balancer.callbacks.values())
 
         balancer.callbacks["on_acquire"][0]("r1", "s0")
-        balancer.callbacks["on_release"][0]("s0")
+        balancer.callbacks["on_release"][0]("s0", 7)  # release forwards prompt_len
         balancer.callbacks["on_servers_removed"][0](["s1", "s2"])
 
         assert received == [
             StatisticEvent("on_acquire", request_id="r1", replica_id="s0"),
-            StatisticEvent("on_release", replica_id="s0"),
+            StatisticEvent("on_release", replica_id="s0", prompt_len=7),
             StatisticEvent("on_servers_removed", server_ids=("s1", "s2")),
         ]
 
@@ -223,10 +235,11 @@ class TestCollectorCallbackIntegration:
         collector = Collector(CallbackTransport(balancer), InflightDecoder())
         collector.start()
         try:
-            balancer.callbacks["on_acquire"][0]("r1", "s0")  # +1 inflight, +1 dispatched
-            balancer.callbacks["on_acquire"][0]("r2", "s0")  # +1 inflight, +1 dispatched
-            balancer.callbacks["on_release"][0]("s0")  # -1 inflight, +1 completed
+            balancer.callbacks["on_acquire"][0]("r1", "s0", [1, 2, 3])  # +1 inflight, +3 tokens
+            balancer.callbacks["on_acquire"][0]("r2", "s0", list(range(10)))  # +1 inflight, +10 tokens
+            balancer.callbacks["on_release"][0]("s0", 3)  # -1 inflight, -3 tokens, +1 completed
             assert DataStore().get_metric("s0", MetricKey.INFLIGHT_COUNT) == 1
+            assert DataStore().get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 10  # 3 + 10 - 3
             assert DataStore().get_metric("s0", MetricKey.DISPATCHED_COUNT) == 2
             assert DataStore().get_metric("s0", MetricKey.COMPLETED_COUNT) == 1
         finally:

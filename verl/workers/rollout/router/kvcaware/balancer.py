@@ -60,10 +60,11 @@ class KVCAwareBalancer:
         self._strategy_summary = self._build_strategy_summary(self._config.strategies)
         self._servers: dict[str, Any] = dict(servers)
         max_num_seqs = self._resolve_max_num_seqs()
+        max_num_batched_tokens = self._resolve_max_num_batched_tokens()
         for strategy, _ in self._strategies:
             if hasattr(strategy, "set_capacity"):
-                strategy.set_capacity(max_num_seqs)
-        logger.info(f"KVCAwareBalancer: max_num_seqs={max_num_seqs}")
+                strategy.set_capacity(max_num_seqs, max_num_batched_tokens)
+        logger.info(f"KVCAwareBalancer: max_num_seqs={max_num_seqs}, max_num_batched_tokens={max_num_batched_tokens}")
         self._route_calls = 0
         # route() latency profiling — cumulative stats flushed every _ROUTE_LOG_EVERY calls.
         # The flush trigger derives from _route_calls % _ROUTE_LOG_EVERY (a separate
@@ -95,21 +96,36 @@ class KVCAwareBalancer:
             bits.append(f"slow_cut={cfg.slow_cut.value}")
         return f"{name}({', '.join(bits)})"
 
-    def _resolve_max_num_seqs(self, default: int = 256) -> int:
+    def _resolve_rollout_config_int(self, attr: str, default: int) -> int:
+        """Read a positive int ``attr`` from the first server's rollout config.
+
+        Fail-closed to ``default`` when no server exposes ``get_rollout_config``,
+        the RPC fails, or the value is missing / non-positive. Shared by the
+        ``max_num_seqs`` (per-step request cap) and ``max_num_batched_tokens``
+        (per-step token budget) resolvers.
+        """
         for handle in self._servers.values():
             if not hasattr(handle, "get_rollout_config"):
                 continue
             try:
                 rollout_cfg = ray.get(handle.get_rollout_config.remote())
             except Exception as e:  # noqa: BLE001
-                logger.warning(f"get_rollout_config failed ({e}); using default max_num_seqs={default}")
+                logger.warning(f"get_rollout_config failed ({e}); using default {attr}={default}")
                 return default
-            value = getattr(rollout_cfg, "max_num_seqs", default)
-            if value <= 0:
-                logger.warning(f"server returned non-positive max_num_seqs={value}; using default={default}")
+            value = getattr(rollout_cfg, attr, default)
+            if value is None or value <= 0:
+                logger.warning(f"server returned non-positive {attr}={value}; using default={default}")
                 return default
             return value
         return default
+
+    def _resolve_max_num_seqs(self, default: int = 256) -> int:
+        """Per-step sequence cap — denominator for the in-flight request load."""
+        return self._resolve_rollout_config_int("max_num_seqs", default)
+
+    def _resolve_max_num_batched_tokens(self, default: int = 2048) -> int:
+        """Per-step token budget — denominator for the in-flight token load."""
+        return self._resolve_rollout_config_int("max_num_batched_tokens", default)
 
     def _init_manager(self) -> None:
         """Resolve per-server endpoints from Ray actor handles, then start collectors.
@@ -192,9 +208,15 @@ class KVCAwareBalancer:
             "sticky_size": self._store.sticky_status()["size"],
         }
 
-    def release_server(self, server_id: str) -> None:
-        """Release a server after a request completes; fires ``on_release``."""
-        self._fire("on_release", server_id)
+    def release_server(self, server_id: str, prompt_len: int = 0) -> None:
+        """Release a server after a request completes; fires ``on_release``.
+
+        ``prompt_len`` (``len(prompt_ids)`` of the completing request) mirrors the
+        value passed at ``acquire_server`` time, so the in-flight token gauge is
+        decremented by exactly what acquire added. Defaults to 0 for callers that
+        do not track it (the token gauge simply stays unchanged on release).
+        """
+        self._fire("on_release", server_id, prompt_len)
 
     def acquire_server(self, request_id: str, prompt_ids: list[int] | None = None) -> tuple[str, Any]:
         """Delegate to ``route()`` for a best-first ranking, return ``(top, handle)``.

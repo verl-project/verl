@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ..types import Layer, SlowCut
+from ..types import Layer, OverloadMode, SlowCut
 from .base import ConfigError, StrategyConfig, _multiline_repr
 
 
@@ -41,6 +41,10 @@ class KVCAwareStrategyConfig(StrategyConfig):
     memory_overload_filter: bool = True
     # Fallback scoring mode used after the sticky short-circuit misses.
     slow_cut: SlowCut = SlowCut.PREFIX_LOAD_AWARE
+    # Overload check mode for the sticky short-circuit (independent of slow_cut).
+    # ``simple`` = kv_cache_usage_perc > load_threshold; ``blended`` = the
+    # original weighted load formula. Default ``blended`` preserves behavior.
+    overload_mode: OverloadMode = OverloadMode.KV_LOAD
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -53,6 +57,13 @@ class KVCAwareStrategyConfig(StrategyConfig):
             self.slow_cut = SlowCut(self.slow_cut)
         except ValueError as exc:
             raise ConfigError(f"slow_cut must be one of {[m.value for m in SlowCut]}, got {self.slow_cut!r}") from exc
+        # Normalize yaml str → OverloadMode (also validates the value is a known mode).
+        try:
+            self.overload_mode = OverloadMode(self.overload_mode)
+        except ValueError as exc:
+            raise ConfigError(
+                f"overload_mode must be one of {[m.value for m in OverloadMode]}, got {self.overload_mode!r}"
+            ) from exc
         # Normalize yaml str keys → Layer (also validates each key is a known layer).
         try:
             self.layer_weights = {Layer(k): v for k, v in self.layer_weights.items()}

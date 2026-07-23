@@ -115,10 +115,10 @@ def init_config(args: argparse.Namespace) -> DictConfig:
         strat0.alpha = args.alpha
     if args.load_threshold is not None:
         strat0.load_threshold = args.load_threshold
-    if args.memory_overload_filter is not None:
-        strat0.memory_overload_filter = args.memory_overload_filter
     if args.slow_cut is not None:
         strat0.slow_cut = args.slow_cut
+    if args.overload_mode is not None:
+        strat0.overload_mode = args.overload_mode
 
     return config
 
@@ -317,18 +317,18 @@ def main():
         "Overrides kvcaware.yaml when set.",
     )
     parser.add_argument(
-        "--memory-overload-filter",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="KVCAware strategy[0] memory_overload_filter — gate the sticky short-circuit on overload. "
-        "Use --memory-overload-filter / --no-memory-overload-filter; omit to keep the kvcaware.yaml default.",
-    )
-    parser.add_argument(
         "--slow-cut",
         type=str,
-        choices=["prefix-load-aware", "least-inflight"],
+        choices=["prefix-load-aware", "least-inflight", "capacity-token-aware"],
         default=None,
         help="KVCAware strategy[0] slow_cut fallback scoring mode. Overrides kvcaware.yaml when set.",
+    )
+    parser.add_argument(
+        "--overload-mode",
+        type=str,
+        choices=["None", "kv_cache_usage_perc", "kv_load"],
+        default=None,
+        help="KVCAware strategy[0] overload_mode for the sticky short-circuit ",
     )
 
     args = parser.parse_args()

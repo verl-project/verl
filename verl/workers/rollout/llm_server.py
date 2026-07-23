@@ -70,10 +70,11 @@ class LLMServerClient:
         )
         return server_id, handle
 
-    def _release_server(self, server_id: str) -> None:
+    def _release_server(self, server_id: str, prompt_len: int = 0) -> None:
         # Fire-and-forget: release is just a counter decrement, no need to await.
         # Awaiting here risks blocking the finally clause if the LB actor is unresponsive.
-        self._load_balancer.release_server.remote(server_id=server_id)
+        # prompt_len mirrors the acquire so the LB's in-flight token gauge stays balanced.
+        self._load_balancer.release_server.remote(server_id=server_id, prompt_len=prompt_len)
 
     @rollout_trace_op
     async def generate(
@@ -125,7 +126,7 @@ class LLMServerClient:
             output.extra_fields.setdefault("max_global_steps", global_steps)
             return output
         finally:
-            self._release_server(server_id)
+            self._release_server(server_id, prompt_len=len(prompt_ids) if prompt_ids else 0)
 
 
 class FullyAsyncLLMServerClient(LLMServerClient):

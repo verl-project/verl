@@ -98,8 +98,13 @@ class GlobalRequestLoadBalancer:
         self._inflight_requests[server_id] += 1
         return server_id, self._servers[server_id]
 
-    def release_server(self, server_id: str) -> None:
-        """Release a server after a request completes."""
+    def release_server(self, server_id: str, prompt_len: int = 0) -> None:
+        """Release a server after a request completes.
+
+        ``prompt_len`` is accepted for signature parity with the kvc-aware
+        balancer (which uses it for its in-flight token gauge); this balancer
+        tracks request counts only and ignores it.
+        """
         if server_id not in self._inflight_requests:
             return
         if self._inflight_requests[server_id] > 0:
@@ -140,7 +145,7 @@ class GlobalRequestLoadBalancer:
     def get_all_servers(self) -> list[str]:
         """Get list of all active server IDs."""
         return list(self._inflight_requests.keys())
-    
+
     def clear_sticky_cache(self) -> dict:
         """Clear the sticky-session cache to force request redistribution.
 

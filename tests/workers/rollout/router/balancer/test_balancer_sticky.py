@@ -68,7 +68,7 @@ class TestStickyEndToEnd:
         # capacity=64 matches the overload scenario (running=64 → load=1.0).
         for strategy, _ in balancer._strategies:
             if hasattr(strategy, "set_capacity"):
-                strategy.set_capacity(64)
+                strategy.set_capacity(64, 1024)
         balancer._store.refresh_metrics(metrics)
         return balancer
 
@@ -105,9 +105,7 @@ class TestStickyEndToEnd:
         # saturate s0: kv_load=1.0 (retained/num_gpu_blocks) + running/waiting/
         # inflight all maxed so load (0.4·kv+0.2·run+0.1·wait+0.3·inflight) = 1.0
         balancer._store.refresh_metrics(
-            _kv_metrics(
-                {"s0": {"kv": 1.0, "running": 64, "waiting": 1000, "inflight": 64}, "s1": {"kv": 0.3}}
-            )
+            _kv_metrics({"s0": {"kv": 1.0, "running": 64, "waiting": 1000, "inflight": 64}, "s1": {"kv": 0.3}})
         )
         balancer._store.add_kv_blocks("s0", [f"b{i}" for i in range(10)])
         balancer._store.refresh_metrics({"s0": {MetricKey.NUM_GPU_BLOCKS: 10}})

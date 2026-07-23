@@ -64,6 +64,12 @@ class MetricKey:
     ESTIMATED_FLOPS_PER_GPU: str = "estimated_flops_per_gpu"
     # In-flight request count (acquire +1 / release -1, mirrors verl least-inflight).
     INFLIGHT_COUNT: str = "inflight_count"
+    # In-flight prompt tokens (acquire +prompt_len / release -prompt_len). The
+    # token-weighted sibling of INFLIGHT_COUNT: a single 30k-token request and a
+    # 100-token one both count as 1 inflight, but load the KV cache very
+    # differently — this gauge captures that. acquire/release share the same
+    # request's prompt_len in one generate() scope, so the gauge is symmetric.
+    INFLIGHT_TOKENS: str = "inflight_tokens"
     # Cumulative dispatched request count (acquire +1) — the running inflight
     # gauge's monotonic sibling. Per-replica; sum across replicas for the global
     # dispatched volume. Paired with COMPLETED_COUNT for dispatch/complete rates.
@@ -177,6 +183,11 @@ METRIC_SPECS: dict[str, dict[str, Any]] = {
         "default": 0,
         "value_type": int,
         "describe": "In-flight request count (acquire +1 / release -1, verl least-inflight signal)",
+    },
+    MetricKey.INFLIGHT_TOKENS: {
+        "default": 0,
+        "value_type": int,
+        "describe": "In-flight prompt tokens (acquire +prompt_len / release -prompt_len) — token-weighted load",
     },
     MetricKey.DISPATCHED_COUNT: {
         "default": 0,

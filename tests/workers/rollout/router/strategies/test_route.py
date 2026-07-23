@@ -181,7 +181,7 @@ def _strat(**kwargs):
     )
     defaults.update(kwargs)
     strat = KVCacheAwareStrategy(**defaults)
-    strat.set_capacity(64)
+    strat.set_capacity(64, 1024)
     return strat
 
 
