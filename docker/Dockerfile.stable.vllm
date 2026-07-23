@@ -1,4 +1,5 @@
-# vllm: x86_64=0.20.2, aarch64=0.20.2
+# vllm: x86_64=0.24.0, aarch64=0.20.2
+# Target: verlai/verl:vllm024.dev2
 
 ARG CUDA_VERSION=13.0.2
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04
@@ -12,7 +13,7 @@ ARG TRANSFORMERS_VERSION=5.3.0
 ARG VLLM_VERSION=0.24.0
 ARG VLLM_OMNI_VERSION=0.24.0
 ARG TRL_VERSION=0.27.0
-ARG TRANSFORMER_ENGINE_VERSION=v2.15
+ARG TRANSFORMER_ENGINE_VERSION=v2.16.1
 ARG FLASH_ATTENTION_VERSION=2.8.3
 ARG NSIGHT_VERSION=2025.6.1
 ARG MEGATRON_BRIDGE_VERSION_OR_BRANCH=r0.5.0
@@ -172,7 +173,8 @@ RUN CUDA_VERSION_MAJOR=$(echo ${CUDA_VERSION} | cut -d '.' -f 1) && \
         CUDNN_HDR=$(find /usr/include -name cudnn_version.h | head -1) && \
         CUDNN_VERSION=$(grep -E '^#define CUDNN_(MAJOR|MINOR|PATCHLEVEL) ' "${CUDNN_HDR}" | awk '{print $3}' | paste -sd. -); \
     fi && \
-    pip install "nvidia-cudnn-cu${CUDA_VERSION_MAJOR}>=${CUDNN_VERSION}"
+    pip install "nvidia-cudnn-cu${CUDA_VERSION_MAJOR}>=${CUDNN_VERSION}" && \
+    pip install nvidia-cudnn-frontend
 
 # Override NCCL to >= 2.29.7 for ncclCommSuspend / ncclCommResume
 # (RFC: https://github.com/verl-project/verl/issues/6266).
