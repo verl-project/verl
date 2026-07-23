@@ -47,6 +47,41 @@ from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAc
 device_name = get_device_name()
 
 
+def get_thd_sequence_parallel_padding_mask(input_ids: torch.Tensor) -> torch.Tensor | None:
+    """Return this TP rank's THD alignment-only positions for router replay.
+
+    The no-padding THD path strips these positions from exported
+    ``routed_experts`` but recreates them as zeros during replay. Canonicalizing
+    them before RECORD keeps the dispatcher topology identical across R2 passes.
+    Context-parallel layouts use zig-zag packing and are intentionally left
+    untouched until they receive their own audited mapping.
+    """
+    if not input_ids.is_nested or mpu.get_context_parallel_world_size() != 1:
+        return None
+
+    tp_size = mpu.get_tensor_model_parallel_world_size()
+    if tp_size <= 1:
+        return None
+
+    seq_lens = input_ids.offsets().diff().tolist()
+    padded_lens = [length + (-length % tp_size) for length in seq_lens]
+    total_padded = sum(padded_lens)
+    if total_padded == sum(seq_lens):
+        return None
+    if total_padded % tp_size:
+        raise RuntimeError(f"THD padded token count must divide TP size: total={total_padded}, tp={tp_size}")
+
+    global_padding_mask = torch.zeros(total_padded, dtype=torch.bool, device=input_ids.device)
+    offset = 0
+    for seq_len, padded_len in zip(seq_lens, padded_lens, strict=True):
+        global_padding_mask[offset + seq_len : offset + padded_len] = True
+        offset += padded_len
+
+    local_tokens = total_padded // tp_size
+    tp_rank = mpu.get_tensor_model_parallel_rank()
+    return global_padding_mask.view(tp_size, local_tokens)[tp_rank].contiguous()
+
+
 # from megatron.core.transformer.transformer_block import get_num_layers_to_build
 def get_num_layers_to_build(
     config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None
@@ -237,7 +272,27 @@ def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_lis
         [1, dynamic_bs_all, layer_num, topk] to mini_layer_topk_idx_list.
     """
     with torch.no_grad():
-        router_instances_list = RouterReplayHelper.get_micro_batch_router_list(tf_config, vp_rank)
+        expected_router_count = get_moe_num_layers_to_build(tf_config, vp_rank)
+        recorded_router_indices = [
+            idx for idx, router in enumerate(RouterReplay.router_instances) if router.recorded_topk_idx is not None
+        ]
+        if len(recorded_router_indices) == expected_router_count:
+            tf_config._verl_router_replay_local_router_indices = recorded_router_indices
+            router_instances_list = [RouterReplay.router_instances[idx] for idx in recorded_router_indices]
+        else:
+            router_instances_list = RouterReplayHelper.get_micro_batch_router_list(tf_config, vp_rank)
+
+        missing = [idx for idx, router in enumerate(router_instances_list) if router.recorded_topk_idx is None]
+        if missing:
+            local_rank_info = get_current_rank_layer_info(tf_config, vp_rank)
+            raise RuntimeError(
+                "router replay RECORD did not capture all local routers: "
+                f"missing_local_positions={missing}, selected={len(router_instances_list)}, "
+                f"expected={expected_router_count}, registry={len(RouterReplay.router_instances)}, "
+                f"recorded_global_indices={recorded_router_indices}, local_layer_range={local_rank_info}, "
+                f"pp_rank={mpu.get_pipeline_model_parallel_rank()}, vp_rank={vp_rank}"
+            )
+
         layers_topk_idx = []
         for router in router_instances_list:
             layers_topk_idx.append(router.recorded_topk_idx.to(torch.uint8))  # dynamic_bs, topk
@@ -327,6 +382,11 @@ def set_router_replay_data(
     Returns:
         None: The function updates internal RouterReplay instances in-place.
     """
+    if layers_topk_idx is None:
+        raise RuntimeError(
+            "router_replay REPLAY requires routed_experts from the preceding RECORD forward."
+        )
+
     with torch.no_grad():
         fp8 = tf_config.fp8
         use_fp8_padding = fp8 in ["e4m3", "hybrid"]
@@ -373,7 +433,11 @@ def set_router_replay_data(
         )  # layer_num, dynamic_bs_all, topk
         local_rank_info = get_current_rank_layer_info(tf_config, vp_rank)
         offset, end = local_rank_info["start"], local_rank_info["end"]
-        router_instances_list = RouterReplayHelper.get_micro_batch_router_list(tf_config, vp_rank)
+        local_router_indices = getattr(tf_config, "_verl_router_replay_local_router_indices", None)
+        if local_router_indices is not None:
+            router_instances_list = [RouterReplay.router_instances[idx] for idx in local_router_indices]
+        else:
+            router_instances_list = RouterReplayHelper.get_micro_batch_router_list(tf_config, vp_rank)
 
         # When dim-0 covers all layers (e.g. R3, or R2 with all-MoE models),
         # index by absolute layer_idx; otherwise (R2 with mixed dense/MoE),
@@ -562,18 +626,18 @@ class RouterReplayHelper:
         Returns:
             list: A contiguous sublist of RouterReplay.router_instances for the local layer range.
         """
-        vp_size = tf_config.virtual_pipeline_model_parallel_size
-        if vp_size is not None:
-            vp_rank = 0 if vp_rank is None else vp_rank
-            offset = 0
-            for pre_vp_stage in range(vp_size):
-                if pre_vp_stage == vp_rank:
-                    break
-                offset += get_moe_num_layers_to_build(tf_config, pre_vp_stage)
-        else:
+        local_rank_info = get_current_rank_layer_info(tf_config, vp_rank)
+        start, end = local_rank_info["start"], local_rank_info["end"]
+        offset = sum(1 for layer_idx in range(start) if is_moe_layer(tf_config, layer_idx))
+        num_layers_to_build = sum(1 for layer_idx in range(start, end) if is_moe_layer(tf_config, layer_idx))
+
+        # Some older Megatron builds only register local router instances in each
+        # PP worker, while Qwen3-Omni currently registers the full PP model in
+        # this process. Support both layouts, but prefer the global layer offset
+        # when the registry is large enough.
+        if len(RouterReplay.router_instances) == num_layers_to_build:
             offset = 0
 
-        num_layers_to_build = get_moe_num_layers_to_build(tf_config, vp_rank)
         router_instances_list = RouterReplay.router_instances[offset : offset + num_layers_to_build]
         return router_instances_list
 
