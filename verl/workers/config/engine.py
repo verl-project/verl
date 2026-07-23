@@ -107,7 +107,7 @@ class EngineConfig(BaseConfig):
     infer_max_token_len_per_gpu: int = None
     infer_micro_batch_size_per_gpu: int = None
     # whether use fuse lm head kernel
-    use_fused_kernels: bool = False
+    use_fused_kernels: bool = True
     # TODO (this may conflict with the one in model config)
     use_remove_padding: bool = True
 

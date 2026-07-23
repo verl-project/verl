@@ -58,7 +58,7 @@ lora_adapter_path: null
 use_liger: False
 
 # whether to use fused kernels.
-use_fused_kernels: False
+use_fused_kernels: True
 
 # fused kernel options.
 fused_kernel_options:
