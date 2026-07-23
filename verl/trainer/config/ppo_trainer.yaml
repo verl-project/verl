@@ -253,6 +253,9 @@ trainer:
       # wait: dropless, wait all trajectories that reach threshold to finish
       max_off_policy_strategy: drop
 
+      # Whether sync trainers replace failed groups that have no trajectories
+      sync_refill_failed_groups: False
+
       # Custom sampler config
       custom_sampler:
 

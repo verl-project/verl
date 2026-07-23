@@ -87,6 +87,7 @@ def test_custom_sampler_skips_builtin_filter_groups_validation():
     assert "train_batch_size" not in sampler.kwargs
     assert "gen_batch_size" not in sampler.kwargs
     assert "max_inflight_gen_batches" not in sampler.kwargs
+    assert "sync_refill_failed_groups" not in sampler.kwargs
 
 
 def test_builtin_filter_groups_uses_default_inflight_limit():
@@ -106,6 +107,49 @@ def test_builtin_filter_groups_forwards_configured_inflight_limit():
     sampler = trainer._build_replay_buffer()
 
     assert sampler.max_inflight_gen_batches == 3
+
+
+def test_builtin_sync_failure_refill_forces_single_prompt_generation():
+    trainer = _trainer_with_filter_groups({"enable": False})
+    trainer.config.trainer.v1.sampler.sync_refill_failed_groups = True
+
+    sampler = trainer._build_replay_buffer()
+
+    assert sampler.sync_refill_failed_groups is True
+    assert sampler.gen_batch_size == 1
+
+
+def test_sync_failure_refill_overrides_dataloader_generation_batch_size():
+    trainer = _trainer_with_filter_groups({"enable": False})
+    trainer.config.trainer.v1.sampler.sync_refill_failed_groups = True
+    trainer.config.data.update(
+        {
+            "train_files": [],
+            "val_files": [],
+            "train_max_samples": -1,
+            "val_max_samples": -1,
+            "dataloader_num_workers": 0,
+            "val_batch_size": 1,
+            "validation_shuffle": False,
+        }
+    )
+    trainer.config.trainer.total_epochs = 1
+    trainer.config.trainer.total_training_steps = None
+    trainer.parameter_sync_step = 1
+    trainer.tokenizer = None
+    trainer.processor = None
+
+    with (
+        patch("verl.trainer.ppo.v1.trainer_base.create_rl_dataset", side_effect=[[{}, {}], [{}]]),
+        patch("verl.trainer.ppo.v1.trainer_base.create_rl_sampler", return_value=None),
+        patch("verl.trainer.ppo.v1.trainer_base.StatefulDataLoader") as dataloader,
+        patch("verl.trainer.ppo.v1.trainer_base.logger.warning") as warning,
+    ):
+        trainer._init_dataloader()
+
+    assert trainer.config.data.gen_batch_size == 1
+    assert dataloader.call_args_list[0].kwargs["batch_size"] == 1
+    warning.assert_any_call("data.gen_batch_size=8 is overridden to 1.")
 
 
 def test_builtin_filter_groups_warns_when_total_generation_limit_is_configured():

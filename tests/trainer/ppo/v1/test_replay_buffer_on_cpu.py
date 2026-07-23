@@ -59,6 +59,7 @@ def _make_rb(
     train_batch_size: int = 2,
     gen_batch_size: int = 1,
     max_inflight_gen_batches: int = 1,
+    sync_refill_failed_groups: bool = False,
 ) -> ReplayBuffer:
     """Construct a ReplayBuffer with defaults that keep generic samples on-policy."""
     replay_buffer_cls = ReplayBuffer if trainer_mode == "sync" else ReplayBufferAsync
@@ -74,6 +75,7 @@ def _make_rb(
         train_batch_size=train_batch_size,
         gen_batch_size=gen_batch_size,
         max_inflight_gen_batches=max_inflight_gen_batches,
+        sync_refill_failed_groups=sync_refill_failed_groups,
     )
 
 
@@ -366,6 +368,33 @@ def test_sample_returns_finished_and_failure_trajectories(tq_init, partition_id)
         _clear_partition(partition_id)
 
 
+def test_sync_failure_without_trajectories_uses_padding_path_by_default(tq_init, partition_id):
+    finished = PromptSpec(uid=_uid(), status="finished", sessions=1)
+    empty_failure = PromptSpec(uid=_uid(), status="failure", sessions=0)
+    _produce(partition_id, [finished, empty_failure]).join_and_check()
+
+    rb = _make_rb()
+    try:
+        batch, metrics = rb.sample(global_steps=0, partition_id=partition_id, batch_size=2)
+
+        assert _uids_of(batch.keys) == {finished.uid}
+        assert metrics == {}
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_sync_all_empty_failures_raise_without_refill(tq_init, partition_id):
+    failures = [PromptSpec(uid=_uid(), status="failure", sessions=0) for _ in range(2)]
+    _produce(partition_id, failures).join_and_check()
+
+    rb = _make_rb()
+    try:
+        with pytest.raises(RuntimeError, match="sync_refill_failed_groups"):
+            rb.sample(global_steps=0, partition_id=partition_id, batch_size=2)
+    finally:
+        _clear_partition(partition_id)
+
+
 def test_sample_prioritizes_smallest_global_steps(tq_init, partition_id):
     """When more prompts are ready than ``batch_size``, sample must hand out the
     oldest ones first (smallest ``global_steps``), leaving the newer surplus."""
@@ -654,6 +683,16 @@ def test_init_rejects_dapo_without_refill_fn():
         _make_rb(filter_groups_metric="acc", refill_fn=None)
 
 
+def test_init_rejects_sync_failure_refill_without_refill_fn():
+    with pytest.raises(ValueError, match="requires refill_fn"):
+        _make_rb(sync_refill_failed_groups=True, refill_fn=None)
+
+
+def test_init_rejects_batched_sync_failure_refill():
+    with pytest.raises(ValueError, match="requires gen_batch_size=1"):
+        _make_rb(sync_refill_failed_groups=True, refill_fn=lambda _n: None, gen_batch_size=2)
+
+
 def test_validation_never_drops_terminal_groups(tq_init):
     partition_id = "val"
     _clear_partition(partition_id)
@@ -672,6 +711,25 @@ def test_validation_never_drops_terminal_groups(tq_init):
     try:
         batch, metrics = rb.sample(global_steps=5, partition_id=partition_id, batch_size=2)
         assert _uids_of(batch.keys) == {stale_dapo.uid, stale_failure.uid}
+        assert refiller.calls == []
+        assert metrics == {}
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_validation_ignores_sync_failure_refill(tq_init):
+    partition_id = "val"
+    _clear_partition(partition_id)
+    finished = PromptSpec(uid=_uid(), status="finished")
+    empty_failure = PromptSpec(uid=_uid(), status="failure", sessions=0)
+    _produce(partition_id, [finished, empty_failure]).join_and_check()
+
+    refiller = FakeRefiller(partition_id, global_steps=1)
+    rb = _make_rb(sync_refill_failed_groups=True, refill_fn=refiller)
+    try:
+        batch, metrics = rb.sample(global_steps=1, partition_id=partition_id, batch_size=2)
+
+        assert _uids_of(batch.keys) == {finished.uid}
         assert refiller.calls == []
         assert metrics == {}
     finally:
@@ -708,6 +766,85 @@ def test_async_failure_refills_exact_missing_count(tq_init, partition_id):
         assert refiller.calls == [1]
         assert metrics["validation/rollout_failure/evicted_samples"] == 1
     finally:
+        _clear_partition(partition_id)
+
+
+def test_sync_failure_refill_replaces_empty_failed_groups(tq_init, partition_id):
+    finished = PromptSpec(uid=_uid(), status="finished")
+    failure = PromptSpec(uid=_uid(), status="failure", sessions=0)
+    _produce(partition_id, [finished, failure]).join_and_check()
+
+    refiller = FakeRefiller(partition_id, global_steps=1)
+    rb = _make_rb(sync_refill_failed_groups=True, refill_fn=refiller)
+    try:
+        batch, metrics = rb.sample(global_steps=1, partition_id=partition_id, batch_size=2)
+        sampled_uids = _uids_of(batch.keys)
+
+        assert len(sampled_uids) == 2
+        assert finished.uid in sampled_uids
+        assert failure.uid not in sampled_uids
+        assert refiller.calls == [1]
+        assert metrics["validation/rollout_failure/evicted_samples"] == 1
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_sync_failure_refill_replaces_multiple_empty_failed_groups(tq_init, partition_id):
+    failures = [PromptSpec(uid=_uid(), status="failure", sessions=0) for _ in range(3)]
+    _produce(partition_id, failures).join_and_check()
+
+    refiller = FakeRefiller(partition_id, global_steps=1)
+    rb = _make_rb(sync_refill_failed_groups=True, refill_fn=refiller, train_batch_size=3)
+    try:
+        batch, metrics = rb.sample(global_steps=1, partition_id=partition_id, batch_size=3)
+
+        assert _uids_of(batch.keys) == set(refiller.produced_uids)
+        assert refiller.calls == [3]
+        assert metrics["validation/rollout_failure/evicted_samples"] == 3
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_sync_failure_refill_keeps_materializable_failed_groups(tq_init, partition_id):
+    finished = PromptSpec(uid=_uid(), status="finished")
+    failure = PromptSpec(uid=_uid(), status="failure", sessions=1)
+    _produce(partition_id, [finished, failure]).join_and_check()
+
+    refiller = FakeRefiller(partition_id, global_steps=1)
+    rb = _make_rb(sync_refill_failed_groups=True, refill_fn=refiller)
+    try:
+        batch, metrics = rb.sample(global_steps=1, partition_id=partition_id, batch_size=2)
+
+        assert _uids_of(batch.keys) == {finished.uid, failure.uid}
+        assert refiller.calls == []
+        assert metrics == {}
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_sync_failure_refill_does_not_drain_unrelated_inflight(tq_init, partition_id):
+    finished = PromptSpec(uid=_uid(), status="finished")
+    empty_failure = PromptSpec(uid=_uid(), status="failure", sessions=0)
+    running = PromptSpec(uid=_uid(), status="running", sessions=0)
+    _produce(partition_id, [finished, empty_failure, running]).join_and_check()
+
+    refiller = FakeRefiller(partition_id, global_steps=1)
+    rb = _make_rb(sync_refill_failed_groups=True, refill_fn=refiller)
+    consumer = SampleConsumer(rb, partition_id, batch_size=1, global_steps=1)
+    try:
+        consumer.start()
+        batch = consumer.result_or_raise(timeout=2)
+
+        assert _uids_of(batch.keys) == {finished.uid}
+        assert refiller.calls == []
+        assert consumer.metrics is not None
+        assert consumer.metrics["validation/rollout_failure/evicted_samples"] == 1
+        remaining = tq.kv_list(partition_id=partition_id).get(partition_id, {})
+        assert running.uid in remaining
+    finally:
+        if consumer.is_alive():
+            _set_prompt_status(partition_id, running.uid, "finished", global_steps=1)
+            consumer.join(timeout=2)
         _clear_partition(partition_id)
 
 
@@ -860,6 +997,35 @@ def test_sync_dapo_refills_twice_and_clears_surplus(tq_init, partition_id):
         assert surplus_uid not in remaining
         assert _trajectory_key(surplus_uid, 0) not in remaining
         assert _trajectory_key(surplus_uid, 1) not in remaining
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_sync_dapo_and_failure_refill_credits_are_combined(tq_init, partition_id):
+    all_same = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[0.0, 0.0])
+    empty_failure = PromptSpec(uid=_uid(), status="failure", sessions=0)
+    mixed = PromptSpec(uid=_uid(), status="finished", sessions=2, rewards=[0.0, 1.0])
+    _produce(partition_id, [all_same, empty_failure, mixed]).join_and_check()
+
+    refiller = FakeRefiller(partition_id, global_steps=1, sessions=2, rewards=[0.0, 1.0])
+    rb = _make_rb(
+        refill_fn=refiller,
+        filter_groups_metric="acc",
+        sync_refill_failed_groups=True,
+        train_batch_size=3,
+    )
+    try:
+        batch, metrics = rb.sample(global_steps=1, partition_id=partition_id, batch_size=3)
+        sampled_uids = _uids_of(batch.keys)
+
+        assert len(sampled_uids) == 3
+        assert mixed.uid in sampled_uids
+        assert all_same.uid not in sampled_uids
+        assert empty_failure.uid not in sampled_uids
+        assert refiller.calls == [3]
+        assert metrics["validation/filter_groups/evicted_samples"] == 1
+        assert metrics["validation/rollout_failure/evicted_samples"] == 1
+        assert metrics["validation/filter_groups/discarded_surplus_samples"] == 1
     finally:
         _clear_partition(partition_id)
 

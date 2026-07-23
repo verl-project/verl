@@ -100,15 +100,16 @@ class ReplayBuffer:
     The matrix applies to the training partition, in which ``k`` is the number of prompts to evict.
     Validation treats all terminal groups as sampleable
 
-    |   trainer mode   |   drop   |               DAPO               |  failure |
-    | ---------------- | -------- | -------------------------------- | -------- |
-    |       sync       |   NO-OP  |    Evict ``k``; refill ``2k``    |   NO-OP  |
-    |      async       |       All the same: Evict ``k``; refill ``k``.         |
+    |   trainer mode   |   drop   |               DAPO               |            failure            |
+    | ---------------- | -------- | -------------------------------- | ----------------------------- |
+    |       sync       |   NO-OP  |    Evict ``k``; refill ``2k``    |  NO-OP or opt-in refill ``k`` |
+    |      async       |              All the same: Evict ``k``; refill ``k``.                       |
 
     In sync mode, DAPO is opt-in and trades generation time for training stability. Each ``k`` evictions add
     ``2k`` logical refill credits, but prompts are fetched only as bounded pending/running slots become available.
     Terminal groups are filtered while other requests remain in flight. Once enough groups are sampleable, inflight
-    requests are drained and discarded. Failure groups retain the standard sync behavior and remain sampleable.
+    requests are drained and discarded. By default, failed groups remain sampleable and missing trajectories are
+    padded downstream. Setting ``sync_refill_failed_groups=True`` allows refilling failed samples.
     In async mode, ``num_warmup_batches`` absorbs retry cost, so all three paths refill exactly ``k`` prompts.
 
     Args:
@@ -124,6 +125,7 @@ class ReplayBuffer:
         train_batch_size (int, optional): Prompt count represented by one Sync DAPO in-flight batch.
         gen_batch_size (int, optional): Dataloader fetch granularity for refill dispatches.
         max_inflight_gen_batches (int): Maximum Sync DAPO prompt batches concurrently pending or running.
+        sync_refill_failed_groups (bool): Whether sync sampling replaces failed groups with no trajectories.
     """
 
     def __init__(
@@ -139,6 +141,7 @@ class ReplayBuffer:
         train_batch_size: int | None = None,
         gen_batch_size: int | None = None,
         max_inflight_gen_batches: int = 1,
+        sync_refill_failed_groups: bool = False,
     ):
         self.trainer_mode = trainer_mode
         self.trainer_config = trainer_config
@@ -151,6 +154,7 @@ class ReplayBuffer:
         self.train_batch_size = train_batch_size
         self.gen_batch_size = gen_batch_size
         self.max_inflight_gen_batches = max_inflight_gen_batches
+        self.sync_refill_failed_groups = sync_refill_failed_groups
 
         assert isinstance(self.max_off_policy_threshold, int) and self.max_off_policy_threshold > 0, (
             f"Invalid max off policy threshold: {self.max_off_policy_threshold}, must be an integer greater than 0"
@@ -160,6 +164,8 @@ class ReplayBuffer:
         )
         if self.filter_groups_metric is not None and self.refill_fn is None:
             raise ValueError("Group filtering (filter_groups_metric) requires refill_fn to replace evicted groups")
+        if self.sync_refill_failed_groups and self.refill_fn is None:
+            raise ValueError("sync_refill_failed_groups requires refill_fn to replace failed groups")
         self._validate_mode_config()
         # partition_id => {key: tag}
         self.partitions: dict[str, dict[str, dict]] = defaultdict(dict)
@@ -176,6 +182,8 @@ class ReplayBuffer:
         if self.filter_groups_metric is not None:
             if not isinstance(self.max_inflight_gen_batches, int) or self.max_inflight_gen_batches <= 0:
                 raise ValueError("max_inflight_gen_batches must be a positive integer")
+        if self.sync_refill_failed_groups and self.gen_batch_size != 1:
+            raise ValueError("sync_refill_failed_groups requires gen_batch_size=1")
 
     def _sync_metadata_from_transfer_queue(self):
         """Sync the metadata from TransferQueue."""
@@ -302,7 +310,11 @@ class ReplayBuffer:
             return set(), set(), set(), Counter()
 
         dapo_uids, dapo_counts = self._dapo_filtered_keys(partition_id)
-        return set(), dapo_uids, set(), dapo_counts
+        failed_uids = set()
+        if self.sync_refill_failed_groups:
+            materializable_uids = {key.split("_")[0] for key in self.partitions[partition_id]}
+            failed_uids = self.failure_keys[partition_id] - materializable_uids
+        return set(), dapo_uids, failed_uids, dapo_counts
 
     def _sampleable_terminal_keys(
         self,
@@ -422,6 +434,7 @@ class ReplayBuffer:
             self._sync_metadata_from_transfer_queue()
 
             eviction_reasons = self._terminal_eviction_reasons(global_steps, partition_id)
+            failed_count = len(eviction_reasons[2])
             evicted_uids, stale_count, dapo_count, metrics = self._evict_terminal_groups(
                 global_steps, partition_id, eviction_reasons
             )
@@ -432,13 +445,17 @@ class ReplayBuffer:
             has_enough_samples = len(sampleable_keys) >= batch_size
             inflight_count = len(self.pending_keys[partition_id]) + len(self.running_keys[partition_id])
 
+            if not dapo_enabled and failed_count > 0 and not has_enough_samples:
+                self.refill_fn(failed_count)
+                continue
+
             if dapo_enabled:
                 if has_enough_samples:
                     # Stop speculative dispatch, then drain requests already running under this policy version.
                     draining = True
                     refill_credit = 0
-                elif not draining and dapo_count > 0:
-                    refill_credit += 2 * dapo_count
+                elif not draining:
+                    refill_credit += 2 * dapo_count + failed_count
 
                 if not draining and refill_credit > 0:
                     available_slots = max(0, max_inflight_prompts - inflight_count)
@@ -468,6 +485,12 @@ class ReplayBuffer:
 
             last_debug_time = self._wait_for_next_poll(partition_id, last_debug_time)
 
+        selected_uids = set(selected_prompt_uids)
+        if partition_id != "val" and not any(key.split("_")[0] in selected_uids for key in partition_snapshot):
+            message = "Sync replay buffer selected terminal groups with no materializable trajectories."
+            if not self.sync_refill_failed_groups:
+                message += " Enable trainer.v1.sampler.sync_refill_failed_groups to replace failed groups."
+            raise RuntimeError(message)
         return self._materialize_batch(partition_id, selected_prompt_uids, partition_snapshot), eviction_metrics
 
 
