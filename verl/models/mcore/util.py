@@ -744,19 +744,10 @@ def postprocess_bshd_engine(
     return output_new_tensor
 
 
-def _is_mbridge_available():
-    try:
-        import importlib.util
-
-        return importlib.util.find_spec("mbridge") is not None
-    except Exception:
-        return False
-
-
 def build_vlm_attn_mask_thd(input_ids: torch.Tensor, pad_token_id: int = None):
     input_ids_rmpad = input_ids.to_padded_tensor(pad_token_id)
 
-    if is_npu_available and not _is_mbridge_available():
+    if is_npu_available:
         return input_ids_rmpad, None
 
     seqlens_in_batch = input_ids.offsets().diff()
@@ -784,7 +775,7 @@ def build_vlm_attn_mask_bshd(input_ids: torch.Tensor, batch_size: int, pad_token
 
     input_ids_bshd = input_ids.to_padded_tensor(pad_token_id, output_size=(batch_size, max_seqlen))
 
-    if is_npu_available and not _is_mbridge_available():
+    if is_npu_available:
         return input_ids_bshd, None
 
     attention_mask = torch.zeros_like(input_ids_bshd, dtype=torch.bool)
