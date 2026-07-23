@@ -24,6 +24,7 @@ from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_class_from_fqn
+from verl.utils.logging_utils import configure_verl_logging
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -132,6 +133,8 @@ class TaskRunnerV1:
 
     def run(self, config: DictConfig):
         """Run the PPO training process."""
+        configure_verl_logging()
+
         import transfer_queue as tq
 
         from verl.trainer.ppo.v1 import get_trainer_cls
