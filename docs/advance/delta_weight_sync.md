@@ -63,20 +63,22 @@ The ``delta_sharded`` backend plugs into the standard checkpoint-engine flow (``
 ``CheckpointEngineWorker``), so they work with any trainer that drives weight sync through the
 checkpoint engine (including the V1 ``separate_async`` trainer).
 
-- **Export contract**: two backend exports, picked by phase. The seed sync consumes
-  ``get_per_tensor_param_shard()`` — ``(name, local_shard, ShardSpec)`` per local parameter; every
-  steady sync consumes ``get_per_tensor_param_delta_shard()`` — ``(name, delta_idx, delta_val,
-  ShardSpec)``, the shard-local coordinates and values of the elements that changed since the
-  previous export. The spec (see :mod:`verl.workers.engine.spec`) describes the shard's placement
-  declaratively (DeviceMesh + Placements), and the engine derives the flat offset, gather group,
-  and contributing rank itself. All layout **and diff** knowledge stays on the trainer side; the
-  engine only converts coordinates, gathers and ships.
+- **Export contract**: the delta engine consumes FINAL HF-coordinate payloads; everything
+  backend-specific — the weight→HF naming, the to-HF conversion, the diff and its base — lives on
+  the backend side. The **seed** (first sync) streams the backend's existing full export
+  ``get_per_tensor_param()`` over the values-only wire: every backend already knows how to assemble
+  and convert its own full tensors (FSDP all-gather, veomni expert restack, Megatron TP/PP fusion),
+  so the seed inherits all of that for free and trainer resume works by construction. After the
+  seed the backend pins its shards (``prime_delta_snapshots``); every **steady** sync consumes
+  ``get_per_tensor_param_delta_shard()`` — per-parameter entries ``(slots, dtype_str, counts,
+  hf_idx, hf_val, gather_group)`` whose coordinates are already final HF coordinates. The engine
+  only batches, gathers, buckets and ships.
 - **Diff (backend-owned)**: the default strategy (shared by the FSDP and veomni backends via
-  ``spec.delta_shard_export``) byte-diffs each rank's **own shard** against a pinned-CPU snapshot
-  refreshed on every export (no rank holds a full-model snapshot). The comparison is bit-exact
-  (integer view inequality), so the reconstruction is lossless by construction — no thresholds, no
-  drift. A backend that already keeps the previous step's weights (e.g. Decoupled PPO) can diff
-  against that checkpoint instead and skip the dedicated snapshot entirely.
+  ``verl.workers.engine.utils.hf_delta_export``) byte-diffs each rank's **own shard** against its
+  pinned-CPU snapshot, refreshed on every export (no rank holds a full-model snapshot). The
+  comparison is bit-exact (integer view inequality), so the reconstruction is lossless by
+  construction — no thresholds, no drift. A backend that already keeps the previous step's weights
+  (e.g. Decoupled PPO) can diff against that checkpoint instead and skip the dedicated snapshot.
 - **Sparse gather + encoding**: only the changed ``(position, value)`` pairs are gathered to rank 0
   (batched, variable-length), translated to full-tensor coordinates, and packed as a shared
   ``(positions, values)`` payload plus a per-parameter manifest (``indices`` encoding: int32

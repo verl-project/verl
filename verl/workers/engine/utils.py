@@ -157,3 +157,152 @@ def postprocess_batch_func(output_lst, indices, data: TensorDict):
     }
 
     return output
+
+
+# ---- sharded-delta HF export (backend side) --------------------------------
+# The delta checkpoint engine consumes FINAL HF-coordinate deltas; everything
+# backend-specific -- the weight->HF naming, the to-HF conversion, the diff and
+# its snapshot -- happens here, on the backend side of the contract. The engine
+# keeps only collectives, bucketing and the wire. Backend-SPECIFIC converters
+# (e.g. veomni's MOE param handlers) stay in their backend's own utils; these
+# helpers are the converter-agnostic executors.
+
+
+def _prodshape(shape) -> int:
+    n = 1
+    for x in shape:
+        n *= int(x)
+    return n
+
+
+def _convert_row_to_hf(name, spec, r: int, pos_in_row, vals, ref):
+    """NaN-probe one dim-0 row through the spec's converter: scatter the row's
+    (within-row position, value) pairs into a NaN-filled row buffer, run
+    ``to_hf_chunk`` on it, and extract each output slot's surviving positions and
+    values (the converter is a pure permutation, so non-NaN survivors are exactly
+    the input pairs in final HF coordinates). Returns
+    ``[(slot_offset_in_row, idx_int32, val), ...]``, skipping empty slots."""
+    full_shape = spec.full_shape
+    inner = max(_prodshape(full_shape[1:]), 1)
+    slots_per_row = len(spec.hf_slots) // int(full_shape[0])
+    buf = torch.full((inner,), float("nan"), dtype=ref.dtype, device=ref.device)
+    buf[pos_in_row] = vals
+    outs = spec.to_hf_chunk(int(r), buf.view(1, *full_shape[1:]))
+    assert len(outs) == slots_per_row, (
+        f"{name}: to_hf_chunk gave {len(outs)} outputs/row, slot table expects {slots_per_row}"
+    )
+    res = []
+    for s_i, (_hf_name, hf_tensor) in enumerate(outs):
+        fl = hf_tensor.reshape(-1)
+        p_ = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
+        if p_.numel():
+            res.append((s_i, p_.to(torch.int32), fl[p_]))
+    return res
+
+
+def _hf_entry_converter(name, spec, place, lidx, lval):
+    """Turn one converter param's shard-local delta into its final HF-coordinate
+    entry ``(slots, dtype_str, counts, idx_concat, val_concat)``: only the touched
+    dim-0 rows go through the NaN probe; every rank enumerates the same slot list
+    (zero counts when untouched) so the engine's batched gather stays aligned."""
+    from .spec import translate_flat_indices
+
+    full_shape = spec.full_shape
+    inner = max(_prodshape(full_shape[1:]), 1)
+    K = len(spec.hf_slots)
+    slots_per_row = K // int(full_shape[0])
+    counts = torch.zeros(K, dtype=torch.int64)
+    idx_pieces: list = []
+    val_pieces: list = []
+    if lidx.numel():
+        g = translate_flat_indices(lidx, place)
+        order = torch.argsort(g)
+        g, gv = g[order], lval[order]
+        rows = torch.div(g, inner, rounding_mode="floor")
+        urows, rcounts = torch.unique_consecutive(rows, return_counts=True)
+        pos = 0
+        for r, cnt in zip(urows.tolist(), rcounts.tolist(), strict=False):
+            sel_g = g[pos : pos + cnt]
+            sel_v = gv[pos : pos + cnt]
+            pos += cnt
+            for s_i, pidx, pval in _convert_row_to_hf(name, spec, r, sel_g - r * inner, sel_v, lval):
+                counts[int(r) * slots_per_row + s_i] = pidx.numel()
+                idx_pieces.append(pidx)
+                val_pieces.append(pval)
+    if idx_pieces:
+        my_idx = torch.cat(idx_pieces)
+        my_val = torch.cat(val_pieces)
+    else:
+        my_idx = torch.empty(0, dtype=torch.int32, device=lval.device)
+        my_val = torch.empty(0, dtype=lval.dtype, device=lval.device)
+    return spec.hf_slots, str(lval.dtype).replace("torch.", ""), counts, my_idx, my_val
+
+
+def _hf_entry_identity(name, spec, place, lidx, lval):
+    """Identity profile: the param IS its own single slot (weight name == HF name)
+    -- translate the shard-local delta to within-param coordinates. int32
+    positions: the wire is int32 anyway and the engine asserts the range."""
+    from .spec import translate_flat_indices
+
+    gidx = (translate_flat_indices(lidx, place) if lidx.numel() else lidx).to(torch.int32)
+    counts = torch.zeros(1, dtype=torch.int64)
+    counts[0] = int(gidx.numel())
+    return [(name, tuple(spec.full_shape))], str(lval.dtype).replace("torch.", ""), counts, gidx, lval
+
+
+_NO_SLOTS_MSG = (
+    "converter specs without an enumerable slot table (hf_slots) are not supported by "
+    "the sender-side HF delta export; rewrite the converter as a dim-0-separable "
+    "to_hf_chunk + hf_slots (see #7060)"
+)
+
+
+def hf_delta_export(gen, snaps: dict):
+    """STEADY export: wrap a raw ``(name, local_shard, spec)`` exporter into final
+    HF-coordinate delta entries ``(slots, dtype_str, counts, hf_idx, hf_val,
+    gather_group)`` -- diff against the pinned snapshot, refresh it, convert. The
+    engine consumes these entries verbatim (batch -> gather -> wire); no spec, no
+    placement and no conversion cross the boundary. Requires a prior seed pass."""
+    from verl.checkpoint_engine.delta_sync.sparse_gather import shard_delta_indices
+
+    from .spec import BlockPlacement, derive_placement
+
+    for name, local, spec in gen:
+        local = local.detach().contiguous().view(-1)
+        snap = snaps.get(name)
+        assert snap is not None and snap.numel() == local.numel(), (
+            f"{name}: no seed snapshot for this shard; run the seed export first"
+        )
+        place, contributes, pg = derive_placement(spec)
+        if contributes:
+            base = snap.to(local.device, non_blocking=True)
+            lidx, lval = shard_delta_indices(local, base, 0)
+        else:
+            # replicated param owned by another rank; empty delta keeps lockstep.
+            lidx = torch.empty(0, dtype=torch.int64, device=local.device)
+            lval = torch.empty(0, dtype=local.dtype, device=local.device)
+        snap.copy_(local, non_blocking=True)
+        if spec.to_hf_chunk is not None and isinstance(place, BlockPlacement) and spec.hf_slots is not None:
+            entry = _hf_entry_converter(name, spec, place, lidx, lval)
+        elif spec.to_hf_chunk is not None:
+            raise NotImplementedError(f"{name}: {_NO_SLOTS_MSG}")
+        else:
+            entry = _hf_entry_identity(name, spec, place, lidx, lval)
+        yield (*entry, pg)
+
+
+def prime_delta_snapshots(gen, snaps: dict) -> None:
+    """Pin each rank's current shards to CPU as the steady diff base. Run right
+    after the seed's full-weight sync: weights do not move during the sync, so
+    the snapshots equal exactly what the rollout side received."""
+    from verl.utils.device import is_cuda_available
+
+    for name, local, _spec in gen:
+        local = local.detach().contiguous().view(-1)
+        snap = snaps.get(name)
+        if snap is None or snap.numel() != local.numel():
+            # pinned host memory needs an accelerator context; degrade gracefully
+            # on CPU-only environments (unit tests) where pinning is meaningless.
+            snap = torch.empty_like(local, device="cpu", pin_memory=is_cuda_available)
+            snaps[name] = snap
+        snap.copy_(local, non_blocking=True)

@@ -63,7 +63,7 @@ def apply_delta(model: torch.nn.Module, named_tensors: Iterable[tuple[str, torch
     spec = json.loads(bytes(tensors["__delta_spec__"].cpu().numpy().tobytes()).decode())
     values = tensors["__values__"]
     positions = tensors.get("__positions__")
-    if positions is None:  # dense flush (first sync) carries values only
+    if positions is None:  # values-only flush (the seed) carries no positions
         positions = torch.empty(0, dtype=torch.uint8, device=values.device)
 
     got = _checksum(positions, values)

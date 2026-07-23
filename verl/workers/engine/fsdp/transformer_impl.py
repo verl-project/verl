@@ -850,23 +850,32 @@ class FSDPEngine(BaseEngine):
     def get_per_tensor_param_shard(self, **kwargs):
         """Like :meth:`get_per_tensor_param`, but yields each rank's *local* FSDP shard
         ``(name, local_flat_shard_bf16, ShardSpec)`` instead of all-gathering the full
-        tensor -- the delta engine's SEED sync. Exporting also refreshes the pinned-CPU
-        delta snapshots (these weights go on the wire, so the next delta diffs against
-        them)."""
-        from ..spec import snapshot_shard_export
+        tensor. Pure export, no side effects -- delta snapshot upkeep lives entirely in
+        :meth:`get_per_tensor_param_delta_shard`."""
+        return self._raw_shard_export(), None
+
+    def prime_delta_snapshots(self) -> None:
+        """Pin this rank's current shards to CPU as the delta diff base. Called right
+        after the seed's full-weight sync: weights do not move during the sync, so
+        the snapshots equal exactly what the rollout just received and the first
+        :meth:`get_per_tensor_param_delta_shard` diff is correct."""
+        from ..utils import prime_delta_snapshots
 
         self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
-        return snapshot_shard_export(self._raw_shard_export(), self._delta_shard_snap), None
+        prime_delta_snapshots(self._raw_shard_export(), self._delta_shard_snap)
 
     def get_per_tensor_param_delta_shard(self, **kwargs):
-        """Yield ``(name, delta_idx, delta_val, ShardSpec)`` -- each shard's changed
-        elements since the previous export, diffed against this engine's pinned-CPU
-        snapshots (see :func:`verl.workers.engine.spec.delta_shard_export`). The seed
-        export must have run first."""
-        from ..spec import delta_shard_export
+        """Yield the delta engine's steady payloads -- FINAL HF-coordinate entries
+        ``(slots, dtype_str, counts, hf_idx, hf_val, gather_group)`` per parameter.
+        Weight->HF naming, to-HF conversion, diff and snapshot are all this
+        backend's business (converter-agnostic executors in
+        :mod:`verl.workers.engine.utils`; backend-specific converters are declared
+        on the specs by :meth:`_raw_shard_export`). Requires a prior
+        :meth:`prime_delta_snapshots` call."""
+        from ..utils import hf_delta_export
 
         self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
-        return delta_shard_export(self._raw_shard_export(), self._delta_shard_snap), None
+        return hf_delta_export(self._raw_shard_export(), self._delta_shard_snap), None
 
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)

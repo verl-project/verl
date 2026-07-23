@@ -14,7 +14,6 @@
 
 
 import logging
-from collections.abc import Generator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence
 
@@ -695,24 +694,10 @@ class VeOmniEngine(FSDPEngine):
 
         return _gen()
 
-    def get_per_tensor_param_shard(self, **kwargs) -> tuple[Generator, None]:
-        """Yield each rank's *local* shard ``(name, local_shard, ShardSpec)`` -- the
-        delta engine's SEED sync (see :meth:`_raw_shard_export` for the placement
-        semantics). Exporting also refreshes the pinned-CPU delta snapshots."""
-        from ..spec import snapshot_shard_export
-
-        self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
-        return snapshot_shard_export(self._raw_shard_export(), self._delta_shard_snap), None
-
-    def get_per_tensor_param_delta_shard(self, **kwargs) -> tuple[Generator, None]:
-        """Yield ``(name, delta_idx, delta_val, ShardSpec)`` -- each shard's changed
-        elements since the previous export, diffed against this engine's pinned-CPU
-        snapshots (see :func:`verl.workers.engine.spec.delta_shard_export`). The seed
-        export must have run first."""
-        from ..spec import delta_shard_export
-
-        self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
-        return delta_shard_export(self._raw_shard_export(), self._delta_shard_snap), None
+    # get_per_tensor_param_shard / get_per_tensor_param_delta_shard are inherited
+    # from FSDPEngine -- they only depend on _raw_shard_export (overridden above),
+    # the HF conversion executors are shared (see verl.workers.engine.utils) and
+    # this backend's converters ride the specs.
 
     def get_per_tensor_param(self, **kwargs):
         load_veomni_model_to_gpu(self.module)
