@@ -2064,6 +2064,99 @@ def compute_policy_loss_cispo(
     return pg_loss, pg_metrics
 
 
+@register_policy_loss("topr")
+def compute_policy_loss_topr(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "seq-mean-token-mean",
+    config: Optional[ActorConfig] = None,
+    rollout_is_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Compute the policy loss for TOPR (Tapered Off-Policy REINFORCE).
+
+    See https://arxiv.org/abs/2503.14286 for more details.
+
+    TOPR treats sequences asymmetrically by advantage sign. Positive-advantage sequences are
+    reinforced with unit weight (no importance correction). Negative-advantage sequences are
+    weighted by the sequence-level importance ratio pi_theta(y|x) / pi_old(y|x) tapered to
+    ``[topr_negative_ratio_lower, topr_negative_ratio_upper]`` (canonically ``[0, 1]``), which
+    bounds the update on off-policy negative sequences without zeroing their gradient the way
+    PPO-style clipping does. The taper weight is treated as a constant (stop-gradient), no KL
+    penalty or reference model is needed, and when on-policy (``log_prob == old_log_prob``) the
+    objective reduces to REINFORCE.
+
+    TOPR is a trajectory-level objective: the taper is decided by the sequence-level advantage,
+    so it is intended for outcome/group-based advantage estimators (e.g. grpo, rloo,
+    reinforce_plus_plus) where the advantage is constant within a sequence.
+
+    Args:
+        old_log_prob (torch.Tensor):
+            Log-probabilities of actions under the behavior policy, shape (batch_size, response_length).
+        log_prob (torch.Tensor):
+            Log-probabilities of actions under the current policy, shape (batch_size, response_length).
+        advantages (torch.Tensor):
+            Advantage estimates for each action, shape (batch_size, response_length).
+        response_mask (torch.Tensor):
+            Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
+        loss_agg_mode (str, optional):
+            Unused; TOPR always aggregates with "seq-mean-token-mean", the paper's per-sequence
+            length normalization (kept for the policy-loss interface).
+        config (ActorConfig, optional):
+            Actor config providing ``policy_loss.topr_negative_ratio_lower`` and
+            ``policy_loss.topr_negative_ratio_upper``.
+        rollout_is_weights (torch.Tensor, optional):
+            Optional rollout-correction weights, shape (batch_size, response_length).
+    """
+    assert config is not None
+    assert isinstance(config, ActorConfig)
+    ratio_lower = config.policy_loss.topr_negative_ratio_lower
+    ratio_upper = config.policy_loss.topr_negative_ratio_upper
+
+    negative_approx_kl = log_prob - old_log_prob
+
+    # sequence-level, length-normalized importance ratio (as in GSPO):
+    # r_i(theta) = exp[(1/|y_i|) * sum_t log(pi_theta(y_i,t|x, y_i,<t) / pi_old(y_i,t|x, y_i,<t))]
+    seq_lengths = torch.sum(response_mask, dim=-1).clamp(min=1)
+    seq_log_ratio = torch.sum(negative_approx_kl * response_mask, dim=-1) / seq_lengths
+    seq_ratio = torch.exp(torch.clamp(seq_log_ratio, max=10.0))  # clamp for numerical stability
+
+    # sequence-level advantage sign decides the taper branch (constant per sequence for
+    # outcome/group-based estimators)
+    seq_advantages = torch.sum(advantages * response_mask, dim=-1) / seq_lengths
+
+    # asymmetric taper: unit weight for positive-advantage sequences, tapered importance
+    # weight for negative-advantage sequences; stop-gradient through the weight
+    taper_weights = torch.where(
+        seq_advantages >= 0,
+        torch.ones_like(seq_ratio),
+        torch.clamp(seq_ratio, min=ratio_lower, max=ratio_upper),
+    ).detach()
+
+    # REINFORCE surrogate: gradient is -taper_weight * A * grad log pi
+    pg_losses = -advantages * log_prob * taper_weights.unsqueeze(-1)
+
+    # Apply rollout correction weights if provided
+    if rollout_is_weights is not None:
+        pg_losses = pg_losses * rollout_is_weights
+
+    # for TOPR, we need to aggregate the loss at the sequence level (seq-mean-token-mean),
+    # matching the paper's per-sequence length normalization (as gspo/sapo do)
+    pg_loss = agg_loss(
+        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode="seq-mean-token-mean", **config.global_batch_info
+    )
+
+    ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+    negative_seq_mask = (seq_advantages < 0).float()
+    pg_metrics = {
+        "actor/ppo_kl": ppo_kl.detach().item(),
+        "actor/topr_negative_seq_frac": negative_seq_mask.mean().detach().item(),
+        "actor/topr_taper_weight_mean": taper_weights.mean().detach().item(),
+    }
+    return pg_loss, pg_metrics
+
+
 def compute_entropy_loss(logits, response_mask, loss_agg_mode: str = "token-mean"):
     """Compute categorical entropy loss (For backward compatibility)
 
