@@ -113,6 +113,13 @@ actor_rollout_ref:
           level: level0
           analysis: true
           discrete: false
+          schedule:
+            _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+            skip_first: 0
+            wait: 0
+            warmup: 0
+            active: 0
+            repeat: 0
         torch:
           _target_: verl.utils.profiler.config.TorchProfilerToolConfig
           contents: []
@@ -219,6 +226,13 @@ actor_rollout_ref:
           level: level0
           analysis: true
           discrete: false
+          schedule:
+            _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+            skip_first: 0
+            wait: 0
+            warmup: 0
+            active: 0
+            repeat: 0
         torch:
           _target_: verl.utils.profiler.config.TorchProfilerToolConfig
           contents: []
@@ -574,6 +588,13 @@ critic:
         level: level0
         analysis: true
         discrete: false
+        schedule:
+          _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+          skip_first: 0
+          wait: 0
+          warmup: 0
+          active: 0
+          repeat: 0
       torch:
         _target_: verl.utils.profiler.config.TorchProfilerToolConfig
         contents: []

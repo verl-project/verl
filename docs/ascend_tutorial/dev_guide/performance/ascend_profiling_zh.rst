@@ -61,6 +61,10 @@ Last updated: 07/13/2026.
 
 -  analysis: 是否启用自动数据解析。
 -  discrete: 是否使用离散模式。
+-  schedule: 可选的 ``torch_npu.profiler.schedule`` 配置（``skip_first``/``wait``/``warmup``/``active``/``repeat``）。
+   仅当 ``active > 0`` 时生效；生效后 verl 会在每个 mini-batch 调用 ``profiler.step()`` 推进 schedule。
+   ``active <= 0`` 时退化为连续采集（start 到 stop 之间全程采集）。该配置仅作用于训练 update 循环
+   （Actor RL update / SFT），对 rollout 侧无效（rollout 请使用 ``profile_token_start``/``profile_token_end``）。
 -  profile_token_start：仅在 rollout role 下生效，用于指定 rollout 解码阶段的采集起始 response token；参数合法时生效（从 0 开始，满足 ``profile_token_end > profile_token_start``，且区间在 response 长度内）。
 -  profile_token_end：仅在 rollout role 下生效，用于指定 rollout 解码阶段的采集结束 response token（右边界不包含）；参数合法时生效（从 0 开始，满足 ``profile_token_end > profile_token_start``，且区间在 response 长度内）。
 
@@ -92,6 +96,34 @@ Last updated: 07/13/2026.
                   npu:
                      discrete: True
                      contents: [npu, cpu]  # 控制采集列表，默认cpu、npu，可配置memory、shapes、module等
+
+按 mini-batch schedule 采集（连续模式）
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+长 update 循环里通常不需要采集每一个 mini-batch。配置 ``schedule`` 后，verl 会按
+``wait/warmup/active/repeat`` 只记录部分 mini-batch，减小数据量并保留稳态行为：
+
+.. code:: yaml
+
+      global_profiler:
+         tool: npu
+         steps: [1, 2, 5]
+         save_path: ./outputs/profile
+      actor_rollout_ref:
+         actor:
+            profiler:
+               enable: True
+               all_ranks: True
+               tool_config:
+                  npu:
+                     discrete: False  # schedule 仅在连续模式下生效
+                     contents: [npu, cpu]
+                     schedule:
+                        skip_first: 1  # 跳过第一个 mini-batch
+                        wait: 1        # 每个周期开始先空转 1 个 mini-batch
+                        warmup: 1      # 预热 1 个 mini-batch（打点但不落盘）
+                        active: 3      # 正式采集 3 个 mini-batch
+                        repeat: 2      # 重复 2 个周期后停止采集
 
 训练和推理阶段分离
 ~~~~~~~~~~~~~~~~~~~~

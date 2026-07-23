@@ -23,6 +23,7 @@ from verl.utils.profiler.profile import DistProfiler
 class TestNPUProfilerInitialization(unittest.TestCase):
     def setUp(self):
         NPUProfiler._define_count = 0
+        NPUProfiler._active_prof = None
 
     def test_init_with_default_config(self):
         tool_config = NPUToolConfig()
@@ -58,6 +59,7 @@ class TestNPUProfilerInitialization(unittest.TestCase):
 class TestNPUProfilerStart(unittest.TestCase):
     def setUp(self):
         NPUProfiler._define_count = 0
+        NPUProfiler._active_prof = None
         self.config = ProfilerConfig(enable=True, ranks=[0], tool="npu")
         self.tool_config = NPUToolConfig(discrete=False)
 
@@ -97,6 +99,7 @@ class TestNPUProfilerStart(unittest.TestCase):
 class TestNPUProfilerStartStopInteraction(unittest.TestCase):
     def setUp(self):
         NPUProfiler._define_count = 0
+        NPUProfiler._active_prof = None
         self.config = ProfilerConfig(enable=True, ranks=[0], tool="npu")
         self.tool_config = NPUToolConfig(discrete=False)
 
@@ -140,6 +143,7 @@ class TestNPUProfilerStep(unittest.TestCase):
 
     def setUp(self):
         NPUProfiler._define_count = 0
+        NPUProfiler._active_prof = None
         self.config = ProfilerConfig(enable=True, ranks=[0], tool="npu")
         self.tool_config = NPUToolConfig(discrete=False)
 
@@ -150,23 +154,79 @@ class TestNPUProfilerStep(unittest.TestCase):
         self.assertEqual(NPUProfiler._define_count, 0)
 
     @patch("verl.utils.profiler.mstx_profile.get_npu_profiler")
-    def test_step_after_start_does_not_drive_backend(self, mock_get_profiler):
+    def test_step_after_start_advances_backend(self, mock_get_profiler):
         mock_profile_npu = MagicMock()
         mock_get_profiler.return_value = mock_profile_npu
 
         profiler = DistProfiler(rank=0, config=self.config, tool_config=self.tool_config)
         profiler.start(role="worker")
         profiler.step()
-        # NPU profiler has no step schedule, so step() must not advance the backend.
-        mock_profile_npu.step.assert_not_called()
-        profiler.stop()
-        # stop() still emits the single trailing step/stop on the backend.
+        # Continuous mode still exposes step(); each call advances the process-global backend.
         mock_profile_npu.step.assert_called_once()
+        profiler.stop()
+        # Continuous stop emits one trailing step, then stop.
+        self.assertEqual(mock_profile_npu.step.call_count, 2)
         mock_profile_npu.stop.assert_called_once()
+
+
+class TestNPUProfilerSchedule(unittest.TestCase):
+    def setUp(self):
+        NPUProfiler._define_count = 0
+        NPUProfiler._active_prof = None
+        self.config = ProfilerConfig(enable=True, ranks=[0], tool="npu", save_path="/tmp/test")
+
+    @patch("verl.utils.profiler.mstx_profile.get_npu_profiler")
+    def test_scheduled_profiler_lifecycle(self, mock_get_profiler):
+        from verl.utils.profiler.config import TorchProfilerScheduleConfig
+
+        mock_profile_npu = MagicMock()
+        mock_get_profiler.return_value = mock_profile_npu
+
+        schedule_cfg = TorchProfilerScheduleConfig(wait=1, warmup=1, active=2, repeat=1)
+        tool_config = NPUToolConfig(discrete=False, schedule=schedule_cfg)
+        profiler = DistProfiler(rank=0, config=self.config, tool_config=tool_config)
+
+        profiler.start(role="worker")
+        _, kwargs = mock_get_profiler.call_args
+        self.assertEqual(
+            kwargs["schedule"],
+            {"skip_first": 0, "wait": 1, "warmup": 1, "active": 2, "repeat": 1},
+        )
+        self.assertIs(NPUProfiler._active_prof, mock_profile_npu)
+
+        profiler.step()
+        profiler.step()
+        self.assertEqual(mock_profile_npu.step.call_count, 2)
+
+        # With a schedule, stop must NOT emit an extra implicit step.
+        profiler.stop()
+        self.assertEqual(mock_profile_npu.step.call_count, 2)
+        mock_profile_npu.stop.assert_called_once()
+        self.assertIsNone(NPUProfiler._active_prof)
+
+    @patch("verl.utils.profiler.mstx_profile.get_npu_profiler")
+    def test_active_zero_disables_schedule(self, mock_get_profiler):
+        from verl.utils.profiler.config import TorchProfilerScheduleConfig
+
+        mock_profile_npu = MagicMock()
+        mock_get_profiler.return_value = mock_profile_npu
+
+        schedule_cfg = TorchProfilerScheduleConfig(active=0)
+        tool_config = NPUToolConfig(discrete=False, schedule=schedule_cfg)
+        profiler = DistProfiler(rank=0, config=self.config, tool_config=tool_config)
+
+        profiler.start()
+        _, kwargs = mock_get_profiler.call_args
+        self.assertIsNone(kwargs["schedule"])
+        profiler.stop()
+        # Continuous mode: trailing step on stop.
+        mock_profile_npu.step.assert_called_once()
 
 
 class TestNPUProfilerAnnotate(unittest.TestCase):
     def setUp(self):
+        NPUProfiler._define_count = 0
+        NPUProfiler._active_prof = None
         self.config = ProfilerConfig(enable=True, all_ranks=True, tool="npu")
         self.tool_config = NPUToolConfig(discrete=False)
         self.rank = 0

@@ -94,6 +94,7 @@ def get_npu_profiler(
     analysis: bool,
     role: Optional[str] = None,
     profile_step: Optional[str] = None,
+    schedule: Optional[dict] = None,
 ):
     """Generate and return an NPU profiler object.
 
@@ -112,6 +113,10 @@ def get_npu_profiler(
             The role of the current data collection. Defaults to None.
         profile_step(str, optional):
             The current training step. Defaults to None.
+        schedule (dict, optional):
+            Optional kwargs for ``torch_npu.profiler.schedule``
+            (``wait``/``warmup``/``active``/``repeat``/``skip_first``). When provided, the
+            caller must drive ``prof.step()`` once per mini-batch to advance the schedule.
     """
     if profile_level == "level_none":
         level = torch_npu.profiler.ProfilerLevel.Level_none
@@ -147,7 +152,7 @@ def get_npu_profiler(
     if contents is None or "cpu" in contents:
         activites.append(torch_npu.profiler.ProfilerActivity.CPU)
 
-    prof = torch_npu.profiler.profile(
+    profile_kwargs = dict(
         with_modules=contents is None or "module" in contents,
         with_stack=contents is None or "stack" in contents,
         record_shapes=contents is None or "shapes" in contents,
@@ -156,7 +161,13 @@ def get_npu_profiler(
         on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(profile_save_path, analyse_flag=analysis),
         experimental_config=experimental_config,
     )
-    return prof
+
+    # torch_npu.profiler.schedule drives the wait/warmup/active/repeat state machine
+    # via prof.step(); without it the profiler collects continuously.
+    if schedule:
+        profile_kwargs["schedule"] = torch_npu.profiler.schedule(**schedule)
+
+    return torch_npu.profiler.profile(**profile_kwargs)
 
 
 class NPUProfiler(DistProfiler):
@@ -167,7 +178,7 @@ class NPUProfiler(DistProfiler):
     _define_count = 0
 
     def __init__(self, rank: int, config: ProfilerConfig, tool_config: NPUToolConfig, **kwargs):
-        """Initialize the NsightSystemsProfiler.
+        """Initialize the NPUProfiler.
 
         Args:
             rank (int): The rank of the current process.
@@ -179,11 +190,16 @@ class NPUProfiler(DistProfiler):
         if not tool_config:
             assert not config.enable, "tool_config must be set when profiler is enabled"
         self.discrete: bool = tool_config.discrete
+        self.tool_config = tool_config
         self.profile_npu = None
         self.profile_contents = tool_config.contents
         self.profile_level = tool_config.level
         self.profile_save_path = config.save_path
         self.analysis = tool_config.analysis
+        # Resolved once from config (None => continuous). Not cleared on stop.
+        self._schedule_kwargs = (
+            tool_config.schedule.to_torch_kwargs() if tool_config.schedule and tool_config.schedule.enabled else None
+        )
 
     def start(self, **kwargs):
         role = kwargs.get("role", None)
@@ -200,22 +216,22 @@ class NPUProfiler(DistProfiler):
 
     def stop(self):
         if not self.discrete and NPUProfiler._define_count == 1:
-            self.profile_npu.step()
+            # Continuous mode emits a trailing step to flush the final window; when a
+            # schedule is configured, stepping is driven per mini-batch instead.
             self.profile_npu.stop()
             NPUProfiler._define_count -= 1
 
     def step(self):
-        """No-op per-mini-batch step hook.
+        """Advance the process-global active profiler by one step (per mini-batch).
 
-        The NPU profiler is driven by explicit start/stop calls and is not created with a
-        torch-style ``wait/warmup/active/repeat`` schedule, so there is nothing to advance
-        per mini-batch. It must still be defined here: without it, the dispatcher's
-        ``getattr(self._impl, "step", lambda: None)`` resolves to the inherited
-        ``DistProfiler.step`` (backend impls subclass ``DistProfiler`` but never run its
-        ``__init__``), which then reads dispatcher-only state such as ``_enable`` and raises
-        ``AttributeError``.
+        No-op when no NPU profiler is currently running. Must still be defined here:
+        without it, the dispatcher's ``getattr(self._impl, "step", lambda: None)``
+        resolves to the inherited ``DistProfiler.step`` (backend impls subclass
+        ``DistProfiler`` but never run its ``__init__``), which then reads
+        dispatcher-only state such as ``_enable`` and raises ``AttributeError``.
         """
-        return
+        if self.profile_npu is not None:
+            self.profile_npu.step()
 
     def annotate(self, message: Optional[str] = None, role: Optional[str] = None, **kwargs_outer) -> Callable:
         """Decorate a Worker member function to profile the current rank in the current training step.
@@ -239,14 +255,15 @@ class NPUProfiler(DistProfiler):
                 if not discrete_mode:
                     mark_range = mark_start_range(message=profile_name)
                 else:
-                    profile_npu = get_npu_profiler(
+                    self.profile_npu = get_npu_profiler(
                         contents=self.profile_contents,
                         profile_level=self.profile_level,
                         profile_save_path=self.profile_save_path,
                         analysis=self.analysis,
+                        schedule=self._schedule_kwargs,
                         role=role,
                     )
-                    profile_npu.start()
+                    self.profile_npu.start()
                     mark_range = mark_start_range(message=profile_name)
 
                 result = func(*args, **kwargs_inner)
@@ -255,8 +272,8 @@ class NPUProfiler(DistProfiler):
                     mark_end_range(mark_range)
                 else:
                     mark_end_range(mark_range)
-                    profile_npu.step()
-                    profile_npu.stop()
+                    self.profile_npu.stop()
+                    self.profile_npu = None
 
                 return result
 
