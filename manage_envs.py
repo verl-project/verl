@@ -149,24 +149,6 @@ CONFLICT_SETS: list[set[str]] = [
 # which pins python_full_version >= '3.12').
 PYTHON_VERSION = "3.12"
 
-# Recommended build-time env vars, keyed by extra. `megatron` source-builds
-# apex + TE v2.15. Every other cu130 extra uses prebuilt wheels only (cu130
-# flash-attn, torch / vllm / sglang from the pytorch / PyPI indexes).
-# MAX_JOBS=32 is the floor that succeeds everywhere; bump via e.g.
-# `MAX_JOBS=128 python manage_envs.py sync megatron` on big hosts.
-BUILD_ENV: dict[str, dict[str, str]] = {
-    "megatron": {
-        "MAX_JOBS": "32",
-        "NVTE_FRAMEWORK": "pytorch",
-        "NVTE_BUILD_THREADS_PER_JOB": "4",
-    },
-    # DEFERRED (cu12.9): veomni / nemoautomodel source-build flash-attn 2.8.3
-    # against torch 2.9.1 (no cu129 prebuilt wheel; uv can't fork a 2nd direct
-    # URL, uv#13073). Re-add when that world returns.
-    # "veomni": {"MAX_JOBS": "32"},
-    # "nemoautomodel": {"MAX_JOBS": "32"},
-}
-
 GROUPS: dict[str, list[str]] = {
     "all": ALL_EXTRAS,
     "inference": INFERENCE_BACKENDS,
@@ -231,33 +213,6 @@ def _extra_flags(extras: list[str]) -> list[str]:
     for e in extras:
         flags += ["--extra", e]
     return flags
-
-
-def _build_env(extras: list[str], env_path: Path) -> dict[str, str]:
-    """Merge recommended build-time env vars for the selected extras.
-
-    ``env_path`` is the venv uv builds into (the project ``.venv`` for ``sync`` /
-    ``run`` / ``shell``; the throwaway env for ``prefetch``). For ``megatron`` it
-    also puts the NCCL + cuDNN headers from the pip ``nvidia-*`` wheels on the
-    compiler include path. TransformerEngine's source build auto-discovers most
-    CUDA pip wheels but NOT NCCL (NVIDIA/TransformerEngine#2331), so
-    ``#include "nccl.h"`` (and sometimes ``cudnn.h``) fails on hosts without the
-    system ``libnccl-dev`` / ``libcudnn-dev`` debs. Since ``--no-build-isolation``
-    builds TE inside ``env_path`` (where uv has already installed torch and its
-    transitive ``nvidia-nccl-cu13`` / ``nvidia-cudnn-cu13`` wheels), pointing
-    CPATH there fixes the build offline and keeps NCCL/cuDNN version-matched to
-    torch. It is harmless where the dev debs exist, and the compiler silently
-    ignores CPATH entries that don't exist."""
-    env: dict[str, str] = {}
-    for e in extras:
-        env.update(BUILD_ENV.get(e, {}))
-    if "megatron" in extras:
-        nvidia = env_path / "lib" / f"python{PYTHON_VERSION}" / "site-packages" / "nvidia"
-        includes = [str(nvidia / pkg / "include") for pkg in ("nccl", "cudnn")]
-        for var in ("CPATH", "CPLUS_INCLUDE_PATH"):
-            prev = os.environ.get(var, "")
-            env[var] = os.pathsep.join([*includes, prev]) if prev else os.pathsep.join(includes)
-    return env
 
 
 def _no_install_packages() -> list[str]:
@@ -380,7 +335,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
         *_no_install_flags(),
         *uv_args,
     ]
-    rc = _run(cmd, _build_env(extras, VENV_DIR) or None)
+    rc = _run(cmd)
     if rc == 0:
         print(f"\n.venv ready ({', '.join(extras)}). Activate: source .venv/bin/activate", flush=True)
     return rc
@@ -412,7 +367,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if _no_install_packages():
         cmd.append("--no-sync")
     cmd += ["--", *command]
-    return _run(cmd, _build_env(extras, VENV_DIR) or None)
+    return _run(cmd)
 
 
 def cmd_shell(args: argparse.Namespace) -> int:
@@ -422,7 +377,6 @@ def cmd_shell(args: argparse.Namespace) -> int:
     _validate_combo(extras)
     rc = _run(
         ["uv", "sync", "--python", PYTHON_VERSION, *_extra_flags(extras), *_no_install_flags()],
-        _build_env(extras, VENV_DIR) or None,
     )
     if rc:
         return rc
@@ -483,32 +437,6 @@ def cmd_list(_args: argparse.Namespace) -> int:
     return 0
 
 
-def _purge_stale_uv_git_builds() -> None:
-    """Best-effort: drop leftover CMake build trees from uv's git-source
-    checkouts so a previously *interrupted* source build can't poison this run.
-
-    Packages such as TransformerEngine (pulled in by ``megatron``) write their
-    CMake build tree *inside* the uv git checkout
-    (``$UV_CACHE_DIR/git-v0/checkouts/<repo>/<rev>/build``) and cache absolute
-    toolchain paths in it — notably ``CMAKE_MAKE_PROGRAM`` pointing at the build
-    env's ``bin/ninja``. ``prefetch`` builds in a throwaway env, so once a build
-    is interrupted that cached ninja path dangles and every later attempt dies
-    in CMake's reconfigure with ``Running '.../.venv/bin/ninja' '--version'
-    failed with: no such file or directory`` — even though ninja is installed in
-    the *current* env. Removing the ``build`` dir forces a clean reconfigure
-    against the current toolchain. It is safe: a cached wheel makes uv skip the
-    build entirely, so this only ever affects an actual rebuild, and none of the
-    pinned git sources track a top-level ``build/`` in their tree. Never raises
-    (uv's cache layout is an implementation detail); if it finds nothing, the
-    deterministic env path below still keeps newly-baked paths valid on retry."""
-    cache = Path(os.environ.get("UV_CACHE_DIR") or (Path.home() / ".cache" / "uv"))
-    checkouts = cache / "git-v0" / "checkouts"
-    if not checkouts.is_dir():
-        return
-    for build_dir in checkouts.glob("*/*/build"):
-        shutil.rmtree(build_dir, ignore_errors=True)
-
-
 def cmd_prefetch(args: argparse.Namespace) -> int:
     """Generate ``uv.lock`` and warm the uv cache — first-time / Docker only.
 
@@ -529,8 +457,9 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
     created or touched.
 
     ``uv lock`` reads only ``pyproject.toml`` + the declared
-    ``[tool.uv.dependency-metadata]``, so it triggers NO source build — apex /
-    TE / megatron-core are compiled in step 2, not here.
+    ``[tool.uv.dependency-metadata]``, so it triggers NO source build — the
+    git-sourced megatron-core / mbridge are compiled in step 2, not here (apex /
+    TE / flash-attn / vllm / sglang-kernel ship prebuilt from the wheelhouse).
 
     Use it once after cloning, or in a Docker layer so both the lock and the
     cache ship *inside* the image: bake it as a real layer (no
@@ -578,10 +507,10 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
     # its own empty env makes every sync a pure *append* — it only installs
     # what that combo needs and never removes anything — which also mirrors
     # exactly what a real runtime `uv sync <combo>` does. Only the shared uv
-    # cache (UV_CACHE_DIR) is durable: wheels download once and source builds
-    # (apex / TE) build once, then later combos hardlink them from the cache
-    # instead of rebuilding. Peak disk is one env at a time (each tempdir is
-    # torn down before the next).
+    # cache (UV_CACHE_DIR) is durable: wheels download once and the git-source
+    # builds (megatron-core / mbridge) build once, then later combos hardlink
+    # them from the cache instead of rebuilding. Peak disk is one env at a time
+    # (each tempdir is torn down before the next).
     for combo in combos:
         with tempfile.TemporaryDirectory(prefix="verl-prefetch-") as tmp:
             env_dir = Path(tmp) / ".venv"
@@ -608,7 +537,7 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
                 *_extra_flags(combo),
                 *warm_args,
             ]
-            rc = _run(cmd, {**proj_env, **_build_env(combo, env_dir)})
+            rc = _run(cmd, proj_env)
             if rc:
                 print(f"error: prefetch failed while warming {combo}", file=sys.stderr)
                 return rc

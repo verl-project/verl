@@ -59,7 +59,6 @@
 #
 # Useful build args:
 #
-#     --build-arg MAX_JOBS=128                   # bump for big build hosts
 #     --build-arg CUDA_VERSION=13.0.2            # alternative CUDA dev base
 #     --build-arg UBUNTU_MIRROR=...              # apt mirror (sglang-style)
 #     --build-arg PIP_DEFAULT_INDEX=...          # pip global index URL
@@ -76,13 +75,6 @@ FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS base
 ARG CUDA_VERSION
 ARG TARGETARCH
 ARG DEBIAN_FRONTEND=noninteractive
-
-# Build parallelism for source-built packages (apex / TransformerEngine /
-# megatron-core). 32 is conservative and survives most CI hosts; raise
-# via --build-arg MAX_JOBS=128 on big machines. flash-attn ships as a
-# prebuilt wheel (mjun0812 v0.9.4) and does not honor MAX_JOBS.
-ARG MAX_JOBS=32
-ENV MAX_JOBS=${MAX_JOBS}
 
 # cuDNN / NCCL — see https://developer.nvidia.com/cudnn-downloads
 # These ARGs control the apt deb versions installed below and MUST match
@@ -291,7 +283,9 @@ RUN printf 'verl\n' > README.md
 # syncs the conflict-free runtime combos (vllm+fsdp, vllm+megatron, sglang+fsdp,
 # sglang+megatron, cpu) into throwaway envs purely to fill UV_CACHE_DIR
 # (/root/.cache/uv) with every wheel & built artifact those backends need from
-# uv.lock — apex / TransformerEngine / megatron-core are compiled here, once.
+# uv.lock. The heavy native packages (apex / TransformerEngine / flash-attn /
+# vllm / sglang-kernel) come prebuilt from the verl wheelhouse index, so only
+# the git-sourced megatron-core / mbridge are compiled here, once.
 # The `cu130 dev` scope keeps this image to its torch-2.11 world. (The deferred
 # cu12.9 / torch-2.9.1 world is commented out in pyproject.toml.) It passes
 # --no-install-project, so only deps are cached and this
@@ -343,16 +337,17 @@ FROM prefetch AS final
 # Runtime host compiler — gcc-13 (CUDA 13.0 supports gcc <= 15).
 #
 # `base` pins the default compiler to gcc-10 (mirrors vllm's basic stage), which
-# is fine for the prefetch source builds (apex / TransformerEngine / megatron-core
-# all compile with it). But sglang JIT-compiles its custom kernels (e.g.
-# custom_all_reduce_push) at RUNTIME in C++20, which uses std::bit_cast — a
-# libstdc++ feature that only exists in GCC >= 11. With gcc-10 as nvcc's host
-# compiler that JIT dies with `namespace "std" has no member "bit_cast"`, surfaced
-# by sglang as `Capture cuda graph failed: ninja exited with status 2`. Flip the
-# RUNTIME default to gcc-13 (already present via build-essential). This lives in
-# `final`, DOWNSTREAM of `prefetch`, so it does NOT invalidate the expensive
-# apex/TE/megatron build cache — only this cheap layer rebuilds. The trailing
-# `--version` calls fail the build loudly if gcc-13 is somehow absent.
+# is fine for the prefetch git-source builds (megatron-core / mbridge compile
+# with it; the native backends ship prebuilt from the wheelhouse). But sglang
+# JIT-compiles its custom kernels (e.g. custom_all_reduce_push) at RUNTIME in
+# C++20, which uses std::bit_cast — a libstdc++ feature that only exists in
+# GCC >= 11. With gcc-10 as nvcc's host compiler that JIT dies with `namespace
+# "std" has no member "bit_cast"`, surfaced by sglang as `Capture cuda graph
+# failed: ninja exited with status 2`. Flip the RUNTIME default to gcc-13
+# (already present via build-essential). This lives in `final`, DOWNSTREAM of
+# `prefetch`, so it does NOT invalidate the expensive prefetch cache — only this
+# cheap layer rebuilds. The trailing `--version` calls fail the build loudly if
+# gcc-13 is somehow absent.
 RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130 --slave /usr/bin/g++ g++ /usr/bin/g++-13 \
     && update-alternatives --set gcc /usr/bin/gcc-13 \
     && gcc --version && g++ --version
