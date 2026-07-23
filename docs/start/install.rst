@@ -112,6 +112,17 @@ backends as **extras**:
    The uv workflow targets **Linux x86_64 with Python 3.12**. For Ascend NPU,
    AMD ROCm, or aarch64 GPUs, use the dedicated images / sections instead.
 
+.. note::
+
+   Heavy native packages — ``apex``, ``transformer-engine``, ``flash-attn``,
+   ``vllm``, and ``sglang-kernel`` — are pulled **prebuilt** from the verl
+   wheelhouse index (`etogaosion.github.io/verl-wheelhouse
+   <https://etogaosion.github.io/verl-wheelhouse/simple/>`_, wired in
+   ``pyproject.toml`` under ``[tool.uv.index]`` / ``[tool.uv.sources]``), so
+   ``uv sync`` never compiles them from source. The wheels are built for
+   cu130 / torch 2.11 / CPython 3.12; only the git-sourced ``megatron-core`` and
+   ``mbridge`` are built at sync time.
+
 Run with the uv Docker image
 :::::::::::::::::::::::::::::::::::::::::::::::::::::
 
@@ -161,7 +172,7 @@ To upgrade, downgrade, or pin a package (e.g. ``vllm``), edit its version in
 
 .. code:: bash
 
-   # 1. edit pyproject.toml — e.g. change vllm==0.20.2 to vllm==0.21.0
+   # 1. edit pyproject.toml — e.g. bump the vllm pin in the [vllm] extra
    # 2. refresh the lockfile and check the combination resolves:
    python manage_envs.py lock                 # regenerate uv.lock
    python manage_envs.py sync vllm fsdp       # install + validate
@@ -170,8 +181,17 @@ To upgrade, downgrade, or pin a package (e.g. ``vllm``), edit its version in
 
 Package versions live under ``[project.optional-dependencies]`` in
 ``pyproject.toml`` (one block per backend); a few project-wide pins
-(``transformers``, ``numpy``, ``kernels``) live under
+(``numpy``, ``kernels``) and the per-engine ``transformers`` pins live under
 ``[tool.uv].override-dependencies``. Update every place the package appears.
+
+``transformers`` tracks the inference engine (its version must match what the
+engine needs): ``vllm`` pins ``5.5.3`` while ``sglang`` and the ``cpu`` dev
+slice pin ``5.3.0``. The training backends (``fsdp`` / ``megatron``) carry no
+``transformers`` pin of their own, so a run inherits the engine it is synced
+with (``sync vllm megatron`` -> ``5.5.3``; ``sync sglang fsdp`` -> ``5.3.0``);
+a training-only sync falls back to ``5.3.0``. The per-engine pins use ``extra``
+conflict markers in ``override-dependencies``, which uv evaluates per
+resolution fork.
 
 To try a version without committing, install it into an already-synced
 ``.venv`` (reverted on the next ``sync``)::
@@ -226,7 +246,7 @@ Set up and sync
    python manage_envs.py sync cpu              # GPU-free, for CI / quick checks
 
 ``manage_envs.py`` is the recommended entry point: it validates your
-combination and sets the build options each backend needs. Other useful
+combination and drives ``uv`` with the right flags. Other useful
 commands:
 
 .. code:: bash
@@ -294,9 +314,11 @@ Troubleshooting
 - **``uv: command not found``** — ``curl -LsSf https://astral.sh/uv/install.sh | sh``.
 - **A combination is rejected** — you selected two inference engines; pick
   ``vllm`` **or** ``sglang``.
-- **``apex`` / ``transformer-engine`` build errors with ``megatron``** — build
-  on a CUDA ``-devel`` base image that has ``nvcc``; on large machines
-  ``MAX_JOBS=128 python manage_envs.py sync megatron`` is faster.
+- **``No solution found`` for ``apex`` / ``transformer-engine`` / ``flash-attn``
+  / ``vllm`` / ``sglang-kernel``** — these are pulled prebuilt from the verl
+  wheelhouse (see the note under *Install with uv*). It means the resolver found
+  no matching wheel for your platform or the wheelhouse was unreachable; the uv
+  flow supports only cu130 / torch 2.11 / CPython 3.12 on Linux x86_64.
 - **``uv sync`` / ``uv lock`` fails on macOS** — the uv workflow is Linux
   x86_64 only; use a Linux host or the Docker image.
 - **Start over** — ``python manage_envs.py clean`` then sync again.
