@@ -307,7 +307,6 @@ class vLLMHttpServer:
             "dtype": self.config.dtype,
             "load_format": self.config.load_format,
             "skip_tokenizer_init": False,
-            "distributed_executor_backend": "mp",
             "worker_extension_cls": self._get_worker_extension_cls(),
             "trust_remote_code": self.model_config.trust_remote_code,
             "max_model_len": self.config.max_model_len,
@@ -329,6 +328,20 @@ class vLLMHttpServer:
             "compilation_config": compilation_config,
             **engine_kwargs,
         }
+
+        # Set distributed_executor_backend default if not already specified
+        # by the user via engine_kwargs.  On ROCm with TP=1, omit it entirely
+        # so vLLM defaults to UniProcExecutor, avoiding a nested WorkerProc
+        # spawn that causes SIGSEGV (HIP runtime issue with two-level
+        # multiprocessing spawn after CUDA/HIP init in a Ray actor).
+        if "distributed_executor_backend" not in args:
+            if not self._should_omit_distributed_executor_backend():
+                args["distributed_executor_backend"] = "mp"
+            else:
+                logger.info(
+                    "ROCm + TP=1 detected: omitting distributed_executor_backend "
+                    "so vLLM uses UniProcExecutor and avoids nested WorkerProc spawn."
+                )
 
         # update profiler args
         profiler_args = build_vllm_profiler_args(
@@ -1110,6 +1123,20 @@ class vLLMHttpServer:
             hf_overrides["quantization_config_file"] = self.config.quantization_config_file
 
         return quantization, hf_overrides
+
+    def _should_omit_distributed_executor_backend(self) -> bool:
+        """On ROCm with TP=1, let vLLM default to UniProcExecutor."""
+        try:
+            from vllm.platforms import current_platform
+
+            return current_platform.is_rocm() and int(self.config.tensor_model_parallel_size) == 1
+        except Exception as e:
+            logger.warning(
+                "Failed to check ROCm executor backend condition: %s. "
+                "Falling back to distributed_executor_backend='mp'.",
+                e,
+            )
+            return False
 
     def _get_worker_extension_cls(self) -> str:
         """Return the fully-qualified colocate worker extension class name."""
