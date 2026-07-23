@@ -14,7 +14,13 @@
 
 from ..device import is_npu_available
 from ..import_utils import is_nvtx_available
-from .config import build_sglang_profiler_args, build_vllm_profiler_args
+from .config import GPUStallDiagnosticsConfig, build_sglang_profiler_args, build_vllm_profiler_args
+from .gpu_stall_diagnostics import (
+    GPUStallDiagnostics,
+    close_gpu_stall_diagnostics_on_exit,
+    gpu_stall_diagnostics_phase,
+    start_gpu_stall_diagnostics,
+)
 from .performance import GPUMemoryLogger, log_gpu_memory_usage, simple_timer
 from .profile import DistProfiler, DistProfilerExtension, ProfilerConfig
 
@@ -29,6 +35,8 @@ else:
 
 __all__ = [
     "GPUMemoryLogger",
+    "GPUStallDiagnostics",
+    "GPUStallDiagnosticsConfig",
     "log_gpu_memory_usage",
     "mark_start_range",
     "mark_end_range",
@@ -37,6 +45,9 @@ __all__ = [
     "DistProfilerExtension",
     "ProfilerConfig",
     "simple_timer",
+    "close_gpu_stall_diagnostics_on_exit",
+    "gpu_stall_diagnostics_phase",
+    "start_gpu_stall_diagnostics",
     "marked_timer",
     "build_vllm_profiler_args",
     "build_sglang_profiler_args",

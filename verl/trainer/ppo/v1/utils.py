@@ -59,8 +59,17 @@ class MetricsAggregator:
                 self.metric_values[key].append(float(value.item()))
                 self.metric_weights[key].append(self._get_metric_weight(key, metrics, sample_count))
 
-    def _get_metric_weight(self, metric_name: str, metrics: dict[str, Any], sample_count: int) -> int:
+    def _get_metric_weight(self, metric_name: str, metrics: dict[str, Any], sample_count: int) -> float:
         """Return the sample weight used when reducing per-iteration average metrics."""
+        if metric_name.startswith("gpu_stall/") and metric_name.endswith(
+            ("/utilization_mean", "/zero_utilization_fraction")
+        ):
+            diagnostic_sample_count = metrics.get(f"{metric_name.rsplit('/', 1)[0]}/sample_count", sample_count)
+            if isinstance(diagnostic_sample_count, torch.Tensor):
+                return float(diagnostic_sample_count.item()) if diagnostic_sample_count.numel() == 1 else sample_count
+            if isinstance(diagnostic_sample_count, int | float | np.number):
+                return float(diagnostic_sample_count)
+
         if metric_name.endswith("/off_policy/dropped_samples_staleness/mean"):
             prefix = metric_name.rsplit("_staleness/mean", 1)[0]
             dropped_samples = metrics.get(prefix, sample_count)
@@ -71,6 +80,12 @@ class MetricsAggregator:
         return sample_count
 
     def _get_aggregation_type(self, metric_name: str) -> str:
+        if metric_name.startswith("gpu_stall/"):
+            if metric_name.endswith("/sample_count"):
+                return "sum"
+            if metric_name.endswith("/device_count"):
+                return "last"
+
         for agg_type, metric_list in self.aggregation_rules.items():
             if metric_name in metric_list:
                 return agg_type

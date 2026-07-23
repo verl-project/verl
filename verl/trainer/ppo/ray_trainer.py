@@ -23,6 +23,7 @@ import os
 import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from pprint import pprint
 from typing import Any, Optional
 
@@ -65,6 +66,7 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.utils.import_utils import deprecated, load_class_from_fqn
 from verl.utils.metric import reduce_metrics
+from verl.utils.profiler import close_gpu_stall_diagnostics_on_exit, start_gpu_stall_diagnostics
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.skip.skip_manager import SkipManager
@@ -1377,6 +1379,7 @@ class RayPPOTrainer:
         critic_output = DataProto.from_single_dict(data={}, meta_info={"metrics": output})
         return critic_output
 
+    @close_gpu_stall_diagnostics_on_exit
     def fit(self):
         """
         The training loop of PPO.
@@ -1403,6 +1406,10 @@ class RayPPOTrainer:
         # load checkpoint and update weights before doing anything
         self._load_checkpoint()
         self.checkpoint_manager.update_weights(self.global_steps)
+
+        self._gpu_stall_diagnostics = start_gpu_stall_diagnostics(
+            self.config.global_profiler.get("gpu_stall_diagnostics", None)
+        )
 
         current_epoch = self.global_steps // len(self.train_dataloader)
 
@@ -1444,6 +1451,8 @@ class RayPPOTrainer:
                 metrics = {}
                 timing_raw = {}
 
+                diagnostics = self._gpu_stall_diagnostics
+
                 with marked_timer("start_profile", timing_raw):
                     self._start_profiling(
                         not prev_step_profile and curr_step_profile
@@ -1480,13 +1489,25 @@ class RayPPOTrainer:
                     num_sampled_prompts = len(gen_batch_output)
 
                 is_last_step = self.global_steps >= self.total_training_steps
+                if diagnostics is not None:
+                    diagnostics.begin_phase("training_step")
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
                         if curr_step_profile:
                             self.llm_server_manager.start_profile()
-                        combined_gen_output = self.async_rollout_manager.generate_sequences(combined_gen_batch)
-                        self.checkpoint_manager.sleep_replicas()
+                        with (
+                            diagnostics.phase("rollout_generate") if diagnostics is not None else nullcontext({})
+                        ) as rollout_generate_metrics:
+                            combined_gen_output = self.async_rollout_manager.generate_sequences(combined_gen_batch)
+                        metrics.update(rollout_generate_metrics)
+                        with (
+                            diagnostics.phase("rollout_sleep_or_release")
+                            if diagnostics is not None
+                            else nullcontext({})
+                        ) as rollout_sleep_metrics:
+                            self.checkpoint_manager.sleep_replicas()
+                        metrics.update(rollout_sleep_metrics)
                         if curr_step_profile:
                             self.llm_server_manager.stop_profile()
 
@@ -1658,11 +1679,21 @@ class RayPPOTrainer:
                     # implement critic warmup
                     if self.config.trainer.critic_warmup > self.global_steps:
                         # Still in critic warmup, only update weights to wake up rollout replicas.
-                        self.checkpoint_manager.update_weights(self.global_steps)
+                        with (
+                            diagnostics.phase("weight_sync_and_wake_or_resume")
+                            if diagnostics is not None
+                            else nullcontext({})
+                        ) as weight_sync_metrics:
+                            self.checkpoint_manager.update_weights(self.global_steps)
+                        metrics.update(weight_sync_metrics)
                     else:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
-                            actor_output = self._update_actor(batch)
+                            with (
+                                diagnostics.phase("actor_update") if diagnostics is not None else nullcontext({})
+                            ) as actor_update_metrics:
+                                actor_output = self._update_actor(batch)
+                        metrics.update(actor_update_metrics)
 
                         # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                         esi_close_to_expiration = should_save_ckpt_esi(
@@ -1688,7 +1719,13 @@ class RayPPOTrainer:
 
                         # update weights from trainer to rollout
                         with marked_timer("update_weights", timing_raw, color="red"):
-                            self.checkpoint_manager.update_weights(self.global_steps)
+                            with (
+                                diagnostics.phase("weight_sync_and_wake_or_resume")
+                                if diagnostics is not None
+                                else nullcontext({})
+                            ) as weight_sync_metrics:
+                                self.checkpoint_manager.update_weights(self.global_steps)
+                        metrics.update(weight_sync_metrics)
 
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
@@ -1697,6 +1734,8 @@ class RayPPOTrainer:
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     if rollout_data_dir:
                         self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
+                if diagnostics is not None:
+                    metrics.update(diagnostics.end_phase("training_step"))
 
                 # validate
                 if self.config.trainer.test_freq > 0 and (

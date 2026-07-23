@@ -210,6 +210,22 @@ class NPUToolConfig(NsightToolConfig):
 
 
 @dataclass
+class GPUStallDiagnosticsConfig(BaseConfig):
+    """Optional node-local NVML sampling, independent of ``ProfilerConfig.tool``."""
+
+    enable: bool = False
+    sample_interval_s: float = 0.25
+    zero_utilization_threshold: float = 1.0
+
+    def __post_init__(self) -> None:
+        assert isinstance(self.enable, bool), "gpu_stall_diagnostics.enable must be a bool"
+        assert 0.2 <= self.sample_interval_s <= 0.5, "gpu_stall_diagnostics.sample_interval_s must be in [0.2, 0.5]"
+        assert 0.0 <= self.zero_utilization_threshold <= 100.0, (
+            "gpu_stall_diagnostics.zero_utilization_threshold must be in [0, 100]"
+        )
+
+
+@dataclass
 class ProfilerConfig(BaseConfig):
     """Worker profiler config.
 
@@ -230,6 +246,7 @@ class ProfilerConfig(BaseConfig):
     save_path: Optional[str] = MISSING
     tool_config: Any = MISSING  # Just a placeholder, will use configs above directly
     global_tool_config: Optional[Any] = None  # Global tool configuration for all profiling tools
+    gpu_stall_diagnostics: GPUStallDiagnosticsConfig = field(default_factory=GPUStallDiagnosticsConfig)
 
     def union(self, other: "ProfilerConfig") -> "ProfilerConfig":
         assert self.tool == other.tool, f"Cannot union ProfilerConfig with different tools: {self.tool} vs {other.tool}"
@@ -241,6 +258,11 @@ class ProfilerConfig(BaseConfig):
             save_path=self.save_path,
             tool_config=self.tool_config,
             global_tool_config=self.global_tool_config or other.global_tool_config,
+            gpu_stall_diagnostics=GPUStallDiagnosticsConfig(
+                enable=self.gpu_stall_diagnostics.enable or other.gpu_stall_diagnostics.enable,
+                sample_interval_s=self.gpu_stall_diagnostics.sample_interval_s,
+                zero_utilization_threshold=self.gpu_stall_diagnostics.zero_utilization_threshold,
+            ),
         )
 
     def intersect(self, other: "ProfilerConfig") -> "ProfilerConfig":
@@ -255,6 +277,11 @@ class ProfilerConfig(BaseConfig):
             save_path=self.save_path,
             tool_config=self.tool_config,
             global_tool_config=self.global_tool_config if self.global_tool_config else other.global_tool_config,
+            gpu_stall_diagnostics=GPUStallDiagnosticsConfig(
+                enable=self.gpu_stall_diagnostics.enable and other.gpu_stall_diagnostics.enable,
+                sample_interval_s=self.gpu_stall_diagnostics.sample_interval_s,
+                zero_utilization_threshold=self.gpu_stall_diagnostics.zero_utilization_threshold,
+            ),
         )
 
     def __post_init__(self) -> None:

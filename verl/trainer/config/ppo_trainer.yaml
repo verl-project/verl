@@ -267,6 +267,23 @@ global_profiler:
   # Path to save profiling contents
   save_path: "outputs/profile"
 
+  # Optional node-local NVML sampling for rollout stalls. This is independent
+  # of global_profiler.tool and has no CUDA, NVML, thread, or Ray-actor work
+  # unless explicitly enabled.
+  gpu_stall_diagnostics:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.utils.profiler.config.GPUStallDiagnosticsConfig
+
+    # Enable node-local physical GPU utilization diagnostics.
+    enable: False
+
+    # Bounded to [0.2, 0.5] seconds by GPUStallDiagnosticsConfig.
+    sample_interval_s: 0.25
+
+    # A utilization value at or below this percentage counts as "zero".
+    zero_utilization_threshold: 1.0
+
   # Specific tool configs, can use +profiler.tool_config.[tool].xxx to config
   global_tool_config:
 

@@ -973,6 +973,11 @@ global_profiler:
   steps: null
   profile_continuous_steps: false
   save_path: outputs/profile
+  gpu_stall_diagnostics:
+    _target_: verl.utils.profiler.config.GPUStallDiagnosticsConfig
+    enable: false
+    sample_interval_s: 0.25
+    zero_utilization_threshold: 1.0
   global_tool_config:
     nsys:
       _target_: verl.utils.profiler.config.NsightToolConfig
