@@ -38,6 +38,274 @@ from verl.utils.tokenizer import build_multimodal_processor_inputs, normalize_to
 logger = logging.getLogger(__name__)
 
 
+_FILTER_PROCESSOR_CACHE: dict[tuple[str, bool, bool], ProcessorMixin] = {}
+_FILTER_TOKENIZER_CACHE: dict[tuple[str, bool], PreTrainedTokenizer] = {}
+
+
+def _get_processor_path(processor: ProcessorMixin) -> str | None:
+    return getattr(processor, "name_or_path", None) or getattr(
+        getattr(processor, "tokenizer", None), "name_or_path", None
+    )
+
+
+def _get_tokenizer_path(tokenizer: PreTrainedTokenizer) -> str | None:
+    return getattr(tokenizer, "name_or_path", None)
+
+
+def _load_filter_processor(source: str, trust_remote_code: bool = False, use_fast: bool = True) -> ProcessorMixin:
+    from verl.utils import hf_processor
+
+    processor = hf_processor(source, trust_remote_code=trust_remote_code, use_fast=use_fast)
+    if processor is None:
+        raise ValueError(f"Failed to create processor from {source!r} for prompt filtering")
+    return processor
+
+
+def _load_filter_tokenizer(source: str, trust_remote_code: bool = False) -> PreTrainedTokenizer:
+    from verl.utils import hf_tokenizer
+
+    return hf_tokenizer(source, trust_remote_code=trust_remote_code)
+
+
+def _get_filter_processor(source: str, trust_remote_code: bool = False, use_fast: bool = True) -> ProcessorMixin:
+    key = (source, bool(trust_remote_code), bool(use_fast))
+    if key not in _FILTER_PROCESSOR_CACHE:
+        _FILTER_PROCESSOR_CACHE[key] = _load_filter_processor(
+            source, trust_remote_code=trust_remote_code, use_fast=use_fast
+        )
+    return _FILTER_PROCESSOR_CACHE[key]
+
+
+def _get_filter_tokenizer(source: str, trust_remote_code: bool = False) -> PreTrainedTokenizer:
+    key = (source, bool(trust_remote_code))
+    if key not in _FILTER_TOKENIZER_CACHE:
+        _FILTER_TOKENIZER_CACHE[key] = _load_filter_tokenizer(source, trust_remote_code=trust_remote_code)
+    return _FILTER_TOKENIZER_CACHE[key]
+
+
+def _build_messages_for_filter(
+    example: dict,
+    *,
+    prompt_key: str,
+    image_key: str,
+    video_key: str,
+    audio_key: str,
+) -> list:
+    messages = copy.deepcopy(example[prompt_key])
+    # When concatenating multimodal datasets, get will return None for samples without a modality column.
+    images = example.get(image_key, None) or []
+    videos = example.get(video_key, None) or []
+    audios = example.get(audio_key, None) or []
+
+    image_offset, video_offset, audio_offset = 0, 0, 0
+    for message in messages:
+        if not images and not videos and not audios:
+            continue
+
+        content = message["content"]
+        if not isinstance(content, str):
+            continue
+
+        content_list = []
+        segments = re.split("(<image>|<video>|<audio>)", content)
+        segments = [item for item in segments if item != ""]
+        for segment in segments:
+            if segment == "<image>":
+                assert image_offset < len(images), f"image_offset {image_offset} >= len(images) {len(images)}"
+                image = images[image_offset]
+                if isinstance(image, Image.Image):
+                    image = image.convert("RGB")
+                    content_list.append({"type": "image", "image": image})
+                elif isinstance(image, dict):
+                    image = dict(image)
+                    if "bytes" in image:
+                        image["image"] = Image.open(BytesIO(image["bytes"]))
+                    content_list.append({"type": "image", **image})
+                elif isinstance(image, str | os.PathLike):
+                    content_list.append({"type": "image", "image": os.fspath(image)})
+                else:
+                    raise TypeError(
+                        f"image must be dict, PIL.Image, or path-like, unsupported image type: {type(image)}"
+                    )
+                image_offset += 1
+            elif segment == "<video>":
+                assert video_offset < len(videos), f"video_offset {video_offset} >= len(videos) {len(videos)}"
+                video = videos[video_offset]
+                if isinstance(video, dict):
+                    content_list.append({"type": "video", **video})
+                elif isinstance(video, str | os.PathLike):
+                    content_list.append({"type": "video", "video": os.fspath(video)})
+                elif isinstance(video, list):
+                    video = [os.fspath(frame) if isinstance(frame, os.PathLike) else frame for frame in video]
+                    content_list.append({"type": "video", "video": video})
+                else:
+                    raise TypeError(f"video must be dict, list, or path-like, unsupported video type: {type(video)}")
+                video_offset += 1
+            elif segment == "<audio>":
+                assert audio_offset < len(audios), f"audio_offset {audio_offset} >= len(audios) {len(audios)}"
+                audio = audios[audio_offset]
+                if isinstance(audio, dict):
+                    payload = dict(audio)
+                    payload["type"] = "audio"
+                    if "audio" not in payload and "audio_url" not in payload:
+                        payload = {"type": "audio", "audio": audio}
+                    content_list.append(payload)
+                else:
+                    content_list.append({"type": "audio", "audio": audio})
+                audio_offset += 1
+            else:
+                content_list.append({"type": "text", "text": segment})
+        message["content"] = content_list
+
+    assert image_offset == len(images), f"image_offset {image_offset} != len(images) {len(images)}"
+    assert video_offset == len(videos), f"video_offset {video_offset} != len(videos) {len(videos)}"
+    assert audio_offset == len(audios), f"audio_offset {audio_offset} != len(audios) {len(audios)}"
+    return messages
+
+
+def _extract_audio_info_for_filter(messages: list[dict]) -> list[Any]:
+    audios = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not isinstance(item, dict) or item.get("type") != "audio":
+                continue
+            if "audio" in item:
+                audios.append(item["audio"])
+            elif "audio_url" in item:
+                audios.append(item["audio_url"])
+            else:
+                audios.append({k: v for k, v in item.items() if k != "type"})
+    return audios or None
+
+
+def _process_multi_modal_info_for_filter(
+    messages: list[dict],
+    image_patch_size,
+) -> tuple[list[Image.Image], list[Any], list[Any]]:
+    has_visual = any(
+        isinstance(message.get("content"), list)
+        and any(isinstance(item, dict) and item.get("type") in {"image", "video"} for item in message["content"])
+        for message in messages
+    )
+    if has_visual:
+        from qwen_vl_utils import process_vision_info
+
+        images, videos = process_vision_info(messages, image_patch_size=image_patch_size, return_video_metadata=True)
+    else:
+        images, videos = None, None
+    audios = _extract_audio_info_for_filter(messages)
+    return images, videos, audios
+
+
+def _filter_prompt_length_with_processor(
+    doc: dict,
+    *,
+    max_prompt_length: int,
+    prompt_key: str,
+    image_key: str,
+    video_key: str,
+    audio_key: str,
+    image_patch_size: int,
+    apply_chat_template_kwargs: dict,
+    mm_processor_kwargs: dict,
+    tool_schemas: list[dict] | None,
+    processor_path: str | None = None,
+    processor: ProcessorMixin | None = None,
+    trust_remote_code: bool = False,
+    use_fast: bool = True,
+    process_multi_modal_info_fn=None,
+    config: DictConfig | None = None,
+) -> bool:
+    try:
+        if processor is None:
+            if processor_path is None:
+                raise ValueError("processor_path is required when processor is not provided")
+            processor = _get_filter_processor(processor_path, trust_remote_code=trust_remote_code, use_fast=use_fast)
+
+        messages = _build_messages_for_filter(
+            doc,
+            prompt_key=prompt_key,
+            image_key=image_key,
+            video_key=video_key,
+            audio_key=audio_key,
+        )
+        # pass tool schemas if available so the processor can format prompts
+        apply_kwargs = dict(**apply_chat_template_kwargs)
+        if tool_schemas is not None:
+            apply_kwargs["tools"] = tool_schemas
+
+        raw_prompt = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False, **apply_kwargs)
+        if process_multi_modal_info_fn is None:
+            images, videos, audios = _process_multi_modal_info_for_filter(messages, image_patch_size)
+        else:
+            images, videos, audios = process_multi_modal_info_fn(messages, image_patch_size, config)
+        if images is None and videos is None and audios is None:
+            # only text prompt
+            prompt_length = len(
+                processor.tokenizer(
+                    text=raw_prompt,
+                    add_special_tokens=False,  # avoid adding special tokens
+                    return_attention_mask=False,
+                )["input_ids"]
+            )
+        else:
+            # multi-modal prompt
+            prompt_length = len(
+                build_multimodal_processor_inputs(
+                    processor,
+                    text=[raw_prompt],
+                    images=images,
+                    videos=videos,
+                    audio=audios,
+                    mm_processor_kwargs=mm_processor_kwargs,
+                )["input_ids"][0]
+            )
+        return prompt_length <= max_prompt_length
+    except Exception:
+        print("Error processing one of the samples, skipping...")
+        traceback.print_exc()
+        return False
+
+
+def _filter_prompt_length_with_tokenizer(
+    doc: dict,
+    *,
+    max_prompt_length: int,
+    prompt_key: str,
+    apply_chat_template_kwargs: dict,
+    tool_schemas: list[dict] | None,
+    tokenizer_path: str | None = None,
+    tokenizer: PreTrainedTokenizer | None = None,
+    trust_remote_code: bool = False,
+) -> bool:
+    try:
+        if tokenizer is None:
+            if tokenizer_path is None:
+                raise ValueError("tokenizer_path is required when tokenizer is not provided")
+            tokenizer = _get_filter_tokenizer(tokenizer_path, trust_remote_code=trust_remote_code)
+
+        apply_kwargs = dict(**apply_chat_template_kwargs)
+        if tool_schemas is not None:
+            apply_kwargs["tools"] = tool_schemas
+
+        # Keep explicit tokenization to avoid transformers version default changes.
+        apply_kwargs.pop("tokenize", None)
+        apply_kwargs.pop("return_dict", None)
+        apply_kwargs.pop("return_tensors", None)
+
+        tokenized_prompt = tokenizer.apply_chat_template(
+            doc[prompt_key], add_generation_prompt=True, tokenize=True, **apply_kwargs
+        )
+        return len(normalize_token_ids(tokenized_prompt)) <= max_prompt_length
+    except Exception:
+        print("Error processing one of the samples, skipping...")
+        traceback.print_exc()
+        return False
+
+
 def collate_fn(data_list: list[dict]) -> dict:
     """
     Collate a batch of sample dicts into batched tensors and arrays.
@@ -197,78 +465,52 @@ class RLHFDataset(Dataset):
     def maybe_filter_out_long_prompts(self, dataframe: datasets.Dataset = None):
         # filter out too long prompts
         if self.filter_overlong_prompts:
-            tokenizer = self.tokenizer
-            processor = self.processor
-            prompt_key = self.prompt_key
+            filter_kwargs = {
+                "max_prompt_length": self.max_prompt_length,
+                "prompt_key": self.prompt_key,
+                "apply_chat_template_kwargs": dict(**self.apply_chat_template_kwargs),
+                "tool_schemas": self.tool_schemas,
+                "trust_remote_code": self.config.get("trust_remote_code", False),
+            }
 
-            if processor is not None:
+            use_multiprocessing = self.num_workers not in (None, 0)
 
-                def doc2len(doc) -> int:
-                    try:
-                        messages = self._build_messages(doc, key=self.prompt_key)
-                        # pass tool schemas if available so the processor can format prompts
-                        apply_kwargs = dict(**self.apply_chat_template_kwargs)
-                        if self.tool_schemas is not None:
-                            apply_kwargs["tools"] = self.tool_schemas
-
-                        raw_prompt = self.processor.apply_chat_template(
-                            messages, add_generation_prompt=True, tokenize=False, **apply_kwargs
-                        )
-                        images, videos, audios = self._process_multi_modal_info(
-                            messages, self.image_patch_size, self.config
-                        )
-                        if images is None and videos is None and audios is None:
-                            # only text prompt
-                            return len(
-                                processor.tokenizer(
-                                    text=raw_prompt,
-                                    add_special_tokens=False,  # avoid adding special tokens
-                                    return_attention_mask=False,
-                                )["input_ids"]
-                            )
-                        else:
-                            # multi-modal prompt
-                            return len(
-                                build_multimodal_processor_inputs(
-                                    processor,
-                                    text=[raw_prompt],
-                                    images=images,
-                                    videos=videos,
-                                    audio=audios,
-                                    mm_processor_kwargs=self.mm_processor_kwargs,
-                                )["input_ids"][0]
-                            )
-                    except Exception:
-                        print("Error processing one of the samples, skipping...")
-                        traceback.print_exc()
-                        return self.max_prompt_length + 1
-
+            if self.processor is not None:
+                processor_path = _get_processor_path(self.processor)
+                if processor_path is None:
+                    use_multiprocessing = False
+                if use_multiprocessing:
+                    filter_kwargs["processor_path"] = processor_path
+                else:
+                    filter_kwargs["processor"] = self.processor
+                filter_kwargs.update(
+                    {
+                        "image_key": self.image_key,
+                        "video_key": self.video_key,
+                        "audio_key": self.audio_key,
+                        "image_patch_size": self.image_patch_size,
+                        "mm_processor_kwargs": dict(**self.mm_processor_kwargs),
+                    }
+                )
+                if not use_multiprocessing:
+                    filter_kwargs["process_multi_modal_info_fn"] = self._process_multi_modal_info
+                    filter_kwargs["config"] = self.config
+                filter_function = _filter_prompt_length_with_processor
             else:
-
-                def doc2len(doc) -> int:
-                    try:
-                        apply_kwargs = dict(**self.apply_chat_template_kwargs)
-                        if self.tool_schemas is not None:
-                            apply_kwargs["tools"] = self.tool_schemas
-
-                        # Keep explicit tokenization to avoid transformers version default changes.
-                        apply_kwargs.pop("tokenize", None)
-                        apply_kwargs.pop("return_dict", None)
-                        apply_kwargs.pop("return_tensors", None)
-
-                        tokenized_prompt = tokenizer.apply_chat_template(
-                            doc[prompt_key], add_generation_prompt=True, tokenize=True, **apply_kwargs
-                        )
-                        return len(normalize_token_ids(tokenized_prompt))
-                    except Exception:
-                        print("Error processing one of the samples, skipping...")
-                        traceback.print_exc()
-                        return self.max_prompt_length + 1
+                tokenizer_path = _get_tokenizer_path(self.tokenizer)
+                if tokenizer_path is None:
+                    use_multiprocessing = False
+                if use_multiprocessing:
+                    filter_kwargs["tokenizer_path"] = tokenizer_path
+                else:
+                    filter_kwargs["tokenizer"] = self.tokenizer
+                filter_function = _filter_prompt_length_with_tokenizer
 
             dataframe = dataframe.filter(
-                lambda doc: doc2len(doc) <= self.max_prompt_length,
-                num_proc=self.num_workers,
+                filter_function,
+                num_proc=self.num_workers if use_multiprocessing else None,
                 desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
+                fn_kwargs=filter_kwargs,
             )
 
             print(f"filter dataset len: {len(dataframe)}")
@@ -310,78 +552,15 @@ class RLHFDataset(Dataset):
         Returns:
             messages: List of messages with replaced placeholder.
         """
-        messages: list = example[key]
-        # When concatenating multimodal datasets, get will return None for samples without a modality column.
-        images = example.get(self.image_key, None) or []
-        videos = example.get(self.video_key, None) or []
-        audios = example.get(self.audio_key, None) or []
-
-        image_offset, video_offset, audio_offset = 0, 0, 0
-        for message in messages:
-            if not images and not videos and not audios:
-                continue
+        if example.get(self.image_key, None) or example.get(self.video_key, None) or example.get(self.audio_key, None):
             assert self.processor is not None, "processor is needed to process multimodal data"
-
-            content = message["content"]
-            if not isinstance(content, str):
-                continue
-
-            content_list = []
-            segments = re.split("(<image>|<video>|<audio>)", content)
-            segments = [item for item in segments if item != ""]
-            for segment in segments:
-                if segment == "<image>":
-                    assert image_offset < len(images), f"image_offset {image_offset} >= len(images) {len(images)}"
-                    image = images[image_offset]
-                    if isinstance(image, Image.Image):
-                        image = image.convert("RGB")
-                        content_list.append({"type": "image", "image": image})
-                    elif isinstance(image, dict):
-                        if "bytes" in image:
-                            image["image"] = Image.open(BytesIO(image["bytes"]))
-                        content_list.append({"type": "image", **image})
-                    elif isinstance(image, str | os.PathLike):
-                        content_list.append({"type": "image", "image": os.fspath(image)})
-                    else:
-                        raise TypeError(
-                            f"image must be dict, PIL.Image, or path-like, unsupported image type: {type(image)}"
-                        )
-                    image_offset += 1
-                elif segment == "<video>":
-                    assert video_offset < len(videos), f"video_offset {video_offset} >= len(videos) {len(videos)}"
-                    video = videos[video_offset]
-                    if isinstance(video, dict):
-                        content_list.append({"type": "video", **video})
-                    elif isinstance(video, str | os.PathLike):
-                        content_list.append({"type": "video", "video": os.fspath(video)})
-                    elif isinstance(video, list):
-                        video = [os.fspath(frame) if isinstance(frame, os.PathLike) else frame for frame in video]
-                        content_list.append({"type": "video", "video": video})
-                    else:
-                        raise TypeError(
-                            f"video must be dict, list, or path-like, unsupported video type: {type(video)}"
-                        )
-                    video_offset += 1
-                elif segment == "<audio>":
-                    assert audio_offset < len(audios), f"audio_offset {audio_offset} >= len(audios) {len(audios)}"
-                    audio = audios[audio_offset]
-                    if isinstance(audio, dict):
-                        payload = dict(audio)
-                        payload["type"] = "audio"
-                        if "audio" not in payload and "audio_url" not in payload:
-                            payload = {"type": "audio", "audio": audio}
-                        content_list.append(payload)
-                    else:
-                        content_list.append({"type": "audio", "audio": audio})
-                    audio_offset += 1
-                else:
-                    content_list.append({"type": "text", "text": segment})
-            message["content"] = content_list
-
-        assert image_offset == len(images), f"image_offset {image_offset} != len(images) {len(images)}"
-        assert video_offset == len(videos), f"video_offset {video_offset} != len(videos) {len(videos)}"
-        assert audio_offset == len(audios), f"audio_offset {audio_offset} != len(audios) {len(audios)}"
-        return messages
+        return _build_messages_for_filter(
+            example,
+            prompt_key=key,
+            image_key=self.image_key,
+            video_key=self.video_key,
+            audio_key=self.audio_key,
+        )
 
     def __getitem__(self, item):
         """For rollout, apply_chat_template has been moved to AgentLoop, so we only return raw_prompt here."""
