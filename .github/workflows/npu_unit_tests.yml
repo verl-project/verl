@@ -45,6 +45,7 @@ on:
   pull_request:
     branches:
       - main
+      - v0.*
     paths:
       # The order that you define paths patterns matters:
       # A matching negative pattern (prefixed with !) after a positive match will exclude the path.
