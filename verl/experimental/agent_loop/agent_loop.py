@@ -724,7 +724,7 @@ class AgentLoopWorker:
                 padded["attention_mask"] = padded["attention_mask"].unsqueeze(0)
         return padded
 
-    async def _agent_loop_postprocess(self, output, validate, **kwargs) -> _InternalAgentLoopOutput:
+    async def _agent_loop_postprocess(self, output, /, validate, **kwargs) -> _InternalAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""
         output.extra_fields["raw_prompt"] = kwargs["raw_prompt"]
 
