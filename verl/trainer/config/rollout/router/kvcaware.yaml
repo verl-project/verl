@@ -31,7 +31,7 @@ strategies:
 # Collector connection-type tuning (HTTP polling + ZMQ long-connection).
 collector:
   http_polling:
-    polling_interval: 1
+    polling_interval: 5
     http_timeout: 10
   long_connection:
     base_retry_delay: 1.0

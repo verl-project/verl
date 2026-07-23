@@ -45,8 +45,8 @@ def _validate_http_polling(params: dict[str, float]) -> None:
     at runtime.  Future HTTP polling parameters can be added without
     changing this signature.
     """
-    pi = params.get("polling_interval", 5.0)
-    ht = params.get("http_timeout", 10.0)
+    pi = params.get("polling_interval", _DEFAULT_HTTP_POLLING["polling_interval"])
+    ht = params.get("http_timeout", _DEFAULT_HTTP_POLLING["http_timeout"])
     if "polling_interval" in params and pi <= 0:
         raise ConfigError(f"polling_interval must be > 0, got {pi}")
     if "http_timeout" in params and ht <= 0:

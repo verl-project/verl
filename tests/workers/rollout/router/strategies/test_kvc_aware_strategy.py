@@ -38,7 +38,6 @@ from verl.workers.rollout.router.kvcaware.strategies.kvc_aware import (
     STICKY_TOP_SCORE,
     KVCacheAwareStrategy,
     StrategyError,
-    load_normalized,
 )
 from verl.workers.rollout.router.kvcaware.strategies.routing import RoutingStrategy
 from verl.workers.rollout.router.kvcaware.types import Layer, MetricKey, SlowCut
@@ -61,6 +60,8 @@ def _strat(**kwargs) -> KVCacheAwareStrategy:
         layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
         collector_names=["vllm_zmq"],
         weight=1.0,
+        # Fixed test baseline — intentionally decoupled from DEFAULT_LOAD_WEIGHTS
+        # so behavior tests stay stable when the production default changes.
         load_weights=(0.4, 0.2, 0.1, 0.3),
     )
     defaults.update(kwargs)
@@ -757,7 +758,7 @@ class TestFromConfig:
         assert strat.load_threshold == pytest.approx(0.85)
         assert strat.layer_weights == {"gpu": 0.6, "cpu": 0.3, "ssd": 0.1}
         assert strat._max_num_seqs is None  # not set until set_capacity()
-        assert strat.load_weights == (0.4, 0.2, 0.1, 0.3)
+        assert strat.load_weights == (0.5, 0.0, 0.0, 0.5)
 
     def test_from_config_scores_match_direct(self):
         from verl.workers.rollout.router.kvcaware.config.strategy import KVCAwareStrategyConfig
@@ -771,7 +772,9 @@ class TestFromConfig:
         )
         strat_from_cfg = KVCacheAwareStrategy.from_config(cfg)
         strat_from_cfg.set_capacity(64)
-        strat_direct = _strat()
+        # Align load_weights with from_config (which lands on DEFAULT_LOAD_WEIGHTS);
+        # _strat()'s own baseline differs, so override here for apples-to-apples.
+        strat_direct = _strat(load_weights=DEFAULT_LOAD_WEIGHTS)
         provider = FakeRouteDataProvider(
             {
                 "rep_a": {
@@ -922,42 +925,49 @@ class TestStickyShortCircuit:
 
 
 # --------------------------------------------------------------------------- #
-# load_normalized (load formula)
+# _compute_load (load formula) — each term exercised with an explicit weight
+# vector, decoupled from DEFAULT_LOAD_WEIGHTS so config changes don't erode
+# the formula-coverage assertions.
 # --------------------------------------------------------------------------- #
-class TestLoadNormalized:
+class TestLoadFormula:
     def test_idle_replica_is_zero(self):
-        assert load_normalized(0.0, 0, 0, 0, max_num_seqs=64) == pytest.approx(0.0)
+        assert _strat()._compute_load(0.0, 0, 0, 0) == pytest.approx(0.0)
 
     def test_kv_only_contribution(self):
-        assert load_normalized(0.5, 0, 0, 0, max_num_seqs=64) == pytest.approx(0.2)
+        s = _strat(load_weights=(1.0, 0.0, 0.0, 0.0))
+        assert s._compute_load(0.5, 0, 0, 0) == pytest.approx(0.5)
 
     def test_running_and_kv(self):
-        assert load_normalized(0.5, 32, 0, 0, max_num_seqs=64) == pytest.approx(0.3)
+        s = _strat(load_weights=(0.5, 0.5, 0.0, 0.0))
+        assert s._compute_load(0.5, 32, 0, 0) == pytest.approx(0.5)
 
     def test_running_clamped_to_one(self):
-        assert load_normalized(0.8, 128, 0, 0, max_num_seqs=64) == pytest.approx(0.52)
+        s = _strat(load_weights=(0.0, 1.0, 0.0, 0.0))
+        assert s._compute_load(0.8, 128, 0, 0) == pytest.approx(1.0)
 
     def test_waiting_term(self):
-        assert load_normalized(0.0, 0, 10, 0, max_num_seqs=64) == pytest.approx(0.1 * (10 / 64))
+        s = _strat(load_weights=(0.0, 0.0, 1.0, 0.0))
+        assert s._compute_load(0.0, 0, 10, 0) == pytest.approx(10 / 64)
 
     def test_inflight_term(self):
-        # inflight=32 with default weight 0.3 → 0.3 * (32/64) = 0.15
-        assert load_normalized(0.0, 0, 0, 32, max_num_seqs=64) == pytest.approx(0.15)
+        s = _strat(load_weights=(0.0, 0.0, 0.0, 1.0))
+        assert s._compute_load(0.0, 0, 0, 32) == pytest.approx(0.5)
 
     def test_custom_weights_change_load(self):
-        load = load_normalized(0.5, 32, 0, 0, max_num_seqs=64, weights=(0.6, 0.2, 0.2, 0.0))
+        strat = _strat(load_weights=(0.6, 0.2, 0.2, 0.0))
+        load = strat._compute_load(0.5, 32, 0, 0)
         assert load == pytest.approx(0.4)
         assert load != pytest.approx(0.35)
 
     def test_near_saturated_exceeds_threshold(self):
-        load = load_normalized(1.0, 64, 1000, 64, max_num_seqs=64)
+        load = _strat()._compute_load(1.0, 64, 1000, 64)
         assert load > 0.9
         assert load <= 1.0
 
 
 class TestDefaultWeights:
     def test_default_weights_tuple(self):
-        assert DEFAULT_LOAD_WEIGHTS == (0.4, 0.2, 0.1, 0.3)
+        assert DEFAULT_LOAD_WEIGHTS == (0.5, 0.0, 0.0, 0.5)
         assert sum(DEFAULT_LOAD_WEIGHTS) == pytest.approx(1.0)
 
 

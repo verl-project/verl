@@ -31,31 +31,7 @@ logger = get_router_logger("kvc-aware-strategy")
 
 STICKY_TOP_SCORE = 1e9
 
-DEFAULT_LOAD_WEIGHTS: tuple[float, float, float, float] = (0.4, 0.2, 0.1, 0.3)
-
-
-def load_normalized(
-    kv_usage: float,
-    running: int | float,
-    waiting: int | float,
-    inflight: int | float,
-    *,
-    max_num_seqs: int,
-    weights: tuple[float, float, float, float] = DEFAULT_LOAD_WEIGHTS,
-) -> float:
-    """load = a·kv_usage + b·running/max + c·waiting/max + d·inflight/max (∈ [0,1], bigger = more loaded).
-
-    ``inflight`` (the Balancer's own acquire/release counter, maintained
-    synchronously) is the only term that is non-zero at cold start — the other
-    three come from async-polled vLLM metrics, which are still 0 before the
-    first poll lands. Its weight (``d``) keeps the first wave of requests from
-    collapsing onto ``pool[0]`` when the polled terms are tied at 0.
-    """
-    a, b, c, d = weights
-    running_usage = min(1.0, float(running) / float(max_num_seqs))
-    waiting_usage = min(1.0, float(waiting) / float(max_num_seqs))
-    inflight_usage = min(1.0, float(inflight) / float(max_num_seqs))
-    return a * float(kv_usage) + b * running_usage + c * waiting_usage + d * inflight_usage
+DEFAULT_LOAD_WEIGHTS: tuple[float, float, float, float] = (0.5, 0.0, 0.0, 0.5)
 
 
 class StrategyError(Exception):
@@ -144,15 +120,24 @@ class KVCacheAwareStrategy:
         waiting: int | float,
         inflight: int | float = 0,
     ) -> float:
+        """load = a·kv_usage + b·running/max + c·waiting/max + d·inflight/max (∈ [0,1], bigger = more loaded).
+
+        Weights ``(a, b, c, d) = self.load_weights``; ``max = self._max_num_seqs``.
+        ``inflight`` (the Balancer's own acquire/release counter, maintained
+        synchronously) is the only term non-zero at cold start — the other three
+        come from async-polled vLLM metrics, still 0 before the first poll lands.
+        Its weight ``d`` keeps the first wave of requests from collapsing onto
+        ``pool[0]`` when the polled terms are tied at 0.
+        """
         if self._max_num_seqs is None:
             raise StrategyError("set_capacity() must be called before routing")
-        return load_normalized(
-            kv_usage,
-            running,
-            waiting,
-            inflight,
-            max_num_seqs=self._max_num_seqs,
-            weights=self.load_weights,
+        a, b, c, d = self.load_weights
+        max_num_seqs = self._max_num_seqs
+        return (
+            a * float(kv_usage)
+            + b * min(1.0, float(running) / max_num_seqs)
+            + c * min(1.0, float(waiting) / max_num_seqs)
+            + d * min(1.0, float(inflight) / max_num_seqs)
         )
 
     def is_overloaded(

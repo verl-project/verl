@@ -1342,7 +1342,7 @@ class TestKVCAwareOther:
         assert strategy.collector_names == ["vllm_zmq", "vllm_metrics", "sticky_stat", "inflight_stat"]
         assert strategy.memory_overload_filter is True
         assert strategy.slow_cut == SlowCut.PREFIX_LOAD_AWARE
-        assert result.collector.http_polling == {"polling_interval": 1.0, "http_timeout": 10.0}
+        assert result.collector.http_polling == {"polling_interval": 5.0, "http_timeout": 10.0}
         assert result.collector.long_connection == {
             "base_retry_delay": 1.0,
             "max_retry_delay": 30.0,
@@ -1534,7 +1534,7 @@ class TestDropInIntegration:
         assert s.weight == 1.0
         assert s.alpha == 0.3
         assert s.collector_names == ["vllm_zmq", "vllm_metrics", "sticky_stat", "inflight_stat"]
-        assert result.collector.http_polling["polling_interval"] == 1.0
+        assert result.collector.http_polling["polling_interval"] == 5.0
         assert result.collector.long_connection["max_retry_attempts"] == 5
         assert result.cache_store.kv_cache_store_type == "list"
         assert result.cache_store.ttl == 30.0
