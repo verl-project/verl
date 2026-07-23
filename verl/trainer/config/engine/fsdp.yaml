@@ -74,7 +74,8 @@ qat:
   # Whether to enable QAT
   enable: false
 
-  # Quantization mode: "w4a16" (weight-only). "w4a4" is experimental and not recommended.
+  # Quantization mode: "w4a16" (weight-only) or "w4a8" (dense and standard Marlin MoE simulation).
+  # "w4a4" is experimental and not recommended.
   mode: "w4a16"
 
   # Quantization group size (NVFP4 requires 16)
