@@ -120,6 +120,20 @@ class _FakeTokenizer:
         return "<decoded>"
 
 
+class _FakeRemoteMethod:
+    def __init__(self, result: dict[str, Any]):
+        self.result = result
+        self.data = None
+
+    def remote(self, data):
+        self.data = data
+
+        async def _result():
+            return self.result
+
+        return _result()
+
+
 def _pad_1d(ids: list[int], *, length: int, pad_id: int = 0) -> list[int]:
     if len(ids) > length:
         return ids[:length]
@@ -308,6 +322,42 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
     torch.testing.assert_close(internal.routed_experts[:, 2:6], expected)
     assert torch.count_nonzero(internal.routed_experts[:, :2]) == 0
     assert torch.count_nonzero(internal.routed_experts[:, 6:]) == 0
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_async_reward_preserves_validation_meta_info_on_cpu():
+    reward_handle = type("_FakeRewardHandle", (), {})()
+    reward_handle.compute_score = _FakeRemoteMethod({"reward_score": 0.0, "reward_extra_info": {}})
+
+    class _DummyWorker:
+        reward_loop_worker_handles = [reward_handle]
+
+        @staticmethod
+        def _compute_multi_modal_inputs(output, input_ids):
+            del output, input_ids
+            return {}
+
+        @staticmethod
+        def _compute_position_ids(input_ids, attention_mask, multi_modal_inputs, mm_processor_kwargs=None):
+            del attention_mask, multi_modal_inputs, mm_processor_kwargs
+            return torch.zeros_like(input_ids)
+
+        @staticmethod
+        def _get_mm_processor_kwargs(*args, **kwargs):
+            del args, kwargs
+            return {}
+
+    output = AgentLoopOutput(
+        prompt_ids=[101],
+        response_ids=[11],
+        response_mask=[1],
+        metrics=AgentLoopMetrics(),
+        extra_fields={},
+    )
+
+    await AgentLoopWorker._compute_score(_DummyWorker(), [output], kwargs={}, validate=True)
+
+    assert reward_handle.compute_score.data.meta_info == {"validate": True}
 
 
 class _FakeTokenizerCustomPad:
