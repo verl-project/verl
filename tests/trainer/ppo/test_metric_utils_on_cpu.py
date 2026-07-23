@@ -15,6 +15,7 @@
 Tests for the metric utilities in verl.trainer.ppo.metric_utils.
 """
 
+import pickle
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -35,7 +36,34 @@ from verl.utils.metric import (
 from verl.utils.metric.utils import (
     AggregationType,
     Metric,
+    materialize_metric_tensors,
 )
+
+
+class _DeferredScalar(torch.Tensor):
+    item_calls = 0
+    cpu_calls = 0
+
+    @staticmethod
+    def __new__(cls, value, dtype=torch.float32):
+        return torch.Tensor._make_subclass(cls, torch.tensor(value, dtype=dtype), require_grad=False)
+
+    @property
+    def device(self):
+        return torch.device("cuda:0")
+
+    def item(self):
+        type(self).item_calls += 1
+        return self.as_subclass(torch.Tensor).item()
+
+    def cpu(self):
+        type(self).cpu_calls += 1
+        return self.as_subclass(torch.Tensor)
+
+    @classmethod
+    def reset_calls(cls):
+        cls.item_calls = 0
+        cls.cpu_calls = 0
 
 
 class TestReduceMetrics(unittest.TestCase):
@@ -116,6 +144,80 @@ class TestMetric(unittest.TestCase):
         metric.append(torch.tensor(3.0))
         metric.append(torch.tensor(4.0))
         self.assertEqual(metric.values, [3.0, 4.0])
+
+    def test_append_device_tensor_defers_host_materialization(self):
+        """Device scalar metrics stay detached until the aggregation boundary."""
+        _DeferredScalar.reset_calls()
+        metric = Metric(aggregation="mean")
+
+        metric.append(_DeferredScalar(3.0))
+        metric.append(_DeferredScalar(4.0))
+
+        self.assertEqual(_DeferredScalar.item_calls, 0)
+        self.assertEqual(_DeferredScalar.cpu_calls, 0)
+        self.assertTrue(all(isinstance(value, _DeferredScalar) for value in metric.values))
+        self.assertEqual(metric.aggregate(), 3.5)
+        self.assertEqual(_DeferredScalar.item_calls, 0)
+        self.assertEqual(_DeferredScalar.cpu_calls, 1)
+
+    def test_materialize_metric_tensors_batches_nested_scalars(self):
+        """Scalar tensors sharing type/device/dtype use one device-to-host copy."""
+        _DeferredScalar.reset_calls()
+        metrics = {
+            "mean": Metric("mean", _DeferredScalar(1.0)),
+            "plain": [_DeferredScalar(2.0), {"nested": _DeferredScalar(3.0)}],
+        }
+
+        materialize_metric_tensors(metrics)
+
+        self.assertEqual(_DeferredScalar.item_calls, 0)
+        self.assertEqual(_DeferredScalar.cpu_calls, 1)
+        self.assertEqual(metrics["mean"].values, [1.0])
+        self.assertEqual(metrics["plain"], [2.0, {"nested": 3.0}])
+
+    def test_materialize_metric_tensors_groups_dtypes(self):
+        """Different dtypes are copied independently without implicit promotion."""
+        _DeferredScalar.reset_calls()
+        metrics = {
+            "fp32": Metric("mean", _DeferredScalar(1.0, torch.float32)),
+            "fp64": Metric("mean", _DeferredScalar(2.0, torch.float64)),
+        }
+
+        materialize_metric_tensors(metrics)
+
+        self.assertEqual(_DeferredScalar.cpu_calls, 2)
+        self.assertEqual(metrics["fp32"].values, [1.0])
+        self.assertEqual(metrics["fp64"].values, [2.0])
+
+    def test_materialize_metric_tensors_normalizes_single_element_shapes(self):
+        """Zero-dimensional and one-element metrics can share one transfer."""
+        metrics = {
+            "scalar": torch.tensor(1.0),
+            "singleton": torch.tensor([2.0]),
+        }
+
+        materialize_metric_tensors(metrics)
+
+        self.assertEqual(metrics, {"scalar": 1.0, "singleton": 2.0})
+
+    def test_materialize_metric_tensors_rejects_non_scalar_tensor(self):
+        """Object-bound metrics must not silently serialize tensor payloads."""
+        with self.assertRaisesRegex(ValueError, r"must be scalar.*\(2,\)"):
+            materialize_metric_tensors({"invalid": torch.tensor([1.0, 2.0])})
+
+    def test_materialized_metrics_are_pickleable_without_tensors(self):
+        """Worker-bound metrics serialize as ordinary host values."""
+        metrics = {
+            "metric": Metric("mean", _DeferredScalar(1.0)),
+            "plain": [_DeferredScalar(2.0)],
+        }
+
+        materialize_metric_tensors(metrics)
+        restored = pickle.loads(pickle.dumps(metrics))
+
+        self.assertEqual(restored["metric"].values, [1.0])
+        self.assertEqual(restored["plain"], [2.0])
+        self.assertFalse(any(isinstance(value, torch.Tensor) for value in restored["metric"].values))
 
     def test_append_non_scalar_tensor_raises(self):
         """Test that appending non-scalar tensor raises ValueError."""

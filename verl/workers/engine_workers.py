@@ -38,7 +38,7 @@ from verl.utils.distributed import initialize_global_process_group_ray, set_numa
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.import_utils import import_external_libs
 from verl.utils.memory_utils import aggressive_empty_cache
-from verl.utils.metric.utils import Metric
+from verl.utils.metric import Metric, materialize_metric_tensors
 from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage
 from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
@@ -191,17 +191,30 @@ class TrainingWorker(Worker, DistProfilerExtension):
         # perform all gather in dp group to ensure that it's correct.
         # Here each metric in metrics can be a list (micro-batch metrics) or a singleton
         # we should always sum the loss of each micro-batch as we scale by global_bsz/global_token
-        loss = torch.sum(torch.tensor(output.pop("loss"), device=self.device_name))
+        losses = output.pop("loss")
+        if isinstance(losses, torch.Tensor):
+            loss = losses.detach().to(self.device_name).sum()
+        elif isinstance(losses, list | tuple) and losses and all(isinstance(loss, torch.Tensor) for loss in losses):
+            loss = torch.stack([loss.detach() for loss in losses]).sum()
+        else:
+            loss = torch.tensor(losses, device=self.device_name).sum()
         dp_group = self.engine.get_data_parallel_group()
         if dp_group is not None:
             torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG, group=dp_group)
-        loss = loss.item()
 
         # For grad_norm, we do not perform all reduce because it is already been done when clipping grad
         grad_norm = metrics.pop("grad_norm", None)
         if isinstance(grad_norm, torch.Tensor):
             grad_norm = grad_norm.detach().item()
         lr = metrics.pop("lr", None)
+
+        # Scalar values stay on device across micro-batches. Materialize loss
+        # and metrics together before object collectives or Ray serialization.
+        host_values = {"metrics": metrics, "loss": loss, "lr": lr}
+        materialize_metric_tensors(host_values)
+        metrics = host_values["metrics"]
+        loss = host_values["loss"]
+        lr = host_values["lr"]
 
         # For other metrics, we perform all gather in dp group (only if DP > 1)
         if dp_group is not None:

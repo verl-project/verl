@@ -1362,9 +1362,9 @@ def compute_policy_loss_vanilla(
     )
 
     pg_metrics = {
-        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-        "actor/ppo_kl": ppo_kl.detach().item(),
-        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+        "actor/pg_clipfrac": pg_clipfrac.detach(),
+        "actor/ppo_kl": ppo_kl.detach(),
+        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach(),
     }
     return pg_loss, pg_metrics
 
@@ -1443,9 +1443,9 @@ def compute_policy_loss_dppo_tv(
     pg_clipfrac_lower = verl_F.masked_mean((ratio > clip_ratio_c).float() * valid_mask, response_mask)
 
     pg_metrics = {
-        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-        "actor/ppo_kl": ppo_kl.detach().item(),
-        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+        "actor/pg_clipfrac": pg_clipfrac.detach(),
+        "actor/ppo_kl": ppo_kl.detach(),
+        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach(),
     }
     return pg_loss, pg_metrics
 
@@ -1528,9 +1528,9 @@ def compute_policy_loss_dppo_kl(
     pg_clipfrac_lower = verl_F.masked_mean((ratio > clip_ratio_c).float() * valid_mask, response_mask)
 
     pg_metrics = {
-        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-        "actor/ppo_kl": ppo_kl.detach().item(),
-        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+        "actor/pg_clipfrac": pg_clipfrac.detach(),
+        "actor/ppo_kl": ppo_kl.detach(),
+        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach(),
     }
     return pg_loss, pg_metrics
 
@@ -1604,9 +1604,9 @@ def compute_policy_loss_gspo(
 
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
     pg_metrics = {
-        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-        "actor/ppo_kl": ppo_kl.detach().item(),
-        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+        "actor/pg_clipfrac": pg_clipfrac.detach(),
+        "actor/ppo_kl": ppo_kl.detach(),
+        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach(),
     }
     return pg_loss, pg_metrics
 
@@ -1688,9 +1688,9 @@ def compute_policy_loss_sapo(
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
     # return metrics dict
     pg_metrics = {
-        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-        "actor/ppo_kl": ppo_kl.detach().item(),
-        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+        "actor/pg_clipfrac": pg_clipfrac.detach(),
+        "actor/ppo_kl": ppo_kl.detach(),
+        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach(),
     }
 
     return pg_loss, pg_metrics
@@ -1831,8 +1831,8 @@ def compute_policy_loss_clip_cov(
         loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
     )
     pg_metrics = {
-        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-        "actor/ppo_kl": ppo_kl.detach().item(),
+        "actor/pg_clipfrac": pg_clipfrac.detach(),
+        "actor/ppo_kl": ppo_kl.detach(),
     }
     return pg_loss, pg_metrics
 
@@ -1912,7 +1912,7 @@ def compute_policy_loss_kl_cov(
         loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
     )
     pg_metrics = {
-        "actor/ppo_kl": ppo_kl_abs.detach().item(),
+        "actor/ppo_kl": ppo_kl_abs.detach(),
     }
     return pg_loss, pg_metrics
 
@@ -1996,9 +1996,9 @@ def compute_policy_loss_geo_mean(
     pg_clipfrac = verl_F.masked_mean((clipped * (advantages > 0)).float(), response_mask)
     pg_clipfrac_lower = verl_F.masked_mean((clipped * (advantages < 0)).float(), response_mask)
     pg_metrics = {
-        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-        "actor/ppo_kl": ppo_kl.detach().item(),
-        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+        "actor/pg_clipfrac": pg_clipfrac.detach(),
+        "actor/ppo_kl": ppo_kl.detach(),
+        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach(),
     }
     return pg_loss, pg_metrics
 
@@ -2057,9 +2057,9 @@ def compute_policy_loss_cispo(
     pg_clipfrac_lower = torch.tensor(0.0, device=pg_loss.device)
 
     pg_metrics = {
-        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-        "actor/ppo_kl": ppo_kl.detach().item(),
-        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+        "actor/pg_clipfrac": pg_clipfrac.detach(),
+        "actor/ppo_kl": ppo_kl.detach(),
+        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach(),
     }
     return pg_loss, pg_metrics
 
@@ -2363,7 +2363,7 @@ def compute_policy_loss_reinforce(
     kl_divergence = verl_F.masked_mean(-negative_approx_kl, response_mask)
 
     pg_metrics = {
-        "actor/ppo_kl": kl_divergence.detach().item(),
+        "actor/ppo_kl": kl_divergence.detach(),
     }
 
     return pg_loss, pg_metrics
