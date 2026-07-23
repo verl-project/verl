@@ -61,7 +61,11 @@ def apply_npu_vllm_patches() -> None:
     from packaging import version
 
     _VLLM_VERSION = version.parse(vllm.__version__)
-    if _VLLM_VERSION >= version.parse("0.13.0") and _VLLM_VERSION <= version.parse("0.14.0"):
+    if (
+        _VLLM_VERSION >= version.parse("0.13.0")
+        and _VLLM_VERSION <= version.parse("0.14.0")
+        or _VLLM_VERSION == version.parse("0.18.0")
+    ):
         # Disable flash_attn in RotaryEmbedding (NPU) when VLLM >= 0.13
         from vllm.model_executor.layers.fused_moe import FusedMoE
 

@@ -1,0 +1,219 @@
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+E2E test for process_weights_after_loading.
+
+Usage:
+    pytest tests/workers/rollout/rollout_vllm/test_vllm_process_weights_after_loading.py -v -s
+    python tests/workers/rollout/rollout_vllm/test_vllm_process_weights_after_loading.py
+"""
+
+import asyncio
+import gc
+import os
+import time
+from uuid import uuid4
+
+import ray
+from omegaconf import OmegaConf
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from verl.utils.tokenizer import normalize_token_ids
+from verl.workers.rollout.replica import RolloutMode, TokenOutput
+from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
+from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
+
+MODEL_ID = os.environ.get("MODEL_ID", "moonshotai/Moonlight-16B-A3B-Instruct")
+MODEL_PATH_DEEPSEEK = os.environ.get("MODEL_PATH", os.path.expanduser(f"~/.cache/models/{MODEL_ID}"))
+
+
+def _build_config(load_format: str, model_path: str):
+    rollout_cfg = OmegaConf.create(
+        {
+            "_target_": "verl.workers.config.RolloutConfig",
+            "name": "vllm",
+            "mode": "async",
+            "tensor_model_parallel_size": 1,
+            "data_parallel_size": 1,
+            "pipeline_model_parallel_size": 1,
+            "gpu_memory_utilization": 0.85,
+            "max_num_batched_tokens": 8192,
+            "max_num_seqs": 64,
+            "max_model_len": 4096,
+            "dtype": "bfloat16",
+            "load_format": load_format,
+            "enforce_eager": False,
+            "enable_chunked_prefill": False,
+            "enable_prefix_caching": False,
+            "enable_sleep_mode": False,
+            "free_cache_engine": True,
+            "disable_log_stats": True,
+            "prompt_length": 512,
+            "response_length": 256,
+            "top_k": -1,
+            "top_p": 1.0,
+            "temperature": 0.0,
+            # vLLM >= 0.18.0: disable custom all-reduce to avoid hangs in some
+            # multi-process setups; suggested with NCCL_P2P_DISABLE=1 upstream.
+            "engine_kwargs": {
+                "vllm": {
+                    "disable_custom_all_reduce": True,
+                }
+            },
+        }
+    )
+    model_cfg = OmegaConf.create(
+        {
+            "_target_": "verl.workers.config.HFModelConfig",
+            "path": model_path,
+            "trust_remote_code": True,
+            "load_tokenizer": True,
+        }
+    )
+    return rollout_cfg, model_cfg
+
+
+def _start_server(load_format: str, model_path: str, force_dummy: bool = False):
+    runtime_env = {
+        "TOKENIZERS_PARALLELISM": "true",
+        "VERL_LOGGING_LEVEL": "INFO",
+        "VLLM_LOGGING_LEVEL": "INFO",
+        "HCCL_CONNECT_TIMEOUT": os.environ.get("HCCL_CONNECT_TIMEOUT", "1500"),
+        "HCCL_HOST_SOCKET_PORT_RANGE": os.environ.get("HCCL_HOST_SOCKET_PORT_RANGE", "60000-60050"),
+        "HCCL_NPU_SOCKET_PORT_RANGE": os.environ.get("HCCL_NPU_SOCKET_PORT_RANGE", "61000-61050"),
+        # Recommended workarounds from upstream issues for shm_broadcast stalls.
+        "NCCL_P2P_DISABLE": "1",
+        "HCCL_OP_EXPANSION_MODE": "AIV",
+    }
+    if ray.is_initialized():
+        ray.shutdown()
+    ray.init(runtime_env={"env_vars": runtime_env})
+
+    rollout_cfg, model_cfg = _build_config(load_format, model_path)
+
+    # Use the same code path as production rollout (vLLMReplica) so the server
+    # runs in COLOCATED mode with worker actors, instead of a standalone actor
+    # with an empty workers list.
+    replica = vLLMReplica(
+        replica_rank=0,
+        config=rollout_cfg,
+        model_config=model_cfg,
+        gpus_per_node=1,
+    )
+
+    # Create a colocated worker group and launch server(s).
+    # NOTE: resource_pool is optional for our E2E test; Ray will schedule workers.
+    asyncio.run(replica.init_standalone())
+    server = replica.servers[0]
+
+    if force_dummy:
+        ray.get(server.__ray_call__.remote(lambda self: setattr(self.config, "load_format", "dummy")))
+
+    return server
+
+
+def _iter_weights(model_path: str):
+    model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True, torch_dtype="auto")
+    try:
+        yield from model.state_dict().items()
+    finally:
+        del model
+        gc.collect()
+
+
+def _update_weights(server, model_path: str):
+    # Use the same zmq handle format as vLLMColocateWorkerExtension._get_zmq_handle().
+    # NOTE: keep IPC enabled when available to avoid shared-memory fallback,
+    # which can exacerbate hangs/timeouts in vLLM's internal shm_broadcast path.
+    replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
+    zmq_handle = f"ipc:///tmp/rl-colocate-zmq-replica-{replica_rank}-rank-0.sock"
+
+    # Force using IPC (cuda/npu IPC handles) for weight transfer whenever possible.
+    # On unsupported platforms this would fail earlier; in CI/NPU env we require IPC-capable stack.
+    use_shm = False
+
+    update_ref = server.collective_rpc.remote("update_weights_from_ipc", kwargs={"use_shm": use_shm})
+    sender = BucketedWeightSender(zmq_handle=zmq_handle, bucket_size_mb=4096, use_shm=use_shm)
+    asyncio.run(sender.async_send_weights(_iter_weights(model_path)))
+    ray.get(update_ref, timeout=300)
+
+
+def _generate(server, prompt: str, tag: str, model_path: str) -> str:
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    prompt_ids = normalize_token_ids(
+        tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=True)
+    )
+    output = ray.get(
+        server.generate.remote(
+            prompt_ids=prompt_ids,
+            sampling_params={"max_tokens": 2046, "temperature": 0.0, "top_p": 1.0, "top_k": -1},
+            request_id=f"test_{tag}_{uuid4().hex[:8]}",
+        ),
+        timeout=300,
+    )
+    assert isinstance(output, TokenOutput) and len(output.token_ids) > 0
+    text = tokenizer.decode(output.token_ids, skip_special_tokens=True)
+    assert text.strip() != ""
+    return text
+
+
+def _clear_npu_memory():
+    gc.collect()
+    time.sleep(2)
+
+
+def _run_compare_test(model_path: str, prompt: str, model_name: str):
+    dummy_server = None
+    auto_server = None
+    try:
+        dummy_server = _start_server("dummy", model_path, force_dummy=True)
+        # Wait for model compilation and engine initialization to complete before weight update
+        # This prevents shared memory broadcast from blocking during compilation
+        # ACL graph compilation for Moonlight-16B can take 1-2 minutes
+        _update_weights(dummy_server, model_path)
+        ray.get(dummy_server.set_global_steps.remote(1))
+        dummy_text = _generate(dummy_server, prompt, "dummy", model_path)
+
+        ray.kill(dummy_server)
+        dummy_server = None
+        _clear_npu_memory()
+
+        auto_server = _start_server("auto", model_path, force_dummy=False)
+        auto_text = _generate(auto_server, prompt, "auto", model_path)
+
+        print(f"\n[{model_name}] Prompt: {prompt}\n[dummy+update] {dummy_text}\n[auto] {auto_text}\n")
+        assert dummy_text == auto_text, (
+            f"{model_name} outputs mismatch:\n[dummy+update] {dummy_text}\n[auto] {auto_text}"
+        )
+    finally:
+        if dummy_server:
+            ray.kill(dummy_server)
+        if auto_server:
+            ray.kill(auto_server)
+        if ray.is_initialized():
+            ray.shutdown()
+
+
+def test_compare_dummy_update_and_auto_outputs_same_prompt():
+    """Test ACL graph mode (npugraph_ex) with Moonlight-16B-A3B-Instruct model."""
+    _run_compare_test(
+        MODEL_PATH_DEEPSEEK,
+        prompt="write a poem about the moon.",
+        model_name="Moonlight-16B-A3B-Instruct",
+    )
+
+
+if __name__ == "__main__":
+    test_compare_dummy_update_and_auto_outputs_same_prompt()
