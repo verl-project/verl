@@ -579,9 +579,9 @@ class VeOmniEngine(FSDPEngine):
         if self._is_offload_optimizer:
             offload_veomni_optimizer(self.optimizer)
 
-    def _raw_shard_export(self):
-        """Raw ``(name, local_shard, ShardSpec)`` exporter shared by the shard and
-        delta-shard exports.
+    def get_per_tensor_param_shard(self, **kwargs):
+        """Yield each rank's *local* shard ``(name, local_shard, ShardSpec)`` -- the
+        DTensor export plus veomni's EP declarations. Pure export, no side effects.
 
         Dense params pass their FSDP DTensor placement through verbatim (flat
         ``Shard(0)`` fast path). Grouped expert params are split twice: the expert
@@ -692,12 +692,25 @@ class VeOmniEngine(FSDPEngine):
                 )
                 yield name, local.reshape(-1), spec
 
-        return _gen()
+        return _gen(), None
 
-    # get_per_tensor_param_shard / get_per_tensor_param_delta_shard are inherited
-    # from FSDPEngine -- they only depend on _raw_shard_export (overridden above),
-    # the HF conversion executors are shared (see verl.workers.engine.utils) and
-    # this backend's converters ride the specs.
+    def _hf_delta_entry(self, name, spec, place, lidx, lval):
+        """veomni's per-param entry builder: EP/converter specs (fused expert
+        stacks) go through this backend's own converter machinery (see
+        :mod:`verl.workers.engine.veomni.utils`); everything else falls back to
+        the FSDP engine's DTensor identity handling."""
+        from ..spec import BlockPlacement
+        from .utils import NO_SLOTS_MSG, hf_entry_converter
+
+        if spec.to_hf_chunk is not None and isinstance(place, BlockPlacement) and spec.hf_slots is not None:
+            return hf_entry_converter(name, spec, place, lidx, lval)
+        if spec.to_hf_chunk is not None:
+            raise NotImplementedError(f"{name}: {NO_SLOTS_MSG}")
+        return super()._hf_delta_entry(name, spec, place, lidx, lval)
+
+    # get_per_tensor_param_delta_shard / prime_delta_snapshots are inherited from
+    # FSDPEngine; they consume this class's get_per_tensor_param_shard and
+    # _hf_delta_entry overrides.
 
     def get_per_tensor_param(self, **kwargs):
         load_veomni_model_to_gpu(self.module)

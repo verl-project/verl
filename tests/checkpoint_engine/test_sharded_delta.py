@@ -127,7 +127,7 @@ def test_prime_then_hf_delta_export_roundtrip():
     entry with exactly the changed elements and refreshes the snapshot (a
     second delta pass yields a zero-count entry)."""
     from verl.workers.engine.spec import ShardSpec
-    from verl.workers.engine.utils import hf_delta_export, prime_delta_snapshots
+    from verl.workers.engine.utils import _hf_entry_identity, hf_delta_export, prime_delta_snapshots
 
     w = torch.arange(12, dtype=torch.float32)
     spec = ShardSpec(full_shape=(12,))
@@ -140,21 +140,39 @@ def test_prime_then_hf_delta_export_roundtrip():
     w2[3] = -1.0
     w2[7] = 42.0
 
-    ((slots, dtype_str, counts, hf_idx, hf_val, pg),) = list(hf_delta_export(iter([("w", w2, spec)]), snaps))
+    ((slots, dtype_str, counts, hf_idx, hf_val, pg),) = list(
+        hf_delta_export(iter([("w", w2, spec)]), snaps, _hf_entry_identity)
+    )
     assert slots == [("w", (12,))] and dtype_str == "float32" and pg is None
     assert counts.tolist() == [2]
     assert hf_idx.dtype == torch.int32 and hf_idx.tolist() == [3, 7]
     assert hf_val.tolist() == [-1.0, 42.0]
 
-    ((_, _, counts2, hf_idx2, _, _),) = list(hf_delta_export(iter([("w", w2.clone(), spec)]), snaps))
+    ((_, _, counts2, hf_idx2, _, _),) = list(
+        hf_delta_export(iter([("w", w2.clone(), spec)]), snaps, _hf_entry_identity)
+    )
     assert counts2.tolist() == [0] and hf_idx2.numel() == 0
 
 
 def test_hf_delta_export_converter_param():
     """A converter param's delta entry carries hf_slots-keyed final coordinates:
-    the NaN probe maps each touched element through to_hf_chunk."""
+    the NaN probe maps each touched element through to_hf_chunk (the converter
+    machinery is veomni's own -- see verl.workers.engine.veomni.utils)."""
+    import importlib.util
+    import pathlib
+
+    # veomni/utils.py is torch-only, but the veomni package __init__ pulls in the
+    # full engine (heavy deps); load the module by file path to keep this a CPU
+    # unit test.
+    import verl.workers.engine as _eng
     from verl.workers.engine.spec import BlockPlacement, ShardSpec
     from verl.workers.engine.utils import hf_delta_export, prime_delta_snapshots
+
+    _p = pathlib.Path(_eng.__file__).parent / "veomni" / "utils.py"
+    _spec = importlib.util.spec_from_file_location("_veomni_delta_utils", _p)
+    _m = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_m)
+    hf_entry_converter = _m.hf_entry_converter
 
     def to_hf_chunk(dim0_start, segment):
         return [(f"w.{dim0_start + i}", segment[i]) for i in range(segment.shape[0])]
@@ -172,7 +190,9 @@ def test_hf_delta_export_converter_param():
     w2 = w.clone()
     w2[5] = -1.0  # row 1, col 1
     w2[11] = 42.0  # row 2, col 3
-    ((slots, _dt, counts, hf_idx, hf_val, _pg),) = list(hf_delta_export(iter([("w", w2, spec)]), snaps))
+    ((slots, _dt, counts, hf_idx, hf_val, _pg),) = list(
+        hf_delta_export(iter([("w", w2, spec)]), snaps, hf_entry_converter)
+    )
     assert slots == spec.hf_slots
     assert counts.tolist() == [0, 1, 1]
     assert hf_idx.tolist() == [1, 3] and hf_val.tolist() == [-1.0, 42.0]
@@ -184,10 +204,10 @@ def test_hf_delta_export_requires_seed():
     import pytest
 
     from verl.workers.engine.spec import ShardSpec
-    from verl.workers.engine.utils import hf_delta_export
+    from verl.workers.engine.utils import _hf_entry_identity, hf_delta_export
 
     def raw():
         yield "w", torch.zeros(4), ShardSpec(full_shape=(4,))
 
     with pytest.raises(AssertionError, match="seed snapshot"):
-        list(hf_delta_export(raw(), {}))
+        list(hf_delta_export(raw(), {}, _hf_entry_identity))

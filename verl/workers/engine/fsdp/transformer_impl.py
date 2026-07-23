@@ -817,9 +817,11 @@ class FSDPEngine(BaseEngine):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.optimizer)
 
-    def _raw_shard_export(self):
-        """Raw ``(name, local_flat_shard_bf16, ShardSpec)`` exporter shared by the
-        shard and delta-shard exports. Non-LoRA base path only."""
+    def get_per_tensor_param_shard(self, **kwargs):
+        """Like :meth:`get_per_tensor_param`, but yields each rank's *local* FSDP shard
+        ``(name, local_flat_shard_bf16, ShardSpec)`` instead of all-gathering the full
+        tensor. Pure DTensor export, no side effects -- delta bookkeeping lives in
+        :meth:`get_per_tensor_param_delta_shard`. Non-LoRA base path only."""
 
         # FSDP1's (SHARDED_)STATE_DICT export runs through the unshard machinery and
         # asserts flat params are GPU-resident; FSDP2 state_dict() only collects
@@ -845,14 +847,20 @@ class FSDPEngine(BaseEngine):
                 local = p.to_local() if hasattr(p, "to_local") else p
                 yield name, local.reshape(-1), spec
 
-        return _gen()
+        return _gen(), None
 
-    def get_per_tensor_param_shard(self, **kwargs):
-        """Like :meth:`get_per_tensor_param`, but yields each rank's *local* FSDP shard
-        ``(name, local_flat_shard_bf16, ShardSpec)`` instead of all-gathering the full
-        tensor. Pure export, no side effects -- delta snapshot upkeep lives entirely in
-        :meth:`get_per_tensor_param_delta_shard`."""
-        return self._raw_shard_export(), None
+    def _hf_delta_entry(self, name, spec, place, lidx, lval):
+        """Per-param HF delta entry builder: this engine handles DTensor identity
+        params only (weight name == HF name, coordinates translate). EP/converter
+        specs are the veomni engine's business -- it overrides this hook."""
+        from ..utils import _hf_entry_identity
+
+        if spec.to_hf_chunk is not None:
+            raise NotImplementedError(
+                f"{name}: the FSDP engine only handles DTensor identity params; "
+                "converter specs belong to the engine that declared them"
+            )
+        return _hf_entry_identity(name, spec, place, lidx, lval)
 
     def prime_delta_snapshots(self) -> None:
         """Pin this rank's current shards to CPU as the delta diff base. Called right
@@ -862,20 +870,22 @@ class FSDPEngine(BaseEngine):
         from ..utils import prime_delta_snapshots
 
         self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
-        prime_delta_snapshots(self._raw_shard_export(), self._delta_shard_snap)
+        gen, _ = self.get_per_tensor_param_shard()
+        prime_delta_snapshots(gen, self._delta_shard_snap)
 
     def get_per_tensor_param_delta_shard(self, **kwargs):
         """Yield the delta engine's steady payloads -- FINAL HF-coordinate entries
         ``(slots, dtype_str, counts, hf_idx, hf_val, gather_group)`` per parameter.
-        Weight->HF naming, to-HF conversion, diff and snapshot are all this
-        backend's business (converter-agnostic executors in
-        :mod:`verl.workers.engine.utils`; backend-specific converters are declared
-        on the specs by :meth:`_raw_shard_export`). Requires a prior
+        Weight->HF naming, to-HF conversion, diff and snapshot are all backend
+        business: the DTensor-generic pipeline lives in
+        :mod:`verl.workers.engine.utils`, the per-param entry builder is the
+        :meth:`_hf_delta_entry` hook. Requires a prior
         :meth:`prime_delta_snapshots` call."""
         from ..utils import hf_delta_export
 
         self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
-        return hf_delta_export(self._raw_shard_export(), self._delta_shard_snap), None
+        gen, _ = self.get_per_tensor_param_shard()
+        return hf_delta_export(gen, self._delta_shard_snap, self._hf_delta_entry), None
 
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
