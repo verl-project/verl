@@ -63,14 +63,20 @@ The ``delta_sharded`` backend plugs into the standard checkpoint-engine flow (``
 ``CheckpointEngineWorker``), so they work with any trainer that drives weight sync through the
 checkpoint engine (including the V1 ``separate_async`` trainer).
 
-- **Export contract**: the trainer's ``get_per_tensor_param_shard()`` yields
-  ``(name, local_shard, ShardSpec)`` per local parameter — the spec (see
-  :mod:`verl.workers.engine.spec`) describes the shard's placement declaratively (DeviceMesh +
-  Placements), and the engine derives the flat offset, gather group, and contributing rank itself.
-  All layout knowledge stays on the trainer side; the engine is trainer-agnostic.
-- **Diff**: each rank byte-diffs **its own shard** against a pinned-CPU snapshot of that shard from
-  the previous sync (no rank holds a full-model snapshot). The comparison is bit-exact (integer
-  view inequality), so the reconstruction is lossless by construction — no thresholds, no drift.
+- **Export contract**: two backend exports, picked by phase. The seed sync consumes
+  ``get_per_tensor_param_shard()`` — ``(name, local_shard, ShardSpec)`` per local parameter; every
+  steady sync consumes ``get_per_tensor_param_delta_shard()`` — ``(name, delta_idx, delta_val,
+  ShardSpec)``, the shard-local coordinates and values of the elements that changed since the
+  previous export. The spec (see :mod:`verl.workers.engine.spec`) describes the shard's placement
+  declaratively (DeviceMesh + Placements), and the engine derives the flat offset, gather group,
+  and contributing rank itself. All layout **and diff** knowledge stays on the trainer side; the
+  engine only converts coordinates, gathers and ships.
+- **Diff (backend-owned)**: the default strategy (shared by the FSDP and veomni backends via
+  ``spec.delta_shard_export``) byte-diffs each rank's **own shard** against a pinned-CPU snapshot
+  refreshed on every export (no rank holds a full-model snapshot). The comparison is bit-exact
+  (integer view inequality), so the reconstruction is lossless by construction — no thresholds, no
+  drift. A backend that already keeps the previous step's weights (e.g. Decoupled PPO) can diff
+  against that checkpoint instead and skip the dedicated snapshot entirely.
 - **Sparse gather + encoding**: only the changed ``(position, value)`` pairs are gathered to rank 0
   (batched, variable-length), translated to full-tensor coordinates, and packed as a shared
   ``(positions, values)`` payload plus a per-parameter manifest (``indices`` encoding: int32

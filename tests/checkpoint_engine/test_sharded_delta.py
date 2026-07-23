@@ -119,3 +119,53 @@ def test_gather_slot_entries_sub_rounds_world1():
         for (ri, rv), (gi, gv) in zip(ref, got, strict=True):
             assert torch.equal(ri, gi)
             assert torch.equal(rv, gv)
+
+
+def test_snapshot_then_delta_shard_export_roundtrip():
+    """The backend-side default delta strategy: a seed pass through
+    snapshot_shard_export fills the pinned snapshots; a later pass through
+    delta_shard_export yields exactly the changed (idx, val) pairs and
+    refreshes the snapshot (a second delta pass yields nothing)."""
+    from verl.workers.engine.spec import ShardSpec, delta_shard_export, snapshot_shard_export
+
+    w = torch.arange(12, dtype=torch.float32)
+    spec = ShardSpec(full_shape=(12,))
+    snaps: dict = {}
+
+    def raw():
+        yield "w", w.clone(), spec
+
+    out = list(snapshot_shard_export(raw(), snaps))
+    assert len(out) == 1 and out[0][0] == "w" and torch.equal(out[0][1], w)
+    assert "w" in snaps and snaps["w"].numel() == 12
+
+    w2 = w.clone()
+    w2[3] = -1.0
+    w2[7] = 42.0
+
+    def raw2():
+        yield "w", w2, spec
+
+    ((name, didx, dval, dspec),) = list(delta_shard_export(raw2(), snaps))
+    assert name == "w" and dspec is spec
+    assert didx.tolist() == [3, 7] and dval.tolist() == [-1.0, 42.0]
+
+    def raw3():
+        yield "w", w2.clone(), spec
+
+    ((_, didx2, dval2, _),) = list(delta_shard_export(raw3(), snaps))
+    assert didx2.numel() == 0 and dval2.numel() == 0
+
+
+def test_delta_shard_export_requires_seed():
+    """A delta export without a prior seed snapshot must fail loud, not diff
+    against garbage."""
+    import pytest
+
+    from verl.workers.engine.spec import ShardSpec, delta_shard_export
+
+    def raw():
+        yield "w", torch.zeros(4), ShardSpec(full_shape=(4,))
+
+    with pytest.raises(AssertionError, match="seed snapshot"):
+        list(delta_shard_export(raw(), {}))

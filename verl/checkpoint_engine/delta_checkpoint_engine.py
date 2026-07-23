@@ -64,7 +64,6 @@ from .delta_sync.encode import checksum as _checksum
 from .delta_sync.sparse_gather import (
     assemble_dense_param_on_rank0,
     gather_slot_entries_to_rank0,
-    shard_delta_indices,
 )
 from .nccl_checkpoint_engine import MasterMetadata, NCCLCheckpointEngine
 
@@ -228,7 +227,8 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
     are gathered to rank 0 and streamed to the rollout side -- no rank ever holds
     a full-model snapshot.
 
-    ``send_weights`` consumes the SHARDED generator ``get_per_tensor_param_shard()``:
+    ``send_weights`` consumes the SHARDED exports (seed: ``get_per_tensor_param_shard()``,
+    steady: ``get_per_tensor_param_delta_shard()`` -- the backend owns the diff):
     ``(name, local_shard, ShardSpec)`` per local parameter (see
     :mod:`verl.workers.engine.spec`). All layout knowledge lives in the
     spec, so this one engine serves any trainer backend that can describe its shards.
@@ -379,13 +379,20 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         super().__init__(*args, **kwargs)
         assert encoding == "indices", f"delta_sharded ships only the 'indices' position encoding; got {encoding!r}"
         self.encoding = encoding
-        self._shard_snap: dict[str, torch.Tensor] = {}  # name -> pinned-CPU shard snapshot
         self._shard_seeded = False
         self._placements: dict[str, tuple] = {}  # name -> (flat_offset, contributes, group)
         # Gather the per-param sparse deltas in groups of this many parameters
         # (one count-matrix all_gather + two padded gathers per group instead of
         # three collectives per parameter).
         self.batch_gather = int(batch_gather)
+
+    @property
+    def needs_seed(self) -> bool:
+        """True until the first (seed) sync has run. The caller picks the export by
+        phase: seed consumes ``get_per_tensor_param_shard`` (full shards, values-only
+        wire for identity params), steady consumes ``get_per_tensor_param_delta_shard``
+        (backend-computed shard-local deltas)."""
+        return not self._shard_seeded
 
     def _placement(self, name: str, spec: ShardSpec) -> tuple[int | BlockPlacement, bool, object]:
         """Derive (and cache) this rank's ``(place, contributes, gather_group)`` from the spec."""
@@ -511,13 +518,9 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             )
 
         for name, local, spec in weights:
+            # snapshot upkeep is the BACKEND's job now: get_per_tensor_param_shard
+            # refreshes the pinned-CPU snapshots as it exports (spec.snapshot_shard_export).
             local = local.detach().contiguous().view(-1)
-            snap = self._shard_snap.get(name)
-            if snap is None or snap.numel() != local.numel():
-                snap = torch.empty_like(local, device="cpu", pin_memory=True)
-            snap.copy_(local, non_blocking=True)
-            self._shard_snap[name] = snap
-
             place, contributes, pg = self._placement(name, spec)
             shard = local if contributes else torch.empty(0, dtype=local.dtype, device=local.device)
             if spec.to_hf_chunk is None:
@@ -659,7 +662,6 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         place: BlockPlacement,
         lidx: torch.Tensor,
         lval: torch.Tensor,
-        local: torch.Tensor,
     ) -> tuple[list, str, torch.Tensor, torch.Tensor, torch.Tensor]:
         """SENDER-SIDE scoped conversion for one converter param: turn this rank's
         shard-local delta into final HF-coordinate slot entries. Only the touched
@@ -687,7 +689,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                 sel_g = g[pos : pos + cnt]
                 sel_v = gv[pos : pos + cnt]
                 pos += cnt
-                for s_i, pidx, pval in self._convert_row_to_hf(name, spec, r, sel_g - r * inner, sel_v, local):
+                for s_i, pidx, pval in self._convert_row_to_hf(name, spec, r, sel_g - r * inner, sel_v, lval):
                     counts[int(r) * slots_per_row + s_i] = pidx.numel()
                     idx_pieces.append(pidx)
                     val_pieces.append(pval)
@@ -695,9 +697,9 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             my_idx = torch.cat(idx_pieces)
             my_val = torch.cat(val_pieces)
         else:
-            my_idx = torch.empty(0, dtype=torch.int32, device=local.device)
-            my_val = torch.empty(0, dtype=local.dtype, device=local.device)
-        return spec.hf_slots, str(local.dtype).replace("torch.", ""), counts, my_idx, my_val
+            my_idx = torch.empty(0, dtype=torch.int32, device=lval.device)
+            my_val = torch.empty(0, dtype=lval.dtype, device=lval.device)
+        return spec.hf_slots, str(lval.dtype).replace("torch.", ""), counts, my_idx, my_val
 
     def _convert_identity(
         self,
@@ -706,7 +708,6 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         place: int | BlockPlacement,
         lidx: torch.Tensor,
         lval: torch.Tensor,
-        local: torch.Tensor,
     ) -> tuple[list, str, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Identity profile (plain DTensor / explicit blocks / unsharded): the
         param IS its own single slot -- translate the shard-local delta to
@@ -717,7 +718,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         gidx = (translate_flat_indices(lidx, place) if lidx.numel() else lidx).to(torch.int32)
         counts = torch.zeros(1, dtype=torch.int64)
         counts[0] = int(gidx.numel())
-        return [(name, tuple(spec.full_shape))], str(local.dtype).replace("torch.", ""), counts, gidx, lval
+        return [(name, tuple(spec.full_shape))], str(lval.dtype).replace("torch.", ""), counts, gidx, lval
 
     async def send_weights(
         self,
@@ -730,6 +731,8 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         # whole model.
         assert self.rank <= 0, "Trainer workers other than rank 0 should not send weights."
         if not self._shard_seeded:
+            # seed consumes the SHARD generator (name, local, spec); the caller
+            # selects it via ``needs_seed``.
             return self._send_seed(weights, global_steps)
         is_r0 = self.is_master
         first = False  # the seed first sync is handled by _send_seed
@@ -765,29 +768,15 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
 
         gq = _GatherQueue(batch_k, self.bucket_size, is_r0, _bucket_slot_delta)
 
-        for name, local, spec in weights:
-            local = local.detach().contiguous().view(-1)
-            place, contributes, pg = self._placement(name, spec)
-            # The seed sync allocated every param's snapshot; a missing name or a
-            # numel drift means the rollout side was never seeded for this shard --
-            # diffing against a fresh (garbage) buffer would silently ship a bogus
-            # near-full delta, so fail loud instead.
-            snap = self._shard_snap[name]
-            assert snap.numel() == local.numel(), (
-                f"{name}: shard numel changed since seed ({snap.numel()} -> {local.numel()})"
-            )
-            if contributes:
-                base = snap.to(local.device, non_blocking=True)
-                lidx, lval = shard_delta_indices(local, base, 0)  # shard-local coordinates
-            else:
-                # replicated param owned by another rank; contribute nothing but keep lockstep.
-                lidx = torch.empty(0, dtype=torch.int64, device=local.device)
-                lval = torch.empty(0, dtype=local.dtype, device=local.device)
-            snap.copy_(local, non_blocking=True)  # update snapshot to current shard
-            self._shard_snap[name] = snap
+        # ``weights`` is the DELTA-shard generator (get_per_tensor_param_delta_shard):
+        # the BACKEND diffed each shard against its own snapshot/checkpoint and yields
+        # shard-local (idx, val) deltas in lockstep order (empty for non-contributing
+        # replicas). This engine only converts coordinates, gathers and ships.
+        for name, lidx, lval, spec in weights:
+            place, _contributes, pg = self._placement(name, spec)
 
             if spec.to_hf_chunk is not None and isinstance(place, BlockPlacement) and spec.hf_slots is not None:
-                entry = self._convert_to_hf(name, spec, place, lidx, lval, local)
+                entry = self._convert_to_hf(name, spec, place, lidx, lval)
             elif spec.to_hf_chunk is not None:
                 raise NotImplementedError(
                     f"{name}: converter specs without an enumerable slot table (hf_slots) are "
@@ -795,7 +784,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                     "dim-0-separable to_hf_chunk + hf_slots (see #7060)"
                 )
             else:
-                entry = self._convert_identity(name, spec, place, lidx, lval, local)
+                entry = self._convert_identity(name, spec, place, lidx, lval)
             gq.put(pg, *entry)
         gq.flush_all()
 

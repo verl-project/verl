@@ -24,6 +24,16 @@ DTensor-based trainers (FSDP, veomni, ...) pass ``param.device_mesh`` /
 ``param.placements`` verbatim; ``mesh=None`` means the local tensor already is
 the whole parameter (replicated / unsharded).
 
+``BaseEngine.get_per_tensor_param_delta_shard`` yields
+``(name, delta_idx, delta_val, ShardSpec)`` -- the shard-local coordinates and
+values of the elements that changed since the previous export. The DELTA is the
+backend's responsibility (it may already hold a previous-step checkpoint, e.g.
+Decoupled PPO, and can diff against that instead of a dedicated snapshot); the
+delta engine only converts, gathers and ships. Non-contributing ranks (replicas)
+yield empty ``delta_idx``/``delta_val`` but stay in the lockstep sequence.
+:func:`snapshot_shard_export` / :func:`delta_shard_export` implement the default
+pinned-CPU-snapshot strategy shared by the FSDP and veomni backends.
+
 ``to_hf_chunk`` + ``hf_slots`` describe trainers whose logical parameter differs
 from the HF tensor(s) (e.g. veomni's fused expert stacks): a dim-0-separable
 converter plus its static output enumeration. Both are None for identity params
@@ -43,7 +53,14 @@ if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
     from torch.distributed.device_mesh import DeviceMesh
 
-__all__ = ["BlockPlacement", "ShardSpec", "derive_placement", "translate_flat_indices"]
+__all__ = [
+    "BlockPlacement",
+    "ShardSpec",
+    "delta_shard_export",
+    "derive_placement",
+    "snapshot_shard_export",
+    "translate_flat_indices",
+]
 
 
 @dataclass
@@ -243,3 +260,48 @@ def _flattened_mesh_group(mesh: DeviceMesh) -> ProcessGroup:
         got = dist.new_group(list(ranks))
         _FLAT_GROUPS[ranks] = got
     return got
+
+
+def snapshot_shard_export(gen, snaps: dict):
+    """Wrap a raw ``(name, local_shard, spec)`` exporter for the SEED sync:
+    refresh each param's pinned-CPU snapshot with the exported values (these
+    weights are going on the wire, so the next delta diffs against them) and
+    pass the tuple through unchanged."""
+    from verl.utils.device import is_cuda_available
+
+    for name, local, spec in gen:
+        snap = snaps.get(name)
+        if snap is None or snap.numel() != local.numel():
+            # pinned host memory needs an accelerator context; degrade gracefully
+            # on CPU-only environments (unit tests) where pinning is meaningless.
+            snap = torch.empty_like(local, device="cpu", pin_memory=is_cuda_available)
+            snaps[name] = snap
+        snap.copy_(local, non_blocking=True)
+        yield name, local, spec
+
+
+def delta_shard_export(gen, snaps: dict):
+    """Wrap a raw ``(name, local_shard, spec)`` exporter into the delta-shard
+    contract ``(name, delta_idx, delta_val, spec)``: bitwise-diff each shard
+    against its pinned-CPU snapshot, then refresh the snapshot. Non-contributing
+    ranks (replicas of a param another rank owns) yield empty deltas but stay in
+    the lockstep sequence. The seed export must have run first (it allocates and
+    fills the snapshots); a missing or resized snapshot means the receiver was
+    never seeded for this shard, so fail loud rather than diff against garbage."""
+    from verl.checkpoint_engine.delta_sync.sparse_gather import shard_delta_indices
+
+    for name, local, spec in gen:
+        snap = snaps.get(name)
+        assert snap is not None and snap.numel() == local.numel(), (
+            f"{name}: no seed snapshot for this shard (numel {getattr(snap, 'numel', lambda: None)()} "
+            f"vs {local.numel()}); run the seed export before delta exports"
+        )
+        _, contributes, _ = derive_placement(spec)
+        if contributes:
+            base = snap.to(local.device, non_blocking=True)
+            delta_idx, delta_val = shard_delta_indices(local, base, 0)
+        else:
+            delta_idx = torch.empty(0, dtype=torch.int64, device=local.device)
+            delta_val = torch.empty(0, dtype=local.dtype, device=local.device)
+        snap.copy_(local, non_blocking=True)
+        yield name, delta_idx, delta_val, spec

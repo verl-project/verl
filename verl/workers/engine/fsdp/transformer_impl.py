@@ -817,14 +817,9 @@ class FSDPEngine(BaseEngine):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.optimizer)
 
-    def get_per_tensor_param_shard(self, **kwargs):
-        """Like :meth:`get_per_tensor_param`, but yields each rank's *local* FSDP shard
-        instead of all-gathering the full tensor -- used by the ``delta_sharded``
-        checkpoint engine, which diffs on shards and gathers only the changes.
-
-        Yields ``(name, local_flat_shard_bf16, within_param_flat_offset, full_numel,
-        full_shape, contributes)``. Non-LoRA base path only.
-        """
+    def _raw_shard_export(self):
+        """Raw ``(name, local_flat_shard_bf16, ShardSpec)`` exporter shared by the
+        shard and delta-shard exports. Non-LoRA base path only."""
 
         # FSDP1's (SHARDED_)STATE_DICT export runs through the unshard machinery and
         # asserts flat params are GPU-resident; FSDP2 state_dict() only collects
@@ -850,7 +845,28 @@ class FSDPEngine(BaseEngine):
                 local = p.to_local() if hasattr(p, "to_local") else p
                 yield name, local.reshape(-1), spec
 
-        return _gen(), None
+        return _gen()
+
+    def get_per_tensor_param_shard(self, **kwargs):
+        """Like :meth:`get_per_tensor_param`, but yields each rank's *local* FSDP shard
+        ``(name, local_flat_shard_bf16, ShardSpec)`` instead of all-gathering the full
+        tensor -- the delta engine's SEED sync. Exporting also refreshes the pinned-CPU
+        delta snapshots (these weights go on the wire, so the next delta diffs against
+        them)."""
+        from ..spec import snapshot_shard_export
+
+        self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
+        return snapshot_shard_export(self._raw_shard_export(), self._delta_shard_snap), None
+
+    def get_per_tensor_param_delta_shard(self, **kwargs):
+        """Yield ``(name, delta_idx, delta_val, ShardSpec)`` -- each shard's changed
+        elements since the previous export, diffed against this engine's pinned-CPU
+        snapshots (see :func:`verl.workers.engine.spec.delta_shard_export`). The seed
+        export must have run first."""
+        from ..spec import delta_shard_export
+
+        self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
+        return delta_shard_export(self._raw_shard_export(), self._delta_shard_snap), None
 
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)

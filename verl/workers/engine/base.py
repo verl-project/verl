@@ -178,6 +178,26 @@ class BaseEngine:
         """
         raise NotImplementedError
 
+    def get_per_tensor_param_delta_shard(self, **kwargs) -> tuple[Generator, Optional[dict]]:
+        """
+        Like :meth:`get_per_tensor_param_shard`, but yields each shard's DELTA since the
+        previous export instead of the shard itself.
+
+        Implementations yield ``(name, delta_idx, delta_val, ShardSpec)`` -- the
+        shard-local flat coordinates and values of the changed elements, in an order
+        identical on every rank (non-contributing replicas yield empty deltas but stay
+        in the sequence). The delta is the backend's responsibility: a backend that
+        already keeps the previous step's weights (e.g. Decoupled PPO) can diff against
+        that instead of a dedicated snapshot; :func:`verl.workers.engine.spec.delta_shard_export`
+        implements the default pinned-CPU-snapshot strategy. The seed sync (a prior
+        :meth:`get_per_tensor_param_shard` pass) must have run first.
+
+        Returns:
+            Generator: A generator that yields per-parameter shard-local deltas with placement metadata.
+            Optional[dict]: Optional peft config.
+        """
+        raise NotImplementedError
+
     def get_data_parallel_size(self):
         raise NotImplementedError
 

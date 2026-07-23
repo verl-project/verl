@@ -699,10 +699,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if effective_mode != "naive":
-            # The sharded delta engine diffs each rank's local FSDP shard (no all-gather),
-            # so it consumes the sharded param generator instead of the full-tensor one.
+            # The sharded delta engine works on each rank's local shard (no all-gather).
+            # Seed sync consumes full shards; steady syncs consume the BACKEND-computed
+            # shard-local deltas (the backend owns the snapshot/diff -- it may already
+            # keep a previous-step checkpoint, and the weight->HF naming map is its
+            # knowledge anyway).
             if effective_mode == "delta_sharded":
-                per_tensor_param, _ = self.actor.engine.get_per_tensor_param_shard()
+                if getattr(self.checkpoint_engine, "needs_seed", True):
+                    per_tensor_param, _ = self.actor.engine.get_per_tensor_param_shard()
+                else:
+                    per_tensor_param, _ = self.actor.engine.get_per_tensor_param_delta_shard()
             else:
                 per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
             metrics = await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
