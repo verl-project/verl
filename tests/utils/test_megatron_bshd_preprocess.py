@@ -32,6 +32,7 @@ def _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size: int = 4):
 
     parallel_state.get_context_parallel_world_size = lambda: 1
     parallel_state.get_context_parallel_rank = lambda: 0
+    parallel_state.get_context_parallel_group = lambda: None
     parallel_state.get_tensor_model_parallel_world_size = lambda: tp_size
 
     class PackedSeqParams:
@@ -147,3 +148,83 @@ def test_preprocess_thd_engine_pads_to_minimum_rows(monkeypatch):
     torch.testing.assert_close(local_ids[0, 100:], torch.zeros(28, dtype=torch.long))
     torch.testing.assert_close(local_positions[0, :100], torch.arange(100, dtype=torch.long))
     torch.testing.assert_close(local_positions[0, 100:], torch.zeros(28, dtype=torch.long))
+
+
+def test_preprocess_thd_engine_uses_flat_packed_cu_seqlens(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=4)
+    input_ids = _nested_tensor([torch.arange(5, dtype=torch.long), torch.arange(3, dtype=torch.long) + 10])
+    cu_seqlens = torch.tensor([0, 2, 5, 7, 8], dtype=torch.int32)
+
+    local_ids, packed_seq_params, local_positions = mcore_util.preprocess_thd_engine(
+        input_ids,
+        packed_cu_seqlens=cu_seqlens,
+    )
+
+    expected_padded_cu = torch.tensor([0, 2, 8, 10, 12], dtype=torch.int32)
+    torch.testing.assert_close(packed_seq_params.cu_seqlens_q, expected_padded_cu)
+    torch.testing.assert_close(packed_seq_params.cu_seqlens_kv, expected_padded_cu)
+    torch.testing.assert_close(
+        getattr(packed_seq_params, mcore_util._VERL_ROW_CU_SEQLENS_PADDED),
+        torch.tensor([0, 8, 12], dtype=torch.int32),
+    )
+    torch.testing.assert_close(local_ids[0, :5], torch.arange(5, dtype=torch.long))
+    torch.testing.assert_close(local_ids[0, 5:8], torch.zeros(3, dtype=torch.long))
+    torch.testing.assert_close(local_ids[0, 8:11], torch.arange(3, dtype=torch.long) + 10)
+    torch.testing.assert_close(local_ids[0, 11], torch.tensor(0, dtype=torch.long))
+    torch.testing.assert_close(local_positions[0], torch.tensor([0, 1, 0, 1, 2, 3, 4, 5, 0, 1, 0, 1]))
+
+    output = torch.arange(12, dtype=torch.float32).view(1, 12, 1)
+    restored = mcore_util.postprocess_thd_engine(output, packed_seq_params, input_ids, batch_size=2)
+    restored_rows = restored.unbind()
+    torch.testing.assert_close(restored_rows[0].squeeze(-1), torch.arange(5, dtype=torch.float32))
+    torch.testing.assert_close(restored_rows[1].squeeze(-1), torch.arange(8, 11, dtype=torch.float32))
+
+
+def test_preprocess_thd_engine_merges_per_row_padded_cu_seqlens(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=4)
+    input_ids = _nested_tensor([torch.arange(5, dtype=torch.long), torch.arange(3, dtype=torch.long) + 10])
+    cu_seqlens = torch.tensor(
+        [
+            [0, 2, 5, 5],
+            [0, 2, 3, 3],
+        ],
+        dtype=torch.int32,
+    )
+
+    _, packed_seq_params, _ = mcore_util.preprocess_thd_engine(
+        input_ids,
+        packed_cu_seqlens=cu_seqlens,
+    )
+
+    torch.testing.assert_close(
+        packed_seq_params.cu_seqlens_q,
+        torch.tensor([0, 2, 8, 10, 12], dtype=torch.int32),
+    )
+
+
+def test_preprocess_thd_engine_rolls_within_packed_cu_seqlens(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=4)
+    input_ids = _nested_tensor([torch.arange(5, dtype=torch.long), torch.arange(3, dtype=torch.long) + 10])
+    cu_seqlens = torch.tensor([0, 2, 5, 7, 8], dtype=torch.int32)
+
+    local_ids, packed_seq_params, local_positions = mcore_util.preprocess_thd_engine(
+        input_ids,
+        need_roll=True,
+        packed_cu_seqlens=cu_seqlens,
+    )
+
+    torch.testing.assert_close(
+        packed_seq_params.cu_seqlens_q,
+        torch.tensor([0, 2, 8, 10, 12], dtype=torch.int32),
+    )
+    torch.testing.assert_close(local_ids[0], torch.tensor([1, 0, 3, 4, 0, 0, 0, 2, 11, 10, 0, 12]))
+    torch.testing.assert_close(local_positions[0], torch.tensor([1, 0, 1, 2, 3, 4, 5, 0, 1, 0, 1, 0]))
+
+
+def test_preprocess_thd_engine_rejects_cu_seqlens_without_row_boundaries(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=4)
+    input_ids = _nested_tensor([torch.arange(5, dtype=torch.long), torch.arange(3, dtype=torch.long) + 10])
+    cu_seqlens = torch.tensor([0, 2, 7, 8], dtype=torch.int32)
+
+    with pytest.raises(ValueError, match="must include nested input row boundaries"):
+        mcore_util.preprocess_thd_engine(input_ids, packed_cu_seqlens=cu_seqlens)

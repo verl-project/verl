@@ -146,6 +146,7 @@ def fused_forward_model_engine(vision_model: bool = False):
         temperature: float,
         calculate_entropy: bool,
         pad_token_id: int,
+        cu_seqlens: Optional[torch.Tensor] = None,
     ):
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
@@ -162,6 +163,7 @@ def fused_forward_model_engine(vision_model: bool = False):
             pre_process=pre_process,
             use_fp8_padding=use_fp8_padding,
             min_local_rows=min_local_rows,
+            packed_cu_seqlens=cu_seqlens,
         )
         input_ids_rmpad = input_ids_rmpad.contiguous()
 
@@ -190,6 +192,7 @@ def fused_forward_model_engine(vision_model: bool = False):
             need_roll=True,
             use_fp8_padding=use_fp8_padding,
             min_local_rows=min_local_rows,
+            packed_cu_seqlens=cu_seqlens,
         )
         labels_rmpad = labels_rmpad.contiguous()
         output_orig: CausalLMOutputForPPO = model(

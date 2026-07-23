@@ -28,6 +28,10 @@ from verl.utils.model import CausalLMOutputForPPO
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+_VERL_ROW_CU_SEQLENS_PADDED = "_verl_row_cu_seqlens_padded"
+_VERL_PACKED_CU_SEQLENS_PADDED = "_verl_packed_cu_seqlens_padded"
+_VERL_PACKED_TOTAL_TOKENS = "_verl_packed_total_tokens"
+
 
 def _compute_fp8_thd_align_size(align_size: int) -> tuple[int, int]:
     """Compute FP8 alignment sizes for thd-format sequences.
@@ -41,6 +45,155 @@ def _compute_fp8_thd_align_size(align_size: int) -> tuple[int, int]:
     return math.lcm(16, align_size), align_size * 128
 
 
+def _strip_cu_seqlens_padding(cu_seqlens: list[int], total_length: int) -> list[int]:
+    """Drop trailing fixed-size collation padding from a cumulative-length row."""
+    try:
+        end_idx = cu_seqlens.index(total_length)
+    except ValueError:
+        return cu_seqlens
+    return cu_seqlens[: end_idx + 1]
+
+
+def _validate_cu_seqlens(cu_seqlens: list[int], total_length: int, name: str):
+    if len(cu_seqlens) < 2:
+        raise ValueError(f"{name} must contain at least start and end offsets, got {cu_seqlens}")
+    if cu_seqlens[0] != 0:
+        raise ValueError(f"{name} must start with 0, got {cu_seqlens[0]}")
+    if cu_seqlens[-1] != total_length:
+        raise ValueError(f"{name} must end with the flattened token length {total_length}, got {cu_seqlens[-1]}")
+    prev = cu_seqlens[0]
+    for value in cu_seqlens[1:]:
+        if value < prev:
+            raise ValueError(f"{name} must be monotonically non-decreasing, got {cu_seqlens}")
+        if value > total_length:
+            raise ValueError(f"{name} contains offset {value} beyond flattened token length {total_length}")
+        prev = value
+
+
+def _merge_padded_cu_seqlens_rows(
+    cu_seqlens: torch.Tensor,
+    row_lengths_cpu: list[int],
+    row_offsets_cpu: list[int],
+    name: str,
+) -> list[int]:
+    """Merge per-sample cu_seqlens rows into one flat cumulative boundary list."""
+    if cu_seqlens.shape[0] != len(row_lengths_cpu):
+        raise ValueError(
+            f"{name} with shape {tuple(cu_seqlens.shape)} must have one row per nested input row "
+            f"({len(row_lengths_cpu)})"
+        )
+
+    merged: list[int] = []
+    for i, row in enumerate(cu_seqlens.detach().cpu()):
+        row_length = row_lengths_cpu[i]
+        row_cu = _strip_cu_seqlens_padding(row.tolist(), row_length)
+        _validate_cu_seqlens(row_cu, row_length, f"{name}[{i}]")
+        offset = row_offsets_cpu[i]
+        if i == 0:
+            merged.extend(row_cu)
+        else:
+            merged.extend(offset + value for value in row_cu[1:])
+    return merged
+
+
+def _normalize_packed_cu_seqlens(
+    cu_seqlens: torch.Tensor,
+    row_lengths_cpu: list[int],
+    row_offsets_cpu: list[int],
+    device: torch.device,
+    name: str,
+) -> torch.Tensor:
+    """Normalize 1-D or per-row padded cu_seqlens to a flat int32 tensor."""
+    cu_seqlens = cu_seqlens.to(device=device, dtype=torch.int32)
+    if cu_seqlens.dim() == 1:
+        cu_seqlens_cpu = _strip_cu_seqlens_padding(cu_seqlens.detach().cpu().tolist(), row_offsets_cpu[-1])
+    elif cu_seqlens.dim() == 2:
+        if cu_seqlens.shape[0] == 1:
+            cu_seqlens_cpu = _strip_cu_seqlens_padding(cu_seqlens[0].detach().cpu().tolist(), row_offsets_cpu[-1])
+        else:
+            cu_seqlens_cpu = _merge_padded_cu_seqlens_rows(
+                cu_seqlens, row_lengths_cpu=row_lengths_cpu, row_offsets_cpu=row_offsets_cpu, name=name
+            )
+    else:
+        raise ValueError(f"{name} must be a 1-D or 2-D tensor, got shape {tuple(cu_seqlens.shape)}")
+
+    _validate_cu_seqlens(cu_seqlens_cpu, row_offsets_cpu[-1], name)
+
+    cu_seqlens_set = set(cu_seqlens_cpu)
+    missing_row_offsets = [offset for offset in row_offsets_cpu[1:-1] if offset not in cu_seqlens_set]
+    if missing_row_offsets:
+        raise ValueError(
+            f"{name} must include nested input row boundaries {missing_row_offsets}; "
+            "Megatron THD preprocessing inserts alignment padding between rows."
+        )
+
+    return torch.tensor(cu_seqlens_cpu, dtype=torch.int32, device=device)
+
+
+def _map_cu_seqlens_to_padded_rows(
+    cu_seqlens: torch.Tensor,
+    row_offsets_cpu: list[int],
+    row_offsets_padded_cpu: list[int],
+    device: torch.device,
+) -> torch.Tensor:
+    """Map real flattened offsets to offsets in the THD buffer with per-row padding folded in."""
+    cu_seqlens_cpu = cu_seqlens.detach().cpu().tolist()
+    padded_cu_seqlens: list[int] = []
+    row_idx = 0
+    last_row_idx = len(row_offsets_cpu) - 2
+
+    for offset in cu_seqlens_cpu:
+        while row_idx < last_row_idx and offset > row_offsets_cpu[row_idx + 1]:
+            row_idx += 1
+        if offset == 0:
+            padded_offset = 0
+        elif offset == row_offsets_cpu[row_idx + 1]:
+            padded_offset = row_offsets_padded_cpu[row_idx + 1]
+        else:
+            padded_offset = row_offsets_padded_cpu[row_idx] + (offset - row_offsets_cpu[row_idx])
+        padded_cu_seqlens.append(padded_offset)
+
+    return torch.tensor(padded_cu_seqlens, dtype=torch.int32, device=device)
+
+
+def _get_thd_partitioned_indices(
+    cu_seqlens: torch.Tensor, total_tokens: int, cp_size: int, cp_rank: int
+) -> torch.Tensor:
+    try:
+        import transformer_engine  # noqa: F401
+        import transformer_engine_torch as tex
+    except ImportError as exc:
+        raise ImportError(
+            "Explicit packed cu_seqlens with context parallelism requires TransformerEngine "
+            "for thd_get_partitioned_indices."
+        ) from exc
+    return tex.thd_get_partitioned_indices(cu_seqlens, total_tokens, cp_size, cp_rank)
+
+
+def _build_segment_position_ids(
+    cu_seqlens: torch.Tensor,
+    total_tokens: int,
+    device: torch.device,
+) -> torch.Tensor:
+    position_ids = torch.zeros(total_tokens, dtype=torch.long, device=device)
+    cu_seqlens_cpu = cu_seqlens.detach().cpu().tolist()
+    for start, end in zip(cu_seqlens_cpu[:-1], cu_seqlens_cpu[1:], strict=True):
+        if end > start:
+            position_ids[start:end] = torch.arange(end - start, dtype=torch.long, device=device)
+    return position_ids
+
+
+def _roll_by_cu_seqlens(values: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
+    rolled = values.clone()
+    cu_seqlens_cpu = cu_seqlens.detach().cpu().tolist()
+    for start, end in zip(cu_seqlens_cpu[:-1], cu_seqlens_cpu[1:], strict=True):
+        if end - start > 1:
+            rolled[start : end - 1] = values[start + 1 : end]
+        if end > start:
+            rolled[end - 1] = values[start]
+    return rolled
+
+
 def preprocess_packed_seqs(
     input_ids: torch.Tensor, attention_mask: torch.Tensor, pre_process: bool = True, use_fp8_padding: bool = False
 ) -> tuple[torch.Tensor, PackedSeqParams]:
@@ -49,6 +202,9 @@ def preprocess_packed_seqs(
     CP splits sequence into CP*2 chunks, and each GPU gets 2 chunks (GPU0 gets first and last chunks, GPU1
     gets second and second last chunks, and so on), this is for load balancing with causal masking.
     See https://github.com/NVIDIA/TransformerEngine/issues/1368
+
+    packed_cu_seqlens optionally marks sequence boundaries inside nested rows. It may be either a flat
+    cumulative-length tensor for the flattened micro-batch, or per-row cu_seqlens padded with trailing row lengths.
     """
     batch_size = input_ids.shape[0]
 
@@ -151,7 +307,10 @@ def postprocess_packed_seqs(
     # Move the lengths and offsets needed for subsequent Python-level indexing to the CPU in advance,
     # to avoid a large number of .item() calls in the loop
     # -------------------------------------------------------------------------
-    cu_padded_cpu: list[int] = packed_seq_params.cu_seqlens_q_padded.tolist()
+    row_cu_seqlens_padded = getattr(
+        packed_seq_params, _VERL_ROW_CU_SEQLENS_PADDED, packed_seq_params.cu_seqlens_q_padded
+    )
+    cu_padded_cpu: list[int] = row_cu_seqlens_padded.tolist()
     seq_lens_cpu: list[int] = attention_mask.sum(dim=1, dtype=torch.int32).cpu().tolist()
 
     shape = [batch_size, seq_len] + list(output.shape[2:])  # 1,packed, dim -> batch_size, seq_len, dim
@@ -321,6 +480,7 @@ def preprocess_thd_engine(
     use_fp8_padding: bool = False,
     local_cp_size: Optional[int] = None,
     min_local_rows: Optional[int] = None,
+    packed_cu_seqlens: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, PackedSeqParams, Optional[torch.Tensor]]:
     """
     Preprocess packed sequences
@@ -352,8 +512,8 @@ def preprocess_thd_engine(
     pad_size = (align_size - seqlens_in_batch % align_size) % align_size
     seqlens_in_batch_padded = seqlens_in_batch + pad_size
 
-    cu_seqlens = torch.zeros(batch_size + 1, dtype=torch.int32, device=input_ids.device)
-    cu_seqlens[1:] = torch.cumsum(seqlens_in_batch, dim=0)
+    row_cu_seqlens = torch.zeros(batch_size + 1, dtype=torch.int32, device=input_ids.device)
+    row_cu_seqlens[1:] = torch.cumsum(seqlens_in_batch, dim=0)
     cu_seqlens_padded = torch.zeros(batch_size + 1, dtype=torch.int32, device=input_ids.device)
     cu_seqlens_padded[1:] = torch.cumsum(seqlens_in_batch_padded, dim=0)
 
@@ -378,14 +538,57 @@ def preprocess_thd_engine(
     # ----------------------------------------------------------------------------
     seqlens_in_batch_cpu: list[int] = seqlens_in_batch.tolist()  # original valid lengths
     seqlens_in_batch_padded_cpu: list[int] = seqlens_in_batch_padded.tolist()  # lengths after padding
+    row_cu_seqlens_cpu: list[int] = row_cu_seqlens.tolist()  # start positions (before padding)
     cu_seqlens_padded_cpu: list[int] = cu_seqlens_padded.tolist()  # start positions (after padding)
 
     # Pure Python int calculation to avoid further synchronization
     max_seqlen_in_batch = max(seqlens_in_batch_padded_cpu)
+    packed_cu_seqlens_padded = cu_seqlens_padded
+    if packed_cu_seqlens is not None:
+        packed_cu_seqlens = _normalize_packed_cu_seqlens(
+            packed_cu_seqlens,
+            row_lengths_cpu=seqlens_in_batch_cpu,
+            row_offsets_cpu=row_cu_seqlens_cpu,
+            device=input_ids.device,
+            name="packed_cu_seqlens",
+        )
+        packed_cu_seqlens_padded = _map_cu_seqlens_to_padded_rows(
+            packed_cu_seqlens,
+            row_offsets_cpu=row_cu_seqlens_cpu,
+            row_offsets_padded_cpu=cu_seqlens_padded_cpu,
+            device=input_ids.device,
+        )
+        max_seqlen_in_batch = int((packed_cu_seqlens_padded[1:] - packed_cu_seqlens_padded[:-1]).max().item())
 
     shape = list(input_ids.shape[1:])
     shape[0] = sum(seqlens_in_batch_padded_cpu) // cp_size
-    if pre_process:
+    if pre_process and packed_cu_seqlens is not None:
+        total_padded_tokens = cu_seqlens_padded_cpu[-1]
+        global_shape = list(input_ids.shape[1:])
+        global_shape[0] = total_padded_tokens
+        input_ids_global = torch.zeros(global_shape, dtype=input_ids.dtype, device=input_ids.device)
+        for i in range(batch_size):
+            seqlen = seqlens_in_batch_cpu[i]
+            start_idx = cu_seqlens_padded_cpu[i]
+            input_ids_global[start_idx : start_idx + seqlen] = input_ids[i]
+
+        position_ids_global = _build_segment_position_ids(
+            packed_cu_seqlens_padded, total_padded_tokens, device=input_ids.device
+        )
+        if need_roll:
+            input_ids_global = _roll_by_cu_seqlens(input_ids_global, packed_cu_seqlens_padded)
+            position_ids_global = _roll_by_cu_seqlens(position_ids_global, packed_cu_seqlens_padded)
+
+        if cp_size > 1:
+            index = _get_thd_partitioned_indices(packed_cu_seqlens_padded, total_padded_tokens, cp_size, cp_rank).to(
+                device=input_ids.device, dtype=torch.long
+            )
+            input_ids_rmpad = input_ids_global.index_select(0, index)
+            position_ids_rmpad = position_ids_global.index_select(0, index)
+        else:
+            input_ids_rmpad = input_ids_global
+            position_ids_rmpad = position_ids_global
+    elif pre_process:
         input_ids_rmpad = torch.zeros(shape, dtype=input_ids.dtype, device=input_ids.device)
         position_ids_rmpad = torch.zeros(shape[0], dtype=torch.long, device=input_ids.device)
         if need_roll:
@@ -474,14 +677,18 @@ def preprocess_thd_engine(
 
     packed_seq_params = PackedSeqParams(
         qkv_format="thd",
-        cu_seqlens_q=cu_seqlens_padded,
+        cu_seqlens_q=packed_cu_seqlens_padded,
         max_seqlen_q=max_seqlen_in_batch,
-        cu_seqlens_kv=cu_seqlens_padded,
+        cu_seqlens_kv=packed_cu_seqlens_padded,
         max_seqlen_kv=max_seqlen_in_batch,
-        cu_seqlens_q_padded=cu_seqlens_padded,
-        cu_seqlens_kv_padded=cu_seqlens_padded,
+        cu_seqlens_q_padded=packed_cu_seqlens_padded,
+        cu_seqlens_kv_padded=packed_cu_seqlens_padded,
         **extra_packed_args,
     )
+    setattr(packed_seq_params, _VERL_ROW_CU_SEQLENS_PADDED, cu_seqlens_padded)
+    if packed_cu_seqlens is not None:
+        setattr(packed_seq_params, _VERL_PACKED_CU_SEQLENS_PADDED, packed_cu_seqlens_padded)
+        setattr(packed_seq_params, _VERL_PACKED_TOTAL_TOKENS, cu_seqlens_padded_cpu[-1])
     if pre_process:
         return input_ids_rmpad.unsqueeze(0), packed_seq_params, position_ids_rmpad.unsqueeze(0)
     else:
@@ -531,6 +738,21 @@ def postprocess_thd_engine(
         output_list[cp_rank] = output
     else:
         output_list = [output]
+
+    packed_cu_seqlens_padded = getattr(packed_seq_params, _VERL_PACKED_CU_SEQLENS_PADDED, None)
+    if cp_size > 1 and packed_cu_seqlens_padded is not None:
+        total_tokens = getattr(packed_seq_params, _VERL_PACKED_TOTAL_TOKENS, cu_padded_cpu[-1])
+        output_global = torch.empty(total_tokens, *output.shape[2:], device=output.device, dtype=output.dtype)
+        for rank, rank_output in enumerate(output_list):
+            index = _get_thd_partitioned_indices(packed_cu_seqlens_padded, total_tokens, cp_size, rank).to(
+                device=output.device, dtype=torch.long
+            )
+            output_global.index_copy_(0, index, rank_output[0])
+        for i in range(batch_size):
+            s = seq_lens_cpu[i]
+            start_idx = cu_padded_cpu[i]
+            output_new.append(output_global[start_idx : start_idx + s])
+        return torch.nested.as_nested_tensor(output_new, layout=torch.jagged)
 
     for i in range(batch_size):
         if cp_size <= 1:
