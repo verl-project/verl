@@ -459,11 +459,7 @@ def rearrange_micro_batches(
         # Place smaller micro-batches at both ends to reduce the bubbles exposed during the warm-up and cool-down.
         micro_bsz_idx = micro_bsz_idx[::2][::-1] + micro_bsz_idx[1::2]
 
-    micro_batches = []
-
-    for partition in micro_bsz_idx:
-        curr_micro_batch = tu.index_select_tensor_dict(batch, partition)
-        micro_batches.append(curr_micro_batch)
+    micro_batches = tu.partition_tensor_dict(batch, micro_bsz_idx)
 
     return micro_batches, micro_bsz_idx
 
