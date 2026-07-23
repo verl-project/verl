@@ -1369,6 +1369,106 @@ def compute_policy_loss_vanilla(
     return pg_loss, pg_metrics
 
 
+@register_policy_loss("up")
+def compute_policy_loss_up(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[ActorConfig] = None,
+    rollout_is_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """UP-GRPO token-level objective (paper arXiv:2607.06987, Eq. 15).
+
+    UP (Unbounded Positive) is a plug-and-play, asymmetric modification of the GRPO
+    policy loss that breaks the exploration-stability dilemma:
+
+    - Positive advantages (A > 0): discard clipping/importance-sampling entirely and
+      use an unbounded self-anchored REINFORCE objective. This is realized through the
+      stop-gradient trick: the self-anchored ratio ``r_tilde = pi / sg(pi)`` equals 1 in
+      value but carries gradient ``grad log pi``. Removing the ``pi_old`` anchor and the
+      upper clip maximizes exploration for rare, low-confidence correct tokens without
+      importance-sampling induced gradient explosion.
+    - Negative advantages (A <= 0): keep the standard GRPO symmetric clip (single epsilon)
+      plus the dual-clip safeguard for stability.
+
+    The KL penalty is handled separately by verl via ``use_kl_loss`` / ``kl_loss_coef``,
+    so it is intentionally NOT added inside this policy-loss function.
+
+    Args:
+        old_log_prob (torch.Tensor):
+            Log-probabilities of actions under the old policy, shape (batch_size, response_length).
+        log_prob (torch.Tensor):
+            Log-probabilities of actions under the current policy, shape (batch_size, response_length).
+        advantages (torch.Tensor):
+            Advantage estimates for each action, shape (batch_size, response_length).
+        response_mask (torch.Tensor):
+            Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
+        loss_agg_mode (str, optional):
+            Aggregation mode for `agg_loss`. Defaults to "token-mean".
+        config: `(verl.trainer.config.ActorConfig)`:
+            config for the actor.
+        rollout_is_weights: `(torch.Tensor)`:
+            Optional rollout-correction importance-sampling weights, shape (batch_size, response_length).
+    """
+    assert config is not None
+    assert not isinstance(config, AlgoConfig)
+    clip_ratio = config.clip_ratio  # Clipping parameter ε for standard PPO. See https://arxiv.org/abs/1707.06347.
+    clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else clip_ratio
+    clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else clip_ratio
+    clip_ratio_c = config.get(  # Lower bound of the ratio for dual-clip PPO. See https://arxiv.org/pdf/1912.09729.
+        "clip_ratio_c", 3.0
+    )
+
+    assert clip_ratio_c > 1.0, (
+        "The lower bound of the clip_ratio_c for dual-clip PPO should be greater than 1.0,"
+        + f" but get the value: {clip_ratio_c}."
+    )
+
+    negative_approx_kl = torch.clamp(log_prob - old_log_prob, min=-20.0, max=20.0)
+    ratio = torch.exp(negative_approx_kl)
+    ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+
+    # Positive branch: unbounded self-anchored REINFORCE objective.
+    # r_tilde = pi / sg(pi) is 1 in value but has gradient grad log pi, so this
+    # removes the pi_old anchor and the clip while keeping the REINFORCE gradient.
+    r_tilde = torch.exp(log_prob - log_prob.detach())
+    pg_losses_pos = -advantages * r_tilde
+
+    # Negative branch: standard GRPO symmetric clip + dual-clip safeguard.
+    pg_losses1 = -advantages * ratio
+    pg_losses2 = -advantages * torch.clamp(ratio, 1 - clip_ratio_low, 1 + clip_ratio_high)
+    clip_pg_losses1 = torch.maximum(pg_losses1, pg_losses2)
+    pg_losses3 = -advantages * clip_ratio_c
+    clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
+    pg_losses_neg = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+
+    pg_losses = torch.where(advantages > 0, pg_losses_pos, pg_losses_neg)
+
+    # Apply rollout correction weights if provided
+    if rollout_is_weights is not None:
+        pg_losses = pg_losses * rollout_is_weights
+
+    pg_loss = agg_loss(
+        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
+    )
+
+    # Clip metrics are only meaningful on the (clipped) non-positive branch.
+    neg_mask = response_mask * (advantages <= 0).float()
+    pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), neg_mask)
+    pg_clipfrac_lower = verl_F.masked_mean(
+        torch.gt(clip_pg_losses1, pg_losses3) * (advantages < 0).float(), response_mask
+    )
+
+    pg_metrics = {
+        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+        "actor/ppo_kl": ppo_kl.detach().item(),
+        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+    }
+    return pg_loss, pg_metrics
+
+
 @register_policy_loss("dppo_tv")
 def compute_policy_loss_dppo_tv(
     old_log_prob: torch.Tensor,
