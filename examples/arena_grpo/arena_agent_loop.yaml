@@ -1,0 +1,8 @@
+# Agent loop registration for Ray workers that do not inherit the driver's
+# Python imports (e.g. TransferQueue-based rollout workers). Point verl at this
+# file with:
+#
+#   actor_rollout_ref.rollout.agent.agent_loop_config_path=./arena_agent_loop.yaml
+#
+- name: arena_agent
+  _target_: verl.experimental.agent_loop.arena_agent_loop.ArenaAgentLoop

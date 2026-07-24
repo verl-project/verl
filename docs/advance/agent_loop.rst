@@ -1,7 +1,7 @@
 Agent Loop
 ==========
 
-Last updated: 07/17/2025.
+Last updated: 07/23/2026.
 
 .. versionadded:: 0.4.2
    [status: alpha]
@@ -229,6 +229,73 @@ they can call ``LLMServerClient.generate`` to generate response_ids.
                List[int]: List of generated token ids.
            """
            ...
+
+OpenAgora Sandbox Agent Loop
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. versionadded:: 0.9.0
+   [status: experimental]
+
+`OpenAgora <https://github.com/albert-lv/OpenAgora>`_ is an external agent execution
+infrastructure that turns the agent loop into a fully sandboxed, observable, and
+reward-decoupled pipeline. The ``arena_agent`` loop
+(``verl.experimental.agent_loop.arena_agent_loop.ArenaAgentLoop``) delegates agent
+execution to the OpenAgora server instead of calling tools in the trainer process:
+
+- **Sandboxed execution**: agents run inside Docker containers orchestrated by the OpenAgora server.
+- **Active LLM proxy**: the OpenAgora proxy injects sampling parameters and records per-token
+  logprobs for every LLM call the agent makes. It can be pointed at an external
+  vLLM/SGLang server serving the policy model.
+- **Decoupled verification**: the reward is computed by OpenAgora's independent verification
+  plane, not by the agent itself, and is returned as ``AgentLoopOutput.reward_score``.
+- **RL-grade trajectories**: every proxy request/response pair is stored in a structured
+  trajectory log and converted back into ``AgentLoopOutput`` (response token ids,
+  response mask, per-token logprobs, and OpenAgora metadata in ``extra_fields``).
+
+**Setup**
+
+1. Install the OpenAgora SDK into the verl environment (imported lazily; only needed
+   when the ``arena_agent`` loop is used)::
+
+      pip install openagora-sdk
+
+2. Start the OpenAgora server (see the OpenAgora repository for installation)::
+
+      openagora-server --sandbox=docker --grpc :9090 --http :9093
+
+3. Start an OpenAI-compatible LLM backend that the proxy forwards agent requests to,
+   e.g. vLLM::
+
+      vllm serve Qwen/Qwen2.5-0.5B-Instruct --port 8001 --dtype bfloat16 --enforce-eager
+
+4. Build the agent sandbox image on the host (default ``openagora-agent-minimal:latest``).
+
+**Environment variables**
+
+- ``ARENA_ENDPOINT``: gRPC endpoint of the OpenAgora server (default ``localhost:9090``).
+- ``ARENA_AGENT_IMAGE``: sandbox image for the agent.
+- ``ARENA_LLM_BACKEND``: LLM backend URL the proxy forwards to (default ``http://localhost:8000/v1``).
+- ``ARENA_VERIFY_COMMAND``: fallback verification command (default ``true``). A per-sample
+  ``openagora_verify`` key in the dataset's ``extra_info`` column takes precedence.
+- ``ARENA_TIMEOUT_SECONDS``: rollout timeout in seconds (default ``3600``).
+
+**Launch**
+
+.. code:: bash
+
+   export ARENA_ENDPOINT=localhost:9090
+   export ARENA_AGENT_IMAGE=openagora-agent-minimal:latest
+   export ARENA_LLM_BACKEND=http://localhost:8001/v1
+
+   python3 examples/arena_grpo/train_grpo_arena.py \
+     algorithm.adv_estimator=grpo \
+     actor_rollout_ref.rollout.agent.default_agent_loop=arena_agent \
+     actor_rollout_ref.rollout.agent.agent_loop_config_path=examples/arena_grpo/arena_agent_loop.yaml \
+     ...
+
+or simply ``bash examples/arena_grpo/run_qwen2_5_0_5b_fsdp.sh``. See
+``examples/arena_grpo/README.md`` for the dataset format (``extra_info`` struct column with
+optional ``openagora_verify`` / ``task_file`` keys) and full setup instructions.
 
 Next
 ----
