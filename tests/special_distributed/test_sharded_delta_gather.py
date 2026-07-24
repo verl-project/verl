@@ -22,10 +22,10 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Replicate, Shard, distribute_tensor
 
 from verl.checkpoint_engine.delta_sync.sparse_gather import (
-    gather_v_batched_to_rank0,
+    gather_slot_entries_to_rank0,
     shard_delta_indices,
 )
-from verl.workers.engine.spec import ShardSpec, derive_placement
+from verl.workers.engine.spec import ShardSpec, derive_placement, translate_flat_indices
 
 
 def _run_case(shape, placements, mesh, dev, rank, si):
@@ -43,18 +43,20 @@ def _run_case(shape, placements, mesh, dev, rank, si):
     dt_new = distribute_tensor(full_new, mesh, placements)
 
     # --- sharded path (real module) ---
-    off, contributes, _pg = derive_placement(ShardSpec.from_param(dt_new))
+    place, contributes, _pg = derive_placement(ShardSpec.from_param(dt_new))
     loc_new = dt_new.to_local().reshape(-1)
     loc_old = dt_old.to_local().reshape(-1)
-    off2, _, _ = derive_placement(ShardSpec.from_param(dt_old))
-    assert off == off2
+    place2, _, _ = derive_placement(ShardSpec.from_param(dt_old))
+    assert place == place2
     if contributes:
-        gidx, gval = shard_delta_indices(loc_new, loc_old, off)
+        # engine convention: diff in shard-local coordinates, then translate
+        lidx, gval = shard_delta_indices(loc_new, loc_old, 0)
+        gidx = translate_flat_indices(lidx, place)
     else:
         gidx = torch.empty(0, dtype=torch.int64, device=dev)
         gval = torch.empty(0, dtype=loc_new.dtype, device=dev)
     counts = torch.tensor([int(gidx.numel())], dtype=torch.int64, device=gidx.device)
-    ((sh_idx, sh_val),) = gather_v_batched_to_rank0(gidx, gval, counts)
+    gathered = gather_slot_entries_to_rank0(gidx, gval, counts)  # None on rank != 0
 
     # --- baseline: full gather + diff ---
     fo = dt_old.full_tensor().reshape(-1)
@@ -65,6 +67,7 @@ def _run_case(shape, placements, mesh, dev, rank, si):
 
     if rank != 0:
         return True
+    ((sh_idx, sh_val),) = gathered
     so = torch.argsort(sh_idx)
     bo = torch.argsort(b_idx)
     idx_ok = torch.equal(sh_idx[so], b_idx[bo])

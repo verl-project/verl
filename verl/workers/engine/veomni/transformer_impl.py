@@ -15,7 +15,7 @@
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence
 
 import torch
 import torch.distributed as dist
@@ -30,6 +30,9 @@ from veomni.optim import build_lr_scheduler, build_optimizer
 from veomni.utils.seqlen_pos_transform_utils import prepare_fa_kwargs_from_position_ids
 
 import verl.utils.torch_functional as verl_F
+
+if TYPE_CHECKING:
+    pass
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -583,6 +586,139 @@ class VeOmniEngine(FSDPEngine):
         if self._is_offload_optimizer:
             offload_veomni_optimizer(self.optimizer)
 
+    def get_per_tensor_param_shard(self, **kwargs):
+        """Yield each rank's *local* shard ``(name, local_shard, ShardSpec)`` -- the
+        DTensor export plus veomni's EP declarations. Pure export, no side effects.
+
+        Dense params pass their FSDP DTensor placement through verbatim (flat
+        ``Shard(0)`` fast path). Grouped expert params are split twice: the expert
+        dim (0) is split *manually* across ``ep_group`` (outside DTensor), and the
+        local expert block is FSDP-sharded as a DTensor. That combination is not
+        expressible as DTensor placements, so the spec carries an explicit
+        :class:`BlockPlacement` in a virtual full tensor of all experts
+        (dim-0 offset = ``ep_rank * n_local_experts`` + the DTensor block offset)
+        with the world group as the gather group, and a ``to_hf_chunk`` closure over
+        the veomni MoE param handler (pure slice + rename: fused -> per-expert HF
+        names) plus its ``hf_slots`` output enumeration.
+        """
+        import torch.distributed as dist
+
+        load_veomni_model_to_gpu(self.module)
+        params = self.module.state_dict()
+        params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
+
+        ps = parallel_state.get_parallel_state()
+        model_type = getattr(self.module.config, "model_type", "default")
+        process_func = MOE_PARAM_HANDERS.get(model_type, default_moe_param_handler)
+
+        from torch.distributed.tensor import DTensor
+        from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
+
+        from ..spec import BlockPlacement, ShardSpec
+
+        def _expert_hf_slots(fqn, full_shape):
+            """Full (hf_name, hf_shape) slot table for one fused expert param, in dim-0
+            order matching the default handler's per-segment output order. Only valid
+            for the default handler (custom MOE_PARAM_HANDERS may rename differently),
+            so the caller attaches it only when process_func is the default."""
+            n_experts = int(full_shape[0])
+            slots = []
+            if "gate_up_proj" in fqn:
+                inter = int(full_shape[1]) // 2
+                inner = (inter, *(int(x) for x in full_shape[2:]))
+                for i in range(n_experts):
+                    for proj in ("gate_proj", "up_proj"):
+                        nm = fqn.replace("gate_up_proj", proj)
+                        slots.append((nm.replace("mlp.experts.", f"mlp.experts.{i}.") + ".weight", inner))
+            else:
+                inner = tuple(int(x) for x in full_shape[1:])
+                for i in range(n_experts):
+                    slots.append((fqn.replace("mlp.experts.", f"mlp.experts.{i}.") + ".weight", inner))
+            return slots
+
+        def _is_ep_param(name, param):
+            # Structural check first: veomni's ParallelPlan.apply attaches
+            # ``spec_info`` (para_name="ep") to every expert-parallel-sliced param
+            # -- the sharding fact itself, not a naming convention. Params can lose
+            # the attribute across state_dict/key conversion, so fall back to the
+            # historical name match.
+            si = getattr(param, "spec_info", None)
+            if si is not None:
+                return si.para_name == "ep"
+            return "mlp.experts." in name and any(
+                p in name for p in ["down_proj", "gate_proj", "up_proj", "gate_up_proj"]
+            )
+
+        def _gen():
+            for name, param in params.items():
+                is_expert = ps.ep_enabled and _is_ep_param(name, param)
+                if param.is_floating_point() and param.dtype != torch.bfloat16:
+                    # mixed-precision keeps fp32 master weights; the wire (and the
+                    # rollout side) speak bf16, so cast before diffing.
+                    param = param.to(torch.bfloat16)
+                if not is_expert:
+                    spec = ShardSpec.from_param(param)
+                    local = param.to_local() if isinstance(param, DTensor) else param
+                    yield name, local.reshape(-1), spec
+                    continue
+
+                # local fused block: [n_local_experts, ...] (ep split already applied)
+                if isinstance(param, DTensor):
+                    lshape, goff = compute_local_shape_and_global_offset(
+                        param.shape, param.device_mesh, list(param.placements)
+                    )
+                    local = param.to_local()
+                else:
+                    lshape, goff = tuple(param.shape), (0,) * param.ndim
+                    local = param
+                n_local = int(param.shape[0])
+                full_shape = (n_local * ps.ep_size,) + tuple(param.shape[1:])
+                offset = (ps.ep_rank * n_local + int(goff[0]),) + tuple(int(o) for o in goff[1:])
+                block = BlockPlacement(tuple(int(x) for x in lshape), offset, full_shape)
+
+                # the blocks of one expert tensor are spread over ep x (block fsdp);
+                # v1 requires that to cover the whole trainer world so the world
+                # group doubles as the gather group (rank 0 == engine master).
+                mesh_world = param.device_mesh.size() if isinstance(param, DTensor) else 1
+                assert ps.ep_size * mesh_world == dist.get_world_size(), (
+                    f"expert blocks must tile the trainer world: ep={ps.ep_size} x "
+                    f"block mesh={mesh_world} != world={dist.get_world_size()}"
+                )
+                spec = ShardSpec(
+                    full_shape=full_shape,
+                    place=block,
+                    gather_group=dist.group.WORLD,
+                    # dim-0-separable: a segment is a run of whole experts starting at
+                    # global expert id ``start`` -- exactly the handler's contract.
+                    to_hf_chunk=lambda start, seg, _f=process_func, _n=name: list(_f(_n, seg, expert_id_base=start)),
+                    # slot table enables sender-side conversion; only the default
+                    # handler's naming is enumerable without running the converter.
+                    hf_slots=(
+                        _expert_hf_slots(name, full_shape) if process_func is default_moe_param_handler else None
+                    ),
+                )
+                yield name, local.reshape(-1), spec
+
+        return _gen(), None
+
+    def _hf_delta_entry(self, name, spec, place, lidx, lval):
+        """veomni's per-param entry builder: EP/converter specs (fused expert
+        stacks) go through this backend's own converter machinery (see
+        :mod:`verl.workers.engine.veomni.utils`); everything else falls back to
+        the FSDP engine's DTensor identity handling."""
+        from ..spec import BlockPlacement
+        from .utils import NO_SLOTS_MSG, hf_entry_converter
+
+        if spec.to_hf_chunk is not None and isinstance(place, BlockPlacement) and spec.hf_slots is not None:
+            return hf_entry_converter(name, spec, place, lidx, lval)
+        if spec.to_hf_chunk is not None:
+            raise NotImplementedError(f"{name}: {NO_SLOTS_MSG}")
+        return super()._hf_delta_entry(name, spec, place, lidx, lval)
+
+    # get_per_tensor_param_delta_shard is inherited from FSDPEngine and
+    # prime_delta_snapshots from BaseEngine; both consume this class's
+    # get_per_tensor_param_shard and _hf_delta_entry overrides.
+
     def get_per_tensor_param(self, **kwargs):
         # FSDP2 CPUOffloadPolicy owns CPU<->accelerator placement; calling model.to(device)
         # here leaves the module half-moved and crashes state_dict() below (#5995). The
@@ -614,11 +750,11 @@ class VeOmniEngine(FSDPEngine):
                     for src_ep_rank in range(ep_size):
                         tensor = unsharded_tensor if src_ep_rank == ep_rank else buffer
                         torch.distributed.broadcast(tensor, group_src=src_ep_rank, group=ps.ep_group)
-                        yield from process_func(name, tensor, ep_rank=src_ep_rank)
+                        yield from process_func(name, tensor, expert_id_base=src_ep_rank * tensor.size(0))
 
                 else:
                     if is_expert_layer:
-                        yield from process_func(name, unsharded_tensor, ep_rank=0)
+                        yield from process_func(name, unsharded_tensor, expert_id_base=0)
                     else:
                         yield name, unsharded_tensor
 

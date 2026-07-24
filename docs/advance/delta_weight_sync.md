@@ -21,11 +21,41 @@ pay off differently:
   tensors or a full-model snapshot, and the gather moves only changed elements. This removes the
   full-tensor all-gather and rank-0 staging costs that the plain ``nccl`` engine pays *regardless
   of network speed* — which is why ``delta_sharded`` beat the full broadcast at every size we
-  measured (0.5B through 72B, 1.3–3.1×), not just at the large end.
+  measured (0.5B through 235B, 1.3–21×), not just at the large end.
 
 This is why ``delta_sharded`` is the only delta backend we ship: an earlier full-gather variant
 (diff on a rank-0 full-model snapshot) was consistently slower than ``delta_sharded`` at every
 size we measured, so it was dropped in favor of the sharded design.
+
+## Wire contract: what a rank sends to rank 0
+
+Steady state has ONE canonical shape. Per parameter, each rank contributes a triple
+``(counts[K], idx_concat int32, val_concat)`` where:
+
+- **K is the parameter's slot count**, fixed by a static slot table identical on every
+  rank. Identity params (dense DTensor, explicit blocks, unsharded) have ``K=1`` -- the
+  slot is the parameter itself. Slot-enumerable converter params (``spec.hf_slots``)
+  have one slot per converter output (e.g. a fused ``gate_up`` stack: ``K = E x 2``).
+- The k-th slice of ``idx``/``val`` holds **final HF coordinates inside slot k**: the
+  sender has already done all conversion; coordinate semantics never change after this
+  point. Rank 0's whole job is slot-keyed assembly: concatenate ranks' (disjoint)
+  pieces per slot, bucket, broadcast. No conversion, no rebuild, no layout knowledge.
+
+Invariants: (1) *alignment* -- every rank enumerates the same K and slot order, with
+``counts[k]=0`` for untouched slots, so the batched gather stays in lockstep; (2)
+*disjointness* -- per slot, different ranks' coordinate sets never overlap (block
+geometry guarantees it), so union == concatenation; (3) *bounds* -- a slot has fewer
+than 2^31 elements (int32 positions), and the batched gather internally splits a
+round into deterministic sub-rounds (derived from the all-gathered counts matrix, so
+every rank derives the same split) whenever the largest per-rank blob would exceed
+``bucket_size``. Flush triggers are count-only: they must be identical on every rank,
+and byte totals are not.
+
+Two explicit exemptions: converter params without an enumerable slot table (custom
+``MOE_PARAM_HANDERS``, the Megatron shard-list contract) fall back to shard-local
+payloads plus a rank-0 segmented NaN rebuild; and the dense seed for identity params
+ships values only (no positions), since the first sync covers every element. The seed
+for slot params is just the steady shape at full coverage.
 
 ## Design
 
@@ -33,14 +63,22 @@ The ``delta_sharded`` backend plugs into the standard checkpoint-engine flow (``
 ``CheckpointEngineWorker``), so they work with any trainer that drives weight sync through the
 checkpoint engine (including the V1 ``separate_async`` trainer).
 
-- **Export contract**: the trainer's ``get_per_tensor_param_shard()`` yields
-  ``(name, local_shard, ShardSpec)`` per local parameter — the spec (see
-  :mod:`verl.workers.engine.spec`) describes the shard's placement declaratively (DeviceMesh +
-  Placements), and the engine derives the flat offset, gather group, and contributing rank itself.
-  All layout knowledge stays on the trainer side; the engine is trainer-agnostic.
-- **Diff**: each rank byte-diffs **its own shard** against a pinned-CPU snapshot of that shard from
-  the previous sync (no rank holds a full-model snapshot). The comparison is bit-exact (integer
-  view inequality), so the reconstruction is lossless by construction — no thresholds, no drift.
+- **Export contract**: the delta engine consumes FINAL HF-coordinate payloads; everything
+  backend-specific — the weight→HF naming, the to-HF conversion, the diff and its base — lives on
+  the backend side. The **seed** (first sync) streams the backend's existing full export
+  ``get_per_tensor_param()`` over the values-only wire: every backend already knows how to assemble
+  and convert its own full tensors (FSDP all-gather, veomni expert restack, Megatron TP/PP fusion),
+  so the seed inherits all of that for free and trainer resume works by construction. After the
+  seed the backend pins its shards (``prime_delta_snapshots``); every **steady** sync consumes
+  ``get_per_tensor_param_delta_shard()`` — per-parameter entries ``(slots, dtype_str, counts,
+  hf_idx, hf_val, gather_group)`` whose coordinates are already final HF coordinates. The engine
+  only batches, gathers, buckets and ships.
+- **Diff (backend-owned)**: the default strategy (shared by the FSDP and veomni backends via
+  ``verl.workers.engine.utils.hf_delta_export``) byte-diffs each rank's **own shard** against its
+  pinned-CPU snapshot, refreshed on every export (no rank holds a full-model snapshot). The
+  comparison is bit-exact (integer view inequality), so the reconstruction is lossless by
+  construction — no thresholds, no drift. A backend that already keeps the previous step's weights
+  (e.g. Decoupled PPO) can diff against that checkpoint instead and skip the dedicated snapshot.
 - **Sparse gather + encoding**: only the changed ``(position, value)`` pairs are gathered to rank 0
   (batched, variable-length), translated to full-tensor coordinates, and packed as a shared
   ``(positions, values)`` payload plus a per-parameter manifest (``indices`` encoding: int32
@@ -98,23 +136,31 @@ Other shard dimensions than ``Shard(0)`` are not supported and raise.
 ## Measured results
 
 All numbers: H100 nodes, GSM8K GRPO, verl V1 ``separate_async`` (disaggregated trainer/rollout),
-FSDP2 + param/optimizer offload, SGLang rollout, per-step steady-state weight sync.
+SGLang rollout, per-step steady-state weight sync. The ``nccl`` baseline is current main
+(including the pinned-staging fix from #7005); param/optimizer offload is ON unless noted.
 
-| model (placement) | ``delta_sharded`` | ``nccl`` (full broadcast) | speedup | saved / step |
-|---|---|---|---|---|
-| Qwen2.5-7B (1+1 nodes, sustained over 200 steps) | **3.8 s** | 9.1 s | 2.4x | 5.2 s |
-| Qwen2.5-32B (2+2 nodes) | **12.5 s** | 23.2 s | 1.9x | 10.7 s |
-| Qwen2.5-72B (4+4 nodes, TP8) | **12.0 s** | 36.9 s | **3.1x** | **24.9 s** |
+| model (placement) | ``delta_sharded`` | ``nccl`` (full broadcast) | speedup |
+|---|---|---|---|
+| Qwen2.5-7B (1+1 nodes) | **3.9-4.9 s** | 5.5-6.0 s | ~1.3x |
+| Qwen2.5-32B (2+2 nodes) | **11.2-11.9 s** | 17.7-18.1 s | 1.55x |
+| Qwen2.5-32B (2+2 nodes, offload off) | **6.2 s** | 14.2 s | 2.3x |
+| Qwen2.5-72B (4+4 nodes, gen TP8, offload off) | **12.0-13.0 s** | 28.5-29.1 s | 2.3x |
+| Qwen3-30B-A3B (veomni ep8, 1+1 nodes, 50-step medians) | **7.1 s** | 32.2 s | **4.5x** |
+| Qwen3-235B-A22B (veomni ep8 x fsdp8, 8+2 nodes, gen TP16) | **11.4-14.9 s** | 246-266 s | **~21x** |
 
-The delta sync time stays essentially flat from 32B to 72B -- the sharded sparse gather amortizes
-over the larger trainer world -- while the full broadcast grows linearly with parameter bytes, so
-the advantage widens with scale. The per-step changed ratio is stable at ~1-3% of parameter bytes
-across sizes and stays there over long runs.
+The delta sync time stays essentially flat from 32B through 235B -- the sharded sparse gather
+amortizes over the larger trainer world -- while the full broadcast pays a full-model
+materialization that grows linearly with parameter bytes, so the advantage widens with scale
+and with MoE sparsity. The per-step changed ratio is ~1-3% of parameter bytes for dense models
+(0.02-0.05% for the 235B MoE early steps) and stays there over long runs.
 
 Correctness evidence (details in the PR):
 
 - **200-step GRPO equivalence at 7B** (delta vs nccl, 400 syncs): reward trajectories track
   phase-for-phase, final rewards within sampling noise, zero receiver checksum failures.
+- **50-step GRPO equivalence at 30B-A3B (veomni ep8)**: score trajectories rise in step
+  (0.646->0.719 delta vs 0.639->0.697 nccl), per-step gap at the independent-sampling
+  noise floor, zero checksum failures.
 - **Bit-exact round-trip**: perturb -> apply as delta -> revert -> apply as delta reproduces
   greedy generations byte-identically on every prompt.
 
@@ -132,7 +178,10 @@ a per-backend apply interface (vllm/trt-llm plugins) is planned.
 Planned extensions, in design order:
 
 - **Megatron-core trainers**: the same ``delta_sharded`` backend via a Megatron
-  ``get_per_tensor_param_shard`` export whose spec carries the native mcore→HF conversion as a
-  pure-permutation ``to_hf`` closure (implemented and validated in a stacked follow-up PR).
+  ``get_per_tensor_param_shard`` export. The native mcore→HF converters are whole-param
+  black boxes, outside the dim-0-separable ``to_hf_chunk`` contract; the path forward is
+  rewriting them per param family as ``to_hf_chunk`` + ``hf_slots`` — the main fusions
+  (interleaved qkv, gate_up concat) are row/block permutations and fit the contract, while
+  TP column splits are already expressible as a ``BlockPlacement`` dim-1 offset (see #7060).
 - **Quantized rollout (fp8 etc.)**: diff the quantized bytes (quantize-then-diff) so a low-precision
   rollout engine can consume deltas without a bf16 intermediate.

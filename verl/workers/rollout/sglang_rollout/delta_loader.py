@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 
 import torch
@@ -54,7 +55,7 @@ CHUNK_BYTES = 512 << 20
 LOADER_FQN = "verl.workers.rollout.sglang_rollout.delta_loader.apply_delta"
 
 
-def apply_delta(model, named_tensors) -> None:
+def apply_delta(model: torch.nn.Module, named_tensors: Iterable[tuple[str, torch.Tensor]]) -> None:
     """Decode one sparse delta flush and masked-apply it onto ``model`` in place."""
     from verl.checkpoint_engine.delta_sync.encode import checksum as _checksum
 
@@ -62,7 +63,7 @@ def apply_delta(model, named_tensors) -> None:
     spec = json.loads(bytes(tensors["__delta_spec__"].cpu().numpy().tobytes()).decode())
     values = tensors["__values__"]
     positions = tensors.get("__positions__")
-    if positions is None:  # dense flush (first sync) carries values only
+    if positions is None:  # values-only flush (the seed) carries no positions
         positions = torch.empty(0, dtype=torch.uint8, device=values.device)
 
     got = _checksum(positions, values)
@@ -92,7 +93,7 @@ def apply_delta(model, named_tensors) -> None:
             model.load_weights(chunk)
 
 
-def _apply_dense(model, params: list[dict], values: torch.Tensor) -> None:
+def _apply_dense(model: torch.nn.Module, params: list[dict], values: torch.Tensor) -> None:
     """Apply a dense (full-coverage) flush: plain chunked load, no masking needed."""
     chunk: list[tuple[str, torch.Tensor]] = []
     chunk_bytes = 0
@@ -135,7 +136,7 @@ def _decode_one(encoding: str, positions: torch.Tensor, values: torch.Tensor, p:
 
 
 @contextmanager
-def _masked_copy():
+def _masked_copy() -> Iterator[None]:
     """Temporarily make ``Tensor.copy_`` skip NaN positions in the source.
 
     SGLang's per-model ``load_weights`` ultimately lands on ``param.copy_(loaded)``
@@ -145,12 +146,15 @@ def _masked_copy():
     """
     orig_copy = torch.Tensor.copy_
 
-    def masked_copy_(self, src, *args, **kwargs):
+    def masked_copy_(self: torch.Tensor, src: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        # Sync-free masked overwrite: boolean advanced indexing (and a
+        # ``mask.all()`` early-out) would force a device->host sync per
+        # parameter -- ruinous for MoE flushes carrying >10k per-expert
+        # entries. ``torch.where`` keeps everything on-stream; a NaN-free
+        # (dense) source degenerates to a plain copy.
         if isinstance(src, torch.Tensor) and src.is_floating_point() and self.shape == src.shape:
-            mask = ~torch.isnan(src)
-            if not bool(mask.all()):
-                self[mask] = src[mask].to(self.dtype)
-                return self
+            cast = src.to(self.dtype)
+            return orig_copy(self, torch.where(torch.isnan(cast), self, cast))
         return orig_copy(self, src, *args, **kwargs)
 
     torch.Tensor.copy_ = masked_copy_

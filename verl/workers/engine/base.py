@@ -178,6 +178,47 @@ class BaseEngine:
         """
         raise NotImplementedError
 
+    def prime_delta_snapshots(self) -> None:
+        """
+        Pin this rank's CURRENT shards as the delta diff base. Called right after the
+        seed sync (which streams :meth:`get_per_tensor_param`'s full HF export):
+        weights do not move during the sync, so the snapshots equal exactly what the
+        rollout side received and the first
+        :meth:`get_per_tensor_param_delta_shard` diff is correct.
+
+        Concrete here: it only consumes :meth:`get_per_tensor_param_shard`, so any
+        engine that implements the shard export gets it for free.
+        """
+        from verl.workers.engine.utils import prime_delta_snapshots
+
+        self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
+        gen, _ = self.get_per_tensor_param_shard()
+        prime_delta_snapshots(gen, self._delta_shard_snap)
+
+    def get_per_tensor_param_delta_shard(self, **kwargs) -> tuple[Generator, Optional[dict]]:
+        """
+        Yield the delta engine's per-parameter payloads in FINAL HF coordinates:
+        ``(slots, dtype_str, counts, hf_idx, hf_val, gather_group)``, in an order
+        identical on every rank (non-contributing replicas yield zero-count entries
+        but stay in the lockstep sequence). ``slots`` enumerates the HF tensors this
+        parameter maps to (identity params: itself; fused params: their hf_slots),
+        and ``hf_idx``/``hf_val`` are the changed elements since the previous export,
+        already converted to HF coordinates.
+
+        Everything backend-specific lives behind this call: the weight->HF naming,
+        the to-HF conversion, the diff and its base. A backend that already keeps the
+        previous step's weights (e.g. Decoupled PPO) can diff against that instead of
+        a dedicated snapshot; :func:`verl.workers.engine.utils.hf_delta_export`
+        implements the default pinned-CPU-snapshot strategy (primed by
+        :meth:`prime_delta_snapshots`). The consuming delta engine only batches,
+        gathers and ships.
+
+        Returns:
+            Generator: A generator that yields per-parameter HF-coordinate delta entries.
+            Optional[dict]: Optional peft config.
+        """
+        raise NotImplementedError
+
     def get_data_parallel_size(self):
         raise NotImplementedError
 

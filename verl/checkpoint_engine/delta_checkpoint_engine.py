@@ -25,14 +25,30 @@ and masked-applies it *in place* onto the live weights. No full-model mirror is
 staged anywhere on the rollout side: receiver peak memory is one bucket plus one
 decode chunk, independent of model size.
 
-The first sync broadcasts a full delta (every position) so a dummy-initialized
-rollout gets a correct base; subsequent syncs are sparse.
+The first (seed) sync streams the backend's FULL HF export (``get_per_tensor_
+param()``) over the values-only wire -- every backend already knows how to
+assemble and convert its own full tensors, so resume works by construction and
+the seed inherits Megatron/veomni assembly for free. After the seed the caller
+primes the backend's pinned shard snapshots; every later sync ships the
+backend-computed sparse HF delta.
+
+Data ladder (sender side, steady) -- the names in this file anchor to these::
+
+    backend HF delta ENTRY (slots, dtype, counts, hf_idx, hf_val, group)
+    --_GatherQueue--> per-SLOT delta on rank 0 --_bucket_*--> _FlushPiece
+    --_FlushBucket--> FLUSH (DeltaFlush) --_publish_flush--> wire
+
+Wire encodings: ``indices`` (int32 positions + values; every steady sync) and
+``values`` (values only; the seed). The values meta tag is ``"dense"`` for
+protocol continuity with the receiver's delta_loader.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Generator, Iterator
+from dataclasses import dataclass
 from unittest.mock import patch
 
 import ray.util.collective as collective
@@ -42,17 +58,10 @@ import zmq
 with patch("importlib.metadata.distributions", return_value=[]):
     import cupy as cp
 
-from verl.workers.engine.spec import derive_placement
-
 from .base import CheckpointEngineRegistry
 from .delta_sync.encode import DeltaFlush, DeltaParam
 from .delta_sync.encode import checksum as _checksum
-from .delta_sync.sparse_gather import (
-    gather_dense_to_rank0,
-    gather_shards_to_rank0,
-    gather_v_batched_to_rank0,
-    shard_delta_indices,
-)
+from .delta_sync.sparse_gather import gather_slot_entries_to_rank0
 from .nccl_checkpoint_engine import MasterMetadata, NCCLCheckpointEngine
 
 logger = logging.getLogger(__name__)
@@ -65,6 +74,146 @@ def _prodshape(shape) -> int:
     return n
 
 
+@dataclass(slots=True)
+class _FlushPiece:
+    """One (possibly sliced) per-parameter piece buffered for a pending indices flush."""
+
+    name: str
+    dtype_str: str
+    shape: list
+    idx: torch.Tensor
+    val: torch.Tensor
+
+
+@dataclass(slots=True)
+class _ValuesPiece:
+    """One whole parameter's flat values buffered for the seed sync's values-only flush."""
+
+    name: str
+    dtype_str: str
+    shape: list
+    flat: torch.Tensor
+
+
+class _FlushBucket:
+    """One-flush-lookahead bucket pipeline, shared by the steady loop and both
+    seed streams. Pieces accumulate until ``cap`` bytes; ``seal`` assembles them
+    into the single pending flush, first emitting the previous pending with
+    ``is_last=False`` (the lookahead: only the caller's finale knows which flush
+    is last and emits it with ``is_last=True``). ``assemble`` and ``publish``
+    carry the only real differences between the streams -- the wire format
+    (indexed flush vs values-only flush) and the flush counters."""
+
+    __slots__ = ("cap", "pieces", "nbytes", "pending", "_assemble", "_publish")
+
+    def __init__(self, cap: int, assemble, publish):
+        self.cap = int(cap)
+        self.pieces: list = []
+        self.nbytes = 0
+        self.pending = None
+        self._assemble = assemble
+        self._publish = publish
+
+    def add(self, piece, nbytes: int) -> None:
+        self.pieces.append(piece)
+        self.nbytes += int(nbytes)
+        if self.nbytes >= self.cap:
+            self.seal()
+
+    def seal(self) -> None:
+        if not self.pieces:
+            return
+        self.emit(is_last=False)
+        self.pending = self._assemble(self.pieces)
+        self.pieces, self.nbytes = [], 0
+
+    def emit(self, is_last: bool) -> None:
+        if self.pending is not None:
+            self._publish(self.pending, is_last)
+            self.pending = None
+
+
+def _bucket_sliced(bkt: _FlushBucket, name: str, dtype_str: str, shape, aidx: torch.Tensor, aval: torch.Tensor) -> None:
+    """Slice one param's (idx, val) delta into <= MAX_ENTRY_ELEMS pieces and bucket
+    them (bounds the receiver-side decode transient; the masked apply is sequential,
+    so splitting is transparent). Bucket bytes = actual wire bytes (int32 positions
+    + values)."""
+    max_elems = DeltaShardedCheckpointEngine.MAX_ENTRY_ELEMS
+    for s in range(0, aidx.numel(), max_elems):
+        e = min(s + max_elems, aidx.numel())
+        bkt.add(
+            _FlushPiece(name, dtype_str, list(shape), aidx[s:e], aval[s:e]),
+            (e - s) * (4 + aval.element_size()),
+        )
+
+
+class _GatherQueue:
+    """Per-gather-group batching of slot-keyed queue entries
+    ``(slots, dtype_str, counts, idx, val)``. Entries carry FINAL-coordinate
+    payloads (identity specs: one slot = the param itself; converter specs: the
+    spec's hf_slots), so rank 0 never converts -- ``consume`` receives assembled
+    per-slot pieces straight from the gather.
+
+    One queue per ProcessGroup: separate queues stop pg alternation (dense fsdp
+    group vs expert world group per layer) from shattering batches. The flush
+    trigger is COUNT-ONLY: entry counts are identical on every rank while byte
+    totals are not, so a count trigger is the only one that keeps the collective
+    sequence identical across ranks (a per-rank byte trigger desyncs the gathers
+    and deadlocks NCCL). Byte bounding happens INSIDE the batched gather via
+    ``max_round_bytes``, decided from the all-gathered counts every rank sees."""
+
+    __slots__ = ("batch_k", "max_round_bytes", "is_r0", "_consume", "_queues")
+
+    def __init__(self, batch_k: int, max_round_bytes: int, is_r0: bool, consume):
+        self.batch_k = max(int(batch_k), 1)
+        self.max_round_bytes = int(max_round_bytes)
+        self.is_r0 = is_r0
+        self._consume = consume
+        self._queues: dict[int, tuple] = {}  # id(pg) -> (pg, [entries])
+
+    def put(self, pg, slots: list, dtype_str: str, counts: torch.Tensor, idx: torch.Tensor, val: torch.Tensor):
+        _pg, entries = self._queues.setdefault(id(pg), (pg, []))
+        entries.append((slots, dtype_str, counts, idx, val))
+        if len(entries) >= self.batch_k:
+            self._flush(pg, entries)
+
+    def flush_all(self) -> None:
+        for pg, entries in self._queues.values():
+            self._flush(pg, entries)
+
+    def _flush(self, pg, entries: list) -> None:
+        """One gather round for one group's queue."""
+        if not entries:
+            return
+        batch = list(entries)
+        entries.clear()
+        if pg is None:
+            # unsharded/replicated params: rank 0's local delta already is global
+            if self.is_r0:
+                for slots, dtype_str, counts, idx, val in batch:
+                    off = 0
+                    for (name, shape), c in zip(slots, counts.tolist(), strict=True):
+                        self._consume(
+                            name, dtype_str, tuple(shape), _prodshape(shape), idx[off : off + c], val[off : off + c]
+                        )
+                        off += c
+            return
+        dev = batch[0][3].device
+        counts_concat = torch.cat([c for _, _, c, _, _ in batch]).to(dev)
+        idx_concat = torch.cat([i for _, _, _, i, _ in batch])
+        val_concat = torch.cat([v for _, _, _, _, v in batch])
+        gathered = gather_slot_entries_to_rank0(
+            idx_concat, val_concat, counts_concat, group=pg, max_round_bytes=self.max_round_bytes
+        )
+        if self.is_r0 and gathered is not None:
+            slot_i = 0
+            for slots, dtype_str, _counts, _i, _v in batch:
+                for name, shape in slots:
+                    aidx, aval = gathered[slot_i]
+                    slot_i += 1
+                    self._consume(name, dtype_str, tuple(shape), _prodshape(shape), aidx, aval)
+
+
 @CheckpointEngineRegistry.register("delta_sharded")
 class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
     """Sparse delta weight sync over NCCL, diffed on each rank's local shard.
@@ -75,10 +224,12 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
     are gathered to rank 0 and streamed to the rollout side -- no rank ever holds
     a full-model snapshot.
 
-    ``send_weights`` consumes the SHARDED generator ``get_per_tensor_param_shard()``:
-    ``(name, local_shard, ShardSpec)`` per local parameter (see
-    :mod:`verl.workers.engine.spec`). All layout knowledge lives in the
-    spec, so this one engine serves any trainer backend that can describe its shards.
+    ``send_weights`` consumes the backend's HF delta export
+    ``get_per_tensor_param_delta_shard()``: per-parameter FINAL-HF-coordinate
+    entries ``(slots, dtype_str, counts, hf_idx, hf_val, gather_group)``. Naming,
+    to-HF conversion, diff and snapshot all live on the backend side (see
+    :mod:`verl.workers.engine.utils`); this engine only batches, gathers,
+    buckets and ships, and so serves any backend that can produce HF deltas.
     """
 
     # Cap on changed elements per DeltaParam entry. The receiver-side decode
@@ -136,8 +287,10 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         collective.broadcast(pos_cp, src_rank=0, group_name=self.group_name)
         collective.broadcast(val_cp, src_rank=0, group_name=self.group_name)
 
-    def _publish_dense_flush(self, params: list[DeltaParam], values: torch.Tensor, is_last: bool) -> None:
-        """Publish a dense (full-coverage, positions-free) flush -- used by the first sync."""
+    def _publish_values_flush(self, params: list[DeltaParam], values: torch.Tensor, is_last: bool) -> None:
+        """Publish a values-only (full-coverage, positions-free) flush -- used by the first
+        sync. The wire encoding tag stays ``"dense"`` -- it is protocol, shared with the
+        receiver's delta_loader decode."""
         values = values.contiguous()
         empty_pos = torch.empty(0, dtype=torch.uint8, device=values.device)
         meta = {
@@ -169,7 +322,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         self.socket.send_pyobj(meta)
 
     # ---- rollout worker side ----
-    def receive_weights(self, global_steps: int | None = None):
+    def receive_weights(self, global_steps: int | None = None) -> Iterator[tuple[list[tuple[str, torch.Tensor]], bool]]:
         """Yield the sparse flushes for the server adapter to apply in place.
 
         Each item is ``(named_tensors, is_last)``: the sentinel-encoded flush
@@ -218,27 +371,26 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         super().__init__(*args, **kwargs)
         assert encoding == "indices", f"delta_sharded ships only the 'indices' position encoding; got {encoding!r}"
         self.encoding = encoding
-        self._shard_snap: dict[str, torch.Tensor] = {}  # name -> pinned-CPU shard snapshot
         self._shard_seeded = False
-        self._placements: dict[str, tuple] = {}  # name -> (flat_offset, contributes, group)
         # Gather the per-param sparse deltas in groups of this many parameters
         # (one count-matrix all_gather + two padded gathers per group instead of
         # three collectives per parameter).
         self.batch_gather = int(batch_gather)
 
-    def _placement(self, name, spec):
-        """Derive (and cache) this rank's placement facts from the declarative spec."""
-        got = self._placements.get(name)
-        if got is None:
-            got = derive_placement(spec)
-            self._placements[name] = got
-        return got
+    @property
+    def needs_seed(self) -> bool:
+        """True until the first (seed) sync has run. The caller picks the export by
+        phase: seed consumes ``get_per_tensor_param()`` (full HF tensors, the
+        backend's own assembly/conversion) shipped values-only; steady syncs consume
+        ``get_per_tensor_param_delta_shard()`` (backend-computed HF deltas). After
+        the seed the caller must ``prime_delta_snapshots()`` on the training engine."""
+        return not self._shard_seeded
 
-    def _assemble_flush(self, per_param: list) -> DeltaFlush:
+    def _assemble_flush(self, per_param: list[_FlushPiece]) -> DeltaFlush:
         """Build one DeltaFlush (indices encoding) from rank 0's gathered per-param deltas.
 
-        ``per_param``: list of ``(name, dtype_str, shape, global_idx, values)`` where
-        ``global_idx`` are within-parameter flat positions (== what the receiver decodes).
+        ``per_param``: :class:`_FlushPiece` entries whose ``idx`` are within-parameter
+        flat positions (== what the receiver decodes).
 
         Positions stay on the GPU end to end (int32 pieces -> one cat -> uint8 view);
         the wire broadcasts from the GPU anyway, and a host round-trip here
@@ -249,21 +401,21 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         val_pieces: list[torch.Tensor] = []
         params: list[DeltaParam] = []
         pos_off = val_off = 0
-        for name, dtype_str, shape, idx, val in per_param:
-            nnz = int(idx.numel())
+        for piece in per_param:
+            nnz = int(piece.idx.numel())
             # positions ride the wire as int32 (pos_width=4); a parameter bigger than
             # 2^31 elements would silently wrap, so fail loud instead. DeltaParam
             # carries pos_width for a future 8-byte escalation if a model needs it.
-            assert _prodshape(shape) < (1 << 31), (
-                f"{name}: {_prodshape(shape)} elements exceeds the int32 position encoding"
+            assert _prodshape(piece.shape) < (1 << 31), (
+                f"{piece.name}: {_prodshape(piece.shape)} elements exceeds the int32 position encoding"
             )
-            idx_pieces.append(idx.to(torch.int32))
-            val_pieces.append(val)
+            idx_pieces.append(piece.idx.to(torch.int32))
+            val_pieces.append(piece.val)
             params.append(
                 DeltaParam(
-                    name=name,
-                    dtype=dtype_str,
-                    shape=list(shape),
+                    name=piece.name,
+                    dtype=piece.dtype_str,
+                    shape=list(piece.shape),
                     pos_start=pos_off,
                     pos_end=pos_off + nnz * 4,
                     pos_width=4,
@@ -285,44 +437,34 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             encoding=self.encoding, params=params, positions_cpu=positions_u8, values_gpu=values_gpu, checksum=cks
         )
 
-    def _send_dense_seed(self, weights, global_steps=None):
-        """First sync: assemble and broadcast the raw weights, bucketed, positions-free.
+    def _send_full_seed(
+        self,
+        weights: Generator[tuple[str, torch.Tensor], None, None],
+        global_steps: int | None = None,
+    ) -> dict[str, float] | None:
+        """First sync: stream the backend's FULL HF export over the values-only wire.
 
-        Explicit dense semantics instead of the previous bitflip-forced full diff:
-        no per-element indices on the wire (values only), no whole-parameter
-        (idx, val) spike on rank 0 -- its peak is one assembled parameter plus a
-        bucket -- and the snapshot is populated as the stream goes.
-        """
+        ``weights`` is ``get_per_tensor_param()`` -- every backend already knows how
+        to assemble and convert its own full tensors (FSDP all-gather, veomni expert
+        restack, Megatron TP/PP fusion), so the seed inherits all of that for free
+        and this engine only buckets and broadcasts. Every trainer rank iterates the
+        generator (the per-tensor assembly is collective); rank 0 buckets. Resume
+        works by construction: whatever the trainer restored is what ships."""
         is_r0 = self.is_master
-        bucket: list = []  # (name, dtype_str, full_shape, flat_full_tensor)
-        bucket_bytes = 0
-        pending = None  # (params, values) awaiting emission (1-flush lookahead for is_last)
         n_flushes = 0
         total_elems = 0
         wire_bytes = 0
 
-        def _emit(is_last):
-            nonlocal pending, n_flushes, wire_bytes
-            if pending is not None:
-                self._publish_dense_flush(pending[0], pending[1], is_last=is_last)
-                n_flushes += 1
-                wire_bytes += int(pending[1].nbytes)
-                pending = None
-
-        def _seal():
-            nonlocal bucket, bucket_bytes, pending
-            if not bucket:
-                return
-            _emit(is_last=False)
+        def _assemble_values(pieces: list[_ValuesPiece]):
             params = []
             val_off = 0
-            for name, dtype_str, full_shape, flat in bucket:
-                n = int(flat.numel())
+            for piece in pieces:
+                n = int(piece.flat.numel())
                 params.append(
                     DeltaParam(
-                        name=name,
-                        dtype=dtype_str,
-                        shape=list(full_shape),
+                        name=piece.name,
+                        dtype=piece.dtype_str,
+                        shape=list(piece.shape),
                         pos_start=0,
                         pos_end=0,
                         pos_width=4,
@@ -331,62 +473,37 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                     )
                 )
                 val_off += n
-            values = torch.cat([flat for *_, flat in bucket])
-            pending = (params, values)
-            bucket = []
-            bucket_bytes = 0
+            return params, torch.cat([piece.flat for piece in pieces])
 
-        def _bucket_dense(hf_name, tensor):
-            nonlocal total_elems, bucket_bytes
-            flat = tensor.reshape(-1)
+        def _publish_values(pending, is_last: bool) -> None:
+            nonlocal n_flushes, wire_bytes
+            params, values = pending
+            self._publish_values_flush(params, values, is_last=is_last)
+            n_flushes += 1
+            wire_bytes += int(values.nbytes)
+
+        bkt = _FlushBucket(self.bucket_size, _assemble_values, _publish_values)
+
+        for name, tensor in weights:
+            tensor = tensor.detach()
+            if tensor.is_floating_point() and tensor.dtype != self.rollout_dtype:
+                tensor = tensor.to(self.rollout_dtype)
+            if not is_r0:
+                del tensor
+                continue
+            flat = tensor.contiguous().reshape(-1)
             total_elems += int(flat.numel())
-            bucket.append((hf_name, str(flat.dtype).replace("torch.", ""), list(tensor.shape), flat))
-            bucket_bytes += int(flat.nbytes)
-            if bucket_bytes >= self.bucket_size:
-                _seal()
-
-        for name, local, spec in weights:
-            local = local.detach().contiguous().view(-1)
-            snap = self._shard_snap.get(name)
-            if snap is None or snap.numel() != local.numel():
-                snap = torch.empty_like(local, device="cpu", pin_memory=True)
-            snap.copy_(local, non_blocking=True)
-            self._shard_snap[name] = snap
-
-            offset, contributes, pg = self._placement(name, spec)
-            shard = local if contributes else torch.empty(0, dtype=local.dtype, device=local.device)
-            if spec.to_hf is None:
-                # the spec's placements map the shard straight into the full tensor
-                if pg is None:
-                    if is_r0 and contributes:
-                        _bucket_dense(name, local.view(spec.full_shape))
-                else:
-                    full = gather_dense_to_rank0(
-                        shard, offset if contributes else 0, _prodshape(spec.full_shape), group=pg
-                    )
-                    if is_r0 and full is not None:
-                        _bucket_dense(name, full.view(spec.full_shape))
-            else:
-                # converter profile (e.g. Megatron): rebuild dense shards via to_hf
-                shards = gather_shards_to_rank0(shard, group=pg)
-                if is_r0 and shards is not None:
-                    for hf_name, hf_tensor in spec.to_hf(shards):
-                        _bucket_dense(hf_name, hf_tensor)
+            bkt.add(_ValuesPiece(name, str(flat.dtype).replace("torch.", ""), list(tensor.shape), flat), flat.nbytes)
 
         self._shard_seeded = True
         if not is_r0:
             return
-        _seal()
-        if pending is not None:
-            _emit(is_last=True)
+        bkt.seal()
+        if bkt.pending is not None:
+            bkt.emit(is_last=True)
         else:
             self._publish_terminal(True)
-        logger.info(
-            "delta-sharded send v=%s DENSE-SEED flushes=%d elems=%d",
-            global_steps,
-            n_flushes,
-            total_elems,
-        )
+        logger.info("delta-sharded send v=%s FULL-SEED flushes=%d elems=%d", global_steps, n_flushes, total_elems)
         if not total_elems:
             return None
         return {
@@ -396,177 +513,69 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             "checkpoint_engine/flushes": float(n_flushes),
         }
 
-    async def send_weights(self, weights, global_steps=None):
+    async def send_weights(
+        self,
+        weights: Generator[tuple, None, None],
+        global_steps: int | None = None,
+    ) -> dict[str, float] | None:
         # All actor ranks participate (gather-v is collective); only torch rank 0 broadcasts.
         # rank 0 accumulates the gathered per-param deltas into bucket_size-sized flushes and streams
         # each one as soon as it fills (then frees it), so peak memory is ~2 buckets rather than the
         # whole model.
         assert self.rank <= 0, "Trainer workers other than rank 0 should not send weights."
         if not self._shard_seeded:
-            return self._send_dense_seed(weights, global_steps)
+            # seed consumes the FULL export (name, full_hf_tensor); the caller
+            # selects it via ``needs_seed``.
+            return self._send_full_seed(weights, global_steps)
         is_r0 = self.is_master
-        first = False  # the dense first sync is handled by _send_dense_seed
-        bucket: list = []
-        bucket_bytes = 0
-        pending = None  # a DeltaFlush awaiting emission (1-flush lookahead so the last flush is is_last)
         n_flushes = 0
         changed_elems = 0
         total_elems = 0
         wire_bytes = 0
 
-        def _emit(is_last):
-            nonlocal pending, n_flushes
-            if pending is not None:
-                self._publish_flush(pending, first, is_last=is_last)
-                n_flushes += 1
-                pending = None
+        def _publish_steady(flush, is_last: bool) -> None:
+            nonlocal n_flushes
+            self._publish_flush(flush, first=False, is_last=is_last)
+            n_flushes += 1
 
-        def _seal():
-            nonlocal bucket, bucket_bytes, pending
-            if not bucket:
-                return
-            _emit(is_last=False)  # another bucket follows, so the prior one is not the last
-            pending = self._assemble_flush(bucket)
-            bucket = []
-            bucket_bytes = 0
+        bkt = _FlushBucket(self.bucket_size, self._assemble_flush, _publish_steady)
 
         batch_k = self.batch_gather
-        group: list = []  # (name, dtype_str, full_shape, full_numel, gidx, gval)
 
-        def _consume(name, dtype_str, full_shape, full_numel, aidx, aval):
-            nonlocal total_elems, changed_elems, wire_bytes, bucket_bytes
+        def _bucket_slot_delta(
+            name: str,
+            dtype_str: str,
+            full_shape: tuple,
+            full_numel: int,
+            aidx: torch.Tensor | None,
+            aval: torch.Tensor | None,
+        ) -> None:
+            nonlocal total_elems, changed_elems, wire_bytes
             total_elems += int(full_numel)
             if aidx is None or aidx.numel() == 0:
                 return
             changed_elems += int(aidx.numel())
             wire_bytes += int(aidx.numel()) * (4 + aval.element_size())
-            # Slice oversized per-param deltas so one entry never exceeds
-            # MAX_ENTRY_ELEMS (bounds the receiver-side decode transient).
-            for s in range(0, aidx.numel(), self.MAX_ENTRY_ELEMS):
-                e = min(s + self.MAX_ENTRY_ELEMS, aidx.numel())
-                bucket.append((name, dtype_str, list(full_shape), aidx[s:e], aval[s:e]))
-                bucket_bytes += (e - s) * 8 + (e - s) * aval.element_size()
-                if bucket_bytes >= self.bucket_size:
-                    _seal()
+            _bucket_sliced(bkt, name, dtype_str, full_shape, aidx, aval)
 
-        def _flush_group():
-            nonlocal group
-            if not group:
-                return
-            pg = group[0][6]
-            if pg is None:
-                # unsharded params: this rank's delta already is the global delta
-                if is_r0:
-                    for name, dtype_str, full_shape, full_numel, gi, gv, _pg in group:
-                        _consume(name, dtype_str, full_shape, full_numel, gi, gv)
-                group = []
-                return
-            dev = group[0][4].device
-            idx_concat = torch.cat([g[4] for g in group])
-            val_concat = torch.cat([g[5] for g in group])
-            counts = torch.tensor([int(g[4].numel()) for g in group], dtype=torch.int64, device=dev)
-            gathered = gather_v_batched_to_rank0(idx_concat, val_concat, counts, group=pg)
-            if is_r0 and gathered is not None:
-                for (name, dtype_str, full_shape, full_numel, _gi, _gv, _pg), (aidx, aval) in zip(
-                    group, gathered, strict=False
-                ):
-                    _consume(name, dtype_str, full_shape, full_numel, aidx, aval)
-            group = []
+        gq = _GatherQueue(batch_k, self.bucket_size, is_r0, _bucket_slot_delta)
 
-        nan_group: list = []  # rebuild-profile params batched per gather_group
+        # ``weights`` is the BACKEND's HF delta stream (hf_delta_export): entries
+        # already carry final HF coordinates -- naming, conversion, diff and
+        # snapshot all happened on the backend side. This engine only batches,
+        # gathers and ships.
+        for slots, dtype_str, counts, hf_idx, hf_val, pg in weights:
+            gq.put(pg, slots, dtype_str, counts, hf_idx, hf_val)
+        gq.flush_all()
 
-        def _flush_nan_group():
-            nonlocal nan_group, total_elems
-            if not nan_group:
-                return
-            pg = nan_group[0][2]
-            dev = nan_group[0][5].device
-            idx_concat = torch.cat([g[5] for g in nan_group])
-            val_concat = torch.cat([g[6] for g in nan_group])
-            counts = torch.tensor([int(g[5].numel()) for g in nan_group], dtype=torch.int64, device=dev)
-            gathered = gather_v_batched_to_rank0(idx_concat, val_concat, counts, group=pg, grouped=True)
-            if is_r0 and gathered is not None:
-                for (name, local_dtype, _pg, spec, shard_shape, _gi, _gv), per_rank in zip(
-                    nan_group, gathered, strict=False
-                ):
-                    shard_list = []
-                    for gi, gv in per_rank:
-                        buf = torch.full(shard_shape, float("nan"), dtype=local_dtype, device=dev)
-                        buf.view(-1)[gi.to(torch.int64)] = gv  # index ops need Long
-                        shard_list.append(buf)
-                    for hf_name, hf_tensor in spec.to_hf(shard_list):
-                        fl = hf_tensor.reshape(-1)
-                        total_elems += int(fl.numel())
-                        pos = (~torch.isnan(fl)).nonzero(as_tuple=False).view(-1)
-                        if pos.numel():
-                            # total_elems is added inside _consume too; compensate
-                            total_elems -= int(fl.numel())
-                            _consume(
-                                hf_name,
-                                str(fl.dtype).replace("torch.", ""),
-                                tuple(hf_tensor.shape),
-                                int(fl.numel()),
-                                pos,
-                                fl[pos],
-                            )
-            nan_group = []
-
-        for name, local, spec in weights:
-            local = local.detach().contiguous().view(-1)
-            offset, contributes, pg = self._placement(name, spec)
-            snap = self._shard_snap.get(name)
-            if snap is None or snap.numel() != local.numel():
-                snap = torch.empty_like(local, device="cpu", pin_memory=True)
-            if contributes:
-                base = snap.to(local.device, non_blocking=True)
-                lidx, lval = shard_delta_indices(local, base, 0)  # shard-local coordinates
-            else:
-                # replicated param owned by another rank; contribute nothing but keep lockstep.
-                lidx = torch.empty(0, dtype=torch.int64, device=local.device)
-                lval = torch.empty(0, dtype=local.dtype, device=local.device)
-            snap.copy_(local, non_blocking=True)  # update snapshot to current shard
-            self._shard_snap[name] = snap
-
-            if spec.to_hf is not None:
-                # converter profile: boundary-preserving gather within the spec's group,
-                # NaN-sentinel rebuild through the trainer's converter on rank 0.
-                if nan_group and nan_group[0][2] is not pg:
-                    _flush_nan_group()
-                # shard-local coordinates are bounded by the shard's numel, so the
-                # full-tensor <2^31 assert in _assemble_flush covers them too.
-                nan_group.append((name, local.dtype, pg, spec, tuple(local.shape), lidx.to(torch.int32), lval))
-                if len(nan_group) >= max(batch_k, 1):
-                    _flush_nan_group()
-                continue
-
-            # placement profile: translate rank-locally, gather without boundaries.
-            # int32 halves the gather's position bytes; the wire is int32 anyway and
-            # the per-parameter <2^31 assert in _assemble_flush covers the range.
-            gidx = ((lidx + offset) if lidx.numel() else lidx).to(torch.int32)
-            gval = lval
-            full_numel = _prodshape(spec.full_shape)
-            if group and group[-1][6] is not pg:
-                _flush_group()
-            group.append((name, str(local.dtype).replace("torch.", ""), spec.full_shape, full_numel, gidx, gval, pg))
-            if len(group) >= max(batch_k, 1):
-                _flush_group()
-        _flush_group()
-        _flush_nan_group()
-
-        self._shard_seeded = True
         if not is_r0:
             return
-        _seal()  # seal the final partial bucket into `pending`
-        if pending is not None:
-            _emit(is_last=True)
+        bkt.seal()  # seal the final partial bucket into the pending flush
+        if bkt.pending is not None:
+            bkt.emit(is_last=True)
         else:
-            self._publish_terminal(first)
-        logger.info(
-            "delta-sharded send v=%s %s flushes=%d (streamed)",
-            global_steps,
-            "FULL" if first else "delta",
-            n_flushes,
-        )
+            self._publish_terminal(False)
+        logger.info("delta-sharded send v=%s delta flushes=%d (streamed)", global_steps, n_flushes)
         if not total_elems:
             return None
         return {
