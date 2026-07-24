@@ -1,0 +1,358 @@
+# Build the cu13 (CUDA 13) slice of verl's uv-managed multi-backend image.
+#
+# verl uses one universal uv.lock for the whole project; this Dockerfile
+# builds its cu13 (CUDA 13.0 / torch 2.11) slice. Backends are PEP 621
+# extras, and mutually exclusive ones are declared in pyproject.toml's
+# [tool.uv].conflicts, so a single committed uv.lock resolves them all:
+#
+#   * cu13.0 (this file, base nvidia/cuda:13.0.2): vllm, sglang, fsdp,
+#     megatron, cpu — all on torch 2.11 / cu130. The `prefetch` below is
+#     scoped to `cu130 dev`.
+#   * DEFERRED in pyproject.toml (commented out, re-enable later):
+#     - the cu12.9 / torch-2.9.1 world (veomni, nemoautomodel) — its image
+#       docker/Dockerfile.uv.cu129 was removed; recover it from git history.
+#     - trtllm (tensorrt-llm), a CUDA-13 RC sdist whose dependency tree
+#       explodes uv's resolver. Revisit on the cu130 stack when it ships a
+#       stable release.
+#
+# At build time we BAKE the full uv cache — every backend combination's wheels
+# & built artifacts, resolved from the committed uv.lock — into the image (the
+# `prefetch` stage). The image does NOT bake a fixed .venv. At container start
+# you materialize the combination you want with `manage_envs.py sync` — it
+# `uv sync`s the requested extras from that baked cache (fast / offline) into a
+# single project venv at /workspace/verl/.venv (already on PATH). There is no
+# per-backend venv and no Ray py_executable switching — every role runs from
+# that one .venv. The uv flow is x86_64 Linux + Python 3.12 only — Ascend NPU
+# (vllm-ascend / sglang-ascend / mindspeed) and aarch64 GPU variants (e.g.
+# Grace-Blackwell) are out of scope; for Ascend see
+# `docker/ascend/Dockerfile.ascend_8.5.0_a2` and friends instead.
+#
+# The base layer is a superset of the "basic" stages of the upstream
+# `sglang/docker/Dockerfile` and `vllm/docker/Dockerfile`, so the resulting
+# image satisfies the system-level prerequisites of both inference engines:
+#
+#   - sglang basic: full RDMA/InfiniBand + OpenMPI + NUMA + dev libs +
+#                   GDRCopy + IBGDA symlink + locale (Ubuntu 24.04).
+#   - vllm  basic: gcc-10 alternatives, uv-driven Python install, the
+#                  uv tunables (UV_HTTP_TIMEOUT / UV_INDEX_STRATEGY /
+#                  UV_LINK_MODE) and CUDA forward-compat toggle.
+#
+# The build context is the verl repo (it COPYs `.`, which must include the
+# committed uv.lock):
+#
+#     docker build -f docker/Dockerfile.uv.cu130 -t verl:uv-cu130 .
+#
+# The image carries the cache for EVERY backend; you pick the combination at
+# RUN time (not build time) by syncing it yourself. It must be conflict-free
+# (see [tool.uv].conflicts):
+#
+#     docker run --rm -it --gpus all verl:uv-cu130 bash
+#     # then, inside the container:
+#     python3 manage_envs.py sync sglang megatron -- --frozen
+#     python3 -m verl.trainer.main_ppo ...
+#
+# Optional named stages:
+#   * --target=prefetch : just the baked uv cache (every backend), no source.
+#   * --target=lock     : regenerate uv.lock (extract it back out).
+#
+#     docker build -f docker/Dockerfile.uv.cu130 --target=lock -t verl:uv-cu130-lock .
+#
+# Useful build args:
+#
+#     --build-arg CUDA_VERSION=13.0.2            # alternative CUDA dev base
+#     --build-arg UBUNTU_MIRROR=...              # apt mirror (sglang-style)
+#     --build-arg PIP_DEFAULT_INDEX=...          # pip global index URL
+#     --build-arg GITHUB_ARTIFACTORY=github.com  # github mirror
+#
+# Build with BuildKit. The `prefetch` stage bakes the uv cache into the image
+# (deliberately no cache mount), so the runtime `uv sync` is offline; the
+# `lock` and apt steps still use BuildKit cache mounts for faster rebuilds.
+# See the "Install from the uv image" section in docs/start/install.rst.
+
+ARG CUDA_VERSION=13.0.2
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS base
+
+ARG CUDA_VERSION
+ARG TARGETARCH
+ARG DEBIAN_FRONTEND=noninteractive
+
+# cuDNN / NCCL — see https://developer.nvidia.com/cudnn-downloads
+# These ARGs control the apt deb versions installed below and MUST match
+# whatever uv resolves into uv.lock. The backend extras don't pin cuDNN /
+# NCCL — torch's wheel pins them transitively (e.g. torch 2.11.0+cu130 ->
+# nvidia-cudnn-cu13==9.19.0.56, nvidia-nccl-cu13==2.28.3). After bumping a
+# torch pin and re-running `python manage_envs.py lock`, grep the resolved
+# versions out of the lockfile and update these ARGs:
+#
+#     grep -E 'nvidia-(cudnn|nccl)-cu13' uv.lock
+ARG NCCL_VERSION=2.28.3-1
+
+# Source to build from. Override VERL_REF for tags / commits.
+ARG VERL_REPO=https://github.com/verl-project/verl.git
+ARG VERL_REF=main
+
+# Mirrors / index overrides (kept compatible with the sglang/vllm Dockerfiles).
+ARG UBUNTU_MIRROR
+ARG PIP_DEFAULT_INDEX
+ARG GITHUB_ARTIFACTORY=github.com
+ARG GDRCOPY_VERSION=2.5.1
+
+ENV CUDA_HOME=/usr/local/cuda \
+    GDRCOPY_HOME=/usr/src/gdrdrv-${GDRCOPY_VERSION}/
+
+# Add GKE default lib and bin locations (mirrors vllm + sglang base layers).
+ENV PATH="${PATH}:/usr/local/nvidia/bin" \
+    LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
+
+# Replace Ubuntu sources if a mirror was supplied (sglang-style override).
+RUN if [ -n "${UBUNTU_MIRROR}" ]; then \
+        find /etc/apt -name '*.list' -o -name '*.sources' | xargs -r \
+            sed -i "s|http://.*archive.ubuntu.com|${UBUNTU_MIRROR}|g; s|http://.*security.ubuntu.com|${UBUNTU_MIRROR}|g"; \
+    fi
+
+# ---------------------------------------------------------------------------
+# System dependencies — superset of `sglang/docker/Dockerfile` (lines 60-127)
+# and `vllm/docker/Dockerfile` (lines 100-114) basic stages.
+# ---------------------------------------------------------------------------
+RUN --mount=type=cache,target=/var/cache/apt,id=verl-uv-apt \
+    apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        software-properties-common \
+        netcat-openbsd \
+        kmod \
+        unzip \
+        openssh-client \
+        openssh-server \
+        sudo \
+        curl \
+        wget \
+        lsof \
+        locales \
+        vim \
+        build-essential \
+        ccache \
+        cmake \
+        ninja-build \
+        perl \
+        patchelf \
+        git \
+        git-lfs \
+        gcc-10 \
+        g++-10 \
+        python3 \
+        python3-dev \
+        python3-pip \
+        python3-venv \
+        libopenmpi-dev \
+        libnuma1 \
+        libnuma-dev \
+        numactl \
+        ffmpeg \
+        libibverbs-dev \
+        libibverbs1 \
+        libibumad3 \
+        librdmacm-dev \
+        librdmacm1 \
+        libnl-3-200 \
+        libnl-route-3-200 \
+        libnl-route-3-dev \
+        libnl-3-dev \
+        ibverbs-providers \
+        infiniband-diags \
+        perftest \
+        libgoogle-glog-dev \
+        libgtest-dev \
+        libjsoncpp-dev \
+        libunwind-dev \
+        libboost-all-dev \
+        libssl-dev \
+        libgrpc-dev \
+        libgrpc++-dev \
+        libprotobuf-dev \
+        protobuf-compiler \
+        protobuf-compiler-grpc \
+        pybind11-dev \
+        libhiredis-dev \
+        libcurl4-openssl-dev \
+        libczmq4 \
+        libczmq-dev \
+        libfabric-dev \
+        devscripts \
+        debhelper \
+        fakeroot \
+        dkms \
+        check \
+        libsubunit0 \
+        libsubunit-dev \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10 \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Generate locale (sglang base layer).
+RUN locale-gen en_US.UTF-8
+ENV LANG=en_US.UTF-8 \
+    LANGUAGE=en_US:en \
+    LC_ALL=en_US.UTF-8
+
+# ---------------------------------------------------------------------------
+# cuDNN + NCCL — actively installed following https://developer.nvidia.com/cudnn-downloads
+# The base image is -devel (no cuDNN); we install it explicitly so the version
+# is visible, pinned, and reproducible. These system libs must match the
+# nvidia-cudnn-cu13 / nvidia-nccl-cu13 pip wheels that torch pins transitively
+# in uv.lock (CUDNN_VERSION / NCCL_VERSION ARGs above).
+# ---------------------------------------------------------------------------
+RUN CUDA_VERSION_MAJOR=$(echo ${CUDA_VERSION} | cut -d '.' -f 1) \
+    && apt-get update && apt-get install -y --no-install-recommends --allow-downgrades --allow-change-held-packages \
+        cudnn9-cuda-${CUDA_VERSION_MAJOR} \
+        libcudnn9-cuda-${CUDA_VERSION_MAJOR} \
+        libcudnn9-dev-cuda-${CUDA_VERSION_MAJOR} \
+        libcudnn9-headers-cuda-${CUDA_VERSION_MAJOR} \
+        libnccl2=${NCCL_VERSION}+cuda${CUDA_VERSION%.*} \
+        libnccl-dev=${NCCL_VERSION}+cuda${CUDA_VERSION%.*} \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo "=== Installed cuDNN $(dpkg-query -W -f='${Version}' libcudnn9-cuda-${CUDA_VERSION_MAJOR}) ===" \
+    && echo "=== Installed NCCL  $(dpkg-query -W -f='${Version}' libnccl2) ==="
+
+# Override pip global index if requested.
+RUN if [ -n "${PIP_DEFAULT_INDEX}" ]; then \
+        python3 -m pip config --global set global.index-url "${PIP_DEFAULT_INDEX}" || true; \
+    fi
+
+# ---------------------------------------------------------------------------
+# GDRCopy — pulled from sglang base. Required by DeepEP / GPUDirect on
+# both sglang and vllm runtime stacks.
+# ---------------------------------------------------------------------------
+RUN mkdir -p /tmp/gdrcopy && cd /tmp \
+    && curl --retry 3 --retry-delay 2 -fsSL -o v${GDRCOPY_VERSION}.tar.gz \
+        https://${GITHUB_ARTIFACTORY}/NVIDIA/gdrcopy/archive/refs/tags/v${GDRCOPY_VERSION}.tar.gz \
+    && tar -xzf v${GDRCOPY_VERSION}.tar.gz && rm v${GDRCOPY_VERSION}.tar.gz \
+    && cd gdrcopy-${GDRCOPY_VERSION}/packages \
+    && CUDA=/usr/local/cuda ./build-deb-packages.sh \
+    && dpkg -i gdrdrv-dkms_*.deb libgdrapi_*.deb gdrcopy-tests_*.deb gdrcopy_*.deb \
+    && cd / && rm -rf /tmp/gdrcopy
+
+# DeepEP IBGDA symlink fix (sglang base).
+RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linux-gnu/libmlx5.so
+
+# ---------------------------------------------------------------------------
+# uv — single static binary. We bake the full uv cache from the committed
+# uv.lock via manage_envs.py (the `prefetch` stage); at run time you sync the
+# combination you want into .venv from it with `manage_envs.py sync`. Put uv on
+# PATH and copy across the uv tunables that vllm sets.
+# ---------------------------------------------------------------------------
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
+# UV_CACHE_DIR pins the cache to a known path; the `prefetch` stage bakes it
+# into the image there (no cache mount) so the runtime `uv sync` resolves
+# offline. UV_LINK_MODE=copy lets that runtime venv copy out of the baked
+# (read-only) cache layer.
+ENV UV_HTTP_TIMEOUT=500 \
+    UV_INDEX_STRATEGY="unsafe-best-match" \
+    UV_LINK_MODE=copy \
+    UV_CACHE_DIR=/root/.cache/uv
+
+# Enable CUDA forward compatibility by setting '-e VLLM_ENABLE_CUDA_COMPATIBILITY=1'.
+# Only needed for datacenter/professional GPUs with older drivers.
+# See: https://docs.nvidia.com/deploy/cuda-compatibility/
+ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
+
+# ---------------------------------------------------------------------------
+# deps: dependency metadata + the uv driver + the extra inputs `uv lock` needs
+# to build verl's OWN metadata. Staged *before* the full source so the expensive
+# `prefetch` cache bake below is invalidated only when the dependencies actually
+# change, not on unrelated source edits.
+#
+# verl's [project] (pyproject.toml) declares version/dependencies/authors/urls
+# as DYNAMIC, supplied by setup.py + verl/version/version — so pyproject.toml +
+# uv.lock alone are NOT enough: the `prefetch` step below first runs `uv lock`,
+# which drives the setuptools build backend to extract that metadata and fails
+# without those files ("No configuration found for dynamic 'authors'"). Stage
+# them too. The verl *package* tree is still absent (find_packages() returns [],
+# fine for metadata-only resolution); README.md is only read for the package
+# long-description, so a stub stands in — which also keeps README edits from
+# busting the prefetch cache. (`final` COPYs the real verl tree over these.)
+# ---------------------------------------------------------------------------
+FROM base AS deps
+WORKDIR /workspace/verl
+COPY pyproject.toml uv.lock manage_envs.py setup.py ./
+COPY verl/version/version ./verl/version/version
+RUN printf 'verl\n' > README.md
+
+# ---------------------------------------------------------------------------
+# prefetch: BAKE this image's uv cache. `manage_envs.py prefetch cu130 dev`
+# syncs the conflict-free runtime combos (vllm+fsdp, vllm+megatron, sglang+fsdp,
+# sglang+megatron, cpu) into throwaway envs purely to fill UV_CACHE_DIR
+# (/root/.cache/uv) with every wheel & built artifact those backends need from
+# uv.lock. The heavy native packages (apex / TransformerEngine / flash-attn /
+# vllm / sglang-kernel) come prebuilt from the verl wheelhouse index, so only
+# the git-sourced megatron-core / mbridge are compiled here, once.
+# The `cu130 dev` scope keeps this image to its torch-2.11 world. (The deferred
+# cu12.9 / torch-2.9.1 world is commented out in pyproject.toml.) It passes
+# --no-install-project, so only deps are cached and this
+# layer is independent of the verl source tree. NOTE: unlike every other uv
+# step there is deliberately NO `--mount=type=cache` here, so the warmed cache
+# is committed as an image layer and ships *inside* the image; the runtime
+# `uv sync` then resolves from it offline.
+# ---------------------------------------------------------------------------
+FROM deps AS prefetch
+RUN python3 manage_envs.py prefetch cu130 dev -- --frozen
+
+# ---------------------------------------------------------------------------
+# source / lock: full source tree, used only to (re)generate uv.lock. Build
+# `--target=lock` to refresh the lockfile and copy it back out:
+#
+#     docker build -f docker/Dockerfile.uv.cu130 --target=lock -t verl:uv-cu130-lock .
+#     docker create --name verl-tmp verl:uv-cu130-lock
+#     docker cp verl-tmp:/workspace/verl/uv.lock ./uv.lock
+#     docker rm verl-tmp
+# ---------------------------------------------------------------------------
+FROM base AS source
+WORKDIR /workspace/verl
+COPY . /workspace/verl
+
+FROM source AS lock
+RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
+    python3 manage_envs.py lock
+
+# ---------------------------------------------------------------------------
+# final: the runtime image. Inherits the full baked uv cache from `prefetch`,
+# adds the verl source, and bakes NO fixed .venv. The container starts in a
+# shell; materialize the combination you want with `manage_envs.py sync` — it
+# `uv sync`s the requested extras into /workspace/verl/.venv from the baked
+# cache (fast / offline, no network). That venv's bin is already on PATH, so it
+# activates in place. The combination must be conflict-free (see
+# [tool.uv].conflicts), e.g.:
+#
+#     docker run --rm -it --gpus all verl:uv-cu130 bash
+#     # then, inside the container:
+#     python3 manage_envs.py sync sglang megatron -- --frozen
+#     python3 -m verl.trainer.main_ppo ...
+#
+# The cuDNN / NCCL pip wheels installed by that sync (nvidia-cudnn-cu13 /
+# nvidia-nccl-cu13, from torch's transitive pins) must match the apt debs above.
+# ---------------------------------------------------------------------------
+FROM prefetch AS final
+
+# ---------------------------------------------------------------------------
+# Runtime host compiler — gcc-13 (CUDA 13.0 supports gcc <= 15).
+#
+# `base` pins the default compiler to gcc-10 (mirrors vllm's basic stage), which
+# is fine for the prefetch git-source builds (megatron-core / mbridge compile
+# with it; the native backends ship prebuilt from the wheelhouse). But sglang
+# JIT-compiles its custom kernels (e.g. custom_all_reduce_push) at RUNTIME in
+# C++20, which uses std::bit_cast — a libstdc++ feature that only exists in
+# GCC >= 11. With gcc-10 as nvcc's host compiler that JIT dies with `namespace
+# "std" has no member "bit_cast"`, surfaced by sglang as `Capture cuda graph
+# failed: ninja exited with status 2`. Flip the RUNTIME default to gcc-13
+# (already present via build-essential). This lives in `final`, DOWNSTREAM of
+# `prefetch`, so it does NOT invalidate the expensive prefetch cache — only this
+# cheap layer rebuilds. The trailing `--version` calls fail the build loudly if
+# gcc-13 is somehow absent.
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130 --slave /usr/bin/g++ g++ /usr/bin/g++-13 \
+    && update-alternatives --set gcc /usr/bin/gcc-13 \
+    && gcc --version && g++ --version
+
+COPY . /workspace/verl
+ENV VIRTUAL_ENV="/workspace/verl/.venv" \
+    PATH="/workspace/verl/.venv/bin:${PATH}"
+CMD ["bash"]

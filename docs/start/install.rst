@@ -95,137 +95,258 @@ After pulling the desired Docker image and installing desired inference and trai
     pip3 install -e ".[sglang]"
 
 
-Install from custom environment
+Install with uv
+---------------------------------------------------------
+
+verl provides a `uv <https://docs.astral.sh/uv/>`_ workflow that installs the
+exact packages for the backends you choose into a single project virtual
+environment (``.venv``), kept reproducible by one ``uv.lock``. You select
+backends as **extras**:
+
+- Inference: ``vllm`` or ``sglang``.
+- Training: ``fsdp`` or ``megatron``.
+- ``cpu``: GPU-free, for CI / quick checks.
+
+.. note::
+
+   The uv workflow targets **Linux x86_64 with Python 3.12**. For Ascend NPU,
+   AMD ROCm, or aarch64 GPUs, use the dedicated images / sections instead.
+
+.. note::
+
+   Heavy native packages — ``apex``, ``transformer-engine``, ``flash-attn``,
+   ``vllm``, and ``sglang-kernel`` — are pulled **prebuilt** from the verl
+   wheelhouse index (`etogaosion.github.io/verl-wheelhouse
+   <https://etogaosion.github.io/verl-wheelhouse/simple/>`_, wired in
+   ``pyproject.toml`` under ``[tool.uv.index]`` / ``[tool.uv.sources]``), so
+   ``uv sync`` never compiles them from source. The wheels are built for
+   cu130 / torch 2.11 / CPython 3.12; only the git-sourced ``megatron-core``,
+   ``mbridge``, and ``megatron-bridge`` (the ``r0.5.0`` release branch, paired
+   with ``megatron-core`` 0.18.0) are built at sync time.
+
+Run with the uv Docker image
+:::::::::::::::::::::::::::::::::::::::::::::::::::::
+
+Build the image once, then pick your backend combination at run time:
+
+.. code:: bash
+
+   DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.uv.cu130 -t verl:uv-cu130 .
+
+   docker run --rm -it --gpus all verl:uv-cu130 bash
+   # then, inside the container, sync the backends you want and train:
+   python3 manage_envs.py sync vllm fsdp -- --frozen
+   python3 -m verl.trainer.main_ppo trainer.n_gpus_per_node=8 ...
+
+   # switch combination at any time — it re-points the same .venv:
+   python3 manage_envs.py sync sglang megatron -- --frozen
+
+Every role in a job (rollout and training) runs from the same ``.venv``.
+
+Valid backend combinations
+:::::::::::::::::::::::::::::::::::::::::::::::::::
+
+A typical run combines **one inference engine** with **one training backend**,
+for example ``vllm fsdp``. The rules:
+
+- Choose at most one inference engine: ``vllm`` **or** ``sglang`` (not both).
+- Add a training backend: ``fsdp`` (default) or ``megatron``.
+- ``cpu`` is GPU-free and is used on its own.
+
+``manage_envs.py`` validates your selection and explains any conflict, so when
+in doubt run ``python manage_envs.py list`` to see the backends and your
+current ``.venv``.
+
+Other backends
+::::::::::::::::
+
+Ascend NPU, AMD ROCm, aarch64 GPUs, and ``trtllm`` are outside the uv
+workflow. Use the standalone Dockerfiles instead — for example
+``docker/ascend/`` (Ascend), ``docker/Dockerfile.rocm`` (AMD), or
+``docker/Dockerfile.stable.trtllm`` (TensorRT-LLM).
+
+Upgrade or modify dependencies
+::::::::::::::::::::::::::::::::::::
+
+To upgrade, downgrade, or pin a package (e.g. ``vllm``), edit its version in
+``pyproject.toml``, refresh the lockfile, and validate:
+
+.. code:: bash
+
+   # 1. edit pyproject.toml — e.g. bump the vllm pin in the [vllm] extra
+   # 2. refresh the lockfile and check the combination resolves:
+   python manage_envs.py lock                 # regenerate uv.lock
+   python manage_envs.py sync vllm fsdp       # install + validate
+   # 3. commit the manifest and the lockfile together:
+   git add pyproject.toml uv.lock
+
+Package versions live under ``[project.optional-dependencies]`` in
+``pyproject.toml`` (one block per backend); a few project-wide pins
+(``numpy``, ``kernels``) and the per-engine ``transformers`` pins live under
+``[tool.uv].override-dependencies``. Update every place the package appears.
+
+``transformers`` tracks the inference engine (its version must match what the
+engine needs): ``vllm`` pins ``5.5.3`` while ``sglang`` and the ``cpu`` dev
+slice pin ``5.3.0``. The training backends (``fsdp`` / ``megatron``) carry no
+``transformers`` pin of their own, so a run inherits the engine it is synced
+with (``sync vllm megatron`` -> ``5.5.3``; ``sync sglang fsdp`` -> ``5.3.0``);
+a training-only sync falls back to ``5.3.0``. The per-engine pins use ``extra``
+conflict markers in ``override-dependencies``, which uv evaluates per
+resolution fork.
+
+To try a version without committing, install it into an already-synced
+``.venv`` (reverted on the next ``sync``)::
+
+   source .venv/bin/activate
+   uv pip install -U vllm        # or: uv pip install vllm==<version>
+
+.. note::
+
+   Upgrading ``vllm`` / ``sglang`` may require a matching ``torch`` (all GPU
+   backends share the same ``torch``), and a large ``torch`` / CUDA bump may
+   need a different Docker base image.
+
+
+Install with uv in a custom environment
 ---------------------------------------------
 
-We recommend to use docker images for convenience. However, if your environment is not compatible with the docker image, you can also install verl in a python environment.
+If you are not using the Docker image, install into your own host or base
+image. ``uv sync`` installs Python packages only, so bring a base whose CUDA
+runtime matches the GPU backends you sync.
 
-.. note::
-
-    - Dockerfile provides more details than this installation instructions. You can find examples in each Dockerfile, for example `verl0.6-cu128-torch2.8.0-fa2.7.4 Dockerfile.base <https://github.com/verl-project/verl/blob/v0.6.0/docker/verl0.6-cu128-torch2.8.0-fa2.7.4/Dockerfile.base>`_ .
-
-
-Pre-requisites
-::::::::::::::
-
-For training and inference engines to utilize better and faster hardware support, CUDA/cuDNN and other dependencies are required,
-and some of the dependencies are easy to be overridden when installing other packages,
-so we put them in the :ref:`Post-installation` step.
-
-.. note::
-
-    - The installation steps below are recommended configurations for the latest version of verl.
-
-    If you are trying to customize your own environment, please ignore the strict constraints.
-
-We need to install the following pre-requisites:
-
-- **CUDA**: Version >= 12.8
-- **cuDNN**: Version >= 9.10.0
-- **Apex**
-
-CUDA above 12.8 is recommended to use as the docker image,
-please refer to `NVIDIA's official website <https://developer.nvidia.com/cuda-toolkit-archive>`_ for other version of CUDA.
-
-.. code:: bash
-
-    # change directory to anywher you like, in verl source code directory is not recommended
-    wget https://developer.download.nvidia.com/compute/cuda/12.8.1/local_installers/cuda-repo-ubuntu2204-12-8-local_12.8.1-570.124.06-1_amd64.deb
-    dpkg -i cuda-repo-ubuntu2204-12-8-local_12.8.1-570.124.06-1_amd64.deb
-    cp /var/cuda-repo-ubuntu2204-12-8-local/cuda-*-keyring.gpg /usr/share/keyrings/
-    apt-get update
-    apt-get -y install cuda-toolkit-12-8
-    update-alternatives --set cuda /usr/local/cuda-12-8
-
-
-cuDNN can be installed via the following command,
-please refer to `NVIDIA's official website <https://developer.nvidia.com/rdp/cudnn-archive>`_ for other version of cuDNN.
-
-.. code:: bash
-
-    # change directory to anywher you like, in verl source code directory is not recommended
-    wget https://developer.download.nvidia.com/compute/cudnn/9.10.2/local_installers/cudnn-local-repo-ubuntu2204-9.10.2_1.0-1_amd64.deb
-    dpkg -i cudnn-local-repo-ubuntu2204-9.10.2_1.0-1_amd64.deb
-    cp /var/cudnn-local-repo-ubuntu2204-9.10.2/cudnn-*-keyring.gpg /usr/share/keyrings/
-    apt-get update
-    apt-get -y install cudnn-cuda-12
-
-Install dependencies
+Pick a base image
 ::::::::::::::::::::
 
-.. note::
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
 
-    We recommend to use a fresh new conda environment to install verl and its dependencies.
+   * - Extra(s)
+     - Recommended base image
+   * - ``vllm`` / ``fsdp`` / ``megatron``
+     - ``nvidia/cuda:13.0.2-devel-ubuntu24.04`` (matches ``docker/Dockerfile.uv.cu130``)
+   * - ``sglang``
+     - ``lmsysorg/sglang:v0.5.12`` or ``nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04``
+   * - ``cpu`` (CI / sanity)
+     - any x86_64 Linux host with Python 3.12; no GPU needed
 
-    **Notice that the inference frameworks often strictly limit your pytorch version and will directly override your installed pytorch if not paying enough attention.**
-
-    As a countermeasure, it is recommended to install inference frameworks first with the pytorch they needed. For vLLM, if you hope to use your existing pytorch,
-    please follow their official instructions
-    `Use an existing PyTorch installation <https://docs.vllm.ai/en/latest/getting_started/installation/gpu.html#build-wheel-from-source>`_ .
-
-
-1. First of all, to manage environment, we recommend using conda:
-
-.. code:: bash
-
-   conda create -n verl python==3.12
-   conda activate verl
-
-
-2. Then, execute the ``install.sh`` script that we provided in verl:
+Set up and sync
+:::::::::::::::::::::::
 
 .. code:: bash
 
-    # Make sure you have activated verl conda env
-    # If you need to run with megatron
-    bash scripts/install_vllm_sglang_mcore.sh
-    # Or if you simply need to run with FSDP
-    USE_MEGATRON=0 bash scripts/install_vllm_sglang_mcore.sh
-
-
-If you encounter errors in this step, please check the script and manually follow the steps in the script.
-
-[Optional] NVIDIA Apex is recommended for Megatron-LM training, but it's not needed if you only use FSDP backend.
-You can install it via the following command, but notice that this steps can take a very long time.
-It is recommended to set the ``MAX_JOBS`` environment variable to accelerate the installation process,
-but do not set it too large, otherwise the memory will be overloaded and your machines may hang.
-
-.. code:: bash
-
-    # change directory to anywher you like, in verl source code directory is not recommended
-    git clone https://github.com/NVIDIA/apex.git && \
-    cd apex && \
-    MAX_JOB=32 pip install -v --disable-pip-version-check --no-cache-dir --no-build-isolation --config-settings "--build-option=--cpp_ext" --config-settings "--build-option=--cuda_ext" ./
-
-Install verl
-::::::::::::
-
-For installing the latest version of verl, the best way is to clone and
-install it from source. Then you can modify our code to customize your
-own post-training jobs.
-
-.. code:: bash
+   # one-time: install uv
+   curl -LsSf https://astral.sh/uv/install.sh | sh
 
    git clone https://github.com/verl-project/verl.git
    cd verl
-   pip install --no-deps -e .
 
+   # create / update .venv for a backend combination:
+   python manage_envs.py sync vllm fsdp        # vLLM rollout + FSDP training
+   python manage_envs.py sync sglang megatron  # SGLang rollout + Megatron training
+   python manage_envs.py sync cpu              # GPU-free, for CI / quick checks
 
-Post-installation
-:::::::::::::::::
+``manage_envs.py`` is the recommended entry point: it validates your
+combination and drives ``uv`` with the right flags. Other useful
+commands:
 
-Please make sure that the installed packages are not overridden during the installation of other packages.
+.. code:: bash
 
-The packages worth checking are:
+   python manage_envs.py list                # backends, valid combinations, .venv state
+   python manage_envs.py shell vllm fsdp     # sync, then open a shell in the .venv
+   python manage_envs.py clean               # delete the .venv to start over
+   python manage_envs.py --help
 
-- **torch** and torch series
-- **vLLM**
-- **SGLang**
-- **pyarrow**
-- **tensordict**
-- **nvidia-cudnn-cu12**: For Magetron backend
+   # forward flags to uv after `--`, e.g. force a clean reinstall:
+   python manage_envs.py sync vllm fsdp -- --reinstall
 
-If you encounter issues about package versions during running verl, please update the outdated ones.
+The equivalent raw ``uv`` command is::
+
+   uv sync --python 3.12 --extra vllm --extra fsdp
+
+Name a separate venv
+::::::::::::::::::::::
+
+By default every combination reuses the same ``.venv``. To keep several
+combinations (or per-user / per-run envs) side by side, add ``--name NAME`` (or
+set ``VERL_VENV_NAME``)::
+
+   python manage_envs.py sync --name vllm-mega vllm megatron
+   python manage_envs.py sync --name sglang-fsdp sglang fsdp
+
+``.venv`` always tracks the combination you synced most recently, so activation
+is unchanged::
+
+   source .venv/bin/activate
+
+The same ``--name`` works with ``run`` / ``shell`` / ``clean`` / ``list`` (for
+``sync`` / ``run`` put it before the extras); ``python manage_envs.py list``
+shows what you have.
+
+Keep your own build of a package
+::::::::::::::::::::::::::::::::::
+
+If you have an in-house build of a package (for example a custom ``ray`` or
+``wandb``) that must not be overwritten, list it in ``VERL_UV_NO_INSTALL`` and
+install it yourself after syncing::
+
+   export VERL_UV_NO_INSTALL="ray wandb"
+   python manage_envs.py sync vllm fsdp      # installs everything except ray / wandb
+   uv pip install <your ray / wandb wheels>
+
+Run code in the .venv
+:::::::::::::::::::::::
+
+.. code:: bash
+
+   # activate it:
+   source .venv/bin/activate
+   python -m verl.trainer.main_ppo ...
+
+   # or run without activating:
+   python manage_envs.py run vllm fsdp -- python -m verl.trainer.main_ppo ...
+
+All Ray worker groups in a job share this single ``.venv`` — sync one
+combination that covers every role you need (e.g. ``vllm megatron``), then
+launch normally.
+
+Example scripts and the ``VERL_USE_UV`` toggle
+::::::::::::::::::::::::::::::::::::::::::::::::::
+
+The launch scripts under ``examples/`` (vllm/sglang × fsdp/megatron) use this
+``.venv`` automatically: run from the repo root, they ``uv sync`` the right
+extras from the committed ``uv.lock`` and then ``uv run --frozen --no-sync`` the
+trainer. During the transition you can opt out and use the ambient/system
+python instead by setting ``VERL_USE_UV=0``::
+
+    # default: run inside the uv-managed .venv
+    bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
+
+    # transition fallback: system python, no uv
+    VERL_USE_UV=0 bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
+
+NPU / trtllm and other non-uv backends already fall back to system python
+regardless of ``VERL_USE_UV``.
+
+Troubleshooting
+:::::::::::::::
+
+- **``uv: command not found``** — ``curl -LsSf https://astral.sh/uv/install.sh | sh``.
+- **A combination is rejected** — you selected two inference engines; pick
+  ``vllm`` **or** ``sglang``.
+- **``No solution found`` for ``apex`` / ``transformer-engine`` / ``flash-attn``
+  / ``vllm`` / ``sglang-kernel``** — these are pulled prebuilt from the verl
+  wheelhouse (see the note under *Install with uv*). It means the resolver found
+  no matching wheel for your platform or the wheelhouse was unreachable; the uv
+  flow supports only cu130 / torch 2.11 / CPython 3.12 on Linux x86_64.
+- **``uv sync`` / ``uv lock`` fails on macOS** — the uv workflow is Linux
+  x86_64 only; use a Linux host or the Docker image.
+- **Start over** — ``python manage_envs.py clean`` then sync again.
+
+Some system-level pieces are not handled by ``uv sync`` (the Dockerfiles set
+them up): system apt packages, GDRCopy + DeepEP for MoE all-to-all, Mooncake
+for SGLang KV-cache transfer, the flashinfer JIT cache, and sgl-router. See
+``docker/Dockerfile.stable.{vllm,sglang}`` for reference.
 
 
 Install with AMD GPUs - ROCM kernel support

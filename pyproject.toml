@@ -1,34 +1,175 @@
-# -------------------------------
-# build-system
-# -------------------------------
 [build-system]
-requires = [
-    "setuptools>=61.0",
-    "wheel"
-]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
-# -------------------------------
-# project (PEP 621 metadata)
-# -------------------------------
 [project]
 name = "verl"
-# We'll mark the version as "dynamic" because it's read from the file "verl/version/version" 
-# (PEP 621 calls this "dynamic version"). 
-# The actual version is specified in the [tool.setuptools.dynamic] section below.
-dynamic = ["version", "dependencies", "optional-dependencies", "authors", "urls"]
-
+dynamic = ["version", "dependencies", "authors", "urls"]
 description = "verl: Volcano Engine Reinforcement Learning for LLM"
-license = {text = "Apache-2.0"}  # Changed from file to text format
+license = {text = "Apache-2.0"}
 readme = {file = "README.md", content-type = "text/markdown"}
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 
-# -------------------------------
-# tool.ruff - Linting configuration
-# -------------------------------
+# One universal uv.lock: each backend is a PEP 621 extra; mutually exclusive ones
+# are in [tool.uv].conflicts, so a single `uv lock` resolves them all. At runtime,
+# sync one conflict-free combo into .venv (shared by every Ray worker group):
+#
+#   uv sync --extra fsdp --extra vllm     # or: python manage_envs.py sync fsdp vllm
+#
+# All backends use torch 2.11.0: vllm/sglang/fsdp/megatron on cu130, cpu on cpu
+# wheels (CI/dev). Both torch worlds coexist via [tool.uv].conflicts forks.
+# DEFERRED: trtllm (torch 2.10.0+cu130) — its RC sdist makes `uv lock` explode.
+# cuDNN/NCCL: torch's wheel pins them, so after `uv lock` sync CUDNN_VERSION /
+# NCCL_VERSION in docker/Dockerfile.uv.cu130 to the resolved values.
+[project.optional-dependencies]
+
+# ---- legacy small extras (kept verbatim from setup.py) ---------------------
+test          = ["pytest", "pre-commit", "py-spy", "pytest-asyncio", "pytest-rerunfailures"]
+math          = ["math-verify"]
+mcore         = ["mbridge"]
+# Named extra so the git source lives in one place; verl-core pulls it in, so it
+# is always installed (no longer opt-in).
+transferqueue = ["TransferQueue @ git+https://github.com/Ascend/TransferQueue.git@main"]
+
+# Shared runtime deps, included by every backend via `verl[verl-core]`.
+# TransferQueue is always installed (imported at top level on core paths).
+verl-core = [
+    "verl[transferqueue]",
+    "accelerate",
+    "codetiming",
+    "datasets",
+    "dill",
+    "hydra-core",
+    "numpy>=2.0.0",
+    "pandas",
+    "peft",
+    "pyarrow>=19.0.0",
+    "pybind11",
+    "pylatexenc",
+    "ray[default]>=2.41.0",
+    "torchdata",
+    "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
+    "wandb",
+    "packaging>=20.0",
+    "tensorboard",
+    "fastapi",
+    "uvicorn",
+    "mathruler",
+    "qwen_vl_utils",
+    "cachetools",
+    "nvtx",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-rerunfailures",
+]
+
+# Pins flash-attn once for the fsdp / megatron parents (wheelhouse-routed below).
+# Don't install alone — needs the parent extra's torch / cuDNN pins.
+flash-attn-cu130torch211 = ["flash-attn==2.8.3"]
+
+# ---- inference backends ----------------------------------------------------
+vllm = [
+    "verl[verl-core]",
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "torchaudio==2.11.0",
+    # vllm 0.24.0 from the wheelhouse v0.24.0 tag; ships a real versioned wheel
+    # now, so pin directly.
+    "vllm==0.24.0",
+    # flashinfer is a transitive dep vllm 0.24 hard-pins to ==0.6.12 (pure-python
+    # from PyPI); the wheelhouse's 0.6.13 doesn't match, so it isn't routed.
+    "mbridge",
+    # vllm 0.24 needs transformers 5.5.3 (enforced in override-dependencies below).
+    "transformers==5.5.3",
+]
+
+sglang = [
+    "verl[verl-core]",
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "torchaudio==2.11.0",
+    # sglang + sglang-kernel come from the wheelhouse cu130 build (sglang-v0.5.12
+    # tag); see [tool.uv.sources].
+    "sglang==0.5.12",
+    # Declared directly so [tool.uv.sources] routes it to the wheelhouse build.
+    "sglang-kernel",
+    # sglang hard-deps flash-attn-4 but we EXCLUDE it (only buggy betas ship); it
+    # is imported lazily (fa4 backend only), so defaults work. See override-deps.
+    "mbridge",
+    "transformers==5.3.0",
+]
+
+# DEFERRED — trtllm is a CUDA-13 backend (torch 2.10.0+cu130, conflict-gated).
+# tensorrt-llm 1.3.0rc14's tightly-pinned RC tree makes `uv lock` explode. To
+# re-enable on a stable release: uncomment, add cu130 torch routing + a
+# `{ extra = "trtllm" }` conflict entry (both flagged below), and re-lock.
+# trtllm = [
+#     "verl[verl-core]",
+#     "torch==2.10.0",   # route to pytorch-cu130 (CUDA 13), see [tool.uv.sources]
+#     "tensorrt-llm==1.3.0rc14 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+#     "mbridge",
+#     "transformers==5.3.0",
+#     "numpy>=2.0.0,<2.4",
+#     "ray[default]==2.54.1",
+# ]
+
+# ---- training backends -----------------------------------------------------
+fsdp = [
+    "verl[verl-core]",
+    "verl[flash-attn-cu130torch211]",
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "torchaudio==2.11.0",
+    "liger-kernel",
+    "trl==0.27.0",
+    # transformers NOT pinned here: trainers inherit the synced engine's version
+    # (vllm 5.5.3 / sglang 5.3.0; else 5.3.0). See override-dependencies below.
+]
+
+# apex / TE / flash-attn come prebuilt from the wheelhouse; megatron-core /
+# megatron-bridge are git-sourced (built at sync time). cupy: Megatron MoE
+# all-to-all. onnxscript: works around an undeclared TE import.
+megatron = [
+    "verl[verl-core]",
+    "verl[flash-attn-cu130torch211]",
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "torchaudio==2.11.0",
+    "nvidia-mathdx",
+    "apex",
+    "transformer-engine",
+    "onnxscript",
+    "trl==0.27.0",
+    "matplotlib",
+    "liger-kernel",
+    # Two Megatron<->HF connectors: mbridge (legacy) and megatron-bridge (NVIDIA,
+    # imported as megatron.bridge; the migration target, installed deps-free — see
+    # [[tool.uv.dependency-metadata]] below).
+    "mbridge",
+    "megatron-bridge",
+    "megatron-core",
+    "cupy-cuda13x==14.0.1",
+    # megatron-bridge hard-imports modelopt but is installed deps-free (below), so
+    # megatron needs it explicitly. 0.44.0: PyPI stable of bridge r0.5.0's 0.44.x.
+    "nvidia-modelopt==0.44.0",
+    # transformers NOT pinned here (see fsdp note): inherited via override-deps below.
+]
+
+# CI / unit tests / dev sanity. No GPU runtime.
+cpu = [
+    "verl[verl-core]",
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "torchaudio==2.11.0",
+    "transformers==5.3.0",
+    "pytest",
+    "pre-commit",
+    "py-spy",
+    "pytest-asyncio",
+    "pytest-rerunfailures",
+]
+
 [tool.ruff]
-# Note: While the formatter will attempt to format lines such that they remain within the line-length,
-# it isn't a hard upper bound, and formatted lines may exceed the line-length.
 line-length = 120
 exclude = ["scripts/legacy_model_merger.py"]
 
@@ -65,16 +206,11 @@ ignore = [
     "UP035",
 ]
 
-# -------------------------------
-# tool.mypy - typechecking config
-# -------------------------------
 [tool.mypy]
 pretty            = true
 ignore_missing_imports = true
 explicit_package_bases = true
 follow_imports = "skip"
-
-# Blanket silence
 ignore_errors = true
 
 [[tool.mypy.overrides]]
@@ -87,24 +223,15 @@ module = [
 ]
 ignore_errors = false
 
-# -------------------------------
-# tool.setuptools - Additional config
-# -------------------------------
 [tool.setuptools]
-# True means `setuptools` will attempt to include all relevant files in package_data automatically.
-# This corresponds to `include_package_data=True` in setup.py.
 include-package-data = true
 
-# We read the version from a file in 'verl/version/version'
 [tool.setuptools.dynamic]
 version = {file = "verl/version/version"}
 
-# If you need to mimic `package_dir={'': '.'}`:
 [tool.setuptools.package-dir]
 "" = "."
 
-# If you need to include specific non-Python data (like YAML files or version file):
-# This is the rough equivalent of package_data={'': ['version/*'], 'verl': ['trainer/config/*.yaml']}
 [tool.setuptools.package-data]
 verl = [
   "version/*",
@@ -112,3 +239,123 @@ verl = [
   "trainer/config/*/*.yaml",
   "experimental/*/config/*.yaml",
 ]
+
+# One universal uv.lock: `uv lock` resolves every extra; conflicting extras
+# coexist in the lock but never in one venv. See docs/start/install.rst.
+[tool.uv]
+# x86_64 Linux + Python 3.12 only (keeps the lock single-variant).
+environments = [
+    "python_full_version >= '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+# Mutually exclusive extras — at most one per set per `uv sync`. Distinct torch
+# worlds never mix (cu130: vllm/sglang/fsdp/megatron; cpu). vllm/sglang/cpu are
+# mutually exclusive; cpu also excludes fsdp/megatron. fsdp/megatron CAN combine
+# with a cu130 inference engine (e.g. --extra megatron --extra vllm).
+conflicts = [
+    # (trtllm DEFERRED — add `{ extra = "trtllm" }` to each set when it rejoins.)
+    [{ extra = "vllm" }, { extra = "sglang" }, { extra = "cpu" }],
+    [{ extra = "fsdp" }, { extra = "cpu" }],
+    [{ extra = "megatron" }, { extra = "cpu" }],
+]
+
+# Global override pins:
+#   * transformers tracks the inference engine (overrides are absolute): vllm ->
+#     5.5.3, sglang/cpu -> 5.3.0. Trainers inherit the engine's version via the
+#     conflict fork; the trailing `extra != <engines/cpu>` marker pins
+#     trainer-only / bare verl to 5.3.0.
+#   * numpy>=2.0.0 floor.
+#   * kernels>=0.10.2,<0.11 — sglang deps `kernels` unbounded; >=0.15 breaks
+#     transformers 5.3.0's hub_kernels.py (huggingface/transformers#46291), so
+#     pin to transformers 5.3.0's own window (satisfies sglang too).
+override-dependencies = [
+    "transformers==5.5.3 ; extra == 'vllm'",
+    "transformers==5.3.0 ; extra == 'sglang'",
+    "transformers==5.3.0 ; extra == 'cpu'",
+    "transformers==5.3.0 ; extra != 'vllm' and extra != 'sglang' and extra != 'cpu'",
+    "numpy>=2.0.0",
+    "kernels>=0.10.2,<0.11",
+]
+
+# Skip lock-time metadata builds for git-source packages with no [project] /
+# dynamic version (the sync-time source build still runs). Versions track
+# [tool.uv.sources] below; bump together. (Wheelhouse packages read metadata from
+# the wheel — no entry needed.)
+[[tool.uv.dependency-metadata]]
+name = "megatron-core"
+version = "0.18.0"
+requires-dist = ["torch>=2.6.0", "numpy", "packaging>=24.2"]
+
+[[tool.uv.dependency-metadata]]
+name = "mbridge"
+version = "0.15.1"
+requires-dist = []
+
+# megatron-bridge is git-sourced from r0.5.0 (v0.5.2), pairing with megatron-core
+# 0.18.0. Its real metadata pulls a conflicting transformers + NeMo stack, so we
+# declare EMPTY requires-dist (like `pip install --no-deps`) — the megatron extra
+# already provides torch / megatron-core / TE.
+[[tool.uv.dependency-metadata]]
+name = "megatron-bridge"
+version = "0.5.2"
+requires-dist = []
+
+# Heavy native packages come prebuilt from the verl wheelhouse (cu130 / torch 2.11
+# / cp312) — no source build here. (flashinfer NOT routed: vllm/sglang pin their
+# own, pulled pure-python from PyPI; the wheelhouse's 0.6.13 matches neither.)
+[tool.uv.sources]
+apex                 = { index = "verl-wheelhouse" }
+flash-attn           = { index = "verl-wheelhouse" }
+transformer-engine   = { index = "verl-wheelhouse" }
+sglang               = { index = "verl-wheelhouse" }
+sglang-kernel        = { index = "verl-wheelhouse" }
+vllm                 = { index = "verl-wheelhouse" }
+
+# megatron-core / mbridge / megatron-bridge aren't in the wheelhouse; git-sourced
+# (built at sync time). megatron-bridge r0.5.0 pairs with megatron-core
+# core_v0.18.0 — bump the two together.
+mbridge            = { git = "https://github.com/ISEEKYAN/mbridge.git",            rev = "641a5a0" }
+megatron-bridge    = { git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge.git", branch = "r0.5.0" }
+megatron-core      = { git = "https://github.com/NVIDIA/Megatron-LM.git",          tag = "core_v0.18.0" }
+
+# Per-extra routing to the matching pytorch wheel index.
+torch = [
+    { index = "pytorch-cu130", extra = "vllm" },
+    { index = "pytorch-cu130", extra = "sglang" },
+    { index = "pytorch-cu130", extra = "fsdp" },
+    { index = "pytorch-cu130", extra = "megatron" },
+    { index = "pytorch-cpu",   extra = "cpu" },
+    # trtllm (DEFERRED) would route to CUDA 13 here:
+    #   { index = "pytorch-cu130", extra = "trtllm" },
+]
+torchvision = [
+    { index = "pytorch-cu130", extra = "vllm" },
+    { index = "pytorch-cu130", extra = "sglang" },
+    { index = "pytorch-cu130", extra = "fsdp" },
+    { index = "pytorch-cu130", extra = "megatron" },
+    { index = "pytorch-cpu",   extra = "cpu" },
+]
+torchaudio = [
+    { index = "pytorch-cu130", extra = "vllm" },
+    { index = "pytorch-cu130", extra = "sglang" },
+    { index = "pytorch-cu130", extra = "fsdp" },
+    { index = "pytorch-cu130", extra = "megatron" },
+    { index = "pytorch-cpu",   extra = "cpu" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+# verl wheelhouse: prebuilt cu130 / torch-2.11 / cp312 native wheels. Only the
+# packages routed above are pulled here (explicit = true); the rest stay on PyPI.
+[[tool.uv.index]]
+name = "verl-wheelhouse"
+url = "https://etogaosion.github.io/verl-wheelhouse/simple/"
+explicit = true

@@ -97,7 +97,9 @@ celerybeat-schedule
 
 # virtualenv
 venv/
-.venv/
+.venv
+.venv-*
+.venvs/
 ENV/
 !**/workers/env/
 
@@ -118,9 +120,6 @@ ENV/
 
 # emacs
 *~
-
-# ckpt
-*.lock
 
 # data
 *.parquet

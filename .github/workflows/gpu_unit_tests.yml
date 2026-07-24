@@ -71,7 +71,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:sgl0512.dev2"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -103,17 +103,21 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      # uv migration: sync the project .venv from the committed uv.lock using
+      # the baked uv cache in the uv.cu130 image (offline), then expose .venv to
+      # subsequent steps. cupy / pytest-asyncio come from the megatron / verl-core
+      # extras; hf_transfer and mlflow are not in the lock, so add them on top.
       - name: Install the current repository
         run: |
-          pip3 install hf_transfer
-          pip3 install -r requirements-test.txt
-          pip3 install -r requirements.txt
-          pip3 install --no-deps -e .
-          pip3 install cupy-cuda13x==13.6.0 pytest-asyncio
-          pip3 install --ignore-installed blinker mlflow
+          python3 manage_envs.py sync sglang megatron -- --frozen
+          echo "VIRTUAL_ENV=${GITHUB_WORKSPACE}/.venv" >> "$GITHUB_ENV"
+          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
+          source "${GITHUB_WORKSPACE}/.venv/bin/activate"
+          uv pip install hf_transfer
+          uv pip install mlflow
       - name: Check final pip list
         run: |
-          pip3 list
+          uv pip list
       - name: Run all GPU unit tests
         run: |
           pytest -s -x --ignore-glob="*on_npu.py" --ignore-glob="*test_special_*.py" --ignore-glob='*on_cpu.py' --ignore-glob="*test_vllm*" --ignore-glob="*_sglang*" --ignore-glob="*_hf_rollout*" --ignore-glob="tests/models/" --ignore-glob='tests/special*' --ignore-glob="tests/experimental" --ignore-glob="tests/workers/reward_model" --ignore-glob="*test_shared_memory*" --ignore-glob="tests/workers/rollout/rollout_trtllm" --ignore-glob="*test_bucketed_weight_transfer*" tests/

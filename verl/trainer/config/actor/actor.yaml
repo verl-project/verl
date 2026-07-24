@@ -332,4 +332,3 @@ qat:
 
   # Path to vLLM quantization config JSON file
   quantization_config_path: null
-
