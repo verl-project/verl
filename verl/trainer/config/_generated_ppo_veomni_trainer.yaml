@@ -864,6 +864,25 @@ distillation:
         response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
         temperature: ${oc.select:actor_rollout_ref.rollout.temperature}
   teacher_key: data_source
+  self_distillation: false
+  privileged_solution_key: reward_model.ground_truth
+  privileged_prefix: '
+
+
+    Reference solution:
+
+    '
+  privileged_suffix: '
+
+
+    Using this as a reference, derive the answer yourself. Think step by step.
+
+    '
+  privileged_insert_before: ''
+  privileged_mode: append
+  privileged_problem_key: extra_info.problem
+  privileged_user_template: ''
+  privileged_enable_thinking: true
 trainer:
   balance_batch: true
   total_epochs: 30
