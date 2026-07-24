@@ -33,6 +33,7 @@ from verl.models.mcore.util import preprocess_packed_seqs, preprocess_thd_engine
 from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 from verl.utils.megatron_utils import unwrap_model
 from verl.utils.model import CausalLMOutputForPPO
+from verl.utils.prefix_tree.forward import fused_prefix_tree_forward
 
 from .util import postprocess_packed_seqs_for_dict_output, postprocess_thd_engine
 
@@ -146,10 +147,32 @@ def fused_forward_model_engine(vision_model: bool = False):
         temperature: float,
         calculate_entropy: bool,
         pad_token_id: int,
+        logits_processor_args: Optional[dict] = None,
     ):
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
 
+        _pt_args = logits_processor_args or {}
+        use_prefix_tree = _pt_args.get("use_prefix_tree", False)
+
+        if use_prefix_tree:
+            # Prefix-tree (MAGI) fused path.
+            from verl.utils.prefix_tree.forward import fuse_try_forward_prefix_tree
+
+            output = fuse_try_forward_prefix_tree(
+                model=model,
+                input_ids=input_ids,
+                labels=labels,
+                temperature=temperature,
+                logits_processor_args=_pt_args,
+                calculate_entropy=calculate_entropy,
+                vision_model=vision_model,
+                has_vision_data="pixel_values" in multi_modal_inputs,
+            )
+            if output is not None:
+                return output
+
+        # Standard FA3 fused path (unchanged from upstream):
         fp8 = unwrap_model(model).config.fp8
         use_fp8_padding = fp8 in ["e4m3", "hybrid"]
         config = unwrap_model(model).config
@@ -192,6 +215,7 @@ def fused_forward_model_engine(vision_model: bool = False):
             min_local_rows=min_local_rows,
         )
         labels_rmpad = labels_rmpad.contiguous()
+
         output_orig: CausalLMOutputForPPO = model(
             input_ids=input_ids_rmpad,
             attention_mask=attention_mask,
@@ -254,6 +278,25 @@ def _fused_GPTModel_forward(
     """
 
     inference_context = deprecate_inference_params(inference_context, inference_params)
+
+    pt_batch = kwargs.pop("pt_batch", None)
+    if pt_batch is not None:
+        output = fused_prefix_tree_forward(
+            model,
+            input_ids=input_ids,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+            temperature=temperature,
+            pt_batch=pt_batch,
+            decoder_input=decoder_input,
+            packed_seq_params=packed_seq_params,
+            extra_block_kwargs=extra_block_kwargs,
+            inference_context=inference_context,
+            kwargs=kwargs,
+        )
+        if output is not None:
+            return output
 
     preproc_output = model._preprocess(
         input_ids=input_ids,

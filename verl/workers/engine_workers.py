@@ -112,6 +112,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
         # TODO: this is not elegant and should refactor later
         self.engine_config.use_remove_padding = self.model_config.get("use_remove_padding", False)
         self.engine_config.use_fused_kernels = self.model_config.get("use_fused_kernels", False)
+        # Thread prefix-tree flags from model config → engine meta_info (actor training dedup)
+        self.engine_config.use_prefix_tree = self.model_config.get("use_prefix_tree", False)
+        self.engine_config.prefix_tree_attention = self.model_config.get("prefix_tree_attention", "magi")
 
         self.profiler_config = self.config.profiler_config
         if self.profiler_config is not None:
@@ -349,6 +352,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
             max_token_len_per_gpu=self.engine_config.max_token_len_per_gpu,
             micro_batch_size_per_gpu=self.engine_config.micro_batch_size_per_gpu,
             use_fused_kernels=self.engine_config.use_fused_kernels,
+            use_prefix_tree=getattr(self.engine_config, "use_prefix_tree", False),
+            prefix_tree_attention=getattr(self.engine_config, "prefix_tree_attention", "magi"),
         )
 
         for key, val in default_keys.items():
@@ -403,6 +408,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
             max_token_len_per_gpu=self.engine_config.infer_max_token_len_per_gpu,
             micro_batch_size_per_gpu=self.engine_config.infer_micro_batch_size_per_gpu,
             use_fused_kernels=self.engine_config.use_fused_kernels,
+            use_prefix_tree=getattr(self.engine_config, "use_prefix_tree", False),
+            prefix_tree_attention=getattr(self.engine_config, "prefix_tree_attention", "magi"),
         )
 
         for key, val in default_keys.items():

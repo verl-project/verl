@@ -64,6 +64,7 @@ from verl.utils.megatron_utils import (
     unwrap_model,
 )
 from verl.utils.model import extract_multi_modal_inputs, load_mcore_dist_weights
+from verl.utils.prefix_tree.magi import get_prefix_tree_logits_args, read_prefix_tree_batch_config
 from verl.utils.seqlen_balancing import restore_dynamic_batch
 from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizerConfig
 
@@ -135,6 +136,11 @@ class MegatronEngine(BaseEngine):
             from verl.models.mcore.patch import apply_patch_megatron_recomputation_backward
 
             apply_patch_megatron_recomputation_backward()
+
+        if self.engine_config.use_prefix_tree:
+            from verl.utils.prefix_tree.prefix_tree_patch_impl import apply_prefix_tree_patch as apply_magi_patch
+
+            apply_magi_patch()
 
     def _init_device_mesh(self):
         # TODO: set different parallelism for actor, critic, ref
@@ -767,6 +773,14 @@ class MegatronEngine(BaseEngine):
             micro_batch_size=1,  # the communication shape is obtained via p2p comm
             forward_only=forward_only,
         )
+        if losses_reduced and self.is_mp_src_rank_with_outputs():
+            from verl.utils.prefix_tree.prefix_tree_patch_impl import (
+                maybe_collect_attn_metrics,
+                maybe_collect_mbs_metric,
+            )
+
+            maybe_collect_attn_metrics(self.engine_config, self, losses_reduced[0])
+            maybe_collect_mbs_metric(self.engine_config, self, losses_reduced[0])
 
         if self.model_config.mtp.enable and mpu.is_pipeline_last_stage(ignore_virtual=True):
             # All CP ranks must participate in the all_reduce inside get_megatron_mtp_loss,
@@ -966,12 +980,25 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 dp_rank=mpu.get_data_parallel_rank(),
             )
 
-        batch = batch.to(get_device_id())
         use_fused_kernels = tu.get_non_tensor_data(batch, key="use_fused_kernels", default=False)
         calculate_entropy = tu.get_non_tensor_data(batch, key="calculate_entropy", default=False)
         calculate_sum_pi_squared = tu.get_non_tensor_data(batch, key="calculate_sum_pi_squared", default=False)
         distillation_use_topk = tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
         distillation_only = tu.get_non_tensor_data(batch, key="distillation_only", default=False)
+
+        _pt_subtree = (
+            tu.pop(batch, key="prefix_tree_subtree", default=None) if self.engine_config.use_prefix_tree else None
+        )
+
+        batch = batch.to(get_device_id())
+
+        if _pt_subtree is not None:
+            tu.assign_non_tensor(batch, prefix_tree_subtree=_pt_subtree)
+
+        if self.engine_config.use_prefix_tree:
+            use_prefix_tree, _ = read_prefix_tree_batch_config(batch, tu, self.engine_config.use_remove_padding)
+        else:
+            use_prefix_tree = False
 
         if calculate_sum_pi_squared and use_fused_kernels:
             raise NotImplementedError(
@@ -1033,6 +1060,11 @@ class MegatronEngineWithLMHead(MegatronEngine):
             else:
                 temperature_value = float(temperature)
 
+        if use_prefix_tree:
+            _pt_logits_args = get_prefix_tree_logits_args(batch, tu)
+        else:
+            _pt_logits_args = {}
+
         if use_fused_kernels:
             from verl.models.mcore import get_mcore_forward_fused_model_engine_fn
 
@@ -1045,6 +1077,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 temperature=temperature_value,
                 calculate_entropy=calculate_entropy,
                 pad_token_id=self.model_config.tokenizer.pad_token_id,
+                logits_processor_args=_pt_logits_args,
             )
         else:
             if not isinstance(temperature, torch.Tensor):
@@ -1076,6 +1109,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 "label": label,
                 "temperature": temperature,
                 "loss_mask": loss_mask,
+                **_pt_logits_args,
                 "response_attention_mask": response_attention_mask,
             }
 
