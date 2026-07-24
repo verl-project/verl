@@ -32,7 +32,7 @@ from verl.utils.device import is_cuda_available
 from verl.utils.fs import copy_to_local, is_non_local, local_mkdir_safe
 from verl.utils.fsdp_utils import fsdp_version, get_fsdp_full_state_dict, get_fsdp_state_ctx
 from verl.utils.logger import log_with_rank
-from verl.utils.transformers_compat import drop_tied_target_keys, get_auto_model_for_vision2seq
+from verl.utils.transformers_compat import drop_tied_target_keys, get_auto_model_for_vision2seq, get_hf_save_kwargs
 
 from .checkpoint_manager import BaseCheckpointManager
 
@@ -420,7 +420,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
                 drop_tied_target_keys(state_dict, save_model, model_config)
 
-                save_model.save_pretrained(hf_local_path, state_dict=state_dict)
+                save_model.save_pretrained(hf_local_path, **get_hf_save_kwargs(save_model, state_dict))
                 log_with_rank(
                     f"Saved hf_model to {os.path.abspath(hf_local_path)}",
                     rank=self.rank,
