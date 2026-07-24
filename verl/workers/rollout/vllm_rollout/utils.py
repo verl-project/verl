@@ -484,9 +484,13 @@ class vLLMColocateWorkerExtension:
             elif use_standard_weight_load and not used_layerwise_reload:
                 # Some post-load transforms are non-idempotent; run once after all buckets.
                 from vllm.model_executor.model_loader.utils import process_weights_after_loading
+                from verl.third_party.vllm import VLLM_SLEEP_LEVEL
 
                 for model, model_config in self._iter_all_models_with_config():
                     process_weights_after_loading(model, model_config, self.device)
+                if VLLM_SLEEP_LEVEL == 2 and is_npu_available:
+                    from verl.utils.vllm.npu_vllm_patch import refresh_ascend_moe_comm_state_after_l2_wake
+                    _refresh_ascend_moe_comm_state_after_l2_wake()
 
     def _apply_buffer_updates_all_models(self, buffer_updates, main_named_buffers):
         """Apply buffer updates to the main model and any synced MTP drafter.
