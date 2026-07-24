@@ -53,6 +53,10 @@ class FP8State:
     seen_params: set = field(default_factory=lambda: set())
     fp8_param_names: set = field(default_factory=lambda: set())
     vllm_patches: list = field(default_factory=lambda: [])
+    # Model tags ("main") with an ACTIVE vLLM layerwise reload, set by
+    # begin_fp8_layerwise_reload() exactly once per weight sync (BEFORE any
+    # IPC bucket) and cleared by finalize_fp8_layerwise_reload().
+    layerwise_active: set = field(default_factory=lambda: set())
 
 
 fp8_state: FP8State = FP8State()
@@ -213,6 +217,15 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
 
     for k, v in weights:
         if not is_fp8_weight(k, model):
+            if fp8_state.layerwise_active:
+                # vLLM layerwise reload BUFFERS streamed tensors until an
+                # entire layer has arrived, potentially across IPC buckets.
+                # The bucketed IPC receive buffer is REUSED between buckets
+                # (BucketedWeightReceiver._init_buffer), so buffered tensors
+                # must own their storage or a later bucket overwrites them
+                # before vLLM replays the layer. (Quantized outputs below
+                # are fresh allocations already.)
+                v = v.clone()
             yield (k, v)
             continue
 
@@ -255,12 +268,160 @@ def prepare_quanted_weights_for_loading(model_runner):
     return prepare_deepseek_v4_weights_for_loading(model, _copy_param_subclass_attrs)
 
 
+# ---------------------------------------------------------------------------
+# FP8 weight resync on vLLM >= 0.20 via vLLM's native layerwise-reload
+# lifecycle.
+#
+# Root cause: on vLLM 0.20.x the FP8 block-quant FusedMoE params are in
+# KERNEL format at weight-sync time. On the EP>1 block-FP8 path
+# process_weights_after_loading() -> _setup_kernel() ->
+# _shuffle_deepseek_fp8_moe_weights() (quantization/utils/flashinfer_utils.py)
+# replaces the checkpoint-format 3D w13_weight (E_local, 2*intermediate,
+# hidden) with a shuffled 4D BlockMajorK tensor (E_local, K/block_k, Mn,
+# block_k) — observed (2, 32, 3072, 128) on Qwen3-235B-A22B (hidden 4096,
+# MoE intermediate 1536, 128 experts over 64-way expert sharding: E_local=2,
+# K/block_k=4096/128=32, Mn=2*1536=3072). vLLM's per-expert loader is
+# written against the CHECKPOINT format: `param.data[expert_id]` indexes the
+# expert axis (correctly), but the resulting per-expert view is now a 3D
+# kernel-blocked tensor (K/block_k, Mn, block_k) instead of the 2D
+# checkpoint matrix, so _load_w13(shard_dim=0) -> _get_hidden_dim(0, ndim=3)
+# raises ValueError (valid data dims for 3D are 1 or 2). Even without the
+# raise, copying checkpoint-layout bytes into the shuffled kernel blocks
+# would silently mis-load.
+#
+# Fix: drive vLLM 0.20's OWN reload protocol (model_loader/reload/), the
+# machinery vLLM's native reload_weights() uses:
+#     initialize_layerwise_reload(model)      # ONCE per sync
+#     model.load_weights(stream)              # every IPC bucket
+#     finalize_layerwise_reload(model, cfg)   # ONCE per sync
+#
+# LIFECYCLE: initialize_layerwise_reload is NOT idempotent across buckets.
+# When a layer completes, _layerwise_process() ends with info.reset(), so a
+# re-initialize would swap the completed layer BACK to meta; if any tensor
+# of that layer then arrives in a later bucket, finalize treats
+# 0 < load_numel < total as "delayed processing" and processes
+# uninitialized memory into the real kernel storage — silent corruption.
+# verl's IPC weight sync is BUCKETED (one load_quanted_weights call per
+# bucket, bucket boundaries chosen by the sender), so initialize/finalize
+# MUST live in update_weights_from_ipc, not in the per-bucket loader.
+#
+# OWNERSHIP: layerwise reload BUFFERS streamed tensors until a layer is
+# complete, potentially across IPC buckets, while BucketedWeightReceiver
+# REUSES one receive buffer for every bucket. Any tensor handed to
+# load_weights that is a view into that buffer and is retained past the
+# bucket boundary gets silently overwritten by the next bucket before vLLM
+# replays it. quant_weights therefore clones every non-quantized tensor
+# while a layerwise reload is active (quantized outputs are already fresh
+# allocations).
+#
+# Scope guard: everything here is reached only when is_fp8_model() is True
+# (rollout.quantization=fp8) and the model is not on the DeepSeek-V4 or
+# Ascend MXFP8 paths (which have their own prepare/process protocols).
+# ---------------------------------------------------------------------------
+
+
+def _vllm_layerwise_reload_available():
+    """True when vLLM ships the layerwise reload protocol (vLLM >= 0.20)."""
+    try:
+        from vllm.model_executor.model_loader.reload import (  # noqa: F401
+            finalize_layerwise_reload,
+            initialize_layerwise_reload,
+        )
+    except ImportError:
+        return False
+    return _get_vllm_version() >= version.parse("0.20.0")
+
+
+def _vllm_supports_layerwise_reload():
+    """True only on the vLLM interval this resync path is validated on (0.20.x).
+
+    Importing the reload entry points proves the module exists, not that the
+    lifecycle semantics are unchanged, so newer vLLM lines are NOT silently
+    opted in: on vLLM >= 0.21 begin/finalize stay no-ops and
+    load_quanted_weights fails closed with an explicit error until the newer
+    line is validated.
+    """
+    return _vllm_layerwise_reload_available() and _get_vllm_version() < version.parse("0.21.0")
+
+
+def begin_fp8_layerwise_reload(model, tag="main"):
+    """Enter vLLM's layerwise reload mode for one model, ONCE per weight sync.
+
+    Must be called BEFORE the first IPC bucket is received (i.e. before
+    receiver.receive_weights in update_weights_from_ipc), mirroring the
+    native lifecycle in gpu_model_runner.reload_weights (initialize ->
+    complete iterator -> finalize, each exactly once). Calling it twice
+    without an intervening finalize is a lifecycle violation and raises.
+
+    Returns True if layerwise reload was entered (vLLM >= 0.20), False on
+    older vLLM (where the verl process_weights patches handle kernel format).
+    """
+    if not _vllm_supports_layerwise_reload():
+        return False
+    if tag in fp8_state.layerwise_active:
+        raise RuntimeError(
+            f"FP8 layerwise reload already active for '{tag}': "
+            "begin_fp8_layerwise_reload must be called exactly once per sync, "
+            "before any IPC bucket."
+        )
+    from vllm.model_executor.model_loader.reload import initialize_layerwise_reload
+
+    initialize_layerwise_reload(model)
+    fp8_state.layerwise_active.add(tag)
+    logger.info("FP8: layerwise reload initialized (%s, once for this sync)", tag)
+    return True
+
+
+def finalize_fp8_layerwise_reload(model, model_config, tag="main"):
+    """Exit layerwise reload mode ONCE after ALL IPC buckets: process layers
+    that did not self-complete during streaming (attention scales, padded
+    layers) and restore kernel tensors. Raises if called without a matching
+    begin (lifecycle violation). Must run inside set_current_vllm_config."""
+    if not _vllm_supports_layerwise_reload():
+        return
+    if tag not in fp8_state.layerwise_active:
+        raise RuntimeError(f"finalize_fp8_layerwise_reload('{tag}') without an active begin — lifecycle violation.")
+    from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
+
+    finalize_layerwise_reload(model, model_config)
+    fp8_state.layerwise_active.discard(tag)
+
+
+def abort_fp8_layerwise_reload(tag="main"):
+    """Clear layerwise-reload state after a FAILED weight sync.
+
+    vLLM's native layerwise reload is NOT transactional: a mid-reload failure
+    (in receive, a per-bucket load, or finalize) can leave the model with
+    meta/partially-updated params and no rollback. This only clears the
+    process-global active flag so the next begin fails on its real error rather
+    than a stale "already active"; the CALLER must additionally mark the worker
+    unusable so the corrupt model is never reused for a subsequent sync.
+    """
+    fp8_state.layerwise_active.discard(tag)
+
+
 def process_quanted_weights_after_loading(model_runner, reload_state):
     process_deepseek_v4_weights_after_loading(model_runner.model, reload_state)
 
 
 def load_quanted_weights(weights, model_runner, is_drafter=False, prepare_model=True, process_model=True):
+    """Quantize and load one IPC bucket of weights into a vLLM model.
+
+    On vLLM >= 0.20 (kernel-format params) this function is called once PER
+    IPC BUCKET and must run INSIDE an active layerwise reload
+    (begin_fp8_layerwise_reload called once by update_weights_from_ipc before
+    any bucket; finalize once after the last bucket). It does NOT initialize
+    the reload itself — per-bucket initialization is unsound because completed
+    layers reset and would be swapped back to meta (see the layerwise-reload
+    block comment above). It fails CLOSED if the outer lifecycle is missing.
+    """
     if is_drafter:
+        if _vllm_supports_layerwise_reload():
+            raise NotImplementedError(
+                "FP8 weight sync for the MTP drafter is not supported under the "
+                "vLLM >= 0.20 layerwise reload lifecycle. Disable MTP speculative "
+                "decoding for FP8 rollout."
+            )
         drafter = getattr(model_runner, "drafter", None)
         model = drafter.model if drafter is not None and hasattr(drafter, "model") else None
         assert model is not None, (
@@ -280,6 +441,29 @@ def load_quanted_weights(weights, model_runner, is_drafter=False, prepare_model=
     if is_mxfp8_npu:
         # For MXFP8 on NPU, restore the original shapes expected by weight_loader.
         restore_mxfp8_weights_for_loading(model)
+    elif (
+        not reload_state
+        and not is_deepseek_v4_model(model)
+        and _vllm_layerwise_reload_available()
+        and "main" not in fp8_state.layerwise_active
+    ):
+        # Fail CLOSED: on vLLM >= 0.20 params are in KERNEL format at sync
+        # time; loading without the reload protocol would either crash
+        # (per-expert indexing of the 4D kernel tensor) or silently mis-load.
+        if not _vllm_supports_layerwise_reload():
+            raise RuntimeError(
+                f"FP8 rollout weight resync is validated on vLLM 0.20.x only; found "
+                f"vLLM {_get_vllm_version()}. The layerwise reload lifecycle this "
+                "path drives is not semantically re-verified on newer lines, so it "
+                "fails closed instead of silently opting in."
+            )
+        # The caller must have run begin_fp8_layerwise_reload() BEFORE the
+        # first bucket.
+        raise RuntimeError(
+            "FP8 bucket received without an active layerwise reload — "
+            "begin_fp8_layerwise_reload(model) must be called once per sync "
+            "before receive_weights."
+        )
 
     weights = list(weights)
     cache_deepseek_v4_dense_fp8_scales(model, weights)
@@ -291,10 +475,16 @@ def load_quanted_weights(weights, model_runner, is_drafter=False, prepare_model=
         if hasattr(param, "subclass_type"):
             param.orig_type = param.__class__
             param.__class__ = param.subclass_type
-    # Finally load the weights into vllm
+    # Finally load the weights into vllm. Under layerwise reload, per-layer
+    # processing (requantize + kernel-format shuffle) runs INSIDE
+    # load_weights when a layer completes and needs the vLLM config context
+    # (mirrors the native reload_weights call site).
+    from vllm.config import set_current_vllm_config
+
     try:
-        loaded_params = model.load_weights(weights_quantized)
-        reload_deepseek_v4_dense_fp8_scales(model)
+        with set_current_vllm_config(model_runner.vllm_config):
+            loaded_params = model.load_weights(weights_quantized)
+            reload_deepseek_v4_dense_fp8_scales(model)
     finally:
         # Undo the type change above to the original type
         for name, param in model.named_parameters():

@@ -386,8 +386,29 @@ class vLLMColocateWorkerExtension:
             )
         return True
 
+    def _fail_stop_fp8_reload(self):
+        """Mark this worker unusable after a FAILED FP8 layerwise reload.
+
+        vLLM's native layerwise reload is not transactional, so a mid-reload
+        failure leaves the model partially updated with no rollback. Record a
+        fail-stop marker (checked at the top of update_weights_from_ipc so the
+        worker is never reused on a corrupt model) and clear the process-global
+        active flag so the next begin surfaces its real error, not a stale
+        "already active".
+        """
+        from verl.utils.vllm.vllm_fp8_utils import abort_fp8_layerwise_reload
+
+        self._fp8_reload_failed = True
+        abort_fp8_layerwise_reload("main")
+
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
+        if getattr(self, "_fp8_reload_failed", False):
+            raise RuntimeError(
+                "This rollout worker was poisoned by a prior failed FP8 layerwise reload: "
+                "vLLM's native reload is not transactional and left the model partially "
+                "updated with no rollback, so it must not be reused. Restart the run."
+            )
         from vllm.config import set_current_vllm_config
         from vllm.platforms import current_platform
 
@@ -428,6 +449,40 @@ class vLLMColocateWorkerExtension:
 
             quant_reload_state = prepare_quanted_weights_for_loading(self.model_runner)
 
+        # FP8 on vLLM >= 0.20: enter vLLM's layerwise reload ONCE, BEFORE any
+        # IPC bucket. Params are in kernel format at sync time (e.g. block-FP8
+        # FusedMoE w13_weight shuffled to 4D BlockMajorK), so per-bucket
+        # load_weights against the checkpoint layout would crash; and
+        # per-bucket initialization is unsound (completed layers reset and a
+        # re-initialize would swap them back to meta, letting finalize process
+        # uninitialized memory into kernel storage — silent corruption). The
+        # DeepSeek-V4 (quant_reload_state) and Ascend MXFP8 paths keep their
+        # own prepare/restore protocols; no-op on vLLM < 0.20. On vLLM >= 0.21
+        # (not yet validated) begin is skipped and load_quanted_weights fails
+        # closed with an explicit version error instead of silently opting in.
+        fp8_layerwise_begun = False
+        if (
+            is_fp8_model(self.model_runner.vllm_config)
+            and not (peft_config and base_sync_done)
+            and not quant_reload_state
+        ):
+            from verl.utils.vllm.vllm_fp8_utils import (
+                _vllm_supports_layerwise_reload,
+                begin_fp8_layerwise_reload,
+                is_mxfp8_vllm_ascend,
+            )
+
+            if not is_mxfp8_vllm_ascend(self.model_runner.vllm_config.quant_config) and (
+                _vllm_supports_layerwise_reload()
+            ):
+                if self._use_mtp_drafter_weight_sync():
+                    raise NotImplementedError(
+                        "FP8 rollout weight sync via vLLM layerwise reload does not "
+                        "support the MTP drafter yet. Disable MTP speculative decoding "
+                        "when rollout.quantization=fp8 on vLLM >= 0.20."
+                    )
+                fp8_layerwise_begun = begin_fp8_layerwise_reload(self.model_runner.model, tag="main")
+
         receiver = BucketedWeightReceiver(
             zmq_handle=self._get_zmq_handle(),
             device=self.device,
@@ -455,7 +510,14 @@ class vLLMColocateWorkerExtension:
                     quant_prepared=bool(quant_reload_state),
                 )
 
-            receiver.receive_weights(on_bucket_received=on_bucket_received)
+            try:
+                # Covers receive AND per-bucket load failures (the bucket loader
+                # runs inside receive_weights via on_bucket_received).
+                receiver.receive_weights(on_bucket_received=on_bucket_received)
+            except Exception:
+                if fp8_layerwise_begun:
+                    self._fail_stop_fp8_reload()
+                raise
             if lora_weights is not None:
                 self._update_weights(
                     list(lora_weights.items()),
@@ -481,6 +543,22 @@ class vLLMColocateWorkerExtension:
 
                 process_quanted_weights_after_loading(self.model_runner, quant_reload_state)
                 logger.info("FP8/MXFP4: process_weights_after_loading completed")
+            elif fp8_layerwise_begun:
+                # Finalize the layerwise reload ONCE after ALL buckets —
+                # processes layers that did not self-complete during streaming
+                # (attention scales, padded layers) and restores kernel
+                # tensors. Pairs with the single begin_fp8_layerwise_reload
+                # before receive_weights.
+                from verl.utils.vllm.vllm_fp8_utils import finalize_fp8_layerwise_reload
+
+                try:
+                    finalize_fp8_layerwise_reload(
+                        self.model_runner.model, self.model_runner.vllm_config.model_config, tag="main"
+                    )
+                except Exception:
+                    self._fail_stop_fp8_reload()
+                    raise
+                logger.info("FP8: layerwise reload finalized (main)")
             elif use_standard_weight_load and not used_layerwise_reload:
                 # Some post-load transforms are non-idempotent; run once after all buckets.
                 from vllm.model_executor.model_loader.utils import process_weights_after_loading
