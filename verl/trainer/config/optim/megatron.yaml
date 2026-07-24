@@ -21,7 +21,9 @@ betas: [0.9, 0.999]
 # Clip gradient
 clip_grad: 1.0
 
-# optimizer type
+# optimizer algorithm. "adam"/"sgd" use Megatron's classic optimizers; "muon"
+# route through Megatron-Core's emerging_optimizers path (tensor-parallel-aware Muon). The muon_*
+# options below only take effect when a Muon algorithm is selected.
 optimizer: adam
 
 # initial learning rate for warmup, default to 0.0
@@ -60,5 +62,18 @@ exp_avg_dtype: fp32
 
 # dtype of the Adam second moment (v) when use_precision_aware_optimizer is enabled. fp32/bf16
 exp_avg_sq_dtype: fp32
+# Muon (emerging optimizer) options. Only consumed when `optimizer` selects a Muon algorithm;
+# each mirrors the like-named field on Megatron-Core's OptimizerConfig. Defaults track Megatron-Core.
+use_layer_wise_distributed_optimizer: False
+muon_momentum: 0.95
+muon_nesterov: False
+muon_split_qkv: True
+muon_scale_mode: spectral
+muon_coefficient_type: quintic
+muon_num_ns_steps: 5
+muon_tp_mode: blockwise
+muon_fp32_matmul_prec: medium
+muon_extra_scale_factor: 1.0
+muon_scalar_optimizer: adam
 
 override_optimizer_config: {}
