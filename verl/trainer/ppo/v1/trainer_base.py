@@ -840,6 +840,10 @@ class PPOTrainer(ABC):
         else:
             logger.warning(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
+        kl_ctrl = getattr(self, "kl_ctrl_in_reward", None)
+        if isinstance(kl_ctrl, core_algos.AdaptiveKLController):
+            kl_ctrl.load(global_step_folder)
+
         # 5. restore TransferQueue state (async modes). Re-issuing the restored in-flight prompts is
         # deferred to fit() to use the agent_loop_manager.
         if self.trainer_mode != "sync" and _tq_supports_checkpoint():
@@ -938,6 +942,9 @@ class PPOTrainer(ABC):
         local_mkdir_safe(local_global_step_folder)
         dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
         torch.save(self.train_dataloader.state_dict(), dataloader_local_path)
+        kl_ctrl = getattr(self, "kl_ctrl_in_reward", None)
+        if isinstance(kl_ctrl, core_algos.AdaptiveKLController):
+            kl_ctrl.save(local_global_step_folder)
 
         # save TransferQueue state for async modes so in-flight prompts (already fetched from the
         # dataloader but not yet trained into this checkpoint's weights) survive a restart:

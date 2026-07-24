@@ -1032,6 +1032,9 @@ class RayPPOTrainer:
         dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
         dataloader_state_dict = self.train_dataloader.state_dict()
         torch.save(dataloader_state_dict, dataloader_local_path)
+        kl_ctrl = getattr(self, "kl_ctrl_in_reward", None)
+        if isinstance(kl_ctrl, core_algos.AdaptiveKLController):
+            kl_ctrl.save(local_global_step_folder)
 
         # latest checkpointed iteration tracker (for atomic usage)
         if (
@@ -1115,6 +1118,10 @@ class RayPPOTrainer:
                 self.train_dataloader.load_state_dict(dataloader_state_dict)
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
+
+        kl_ctrl = getattr(self, "kl_ctrl_in_reward", None)
+        if isinstance(kl_ctrl, core_algos.AdaptiveKLController):
+            kl_ctrl.load(global_step_folder)
 
     def _start_profiling(self, do_profile: bool) -> None:
         """Start profiling for all worker groups if profiling is enabled."""
