@@ -3555,7 +3555,7 @@ wheels = [
 [[package]]
 name = "sglang"
 version = "0.5.12"
-source = { registry = "https://pypi.org/simple" }
+source = { registry = "https://etogaosion.github.io/verl-wheelhouse/simple/" }
 dependencies = [
     { name = "aiohttp", marker = "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "anthropic", marker = "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -3623,9 +3623,7 @@ dependencies = [
     { name = "xgrammar", version = "0.2.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/84/cb/a7802dcbdc35ec90d15115d312d55bc2b7aee1aea04b48d4f43df1f67267/sglang-0.5.12-cp310-cp310-manylinux_2_34_x86_64.whl", hash = "sha256:4b88edfd3870d7dc8dd880f97d104f637baf105538827f968483d6cac56258f8", size = 7788511, upload-time = "2026-05-16T18:20:05.348Z" },
-    { url = "https://files.pythonhosted.org/packages/41/4e/18a0cfc5663e42e7b85e84427c7b8163f4d723aa23795e72859562dbc796/sglang-0.5.12-cp311-cp311-manylinux_2_34_x86_64.whl", hash = "sha256:4ed786a38655851fd055ef57380c34d29b87753b53f63457309f51e5bf48c2e6", size = 7789273, upload-time = "2026-05-16T18:20:09.252Z" },
-    { url = "https://files.pythonhosted.org/packages/71/29/71e0b6e700268510d4280fe343b4245aa95af7c0fbc790d1aa7e8fa6699c/sglang-0.5.12-cp312-cp312-manylinux_2_34_x86_64.whl", hash = "sha256:d3fc7ecb61ad3e533ebe1ae9b4109fbb62ecbf2d17453b62770c8a7ec49d539a", size = 7788268, upload-time = "2026-05-16T18:20:14.234Z" },
+    { url = "https://github.com/ETOgaosion/verl-wheelhouse/releases/download/sglang-v0.5.12/sglang-0.5.12-cp312-cp312-manylinux_2_34_x86_64.whl" },
 ]
 
 [[package]]
@@ -3633,7 +3631,7 @@ name = "sglang-kernel"
 version = "0.4.2.post2+cu130"
 source = { registry = "https://etogaosion.github.io/verl-wheelhouse/simple/" }
 wheels = [
-    { url = "https://github.com/ETOgaosion/verl-wheelhouse/releases/download/sglang-kernel-v0.5.12/sglang_kernel-0.4.2.post2%2Bcu130-cp310-abi3-manylinux2014_x86_64.whl" },
+    { url = "https://github.com/ETOgaosion/verl-wheelhouse/releases/download/sglang-v0.5.12/sglang_kernel-0.4.2.post2%2Bcu130-cp310-abi3-manylinux2014_x86_64.whl" },
 ]
 
 [[package]]
@@ -4672,7 +4670,7 @@ requires-dist = [
     { name = "qwen-vl-utils", marker = "extra == 'verl-core'" },
     { name = "ray", extras = ["default"], specifier = ">=2.41.0" },
     { name = "ray", extras = ["default"], marker = "extra == 'verl-core'", specifier = ">=2.41.0" },
-    { name = "sglang", marker = "extra == 'sglang'", specifier = "==0.5.12" },
+    { name = "sglang", marker = "extra == 'sglang'", specifier = "==0.5.12", index = "https://etogaosion.github.io/verl-wheelhouse/simple/" },
     { name = "sglang-kernel", marker = "extra == 'sglang'", index = "https://etogaosion.github.io/verl-wheelhouse/simple/" },
     { name = "tensorboard" },
     { name = "tensorboard", marker = "extra == 'verl-core'" },
@@ -4711,7 +4709,7 @@ requires-dist = [
     { name = "verl", extras = ["verl-core"], marker = "extra == 'megatron'" },
     { name = "verl", extras = ["verl-core"], marker = "extra == 'sglang'" },
     { name = "verl", extras = ["verl-core"], marker = "extra == 'vllm'" },
-    { name = "vllm", marker = "extra == 'vllm'", specifier = "==0.1.dev1+gee0da84ab.d20260720", index = "https://etogaosion.github.io/verl-wheelhouse/simple/" },
+    { name = "vllm", marker = "extra == 'vllm'", specifier = "==0.24.0", index = "https://etogaosion.github.io/verl-wheelhouse/simple/" },
     { name = "wandb" },
     { name = "wandb", marker = "extra == 'verl-core'" },
 ]
@@ -4734,7 +4732,7 @@ wheels = [
 
 [[package]]
 name = "vllm"
-version = "0.1.dev1+gee0da84ab.d20260720"
+version = "0.24.0"
 source = { registry = "https://etogaosion.github.io/verl-wheelhouse/simple/" }
 dependencies = [
     { name = "aiohttp", marker = "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -4807,7 +4805,7 @@ dependencies = [
     { name = "xgrammar", version = "0.2.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://github.com/ETOgaosion/verl-wheelhouse/releases/download/vllm-v0.24.0/vllm-0.1.dev1%2Bgee0da84ab.d20260720-cp312-cp312-linux_x86_64.whl" },
+    { url = "https://github.com/ETOgaosion/verl-wheelhouse/releases/download/vllm-v0.24.0/vllm-0.24.0-cp312-cp312-linux_x86_64.whl" },
 ]
 
 [[package]]

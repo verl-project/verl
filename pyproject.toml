@@ -92,11 +92,10 @@ vllm = [
     "torch==2.11.0",
     "torchvision==0.26.0",
     "torchaudio==2.11.0",
-    # vllm 0.24.0 (the wheelhouse builds the v0.24.0 tag, commit ee0da84ab). Its
-    # setuptools_scm version is a "0.1.dev1+g<hash>.d<date>" fallback that sorts
-    # below 0.23, so pin the exact wheel rather than a >=0.24 range (which the
-    # 0.1.dev1 string would never satisfy).
-    "vllm==0.1.dev1+gee0da84ab.d20260720",
+    # vllm 0.24.0 (the wheelhouse builds the v0.24.0 tag, commit ee0da84ab). The
+    # release now ships a properly versioned "0.24.0" wheel instead of the old
+    # setuptools_scm "0.1.dev1+g<hash>.d<date>" fallback, so pin it directly.
+    "vllm==0.24.0",
     # flashinfer (python + cubin) is a transitive dep of vllm 0.24, which
     # hard-pins it to ==0.6.12 — pure-python wheels, so let vllm pull them from
     # PyPI. The wheelhouse ships flashinfer 0.6.13 (doesn't match vllm's pin),
@@ -112,6 +111,9 @@ sglang = [
     "torch==2.11.0",
     "torchvision==0.26.0",
     "torchaudio==2.11.0",
+    # sglang is routed to the wheelhouse cu130 build (see [tool.uv.sources]);
+    # the wheelhouse ships sglang + sglang-kernel together under the
+    # sglang-v0.5.12 release tag.
     "sglang==0.5.12",
     # sglang-kernel is a transitive dep of sglang; declare it directly so
     # [tool.uv.sources] routes it to the wheelhouse cu130 build
@@ -358,6 +360,7 @@ requires-dist = []
 apex                 = { index = "verl-wheelhouse" }
 flash-attn           = { index = "verl-wheelhouse" }
 transformer-engine   = { index = "verl-wheelhouse" }
+sglang               = { index = "verl-wheelhouse" }
 sglang-kernel        = { index = "verl-wheelhouse" }
 vllm                 = { index = "verl-wheelhouse" }
 
