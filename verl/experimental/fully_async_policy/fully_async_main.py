@@ -112,6 +112,10 @@ class FullyAsyncTaskRunner:
         if config.trainer.get("val_before_train", True):
             ray.get(self.components["trainer"]._fit_validate.remote(True))
 
+        # Trainer-colocated OPD keeps the teacher resident while waiting for
+        # trajectories. Initial actor weight sync and validation must finish first.
+        ray.get(self.components["trainer"].prepare_fused_teacher.remote())
+
         print("[ASYNC MAIN] All components initialized successfully")
 
     def _create_rollouter(self, config) -> None:

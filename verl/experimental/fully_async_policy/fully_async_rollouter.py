@@ -776,7 +776,11 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         from verl.trainer.ppo.utils import Role
 
         self.teacher_model_manager = None
-        if is_distillation_enabled(self.config.get("distillation")):
+        distillation_enabled = is_distillation_enabled(self.config.get("distillation"))
+        teacher_execution = (
+            self.config.distillation.get("teacher_execution", "rollout") if distillation_enabled else "rollout"
+        )
+        if distillation_enabled and teacher_execution == "rollout":
             from verl.experimental.teacher_loop import MultiTeacherModelManager
 
             resource_pool_spec = {}

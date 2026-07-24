@@ -517,7 +517,11 @@ class AgentLoopWorker:
 
         # Online policy distillation
         self.distillation_enabled = is_distillation_enabled(config.distillation)
-        if self.distillation_enabled:
+        self.teacher_execution = (
+            config.distillation.get("teacher_execution", "rollout") if self.distillation_enabled else "rollout"
+        )
+        self.rollout_teacher_enabled = self.distillation_enabled and self.teacher_execution == "rollout"
+        if self.rollout_teacher_enabled:
             from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
 
             self.teacher_key: str = config.distillation.teacher_key
@@ -1012,7 +1016,7 @@ class AgentLoopWorker:
         sample_kwargs: Optional[dict[str, Any]] = None,
     ) -> None:
         """Compute teacher logprobs for single sample."""
-        if self.distillation_enabled and not validate:
+        if self.rollout_teacher_enabled and not validate:
             routing_key = None
             if sample_kwargs is not None:
                 routing_value = sample_kwargs.get(self.teacher_key)

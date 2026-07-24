@@ -804,6 +804,7 @@ algorithm:
 distillation:
   _target_: verl.workers.config.DistillationConfig
   enabled: false
+  teacher_execution: rollout
   distillation_loss:
     _target_: verl.workers.config.DistillationLossConfig
     loss_mode: k3
