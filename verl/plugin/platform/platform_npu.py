@@ -55,7 +55,10 @@ class PlatformNPU(PlatformBase):
         return torch.npu
 
     def is_available(self) -> bool:
-        return torch.npu.is_available()
+        try:
+            return torch.npu.is_available()
+        except Exception:
+            return False
 
     def is_platform_available(self, use_smi_check=False) -> bool:
         """Return True if this platform is available on this host.
@@ -114,12 +117,16 @@ class PlatformNPU(PlatformBase):
     # ------------------------------------------------------------------
 
     def get_device_capability(self, device_index: int = 0) -> tuple[Optional[int], Optional[int]]:
+        if not self.is_available():
+            return (None, None)
         if hasattr(torch.npu, "get_device_capability"):
-            result = torch.npu.get_device_capability(device_index)
-            # torch.npu.get_device_capability may return None instead of a tuple
-            if result is None:
+            try:
+                result = torch.npu.get_device_capability(device_index)
+                if result is None:
+                    return (None, None)
+                return result
+            except Exception:
                 return (None, None)
-            return result
         return (None, None)
 
     # ------------------------------------------------------------------
