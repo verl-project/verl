@@ -1,186 +1,142 @@
-# Global build args shared across stages.
-# Declared before the first FROM so the default value lives in ONE place.
-ARG GPU_ARCH="gfx942;gfx950"
+ARG DEFAULT_BASE=rocm/primus:v26.4
+ARG BASE_IMAGE=${DEFAULT_BASE}
+FROM ${BASE_IMAGE:-$DEFAULT_BASE} AS pytorch_base
 
-# Install basic packages from OS distro
-FROM ubuntu:22.04 AS base
+FROM pytorch_base AS install_vllm
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+# Set the working dir explicitly so later RUN steps don't rely on the base
+# image's inherited WORKDIR being /workspace.
+WORKDIR /workspace
+ENV PYTORCH_ROCM_ARCH="gfx942;gfx950"
 
-ENV DEBIAN_FRONTEND=noninteractive
-ARG PYTHON_VERSION=3.12
+# Install Causal-Conv1d and its dependencies
+ARG CAUSAL_CONV1D_REPO=https://github.com/Dao-AILab/causal-conv1d
+ARG CAUSAL_CONV1D_BRANCH=e940ead2fd962c56854455017541384909ca669f
 
-RUN --mount=target=/var/lib/apt/lists,type=cache,sharing=locked \
-    --mount=target=/var/cache/apt,type=cache,sharing=locked \
-    apt update && \
-    apt install -y git software-properties-common curl rsync dialog gfortran wget sqlite3 ccache vim && \
-    if ! python3 --version | grep -q ${PYTHON_VERSION} ; then \
-    add-apt-repository -y ppa:deadsnakes/ppa && apt update && \
-    apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
-    python${PYTHON_VERSION}-lib2to3 python-is-python3 ; fi
+ENV CAUSAL_CONV1D_FORCE_BUILD=TRUE
+ENV MAMBA_FORCE_BUILD=TRUE
+ENV HIP_ARCHITECTURES=gfx942,gfx950
 
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
-    update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} && \
-    ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config && \
-    curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION}
+RUN cd /workspace \
+    && git clone ${CAUSAL_CONV1D_REPO} causal-conv1d \
+    && cd causal-conv1d \
+    && git checkout ${CAUSAL_CONV1D_BRANCH} \
+    && git show --oneline -s \
+    && pip install --no-cache-dir --no-build-isolation . \
+    && cd .. \
+    && rm -fr causal-conv1d
 
-RUN wget -nv -O /tmp/cmake-3.26.4-linux-x86_64.tar.gz https://cmake.org/files/v3.26/cmake-3.26.4-linux-x86_64.tar.gz && \
-    tar zfx /tmp/cmake-3.26.4-linux-x86_64.tar.gz -C /opt/ && \
-    mv /opt/cmake-3.26.4-linux-x86_64 /opt/cmake-3.26.4 && \
-    rm -f /tmp/cmake-3.26.4-linux-x86_64.tar.gz
+ARG VLLM_TAG="18d87a87dc39c1a50f452b218fdcc3aeec48d18e"
+RUN pip install --no-cache-dir setuptools_scm && \
+    cd /workspace && git clone https://github.com/vllm-project/vllm && \
+    cd vllm && git checkout ${VLLM_TAG} && \
+    # [V1] Add sleep/wake correctness regression test for hybrid GDN
+    # Ref: https://github.com/vllm-project/vllm/pull/44972
+    sed -i 's|\(  // std::cout << "create_and_map:\)|#ifdef USE_ROCM\n  // ROCm: zero freshly mapped VRAM to avoid stale data (PR #44972)\n  CUDA_CHECK((CUresult)hipMemset(reinterpret_cast<void*>(d_mem), 0, size));\n  if (error_code != 0) {\n    return;\n  }\n#endif\n\1|' csrc/cumem_allocator.cpp && \
+    # [Bugfix][MoE] Preserve unquantized weight storage on ROCm
+    # Ref: https://github.com/vllm-project/vllm/pull/46009
+    sed -i 's/layer\.w13_weight\.data = self\._maybe_pad_weight(layer\.w13_weight\.data)/layer.w13_weight.data.copy_(self._maybe_pad_weight(layer.w13_weight.data))/' \
+      /workspace/vllm/vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py && \
+    sed -i 's/layer\.w2_weight\.data = self\._maybe_pad_weight(layer\.w2_weight\.data)/layer.w2_weight.data.copy_(self._maybe_pad_weight(layer.w2_weight.data))/' \
+      /workspace/vllm/vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py && \
+    sed -i 's/return w13_weight\.contiguous(), w2_weight\.contiguous()/return w13_weight, w2_weight/' \
+      /workspace/vllm/vllm/model_executor/layers/fused_moe/oracle/unquantized.py && \
+    pip install --no-cache-dir -r requirements/rocm.txt && \
+    MAX_JOBS=64 python3 setup.py develop --no-deps
+RUN pip uninstall tilelang -y && pip install --no-cache-dir --no-deps xgrammar==0.1.32
 
-ENV PATH=/opt/cmake-3.26.4/bin:$PATH
-
-# ccache speeds up repeated source builds (FA / TE / vLLM / aiter).
-# The actual cache lives in a BuildKit cache mount, so it persists across
-# builds without being baked into the image.
-ENV CCACHE_DIR=/root/.cache/ccache
-ENV CCACHE_MAXSIZE=50G
-ENV CMAKE_C_COMPILER_LAUNCHER=ccache
-ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
-ENV CMAKE_HIP_COMPILER_LAUNCHER=ccache
-
-# Install ROCm deb packages
-FROM base AS rocm_deb
-
-ARG ROCM_VERSION=7.0.2
-ARG AMDGPU_VERSION=7.0.2
-ARG GFX_ARCH=gfx942|gfx950
-
-RUN --mount=target=/var/lib/apt/lists,type=cache,sharing=locked \
-    --mount=target=/var/cache/apt,type=cache,sharing=locked \
-    curl -sL https://repo.radeon.com/rocm/rocm.gpg.key | apt-key add - \
-    && printf "deb [arch=amd64] https://repo.radeon.com/rocm/apt/$ROCM_VERSION/ jammy main\n" | tee /etc/apt/sources.list.d/rocm.list \
-    && printf "deb [arch=amd64] https://repo.radeon.com/amdgpu/$AMDGPU_VERSION/ubuntu jammy main\n" | tee /etc/apt/sources.list.d/amdgpu.list \
-    && printf "Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600\n" | tee /etc/apt/preferences.d/rocm-pin-600 \
-    && apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y rocm && \
-    find /opt/rocm/lib -type f -name '*gfx*' | grep -Ev "${GFX_ARCH}" | xargs rm -f && \
-    find /opt/rocm/lib/hipblaslt/library -type f -name '*gfx*' | grep -Ev "${GFX_ARCH}" | xargs rm -f && \
-    find /opt/rocm/lib/rocblas/library -type f -name '*gfx*' | grep -Ev "${GFX_ARCH}" | xargs rm -f && \
-    find /opt/rocm/share/miopen/db -type f -name '*gfx*' | grep -Ev "${GFX_ARCH}" | xargs rm -f
-
-ENV ROCM_HOME=/opt/rocm
-ENV CPLUS_INCLUDE_PATH=/opt/rocm/include
-ENV LD_LIBRARY_PATH=/opt/rocm/lib
-ENV PATH=/opt/rocm/bin:/opt/rocm/llvm/bin:$PATH
-
-# Install pytorch packages
-FROM rocm_deb AS rocm_torch
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --upgrade pip "setuptools<80" wheel numpy einops packaging psutil ninja && \
-    pip install /opt/rocm/share/amd_smi
-
-# Install the prebuilt ROCm wheels directly via pip.
-# NOTE: these URLs are pinned to a specific ROCm release (rocm-rel-7.0.2),
-# Python ABI (cp312) and nightly git hashes. Overriding ROCM_VERSION or
-# PYTHON_VERSION alone will NOT change these wheels -- you must also update
-# the URLs below to matching builds, otherwise install will 404 or mismatch.
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip3 install \
-    https://repo.radeon.com/rocm/manylinux/rocm-rel-7.0.2/torch-2.9.1.dev20251204+rocm7.0.2.lw.git351ff442-cp312-cp312-linux_x86_64.whl \
-    https://repo.radeon.com/rocm/manylinux/rocm-rel-7.0.2/apex-1.9.0a0+rocm7.0.2.git07c3ee53-cp312-cp312-linux_x86_64.whl \
-    https://repo.radeon.com/rocm/manylinux/rocm-rel-7.0.2/torchaudio-2.9.0+rocm7.0.2.gite3c6ee2b-cp312-cp312-linux_x86_64.whl \
-    https://repo.radeon.com/rocm/manylinux/rocm-rel-7.0.2/torchvision-0.24.0+rocm7.0.2.gitb919bd0c-cp312-cp312-linux_x86_64.whl \
-    https://repo.radeon.com/rocm/manylinux/rocm-rel-7.0.2/triton-3.5.1+rocm7.0.2.gita272dfa8-cp312-cp312-linux_x86_64.whl
-
-ARG GPU_ARCH
-ENV PYTORCH_ROCM_ARCH=${GPU_ARCH}
-
-WORKDIR /root
-
-# Build Flash Attention wheel
-FROM rocm_torch AS fa_build
-
-ARG FA_REPO="https://github.com/ROCm/flash-attention"
-ARG FA_TAG="83f9e450cd10e20701fb109db9c7703d376f282b"
-
-RUN git clone ${FA_REPO} \
-    && cd flash-attention \
-    && git checkout ${FA_TAG} \
-    && git submodule init \
-    && git submodule update
-
-ARG GPU_ARCH
-ARG MAX_JOBS=
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    cd flash-attention \
-    && GPU_ARCHS=${GPU_ARCH} BUILD_TARGET=rocm MAX_JOBS=${MAX_JOBS:-$(nproc)} python3 setup.py bdist_wheel \
-    && mkdir /install && cp dist/*.whl /install \
-    && ccache -s
-
-# Install Flash Attention
-FROM fa_build AS install_fa
-
-RUN --mount=type=bind,from=fa_build,source=/install,target=/tmp/install \
-    --mount=type=cache,target=/root/.cache/pip \
-    pip install /tmp/install/*.whl
-
-# Install TE
-FROM install_fa AS te
-
-ARG GPU_ARCH
-ENV NVTE_USE_HIPBLASLT=1
-ENV NVTE_USE_ROCM=1
-ENV NVTE_FRAMEWORK=pytorch
-ENV NVTE_ROCM_ARCH=${GPU_ARCH}
-ENV NVTE_USE_CAST_TRANSPOSE_TRITON=0
-ENV NVTE_CK_USES_BWD_V3=1
-ENV NVTE_CK_V3_BF16_CVT=2
-
-ARG TE_TAG="386bd316"
-ARG MAX_JOBS=
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    pip install pybind11 && git clone https://github.com/ROCm/TransformerEngine.git && \
-    cd TransformerEngine && git checkout ${TE_TAG} && git submodule update --init --recursive && \
-    GPU_ARCHS=${GPU_ARCH} MAX_JOBS=${MAX_JOBS:-$(nproc)} python3 setup.py install && \
-    ccache -s && \
-    cd .. && rm -rf TransformerEngine
-# TE patch
-RUN FILE=$(find /usr/local/lib/python3.12/dist-packages/ -path "*transformer_engine*/transformer_engine/pytorch/attention/dot_product_attention/utils.py") && \
-    sed -i '121s/2\.8\.3/2.8.4/' "$FILE"
-
-# Install vllm
-FROM te AS install_vllm
-
-ARG VLLM_TAG="1ff9d3353"
-ARG MAX_JOBS=
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    pip install setuptools_scm && \
-    mkdir /workspace && cd /workspace && \
-    ln -sf /opt/rocm/lib/libamdhip64.so /usr/lib/libamdhip64.so && \
-    git clone https://github.com/vllm-project/vllm && \
-    cd vllm && git checkout ${VLLM_TAG} && pip install -r requirements/rocm.txt && \
-    MAX_JOBS=${MAX_JOBS:-$(nproc)} python3 setup.py develop --no-deps && \
-    ccache -s
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip uninstall tilelang -y && pip install xgrammar==0.1.32
 
 FROM install_vllm AS install_verl
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install cupy-rocm-7-0
+ARG VERL_TAG="7b19203c52503760f92e0368067c7eb744236274"
+RUN cd /workspace && git clone https://github.com/verl-project/verl.git && \
+    cd verl && git checkout ${VERL_TAG} && \
+    git submodule update --init --recursive && \
+    sed -i 's/^  vllm: {}/  vllm:\n    disable_custom_all_reduce: True/' /workspace/verl/verl/trainer/config/rollout/rollout.yaml && \
+    sed -i 's/^  sglang: {}/  sglang:\n    disable_custom_all_reduce: True\n    attention_backend: triton/' /workspace/verl/verl/trainer/config/rollout/rollout.yaml && \
+    pip install --no-cache-dir . 
+    
+# for qwen3.5 — versions pinned to what was validated on this image for reproducibility.
+RUN pip install --no-cache-dir \
+    "git+https://github.com/ISEEKYAN/mbridge.git@a61943d7fcb34a190471cfeb0a0eb8bbda621ddf" \
+    mcore_bridge==1.5.2 \
+    megatron-core==0.18.0 \
+    mathruler==0.1.0 \
+    qwen_vl_utils==0.0.14 \
+    datasets==5.0.0 \
+    accelerate==1.14.0 \
+    TransferQueue==0.1.8 \
+    flash-linear-attention==0.5.1
 
-ENV MIOPEN_DEBUG_CONV_DIRECT=0
-ARG AITER_TAG="45c428e54"
-ARG MAX_JOBS=
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    cd /workspace && git clone --recursive https://github.com/ROCm/aiter.git && \
-    cd aiter && git checkout ${AITER_TAG} && \
-    MAX_JOBS=${MAX_JOBS:-$(nproc)} python3 setup.py develop && \
-    ccache -s
+RUN pip install --no-cache-dir cupy-rocm-7-0==14.1.1
 
-# For qwen3.5
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -U git+https://github.com/ISEEKYAN/mbridge.git@v0.15.1 && \
-    pip install --no-deps megatron-bridge==0.5.0 && \
-    pip install transformers --upgrade && \
-    pip install megatron-core==0.18.0 && \
-    pip install mathruler && \
-    pip install qwen_vl_utils && \
-    pip install flash-linear-attention
+FROM install_verl AS install_sglang
 
-RUN --mount=type=cache,target=/root/.cache/pip \
-    cd /workspace && git clone https://github.com/verl-project/verl.git && \
-    cd verl && pip install .
+ENV SGLANG_USE_AITER=0
+ENV SGLANG_ATTENTION_BACKEND=triton
+ARG SGLANG_TAG="0801cc05ed202544e2e5c67d6b0a1d454de54fca"
 
-WORKDIR /workspace/verl
-CMD ["/bin/bash"]
+RUN cd /workspace && git clone https://github.com/sgl-project/sglang.git && \
+    cd sglang && git checkout ${SGLANG_TAG} && \
+    # [Bugfix][ROCm] Fix vllm fused_add_rms_norm 6-arg crash on non-AITER path
+    # Ref: https://github.com/sgl-project/sglang/pull/32034
+    sed -zi 's/            out = torch.empty_like(x)\n            residual_out = torch.empty_like(x)\n            if post_residual_addition is not None:\n                residual = residual + post_residual_addition\n            fused_add_rms_norm(\n                out, x, residual_out, residual, self.weight.data, self.variance_epsilon\n            )\n            return out, residual_out/            if post_residual_addition is not None:\n                residual = residual + post_residual_addition\n            residual = residual.contiguous()\n            fused_add_rms_norm(x, residual, self.weight.data, self.variance_epsilon)\n            return x, residual/' \
+      python/sglang/srt/layers/layernorm.py && \
+    sed -zi 's/                out = torch.empty_like(x)\n                residual_out = torch.empty_like(x)\n                if post_residual_addition is not None:\n                    residual = residual + post_residual_addition\n                fused_add_rms_norm(\n                    out, x, residual_out, residual, w, self.variance_epsilon\n                )\n                return out, residual_out/                if post_residual_addition is not None:\n                    residual = residual + post_residual_addition\n                residual = residual.contiguous()\n                fused_add_rms_norm(x, residual, w, self.variance_epsilon)\n                return x, residual/' \
+      python/sglang/srt/layers/layernorm.py && \
+    sed -i 's|^\[\[tool.setuptools-rust.ext-modules\]\]|# [[tool.setuptools-rust.ext-modules]]|; s|^target = "sglang.srt.grpc._core"|# target = "sglang.srt.grpc._core"|; s|^path = "../rust/sglang-grpc/Cargo.toml"|# path = "../rust/sglang-grpc/Cargo.toml"|; s|^binding = "PyO3"|# binding = "PyO3"|' python/pyproject.toml && \
+    pip install --no-cache-dir --no-build-isolation --no-deps \
+      -e ./python \
+      IPython \
+      soundfile==0.13.1 \
+      "git+https://github.com/fzyzcjy/torch_memory_saver.git" && \
+    cd sgl-kernel && cp pyproject_rocm.toml pyproject.toml && rm -rf build && \
+    sed -i 's|f"--amdgpu-target={amdgpu_target}"|"--offload-arch=gfx942", "--offload-arch=gfx950"|' setup_rocm.py && \
+    sed -i '/amdgpu_target not in \["gfx942", "gfx950"\]/,/sys.exit(1)/d' setup_rocm.py && \
+    sed -zi 's/#if HIP_FP8_TYPE_FNUZ\n#include <c10\/util\/Float8_e4m3fnuz.h>\nusing FP8_TYPE = c10::Float8_e4m3fnuz;\nconstexpr auto FP8_E4M3_MAX = 224.0f;\n#else\n#if HIP_FP8_TYPE_E4M3\n#include <c10\/util\/Float8_e4m3fn.h>\nusing FP8_TYPE = c10::Float8_e4m3fn;\nC10_HOST_DEVICE constexpr auto FP8_E4M3_MAX = std::numeric_limits<FP8_TYPE>::max();\n#else\n#error "fp8 is not supported in this processor (arch < gfx942)."\n#endif  \/\/ HIP_FP8_TYPE_E4M3\n#endif  \/\/ HIP_FP8_TYPE_FNUZ/#if defined(__gfx942__)\n#include <c10\/util\/Float8_e4m3fnuz.h>\nusing FP8_TYPE = c10::Float8_e4m3fnuz;\nconstexpr auto FP8_E4M3_MAX = 224.0f;\n#else\n#include <c10\/util\/Float8_e4m3fn.h>\nusing FP8_TYPE = c10::Float8_e4m3fn;\nC10_HOST_DEVICE constexpr auto FP8_E4M3_MAX = std::numeric_limits<FP8_TYPE>::max();\n#endif  \/\/ __gfx942__/' include/utils.h && \
+    python setup_rocm.py install
+
+# [Patch] megatron-core attention backend: assert → warn + override
+# Base image sets NVTE_FLASH_ATTN=0/NVTE_FUSED_ATTN=1 which conflicts with
+# megatron-core's attention_backend config (flash or auto).
+RUN sed -i \
+    's/            assert current_value is None or current_value == str(/            if current_value is not None and current_value != str(expected_value):/' \
+    /opt/venv/lib/python3.12/site-packages/megatron/core/models/common/language_module/language_module.py && \
+    sed -i \
+    's/                expected_value/                import warnings/' \
+    /opt/venv/lib/python3.12/site-packages/megatron/core/models/common/language_module/language_module.py && \
+    sed -i \
+    "s/            ), f'{env_variable_name} set to {current_value}, but expected {expected_value} for attention backend type {attn_type.name}. unset NVTE_FLASH_ATTN, NVTE_FUSED_ATTN and NVTE_UNFUSED_ATTN. Use the --attention-backend argument if you want to choose between (flash\/fused\/unfused\/auto\/local). Default is auto.'/                warnings.warn(f'{env_variable_name} was {current_value}, overriding to {expected_value} for attention backend {attn_type.name}')/" \
+    /opt/venv/lib/python3.12/site-packages/megatron/core/models/common/language_module/language_module.py
+
+ENV NVTE_USE_GROUPED_GEMM_TRITON=1
+ENV NCCL_DEBUG=ERROR
+ENV ROCPROFILER_LOG_LEVEL=fatal
+ENV HSA_ENABLE_IPC_MODE_LEGACY=1
+ENV PYTORCH_ALLOC_CONF=expandable_segments:True
+ENV MIOPEN_DEBUG_FORCE_IMMED_MODE_FALLBACK=1
+RUN SP="$(python -c 'import site; print(site.getsitepackages()[0])')"; \
+    ln -sfn "$SP/_rocm_sdk_core/share/amd_smi/amdsmi" "$SP/amdsmi"
+RUN apt-get update && apt-get install -y --no-install-recommends vim \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clean build artifacts and caches
+RUN rm -rf /*.whl \
+    && rm -rf /root/.cache \
+    && rm -rf /root/.triton \
+    && rm -rf /workspace/aiter/aiter/jit/build \
+    && rm -rf /workspace/TransformerEngine
+
+# Training docker manifest
+ARG GIT_COMMIT_TAG=DEV
+ARG DOCKERFILE_PATH=Dockerfile
+
+# Copy patch files for training docker versioning
+RUN mkdir -p /workspace/.manifest \
+    && env > /workspace/.manifest/env.txt \
+    && pip list > /workspace/.manifest/requirements.txt \
+    && dpkg -l > /workspace/.manifest/dpkg-list.txt \
+    && echo "${GIT_COMMIT_TAG}" > /workspace/.manifest/training_docker_version
+
+
+CMD ["/usr/bin/bash"]
