@@ -17,7 +17,76 @@
 # 1. `get_query_key_value_tensors` in `multi_latent_attention.py` works wrong when packed_seq_params is not None
 
 
+def apply_fast_hadamard_transform_shim():
+    """Provide a pure-torch ``fast_hadamard_transform`` when the CUDA package is absent.
+
+    DeepSeek-V4's DSA/CSA indexer (Megatron's
+    ``transformer/experimental_attention_variant/dsa.py``) does
+    ``from fast_hadamard_transform import hadamard_transform`` at import time and
+    asserts it is not None inside ``rotate_activation``. The upstream Dao-AILab
+    package only ships CUDA/nvcc kernels and fails to install on ROCm (its
+    setup.py hard-requires nvcc), so on ROCm that import yields ``None`` and the
+    forward pass crashes.
+
+    The op is just an exact orthogonal transform that upstream documents as
+    equivalent to ``F.linear(x, scipy.linalg.hadamard(dim)) * scale``, so we
+    register a vectorized Fast Walsh-Hadamard Transform under the same import
+    name. It is numerically equivalent (fp32 butterfly accumulation), the
+    indexer dims are tiny, and it works identically on ROCm and CUDA. No-ops when
+    the real package is already installed.
+    """
+    import sys
+    import types
+
+    import torch
+
+    # Real CUDA package present and working -> leave it alone.
+    existing = sys.modules.get("fast_hadamard_transform")
+    if existing is not None and getattr(existing, "hadamard_transform", None) is not None:
+        return
+    if existing is None:
+        try:
+            import fast_hadamard_transform as existing  # noqa: F401
+
+            if getattr(existing, "hadamard_transform", None) is not None:
+                return
+        except ImportError:
+            existing = None
+
+    def _next_power_of_two(n: int) -> int:
+        return 1 << (n - 1).bit_length()
+
+    def hadamard_transform(x: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
+        *batch, dim = x.shape
+        n = _next_power_of_two(dim)
+        work = x if n == dim else torch.nn.functional.pad(x, (0, n - dim))
+        orig_dtype = work.dtype
+        y = work.to(torch.float32).reshape(-1, n)
+        h = 1
+        while h < n:
+            y = y.view(-1, n // (2 * h), 2, h)
+            a = y[:, :, 0, :]
+            b = y[:, :, 1, :]
+            y = torch.stack((a + b, a - b), dim=2).reshape(-1, n)
+            h *= 2
+        y = (y * scale).to(orig_dtype).view(*batch, n)
+        return y if n == dim else y[..., :dim]
+
+    module = existing if existing is not None else types.ModuleType("fast_hadamard_transform")
+    module.hadamard_transform = hadamard_transform
+    module.hadamard_transform_ref = hadamard_transform
+    sys.modules["fast_hadamard_transform"] = module
+
+    # Backfill modules that already ran `from fast_hadamard_transform import
+    # hadamard_transform` and captured None (Megatron's dsa.py at import time).
+    for mod in list(sys.modules.values()):
+        if mod is not None and getattr(mod, "hadamard_transform", "keep") is None:
+            mod.hadamard_transform = hadamard_transform
+
+
 def apply_patch():
+    apply_fast_hadamard_transform_shim()
+
     import megatron.core
     import torch
     import torch.nn.functional as F

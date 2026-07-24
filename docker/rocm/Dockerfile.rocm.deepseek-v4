@@ -1,0 +1,267 @@
+# Global build args shared across stages.
+ARG GPU_ARCH="gfx942;gfx950"
+
+# Install basic packages from OS distro
+FROM ubuntu:22.04 AS base
+
+ENV DEBIAN_FRONTEND=noninteractive
+ARG PYTHON_VERSION=3.12
+
+RUN --mount=target=/var/lib/apt/lists,type=cache,sharing=locked \
+    --mount=target=/var/cache/apt,type=cache,sharing=locked \
+    apt update && \
+    apt install -y git software-properties-common curl rsync dialog gfortran wget sqlite3 ccache vim && \
+    if ! python3 --version | grep -q ${PYTHON_VERSION} ; then \
+    add-apt-repository -y ppa:deadsnakes/ppa && apt update && \
+    apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
+    python${PYTHON_VERSION}-lib2to3 python-is-python3 ; fi
+
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
+    update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} && \
+    ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config && \
+    curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION}
+
+RUN wget -nv -O /tmp/cmake-3.26.4-linux-x86_64.tar.gz https://cmake.org/files/v3.26/cmake-3.26.4-linux-x86_64.tar.gz && \
+    tar zfx /tmp/cmake-3.26.4-linux-x86_64.tar.gz -C /opt/ && \
+    mv /opt/cmake-3.26.4-linux-x86_64 /opt/cmake-3.26.4 && \
+    rm -f /tmp/cmake-3.26.4-linux-x86_64.tar.gz
+
+ENV PATH=/opt/cmake-3.26.4/bin:$PATH
+
+# ccache speeds up repeated source builds (FA / TE / vLLM / aiter / triton).
+ENV CCACHE_DIR=/root/.cache/ccache
+ENV CCACHE_MAXSIZE=50G
+ENV CMAKE_C_COMPILER_LAUNCHER=ccache
+ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
+ENV CMAKE_HIP_COMPILER_LAUNCHER=ccache
+
+# Install ROCm deb packages
+FROM base AS rocm_deb
+
+ARG ROCM_VERSION=7.0.2
+ARG AMDGPU_VERSION=7.0.2
+ARG GFX_ARCH=gfx942|gfx950
+
+RUN --mount=target=/var/lib/apt/lists,type=cache,sharing=locked \
+    --mount=target=/var/cache/apt,type=cache,sharing=locked \
+    curl -sL https://repo.radeon.com/rocm/rocm.gpg.key | apt-key add - \
+    && printf "deb [arch=amd64] https://repo.radeon.com/rocm/apt/$ROCM_VERSION/ jammy main\n" | tee /etc/apt/sources.list.d/rocm.list \
+    && printf "deb [arch=amd64] https://repo.radeon.com/amdgpu/$AMDGPU_VERSION/ubuntu jammy main\n" | tee /etc/apt/sources.list.d/amdgpu.list \
+    && printf "Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600\n" | tee /etc/apt/preferences.d/rocm-pin-600 \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y rocm && \
+    find /opt/rocm/lib -type f -name '*gfx*' | grep -Ev "${GFX_ARCH}" | xargs rm -f && \
+    find /opt/rocm/lib/hipblaslt/library -type f -name '*gfx*' | grep -Ev "${GFX_ARCH}" | xargs rm -f && \
+    find /opt/rocm/lib/rocblas/library -type f -name '*gfx*' | grep -Ev "${GFX_ARCH}" | xargs rm -f && \
+    find /opt/rocm/share/miopen/db -type f -name '*gfx*' | grep -Ev "${GFX_ARCH}" | xargs rm -f
+
+ENV ROCM_HOME=/opt/rocm
+ENV CPLUS_INCLUDE_PATH=/opt/rocm/include
+ENV LD_LIBRARY_PATH=/opt/rocm/lib
+ENV PATH=/opt/rocm/bin:/opt/rocm/llvm/bin:$PATH
+
+# Install pytorch packages (torch 2.10 matched set + patched Triton + triton_kernels)
+FROM rocm_deb AS rocm_torch
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip "setuptools<80" wheel numpy einops packaging psutil ninja build pybind11 && \
+    pip install /opt/rocm/share/amd_smi
+
+# (1) torch / torchvision / torchaudio 2.10 — matched ROCm 7.0 set from PyTorch.
+#     This replaces the 2.9.1 repo.radeon wheels. pip also pulls a matching
+#     pytorch-triton-rocm, which we overwrite below with the patched Triton.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install --index-url https://download.pytorch.org/whl/rocm7.0 \
+    --extra-index-url https://pypi.org/simple \
+    torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0
+
+# apex is training-only (Megatron). The prebuilt wheel below is built for
+# torch 2.9.1 and is ABI-incompatible with torch 2.10 -- it installs fine and
+# does NOT affect vLLM serving, but will fail to import under Megatron training.
+# If you need apex for training, rebuild it from source against torch 2.10.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install --no-deps \
+    https://repo.radeon.com/rocm/manylinux/rocm-rel-7.0.2/apex-1.9.0a0+rocm7.0.2.git07c3ee53-cp312-cp312-linux_x86_64.whl || \
+    echo "WARN: apex install skipped/failed (training-only, safe to ignore for serving)"
+
+# TODO: remove patch later if upstreamed.
+# (2) Patched Triton + triton_kernels.
+#     ROCm/triton@ba5c1517 + cherry-pick of two AMD CanonicalizePointers fixes:
+#       555d04f -> triton PR #8991  (Fix null uniformSum crash in CanonicalizePointers)
+#       dd998b6 -> triton PR #9541  (CanonicalizePointers: handle different base ptrs)
+#     These fix the gfx950 fp8 GEMM "PassManager::run failed" crash. The
+#     triton_kernels package provides the MXFP4 unfused-MoE kernels that
+#     --moe-backend triton_unfused depends on.
+ARG TRITON_REPO="https://github.com/ROCm/triton.git"
+ARG TRITON_BRANCH="ba5c1517"
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    git config --global user.email "build@verl" && git config --global user.name "verl-build" && \
+    git clone ${TRITON_REPO} /opt/triton && cd /opt/triton && \
+    git checkout ${TRITON_BRANCH} && \
+    git cherry-pick 555d04f && \
+    git cherry-pick dd998b6 && \
+    ( [ -f setup.py ] || cd python ) && \
+    python3 setup.py bdist_wheel --dist-dir=/opt/triton-dist && \
+    pip install --force-reinstall --no-deps /opt/triton-dist/*.whl && \
+    cd /opt/triton/python/triton_kernels && python3 -m build --wheel --outdir /opt/triton-dist && \
+    pip install --force-reinstall --no-deps /opt/triton-dist/triton_kernels-*.whl
+
+ARG GPU_ARCH
+ENV PYTORCH_ROCM_ARCH=${GPU_ARCH}
+
+WORKDIR /root
+
+# Build Flash Attention wheel (from source, against torch 2.10)
+FROM rocm_torch AS fa_build
+
+ARG FA_REPO="https://github.com/ROCm/flash-attention"
+ARG FA_TAG="83f9e450cd10e20701fb109db9c7703d376f282b"
+
+RUN git clone ${FA_REPO} \
+    && cd flash-attention \
+    && git checkout ${FA_TAG} \
+    && git submodule init \
+    && git submodule update
+
+ARG GPU_ARCH
+ARG MAX_JOBS=
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    cd flash-attention \
+    && GPU_ARCHS=${GPU_ARCH} BUILD_TARGET=rocm MAX_JOBS=${MAX_JOBS:-$(nproc)} python3 setup.py bdist_wheel \
+    && mkdir /install && cp dist/*.whl /install \
+    && ccache -s
+
+# Install Flash Attention
+FROM fa_build AS install_fa
+
+RUN --mount=type=bind,from=fa_build,source=/install,target=/tmp/install \
+    --mount=type=cache,target=/root/.cache/pip \
+    pip install /tmp/install/*.whl
+
+# Install TE (from source, against torch 2.10)
+FROM install_fa AS te
+
+ARG GPU_ARCH
+ENV NVTE_USE_HIPBLASLT=1
+ENV NVTE_USE_ROCM=1
+ENV NVTE_FRAMEWORK=pytorch
+ENV NVTE_ROCM_ARCH=${GPU_ARCH}
+ENV NVTE_USE_CAST_TRANSPOSE_TRITON=0
+ENV NVTE_CK_USES_BWD_V3=1
+ENV NVTE_CK_V3_BF16_CVT=2
+
+ARG TE_TAG="386bd316"
+ARG MAX_JOBS=
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    pip install pybind11 pandas && git clone https://github.com/ROCm/TransformerEngine.git && \
+    cd TransformerEngine && git checkout ${TE_TAG} && git submodule update --init --recursive && \
+    GPU_ARCHS=${GPU_ARCH} MAX_JOBS=${MAX_JOBS:-$(nproc)} python3 setup.py install && \
+    ccache -s && \
+    cd .. && rm -rf TransformerEngine
+# TE patch
+RUN FILE=$(find /usr/local/lib/python3.12/dist-packages/ -path "*transformer_engine*/transformer_engine/pytorch/attention/dot_product_attention/utils.py") && \
+    sed -i '121s/2\.8\.3/2.8.4/' "$FILE"
+
+# Install vllm (DeepSeek-V4 capable commit)
+FROM te AS install_vllm
+
+# (4) Bump to a vLLM commit with DeepSeek-V4 support. 43914dd74 = 2026-06-11.
+ARG VLLM_TAG="43914dd74"
+ARG MAX_JOBS=
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    pip install setuptools_scm && \
+    mkdir /workspace && cd /workspace && \
+    ln -sf /opt/rocm/lib/libamdhip64.so /usr/lib/libamdhip64.so && \
+    git clone https://github.com/vllm-project/vllm && \
+    cd vllm && git checkout ${VLLM_TAG} && \
+    pip install -r requirements/rocm.txt && \
+    MAX_JOBS=${MAX_JOBS:-$(nproc)} python3 setup.py develop --no-deps && \
+    ccache -s
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip uninstall tilelang -y && pip install xgrammar==0.1.32
+
+FROM install_vllm AS install_verl
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install cupy-rocm-7-0
+
+ENV MIOPEN_DEBUG_CONV_DIRECT=0
+
+ARG AITER_TAG="v0.1.13.post1"
+ARG GPU_ARCH
+ARG MAX_JOBS=
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    cd /workspace && git clone --recursive https://github.com/ROCm/aiter.git && \
+    cd aiter && git checkout ${AITER_TAG} && git submodule update --init --recursive && \
+    pip install -r requirements.txt && \
+    PREBUILD_KERNELS=1 GPU_ARCHS="${GPU_ARCH}" MAX_JOBS=${MAX_JOBS:-$(nproc)} python3 setup.py develop && \
+    ccache -s
+
+# For qwen3.5 / verl deps
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -U git+https://github.com/ISEEKYAN/mbridge.git@v0.15.1 && \
+    pip install "transformers==5.12.1" && \
+    pip install mathruler && \
+    pip install qwen_vl_utils && \
+    pip install flash-linear-attention
+
+
+ARG MEGATRON_LM_REPO="https://github.com/NVIDIA/Megatron-LM.git"
+ARG MEGATRON_LM_COMMIT="cf081d5df0b34b665d214ff936f27489d7396876"
+ARG MEGATRON_BRIDGE_REPO="https://github.com/radixark/Megatron-Bridge.git"
+ARG MEGATRON_BRIDGE_COMMIT="318c5ff0369c1086a3852ff018a1d87ba3b36077"
+
+COPY docker/rocm/megatron_hc_head_contraction.patch /tmp/megatron_hc_head_contraction.patch
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-deps "nvidia-modelopt>=0.37.0" "pulp<4.0" && \
+    git clone ${MEGATRON_LM_REPO} /opt/Megatron-LM && \
+    cd /opt/Megatron-LM && \
+    git fetch --depth 1 origin ${MEGATRON_LM_COMMIT} && \
+    git checkout ${MEGATRON_LM_COMMIT} && \
+    patch -p1 --forward < /tmp/megatron_hc_head_contraction.patch && \
+    pip install -e . --no-deps && \
+    pip install --no-deps --no-build-isolation --ignore-requires-python \
+    git+${MEGATRON_BRIDGE_REPO}@${MEGATRON_BRIDGE_COMMIT}
+
+ARG BUILD_DATE="2026-07-15"
+RUN --mount=type=cache,target=/root/.cache/pip \
+    cd /workspace && git clone -b rocm-dsv4-dev-v3 https://github.com/PeterYang12/verl.git && \
+    cd verl && pip install .
+
+# (6) Pin fastapi < 0.137. vLLM has no upper bound on fastapi, so the latest
+#     0.137.x gets pulled in, whose include_router refactor puts a
+#     `_IncludedRouter` (no `.path`) into app.routes. The pinned
+#     prometheus-fastapi-instrumentator that vLLM hard-depends on walks
+#     app.routes and reads `route.path`, so every request 500s with
+#     "'_IncludedRouter' object has no attribute 'path'". 0.136.3 is the last
+#     release before that refactor. Done last so nothing upgrades it back.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install "fastapi==0.136.3"
+
+# (6b) Pin scipy < 1.18. Nothing in this stack pins scipy, so a build after
+#      2026-06 pulls scipy 1.18.0, which dropped NumPy 1.x support and requires
+#      numpy>=2.0. But numpy is held at 1.26.4 by the torch/vLLM ROCm stack, so
+#      scipy 1.18 hits `np.long` at import time (removed in numpy 1.24, re-added
+#      in numpy 2.0). transformers lazily imports scipy via its loss utils, so
+#      `import transformers` -> verl startup crashes with
+#      "module 'numpy' has no attribute 'long'" before training/rollout begins.
+#      1.17.x is the last line compatible with numpy 1.26. Done last so nothing
+#      upgrades it back.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install "scipy<1.18"
+
+# libdrm is compiled to look for the PCI-ID -> marketing-name table at
+# /opt/amdgpu/share/libdrm/amdgpu.ids, but the deb ships it under
+# /usr/share/libdrm. The missing file is harmless (only the GPU "marketing
+# name" lookup fails) but prints a noisy warning on every run; symlink it.
+RUN mkdir -p /opt/amdgpu/share/libdrm && \
+    ln -sf /usr/share/libdrm/amdgpu.ids /opt/amdgpu/share/libdrm/amdgpu.ids
+
+# (5) Runtime env for serving DeepSeek-V4-Flash on this ROCm 7.0.2 stack.
+#     VLLM_ROCM_USE_AITER_LINEAR is intentionally NOT set to 0: the aiter CK
+#     block-scale GEMM works for this model's shapes here, so we keep the
+#     default (True) and let fp8 linear use the faster aiter CK path.
+ENV VLLM_ROCM_USE_AITER=1
+ENV HSA_NO_SCRATCH_RECLAIM=1
+
+WORKDIR /workspace/verl
+CMD ["/bin/bash"]

@@ -1,0 +1,80 @@
+--- a/megatron/core/transformer/transformer_block.py
++++ b/megatron/core/transformer/transformer_block.py
+@@ -1,6 +1,7 @@
+ # Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ 
+ import logging
++import os
+ from contextlib import nullcontext
+ from dataclasses import dataclass
+ from typing import List, Optional, Set, Tuple, Union, cast
+@@ -384,6 +385,27 @@
+         else:
+             self.final_layernorm = None  # Either this or nn.Identity
+ 
++        # DeepSeek-V4 learned hyper-connection head contraction parameters.
++        # The residual streams are collapsed to one via a learned,
++        # data-dependent gated reduction (see inference/model.py
++        # ParallelHead.hc_head), NOT a plain mean. These live on the same
++        # stage as the final layernorm and are exported to / imported from
++        # the checkpoint as decoder.hc_head_{fn,base,scale}.
++        if self.config.enable_hyper_connections and self.has_final_layernorm_in_this_stage():
++            _hc_n = self.num_residual_streams
++            _hc_c = self.config.hidden_size
++            self.hc_head_fn = torch.nn.Parameter(torch.empty(_hc_n, _hc_n * _hc_c))
++            self.hc_head_base = torch.nn.Parameter(torch.empty(_hc_n))
++            self.hc_head_scale = torch.nn.Parameter(torch.empty(1))
++            self.hc_head_norm_eps = self.config.layernorm_epsilon
++            self.hc_head_hc_eps = 1e-6
++            torch.nn.init.zeros_(self.hc_head_fn)
++            torch.nn.init.zeros_(self.hc_head_base)
++            torch.nn.init.ones_(self.hc_head_scale)
++            if self.config.sequence_parallel:
++                for _hc_p in (self.hc_head_fn, self.hc_head_base, self.hc_head_scale):
++                    setattr(_hc_p, 'sequence_parallel', True)
++
+         if self.config.inference_fuse_tp_communication:
+             self._setup_fused_tp_communication()
+ 
+@@ -927,9 +949,38 @@
+ 
+         # Only contract if the final layer norm is in this stage
+         if self.config.enable_hyper_connections and self.has_final_layernorm_in_this_stage():
+-            hidden_states = HyperConnectionModule.output_contract(
+-                hidden_states, self.num_residual_streams
+-            )  # [s, b, n*C] -> [s, b, C]
++            # Contract the n hyper-connection residual streams to one at the
++            # model head. DeepSeek-V4 uses a learned, data-dependent gated sum
++            # (see inference/model.py ParallelHead.hc_head and the vLLM HCHeadOp
++            # fused kernel), NOT the plain mean that stock Megatron-Core used.
++            _hc_n = self.num_residual_streams
++            _hc_s, _hc_b, _hc_nc = hidden_states.shape
++            _hc_c = _hc_nc // _hc_n
++            if os.environ.get('VERL_HC_HEAD_MEAN', '0') == '1':
++                # Diagnostic kill-switch: revert to the original mean pooling.
++                hidden_states = hidden_states.view(
++                    _hc_s, _hc_b, _hc_n, _hc_c
++                ).mean(dim=2)
++            else:
++                # Memory-frugal AND fp32-accurate: one transient fp32 copy for
++                # the gate math, then a per-stream fp32 accumulation for the
++                # weighted sum -- we never materialize a full fp32 [s, b, n, C]
++                # product on the (memory-tight) final pipeline stage, and the
++                # reduction stays in fp32 to match the reference / vLLM kernel.
++                _hc_xf = hidden_states.float()  # [s, b, n*C]
++                _hc_rsqrt = torch.rsqrt(
++                    _hc_xf.square().mean(-1, keepdim=True) + self.hc_head_norm_eps
++                )
++                _hc_mixes = torch.nn.functional.linear(_hc_xf, self.hc_head_fn.float()) * _hc_rsqrt
++                _hc_pre = torch.sigmoid(
++                    _hc_mixes * self.hc_head_scale.float() + self.hc_head_base.float()
++                ) + self.hc_head_hc_eps  # [s, b, n], fp32
++                del _hc_xf
++                _hc_streams = hidden_states.view(_hc_s, _hc_b, _hc_n, _hc_c)
++                _hc_out = _hc_pre[..., 0:1] * _hc_streams[..., 0, :].float()
++                for _hc_i in range(1, _hc_n):
++                    _hc_out = _hc_out + _hc_pre[..., _hc_i:_hc_i + 1] * _hc_streams[..., _hc_i, :].float()
++                hidden_states = _hc_out.to(hidden_states.dtype)  # [s, b, C]
+ 
+         # Final layer norm.
+         if self.final_layernorm is not None:

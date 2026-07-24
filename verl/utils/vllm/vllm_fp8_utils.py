@@ -23,13 +23,14 @@ import torch
 from packaging import version
 
 try:
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
     from vllm.model_executor.layers.linear import LinearBase
 except ImportError as e:
     raise ImportError("FP8 quantization not available") from e
 
 from verl.utils.kernel.fp8_kernel import scaled_fp8_blockwise
 from verl.utils.vllm.vllm_dsv4_fp8_utils import (
+    FusedMoE,
+    _is_fused_moe_expert_module,
     cache_deepseek_v4_dense_fp8_scales,
     is_deepseek_v4_model,
     iter_deepseek_v4_weights,
@@ -107,7 +108,7 @@ def get_module_from_param_name(model, name: str):
     try:
         # Traverse the model hierarchy
         for part in module_path:
-            if isinstance(current_module, FusedMoE):
+            if _is_fused_moe_expert_module(current_module):
                 return current_module
             elif isinstance(current_module, torch.nn.ModuleList):
                 current_module = current_module[int(part)]
@@ -126,10 +127,15 @@ def is_fp8_weight(name, model):
             module = get_module_from_param_name(model, name)
             # We currently only quantize linear layers
 
-            if (isinstance(module, LinearBase) and module.weight.dtype == torch.float8_e4m3fn) or (
-                isinstance(module, FusedMoE)
-                and module.w13_weight.dtype == torch.float8_e4m3fn
-                and module.w2_weight.dtype == torch.float8_e4m3fn
+            if module is not None and (
+                (isinstance(module, LinearBase) and module.weight.dtype == torch.float8_e4m3fn)
+                or (
+                    _is_fused_moe_expert_module(module)
+                    and getattr(module, "w13_weight", None) is not None
+                    and module.w13_weight.dtype == torch.float8_e4m3fn
+                    and getattr(module, "w2_weight", None) is not None
+                    and module.w2_weight.dtype == torch.float8_e4m3fn
+                )
             ):
                 fp8_state.fp8_param_names.add(name)
     return name in fp8_state.fp8_param_names
