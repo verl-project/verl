@@ -53,7 +53,7 @@ def is_torch_npu_available(check_device=True) -> bool:
             return torch.npu.is_available()
         else:
             return True
-    except Exception:
+    except (ImportError, RuntimeError):
         return False
 
 
