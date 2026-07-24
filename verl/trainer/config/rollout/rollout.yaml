@@ -274,7 +274,7 @@ checkpoint_engine:
   # Target class for checkpoint engine config
   _target_: verl.workers.config.CheckpointEngineConfig
 
-  # Backend for checkpoint engine: naive, nccl, nixl, hccl
+  # Backend for checkpoint engine: naive, nccl, nixl, hccl, p2p
   backend: naive
 
   # Specifies the tensor bucket size (in megabytes) for batch weight updates during rollout operations.
@@ -293,6 +293,11 @@ checkpoint_engine:
 
   # Additional keyword arguments to pass to the checkpoint engine constructor
   engine_kwargs: {}
+
+  # Miles --check-weight-update-equal: corruption test via SGLang /weights_checker.
+  # Snapshots rollout weights at first sync, resets to random, then compares after update.
+  check_weight_update_equal: false
+  check_weight_update_allow_quant_error: false
 
   # If set, this Python module is imported on every worker process before the
   # backend is instantiated, allowing custom backends to register themselves

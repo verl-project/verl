@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import ray
+import requests
 import sglang
 import sglang.srt.entrypoints.engine
 import torch
@@ -50,6 +51,10 @@ from verl.utils.profiler import DistProfiler, build_sglang_profiler_args
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
+from verl.workers.rollout.sglang_rollout.p2p_bootstrap import (
+    sanitize_sglang_engine_kwargs_for_p2p,
+    should_enable_p2p_weight_transfer_bootstrap,
+)
 from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_config
 from verl.workers.rollout.sglang_rollout.utils import SGLANG_LORA_NAME
 from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
@@ -110,6 +115,39 @@ def _extract_prompt_logprobs_sglang(
     result_dict["prompt_logprobs"] = prompt_logprobs_ls
 
 
+def _resolve_sglang_launch_subprocesses():
+    """Resolve SGLang's subprocess launcher across API generations."""
+    try:
+        from sglang.srt.entrypoints.http_server import _launch_subprocesses
+
+        return _launch_subprocesses
+    except ImportError:
+        # Newer SGLang moved the implementation behind Engine._launch_subprocesses.
+        from sglang.srt.entrypoints.engine import Engine
+
+        return Engine._launch_subprocesses
+
+
+def _normalize_launch_subprocesses_result(result: tuple[Any, ...]) -> tuple[Any, Any, dict[str, Any]]:
+    """Extract (tokenizer_manager, template_manager, scheduler_info) across SGLang API generations."""
+    tokenizer_manager, template_manager = result[:2]
+
+    # Stock SGLang <= 0.5.8: (tokenizer_manager, template_manager, scheduler_info, port_args)
+    if len(result) >= 3 and isinstance(result[2], dict):
+        return tokenizer_manager, template_manager, result[2]
+
+    # Stock SGLang 0.5.9: (tokenizer_manager, template_manager, scheduler_infos, port_args)
+    if len(result) >= 3 and isinstance(result[2], list | tuple) and result[2]:
+        return tokenizer_manager, template_manager, result[2][0]
+
+    # Stock SGLang >= 0.5.10 and sglang-miles:
+    # (tokenizer_manager, template_manager, port_args, scheduler_init_result[, watchdog])
+    if len(result) >= 4 and hasattr(result[3], "scheduler_infos"):
+        return tokenizer_manager, template_manager, result[3].scheduler_infos[0]
+
+    raise RuntimeError(f"Unsupported SGLang launch_subprocesses result shape: {type(result)} / len={len(result)}")
+
+
 class SGLangHttpServer:
     """SGLang http server in single node, this is equivalent to launch server with command line:
     ```
@@ -152,6 +190,10 @@ class SGLangHttpServer:
         self._disaggregation_bootstrap_port = disaggregation_bootstrap_port
 
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
+        self._enable_p2p_weight_transfer_bootstrap = should_enable_p2p_weight_transfer_bootstrap(self.config)
+        self._engine_info_bootstrap_port = None
+        self._engine_info_bootstrap_sock = None
+
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
         max_position_embeddings = get_max_position_embeddings(self.model_config.hf_config)
         if self.config.max_model_len is None:
@@ -213,6 +255,30 @@ class SGLangHttpServer:
         """Get master address and port for init NCCL process group."""
         return self._master_address, self._master_port
 
+    def reserve_engine_info_bootstrap_port(self) -> int:
+        """Reserve a unique bootstrap port on the replica head node for P2P metadata."""
+        if not self._enable_p2p_weight_transfer_bootstrap:
+            raise RuntimeError("P2P bootstrap is not enabled for this rollout server")
+        if self.node_rank != 0:
+            raise RuntimeError("engine_info_bootstrap_port can only be reserved on node_rank=0")
+        if self._engine_info_bootstrap_port is not None:
+            return self._engine_info_bootstrap_port
+
+        port, sock = get_free_port(self._server_address, with_alive_sock=True)
+        self._engine_info_bootstrap_port = port
+        self._engine_info_bootstrap_sock = sock
+        logger.info(
+            f"SGLangHttpServer replica_rank={self.replica_rank} reserved "
+            f"engine_info_bootstrap_port={port} on {self._server_address}"
+        )
+        return port
+
+    def set_engine_info_bootstrap_port(self, port: int) -> None:
+        """Share the replica-wide bootstrap port with non-head nodes before launch."""
+        if not self._enable_p2p_weight_transfer_bootstrap:
+            return
+        self._engine_info_bootstrap_port = int(port)
+
     def get_server_address(self):
         """Get http server address and port."""
         assert self._server_port is not None, "http server is not launched, port is None"
@@ -254,7 +320,7 @@ class SGLangHttpServer:
                 self._master_address = master_address
                 self._master_port = master_port
 
-        engine_kwargs = self.config.get("engine_kwargs", {}).get("sglang", {}) or {}
+        engine_kwargs = sanitize_sglang_engine_kwargs_for_p2p(self.config)
         attention_backend = engine_kwargs.pop("attention_backend", None)
         mm_attention_backend = engine_kwargs.pop("mm_attention_backend", None)
         # Delta checkpoint engines apply sparse weight updates in place through SGLang's
@@ -297,7 +363,10 @@ class SGLangHttpServer:
             "dtype": self.config.dtype,
             "mem_fraction_static": self.config.gpu_memory_utilization,
             "disable_cuda_graph": self.config.enforce_eager,
-            "enable_memory_saver": True,
+            # torch_memory_saver is incompatible with Mooncake TransferEngine (RDMA
+            # registrations don't survive VMM unmap/remap); SGLang refuses to start
+            # the P2P engine-info bootstrap server when memory saver is on.
+            "enable_memory_saver": not self._enable_p2p_weight_transfer_bootstrap,
             "base_gpu_id": self.base_gpu_id,
             "gpu_id_step": 1,
             "tp_size": infer_tp,
@@ -384,6 +453,33 @@ class SGLangHttpServer:
         if self.config.enable_rollout_routing_replay:
             args.update({"enable_return_routed_experts": True})
 
+        if self._enable_p2p_weight_transfer_bootstrap:
+            if self._engine_info_bootstrap_port is None:
+                raise RuntimeError(
+                    "P2P bootstrap is enabled but engine_info_bootstrap_port is unset. "
+                    "Reserve it on replica head node before launch_server."
+                )
+            if self._engine_info_bootstrap_sock is not None:
+                self._engine_info_bootstrap_sock.close()
+                self._engine_info_bootstrap_sock = None
+            if args.get("enable_memory_saver"):
+                raise ValueError(
+                    "checkpoint_engine.backend=p2p is incompatible with SGLang's memory saver: "
+                    "Mooncake TransferEngine RDMA registrations do not survive torch_memory_saver "
+                    "VMM unmap/remap, so SGLang would silently skip starting the P2P engine-info "
+                    "bootstrap server. Remove `engine_kwargs.sglang.enable_memory_saver=True` "
+                    "from the rollout config."
+                )
+            args["remote_instance_weight_loader_start_seed_via_transfer_engine"] = True
+            args["engine_info_bootstrap_port"] = self._engine_info_bootstrap_port
+            # Multi-node only: SGLang registers to dist_init_addr host; single-node uses 127.0.0.1.
+            if self.nnodes > 1:
+                args["host"] = self._server_address
+            logger.info(
+                f"SGLangHttpServer replica_rank={self.replica_rank} node_rank={self.node_rank} "
+                f"enabling P2P bootstrap on port {self._engine_info_bootstrap_port}"
+            )
+
         # mtp
         if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
             # Enable weights CPU backup for sglang >= 0.5.6
@@ -403,32 +499,19 @@ class SGLangHttpServer:
         sglang.srt.entrypoints.engine._set_envs_and_config = _set_envs_and_config
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
         server_args = ServerArgs(**args)
-        # For SGLang main branch or version >= 0.5.10
-        # The latest main branch of SGLang has wrapped the _launch_subprocesses function inside the Engine class
-        if version.parse(sglang.__version__) >= version.parse("0.5.10"):
-            from sglang.srt.entrypoints.http_server import Engine
-
-            self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = Engine._launch_subprocesses(
-                server_args=server_args,
-                init_tokenizer_manager_func=sglang.srt.entrypoints.engine.init_tokenizer_manager,
-                run_scheduler_process_func=sglang.srt.entrypoints.engine.run_scheduler_process,
-                run_detokenizer_process_func=sglang.srt.entrypoints.engine.run_detokenizer_process,
-            )
-        elif version.parse(sglang.__version__) >= version.parse("0.5.7"):
-            from sglang.srt.entrypoints.http_server import _launch_subprocesses
-
-            self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
+        if version.parse(sglang.__version__) >= version.parse("0.5.7"):
+            launch_result = _resolve_sglang_launch_subprocesses()(
                 server_args=server_args,
                 init_tokenizer_manager_func=sglang.srt.entrypoints.engine.init_tokenizer_manager,
                 run_scheduler_process_func=sglang.srt.entrypoints.engine.run_scheduler_process,
                 run_detokenizer_process_func=sglang.srt.entrypoints.engine.run_detokenizer_process,
             )
         else:
-            from sglang.srt.entrypoints.http_server import _launch_subprocesses
+            launch_result = _resolve_sglang_launch_subprocesses()(server_args=server_args)
 
-            self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
-                server_args=server_args
-            )
+        self.tokenizer_manager, self.template_manager, self.scheduler_info = _normalize_launch_subprocesses_result(
+            launch_result
+        )
 
         # In multi-node cases, non-zero rank nodes should not launch http server.
         if self.node_rank > 0:
@@ -714,6 +797,106 @@ class SGLangHttpServer:
             return
         await self.tokenizer_manager.continue_generation(ContinueGenerationReqInput())
 
+    async def get_remote_instance_transfer_engine_info(self, rank: int):
+        if self.node_rank != 0:
+            return None
+
+        server_args = self.tokenizer_manager.server_args
+        resp = requests.get(
+            f"{server_args.engine_info_bootstrap_url}/get_transfer_engine_info",
+            params={"rank": rank},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        return resp.json()["remote_instance_transfer_engine_info"]
+
+    async def get_parallelism_info(self, rank: int):
+        if self.node_rank != 0:
+            return None
+
+        server_args = self.tokenizer_manager.server_args
+        resp = requests.get(
+            f"{server_args.engine_info_bootstrap_url}/get_parallelism_config",
+            params={"rank": rank},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def get_server_info(self) -> dict[str, Any]:
+        if self.node_rank != 0:
+            return {}
+
+        server_args = self.tokenizer_manager.server_args
+        internal_states = await self.tokenizer_manager.get_internal_state()
+        return {
+            **dataclasses.asdict(server_args),
+            **self.scheduler_info,
+            "internal_states": internal_states,
+            "version": sglang.__version__,
+            "kv_events": server_args.describe_kv_events_publisher(),
+        }
+
+    async def begin_weight_update(self, selector: str = "all") -> dict[str, Any]:
+        if self.node_rank != 0:
+            return {}
+
+        # Available in SGLang builds with the Miles weight-update lifecycle.
+        from sglang.srt.managers.io_struct import BeginWeightUpdateReqInput
+
+        success, message = await self.tokenizer_manager.begin_weight_update(
+            BeginWeightUpdateReqInput(selector=selector), None
+        )
+        return {"success": success, "message": message}
+
+    async def end_weight_update(self) -> dict[str, Any]:
+        if self.node_rank != 0:
+            return {}
+
+        from sglang.srt.managers.io_struct import EndWeightUpdateReqInput
+
+        success, message = await self.tokenizer_manager.end_weight_update(EndWeightUpdateReqInput(), None)
+        return {"success": success, "message": message}
+
+    async def update_weight_version(self, weight_version: str, abort_all_requests: bool = True) -> dict[str, Any]:
+        if self.node_rank != 0:
+            return {}
+
+        new_version = str(weight_version)
+        if abort_all_requests:
+            self.tokenizer_manager.abort_request(abort_all=True)
+        self.tokenizer_manager.server_args.weight_version = new_version
+        try:
+            self.global_steps = int(new_version)
+        except (TypeError, ValueError):
+            logger.debug(
+                "weight_version %r is not numeric; keeping global_steps=%s",
+                new_version,
+                self.global_steps,
+            )
+        return {
+            "success": True,
+            "message": f"Weight version updated to {new_version}",
+            "new_version": new_version,
+        }
+
+    async def check_weights(self, action: str, allow_quant_error: bool = False) -> dict[str, Any]:
+        if self.node_rank != 0:
+            return {}
+
+        from sglang.srt.managers.io_struct import CheckWeightsReqInput
+
+        success, message, ranks, per_engine_checksum = await self.tokenizer_manager.check_weights(
+            CheckWeightsReqInput(action=action, allow_quant_error=allow_quant_error),
+            None,
+        )
+        return {
+            "success": success,
+            "message": message,
+            "ranks": ranks,
+            "per_engine_checksum": per_engine_checksum,
+        }
+
     async def start_profile(self, **kwargs):
         if (
             self.profiler_controller.check_enable()
@@ -779,6 +962,9 @@ class SGLangReplica(RolloutReplica):
         if os.environ.get(f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword}", None):
             logger.warning(f"RAY_EXPERIMENTAL_NOSET_{visible_devices_keyword} is set True!")
             base_gpu_id = (0 + self.replica_rank * replica_world_size) % self.gpus_per_node
+
+        enable_p2p_bootstrap = should_enable_p2p_weight_transfer_bootstrap(self.config)
+
         # create server actor in each node with node affinity and cuda visible devices
         for node_rank in range(self.nnodes):
             workers = self.workers[
@@ -834,6 +1020,16 @@ class SGLangReplica(RolloutReplica):
             )
             self.servers.append(server)
 
+        if enable_p2p_bootstrap:
+            bootstrap_port = await self.servers[0].reserve_engine_info_bootstrap_port.remote()
+            if self.nnodes > 1:
+                await asyncio.gather(
+                    *[server.set_engine_info_bootstrap_port.remote(bootstrap_port) for server in self.servers[1:]]
+                )
+            logger.info(
+                f"SGLangReplica replica_rank={self.replica_rank} allocated engine_info_bootstrap_port={bootstrap_port}"
+            )
+
         # launch http server in each node
         master_address, master_port = None, None
         if self.nnodes > 1:
@@ -865,3 +1061,24 @@ class SGLangReplica(RolloutReplica):
     async def resume_generation(self):
         """Resume generation on the primary server after abort_all_requests."""
         await self.servers[0].resume_generation.remote()
+
+    async def get_remote_instance_transfer_engine_info(self, rank: int):
+        return await self.servers[0].get_remote_instance_transfer_engine_info.remote(rank)
+
+    async def get_parallelism_info(self, rank: int):
+        return await self.servers[0].get_parallelism_info.remote(rank)
+
+    async def get_server_info(self) -> dict[str, Any]:
+        return await self.servers[0].get_server_info.remote()
+
+    async def begin_weight_update(self, selector: str = "all") -> dict[str, Any]:
+        return await self.servers[0].begin_weight_update.remote(selector)
+
+    async def end_weight_update(self) -> dict[str, Any]:
+        return await self.servers[0].end_weight_update.remote()
+
+    async def update_weight_version(self, weight_version: str, abort_all_requests: bool = True) -> dict[str, Any]:
+        return await self.servers[0].update_weight_version.remote(weight_version, abort_all_requests)
+
+    async def check_weights(self, action: str, allow_quant_error: bool = False) -> dict[str, Any]:
+        return await self.servers[0].check_weights.remote(action, allow_quant_error)

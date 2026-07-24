@@ -129,12 +129,18 @@ class CheckpointEngineConfig(BaseConfig):
 
     _mutable_fields = {"backend"}
 
-    # Backend for checkpoint engine: naive, nccl, nixl, hccl
+    # Backend for checkpoint engine: naive, nccl, nixl, hccl, p2p
     backend: Optional[str] = "naive"
     # Bucket size in MB to transfer multiple weights at one time
     update_weights_bucket_megabytes: int = 2048
-    # Additional keyword arguments for checkpoint engine
+    # Additional keyword arguments for checkpoint engine.
+    # For backend ``p2p``: ``p2p_transfer_num_workers``, ``p2p_transfer_timeout``.
     engine_kwargs: dict = field(default_factory=dict)
+    # Miles ``--check-weight-update-equal``: snapshot HF weights at startup, corrupt with
+    # random values, then verify the first weight sync restores them via SGLang weights_checker.
+    check_weight_update_equal: bool = False
+    # Allow quantized tensors to differ by up to 1 ULP in dequantized space during compare.
+    check_weight_update_allow_quant_error: bool = False
     # If set, this Python module is imported on every worker process before the
     # backend is instantiated, allowing custom backends to register themselves
     # in CheckpointEngineRegistry.

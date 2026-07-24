@@ -1036,7 +1036,9 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         """
         if hasattr(batch, "meta_info") and batch.meta_info:
             trajectory_param_versions = batch.meta_info["trajectory_param_versions"]
-            stale_traj_count = sum(1 for v in trajectory_param_versions if self.current_param_version - v >= 1)
+            stale_traj_count = sum(
+                1 for v in trajectory_param_versions if v is not None and self.current_param_version - v >= 1
+            )
             self.stale_trajectory_processed += stale_traj_count
             metrics.update(
                 {

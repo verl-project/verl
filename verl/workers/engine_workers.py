@@ -714,7 +714,24 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         assert "actor" in self.role, "save_checkpoint only support actor role"
-        self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
+        release = getattr(self.checkpoint_engine, "release_for_checkpoint", None)
+        restore = getattr(self.checkpoint_engine, "restore_after_checkpoint", None)
+        if release is not None:
+            release()
+        try:
+            self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
+        finally:
+            if restore is not None:
+                restore()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init_p2p_rollout_metadata(self, rollout_metadata: dict):
+        if "actor" not in self.role:
+            return
+        connect = getattr(self.checkpoint_engine, "connect_rollout_metadata", None)
+        if connect is None:
+            raise RuntimeError("checkpoint_engine backend does not support P2P rollout metadata")
+        connect(rollout_metadata)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None, mode: str = "auto"):
@@ -752,6 +769,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # so it consumes the sharded param generator instead of the full-tensor one.
             if effective_mode == "delta_sharded":
                 per_tensor_param, _ = self.actor.engine.get_per_tensor_param_shard()
+            elif effective_mode == "p2p":
+                # P2P pushes PP-local HF weights from source ranks only; other
+                # ranks just participate in the PP-local export collectives.
+                if not self.checkpoint_engine.is_source:
+                    return {}
+                per_tensor_param, _ = self.actor.engine.get_per_tensor_param(pp_local_export=True)
             else:
                 per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
             metrics = await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)

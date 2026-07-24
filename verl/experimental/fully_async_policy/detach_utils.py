@@ -150,7 +150,14 @@ def assemble_batch_from_rollout_samples(
 
     param_version_start = final_batch.non_tensor_batch["min_global_steps"]
     param_version_end = final_batch.non_tensor_batch["max_global_steps"]
-    param_version_diff = [abs(a - b) for a, b in zip(param_version_end, param_version_start, strict=False)]
+
+    def _normalize_param_version(value):
+        return 0 if value is None else value
+
+    param_version_diff = [
+        abs(_normalize_param_version(a) - _normalize_param_version(b))
+        for a, b in zip(param_version_end, param_version_start, strict=False)
+    ]
     num_diff0 = param_version_diff.count(0)
     partial_stats = {
         "fully_async/partial/total_partial_num": len(param_version_diff) - num_diff0,
@@ -159,10 +166,11 @@ def assemble_batch_from_rollout_samples(
     }
     # add meta_info
     trajectory_param_versions = final_batch.non_tensor_batch["max_global_steps"]
+    normalized_trajectory_versions = [_normalize_param_version(v) for v in trajectory_param_versions]
 
     final_batch.meta_info.update(
         {
-            "param_version_diversity": len(set(trajectory_param_versions)),
+            "param_version_diversity": len(set(normalized_trajectory_versions)),
             "trajectory_param_versions": trajectory_param_versions,
             **processing_time_stats,
             **rollout_status,

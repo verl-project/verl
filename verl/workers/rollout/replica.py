@@ -290,6 +290,22 @@ class RolloutReplica(ABC):
         """Restore the kv_cache GPU memory after a weight sync."""
         await asyncio.gather(*[server.resume_kv_cache.remote() for server in self.servers])
 
+    async def begin_weight_update(self, selector: str = "all") -> dict[str, Any]:
+        """Begin a rollout weight-update session, if the backend requires one."""
+        return {"success": True, "message": "No-op begin_weight_update", "selector": selector}
+
+    async def end_weight_update(self) -> dict[str, Any]:
+        """End a rollout weight-update session, if the backend requires one."""
+        return {"success": True, "message": "No-op end_weight_update"}
+
+    async def update_weight_version(self, weight_version: str, abort_all_requests: bool = True) -> dict[str, Any]:
+        """Bump rollout weight version after a successful weight sync."""
+        return {
+            "success": True,
+            "message": "No-op update_weight_version",
+            "new_version": weight_version,
+        }
+
     async def start_profile(self, **kwargs):
         """Start profiling on the replica."""
         await asyncio.gather(*[server.start_profile.remote(**kwargs) for server in self.servers])
