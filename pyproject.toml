@@ -172,10 +172,11 @@ fsdp = [
 ]
 
 # apex / TE / flash-attn come prebuilt from the wheelhouse (see
-# [tool.uv.sources]); megatron-core is still git-sourced (built at sync time
-# with build isolation). cupy-cuda13x is for Megatron MoE all-to-all;
-# onnxscript papers over a TE import quirk (its pytorch module imports it
-# undeclared — the reference Dockerfiles add it standalone for the same reason).
+# [tool.uv.sources]); megatron-core and megatron-bridge are still git-sourced
+# (built at sync time with build isolation). cupy-cuda13x is for Megatron MoE
+# all-to-all; onnxscript papers over a TE import quirk (its pytorch module
+# imports it undeclared — the reference Dockerfiles add it standalone for the
+# same reason).
 megatron = [
     "verl[verl-core]",
     "verl[flash-attn-cu130torch211]",
@@ -189,7 +190,13 @@ megatron = [
     "trl==0.27.0",
     "matplotlib",
     "liger-kernel",
+    # Two Megatron<->HF connectors, both git-sourced below. mbridge (ISEEKYAN) is
+    # the legacy one; megatron-bridge (NVIDIA-NeMo, imported as `megatron.bridge`)
+    # is the one verl is migrating to and is ALWAYS installed with the megatron
+    # backend. Its own dep tree conflicts with verl's pins, so it is installed
+    # deps-free — see the [[tool.uv.dependency-metadata]] note below.
     "mbridge",
+    "megatron-bridge",
     "megatron-core",
     "cupy-cuda13x==14.0.1",
     # transformers is intentionally NOT pinned here: a trainer inherits the
@@ -358,6 +365,17 @@ name = "mbridge"
 version = "0.15.1"
 requires-dist = []
 
+# megatron-bridge is git-sourced from its r0.5.0 release branch (version 0.5.2),
+# the branch that pairs with megatron-core 0.18.0. Its real metadata pulls a
+# conflicting transformers (>=5.8.1,<5.9.0) plus a large NeMo stack, so — exactly
+# like the reference Dockerfiles' `pip install --no-deps megatron-bridge` — we
+# declare an EMPTY requires-dist: the megatron extra already provides torch /
+# megatron-core / TE, and uv must not resolve megatron-bridge's own deps.
+[[tool.uv.dependency-metadata]]
+name = "megatron-bridge"
+version = "0.5.2"
+requires-dist = []
+
 # Heavy native packages come prebuilt from the verl wheelhouse (cu130 / torch
 # 2.11 / cp312), so there is no source build here — no no-build-isolation, no
 # extra-build-dependencies/-variables, and no nvcc/MAX_JOBS at sync time. Each
@@ -372,10 +390,13 @@ sglang               = { index = "verl-wheelhouse" }
 sglang-kernel        = { index = "verl-wheelhouse" }
 vllm                 = { index = "verl-wheelhouse" }
 
-# megatron-core / mbridge are not in the wheelhouse; keep the reference
-# Dockerfile git revs (source-built at sync time with build isolation).
-mbridge            = { git = "https://github.com/ISEEKYAN/mbridge.git",         rev = "641a5a0" }
-megatron-core      = { git = "https://github.com/NVIDIA/Megatron-LM.git",       tag = "core_v0.18.0" }
+# megatron-core / mbridge / megatron-bridge are not in the wheelhouse; keep the
+# reference Dockerfile git revs (source-built at sync time with build isolation).
+# megatron-bridge tracks the r0.5.0 release branch, which pairs with the
+# megatron-core core_v0.18.0 tag below — bump the two together.
+mbridge            = { git = "https://github.com/ISEEKYAN/mbridge.git",            rev = "641a5a0" }
+megatron-bridge    = { git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge.git", branch = "r0.5.0" }
+megatron-core      = { git = "https://github.com/NVIDIA/Megatron-LM.git",          tag = "core_v0.18.0" }
 
 # Per-extra routing to the matching pytorch wheel index.
 torch = [

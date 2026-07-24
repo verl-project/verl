@@ -49,6 +49,34 @@ the underlying ``uv`` invocation, e.g.::
 
     python manage_envs.py sync megatron -- --reinstall -v
 
+Naming distinct venvs
+---------------------
+By default everything lands in the project venv ``.venv``. Pass ``--name NAME``
+(or set ``VERL_VENV_NAME``) to put the real env in ``.venv-<NAME>`` instead — uv
+is pointed at it via ``UV_PROJECT_ENVIRONMENT`` — so several backend combos,
+users, or runs can coexist on one checkout without clobbering a single shared
+venv::
+
+    python manage_envs.py sync --name vllm-mega vllm megatron   # -> .venv-vllm-mega
+    python manage_envs.py shell --name sglang-fsdp sglang fsdp  # -> .venv-sglang-fsdp
+
+After a named ``sync`` / ``shell`` (or a syncing ``run``) the conventional
+``.venv`` is (re)created as a **symlink to the composition just synced**, so it
+always points at the latest env and ``source .venv/bin/activate``, CI, and the
+byted wrappers keep working unchanged::
+
+    python manage_envs.py sync --name vllm-mega vllm megatron   # .venv -> .venv-vllm-mega
+    python manage_envs.py sync --name sglang-fsdp sglang fsdp   # .venv -> .venv-sglang-fsdp
+    source .venv/bin/activate                                   # = the sglang-fsdp env
+
+A nameless ``sync`` reclaims ``.venv`` as a real directory (dropping the pointer
+first, so it never writes through the link into a named env). ``clean`` unlinks
+the pointer instead of deleting through it, and drops it when it would dangle.
+``sync`` / ``run`` / ``shell`` / ``clean`` / ``list`` all accept the same
+``--name`` (or ``VERL_VENV_NAME``); for ``sync`` / ``run`` put it before the
+extras. An explicit ``UV_PROJECT_ENVIRONMENT`` is honored as-is when no name is
+given. ``prefetch`` is unaffected — it only warms the cache via throwaway envs.
+
 Keeping internal packages out of uv's hands
 --------------------------------------------
 If your site ships its own build of some package (e.g. an internal ``ray`` or
@@ -109,6 +137,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -161,7 +190,142 @@ GROUPS: dict[str, list[str]] = {
 }
 
 VERL_DIR = Path(__file__).resolve().parent
-VENV_DIR = (VERL_DIR / ".venv").resolve()
+# The conventional project venv path. A user-offered name (``--name`` /
+# ``VERL_VENV_NAME``) puts the real env in ``.venv-<name>`` so distinct backend
+# combos / users / runs coexist on one checkout, and ``.venv`` is maintained as a
+# symlink to the latest such composition (see ``_point_default_venv``) so
+# ``source .venv/bin/activate`` and tooling always reach it. uv is pointed at the
+# chosen directory through ``UV_PROJECT_ENVIRONMENT`` (see ``_venv_dir``).
+# NB: not ``.resolve()``-d — that would follow the ``.venv`` symlink to its
+# target, and a nameless ``sync`` must operate on ``.venv`` itself.
+DEFAULT_VENV_DIR = VERL_DIR / ".venv"
+
+# A name is used verbatim as the ``.venv-<name>`` directory suffix, so keep it to
+# filesystem-safe characters (no path separators, no leading dot / dash).
+_VENV_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _resolve_name(cli_name: str | None) -> str | None:
+    """The user-offered suffix for the project venv directory.
+
+    ``--name`` / ``-n`` wins; otherwise the ``VERL_VENV_NAME`` env var. Returns
+    ``None`` when neither is set (the default ``.venv``). The value is validated
+    because it becomes a directory-name suffix.
+    """
+    name = cli_name if cli_name is not None else os.environ.get("VERL_VENV_NAME")
+    if name is None:
+        return None
+    name = name.strip()
+    if not name:
+        return None
+    if not _VENV_NAME_RE.match(name):
+        sys.exit(
+            f"error: invalid venv name {name!r}: use letters, digits, '.', '_' or '-' "
+            "(it becomes the '.venv-<name>' directory suffix)"
+        )
+    return name
+
+
+def _venv_dir(name: str | None) -> Path:
+    """Resolve the project venv directory for this invocation.
+
+    Priority: a user-offered ``name`` -> ``.venv-<name>``; else an explicit
+    ``UV_PROJECT_ENVIRONMENT`` (uv's own override) used as-is; else the default
+    ``.venv``. The result is what every command hands back to uv via
+    ``UV_PROJECT_ENVIRONMENT`` so sync / run / shell / clean / list all agree on
+    which env they target. Paths under the checkout are left un-resolved so we
+    never follow the ``.venv`` pointer symlink to a named env.
+    """
+    if name:
+        return VERL_DIR / f".venv-{name}"
+    env = os.environ.get("UV_PROJECT_ENVIRONMENT")
+    if env:
+        return Path(env).expanduser().resolve()
+    return DEFAULT_VENV_DIR
+
+
+def _proj_env(venv_dir: Path) -> dict[str, str | None]:
+    """Env override routing uv at ``venv_dir`` (``UV_PROJECT_ENVIRONMENT``)."""
+    return {"UV_PROJECT_ENVIRONMENT": str(venv_dir)}
+
+
+def _detach_symlink_target(venv_dir: Path) -> None:
+    """Drop ``venv_dir`` if it is currently a symlink, so a subsequent ``uv sync``
+    builds a real directory there instead of writing THROUGH the link into the
+    named env it points at.
+
+    Only the conventional ``.venv`` is ever a symlink (the latest-composition
+    pointer), so this fires when a nameless ``sync`` / ``shell`` follows an
+    earlier named one: the pointer is consumed and ``.venv`` becomes a real env.
+    """
+    if venv_dir.is_symlink():
+        prev = os.readlink(venv_dir)
+        venv_dir.unlink()
+        print(f"note: {venv_dir} was a symlink (-> {prev}); replacing it with a real env", flush=True)
+
+
+def _point_default_venv(venv_dir: Path) -> None:
+    """Point the conventional ``.venv`` at ``venv_dir`` — the composition just
+    synced — so ``source .venv/bin/activate``, CI, and the byted wrappers reach
+    the latest env even when it lives in ``.venv-<name>``.
+
+    No-op when ``venv_dir`` already is ``.venv`` or was not materialized. An
+    existing ``.venv`` *symlink* is repointed; a real ``.venv`` *directory* is
+    left untouched (with a warning) so a materialized env is never deleted.
+    """
+    link = DEFAULT_VENV_DIR
+    if venv_dir == link or not venv_dir.exists():
+        return
+    if link.is_symlink():
+        try:
+            if link.resolve() == venv_dir.resolve():
+                return  # already points here; stay quiet on repeat syncs
+        except OSError:
+            pass
+        link.unlink()
+    elif link.exists():
+        print(
+            f"warning: {link} is a real directory; not repointing it at {venv_dir.name}. "
+            f"Activate {venv_dir}/bin/activate directly, or `python manage_envs.py clean` "
+            "to replace it with a link.",
+            file=sys.stderr,
+        )
+        return
+    # Relative link when the env sits beside ``.venv`` (portable if the checkout
+    # moves); absolute for an external UV_PROJECT_ENVIRONMENT.
+    rel = os.path.relpath(venv_dir, VERL_DIR)
+    target = rel if not rel.startswith("..") else str(venv_dir)
+    link.symlink_to(target, target_is_directory=True)
+    print(f"pointed {link} -> {target} (latest composition)", flush=True)
+
+
+def _pop_name(tokens: list[str]) -> tuple[str | None, list[str]]:
+    """Pull a ``--name`` / ``-n`` (or ``--name=…``) value out of ``tokens``.
+
+    argparse only binds ``--name`` when it precedes the ``REMAINDER`` positional,
+    so ``sync vllm --name foo`` strands it in ``rest``; this recovers it. Scanning
+    stops at the first ``--`` so a passthrough command / uv args are never touched.
+    Returns ``(name, tokens_without_the_flag)``.
+    """
+    name: str | None = None
+    out: list[str] = []
+    i, n = 0, len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if tok == "--":
+            out.extend(tokens[i:])
+            break
+        if tok in ("--name", "-n"):
+            if i + 1 >= n or tokens[i + 1] == "--":
+                sys.exit("error: --name/-n requires a value")
+            name, i = tokens[i + 1], i + 2
+            continue
+        if tok.startswith("--name="):
+            name, i = tok[len("--name=") :], i + 1
+            continue
+        out.append(tok)
+        i += 1
+    return name, out
 
 
 def _require_uv() -> None:
@@ -322,10 +486,14 @@ def cmd_sync(args: argparse.Namespace) -> int:
         backends, uv_args = rest[:sep], rest[sep + 1 :]
     else:
         backends, uv_args = rest, []
+    stray_name, backends = _pop_name(backends)
+    name = _resolve_name(args.name if args.name is not None else stray_name)
     if not backends:
-        sys.exit("error: usage: manage_envs.py sync <extras...> [-- uv args...]")
+        sys.exit("error: usage: manage_envs.py sync [--name NAME] <extras...> [-- uv args...]")
     extras = _expand(backends)
     _validate_combo(extras)
+    venv_dir = _venv_dir(name)
+    _detach_symlink_target(venv_dir)
     cmd = [
         "uv",
         "sync",
@@ -335,9 +503,13 @@ def cmd_sync(args: argparse.Namespace) -> int:
         *_no_install_flags(),
         *uv_args,
     ]
-    rc = _run(cmd)
+    rc = _run(cmd, _proj_env(venv_dir))
     if rc == 0:
-        print(f"\n.venv ready ({', '.join(extras)}). Activate: source .venv/bin/activate", flush=True)
+        _point_default_venv(venv_dir)
+        print(
+            f"\n.venv ready ({', '.join(extras)}) at {venv_dir}. Activate: source {venv_dir}/bin/activate",
+            flush=True,
+        )
     return rc
 
 
@@ -354,58 +526,99 @@ def cmd_run(args: argparse.Namespace) -> int:
     _require_uv()
     rest = list(args.rest)
     if "--" not in rest:
-        sys.exit("error: usage: manage_envs.py run <extras...> -- <command...>")
+        sys.exit("error: usage: manage_envs.py run [--name NAME] <extras...> -- <command...>")
     sep = rest.index("--")
-    extras = _expand(rest[:sep])
+    stray_name, pre = _pop_name(rest[:sep])
+    name = _resolve_name(args.name if args.name is not None else stray_name)
+    extras = _expand(pre)
     command = rest[sep + 1 :]
     if not extras:
         sys.exit("error: no extras given before `--`")
     if not command:
         sys.exit("error: nothing to run after `--`")
     _validate_combo(extras)
+    venv_dir = _venv_dir(name)
     cmd = ["uv", "run", "--python", PYTHON_VERSION, *_extra_flags(extras)]
-    if _no_install_packages():
+    # With VERL_UV_NO_INSTALL, `uv run` gets --no-sync: it must use the env as-is
+    # (including a `.venv` symlink to a curated combo), so don't detach/repoint.
+    syncs = not _no_install_packages()
+    if not syncs:
         cmd.append("--no-sync")
+    elif venv_dir == DEFAULT_VENV_DIR:
+        _detach_symlink_target(venv_dir)
     cmd += ["--", *command]
-    return _run(cmd)
+    rc = _run(cmd, _proj_env(venv_dir))
+    if rc == 0 and syncs:
+        _point_default_venv(venv_dir)
+    return rc
 
 
 def cmd_shell(args: argparse.Namespace) -> int:
     """Sync the requested combination, then spawn a shell with ``.venv`` active."""
     _require_uv()
-    extras = _expand(args.backends)
+    stray_name, backends = _pop_name(list(args.backends))
+    name = _resolve_name(args.name if args.name is not None else stray_name)
+    extras = _expand(backends)
     _validate_combo(extras)
+    venv_dir = _venv_dir(name)
+    _detach_symlink_target(venv_dir)
     rc = _run(
         ["uv", "sync", "--python", PYTHON_VERSION, *_extra_flags(extras), *_no_install_flags()],
+        _proj_env(venv_dir),
     )
     if rc:
         return rc
+    _point_default_venv(venv_dir)
     shell = os.environ.get("SHELL", "/bin/bash")
-    print(f"spawning {shell} inside .venv [{', '.join(extras)}] (exit to leave)", flush=True)
+    print(f"spawning {shell} inside {venv_dir} [{', '.join(extras)}] (exit to leave)", flush=True)
     env = {
         **os.environ,
-        "VIRTUAL_ENV": str(VENV_DIR),
-        "PATH": f"{VENV_DIR / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}",
+        "VIRTUAL_ENV": str(venv_dir),
+        "UV_PROJECT_ENVIRONMENT": str(venv_dir),
+        "PATH": f"{venv_dir / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}",
         "PS1": f"(verl:{'+'.join(extras)}) {os.environ.get('PS1', '$ ')}",
     }
     return subprocess.run([shell], env=env).returncode
 
 
-def cmd_clean(_args: argparse.Namespace) -> int:
-    """Remove the project ``.venv`` (and the legacy ``.venvs/`` dir if present)."""
+def cmd_clean(args: argparse.Namespace) -> int:
+    """Remove the resolved project venv (``.venv`` or ``.venv-<name>``), then the
+    ``.venv`` pointer if it now dangles, plus the legacy ``.venvs/`` dir."""
+    venv_dir = _venv_dir(_resolve_name(args.name))
     removed = False
-    for path in (VENV_DIR, VERL_DIR / ".venvs"):
-        if path.exists():
-            shutil.rmtree(path)
-            print(f"removed {path}")
+    # Remove the target env. A bare ``.venv`` may be the latest-composition
+    # symlink — unlink it rather than rmtree'ing THROUGH to the real named env.
+    if venv_dir.is_symlink():
+        venv_dir.unlink()
+        print(f"removed symlink {venv_dir}")
+        removed = True
+    elif venv_dir.exists():
+        shutil.rmtree(venv_dir)
+        print(f"removed {venv_dir}")
+        removed = True
+    # Drop the ``.venv`` pointer if it targeted what we just removed (now dangling).
+    link = DEFAULT_VENV_DIR
+    if link != venv_dir and link.is_symlink():
+        try:
+            points_here = link.resolve() == venv_dir.resolve()
+        except OSError:
+            points_here = True  # broken link -> safe to drop
+        if points_here or not link.exists():
+            link.unlink()
+            print(f"removed dangling symlink {link}")
             removed = True
+    legacy = VERL_DIR / ".venvs"
+    if legacy.exists():
+        shutil.rmtree(legacy)
+        print(f"removed {legacy}")
+        removed = True
     if not removed:
-        print("(no-op) no .venv to remove")
+        print(f"(no-op) no venv to remove at {venv_dir}")
     return 0
 
 
-def cmd_list(_args: argparse.Namespace) -> int:
-    """Show available extras, conflict rules, .venv state, and prefetch plan."""
+def cmd_list(args: argparse.Namespace) -> int:
+    """Show available extras, conflict rules, venv state, and prefetch plan."""
     print("extras (one universal uv.lock; cu130/torch-2.11 + cpu):")
     print(f"  inference (cu130/torch-2.11) : {', '.join(INFERENCE_BACKENDS)}")
     print(f"  training  (cu130/torch-2.11) : {', '.join(TRAINING_BACKENDS)}")
@@ -415,8 +628,10 @@ def cmd_list(_args: argparse.Namespace) -> int:
     for cs in CONFLICT_SETS:
         print("  {" + ", ".join(sorted(cs)) + "}")
 
-    print("\nproject .venv:")
-    py = VENV_DIR / "bin" / "python"
+    venv_dir = _venv_dir(_resolve_name(args.name))
+    target_label = f"{venv_dir} -> {os.readlink(venv_dir)}" if venv_dir.is_symlink() else f"{venv_dir}"
+    print(f"\nproject venv (target: {target_label}):")
+    py = venv_dir / "bin" / "python"
     if py.exists():
         try:
             ver = subprocess.check_output(
@@ -425,9 +640,23 @@ def cmd_list(_args: argparse.Namespace) -> int:
             ).strip()
         except subprocess.CalledProcessError:
             ver = "?"
-        print(f"  present (python {ver}) at {VENV_DIR}")
+        print(f"  present (python {ver}) at {venv_dir}")
     else:
-        print(f"  absent — run `python manage_envs.py sync <extras...>` to create {VENV_DIR}")
+        print(f"  absent — run `python manage_envs.py sync <extras...>` to create {venv_dir}")
+
+    # Other venvs already materialized on this checkout (default, named, or the
+    # `.venv` pointer), so a user can see / reuse / clean them by name.
+    others = sorted(p for p in VERL_DIR.glob(".venv*") if p != venv_dir and (p / "bin" / "python").exists())
+    if others:
+        print("  other venvs on this checkout (target with --name):")
+        for p in others:
+            if p.is_symlink():
+                note = f"-> {os.readlink(p)} (latest-composition pointer)"
+            elif p.name.startswith(".venv-"):
+                note = f"[--name {p.name[len('.venv-') :]}]"
+            else:
+                note = "(default)"
+            print(f"    {p}  {note}")
 
     combos = _covering_combos()
     print("\nprefetch plan (cache-warm combos; 1 inference + 1 training each):")
@@ -561,6 +790,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "pyproject.toml): the cu12.9 world (veomni, nemoautomodel) and trtllm "
         "(a CUDA-13 RC)."
     )
+    name_help = (
+        "name a distinct project venv: targets '.venv-<NAME>' (via "
+        "UV_PROJECT_ENVIRONMENT) instead of the default '.venv', so different "
+        "backend combos / users / runs don't clobber one shared venv. Also "
+        "settable with the VERL_VENV_NAME env var (this flag wins). For 'sync' / "
+        "'run' put it before the extras."
+    )
 
     lk = sub.add_parser("lock", help="(re)generate the universal uv.lock (uv lock)")
     lk.add_argument(
@@ -572,12 +808,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser(
         "sync",
-        help="materialize .venv for one conflict-free extra combination (runtime)",
+        help="materialize .venv (or .venv-<name>) for one conflict-free extra combination (runtime)",
     )
+    s.add_argument("--name", "-n", default=None, help=name_help)
     s.add_argument(
         "rest",
         nargs=argparse.REMAINDER,
-        help="<extras...> [-- uv args...]: anything after `--` is forwarded to `uv sync`. " + extras_help,
+        help="[--name NAME] <extras...> [-- uv args...]: anything after `--` is forwarded to `uv sync`. " + extras_help,
     )
     s.set_defaults(func=cmd_sync)
 
@@ -585,20 +822,26 @@ def _build_parser() -> argparse.ArgumentParser:
         "run",
         help="uv run --extra ... -- <command> for a conflict-free combination",
     )
+    r.add_argument("--name", "-n", default=None, help=name_help)
     r.add_argument(
         "rest",
         nargs=argparse.REMAINDER,
-        help="<extras...> -- <command...>",
+        help="[--name NAME] <extras...> -- <command...>",
     )
     r.set_defaults(func=cmd_run)
 
-    sh = sub.add_parser("shell", help="sync a combination then open a shell with .venv active")
+    sh = sub.add_parser("shell", help="sync a combination then open a shell with .venv (or .venv-<name>) active")
+    sh.add_argument("--name", "-n", default=None, help=name_help)
     sh.add_argument("backends", nargs="+", help=extras_help)
     sh.set_defaults(func=cmd_shell)
 
-    sub.add_parser("list", help="show extras, conflict rules, .venv state, prefetch plan").set_defaults(func=cmd_list)
+    ls = sub.add_parser("list", help="show extras, conflict rules, venv state, prefetch plan")
+    ls.add_argument("--name", "-n", default=None, help=name_help)
+    ls.set_defaults(func=cmd_list)
 
-    sub.add_parser("clean", help="remove the project .venv").set_defaults(func=cmd_clean)
+    cl = sub.add_parser("clean", help="remove the project .venv (or .venv-<name>)")
+    cl.add_argument("--name", "-n", default=None, help=name_help)
+    cl.set_defaults(func=cmd_clean)
 
     pf = sub.add_parser(
         "prefetch",

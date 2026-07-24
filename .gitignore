@@ -97,7 +97,8 @@ celerybeat-schedule
 
 # virtualenv
 venv/
-.venv/
+.venv
+.venv-*
 .venvs/
 ENV/
 !**/workers/env/
