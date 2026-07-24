@@ -267,26 +267,21 @@ The equivalent raw ``uv`` command is::
 Name a separate venv
 ::::::::::::::::::::::
 
-By default every combination re-points the same project venv (``.venv``). To keep
-several combinations (or per-user / per-run envs) side by side on one checkout,
-pass ``--name NAME`` (or set ``VERL_VENV_NAME``); the real env goes in
-``.venv-<NAME>``, wired to ``uv`` through ``UV_PROJECT_ENVIRONMENT``::
+By default every combination reuses the same ``.venv``. To keep several
+combinations (or per-user / per-run envs) side by side, add ``--name NAME`` (or
+set ``VERL_VENV_NAME``)::
 
-   python manage_envs.py sync --name vllm-mega vllm megatron    # -> .venv-vllm-mega
-   python manage_envs.py sync --name sglang-fsdp sglang fsdp    # -> .venv-sglang-fsdp
+   python manage_envs.py sync --name vllm-mega vllm megatron
+   python manage_envs.py sync --name sglang-fsdp sglang fsdp
 
-After each named ``sync`` (or ``shell``) the conventional ``.venv`` is updated to
-be a **symlink to the composition you just synced**, so it always tracks the
-latest env and the usual entry points keep working::
+``.venv`` always tracks the combination you synced most recently, so activation
+is unchanged::
 
-   source .venv/bin/activate                 # activates the most recent composition
+   source .venv/bin/activate
 
-A nameless ``sync`` turns ``.venv`` back into a real directory. ``sync`` / ``run``
-/ ``shell`` / ``clean`` / ``list`` all take the same ``--name`` (for ``sync`` /
-``run`` put it before the extras); ``python manage_envs.py list`` shows the
-target venv, where ``.venv`` points, and any other ``.venv*`` on the checkout.
-``clean`` unlinks the ``.venv`` pointer rather than deleting through it. An
-explicit ``UV_PROJECT_ENVIRONMENT`` is honored as-is when no name is given.
+The same ``--name`` works with ``run`` / ``shell`` / ``clean`` / ``list`` (for
+``sync`` / ``run`` put it before the extras); ``python manage_envs.py list``
+shows what you have.
 
 Keep your own build of a package
 ::::::::::::::::::::::::::::::::::
