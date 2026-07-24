@@ -178,6 +178,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install qwen_vl_utils && \
     pip install flash-linear-attention
 
+# Smoke: shim surface used by verl/models/mcore/bridge.py (fails the image build if missing).
+# Placed after megatron-core so the shim import surface is fully resolvable.
+RUN python3 -c "from megatron.bridge import AutoBridge; \
+from megatron.bridge.training.utils.train_utils import LinearForLastLayer, freeze_moe_router, make_value_model; \
+print('megatron-bridge OK')"
+
 RUN --mount=type=cache,target=/root/.cache/pip \
     cd /workspace && git clone https://github.com/verl-project/verl.git && \
     cd verl && pip install .

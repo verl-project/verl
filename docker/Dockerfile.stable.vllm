@@ -150,6 +150,11 @@ RUN pip install --no-deps megatron-bridge==0.5.0
 
 RUN pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@${MCORE_VERSION}
 
+# Smoke: shim surface used by verl/models/mcore/bridge.py (fails the image build if missing).
+RUN python3 -c "from megatron.bridge import AutoBridge; \
+from megatron.bridge.training.utils.train_utils import LinearForLastLayer, freeze_moe_router, make_value_model; \
+print('megatron-bridge OK')"
+
 RUN pip install torchcodec --index-url=https://download.pytorch.org/whl/cu130
 
 RUN apt-get update && \
