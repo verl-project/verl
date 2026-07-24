@@ -14,7 +14,6 @@
 
 
 import logging
-from collections.abc import Generator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence
 
@@ -33,7 +32,7 @@ from veomni.utils.seqlen_pos_transform_utils import prepare_fa_kwargs_from_posit
 import verl.utils.torch_functional as verl_F
 
 if TYPE_CHECKING:
-    from verl.workers.engine.spec import ShardSpec
+    pass
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -580,9 +579,9 @@ class VeOmniEngine(FSDPEngine):
         if self._is_offload_optimizer:
             offload_veomni_optimizer(self.optimizer)
 
-    def get_per_tensor_param_shard(self, **kwargs) -> Generator[tuple[str, torch.Tensor, "ShardSpec"], None, None]:
-        """Yield each rank's *local* shard with its :class:`ShardSpec` -- consumed by
-        the ``delta_sharded`` checkpoint engine (diff on shards, gather only changes).
+    def get_per_tensor_param_shard(self, **kwargs):
+        """Yield each rank's *local* shard ``(name, local_shard, ShardSpec)`` -- the
+        DTensor export plus veomni's EP declarations. Pure export, no side effects.
 
         Dense params pass their FSDP DTensor placement through verbatim (flat
         ``Shard(0)`` fast path). Grouped expert params are split twice: the expert
@@ -694,6 +693,24 @@ class VeOmniEngine(FSDPEngine):
                 yield name, local.reshape(-1), spec
 
         return _gen(), None
+
+    def _hf_delta_entry(self, name, spec, place, lidx, lval):
+        """veomni's per-param entry builder: EP/converter specs (fused expert
+        stacks) go through this backend's own converter machinery (see
+        :mod:`verl.workers.engine.veomni.utils`); everything else falls back to
+        the FSDP engine's DTensor identity handling."""
+        from ..spec import BlockPlacement
+        from .utils import NO_SLOTS_MSG, hf_entry_converter
+
+        if spec.to_hf_chunk is not None and isinstance(place, BlockPlacement) and spec.hf_slots is not None:
+            return hf_entry_converter(name, spec, place, lidx, lval)
+        if spec.to_hf_chunk is not None:
+            raise NotImplementedError(f"{name}: {NO_SLOTS_MSG}")
+        return super()._hf_delta_entry(name, spec, place, lidx, lval)
+
+    # get_per_tensor_param_delta_shard is inherited from FSDPEngine and
+    # prime_delta_snapshots from BaseEngine; both consume this class's
+    # get_per_tensor_param_shard and _hf_delta_entry overrides.
 
     def get_per_tensor_param(self, **kwargs):
         load_veomni_model_to_gpu(self.module)

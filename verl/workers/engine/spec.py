@@ -24,6 +24,15 @@ DTensor-based trainers (FSDP, veomni, ...) pass ``param.device_mesh`` /
 ``param.placements`` verbatim; ``mesh=None`` means the local tensor already is
 the whole parameter (replicated / unsharded).
 
+``BaseEngine.get_per_tensor_param_delta_shard`` is the delta engine's single
+export entry and yields FINAL HF-coordinate payloads: the weight->HF naming,
+the to-HF conversion, the diff and its snapshot are all the backend's business
+(a backend may already hold a previous-step checkpoint, e.g. Decoupled PPO, and
+diff against that); the delta engine only gathers, buckets and ships. This
+module stays purely declarative -- the converter-agnostic execution helpers
+live in :mod:`verl.workers.engine.utils` (``hf_delta_export`` /
+``prime_delta_snapshots``), and backend-specific converters ride the specs.
+
 ``to_hf_chunk`` + ``hf_slots`` describe trainers whose logical parameter differs
 from the HF tensor(s) (e.g. veomni's fused expert stacks): a dim-0-separable
 converter plus its static output enumeration. Both are None for identity params
