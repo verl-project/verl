@@ -274,6 +274,7 @@ def gptmodel_forward_model_engine(
     mtp_enable_train: bool = False,
     local_cp_size: Optional[int] = None,
     forced_max_seqlen: Optional[int] = None,
+    router_padding_mask: torch.Tensor | None = None,
 ):
     """Default forward pass for GPT models with optional sequence packing."""
 
@@ -338,6 +339,16 @@ def gptmodel_forward_model_engine(
         attention_mask = None
         if vision_model:
             input_ids_rmpad, attention_mask = build_vlm_attn_mask_thd(input_ids, pad_token_id)
+
+        if router_padding_mask is not None:
+            if local_cp_size is None:
+                raise ValueError("router_padding_mask requires local_cp_size")
+            expected_local_tokens = int(packed_seq_params.cu_seqlens_q_padded[-1].item()) // local_cp_size
+            if router_padding_mask.dtype != torch.bool or router_padding_mask.numel() != expected_local_tokens:
+                raise ValueError(
+                    "Dynamic CP router padding mask must be boolean and match the local packed token count"
+                )
+            model_kwargs["padding_mask"] = router_padding_mask
 
         output_orig = model(
             input_ids=input_ids_rmpad,

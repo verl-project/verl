@@ -34,6 +34,15 @@ from verl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpoint
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
+from verl.utils.dynamic_cp_scheduler import (
+    DCP_GROUP_LEADER,
+    DCP_LOCAL_NUM_TOKENS,
+    DCP_PADDING_MASK,
+    DCP_SAMPLE_IDS,
+    DynamicCPScheduler,
+    get_megatron_dynamic_cp_scheduler_cls,
+    postprocess_dynamic_cp_batch,
+)
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction, apply_router_replay_patch
 from verl.utils.megatron.router_replay_utils import (
@@ -90,6 +99,21 @@ class MegatronEngine(BaseEngine):
         self.optimizer_config = optimizer_config
         self.checkpoint_config = checkpoint_config
         assert self.engine_config.use_mbridge, "use_mbridge must be True"
+        if self.engine_config.dynamic_context_parallel:
+            if not self.engine_config.use_remove_padding:
+                raise ValueError("dynamic_context_parallel requires use_remove_padding=True")
+            if self.engine_config.use_fused_kernels:
+                raise NotImplementedError("Dynamic CP does not support fused model kernels")
+            if self.model_config.model_type == "value_model":
+                raise NotImplementedError("Dynamic CP currently supports language models only")
+            if hasattr(self.model_config.hf_config, "vision_config"):
+                raise NotImplementedError("Dynamic CP does not support multimodal models")
+            if self.model_config.mtp.enable and self.model_config.mtp.enable_train:
+                raise NotImplementedError("Dynamic CP does not support MTP training")
+            if self.engine_config.router_replay.mode != "disabled":
+                raise NotImplementedError("Dynamic CP does not support router replay")
+            if self.engine_config.virtual_pipeline_model_parallel_size not in (None, 1):
+                raise NotImplementedError("Dynamic CP does not support virtual pipeline parallelism")
         self._init_device_mesh()
 
         set_random_seed(seed=self.engine_config.seed)
@@ -148,9 +172,7 @@ class MegatronEngine(BaseEngine):
                 "dynamic_context_parallel is not supported in your megatron version, "
                 + "please update your megatron version to the latest version"
             )
-            assert self.engine_config.max_seqlen_per_dp_cp_rank is not None, (
-                "max_seqlen_per_dp_cp_rank is required when dynamic_context_parallel is enabled"
-            )
+            get_megatron_dynamic_cp_scheduler_cls()
             extra_args["dynamic_context_parallel"] = self.engine_config.dynamic_context_parallel
 
         mpu.initialize_model_parallel(
@@ -185,13 +207,15 @@ class MegatronEngine(BaseEngine):
             self.share_embeddings_and_output_weights = False
             override_transformer_config["share_embeddings_and_output_weights"] = False
         if self.engine_config.dynamic_context_parallel:
-            override_transformer_config["max_seqlen_per_dp_cp_rank"] = self.engine_config.max_seqlen_per_dp_cp_rank
-            # note(baiyan): we must set the transformer_config.dynamic_context_parallel to False
-            # because of the bad coupling design in Megatron-LM
-            # https://github.com/xiaoyao0115/Megatron-LM/blob/88733ab6614e3e91b9d095172f41e7d8b5d8e9d4/megatron/core/pipeline_parallel/dynamic_cp_schedule.py#L552-L553
-            # but it does not affect the functionality of dynamic CP, so we can use it to avoid the coupling.
-            override_transformer_config["dynamic_context_parallel"] = False
-            override_transformer_config["context_parallel_size"] = mpu.get_data_parallel_world_size()
+            override_transformer_config.update(
+                {
+                    "calculate_per_token_loss": True,
+                    "context_parallel_size": self.engine_config.context_parallel_size,
+                    # verl invokes the MCore scheduler before the pipeline schedule.
+                    "dynamic_context_parallel": False,
+                    "max_seqlen_per_dp_cp_rank": self.engine_config.max_seqlen_per_dp_cp_rank,
+                }
+            )
         self.provider = None
         self.vanilla_bridge = self.engine_config.vanilla_mbridge
 
@@ -413,10 +437,13 @@ class MegatronEngine(BaseEngine):
             mpu.get_tensor_model_parallel_rank() == 0
             and mpu.get_pipeline_model_parallel_rank() == mpu.get_pipeline_model_parallel_world_size() - 1
             and mpu.get_context_parallel_rank() == 0
+            and (not self.engine_config.dynamic_context_parallel or mpu.get_data_parallel_rank() == 0)
         )
 
     def initialize(self):
         self._build_tf_config()
+        if self.engine_config.dynamic_context_parallel and getattr(self.tf_config, "fp8", None) not in (None, False):
+            raise NotImplementedError("Dynamic CP does not support FP8 training")
 
         self.module = self._build_megatron_module()
 
@@ -600,6 +627,9 @@ class MegatronEngine(BaseEngine):
         return mpu.get_data_parallel_world_size()
 
     def get_data_parallel_group(self):
+        if self.engine_config.dynamic_context_parallel:
+            # The replicated DCP batch is one logical data-parallel replica.
+            return mpu.get_dynamic_data_context_parallel_groups(group_size=1)
         return mpu.get_data_parallel_group()
 
     def get_model_parallel_group(self):
@@ -672,11 +702,21 @@ class MegatronEngine(BaseEngine):
         self._distillation_use_topk_active = tu.get_non_tensor_data(data, key="distillation_use_topk", default=False)
         tu.assign_non_tensor(data, sp_size=self.engine_config.context_parallel_size)
 
+        if self.engine_config.dynamic_context_parallel:
+            if self._distillation_use_topk_active or tu.get_non_tensor_data(
+                data, key="distillation_only", default=False
+            ):
+                raise NotImplementedError("Dynamic CP does not support distillation")
+            if tu.get_non_tensor_data(data, key="enable_routing_replay", default=False):
+                raise NotImplementedError("Dynamic CP does not support router replay")
+
         # compute num_tokens in global batch for loss normalization
-        batch_num_tokens = data["loss_mask"].sum().to(get_device_id())
-        torch.distributed.all_reduce(
-            batch_num_tokens, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group()
-        )
+        loss_mask = data["loss_mask"]
+        batch_num_tokens = (loss_mask.values().sum() if loss_mask.is_nested else loss_mask.sum()).to(get_device_id())
+        if not self.engine_config.dynamic_context_parallel:
+            torch.distributed.all_reduce(
+                batch_num_tokens, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group()
+            )
         tu.assign_non_tensor(data, batch_num_tokens=batch_num_tokens.item())
         tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
 
@@ -685,9 +725,10 @@ class MegatronEngine(BaseEngine):
         # all-reduce over the DP group gives the global value.
         if self.tf_config is not None and self.tf_config.calculate_per_token_loss:
             routed_num_tokens = self._routed_num_tokens(data).to(get_device_id())
-            torch.distributed.all_reduce(
-                routed_num_tokens, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group()
-            )
+            if not self.engine_config.dynamic_context_parallel:
+                torch.distributed.all_reduce(
+                    routed_num_tokens, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group()
+                )
             tu.assign_non_tensor(data, routed_num_tokens=routed_num_tokens.item())
 
         # BSHD path only: pad every micro-batch to the mini-batch's global max seq_len so the
@@ -706,13 +747,28 @@ class MegatronEngine(BaseEngine):
         else:
             num_batches_divided_by = None
 
-        micro_batches, indices = prepare_micro_batches(
-            data=data,
-            dp_group=self.get_data_parallel_group(),
-            num_batches_divided_by=num_batches_divided_by,
-            same_micro_num_in_dp=True,
-            min_num_micro_batch=None,
-        )
+        dcp_group = None
+        if self.engine_config.dynamic_context_parallel:
+            dcp_group = mpu.get_data_parallel_group(with_context_parallel=True)
+            scheduler = DynamicCPScheduler(
+                max_seqlen_per_dp_cp_rank=self.engine_config.max_seqlen_per_dp_cp_rank,
+                dp_size=mpu.get_data_parallel_world_size(),
+                cp_size=mpu.get_context_parallel_world_size(),
+            )
+            micro_batches = scheduler.schedule(
+                data,
+                dcp_group,
+                tp_size=mpu.get_tensor_model_parallel_world_size(),
+            )
+            indices = None
+        else:
+            micro_batches, indices = prepare_micro_batches(
+                data=data,
+                dp_group=self.get_data_parallel_group(),
+                num_batches_divided_by=num_batches_divided_by,
+                same_micro_num_in_dp=True,
+                min_num_micro_batch=None,
+            )
 
         if num_batches_divided_by is not None:
             assert len(micro_batches) % num_batches_divided_by == 0, (
@@ -799,7 +855,10 @@ class MegatronEngine(BaseEngine):
 
         output = {}
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
-            output = postprocess_batch_func(output_lst=losses_reduced, indices=indices, data=data)
+            if dcp_group is not None:
+                output = postprocess_dynamic_cp_batch(losses_reduced, len(data), dcp_group)
+            else:
+                output = postprocess_batch_func(output_lst=losses_reduced, indices=indices, data=data)
             if RouterReplayHelper.is_r2_record_action(self.tf_config):
                 output["model_output"]["routed_experts"] = layers_topk_idx
         if enable_routing_replay:
@@ -955,17 +1014,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
     ):
         batch: TensorDict = next(batch_iter)
 
-        if self.engine_config.dynamic_context_parallel:
-            # split the batch and give the sub-batches to each dp-cp group
-            from verl.utils.megatron_utils import dynamic_cp_split_batch
-
-            batch = dynamic_cp_split_batch(
-                batch=batch,
-                engine_config=self.engine_config,
-                dp_size=mpu.get_data_parallel_world_size(),
-                dp_rank=mpu.get_data_parallel_rank(),
-            )
-
         batch = batch.to(get_device_id())
         use_fused_kernels = tu.get_non_tensor_data(batch, key="use_fused_kernels", default=False)
         calculate_entropy = tu.get_non_tensor_data(batch, key="calculate_entropy", default=False)
@@ -985,6 +1033,14 @@ class MegatronEngineWithLMHead(MegatronEngine):
         attention_mask = model_inputs["attention_mask"]
         multi_modal_inputs = model_inputs["multi_modal_inputs"]
         local_cp_size = tu.get_non_tensor_data(data=batch, key="local_cp_size", default=None)
+        if self.engine_config.dynamic_context_parallel and local_cp_size is None:
+            raise RuntimeError("Dynamic CP micro-batch is missing local_cp_size")
+        router_padding_mask = None
+        if self.engine_config.dynamic_context_parallel:
+            router_padding_mask = tu.get_non_tensor_data(data=batch, key=DCP_PADDING_MASK, default=None)
+            if router_padding_mask is None:
+                raise RuntimeError("Dynamic CP micro-batch is missing its router padding mask")
+            router_padding_mask = router_padding_mask.to(input_ids.device, non_blocking=True).unsqueeze(0)
         loss_mask = model_inputs["loss_mask"]
 
         unwrapped_model = unwrap_model(model)
@@ -1090,6 +1146,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 data_format=data_format,
                 mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
                 local_cp_size=local_cp_size,
+                router_padding_mask=router_padding_mask,
                 forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
             )
 
@@ -1125,7 +1182,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
             loss = torch.tensor(1.0, device=device)
             scaled_loss = loss
             metrics = {}
-        if local_cp_size is not None:
+        if local_cp_size is not None and not self.engine_config.dynamic_context_parallel:
             # aggregate model_output by DP-CP groups
             from verl.utils.megatron_utils import dynamic_cp_merge_output
 
@@ -1136,11 +1193,12 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 local_cp_size=local_cp_size,
             )
 
-        output = {
-            "model_output": model_output,
-            "loss": loss.detach().item(),
-            "metrics": metrics,
-        }
+        output = {"loss": loss.detach().item(), "metrics": metrics}
+        if forward_only or not self.engine_config.dynamic_context_parallel:
+            output["model_output"] = model_output
+        if self.engine_config.dynamic_context_parallel:
+            output[DCP_SAMPLE_IDS] = tu.get_non_tensor_data(data, key=DCP_SAMPLE_IDS, default=None)
+            output[DCP_GROUP_LEADER] = tu.get_non_tensor_data(data, key=DCP_GROUP_LEADER, default=False)
 
         # calculate_per_token_loss=True (auto-enabled by Megatron-Bridge at CP>1) puts
         # Megatron in its per-token regime: loss_func must return (loss_sum, num_tokens,
@@ -1149,12 +1207,12 @@ class MegatronEngineWithLMHead(MegatronEngine):
         # of the aux/z loss by num_tokens; a 2-tuple leaves total_num_tokens=0, so the factor
         # is never cancelled (the ~1e4 grad_norm blow-up at CP>1).
         if self.tf_config is not None and self.tf_config.calculate_per_token_loss and loss_function is not None:
-            # seq-mean-token-mean is the one incompatible agg mode: its per-sequence 1/n_s
-            # uses CP-local shard counts that diverge from the global normalization. The
-            # other modes compose correctly across CP shards.
+            # Static CP cannot compose per-sequence token means from local output shards.
+            # DCP reconstructs each sequence inside its dynamic CP group before applying
+            # the native loss, so all aggregation modes remain valid there.
             if hasattr(loss_function, "keywords") and "config" in loss_function.keywords:
                 _agg_mode = getattr(loss_function.keywords["config"], "loss_agg_mode", None)
-                if _agg_mode == "seq-mean-token-mean":
+                if _agg_mode == "seq-mean-token-mean" and not self.engine_config.dynamic_context_parallel:
                     raise ValueError(
                         "loss_agg_mode='seq-mean-token-mean' is incompatible with "
                         "calculate_per_token_loss=True (auto-enabled by Megatron-Bridge "
@@ -1162,10 +1220,8 @@ class MegatronEngineWithLMHead(MegatronEngine):
                         "local-shard counts that diverge from global under CP. Use one "
                         "of: 'token-mean', 'seq-mean-token-sum', 'seq-mean-token-sum-norm'."
                     )
-            # verl never passes a router padding_mask, so the MoE router normalizes the
-            # aux/z loss by logits.shape[0]. THD packs padding out -> that equals the real
-            # token count; BSHD leaves it at B*S (padding-inclusive), while gradients are
-            # divided by the real token count -> a padding-ratio mis-normalization.
+            # The static BSHD path does not pass a router padding mask, so the MoE router
+            # normalizes aux/z loss by B*S while gradients are divided by real tokens.
             if not self.engine_config.use_remove_padding:
                 raise ValueError(
                     "calculate_per_token_loss=True requires use_remove_padding=True. "
@@ -1174,19 +1230,22 @@ class MegatronEngineWithLMHead(MegatronEngine):
                     "while gradients are divided by the real token count. Use THD "
                     "(use_remove_padding=True) or disable CP."
                 )
-            # finalize_model_grads all-reduces the returned token count over the DP*CP group
-            # and divides every gradient by it. Real tokens are CP-replicated across the CP
-            # ranks, so report the per-CP-rank share (/cp_size); otherwise that DP*CP sum
-            # over-counts by cp_size and every gradient comes out 1/cp_size too small.
-            cp_size = self.engine_config.context_parallel_size
-            local_num_tokens = (self._routed_num_tokens(data) // cp_size).to(torch.int)
+            if self.engine_config.dynamic_context_parallel:
+                local_num_tokens = tu.get_non_tensor_data(data, key=DCP_LOCAL_NUM_TOKENS, default=None)
+                if local_num_tokens is None:
+                    raise ValueError("Dynamic CP micro-batch is missing its local token count")
+                local_num_tokens = torch.as_tensor(local_num_tokens, device=device, dtype=torch.int)
+            else:
+                # Static CP replicas contain the same real tokens, so report one CP share.
+                cp_size = self.engine_config.context_parallel_size
+                local_num_tokens = (self._routed_num_tokens(data) // cp_size).to(torch.int)
             # n_i is the global routed-token count (all-reduced in forward_backward_batch);
             # scaling loss by the same value makes Sum(L_i)/Sum(n_i) recover the loss. Falls
             # back to local counts when not plumbed (single-rank / tests).
-            routed_num_tokens = data["routed_num_tokens"] if "routed_num_tokens" in data.keys() else None
+            routed_num_tokens = tu.get_non_tensor_data(data, key="routed_num_tokens", default=None)
             if routed_num_tokens is None:
                 routed_num_tokens = self._routed_num_tokens(data)
-            dp_size = data["dp_size"] if "dp_size" in data.keys() else 1
+            dp_size = tu.get_non_tensor_data(data, key="dp_size", default=1)
             local_sum = loss * routed_num_tokens / dp_size
             return local_sum, local_num_tokens, output
 
