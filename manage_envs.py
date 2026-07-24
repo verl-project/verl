@@ -51,31 +51,17 @@ the underlying ``uv`` invocation, e.g.::
 
 Naming distinct venvs
 ---------------------
-By default everything lands in the project venv ``.venv``. Pass ``--name NAME``
-(or set ``VERL_VENV_NAME``) to put the real env in ``.venv-<NAME>`` instead — uv
-is pointed at it via ``UV_PROJECT_ENVIRONMENT`` — so several backend combos,
-users, or runs can coexist on one checkout without clobbering a single shared
-venv::
+By default every combination reuses the project venv ``.venv``. Add ``--name
+NAME`` (or set ``VERL_VENV_NAME``) to keep several combinations side by side;
+``.venv`` always tracks the one you synced most recently, so activation is
+unchanged::
 
-    python manage_envs.py sync --name vllm-mega vllm megatron   # -> .venv-vllm-mega
-    python manage_envs.py shell --name sglang-fsdp sglang fsdp  # -> .venv-sglang-fsdp
+    python manage_envs.py sync --name vllm-mega vllm megatron
+    python manage_envs.py sync --name sglang-fsdp sglang fsdp
+    source .venv/bin/activate                    # = the sglang-fsdp env
 
-After a named ``sync`` / ``shell`` (or a syncing ``run``) the conventional
-``.venv`` is (re)created as a **symlink to the composition just synced**, so it
-always points at the latest env and ``source .venv/bin/activate``, CI, and the
-byted wrappers keep working unchanged::
-
-    python manage_envs.py sync --name vllm-mega vllm megatron   # .venv -> .venv-vllm-mega
-    python manage_envs.py sync --name sglang-fsdp sglang fsdp   # .venv -> .venv-sglang-fsdp
-    source .venv/bin/activate                                   # = the sglang-fsdp env
-
-A nameless ``sync`` reclaims ``.venv`` as a real directory (dropping the pointer
-first, so it never writes through the link into a named env). ``clean`` unlinks
-the pointer instead of deleting through it, and drops it when it would dangle.
-``sync`` / ``run`` / ``shell`` / ``clean`` / ``list`` all accept the same
-``--name`` (or ``VERL_VENV_NAME``); for ``sync`` / ``run`` put it before the
-extras. An explicit ``UV_PROJECT_ENVIRONMENT`` is honored as-is when no name is
-given. ``prefetch`` is unaffected — it only warms the cache via throwaway envs.
+``sync`` / ``run`` / ``shell`` / ``clean`` / ``list`` all take the same
+``--name`` (for ``sync`` / ``run`` put it before the extras).
 
 Keeping internal packages out of uv's hands
 --------------------------------------------
@@ -791,11 +777,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "(a CUDA-13 RC)."
     )
     name_help = (
-        "name a distinct project venv: targets '.venv-<NAME>' (via "
-        "UV_PROJECT_ENVIRONMENT) instead of the default '.venv', so different "
-        "backend combos / users / runs don't clobber one shared venv. Also "
-        "settable with the VERL_VENV_NAME env var (this flag wins). For 'sync' / "
-        "'run' put it before the extras."
+        "keep this combination in a separate venv so several can coexist; '.venv' "
+        "tracks the latest one you sync. Also settable via VERL_VENV_NAME. For "
+        "'sync' / 'run' put it before the extras."
     )
 
     lk = sub.add_parser("lock", help="(re)generate the universal uv.lock (uv lock)")
