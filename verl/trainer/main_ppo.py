@@ -17,7 +17,8 @@ from pprint import pprint
 
 import hydra
 import ray
-from omegaconf import DictConfig, OmegaConf
+from hydra.core.hydra_config import HydraConfig
+from omegaconf import DictConfig, OmegaConf, open_dict
 
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
@@ -164,6 +165,29 @@ class TaskRunnerV1:
                 tq.close()
 
 
+def _resolve_remote_backend_from_hydra_choice(config: DictConfig) -> None:
+    """Mirror the Hydra ``remote_backend=<name>`` group choice onto
+    ``trainer.remote_backend`` and ``trainer.v1.trainer_mode`` so users
+    only need the group-choice shorthand. Explicit values already in the
+    config win: ``trainer_mode`` is only overwritten when it is still at
+    the default ``"sync"``.
+    """
+    try:
+        choice = HydraConfig.get().runtime.choices.get("remote_backend")
+    except (ValueError, AttributeError):
+        choice = None
+    if not choice:
+        return
+    with open_dict(config.trainer):
+        if not config.trainer.get("remote_backend"):
+            config.trainer.remote_backend = choice
+        v1_cfg = config.trainer.get("v1")
+        if v1_cfg is not None:
+            with open_dict(v1_cfg):
+                if v1_cfg.get("trainer_mode", "sync") == "sync":
+                    v1_cfg.trainer_mode = "remote_backend"
+
+
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
 def main(config):
     """Main entry point for PPO training with Hydra configuration management.
@@ -173,6 +197,8 @@ def main(config):
     """
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)
+
+    _resolve_remote_backend_from_hydra_choice(config)
 
     # validate config
     validate_config(

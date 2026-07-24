@@ -99,6 +99,7 @@ class RolloutReplica(ABC):
         is_reward_model: bool = False,
         is_teacher_model: bool = False,
         name_suffix: str = "",
+        **kwargs,  # forwarded from LLMServerManager.replica_init_kwargs
     ) -> None:
         self.replica_rank = replica_rank
         self.config: RolloutConfig = omega_conf_to_dataclass(config)

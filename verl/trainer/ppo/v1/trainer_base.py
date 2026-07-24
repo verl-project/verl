@@ -242,6 +242,7 @@ class PPOTrainer(ABC):
             config=self.config.actor_rollout_ref,
             distillation_config=self.config.get("distillation"),
             role=str(actor_role),
+            **self._actor_rollout_wg_extra_kwargs(),
         )
         self.resource_pool_to_cls[actor_rollout_resource_pool][str(actor_role)] = actor_rollout_cls
 
@@ -349,12 +350,15 @@ class PPOTrainer(ABC):
 
         # 9. initialize agent loop manager
         self.llm_server_manager: LLMServerManager = LLMServerManager.create(
-            config=self.config, worker_group=self.actor_rollout_wg, rollout_resource_pool=actor_rollout_resource_pool
+            config=self.config,
+            worker_group=self.actor_rollout_wg,
+            rollout_resource_pool=actor_rollout_resource_pool,
+            replica_init_kwargs=self._llm_server_replica_init_kwargs(),
         )
 
         # 10. initialize checkpoint engine manager
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
-        checkpoint_engine_config.backend = "naive"
+        checkpoint_engine_config.backend = self._checkpoint_engine_backend()
         self.checkpoint_manager: CheckpointEngineManager = CheckpointEngineManager(
             config=checkpoint_engine_config,
             actor_wg=self.actor_rollout_wg,
@@ -733,6 +737,23 @@ class PPOTrainer(ABC):
                     self.config.critic.optim.total_training_steps = optim_total_training_steps
         except Exception as e:
             logger.warning(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
+
+    # Extension hooks: subclasses override to customize the actor/rollout
+    # worker group and checkpoint-engine wiring without duplicating _setup.
+    # Defaults match the standard (non-plugin) V1 setup.
+
+    def _actor_rollout_wg_extra_kwargs(self) -> dict:
+        """Extra kwargs merged into the actor-rollout ``RayClassWithInitArgs``."""
+        return {}
+
+    def _llm_server_replica_init_kwargs(self) -> dict:
+        """Extra kwargs forwarded to each :class:`RolloutReplica` constructor by
+        :class:`LLMServerManager`. Standard replicas ignore this dict."""
+        return {}
+
+    def _checkpoint_engine_backend(self) -> str:
+        """Backend name for the :class:`CheckpointEngineManager`."""
+        return "naive"
 
     def _init_resource_pool_mgr(self):
         config = self.config
