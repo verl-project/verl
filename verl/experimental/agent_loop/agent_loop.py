@@ -1218,6 +1218,19 @@ class AgentLoopManager:
         if "priority" not in prompts.non_tensor_batch:
             prompts.non_tensor_batch["priority"] = np.arange(len(prompts), dtype=np.int64)
 
+        # [DET] record the priority assignment + a checksum of the batch order.
+        # If priority or batch order differs across runs, downstream routing/scheduling
+        # diverges. priority = np.arange(len), so its sum + the order of sample indices
+        # together characterize whether the batch is identical across runs.
+        _det_path = os.getenv("VERL_FILE_LOGGER_PATH", "")
+        if _det_path:
+            _prio = prompts.non_tensor_batch["priority"]
+            _idx = prompts.non_tensor_batch.get("index", None)
+            _idx_sum = int(np.array(_idx).sum()) if _idx is not None else -1
+            _prio_line = f"[DET] priority_batch len={len(prompts)} prio_sum={int(_prio.sum())} index_sum={_idx_sum}"
+            with open(_det_path.replace(".jsonl", "_det.log"), "a") as _f:
+                _f.write(_prio_line + "\n")
+
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         outputs = await asyncio.gather(
             *[

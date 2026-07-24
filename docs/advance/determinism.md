@@ -16,11 +16,15 @@ Useful for:
 
 ## Quick Start
 
+`full_determinism` is supported on all training engines (FSDP, Megatron, etc.) via each engine's config. The example below uses FSDP; for Megatron set `actor_rollout_ref.actor.megatron_config.full_determinism=true` (and similarly for the ref model).
+
 ```yaml
 actor_rollout_ref:
   rollout:
     full_determinism: true
     seed: 42
+    # If the policy model is not covered by vLLM batch invariance, set to 1.
+    # max_num_seqs: 1
   actor:
     fsdp_config:
       full_determinism: true
@@ -34,7 +38,11 @@ reward:
     rollout:
       full_determinism: true
       seed: 42
+      # If the RM model is not covered by vLLM batch invariance, set to 1.
+      # max_num_seqs: 1
 ```
+
+Both actor rollout and generative RM (VLM scoring) rely on vLLM batch invariance for co-batching. If your model or hardware is not covered, set `max_num_seqs=1` to serialize. Discriminative RM (score-outputting, e.g. Skywork-Reward) is forced to `1` automatically (see Reward model routing).
 
 Or via Hydra overrides:
 
@@ -50,81 +58,57 @@ python -m verl.trainer.main_ppo \
   [other config overrides...]
 ```
 
-> **Important:** `PYTHONHASHSEED` must be set **before the Python interpreter starts**. verl handles this automatically — it sets `PYTHONHASHSEED` from `rollout.seed` before `ray.init()` and propagates it to all Ray actors. Do NOT set it manually.
+If the policy or RM model is not covered by vLLM batch invariance, add `actor_rollout_ref.rollout.max_num_seqs=1` and/or `reward.reward_model.rollout.max_num_seqs=1` to serialize. Discriminative RM (score-outputting) is forced to 1 automatically.
 
 ## Configuration Reference
 
 | Parameter | Default | Scope | Description |
 |-----------|---------|-------|-------------|
 | `actor_rollout_ref.rollout.full_determinism` | `false` | Rollout | Enables deterministic rollout generation |
+| `actor_rollout_ref.rollout.max_num_seqs` | `1024` | Rollout | Set to `1` to serialize if the policy model is not covered by vLLM batch invariance |
 | `actor_rollout_ref.rollout.seed` | `42` | Rollout | Base seed; each replica uses `replica_rank + seed` |
 | `actor_rollout_ref.actor.fsdp_config.full_determinism` | `false` | Actor | Enables deterministic PyTorch ops for actor |
 | `actor_rollout_ref.ref.fsdp_config.full_determinism` | `false` | Ref model | Enables deterministic PyTorch ops for reference model |
-| `reward.reward_model.rollout.full_determinism` | `false` | Reward model | Enables deterministic RM inference (forces `max_num_seqs=1`) |
+| `reward.reward_model.rollout.full_determinism` | `false` | Reward model | Enables deterministic RM inference |
+| `reward.reward_model.rollout.max_num_seqs` | `1024` | Reward model | Discriminative RM forced to 1 under full_determinism; set to 1 for generative RM if not covered by batch invariance |
 | `reward.reward_model.rollout.seed` | `42` | Reward model | Base seed for RM vLLM server |
 
 ## How It Works
 
-Determinism is enforced at five layers. All must be enabled for full E2E reproducibility:
+`full_determinism=true` is enforced at four layers. `main_ppo.run_ppo()` sets `PYTHONHASHSEED` (from `rollout.seed`, before the interpreter starts), `VERL_FULL_DETERMINISM`, `VLLM_BATCH_INVARIANT` before `ray.init()` and forwards them to all Ray actors via `PPO_RAY_RUNTIME_ENV`. Do NOT set `PYTHONHASHSEED` manually — verl handles it.
 
-### PyTorch-level
+### Floating-point determinism
 
-`enable_full_determinism(seed)` sets `PYTHONHASHSEED`, `CUBLAS_WORKSPACE_CONFIG`, `FLASH_ATTENTION_DETERMINISTIC`, seeds all RNGs, calls `torch.use_deterministic_algorithms(True, warn_only=True)`, and disables cuDNN benchmarking. Applied in all training engine implementations.
+`enable_full_determinism(seed)` sets `CUBLAS_WORKSPACE_CONFIG`, `FLASH_ATTENTION_DETERMINISTIC`, seeds all RNGs, calls `torch.use_deterministic_algorithms(True, warn_only=True)`, and disables cuDNN benchmarking. Applied in all training engine implementations (FSDP, Megatron, etc.).
 
-### Environment propagation
+### Sampling seeds
 
-`main_ppo.run_ppo()` sets three env vars before `ray.init()`:
+- **Replica seed**: each replica uses `replica_rank + config.seed`, producing different but internally reproducible outputs across replicas. Two runs with the same config produce bitwise-aligned results.
+- **Per-request seed**: each `generate()` call injects `SamplingParams.seed = replica_rank + config.seed` to reset the sampler RNG per request, so the same prompt+seed yields the same tokens regardless of batch.
 
-- `PYTHONHASHSEED` — freezes Python hash() and dict ordering
-- `VERL_FULL_DETERMINISM` — signals subprocesses to apply determinism
-- `VLLM_BATCH_INVARIANT` — makes vLLM outputs independent of batch composition
+### Deterministic routing
 
-These are forwarded to all Ray actors via `PPO_RAY_RUNTIME_ENV`.
+- **Actor rollout**: `SingleTurnAgentLoop` uses `request_id=f"det-{priority}"` (priority from `non_tensor_batch["priority"]`), and `GlobalRequestLoadBalancer` tie-breaks with `hash(request_id) % len(candidates)` — the same request always routes to the same vLLM server across runs. (`priority` is vLLM-only; `LLMServerClient.generate()` filters it for non-vLLM backends.)
+- **Reward**: `NaiveRouter` tie-breaks equally-loaded RM replicas with `hash(request body) % len(candidates)`, so the same reward request always routes to the same replica. This neutralizes replica-level floating-point differences that seed alone cannot equalize.
 
-### vLLM batch invariance + per-request seed
+### Batch invariance
 
-`VLLM_BATCH_INVARIANT=1` ensures vLLM outputs don't depend on which other requests are batched together. Each `generate()` call injects `SamplingParams.seed = replica_rank + config.seed` to reset RNG per request.
+`VLLM_BATCH_INVARIANT=1` makes vLLM outputs independent of batch composition. Coverage is model- and hardware-dependent — see the [vLLM batch invariance docs](https://docs.vllm.ai/en/latest/features/batch_invariance/) (and [tested models](https://docs.vllm.ai/en/latest/features/batch_invariance/#tested-models)). If not covered, set `max_num_seqs=1` to serialize.
 
-### Priority scheduling + deterministic routing
+For reward specifically:
+- **Discriminative RM** (score-outputting, e.g. Skywork-Reward; no custom reward fn): `max_num_seqs` is **forced to 1** — batch invariance is verified on generation models, not score-outputting RM architectures.
+- **Generative RM** (VLM that outputs text scores, via custom reward fn): `max_num_seqs` is **not forced** — user-managed; rely on batch invariance + per-request seed.
 
-Without determinism, request order depends on arrival timing and server selection on dict iteration order. When `full_determinism=true`:
+## Side Effects
 
-- Each sample gets a globally unique priority injected into the batch (`non_tensor_batch["priority"]`), so each rollout request is scheduled with a stable, distinct priority
-- `SingleTurnAgentLoop` uses `request_id=f"det-{priority}"` instead of random UUID
-- `GlobalRequestLoadBalancer` tie-breaking uses `hash(request_id) % len(candidates)` — deterministic with frozen `PYTHONHASHSEED`
+- **Performance**: deterministic PyTorch kernels are slower and cuDNN benchmarking is disabled. Discriminative RM is serialized (`max_num_seqs=1`) under full_determinism.
+- **Recommendation**: Only enable for debugging, regression testing, or research. Leave disabled for production training.
 
-> **Note:** `priority` is a vLLM-only parameter. `LLMServerClient.generate()` automatically filters it for non-vLLM backends.
+## Limitations
 
-### Reward model serialization
-
-vLLM's `/classify` endpoint (used by RM) does not support priority or batch invariance. When `full_determinism=true`, `RewardModelManager` forces `max_num_seqs=1`, serializing RM inference one request at a time.
-
-## Side Effects and Limitations
-
-**Performance**: deterministic PyTorch kernels are slower, cuDNN benchmarking is disabled, and RM `max_num_seqs=1` causes severe throughput loss. Typical E2E throughput drops 10–30% without RM; RM determinism can drop significantly more.
-
-**Recommendation**: Only enable for debugging, regression testing, or research. Leave disabled for production training.
-
-**Nondeterministic fallbacks**: Some GPU ops have no deterministic implementation. `torch.use_deterministic_algorithms(True, warn_only=True)` warns when these are encountered.
-
-**Backend support**:
-
-| Backend | Rollout | Reward model |
-|---------|---------|--------------|
-| vLLM | ✅ | ✅ (serialized) |
-| SGLang | ❌ | ❌ |
-| TensorRT-LLM | ❌ | ❌ |
-
-**PYTHONHASHSEED**: Must be set before process start. verl handles this automatically; manual Ray actor creation must propagate it via `runtime_env`.
-
-**Data parallelism**: Each replica uses `replica_rank + seed`, producing different but internally reproducible outputs. Two runs with the same config produce bitwise-aligned results.
-
-**Multi-turn agent not supported**: Full determinism only works for single-turn rollouts (`single_turn_agent_loop`). Multi-turn rollouts (`tool_agent_loop`) are **not** bitwise reproducible, for two reasons:
-
-- `tool_agent_loop` uses a random UUID per trajectory as `request_id` and does not pass `priority` to `server_manager.generate()`, so the deterministic routing and priority scheduling described above do not apply.
-- Even with those added, each turn is interleaved with external tool calls whose execution time varies across runs, so the order in which requests arrive at vLLM cannot be made deterministic. This is inherent to multi-turn agentic workloads.
-
-For bitwise-reproducible rollouts, use `single_turn_agent_loop`. (The per-request sampling seed is still applied to multi-turn requests inside the vLLM server, but this alone is not sufficient for end-to-end reproducibility.)
+- **Hardware**: vLLM batch invariance (and some deterministic GPU ops) requires specific hardware — see the [vLLM batch invariance docs](https://docs.vllm.ai/en/latest/features/batch_invariance/) for requirements. On unsupported hardware, set `max_num_seqs=1` to serialize. `torch.use_deterministic_algorithms(True, warn_only=True)` warns when a deterministic kernel is unavailable.
+- **Backend**: only vLLM is supported.
+- **Multi-turn agent**: not supported. Full determinism only works for single-turn rollouts (`single_turn_agent_loop`). Multi-turn rollouts (`tool_agent_loop`) are **not** bitwise reproducible — `tool_agent_loop` uses a random UUID per trajectory as `request_id`, does not pass `priority`, and each turn is interleaved with external tool calls whose timing varies across runs. Use `single_turn_agent_loop` for bitwise-reproducible rollouts.
 
 ## Verifying Determinism
 
@@ -136,7 +120,7 @@ VLLM_DETERMINISM_N_GPUS=2 \
 pytest tests/workers/rollout/rollout_vllm/test_vllm_generation_determinism.py -v -s
 ```
 
-E2E training (bitwise-aligned reward curves across two full PPO runs):
+E2E training (bitwise-aligned reward curves across two full PPO runs). The discriminative RM path goes through `NaiveRouter` and is serialized (`max_num_seqs=1`):
 
 ```bash
 python tests/experimental/reward_loop/run_determinism_e2e_with_rm.py \
@@ -144,5 +128,5 @@ python tests/experimental/reward_loop/run_determinism_e2e_with_rm.py \
   --rm_model ~/models/Skywork/Skywork-Reward-V2-Llama-3.2-1B \
   --train_files ~/data/gsm8k/train.parquet \
   --val_files ~/data/gsm8k/test.parquet \
-  --n_gpus 2 --n_steps 5
+  --n_gpus 2 --rm_tp 1 --rollout_tp 1 --n_steps 10
 ```

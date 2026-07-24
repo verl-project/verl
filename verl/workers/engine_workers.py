@@ -360,8 +360,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
             Timer(name="train_batch", logger=None) as timer,
         ):
             output = self.engine.train_batch(data, loss_function=self.loss_fn)
-            # containing loss, model_output and metrics
-            # for training, we only care about loss and metrics
         delta_time = timer.last
 
         update_lr_scheduler = tu.get(data, key="update_lr_scheduler", default=False)

@@ -23,9 +23,6 @@ Tests:
 2. Cross-instance vLLM: two separate server instances produce identical logprobs.
 3. Cross-instance AgentLoop: two full AgentLoopManager pipelines produce identical logprobs.
 
-Cross-instance RewardLoop determinism is verified by the separate E2E script:
-  tests/experimental/reward_loop/run_determinism_e2e_with_rm.py
-
 Environment overrides:
   VLLM_DETERMINISM_DENSE_MODEL_PATH  - policy model (default Qwen2.5-0.5B-Instruct)
   VLLM_DETERMINISM_N_GPUS            - GPUs for AgentLoop tests (default 1)

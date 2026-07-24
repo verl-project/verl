@@ -37,8 +37,16 @@ def enable_full_determinism(seed: int):
     os.environ["PYTHONHASHSEED"] = str(seed)
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
     os.environ["FLASH_ATTENTION_DETERMINISTIC"] = "1"
+    os.environ["NCCL_DETERMINISTIC"] = "1"
+    os.environ["NCCL_ALGO"] = "Ring"
+    os.environ["NCCL_PROTO"] = "Simple"
+    # flash-attn's Triton cross-entropy kernel (used by logprobs_from_logits to
+    # compute log_probs) has a non-deterministic reduction that is NOT covered by
+    # FLASH_ATTENTION_DETERMINISTIC (only governs attention kernels' backward) nor
+    # by torch.use_deterministic_algorithms (Triton custom ops don't trigger
+    # warn_only). Force the pure-PyTorch log_softmax+gather path instead.
+    os.environ.setdefault("VERL_DISABLE_FLASH_ATTN_CE", "1")
     if is_npu_available:
-        # The environment variable required to enable deterministic mode on Ascend NPUs.
         os.environ["HCCL_DETERMINISTIC"] = "true"
         os.environ["CLOSE_MATMUL_K_SHIFT"] = "1"
 

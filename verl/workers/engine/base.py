@@ -125,7 +125,31 @@ class BaseEngine:
 
         self.optimizer_zero_grad()
         outputs = self.forward_backward_batch(data, loss_function, forward_only=False)
+        # Use an instance call counter so run1/run2 can align the Nth train_batch call.
+        # PPO step mapping isn't available at the engine layer.
+        _det_step = getattr(self, "_det_call_count", 0)
+        self._det_call_count = _det_step + 1
+        _det_rank = self.get_data_parallel_rank()
+        _fb_metrics = outputs.get("metrics", {})
+        _fb_loss = _fb_metrics.get("loss")
+        _fb_line = f"[DET] step={_det_step} after_forward_backward rank={_det_rank}"
+        if isinstance(_fb_loss, torch.Tensor):
+            _fb_line += f" loss_sum={_fb_loss.float().sum().item():.10e}"
+        else:
+            _fb_line += f" loss={_fb_loss}"
+        print(_fb_line, flush=True)
+        _det_path = os.getenv("VERL_FILE_LOGGER_PATH", "")
+        if _det_path:
+            with open(_det_path.replace(".jsonl", "_det.log"), "a") as _f:
+                _f.write(_fb_line + "\n")
+
         grad_norm = self.optimizer_step()
+        _opt_line = f"[DET] step={_det_step} after_optimizer_step rank={_det_rank} grad_norm={grad_norm:.10e}"
+        print(_opt_line, flush=True)
+        if _det_path:
+            with open(_det_path.replace(".jsonl", "_det.log"), "a") as _f:
+                _f.write(_opt_line + "\n")
+
         if self.is_mp_src_rank_with_outputs():
             assert "grad_norm" not in outputs["metrics"]
             outputs["metrics"]["grad_norm"] = grad_norm

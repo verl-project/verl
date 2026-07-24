@@ -58,6 +58,10 @@ def run_training(
     rm_tp=1,
     train_files=None,
     val_files=None,
+    attn_impl=None,
+    param_dtype=None,
+    temperature=0.7,
+    max_num_seqs=4,
 ):
     """Run one PPO training session via main_ppo using Hydra overrides.
 
@@ -98,30 +102,38 @@ def run_training(
         f"actor_rollout_ref.rollout.seed={SEED}",
         "actor_rollout_ref.rollout.scheduling_policy=priority",
         "actor_rollout_ref.rollout.enforce_eager=true",
-        "actor_rollout_ref.rollout.temperature=0.7",
+        f"actor_rollout_ref.rollout.temperature={temperature}",
         "actor_rollout_ref.rollout.calculate_log_probs=true",
         "actor_rollout_ref.rollout.n=1",
         "actor_rollout_ref.rollout.prompt_length=64",
         "actor_rollout_ref.rollout.response_length=64",
         "actor_rollout_ref.rollout.max_model_len=128",
-        "actor_rollout_ref.rollout.max_num_seqs=4",
+        f"actor_rollout_ref.rollout.max_num_seqs={max_num_seqs}",
         f"actor_rollout_ref.rollout.tensor_model_parallel_size={rollout_tp}",
         "actor_rollout_ref.rollout.agent.num_workers=1",
         "actor_rollout_ref.rollout.disable_log_stats=true",
         # Actor
         "actor_rollout_ref.actor.fsdp_config.full_determinism=true",
         f"actor_rollout_ref.actor.fsdp_config.seed={SEED}",
-        "actor_rollout_ref.actor.fsdp_config.param_offload=true",
-        "actor_rollout_ref.actor.fsdp_config.optimizer_offload=true",
+        "actor_rollout_ref.actor.fsdp_config.param_offload=false",
+        "actor_rollout_ref.actor.fsdp_config.optimizer_offload=false",
         "actor_rollout_ref.actor.fsdp_config.fsdp_size=1",
         "actor_rollout_ref.actor.use_dynamic_bsz=true",
         "actor_rollout_ref.actor.ppo_mini_batch_size=4",
+        "actor_rollout_ref.actor.shuffle=false",
         # Ref
         "actor_rollout_ref.ref.fsdp_config.full_determinism=true",
         f"actor_rollout_ref.ref.fsdp_config.seed={SEED}",
         # Model
         f"actor_rollout_ref.model.path={policy_model}",
         "actor_rollout_ref.model.trust_remote_code=true",
+        # Diag overrides (None = keep defaults: flash_attention_2 + bf16).
+        *([f"actor_rollout_ref.model.attn_implementation={attn_impl}"] if attn_impl else []),
+        *(
+            [f"actor_rollout_ref.actor.fsdp_config.mixed_precision.param_dtype={param_dtype}"]
+            if param_dtype
+            else []
+        ),
         # RM — colocate mode: shares GPU pool with actor/ref/rollout.
         # RM scoring goes through _compute_reward_colocate path with
         # sleep/wake GPU memory management (not agent-loop HTTP path).
@@ -131,11 +143,9 @@ def run_training(
         "reward.reward_model.rollout.full_determinism=true",
         f"reward.reward_model.rollout.seed={SEED}",
         "reward.reward_model.rollout.enforce_eager=true",
-        "reward.reward_model.rollout.gpu_memory_utilization=0.4",
+        "reward.reward_model.rollout.gpu_memory_utilization=0.3",
         f"reward.reward_model.rollout.tensor_model_parallel_size={rm_tp}",
         "reward.reward_model.rollout.max_model_len=512",
-        # Serialize RM inference for determinism: max_num_seqs=1 ensures
-        # each RM forward pass processes one request at a time.
         "reward.reward_model.rollout.max_num_seqs=1",
         "reward.reward_model.rollout.skip_tokenizer_init=false",
         "reward.reward_model.rollout.disable_log_stats=true",
@@ -173,7 +183,32 @@ def run_training(
     subprocess.run(["ray", "stop"], env=env, capture_output=True)
     time.sleep(3)
 
+    # [DET] checkpoints are written directly to files by both layers (NOT via stdout,
+    # because Ray's driver stdout aggregation mangles multi-actor prints with
+    # "[repeated Nx across cluster]" tags and broken newlines):
+    #   - trainer layer (RayPPOTrainer in TaskRunner actor) -> /tmp/verl_det_{run_name}.log
+    #     (path derived from config, no env-var propagation needed)
+    #   - engine layer (worker actors) -> {output_dir}/{run_name}_det.log
+    #     (via VERL_FILE_LOGGER_PATH)
+    # We merge both into {output_dir}/{run_name}_det.log after the run.
+    det_file = os.path.join(output_dir, f"{run_name}_det.log")
+    if os.path.exists(det_file):
+        os.remove(det_file)
+    trainer_det = f"/tmp/verl_det_{run_name}.log"
+    if os.path.exists(trainer_det):
+        os.remove(trainer_det)
+    legacy_det = "/tmp/det_checkpoint.log"
+    if os.path.exists(legacy_det):
+        os.remove(legacy_det)
+
     result = subprocess.run(cmd, env=env)
+    # Merge engine-layer det log (already at det_file via VERL_FILE_LOGGER_PATH) with
+    # trainer-layer det log from /tmp.
+    with open(det_file, "a") as out:
+        for src in (trainer_det, legacy_det):
+            if os.path.exists(src):
+                with open(src) as f:
+                    out.write(f.read())
     if result.returncode != 0:
         print(f"ERROR: {run_name} failed (return code {result.returncode})")
         # Print the JSONL file if it exists — it may contain partial metrics useful for debugging.
@@ -327,6 +362,15 @@ def main():
     parser.add_argument("--train_files", default=None, help="Path to training data parquet")
     parser.add_argument("--val_files", default=None, help="Path to validation data parquet")
     parser.add_argument("--output_dir", default="/tmp/determinism_e2e")
+    # Diag overrides: set to "eager" / "sdpa" to isolate attention nondeterminism.
+    parser.add_argument("--attn_impl", default=None, help="attn_implementation override (eager/sdpa/flash_attention_2)")
+    # Set to "fp32" to isolate bf16 matmul nondeterminism.
+    parser.add_argument("--param_dtype", default=None, help="FSDP param_dtype override (bf16/fp32)")
+    # Set to 0 (greedy) to verify vLLM RNG is the rollout nondeterminism source.
+    parser.add_argument("--temperature", type=float, default=0.7, help="rollout sampling temperature (0=greedy)")
+    # Set to 1 to serialize vLLM requests (no batch interleaving) — verifies
+    # whether VLLM_BATCH_INVARIANT is actually taking effect for your vLLM version.
+    parser.add_argument("--max_num_seqs", type=int, default=4, help="vLLM max_num_seqs (1=serialize)")
     parser.add_argument("--project_name", default="determinism_e2e")
     args = parser.parse_args()
 
@@ -343,6 +387,10 @@ def main():
         output_dir=output_dir,
         rollout_tp=args.rollout_tp,
         rm_tp=args.rm_tp,
+        attn_impl=args.attn_impl,
+        param_dtype=args.param_dtype,
+        temperature=args.temperature,
+        max_num_seqs=args.max_num_seqs,
         train_files=args.train_files,
         val_files=args.val_files,
     )
@@ -362,6 +410,29 @@ def main():
 
     # ── Verify ──
     aligned = verify_bitwise_alignment(rewards1, rewards2)
+
+    # ── Per-metric diff: find which metric diverges first ──
+    print(f"\n{'=' * 60}")
+    print("Per-metric diff (first divergence per step)")
+    print(f"{'=' * 60}")
+    common_steps = sorted(set(metrics1.keys()) & set(metrics2.keys()))
+    for step in common_steps:
+        d1 = metrics1[step]
+        d2 = metrics2[step]
+        all_keys = sorted(set(d1.keys()) | set(d2.keys()))
+        first_diff = None
+        for key in all_keys:
+            v1 = d1.get(key)
+            v2 = d2.get(key)
+            if isinstance(v1, int | float) and isinstance(v2, int | float):
+                if v1 != v2:
+                    if first_diff is None:
+                        first_diff = (key, v1, v2, abs(v1 - v2))
+        if first_diff:
+            key, v1, v2, diff = first_diff
+            print(f"  step={step} first_diff_key={key} v1={v1:.10e} v2={v2:.10e} diff={diff:.10e}")
+        else:
+            print(f"  step={step} all metrics aligned")
 
     # ── Plot ──
     plot_path = os.path.join(output_dir, "determinism_reward_curves.png")
