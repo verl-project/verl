@@ -49,10 +49,18 @@ requires-python = ">=3.10,<3.13"
 test          = ["pytest", "pre-commit", "py-spy", "pytest-asyncio", "pytest-rerunfailures"]
 math          = ["math-verify"]
 mcore         = ["mbridge"]
+# Kept as a named extra so the git source lives in exactly one place (and
+# `--extra transferqueue` still works), but it is no longer opt-in: verl-core
+# below pulls it in, so every synced backend always installs it.
 transferqueue = ["TransferQueue @ git+https://github.com/Ascend/TransferQueue.git@main"]
 
 # Shared runtime deps; included by every backend extra via `verl[verl-core]`.
+# TransferQueue is always installed (pulled in via `verl[transferqueue]`, not
+# left as an opt-in extra): verl.utils.transferqueue_utils is imported at module
+# top level on core paths (protocol.py, single_controller/base/decorator.py), so
+# every backend must have it available regardless of which extras are synced.
 verl-core = [
+    "verl[transferqueue]",
     "accelerate",
     "codetiming",
     "datasets",
