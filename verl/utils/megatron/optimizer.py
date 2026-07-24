@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
+
 import torch
 from megatron.core.optimizer import OptimizerConfig
 from megatron.core.optimizer import get_megatron_optimizer as get_megatron_optimizer_native
@@ -20,6 +22,69 @@ from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
 from verl.utils.logger import print_rank_0
 from verl.utils.torch_dtypes import PrecisionType
+
+# Names of the Muon (emerging optimizer) algorithms recognized by Megatron-Core's
+# ``get_megatron_optimizer`` (anything other than "adam"/"sgd" routes to the emerging path).
+_MUON_ALGORITHMS = ("muon",)
+
+
+def is_muon_layer_wise_config(optim_config) -> bool:
+    """True when verl will build Megatron's LayerWiseDistributedOptimizer path."""
+    algo = str(getattr(optim_config, "optimizer", optim_config.get("optimizer", ""))).lower()
+    if algo not in _MUON_ALGORITHMS:
+        return False
+    return bool(
+        getattr(optim_config, "use_layer_wise_distributed_optimizer", None)
+        or optim_config.get("use_layer_wise_distributed_optimizer", False)
+    )
+
+
+# Muon knobs exposed on verl's ``McoreOptimizerConfig`` that mirror like-named fields on
+# Megatron-Core's ``OptimizerConfig``. Only the ones the installed Megatron actually declares are
+# forwarded (older Megatron builds without emerging_optimizers won't have them).
+_MUON_PASSTHROUGH_FIELDS = (
+    "use_layer_wise_distributed_optimizer",
+    "use_layer_wise_param_layout",
+    "muon_momentum",
+    "muon_nesterov",
+    "muon_split_qkv",
+    "muon_scale_mode",
+    "muon_coefficient_type",
+    "muon_num_ns_steps",
+    "muon_tp_mode",
+    "muon_fp32_matmul_prec",
+    "muon_extra_scale_factor",
+    "muon_scalar_optimizer",
+)
+
+
+def _add_muon_args(optim_args: dict, optim_config: dict) -> None:
+    """Forward the Muon hyperparameters onto the Megatron ``OptimizerConfig`` kwargs.
+
+    Only fields declared by the installed ``OptimizerConfig`` are forwarded so this stays compatible
+    with Megatron builds that lack (some of) the Muon knobs. If a Muon algorithm is requested but the
+    installed Megatron exposes none of the Muon fields, we fail loudly instead of letting Megatron
+    silently fall back to Adam.
+    """
+    supported_fields = {f.name for f in dataclasses.fields(OptimizerConfig)}
+    forwarded = []
+    for field in _MUON_PASSTHROUGH_FIELDS:
+        if field not in supported_fields:
+            continue
+        value = optim_config.get(field, None)
+        if value is None:
+            continue
+        optim_args[field] = value
+        forwarded.append(field)
+
+    muon_related = supported_fields & set(_MUON_PASSTHROUGH_FIELDS)
+    if not muon_related:
+        raise ValueError(
+            f"optimizer={optim_args['optimizer']!r} requests Muon, but the installed "
+            "megatron.core.optimizer.OptimizerConfig exposes no Muon fields. Muon requires a "
+            "Megatron-Core build with emerging_optimizers support; refusing to fall back to Adam."
+        )
+    print_rank_0(f"Muon optimizer selected; forwarded fields: {forwarded}")
 
 
 def init_megatron_optim_config(
@@ -36,6 +101,16 @@ def init_megatron_optim_config(
         "weight_decay": optim_config.weight_decay,
         "use_distributed_optimizer": use_distributed_optimizer,
     }
+    if str(optim_config.optimizer).lower() in _MUON_ALGORITHMS:
+        _add_muon_args(optim_args, optim_config)
+        # Megatron buffer-integrated master weights (avoids Float16Optimizer fp32 clones).
+        supported_fields = {f.name for f in dataclasses.fields(OptimizerConfig)}
+        if (
+            "use_layer_wise_param_layout" in supported_fields
+            and is_muon_layer_wise_config(optim_config)
+            and getattr(optim_config, "use_layer_wise_param_layout", None) is None
+        ):
+            optim_args["use_layer_wise_param_layout"] = True
     if fp16:
         optim_args.update(
             {

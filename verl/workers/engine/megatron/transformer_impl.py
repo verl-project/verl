@@ -295,7 +295,11 @@ class MegatronEngine(BaseEngine):
         dtype, so inject ``grad_reduce_in_fp32=False`` unless the user set it
         explicitly via ``override_ddp_config``. Default (opt-out) leaves the fp32
         grad bucket untouched, preserving prior behavior.
+
+        For Muon + LayerWise, also enable ``use_layer_wise_param_layout`` on the
+        DDP config so master weights live in the param buffer (not fp32 clones).
         """
+        from verl.utils.megatron.optimizer import is_muon_layer_wise_config
         from verl.utils.torch_dtypes import PrecisionType
 
         override_ddp_config = dict(self.engine_config.override_ddp_config or {})
@@ -307,9 +311,12 @@ class MegatronEngine(BaseEngine):
             and "grad_reduce_in_fp32" not in override_ddp_config
         ):
             override_ddp_config["grad_reduce_in_fp32"] = False
+        if opt_cfg is not None and is_muon_layer_wise_config(opt_cfg):
+            override_ddp_config.setdefault("use_layer_wise_param_layout", True)
         return override_ddp_config
 
     def _build_megatron_module(self):
+        from verl.utils.megatron.optimizer import is_muon_layer_wise_config
         from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
         from verl.utils.model import print_model_size
 
@@ -318,10 +325,12 @@ class MegatronEngine(BaseEngine):
         else:
             wrap_with_ddp = True
 
+        layer_wise_muon = is_muon_layer_wise_config(self.optimizer_config)
         wrap_config = McoreModuleWrapperConfig(
             is_value_model=self.is_value_model,
             wrap_with_ddp=wrap_with_ddp,
             use_distributed_optimizer=self.engine_config.use_distributed_optimizer,
+            use_layer_wise_distributed_optimizer=layer_wise_muon,
             use_megatron_fsdp=self.engine_config.use_megatron_fsdp,
         )
         override_ddp_config = self._resolve_override_ddp_config()
