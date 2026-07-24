@@ -55,6 +55,29 @@ def get_model_config(model):
     return get_attr_wrapped_model(model, "config", allow_none=False)
 
 
+def _assert_muon_layer_wise_ddp_supported() -> None:
+    """Fail closed when Megatron-Core cannot build LayerWise DDP layouts."""
+    try:
+        from megatron.core.optimizer.layer_wise_optimizer import (  # noqa: F401
+            LayerWiseDistributedOptimizer,
+            tag_params_for_buffer_routing,
+        )
+    except ImportError as exc:
+        raise ValueError(
+            "Muon layer-wise distributed optimizer requires Megatron-Core "
+            "layer_wise_optimizer support. Upgrade megatron-core or disable "
+            "use_layer_wise_distributed_optimizer."
+        ) from exc
+    try:
+        DistributedDataParallelConfig(use_layer_wise_param_layout=True)
+    except TypeError as exc:
+        raise ValueError(
+            "Muon layer-wise distributed optimizer requires DistributedDataParallelConfig."
+            "use_layer_wise_param_layout. Upgrade megatron-core or disable "
+            "use_layer_wise_distributed_optimizer."
+        ) from exc
+
+
 def wrap_model_chunks_with_layerwise_aware_ddp(
     model_chunks,
     tfconfig,
@@ -353,9 +376,18 @@ def make_megatron_module(
             for callback in post_model_creation_callbacks:
                 provider.register_pre_wrap_hook(callback)
 
+            layer_wise_ddp = wrap_config.wrap_with_ddp and wrap_config.use_layer_wise_distributed_optimizer
+            if layer_wise_ddp:
+                if wrap_config.use_megatron_fsdp:
+                    raise ValueError(
+                        "Muon layer-wise distributed optimizer is incompatible with Megatron FSDP. "
+                        "Set use_megatron_fsdp=False or disable use_layer_wise_distributed_optimizer."
+                    )
+                _assert_muon_layer_wise_ddp_supported()
+
             # Create DDP config if needed
             ddp_config = create_ddp_config(
-                wrap_with_ddp=wrap_config.wrap_with_ddp,
+                wrap_with_ddp=wrap_config.wrap_with_ddp and not layer_wise_ddp,
                 use_distributed_optimizer=wrap_config.use_distributed_optimizer,
                 use_megatron_fsdp=wrap_config.use_megatron_fsdp,
                 overrides=override_ddp_config,
@@ -364,12 +396,24 @@ def make_megatron_module(
             # Now call provide_distributed_model with all hooks registered
             # Hooks will be applied automatically before DDP wrapping
             model = provider.provide_distributed_model(
-                wrap_with_ddp=wrap_config.wrap_with_ddp,
+                wrap_with_ddp=wrap_config.wrap_with_ddp and not layer_wise_ddp,
                 ddp_config=ddp_config,
                 fp16=provider.fp16,
                 bf16=provider.bf16,
                 use_megatron_fsdp=wrap_config.use_megatron_fsdp,
             )
+
+            if layer_wise_ddp:
+                if not isinstance(model, list):
+                    model = [model]
+                bridge_tf_config = get_model_config(model[0])
+                model = wrap_model_chunks_with_layerwise_aware_ddp(
+                    model,
+                    bridge_tf_config,
+                    use_distributed_optimizer=wrap_config.use_distributed_optimizer,
+                    use_layer_wise_distributed_optimizer=True,
+                    override_ddp_config=override_ddp_config,
+                )
 
             # Extract TransformerConfig from the created model
             tf_config = get_model_config(model[0] if isinstance(model, list) else model)
