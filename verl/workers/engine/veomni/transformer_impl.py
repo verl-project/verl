@@ -708,9 +708,9 @@ class VeOmniEngine(FSDPEngine):
             raise NotImplementedError(f"{name}: {NO_SLOTS_MSG}")
         return super()._hf_delta_entry(name, spec, place, lidx, lval)
 
-    # get_per_tensor_param_delta_shard / prime_delta_snapshots are inherited from
-    # FSDPEngine; they consume this class's get_per_tensor_param_shard and
-    # _hf_delta_entry overrides.
+    # get_per_tensor_param_delta_shard is inherited from FSDPEngine and
+    # prime_delta_snapshots from BaseEngine; both consume this class's
+    # get_per_tensor_param_shard and _hf_delta_entry overrides.
 
     def get_per_tensor_param(self, **kwargs):
         load_veomni_model_to_gpu(self.module)

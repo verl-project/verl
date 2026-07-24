@@ -862,17 +862,6 @@ class FSDPEngine(BaseEngine):
             )
         return _hf_entry_identity(name, spec, place, lidx, lval)
 
-    def prime_delta_snapshots(self) -> None:
-        """Pin this rank's current shards to CPU as the delta diff base. Called right
-        after the seed's full-weight sync: weights do not move during the sync, so
-        the snapshots equal exactly what the rollout just received and the first
-        :meth:`get_per_tensor_param_delta_shard` diff is correct."""
-        from ..utils import prime_delta_snapshots
-
-        self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
-        gen, _ = self.get_per_tensor_param_shard()
-        prime_delta_snapshots(gen, self._delta_shard_snap)
-
     def get_per_tensor_param_delta_shard(self, **kwargs):
         """Yield the delta engine's steady payloads -- FINAL HF-coordinate entries
         ``(slots, dtype_str, counts, hf_idx, hf_val, gather_group)`` per parameter.

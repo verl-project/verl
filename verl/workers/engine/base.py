@@ -185,8 +185,15 @@ class BaseEngine:
         weights do not move during the sync, so the snapshots equal exactly what the
         rollout side received and the first
         :meth:`get_per_tensor_param_delta_shard` diff is correct.
+
+        Concrete here: it only consumes :meth:`get_per_tensor_param_shard`, so any
+        engine that implements the shard export gets it for free.
         """
-        raise NotImplementedError
+        from verl.workers.engine.utils import prime_delta_snapshots
+
+        self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
+        gen, _ = self.get_per_tensor_param_shard()
+        prime_delta_snapshots(gen, self._delta_shard_snap)
 
     def get_per_tensor_param_delta_shard(self, **kwargs) -> tuple[Generator, Optional[dict]]:
         """
