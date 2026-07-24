@@ -120,8 +120,9 @@ backends as **extras**:
    <https://etogaosion.github.io/verl-wheelhouse/simple/>`_, wired in
    ``pyproject.toml`` under ``[tool.uv.index]`` / ``[tool.uv.sources]``), so
    ``uv sync`` never compiles them from source. The wheels are built for
-   cu130 / torch 2.11 / CPython 3.12; only the git-sourced ``megatron-core`` and
-   ``mbridge`` are built at sync time.
+   cu130 / torch 2.11 / CPython 3.12; only the git-sourced ``megatron-core``,
+   ``mbridge``, and ``megatron-bridge`` (the ``r0.5.0`` release branch, paired
+   with ``megatron-core`` 0.18.0) are built at sync time.
 
 Run with the uv Docker image
 :::::::::::::::::::::::::::::::::::::::::::::::::::::
@@ -262,6 +263,30 @@ commands:
 The equivalent raw ``uv`` command is::
 
    uv sync --python 3.12 --extra vllm --extra fsdp
+
+Name a separate venv
+::::::::::::::::::::::
+
+By default every combination re-points the same project venv (``.venv``). To keep
+several combinations (or per-user / per-run envs) side by side on one checkout,
+pass ``--name NAME`` (or set ``VERL_VENV_NAME``); the real env goes in
+``.venv-<NAME>``, wired to ``uv`` through ``UV_PROJECT_ENVIRONMENT``::
+
+   python manage_envs.py sync --name vllm-mega vllm megatron    # -> .venv-vllm-mega
+   python manage_envs.py sync --name sglang-fsdp sglang fsdp    # -> .venv-sglang-fsdp
+
+After each named ``sync`` (or ``shell``) the conventional ``.venv`` is updated to
+be a **symlink to the composition you just synced**, so it always tracks the
+latest env and the usual entry points keep working::
+
+   source .venv/bin/activate                 # activates the most recent composition
+
+A nameless ``sync`` turns ``.venv`` back into a real directory. ``sync`` / ``run``
+/ ``shell`` / ``clean`` / ``list`` all take the same ``--name`` (for ``sync`` /
+``run`` put it before the extras); ``python manage_envs.py list`` shows the
+target venv, where ``.venv`` points, and any other ``.venv*`` on the checkout.
+``clean`` unlinks the ``.venv`` pointer rather than deleting through it. An
+explicit ``UV_PROJECT_ENVIRONMENT`` is honored as-is when no name is given.
 
 Keep your own build of a package
 ::::::::::::::::::::::::::::::::::

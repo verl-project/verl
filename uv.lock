@@ -34,6 +34,10 @@ name = "mbridge"
 version = "0.15.1"
 
 [[manifest.dependency-metadata]]
+name = "megatron-bridge"
+version = "0.5.2"
+
+[[manifest.dependency-metadata]]
 name = "megatron-core"
 version = "0.18.0"
 requires-dist = ["torch>=2.6.0", "numpy", "packaging>=24.2"]
@@ -1746,6 +1750,11 @@ sdist = { url = "https://files.pythonhosted.org/packages/d6/54/cfe61301667036ec9
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl", hash = "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8", size = 9979, upload-time = "2022-08-14T12:40:09.779Z" },
 ]
+
+[[package]]
+name = "megatron-bridge"
+version = "0.5.2"
+source = { git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge.git?branch=r0.5.0#c973cb5b30e58dbe5dc6b7ce13efa1df1cf1e232" }
 
 [[package]]
 name = "megatron-core"
@@ -4477,6 +4486,7 @@ megatron = [
     { name = "mathruler", marker = "(python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "matplotlib", marker = "(python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "mbridge", marker = "(python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
+    { name = "megatron-bridge", marker = "(python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "megatron-core", marker = "(python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "numpy", marker = "(python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "nvidia-mathdx", marker = "(python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
@@ -4643,6 +4653,7 @@ requires-dist = [
     { name = "mbridge", marker = "extra == 'megatron'", git = "https://github.com/ISEEKYAN/mbridge.git?rev=641a5a0" },
     { name = "mbridge", marker = "extra == 'sglang'", git = "https://github.com/ISEEKYAN/mbridge.git?rev=641a5a0" },
     { name = "mbridge", marker = "extra == 'vllm'", git = "https://github.com/ISEEKYAN/mbridge.git?rev=641a5a0" },
+    { name = "megatron-bridge", marker = "extra == 'megatron'", git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge.git?branch=r0.5.0" },
     { name = "megatron-core", marker = "extra == 'megatron'", git = "https://github.com/NVIDIA/Megatron-LM.git?tag=core_v0.18.0" },
     { name = "numpy", specifier = ">=2.0.0" },
     { name = "numpy", marker = "extra == 'verl-core'", specifier = ">=2.0.0" },
