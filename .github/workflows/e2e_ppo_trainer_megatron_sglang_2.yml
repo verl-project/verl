@@ -86,8 +86,11 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:sgl0512.dev2"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:sgl0512.dev4"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
+  # The image bakes Megatron-LM at /workspace/Megatron-LM onto PYTHONPATH, but the vemlp
+  # dynamic runner does not inherit the image ENV, so re-declare it for the job steps.
+  PYTHONPATH: "/workspace/Megatron-LM"
 
 jobs:
   setup:
@@ -122,7 +125,7 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
-          pip3 install --no-deps TransferQueue==0.1.8
+          pip install --no-deps transformers==5.3.0
       - name: Check final pip list
         run: |
           pip3 list
@@ -153,6 +156,7 @@ jobs:
           pip3 install -r requirements-test.txt
           pip3 install -r requirements.txt
           pip3 install --no-deps -e .
+          pip3 install transformers==5.3.0
       - name: Check final pip list
         run: |
           pip3 list

@@ -80,8 +80,11 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm023.dev1"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm024.dev2"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
+  # The image bakes Megatron-LM at /workspace/Megatron-LM onto PYTHONPATH, but the vemlp
+  # dynamic runner does not inherit the image ENV, so re-declare it for the job steps.
+  PYTHONPATH: "/workspace/Megatron-LM"
 
 jobs:
   setup:
@@ -152,9 +155,6 @@ jobs:
           pip3 install -r requirements.txt
           pip3 install --no-deps -e .
           pip3 install cupy-cuda13x==13.6.0
-          pip3 uninstall -y mbridge
-          pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@e2cfe7e --ignore-requires-python --no-deps --no-build-isolation
-          pip3 install git+https://github.com/NVIDIA/Megatron-LM.git@0823c73 --ignore-requires-python --no-deps --no-build-isolation
           pip3 install "nvidia-modelopt>=0.37.0"
       - name: Check final pip list
         run: |

@@ -88,6 +88,73 @@ def is_fp8_model(vllm_config):
     return False
 
 
+# vLLM 0.24.0 (MoE refactor, vllm-project/vllm#41184) removed the ``FusedMoE``
+# ``nn.Module`` class. ``FusedMoE`` is now a factory *function* that builds a
+# ``MoERunner``, and the fused expert weight tensors (``w13_weight`` /
+# ``w2_weight``) moved onto a ``RoutedExperts`` submodule owned by the runner
+# (i.e. ``experts`` -> ``experts.routed_experts``). Resolve the concrete module
+# classes once so ``isinstance`` checks keep working across vLLM versions --
+# calling ``isinstance(x, FusedMoE)`` when ``FusedMoE`` is a function raises
+# ``TypeError: isinstance() arg 2 must be a type``.
+if isinstance(FusedMoE, type):
+    # vLLM < 0.24: ``FusedMoE`` is itself the expert-weight-holding module.
+    _MOE_STOP_CLASSES = (FusedMoE,)
+    _EXPERT_WEIGHT_CLASSES = (FusedMoE,)
+else:
+    _stop_classes: list[type] = []
+    _weight_classes: list[type] = []
+    try:
+        from vllm.model_executor.layers.fused_moe import RoutedExperts
+
+        _stop_classes.append(RoutedExperts)
+        _weight_classes.append(RoutedExperts)
+    except ImportError:
+        pass
+    try:
+        from vllm.model_executor.layers.fused_moe import MoERunner
+
+        _stop_classes.append(MoERunner)
+    except ImportError:
+        pass
+    _MOE_STOP_CLASSES = tuple(_stop_classes)
+    _EXPERT_WEIGHT_CLASSES = tuple(_weight_classes)
+
+
+def _is_expert_weight_module(module) -> bool:
+    """Return whether ``module`` directly owns fused expert weights.
+
+    True for the pre-0.24 ``FusedMoE`` module and the post-0.24 ``RoutedExperts``
+    module (both expose ``w13_weight`` / ``w2_weight``). Falls back to duck typing
+    so the check keeps working even if the concrete classes cannot be imported.
+    """
+    if _EXPERT_WEIGHT_CLASSES and isinstance(module, _EXPERT_WEIGHT_CLASSES):
+        return True
+    return hasattr(module, "w13_weight") and hasattr(module, "w2_weight")
+
+
+def _is_fused_moe_block(module) -> bool:
+    """Return whether ``module`` is the fused-MoE block reached while walking the
+    module tree, so traversal must stop before descending into per-expert name
+    parts (e.g. the expert index) that are not real submodules."""
+    if _MOE_STOP_CLASSES and isinstance(module, _MOE_STOP_CLASSES):
+        return True
+    # ``MoERunner`` owns a ``routed_experts`` child; the weight holder owns the
+    # expert weight tensors directly.
+    return hasattr(module, "routed_experts") or _is_expert_weight_module(module)
+
+
+def _resolve_expert_weight_module(module):
+    """Return the submodule that actually owns the fused expert weights.
+
+    On vLLM >= 0.24 the walked module is a ``MoERunner`` whose ``routed_experts``
+    child holds the weights; on older vLLM the module already holds them.
+    """
+    routed_experts = getattr(module, "routed_experts", None)
+    if routed_experts is not None:
+        return routed_experts
+    return module
+
+
 def get_module_from_param_name(model, name: str):
     # Split the name into parts (e.g., 'layers', '0', 'self_attn', 'q_proj', 'weight')
     # The module path is all but the last part (the parameter's own name)
@@ -107,15 +174,18 @@ def get_module_from_param_name(model, name: str):
     try:
         # Traverse the model hierarchy
         for part in module_path:
-            if isinstance(current_module, FusedMoE):
-                return current_module
+            if _is_fused_moe_block(current_module):
+                # Reached the fused-MoE block: the remaining name parts (expert
+                # index, per-expert proj name, ...) are handled by vLLM's fused
+                # weight loader, so return the module owning the expert weights.
+                return _resolve_expert_weight_module(current_module)
             elif isinstance(current_module, torch.nn.ModuleList):
                 current_module = current_module[int(part)]
             else:
                 current_module = getattr(current_module, part)
     except (AttributeError, IndexError, ValueError) as e:
         print(f"Warning: Could not find module for parameter '{name}'. Error: {e}")
-    return current_module
+    return _resolve_expert_weight_module(current_module)
 
 
 def is_fp8_weight(name, model):
@@ -124,13 +194,14 @@ def is_fp8_weight(name, model):
         # Filter out bias params
         if name.endswith("weight"):
             module = get_module_from_param_name(model, name)
-            # We currently only quantize linear layers
-
-            if (isinstance(module, LinearBase) and module.weight.dtype == torch.float8_e4m3fn) or (
-                isinstance(module, FusedMoE)
+            # We currently only quantize linear and fused-MoE expert layers.
+            is_fp8_linear = isinstance(module, LinearBase) and module.weight.dtype == torch.float8_e4m3fn
+            is_fp8_moe = (
+                _is_expert_weight_module(module)
                 and module.w13_weight.dtype == torch.float8_e4m3fn
                 and module.w2_weight.dtype == torch.float8_e4m3fn
-            ):
+            )
+            if is_fp8_linear or is_fp8_moe:
                 fp8_state.fp8_param_names.add(name)
     return name in fp8_state.fp8_param_names
 
@@ -175,7 +246,7 @@ def apply_mxfp8_transformation_after_loading(model):
         return
 
     for name, module in model.named_modules():
-        if (isinstance(module, LinearBase) or isinstance(module, FusedMoE)) and hasattr(
+        if (isinstance(module, LinearBase) or _is_expert_weight_module(module)) and hasattr(
             module, "_mxfp8_original_shapes"
         ):
             if hasattr(module, "quant_method") and hasattr(module.quant_method, "process_weights_after_loading"):

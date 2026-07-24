@@ -24,7 +24,7 @@
 #         (sglang via ``rollout.enable_rollout_routing_replay=True``).
 #
 # Environment (same as run_qwen3_5-35b-a3b_veomni.sh):
-#   - transformers==5.3.0
+#   - transformers==5.5.3
 #   - sglang==0.5.9
 #   - flash-linear-attention==0.4.1
 #   - veomni==0.1.10  # contains the maybe_replay_indices hook wired for Qwen3.5-MoE

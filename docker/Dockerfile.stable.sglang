@@ -1,13 +1,15 @@
 # sgl0512
+# Target: verlai/verl:sgl0512.dev4
 
 FROM lmsysorg/sglang:v0.5.12
 
 ARG CUDA_VERSION=13.0.2
 ARG TRL_VERSION=0.27.0
-ARG TRANSFORMER_ENGINE_VERSION=v2.15
 ARG FLASH_ATTENTION_VERSION=2.8.3
 ARG NSIGHT_VERSION=2025.6.1
+ARG MEGATRON_BRIDGE_VERSION_OR_BRANCH=r0.5.0
 ARG MCORE_VERSION=core_v0.18.0
+ARG TRANSFER_QUEUE_VERSION=0.1.8
 ARG VERL_VERSION=v0.7.1
 
 # =========================
@@ -76,9 +78,13 @@ RUN if [ "$(uname -m)" = "aarch64" ]; then \
 
 RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git@main
 
-RUN pip install --no-deps megatron-bridge==0.5.0
+RUN pip install --no-deps --no-build-isolation git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@${MEGATRON_BRIDGE_VERSION_OR_BRANCH}
 
-RUN pip install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@${MCORE_VERSION}
+RUN pip install --no-deps --no-build-isolation git+https://github.com/NVIDIA/Megatron-LM.git@${MCORE_VERSION}
+
+RUN pip install --no-deps TransferQueue==${TRANSFER_QUEUE_VERSION}
+
+RUN pip uninstall -y scipy
 
 RUN pip install git+https://github.com/verl-project/verl.git@${VERL_VERSION} && \
     pip uninstall -y verl
