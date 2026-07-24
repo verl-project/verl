@@ -16,6 +16,8 @@ from typing import Optional
 
 import torch
 
+from verl.utils.torch_functional import resolve_temperature_for_fused_kernel
+
 try:
     from flash_attn.ops.triton.cross_entropy import cross_entropy_loss
 
@@ -219,13 +221,28 @@ class FusedLinearForPPO(torch.nn.Module):
         hidden_states: torch.FloatTensor,
         vocab_weights: torch.FloatTensor,
         input_ids: torch.LongTensor,
-        temperature: float = 1.0,
+        temperature: float | torch.Tensor = 1.0,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
+        """Compute log-probs and entropy via fused linear + cross-entropy.
+
+        Args:
+            hidden_states: ``(num_tokens, D)`` hidden representations.
+            vocab_weights: ``(vocab_size, D)`` output projection weight.
+            input_ids: ``(num_tokens,)`` label token ids.
+            temperature: Global scalar (``float`` or 0/1-dim tensor) applied
+                inside the kernel, **or** a 1-D tensor of shape
+                ``(num_tokens,)`` for per-token temperature.  In the
+                per-token case ``hidden_states`` is pre-scaled by ``1/T``
+                in fp32 and the kernel runs at ``temperature=1.0``.
+        """
         input_ids = input_ids.to(torch.int64)
+        # Per-sample temperature: prescale hidden by 1/T outside the
+        # ``Function`` so autograd handles the extra op automatically.
+        hidden_states, scalar_temperature = resolve_temperature_for_fused_kernel(hidden_states, temperature)
         return FusedLinearForPPOFunction.apply(
             hidden_states,
             vocab_weights,
             input_ids,
-            temperature,
+            scalar_temperature,
             self.chunk_size,
         )

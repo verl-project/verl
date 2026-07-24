@@ -43,7 +43,7 @@ compute_entropy_from_logits = torch.compile(verl_F.entropy_from_logits, dynamic=
 fused_linear_for_ppo = FusedLinearForPPO()
 fused_linear_for_ppo.compile(dynamic=True)
 
-MAX_TEST_CASES = os.environ.get("MAX_TEST_CASES", 5)
+MAX_TEST_CASES = int(os.environ.get("MAX_TEST_CASES", 5))
 
 
 def run_torch_entropy(
@@ -95,6 +95,31 @@ def run_verl_torch_fused_entropy(
         temperature=temperature,
     )
     return logprobs.squeeze(0), entropy.squeeze(0)
+
+
+def run_torch_per_sample_entropy(
+    hidden: torch.Tensor,
+    weight: torch.Tensor,
+    labels: torch.Tensor,
+    temperature: torch.Tensor,
+) -> list[torch.Tensor]:
+    """Reference implementation of per-sample temperature in fp32.
+
+    ``temperature`` is a 1-D tensor of shape ``(num_tokens,)`` aligned with the
+    flattened hidden states. Divides logits row-wise before softmax/logsumexp,
+    which is the semantic the two fused paths must match.
+    """
+    hidden = hidden.squeeze(0).to(torch.float32)
+    weight = weight.transpose(0, 1).to(torch.float32)
+    logits = torch.matmul(hidden, weight)  # [num_tokens, vocab_size]
+    logits = logits / temperature.to(torch.float32).unsqueeze(-1)
+    pd = torch.nn.functional.softmax(logits, dim=-1)
+    entropy_a = torch.logsumexp(logits, dim=-1)
+    entropy_b = torch.sum(pd * logits, dim=-1)
+    entropy = entropy_a - entropy_b
+    logprobs = torch.nn.functional.cross_entropy(logits, labels.squeeze(0), reduction="none")
+    logprobs = torch.neg(logprobs)
+    return logprobs, entropy
 
 
 class TestLinearCrossEntropy:
@@ -320,6 +345,119 @@ class TestLinearCrossEntropy:
             f"{sum(kernel_backward_latency) / len(kernel_backward_latency):.2f} ms"
         )
 
+    def verify_uniform_tensor_matches_scalar(self, iterations=3):
+        """Passing a 1-D tensor temperature whose entries are all equal to a
+        scalar ``T`` must produce (up to one bf16 rounding introduced by the
+        prescale wrapper) the same result as passing the Python float ``T``.
+
+        This guards against the dispatcher accidentally activating a different
+        code path for uniform-valued tensor temperatures.
+        """
+        self.cleanup()
+        self.generate_hyper()
+
+        for _ in range(iterations):
+            hidden, weight, labels = self.generate_forward_inputs()
+            t_tensor = torch.full((self.num_tokens,), self.temperature, dtype=torch.float32, device="cuda")
+
+            # torch fused path runs in fp32 so the prescale cast is a no-op.
+            # Residual difference (~1e-5) comes from the matmul associativity
+            # change: scalar path evaluates (h @ W.T) / T while tensor path
+            # evaluates (h / T) @ W.T, which accumulates in a different order
+            # and differs by a few ULPs per-token. Match the cross-implementation
+            # tolerance used for verl_fused vs. torch further down.
+            lp_scalar, ent_scalar = run_verl_torch_fused_entropy(hidden, weight, labels, self.temperature)
+            hidden_f32 = hidden.to(torch.float32)
+            weight_f32 = weight.to(torch.float32)
+            lp_tensor, ent_tensor = fused_linear_for_ppo(hidden_f32, weight_f32, labels, temperature=t_tensor)
+            lp_tensor = lp_tensor.squeeze(0)
+            ent_tensor = ent_tensor.squeeze(0)
+            torch.testing.assert_close(lp_scalar, lp_tensor, atol=1e-4, rtol=1e-4)
+            torch.testing.assert_close(ent_scalar, ent_tensor, atol=1e-4, rtol=1e-4)
+
+            # triton kernel path: prescale forces one extra bf16 cast round on
+            # hidden. The rounding propagates through a matmul sum of size D
+            # and an entropy sum of size V, so entropy tolerance scales with
+            # roughly sqrt(V/D) relative to logprobs.
+            lp_scalar_k, ent_scalar_k = linear_cross_entropy(hidden, weight, labels, self.temperature)
+            lp_tensor_k, ent_tensor_k = linear_cross_entropy(hidden, weight, labels, t_tensor)
+            torch.testing.assert_close(lp_scalar_k, lp_tensor_k, atol=5e-3, rtol=5e-3)
+            torch.testing.assert_close(ent_scalar_k, ent_tensor_k, atol=5e-2, rtol=1e-2)
+
+        print("\n[INFO]: Uniform-tensor temperature matches scalar temperature.")
+
+    def verify_per_sample_correctness(self, iterations=3):
+        """Random per-token temperatures from a plausible RL range [0.5, 2.0],
+        comparing both fused paths against an all-fp32 reference.
+
+        Note we deliberately do *not* test ``run_verl_original_entropy`` or
+        ``run_torch_entropy`` here — those implementations only accept a scalar
+        temperature. The guarantee this test checks is that the new per-sample
+        path on each fused implementation matches what a naive per-token fp32
+        pipeline would produce.
+        """
+        self.cleanup()
+        self.generate_hyper()
+
+        for _ in range(iterations):
+            hidden, weight, labels = self.generate_forward_inputs()
+            temperature_per_token = torch.empty((self.num_tokens,), dtype=torch.float32, device="cuda").uniform_(
+                0.5, 2.0
+            )
+
+            ref_logprobs, ref_entropy = run_torch_per_sample_entropy(hidden, weight, labels, temperature_per_token)
+
+            hidden_f32 = hidden.to(torch.float32)
+            weight_f32 = weight.to(torch.float32)
+            fused_logprobs, fused_entropy = fused_linear_for_ppo(
+                hidden_f32, weight_f32, labels, temperature=temperature_per_token
+            )
+            fused_logprobs = fused_logprobs.squeeze(0)
+            fused_entropy = fused_entropy.squeeze(0)
+
+            kernel_logprobs, kernel_entropy = linear_cross_entropy(hidden, weight, labels, temperature_per_token)
+
+            # torch fused path is run in fp32, so we expect tight agreement.
+            torch.testing.assert_close(ref_logprobs, fused_logprobs, atol=1e-4, rtol=1e-4)
+            torch.testing.assert_close(ref_entropy, fused_entropy, atol=1e-4, rtol=1e-4)
+
+            # triton kernel path operates in bf16 with one extra fp32 prescale
+            # cast on hidden. Entropy tolerance accounts for the sum-over-V step.
+            torch.testing.assert_close(ref_logprobs, kernel_logprobs, atol=5e-3, rtol=5e-3)
+            torch.testing.assert_close(ref_entropy, kernel_entropy, atol=5e-2, rtol=1e-2)
+
+            # backward
+            g_entropy, g_logprobs = self.generate_backward_inputs()
+
+            (d_ref_hidden, d_ref_weight) = torch.autograd.grad(
+                (ref_entropy, ref_logprobs),
+                (hidden, weight),
+                (g_entropy, g_logprobs),
+                retain_graph=False,
+            )
+            (d_fused_hidden, d_fused_weight) = torch.autograd.grad(
+                (fused_entropy, fused_logprobs),
+                (hidden, weight),
+                (g_entropy, g_logprobs),
+                retain_graph=False,
+            )
+            (d_kernel_hidden, d_kernel_weight) = torch.autograd.grad(
+                (kernel_entropy, kernel_logprobs),
+                (hidden, weight),
+                (g_entropy, g_logprobs),
+                retain_graph=False,
+            )
+
+            torch.testing.assert_close(d_ref_hidden, d_fused_hidden, atol=1e-2, rtol=1e-4)
+            torch.testing.assert_close(d_ref_weight, d_fused_weight, atol=1e-2, rtol=1e-4)
+            # Slightly looser than ``verify_correctness`` (bf16 vs bf16) because
+            # here the reference is computed in fp32 and the kernel path also
+            # pays one extra bf16 round-trip from the hidden prescale.
+            torch.testing.assert_close(d_ref_hidden, d_kernel_hidden, atol=3e-2, rtol=4e-2)
+            torch.testing.assert_close(d_ref_weight, d_kernel_weight, atol=3e-2, rtol=4e-2)
+
+        print("\n[INFO]: Per-sample temperature forward & backward correctness verified.")
+
     def check_storage(self, method_name, run_forward):
         self.cleanup()
         self.generate_hyper()
@@ -395,6 +533,28 @@ def test_lce_non_divisible_vocab_padding():
         torch.testing.assert_close(ref_ent, ker_ent, atol=1e-3, rtol=1e-3, msg=f"entropy mismatch: {desc}")
 
 
+def test_lce_per_sample_temperature():
+    """Standalone regression test for per-sample temperature support.
+
+    Covers both fused paths (Triton ``linear_cross_entropy`` and the pure-PyTorch
+    ``FusedLinearForPPO``) against an all-fp32 per-token reference, and also
+    checks that feeding a uniform 1-D tensor temperature is equivalent to
+    feeding the equivalent Python float.
+
+    Runs a single smaller shape so it fits in the standard unit-test budget;
+    the full sweep is exercised by the class-based ``verify_per_sample_*``
+    methods invoked from ``__main__``.
+    """
+    if not torch.cuda.is_available() or is_torch_npu_available(check_device=False):
+        return
+
+    torch.manual_seed(0)
+
+    test = TestLinearCrossEntropy(test_case_idx=2, temperature=1.5)
+    test.verify_uniform_tensor_matches_scalar(iterations=2)
+    test.verify_per_sample_correctness(iterations=2)
+
+
 if __name__ == "__main__":
     # torch.cuda.memory._record_memory_history()
 
@@ -403,8 +563,11 @@ if __name__ == "__main__":
         test = TestLinearCrossEntropy(test_case_idx)
 
         test.verify_correctness()
+        test.verify_uniform_tensor_matches_scalar()
+        test.verify_per_sample_correctness()
         test.check_storage_all()
 
     test_lce_non_divisible_vocab_padding()
+    test_lce_per_sample_temperature()
 
     # torch.cuda.memory._dump_snapshot("test_linear_cross_entropy.pkl")
