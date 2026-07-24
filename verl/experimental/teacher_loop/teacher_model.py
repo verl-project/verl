@@ -153,10 +153,11 @@ class TeacherModelManager:
                 )
 
     def _initialize_load_balancer_handle(self):
-        from verl.workers.rollout.llm_server import GlobalRequestLoadBalancer
+        from verl.workers.rollout.router import get_router_handle
 
-        self.load_balancer_handle = GlobalRequestLoadBalancer.remote(
-            servers=dict(zip(self.server_addresses, self.server_handles, strict=True))
+        self.load_balancer_handle = get_router_handle(
+            servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
+            rollout_config=self.teacher_model_config.inference,
         )
 
 

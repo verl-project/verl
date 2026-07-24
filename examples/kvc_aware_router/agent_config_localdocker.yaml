@@ -1,0 +1,44 @@
+# Local docker sandbox config with CN mirror + swe-rex wheels pre-download.
+# Replace <DATA_DIR> with your host data path (where swe_wheels lives).
+- name: swe_agent
+
+  _target_: uni_agent.agent_loop.UniAgentLoop
+
+  concurrency: 32
+  log_dir: /tmp/swebench_llm_router
+  mask_abnormal_exit_traj: false
+
+  interaction:
+    action_timeout: 300
+    max_turns: 100
+
+  env:
+    deployment:
+      type: local
+      command: "/usr/bin/python3 -m pip install -q --find-links /wheels swe-rex -i https://pypi.tuna.tsinghua.edu.cn/simple && /usr/bin/python3 -m swerex.server --auth-token {token}"
+      timeout: 600
+      startup_timeout: 1200
+      container_runtime: docker
+      extra_run_args:
+        - "-v"
+        - "<DATA_DIR>/swe_wheels:/wheels:ro"
+    env_variables:
+      PIP_PROGRESS_BAR: "off"
+      PIP_CACHE_DIR: "~/.cache/pip"
+      PIP_INDEX_URL: "https://pypi.tuna.tsinghua.edu.cn/simple"
+      PIP_TRUSTED_HOST: "pypi.tuna.tsinghua.edu.cn"
+      PAGER: "cat"
+      MANPAGER: "cat"
+      LESS: "-R"
+      TQDM_DISABLE: "1"
+      GIT_PAGER: "cat"
+
+  tool_parser: hermes
+
+  tools:
+    - name: str_replace_editor
+    - name: execute_bash
+    - name: submit
+
+  reward:
+    eval_timeout: 600

@@ -179,6 +179,7 @@ class vLLMHttpServer:
         # used for http server
         self._server_address = ray.util.get_node_ip_address().strip("[]")
         self._server_port = None
+        self._kv_events_endpoints = None
 
         # used for controlling vllm server profiler
         profiler_config = self.config.profiler
@@ -218,6 +219,22 @@ class vLLMHttpServer:
         """Get http server address and port."""
         assert self._server_port is not None, "http server is not launched, port is None"
         return self._server_address, self._server_port
+
+    def get_kv_events_endpoints(self):
+        """Get kv-events ZMQ endpoint addresses.
+
+        Returns list [endpoint, replay_endpoint] or None.
+        """
+        return self._kv_events_endpoints
+
+    def get_rollout_config(self):
+        """Get the RolloutConfig (e.g. max_num_seqs, max_model_len).
+
+        Lets external routers fetch server-side config (vLLM doesn't expose
+        these on /metrics) via the same handler-getter pattern as
+        ``get_server_address``.
+        """
+        return self.config
 
     @property
     def lora_as_adapter(self) -> bool:
@@ -1033,6 +1050,28 @@ class vLLMHttpServer:
             # Work around multimodal processor cache desync across pause/resume.
             # See: https://github.com/vllm-project/vllm/pull/43001/
             engine_kwargs.setdefault("mm_processor_cache_gb", 0)
+
+        # Use OS-assigned free ports for kv-events ZMQ sockets to avoid port
+        # conflicts across replicas. vLLM's ZmqEventPublisher further offsets
+        # by data_parallel_rank inside each replica, so a fixed port offset
+        # scheme is fragile — get_free_port is simpler and reliable.
+        kv_events_config = engine_kwargs.get("kv-events-config")
+        if kv_events_config and kv_events_config.get("enable_kv_cache_events", False):
+            endpoints = []
+            for key, default in [("endpoint", "tcp://*:5557"), ("replay_endpoint", "tcp://*:5558")]:
+                ep = kv_events_config.get(key, default)
+                if "tcp" in ep and ":" in ep:
+                    idx = ep.rfind(":")
+                    addr = ep[:idx]
+                    free_port, _ = get_free_port(self._server_address)
+                    kv_events_config[key] = f"{addr}:{free_port}"
+                    endpoints.append(f"{self._server_address}:{free_port}")
+
+            publisher = kv_events_config.get("publisher", "zmq")
+            topic = kv_events_config.get("topic", "kv-event")
+            endpoints.extend([publisher, topic])
+
+            self._kv_events_endpoints = endpoints
 
     def _get_override_generation_config(self) -> dict:
         """Return the override_generation_config dict."""

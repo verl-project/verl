@@ -251,6 +251,8 @@ actor_rollout_ref:
         mode: disabled
     _target_: verl.workers.config.VeOmniActorConfig
   rollout:
+    router_config:
+      max_cache_size: 10000
     _target_: verl.workers.config.RolloutConfig
     name: ???
     mode: async
@@ -291,6 +293,7 @@ actor_rollout_ref:
     'n': 1
     over_sample_rate: 0
     multi_stage_wake_up: false
+    router_strategy: global_sticky_inflight
     engine_kwargs:
       vllm: {}
       sglang: {}
