@@ -24,22 +24,31 @@ positions land bit-exactly, and positions outside the delta are never touched.
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
+import pytest
 import torch
 
 from verl.checkpoint_engine.delta_sync import DeltaParam, checksum
-from verl.workers.rollout.sglang_rollout.delta_loader import apply_delta
+from verl.workers.rollout.sglang_rollout.delta_loader import _masked_copy, apply_delta
 
 
-class _FakeModel:
+class _FakeModel(torch.nn.Module):
     """Holds live params; load_weights lands on param.copy_(loaded), like SGLang."""
 
     def __init__(self, named: list[tuple[str, torch.Tensor]]):
-        self.params = {n: t.clone() for n, t in named}
+        super().__init__()
+        self.params = torch.nn.ParameterDict(
+            {n.replace(".", "_"): torch.nn.Parameter(t.clone(), requires_grad=False) for n, t in named}
+        )
+        self._param_names = {name: name.replace(".", "_") for name, _ in named}
 
     def load_weights(self, chunk):
         for name, tensor in chunk:
-            self.params[name].copy_(tensor)
+            self.get_param(name).copy_(tensor)
+
+    def get_param(self, name):
+        return self.params[self._param_names[name]]
 
 
 def _make_named(dtype=torch.bfloat16) -> list[tuple[str, torch.Tensor]]:
@@ -111,7 +120,7 @@ def test_masked_apply_bit_identical():
     apply_delta(model, _named_tensors(*_sparse_indices_flush(named, new_named)))
 
     for name, expected in new_named:
-        got = model.params[name]
+        got = model.get_param(name)
         assert torch.equal(got.view(torch.int16), expected.view(torch.int16)), f"{name} not bit-identical"
 
 
@@ -122,7 +131,7 @@ def test_untouched_positions_preserved():
     model = _FakeModel(named)
     # Poison one untouched position in the live model; a full overwrite would revert it.
     sentinel_name = named[0][0]
-    model.params[sentinel_name].view(-1)[3] = 42.0
+    model.get_param(sentinel_name).view(-1)[3] = 42.0
 
     new_named = []
     for name, t in named:
@@ -132,14 +141,192 @@ def test_untouched_positions_preserved():
 
     apply_delta(model, _named_tensors(*_sparse_indices_flush(named, new_named)))
 
-    live = model.params[sentinel_name].view(-1)
+    live = model.get_param(sentinel_name).view(-1)
     assert live[3].item() == 42.0, "masked apply must not touch positions outside the delta"
     assert live[7] == new_named[0][1].view(-1)[7]
 
 
-def test_checksum_mismatch_raises():
-    import pytest
+def test_masked_apply_does_not_change_scratch_copy_semantics():
+    named = _make_named()
+    model = _FakeModel(named)
+    scratch = torch.zeros_like(named[0][1])
 
+    def load_weights(chunk):
+        for name, tensor in chunk:
+            scratch.copy_(tensor)
+            model.get_param(name).copy_(tensor)
+
+    model.load_weights = load_weights
+    new_named = [(name, tensor.clone()) for name, tensor in named]
+    new_named[0][1].view(-1)[7] += 1.0
+
+    apply_delta(model, _named_tensors(*_sparse_indices_flush(named, new_named)))
+
+    assert torch.isnan(scratch).any(), "non-model scratch copies must retain ordinary copy_ semantics"
+    assert model.get_param(named[0][0]).view(-1)[7] == new_named[0][1].view(-1)[7]
+
+
+def test_masked_apply_covers_views_into_parameter_storage():
+    named = _make_named()
+    model = _FakeModel(named)
+
+    def load_weights(chunk):
+        for name, tensor in chunk:
+            destination = model.get_param(name)
+            midpoint = destination.shape[0] // 2
+            destination[:midpoint].copy_(tensor[:midpoint])
+            destination[midpoint:].copy_(tensor[midpoint:])
+
+    model.load_weights = load_weights
+    new_named = [(name, tensor.clone()) for name, tensor in named]
+    for _, tensor in new_named:
+        tensor.view(-1)[7] += 1.0
+        tensor.view(-1)[-7] += 1.0
+
+    apply_delta(model, _named_tensors(*_sparse_indices_flush(named, new_named)))
+
+    for name, expected in new_named:
+        assert torch.equal(model.get_param(name).view(torch.int16), expected.view(torch.int16))
+
+
+def test_masked_apply_covers_registered_buffer_storage():
+    named = _make_named()
+    model = _FakeModel(named)
+    model.register_buffer("packed_weight", named[0][1].clone())
+
+    def load_weights(chunk):
+        for _, tensor in chunk:
+            model.packed_weight.copy_(tensor)
+            break
+
+    model.load_weights = load_weights
+    new_named = [(name, tensor.clone()) for name, tensor in named]
+    new_named[0][1].view(-1)[7] += 1.0
+    model.packed_weight.view(-1)[3] = 42.0
+
+    apply_delta(model, _named_tensors(*_sparse_indices_flush(named, new_named)))
+
+    assert model.packed_weight.view(-1)[3].item() == 42.0
+    assert model.packed_weight.view(-1)[7] == new_named[0][1].view(-1)[7]
+
+
+def test_post_load_weights_runs_with_original_copy_semantics():
+    named = _make_named()
+    model = _FakeModel(named)
+    derived = torch.zeros_like(named[0][1])
+    post_load_calls = 0
+
+    def post_load_weights():
+        nonlocal post_load_calls
+        post_load_calls += 1
+        derived.copy_(torch.full_like(derived, float("nan")))
+
+    def load_weights(chunk):
+        for name, tensor in chunk:
+            model.get_param(name).copy_(tensor)
+        model.post_load_weights()
+
+    model.load_weights = load_weights
+    model.post_load_weights = post_load_weights
+    new_named = [(name, tensor.clone()) for name, tensor in named]
+    new_named[0][1].view(-1)[7] += 1.0
+
+    apply_delta(model, _named_tensors(*_sparse_indices_flush(named, new_named)))
+
+    assert post_load_calls == 1
+    assert torch.isnan(derived).all(), "post-load derived tensor writes must not use masked copy semantics"
+
+
+def test_quant_method_post_load_runs_with_original_copy_semantics():
+    named = _make_named()
+    model = _FakeModel(named)
+    derived = torch.zeros_like(named[0][1])
+    post_load_calls = 0
+
+    class QuantMethod:
+        def process_weights_after_loading(self, layer):
+            nonlocal post_load_calls
+            post_load_calls += 1
+            assert layer is model
+            derived.copy_(torch.full_like(derived, float("nan")))
+
+    model.quant_method = QuantMethod()
+
+    def load_weights(chunk):
+        for name, tensor in chunk:
+            model.get_param(name).copy_(tensor)
+        model.quant_method.process_weights_after_loading(model)
+
+    model.load_weights = load_weights
+    new_named = [(name, tensor.clone()) for name, tensor in named]
+    new_named[0][1].view(-1)[7] += 1.0
+
+    apply_delta(model, _named_tensors(*_sparse_indices_flush(named, new_named)))
+
+    assert post_load_calls == 1
+    assert torch.isnan(derived).all(), "quantization post-load writes must not use masked copy semantics"
+
+
+def test_masked_copy_restores_global_and_model_hooks_after_error():
+    named = _make_named()
+    model = _FakeModel(named)
+
+    def post_load_weights():
+        pass
+
+    model.post_load_weights = post_load_weights
+    original_copy = torch.Tensor.copy_
+    original_post_load = model.post_load_weights
+
+    with pytest.raises(RuntimeError, match="load failed"):
+        with _masked_copy(model):
+            assert torch.Tensor.copy_ is not original_copy
+            assert model.post_load_weights is not original_post_load
+            raise RuntimeError("load failed")
+
+    assert torch.Tensor.copy_ is original_copy
+    assert model.post_load_weights is original_post_load
+
+
+def test_masked_copy_rolls_back_hooks_when_one_cannot_be_wrapped():
+    named = _make_named()
+    model = _FakeModel(named)
+
+    def post_load_weights():
+        pass
+
+    class ReadOnlyQuantMethod:
+        __slots__ = ()
+
+        def process_weights_after_loading(self, layer):
+            pass
+
+    model.post_load_weights = post_load_weights
+    model.quant_method = ReadOnlyQuantMethod()
+    original_copy = torch.Tensor.copy_
+    original_post_load = model.post_load_weights
+
+    with pytest.raises(RuntimeError, match="cannot safely isolate post-load hook"):
+        with _masked_copy(model):
+            pass
+
+    assert torch.Tensor.copy_ is original_copy
+    assert model.post_load_weights is original_post_load
+
+
+def test_masked_copy_fails_closed_when_model_storage_is_unavailable():
+    named = _make_named()
+    model = _FakeModel(named)
+
+    with (
+        patch.object(torch.Tensor, "untyped_storage", side_effect=NotImplementedError("unsupported")),
+        pytest.raises(RuntimeError, match="cannot identify storage for model tensor"),
+    ):
+        with _masked_copy(model):
+            pass
+
+
+def test_checksum_mismatch_raises():
     named = _make_named()
     new_named = [(n, t + 0.5) for n, t in named]
     named_tensors = _named_tensors(*_sparse_indices_flush(named, new_named))
@@ -177,4 +364,4 @@ def test_dense_flush_applies_full_tensors():
     apply_delta(model, [("__delta_spec__", spec_t), ("__values__", values)])
 
     for name, expected in named:
-        assert torch.equal(model.params[name].view(torch.int16), expected.view(torch.int16)), name
+        assert torch.equal(model.get_param(name).view(torch.int16), expected.view(torch.int16)), name

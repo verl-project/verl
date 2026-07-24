@@ -77,7 +77,7 @@ def apply_delta(model, named_tensors) -> None:
         return
 
     encoding = spec["encoding"]
-    with _masked_copy():
+    with _masked_copy(model):
         chunk: list[tuple[str, torch.Tensor]] = []
         chunk_bytes = 0
         for p in spec["params"]:
@@ -134,27 +134,109 @@ def _decode_one(encoding: str, positions: torch.Tensor, values: torch.Tensor, p:
     return flat.view(p["shape"])
 
 
+def _model_storage_keys(model) -> set[tuple[torch.device, int, int]]:
+    """Return storage identities owned by model parameters and buffers."""
+    storage_keys = set()
+    for named_tensors in (model.named_parameters(), model.named_buffers()):
+        for _, tensor in named_tensors:
+            if tensor.is_meta:
+                continue
+            try:
+                storage = tensor.untyped_storage()
+                key = (tensor.device, storage.data_ptr(), storage.nbytes())
+            except (NotImplementedError, RuntimeError) as exc:
+                raise RuntimeError(
+                    f"cannot identify storage for model tensor with shape {tuple(tensor.shape)} on {tensor.device}"
+                ) from exc
+            if key[1]:
+                storage_keys.add(key)
+    return storage_keys
+
+
+def _post_load_hooks(model):
+    """Yield post-load hooks that may write derived model state."""
+    post_load = getattr(model, "post_load_weights", None)
+    if callable(post_load):
+        yield model, "post_load_weights", post_load
+
+    seen_quant_methods = set()
+    for module in model.modules():
+        quant_method = getattr(module, "quant_method", None)
+        if quant_method is None or id(quant_method) in seen_quant_methods:
+            continue
+        seen_quant_methods.add(id(quant_method))
+        process_weights = getattr(quant_method, "process_weights_after_loading", None)
+        if callable(process_weights):
+            yield quant_method, "process_weights_after_loading", process_weights
+
+
 @contextmanager
-def _masked_copy():
-    """Temporarily make ``Tensor.copy_`` skip NaN positions in the source.
+def _masked_copy(model):
+    """Make model-weight ``copy_`` calls skip NaN positions in the source.
 
     SGLang's per-model ``load_weights`` ultimately lands on ``param.copy_(loaded)``
     (possibly on a narrowed TP slice). Under this context a NaN-masked source
-    overwrites only the changed positions; fully dense sources (e.g. the first
-    full-seed flush) take the original fast path untouched.
+    overwrites only the changed positions. Writes outside model parameter and
+    buffer storage retain ordinary ``copy_`` semantics.
     """
     orig_copy = torch.Tensor.copy_
+    model_storage_keys = _model_storage_keys(model)
+
+    def is_model_storage(tensor):
+        try:
+            storage = tensor.untyped_storage()
+            key = (tensor.device, storage.data_ptr(), storage.nbytes())
+        except (NotImplementedError, RuntimeError):
+            return False
+        return key in model_storage_keys
 
     def masked_copy_(self, src, *args, **kwargs):
-        if isinstance(src, torch.Tensor) and src.is_floating_point() and self.shape == src.shape:
+        if (
+            is_model_storage(self)
+            and isinstance(src, torch.Tensor)
+            and src.is_floating_point()
+            and self.shape == src.shape
+        ):
             mask = ~torch.isnan(src)
             if not bool(mask.all()):
                 self[mask] = src[mask].to(self.dtype)
                 return self
         return orig_copy(self, src, *args, **kwargs)
 
+    wrapped_hooks = []
+    try:
+        for owner, name, original_hook in _post_load_hooks(model):
+            instance_dict = getattr(owner, "__dict__", {})
+            had_instance_hook = name in instance_dict
+
+            def unpatched_post_load(*args, _hook=original_hook, **kwargs):
+                current_copy = torch.Tensor.copy_
+                torch.Tensor.copy_ = orig_copy
+                try:
+                    return _hook(*args, **kwargs)
+                finally:
+                    torch.Tensor.copy_ = current_copy
+
+            try:
+                setattr(owner, name, unpatched_post_load)
+            except (AttributeError, TypeError) as exc:
+                raise RuntimeError(f"cannot safely isolate post-load hook {type(owner).__name__}.{name}") from exc
+            wrapped_hooks.append((owner, name, original_hook, had_instance_hook))
+    except Exception:
+        for owner, name, original_hook, had_instance_hook in reversed(wrapped_hooks):
+            if had_instance_hook:
+                setattr(owner, name, original_hook)
+            else:
+                delattr(owner, name)
+        raise
+
     torch.Tensor.copy_ = masked_copy_
     try:
         yield
     finally:
         torch.Tensor.copy_ = orig_copy
+        for owner, name, original_hook, had_instance_hook in reversed(wrapped_hooks):
+            if had_instance_hook:
+                setattr(owner, name, original_hook)
+            else:
+                delattr(owner, name)
