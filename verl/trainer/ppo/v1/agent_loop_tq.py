@@ -55,9 +55,46 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         super().__init__(*args, **kwargs)
         tq.init()
         self.background_tasks = set()
+        self.batch_queue = asyncio.Queue(maxsize=0)
+        self.batch_scheduler_task = None
 
     async def generate_sequences(self, batch: TensorDict) -> None:
-        """Spawn agent loop for each sample in the batch without waiting for the results."""
+        """Enqueue one batch chunk and return without waiting for rollout completion."""
+        await self.batch_queue.put(batch)
+        self._ensure_batch_scheduler()
+
+    def _ensure_batch_scheduler(self) -> None:
+        if self.batch_scheduler_task is not None and not self.batch_scheduler_task.done():
+            return
+
+        self.batch_scheduler_task = asyncio.create_task(self._batch_scheduler())
+        self.batch_scheduler_task.add_done_callback(self._on_batch_scheduler_done)
+
+    def _on_batch_scheduler_done(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("AgentLoopWorkerTQ batch scheduler failed", exc_info=(type(exc), exc, exc.__traceback__))
+
+    async def _batch_scheduler(self) -> None:
+        """Run queued batch chunks serially while keeping prompt-level parallelism within each chunk."""
+        while True:
+            batch = await self.batch_queue.get()
+            validate = batch["validate"] if "validate" in batch else False
+            try:
+                await self._run_batch(batch)
+            except Exception:
+                logger.exception("Failed to run queued agent loop batch")
+                try:
+                    await self._mark_batch_failure(batch, validate=validate)
+                except Exception:
+                    logger.exception("Failed to mark batch failure in TransferQueue")
+            finally:
+                self.batch_queue.task_done()
+
+    async def _run_batch(self, batch: TensorDict) -> None:
+        """Spawn agent loops for all prompts in one batch chunk and wait for the chunk to finish."""
         validate = batch["validate"] if "validate" in batch else False
         batch.pop("validate", None)
         config = self.config.actor_rollout_ref.rollout
@@ -82,7 +119,9 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
 
         trajectory_info = await get_trajectory_info(batch["global_steps"], batch["index"], validate)
 
-        # create background tasks for each sample in the batch
+        # create tasks for each sample in the batch. The batch scheduler waits for
+        # all of them before launching the next queued batch chunk on this worker.
+        tasks = []
         for i in range(len(batch)):
             # TODO(wuxibin): add trace support
             trace_this_sample = False
@@ -101,8 +140,19 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             task = asyncio.create_task(
                 self._run_prompt(prompt, sampling_params, trajectory=trajectory_info[i], trace=trace_this_sample)
             )
-            self.background_tasks.add(task)
-            task.add_done_callback(self.background_tasks.discard)
+            tasks.append(task)
+
+        await asyncio.gather(*tasks)
+
+    async def _mark_batch_failure(self, batch: TensorDict, validate: bool) -> None:
+        partition_id = "val" if validate else "train"
+        if "uid" not in batch:
+            return
+
+        for uid in list(batch["uid"]):
+            if isinstance(uid, NonTensorData):
+                uid = uid.data
+            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
 
     async def _run_prompt(self, prompt: dict, sampling_params: dict, trajectory: dict, trace: bool = False) -> None:
         """Spawn multiple agent loops in parallel according to rollout.n or rollout.val_kwargs.n."""
