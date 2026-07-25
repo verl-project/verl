@@ -234,7 +234,6 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install -r requirements-npu.txt
           pip install --no-deps -e .
       - name: Check final pip list
         run: |
@@ -385,7 +384,7 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install -r requirements-npu.txt && pip install -v -e .
+          pip install -v -e .
       - name: Check final pip list
         run: |
           pip list
@@ -588,7 +587,7 @@ jobs:
         run: pip install uv
       - name: Install the current repository
         run: |
-          uv pip install -r requirements-npu.txt && uv pip install -v -e .
+          uv pip install -v -e .
           uv pip install transformers==5.3.0
       - name: Check initial pip list from image
         run: |
