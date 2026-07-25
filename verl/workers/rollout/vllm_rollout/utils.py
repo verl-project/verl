@@ -436,9 +436,17 @@ class vLLMColocateWorkerExtension:
         # re-initialize would swap them back to meta, letting finalize process
         # uninitialized memory into kernel storage — silent corruption). The
         # DeepSeek-V4 (quant_reload_state) and Ascend MXFP8 paths keep their
-        # own prepare/restore protocols; no-op on vLLM < 0.20. On vLLM >= 0.21
-        # (not yet validated) begin is skipped and load_quanted_weights fails
-        # closed with an explicit version error instead of silently opting in.
+        # own prepare/restore protocols; no-op on vLLM < 0.20.
+        #
+        # Unsupported configurations (MTP drafter, vLLM outside the validated
+        # interval, a worker poisoned by an earlier failed reload) are rejected
+        # by validate_fp8_layerwise_reload_config BEFORE the receiver — and so
+        # before any socket or shared buffer — exists: the sender waits for an
+        # un-timed initial ACK and only awaits this worker's future after
+        # sending completes, so raising once IPC is live would hang the driver
+        # instead of failing the sync. begin failures poison the worker
+        # (_fail_stop_fp8_reload) because initialize_layerwise_reload mutates
+        # layers one at a time and can leave the model half-converted.
         fp8_layerwise_begun = False
         if (
             is_fp8_model(self.model_runner.vllm_config)
@@ -446,21 +454,36 @@ class vLLMColocateWorkerExtension:
             and not quant_reload_state
         ):
             from verl.utils.vllm.vllm_fp8_utils import (
+                _fail_stop_fp8_reload,
                 _vllm_supports_layerwise_reload,
                 begin_fp8_layerwise_reload,
-                is_mxfp8_vllm_ascend,
+                fp8_state,
+                validate_fp8_layerwise_reload_config,
             )
 
-            if not is_mxfp8_vllm_ascend(self.model_runner.vllm_config.quant_config) and (
-                _vllm_supports_layerwise_reload()
-            ):
-                if self._use_mtp_drafter_weight_sync():
-                    raise NotImplementedError(
-                        "FP8 rollout weight sync via vLLM layerwise reload does not "
-                        "support the MTP drafter yet. Disable MTP speculative decoding "
-                        "when rollout.quantization=fp8 on vLLM >= 0.20."
+            validate_fp8_layerwise_reload_config(
+                self.model_runner.vllm_config,
+                uses_mtp_drafter=self._use_mtp_drafter_weight_sync(),
+            )
+            if _vllm_supports_layerwise_reload():
+                try:
+                    fp8_layerwise_begun = begin_fp8_layerwise_reload(
+                        self.model_runner.model, tag="main", model_runner=self.model_runner
                     )
-                fp8_layerwise_begun = begin_fp8_layerwise_reload(self.model_runner.model, tag="main")
+                except BaseException:
+                    # begin_fp8_layerwise_reload already fail-stops when
+                    # initialize_layerwise_reload itself raises; this catch
+                    # covers every OTHER way begin can fail once the attempt is
+                    # on record (e.g. a lifecycle violation from a previous sync
+                    # that never finalized), which leaves the same
+                    # possibly-half-converted model. Poisoning is idempotent.
+                    if "main" in fp8_state.layerwise_begin_attempted:
+                        _fail_stop_fp8_reload(
+                            self.model_runner,
+                            "begin_fp8_layerwise_reload failed",
+                            tag="main",
+                        )
+                    raise
 
         receiver = BucketedWeightReceiver(
             zmq_handle=self._get_zmq_handle(),

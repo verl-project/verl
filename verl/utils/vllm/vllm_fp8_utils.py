@@ -57,6 +57,16 @@ class FP8State:
     # begin_fp8_layerwise_reload() exactly once per weight sync (BEFORE any
     # IPC bucket) and cleared by finalize_fp8_layerwise_reload().
     layerwise_active: set = field(default_factory=lambda: set())
+    # Model tags for which begin_fp8_layerwise_reload() ENTERED
+    # initialize_layerwise_reload. Recorded BEFORE calling into vLLM, because
+    # initialize_layerwise_reload swaps layers to meta one at a time: if it
+    # raises midway the model is left partially converted even though
+    # `layerwise_active` was never reached.
+    layerwise_begin_attempted: set = field(default_factory=lambda: set())
+    # Model tags whose worker is FAIL-STOPPED: a reload failed with the model
+    # possibly half-converted, so it must not serve requests or accept another
+    # sync. Set by _fail_stop_fp8_reload(); only a worker restart clears it.
+    layerwise_poisoned: set = field(default_factory=lambda: set())
 
 
 fp8_state: FP8State = FP8State()
@@ -332,19 +342,197 @@ def _vllm_layerwise_reload_available():
     return _get_vllm_version() >= version.parse("0.20.0")
 
 
+# Upper bound (exclusive) of the vLLM interval this resync path is validated
+# on. The lifecycle this path drives depends on exactly two properties of
+# vllm/model_executor/model_loader/reload/:
+#
+#   (i)  initialize_layerwise_reload is NOT idempotent across buckets — a
+#        completed layer ends _layerwise_process() with info.reset(), so a
+#        re-initialize swaps it back to meta and finalize then treats
+#        0 < load_numel < load_numel_total as "delayed processing" and pushes
+#        uninitialized memory into kernel storage (silent corruption);
+#   (ii) streamed tensors are BUFFERED (info.loaded_weights holds the bound
+#        weight-loader args, including the incoming tensor) until a layer is
+#        complete, so a tensor that aliases verl's reused IPC receive buffer
+#        must be cloned by the caller.
+#
+# Both properties were desk-audited against the vLLM sources at tags v0.20.2,
+# v0.21.0, v0.22.1, v0.23.0, v0.23.1rc0 and v0.24.0: LayerReloadingInfo
+# (types.py) is byte-identical on all of them, the completion trigger
+# (`info.load_numel >= info.load_numel_total` -> _layerwise_process ->
+# info.reset()) and the finalize delayed-processing branch
+# (`0 < load_numel < load_numel_total` -> _layerwise_process) are unchanged,
+# and the buffering site (`info.loaded_weights.append((param_name,
+# bound_args))`) is unchanged. The deltas over that interval are additive and
+# orthogonal: a LOADING_LAYERS device-memory warning (0.21), attention layers
+# returning early from the online loader instead of being excluded from the
+# completion condition (0.21, same effective behaviour: attention is
+# finalized in _finalize_attention_layer either way), a
+# non-persistent-parameter-alias buffer skip in capture_layer_to_meta and an
+# `is_meta` guard in materialize_layer (0.22), a `name not in layer._buffers`
+# guard in _copy_and_restore_kernel_tensors (0.23), and a numel cap in
+# get_numel_loaded (0.23.1rc0/0.24, which makes per-layer accounting stricter,
+# not looser).
+#
+# vLLM 0.25.0 is deliberately NOT included: layerwise.py grows
+# _wrap_parameters_weight_loader() and re-runs
+# `info.load_numel_total = get_layer_size(layer)` on EVERY load to pick up
+# late-registered parameters, which changes when a layer is considered
+# complete. That is the exact property (i) this path depends on, so the newer
+# line fails closed until it is audited and re-measured.
+_VLLM_LAYERWISE_RELOAD_VALIDATED_BELOW = "0.25.0"
+
+
 def _vllm_supports_layerwise_reload():
-    """True only on the vLLM interval this resync path is validated on (0.20.x).
+    """True only on the vLLM interval this resync path is validated on.
 
     Importing the reload entry points proves the module exists, not that the
     lifecycle semantics are unchanged, so newer vLLM lines are NOT silently
-    opted in: on vLLM >= 0.21 begin/finalize stay no-ops and
+    opted in: above the validated interval begin/finalize stay no-ops and
     load_quanted_weights fails closed with an explicit error until the newer
-    line is validated.
+    line is validated (see _VLLM_LAYERWISE_RELOAD_VALIDATED_BELOW).
     """
-    return _vllm_layerwise_reload_available() and _get_vllm_version() < version.parse("0.21.0")
+    return _vllm_layerwise_reload_available() and _get_vllm_version() < version.parse(
+        _VLLM_LAYERWISE_RELOAD_VALIDATED_BELOW
+    )
 
 
-def begin_fp8_layerwise_reload(model, tag="main"):
+def _fail_stop_fp8_reload(model_runner, reason, tag="main", model=None):
+    """Poison this worker after a failed/aborted FP8 layerwise reload.
+
+    ``initialize_layerwise_reload`` swaps a model's layers to meta one at a
+    time and ``_layerwise_process`` restores them one at a time, so a failure
+    part-way through leaves a model whose early layers are meta placeholders
+    (or unprocessed) while the rest still hold real kernel data. Such a model
+    must never serve a generation request: a crash is recoverable, a silent
+    mis-generation from a half-converted model is not (the same reason this
+    path refuses to hand-reshape kernel tensors).
+
+    Best-effort and non-raising by construction — it runs on the error path,
+    so it must not mask the original exception. It:
+
+    1. records ``tag`` in ``fp8_state.layerwise_poisoned``, which makes every
+       later begin_fp8_layerwise_reload / load_quanted_weights on this worker
+       raise instead of loading into the damaged model;
+    2. installs a forward guard on the model so a generation request raises an
+       explicit RuntimeError naming the failed sync instead of running on
+       meta/half-converted weights.
+
+    Only a worker restart clears the poison.
+    """
+    fp8_state.layerwise_poisoned.add(tag)
+    fp8_state.layerwise_active.discard(tag)
+    logger.error(
+        "FP8: layerwise reload FAILED for '%s' (%s); worker poisoned — it will refuse "
+        "further weight syncs and generation requests until restarted.",
+        tag,
+        reason,
+    )
+
+    if model is None:
+        model = getattr(model_runner, "model", None)
+    if model is None:
+        return
+
+    message = (
+        f"vLLM worker is fail-stopped: FP8 layerwise weight reload '{tag}' failed "
+        f"({reason}). The model may be partially converted (some layers on meta or "
+        "unprocessed), so generation is refused instead of returning possibly "
+        "corrupt output. Restart the rollout worker."
+    )
+    try:
+        model_runner._verl_fp8_reload_fail_stop = message
+    except Exception:  # pragma: no cover - exotic model_runner objects
+        pass
+
+    forward = getattr(model, "forward", None)
+    if forward is None or getattr(forward, "_verl_fp8_fail_stop", False):
+        return
+
+    def _fail_stopped_forward(*args, **kwargs):
+        raise RuntimeError(message)
+
+    _fail_stopped_forward._verl_fp8_fail_stop = True
+    try:
+        model.forward = _fail_stopped_forward
+    except Exception:  # pragma: no cover - modules that forbid attribute set
+        logger.error("FP8: could not install fail-stop forward guard on %s", type(model).__name__)
+
+
+def _assert_not_fail_stopped(tag="main"):
+    if tag in fp8_state.layerwise_poisoned:
+        raise RuntimeError(
+            f"FP8 layerwise reload for '{tag}' is fail-stopped after an earlier failed "
+            "reload left the model possibly partially converted. Restart the rollout "
+            "worker; retrying a weight sync on a half-converted model risks silent "
+            "weight corruption."
+        )
+
+
+def validate_fp8_layerwise_reload_config(vllm_config, uses_mtp_drafter, tag="main"):
+    """Validate an FP8 weight sync BEFORE any IPC resource is created.
+
+    Every unsupported-configuration check this path performs is decidable from
+    the rollout config plus the installed vLLM version — i.e. from information
+    available before a single byte moves. That matters because verl's bucketed
+    weight sync is a two-party ACK protocol with no timeout on either side:
+    the driver launches the receiver worker non-blocking and then waits in
+    ``BucketedWeightSender._init_buffer()`` for the initial ACK, and awaits the
+    worker future only after sending completes. A raise from inside the worker
+    after the socket exists therefore turns an intended fail-closed error into
+    a silent hang, with the real message buried in the worker's log.
+
+    So the checks run HERE, at a point where raising can only fail the sync
+    loudly:
+
+    * a poisoned worker (an earlier reload left the model half-converted);
+    * MTP speculative decoding, which the layerwise lifecycle does not cover
+      (vLLM's reload targets the main model only, while verl's fallback also
+      syncs the drafter);
+    * a vLLM version outside the validated interval, where the lifecycle
+      semantics this path depends on have not been re-audited.
+
+    Only applies to the FP8 layerwise-reload path: returns immediately when
+    the reload module is absent (vLLM < 0.20) or the model is on the Ascend
+    MXFP8 path, both of which use their own protocols.
+
+    Args:
+        vllm_config: the worker's ``vllm_config`` (needs ``quant_config``).
+        uses_mtp_drafter: True when this sync would also update an MTP drafter.
+        tag: model tag, matching begin/finalize_fp8_layerwise_reload.
+
+    Raises:
+        RuntimeError / NotImplementedError on an unsupported configuration.
+    """
+    if not _vllm_layerwise_reload_available():
+        return
+    if is_mxfp8_vllm_ascend(getattr(vllm_config, "quant_config", None)):
+        return
+
+    _assert_not_fail_stopped(tag)
+
+    if uses_mtp_drafter:
+        raise NotImplementedError(
+            "FP8 rollout weight sync via vLLM layerwise reload does not "
+            "support the MTP drafter yet. Disable MTP speculative decoding "
+            "when rollout.quantization=fp8 on vLLM >= 0.20. (Validated before "
+            "the weight-transfer IPC starts, so the sync fails fast instead of "
+            "stranding the sender.)"
+        )
+
+    if not _vllm_supports_layerwise_reload():
+        raise RuntimeError(
+            f"FP8 rollout weight resync is validated on vLLM "
+            f">= 0.20, < {_VLLM_LAYERWISE_RELOAD_VALIDATED_BELOW}; found "
+            f"vLLM {_get_vllm_version()}. The layerwise reload lifecycle this path "
+            "drives is not semantically re-verified on newer lines, so it fails "
+            "closed instead of silently opting in. (Validated before the "
+            "weight-transfer IPC starts, so the sync fails fast instead of "
+            "stranding the sender.)"
+        )
+
+
+def begin_fp8_layerwise_reload(model, tag="main", model_runner=None):
     """Enter vLLM's layerwise reload mode for one model, ONCE per weight sync.
 
     Must be called BEFORE the first IPC bucket is received (i.e. before
@@ -353,9 +541,19 @@ def begin_fp8_layerwise_reload(model, tag="main"):
     complete iterator -> finalize, each exactly once). Calling it twice
     without an intervening finalize is a lifecycle violation and raises.
 
-    Returns True if layerwise reload was entered (vLLM >= 0.20), False on
-    older vLLM (where the verl process_weights patches handle kernel format).
+    ``initialize_layerwise_reload`` mutates the model layer by layer, so the
+    attempt is recorded BEFORE calling into vLLM and any failure inside it
+    fail-stops the worker (_fail_stop_fp8_reload): once some layers are on
+    meta, neither reuse nor a retry is safe. The caller in
+    update_weights_from_ipc catches begin failures for the same reason, so a
+    raise from anywhere in this function leaves a poisoned worker rather than
+    a silently half-converted one.
+
+    Returns True if layerwise reload was entered (vLLM on the validated
+    interval), False otherwise (where the verl process_weights patches handle
+    kernel format).
     """
+    _assert_not_fail_stopped(tag)
     if not _vllm_supports_layerwise_reload():
         return False
     if tag in fp8_state.layerwise_active:
@@ -366,7 +564,21 @@ def begin_fp8_layerwise_reload(model, tag="main"):
         )
     from vllm.model_executor.model_loader.reload import initialize_layerwise_reload
 
-    initialize_layerwise_reload(model)
+    # Record the attempt BEFORE vLLM starts swapping layers to meta: if
+    # initialize_layerwise_reload raises at layer N, layers 1..N-1 are already
+    # converted while `layerwise_active` was never reached, so `attempted` is
+    # the only durable evidence that this model was touched.
+    fp8_state.layerwise_begin_attempted.add(tag)
+    try:
+        initialize_layerwise_reload(model)
+    except BaseException as exc:
+        _fail_stop_fp8_reload(
+            model_runner,
+            f"initialize_layerwise_reload raised: {type(exc).__name__}: {exc}",
+            tag=tag,
+            model=model,
+        )
+        raise
     fp8_state.layerwise_active.add(tag)
     logger.info("FP8: layerwise reload initialized (%s, once for this sync)", tag)
     return True
@@ -376,15 +588,30 @@ def finalize_fp8_layerwise_reload(model, model_config, tag="main"):
     """Exit layerwise reload mode ONCE after ALL IPC buckets: process layers
     that did not self-complete during streaming (attention scales, padded
     layers) and restore kernel tensors. Raises if called without a matching
-    begin (lifecycle violation). Must run inside set_current_vllm_config."""
+    begin (lifecycle violation). Must run inside set_current_vllm_config.
+
+    A failure here also leaves the model partially restored (some layers
+    processed back to kernel format, some not), so it fail-stops the worker
+    for the same reason begin does.
+    """
     if not _vllm_supports_layerwise_reload():
         return
     if tag not in fp8_state.layerwise_active:
         raise RuntimeError(f"finalize_fp8_layerwise_reload('{tag}') without an active begin — lifecycle violation.")
     from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
 
-    finalize_layerwise_reload(model, model_config)
+    try:
+        finalize_layerwise_reload(model, model_config)
+    except BaseException as exc:
+        _fail_stop_fp8_reload(
+            None,
+            f"finalize_layerwise_reload raised: {type(exc).__name__}: {exc}",
+            tag=tag,
+            model=model,
+        )
+        raise
     fp8_state.layerwise_active.discard(tag)
+    fp8_state.layerwise_begin_attempted.discard(tag)
 
 
 def process_quanted_weights_after_loading(model_runner, reload_state):
@@ -437,9 +664,19 @@ def load_quanted_weights(weights, model_runner, is_drafter=False, prepare_model=
         # Fail CLOSED: on vLLM >= 0.20 params are in KERNEL format at sync
         # time; loading without the reload protocol would either crash
         # (per-expert indexing of the 4D kernel tensor) or silently mis-load.
+        #
+        # Both raises below are reached from inside the IPC receive loop
+        # (on_bucket_received), where an un-ACKed exception would strand the
+        # sender. update_weights_from_ipc validates the configuration BEFORE
+        # any IPC socket exists, and BucketedWeightReceiver reports bucket
+        # errors to the sender as an error frame, so these are backstops for
+        # a caller that skipped the pre-IPC validation rather than the primary
+        # detection point.
+        _assert_not_fail_stopped("main")
         if not _vllm_supports_layerwise_reload():
             raise RuntimeError(
-                f"FP8 rollout weight resync is validated on vLLM 0.20.x only; found "
+                f"FP8 rollout weight resync is validated on vLLM "
+                f">= 0.20, < {_VLLM_LAYERWISE_RELOAD_VALIDATED_BELOW}; found "
                 f"vLLM {_get_vllm_version()}. The layerwise reload lifecycle this "
                 "path drives is not semantically re-verified on newer lines, so it "
                 "fails closed instead of silently opting in."

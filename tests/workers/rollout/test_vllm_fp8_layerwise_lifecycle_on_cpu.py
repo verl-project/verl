@@ -199,11 +199,16 @@ class _FakeQuantConfig:
 
 @pytest.fixture(autouse=True)
 def _reset_fp8_state(monkeypatch):
-    fp8_utils.fp8_state.seen_params.clear()
-    fp8_utils.fp8_state.fp8_param_names.clear()
-    fp8_utils.fp8_state.layerwise_active.clear()
+    def _clear():
+        fp8_utils.fp8_state.seen_params.clear()
+        fp8_utils.fp8_state.fp8_param_names.clear()
+        fp8_utils.fp8_state.layerwise_active.clear()
+        fp8_utils.fp8_state.layerwise_begin_attempted.clear()
+        fp8_utils.fp8_state.layerwise_poisoned.clear()
+
+    _clear()
     yield
-    fp8_utils.fp8_state.layerwise_active.clear()
+    _clear()
 
 
 def _pin_version(monkeypatch, ver: str):
@@ -312,15 +317,150 @@ def test_load_quanted_weights_fails_closed_without_begin(monkeypatch):
         fp8_utils.load_quanted_weights([("model.norm.weight", torch.zeros(4))], runner)
 
 
+def test_validated_interval_covers_the_audited_vllm_tags(monkeypatch):
+    """The gate must cover every vLLM line whose reload semantics were audited.
+
+    verl's CI images pin vllm023.dev1 and the dense/MoE FP8 E2Es exercise this
+    path, so a gate that excludes 0.23 turns fail-closed into a red CI. The
+    upper bound is the first line whose layer-completion accounting changed
+    (0.25.0, which re-derives load_numel_total on every load).
+    """
+    for validated in ("0.20.0", "0.20.2", "0.21.0", "0.22.1", "0.23.0", "0.24.0"):
+        _pin_version(monkeypatch, validated)
+        assert fp8_utils._vllm_supports_layerwise_reload() is True, validated
+
+    for unvalidated in ("0.25.0", "0.26.0"):
+        _pin_version(monkeypatch, unvalidated)
+        assert fp8_utils._vllm_layerwise_reload_available() is True, unvalidated
+        assert fp8_utils._vllm_supports_layerwise_reload() is False, unvalidated
+
+
 def test_load_quanted_weights_fails_closed_on_unvalidated_vllm(monkeypatch):
-    """vLLM >= 0.21 ships the reload module but is not validated: begin must
-    be a no-op and the per-bucket loader must raise an explicit version
-    error instead of silently opting the new line in."""
-    _pin_version(monkeypatch, "0.21.0")
+    """Above the validated interval the reload module still imports, but the
+    lifecycle semantics are unverified: begin must be a no-op and the
+    per-bucket loader must raise an explicit version error instead of silently
+    opting the new line in."""
+    _pin_version(monkeypatch, "0.25.0")
     assert fp8_utils._vllm_layerwise_reload_available() is True
     assert fp8_utils._vllm_supports_layerwise_reload() is False
     assert fp8_utils.begin_fp8_layerwise_reload(_ToyModel(), tag="main") is False
 
     runner = _FakeModelRunner(_ToyModel())
-    with pytest.raises(RuntimeError, match="validated on vLLM 0.20.x only"):
+    with pytest.raises(RuntimeError, match=r"validated on vLLM >= 0\.20, < 0\.25\.0"):
         fp8_utils.load_quanted_weights([("model.norm.weight", torch.zeros(4))], runner)
+
+
+# ---------------------------------------------------------------------------
+# Fault injection: a begin that dies part-way through initialize_layerwise_reload
+# leaves the model half-converted (early layers on meta, the rest real), so the
+# worker must be fail-stopped rather than reused.
+# ---------------------------------------------------------------------------
+
+
+def _pin_failing_initialize(monkeypatch, layers_converted: int):
+    """Make initialize_layerwise_reload convert N layers, then raise."""
+    fake_reload = types.ModuleType("vllm.model_executor.model_loader.reload")
+    converted = []
+
+    def _initialize_layerwise_reload(model):
+        for index, module in enumerate(model.modules()):
+            if index >= layers_converted:
+                raise RuntimeError("synthetic vLLM failure mid-initialize (layer swap to meta)")
+            converted.append(module)
+
+    fake_reload.initialize_layerwise_reload = _initialize_layerwise_reload
+    fake_reload.finalize_layerwise_reload = lambda model, cfg: None
+    monkeypatch.setitem(sys.modules, "vllm.model_executor.model_loader.reload", fake_reload)
+    return converted
+
+
+def test_begin_records_attempt_before_calling_into_vllm(monkeypatch):
+    """`attempted` must be recorded BEFORE the vLLM call, otherwise a failure
+    part-way through initialize leaves no durable evidence that the model was
+    touched (`layerwise_active` is never reached)."""
+    _pin_version(monkeypatch, "0.23.0")
+    converted = _pin_failing_initialize(monkeypatch, layers_converted=1)
+    model = _ToyModel()
+
+    with pytest.raises(RuntimeError, match="synthetic vLLM failure mid-initialize"):
+        fp8_utils.begin_fp8_layerwise_reload(model, tag="main")
+
+    assert converted, "the fault injection must convert at least one layer before raising"
+    assert "main" in fp8_utils.fp8_state.layerwise_begin_attempted
+    # NOT active: the reload never completed.
+    assert "main" not in fp8_utils.fp8_state.layerwise_active
+
+
+def test_begin_failure_poisons_the_worker(monkeypatch):
+    """A begin that raises mid-initialize must fail-stop the worker: later
+    syncs raise, and a generation request on the half-converted model raises
+    instead of returning possibly corrupt output."""
+    _pin_version(monkeypatch, "0.23.0")
+    _pin_failing_initialize(monkeypatch, layers_converted=1)
+    model = _ToyModel()
+    runner = _FakeModelRunner(model)
+
+    with pytest.raises(RuntimeError, match="synthetic vLLM failure mid-initialize"):
+        fp8_utils.begin_fp8_layerwise_reload(model, tag="main", model_runner=runner)
+
+    assert "main" in fp8_utils.fp8_state.layerwise_poisoned
+
+    # 1. A later weight sync must refuse rather than load into the damaged model.
+    monkeypatch.setitem(sys.modules, "vllm.model_executor.model_loader.reload", _make_fake_reload_module())
+    with pytest.raises(RuntimeError, match="fail-stopped"):
+        fp8_utils.begin_fp8_layerwise_reload(model, tag="main", model_runner=runner)
+
+    # 2. The pre-IPC config validation must also refuse (before any socket exists).
+    with pytest.raises(RuntimeError, match="fail-stopped"):
+        fp8_utils.validate_fp8_layerwise_reload_config(runner.vllm_config, uses_mtp_drafter=False)
+
+    # 3. A per-bucket load must refuse.
+    with pytest.raises(RuntimeError, match="fail-stopped"):
+        fp8_utils.load_quanted_weights([("model.norm.weight", torch.zeros(4))], runner)
+
+    # 4. A generation request must raise instead of running on meta weights.
+    with pytest.raises(RuntimeError, match="fail-stopped"):
+        model.forward(torch.zeros(1))
+
+
+def test_finalize_failure_poisons_the_worker(monkeypatch):
+    """finalize also restores layers one at a time, so a failure there leaves
+    the same partially-restored model and must fail-stop too."""
+    _pin_version(monkeypatch, "0.23.0")
+    fake_reload = types.ModuleType("vllm.model_executor.model_loader.reload")
+    fake_reload.initialize_layerwise_reload = lambda model: None
+
+    def _finalize(model, cfg):
+        raise RuntimeError("synthetic vLLM failure mid-finalize")
+
+    fake_reload.finalize_layerwise_reload = _finalize
+    monkeypatch.setitem(sys.modules, "vllm.model_executor.model_loader.reload", fake_reload)
+
+    model = _ToyModel()
+    assert fp8_utils.begin_fp8_layerwise_reload(model, tag="main") is True
+    with pytest.raises(RuntimeError, match="synthetic vLLM failure mid-finalize"):
+        fp8_utils.finalize_fp8_layerwise_reload(model, model_config=None, tag="main")
+
+    assert "main" in fp8_utils.fp8_state.layerwise_poisoned
+    assert "main" not in fp8_utils.fp8_state.layerwise_active
+
+
+def test_validate_config_rejects_mtp_and_unvalidated_version(monkeypatch):
+    """The pre-IPC validation gate must reject exactly the configurations the
+    in-loop raises used to reject, so no unsupported sync ever reaches IPC."""
+    runner = _FakeModelRunner(_ToyModel())
+
+    _pin_version(monkeypatch, "0.23.0")
+    # Supported configuration: must not raise.
+    fp8_utils.validate_fp8_layerwise_reload_config(runner.vllm_config, uses_mtp_drafter=False)
+
+    with pytest.raises(NotImplementedError, match="MTP drafter"):
+        fp8_utils.validate_fp8_layerwise_reload_config(runner.vllm_config, uses_mtp_drafter=True)
+
+    _pin_version(monkeypatch, "0.25.0")
+    with pytest.raises(RuntimeError, match=r"validated on vLLM >= 0\.20, < 0\.25\.0"):
+        fp8_utils.validate_fp8_layerwise_reload_config(runner.vllm_config, uses_mtp_drafter=False)
+
+    # Below 0.20 the reload module is absent: this path does not apply at all.
+    _pin_version(monkeypatch, "0.19.0")
+    fp8_utils.validate_fp8_layerwise_reload_config(runner.vllm_config, uses_mtp_drafter=True)
