@@ -56,6 +56,23 @@ class _FakeModel:
         return iter(())
 
 
+class _FakeExperts:
+    def __init__(self, expert_map):
+        self._expert_map = torch.tensor(expert_map, dtype=torch.int32)
+
+
+class _FakeExpertModel(_FakeModel):
+    def __init__(self, expert_map, mapper=None):
+        super().__init__()
+        if mapper is not None:
+            self.hf_to_vllm_mapper = mapper
+        self.experts = _FakeExperts(expert_map)
+
+    def named_modules(self):
+        yield "", self
+        yield "model.layers.0.mlp.experts", self.experts
+
+
 def _make_worker(model):
     worker = object.__new__(vLLMColocateWorkerExtension)
     worker.model_runner = SimpleNamespace(model=model)
@@ -100,6 +117,77 @@ def test_normalize_base_sync_weight_names_handles_bridge_inserted_base_layer_on_
         "model.language_model.layers.0.mlp.experts.gate_up_proj",
         "model.language_model.layers.0.mlp.experts.down_proj",
     ]
+
+
+def test_layerwise_reload_skips_nonlocal_expert_weights_before_clone():
+    mapper = _FakeMapper(
+        {
+            "model.language_model.layers.0.mlp.experts.1.down_proj.weight": (
+                "model.layers.0.mlp.experts.1.down_proj.weight"
+            )
+        }
+    )
+    worker = _make_worker(_FakeExpertModel([0, -1], mapper=mapper))
+    local_expert = torch.tensor([1.0])
+    nonlocal_expert = torch.tensor([2.0])
+    dense_weight = torch.tensor([3.0])
+
+    normalized_weights = list(
+        worker._iter_normalized_base_sync_weights(
+            [
+                ("model.layers.0.mlp.experts.0.gate_proj.weight", local_expert),
+                ("model.layers.0.mlp.experts.1.gate_proj.weight", nonlocal_expert),
+                ("model.language_model.layers.0.mlp.experts.1.down_proj.weight", nonlocal_expert),
+                ("model.layers.0.self_attn.q_proj.weight", dense_weight),
+            ],
+            clone_tensors=True,
+        )
+    )
+
+    assert [name for name, _ in normalized_weights] == [
+        "model.layers.0.mlp.experts.0.gate_proj.weight",
+        "model.layers.0.self_attn.q_proj.weight",
+    ]
+    assert normalized_weights[0][1].data_ptr() != local_expert.data_ptr()
+    assert normalized_weights[1][1].data_ptr() != dense_weight.data_ptr()
+
+
+def test_layerwise_reload_expert_filter_fails_open_for_unknown_weights():
+    worker = _make_worker(_FakeExpertModel([0, -1]))
+    unknown_expert = torch.tensor([1.0])
+    expert_scale = torch.tensor([2.0])
+
+    normalized_weights = list(
+        worker._iter_normalized_base_sync_weights(
+            [
+                ("model.layers.1.mlp.experts.1.gate_proj.weight", unknown_expert),
+                ("model.layers.0.mlp.experts.1.gate_proj.weight_scale", expert_scale),
+            ],
+            clone_tensors=True,
+        )
+    )
+
+    assert [name for name, _ in normalized_weights] == [
+        "model.layers.1.mlp.experts.1.gate_proj.weight",
+        "model.layers.0.mlp.experts.1.gate_proj.weight_scale",
+    ]
+    assert normalized_weights[0][1].data_ptr() != unknown_expert.data_ptr()
+    assert normalized_weights[1][1].data_ptr() != expert_scale.data_ptr()
+
+
+def test_nonlocal_expert_filter_only_applies_to_layerwise_clone_path():
+    worker = _make_worker(_FakeExpertModel([0, -1]))
+    nonlocal_expert = torch.tensor([1.0])
+
+    normalized_weights = list(
+        worker._iter_normalized_base_sync_weights(
+            [("model.layers.0.mlp.experts.1.gate_proj.weight", nonlocal_expert)],
+            clone_tensors=False,
+        )
+    )
+
+    assert len(normalized_weights) == 1
+    assert normalized_weights[0][1] is nonlocal_expert
 
 
 def test_update_weights_from_ipc_accumulates_lora_tensors_across_buckets(monkeypatch):

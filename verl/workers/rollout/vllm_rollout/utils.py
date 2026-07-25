@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import platform
+import re
 import signal
 import threading
 from collections.abc import Mapping
@@ -42,6 +43,8 @@ VLLM_LORA_NAME = "123"
 VLLM_LORA_PATH = "simon_lora_path"
 
 VLLM_ASCEND_REQUIRED_ENV_VARS = {"VLLM_ALL2ALL_BACKEND": "flashinfer_all2allv", "VLLM_ASCEND_ENABLE_NZ": "0"}
+
+_PER_EXPERT_WEIGHT_PATTERN = re.compile(r"^(?P<module>.+\.experts)\.(?P<expert_id>\d+)\..+\.weight$")
 
 
 def _resolve_vllm_weight_sync_local_rank(worker_local_rank: int, parallel_config: Any) -> int:
@@ -346,10 +349,60 @@ class vLLMColocateWorkerExtension:
 
         return weight_name
 
+    @staticmethod
+    def _collect_expert_maps(model) -> dict[str, tuple[int, ...]]:
+        """Snapshot vLLM's global-to-local expert maps for this reload."""
+        named_modules = getattr(model, "named_modules", None)
+        if not callable(named_modules):
+            return {}
+
+        expert_maps = {}
+        for module_name, module in named_modules():
+            expert_map = getattr(module, "_expert_map", None)
+            if not isinstance(expert_map, torch.Tensor) or expert_map.ndim != 1:
+                continue
+            expert_maps[module_name] = tuple(int(local_id) for local_id in expert_map.detach().cpu().tolist())
+        return expert_maps
+
+    @classmethod
+    def _is_nonlocal_expert_weight(
+        cls,
+        model,
+        weight_name: str,
+        expert_maps: dict[str, tuple[int, ...]],
+    ) -> bool:
+        """Return whether vLLM's live expert map rejects this expert weight."""
+        # Some quantization backends need scale metadata from every expert.
+        # Only filter the large checkpoint weight tensors.
+        if not expert_maps or not weight_name.endswith(".weight"):
+            return False
+
+        candidate_names = [weight_name]
+        mapped_name = cls._map_weight_name_for_vllm(model, weight_name)
+        if mapped_name is not None and mapped_name != weight_name:
+            candidate_names.append(mapped_name)
+
+        for candidate_name in candidate_names:
+            match = _PER_EXPERT_WEIGHT_PATTERN.match(candidate_name)
+            if match is None:
+                continue
+
+            expert_map = expert_maps.get(match.group("module"))
+            if expert_map is None:
+                continue
+
+            expert_id = int(match.group("expert_id"))
+            if expert_id < len(expert_map):
+                return expert_map[expert_id] < 0
+
+        return False
+
     def _iter_normalized_base_sync_weights(self, weights, clone_tensors: bool = False):
         model = self.model_runner.model
         model_weight_names = {name for name, _ in model.named_parameters(remove_duplicate=False)}
         model_weight_names.update(name for name, _ in model.named_buffers())
+        expert_maps = self._collect_expert_maps(model) if clone_tensors else {}
+        skipped_nonlocal_expert_weights = 0
 
         for name, tensor in weights:
             normalized_name = self._resolve_weight_name_for_vllm(
@@ -358,6 +411,15 @@ class vLLMColocateWorkerExtension:
                 model_weight_names=model_weight_names,
             )
 
+            if self._is_nonlocal_expert_weight(model, normalized_name, expert_maps):
+                if skipped_nonlocal_expert_weights == 0:
+                    logger.info(
+                        "Filtering non-local expert weights using %d live expert maps",
+                        len(expert_maps),
+                    )
+                skipped_nonlocal_expert_weights += 1
+                continue
+
             if clone_tensors:
                 # vLLM layerwise reload may retain references to incoming tensors
                 # until an entire layer has been reconstructed. Clone here so
@@ -365,6 +427,12 @@ class vLLMColocateWorkerExtension:
                 tensor = tensor.clone()
 
             yield normalized_name, tensor
+
+        if skipped_nonlocal_expert_weights:
+            logger.info(
+                "Skipped %d non-local expert weights before vLLM layerwise reload",
+                skipped_nonlocal_expert_weights,
+            )
 
     def _maybe_reload_standard_weights_from_ipc(self, receiver) -> bool:
         from vllm.config import set_current_vllm_config
