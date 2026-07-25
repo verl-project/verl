@@ -67,6 +67,11 @@ class _FakeSocket:
     def send_pyobj(self, message):
         self.messages.append(message)
 
+    def poll(self, timeout=None, flags=None):
+        # The sender polls before every recv() so a dead receiver surfaces as a
+        # timeout instead of an un-timed block; this fake always has an ACK ready.
+        return True
+
     def recv(self):
         return b""
 

@@ -32,6 +32,30 @@ from verl.utils.device import get_device_id, get_device_name, get_torch_device
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
+# Marker prefix for a receiver -> sender ERROR frame, sent in place of a
+# normal empty ACK when the receiver fails while handling a bucket (or while
+# building the communication buffer). Both parties speak REQ/REP with strict
+# alternation, so the failing receiver's last act is to answer the outstanding
+# request with this frame; without it the sender blocks in recv() forever and
+# an intended fail-closed error becomes a silent training hang, with the real
+# traceback buried in the receiver worker's log.
+ACK_ERROR_PREFIX = b"VERL_WEIGHT_TRANSFER_ERROR:"
+
+# Upper bound (seconds) on how long the sender waits for any single ACK. This
+# is a deadlock bound, not a performance knob: it only fires when the receiver
+# died without answering (e.g. killed mid-bucket, or a failure before its
+# first send). Keep it far above real per-bucket latency — an ACK covers one
+# bucket's load_weights + quantization + device sync.
+DEFAULT_ACK_TIMEOUT_S = float(os.getenv("VERL_WEIGHT_TRANSFER_ACK_TIMEOUT_S", "1800"))
+
+
+class WeightTransferReceiverError(RuntimeError):
+    """Raised on the sender when the receiver reported a failure via an ACK error frame."""
+
+
+class WeightTransferAckTimeoutError(RuntimeError):
+    """Raised on the sender when an ACK did not arrive within the bound."""
+
 
 class TensorMetadata(TypedDict):
     name: str
@@ -89,16 +113,43 @@ class BucketedWeightSender:
         zmq_handle: str,
         bucket_size_mb: int = 512,
         use_shm: bool = False,
+        ack_timeout_s: float | None = None,
     ):
         self.zmq_handle = zmq_handle
         self.bucket_size_mb = bucket_size_mb
         self.bucket_size = int(bucket_size_mb) << 20
         self.use_shm = use_shm
+        self.ack_timeout_s = DEFAULT_ACK_TIMEOUT_S if ack_timeout_s is None else ack_timeout_s
 
         self.zmq_context = zmq.Context.instance()
         self.socket = None
         self.buffer = None
         self.shm = None
+
+    def _recv_ack(self, what: str):
+        """Wait for one receiver ACK, bounded in time and aware of error frames.
+
+        The receiver is launched non-blocking by the caller and its future is
+        awaited only after sending completes, so a receiver that dies without
+        answering would otherwise leave this sender blocked in an un-timed
+        recv() forever. Both failure modes surface here as an exception instead:
+        an explicit error frame (receiver raised and reported it) or a timeout
+        (receiver died without reporting).
+        """
+        if self.ack_timeout_s and self.ack_timeout_s > 0:
+            if not self.socket.poll(timeout=int(self.ack_timeout_s * 1000), flags=zmq.POLLIN):
+                raise WeightTransferAckTimeoutError(
+                    f"Timed out after {self.ack_timeout_s:.0f} s waiting for the weight-transfer "
+                    f"receiver's ACK ({what}). The receiver worker is unresponsive or died without "
+                    "reporting an error; check the rollout worker log for the original traceback."
+                )
+        ack = self.socket.recv()
+        if ack.startswith(ACK_ERROR_PREFIX):
+            raise WeightTransferReceiverError(
+                f"Weight-transfer receiver failed ({what}): "
+                f"{ack[len(ACK_ERROR_PREFIX) :].decode('utf-8', errors='replace')}"
+            )
+        return ack
 
     async def async_send_weights(self, weights):
         """
@@ -129,7 +180,7 @@ class BucketedWeightSender:
                 if offset + weight.nbytes > self.bucket_size and len(bucket_meta) > 0:
                     get_torch_device().synchronize()
                     self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
-                    self.socket.recv()
+                    self._recv_ack("intermediate bucket")
                     bucket_meta = {}
                     offset = 0
 
@@ -156,7 +207,7 @@ class BucketedWeightSender:
             # send the last bucket
             get_torch_device().synchronize()
             self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": True})
-            self.socket.recv()
+            self._recv_ack("final bucket")
         finally:
             self._cleanup()
 
@@ -189,7 +240,7 @@ class BucketedWeightSender:
             comm_metadata = {"name": shm_name, "size": self.bucket_size}
             self.socket.send_pyobj(comm_metadata)
 
-        self.socket.recv()
+        self._recv_ack("initial buffer handshake")
         self.buffer = buffer
         self.shm = shm
 
@@ -229,7 +280,7 @@ class BucketedWeightSender:
             "handle": handle,
         }
         self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
-        self.socket.recv()
+        self._recv_ack(f"direct large weight {name}")
 
 
 class BucketedWeightReceiver:
@@ -259,6 +310,29 @@ class BucketedWeightReceiver:
         self.socket = None
         self.buffer = None
         self.shm = None
+
+    def _report_error_to_sender(self, exc: BaseException):
+        """Answer the sender's outstanding request with an error frame.
+
+        The sender waits for an ACK after every send, so a receiver that dies
+        without answering strands it. Best-effort: the socket may already be
+        unusable (or the failure may have happened while no request was
+        outstanding), and this runs on the error path, so it must never mask
+        the original exception.
+        """
+        socket = self.socket
+        if socket is None:
+            return
+        detail = f"{type(exc).__name__}: {exc}"
+        logger.error("Weight transfer receiver failed, reporting to sender: %s", detail)
+        try:
+            # Bound how long _cleanup()'s close() may block flushing this frame:
+            # the default LINGER of -1 would wait forever if the sender has also
+            # gone away, turning the receiver's own teardown into a hang.
+            socket.setsockopt(zmq.LINGER, 5000)
+            socket.send(ACK_ERROR_PREFIX + detail.encode("utf-8", errors="replace")[:4096], flags=zmq.NOBLOCK)
+        except Exception as report_exc:  # pragma: no cover - socket already broken
+            logger.error("Could not report receiver failure to sender: %s", report_exc)
 
     def receive_weights(self, on_bucket_received: callable):
         """
@@ -292,6 +366,12 @@ class BucketedWeightReceiver:
                 del weights, tensor
                 if metadata["is_last"]:
                     break
+        except BaseException as exc:
+            # on_bucket_received (weight loading, quantization) is the likely
+            # raiser; its exception must reach the sender, which is otherwise
+            # blocked waiting for this bucket's ACK.
+            self._report_error_to_sender(exc)
+            raise
         finally:
             self._cleanup()
 
@@ -320,6 +400,16 @@ class BucketedWeightReceiver:
                 tensor = None
                 if metadata["is_last"]:
                     break
+        except GeneratorExit:
+            # Normal early close by the consumer — not a receiver failure, and
+            # the generator is already exhausted on the success path (the loop
+            # `break`s after the last bucket). Keep the pre-existing behaviour.
+            raise
+        except BaseException as exc:
+            # The consumer of this generator (vLLM's reload_weights) can raise
+            # into the yield; report it so the sender does not hang.
+            self._report_error_to_sender(exc)
+            raise
         finally:
             self._cleanup()
 
@@ -355,7 +445,26 @@ class BucketedWeightReceiver:
         del self.buffer
         self.buffer = None
         if self.shm is not None:
-            self.shm.close()
+            # Best-effort: this runs from a `finally`, so a teardown failure here
+            # would REPLACE the exception on its way out. On the shared-memory
+            # path that is not hypothetical — the per-bucket tensors are views
+            # into `shm.buf` (an exported memoryview), and when we unwind from an
+            # exception the traceback keeps the raising frame's locals alive past
+            # the gc.collect() below, so close() raises
+            # `BufferError: cannot close exported pointers exist` and buries the
+            # real cause (a weight-loading or reload-lifecycle error) in the
+            # worker log. The mapping is released by SharedMemory.__del__ once
+            # the traceback is dropped, and the sender owns unlink(), so logging
+            # and moving on is the correct trade.
+            try:
+                self.shm.close()
+            except BufferError as exc:
+                logger.warning(
+                    "Deferring shared-memory close during weight-transfer receiver cleanup: %s "
+                    "(buffer views are still referenced, most likely by the traceback of an "
+                    "in-flight exception; the mapping is released when they are dropped)",
+                    exc,
+                )
             del self.shm
             self.shm = None
         gc.collect()
