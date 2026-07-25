@@ -1,0 +1,10 @@
+# Global sticky-session + in-flight load balancer (verl's built-in default).
+#
+# Selected via rollout.yaml ``defaults: [- router@router_config: global_sticky_inflight]``;
+# Hydra composes this whole file under the rollout ``router_config`` node, and
+# ``get_router_handle`` injects ``full_determinism`` into it before construction.
+#
+# ``GlobalRequestLoadBalancer`` reads ``max_cache_size`` (the sticky-session LRU
+# capacity) from here; everything else uses built-in defaults.
+
+max_cache_size: 10000

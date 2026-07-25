@@ -105,6 +105,10 @@ DEFAULT_IGNORE_FILES = (
     # folding ``_multi_rs`` into a ROLLOUT_SERVER env-var toggle rather than
     # in this PR.
     "examples/rollout_correction/run_qwen2_5_7b_fsdp_multi_rs.sh",
+    # KV-cache-aware router example: pure rollout/routing-demo entry point
+    # that drives the pluggable load balancer — not a training run, so the
+    # run_<model>_<train-backend>.sh convention does not apply.
+    "examples/kvc_aware_router/run_infer.sh",
 )
 
 

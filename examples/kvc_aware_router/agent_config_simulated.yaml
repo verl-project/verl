@@ -1,0 +1,55 @@
+# Simulated sandbox agent config — for performance / routing testing.
+#
+# The LLM (vLLM replicas + router) runs for real; only the sandbox is simulated
+# (type: simulated — canned observations, no real swe-rex container). Use this as the
+# 3rd arg to run_infer.sh so the full stack (AgentLoopManager -> UniAgentLoop ->
+# AgentEnv) runs without the docker-sandbox overhead (and the high-concurrency
+# uvloop fd issues of real sandboxes):
+#
+#   bash examples/llm_router/run_infer.sh <MODEL_PATH> <DATA_PATH> examples/llm_router/agent_config_simulated.yaml
+#
+# Tunables under env.deployment:
+#   seed:             null = random each run; an int = reproducible sampling
+#   observation_scale: 1.0 = as-authored; >1 stresses KV/prefill load
+#   timeout:          simulated command timeouts (CommandTimeoutError ->
+#                     recoverable ActionTimeoutError). disabled by default.
+#   terminal_dead:    simulated terminal death (fatal TerminalNotAliveError).
+#                     disabled by default.
+#
+# Observation templates live in uni_agent/deployment/simulated/observations.yaml;
+# edit weights / add long-tail entries there without touching code.
+
+- name: swe_agent
+
+  _target_: uni_agent.agent_loop.UniAgentLoop
+
+  concurrency: 128
+  log_dir: /tmp/swebench_llm_router_simulated
+  mask_abnormal_exit_traj: false
+
+  interaction:
+    action_timeout: 300
+    max_turns: 100
+
+  env:
+    deployment:
+      type: simulated
+      seed: null
+      observation_scale: 1.0
+      timeout:
+        enabled: false
+        probability: 0.05
+        delay_seconds: 0.5
+      terminal_dead:
+        enabled: false
+        probability: 0.01
+
+  tool_parser: hermes
+
+  tools:
+    - name: str_replace_editor
+    - name: execute_bash
+    - name: submit
+
+  reward:
+    eval_timeout: 600

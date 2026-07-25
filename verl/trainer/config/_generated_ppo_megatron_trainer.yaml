@@ -289,6 +289,8 @@ actor_rollout_ref:
     entropy_from_logits_with_chunking: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_with_chunking,False}
     entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_chunk_size,2048}
   rollout:
+    router_config:
+      max_cache_size: 10000
     _target_: verl.workers.config.RolloutConfig
     name: ???
     mode: async
@@ -329,6 +331,7 @@ actor_rollout_ref:
     'n': 1
     over_sample_rate: 0
     multi_stage_wake_up: false
+    router_strategy: global_sticky_inflight
     engine_kwargs:
       vllm: {}
       sglang: {}
