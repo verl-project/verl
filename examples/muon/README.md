@@ -58,11 +58,13 @@ muon_extra_scale_factor = sqrt((1 - beta1) / (1 + beta1))
 ```
 
 where `beta1` is AdamW's first-moment coefficient — `0.229416` at the default
-`beta1 = 0.9`. Set `muon_match_adamw_update_rms=True` and verl computes it from
-your `optim.betas[0]` and logs the resolved value on rank 0, so the number is
-reproducible from the config instead of pasted in as a constant. Setting both
-`muon_match_adamw_update_rms=True` and an explicit `muon_extra_scale_factor`
-raises.
+`beta1 = 0.9` — quoted for orientation only. **Configure the switch, not the
+number**: set `muon_match_adamw_update_rms=True` and verl derives the factor from
+your `optim.betas[0]` and logs the resolved value on rank 0. A hand-entered
+constant is the thing to avoid regardless of how it was obtained — anyone reading
+the config can re-derive the switch's value from `beta1`, but not a pasted-in
+literal. Setting both `muon_match_adamw_update_rms=True` and an explicit
+`muon_extra_scale_factor` raises.
 
 Note that `muon_scale_mode` and `muon_extra_scale_factor` are orthogonal and both
 matter: the former normalizes for parameter *shape*, the latter for the
