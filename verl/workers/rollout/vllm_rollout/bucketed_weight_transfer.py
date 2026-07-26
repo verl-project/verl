@@ -48,6 +48,29 @@ ACK_ERROR_PREFIX = b"VERL_WEIGHT_TRANSFER_ERROR:"
 # bucket's load_weights + quantization + device sync.
 DEFAULT_ACK_TIMEOUT_S = float(os.getenv("VERL_WEIGHT_TRANSFER_ACK_TIMEOUT_S", "1800"))
 
+# Upper bound (milliseconds) on how long socket.close() may block flushing
+# queued outbound frames. ZMQ's default is LINGER=-1 ("block forever"), which
+# makes teardown itself a deadlock site: after an ACK timeout or a dead peer,
+# close() inside the `finally: _cleanup()` can wait indefinitely for a frame
+# nobody will ever read, so the bounded-ACK guarantee above would be undone by
+# the very cleanup that follows it. Set on BOTH sockets at creation time — not
+# only on the receiver's error path — so the bound holds for every exit path,
+# including the success path and failures that happen before any error frame
+# could be sent. 5000 ms is generous for a local IPC/TCP flush while still
+# finite.
+SOCKET_LINGER_MS = int(os.getenv("VERL_WEIGHT_TRANSFER_LINGER_MS", "5000"))
+
+# Upper bound (milliseconds) on how long a single socket.send() may block. ZMQ's
+# default is -1 ("block forever"), and for a REQ socket that is a real deadlock
+# site independent of the ACK bound: if the peer has disconnected, there is no
+# pipe to queue the frame on, so send() blocks *before* any recv() the bound
+# guards. Measured, not hypothetical — a receiver that connects and exits without
+# reading wedges the sender inside
+# ``_init_buffer -> socket.send_pyobj(comm_metadata)``. Bounding send turns that
+# into an exception on the driver. Shares the ACK timeout's order of magnitude
+# because both answer the same question ("is the peer still there?").
+SOCKET_SEND_TIMEOUT_MS = int(os.getenv("VERL_WEIGHT_TRANSFER_SEND_TIMEOUT_MS", "1800000"))
+
 
 class WeightTransferReceiverError(RuntimeError):
     """Raised on the sender when the receiver reported a failure via an ACK error frame."""
@@ -220,7 +243,38 @@ class BucketedWeightSender:
             except OSError:
                 pass
         self.socket = self.zmq_context.socket(zmq.REQ)
+        # Finite LINGER at creation: _cleanup()'s close() must never block
+        # forever on an unflushable frame (see SOCKET_LINGER_MS).
+        self.socket.setsockopt(zmq.LINGER, SOCKET_LINGER_MS)
+        # Finite SNDTIMEO: send() itself blocks forever on a REQ socket with no
+        # live peer, which is upstream of every recv() the ACK bound protects.
+        # A caller-provided ack_timeout_s bounds the send too (same failure
+        # class: nobody is reading), otherwise SOCKET_SEND_TIMEOUT_MS applies.
+        # zmq.Again then surfaces as a WeightTransferAckTimeoutError from the
+        # send sites below.
+        if self.ack_timeout_s and self.ack_timeout_s > 0:
+            snd_timeout_ms = min(int(self.ack_timeout_s * 1000), SOCKET_SEND_TIMEOUT_MS)
+        else:
+            snd_timeout_ms = SOCKET_SEND_TIMEOUT_MS
+        self.socket.setsockopt(zmq.SNDTIMEO, snd_timeout_ms)
         self.socket.bind(self.zmq_handle)
+
+    def _send_or_timeout(self, payload, what: str):
+        """Send one frame, converting ZMQ's ``Again`` into an explicit failure.
+
+        The sender is the process the driver is waiting on, so an un-timed send
+        is the same class of bug as an un-timed recv: the job hangs with no
+        diagnosis. Raising here names the peer and the stage instead.
+        """
+        try:
+            self.socket.send_pyobj(payload)
+        except zmq.Again as exc:
+            raise WeightTransferAckTimeoutError(
+                f"Timed out after {SOCKET_SEND_TIMEOUT_MS / 1000:.0f} s trying to send the "
+                f"weight-transfer frame ({what}) — the receiver is not reading from the socket "
+                "(it died, or never connected). Check the rollout worker log for the original "
+                "traceback."
+            ) from exc
 
     def _init_buffer(self):
         """build communication buffer"""
@@ -228,7 +282,7 @@ class BucketedWeightSender:
         if not self.use_shm:
             buffer = torch.empty(self.bucket_size, dtype=torch.uint8, device=f"{get_device_name()}:{get_device_id()}")
             handle = reduce_tensor(buffer)
-            self.socket.send_pyobj(handle)
+            self._send_or_timeout(handle, "initial buffer handshake (IPC handle)")
         else:
             import uuid
 
@@ -238,16 +292,28 @@ class BucketedWeightSender:
             buffer = torch.frombuffer(shm.buf, dtype=torch.uint8)
 
             comm_metadata = {"name": shm_name, "size": self.bucket_size}
-            self.socket.send_pyobj(comm_metadata)
+            self._send_or_timeout(comm_metadata, "initial buffer handshake (shm metadata)")
 
         self._recv_ack("initial buffer handshake")
         self.buffer = buffer
         self.shm = shm
 
     def _cleanup(self):
-        """clean up"""
+        """Release the socket, buffer and shm.
+
+        Best-effort by construction: this runs from ``finally``, so it may be
+        unwinding an in-flight exception (e.g. a CUDA init failure inside
+        ``_init_buffer``). Every step is therefore individually guarded — an
+        accelerator call that fails *because of* the original failure must not
+        replace the traceback the caller needs. Observed in a 0.20 aggregate
+        log: a CUDA init error in ``_init_buffer()`` was overwritten by a second
+        CUDA error raised from ``ipc_collect()`` in this method.
+        """
         if self.socket is not None:
-            self.socket.close()
+            try:
+                self.socket.close()
+            except Exception as exc:  # pragma: no cover - close() rarely raises
+                logger.warning("Weight transfer sender: socket close failed during cleanup: %s", exc)
             self.socket = None
         if self.zmq_handle.startswith("ipc://"):
             ipc_path = self.zmq_handle[len("ipc://") :]
@@ -258,13 +324,31 @@ class BucketedWeightSender:
         del self.buffer
         self.buffer = None
         if self.shm is not None:
-            self.shm.close()
-            self.shm.unlink()
+            try:
+                self.shm.close()
+                self.shm.unlink()
+            except Exception as exc:  # pragma: no cover - already-unlinked segment
+                logger.warning("Weight transfer sender: shm teardown failed during cleanup: %s", exc)
             del self.shm
             self.shm = None
         gc.collect()
-        get_torch_device().ipc_collect()
-        get_torch_device().empty_cache()
+        # Accelerator cleanup is the step that historically masked the primary
+        # exception: if the device context never came up, ipc_collect() /
+        # empty_cache() raise the *same* CUDA failure again from inside this
+        # finally-block and it becomes the exception the caller sees.
+        for label, fn in (
+            ("ipc_collect", get_torch_device().ipc_collect),
+            ("empty_cache", get_torch_device().empty_cache),
+        ):
+            try:
+                fn()
+            except Exception as exc:
+                logger.warning(
+                    "Weight transfer sender: accelerator %s failed during cleanup and was "
+                    "suppressed to preserve the original error: %s",
+                    label,
+                    exc,
+                )
 
     def _direct_send_large_weight(self, name: str, weight: torch.Tensor):
         """Send a weight larger than the bucket size via cuda ipc or share memory."""
@@ -416,6 +500,12 @@ class BucketedWeightReceiver:
     def _init_socket(self):
         """Initialize ZMQ REP socket and connect."""
         self.socket = self.zmq_context.socket(zmq.REP)
+        # Finite LINGER at creation: the error frame written by
+        # _report_error_to_sender() (and any queued normal ACK) must not be able
+        # to wedge _cleanup()'s close() when the sender is already gone. Setting
+        # it here rather than only on the error path means the bound also covers
+        # failures that happen before _report_error_to_sender() can run.
+        self.socket.setsockopt(zmq.LINGER, SOCKET_LINGER_MS)
         self.socket.connect(self.zmq_handle)
 
     def _init_buffer(self):
@@ -435,13 +525,31 @@ class BucketedWeightReceiver:
         self.shm = shm
 
     def _cleanup(self):
-        """clean up"""
+        """Release the socket and buffer.
+
+        Best-effort by construction: called from ``finally``, so it may be
+        unwinding an in-flight exception and must never replace it (see the
+        BufferError note below and the matching guard in the sender).
+        """
         if self.socket is not None:
-            self.socket.close()
+            try:
+                self.socket.close()
+            except Exception as exc:  # pragma: no cover - close() rarely raises
+                logger.warning("Weight transfer receiver: socket close failed during cleanup: %s", exc)
             self.socket = None
         # Synchronize before releasing the buffer to ensure all async ops
-        # referencing it (e.g. clone, .to()) have completed.
-        get_torch_device().synchronize()
+        # referencing it (e.g. clone, .to()) have completed. Guarded for the
+        # same reason as the sender's accelerator cleanup: if the device context
+        # is the thing that failed, synchronize() re-raises it from inside this
+        # finally-block and masks the primary error.
+        try:
+            get_torch_device().synchronize()
+        except Exception as exc:
+            logger.warning(
+                "Weight transfer receiver: device synchronize failed during cleanup and was "
+                "suppressed to preserve the original error: %s",
+                exc,
+            )
         del self.buffer
         self.buffer = None
         if self.shm is not None:

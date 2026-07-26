@@ -48,6 +48,7 @@ import multiprocessing as mp
 import os
 import queue
 import signal
+import sys
 import time
 import uuid
 
@@ -400,3 +401,128 @@ def test_pre_ipc_validation_rejects_unsupported_config_without_touching_a_socket
     # Unsupported: raises, with no IPC resource involved.
     with pytest.raises(NotImplementedError, match="MTP drafter"):
         vllm_fp8_utils.validate_fp8_layerwise_reload_config(config, uses_mtp_drafter=True)
+
+
+# ---------------------------------------------------------------------------
+# (c) Teardown is bounded too: a finite LINGER on both sockets.
+#
+# The bounded ACK above stops the sender waiting forever for a *reply*, but
+# ZMQ's default LINGER of -1 means ``socket.close()`` can then block forever
+# flushing an outbound frame the dead peer will never read — and close() runs
+# from ``finally: _cleanup()``, i.e. on exactly the paths the bound just made
+# reachable. These two tests pin the invariant at the level it must hold:
+# the option is set when the socket is CREATED (not only on the receiver's
+# error path, which can itself fail before it gets there), and the whole
+# send+cleanup sequence completes in bounded time with an unflushable frame
+# queued.
+# ---------------------------------------------------------------------------
+def test_both_sockets_get_a_finite_linger_at_creation():
+    """LINGER must be finite on the real sockets, set by ``_init_socket``."""
+    import zmq
+
+    from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import (
+        SOCKET_LINGER_MS,
+        BucketedWeightReceiver,
+        BucketedWeightSender,
+    )
+
+    assert 0 <= SOCKET_LINGER_MS < 2**31 - 1, f"LINGER must be finite, got {SOCKET_LINGER_MS}"
+
+    handle = _unique_zmq_handle()
+    sender = BucketedWeightSender(zmq_handle=handle, bucket_size_mb=1, use_shm=True)
+    sender._init_socket()
+    try:
+        assert sender.socket.getsockopt(zmq.LINGER) == SOCKET_LINGER_MS, (
+            "sender socket kept ZMQ's default LINGER=-1: close() in _cleanup() could block forever"
+        )
+        receiver = BucketedWeightReceiver(zmq_handle=handle, device=torch.device("cpu"), use_shm=True)
+        receiver._init_socket()
+        try:
+            assert receiver.socket.getsockopt(zmq.LINGER) == SOCKET_LINGER_MS, (
+                "receiver socket's finite LINGER is only set on the error path"
+            )
+        finally:
+            receiver.socket.close()
+    finally:
+        sender.socket.close(linger=0)
+        try:
+            os.remove(handle[len("ipc://") :])
+        except OSError:
+            pass
+
+
+def _receiver_fn_connects_then_leaves(zmq_handle, result_queue):
+    """Connect (so frames are queued to us) and exit without ever reading one."""
+    import zmq
+
+    context = zmq.Context.instance()
+    socket = context.socket(zmq.REP)
+    socket.setsockopt(zmq.LINGER, 0)
+    socket.connect(zmq_handle)
+    time.sleep(1.0)
+    socket.close()
+    context.term()
+    result_queue.put(("left", None, None, 0.0))
+
+
+def test_send_and_cleanup_are_bounded_when_frames_cannot_be_flushed():
+    """Fault-inject an unflushable queued frame; total time must stay bounded.
+
+    Without a finite LINGER this test hangs until the harness timeout: the ACK
+    bound fires as designed, and then ``close()`` blocks forever inside the
+    ``finally``. The assertion is deliberately on the WHOLE sequence, not just
+    on ``_recv_ack``, because a bound that the cleanup path can undo is not a
+    deadlock bound.
+    """
+    sender_result, _ = _run_pair(_receiver_fn_connects_then_leaves, (), num_weights=1)
+
+    status, exc_name, _message, elapsed = sender_result
+    assert status == "raised", f"expected the bounded ACK to fire, got {sender_result}"
+    assert exc_name in ("WeightTransferAckTimeoutError", "WeightTransferReceiverError"), sender_result
+    # ACK bound + LINGER (5 s) + slack. A LINGER=-1 regression blows straight
+    # past this and is killed by PROCESS_TIMEOUT_S instead.
+    bound_s = ACK_TIMEOUT_S + 30
+    assert elapsed < bound_s, (
+        f"send+cleanup took {elapsed:.1f} s (bound {bound_s:.0f} s): teardown is not bounded — "
+        "check that both sockets set a finite ZMQ LINGER at creation"
+    )
+
+
+def test_cleanup_preserves_the_primary_exception_when_the_accelerator_fails():
+    """A failing accelerator teardown must not replace the original traceback.
+
+    Observed in a 0.20 aggregate log: a CUDA init failure inside
+    ``_init_buffer()`` was overwritten by a *second* CUDA failure raised from
+    ``ipc_collect()`` in ``_cleanup()``, so the reported error named the wrong
+    call. ``_cleanup()`` is best-effort by construction; this pins it.
+    """
+    import verl.workers.rollout.vllm_rollout.bucketed_weight_transfer as bwt
+    from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
+
+    class _BrokenDevice:
+        @staticmethod
+        def synchronize():
+            raise RuntimeError("secondary failure: device synchronize")
+
+        @staticmethod
+        def ipc_collect():
+            raise RuntimeError("secondary failure: ipc_collect")
+
+        @staticmethod
+        def empty_cache():
+            raise RuntimeError("secondary failure: empty_cache")
+
+    original = bwt.get_torch_device
+    bwt.get_torch_device = lambda: _BrokenDevice
+    try:
+        sender = BucketedWeightSender(zmq_handle=_unique_zmq_handle(), bucket_size_mb=1, use_shm=True)
+        try:
+            raise ValueError("primary failure: the error the caller must see")
+        except ValueError:
+            # Exactly the shape of async_send_weights: raise, then finally-cleanup.
+            sender._cleanup()
+            surfaced = sys.exc_info()[1]
+        assert isinstance(surfaced, ValueError), f"cleanup replaced the primary exception with {surfaced!r}"
+        assert "primary failure" in str(surfaced), str(surfaced)
+    finally:
+        bwt.get_torch_device = original
