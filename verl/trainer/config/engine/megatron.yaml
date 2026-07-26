@@ -139,11 +139,14 @@ router_replay:
 # QAT (Quantization-Aware Training) configuration
 qat:
   _target_: verl.workers.config.QATEngineConfig
-  # Whether to enable QAT
+  # Whether to enable online quantized weight export for low-precision rollout
   enable: false
-  # Quantization mode: "w4a16" (weight-only FP4) or "w4a4" (weight + activation FP4)
+  # Disable when impl_cfg.qat supplies training fake quantization. Export
+  # remains active, avoiding a second ModelOpt fake-quant layer.
+  apply_modelopt_fake_quant: true
+  # Quantization mode: "w4a16" (NVFP4 weight-only), "mxfp4" (OCP MXFP4 weight-only), or "w4a4"
   mode: "w4a16"
-  # Group size for blockwise quantization (NVFP4 requires 16)
+  # Group size for blockwise quantization (NVFP4 requires 16; MXFP4 requires 32)
   group_size: 16
   # Module name patterns to exclude from quantization (fnmatch style for Megatron)
   ignore_patterns:

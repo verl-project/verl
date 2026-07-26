@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""ModelOpt integration for NVFP4 quantization with Megatron QAT training and vLLM inference."""
+"""ModelOpt integration for FP4 quantization with Megatron QAT training and vLLM inference."""
 
 from verl.utils.modelopt.qat_utils import apply_qat_to_modules, export_qat_weights
 from verl.utils.modelopt.qat_weight_exporter import QATWeightExporter

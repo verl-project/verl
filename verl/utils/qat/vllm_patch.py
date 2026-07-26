@@ -13,13 +13,14 @@
 # limitations under the License.
 
 """
-vLLM NVFP4 Patches for Dynamic Weight Updates.
+vLLM FP4 Patches for Dynamic Weight Updates.
 
-Enables dynamic weight reloading for NVFP4 quantized models in vLLM.
+Enables dynamic weight reloading for NVFP4 and MXFP4 quantized models in vLLM.
 
 Supported schemes:
 - Dense: W4A16-FP4, W4A4-FP4
 - MoE: NVFP4-MoE
+- MoE: MXFP4-MoE
 """
 
 import logging
@@ -710,6 +711,193 @@ def patched_nvfp4_moe_process_weights_after_loading(self, layer: torch.nn.Module
         delattr(layer, "w2_weight_packed")
 
 
+_original_mxfp4_dense_process_weights_after_loading = None
+_original_mxfp4_moe_process_weights_after_loading = None
+_original_current_nvfp4_dense_process_weights_after_loading = {}
+_original_current_nvfp4_moe_process_weights_after_loading = None
+_MXFP4_DENSE_HF_PARAMS = ("weight_packed", "weight_scale")
+_MXFP4_DENSE_COMPUTE_PARAMS = ("weight", "weight_scale")
+_MXFP4_HF_PARAMS = ("w13_weight_packed", "w2_weight_packed", "w13_weight_scale", "w2_weight_scale")
+_MXFP4_COMPUTE_PARAMS = ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale")
+_CURRENT_NVFP4_DENSE_HF_PARAMS = ("weight_packed", "weight_scale", "weight_global_scale", "input_global_scale")
+_CURRENT_NVFP4_MOE_HF_PARAMS = (
+    "w13_weight_packed",
+    "w2_weight_packed",
+    "w13_weight_scale",
+    "w2_weight_scale",
+    "w13_weight_global_scale",
+    "w2_weight_global_scale",
+    "w13_input_global_scale",
+    "w2_input_global_scale",
+)
+
+
+def _save_reloadable_params(layer: torch.nn.Module, param_names: tuple[str, ...]) -> None:
+    for param_name in param_names:
+        save_param_meta(layer, param_name)
+    if not hasattr(layer, "_weight_loaders"):
+        layer._weight_loaders = {}
+    for param_name in param_names:
+        param = getattr(layer, param_name, None)
+        if param is not None and hasattr(param, "weight_loader"):
+            layer._weight_loaders[param_name] = param.weight_loader
+
+
+def _save_compute_refs(layer: torch.nn.Module, prefix: str) -> None:
+    refs = {
+        name: param.data
+        for name, param in layer.named_parameters(recurse=False)
+        if name == "weight" or name.startswith(("weight_", "w13_", "w2_"))
+    }
+    setattr(layer, f"_{prefix}_tensor_refs", refs)
+    layer._marlin_tensor_refs = {
+        name: ref for name, ref in refs.items() if name in {"weight_scale", "w13_weight_scale", "w2_weight_scale"}
+    }
+
+
+def _restore_compute_refs(layer: torch.nn.Module, prefix: str) -> None:
+    refs = getattr(layer, f"_{prefix}_tensor_refs")
+    for name, stable in refs.items():
+        transformed = getattr(layer, name).data
+        if stable.shape != transformed.shape or stable.dtype != transformed.dtype:
+            raise ValueError(
+                f"NVFP4 reload changed {name} contract: "
+                f"{tuple(stable.shape)}/{stable.dtype} -> {tuple(transformed.shape)}/{transformed.dtype}"
+            )
+        stable.copy_(transformed)
+        setattr(layer, name, Parameter(stable, requires_grad=False))
+
+
+def patched_current_nvfp4_dense_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    """Wrap vLLM's unified NVFP4 dense scheme with reloadable stable storage."""
+    original = _original_current_nvfp4_dense_process_weights_after_loading.get(type(self))
+    if original is None:
+        raise RuntimeError(f"NVFP4 dense patch was not initialized for {type(self).__name__}")
+
+    is_first_call = _check_first_call(layer)
+    if is_first_call:
+        _save_reloadable_params(layer, _CURRENT_NVFP4_DENSE_HF_PARAMS)
+    original(self, layer)
+    if is_first_call:
+        _save_compute_refs(layer, "nvfp4")
+    else:
+        _restore_compute_refs(layer, "nvfp4")
+
+
+def patched_current_nvfp4_moe_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    """Wrap vLLM's modular NVFP4 MoE scheme with reloadable stable storage."""
+    if _original_current_nvfp4_moe_process_weights_after_loading is None:
+        raise RuntimeError("NVFP4 MoE patch was not initialized")
+
+    is_first_call = _check_first_call(layer)
+    if is_first_call:
+        _save_reloadable_params(layer, _CURRENT_NVFP4_MOE_HF_PARAMS)
+    _original_current_nvfp4_moe_process_weights_after_loading(self, layer)
+    if is_first_call:
+        _save_compute_refs(layer, "nvfp4")
+    else:
+        _restore_compute_refs(layer, "nvfp4")
+
+
+def patched_mxfp4_dense_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    """Run vLLM's dense MXFP4 transform with reloadable stable storage."""
+    if _original_mxfp4_dense_process_weights_after_loading is None:
+        raise RuntimeError("Dense MXFP4 process_weights_after_loading patch was not initialized")
+
+    is_first_call = _check_first_call(layer)
+    if is_first_call:
+        for param_name in _MXFP4_DENSE_HF_PARAMS:
+            save_param_meta(layer, param_name)
+        if not hasattr(layer, "_weight_loaders"):
+            layer._weight_loaders = {}
+        for param_name in _MXFP4_DENSE_HF_PARAMS:
+            param = getattr(layer, param_name, None)
+            if param is not None and hasattr(param, "weight_loader"):
+                layer._weight_loaders[param_name] = param.weight_loader
+
+    _original_mxfp4_dense_process_weights_after_loading(self, layer)
+
+    if is_first_call:
+        layer._mxfp4_tensor_refs = {
+            param_name: getattr(layer, param_name).data for param_name in _MXFP4_DENSE_COMPUTE_PARAMS
+        }
+        return
+
+    refs = layer._mxfp4_tensor_refs
+    for param_name in _MXFP4_DENSE_COMPUTE_PARAMS:
+        transformed = getattr(layer, param_name).data
+        stable = refs[param_name]
+        if stable.shape != transformed.shape or stable.dtype != transformed.dtype:
+            raise ValueError(
+                f"MXFP4 reload changed {param_name} contract: "
+                f"{tuple(stable.shape)}/{stable.dtype} -> {tuple(transformed.shape)}/{transformed.dtype}"
+            )
+        stable.copy_(transformed)
+        setattr(layer, param_name, Parameter(stable, requires_grad=False))
+
+
+def _rebuild_mxfp4_moe_kernel(method, layer: torch.nn.Module) -> None:
+    method.moe_quant_config = method.get_fused_moe_quant_config(layer)
+    if method.moe_quant_config is None:
+        return
+
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import make_mxfp4_moe_kernel
+
+    kwargs = {
+        "moe_quant_config": method.moe_quant_config,
+        "moe_config": method.moe,
+        "experts_cls": method.experts_cls,
+        "mxfp4_backend": method.mxfp4_backend,
+    }
+    routing_tables = getattr(layer, "_expert_routing_tables", None)
+    if callable(routing_tables):
+        kwargs["routing_tables"] = routing_tables()
+    method.moe_kernel = make_mxfp4_moe_kernel(**kwargs)
+
+
+def patched_mxfp4_moe_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    """Run vLLM's MXFP4 transform while keeping reloadable HF parameters.
+
+    The original vLLM method consumes ``w13/w2_weight_packed`` and may replace
+    the compute parameters. The patch records the packed shapes/loaders before
+    the first transform, then copies subsequent transforms back into stable
+    storage so CUDA graph addresses remain valid across RL weight resyncs.
+    """
+    if _original_mxfp4_moe_process_weights_after_loading is None:
+        raise RuntimeError("MXFP4 process_weights_after_loading patch was not initialized")
+
+    is_first_call = _check_first_call(layer)
+    if is_first_call:
+        for param_name in _MXFP4_HF_PARAMS:
+            save_param_meta(layer, param_name)
+        if not hasattr(layer, "_weight_loaders"):
+            layer._weight_loaders = {}
+        for param_name in _MXFP4_HF_PARAMS:
+            param = getattr(layer, param_name, None)
+            if param is not None and hasattr(param, "weight_loader"):
+                layer._weight_loaders[param_name] = param.weight_loader
+
+    _original_mxfp4_moe_process_weights_after_loading(self, layer)
+
+    if is_first_call:
+        layer._mxfp4_tensor_refs = {param_name: getattr(layer, param_name).data for param_name in _MXFP4_COMPUTE_PARAMS}
+        return
+
+    refs = layer._mxfp4_tensor_refs
+    for param_name in _MXFP4_COMPUTE_PARAMS:
+        transformed = getattr(layer, param_name).data
+        stable = refs[param_name]
+        if stable.shape != transformed.shape or stable.dtype != transformed.dtype:
+            raise ValueError(
+                f"MXFP4 reload changed {param_name} contract: "
+                f"{tuple(stable.shape)}/{stable.dtype} -> {tuple(transformed.shape)}/{transformed.dtype}"
+            )
+        stable.copy_(transformed)
+        setattr(layer, param_name, Parameter(stable, requires_grad=False))
+
+    _rebuild_mxfp4_moe_kernel(self, layer)
+
+
 _PATCH_TARGETS = [
     # Dense W4A16
     (
@@ -731,25 +919,88 @@ _PATCH_TARGETS = [
     ),
 ]
 
+_MXFP4_PATCH_TARGET = (
+    "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe."
+    "compressed_tensors_moe_w4a4_mxfp4.CompressedTensorsW4A4Mxfp4MoEMethod."
+    "process_weights_after_loading"
+)
+_MXFP4_DENSE_PATCH_TARGET = (
+    "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
+    "compressed_tensors_w4a4_mxfp4.CompressedTensorsW4A4Mxfp4.process_weights_after_loading"
+)
+
 _applied_patches = []
 
 
 def apply_qat_patches():
-    """Apply NVFP4 patches to support dynamic weight updates. Call before model loading."""
+    """Apply FP4 patches to support dynamic weight updates. Call before model loading."""
     global _applied_patches
+    global _original_current_nvfp4_moe_process_weights_after_loading
+    global _original_mxfp4_dense_process_weights_after_loading
+    global _original_mxfp4_moe_process_weights_after_loading
 
     if _applied_patches:
         logger.warning("QAT patches already applied, skipping")
         return _applied_patches
 
-    logger.info("Applying NVFP4 patches for dynamic weight loading...")
+    logger.info("Applying FP4 patches for dynamic weight loading...")
 
-    for target, replacement in _PATCH_TARGETS:
+    try:
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_nvfp4 import (  # noqa: E501
+            CompressedTensorsW4A4Nvfp4MoEMethod,
+        )
+        from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w4a4_nvfp4 import (  # noqa: E501
+            CompressedTensorsW4A4Fp4,
+        )
+    except ImportError:
+        patch_targets = list(_PATCH_TARGETS)
+    else:
+        _original_current_nvfp4_dense_process_weights_after_loading[CompressedTensorsW4A4Fp4] = (
+            CompressedTensorsW4A4Fp4.process_weights_after_loading
+        )
+        _original_current_nvfp4_moe_process_weights_after_loading = (
+            CompressedTensorsW4A4Nvfp4MoEMethod.process_weights_after_loading
+        )
+        patch_targets = [
+            (
+                "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
+                "compressed_tensors_w4a4_nvfp4.CompressedTensorsW4A4Fp4."
+                "process_weights_after_loading",
+                patched_current_nvfp4_dense_process_weights_after_loading,
+            ),
+            (
+                "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe."
+                "compressed_tensors_moe_w4a4_nvfp4.CompressedTensorsW4A4Nvfp4MoEMethod."
+                "process_weights_after_loading",
+                patched_current_nvfp4_moe_process_weights_after_loading,
+            ),
+        ]
+    try:
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4 import (  # noqa: E501
+            CompressedTensorsW4A4Mxfp4MoEMethod,
+        )
+        from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w4a4_mxfp4 import (  # noqa: E501
+            CompressedTensorsW4A4Mxfp4,
+        )
+    except ImportError:
+        logger.info("vLLM has no compressed-tensors MXFP4 scheme; applying NVFP4 patches only")
+    else:
+        _original_mxfp4_dense_process_weights_after_loading = CompressedTensorsW4A4Mxfp4.process_weights_after_loading
+        _original_mxfp4_moe_process_weights_after_loading = (
+            CompressedTensorsW4A4Mxfp4MoEMethod.process_weights_after_loading
+        )
+        patch_targets.extend(
+            [
+                (_MXFP4_DENSE_PATCH_TARGET, patched_mxfp4_dense_process_weights_after_loading),
+                (_MXFP4_PATCH_TARGET, patched_mxfp4_moe_process_weights_after_loading),
+            ]
+        )
+    for target, replacement in patch_targets:
         p = patch(target, replacement)
         _applied_patches.append(p)
         p.start()
 
-    logger.info(f"Applied {len(_applied_patches)} NVFP4 patches for dynamic weight loading")
+    logger.info(f"Applied {len(_applied_patches)} FP4 patches for dynamic weight loading")
     return _applied_patches
 
 

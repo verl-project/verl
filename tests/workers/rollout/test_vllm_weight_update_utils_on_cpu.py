@@ -242,3 +242,29 @@ def test_vllm_update_weights_syncs_buffers_to_mtp_drafter():
     expected = torch.tensor([5, 6, 7, 8], dtype=torch.float32)
     torch.testing.assert_close(main_model.model.layers[0].e_score_correction_bias, expected)
     torch.testing.assert_close(drafter_model.model.layers[0].e_score_correction_bias, expected)
+
+
+def test_vllm_worker_detects_mxfp4_compressed_tensors_qat():
+    applied = []
+    fake_qat = types.ModuleType("verl.utils.qat")
+    fake_qat.apply_qat_patches = lambda: applied.append(True)
+    previous_qat = sys.modules.get("verl.utils.qat")
+    previous_signal = _vllm_rollout_utils.set_death_signal
+    _vllm_rollout_utils.set_death_signal = lambda: None
+
+    class _Mxfp4QuantConfig:
+        quant_format = "mxfp4-pack-quantized"
+
+    vllm_config = types.SimpleNamespace(quant_config=_Mxfp4QuantConfig())
+    try:
+        sys.modules["verl.utils.qat"] = fake_qat
+        worker = vLLMColocateWorkerExtension(vllm_config=vllm_config)
+    finally:
+        _vllm_rollout_utils.set_death_signal = previous_signal
+        if previous_qat is None:
+            sys.modules.pop("verl.utils.qat", None)
+        else:
+            sys.modules["verl.utils.qat"] = previous_qat
+
+    assert worker._is_qat_model
+    assert applied == [True]

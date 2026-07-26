@@ -1,13 +1,21 @@
-# NVFP4 QAT (Quantization-Aware Training) in verl
+# FP4 QAT (Quantization-Aware Training) in verl
 
 Last updated: 04/02/2026
 
-verl supports NVFP4 Quantization-Aware Training (QAT), which applies fake quantization during training so the model learns to tolerate NVFP4 quantization error. At rollout time, weights are packed into real NVFP4 format for vLLM inference. This closes the precision gap between training and inference, preventing KL divergence explosion.
+verl supports NVFP4 and OCP MXFP4 Quantization-Aware Training (QAT). QAT
+applies fake quantization during training so the model learns to tolerate the
+same representation used by rollout. At each weight resync, verl packs the
+BF16 master weights into real FP4 weights and loads them into vLLM.
 
 | Training Backend | Training Precision | Rollout Precision | vLLM Quant Method |
 |---|---|---|---|
 | **FSDP** | BF16 + fake quantization | NVFP4 W4A16 | `compressed-tensors` |
-| **Megatron** | BF16 + fake quantization | NVFP4 W4A16 | `modelopt` |
+| **Megatron** | BF16 + fake quantization | NVFP4 W4A16 | `compressed-tensors` or `modelopt` |
+
+MXFP4 currently uses the Megatron backend and vLLM's `compressed-tensors`
+path. The exporter produces E2M1 weights packed along the input dimension and
+one E8M0 scale per 32 values. Dense and MoE rollout layers use vLLM's
+`oracle.mxfp4` kernel selection.
 
 > [!TIP]
 > For ready-to-run scripts, environment setup, and experimental results, see the [QAT recipe](https://github.com/verl-project/verl-recipe/tree/main/qat).
@@ -26,6 +34,7 @@ actor_rollout_ref:
     fsdp_config:
       qat:
         enable: true
+        apply_modelopt_fake_quant: true
         mode: "w4a16"
         group_size: 16
         ignore_patterns:
@@ -64,20 +73,50 @@ actor_rollout_ref:
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `megatron.qat.enable` | Enable QAT | `False` |
+| `megatron.qat.apply_modelopt_fake_quant` | Apply ModelOpt training fake quantization; disable when another backend supplies it | `True` |
 | `megatron.qat.mode` | Quantization mode | `"w4a16"` |
 | `megatron.qat.group_size` | Quantization group size | `16` |
 | `megatron.qat.ignore_patterns` | Layers to skip. Uses `fnmatch` glob syntax | `["lm_head", "*mlp.gate"]` |
 | `megatron.qat.quantization_config_path` | vLLM quantization config JSON path | Required |
+
+### MXFP4 with Megatron
+
+Set `mode` to `mxfp4`, use block size 32, and select the
+`compressed-tensors` example config:
+
+```yaml
+actor_rollout_ref:
+  actor:
+    megatron:
+      qat:
+        enable: true
+        apply_modelopt_fake_quant: false
+        mode: "mxfp4"
+        group_size: 32
+        ignore_patterns:
+          - "lm_head"
+          - "*mlp.gate"
+        quantization_config_path: "examples/qat/mxfp4_w4a16.json"
+```
+
+The dynamic resync path in `verl.utils.qat.vllm_patch` requires a
+`compressed-tensors` rollout config. `enable: true` keeps online quantized
+weight export active. Set `apply_modelopt_fake_quant: false` for a rollout-QAT
+off arm or when a backend-specific `impl_cfg.qat` supplies training fake
+quantization; this prevents two fake-quant layers from being applied. A BF16
+rollout is not a valid control for measuring whether MXFP4 QAT closes the
+train/rollout precision gap.
 
 ---
 
 ## Support Matrix
 
 - NVFP4 W4A16 (weight-only FP4 quantization)
+- MXFP4 W4A16 (weight-only FP4 quantization, block size 32)
 - Dense models and MoE models
 - FSDP and Megatron training backends
 - Full quantization and FFN-only quantization strategies
-- Verified on Qwen3-8B-Base and Qwen3-30B-A3B-Base
+- Existing NVFP4 recipes cover Qwen3-8B-Base and Qwen3-30B-A3B-Base
 
 ---
 

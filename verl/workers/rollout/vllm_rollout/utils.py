@@ -181,9 +181,10 @@ class vLLMColocateWorkerExtension:
         # fp8 from the HF config rather than an explicit rollout quantization arg.
         if os.environ.get("VERL_VLLM_FP8_QUANT_ENABLED", "0") == "1" or is_fp8_model(vllm_config):
             apply_vllm_fp8_patches()
-        # 3. patch QAT (compressed-tensors NVFP4) for dynamic weight loading
+        # 3. patch QAT (compressed-tensors FP4) for dynamic weight loading
         quant_config = getattr(vllm_config, "quant_config", None) if vllm_config else None
-        _is_qat_model = getattr(quant_config, "quant_format", None) == "nvfp4-pack-quantized"
+        _qat_format = getattr(quant_config, "quant_format", None)
+        _is_qat_model = _qat_format in {"nvfp4-pack-quantized", "mxfp4-pack-quantized"}
         _is_modelopt_qat = type(quant_config).__name__ == "ModelOptNvFp4Config"
         if _is_qat_model:
             from verl.utils.qat import apply_qat_patches

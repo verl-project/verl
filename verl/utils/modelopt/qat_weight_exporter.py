@@ -13,20 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""QAT weight exporter for Megatron-to-vLLM NVFP4 quantized weight sync."""
+"""QAT weight exporter for Megatron-to-vLLM FP4 quantized weight sync."""
 
 import re
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from typing import Any, Iterator, Optional
 
 import torch
 from modelopt.torch.export.quant_utils import (
+    QUANTIZATION_MXFP4,
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
     get_quantization_format,
     get_weight_block_size,
     to_quantized_weight,
 )
+from modelopt.torch.quantization.qtensor.mxfp4_tensor import MXFP4QTensor
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 
 from verl.utils.megatron_utils import unwrap_model
@@ -53,9 +56,18 @@ class QATWeightExporter:
         self,
         actor_module: list,
         bridge: Any,
-        qat_mode: str = "w4a16",
+        qat_config: Any = "w4a16",
     ):
-        self.qat_mode = qat_mode
+        if isinstance(qat_config, str):
+            self.qat_mode = qat_config
+            self._block_size = 32 if qat_config == "mxfp4" else 16
+            self._ignore_patterns = []
+            self._use_modelopt_fake_quant = True
+        else:
+            self.qat_mode = getattr(qat_config, "mode", "w4a16")
+            self._block_size = getattr(qat_config, "group_size", 32 if self.qat_mode == "mxfp4" else 16)
+            self._ignore_patterns = list(getattr(qat_config, "ignore_patterns", []))
+            self._use_modelopt_fake_quant = getattr(qat_config, "apply_modelopt_fake_quant", True)
         self._actor_module = actor_module
 
         self._registry = self._get_mapping_registry(bridge)
@@ -97,9 +109,12 @@ class QATWeightExporter:
             meta = self._resolve_quant_metadata(hf_name)
             if meta is None:
                 yield (hf_name, weight)
-            else:
-                assert meta.qformat == QUANTIZATION_NVFP4, f"Unsupported qformat: {meta.qformat}"
+            elif meta.qformat == QUANTIZATION_NVFP4:
                 yield from self._quantize_nvfp4(hf_name, weight, meta)
+            elif meta.qformat == QUANTIZATION_MXFP4:
+                yield from self._quantize_mxfp4(hf_name, weight, meta)
+            else:
+                raise ValueError(f"Unsupported qformat: {meta.qformat}")
 
     @staticmethod
     def _get_mapping_registry(bridge):
@@ -197,7 +212,21 @@ class QATWeightExporter:
             if meta is not None:
                 return meta
 
+        if not self._use_modelopt_fake_quant and not self._is_ignored(hf_name):
+            qformat = QUANTIZATION_MXFP4 if self.qat_mode == "mxfp4" else QUANTIZATION_NVFP4
+            return _QuantMeta(qformat=qformat, block_size=self._block_size, weight_amax=None)
+
         return None
+
+    def _is_ignored(self, hf_name: str) -> bool:
+        module_name = hf_name.removesuffix(".weight")
+        for pattern in self._ignore_patterns:
+            if pattern.startswith("re:"):
+                if re.search(pattern[3:], module_name):
+                    return True
+            elif pattern in module_name or fnmatch(module_name, pattern):
+                return True
+        return False
 
     def _quantize_nvfp4(
         self,
@@ -213,7 +242,7 @@ class QATWeightExporter:
           ``(weight_scale_2, global_scale_from_amax)``
           ``(input_scale, activation_scale)`` -- only when available
         """
-        w_amax = meta.weight_amax.to(weight.device)
+        w_amax = weight.detach().abs().amax() if meta.weight_amax is None else meta.weight_amax.to(weight.device)
         w_scale_2 = w_amax.float() / _NVFP4_AMAX_DENOMINATOR
 
         w_scale = NVFP4QTensor.get_weights_scaling_factor(
@@ -231,6 +260,39 @@ class QATWeightExporter:
         input_scale = _compute_input_scale(meta)
         if input_scale is not None:
             yield (_derive_scale_name(name, "input_scale"), input_scale)
+
+    def _quantize_mxfp4(
+        self,
+        name: str,
+        weight: torch.Tensor,
+        meta: _QuantMeta,
+    ) -> Iterator[tuple[str, torch.Tensor]]:
+        """OCP MXFP4 quantization with one E8M0 scale per 32 values.
+
+        Packing is always along the input (last) dimension. This preserves the
+        projection layout consumed by vLLM's fused MoE loader:
+        gate/up projections concatenate into ``w13`` while down projections
+        populate ``w2``.
+        """
+        if meta.block_size != 32:
+            raise ValueError(f"MXFP4 requires block size 32, got {meta.block_size}")
+        if weight.shape[-1] % meta.block_size != 0:
+            raise ValueError(
+                f"MXFP4 input dimension must be divisible by block size 32, got shape {tuple(weight.shape)}"
+            )
+
+        _, weight_scale = MXFP4QTensor.quantize(weight, meta.block_size)
+        scale_shape = (*weight.shape[:-1], weight.shape[-1] // meta.block_size)
+        weight_scale = weight_scale.reshape(scale_shape)
+        quantized = to_quantized_weight(
+            weight,
+            weight_scale,
+            meta.qformat,
+            block_size=meta.block_size,
+        )
+
+        yield (name, quantized)
+        yield (_derive_scale_name(name, "weight_scale"), weight_scale)
 
 
 def _iter_hf_to_megatron_matches(registry, hf_name: str):

@@ -130,15 +130,19 @@ class QATEngineConfig(BaseConfig):
     """Configuration for QAT (Quantization-Aware Training) within an engine.
 
     Args:
-        enable (bool): Whether to enable QAT, default False
-        mode (str): Quantization mode, "w4a16" or "w4a4", default "w4a16"
-        group_size (int): Group size for blockwise quantization, default 16
+        enable (bool): Whether to enable quantized weight export, default False
+        apply_modelopt_fake_quant (bool): Apply ModelOpt fake quantization during
+            training. Disable this when another training backend supplies fake
+            quantization but quantized rollout export is still required.
+        mode (str): Quantization mode, "w4a16", "w4a4", or "mxfp4", default "w4a16"
+        group_size (int): Group size for blockwise quantization (NVFP4: 16, MXFP4: 32)
         ignore_patterns (list[str]): Module name patterns to exclude from quantization
         activation_observer (str): Observer strategy for activation global_scale (W4A4 only)
         quantization_config_path (Optional[str]): Path to quantization config JSON for vLLM
     """
 
     enable: bool = False
+    apply_modelopt_fake_quant: bool = True
     mode: str = "w4a16"
     group_size: int = 16
     ignore_patterns: list[str] = field(default_factory=lambda: ["lm_head", "embed_tokens", "re:.*mlp.gate$"])

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""ModelOpt NVFP4 quantization config and application for Megatron QAT."""
+"""ModelOpt FP4 quantization configs and application for Megatron QAT."""
 
 import copy
 
@@ -25,6 +25,16 @@ _NVFP4_W4A16_QUANTIZER_CFG = {
     "*weight_quantizer": {
         "num_bits": (2, 1),
         "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+        "axis": None,
+        "enable": True,
+    },
+    "*input_quantizer": {"enable": False},
+}
+
+_MXFP4_W4A16_QUANTIZER_CFG = {
+    "*weight_quantizer": {
+        "num_bits": (2, 1),
+        "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
         "axis": None,
         "enable": True,
     },
@@ -52,21 +62,23 @@ def build_quantize_config(
     ignore_patterns: list[str] | None = None,
 ) -> dict:
     """Build a complete ModelOpt quantization config for ``mtq.quantize``."""
-    if qat_mode != "w4a16":
-        raise ValueError(f"Only 'w4a16' is supported, got: {qat_mode}")
+    if qat_mode not in {"w4a16", "mxfp4"}:
+        raise ValueError(f"Only 'w4a16' and 'mxfp4' are supported, got: {qat_mode}")
 
     if ignore_patterns is None:
         ignore_patterns = []
 
     ignore_cfg = _ignore_patterns_to_quant_cfg(ignore_patterns)
 
-    quant_cfg = mtq.normalize_quant_cfg_list(_NVFP4_W4A16_QUANTIZER_CFG)
+    quantizer_cfg = _NVFP4_W4A16_QUANTIZER_CFG if qat_mode == "w4a16" else _MXFP4_W4A16_QUANTIZER_CFG
+    quant_cfg = mtq.normalize_quant_cfg_list(quantizer_cfg)
     disabled_cfg = copy.deepcopy(_default_disabled_quantizer_cfg)
     if isinstance(disabled_cfg, dict):
         disabled_cfg = mtq.normalize_quant_cfg_list(disabled_cfg)
     quant_cfg.extend(disabled_cfg)
     quant_cfg.extend(ignore_cfg)
-    return {"quant_cfg": quant_cfg, "algorithm": "max"}
+    algorithm = "max" if qat_mode == "w4a16" else None
+    return {"quant_cfg": quant_cfg, "algorithm": algorithm}
 
 
 def apply_qat(

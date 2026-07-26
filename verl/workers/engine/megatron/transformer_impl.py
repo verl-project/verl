@@ -109,6 +109,7 @@ class MegatronEngine(BaseEngine):
         # QAT configuration
         self._qat_config = getattr(self.engine_config, "qat", None)
         self._qat_enabled = self._qat_config is not None and getattr(self._qat_config, "enable", False)
+        self._modelopt_qat_enabled = self._qat_enabled and getattr(self._qat_config, "apply_modelopt_fake_quant", True)
         if self._qat_enabled:
             if self.engine_config.vanilla_mbridge:
                 raise ValueError(
@@ -251,7 +252,7 @@ class MegatronEngine(BaseEngine):
                 else:
                     provider_overrides["enable_routing_replay"] = True
 
-            if self._qat_enabled:
+            if self._modelopt_qat_enabled:
                 from megatron.bridge.models.gpt_provider import modelopt_transformer_layer_spec
 
                 provider.transformer_layer_spec = modelopt_transformer_layer_spec
@@ -420,7 +421,7 @@ class MegatronEngine(BaseEngine):
 
         self.module = self._build_megatron_module()
 
-        if self._qat_enabled and not self.engine_config.forward_only:
+        if self._modelopt_qat_enabled and not self.engine_config.forward_only:
             from verl.utils.modelopt import apply_qat_to_modules
 
             self.module = apply_qat_to_modules(self.module, self._qat_config)
@@ -830,7 +831,7 @@ class MegatronEngine(BaseEngine):
         if self._qat_enabled:
             from verl.utils.modelopt import export_qat_weights
 
-            per_tensor_param = export_qat_weights(per_tensor_param, self.module, self._qat_config.mode, self.bridge)
+            per_tensor_param = export_qat_weights(per_tensor_param, self.module, self._qat_config, self.bridge)
 
         return per_tensor_param, peft_config
 

@@ -77,6 +77,7 @@ actor_rollout_ref:
       qat:
         _target_: verl.workers.config.QATEngineConfig
         enable: false
+        apply_modelopt_fake_quant: true
         mode: w4a16
         group_size: 16
         ignore_patterns:
@@ -278,6 +279,7 @@ actor_rollout_ref:
       qat:
         _target_: verl.workers.config.QATEngineConfig
         enable: false
+        apply_modelopt_fake_quant: true
         mode: w4a16
         group_size: 16
         ignore_patterns:
@@ -602,6 +604,7 @@ critic:
     qat:
       _target_: verl.workers.config.QATEngineConfig
       enable: false
+      apply_modelopt_fake_quant: true
       mode: w4a16
       group_size: 16
       ignore_patterns:
