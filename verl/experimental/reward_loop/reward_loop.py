@@ -36,6 +36,35 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def assemble_reward_extra_info(reward_extra_infos: list[dict]) -> dict[str, np.ndarray]:
+    """Assemble per-sample ``reward_extra_info`` dicts into batch-level arrays.
+
+    The key set is the union over all samples (in first-seen order), not the keys of
+    sample 0: reward functions may emit a key only for some samples (e.g. a diagnostic
+    that exists only on parse success), and ``default_compute_score`` returns a dict for
+    some data sources but a bare float for others, so mixed-dataset batches routinely
+    have per-sample schemas. Samples that did not emit a key are filled with ``None``,
+    matching the null-fill convention used for sparse keys elsewhere in the trainer.
+    """
+    reward_extra_keys: list[str] = []
+    seen: set[str] = set()
+    for info in reward_extra_infos:
+        for key in info:
+            if key not in seen:
+                seen.add(key)
+                reward_extra_keys.append(key)
+
+    non_tensor_batch = {}
+    for key in reward_extra_keys:
+        values = [info.get(key) for info in reward_extra_infos]
+        if all(key in info for info in reward_extra_infos):
+            non_tensor_batch[key] = np.array(values)
+        else:
+            # sparse key: keep object dtype so the None fills survive
+            non_tensor_batch[key] = np.array(values, dtype=object)
+    return non_tensor_batch
+
+
 def migrate_legacy_reward_impl(config):
     """
     Migrate the legacy reward model implementation to the new one.
@@ -343,10 +372,8 @@ class RewardLoopManager:
         batch = TensorDict({"rm_scores": rm_scores}, batch_size=len(data))
 
         reward_extra_infos = [output.get("reward_extra_info", {}) for output in outputs_flat]
-        reward_extra_keys = list(reward_extra_infos[0].keys())
-        non_tensor_batch = {}
-        for key in reward_extra_keys:
-            non_tensor_batch[key] = np.array([info[key] for info in reward_extra_infos])
+        non_tensor_batch = assemble_reward_extra_info(reward_extra_infos)
+        reward_extra_keys = list(non_tensor_batch.keys())
 
         if self.reward_model_manager is not None:
             self.reward_model_manager.sleep()
