@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import dataclasses
+import math
 
 import torch
 from megatron.core.optimizer import OptimizerConfig
@@ -87,6 +88,35 @@ def _add_muon_args(optim_args: dict, optim_config: dict) -> None:
     print_rank_0(f"Muon optimizer selected; forwarded fields: {forwarded}")
 
 
+def adamw_rms_match_scale_factor(beta1: float) -> float:
+    """Extra Muon scale factor that matches AdamW's update RMS norm.
+
+    ``emerging_optimizers`` 0.3.0 documents the closed form in
+    ``orthogonalized_optimizers/muon.py::get_muon_scale_factor``:
+
+        "Default mode is 'spectral', which is the mode that allows for learning rate
+        transferability from AdamW. An extra scale factor is used to match the update RMS
+        norm of AdamW, so that we can transfer hyperparameters from AdamW to Muon. An extra
+        scale factor of sqrt((1-B1)/(1+B1)), where B1 is AdamW's momentum EMA coefficient,
+        analytically gives the update RMS norm of AdamW (https://kexue.fm/archives/11267)."
+
+    ``muon_scale_mode`` and ``muon_extra_scale_factor`` are orthogonal and both matter:
+    the former normalizes for parameter *shape*, this one for the *momentum/EMA*. See also
+    https://arxiv.org/abs/2502.16982, which is where the widely quoted ~0.2 value comes
+    from -- it is the value of the *factor* at B1=0.9, not a target for any measured
+    update RMS.
+
+    Args:
+        beta1: AdamW's first moment (momentum EMA) coefficient.
+
+    Returns:
+        The extra scale factor, e.g. 0.229416 at ``beta1=0.9``.
+    """
+    if not 0.0 <= beta1 < 1.0:
+        raise ValueError(f"beta1 must be in [0, 1) to match AdamW update RMS, got {beta1!r}")
+    return math.sqrt((1.0 - beta1) / (1.0 + beta1))
+
+
 def init_megatron_optim_config(
     optim_config: dict,
     use_distributed_optimizer: bool = True,
@@ -103,6 +133,21 @@ def init_megatron_optim_config(
     }
     if str(optim_config.optimizer).lower() in _MUON_ALGORITHMS:
         _add_muon_args(optim_args, optim_config)
+        if optim_config.get("muon_match_adamw_update_rms", False):
+            explicit = optim_config.get("muon_extra_scale_factor", 1.0)
+            if explicit != 1.0:
+                raise ValueError(
+                    "muon_match_adamw_update_rms=True derives muon_extra_scale_factor from beta1, "
+                    f"but muon_extra_scale_factor was also set explicitly to {explicit!r}. "
+                    "Set exactly one of the two."
+                )
+            beta1 = tuple(optim_config.get("betas", (0.9, 0.999)))[0]
+            resolved = adamw_rms_match_scale_factor(beta1)
+            optim_args["muon_extra_scale_factor"] = resolved
+            print_rank_0(
+                "muon_match_adamw_update_rms=True: muon_extra_scale_factor resolved to "
+                f"{resolved!r} from sqrt((1-beta1)/(1+beta1)) with beta1={beta1!r}"
+            )
         # Megatron buffer-integrated master weights (avoids Float16Optimizer fp32 clones).
         supported_fields = {f.name for f in dataclasses.fields(OptimizerConfig)}
         if (

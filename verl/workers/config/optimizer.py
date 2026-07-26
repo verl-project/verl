@@ -170,7 +170,18 @@ class McoreOptimizerConfig(OptimizerConfig):
         muon_tp_mode (str): How the Newton-Schulz calculation is performed for tensor-parallel weights
             (e.g. "blockwise").
         muon_fp32_matmul_prec (str): Precision for Muon's fp32 matmul (e.g. "medium").
-        muon_extra_scale_factor (float): Additional scale factor applied to the Muon update.
+        muon_extra_scale_factor (float): Additional scale factor applied to the Muon update. Muon's
+            effective step size is ``lr * muon_extra_scale_factor``; the Megatron-Core default of
+            ``1.0`` is *not* AdamW-comparable, so reusing an AdamW learning rate unchanged gives a
+            much larger effective step. Prefer ``muon_match_adamw_update_rms`` over hard-coding a
+            constant here.
+        muon_match_adamw_update_rms (bool): Derive ``muon_extra_scale_factor`` from
+            ``sqrt((1 - betas[0]) / (1 + betas[0]))``, the closed form that analytically matches
+            AdamW's update RMS norm (emerging_optimizers 0.3.0 ``get_muon_scale_factor`` docstring;
+            https://kexue.fm/archives/11267; https://arxiv.org/abs/2502.16982). At the default
+            ``betas[0] = 0.9`` this resolves to ~0.2294. The resolved value is logged on rank 0.
+            verl-side only -- it is not forwarded to Megatron-Core. Conflicts with an explicitly set
+            ``muon_extra_scale_factor`` and raises in that case.
         muon_scalar_optimizer (str): Optimizer intended for the non-matrix ("scalar") parameters
             (embeddings, biases, norms) when Muon is selected. Megatron-Core declares this field
             but no Megatron-Core code path currently reads it, so the effective (and only
@@ -207,6 +218,10 @@ class McoreOptimizerConfig(OptimizerConfig):
     muon_fp32_matmul_prec: str = "medium"
     muon_extra_scale_factor: float = 1.0
     muon_scalar_optimizer: str = "adam"
+    # verl-side convenience, not forwarded to Megatron: derives muon_extra_scale_factor
+    # from betas[0] instead of hard-coding a constant. See
+    # verl.utils.megatron.optimizer.adamw_rms_match_scale_factor.
+    muon_match_adamw_update_rms: bool = False
     override_optimizer_config: Optional[dict] = None
 
     def __post_init__(self):

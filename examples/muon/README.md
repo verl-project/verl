@@ -22,7 +22,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.optim.muon_scale_mode=spectral \
     actor_rollout_ref.actor.optim.muon_coefficient_type=quintic \
     actor_rollout_ref.actor.optim.muon_num_ns_steps=5 \
-    actor_rollout_ref.actor.optim.muon_tp_mode=blockwise
+    actor_rollout_ref.actor.optim.muon_tp_mode=blockwise \
+    actor_rollout_ref.actor.optim.muon_match_adamw_update_rms=True
 ```
 
 ## Key knobs
@@ -37,10 +38,39 @@ python3 -m verl.trainer.main_ppo \
 | `muon_scale_mode` | `spectral` | update-scaling mode. |
 | `muon_num_ns_steps` | `5` | Newton–Schulz iteration steps for the orthogonalization. |
 | `muon_tp_mode` | `blockwise` | tensor-parallel sharding mode for the Muon update. |
+| `muon_match_adamw_update_rms` | `True` | derive `muon_extra_scale_factor` from `betas[0]` so Muon's update RMS matches AdamW's — see below. |
 
-`lr` / `weight_decay` are reused from the AdamW settings — Muon does not need a
-separate learning rate. A `muon_*` field that the installed Megatron-Core build
-does not declare raises at build time instead of being silently ignored.
+A `muon_*` field that the installed Megatron-Core build does not declare raises at
+build time instead of being silently ignored.
+
+### Learning rate: Muon's effective step is `lr × muon_extra_scale_factor`
+
+An AdamW learning rate is **not** directly reusable. Megatron-Core's default
+`muon_extra_scale_factor = 1.0` is *not* AdamW-comparable: carrying an AdamW `lr`
+over unchanged yields roughly a **4.4×** larger effective step (`1 / 0.2294`, see
+below), which is a common cause of unstable or non-converging Muon runs.
+
+`emerging_optimizers` gives the closed form for the factor that matches AdamW's
+update RMS norm:
+
+```
+muon_extra_scale_factor = sqrt((1 - beta1) / (1 + beta1))
+```
+
+where `beta1` is AdamW's first-moment coefficient — `0.229416` at the default
+`beta1 = 0.9`. Set `muon_match_adamw_update_rms=True` and verl computes it from
+your `optim.betas[0]` and logs the resolved value on rank 0, so the number is
+reproducible from the config instead of pasted in as a constant. Setting both
+`muon_match_adamw_update_rms=True` and an explicit `muon_extra_scale_factor`
+raises.
+
+Note that `muon_scale_mode` and `muon_extra_scale_factor` are orthogonal and both
+matter: the former normalizes for parameter *shape*, the latter for the
+*momentum/EMA*. Sources: emerging_optimizers 0.3.0
+`orthogonalized_optimizers/muon.py::get_muon_scale_factor` docstring,
+<https://kexue.fm/archives/11267>, <https://arxiv.org/abs/2502.16982>. The often
+quoted `0.2` is the value of the *factor* at `beta1 = 0.9`, not a target for any
+measured update RMS.
 
 ## Notes
 

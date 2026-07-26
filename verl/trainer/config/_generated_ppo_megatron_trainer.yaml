@@ -40,6 +40,7 @@ actor_rollout_ref:
       muon_fp32_matmul_prec: medium
       muon_extra_scale_factor: 1.0
       muon_scalar_optimizer: adam
+      muon_match_adamw_update_rms: false
       override_optimizer_config: {}
     megatron:
       _target_: verl.workers.config.McoreEngineConfig
@@ -576,6 +577,7 @@ critic:
     muon_fp32_matmul_prec: medium
     muon_extra_scale_factor: 1.0
     muon_scalar_optimizer: adam
+    muon_match_adamw_update_rms: false
     override_optimizer_config: {}
   megatron:
     _target_: verl.workers.config.McoreEngineConfig

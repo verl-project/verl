@@ -75,5 +75,10 @@ muon_tp_mode: blockwise
 muon_fp32_matmul_prec: medium
 muon_extra_scale_factor: 1.0
 muon_scalar_optimizer: adam
+# Derive muon_extra_scale_factor from sqrt((1-betas[0])/(1+betas[0])), the closed form that
+# analytically matches AdamW's update RMS norm (emerging_optimizers 0.3.0 get_muon_scale_factor
+# docstring; https://kexue.fm/archives/11267; https://arxiv.org/abs/2502.16982). Prefer this over
+# hard-coding a constant in muon_extra_scale_factor. verl-side only; not forwarded to Megatron.
+muon_match_adamw_update_rms: False
 
 override_optimizer_config: {}
