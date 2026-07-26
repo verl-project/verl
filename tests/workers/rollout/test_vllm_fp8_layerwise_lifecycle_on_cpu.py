@@ -303,9 +303,26 @@ class _FakeVllmConfig:
 
 
 class _FakeModelRunner:
+    """Stand-in for vLLM's ``GPUModelRunner`` with the two serving entry points.
+
+    ``execute_model`` / ``_dummy_run`` are the methods
+    ``vllm/v1/worker/gpu_worker.py`` ``Worker.execute_model`` /
+    ``Worker.execute_dummy_batch`` delegate to at every audited tag, so they are
+    what the poison guard must shadow.
+    """
+
     def __init__(self, model):
         self.model = model
         self.vllm_config = _FakeVllmConfig()
+        self.served = 0
+
+    def execute_model(self, scheduler_output=None, intermediate_tensors=None):
+        self.served += 1
+        return "output"
+
+    def _dummy_run(self, num_tokens=1, **kwargs):
+        self.served += 1
+        return "output"
 
 
 def test_load_quanted_weights_fails_closed_without_begin(monkeypatch):
@@ -418,14 +435,69 @@ def test_begin_failure_poisons_the_worker(monkeypatch):
     with pytest.raises(RuntimeError, match="fail-stopped"):
         fp8_utils.load_quanted_weights([("model.norm.weight", torch.zeros(4))], runner)
 
-    # 4. A generation request must raise instead of running on meta weights.
+    # 4. A generation request must raise instead of running on meta weights —
+    #    at the WORKER level: vLLM's Worker.execute_model /
+    #    Worker.execute_dummy_batch delegate to exactly these two runner
+    #    methods, so guarding them refuses the request before the forward pass.
+    with pytest.raises(RuntimeError, match="fail-stopped"):
+        runner.execute_model(scheduler_output=None)
+    with pytest.raises(RuntimeError, match="fail-stopped"):
+        runner._dummy_run(1)
+    assert runner.served == 0, "a poisoned runner still executed the model"
+    # 5. And the model-level backstop still holds for callers that hold the
+    #    model object directly.
     with pytest.raises(RuntimeError, match="fail-stopped"):
         model.forward(torch.zeros(1))
 
 
+def test_poison_guard_names_the_real_vllm_worker_entry_points():
+    """The guarded runner methods must be the ones vLLM's Worker actually calls.
+
+    Pins the invariant to vLLM's own delegation rather than to a name we chose:
+    if a future vLLM line renames ``execute_model`` / ``_dummy_run``, or verl's
+    tuple drifts from them, this fails instead of silently leaving a poisoned
+    worker able to serve.
+
+    Reads ``vllm/v1/worker/gpu_worker.py`` as TEXT from the installed package
+    directory rather than importing it: importing that module pulls in the whole
+    engine/config chain, which is not available in a CPU-only test environment
+    (and fails with an ImportError rather than a skippable ModuleNotFoundError
+    on a source checkout). Skipped when vLLM is absent entirely, with the tuple
+    still asserted non-empty.
+    """
+    assert fp8_utils._MODEL_RUNNER_SERVING_ENTRY_POINTS, "the guard must name at least one entry point"
+
+    vllm_spec = importlib.util.find_spec("vllm")
+    if vllm_spec is None or not vllm_spec.submodule_search_locations:
+        pytest.skip("needs an installed vLLM to read Worker's delegation from source")
+    source_path = Path(next(iter(vllm_spec.submodule_search_locations))) / "v1" / "worker" / "gpu_worker.py"
+    if not source_path.is_file():
+        pytest.skip(f"installed vLLM has no {source_path}")
+    source = source_path.read_text()
+
+    for method_name, entry_point in (
+        ("execute_model", "execute_model"),
+        ("execute_dummy_batch", "_dummy_run"),
+    ):
+        marker = f"    def {method_name}("
+        start = source.find(marker)
+        assert start != -1, f"vLLM's Worker no longer defines {method_name} in {source_path}"
+        # Method body = up to the next same-indentation def.
+        end = source.find("\n    def ", start + len(marker))
+        body = source[start:] if end == -1 else source[start:end]
+        assert f"self.model_runner.{entry_point}(" in body, (
+            f"vLLM's Worker.{method_name} no longer delegates to model_runner.{entry_point}; "
+            "the FP8 fail-stop guard must be re-pointed at the current entry point"
+        )
+        assert entry_point in fp8_utils._MODEL_RUNNER_SERVING_ENTRY_POINTS, (
+            f"model_runner.{entry_point} serves requests but is not fail-stop guarded"
+        )
+
+
 def test_finalize_failure_poisons_the_worker(monkeypatch):
     """finalize also restores layers one at a time, so a failure there leaves
-    the same partially-restored model and must fail-stop too."""
+    the same partially-restored model and must fail-stop too — including the
+    worker/runner serving entry points when the runner is passed in."""
     _pin_version(monkeypatch, "0.23.0")
     fake_reload = types.ModuleType("vllm.model_executor.model_loader.reload")
     fake_reload.initialize_layerwise_reload = lambda model: None
@@ -437,12 +509,18 @@ def test_finalize_failure_poisons_the_worker(monkeypatch):
     monkeypatch.setitem(sys.modules, "vllm.model_executor.model_loader.reload", fake_reload)
 
     model = _ToyModel()
+    runner = _FakeModelRunner(model)
     assert fp8_utils.begin_fp8_layerwise_reload(model, tag="main") is True
     with pytest.raises(RuntimeError, match="synthetic vLLM failure mid-finalize"):
-        fp8_utils.finalize_fp8_layerwise_reload(model, model_config=None, tag="main")
+        fp8_utils.finalize_fp8_layerwise_reload(model, model_config=None, tag="main", model_runner=runner)
 
     assert "main" in fp8_utils.fp8_state.layerwise_poisoned
     assert "main" not in fp8_utils.fp8_state.layerwise_active
+    with pytest.raises(RuntimeError, match="fail-stopped"):
+        runner.execute_model(scheduler_output=None)
+    with pytest.raises(RuntimeError, match="fail-stopped"):
+        runner._dummy_run(1)
+    assert runner.served == 0, "a poisoned runner still executed the model"
 
 
 def test_validate_config_rejects_mtp_and_unvalidated_version(monkeypatch):

@@ -148,6 +148,11 @@ class BucketedWeightSender:
         self.socket = None
         self.buffer = None
         self.shm = None
+        # Effective SNDTIMEO in milliseconds, recomputed by _init_socket(). Kept
+        # on the instance so the timeout diagnostic reports the bound that was
+        # actually armed rather than the module default — the two differ
+        # whenever ack_timeout_s wins the min in _init_socket().
+        self._snd_timeout_ms = SOCKET_SEND_TIMEOUT_MS
 
     def _recv_ack(self, what: str):
         """Wait for one receiver ACK, bounded in time and aware of error frames.
@@ -257,6 +262,7 @@ class BucketedWeightSender:
         else:
             snd_timeout_ms = SOCKET_SEND_TIMEOUT_MS
         self.socket.setsockopt(zmq.SNDTIMEO, snd_timeout_ms)
+        self._snd_timeout_ms = snd_timeout_ms
         self.socket.bind(self.zmq_handle)
 
     def _send_or_timeout(self, payload, what: str):
@@ -265,12 +271,18 @@ class BucketedWeightSender:
         The sender is the process the driver is waiting on, so an un-timed send
         is the same class of bug as an un-timed recv: the job hangs with no
         diagnosis. Raising here names the peer and the stage instead.
+
+        The reported bound is the EFFECTIVE one recorded by ``_init_socket``
+        (``min(ack_timeout_s, SOCKET_SEND_TIMEOUT_MS)``), not the module
+        default: a caller that passes a short ``ack_timeout_s`` gets a message
+        matching the wait it actually observed, which is the difference between
+        a usable diagnostic and a misleading one.
         """
         try:
             self.socket.send_pyobj(payload)
         except zmq.Again as exc:
             raise WeightTransferAckTimeoutError(
-                f"Timed out after {SOCKET_SEND_TIMEOUT_MS / 1000:.0f} s trying to send the "
+                f"Timed out after {self._snd_timeout_ms / 1000:.0f} s trying to send the "
                 f"weight-transfer frame ({what}) — the receiver is not reading from the socket "
                 "(it died, or never connected). Check the rollout worker log for the original "
                 "traceback."

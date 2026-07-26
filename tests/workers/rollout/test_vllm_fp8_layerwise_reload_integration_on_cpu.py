@@ -297,6 +297,17 @@ def test_real_begin_failure_poisons_the_worker(monkeypatch):
         def __init__(self, m):
             self.model = m
             self.vllm_config = type("_Cfg", (), {"quant_config": None})()
+            self.served = 0
+
+        # The two methods vLLM's Worker delegates serving to (verified in
+        # vllm/v1/worker/gpu_worker.py at every audited tag).
+        def execute_model(self, scheduler_output=None, intermediate_tensors=None):
+            self.served += 1
+            return "output"
+
+        def _dummy_run(self, num_tokens=1, **kwargs):
+            self.served += 1
+            return "output"
 
     runner = _Runner(model)
     with pytest.raises(RuntimeError, match="synthetic failure after partially moving layers"):
@@ -317,6 +328,13 @@ def test_real_begin_failure_poisons_the_worker(monkeypatch):
         begin_fp8_layerwise_reload(model, tag="main", model_runner=runner)
     with pytest.raises(RuntimeError, match="fail-stopped"):
         validate_fp8_layerwise_reload_config(runner.vllm_config, uses_mtp_drafter=False)
+    # Serving is refused at the worker/runner level, ahead of the forward pass,
+    # after a REAL partial initialize_layerwise_reload.
+    with pytest.raises(RuntimeError, match="fail-stopped"):
+        runner.execute_model(scheduler_output=None)
+    with pytest.raises(RuntimeError, match="fail-stopped"):
+        runner._dummy_run(1)
+    assert runner.served == 0, "a poisoned runner still executed the model"
     with pytest.raises(RuntimeError, match="fail-stopped"):
         model.forward(torch.zeros(1))
 

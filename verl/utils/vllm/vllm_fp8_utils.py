@@ -397,6 +397,48 @@ def _vllm_supports_layerwise_reload():
     )
 
 
+def _install_fail_stop_guard(target, attribute, message):
+    """Shadow one callable on ``target`` with a raising stub. Best-effort.
+
+    Sets an INSTANCE attribute, so the class (and every other worker in the
+    process) is untouched and the guard disappears with the object. Idempotent
+    via the ``_verl_fp8_fail_stop`` marker. Returns True when the guard is in
+    place after the call.
+    """
+    existing = getattr(target, attribute, None)
+    if existing is None:
+        return False
+    if getattr(existing, "_verl_fp8_fail_stop", False):
+        return True
+
+    def _fail_stopped(*args, **kwargs):
+        raise RuntimeError(message)
+
+    _fail_stopped._verl_fp8_fail_stop = True
+    try:
+        setattr(target, attribute, _fail_stopped)
+    except Exception:  # pragma: no cover - objects that forbid attribute set
+        logger.error(
+            "FP8: could not install fail-stop guard on %s.%s",
+            type(target).__name__,
+            attribute,
+        )
+        return False
+    return True
+
+
+# vLLM's serving entry points on the worker side, verified in the sources of
+# every tag this path is audited against (v0.20.2, v0.21.0, v0.22.1, v0.23.0,
+# v0.23.1rc0, v0.24.0, v0.25.0): ``vllm/v1/worker/gpu_worker.py``
+# ``Worker.execute_model()`` delegates the forward pass to
+# ``self.model_runner.execute_model(...)``, and ``Worker.execute_dummy_batch()``
+# to ``self.model_runner._dummy_run(...)``. Guarding the RUNNER covers both,
+# and covers them ahead of the model call itself — a request is refused before
+# any kernel touches a half-converted parameter, whether or not the model
+# object exposes a patchable ``forward``.
+_MODEL_RUNNER_SERVING_ENTRY_POINTS = ("execute_model", "_dummy_run")
+
+
 def _fail_stop_fp8_reload(model_runner, reason, tag="main", model=None):
     """Poison this worker after a failed/aborted FP8 layerwise reload.
 
@@ -414,9 +456,13 @@ def _fail_stop_fp8_reload(model_runner, reason, tag="main", model=None):
     1. records ``tag`` in ``fp8_state.layerwise_poisoned``, which makes every
        later begin_fp8_layerwise_reload / load_quanted_weights on this worker
        raise instead of loading into the damaged model;
-    2. installs a forward guard on the model so a generation request raises an
-       explicit RuntimeError naming the failed sync instead of running on
-       meta/half-converted weights.
+    2. poisons the MODEL RUNNER: ``execute_model`` and ``_dummy_run`` — the two
+       entry points vLLM's ``Worker`` routes serving through
+       (``_MODEL_RUNNER_SERVING_ENTRY_POINTS``) — raise an explicit RuntimeError
+       naming the failed sync, so a generation request is refused before the
+       forward pass starts;
+    3. also guards the model's ``forward`` as a backstop for callers that hold
+       the model object directly rather than going through the runner.
 
     Only a worker restart clears the poison.
     """
@@ -431,8 +477,6 @@ def _fail_stop_fp8_reload(model_runner, reason, tag="main", model=None):
 
     if model is None:
         model = getattr(model_runner, "model", None)
-    if model is None:
-        return
 
     message = (
         f"vLLM worker is fail-stopped: FP8 layerwise weight reload '{tag}' failed "
@@ -440,23 +484,22 @@ def _fail_stop_fp8_reload(model_runner, reason, tag="main", model=None):
         "unprocessed), so generation is refused instead of returning possibly "
         "corrupt output. Restart the rollout worker."
     )
-    try:
-        model_runner._verl_fp8_reload_fail_stop = message
-    except Exception:  # pragma: no cover - exotic model_runner objects
-        pass
+    if model_runner is not None:
+        try:
+            model_runner._verl_fp8_reload_fail_stop = message
+        except Exception:  # pragma: no cover - exotic model_runner objects
+            pass
+        guarded = [
+            entry_point
+            for entry_point in _MODEL_RUNNER_SERVING_ENTRY_POINTS
+            if _install_fail_stop_guard(model_runner, entry_point, message)
+        ]
+        if guarded:
+            logger.error("FP8: fail-stop guard installed on model_runner.%s", ", ".join(guarded))
 
-    forward = getattr(model, "forward", None)
-    if forward is None or getattr(forward, "_verl_fp8_fail_stop", False):
+    if model is None:
         return
-
-    def _fail_stopped_forward(*args, **kwargs):
-        raise RuntimeError(message)
-
-    _fail_stopped_forward._verl_fp8_fail_stop = True
-    try:
-        model.forward = _fail_stopped_forward
-    except Exception:  # pragma: no cover - modules that forbid attribute set
-        logger.error("FP8: could not install fail-stop forward guard on %s", type(model).__name__)
+    _install_fail_stop_guard(model, "forward", message)
 
 
 def _assert_not_fail_stopped(tag="main"):
@@ -584,7 +627,7 @@ def begin_fp8_layerwise_reload(model, tag="main", model_runner=None):
     return True
 
 
-def finalize_fp8_layerwise_reload(model, model_config, tag="main"):
+def finalize_fp8_layerwise_reload(model, model_config, tag="main", model_runner=None):
     """Exit layerwise reload mode ONCE after ALL IPC buckets: process layers
     that did not self-complete during streaming (attention scales, padded
     layers) and restore kernel tensors. Raises if called without a matching
@@ -592,7 +635,8 @@ def finalize_fp8_layerwise_reload(model, model_config, tag="main"):
 
     A failure here also leaves the model partially restored (some layers
     processed back to kernel format, some not), so it fail-stops the worker
-    for the same reason begin does.
+    for the same reason begin does — pass ``model_runner`` so the serving entry
+    points are guarded too, not just the model's ``forward``.
     """
     if not _vllm_supports_layerwise_reload():
         return
@@ -604,7 +648,7 @@ def finalize_fp8_layerwise_reload(model, model_config, tag="main"):
         finalize_layerwise_reload(model, model_config)
     except BaseException as exc:
         _fail_stop_fp8_reload(
-            None,
+            model_runner,
             f"finalize_layerwise_reload raised: {type(exc).__name__}: {exc}",
             tag=tag,
             model=model,

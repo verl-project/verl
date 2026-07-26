@@ -547,7 +547,10 @@ class vLLMColocateWorkerExtension:
                 from verl.utils.vllm.vllm_fp8_utils import finalize_fp8_layerwise_reload
 
                 finalize_fp8_layerwise_reload(
-                    self.model_runner.model, self.model_runner.vllm_config.model_config, tag="main"
+                    self.model_runner.model,
+                    self.model_runner.vllm_config.model_config,
+                    tag="main",
+                    model_runner=self.model_runner,
                 )
                 logger.info("FP8: layerwise reload finalized (main)")
             elif use_standard_weight_load and not used_layerwise_reload:

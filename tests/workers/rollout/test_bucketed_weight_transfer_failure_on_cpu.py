@@ -476,7 +476,7 @@ def test_send_and_cleanup_are_bounded_when_frames_cannot_be_flushed():
     """
     sender_result, _ = _run_pair(_receiver_fn_connects_then_leaves, (), num_weights=1)
 
-    status, exc_name, _message, elapsed = sender_result
+    status, exc_name, message, elapsed = sender_result
     assert status == "raised", f"expected the bounded ACK to fire, got {sender_result}"
     assert exc_name in ("WeightTransferAckTimeoutError", "WeightTransferReceiverError"), sender_result
     # ACK bound + LINGER (5 s) + slack. A LINGER=-1 regression blows straight
@@ -486,6 +486,62 @@ def test_send_and_cleanup_are_bounded_when_frames_cannot_be_flushed():
         f"send+cleanup took {elapsed:.1f} s (bound {bound_s:.0f} s): teardown is not bounded — "
         "check that both sockets set a finite ZMQ LINGER at creation"
     )
+    # Whichever bound fired, the diagnostic must name the bound that was
+    # actually armed for THIS sender (ack_timeout_s=5 s), not the module-level
+    # send timeout. An operator who reads "1800 s" after a 5 s failure debugs
+    # the wrong knob.
+    if "trying to send" in message:
+        assert f"Timed out after {ACK_TIMEOUT_S:.0f} s" in message, f"send timeout reported the wrong bound: {message}"
+
+
+def test_send_timeout_message_reports_the_effective_bound():
+    """The send-side diagnostic must quote the EFFECTIVE SNDTIMEO.
+
+    ``_init_socket`` arms ``min(ack_timeout_s * 1000, SOCKET_SEND_TIMEOUT_MS)``,
+    so with the caller-supplied bound below the module default the two differ by
+    orders of magnitude (5 s vs 1800 s). Reporting the constant instead of the
+    armed value sends the reader after the wrong timeout: single process, no
+    peer ever connects, so the very first handshake send hits SNDTIMEO.
+    """
+    from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import (
+        SOCKET_SEND_TIMEOUT_MS,
+        BucketedWeightSender,
+        WeightTransferAckTimeoutError,
+    )
+
+    short_bound_s = 1.0
+    assert int(short_bound_s * 1000) < SOCKET_SEND_TIMEOUT_MS, "the bound under test must win the min"
+
+    handle = _unique_zmq_handle()
+    sender = BucketedWeightSender(
+        zmq_handle=handle,
+        bucket_size_mb=1,
+        use_shm=True,
+        ack_timeout_s=short_bound_s,
+    )
+    started = time.monotonic()
+    try:
+        sender._init_socket()
+        assert sender._snd_timeout_ms == int(short_bound_s * 1000), sender._snd_timeout_ms
+        with pytest.raises(WeightTransferAckTimeoutError) as excinfo:
+            sender._send_or_timeout({"probe": True}, "unit-test handshake")
+    finally:
+        if sender.socket is not None:
+            sender.socket.close(linger=0)
+        try:
+            os.remove(handle[len("ipc://") :])
+        except OSError:
+            pass
+    elapsed = time.monotonic() - started
+
+    message = str(excinfo.value)
+    assert f"Timed out after {short_bound_s:.0f} s" in message, message
+    assert f"{SOCKET_SEND_TIMEOUT_MS / 1000:.0f} s" not in message, (
+        f"the diagnostic still quotes the module default instead of the armed bound: {message}"
+    )
+    # And the wait really was the armed bound, so the message is not merely
+    # consistent with itself.
+    assert short_bound_s <= elapsed < short_bound_s + 30, f"send gave up after {elapsed:.1f} s"
 
 
 def test_cleanup_preserves_the_primary_exception_when_the_accelerator_fails():
