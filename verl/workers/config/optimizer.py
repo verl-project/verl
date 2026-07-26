@@ -171,8 +171,11 @@ class McoreOptimizerConfig(OptimizerConfig):
             (e.g. "blockwise").
         muon_fp32_matmul_prec (str): Precision for Muon's fp32 matmul (e.g. "medium").
         muon_extra_scale_factor (float): Additional scale factor applied to the Muon update.
-        muon_scalar_optimizer (str): Optimizer used for the non-matrix ("scalar") parameters
-            (embeddings, biases, norms) when Muon is selected; one of "adam"/"lion".
+        muon_scalar_optimizer (str): Optimizer intended for the non-matrix ("scalar") parameters
+            (embeddings, biases, norms) when Muon is selected. Megatron-Core declares this field
+            but no Megatron-Core code path currently reads it, so the effective (and only
+            recommended) behaviour is the default, "adam"; setting any other value is a silent
+            no-op today. Forwarded as-is for forward-compatibility.
     """
 
     optimizer: str = "adam"
