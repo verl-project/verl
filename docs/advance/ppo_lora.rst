@@ -42,6 +42,10 @@ FSDP Backend Usage Guide
 - `actor_rollout_ref.model.lora_adapter_path`: string, path to a pretrained LoRA adapter directory. 
    If provided, loads existing adapter instead of creating new one. Enables multi-stage training from previously saved adapters.
    Directory need contain `adapter_model.safetensors` and `adapter_config.json`.
+- `actor_rollout_ref.model.lora_layers_to_transform`: int or list of ints, restrict LoRA to selected transformer block indices.
+- `actor_rollout_ref.model.lora_layers_pattern`: string or list of strings, identify the module list used with ``lora_layers_to_transform`` (for example, ``layers``).
+- `actor_rollout_ref.model.lora_init`: ``default`` or ``svd``. ``svd`` initializes the effective PEFT projection as :math:`A=\Sigma_r V_r^\top` from each target base weight and initializes B to zero.
+- `actor_rollout_ref.model.lora_freeze_a`: bool, freeze LoRA A while keeping B trainable. This can be combined with SVD initialization for online fast-weight updates.
 - `actor_rollout_ref.model.lora.merge`: bool, whether to merge LoRA adapters into the base model weights before transferring to the rollout engine (vLLM or SGLang).
    If True, LoRA adapters are merged into base weights and full merged weights are synced. If False, only LoRA adapter deltas are transferred natively.
    For SGLang, ``merge=True`` is currently required. Native adapter loading (``merge=False``) for SGLang is planned.

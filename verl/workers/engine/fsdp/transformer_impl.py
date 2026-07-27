@@ -61,6 +61,7 @@ from verl.utils.fsdp_utils import (
     replace_lora_wrapper,
 )
 from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
+from verl.utils.peft_lora import freeze_lora_a, initialize_lora_with_svd
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import (
@@ -340,9 +341,22 @@ class FSDPEngine(BaseEngine):
                 "target_modules": convert_to_regular_types(self.model_config.target_modules),
                 "target_parameters": convert_to_regular_types(self.model_config.target_parameters),
                 "exclude_modules": convert_to_regular_types(self.model_config.exclude_modules),
+                "layers_to_transform": convert_to_regular_types(self.model_config.lora_layers_to_transform),
+                "layers_pattern": convert_to_regular_types(self.model_config.lora_layers_pattern),
                 "bias": "none",
             }
             module = get_peft_model(module, LoraConfig(**lora_config))
+
+            if self.model_config.lora_init == "svd":
+                initialized = initialize_lora_with_svd(
+                    module,
+                    freeze_a=self.model_config.lora_freeze_a,
+                    allow_meta=True,
+                )
+                logger.info(f"SVD-initialized {len(initialized)} LoRA layers")
+            elif self.model_config.lora_freeze_a:
+                frozen = freeze_lora_a(module)
+                logger.info(f"Froze LoRA A matrices in {len(frozen)} layers")
 
             # FSDP requires all params in a flat group to share dtype: cast a
             # fp32 adapter to the bf16 base dtype only when they actually differ.

@@ -125,6 +125,12 @@ class HFModelConfig(BaseConfig):
     lora_alpha: int = 16
     target_modules: Optional[Any] = "all-linear"  # allow both "all-linear" and ["q_proj","k_proj"]
     target_parameters: Optional[list[str]] = None  # for lora adapter on nn.Parameter
+    # Restrict PEFT LoRA injection to selected transformer block indices.
+    lora_layers_to_transform: Optional[Any] = None
+    lora_layers_pattern: Optional[Any] = None
+    # "svd" uses A = Sigma_r V_r^T and B = 0 from each target base weight.
+    lora_init: str = "default"
+    lora_freeze_a: bool = False
 
     exclude_modules: Optional[str] = None
 
@@ -146,6 +152,7 @@ class HFModelConfig(BaseConfig):
     mtp: MtpConfig = field(default_factory=MtpConfig)
 
     def __post_init__(self):
+        self._validate_lora_config()
         import_external_libs(self.external_lib)
 
         if self.hf_config_path is None:
@@ -243,7 +250,8 @@ class HFModelConfig(BaseConfig):
             if hasattr(self.hf_config, "text_config") and hasattr(self.hf_config.text_config, "mtp_num_hidden_layers"):
                 self.hf_config.text_config.mtp_num_hidden_layers = 0
 
-        # Ensure target_modules is a str or list[str] (only if not None)
+    def _validate_lora_config(self):
+        """Validate LoRA fields before loading any model artifacts."""
         if self.target_modules is not None:
             if not isinstance(self.target_modules, (str | list)):
                 raise TypeError(
@@ -256,6 +264,24 @@ class HFModelConfig(BaseConfig):
                         raise TypeError(
                             f"All elements in target_modules list must be strings, but found {type(x).__name__}"
                         )
+        if self.lora_init not in {"default", "svd"}:
+            raise ValueError(f"lora_init must be 'default' or 'svd', got {self.lora_init!r}")
+        if self.lora_init == "svd" and self.lora_adapter_path is not None:
+            raise ValueError("lora_init='svd' cannot be combined with lora_adapter_path")
+        if self.lora_layers_to_transform is not None:
+            layer_indices = (
+                [self.lora_layers_to_transform]
+                if isinstance(self.lora_layers_to_transform, int)
+                else self.lora_layers_to_transform
+            )
+            if not isinstance(layer_indices, list) or not all(isinstance(index, int) for index in layer_indices):
+                raise TypeError("lora_layers_to_transform must be an int or a list of ints")
+        if self.lora_layers_pattern is not None:
+            layer_patterns = (
+                [self.lora_layers_pattern] if isinstance(self.lora_layers_pattern, str) else self.lora_layers_pattern
+            )
+            if not isinstance(layer_patterns, list) or not all(isinstance(pattern, str) for pattern in layer_patterns):
+                raise TypeError("lora_layers_pattern must be a string or a list of strings")
 
     def get_processor(self):
         return self.processor if self.processor is not None else self.tokenizer

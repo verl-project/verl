@@ -94,3 +94,21 @@ class TestHFModelConfigCPU:
         merged_config = OmegaConf.merge(base_config, invalid_cli_config)
         with pytest.raises(TypeError):
             OmegaConf.to_object(merged_config)
+
+    def test_svd_lora_fields_accept_cli_types(self):
+        cfg_from_dataclass = OmegaConf.structured(HFModelConfig)
+        cli_config = OmegaConf.create(
+            {
+                "path": self.model_path,
+                "lora_layers_to_transform": [32, 33, 34, 35],
+                "lora_layers_pattern": "layers",
+                "lora_init": "svd",
+                "lora_freeze_a": True,
+            }
+        )
+
+        merged = OmegaConf.merge(cfg_from_dataclass, cli_config)
+        assert list(merged.lora_layers_to_transform) == [32, 33, 34, 35]
+        assert merged.lora_layers_pattern == "layers"
+        assert merged.lora_init == "svd"
+        assert merged.lora_freeze_a is True
