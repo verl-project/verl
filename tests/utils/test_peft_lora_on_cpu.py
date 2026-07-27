@@ -200,7 +200,7 @@ def test_mixed_adapter_sft_matches_independent_updates():
         epochs=2,
         batch_size=2,
         max_grad_norm=0.0,
-        sft_adapters_per_step=2,
+        sft_episode_microbatch_size=2,
     )
     first_pairs = [
         {"instruction": "Who went?", "output": "Alice"},

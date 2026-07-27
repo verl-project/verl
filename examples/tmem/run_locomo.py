@@ -30,7 +30,7 @@ import torch
 import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
 from torch.nn.utils.rnn import pad_sequence
-from transformers import AutoModelForCausalLM, AutoTokenizer, StoppingCriteria, StoppingCriteriaList
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, StoppingCriteria, StoppingCriteriaList
 
 from examples.tmem.locomo import (
     ANSWER_PROMPT,
@@ -54,6 +54,16 @@ from verl.utils.peft_lora import (
     reset_lora_b,
 )
 
+PAPER_TMEM_HPARAMS: dict[str, Any] = {
+    "rank": 6,
+    "learning_rate": 5e-4,
+    "epochs": 5,
+    "batch_size": 16,
+    "context_budget": 4096,
+    "memory_mode": "tmem",
+    "max_grad_norm": 0.0,
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -67,7 +77,11 @@ def parse_args() -> argparse.Namespace:
         "--dflash-draft-model",
         help="DFlash draft checkpoint. Required when --rollout-backend=dflash.",
     )
-    parser.add_argument("--dflash-block-size", type=int, default=16)
+    parser.add_argument(
+        "--dflash-block-size",
+        type=int,
+        help="Optional DFlash runtime override; by default infer block_size from the draft checkpoint.",
+    )
     parser.add_argument("--memory-mode", choices=["none", "tmem"], default="tmem")
     parser.add_argument("--sglang-mem-fraction", type=float, default=0.75)
     parser.add_argument("--seeds", type=int, nargs="+", default=[1, 2, 3])
@@ -77,10 +91,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument(
-        "--sft-adapters-per-step",
+        "--sft-episode-microbatch-size",
         type=int,
-        default=4,
-        help="Independent episode adapters to update in one mixed SFT forward.",
+        default=1,
+        help="Execution-only grouping of independent episodes; this does not change SFT epochs or optimizer steps.",
     )
     parser.add_argument(
         "--max-grad-norm",
@@ -94,9 +108,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--extraction-temperature", type=float, default=0.7)
     parser.add_argument("--extraction-top-p", type=float, default=0.8)
     parser.add_argument("--extraction-top-k", type=int, default=20)
-    parser.add_argument("--answer-temperature", type=float, default=0.4)
-    parser.add_argument("--answer-top-p", type=float, default=0.9)
-    parser.add_argument("--answer-top-k", type=int, default=10)
+    parser.add_argument("--answer-temperature", type=float, default=0.7)
+    parser.add_argument("--answer-top-p", type=float, default=0.8)
+    parser.add_argument("--answer-top-k", type=int, default=20)
     parser.add_argument("--max-questions", type=int)
     parser.add_argument("--questions-per-category", type=int)
     parser.add_argument("--generation-batch-size", type=int, default=8)
@@ -111,6 +125,21 @@ def file_sha256(path: str | Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def sampling_seed_for_request(seed: int, adapter_name: str, rendered_prompt: str) -> int:
+    payload = f"{seed}\0{adapter_name}\0{rendered_prompt}".encode()
+    return int.from_bytes(hashlib.sha256(payload).digest()[:4], byteorder="big")
+
+
+def validate_table1_hparams(args: argparse.Namespace) -> None:
+    mismatches = {
+        name: (getattr(args, name), expected)
+        for name, expected in PAPER_TMEM_HPARAMS.items()
+        if getattr(args, name) != expected
+    }
+    if mismatches:
+        raise ValueError(f"Table 1 reproduction requires the paper hyperparameters; mismatches={mismatches}")
 
 
 def build_model(model_path: str, device: str, rank: int):
@@ -307,7 +336,7 @@ class DFlashRollout:
     def __init__(self, model_path: str, device: str, tokenizer, args: argparse.Namespace):
         if not args.dflash_draft_model:
             raise ValueError("--dflash-draft-model is required for DFlash rollout")
-        if args.dflash_block_size < 2:
+        if args.dflash_block_size is not None and args.dflash_block_size < 2:
             raise ValueError("--dflash-block-size must be at least 2")
 
         import sglang as sgl
@@ -322,34 +351,43 @@ class DFlashRollout:
         self.tokenizer = tokenizer
         self.args = args
         self.loaded_adapters: set[str] = set()
+        draft_config = AutoConfig.from_pretrained(args.dflash_draft_model)
+        checkpoint_block_size = getattr(draft_config, "block_size", None)
+        if checkpoint_block_size is None:
+            raise ValueError("The DFlash draft checkpoint does not declare block_size")
+        self.dflash_block_size = int(checkpoint_block_size)
+        if args.dflash_block_size is not None and args.dflash_block_size != self.dflash_block_size:
+            raise ValueError(
+                f"--dflash-block-size={args.dflash_block_size} does not match "
+                f"checkpoint block_size={self.dflash_block_size}"
+            )
         self.extraction_stop_token_ids = JsonArrayEndCriteria(tokenizer).end_token_ids
         self.reset_stats(seed=0)
         device_index = torch.device(device).index
         if device_index is None:
             raise ValueError(f"DFlash rollout device must have an explicit CUDA index, got {device!r}")
-        self.engine = sgl.Engine(
-            model_path=model_path,
-            dtype="bfloat16",
-            tp_size=1,
-            base_gpu_id=device_index,
-            mem_fraction_static=args.sglang_mem_fraction,
-            disable_radix_cache=True,
-            attention_backend="triton",
-            sampling_backend="pytorch",
-            disable_cuda_graph=True,
-            disable_piecewise_cuda_graph=True,
-            enable_deterministic_inference=True,
-            speculative_algorithm="DFLASH",
-            speculative_draft_model_path=args.dflash_draft_model,
-            speculative_num_steps=1,
-            speculative_eagle_topk=1,
-            speculative_num_draft_tokens=args.dflash_block_size,
-            enable_lora=True,
-            max_lora_rank=args.rank,
-            lora_target_modules=["gate_proj", "up_proj", "down_proj"],
-            max_loras_per_batch=args.generation_batch_size,
-            max_loaded_loras=args.generation_batch_size + 1,
-        )
+        engine_args: dict[str, Any] = {
+            "model_path": model_path,
+            "dtype": "bfloat16",
+            "tp_size": 1,
+            "base_gpu_id": device_index,
+            "mem_fraction_static": args.sglang_mem_fraction,
+            "disable_radix_cache": True,
+            "attention_backend": "triton",
+            "sampling_backend": "pytorch",
+            "disable_cuda_graph": True,
+            "disable_piecewise_cuda_graph": True,
+            "enable_deterministic_inference": True,
+            "speculative_algorithm": "DFLASH",
+            "speculative_draft_model_path": args.dflash_draft_model,
+            "enable_lora": True,
+            "max_lora_rank": args.rank,
+            "lora_target_modules": ["gate_proj", "up_proj", "down_proj"],
+            "max_loras_per_batch": args.generation_batch_size,
+            "max_loaded_loras": args.generation_batch_size + 1,
+        }
+        engine_args["speculative_num_draft_tokens"] = self.dflash_block_size
+        self.engine = sgl.Engine(**engine_args)
 
     def reset_stats(self, *, seed: int) -> None:
         self.seed = seed
@@ -367,16 +405,18 @@ class DFlashRollout:
             self.spec_accept_length_sum / self.spec_accept_length_count if self.spec_accept_length_count else 0.0
         )
         return {
+            "dflash_block_size": self.dflash_block_size,
             "generation_calls": self.generation_calls,
             "resumed_request_count": self.resumed_request_count,
             "generation_seconds": self.generation_seconds,
             "completion_tokens": self.completion_tokens,
             "spec_verify_count": self.spec_verify_count,
+            "spec_accept_length_count": self.spec_accept_length_count,
             "mean_spec_accept_length": mean_accept_length,
         }
 
     def restore_progress(self, records: Sequence[dict[str, Any]]) -> None:
-        """Continue the deterministic per-request sampling-seed stream."""
+        """Restore the checkpointed request count for resume telemetry."""
         restored = sum(int(record.get("trigger_count", len(record.get("triggers", [])))) + 1 for record in records)
         self.request_count = restored
         self.resumed_request_count = restored
@@ -417,7 +457,11 @@ class DFlashRollout:
         sampling_params = [
             self._sampling_params(
                 extraction=extraction,
-                sampling_seed=self.seed + self.request_count + request_offset,
+                sampling_seed=sampling_seed_for_request(
+                    self.seed,
+                    adapter_names[request_offset],
+                    rendered[request_offset],
+                ),
             )
             for request_offset in range(len(prompts))
         ]
@@ -512,7 +556,11 @@ def encode_sft_pair(tokenizer, instruction: str, output: str, max_length: int) -
         full_ids = tokenizer.apply_chat_template(messages, enable_thinking=False, **kwargs)
     except TypeError:
         full_ids = tokenizer.apply_chat_template(messages, **kwargs)
-    full_ids = full_ids[0, :max_length]
+    full_ids = full_ids[0]
+    if full_ids.shape[0] > max_length:
+        raise ValueError(
+            f"Generated SFT pair has {full_ids.shape[0]} tokens, exceeding the {max_length}-token safety limit"
+        )
     labels = full_ids.clone()
     labels[: min(prompt_ids.shape[1], labels.shape[0])] = -100
     return full_ids, labels
@@ -594,8 +642,8 @@ def online_sft_batch(
             adapter_name: torch.randperm(len(adapter_examples), generator=generators[adapter_name]).tolist()
             for adapter_name, adapter_examples in examples.items()
         }
-        for adapter_start in range(0, len(adapter_names), args.sft_adapters_per_step):
-            adapter_group = adapter_names[adapter_start : adapter_start + args.sft_adapters_per_step]
+        for adapter_start in range(0, len(adapter_names), args.sft_episode_microbatch_size):
+            adapter_group = adapter_names[adapter_start : adapter_start + args.sft_episode_microbatch_size]
             step_count = max(
                 (len(orders[adapter_name]) + args.batch_size - 1) // args.batch_size for adapter_name in adapter_group
             )
@@ -877,12 +925,14 @@ def append_record(
 
 def main() -> None:
     args = parse_args()
-    if args.rank != 6:
-        raise ValueError("This Table 1 reproduction fixes LoRA rank to 6")
-    if args.generation_batch_size < 1 or args.sft_adapters_per_step < 1:
-        raise ValueError("generation and SFT adapter batch sizes must be positive")
-    if args.max_grad_norm < 0:
-        raise ValueError("max_grad_norm must be non-negative")
+    validate_table1_hparams(args)
+    if args.generation_batch_size < 1 or args.sft_episode_microbatch_size < 1:
+        raise ValueError("generation batch size and SFT episode microbatch size must be positive")
+    print(
+        "Paper TMEM HP: rank=6, targets=last-4 FFN gate/up/down, frozen-A/train-B, "
+        "SGD lr=5e-4, epochs=5, SFT batch=16, cumulative triggers, Lmax=4096",
+        flush=True,
+    )
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     tokenizer = AutoTokenizer.from_pretrained(args.model)

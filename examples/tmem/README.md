@@ -21,6 +21,23 @@ including the temporal suffix for category 2 and randomized
 Independent question episodes use separately named adapters so rollout
 generation can be batched without sharing fast-weight state between questions.
 
+## Hyperparameter boundary
+
+The Table 1 runner fails closed if any paper-specified TMEM setting differs:
+
+| Setting | Locked value |
+| --- | --- |
+| LoRA | rank 6; `gate_proj`, `up_proj`, `down_proj`; final 4 layers |
+| Initialization/update | `A=Sigma_r V_r^T` frozen; `B=0` then train B only |
+| Online SFT | plain SGD, learning rate `5e-4`, 5 epochs, batch size 16 |
+| Trigger dynamics | cumulative B within an episode; working context cleared |
+| LoCoMo context budget | 4096 tokens |
+
+Question sharding, generation batch size, SGLang memory reservation, and the
+SFT *episode microbatch* are execution settings, not TMEM training
+hyperparameters. The episode microbatch defaults to 1. DFlash block size is
+read from the draft checkpoint and validated rather than chosen by the runner.
+
 ## Data
 
 Download the official LoCoMo-10 file:
@@ -75,8 +92,8 @@ CUDA_VISIBLE_DEVICES=4,5 python -m examples.tmem.run_locomo \
   --seeds 1 2 3
 ```
 
-To evaluate one seed with training and DFlash rollout isolated on physical
-GPUs 4 and 5, respectively, use the resumable two-GPU launcher:
+To evaluate one seed with both training and DFlash rollout active on both
+physical GPUs 4 and 5, use the resumable two-shard launcher:
 
 ```bash
 bash scripts/tmem/run_locomo_dflash_2gpu.sh \
@@ -85,16 +102,21 @@ bash scripts/tmem/run_locomo_dflash_2gpu.sh \
   outputs/tmem_locomo_qwen3_4b_dflash_seed_1
 ```
 
-The launcher defaults to the sibling `Draft-OPD` checkout and its
-`.conda/draft-opd` environment. Paths and resources can be overridden with
+It partitions the ten conversations into balanced 999- and 987-question
+shards. Each GPU hosts its own trainer and rollout engine, and the launcher
+merges both shards into one 1,986-question seed result. It defaults to the
+sibling `Draft-OPD` checkout and its `.conda/draft-opd` environment. Paths and
+resources can be overridden with
 `CONDA_ENV`, `MODEL_PATH`, `DRAFT_MODEL_PATH`, `GPU_IDS`,
 `SGLANG_MEM_FRACTION`, `GENERATION_BATCH_SIZE`, and `TMEM_CUDA_HOME`. Set
-`MAX_QUESTIONS=1` for a one-question runtime smoke test.
+`MAX_QUESTIONS=1` for a one-question-per-GPU runtime smoke test.
 
 The DFlash verifier uses SGLang's rejection sampler for non-greedy decoding,
 including the extraction and answer top-k/top-p settings. Adapter tensors are
 loaded directly from PEFT after every update; base weights and the fixed draft
-are not retransferred.
+are not retransferred. The DFlash block size is inferred from the draft
+checkpoint (`16` for the validated Draft-OPD model); DFlash itself fixes its
+non-applicable EAGLE step/top-k bookkeeping fields to `1`.
 
 For a smoke test:
 
@@ -115,8 +137,9 @@ decoding limit or sampling parameters, final-answer decoding parameters, LoRA
 alpha, or gradient clipping. This example uses the paper's Appendix system
 template and Figure 3 memory-writing prompt as separate system/user messages,
 the official LoCoMo answer protocol, `lora_alpha=rank` so PEFT implements the
-paper's unscaled `BA`, Qwen3's standard non-thinking extraction sampling with
-a 1024-token cap (the only response budget published, in the RL setup), and
-plain SGD without gradient clipping. Every operational
+paper's unscaled `BA`, Qwen3's standard non-thinking sampling
+(`temperature=0.7`, `top_p=0.8`, `top_k=20`) for extraction and answering, a
+1024-token extraction cap (the only response budget published, in the RL
+setup), and plain SGD without gradient clipping. Every operational
 choice and generated record is stored so differences from the reported 25.72
 F1 / 15.40 EM can be audited instead of hidden.

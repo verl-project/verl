@@ -14,6 +14,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from examples.tmem.locomo import (
@@ -28,7 +29,14 @@ from examples.tmem.locomo import (
     score_records,
     token_f1,
 )
-from examples.tmem.run_locomo import DFlashRollout, JsonArrayEndCriteria
+from examples.tmem.merge_shards import merge_rollout_stats
+from examples.tmem.run_locomo import (
+    PAPER_TMEM_HPARAMS,
+    DFlashRollout,
+    JsonArrayEndCriteria,
+    sampling_seed_for_request,
+    validate_table1_hparams,
+)
 
 
 def test_parse_qa_pairs_accepts_fenced_json_and_drops_invalid_entries():
@@ -36,6 +44,15 @@ def test_parse_qa_pairs_accepts_fenced_json_and_drops_invalid_entries():
     [{"instruction": " Who? ", "output": " Alice "}, {"instruction": 3, "output": "bad"}]
     ```"""
     assert parse_qa_pairs(text) == [{"instruction": "Who?", "output": "Alice"}]
+
+
+def test_table1_hparams_are_locked_to_paper_values():
+    args = SimpleNamespace(**PAPER_TMEM_HPARAMS)
+    validate_table1_hparams(args)
+
+    args.epochs = 2
+    with pytest.raises(ValueError, match=r"epochs.*2.*5"):
+        validate_table1_hparams(args)
 
 
 def test_paper_normalization_and_metrics():
@@ -138,6 +155,7 @@ def test_dflash_extraction_keeps_json_terminator():
 
 def test_dflash_stats_are_reset_per_seed():
     rollout = object.__new__(DFlashRollout)
+    rollout.dflash_block_size = 16
     rollout.reset_stats(seed=7)
     rollout.generation_seconds = 2.5
     rollout.completion_tokens = 10
@@ -146,17 +164,20 @@ def test_dflash_stats_are_reset_per_seed():
     rollout.spec_accept_length_count = 2
 
     assert rollout.stats() == {
+        "dflash_block_size": 16,
         "generation_calls": 0,
         "resumed_request_count": 0,
         "generation_seconds": 2.5,
         "completion_tokens": 10,
         "spec_verify_count": 4,
+        "spec_accept_length_count": 2,
         "mean_spec_accept_length": 3.0,
     }
 
 
 def test_dflash_resume_restores_sampling_request_count():
     rollout = object.__new__(DFlashRollout)
+    rollout.dflash_block_size = 16
     rollout.reset_stats(seed=3)
     rollout.restore_progress(
         [
@@ -168,3 +189,48 @@ def test_dflash_resume_restores_sampling_request_count():
     assert rollout.request_count == 7
     assert rollout.resumed_request_count == 7
     assert rollout.stats()["resumed_request_count"] == 7
+
+
+def test_dflash_sampling_seed_is_batch_and_shard_invariant():
+    prompt = "<|im_start|>user\nWhat happened?<|im_end|>"
+
+    assert sampling_seed_for_request(3, "episode_7", prompt) == sampling_seed_for_request(3, "episode_7", prompt)
+    assert sampling_seed_for_request(3, "episode_7", prompt) != sampling_seed_for_request(3, "episode_8", prompt)
+
+
+def test_merge_rollout_stats_weights_acceptance_by_request_count():
+    merged = merge_rollout_stats(
+        [
+            {
+                "dflash_block_size": 16,
+                "generation_calls": 2,
+                "resumed_request_count": 3,
+                "generation_seconds": 4.0,
+                "completion_tokens": 20,
+                "spec_verify_count": 5,
+                "spec_accept_length_count": 2,
+                "mean_spec_accept_length": 3.0,
+            },
+            {
+                "dflash_block_size": 16,
+                "generation_calls": 4,
+                "resumed_request_count": 0,
+                "generation_seconds": 6.0,
+                "completion_tokens": 30,
+                "spec_verify_count": 7,
+                "spec_accept_length_count": 3,
+                "mean_spec_accept_length": 5.0,
+            },
+        ]
+    )
+
+    assert merged == {
+        "dflash_block_size": 16,
+        "generation_calls": 6,
+        "resumed_request_count": 3,
+        "generation_gpu_seconds": 10.0,
+        "completion_tokens": 50,
+        "spec_verify_count": 12,
+        "spec_accept_length_count": 5,
+        "mean_spec_accept_length": 4.2,
+    }
