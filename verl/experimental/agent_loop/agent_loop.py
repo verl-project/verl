@@ -43,7 +43,16 @@ from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
-from transformers import AutoProcessor, AutoTokenizer
+from transformers import AutoTokenizer
+
+# AutoProcessor imports transformers' image_processing chain → torchvision._C.
+# torchvision's C extension may fail to load in environments where the wheel ABI does
+# not match the installed torch (e.g., CSCS Alps aarch64 containers).  Guard the import
+# so the process can still start for text-only models that never use the processor.
+try:
+    from transformers import AutoProcessor
+except Exception:
+    AutoProcessor = Any  # type: ignore[assignment,misc]
 
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
