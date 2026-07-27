@@ -512,7 +512,27 @@ class vLLMColocateWorkerExtension:
                     quant_prepared=bool(quant_reload_state),
                 )
 
-            receiver.receive_weights(on_bucket_received=on_bucket_received)
+            try:
+                # Covers receive AND per-bucket load failures (the bucket
+                # loader runs inside receive_weights via on_bucket_received).
+                # With the layerwise reload active this leaves the model
+                # partially updated with no rollback — same failure class as a
+                # begin/finalize failure, so it fail-stops the worker the same
+                # way (supersedes the receive-stage abort in the PR's previous
+                # head, 3a5d729d, which cleared the lifecycle flag but did not
+                # guard the serving entry points).
+                receiver.receive_weights(on_bucket_received=on_bucket_received)
+            except BaseException as exc:
+                if fp8_layerwise_begun:
+                    from verl.utils.vllm.vllm_fp8_utils import _fail_stop_fp8_reload
+
+                    _fail_stop_fp8_reload(
+                        self.model_runner,
+                        f"weight receive failed mid-reload: {type(exc).__name__}: {exc}",
+                        tag="main",
+                        model=self.model_runner.model,
+                    )
+                raise
             if lora_weights is not None:
                 self._update_weights(
                     list(lora_weights.items()),

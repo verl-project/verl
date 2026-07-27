@@ -242,3 +242,162 @@ def test_vllm_update_weights_syncs_buffers_to_mtp_drafter():
     expected = torch.tensor([5, 6, 7, 8], dtype=torch.float32)
     torch.testing.assert_close(main_model.model.layers[0].e_score_correction_bias, expected)
     torch.testing.assert_close(drafter_model.model.layers[0].e_score_correction_bias, expected)
+
+
+# ---------------------------------------------------------------------------
+# FP8 layerwise reload fail-stop through update_weights_from_ipc.
+#
+# Ported from the receive-stage abort tests on the PR's previous head
+# (3a5d729d) and adapted to the entry-point fail-stop mechanism: a failure
+# during receive or finalize while the layerwise reload is active must poison
+# the worker (via _fail_stop_fp8_reload) so a follow-on sync refuses up front,
+# instead of re-initializing a partially-updated model.
+# ---------------------------------------------------------------------------
+
+import pytest  # noqa: E402
+
+
+def _stub_fp8_layerwise_env(monkeypatch, *, receive_error=None, finalize_error=None):
+    """Wire update_weights_from_ipc onto the FP8 layerwise path with the vLLM /
+    fp8_utils touch-points faked. Returns the real fp8_utils module so tests can
+    assert on fp8_state, plus the recorded fail-stop reasons.
+
+    ``receive_error`` / ``finalize_error`` inject a failure at the matching
+    lifecycle stage; both None drives the happy path.
+    """
+    fail_stop_reasons: list[str] = []
+
+    fake_config = types.ModuleType("vllm.config")
+
+    class _CtxMgr:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *a):
+            return False
+
+    fake_config.set_current_vllm_config = _CtxMgr
+
+    fake_platforms = types.ModuleType("vllm.platforms")
+
+    class _Platform:
+        device_type = "cpu"
+
+    fake_platforms.current_platform = _Platform()
+
+    fake_bwt = types.ModuleType("verl.workers.rollout.vllm_rollout.bucketed_weight_transfer")
+
+    class _Receiver:
+        def __init__(self, **kwargs):
+            pass
+
+        def receive_weights(self, on_bucket_received):
+            if receive_error is not None:
+                raise receive_error
+
+    fake_bwt.BucketedWeightReceiver = _Receiver
+
+    fake_fp8 = types.ModuleType("verl.utils.vllm.vllm_fp8_utils")
+
+    class _FP8State:
+        def __init__(self):
+            self.layerwise_active = set()
+            self.layerwise_begin_attempted = set()
+            self.layerwise_poisoned = set()
+
+    state = _FP8State()
+    fake_fp8.fp8_state = state
+    fake_fp8.prepare_quanted_weights_for_loading = lambda runner: False
+    fake_fp8._vllm_supports_layerwise_reload = lambda: True
+    fake_fp8.is_mxfp8_vllm_ascend = lambda cfg: False
+
+    def _validate(vllm_config, uses_mtp_drafter, tag="main"):
+        if tag in state.layerwise_poisoned:
+            raise RuntimeError(f"FP8 layerwise reload for '{tag}' previously FAILED and the worker is fail-stopped.")
+
+    fake_fp8.validate_fp8_layerwise_reload_config = _validate
+
+    def _begin(model, tag="main", model_runner=None):
+        state.layerwise_begin_attempted.add(tag)
+        state.layerwise_active.add(tag)
+        return True
+
+    fake_fp8.begin_fp8_layerwise_reload = _begin
+
+    def _fail_stop(model_runner, reason, tag="main", model=None):
+        fail_stop_reasons.append(reason)
+        state.layerwise_poisoned.add(tag)
+        state.layerwise_active.discard(tag)
+
+    fake_fp8._fail_stop_fp8_reload = _fail_stop
+
+    def _finalize(model, model_config, tag="main", model_runner=None):
+        if finalize_error is not None:
+            _fail_stop(model_runner, f"finalize raised: {finalize_error}", tag=tag, model=model)
+            raise finalize_error
+        state.layerwise_active.discard(tag)
+        state.layerwise_begin_attempted.discard(tag)
+
+    fake_fp8.finalize_fp8_layerwise_reload = _finalize
+
+    monkeypatch.setitem(sys.modules, "vllm.config", fake_config)
+    monkeypatch.setitem(sys.modules, "vllm.platforms", fake_platforms)
+    monkeypatch.setitem(sys.modules, "verl.workers.rollout.vllm_rollout.bucketed_weight_transfer", fake_bwt)
+    monkeypatch.setitem(sys.modules, "verl.utils.vllm.vllm_fp8_utils", fake_fp8)
+    # is_fp8_model was bound into the utils module at import time.
+    monkeypatch.setattr(_vllm_rollout_utils, "is_fp8_model", lambda cfg: True)
+    return state, fail_stop_reasons
+
+
+def _make_fp8_worker():
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    worker.model_runner = _FakeModelRunner(_ToyModel())
+    worker.model_runner.vllm_config.quant_config = object()
+    worker.model_runner.vllm_config.model_config = object()
+    worker.device = torch.device("cpu")
+    worker.local_rank = 0
+    worker._is_qat_model = False
+    worker._is_modelopt_qat = False
+    worker._get_zmq_handle = lambda: "ipc:///tmp/unused"
+    return worker
+
+
+@pytest.mark.parametrize("stage", ["receive", "finalize"])
+def test_update_weights_from_ipc_fp8_failure_fails_stop(monkeypatch, stage):
+    """A failure in the FP8 layerwise reload (at receive OR finalize) must
+    fail-stop the worker, and a follow-on sync must refuse up front instead of
+    re-initializing a partially-updated model."""
+    err = RuntimeError(f"boom in {stage}")
+    state, reasons = _stub_fp8_layerwise_env(
+        monkeypatch,
+        receive_error=err if stage == "receive" else None,
+        finalize_error=err if stage == "finalize" else None,
+    )
+    worker = _make_fp8_worker()
+
+    with pytest.raises(RuntimeError, match=f"boom in {stage}"):
+        worker.update_weights_from_ipc()
+
+    assert "main" in state.layerwise_poisoned
+    assert len(reasons) >= 1
+
+    # The worker is now poisoned: any subsequent sync must refuse up front
+    # (from validate_fp8_layerwise_reload_config, before any IPC).
+    with pytest.raises(RuntimeError, match="fail-stopped"):
+        worker.update_weights_from_ipc()
+
+
+def test_update_weights_from_ipc_fp8_success_does_not_fail_stop(monkeypatch):
+    """Negative control: a clean FP8 layerwise reload leaves no fail-stop
+    marker and completes the lifecycle."""
+    state, reasons = _stub_fp8_layerwise_env(monkeypatch)
+    worker = _make_fp8_worker()
+
+    worker.update_weights_from_ipc()
+
+    assert state.layerwise_poisoned == set()
+    assert reasons == []
+    assert state.layerwise_active == set()
