@@ -13,9 +13,7 @@
 # limitations under the License.
 """Utilities for PEFT (Parameter-Efficient Fine-Tuning) of Megatron in VERL."""
 
-from typing import Iterator
-
-import torch
+from typing import Callable
 
 # Map megatron lora target modules to HF-style module names for vLLM
 MEGATRON_TO_HF_MODULES = {
@@ -30,6 +28,9 @@ MEGATRON_TO_HF_MODULES = {
     "linear_v": ["v_proj"],
     "linear_fc1_up": ["up_proj"],
     "linear_fc1_gate": ["gate_proj"],
+    # GDN mappings
+    "in_proj": ["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a"],
+    "out_proj": ["out_proj"],
     # MLA mappings
     "linear_kv_down_proj": ["kv_a_proj_with_mqa"],
     "linear_kv_up_proj": ["kv_b_proj"],
@@ -41,31 +42,6 @@ MEGATRON_TO_HF_MODULES = {
     "linear_wk": ["wk"],
     "linear_weights_proj": ["weights_proj"],
 }
-
-# Modules with stacked parameters that need .base_layer suffix in vLLM
-STACKED_PARAMS = [
-    ".q_proj.weight",
-    ".q_proj.bias",
-    ".k_proj.weight",
-    ".k_proj.bias",
-    ".v_proj.weight",
-    ".v_proj.bias",
-    ".o_proj.weight",
-    ".o_proj.bias",
-    ".gate_proj.weight",
-    ".up_proj.weight",
-    ".down_proj.weight",
-    ".mlp.gate.weight",
-    ".mlp.gate.bias",
-    ".mlp.gate.e_score_correction_bias",
-    ".kv_a_proj_with_mqa.weight",
-    ".kv_b_proj.weight",
-    ".q_a_proj.weight",
-    ".q_b_proj.weight",
-    ".wq_b.weight",
-    ".wk.weight",
-    ".weights_proj.weight",
-]
 
 
 def count_adapter_parameters(model):
@@ -156,36 +132,51 @@ def build_peft_config_for_vllm(lora_config: dict) -> dict:
 
 
 # vLLM needs to target all-linear no matter about specific LoRA config
-def add_base_layer_suffix(
-    params: Iterator[tuple[str, torch.Tensor]],
-    model_type: str,
-) -> Iterator[tuple[str, torch.Tensor]]:
-    """Yield param pairs with a base-layer suffix added to the param name.
+def add_base_layer_to_name(name: str) -> str:
+    """Insert ``.base_layer`` before the leaf field of a parameter name."""
+    if ".base_layer." in name or "." not in name:
+        return name
 
-    Args:
-        params: Iterator of (param_name, tensor)
-        model_type: The type of the model (e.g., "llama").
+    prefix, leaf = name.rsplit(".", 1)
+    return f"{prefix}.base_layer.{leaf}"
+
+
+def remove_base_layer_from_name(name: str) -> str:
+    """Remove the first ``.base_layer`` component from a parameter name."""
+    return name.replace(".base_layer.", ".", 1)
+
+
+def resolve_base_layer_name(
+    name: str,
+    *,
+    exists: Callable[[str], bool],
+) -> str:
+    """Resolve a parameter name against a target namespace.
+
+    The resolver keeps the original name when it already exists. Otherwise it
+    tries the single alternative form by either adding or removing one
+    ``.base_layer`` component.
     """
-    stacked_params = STACKED_PARAMS
-    # TODO: other models may have more special treatment, or integrate this into Megatron-Bridge
-    if model_type == "llama":
-        stacked_params = [".embed_tokens.weight", *STACKED_PARAMS]
-    for name, param in params:
-        ending_suffix = ""
-        for suffix in stacked_params:
-            if name.endswith(suffix):
-                ending_suffix = suffix
-                break
-        if ending_suffix:
-            suffix = ending_suffix.rsplit(".", 1)[-1]
-            name = f"{name[: -len(suffix)]}base_layer.{suffix}"
-        yield name, param
+    if exists(name):
+        return name
+
+    if ".base_layer." in name:
+        candidate = remove_base_layer_from_name(name)
+    else:
+        candidate = add_base_layer_to_name(name)
+
+    if candidate != name and exists(candidate):
+        return candidate
+
+    return name
 
 
 __all__ = [
     "count_adapter_parameters",
     "print_adapter_info",
     "convert_megatron_to_hf_target_modules",
+    "add_base_layer_to_name",
     "build_peft_config_for_vllm",
-    "add_base_layer_suffix",
+    "remove_base_layer_from_name",
+    "resolve_base_layer_name",
 ]

@@ -73,6 +73,24 @@ algorithm:
   # Whether to normalize advantages by std (specific to GRPO)
   norm_adv_by_std_in_grpo: True
 
+  # Group filtering configuration used by DAPO and entropy-based sampling
+  filter_groups:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.trainer.config.FilterGroupsConfig
+
+    # Whether to enable group filtering
+    enable: False
+
+    # Metric used to identify groups with uniform rewards, acc / score / seq_reward / seq_final_reward / ...
+    metric: null
+
+    # Maximum number of generation batches; non-positive values mean no upper limit
+    max_num_gen_batches: 0
+
+    # Maximum Sync DAPO prompt batches concurrently in flight, measured in train-batch units
+    max_inflight_gen_batches: 1
+
   # Whether to enable in-reward KL penalty
   use_kl_in_reward: False
 
@@ -234,6 +252,9 @@ trainer:
       # drop: drop the trajectory
       # wait: dropless, wait all trajectories that reach threshold to finish
       max_off_policy_strategy: drop
+
+      # Whether sync trainers replace failed groups that have no trajectories
+      sync_refill_failed_groups: False
 
       # Custom sampler config
       custom_sampler:

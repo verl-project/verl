@@ -57,7 +57,7 @@ seed_all(mode=True)
 
 在多卡通信情况下：
 
-- HCCL通信下(默认场景):
+- HCCL通信下（默认场景）：
   
   -  export CLOSE_MATMUL_K_SHIFT=1
   -  export ATB_MATMUL_SHUFFLE_K_ENABLE=0

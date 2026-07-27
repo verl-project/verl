@@ -13,13 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.metadata
 import inspect
 import logging
 from dataclasses import dataclass, field
 from unittest.mock import patch
 
 import torch
-import vllm
 from packaging import version
 
 try:
@@ -29,8 +29,20 @@ except ImportError as e:
     raise ImportError("FP8 quantization not available") from e
 
 from verl.utils.kernel.fp8_kernel import scaled_fp8_blockwise
+from verl.utils.vllm.vllm_dsv4_fp8_utils import (
+    cache_deepseek_v4_dense_fp8_scales,
+    is_deepseek_v4_model,
+    iter_deepseek_v4_weights,
+    prepare_deepseek_v4_weights_for_loading,
+    process_deepseek_v4_weights_after_loading,
+    reload_deepseek_v4_dense_fp8_scales,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _get_vllm_version():
+    return version.parse(importlib.metadata.version("vllm"))
 
 
 # Ref: https://github.com/NVIDIA-NeMo/RL/commit/bc24887c72a6e1b2699a228bc87c588546dfe6b7
@@ -44,6 +56,24 @@ class FP8State:
 
 
 fp8_state: FP8State = FP8State()
+
+
+def _copy_param_subclass_attrs(dst_param, src_param):
+    if src_param is None:
+        return
+
+    base_param_attrs = dir(torch.nn.Parameter)
+    for attr in dir(src_param):
+        if attr in base_param_attrs or attr.startswith("__"):
+            continue
+        try:
+            setattr(dst_param, attr, getattr(src_param, attr))
+        except AttributeError:
+            pass
+
+    subclass_type = getattr(src_param, "subclass_type", type(src_param))
+    if subclass_type is not torch.nn.Parameter:
+        dst_param.subclass_type = subclass_type
 
 
 def is_fp8_model(vllm_config):
@@ -167,6 +197,10 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
         Tuples of (name, tensor) for each weight and its scale
     """
 
+    if is_deepseek_v4_model(model):
+        yield from iter_deepseek_v4_weights(weights)
+        return
+
     fp8_state.seen_params.clear()
     fp8_state.fp8_param_names.clear()
     is_mxfp8_npu = is_mxfp8_vllm_ascend(quant_config)
@@ -174,7 +208,8 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
         import torch_npu
     # vLLM v0.11-v0.12 renamed weight_scale_inv → weight_scale in process_weights_after_loading,
     # so load_weights expects "_scale" suffix. v0.14+ keeps weight_scale_inv, so expects "_scale_inv".
-    _use_scale_not_scale_inv = version.parse("0.11.0") <= version.parse(vllm.__version__) < version.parse("0.14.0")
+    vllm_ver = _get_vllm_version()
+    _use_scale_not_scale_inv = version.parse("0.11.0") <= vllm_ver < version.parse("0.14.0")
 
     for k, v in weights:
         if not is_fp8_weight(k, model):
@@ -213,7 +248,18 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
         del v, param_lp, param_scale
 
 
-def load_quanted_weights(weights, model_runner, is_drafter=False):
+def prepare_quanted_weights_for_loading(model_runner):
+    model = model_runner.model
+    if not is_deepseek_v4_model(model):
+        return False
+    return prepare_deepseek_v4_weights_for_loading(model, _copy_param_subclass_attrs)
+
+
+def process_quanted_weights_after_loading(model_runner, reload_state):
+    process_deepseek_v4_weights_after_loading(model_runner.model, reload_state)
+
+
+def load_quanted_weights(weights, model_runner, is_drafter=False, prepare_model=True, process_model=True):
     if is_drafter:
         drafter = getattr(model_runner, "drafter", None)
         model = drafter.model if drafter is not None and hasattr(drafter, "model") else None
@@ -226,15 +272,17 @@ def load_quanted_weights(weights, model_runner, is_drafter=False):
     quant_config = model_runner.vllm_config.quant_config
     vllm_dtype = model_runner.vllm_config.model_config.dtype
 
-    is_mxfp8_npu = is_mxfp8_vllm_ascend(quant_config)
+    reload_state = None
+    if prepare_model:
+        reload_state = prepare_quanted_weights_for_loading(model_runner)
 
+    is_mxfp8_npu = is_mxfp8_vllm_ascend(quant_config)
     if is_mxfp8_npu:
-        # For MXFP8 on NPU, we need to restore weights to original shapes
-        # before loading, then re-apply transformation after loading.
-        # This is because process_weights_after_loading transposes the weights,
-        # but the weight_loader expects original shapes.
+        # For MXFP8 on NPU, restore the original shapes expected by weight_loader.
         restore_mxfp8_weights_for_loading(model)
 
+    weights = list(weights)
+    cache_deepseek_v4_dense_fp8_scales(model, weights)
     weights_quantized = quant_weights(weights, model, quant_config, dtype=vllm_dtype)
 
     # Monkey patch the param class to their subclass, as certain models
@@ -244,35 +292,22 @@ def load_quanted_weights(weights, model_runner, is_drafter=False):
             param.orig_type = param.__class__
             param.__class__ = param.subclass_type
     # Finally load the weights into vllm
-    loaded_params = model.load_weights(weights_quantized)
-    # Undo the type change above to the original type
-    for name, param in model.named_parameters():
-        if hasattr(param, "subclass_type"):
-            param.__class__ = param.orig_type
+    try:
+        loaded_params = model.load_weights(weights_quantized)
+        reload_deepseek_v4_dense_fp8_scales(model)
+    finally:
+        # Undo the type change above to the original type
+        for name, param in model.named_parameters():
+            if hasattr(param, "orig_type"):
+                param.__class__ = param.orig_type
+                del param.orig_type
 
-    if is_mxfp8_npu:
-        # Re-apply MXFP8 transformations after weight loading
-        apply_mxfp8_transformation_after_loading(model)
+    if process_model:
+        if is_mxfp8_npu:
+            apply_mxfp8_transformation_after_loading(model)
+        process_quanted_weights_after_loading(model_runner, reload_state)
 
     return loaded_params
-
-
-def _copy_param_subclass_attrs(param, source_param):
-    if source_param is None:
-        return
-
-    base_param_dir = dir(torch.nn.Parameter)
-    source_param_dir = dir(source_param)
-    custom_attributes = [attr for attr in source_param_dir if attr not in base_param_dir and not attr.startswith("__")]
-    for attr in custom_attributes:
-        try:
-            setattr(param, attr, getattr(source_param, attr))
-        except AttributeError:
-            pass
-
-    subclass_type = getattr(source_param, "subclass_type", type(source_param))
-    if subclass_type is not torch.nn.Parameter:
-        param.subclass_type = subclass_type
 
 
 def replace_parameter_preserve_subclass(layer: torch.nn.Module, param_name: str, new_data: torch.Tensor | None):
@@ -419,7 +454,7 @@ def process_weights_after_loading_for_vllm11(self, layer) -> None:
 
     del layer.weight_scale_inv
 
-    if version.parse(vllm.__version__) == version.parse("0.11.0"):
+    if _get_vllm_version() == version.parse("0.11.0"):
         maybe_post_process_fp8_weight_block(layer, self.cutlass_block_fp8_supported)
     else:
         maybe_post_process_fp8_weight_block(layer)
@@ -699,7 +734,7 @@ def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
 
 def apply_vllm_fp8_patches():
     logger.info("Applying vllm fp8 patches for blockwise quantization")
-    vllm_ver = version.parse(vllm.__version__)
+    vllm_ver = _get_vllm_version()
     if fp8_state.vllm_patches:
         logger.debug("vLLM FP8 patches already applied")
         return

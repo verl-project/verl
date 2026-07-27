@@ -657,13 +657,16 @@ def _split_training_primitives_fsdp_worker(
 
     with engine.train_mode(zero_grad_on_exit=False):
         engine.optimizer_zero_grad()
+        first_batch = _make_split_step_batch(model_config, engine_config, world_size)
+        tu.assign_non_tensor(first_batch, return_model_output=True)
         output_1 = engine.forward_backward_batch(
-            _make_split_step_batch(model_config, engine_config, world_size),
+            first_batch,
             loss_function=loss_fn,
             forward_only=False,
         )
     if engine.is_mp_src_rank_with_outputs():
         assert "grad_norm" not in output_1["metrics"]
+        assert "log_probs" in output_1["model_output"]
     grad_norm_1 = _grad_norm(engine.module)
     assert grad_norm_1.item() > 0
     assert _param_delta_norm(engine.module, before).item() == pytest.approx(0.0, abs=0.0)
@@ -676,6 +679,7 @@ def _split_training_primitives_fsdp_worker(
         )
     if engine.is_mp_src_rank_with_outputs():
         assert "grad_norm" not in output_2["metrics"]
+        assert output_2["model_output"] == {}
     grad_norm_2 = _grad_norm(engine.module)
     assert grad_norm_2.item() > grad_norm_1.item() * 1.5
     assert _param_delta_norm(engine.module, before).item() == pytest.approx(0.0, abs=0.0)

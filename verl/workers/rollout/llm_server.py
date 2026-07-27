@@ -33,6 +33,7 @@ from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils import normalize_token_ids
 from verl.utils.ray_utils import auto_await
 from verl.utils.rollout_trace import rollout_trace_op
+from verl.utils.tracking import RLInsightLogger
 from verl.workers.rollout.replica import RolloutReplica, TokenOutput, get_rollout_replica_class
 from verl.workers.rollout.utils import update_prometheus_config
 
@@ -68,8 +69,8 @@ class GlobalRequestLoadBalancer:
         max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE,
         full_determinism: bool = False,
     ):
-        if not servers:
-            raise ValueError("servers must be non-empty")
+        # Allow empty initial servers: in dynamic-resource-scheduling mode all
+        # replicas are hybrid and will be registered later via add_servers().
 
         self._servers: dict[str, ray.actor.ActorHandle] = dict(servers)
         self._inflight_requests: dict[str, int] = {sid: 0 for sid in servers}
@@ -152,6 +153,30 @@ class GlobalRequestLoadBalancer:
         """Get list of all active server IDs."""
         return list(self._inflight_requests.keys())
 
+    def clear_sticky_cache(self) -> dict:
+        """Clear the sticky-session cache to force request redistribution.
+
+        After clearing, all subsequent ``acquire_server()`` calls will select
+        the least-loaded server (based on ``_inflight_requests``), which
+        naturally balances load across all active replicas — including newly
+        added ones with zero in-flight requests.
+
+        Returns:
+            A dict with ``cleared_entries`` (number of cache entries dropped)
+            and ``server_loads`` (current per-server inflight counts for
+            diagnostics).
+        """
+        cleared = len(self._request_id_to_server)
+        self._request_id_to_server.clear()
+        logger.info(
+            f"[GlobalLoadBalancer] Sticky cache cleared: {cleared} entries dropped. "
+            f"Server loads: {dict(self._inflight_requests)}"
+        )
+        return {
+            "cleared_entries": cleared,
+            "server_loads": dict(self._inflight_requests),
+        }
+
     def get_status(self) -> dict:
         """Return current load balancer state for debugging."""
         return {
@@ -160,6 +185,10 @@ class GlobalRequestLoadBalancer:
             "active_servers": len(self._inflight_requests),
             "registered_handles": list(self._servers.keys()),
         }
+
+    def get_total_inflight(self) -> int:
+        """Return the sum of in-flight requests across all currently registered servers."""
+        return sum(self._inflight_requests.values())
 
 
 class LLMServerClient:
@@ -253,6 +282,42 @@ class FullyAsyncLLMServerClient(LLMServerClient):
     """FullyLLMServerClient supports resume generation on partial rollout, making rollout interruption
     invisible to the AgentLoop.
     """
+
+    def __init__(
+        self,
+        config: DictConfig,
+        load_balancer_handle: ray.actor.ActorHandle = None,
+        only_hybrid: bool = False,
+        **kwargs,
+    ):
+        """Initialize the FullyAsyncLLMServerClient.
+
+        Args:
+            config (DictConfig): whole config for main entrypoint.
+            load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor
+                that also holds the server-handle registry.
+            only_hybrid (bool): When ``True``, hybrid replicas are the *only* rollout
+                resource.  If the load balancer is temporarily empty (e.g. during
+                weight synchronisation) :meth:`_acquire_server` will keep retrying
+                every 1 second instead of raising immediately.
+        """
+        super().__init__(config=config, load_balancer_handle=load_balancer_handle, **kwargs)
+        self._only_hybrid = only_hybrid
+
+    async def _acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
+        # Atomic acquire: returns (server_id, handle) in one Ray RPC.
+        # When only_hybrid is True, hybrid replicas are the sole rollout resource and
+        # the LB may be temporarily empty during weight sync / scaling transitions.
+        # In that case keep retrying every 1 s until a server becomes available.
+        # Otherwise raise immediately so callers see the error right away.
+        while True:
+            try:
+                return await super()._acquire_server(request_id)
+            except RuntimeError as e:
+                if "No available servers in load balancer" in str(e) and self._only_hybrid:
+                    await asyncio.sleep(1)
+                else:
+                    raise
 
     @rollout_trace_op
     async def generate(
@@ -469,11 +534,22 @@ class LLMServerManager:
         self.server_addresses = [server._server_address for server in self.rollout_replicas]
         print(f"LLMServerManager: {self.server_addresses}")
 
-        # Update Prometheus configuration with server addresses
-        if self.rollout_config.prometheus.enable:
-            if self.rollout_config.disable_log_stats:
-                raise ValueError("PROMETHEUS needs disable_log_stats==False, but it is currently True.")
-            update_prometheus_config(self.rollout_config.prometheus, self.server_addresses, self.rollout_config.name)
+        # Update Prometheus / rl-insight metrics with server addresses
+        needs_metrics = self.rollout_config.prometheus.enable or RLInsightLogger.enabled()
+        if self.rollout_config.disable_log_stats:
+            if needs_metrics:
+                raise ValueError("Metrics monitoring requires disable_log_stats=False, but it is currently True.")
+        if not self.rollout_config.disable_log_stats:
+            if self.rollout_config.prometheus.enable:
+                update_prometheus_config(
+                    self.rollout_config.prometheus, self.server_addresses, self.rollout_config.name
+                )
+            if RLInsightLogger.enabled():
+                RLInsightLogger.register_rollout_metrics(
+                    self.server_addresses,
+                    self.rollout_config.name,
+                    labels=[{"replica": server.replica_rank} for server in self.rollout_replicas],
+                )
 
     async def _init_global_load_balancer(self) -> None:
         self.global_load_balancer = GlobalRequestLoadBalancer.remote(

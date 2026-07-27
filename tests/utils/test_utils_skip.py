@@ -79,8 +79,17 @@ def _minimal_skip_cfg(
                 },
             },
             "actor_rollout_ref": {"rollout": {"skip": {"enable": False}, "n": 2}},
-            "trainer": {"experiment_name": "ut_exp", "project_name": "ut_proj"},
-            "data": {"gen_batch_size": 4, "max_prompt_length": 8, "max_response_length": 16},
+            "trainer": {
+                "experiment_name": "ut_exp",
+                "project_name": "ut_proj",
+                "v1": {"trainer_mode": "sync"},
+            },
+            "data": {
+                "train_batch_size": 8,
+                "gen_batch_size": 4,
+                "max_prompt_length": 8,
+                "max_response_length": 16,
+            },
         }
     )
 
@@ -92,7 +101,7 @@ def _local_rollout_config(cfg: OmegaConf) -> RolloutSkipConfig:
 def _project_dump_root(dump_dir: Path, cfg: OmegaConf) -> Path:
     exp = cfg.trainer.experiment_name
     proj = cfg.trainer.project_name
-    gbs = cfg.data.gen_batch_size
+    gbs = cfg.data.gen_batch_size or cfg.data.train_batch_size
     n = int(OmegaConf.select(cfg, "actor_rollout_ref.rollout.n", default=0))
     inp = cfg.data.max_prompt_length
     out = cfg.data.max_response_length
@@ -322,6 +331,14 @@ class TestAsyncRolloutSkipExtractStep:
 
 
 class TestSkipManagerInitAndAnnotate:
+    def test_init_uses_train_batch_size_when_gen_batch_size_is_null(self, tmp_path: Path):
+        cfg = _minimal_skip_cfg(str(tmp_path), enable=False)
+        cfg.data.gen_batch_size = None
+
+        SkipManager.init(cfg)
+
+        assert SkipManager.skip_instances["rollout"].gbs == cfg.data.train_batch_size
+
     def test_init_builds_rollout_and_async_instances(self, tmp_path: Path):
         cfg = _minimal_skip_cfg(str(tmp_path), steps=[1, 2], async_enable=True)
         SkipManager.init(cfg)

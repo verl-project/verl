@@ -24,6 +24,7 @@ from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_class_from_fqn
+from verl.utils.logging_utils import configure_verl_logging
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -47,6 +48,10 @@ def run_ppo(config, task_runner_class) -> None:
         os.environ["VERL_FULL_DETERMINISM"] = "1"
         os.environ["VLLM_BATCH_INVARIANT"] = "1"
         os.environ["PYTHONHASHSEED"] = str(rollout_cfg.seed)
+
+    trainer_logger = config.trainer.get("logger", [])
+    if "rl_insight" in ([trainer_logger] if isinstance(trainer_logger, str) else trainer_logger or []):
+        os.environ["VERL_RL_INSIGHT_ENABLE"] = "1"
 
     # Check if Ray is not initialized
     if not ray.is_initialized():
@@ -128,6 +133,8 @@ class TaskRunnerV1:
 
     def run(self, config: DictConfig):
         """Run the PPO training process."""
+        configure_verl_logging()
+
         import transfer_queue as tq
 
         from verl.trainer.ppo.v1 import get_trainer_cls
@@ -141,13 +148,20 @@ class TaskRunnerV1:
 
         # initialize transfer queue
         tq.init(config.transfer_queue)
+        succeeded = False
         try:
             self.trainer = trainer_cls(config=config)
             self.trainer.init()
             self.init_agent_loop_manager()
             self.trainer.fit(self.agent_loop_manager)
+            succeeded = True
         finally:
-            tq.close()
+            try:
+                tracking = getattr(self.trainer, "logger", None)
+                if tracking is not None:
+                    tracking.finish(exit_code=0 if succeeded else 1)
+            finally:
+                tq.close()
 
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)

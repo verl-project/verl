@@ -25,6 +25,7 @@ import math
 import pytest
 import torch
 
+from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY
 from verl.trainer.ppo.v1.utils import MetricsAggregator
 
 
@@ -67,32 +68,32 @@ def test_timing_and_sum_metrics_accumulate():
     assert out["some/total_tokens"] == pytest.approx(30.0)
 
 
-def test_dropped_samples_are_summed_across_iterations():
-    # Per-iteration off-policy drop counts must accumulate, not average.
+def test_evicted_samples_are_summed_across_iterations():
+    # Per-iteration off-policy eviction counts must accumulate, not average.
     agg = MetricsAggregator()
-    agg.add_step_metrics({"training/off_policy/dropped_samples": 2})
-    agg.add_step_metrics({"training/off_policy/dropped_samples": 3})
-    assert agg.get_aggregated_metrics()["training/off_policy/dropped_samples"] == pytest.approx(5.0)
+    agg.add_step_metrics({"training/off_policy/evicted_samples": 2})
+    agg.add_step_metrics({"training/off_policy/evicted_samples": 3})
+    assert agg.get_aggregated_metrics()["training/off_policy/evicted_samples"] == pytest.approx(5.0)
 
 
-def test_dropped_samples_staleness_mean_uses_dropped_count_weight():
-    # Dropped-sample staleness is averaged over dropped samples, not over kept batch size.
+def test_evicted_samples_staleness_mean_uses_evicted_count_weight():
+    # Evicted-sample staleness is averaged over evicted samples, not over kept batch size.
     agg = MetricsAggregator()
     agg.add_step_metrics(
         {
-            "training/off_policy/dropped_samples": 1,
-            "training/off_policy/dropped_samples_staleness/mean": 10.0,
+            "training/off_policy/evicted_samples": 1,
+            "training/off_policy/evicted_samples_staleness/mean": 10.0,
         },
         sample_count=100,
     )
     agg.add_step_metrics(
         {
-            "training/off_policy/dropped_samples": 3,
-            "training/off_policy/dropped_samples_staleness/mean": 2.0,
+            "training/off_policy/evicted_samples": 3,
+            "training/off_policy/evicted_samples_staleness/mean": 2.0,
         },
         sample_count=1,
     )
-    assert agg.get_aggregated_metrics()["training/off_policy/dropped_samples_staleness/mean"] == pytest.approx(4.0)
+    assert agg.get_aggregated_metrics()["training/off_policy/evicted_samples_staleness/mean"] == pytest.approx(4.0)
 
 
 def test_last_metric_keeps_final_value():
@@ -166,3 +167,54 @@ def test_missing_key_in_some_iterations_uses_present_values():
     out = agg.get_aggregated_metrics()
     assert out["actor/loss/mean"] == pytest.approx(5.0)
     assert not math.isnan(out["actor/loss/mean"])
+
+
+# --------------------------------------------------------------------------- #
+# DAPO group-filtering diagnostics flow through the aggregator (multiple
+# mini-batches per global step). These pin down two suspected bugs:
+#   Bug #1: the dict-valued reward-count breakdown is dropped, so the wandb table
+#           never receives data on the real step() -> aggregator path.
+#   Bug #2: filter_groups / rollout_failure eviction *counts* are averaged
+#           instead of summed across mini-batches.
+# --------------------------------------------------------------------------- #
+
+
+def test_dapo_filtered_reward_counts_survive_aggregation():
+    """The {reward_value: count} breakdown must reach the logger via the aggregator.
+
+    ``ReplayBuffer.sample`` emits ``DAPO_FILTERED_REWARD_COUNTS_KEY`` as a dict; the trainer pops it
+    from the aggregated metrics and feeds the wandb table. If the aggregator drops it (only scalars
+    kept), the table is never populated in the real training loop.
+    """
+    agg = MetricsAggregator()
+    agg.add_step_metrics({DAPO_FILTERED_REWARD_COUNTS_KEY: {0.0: 3, 1.0: 1}}, sample_count=8)
+    agg.add_step_metrics({DAPO_FILTERED_REWARD_COUNTS_KEY: {0.0: 2}}, sample_count=8)
+
+    out = agg.get_aggregated_metrics()
+    assert DAPO_FILTERED_REWARD_COUNTS_KEY in out, (
+        "dict-valued DAPO breakdown was dropped by the aggregator; wandb table never gets data"
+    )
+    # Counts for the same step must accumulate additively across mini-batches.
+    assert out[DAPO_FILTERED_REWARD_COUNTS_KEY] == {0.0: 5, 1.0: 1}
+
+
+def test_filter_groups_evicted_samples_are_summed_across_iterations():
+    # Per-mini-batch DAPO eviction counts must accumulate, like off_policy/evicted_samples.
+    agg = MetricsAggregator()
+    agg.add_step_metrics({"training/filter_groups/evicted_samples": 2})
+    agg.add_step_metrics({"training/filter_groups/evicted_samples": 3})
+    assert agg.get_aggregated_metrics()["training/filter_groups/evicted_samples"] == pytest.approx(5.0)
+
+
+def test_filter_groups_discarded_surplus_samples_are_summed_across_iterations():
+    agg = MetricsAggregator()
+    agg.add_step_metrics({"training/filter_groups/discarded_surplus_samples": 4})
+    agg.add_step_metrics({"training/filter_groups/discarded_surplus_samples": 1})
+    assert agg.get_aggregated_metrics()["training/filter_groups/discarded_surplus_samples"] == pytest.approx(5.0)
+
+
+def test_rollout_failure_evicted_samples_are_summed_across_iterations():
+    agg = MetricsAggregator()
+    agg.add_step_metrics({"training/rollout_failure/evicted_samples": 1})
+    agg.add_step_metrics({"training/rollout_failure/evicted_samples": 2})
+    assert agg.get_aggregated_metrics()["training/rollout_failure/evicted_samples"] == pytest.approx(3.0)

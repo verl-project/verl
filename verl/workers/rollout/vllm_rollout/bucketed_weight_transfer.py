@@ -295,6 +295,34 @@ class BucketedWeightReceiver:
         finally:
             self._cleanup()
 
+    def iter_weights(self):
+        """Yield received weights one-by-one while preserving bucket backpressure."""
+        try:
+            self._init_socket()
+            self._init_buffer()
+
+            while True:
+                metadata = self.socket.recv_pyobj()
+                tensor = None
+                for name, meta in metadata["bucket_meta"].items():
+                    shape, dtype, offset, handle = meta["shape"], meta["dtype"], meta["offset"], meta["handle"]
+                    if handle is not None:
+                        tensor = rebuild_ipc(handle, self.device.index)
+                        yield name, tensor
+                        continue
+                    size = dtype.itemsize * shape.numel()
+                    tensor = self.buffer[offset : offset + size].view(dtype=dtype).view(shape)
+                    if self.use_shm:
+                        tensor = tensor.to(self.device)
+                    yield name, tensor
+                get_torch_device().synchronize()
+                self.socket.send(b"")
+                tensor = None
+                if metadata["is_last"]:
+                    break
+        finally:
+            self._cleanup()
+
     def _init_socket(self):
         """Initialize ZMQ REP socket and connect."""
         self.socket = self.zmq_context.socket(zmq.REP)

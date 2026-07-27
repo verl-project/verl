@@ -38,6 +38,7 @@ from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction, apply_router_replay_patch
 from verl.utils.megatron.router_replay_utils import (
     RouterReplayHelper,
+    build_r3_replay_mask,
     merge_router_topk_indices,
     pp_gather,
     reorder_and_merge_vpp_layers,
@@ -49,7 +50,7 @@ from verl.utils.megatron.tensor_parallel import (
     vocab_parallel_log_probs_from_logits,
     vocab_parallel_sum_pi_squared,
 )
-from verl.utils.megatron_peft_utils import add_base_layer_suffix, build_peft_config_for_vllm
+from verl.utils.megatron_peft_utils import build_peft_config_for_vllm
 from verl.utils.megatron_utils import (
     check_mtp_config,
     get_megatron_module_device,
@@ -235,6 +236,15 @@ class MegatronEngine(BaseEngine):
             }
             for key, value in override_transformer_config.items():
                 provider_overrides[key] = value
+            if (
+                self.model_config.hf_config.model_type == "deepseek_v4"
+                and not self.model_config.mtp.enable
+                and getattr(provider, "mtp_num_layers", 0)
+            ):
+                provider_overrides["mtp_num_layers"] = 0
+                csa_compress_ratios = getattr(provider, "csa_compress_ratios", None)
+                if csa_compress_ratios is not None:
+                    provider_overrides["csa_compress_ratios"] = csa_compress_ratios[: provider.num_layers]
             if self.enable_routing_replay:
                 if hasattr(provider, "moe_enable_routing_replay"):
                     provider_overrides["moe_enable_routing_replay"] = True
@@ -257,12 +267,14 @@ class MegatronEngine(BaseEngine):
         if not self.bridge:
             self.weight_converter = get_mcore_weight_converter(self.model_config.hf_config, self.dtype)
 
-        # Set enable_routing_replay directly on tf_config instead of passing through
+        # Set router replay directly on tf_config instead of passing through
         # override_transformer_config, because dataclass subclasses like MLATransformerConfig
-        # generate their own __init__ and don't inherit the patched TransformerConfig.__init__
-        # that accepts this kwarg.
+        # generate their own __init__ and may not accept compatibility kwargs.
         if self.enable_routing_replay and tf_config is not None:
-            tf_config.enable_routing_replay = True
+            if hasattr(tf_config, "moe_enable_routing_replay"):
+                tf_config.moe_enable_routing_replay = True
+            else:
+                tf_config.enable_routing_replay = True
 
         if torch.distributed.get_rank() == 0:
             if tf_config is not None:
@@ -644,6 +656,18 @@ class MegatronEngine(BaseEngine):
         if self._is_offload_optimizer:
             offload_megatron_optimizer(self.optimizer)
 
+    def _routed_num_tokens(self, data: TensorDict) -> torch.Tensor:
+        """Real (unpadded) tokens fed to the MoE router: attention_mask in the padded RL
+        path, else the packed input_ids count in the no-padding SFT path. Not loss_mask,
+        which counts response tokens only and would under-normalize the router loss."""
+        attention_mask = data.get("attention_mask", None)
+        if attention_mask is not None:
+            return attention_mask.sum()
+        input_ids = data["input_ids"]
+        if input_ids.is_nested:
+            return input_ids.offsets()[-1]
+        return torch.tensor(input_ids.numel(), device=input_ids.device)
+
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> Any:
         self._distillation_use_topk_active = tu.get_non_tensor_data(data, key="distillation_use_topk", default=False)
         tu.assign_non_tensor(data, sp_size=self.engine_config.context_parallel_size)
@@ -655,6 +679,16 @@ class MegatronEngine(BaseEngine):
         )
         tu.assign_non_tensor(data, batch_num_tokens=batch_num_tokens.item())
         tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
+
+        # Global routed-token count for the per-token-loss regime (consumed in
+        # postprocess_micro_batch_func). Real tokens are CP-replicated, so a single
+        # all-reduce over the DP group gives the global value.
+        if self.tf_config is not None and self.tf_config.calculate_per_token_loss:
+            routed_num_tokens = self._routed_num_tokens(data).to(get_device_id())
+            torch.distributed.all_reduce(
+                routed_num_tokens, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group()
+            )
+            tu.assign_non_tensor(data, routed_num_tokens=routed_num_tokens.item())
 
         # BSHD path only: pad every micro-batch to the mini-batch's global max seq_len so the
         # padded `s_q` is shared -> cuDNN plan built once per shape. Raw (unaligned)
@@ -791,10 +825,6 @@ class MegatronEngine(BaseEngine):
                 if non_merge_lora_sync
                 else self.bridge.export_hf_weights(self.module)
             )
-            if non_merge_lora_sync:
-                per_tensor_param = add_base_layer_suffix(
-                    per_tensor_param, model_type=self.model_config.hf_config.model_type
-                )
 
         # QAT: process weights through QATWeightExporter for quantized weight sync to vLLM
         if self._qat_enabled:
@@ -970,7 +1000,16 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
         if RouterReplayHelper.is_replay_forward_action(self.tf_config, vp_rank):
             layers_topk_idx = model_inputs["routed_experts"]
-            set_router_replay_data(layers_topk_idx, None, self.tf_config, vp_rank)
+            replay_mask = None
+            if self.engine_config.router_replay.mode == "R3":
+                replay_mask = build_r3_replay_mask(input_ids, batch["response_mask"])
+            set_router_replay_data(
+                layers_topk_idx,
+                None,
+                self.tf_config,
+                vp_rank,
+                replay_mask=replay_mask,
+            )
 
         if pad_mode == DatasetPadMode.NO_PADDING:
             label = input_ids.clone()
@@ -1081,29 +1120,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
             # scale loss by num_micro_batch because megatron will scale loss
             # by n_micro_batch inside pp schedule
             scaled_loss = loss * data["num_micro_batch"]
-            if self.tf_config.calculate_per_token_loss and not forward_only:
-                # verl losses are already normalized over the global DP batch. MCore's
-                # legacy two-item loss callback still multiplies by CP, while per-token
-                # mode disables DDP's usual 1/(DP*CP) gradient pre-scaling. Compensate
-                # for that combined reduction until the callback returns MCore's
-                # three-item (loss sum, token count, metrics) contract.
-                num_moe_experts = getattr(self.tf_config, "num_moe_experts", None)
-                has_moe_aux_loss = bool(num_moe_experts) and (
-                    bool(getattr(self.tf_config, "moe_aux_loss_coeff", 0.0))
-                    or bool(getattr(self.tf_config, "moe_z_loss_coeff", None))
-                )
-                has_auxiliary_loss = (
-                    has_moe_aux_loss
-                    or bool(getattr(self.tf_config, "mtp_num_layers", None))
-                    or getattr(self.tf_config, "experimental_attention_variant_loss_scale_func", None) is not None
-                    or getattr(self.tf_config, "experimental_attention_variant", None) == "dsa"
-                )
-                # Auxiliary-loss autograd scalers bypass scaled_loss, and dynamic CP
-                # uses per-microbatch groups. Preserve their existing behavior until
-                # verl adopts the three-item callback that normalizes every gradient.
-                if not self.engine_config.dynamic_context_parallel and not has_auxiliary_loss:
-                    dp_cp_world_size = mpu.get_data_parallel_world_size(with_context_parallel=True)
-                    scaled_loss /= dp_cp_world_size
         else:
             assert forward_only, "forward_only must be True when loss_function is None"
             loss = torch.tensor(1.0, device=device)
@@ -1125,6 +1141,54 @@ class MegatronEngineWithLMHead(MegatronEngine):
             "loss": loss.detach().item(),
             "metrics": metrics,
         }
+
+        # calculate_per_token_loss=True (auto-enabled by Megatron-Bridge at CP>1) puts
+        # Megatron in its per-token regime: loss_func must return (loss_sum, num_tokens,
+        # output), and finalize_model_grads divides every gradient by the accumulated
+        # total_num_tokens. That division is what cancels the MoE router's pre-multiplication
+        # of the aux/z loss by num_tokens; a 2-tuple leaves total_num_tokens=0, so the factor
+        # is never cancelled (the ~1e4 grad_norm blow-up at CP>1).
+        if self.tf_config is not None and self.tf_config.calculate_per_token_loss and loss_function is not None:
+            # seq-mean-token-mean is the one incompatible agg mode: its per-sequence 1/n_s
+            # uses CP-local shard counts that diverge from the global normalization. The
+            # other modes compose correctly across CP shards.
+            if hasattr(loss_function, "keywords") and "config" in loss_function.keywords:
+                _agg_mode = getattr(loss_function.keywords["config"], "loss_agg_mode", None)
+                if _agg_mode == "seq-mean-token-mean":
+                    raise ValueError(
+                        "loss_agg_mode='seq-mean-token-mean' is incompatible with "
+                        "calculate_per_token_loss=True (auto-enabled by Megatron-Bridge "
+                        "under CP>1). The per-sequence inner division by n_s requires "
+                        "local-shard counts that diverge from global under CP. Use one "
+                        "of: 'token-mean', 'seq-mean-token-sum', 'seq-mean-token-sum-norm'."
+                    )
+            # verl never passes a router padding_mask, so the MoE router normalizes the
+            # aux/z loss by logits.shape[0]. THD packs padding out -> that equals the real
+            # token count; BSHD leaves it at B*S (padding-inclusive), while gradients are
+            # divided by the real token count -> a padding-ratio mis-normalization.
+            if not self.engine_config.use_remove_padding:
+                raise ValueError(
+                    "calculate_per_token_loss=True requires use_remove_padding=True. "
+                    "verl does not pass a padding_mask to the MoE router, so in BSHD it "
+                    "normalizes the aux/z loss by the padding-inclusive token count (B*S) "
+                    "while gradients are divided by the real token count. Use THD "
+                    "(use_remove_padding=True) or disable CP."
+                )
+            # finalize_model_grads all-reduces the returned token count over the DP*CP group
+            # and divides every gradient by it. Real tokens are CP-replicated across the CP
+            # ranks, so report the per-CP-rank share (/cp_size); otherwise that DP*CP sum
+            # over-counts by cp_size and every gradient comes out 1/cp_size too small.
+            cp_size = self.engine_config.context_parallel_size
+            local_num_tokens = (self._routed_num_tokens(data) // cp_size).to(torch.int)
+            # n_i is the global routed-token count (all-reduced in forward_backward_batch);
+            # scaling loss by the same value makes Sum(L_i)/Sum(n_i) recover the loss. Falls
+            # back to local counts when not plumbed (single-rank / tests).
+            routed_num_tokens = data["routed_num_tokens"] if "routed_num_tokens" in data.keys() else None
+            if routed_num_tokens is None:
+                routed_num_tokens = self._routed_num_tokens(data)
+            dp_size = data["dp_size"] if "dp_size" in data.keys() else 1
+            local_sum = loss * routed_num_tokens / dp_size
+            return local_sum, local_num_tokens, output
 
         # return loss and stats
         return scaled_loss, output

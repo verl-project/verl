@@ -37,13 +37,10 @@ class RolloutSkip(BaseSkip):
         self.exp_name = global_config.trainer.get("experiment_name", "default_experiment_name")
         self.project_name = global_config.trainer.get("project_name", "default_project_name")
         self.n = int(OmegaConf.select(global_config, "actor_rollout_ref.rollout.n", default=0))
-        self.gbs = int(
-            OmegaConf.select(
-                global_config,
-                "data.gen_batch_size",
-                default=OmegaConf.select(global_config, "data.train_batch_size", default=0),
-            )
-        )
+        gen_batch_size = OmegaConf.select(global_config, "data.gen_batch_size")
+        if gen_batch_size is None:
+            gen_batch_size = OmegaConf.select(global_config, "data.train_batch_size", default=0)
+        self.gbs = int(gen_batch_size)
         self.response_length = OmegaConf.select(global_config, "data.max_response_length", default=0)
         self.prompt_length = OmegaConf.select(global_config, "data.max_prompt_length", default=0)
 
@@ -173,10 +170,43 @@ class RolloutTqSkip(RolloutSkip):
     then sample trajectories) requires direct method calls from the trainer:
     - Phase one (no cache): trainer calls ``prepare_data`` after ``replay_buffer.sample``
     - Phase two (cache exists): trainer calls ``load_dump_data`` in ``_add_batch_to_generate``
+
+    When ``parameter_sync_step > 1`` (separate async), one global step performs multiple
+    ``sample`` calls.  Each mini-batch is saved to a separate inner sub-directory
+    ``{step}/{inner_idx}/`` so the full step is captured; on load all inner dirs are
+    merged.  For ``parameter_sync_step == 1`` (sync / colocate async) the directory
+    structure is (``{step}/{0}/tq_batch.pt``).
     """
 
     print_mark = "[RolloutTqSkip()] "
     tq_batch_name = "tq_batch.pt"
+
+    def __init__(self, local_config, global_config):
+        super().__init__(local_config, global_config)
+        self.parameter_sync_step = int(
+            OmegaConf.select(
+                global_config,
+                f"trainer.v1.{global_config.trainer.v1.trainer_mode}.parameter_sync_step",
+                default=1,
+            )
+        )
+
+    def _get_v1_inner_dir(self, step: int, inner_idx: int) -> Path:
+        """Return the dump directory for one mini-batch within a step."""
+        return self._get_step_dump_dir(step) / str(inner_idx)
+
+    def _check_valid_v1_step(self, step: int) -> bool:
+        """Check whether ALL inner dirs for *step* exist (complete cache)."""
+        return all(
+            self._check_valid_v1_step_path(self._get_v1_inner_dir(step, i)) for i in range(self.parameter_sync_step)
+        )
+
+    def _find_first_missing_inner(self, step: int) -> int:
+        """Return the first inner index whose dir does not yet exist."""
+        for i in range(self.parameter_sync_step):
+            if not self._check_valid_v1_step_path(self._get_v1_inner_dir(step, i)):
+                return i
+        return -1  # all present
 
     def _check_valid_v1_step_path(self, path: Path) -> bool:
         """Check whether a V1-format cached batch (``tq_batch.pt``) exists at *path*."""
@@ -197,7 +227,7 @@ class RolloutTqSkip(RolloutSkip):
                 step = int(child.name)
             except ValueError:
                 continue
-            if not self._check_valid_v1_step_path(child):
+            if not self._check_valid_v1_step(step):
                 continue
             result.append(step)
         return sorted(result)
@@ -208,7 +238,7 @@ class RolloutTqSkip(RolloutSkip):
         - ``cache``: exact step match
         - ``repeat``: closest available step (prefer smaller, then larger)
         """
-        if self._check_valid_v1_step_path(self._get_step_dump_dir(step)):
+        if self._check_valid_v1_step(step):
             return step
         if self.action == SkipAction.REPEAT:
             available = self._get_available_steps_v1()
@@ -251,6 +281,11 @@ class RolloutTqSkip(RolloutSkip):
             partition_id: TQ partition (``"train"`` or ``"val"``).
         """
         if not self.meet_precondition(step):
+            print(
+                f"{self.print_mark}\033[33mNo cached data found for step {step}. "
+                f"The trainer will generate and dump the data.\033[0m",
+                flush=True,
+            )
             return False
         self.load_dump_data(
             step=step,
@@ -262,23 +297,25 @@ class RolloutTqSkip(RolloutSkip):
         return True
 
     def prepare_data(self, step: int, batch, global_steps: int) -> None:
-        """Phase one: read full batch from TransferQueue and save to disk.
+        """Phase one: read batch from TransferQueue and save to disk.
+
+        When ``parameter_sync_step > 1``, each ``sample`` call saves its mini-batch
+        to ``{step}/{inner_idx}/``.  The first missing inner index is used so that
+        repeated calls within the same step fill successive sub-directories.
 
         Args:
             step: Current training step (used as dump directory name).
             batch: :class:`transfer_queue.KVBatchMeta` from ``ReplayBuffer.sample()``.
             global_steps: Current ``global_steps`` for metadata.
         """
-        print(
-            f"{self.print_mark}\033[33mNo dumped data found "
-            f"from {self._get_project_dump_dir()}. "
-            f"The trainer will generate and dump the data.\033[0m",
-            flush=True,
-        )
         import transfer_queue as tq
 
-        step_dir = self._get_step_dump_dir(step)
-        step_dir.mkdir(parents=True, exist_ok=True)
+        # Determine which inner index to save to (-1 means all present, shouldn't happen)
+        inner_idx = self._find_first_missing_inner(step)
+        if inner_idx == -1:
+            return
+        save_dir = self._get_v1_inner_dir(step, inner_idx)
+        save_dir.mkdir(parents=True, exist_ok=True)
 
         # Read all trajectory fields from TQ
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id)
@@ -289,13 +326,13 @@ class RolloutTqSkip(RolloutSkip):
             "keys": list(batch.keys),
             "global_steps": global_steps,
         }
-        torch.save(save_payload, step_dir / self.tq_batch_name)
+        torch.save(save_payload, save_dir / self.tq_batch_name)
 
-        meta_path = step_dir / self.meta_name
+        meta_path = save_dir / self.meta_name
         meta_path.write_text(json.dumps({"global_steps": global_steps, "num_trajectories": len(batch.keys)}))
         print(
             f"{self.print_mark}\033[33mDump TQ batch at step {step} "
-            f"({len(batch.keys)} trajectories) to {step_dir}\033[0m",
+            f"({len(batch.keys)} trajectories) to {save_dir}\033[0m",
             flush=True,
         )
 
@@ -328,11 +365,23 @@ class RolloutTqSkip(RolloutSkip):
                 f"{self.print_mark}No dump data found for step {step} under {self._get_project_dump_dir()}"
             )
 
-        step_dir = self._get_step_dump_dir(load_step)
-        save_payload = torch.load(step_dir / self.tq_batch_name, weights_only=False)
-        data = save_payload["tensordict"]
-        old_keys = save_payload["keys"]
-        old_tags = save_payload["tags"]
+        # Load all inner dirs and merge (parameter_sync_step == 1 → single dir)
+        old_keys: list = []
+        old_tags: list = []
+        data_list: list = []
+        for inner_idx in range(self.parameter_sync_step):
+            inner_dir = self._get_v1_inner_dir(load_step, inner_idx)
+            payload = torch.load(inner_dir / self.tq_batch_name, weights_only=False)
+            data_list.append(payload["tensordict"])
+            old_keys.extend(payload["keys"])
+            old_tags.extend(payload["tags"])
+
+        if len(data_list) > 1:
+            from verl.utils.tensordict_utils import concat_tensordict
+
+            data = concat_tensordict(data_list)
+        else:
+            data = data_list[0]
 
         # Group saved trajectories by parent uid.
         # Key format: {uid}_{session_id}_{index}, uid is UUID4 (no underscores).

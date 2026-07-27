@@ -58,6 +58,18 @@ def _uses_megatron(config) -> bool:
     return False
 
 
+def _uses_mindspeed(config) -> bool:
+    """Return True if any trainable engine in the config uses the mindspeed strategy."""
+    if config is None:
+        return False
+    from omegaconf import OmegaConf
+
+    for key in ("actor_rollout_ref.actor.strategy", "critic.strategy"):
+        if OmegaConf.select(config, key, default=None) == "mindspeed":
+            return True
+    return False
+
+
 PPO_RAY_RUNTIME_ENV = {
     "env_vars": {
         "TOKENIZERS_PARALLELISM": "true",
@@ -98,10 +110,12 @@ def get_ppo_ray_runtime_env(config=None):
     # Only Megatron on Hopper/Ampere needs CUDA_DEVICE_MAX_CONNECTIONS=1.
     if _is_hopper_or_ampere and _uses_megatron(config):
         runtime_env["env_vars"]["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+    if _uses_mindspeed(config):
+        runtime_env["env_vars"]["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     for key in list(runtime_env["env_vars"].keys()):
         if os.environ.get(key) is not None:
             runtime_env["env_vars"].pop(key, None)
     # Always forward these at call-time, not import-time.
-    for key in ("PYTHONHASHSEED", "VERL_FULL_DETERMINISM", "VLLM_BATCH_INVARIANT"):
+    for key in ("PYTHONHASHSEED", "VERL_FULL_DETERMINISM", "VLLM_BATCH_INVARIANT", "VERL_RL_INSIGHT_ENABLE"):
         runtime_env["env_vars"][key] = os.environ.get(key, "0")
     return runtime_env

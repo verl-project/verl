@@ -41,10 +41,16 @@ from verl.utils.device import get_resource_name, get_visible_devices_keyword, is
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
 from verl.utils.tokenizer import normalize_token_ids
+from verl.utils.tracking import RLInsightLogger
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
-from verl.workers.rollout.utils import get_max_position_embeddings, qwen2_5_vl_dedup_image_tokens, run_uvicorn
+from verl.workers.rollout.utils import (
+    get_max_position_embeddings,
+    get_vision_placeholder_token_ids,
+    qwen2_5_vl_dedup_image_tokens,
+    run_uvicorn,
+)
 from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
     VLLM_LORA_NAME,
@@ -462,8 +468,14 @@ class vLLMHttpServer:
 
         # Don't keep the dummy data in memory
         await engine_client.reset_mm_cache()
+        # A sampled <|image_pad|>/<|video_pad|> has no image behind it, and every consumer of the
+        # sequence assumes it does. Mask them out with the OOV tail, so the policy cannot pick one.
         await engine_client.collective_rpc(
-            method="monkey_patch_model", kwargs={"vocab_size": len(self.model_config.tokenizer)}
+            method="monkey_patch_model",
+            kwargs={
+                "vocab_size": len(self.model_config.tokenizer),
+                "banned_token_ids": get_vision_placeholder_token_ids(self.model_config.processor),
+            },
         )
 
         build_app_sig = inspect.signature(build_app)
@@ -620,19 +632,20 @@ class vLLMHttpServer:
                     lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
                 )
 
-        generator = self.engine.generate(
-            prompt=prompt,
-            sampling_params=sampling_params,
-            request_id=request_id,
-            lora_request=lora_request,
-            priority=priority,
-        )
+        with RLInsightLogger.trace_state("vllm_generate", state_lane_id=f"replica_{self.replica_rank}"):
+            generator = self.engine.generate(
+                prompt=prompt,
+                sampling_params=sampling_params,
+                request_id=request_id,
+                lora_request=lora_request,
+                priority=priority,
+            )
 
-        # Get final response
-        final_res: Optional[RequestOutput] = None
-        async for output in generator:
-            final_res = output
-        assert final_res is not None
+            # Get final response
+            final_res: Optional[RequestOutput] = None
+            async for output in generator:
+                final_res = output
+            assert final_res is not None
 
         extra_fields = {"global_steps": self.global_steps}
         # Handle abort case: when the request is aborted by pause_generation(abort),
@@ -1015,8 +1028,11 @@ class vLLMHttpServer:
         return "vllm"
 
     def _preprocess_engine_kwargs(self, engine_kwargs: dict) -> None:
-        """Mutate engine_kwargs in-place before the CLI args dict is built. No-op by default."""
-        pass
+        """Mutate engine_kwargs in-place before the CLI args dict is built."""
+        if _VLLM_VERSION < version.parse("0.22.0"):
+            # Work around multimodal processor cache desync across pause/resume.
+            # See: https://github.com/vllm-project/vllm/pull/43001/
+            engine_kwargs.setdefault("mm_processor_cache_gb", 0)
 
     def _get_override_generation_config(self) -> dict:
         """Return the override_generation_config dict."""
@@ -1034,11 +1050,6 @@ class vLLMHttpServer:
         """Process quantization config. Returns (quantization_str, hf_overrides)."""
         quantization = self.config.quantization
         hf_overrides = {}
-
-        if is_torch_npu_available(check_device=False):
-            from verl.utils.vllm.npu_vllm_patch import check_vllm_ascend_before_server_launch
-
-            check_vllm_ascend_before_server_launch()
 
         # Handle QAT (Quantization-Aware Training) configuration
         qat_config_dict = getattr(self.config, "qat", {}) or {}
@@ -1089,6 +1100,11 @@ class vLLMHttpServer:
                 apply_vllm_fp8_patches()
                 # for subprocesses patching
                 os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
+
+        model_quantization_config = getattr(self.model_config.hf_config, "quantization_config", {}) or {}
+        if quantization is None and model_quantization_config.get("quant_method") == "fp8":
+            apply_vllm_fp8_patches()
+            os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
 
         if quantization is not None and self.config.quantization_config_file is not None:
             hf_overrides["quantization_config_file"] = self.config.quantization_config_file

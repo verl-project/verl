@@ -157,3 +157,79 @@ def postprocess_batch_func(output_lst, indices, data: TensorDict):
     }
 
     return output
+
+
+# ---- sharded-delta HF export (backend side) --------------------------------
+# The delta checkpoint engine consumes FINAL HF-coordinate deltas; everything
+# backend-specific -- the weight->HF naming, the to-HF conversion, the diff and
+# its snapshot -- happens here, on the backend side of the contract. The engine
+# keeps only collectives, bucketing and the wire. This module holds only the
+# DTensor-generic pieces both backends share; EP/converter machinery lives in
+# the veomni backend's own utils.
+
+
+def _prodshape(shape) -> int:
+    n = 1
+    for x in shape:
+        n *= int(x)
+    return n
+
+
+def _hf_entry_identity(name, spec, place, lidx, lval):
+    """Identity profile: the param IS its own single slot (weight name == HF name)
+    -- translate the shard-local delta to within-param coordinates. int32
+    positions: the wire is int32 anyway and the engine asserts the range."""
+    from .spec import translate_flat_indices
+
+    gidx = (translate_flat_indices(lidx, place) if lidx.numel() else lidx).to(torch.int32)
+    counts = torch.zeros(1, dtype=torch.int64)
+    counts[0] = int(gidx.numel())
+    return [(name, tuple(spec.full_shape))], str(lval.dtype).replace("torch.", ""), counts, gidx, lval
+
+
+def hf_delta_export(gen, snaps: dict, entry_fn):
+    """STEADY export: wrap a raw ``(name, local_shard, spec)`` exporter into final
+    HF-coordinate delta entries ``(slots, dtype_str, counts, hf_idx, hf_val,
+    gather_group)`` -- diff against the pinned snapshot, refresh it, then hand the
+    shard-local delta to ``entry_fn(name, spec, place, lidx, lval)``, the engine's
+    per-param entry builder (FSDP: identity only; veomni adds the EP converter).
+    The delta engine consumes these entries verbatim (batch -> gather -> wire); no
+    spec, no placement and no conversion cross the boundary. Requires a prior seed
+    pass."""
+    from verl.checkpoint_engine.delta_sync.sparse_gather import shard_delta_indices
+
+    from .spec import derive_placement
+
+    for name, local, spec in gen:
+        local = local.detach().contiguous().view(-1)
+        snap = snaps.get(name)
+        assert snap is not None and snap.numel() == local.numel(), (
+            f"{name}: no seed snapshot for this shard; run the seed export first"
+        )
+        place, contributes, pg = derive_placement(spec)
+        if contributes:
+            base = snap.to(local.device, non_blocking=True)
+            lidx, lval = shard_delta_indices(local, base, 0)
+        else:
+            # replicated param owned by another rank; empty delta keeps lockstep.
+            lidx = torch.empty(0, dtype=torch.int64, device=local.device)
+            lval = torch.empty(0, dtype=local.dtype, device=local.device)
+        snap.copy_(local, non_blocking=True)
+        yield (*entry_fn(name, spec, place, lidx, lval), pg)
+
+
+def prime_delta_snapshots(gen, snaps: dict) -> None:
+    """Pin each rank's current shards to CPU as the steady diff base. Run right
+    after the seed's full-weight sync: weights do not move during the sync, so
+    the snapshots equal exactly what the rollout side received."""
+    from verl.utils.device import is_cuda_available
+
+    for name, local, _spec in gen:
+        local = local.detach().contiguous().view(-1)
+        snap = snaps.get(name)
+        if snap is None or snap.numel() != local.numel():
+            # pinned host memory needs an accelerator context; degrade gracefully
+            # on CPU-only environments (unit tests) where pinning is meaningless.
+            snap = torch.empty_like(local, device="cpu", pin_memory=is_cuda_available)
+            snaps[name] = snap
+        snap.copy_(local, non_blocking=True)
