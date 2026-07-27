@@ -141,7 +141,7 @@ class PrecisionDebuggerProfiler:
             # Megatron stores model chunks in ``engine.module``. msprobe's
             # PrecisionDebugger accepts one module, so bind the first chunk
             # that can be called directly.
-            if isinstance(value, (list, tuple)):
+            if isinstance(value, list | tuple):
                 models = [model for model in value if self._is_valid_model(model)]
                 if models:
                     if len(models) > 1:
