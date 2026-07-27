@@ -278,10 +278,14 @@ class vLLMHttpServer:
                 if isinstance(kv_transfer_config, dict)
                 else getattr(kv_transfer_config, "kv_role", None)
             )
-            expected_connectors = {"mooncake_store": "MooncakeStoreConnector"}
+            expected_connectors = {
+                "mooncake_store": "MooncakeStoreConnector",
+                "flexkv": "FlexKVConnectorV1",
+            }
             if kv_backend not in expected_connectors:
                 raise ValueError(
-                    "abort_kv_reuse requires kv_backend=mooncake_store in the first version; "
+                    "abort_kv_reuse requires a supported external KV backend; "
+                    f"supported={sorted(expected_connectors)}, "
                     f"got {kv_backend!r}"
                 )
             expected_connector = expected_connectors[kv_backend]
