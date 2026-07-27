@@ -347,17 +347,6 @@ class FSDPEngine(BaseEngine):
             }
             module = get_peft_model(module, LoraConfig(**lora_config))
 
-            if self.model_config.lora_init == "svd":
-                initialized = initialize_lora_with_svd(
-                    module,
-                    freeze_a=self.model_config.lora_freeze_a,
-                    allow_meta=True,
-                )
-                logger.info(f"SVD-initialized {len(initialized)} LoRA layers")
-            elif self.model_config.lora_freeze_a:
-                frozen = freeze_lora_a(module)
-                logger.info(f"Froze LoRA A matrices in {len(frozen)} layers")
-
             # FSDP requires all params in a flat group to share dtype: cast a
             # fp32 adapter to the bf16 base dtype only when they actually differ.
             base_dtype = next((p.dtype for p in module.parameters() if not p.requires_grad), None)
@@ -370,6 +359,17 @@ class FSDPEngine(BaseEngine):
                     )
                     for param in mismatched:
                         param.data = param.data.to(base_dtype)
+
+        if self.model_config.lora_init == "svd":
+            initialized = initialize_lora_with_svd(
+                module,
+                freeze_a=self.model_config.lora_freeze_a,
+                allow_meta=True,
+            )
+            logger.info(f"SVD-initialized {len(initialized)} LoRA layers")
+        elif self.model_config.lora_freeze_a:
+            frozen = freeze_lora_a(module)
+            logger.info(f"Froze LoRA A matrices in {len(frozen)} layers")
 
         return module
 

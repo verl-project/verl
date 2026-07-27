@@ -137,10 +137,14 @@ def copy_lora_weights(
     destination: nn.Module,
     *,
     adapter_name: str = "default",
+    source_adapter_name: str | None = None,
+    destination_adapter_name: str | None = None,
 ) -> list[str]:
     """Synchronize A and B factors between equivalent PEFT model replicas."""
-    source_layers = dict(_iter_lora_layers(source, adapter_name))
-    destination_layers = dict(_iter_lora_layers(destination, adapter_name))
+    source_adapter_name = source_adapter_name or adapter_name
+    destination_adapter_name = destination_adapter_name or adapter_name
+    source_layers = dict(_iter_lora_layers(source, source_adapter_name))
+    destination_layers = dict(_iter_lora_layers(destination, destination_adapter_name))
     if source_layers.keys() != destination_layers.keys():
         missing = sorted(source_layers.keys() - destination_layers.keys())
         extra = sorted(destination_layers.keys() - source_layers.keys())
@@ -151,8 +155,8 @@ def copy_lora_weights(
     for name, source_layer in source_layers.items():
         destination_layer = destination_layers[name]
         for factor_name in ("lora_A", "lora_B"):
-            source_weight = getattr(source_layer, factor_name)[adapter_name].weight
-            destination_weight = getattr(destination_layer, factor_name)[adapter_name].weight
+            source_weight = getattr(source_layer, factor_name)[source_adapter_name].weight
+            destination_weight = getattr(destination_layer, factor_name)[destination_adapter_name].weight
             if source_weight.shape != destination_weight.shape:
                 raise ValueError(
                     f"{name}.{factor_name} shape mismatch: {tuple(source_weight.shape)} != "

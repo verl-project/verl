@@ -24,35 +24,57 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-EXTRACTION_PROMPT = """You are given one problem to solve, previous extracted QA pairs and one conversation session.
-Your task is to create high-quality supervised fine-tuning (SFT) QA pairs
-grounded ONLY in this session.
-Question:
-<question> {question} </question>
-Previous extracted QA pairs:
-<qa_history> {qa_history} </qa_history>
-Session:
-<session> {chunk} </session>
+EXTRACTION_SYSTEM_PROMPT = (
+    "You are given one problem to solve, previous extracted QA pairs and one conversation session.\n"
+    "Your task is to create high-quality supervised fine-tuning (SFT) QA pairs\n"
+    "grounded ONLY in this session.\n"
+    "Question:\n"
+    "<question> {question} </question>\n"
+    "Previous extracted QA pairs:\n"
+    "<qa_history> {qa_history} </qa_history>\n"
+    "Session:\n"
+    "<session> {chunk} </session>"
+)
 
-Generate more pairs when the session contains rich, concrete facts, fewer when
-it contains little useful evidence, and an empty array when it contains none.
-Pairs may capture preferences, plans, events, temporal details, and useful
-lessons. Every question must be answerable from explicit session information;
-answers must be concise, factual, and directly supported. Cover diverse facts
-and avoid duplicate or near-duplicate pairs, including pairs already present
-in the QA history.
+MEMORY_WRITING_PROMPT = """Task: Generate grounded SFT QA pairs from the current session.
 
-Return only a JSON array. Each item must have this form:
-{{"instruction": "<question>", "output": "<answer>"}}"""
+Given the problem to solve, previous conversation history. Now you should create high-quality supervised fine-tuning
+(SFT) QA pairs grounded on the history.
 
-ANSWER_PROMPT = """Answer the question using the conversation and facts retained in your model.
-If the information is absent, answer "not mentioned". Give only the concise answer.
+Requirements:
+1. Generate QA pairs adaptively based on how much useful information is present in the session.
+   - If the session contains rich, concrete facts, generate more QA pairs.
+   - If the session has limited useful evidence, generate fewer QA pairs.
+   - If there is no usable evidence, return an empty JSON array.
+2. You can generate QA pairs that capture the lessons learned from the session to help improve future interactions,
+   such as preferences, plans, events, and temporal details, rather than just factual questions.
+3. Each question must be answerable using explicit information from the session.
+4. Each answer must be concise, factual, and directly supported by the session.
+5. Cover diverse types when possible: who/what/when/where, preferences, plans, events, and temporal details.
+6. Avoid duplicate or near-duplicate QA pairs, and keep wording natural and clear.
 
-Conversation:
-{context}
+Return ONLY a JSON array. Each item must be:
+{
+  "instruction": "<question>",
+  "output": "<answer>"
+}
 
-Question: {question}
-Answer:"""
+Output the generated SFT QA pairs in the specified JSON format. Do not include any explanations or additional text."""
+
+ANSWER_SYSTEM_PROMPT = (
+    "You are a helpful, respectful and honest assistant whose job is to understand the following conversation and "
+    "answer questions based on the conversation.\n"
+    "If you don't know the answer to a question, please don't share false information."
+)
+
+ANSWER_PROMPT = (
+    "Below is a conversation between two people: {speaker_a} and {speaker_b}. The conversation takes place over "
+    "multiple days and the date of each conversation is wriiten at the beginning of the conversation.\n\n"
+    "{context}\n\n"
+    "Based on the above conversations, write a short answer for the following question in a few words. Do not write "
+    "complete and lengthy sentences. Answer with exact words from the conversations whenever possible.\n\n"
+    "Question: {question}"
+)
 
 
 def load_locomo(path: str | Path) -> list[dict[str, Any]]:
@@ -70,39 +92,35 @@ def conversation_sessions(sample: dict[str, Any]) -> list[str]:
     while f"session_{index}_date_time" in conversation:
         turns = conversation.get(f"session_{index}")
         if turns:
-            lines = [f"Date: {conversation[f'session_{index}_date_time']}"]
+            lines = [f"DATE: {conversation[f'session_{index}_date_time']}", "CONVERSATION:"]
             for turn in turns:
-                text = turn["text"]
+                text = f'{turn["speaker"]} said, "{turn["text"]}"'
                 if turn.get("blip_caption"):
-                    text = f"{text} [Image: {turn['blip_caption']}]"
-                lines.append(f"{turn['speaker']}: {text}")
+                    text = f"{text}\n and shared {turn['blip_caption']}."
+                lines.append(text)
             sessions.append("\n".join(lines))
         index += 1
     return sessions
 
 
 def pack_context_chunks(sessions: Iterable[str], tokenizer, token_budget: int) -> list[str]:
-    """Pack ordered sessions into chunks no longer than the trigger budget."""
-    chunks: list[str] = []
+    """Return trigger contexts followed by the final working context.
+
+    A complete conversation session is first appended to the working context.
+    If that makes the context exceed the budget, the accumulated context is
+    emitted for memory writing and the working context is cleared.  The final
+    element is therefore always the unconsumed working context (possibly
+    empty), which is the only raw conversation passed to answer generation.
+    """
+    trigger_contexts: list[str] = []
     current: list[str] = []
-    current_tokens = 0
     for session in sessions:
-        session_tokens = tokenizer.encode(session, add_special_tokens=False)
-        if len(session_tokens) > token_budget:
-            if current:
-                chunks.append("\n\n".join(current))
-                current, current_tokens = [], 0
-            for offset in range(0, len(session_tokens), token_budget):
-                chunks.append(tokenizer.decode(session_tokens[offset : offset + token_budget]))
-            continue
-        if current and current_tokens + len(session_tokens) > token_budget:
-            chunks.append("\n\n".join(current))
-            current, current_tokens = [], 0
         current.append(session)
-        current_tokens += len(session_tokens)
-    if current:
-        chunks.append("\n\n".join(current))
-    return chunks
+        context = "\n\n".join(current)
+        if len(tokenizer.encode(context, add_special_tokens=False)) > token_budget:
+            trigger_contexts.append(context)
+            current = []
+    return [*trigger_contexts, "\n\n".join(current)]
 
 
 def parse_qa_pairs(text: str) -> list[dict[str, str]]:
@@ -129,8 +147,41 @@ def parse_qa_pairs(text: str) -> list[dict[str, str]]:
 
 
 def reference_answer(qa: dict[str, Any]) -> str:
+    if int(qa["category"]) == 5:
+        return "No information available"
     answer = qa.get("answer")
     return "not mentioned" if answer is None else str(answer)
+
+
+def prepare_question(qa: dict[str, Any], *, no_information_first: bool) -> tuple[str, dict[str, str] | None]:
+    """Apply the official LoCoMo temporal and adversarial question protocol."""
+    question = qa["question"]
+    if qa["category"] == 2:
+        return f"{question} Use DATE of CONVERSATION to answer with an approximate date.", None
+    if qa["category"] != 5:
+        return question, None
+
+    distractor = str(qa["adversarial_answer"])
+    unavailable = "No information available"
+    if no_information_first:
+        options = {"a": unavailable, "b": distractor}
+    else:
+        options = {"a": distractor, "b": unavailable}
+    question = f"{question} (a) {options['a']} (b) {options['b']}. Select the correct answer by writing (a) or (b)."
+    return question, options
+
+
+def postprocess_prediction(text: str, options: dict[str, str] | None) -> str:
+    """Normalize the official answer wrapper and resolve category-5 options."""
+    text = text.replace('\\"', "'").strip()
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    answer = lines[0] if lines else ""
+    if options is not None:
+        normalized = answer.lower()
+        selected = "a" if "(a)" in normalized or normalized in {"a", "a)"} else "b"
+        return options[selected]
+    answer = re.sub(r"^answer\s*:\s*", "", answer, flags=re.IGNORECASE)
+    return re.sub(r"^(?:\([ab]\)|[ab]\))\s*", "", answer, flags=re.IGNORECASE).strip()
 
 
 def normalize_answer(text: str) -> str:
@@ -165,4 +216,18 @@ def score_records(records: Iterable[dict[str, Any]]) -> dict[str, float]:
         "count": len(records),
         "f1": 100 * sum(token_f1(record["prediction"], record["reference"]) for record in records) / len(records),
         "em": 100 * sum(exact_match(record["prediction"], record["reference"]) for record in records) / len(records),
+    }
+
+
+def score_breakdown(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """Score all questions, non-adversarial questions, and each category."""
+    records = list(records)
+    categories = sorted({int(record["category"]) for record in records})
+    return {
+        **score_records(records),
+        "without_category_5": score_records(record for record in records if int(record["category"]) != 5),
+        "by_category": {
+            str(category): score_records(record for record in records if int(record["category"]) == category)
+            for category in categories
+        },
     }

@@ -10,7 +10,16 @@ The trainer and rollout use separate GPUs. The default Transformers mode uses
 a second PEFT replica and copies only LoRA A/B tensors, matching verl's native
 adapter synchronization invariant. The optional `--rollout-backend sglang`
 mode transfers only the 12 merged FFN matrices changed by LoRA after each
-update, matching verl's required `merge=True` SGLang path.
+update, matching verl's required `merge=True` SGLang path. The
+`--rollout-backend dflash` mode uses SGLang's batched DFlash verifier and
+dynamically loads one LoRA adapter per question. The DFlash draft stays fixed;
+only verifier adapters are synchronized after online SFT.
+
+The evaluator follows the official LoCoMo conversation and answer templates,
+including the temporal suffix for category 2 and randomized
+`No information available` / adversarial-answer choices for category 5.
+Independent question episodes use separately named adapters so rollout
+generation can be batched without sharing fast-weight state between questions.
 
 ## Data
 
@@ -34,6 +43,7 @@ CUDA_VISIBLE_DEVICES=4,5 python -m examples.tmem.run_locomo \
   --output-dir outputs/tmem_locomo_qwen3_4b \
   --trainer-device cuda:0 \
   --rollout-device cuda:1 \
+  --generation-batch-size 20 \
   --seeds 1 2 3
 ```
 
@@ -42,6 +52,31 @@ Per-seed predictions, generated supervision, templates, configuration, and a
 three-run summary are written under `outputs/tmem_locomo_qwen3_4b`.
 Interrupted runs can continue with `--resume`; every completed question is
 checkpointed to JSONL immediately.
+
+### DFlash rollout
+
+DFlash requires an SGLang build with DFlash and verifier-only multi-LoRA
+support. In particular, the target worker must keep LoRA enabled while its
+cloned draft-worker arguments set `enable_lora=False`. Run it with a compatible
+DFlash draft checkpoint:
+
+```bash
+CUDA_VISIBLE_DEVICES=4,5 python -m examples.tmem.run_locomo \
+  --model /path/to/Qwen3-4B \
+  --dflash-draft-model /path/to/Qwen3-4B-DFlash-b16 \
+  --rollout-backend dflash \
+  --data data/locomo10.json \
+  --output-dir outputs/tmem_locomo_qwen3_4b_dflash \
+  --trainer-device cuda:0 \
+  --rollout-device cuda:1 \
+  --generation-batch-size 20 \
+  --seeds 1 2 3
+```
+
+The DFlash verifier uses SGLang's rejection sampler for non-greedy decoding,
+including the extraction and answer top-k/top-p settings. Adapter tensors are
+loaded directly from PEFT after every update; base weights and the fixed draft
+are not retransferred.
 
 For a smoke test:
 
@@ -57,11 +92,13 @@ CUDA_VISIBLE_DEVICES=4,5 python -m examples.tmem.run_locomo \
 
 The paper specifies LoRA rank and targets, SVD initialization, frozen A,
 online-SFT optimizer settings, context budget, extraction prompt, dataset, and
-metrics. It does not publish its final-answer template or generation sampling
-parameters, and it does not state exactly how the Appendix system template and
-the memory-writing requirements are combined. This example preserves both in
-one extraction prompt and stores all operational choices with results so
-differences from the reported 25.72 F1 / 15.40 EM can be audited. The runner
-also exposes and records a 1.0 gradient-norm clip: the paper does not state
-this value, but it is verl's actor default and prevents the stated SVD scale
-and SGD learning rate from destabilizing online updates.
+metrics. It does not publish its model revision, random seeds, extraction
+decoding limit or sampling parameters, final-answer decoding parameters, LoRA
+alpha, or gradient clipping. This example uses the paper's Appendix system
+template and Figure 3 memory-writing prompt as separate system/user messages,
+the official LoCoMo answer protocol, `lora_alpha=rank` so PEFT implements the
+paper's unscaled `BA`, Qwen3's standard non-thinking extraction sampling with
+a 1024-token cap matching the paper's stated response budget, and plain SGD
+without gradient clipping. Every operational
+choice and generated record is stored so differences from the reported 25.72
+F1 / 15.40 EM can be audited instead of hidden.
