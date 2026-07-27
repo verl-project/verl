@@ -13,13 +13,14 @@
 # limitations under the License.
 """Routing-record merging across partial rollout resumes in FullyAsyncLLMServerClient.
 
-Each rollout backend hands back ``routed_experts`` in a different container, so the
-merge has to stay container-agnostic:
+Every backend normalizes ``routed_experts`` to numpy, but dtype and writability still
+differ and the merge has to survive all of them:
 
 - vLLM: writable ``np.uint8`` (``np.uint16`` above 256 experts)
 - SGLang with ``skip_tokenizer_init=False``: read-only ``np.int32``, since
   ``extract_routed_experts_from_meta_info`` builds it via ``np.frombuffer`` over bytes
-- SGLang with ``skip_tokenizer_init=True``: ``torch.int32``, straight off the scheduler
+- SGLang with ``skip_tokenizer_init=True``: writable ``np.int32``, converted by
+  ``async_sglang_server`` from the scheduler's CPU tensor
 """
 
 from __future__ import annotations
@@ -40,8 +41,8 @@ LAYERS, TOPK = 2, 4
 BACKENDS = ["vllm", "sglang_detokenized", "sglang_skip_tokenizer_init"]
 
 
-def _routing(markers: list[int], backend: str) -> Any:
-    """Build a ``[len(markers), LAYERS, TOPK]`` routing record in ``backend``'s container.
+def _routing(markers: list[int], backend: str) -> np.ndarray:
+    """Build a ``[len(markers), LAYERS, TOPK]`` routing record as ``backend`` delivers it.
 
     Every entry of row ``i`` is ``markers[i]`` so :func:`_markers` can recover which
     source rows survived the merge.
@@ -52,7 +53,8 @@ def _routing(markers: list[int], backend: str) -> Any:
     if backend == "sglang_detokenized":
         return np.frombuffer(array.tobytes(), dtype=np.int32).reshape(-1, LAYERS, TOPK)
     if backend == "sglang_skip_tokenizer_init":
-        return torch.from_numpy(array)
+        # Mirrors the ``.numpy()`` conversion async_sglang_server applies to the tensor.
+        return torch.from_numpy(array).numpy()
     raise AssertionError(f"unknown backend: {backend}")
 
 
@@ -132,9 +134,9 @@ async def test_resume_appends_only_newly_generated_routing(monkeypatch, backend)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", BACKENDS)
-async def test_merge_preserves_backend_container_and_dtype(monkeypatch, backend):
-    """The merge must not silently normalize types: ``AgentLoopWorker._postprocess``
-    dispatches on ``isinstance`` and keys the padded buffer off the incoming dtype."""
+async def test_merge_yields_numpy_and_preserves_dtype(monkeypatch, backend):
+    """Backends agree on numpy, which is what lets the merge be a plain concatenate. Dtype
+    still varies, and ``AgentLoopWorker._postprocess`` keys its padded buffer off it."""
     original = _routing([10, 11], backend)
     segments = [
         TokenOutput(token_ids=[101, 102], routed_experts=original, stop_reason="aborted"),
@@ -144,7 +146,7 @@ async def test_merge_preserves_backend_container_and_dtype(monkeypatch, backend)
 
     merged = (await _client().generate(request_id="req-0", prompt_ids=[], sampling_params={})).routed_experts
 
-    assert type(merged) is type(original)
+    assert isinstance(merged, np.ndarray)
     assert merged.dtype == original.dtype
 
 
@@ -179,8 +181,7 @@ async def test_merged_routing_converts_for_downstream(monkeypatch, backend):
     assert as_dict_sink.shape == (3, LAYERS, TOPK)
     assert _markers(as_dict_sink) == [10, 11, 22]
 
-    if isinstance(merged, np.ndarray):
-        # _postprocess only copies when the array is read-only; concatenation already
-        # produced a fresh writable buffer, so from_numpy is safe without one.
-        assert merged.flags.writeable
-        assert _markers(torch.from_numpy(merged)) == [10, 11, 22]
+    # _postprocess only copies when the array is read-only; concatenation already produced
+    # a fresh writable buffer, so from_numpy is safe without one.
+    assert merged.flags.writeable
+    assert _markers(torch.from_numpy(merged)) == [10, 11, 22]

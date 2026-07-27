@@ -660,7 +660,9 @@ class SGLangHttpServer:
         routed_experts = None
         if self.config.enable_rollout_routing_replay:
             if self.config.skip_tokenizer_init:
-                routed_experts = output.get("meta_info", {}).get("routed_experts", None)
+                # convert to numpy
+                captured = output.get("meta_info", {}).get("routed_experts", None)
+                routed_experts = captured.numpy() if captured is not None else None
             else:
                 from sglang.srt.layers.moe.routed_experts_capturer import extract_routed_experts_from_meta_info
 
