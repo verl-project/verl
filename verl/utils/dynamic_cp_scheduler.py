@@ -16,7 +16,6 @@
 """Thin TensorDict adapter for Megatron-Core's Dynamic CP scheduler."""
 
 import math
-from collections import Counter
 
 import torch
 from tensordict import TensorDict
@@ -76,8 +75,7 @@ def _cp_members(rank_assignments: list[list[int]], rank: int) -> list[int]:
     rank_sample_ids = rank_assignments[rank]
     if not rank_sample_ids:
         raise RuntimeError("Megatron-Core Dynamic CP returned an empty rank assignment")
-    first_sample_id = rank_sample_ids[0]
-    return [peer for peer, sample_ids in enumerate(rank_assignments) if first_sample_id in sample_ids]
+    return [peer for peer, sample_ids in enumerate(rank_assignments) if sample_ids == rank_sample_ids]
 
 
 class DynamicCPScheduler:
@@ -89,14 +87,8 @@ class DynamicCPScheduler:
         dp_size: int,
         cp_size: int,
     ):
-        values = {
-            "max_seqlen_per_dp_cp_rank": max_seqlen_per_dp_cp_rank,
-            "dp_size": dp_size,
-            "cp_size": cp_size,
-        }
-        for name, value in values.items():
-            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-                raise ValueError(f"{name} must be a positive integer, got {value!r}")
+        if any(type(value) is not int or value <= 0 for value in (max_seqlen_per_dp_cp_rank, dp_size, cp_size)):
+            raise ValueError("Dynamic CP scheduler sizes must be positive integers")
 
         self.max_seqlen_per_dp_cp_rank = max_seqlen_per_dp_cp_rank
         self.dp_size = dp_size
@@ -126,8 +118,16 @@ class DynamicCPScheduler:
         if any(seq_len <= 0 for seq_len in seq_lens):
             raise ValueError("Dynamic CP requires every input sequence to contain at least one token")
 
-        scheduler_cls = get_megatron_dynamic_cp_scheduler_cls()
-        scheduler = scheduler_cls(
+        max_seq_len = max(seq_lens)
+        required_ranks = math.ceil(max_seq_len / self.max_seqlen_per_dp_cp_rank)
+        if required_ranks > self.total_ranks:
+            raise ValueError(
+                f"A sequence with {max_seq_len} tokens needs at least {required_ranks} ranks at "
+                f"max_seqlen_per_dp_cp_rank={self.max_seqlen_per_dp_cp_rank}, but the DPxCP group only has "
+                f"{self.total_ranks} ranks. Increase max_seqlen_per_dp_cp_rank or cap the rollout sequence length."
+            )
+
+        scheduler = get_megatron_dynamic_cp_scheduler_cls()(
             max_seqlen_per_dp_cp_rank=self.max_seqlen_per_dp_cp_rank,
             cp_size=self.cp_size,
             dp_size=self.dp_size,
@@ -135,24 +135,13 @@ class DynamicCPScheduler:
         )
         sample_id_groups = scheduler.get_groups_and_subsamples(list(enumerate(seq_lens)))
 
-        expected_ids = set(range(len(seq_lens)))
-        assigned_ids = {sample_id for group in sample_id_groups for ids in group for sample_id in ids}
-        if assigned_ids != expected_ids:
-            raise RuntimeError(
-                "Megatron-Core Dynamic CP did not preserve the input sample set: "
-                f"expected={sorted(expected_ids)}, assigned={sorted(assigned_ids)}"
-            )
-
         dcp_rank = dcp_group.rank()
         micro_batches = []
         for rank_assignments in sample_id_groups:
-            if len(rank_assignments) != self.total_ranks:
+            if len(rank_assignments) != self.total_ranks or any(not ids for ids in rank_assignments):
                 raise RuntimeError(
-                    "Megatron-Core Dynamic CP returned an assignment with "
-                    f"{len(rank_assignments)} ranks, expected {self.total_ranks}"
+                    f"Megatron-Core Dynamic CP must assign all {self.total_ranks} ranks in every micro-batch"
                 )
-            if any(not sample_ids for sample_ids in rank_assignments):
-                raise RuntimeError("Megatron-Core Dynamic CP returned an empty rank assignment")
 
             sample_ids = rank_assignments[dcp_rank]
             members = _cp_members(rank_assignments, dcp_rank)
@@ -162,8 +151,6 @@ class DynamicCPScheduler:
                 raise RuntimeError(f"Dynamic CP group members must be contiguous, got {members}")
             if members[0] % local_cp_size != 0:
                 raise RuntimeError(f"Dynamic CP group {members} is not aligned to its size")
-            if any(rank_assignments[member] != sample_ids for member in members):
-                raise RuntimeError(f"Dynamic CP group {members} does not share one packed sample list")
 
             micro_batch = tu.index_select_tensor_dict(batch, sample_ids)
             selected_lens = [seq_lens[sample_id] for sample_id in sample_ids]
@@ -198,8 +185,10 @@ def _detach_model_output(model_output: dict, sample_ids: list[int]) -> dict[str,
     return detached
 
 
-def postprocess_dynamic_cp_batch(output_lst: list[dict], batch_size: int, dcp_group) -> dict:
-    """Collect one full-output copy per CP group and restore the original sample order."""
+def postprocess_dynamic_cp_batch(
+    output_lst: list[dict], batch_size: int, dcp_group, include_model_output: bool = True
+) -> dict:
+    """Collect one output per CP group and restore the original sample order."""
     output_device = next(
         (
             value.device
@@ -223,16 +212,15 @@ def postprocess_dynamic_cp_batch(output_lst: list[dict], batch_size: int, dcp_gr
             }
         )
 
-    records_by_rank = [None for _ in range(dcp_group.size())]
+    records_by_rank = [None] * dcp_group.size()
     torch.distributed.all_gather_object(records_by_rank, local_records, group=dcp_group)
     records = [record for rank_records in records_by_rank for record in rank_records]
 
-    id_counts = Counter(sample_id for record in records for sample_id in record["sample_ids"])
+    collected_ids = [sample_id for record in records for sample_id in record["sample_ids"]]
     expected_ids = set(range(batch_size))
-    if set(id_counts) != expected_ids or any(count != 1 for count in id_counts.values()):
+    if sorted(collected_ids) != list(range(batch_size)):
         raise RuntimeError(
-            "Dynamic CP output collection must contain every sample exactly once: "
-            f"expected={sorted(expected_ids)}, counts={dict(sorted(id_counts.items()))}"
+            f"Dynamic CP output collection must contain each sample once, got ids {sorted(collected_ids)}"
         )
 
     records.sort(key=lambda record: min(record["sample_ids"]))
@@ -249,14 +237,15 @@ def postprocess_dynamic_cp_batch(output_lst: list[dict], batch_size: int, dcp_gr
                 values[sample_id] = part
 
     model_output = {}
-    for key, values in by_key.items():
-        missing = expected_ids.difference(values)
-        if missing:
-            raise RuntimeError(f"Dynamic CP output {key!r} is missing sample ids {sorted(missing)}")
-        model_output[key] = torch.nested.as_nested_tensor(
-            [values[sample_id] for sample_id in range(batch_size)], layout=torch.jagged
-        )
-        if output_device is not None:
-            model_output[key] = model_output[key].to(output_device)
+    if include_model_output:
+        for key, values in by_key.items():
+            missing = expected_ids.difference(values)
+            if missing:
+                raise RuntimeError(f"Dynamic CP output {key!r} is missing sample ids {sorted(missing)}")
+            model_output[key] = torch.nested.as_nested_tensor(
+                [values[sample_id] for sample_id in range(batch_size)], layout=torch.jagged
+            )
+            if output_device is not None:
+                model_output[key] = model_output[key].to(output_device)
 
     return {"model_output": model_output, "loss": losses, "metrics": metrics}

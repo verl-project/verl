@@ -276,6 +276,7 @@ def gptmodel_forward_model_engine(
     forced_max_seqlen: Optional[int] = None,
     cp_layout: str = "zigzag",
     router_padding_mask: torch.Tensor | None = None,
+    mtp_loss_normalization_factor: float | None = None,
 ):
     """Default forward pass for GPT models with optional sequence packing."""
 
@@ -305,6 +306,8 @@ def gptmodel_forward_model_engine(
             local_cp_size=local_cp_size,
             cp_layout=cp_layout,
         )
+        if mtp_loss_normalization_factor is not None:
+            packed_seq_params._verl_mtp_loss_normalization_factor = mtp_loss_normalization_factor
         input_ids_rmpad = input_ids_rmpad.contiguous()
 
         args = {}
@@ -344,13 +347,6 @@ def gptmodel_forward_model_engine(
             input_ids_rmpad, attention_mask = build_vlm_attn_mask_thd(input_ids, pad_token_id)
 
         if router_padding_mask is not None:
-            if local_cp_size is None:
-                raise ValueError("router_padding_mask requires local_cp_size")
-            expected_local_tokens = int(packed_seq_params.cu_seqlens_q_padded[-1].item()) // local_cp_size
-            if router_padding_mask.dtype != torch.bool or router_padding_mask.numel() != expected_local_tokens:
-                raise ValueError(
-                    "Dynamic CP router padding mask must be boolean and match the local packed token count"
-                )
             model_kwargs["padding_mask"] = router_padding_mask
 
         output_orig = model(
