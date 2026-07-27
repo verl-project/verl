@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import importlib.util
 import sys
 import types
 from pathlib import Path
+from unittest import mock
 
 import torch
 
@@ -211,6 +213,58 @@ def test_vllm_update_weights_loads_params_and_buffers():
     torch.testing.assert_close(
         model.model.layers[0].e_score_correction_bias, torch.tensor([5, 6, 7, 8], dtype=torch.float32)
     )
+
+
+def _fake_vllm_config_module():
+    """Provide vllm.config.set_current_vllm_config for the lazy import in the reload path."""
+    fake_config = types.ModuleType("vllm.config")
+    fake_config.set_current_vllm_config = contextlib.nullcontext
+    fake_vllm = types.ModuleType("vllm")
+    fake_vllm.config = fake_config
+    return mock.patch.dict(sys.modules, {"vllm": fake_vllm, "vllm.config": fake_config})
+
+
+def _fake_receiver(weights):
+    return types.SimpleNamespace(iter_weights=lambda: iter(weights))
+
+
+def _make_reload_worker(model_runner_reload=None):
+    """Build a worker whose reload_weights mirrors vLLM's worker-level *args/**kwargs forwarding."""
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    worker.model_runner = _FakeModelRunner(_ToyModel())
+    if model_runner_reload is not None:
+        worker.model_runner.reload_weights = model_runner_reload
+        worker.reload_weights = lambda *args, **kwargs: worker.model_runner.reload_weights(*args, **kwargs)
+    return worker
+
+
+def test_maybe_reload_standard_weights_falls_back_on_legacy_signature():
+    calls = []
+    worker = _make_reload_worker(model_runner_reload=lambda: calls.append("reload"))
+
+    with _fake_vllm_config_module():
+        used = worker._maybe_reload_standard_weights_from_ipc(_fake_receiver([]))
+
+    assert used is False
+    assert calls == []
+
+
+def test_maybe_reload_standard_weights_uses_layerwise_reload_when_supported():
+    received = {}
+
+    def _reload_weights(weights_iterator=None, weights_path=None, is_checkpoint_format=True):
+        received["weights"] = [(name, tensor.clone()) for name, tensor in weights_iterator]
+        received["is_checkpoint_format"] = is_checkpoint_format
+
+    worker = _make_reload_worker(model_runner_reload=_reload_weights)
+    weights = [("model.layers.0.linear.weight", torch.ones(4, 4, dtype=torch.float32))]
+
+    with _fake_vllm_config_module():
+        used = worker._maybe_reload_standard_weights_from_ipc(_fake_receiver(weights))
+
+    assert used is True
+    assert received["is_checkpoint_format"] is True
+    assert [name for name, _ in received["weights"]] == ["model.layers.0.linear.weight"]
 
 
 def test_vllm_update_weights_syncs_buffers_to_mtp_drafter():

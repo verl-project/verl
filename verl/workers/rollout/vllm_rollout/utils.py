@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import ctypes
+import inspect
 import json
 import logging
 import os
@@ -366,6 +367,22 @@ class vLLMColocateWorkerExtension:
 
             yield normalized_name, tensor
 
+    def _supports_layerwise_reload(self) -> bool:
+        """Return whether reload_weights accepts the weights_iterator kwarg (added in vLLM 0.16.0)."""
+        # Platform workers without the layerwise reload API (e.g. vllm-ascend's
+        # NPUWorker) fall back to bucketed load_weights.
+        if not callable(getattr(self, "reload_weights", None)):
+            return False
+
+        # The worker-level method forwards *args/**kwargs; the model runner declares the real signature.
+        runner_reload = getattr(getattr(self, "model_runner", None), "reload_weights", None)
+        if not callable(runner_reload):
+            return False
+        try:
+            return "weights_iterator" in inspect.signature(runner_reload).parameters
+        except (TypeError, ValueError):
+            return False
+
     def _maybe_reload_standard_weights_from_ipc(self, receiver) -> bool:
         from vllm.config import set_current_vllm_config
 
@@ -373,9 +390,8 @@ class vLLMColocateWorkerExtension:
         if self._use_mtp_drafter_weight_sync():
             return False
 
-        # Platform workers without the layerwise reload API (e.g. vllm-ascend's
-        # NPUWorker) fall back to bucketed load_weights.
-        if not callable(getattr(self, "reload_weights", None)):
+        if not self._supports_layerwise_reload():
+            logger.info("vLLM layerwise reload_weights unavailable; falling back to bucketed load_weights")
             return False
 
         logger.info("Loading standard weights via vLLM reload_weights (async)")
