@@ -284,8 +284,9 @@ RUN printf 'verl\n' > README.md
 # sglang+megatron, cpu) into throwaway envs purely to fill UV_CACHE_DIR
 # (/root/.cache/uv) with every wheel & built artifact those backends need from
 # uv.lock. The heavy native packages (apex / TransformerEngine / flash-attn /
-# vllm / sglang-kernel) come prebuilt from the verl wheelhouse index, so only
-# the git-sourced megatron-core / mbridge are compiled here, once.
+# vllm / sglang-kernel) and megatron-bridge come prebuilt from the verl
+# wheelhouse index, so only the git-sourced megatron-core / mbridge are compiled
+# here, once.
 # The `cu130 dev` scope keeps this image to its torch-2.11 world. (The deferred
 # cu12.9 / torch-2.9.1 world is commented out in pyproject.toml.) It passes
 # --no-install-project, so only deps are cached and this

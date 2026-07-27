@@ -115,14 +115,15 @@ backends as **extras**:
 .. note::
 
    Heavy native packages — ``apex``, ``transformer-engine``, ``flash-attn``,
-   ``vllm``, and ``sglang-kernel`` — are pulled **prebuilt** from the verl
-   wheelhouse index (`etogaosion.github.io/verl-wheelhouse
+   ``vllm``, ``sglang-kernel`` — and the pure-python ``megatron-bridge`` are
+   pulled **prebuilt** from the verl wheelhouse index
+   (`etogaosion.github.io/verl-wheelhouse
    <https://etogaosion.github.io/verl-wheelhouse/simple/>`_, wired in
    ``pyproject.toml`` under ``[tool.uv.index]`` / ``[tool.uv.sources]``), so
-   ``uv sync`` never compiles them from source. The wheels are built for
-   cu130 / torch 2.11 / CPython 3.12; only the git-sourced ``megatron-core``,
-   ``mbridge``, and ``megatron-bridge`` (the ``r0.5.0`` release branch, paired
-   with ``megatron-core`` 0.18.0) are built at sync time.
+   ``uv sync`` never compiles them from source. The native wheels are built for
+   cu130 / torch 2.11 / CPython 3.12; only the git-sourced ``megatron-core``
+   (``core_v0.18.0``, paired with ``megatron-bridge`` 0.5.2) and ``mbridge`` are
+   built at sync time.
 
 Run with the uv Docker image
 :::::::::::::::::::::::::::::::::::::::::::::::::::::
