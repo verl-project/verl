@@ -41,6 +41,7 @@ from verl.third_party.vllm import VLLM_SLEEP_LEVEL, get_version
 from verl.utils.device import get_device_id, is_support_ipc
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
+from verl.workers.rollout.topology import get_rollout_replica_world_size
 from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
 from verl.workers.rollout.vllm_rollout.utils import get_device_uuid
 
@@ -76,8 +77,6 @@ class ServerAdapter(BaseRollout):
 
         rank = int(os.environ["RANK"])
         local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
-        # PD asymmetric layout inflates per-replica footprint; must match
-        # llm_server.py:_initialize_llm_servers or trainer-to-replica mapping breaks.
         prefill_tp = self.config.tensor_model_parallel_size
         disagg = getattr(self.config, "disaggregation", None)
         if disagg is not None and getattr(disagg, "enabled", False):
@@ -86,11 +85,9 @@ class ServerAdapter(BaseRollout):
                 if disagg.decode_tensor_model_parallel_size is not None
                 else prefill_tp
             )
-            per_replica = prefill_tp * disagg.prefill_replicas + decode_tp * disagg.decode_replicas
         else:
             decode_tp = prefill_tp
-            per_replica = prefill_tp
-        rollout_world_size = per_replica * self.config.data_parallel_size * self.config.pipeline_model_parallel_size
+        rollout_world_size = get_rollout_replica_world_size(self.config)
         if replica_rank == -1:
             self.replica_rank = rank // rollout_world_size
         else:

@@ -120,7 +120,10 @@ class FullyAsyncLLMServerManager(LLMServerManager):
             if standalone_gmu is not None and original_gmu is not None:
                 with open_dict(self.rollout_config):
                     self.rollout_config.gpu_memory_utilization = standalone_gmu
-            await super()._initialize_llm_servers(start_rank=num_hybrid)
+            await super()._initialize_llm_servers(
+                start_rank=num_hybrid,
+                allow_empty=self.rollout_config.nnodes == 0,
+            )
         finally:
             # Always restore the original value to avoid affecting downstream logic.
             if standalone_gmu is not None and original_gmu is not None:
