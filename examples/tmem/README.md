@@ -88,7 +88,8 @@ bash scripts/tmem/run_locomo_dflash_2gpu.sh \
 The launcher defaults to the sibling `Draft-OPD` checkout and its
 `.conda/draft-opd` environment. Paths and resources can be overridden with
 `CONDA_ENV`, `MODEL_PATH`, `DRAFT_MODEL_PATH`, `GPU_IDS`,
-`SGLANG_MEM_FRACTION`, and `GENERATION_BATCH_SIZE`.
+`SGLANG_MEM_FRACTION`, `GENERATION_BATCH_SIZE`, and `TMEM_CUDA_HOME`. Set
+`MAX_QUESTIONS=1` for a one-question runtime smoke test.
 
 The DFlash verifier uses SGLang's rejection sampler for non-greedy decoding,
 including the extraction and answer top-k/top-p settings. Adapter tensors are
