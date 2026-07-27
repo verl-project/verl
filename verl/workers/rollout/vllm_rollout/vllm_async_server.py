@@ -130,6 +130,9 @@ class vLLMHttpServer:
 
         os.environ[get_visible_devices_keyword()] = cuda_visible_devices
         os.environ["VERL_REPLICA_RANK"] = str(replica_rank)
+        flexkv_instance_num = int(os.getenv("FLEXKV_INSTANCE_NUM", "1"))
+        if flexkv_instance_num > 1:
+            os.environ["FLEXKV_INSTANCE_ID"] = str(replica_rank % flexkv_instance_num)
         # Forward the Ray job id into the vLLM worker subprocess so the
         # colocated weight-transfer IPC socket path is unique per Ray job.
         # Without this, two concurrent verl jobs on the same node both bind
