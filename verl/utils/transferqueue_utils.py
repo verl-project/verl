@@ -87,15 +87,13 @@ def _run_async_in_temp_loop(async_func: Callable[..., Any], *args, **kwargs) -> 
         future = asyncio.run_coroutine_threadsafe(coroutine, tmp_event_loop)
         return future.result()
 
-    async def stop_loop():
-        tmp_event_loop.stop()
-
     try:
         return run_coroutine(async_func(*args, **kwargs))
     finally:
         if thread.is_alive():
-            asyncio.run_coroutine_threadsafe(stop_loop(), tmp_event_loop)
+            tmp_event_loop.call_soon_threadsafe(tmp_event_loop.stop)
             thread.join()
+        tmp_event_loop.close()
 
 
 def _find_meta(*args, **kwargs):
