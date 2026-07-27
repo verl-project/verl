@@ -137,6 +137,20 @@ class PrecisionDebuggerProfiler:
             value = self._resolve_attr(self_instance, attr)
             if self._is_valid_model(value):
                 return value
+
+            # Megatron stores model chunks in ``engine.module``. msprobe's
+            # PrecisionDebugger accepts one module, so bind the first chunk
+            # that can be called directly.
+            if isinstance(value, (list, tuple)):
+                models = [model for model in value if self._is_valid_model(model)]
+                if models:
+                    if len(models) > 1:
+                        logger.warning(
+                            "PrecisionDebugger only binds the first of %d model chunks for stage '%s'",
+                            len(models),
+                            stage,
+                        )
+                    return models[0]
         fallback = getattr(self_instance, "module", None)
         return fallback if self._is_valid_model(fallback) else None
 
