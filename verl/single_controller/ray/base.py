@@ -84,7 +84,19 @@ def sort_placement_group_by_node_ip(pgs: list[PlacementGroup]) -> list[Placement
         # all bunles should be on the same node
         node_id = specs["bundles_to_node_id"][0]
         pg_ip[pg.id] = node_ip[node_id]
-    return sorted(pgs, key=lambda pg: pg_ip[pg.id])
+    def _ip_sort_key(ip: str):
+        # Sort dotted-quad IPs numerically; lexicographic order breaks whenever the
+        # allocation spans an octet-width boundary (e.g. .9 vs .66), which lands
+        # ring-adjacent ranks on physically distant nodes. Non-IPv4 keeps string order.
+        parts = ip.split(".")
+        if len(parts) == 4:
+            try:
+                return (0, tuple(int(p) for p in parts), "")
+            except ValueError:
+                pass
+        return (1, (), ip)
+
+    return sorted(pgs, key=lambda pg: _ip_sort_key(pg_ip[pg.id]))
 
 
 @ray.remote
