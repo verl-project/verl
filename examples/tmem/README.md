@@ -44,6 +44,7 @@ CUDA_VISIBLE_DEVICES=4,5 python -m examples.tmem.run_locomo \
   --trainer-device cuda:0 \
   --rollout-device cuda:1 \
   --generation-batch-size 20 \
+  --max-extraction-tokens 1024 \
   --seeds 1 2 3
 ```
 
@@ -70,8 +71,24 @@ CUDA_VISIBLE_DEVICES=4,5 python -m examples.tmem.run_locomo \
   --trainer-device cuda:0 \
   --rollout-device cuda:1 \
   --generation-batch-size 20 \
+  --max-extraction-tokens 1024 \
   --seeds 1 2 3
 ```
+
+To evaluate one seed with training and DFlash rollout isolated on physical
+GPUs 4 and 5, respectively, use the resumable two-GPU launcher:
+
+```bash
+bash scripts/tmem/run_locomo_dflash_2gpu.sh \
+  1 \
+  /tmp/locomo10.json \
+  outputs/tmem_locomo_qwen3_4b_dflash_seed_1
+```
+
+The launcher defaults to the sibling `Draft-OPD` checkout and its
+`.conda/draft-opd` environment. Paths and resources can be overridden with
+`CONDA_ENV`, `MODEL_PATH`, `DRAFT_MODEL_PATH`, `GPU_IDS`,
+`SGLANG_MEM_FRACTION`, and `GENERATION_BATCH_SIZE`.
 
 The DFlash verifier uses SGLang's rejection sampler for non-greedy decoding,
 including the extraction and answer top-k/top-p settings. Adapter tensors are
@@ -98,7 +115,7 @@ alpha, or gradient clipping. This example uses the paper's Appendix system
 template and Figure 3 memory-writing prompt as separate system/user messages,
 the official LoCoMo answer protocol, `lora_alpha=rank` so PEFT implements the
 paper's unscaled `BA`, Qwen3's standard non-thinking extraction sampling with
-a 1024-token cap matching the paper's stated response budget, and plain SGD
-without gradient clipping. Every operational
+a 1024-token cap (the only response budget published, in the RL setup), and
+plain SGD without gradient clipping. Every operational
 choice and generated record is stored so differences from the reported 25.72
 F1 / 15.40 EM can be audited instead of hidden.

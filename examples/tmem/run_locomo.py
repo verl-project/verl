@@ -354,6 +354,7 @@ class DFlashRollout:
     def reset_stats(self, *, seed: int) -> None:
         self.seed = seed
         self.request_count = 0
+        self.resumed_request_count = 0
         self.generation_calls = 0
         self.generation_seconds = 0.0
         self.completion_tokens = 0
@@ -367,11 +368,18 @@ class DFlashRollout:
         )
         return {
             "generation_calls": self.generation_calls,
+            "resumed_request_count": self.resumed_request_count,
             "generation_seconds": self.generation_seconds,
             "completion_tokens": self.completion_tokens,
             "spec_verify_count": self.spec_verify_count,
             "mean_spec_accept_length": mean_accept_length,
         }
+
+    def restore_progress(self, records: Sequence[dict[str, Any]]) -> None:
+        """Continue the deterministic per-request sampling-seed stream."""
+        restored = sum(int(record.get("trigger_count", len(record.get("triggers", [])))) + 1 for record in records)
+        self.request_count = restored
+        self.resumed_request_count = restored
 
     def _sampling_params(self, *, extraction: bool, sampling_seed: int | None = None) -> dict[str, Any]:
         max_new_tokens = self.args.max_extraction_tokens if extraction else self.args.max_answer_tokens
@@ -925,6 +933,8 @@ def main() -> None:
         else:
             records = []
             records_path.write_text("", encoding="utf-8")
+        if isinstance(rollout, DFlashRollout):
+            rollout.restore_progress(records)
         completed = {(record["sample_id"], record["qa_index"]) for record in records}
         started = time.time()
 

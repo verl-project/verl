@@ -147,8 +147,24 @@ def test_dflash_stats_are_reset_per_seed():
 
     assert rollout.stats() == {
         "generation_calls": 0,
+        "resumed_request_count": 0,
         "generation_seconds": 2.5,
         "completion_tokens": 10,
         "spec_verify_count": 4,
         "mean_spec_accept_length": 3.0,
     }
+
+
+def test_dflash_resume_restores_sampling_request_count():
+    rollout = object.__new__(DFlashRollout)
+    rollout.reset_stats(seed=3)
+    rollout.restore_progress(
+        [
+            {"trigger_count": 3},
+            {"triggers": [{}, {}]},
+        ]
+    )
+
+    assert rollout.request_count == 7
+    assert rollout.resumed_request_count == 7
+    assert rollout.stats()["resumed_request_count"] == 7
