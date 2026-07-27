@@ -47,7 +47,9 @@ from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction, apply_router_replay_patch
 from verl.utils.megatron.router_replay_utils import (
     RouterReplayHelper,
+    align_r3_router_replay_data,
     build_r3_replay_mask,
+    merge_nested_router_maps,
     merge_router_topk_indices,
     pp_gather,
     reorder_and_merge_vpp_layers,
@@ -84,6 +86,78 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def _resolve_fused_temperature(temperature: float | torch.Tensor) -> float:
+    """Return the scalar temperature required by fused linear cross entropy."""
+    values = torch.as_tensor(temperature).detach().flatten()
+    if values.numel() == 0 or not torch.isfinite(values).all().item():
+        raise ValueError("temperature must contain finite values")
+    if not torch.all(values == values[0]).item():
+        raise NotImplementedError(
+            "Megatron fused kernels require a uniform temperature; set use_fused_kernels=False "
+            "for per-sample temperatures."
+        )
+    return max(float(values[0].item()), 1e-8)
+
+
+def _validate_dcp_world_size(dpcp_size: int) -> None:
+    """Validate the topology accepted by Megatron-Core's dynamic group builder."""
+    if dpcp_size < 2 or dpcp_size % 2 != 0:
+        raise ValueError(
+            f"Dynamic CP requires the DPxCP world size to be an even integer of at least two, got DPxCP={dpcp_size}."
+        )
+
+
+def _check_dcp_unsupported_features(engine_config, model_config, tf_config=None, batch=None) -> None:
+    """Validate DCP capabilities as model, transformer, and batch state become available."""
+    if not engine_config.dynamic_context_parallel:
+        return
+    if not engine_config.use_remove_padding:
+        raise ValueError("dynamic_context_parallel requires use_remove_padding=True")
+    if model_config.model_type == "value_model":
+        raise NotImplementedError("Dynamic CP currently supports language models only")
+    if hasattr(model_config.hf_config, "vision_config"):
+        raise NotImplementedError("Dynamic CP does not support multimodal models")
+    if engine_config.virtual_pipeline_model_parallel_size not in (None, 1):
+        raise NotImplementedError("Dynamic CP does not support virtual pipeline parallelism")
+
+    if tf_config is not None:
+        if getattr(tf_config, "fp8", None) not in (None, False):
+            raise NotImplementedError("Dynamic CP does not support FP8 training")
+        if engine_config.router_replay.mode != "disabled" and getattr(tf_config, "moe_router_fusion", False):
+            raise NotImplementedError("Dynamic CP router replay requires moe_router_fusion=False")
+
+    if batch is not None:
+        if tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False) or tu.get_non_tensor_data(
+            batch, key="distillation_only", default=False
+        ):
+            raise NotImplementedError("Dynamic CP does not support distillation")
+
+
+def _attach_dcp_recorded_routes(losses_reduced: list[dict], layers_topk_idx: torch.Tensor) -> None:
+    """Attach recorded routes to DCP micro-batches without dropping or inventing samples."""
+    recorded_routes = list(layers_topk_idx.unbind())
+    cursor = 0
+    for micro_batch_index, micro_output in enumerate(losses_reduced):
+        micro_sample_ids = micro_output.get(DCP_SAMPLE_IDS)
+        if not micro_sample_ids:
+            raise RuntimeError(f"DCP router replay micro-batch {micro_batch_index} has no sample ids")
+        end = cursor + len(micro_sample_ids)
+        if end > len(recorded_routes):
+            raise RuntimeError(
+                "DCP router replay produced fewer route tensors than scheduled samples: "
+                f"need {end}, got {len(recorded_routes)}"
+            )
+        micro_output.setdefault("model_output", {})["routed_experts"] = torch.nested.as_nested_tensor(
+            recorded_routes[cursor:end], layout=torch.jagged
+        )
+        cursor = end
+
+    if cursor != len(recorded_routes):
+        raise RuntimeError(
+            f"DCP router replay produced unconsumed route tensors: consumed {cursor}, recorded {len(recorded_routes)}"
+        )
+
+
 class MegatronEngine(BaseEngine):
     # mcore keeps model-parallel-local params resident and moves large host
     # buffers every step; pinning the whole delta snapshot set on top of that
@@ -112,21 +186,7 @@ class MegatronEngine(BaseEngine):
         self.optimizer_config = optimizer_config
         self.checkpoint_config = checkpoint_config
         assert self.engine_config.use_mbridge, "use_mbridge must be True"
-        if self.engine_config.dynamic_context_parallel:
-            if not self.engine_config.use_remove_padding:
-                raise ValueError("dynamic_context_parallel requires use_remove_padding=True")
-            if self.engine_config.use_fused_kernels:
-                raise NotImplementedError("Dynamic CP does not support fused model kernels")
-            if self.model_config.model_type == "value_model":
-                raise NotImplementedError("Dynamic CP currently supports language models only")
-            if hasattr(self.model_config.hf_config, "vision_config"):
-                raise NotImplementedError("Dynamic CP does not support multimodal models")
-            if self.model_config.mtp.enable and self.model_config.mtp.enable_train:
-                raise NotImplementedError("Dynamic CP does not support MTP training")
-            if self.engine_config.router_replay.mode != "disabled":
-                raise NotImplementedError("Dynamic CP does not support router replay")
-            if self.engine_config.virtual_pipeline_model_parallel_size not in (None, 1):
-                raise NotImplementedError("Dynamic CP does not support virtual pipeline parallelism")
+        _check_dcp_unsupported_features(self.engine_config, self.model_config)
         self._init_device_mesh()
 
         set_random_seed(seed=self.engine_config.seed)
@@ -175,7 +235,21 @@ class MegatronEngine(BaseEngine):
 
     def _init_device_mesh(self):
         # TODO: set different parallelism for actor, critic, ref
+        if self.engine_config.dynamic_context_parallel:
+            get_megatron_dynamic_cp_scheduler_cls()
+
         if mpu.is_initialized():
+            if self.engine_config.dynamic_context_parallel:
+                dpcp_size = mpu.get_data_parallel_world_size(with_context_parallel=True)
+                _validate_dcp_world_size(dpcp_size)
+                try:
+                    mpu.get_dynamic_data_context_parallel_groups(group_size=1)
+                except (KeyError, AssertionError, AttributeError) as exc:
+                    raise RuntimeError(
+                        "Dynamic CP is enabled on this engine, but Megatron model-parallel state was already "
+                        "initialized without dynamic DPxCP groups. Enable dynamic_context_parallel consistently "
+                        "on every colocated Megatron engine (for example the reference model)."
+                    ) from exc
             return
 
         extra_args = dict()
@@ -185,7 +259,10 @@ class MegatronEngine(BaseEngine):
                 "dynamic_context_parallel is not supported in your megatron version, "
                 + "please update your megatron version to the latest version"
             )
-            get_megatron_dynamic_cp_scheduler_cls()
+            dpcp_size = torch.distributed.get_world_size() // (
+                self.engine_config.tensor_model_parallel_size * self.engine_config.pipeline_model_parallel_size
+            )
+            _validate_dcp_world_size(dpcp_size)
             extra_args["dynamic_context_parallel"] = self.engine_config.dynamic_context_parallel
 
         mpu.initialize_model_parallel(
@@ -413,9 +490,10 @@ class MegatronEngine(BaseEngine):
         if not self.engine_config.use_fused_kernels:
             return
 
-        if self.is_value_model or self.model_config.mtp.enable:
+        if not self.engine_config.use_remove_padding or self.is_value_model or self.model_config.mtp.enable:
             logger.warning_once(
-                "Fused kernels are not supported for value models or when MTP is enabled in Megatron engine; disabling."
+                "Fused kernels require remove-padding and are not supported for value models or when MTP is enabled "
+                "in Megatron engine; disabling."
             )
             self.engine_config.use_fused_kernels = False
             return
@@ -464,8 +542,7 @@ class MegatronEngine(BaseEngine):
 
     def initialize(self):
         self._build_tf_config()
-        if self.engine_config.dynamic_context_parallel and getattr(self.tf_config, "fp8", None) not in (None, False):
-            raise NotImplementedError("Dynamic CP does not support FP8 training")
+        _check_dcp_unsupported_features(self.engine_config, self.model_config, tf_config=self.tf_config)
 
         self.module = self._build_megatron_module()
 
@@ -724,13 +801,7 @@ class MegatronEngine(BaseEngine):
         self._distillation_use_topk_active = tu.get_non_tensor_data(data, key="distillation_use_topk", default=False)
         tu.assign_non_tensor(data, sp_size=self.engine_config.context_parallel_size)
 
-        if self.engine_config.dynamic_context_parallel:
-            if self._distillation_use_topk_active or tu.get_non_tensor_data(
-                data, key="distillation_only", default=False
-            ):
-                raise NotImplementedError("Dynamic CP does not support distillation")
-            if tu.get_non_tensor_data(data, key="enable_routing_replay", default=False):
-                raise NotImplementedError("Dynamic CP does not support router replay")
+        _check_dcp_unsupported_features(self.engine_config, self.model_config, batch=data)
 
         # compute num_tokens in global batch for loss normalization
         loss_mask = data["loss_mask"]
@@ -743,8 +814,10 @@ class MegatronEngine(BaseEngine):
         tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
 
         # Global routed-token count for the per-token-loss regime (consumed in
-        # postprocess_micro_batch_func). Real tokens are CP-replicated, so a single
-        # all-reduce over the DP group gives the global value.
+        # postprocess_micro_batch_func). Static CP replicates real tokens inside
+        # each CP group, so one DP all-reduce yields the global value; the DCP
+        # batch is replicated across the whole DPxCP plane, so the local count
+        # already is the global one.
         if self.tf_config is not None and self.tf_config.calculate_per_token_loss:
             routed_num_tokens = self._routed_num_tokens(data).to(get_device_id())
             if not self.engine_config.dynamic_context_parallel:
@@ -866,22 +939,28 @@ class MegatronEngine(BaseEngine):
                     self.mini_layer_topk_idx_list, bs, vp_size, microbatch_group_size_per_vp_stage
                 )
             else:
-                tensors = [tensor for nt in self.mini_layer_topk_idx_list for tensor in nt.unbind()]
-                topk_idx_td = torch.nested.as_nested_tensor(tensors, layout=torch.jagged)
+                topk_idx_td = merge_nested_router_maps(self.mini_layer_topk_idx_list)
             self.mini_layer_topk_idx_list = []
 
             layers_topk_idx = pp_gather(topk_idx_td.to(torch.uint8), self.tf_config)
             use_dynamic_bsz = tu.get_non_tensor_data(data=data, key="use_dynamic_bsz", default=True)
             if use_dynamic_bsz and indices is not None:
                 layers_topk_idx = restore_dynamic_batch(layers_topk_idx, indices)
+            if dcp_group is not None and mpu.is_pipeline_last_stage(ignore_virtual=True):
+                # This rank only recorded routes for its scheduled samples, in
+                # micro-batch order. Hand them per micro-batch to the leader
+                # collection below, which restores the original sample order.
+                _attach_dcp_recorded_routes(losses_reduced, layers_topk_idx)
 
         output = {}
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
             if dcp_group is not None:
-                output = postprocess_dynamic_cp_batch(losses_reduced, len(data), dcp_group)
+                output = postprocess_dynamic_cp_batch(
+                    losses_reduced, len(data), dcp_group, include_model_output=self.is_mp_src_rank_with_outputs()
+                )
             else:
                 output = postprocess_batch_func(output_lst=losses_reduced, indices=indices, data=data)
-            if RouterReplayHelper.is_r2_record_action(self.tf_config):
+            if RouterReplayHelper.is_r2_record_action(self.tf_config) and dcp_group is None:
                 output["model_output"]["routed_experts"] = layers_topk_idx
         if enable_routing_replay:
             RouterReplay.clear_global_indices()
@@ -1103,7 +1182,14 @@ class MegatronEngineWithLMHead(MegatronEngine):
         batch: TensorDict = next(batch_iter)
 
         batch = batch.to(get_device_id())
-        use_fused_kernels = tu.get_non_tensor_data(batch, key="use_fused_kernels", default=False)
+        use_fused_kernels = tu.get_non_tensor_data(
+            batch, key="use_fused_kernels", default=self.engine_config.use_fused_kernels
+        )
+        if bool(use_fused_kernels) != bool(self.engine_config.use_fused_kernels):
+            raise RuntimeError(
+                "Per-batch use_fused_kernels must match the Megatron engine setting because fused forward is "
+                "installed when the model is initialized."
+            )
         calculate_entropy = tu.get_non_tensor_data(batch, key="calculate_entropy", default=False)
         calculate_sum_pi_squared = tu.get_non_tensor_data(batch, key="calculate_sum_pi_squared", default=False)
         distillation_use_topk = tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
@@ -1147,6 +1233,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
             layers_topk_idx = model_inputs["routed_experts"]
             replay_mask = None
             if self.engine_config.router_replay.mode == "R3":
+                layers_topk_idx = align_r3_router_replay_data(layers_topk_idx, input_ids)
                 replay_mask = build_r3_replay_mask(input_ids, batch["response_mask"])
             set_router_replay_data(
                 layers_topk_idx,
@@ -1154,6 +1241,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 self.tf_config,
                 vp_rank,
                 replay_mask=replay_mask,
+                local_cp_size=local_cp_size,
             )
 
         if pad_mode == DatasetPadMode.NO_PADDING:
@@ -1162,21 +1250,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
             raise NotImplementedError(f"Pad mode {pad_mode} is not supported for megatron engine")
 
         if use_fused_kernels:
-            if not self.engine_config.use_remove_padding:
-                logger.warning_once(
-                    "Fused kernels require `use_remove_padding=True` for Megatron engine. Falling back to non-fused."
-                )
-                use_fused_kernels = False
-            elif isinstance(temperature, torch.Tensor):
-                if temperature.numel() != 1:
-                    logger.warning_once(
-                        "Fused kernels do not support per-sample temperature. Falling back to non-fused."
-                    )
-                    use_fused_kernels = False
-                else:
-                    temperature_value = float(temperature.item())
-            else:
-                temperature_value = float(temperature)
+            temperature_value = _resolve_fused_temperature(temperature)
 
         if use_fused_kernels:
             from verl.models.mcore import get_mcore_forward_fused_model_engine_fn
@@ -1191,6 +1265,8 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 calculate_entropy=calculate_entropy,
                 pad_token_id=self.model_config.tokenizer.pad_token_id,
                 cp_layout=cp_layout,
+                local_cp_size=local_cp_size,
+                router_padding_mask=router_padding_mask,
             )
         else:
             if not isinstance(temperature, torch.Tensor):
@@ -1225,6 +1301,17 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 "response_attention_mask": response_attention_mask,
             }
 
+            mtp_loss_normalization_factor = None
+            if (
+                self.model_config.mtp.enable
+                and self.model_config.mtp.enable_train
+                and self.tf_config.calculate_per_token_loss
+            ):
+                batch_num_tokens = tu.get_non_tensor_data(batch, key="batch_num_tokens", default=0)
+                routed_num_tokens = tu.get_non_tensor_data(batch, key="routed_num_tokens", default=0)
+                if batch_num_tokens > 0:
+                    mtp_loss_normalization_factor = routed_num_tokens / batch_num_tokens
+
             output = forward_fn(
                 model,
                 input_ids,
@@ -1237,13 +1324,16 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
                 local_cp_size=local_cp_size,
                 router_padding_mask=router_padding_mask,
+                mtp_loss_normalization_factor=mtp_loss_normalization_factor,
                 forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
                 cp_layout=cp_layout,
             )
 
         # Router replay: record routing decisions for R2 mode
         if RouterReplayHelper.is_r2_record_action(self.tf_config, vp_rank):
-            merge_router_topk_indices(None, input_ids, self.mini_layer_topk_idx_list, self.tf_config, vp_rank)
+            merge_router_topk_indices(
+                None, input_ids, self.mini_layer_topk_idx_list, self.tf_config, vp_rank, local_cp_size=local_cp_size
+            )
 
         # Router replay: switch to backward replay mode for next backward pass
         if RouterReplayHelper.is_replay_forward_action(self.tf_config, vp_rank):
@@ -1273,17 +1363,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
             loss = torch.tensor(1.0, device=device)
             scaled_loss = loss
             metrics = {}
-        if local_cp_size is not None and not self.engine_config.dynamic_context_parallel:
-            # aggregate model_output by DP-CP groups
-            from verl.utils.megatron_utils import dynamic_cp_merge_output
-
-            model_output = dynamic_cp_merge_output(
-                model_output,
-                dp_size=mpu.get_data_parallel_world_size(),
-                dp_rank=mpu.get_data_parallel_rank(),
-                local_cp_size=local_cp_size,
-            )
-
         output = {"loss": loss.detach().item(), "metrics": metrics}
         if forward_only or not self.engine_config.dynamic_context_parallel:
             output["model_output"] = model_output

@@ -1,10 +1,12 @@
 Dynamic Context Parallelism
 ===========================
 
+Last updated: 07/26/2026.
+
 Dynamic Context Parallelism (DCP) lets the Megatron engine choose a context
-parallel size for each packed micro-batch. It extends verl's existing DCP path,
-which selects one CP size for an entire micro-batch, with Megatron-Core's
-sequence-length-aware scheduler.
+parallel size for each packed micro-batch. It replaces verl's previous
+fixed-size dynamic CP path (one CP size for the whole mini-batch) with
+Megatron-Core's sequence-length-aware scheduler.
 
 Requirements
 ------------
@@ -12,7 +14,18 @@ Requirements
 DCP requires a Megatron-Core build containing
 `NVIDIA/Megatron-LM PR #5154 <https://github.com/NVIDIA/Megatron-LM/pull/5154>`_
 (``d2e7ec5b``). DCP currently supports text-only language models with
-remove-padding/THD inputs.
+remove-padding/THD inputs. The DPxCP world size (``DP * CP``) must be an even
+integer of at least two. Megatron-Core creates power-of-two subgroups and a
+full DPxCP group when needed, so even non-power-of-two layouts are supported
+without leaving ranks empty.
+
+Fused linear cross entropy is supported when temperature is scalar or uniform
+across the micro-batch. Non-uniform per-sample temperatures require
+``use_fused_kernels=False``.
+
+Router replay modes R2 and R3 require ``moe_router_fusion=False``. The fused
+router path bypasses Megatron-Core's replay hook; other model fused kernels,
+including fused linear cross entropy, remain supported.
 
 Configuration
 -------------
@@ -30,10 +43,14 @@ limit is ``16384 / 4 = 4096``:
 Apply the same settings to the reference model when it uses the Megatron
 engine.
 
-``max_seqlen_per_dp_cp_rank`` is the scheduler's per-rank packing limit. Keep
-it unchanged between static CP and DCP benchmarks. In particular, do not tune
-``data.max_token_len_per_gpu`` only for the DCP run: both modes must process
-the same samples and token budget.
+``max_seqlen_per_dp_cp_rank`` is the scheduler's per-rank packing limit. Derive
+it from the static run's packed-sequence budget divided by its CP size; do not
+set it equal to the static run's total packed-sequence budget. With verl's
+dynamic-batch configuration, the static packed-sequence budget is
+``data.max_token_len_per_gpu * context_parallel_size``, so the DCP limit is
+normally the same numeric value as ``data.max_token_len_per_gpu``. Keep that
+setting and the input samples unchanged between the static CP and DCP runs so
+both modes process the same work.
 
 Implementation
 --------------
@@ -55,10 +72,9 @@ Current limitations
 
 The following combinations are not currently supported:
 
-* fused model kernels;
 * FP8 training;
 * multimodal or value models;
-* MTP training, distillation, or router replay;
+* distillation;
 * virtual pipeline parallelism.
 
 Benchmarking

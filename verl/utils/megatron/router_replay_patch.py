@@ -126,6 +126,12 @@ class RouterReplay:
         indices = indices.to(scores.device)
         if replay_mask is not None:
             _, native_indices = default_compute_topk(scores, topk, num_groups=num_groups, group_topk=group_topk)
+            if indices.shape != native_indices.shape or replay_mask.numel() != scores.shape[0]:
+                raise RuntimeError(
+                    "Router replay tensors are not aligned: "
+                    f"scores={tuple(scores.shape)}, targets={tuple(indices.shape)}, "
+                    f"native={tuple(native_indices.shape)}, mask={tuple(replay_mask.shape)}"
+                )
             indices = torch.where(replay_mask.to(scores.device).bool().unsqueeze(-1), indices, native_indices)
         return scores.gather(1, indices), indices
 
