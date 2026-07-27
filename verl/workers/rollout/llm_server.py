@@ -24,6 +24,7 @@ import os
 from typing import Any, Optional
 from uuid import uuid4
 
+import numpy as np
 import ray
 import torch
 from cachetools import LRUCache
@@ -385,10 +386,10 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                 if final_output.routed_experts is None:
                     final_output.routed_experts = output.routed_experts
                 else:
-                    final_output.routed_experts = torch.cat(
-                        [final_output.routed_experts, output.routed_experts[-len(output.token_ids) :]],
-                        dim=0,
-                    )
+                    # Compatiable to different backends
+                    tail = output.routed_experts[-len(output.token_ids) :]
+                    concat = torch.cat if isinstance(tail, torch.Tensor) else np.concatenate
+                    final_output.routed_experts = concat([final_output.routed_experts, tail])
             if output.num_preempted is not None:
                 final_output.num_preempted += output.num_preempted
             final_output.stop_reason = output.stop_reason
