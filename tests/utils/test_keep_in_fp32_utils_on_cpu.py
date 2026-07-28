@@ -25,6 +25,7 @@ import pytest
 import torch
 import torch.nn as nn
 import transformers
+from packaging.version import Version
 
 from verl.utils import fsdp_utils
 from verl.utils.fsdp_utils import (
@@ -118,7 +119,7 @@ def test_names_are_deduplicated_deterministically():
 
 
 def test_only_the_top_most_declaration_is_read():
-    """4.56.1 reads the top-level model; 5.11.0's post_init has already folded
+    """4.56.1 reads the top-level model; 5.10.0's post_init has already folded
     every child's declaration into it. Re-collecting from nested models would
     widen 4.56.1's behaviour."""
     model = Model()
@@ -175,7 +176,7 @@ def test_model_without_keep_lists_resolves_empty():
 # Oracles derived from the upstream sources, not from this implementation:
 #   4.56.1 modeling_utils.py:5127
 #       re.compile("|".join(rf"((^|\.){m}($|\.))" for m in keep_in_fp32_modules))
-#   5.11.0 core_model_loading.build_glob_alternation
+#   5.10.0 core_model_loading.build_glob_alternation
 #       branches.append(f"(?P<{group}>{glob.replace('*', '.*')})"); re.compile("|".join(branches))
 def _oracle_4x(names):
     return re.compile("|".join(rf"((^|\.){name}($|\.))" for name in names))
@@ -243,10 +244,9 @@ def test_matcher_agrees_with_the_upstream_oracle(glob_matching, fqn, monkeypatch
     assert bool(_keep_in_fp32_regex(names).search(fqn)) is bool(oracle(names).search(fqn))
 
 
-def test_installed_transformers_selects_the_4x_matcher():
-    """This environment runs 4.56.1, which has no `core_model_loading`."""
-    assert transformers.__version__.startswith("4.")
-    assert fsdp_utils._keep_in_fp32_uses_glob_matching() is False
+def test_installed_transformers_selects_its_native_matcher():
+    uses_glob_matching = Version(transformers.__version__).major >= 5
+    assert fsdp_utils._keep_in_fp32_uses_glob_matching() is uses_glob_matching
 
 
 def test_regex_is_none_without_names():
