@@ -13,6 +13,7 @@
 # limitations under the License.
 """Exercise CP2 on ranks 0-1 and independent CP1 micro-batches on ranks 2-3."""
 
+from inspect import signature
 from types import SimpleNamespace
 
 import pytest
@@ -20,8 +21,6 @@ import torch
 import torch.distributed
 import torch.nn.functional as F
 
-if not torch.cuda.is_available():
-    pytest.skip("Dynamic CP feature coverage requires CUDA", allow_module_level=True)
 pytest.importorskip("megatron.core")
 
 from megatron.core import parallel_state  # noqa: E402
@@ -40,6 +39,14 @@ from verl.utils.megatron.router_replay_patch import (  # noqa: E402
     _patched_topk_routing_with_score_function,
 )
 from verl.utils.megatron.router_replay_utils import merge_router_topk_indices, set_router_replay_data  # noqa: E402
+
+pytestmark = [
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="Dynamic CP feature coverage requires CUDA"),
+    pytest.mark.skipif(
+        "dynamic_context_parallel" not in signature(parallel_state.initialize_model_parallel).parameters,
+        reason="Installed Megatron-Core does not support dynamic context parallel initialization",
+    ),
+]
 
 
 @pytest.fixture(scope="module", autouse=True)
