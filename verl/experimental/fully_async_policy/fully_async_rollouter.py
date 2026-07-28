@@ -645,6 +645,10 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         """Stop rollout profiling on all replicas before the next weight sync."""
         await self.llm_server_manager.stop_profile()
 
+    async def shutdown_services(self):
+        if hasattr(self, "llm_server_manager"):
+            await self.llm_server_manager.shutdown()
+
     def do_validate(self):
         """Run validation and return metrics"""
         timing_raw = {}

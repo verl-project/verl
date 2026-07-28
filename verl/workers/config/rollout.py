@@ -30,6 +30,7 @@ __all__ = [
     "TraceConfig",
     "ServerConfig",
     "PrometheusConfig",
+    "FlexKVServiceConfig",
     "RolloutConfig",
     "CheckpointEngineConfig",
 ]
@@ -152,6 +153,26 @@ class AbortKVReuseConfig(BaseConfig):
 
 
 @dataclass
+class FlexKVServiceConfig(BaseConfig):
+    """Ray-managed distributed FlexKV service configuration."""
+
+    auto_start: bool = False
+    redis_server_path: str = "redis-server"
+    expected_gpus_per_node: Optional[int] = None
+    cpu_cache_gb: int = 16
+    flexkv_redis_port: int = 6393
+    mooncake_redis_port: int = 6395
+    local_zmq_port_base: int = 56800
+    transfer_engine_port_base: int = 56900
+    tokens_per_block: int = 16
+    protocol: str = "tcp"
+    device_name: str = ""
+    node_ttl_seconds: int = 3600
+    startup_timeout_s: float = 120.0
+    log_dir: str = "/tmp/verl_flexkv"
+
+
+@dataclass
 class RolloutConfig(BaseConfig):
     _mutable_fields = {
         "max_model_len",
@@ -199,6 +220,7 @@ class RolloutConfig(BaseConfig):
     cudagraph_capture_sizes: Optional[list] = None
     free_cache_engine: bool = True
     abort_kv_reuse: AbortKVReuseConfig = field(default_factory=AbortKVReuseConfig)
+    flexkv_service: FlexKVServiceConfig = field(default_factory=FlexKVServiceConfig)
     kv_backend: Optional[str] = None
     data_parallel_size: int = 1
     expert_parallel_size: int = 1

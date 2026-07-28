@@ -215,6 +215,12 @@ class FullyAsyncTaskRunner:
                 ray.cancel(future)
             raise
         finally:
+            rollouter = self.components.get("rollouter")
+            if rollouter is not None:
+                try:
+                    ray.get(rollouter.shutdown_services.remote())
+                except Exception as e:
+                    print(f"[ASYNC MAIN] Rollout service cleanup failed: {e}")
             asyncio.run(self.components["message_queue_client"].clear_queue())
             print("[ASYNC MAIN] Training completed or interrupted")
 
