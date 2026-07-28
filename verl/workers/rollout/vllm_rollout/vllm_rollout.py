@@ -244,7 +244,6 @@ class ServerAdapter(BaseRollout):
             bucket_size_mb=bucket_size_mb,
             use_shm=self.use_shm,
         )
-
         await sender.async_send_weights(weights)
 
         if future is not None:
