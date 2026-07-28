@@ -113,7 +113,7 @@ def test_merge_router_topk_indices_prefers_actual_recorded_routers(monkeypatch):
 
     rr_utils.merge_router_topk_indices(attention_mask, input_ids, merged, tf_config)
 
-    assert tf_config._verl_router_replay_local_router_indices == [2, 5]
+    assert tf_config._verl_router_replay_local_router_indices_by_vp == {0: [2, 5]}
     assert len(merged) == 1
     assert merged[0].shape == (1, 3, 2, 2)
     assert torch.equal(merged[0][0, :, 0, :], recorded_a.to(torch.uint8))
@@ -168,7 +168,8 @@ def test_merge_router_topk_indices_hard_fails_when_record_count_mismatches(monke
     assert "recorded_global_indices=[0]" in message
 
 
-def test_set_router_replay_data_reuses_cached_recorded_router_indices(monkeypatch):
+@pytest.mark.parametrize("vp_rank, cached_router_indices", [(0, [2, 5]), (1, [1, 4])])
+def test_set_router_replay_data_reuses_cached_recorded_router_indices(monkeypatch, vp_rank, cached_router_indices):
     routers = [
         _FakeRouter(),
         _FakeRouter(),
@@ -179,7 +180,7 @@ def test_set_router_replay_data_reuses_cached_recorded_router_indices(monkeypatc
     ]
     RouterReplay.router_instances = routers
     tf_config = _config(num_layers=2)
-    tf_config._verl_router_replay_local_router_indices = [2, 5]
+    tf_config._verl_router_replay_local_router_indices_by_vp = {0: [2, 5], 1: [1, 4]}
     attention_mask = torch.ones(1, 3, dtype=torch.bool)
     routed_experts = torch.tensor(
         [[[[1, 2], [7, 8]], [[3, 4], [9, 10]], [[5, 6], [11, 12]]]],
@@ -195,12 +196,12 @@ def test_set_router_replay_data_reuses_cached_recorded_router_indices(monkeypatc
     monkeypatch.setattr(rr_utils, "scatter_to_sequence_parallel_region", lambda tensor: tensor)
     monkeypatch.setattr(rr_utils, "get_current_rank_layer_info", lambda _config, _vp_rank=None: {"start": 0, "end": 2})
 
-    rr_utils.set_router_replay_data(routed_experts, attention_mask, tf_config)
+    rr_utils.set_router_replay_data(routed_experts, attention_mask, tf_config, vp_rank=vp_rank)
 
-    assert torch.equal(routers[2].target_topk_idx, routed_experts[0, :, 0, :])
-    assert torch.equal(routers[5].target_topk_idx, routed_experts[0, :, 1, :])
-    assert routers[0].target_topk_idx is None
-    assert routers[1].target_topk_idx is None
+    assert torch.equal(routers[cached_router_indices[0]].target_topk_idx, routed_experts[0, :, 0, :])
+    assert torch.equal(routers[cached_router_indices[1]].target_topk_idx, routed_experts[0, :, 1, :])
+    untouched = set(range(len(routers))) - set(cached_router_indices)
+    assert all(routers[idx].target_topk_idx is None for idx in untouched)
 
 
 def test_set_router_replay_data_rejects_missing_routes():
