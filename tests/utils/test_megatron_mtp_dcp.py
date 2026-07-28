@@ -82,7 +82,7 @@ def test_process_mtp_loss_uses_dynamic_group_and_token_scale(monkeypatch):
         captured.update(kwargs)
         return kwargs["hidden_states"][:1]
 
-    monkeypatch.setattr(mtp_patch, "_process_mtp_loss", fake_process)
+    monkeypatch.setattr(mtp_patch, "_process_mtp_loss", fake_process, raising=False)
     _postprocess(model, packed)
 
     assert captured["cp_group"] is dynamic_group
