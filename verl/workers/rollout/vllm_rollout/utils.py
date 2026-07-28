@@ -256,14 +256,10 @@ class vLLMColocateWorkerExtension:
 
         if current_platform.device_type == "npu" and self.device is None:
             self.device = torch.device(f"npu:{self.local_rank}")
+        assert self.device is not None
 
-        # In async mode, make sure the old lora is removed before adding the new one
-        if peft_config and base_sync_done:
-            self.remove_lora(VLLM_LORA_INT_ID)
-
-        use_standard_weight_load = not (peft_config and base_sync_done) and not is_fp8_model(
-            self.model_runner.vllm_config
-        )
+        # =========================== step 1: prepare for weight loading ===========================
+        quant_reload_states = None
 
         if self._is_qat_model:
             # QAT (compressed-tensors): Prepare for weight loading BEFORE receiving any buckets
@@ -277,18 +273,23 @@ class vLLMColocateWorkerExtension:
 
             prepare_modelopt_for_weight_reload(self.model_runner.model, device=self.device)
             logger.info("ModelOpt: prepare_modelopt_for_weight_reload completed")
-        elif use_standard_weight_load:
-            # Re-apply here because async IPC weight sync can happen long after init and lose MoE weight_loader attrs.
+        elif peft_config and base_sync_done:
+            # In async mode, make sure the old lora is removed before adding the new one
+            # TODO: this is buggy if lora span multiple buckets.
+            self.remove_lora(VLLM_LORA_INT_ID)
+            logger.info("LoRA adapter sync: remove old lora and prepare new lora")
+        elif is_fp8_model(self.model_runner.vllm_config):
+            from verl.utils.vllm.vllm_fp8_utils import prepare_quanted_weights_for_loading
+
+            quant_reload_states = [
+                (model, prepare_quanted_weights_for_loading(model)) for model in self._iter_all_models()
+            ]
+        else:
+            # TODO(wuxibin): not need anymore for newer vllm version.
             for model in self._iter_all_models():
                 patch_vllm_moe_model_weight_loader(model)
 
-        assert self.device is not None
-        quant_reload_state = False
-        if is_fp8_model(self.model_runner.vllm_config) and not (peft_config and base_sync_done):
-            from verl.utils.vllm.vllm_fp8_utils import prepare_quanted_weights_for_loading
-
-            quant_reload_state = prepare_quanted_weights_for_loading(self.model_runner)
-
+        # =========================== step 2: receive weights and update ===========================
         receiver = BucketedWeightReceiver(
             zmq_handle=self._get_zmq_handle(),
             device=self.device,
@@ -299,10 +300,10 @@ class vLLMColocateWorkerExtension:
                 weights,
                 peft_config=peft_config,
                 base_sync_done=base_sync_done,
-                quant_prepared=bool(quant_reload_state),
             )
         )
 
+        # =========================== step 3: process weights after loading ===========================
         if self._is_qat_model:
             # QAT (compressed-tensors): call process_weights_after_loading AFTER all buckets are received
             from verl.utils.qat import manual_process_weights_after_loading
@@ -315,12 +316,14 @@ class vLLMColocateWorkerExtension:
 
             modelopt_process_weights_after_loading(self.model_runner.model)
             logger.info("ModelOpt QAT: process_weights_after_loading completed")
-        elif quant_reload_state:
+        elif peft_config and base_sync_done:
+            logger.info("LoRA adapter sync, no post-process needed")
+        elif is_fp8_model(self.model_runner.vllm_config):
             from verl.utils.vllm.vllm_fp8_utils import process_quanted_weights_after_loading
 
-            process_quanted_weights_after_loading(self.model_runner, quant_reload_state)
-            logger.info("FP8/MXFP4: process_weights_after_loading completed")
-        elif use_standard_weight_load:
+            for model, reload_state in quant_reload_states:
+                process_quanted_weights_after_loading(model, reload_state)
+        else:
             # Some post-load transforms are non-idempotent; run once after all buckets.
             from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
@@ -344,7 +347,6 @@ class vLLMColocateWorkerExtension:
         weights: list[tuple[str, torch.Tensor]],
         peft_config: dict,
         base_sync_done: bool,
-        quant_prepared: bool = False,
     ):
         if peft_config and base_sync_done:
             # Clone out of the receiver's reused IPC bucket buffer: add_lora keeps these tensors
@@ -366,13 +368,10 @@ class vLLMColocateWorkerExtension:
             if is_fp8_model(self.model_runner.vllm_config):
                 logger.info(f"FP8 model detected (async): {self.model_runner.vllm_config.quant_config}")
                 # Convert bf16 weights to fp8 format before loading
-                reload_kwargs = {"prepare_model": not quant_prepared, "process_model": not quant_prepared}
-                loaded_params = (
-                    load_quanted_weights(param_updates, self.model_runner, **reload_kwargs) if param_updates else []
-                )
+                loaded_params = load_quanted_weights(param_updates, self.model_runner) if param_updates else []
                 # Keep the draft model in sync when present.
                 if self._use_mtp_drafter_weight_sync() and param_updates:
-                    load_quanted_weights(param_updates, self.model_runner, is_drafter=True, **reload_kwargs)
+                    load_quanted_weights(param_updates, self.model_runner, is_drafter=True)
                 loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
                 logger.info(
                     f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}, loaded_buffers: {loaded_buffers}"

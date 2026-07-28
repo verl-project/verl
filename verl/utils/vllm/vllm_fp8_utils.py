@@ -319,18 +319,28 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
         del v, param_lp, param_scale
 
 
-def prepare_quanted_weights_for_loading(model_runner):
-    model = model_runner.model
+def prepare_quanted_weights_for_loading(model):
+    """Restore quantized params to the layout their ``weight_loader`` expects.
+
+    Must run once before the first bucket, and pairs with
+    ``process_quanted_weights_after_loading``, which re-applies the inference
+    layout once the last bucket has landed. Both helpers select work by
+    inspecting the model, so they are no-ops for quantization schemes that need
+    no restore. The returned value is opaque reload state for the paired call.
+    """
+    restore_mxfp8_weights_for_loading(model)
     if not is_deepseek_v4_model(model):
         return False
     return prepare_deepseek_v4_weights_for_loading(model, _copy_param_subclass_attrs)
 
 
-def process_quanted_weights_after_loading(model_runner, reload_state):
-    process_deepseek_v4_weights_after_loading(model_runner.model, reload_state)
+def process_quanted_weights_after_loading(model, reload_state):
+    """Re-apply the inference layout undone by ``prepare_quanted_weights_for_loading``."""
+    apply_mxfp8_transformation_after_loading(model)
+    process_deepseek_v4_weights_after_loading(model, reload_state)
 
 
-def load_quanted_weights(weights, model_runner, is_drafter=False, prepare_model=True, process_model=True):
+def load_quanted_weights(weights, model_runner, is_drafter=False):
     if is_drafter:
         drafter = getattr(model_runner, "drafter", None)
         model = drafter.model if drafter is not None and hasattr(drafter, "model") else None
@@ -342,15 +352,6 @@ def load_quanted_weights(weights, model_runner, is_drafter=False, prepare_model=
         model = model_runner.model
     quant_config = model_runner.vllm_config.quant_config
     vllm_dtype = model_runner.vllm_config.model_config.dtype
-
-    reload_state = None
-    if prepare_model:
-        reload_state = prepare_quanted_weights_for_loading(model_runner)
-
-    is_mxfp8_npu = is_mxfp8_vllm_ascend(quant_config)
-    if is_mxfp8_npu:
-        # For MXFP8 on NPU, restore the original shapes expected by weight_loader.
-        restore_mxfp8_weights_for_loading(model)
 
     weights = list(weights)
     cache_deepseek_v4_dense_fp8_scales(model, weights)
@@ -372,11 +373,6 @@ def load_quanted_weights(weights, model_runner, is_drafter=False, prepare_model=
             if hasattr(param, "orig_type"):
                 param.__class__ = param.orig_type
                 del param.orig_type
-
-    if process_model:
-        if is_mxfp8_npu:
-            apply_mxfp8_transformation_after_loading(model)
-        process_quanted_weights_after_loading(model_runner, reload_state)
 
     return loaded_params
 
