@@ -18,6 +18,7 @@ import pytest
 import torch
 
 from examples.tmem.locomo import (
+    EXTRACTION_END_SENTINEL,
     exact_match,
     normalize_answer,
     pack_context_chunks,
@@ -31,9 +32,13 @@ from examples.tmem.locomo import (
 )
 from examples.tmem.merge_shards import merge_rollout_stats
 from examples.tmem.run_locomo import (
+    OFFICIAL_LOCOMO_ANSWER_HPARAMS,
     PAPER_TMEM_HPARAMS,
     DFlashRollout,
     JsonArrayEndCriteria,
+    _decode_sglang_output,
+    _render_sglang_prompt,
+    parse_args,
     sampling_seed_for_request,
     validate_table1_hparams,
 )
@@ -47,12 +52,37 @@ def test_parse_qa_pairs_accepts_fenced_json_and_drops_invalid_entries():
 
 
 def test_table1_hparams_are_locked_to_paper_values():
-    args = SimpleNamespace(**PAPER_TMEM_HPARAMS)
+    args = SimpleNamespace(**(PAPER_TMEM_HPARAMS | OFFICIAL_LOCOMO_ANSWER_HPARAMS))
     validate_table1_hparams(args)
 
     args.epochs = 2
     with pytest.raises(ValueError, match=r"epochs.*2.*5"):
         validate_table1_hparams(args)
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "expected"),
+    [
+        ("max_answer_tokens", 51, 50),
+        ("answer_temperature", 0.7, 0.4),
+        ("answer_top_p", 0.8, 0.9),
+        ("answer_top_k", 20, 10),
+    ],
+)
+def test_table1_hparams_lock_official_locomo_answer_protocol(name, value, expected):
+    args = SimpleNamespace(**(PAPER_TMEM_HPARAMS | OFFICIAL_LOCOMO_ANSWER_HPARAMS))
+    setattr(args, name, value)
+
+    with pytest.raises(ValueError, match=rf"{name}.*{value}.*{expected}"):
+        validate_table1_hparams(args)
+
+
+def test_cli_defaults_follow_official_locomo_answer_protocol(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["run_locomo", "--data", "locomo10.json"])
+
+    args = parse_args()
+
+    assert {name: getattr(args, name) for name in OFFICIAL_LOCOMO_ANSWER_HPARAMS} == OFFICIAL_LOCOMO_ANSWER_HPARAMS
 
 
 def test_paper_normalization_and_metrics():
@@ -116,22 +146,19 @@ def test_context_trigger_includes_session_that_crosses_budget():
 
 def test_json_array_stopping_criteria_is_vectorized_per_sequence():
     class Tokenizer:
-        def __len__(self):
-            return 3
+        def batch_decode(self, token_ids, skip_special_tokens=True):
+            values = {0: "[", 1: '{"instruction":"x]y","output":"z"}', 2: "]", 9: "prompt"}
+            return ["".join(values[token_id] for token_id in row) for row in token_ids]
 
-        def batch_decode(self, token_ids):
-            values = ["word", "other", "]\n"]
-            return [values[token_id[0]] for token_id in token_ids]
-
-    criteria = JsonArrayEndCriteria(Tokenizer())
-    finished = criteria(torch.tensor([[0, 2], [1, 0]]), torch.empty(0))
-    torch.testing.assert_close(finished, torch.tensor([True, False]))
+    criteria = JsonArrayEndCriteria(Tokenizer(), prompt_length=1)
+    finished = criteria(torch.tensor([[9, 0, 1], [9, 0, 2]]), torch.empty(0))
+    torch.testing.assert_close(finished, torch.tensor([False, True]))
 
 
-def test_dflash_extraction_keeps_json_terminator():
+def test_dflash_extraction_stops_at_unambiguous_sentinel_not_closing_bracket():
     rollout = object.__new__(DFlashRollout)
     rollout.args = SimpleNamespace(
-        max_extraction_tokens=1024,
+        max_extraction_tokens=4096,
         max_answer_tokens=50,
         extraction_temperature=0.7,
         extraction_top_p=0.8,
@@ -140,17 +167,47 @@ def test_dflash_extraction_keeps_json_terminator():
         answer_top_p=0.9,
         answer_top_k=10,
     )
-    rollout.extraction_stop_token_ids = [2, 7]
 
     params = rollout._sampling_params(extraction=True, sampling_seed=17)
 
-    assert params["stop_token_ids"] == [2, 7]
-    assert params["no_stop_trim"] is True
-    assert params["max_new_tokens"] == 1024
+    assert "stop_token_ids" not in params
+    assert "no_stop_trim" not in params
+    assert params["stop"] == EXTRACTION_END_SENTINEL
+    assert params["max_new_tokens"] == 4096
     assert params["temperature"] == 0.7
     assert params["top_p"] == 0.8
     assert params["top_k"] == 20
     assert params["sampling_seed"] == 17
+
+
+def test_sglang_extraction_restores_prefilled_json_array_start():
+    assert _decode_sglang_output('{"instruction":"q","output":"a"}]', extraction=True) == (
+        '[{"instruction":"q","output":"a"}]'
+    )
+    assert _decode_sglang_output("plain answer", extraction=False) == "plain answer"
+    assert (
+        _decode_sglang_output(
+            f'{{"instruction":"q","output":"a"}}]{EXTRACTION_END_SENTINEL}ignored',
+            extraction=True,
+        )
+        == '[{"instruction":"q","output":"a"}]'
+    )
+
+
+def test_sglang_extraction_prompt_requests_unambiguous_end_sentinel():
+    class Tokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            assert kwargs["tokenize"] is False
+            return messages[-1]["content"]
+
+    rendered = _render_sglang_prompt(
+        Tokenizer(),
+        [{"role": "user", "content": "Return JSON."}],
+        extraction=True,
+    )
+
+    assert f"append exactly {EXTRACTION_END_SENTINEL}" in rendered
+    assert rendered.endswith("[")
 
 
 def test_dflash_stats_are_reset_per_seed():

@@ -23,7 +23,8 @@ generation can be batched without sharing fast-weight state between questions.
 
 ## Hyperparameter boundary
 
-The Table 1 runner fails closed if any paper-specified TMEM setting differs:
+The Table 1 runner fails closed if any paper-specified TMEM setting or official
+LoCoMo final-answer decoding setting differs:
 
 | Setting | Locked value |
 | --- | --- |
@@ -32,6 +33,7 @@ The Table 1 runner fails closed if any paper-specified TMEM setting differs:
 | Online SFT | plain SGD, learning rate `5e-4`, 5 epochs, batch size 16 |
 | Trigger dynamics | cumulative B within an episode; working context cleared |
 | LoCoMo context budget | 4096 tokens |
+| Final-answer decoding | official LoCoMo runner: 50 tokens, temperature 0.4, top-p 0.9, top-k 10 |
 
 Question sharding, generation batch size, SGLang memory reservation, and the
 SFT *episode microbatch* are execution settings, not TMEM training
@@ -61,7 +63,8 @@ CUDA_VISIBLE_DEVICES=4,5 python -m examples.tmem.run_locomo \
   --trainer-device cuda:0 \
   --rollout-device cuda:1 \
   --generation-batch-size 20 \
-  --max-extraction-tokens 1024 \
+  --max-extraction-tokens 4096 \
+  --extraction-retries 2 \
   --seeds 1 2 3
 ```
 
@@ -73,10 +76,13 @@ checkpointed to JSONL immediately.
 
 ### DFlash rollout
 
-DFlash requires an SGLang build with DFlash and verifier-only multi-LoRA
-support. In particular, the target worker must keep LoRA enabled while its
-cloned draft-worker arguments set `enable_lora=False`. Run it with a compatible
-DFlash draft checkpoint:
+DFlash requires an SGLang build with DFlash, verifier-only multi-LoRA support,
+and request-seeded verifier sampling. In particular, the target worker must
+keep LoRA enabled while its cloned draft-worker arguments set
+`enable_lora=False`, and speculative acceptance/final-sampling draws must be
+keyed by each request's sampling seed and absolute token position. The runner
+fails closed when that seeded-verifier capability is absent. Run it with a
+compatible DFlash draft checkpoint:
 
 ```bash
 CUDA_VISIBLE_DEVICES=4,5 python -m examples.tmem.run_locomo \
@@ -88,7 +94,8 @@ CUDA_VISIBLE_DEVICES=4,5 python -m examples.tmem.run_locomo \
   --trainer-device cuda:0 \
   --rollout-device cuda:1 \
   --generation-batch-size 20 \
-  --max-extraction-tokens 1024 \
+  --max-extraction-tokens 4096 \
+  --extraction-retries 2 \
   --seeds 1 2 3
 ```
 
@@ -108,7 +115,8 @@ merges both shards into one 1,986-question seed result. It defaults to the
 sibling `Draft-OPD` checkout and its `.conda/draft-opd` environment. Paths and
 resources can be overridden with
 `CONDA_ENV`, `MODEL_PATH`, `DRAFT_MODEL_PATH`, `GPU_IDS`,
-`SGLANG_MEM_FRACTION`, `GENERATION_BATCH_SIZE`, and `TMEM_CUDA_HOME`. Set
+`SGLANG_MEM_FRACTION`, `GENERATION_BATCH_SIZE`, `MAX_EXTRACTION_TOKENS`,
+`EXTRACTION_RETRIES`, `EXTRACTION_FAILURE_POLICY`, and `TMEM_CUDA_HOME`. Set
 `MAX_QUESTIONS=1` for a one-question-per-GPU runtime smoke test.
 
 The DFlash verifier uses SGLang's rejection sampler for non-greedy decoding,
@@ -133,13 +141,30 @@ CUDA_VISIBLE_DEVICES=4,5 python -m examples.tmem.run_locomo \
 The paper specifies LoRA rank and targets, SVD initialization, frozen A,
 online-SFT optimizer settings, context budget, extraction prompt, dataset, and
 metrics. It does not publish its model revision, random seeds, extraction
-decoding limit or sampling parameters, final-answer decoding parameters, LoRA
-alpha, or gradient clipping. This example uses the paper's Appendix system
-template and Figure 3 memory-writing prompt as separate system/user messages,
-the official LoCoMo answer protocol, `lora_alpha=rank` so PEFT implements the
-paper's unscaled `BA`, Qwen3's standard non-thinking sampling
-(`temperature=0.7`, `top_p=0.8`, `top_k=20`) for extraction and answering, a
-1024-token extraction cap (the only response budget published, in the RL
-setup), and plain SGD without gradient clipping. Every operational
-choice and generated record is stored so differences from the reported 25.72
-F1 / 15.40 EM can be audited instead of hidden.
+decoding limit or sampling parameters, Qwen3-specific final-answer decoding
+parameters, LoRA alpha, or gradient clipping. This example uses the paper's
+Appendix system template and Figure 3 memory-writing prompt as separate
+system/user messages, `lora_alpha=rank` so PEFT implements the paper's unscaled
+`BA`, and plain SGD without gradient clipping. Final answers follow the
+[official LoCoMo Hugging Face benchmark runner][locomo-hf-runner]
+(`max_new_tokens=50` for one question, `temperature=0.4`, `top_p=0.9`,
+`top_k=10`); these values come from that benchmark protocol, not from the TMEM
+paper. Extraction remains a separate reproduction choice: Qwen3's standard
+non-thinking sampling (`temperature=0.7`, `top_p=0.8`, `top_k=20`), a
+prefilled `[` on SGLang backends, a 4096-token operational safety cap, and at
+most two retries. SGLang and DFlash requests additionally require a
+`</qa_pairs>` sentinel after the outer JSON array and stop on that unambiguous
+string; this avoids treating `]` inside a JSON string as an endpoint. Exact QA
+duplicates, ignoring case and repeated whitespace, are removed before SFT and
+before extending episode history. Entries without an actual question mark, or
+whose normalized instruction and output are identical, are rejected as
+non-QA supervision. The runner records every extraction attempt,
+sentinel-independent parse result, schema drop, and duplicate count instead of
+silently losing malformed or truncated JSON. The long-run default records
+`extraction_failed=true` and applies an explicit empty update after retries;
+`--extraction-failure-policy error` is available for debugging. These are
+operational safeguards rather than paper-reported hyperparameters. Every
+operational choice and generated record is stored so differences from the
+reported 25.72 F1 / 15.40 EM can be audited instead of hidden.
+
+[locomo-hf-runner]: https://github.com/snap-research/locomo/blob/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376/task_eval/hf_llm_utils.py#L87-L166

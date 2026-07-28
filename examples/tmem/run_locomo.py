@@ -22,6 +22,7 @@ import json
 import random
 import statistics
 import time
+from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -35,12 +36,15 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, Stoppi
 from examples.tmem.locomo import (
     ANSWER_PROMPT,
     ANSWER_SYSTEM_PROMPT,
+    EXTRACTION_END_SENTINEL,
     EXTRACTION_SYSTEM_PROMPT,
     MEMORY_WRITING_PROMPT,
     conversation_sessions,
+    deduplicate_qa_pairs,
+    has_complete_json_array,
     load_locomo,
     pack_context_chunks,
-    parse_qa_pairs,
+    parse_qa_pairs_result,
     postprocess_prediction,
     prepare_question,
     reference_answer,
@@ -62,6 +66,13 @@ PAPER_TMEM_HPARAMS: dict[str, Any] = {
     "context_budget": 4096,
     "memory_mode": "tmem",
     "max_grad_norm": 0.0,
+}
+
+OFFICIAL_LOCOMO_ANSWER_HPARAMS: dict[str, Any] = {
+    "max_answer_tokens": 50,
+    "answer_temperature": 0.4,
+    "answer_top_p": 0.9,
+    "answer_top_k": 10,
 }
 
 
@@ -103,14 +114,31 @@ def parse_args() -> argparse.Namespace:
         help="Optional gradient clipping; 0 follows the paper's stated plain-SGD update.",
     )
     parser.add_argument("--max-sft-length", type=int, default=512)
-    parser.add_argument("--max-extraction-tokens", type=int, default=1024)
+    parser.add_argument(
+        "--max-extraction-tokens",
+        type=int,
+        default=4096,
+        help="Extraction safety cap. This is an operational choice because the pre-RL paper does not publish one.",
+    )
+    parser.add_argument(
+        "--extraction-retries",
+        type=int,
+        default=2,
+        help="Retries after malformed or truncated extraction output; all attempts are recorded.",
+    )
+    parser.add_argument(
+        "--extraction-failure-policy",
+        choices=["empty", "error"],
+        default="empty",
+        help="After retries, record an explicit empty update or stop the run for debugging.",
+    )
     parser.add_argument("--max-answer-tokens", type=int, default=50)
     parser.add_argument("--extraction-temperature", type=float, default=0.7)
     parser.add_argument("--extraction-top-p", type=float, default=0.8)
     parser.add_argument("--extraction-top-k", type=int, default=20)
-    parser.add_argument("--answer-temperature", type=float, default=0.7)
-    parser.add_argument("--answer-top-p", type=float, default=0.8)
-    parser.add_argument("--answer-top-k", type=int, default=20)
+    parser.add_argument("--answer-temperature", type=float, default=0.4)
+    parser.add_argument("--answer-top-p", type=float, default=0.9)
+    parser.add_argument("--answer-top-k", type=int, default=10)
     parser.add_argument("--max-questions", type=int)
     parser.add_argument("--questions-per-category", type=int)
     parser.add_argument("--generation-batch-size", type=int, default=8)
@@ -133,13 +161,14 @@ def sampling_seed_for_request(seed: int, adapter_name: str, rendered_prompt: str
 
 
 def validate_table1_hparams(args: argparse.Namespace) -> None:
+    required_hparams = PAPER_TMEM_HPARAMS | OFFICIAL_LOCOMO_ANSWER_HPARAMS
     mismatches = {
         name: (getattr(args, name), expected)
-        for name, expected in PAPER_TMEM_HPARAMS.items()
+        for name, expected in required_hparams.items()
         if getattr(args, name) != expected
     }
     if mismatches:
-        raise ValueError(f"Table 1 reproduction requires the paper hyperparameters; mismatches={mismatches}")
+        raise ValueError(f"Table 1 reproduction requires the locked paper/LoCoMo settings; mismatches={mismatches}")
 
 
 def build_model(model_path: str, device: str, rank: int):
@@ -177,27 +206,42 @@ def _strip_thinking(text: str) -> str:
     return text.rsplit("</think>", maxsplit=1)[-1].strip() if "</think>" in text else text.strip()
 
 
+def _render_sglang_prompt(tokenizer, prompt, *, extraction: bool) -> str:
+    if extraction:
+        prompt = [dict(message) for message in prompt]
+        prompt[-1]["content"] += (
+            "\nAfter the closing bracket of the outer JSON array, append exactly "
+            f"{EXTRACTION_END_SENTINEL}. Do not use this sentinel inside a JSON string."
+        )
+    rendered = render_chat(tokenizer, prompt, tokenize=False)
+    return f"{rendered}[" if extraction else rendered
+
+
+def _decode_sglang_output(text: str, *, extraction: bool) -> str:
+    text = _strip_thinking(text)
+    if extraction:
+        text = text.split(EXTRACTION_END_SENTINEL, maxsplit=1)[0]
+    return f"[{text}" if extraction else text
+
+
 class JsonArrayEndCriteria(StoppingCriteria):
-    def __init__(self, tokenizer):
-        self.end_token_ids = []
-        for start in range(0, len(tokenizer), 4096):
-            ids = [[token_id] for token_id in range(start, min(start + 4096, len(tokenizer)))]
-            decoded = tokenizer.batch_decode(ids)
-            self.end_token_ids.extend(
-                token_id
-                for token_id, text in zip(range(start, start + len(decoded)), decoded, strict=True)
-                if text.rstrip().endswith("]")
-            )
-        if not self.end_token_ids:
-            raise ValueError("Tokenizer has no token that can terminate a JSON array")
-        self._device_token_ids: dict[torch.device, torch.Tensor] = {}
+    """Stop only after a top-level JSON array closes, not at `]` inside a string."""
+
+    def __init__(self, tokenizer, prompt_length: int = 0):
+        self.tokenizer = tokenizer
+        self.prompt_length = prompt_length
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> torch.BoolTensor:
-        end_token_ids = self._device_token_ids.get(input_ids.device)
-        if end_token_ids is None:
-            end_token_ids = torch.tensor(self.end_token_ids, device=input_ids.device)
-            self._device_token_ids[input_ids.device] = end_token_ids
-        return torch.isin(input_ids[:, -1], end_token_ids)
+        continuations = input_ids[:, self.prompt_length :].tolist()
+        try:
+            texts = self.tokenizer.batch_decode(continuations, skip_special_tokens=True)
+        except TypeError:
+            texts = self.tokenizer.batch_decode(continuations)
+        return torch.tensor(
+            [has_complete_json_array(text) for text in texts],
+            dtype=torch.bool,
+            device=input_ids.device,
+        )
 
 
 class TransformersRollout:
@@ -206,7 +250,6 @@ class TransformersRollout:
         self.model.requires_grad_(False).eval()
         self.tokenizer = tokenizer
         self.args = args
-        self.extraction_stopping_criteria = StoppingCriteriaList([JsonArrayEndCriteria(tokenizer)])
 
     @torch.inference_mode()
     def generate_batch(
@@ -232,7 +275,11 @@ class TransformersRollout:
             temperature = self.args.answer_temperature
             top_p = self.args.answer_top_p
             top_k = self.args.answer_top_k
-        stopping_criteria = self.extraction_stopping_criteria if extraction else None
+        stopping_criteria = (
+            StoppingCriteriaList([JsonArrayEndCriteria(self.tokenizer, inputs.input_ids.shape[1])])
+            if extraction
+            else None
+        )
         generation_args: dict[str, Any] = {
             "input_ids": inputs.input_ids,
             "attention_mask": inputs.attention_mask,
@@ -305,12 +352,17 @@ class SGLangRollout:
             "max_new_tokens": max_new_tokens,
             "temperature": temperature,
         }
+        if extraction:
+            sampling_params["stop"] = EXTRACTION_END_SENTINEL
         if temperature > 0:
             top_p = self.args.extraction_top_p if extraction else self.args.answer_top_p
             top_k = self.args.extraction_top_k if extraction else self.args.answer_top_k
             sampling_params.update({"top_p": top_p, "top_k": top_k})
-        rendered = render_chat(self.tokenizer, prompt, tokenize=False)
-        return _strip_thinking(self.engine.generate(prompt=rendered, sampling_params=sampling_params)["text"])
+        rendered = _render_sglang_prompt(self.tokenizer, prompt, extraction=extraction)
+        return _decode_sglang_output(
+            self.engine.generate(prompt=rendered, sampling_params=sampling_params)["text"],
+            extraction=extraction,
+        )
 
     def sync(self, trainer, *, adapter_name: str = "default") -> None:
         if adapter_name != "default":
@@ -340,7 +392,22 @@ class DFlashRollout:
             raise ValueError("--dflash-block-size must be at least 2")
 
         import sglang as sgl
-        from sglang.srt.speculative.dflash_utils import is_dflash_sampling_verify_available
+
+        try:
+            from sglang.srt.speculative.dflash_utils import (
+                DFLASH_REQUEST_SEEDED_VERIFY_VERSION,
+                is_dflash_sampling_verify_available,
+            )
+        except ImportError as error:
+            raise RuntimeError(
+                "This DFlash checkout lacks request-seeded verifier sampling. "
+                "Use the patched Draft-OPD revision documented in examples/tmem/README.md."
+            ) from error
+
+        if DFLASH_REQUEST_SEEDED_VERIFY_VERSION != 1:
+            raise RuntimeError(
+                f"Unsupported DFlash request-seeded verifier version: {DFLASH_REQUEST_SEEDED_VERIFY_VERSION}"
+            )
 
         if not is_dflash_sampling_verify_available():
             raise RuntimeError(
@@ -361,7 +428,6 @@ class DFlashRollout:
                 f"--dflash-block-size={args.dflash_block_size} does not match "
                 f"checkpoint block_size={self.dflash_block_size}"
             )
-        self.extraction_stop_token_ids = JsonArrayEndCriteria(tokenizer).end_token_ids
         self.reset_stats(seed=0)
         device_index = torch.device(device).index
         if device_index is None:
@@ -421,13 +487,20 @@ class DFlashRollout:
         self.request_count = restored
         self.resumed_request_count = restored
 
-    def _sampling_params(self, *, extraction: bool, sampling_seed: int | None = None) -> dict[str, Any]:
+    def _sampling_params(
+        self,
+        *,
+        extraction: bool,
+        sampling_seed: int | None = None,
+    ) -> dict[str, Any]:
         max_new_tokens = self.args.max_extraction_tokens if extraction else self.args.max_answer_tokens
         temperature = self.args.extraction_temperature if extraction else self.args.answer_temperature
         params: dict[str, Any] = {
             "max_new_tokens": max_new_tokens,
             "temperature": temperature,
         }
+        if extraction:
+            params["stop"] = EXTRACTION_END_SENTINEL
         if temperature > 0:
             params.update(
                 {
@@ -435,11 +508,6 @@ class DFlashRollout:
                     "top_k": self.args.extraction_top_k if extraction else self.args.answer_top_k,
                 }
             )
-        if extraction:
-            params["stop_token_ids"] = self.extraction_stop_token_ids
-            # Keep the closing JSON-array token in the decoded text so the
-            # generated supervision remains parseable.
-            params["no_stop_trim"] = True
         if sampling_seed is not None:
             params["sampling_seed"] = sampling_seed
         return params
@@ -453,7 +521,7 @@ class DFlashRollout:
     ) -> list[str]:
         if adapter_names is None:
             adapter_names = ["default"] * len(prompts)
-        rendered = [render_chat(self.tokenizer, prompt, tokenize=False) for prompt in prompts]
+        rendered = [_render_sglang_prompt(self.tokenizer, prompt, extraction=extraction) for prompt in prompts]
         sampling_params = [
             self._sampling_params(
                 extraction=extraction,
@@ -489,7 +557,7 @@ class DFlashRollout:
         ]
         self.spec_accept_length_sum += sum(accept_lengths)
         self.spec_accept_length_count += len(accept_lengths)
-        return [_strip_thinking(result["text"]) for result in results]
+        return [_decode_sglang_output(result["text"], extraction=extraction) for result in results]
 
     def generate(self, prompt, *, extraction: bool) -> str:
         return self.generate_batch([prompt], extraction=extraction)[0]
@@ -546,6 +614,148 @@ def _generate_in_batches(
             )
         )
     return outputs
+
+
+class ExtractionGenerationError(RuntimeError):
+    """Raised before SFT when extraction retries cannot produce valid supervision."""
+
+
+def _retry_extraction_prompt(prompt: Sequence[dict[str, str]], attempt: int, status: str) -> list[dict[str, str]]:
+    retry_prompt = [dict(message) for message in prompt]
+    retry_prompt[-1]["content"] += (
+        f"\n\nYour previous extraction attempt {attempt} was rejected ({status}). "
+        "Regenerate the response from scratch. Return one complete, valid JSON array only; "
+        "escape quotes inside strings and close every object and the outer array."
+    )
+    return retry_prompt
+
+
+def _generate_extractions_with_retries(
+    rollout,
+    tokenizer,
+    prompts: list[Sequence[dict[str, str]]],
+    adapter_names: list[str],
+    args: argparse.Namespace,
+) -> list[dict[str, Any]]:
+    """Generate strict extraction records, retrying only failed requests."""
+    max_attempts = args.extraction_retries + 1
+    pending = list(range(len(prompts)))
+    attempt_prompts = list(prompts)
+    records: list[dict[str, Any] | None] = [None] * len(prompts)
+    attempts_by_request: list[list[dict[str, Any]]] = [[] for _ in prompts]
+
+    for attempt_index in range(1, max_attempts + 1):
+        if not pending:
+            break
+        pending_prompts = [attempt_prompts[index] for index in pending]
+        pending_adapters = [adapter_names[index] for index in pending]
+        if hasattr(rollout, "generate_batch"):
+            raw_extractions = _generate_in_batches(
+                rollout,
+                pending_prompts,
+                pending_adapters,
+                extraction=True,
+                batch_size=args.generation_batch_size,
+            )
+        else:
+            raw_extractions = [rollout.generate(prompt, extraction=True) for prompt in pending_prompts]
+
+        retry_pending = []
+        for request_index, raw_extraction in zip(pending, raw_extractions, strict=True):
+            parse_result = parse_qa_pairs_result(raw_extraction)
+            generated_tokens = len(tokenizer.encode(raw_extraction, add_special_tokens=False))
+            attempt_record = {
+                "attempt": attempt_index,
+                "status": parse_result.status,
+                "error": parse_result.error,
+                "dropped_items": parse_result.dropped_items,
+                "generated_tokens": generated_tokens,
+                "at_token_limit": generated_tokens >= args.max_extraction_tokens,
+                "raw_extraction": raw_extraction,
+            }
+            attempts_by_request[request_index].append(attempt_record)
+            if parse_result.valid:
+                records[request_index] = {
+                    "pairs": parse_result.pairs,
+                    "raw_extraction": raw_extraction,
+                    "extraction_attempts": attempts_by_request[request_index],
+                    "extraction_failed": False,
+                }
+                continue
+
+            adapter_name = adapter_names[request_index]
+            print(
+                f"adapter={adapter_name} extraction_attempt={attempt_index}/{max_attempts} "
+                f"status={parse_result.status} generated_tokens={generated_tokens} "
+                f"at_token_limit={attempt_record['at_token_limit']}",
+                flush=True,
+            )
+            if attempt_index < max_attempts:
+                attempt_prompts[request_index] = _retry_extraction_prompt(
+                    prompts[request_index],
+                    attempt_index,
+                    parse_result.status,
+                )
+                retry_pending.append(request_index)
+        pending = retry_pending
+
+    failed_indices = [index for index, record in enumerate(records) if record is None]
+    failures = {
+        adapter_names[index]: {
+            "statuses": [attempt["status"] for attempt in attempts_by_request[index]],
+            "generated_tokens": [attempt["generated_tokens"] for attempt in attempts_by_request[index]],
+            "raw_previews": [repr(attempt["raw_extraction"][:256]) for attempt in attempts_by_request[index]],
+        }
+        for index in failed_indices
+    }
+    if failed_indices and args.extraction_failure_policy == "error":
+        raise ExtractionGenerationError(
+            f"Extraction remained invalid after {max_attempts} attempts; refusing silent empty SFT: {failures}"
+        )
+    for index in failed_indices:
+        last_attempt = attempts_by_request[index][-1]
+        records[index] = {
+            "pairs": [],
+            "raw_extraction": last_attempt["raw_extraction"],
+            "extraction_attempts": attempts_by_request[index],
+            "extraction_failed": True,
+        }
+    if failures:
+        print(f"Continuing with explicit empty SFT updates after extraction failures: {failures}", flush=True)
+    return [record for record in records if record is not None]
+
+
+def extraction_telemetry(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate parse/retry outcomes already persisted in question records."""
+    statuses: Counter[str] = Counter()
+    request_count = 0
+    attempt_count = 0
+    at_token_limit_count = 0
+    failed_request_count = 0
+    duplicate_pairs_dropped = 0
+    for record in records:
+        for trigger in record.get("triggers", []):
+            request_count += 1
+            failed_request_count += int(bool(trigger.get("extraction_failed")))
+            duplicate_pairs_dropped += int(trigger.get("duplicate_pairs_dropped", 0))
+            attempts = trigger.get("extraction_attempts")
+            if attempts is None:
+                statuses["legacy_untracked"] += 1
+                attempt_count += 1
+                continue
+            for attempt in attempts:
+                statuses[str(attempt["status"])] += 1
+                attempt_count += 1
+                at_token_limit_count += int(bool(attempt.get("at_token_limit")))
+    return {
+        "requests": request_count,
+        "attempts": attempt_count,
+        "retries": max(0, attempt_count - request_count),
+        "at_token_limit": at_token_limit_count,
+        "failed_requests": failed_request_count,
+        "duplicate_pairs_dropped": duplicate_pairs_dropped,
+        "statuses": dict(sorted(statuses.items())),
+    }
 
 
 def encode_sft_pair(tokenizer, instruction: str, output: str, max_length: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -757,25 +967,32 @@ def evaluate_question_batch(
                 ]
                 for question, history in zip(prompted_questions, histories, strict=True)
             ]
-            raw_extractions = _generate_in_batches(
+            extraction_records = _generate_extractions_with_retries(
                 rollout,
+                tokenizer,
                 extraction_prompts,
                 episode_names,
-                extraction=True,
-                batch_size=args.generation_batch_size,
+                args,
             )
+            for question_index, extraction_record in enumerate(extraction_records):
+                unique_pairs, duplicate_count = deduplicate_qa_pairs(
+                    extraction_record["pairs"],
+                    histories[question_index],
+                )
+                extraction_record["pairs"] = unique_pairs
+                extraction_record["duplicate_pairs_dropped"] = duplicate_count
             pairs_by_adapter = [
-                (adapter_name, parse_qa_pairs(raw_extraction))
-                for adapter_name, raw_extraction in zip(episode_names, raw_extractions, strict=True)
+                (adapter_name, extraction_record["pairs"])
+                for adapter_name, extraction_record in zip(episode_names, extraction_records, strict=True)
             ]
             online_sft_batch(trainer, tokenizer, pairs_by_adapter, args, seed + trigger_index)
-            for question_index, (adapter_name, raw_extraction) in enumerate(
-                zip(episode_names, raw_extractions, strict=True)
+            for question_index, (adapter_name, extraction_record) in enumerate(
+                zip(episode_names, extraction_records, strict=True)
             ):
                 pairs = pairs_by_adapter[question_index][1]
                 rollout.sync(trainer, adapter_name=adapter_name)
                 histories[question_index].extend(pairs)
-                trigger_details[question_index].append({"pairs": pairs, "raw_extraction": raw_extraction})
+                trigger_details[question_index].append(extraction_record)
             print(
                 f"sample={sample['sample_id']} episodes={len(questions)} "
                 f"trigger={trigger_index + 1}/{len(memory_chunks)} synchronized",
@@ -861,12 +1078,20 @@ def evaluate_question(
             },
             {"role": "user", "content": MEMORY_WRITING_PROMPT},
         ]
-        raw_extraction = rollout.generate(extraction_messages, extraction=True)
-        pairs = parse_qa_pairs(raw_extraction)
+        extraction_record = _generate_extractions_with_retries(
+            rollout,
+            tokenizer,
+            [extraction_messages],
+            ["default"],
+            args,
+        )[0]
+        pairs, duplicate_count = deduplicate_qa_pairs(extraction_record["pairs"], qa_history)
+        extraction_record["pairs"] = pairs
+        extraction_record["duplicate_pairs_dropped"] = duplicate_count
         online_sft(trainer, tokenizer, pairs, args, seed + trigger_index)
         rollout.sync(trainer)
         qa_history.extend(pairs)
-        trigger_details.append({"pairs": pairs, "raw_extraction": raw_extraction})
+        trigger_details.append(extraction_record)
 
     working_context = chunks[-1] if chunks else ""
     answer_messages = [
@@ -926,8 +1151,13 @@ def append_record(
 def main() -> None:
     args = parse_args()
     validate_table1_hparams(args)
-    if args.generation_batch_size < 1 or args.sft_episode_microbatch_size < 1:
-        raise ValueError("generation batch size and SFT episode microbatch size must be positive")
+    if (
+        args.generation_batch_size < 1
+        or args.sft_episode_microbatch_size < 1
+        or args.max_extraction_tokens < 1
+        or args.extraction_retries < 0
+    ):
+        raise ValueError("batch sizes/token limits must be positive and extraction retries must be non-negative")
     print(
         "Paper TMEM HP: rank=6, targets=last-4 FFN gate/up/down, frozen-A/train-B, "
         "SGD lr=5e-4, epochs=5, SFT batch=16, cumulative triggers, Lmax=4096",
@@ -1030,6 +1260,7 @@ def main() -> None:
 
         metrics = score_breakdown(records)
         metrics.update({"seed": seed, "elapsed_seconds": time.time() - started})
+        metrics["extraction"] = extraction_telemetry(records)
         if isinstance(rollout, DFlashRollout):
             metrics["rollout"] = rollout.stats()
         all_run_metrics.append(metrics)

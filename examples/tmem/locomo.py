@@ -21,6 +21,7 @@ import re
 import string
 from collections import Counter
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,8 @@ Return ONLY a JSON array. Each item must be:
 }
 
 Output the generated SFT QA pairs in the specified JSON format. Do not include any explanations or additional text."""
+
+EXTRACTION_END_SENTINEL = "</qa_pairs>"
 
 ANSWER_SYSTEM_PROMPT = (
     "You are a helpful, respectful and honest assistant whose job is to understand the following conversation and "
@@ -123,14 +126,122 @@ def pack_context_chunks(sessions: Iterable[str], tokenizer, token_budget: int) -
     return [*trigger_contexts, "\n\n".join(current)]
 
 
-def parse_qa_pairs(text: str) -> list[dict[str, str]]:
+@dataclass(frozen=True)
+class QAPairParseResult:
+    """Structured result for auditing memory-extraction generations."""
+
+    pairs: list[dict[str, str]]
+    status: str
+    error: str | None = None
+    dropped_items: int = 0
+
+    @property
+    def valid(self) -> bool:
+        return self.status in {"ok", "empty", "partial"}
+
+
+def _json_array_span(text: str) -> tuple[int, int | None, str]:
+    """Locate the first top-level JSON array without treating `]` in strings as its end."""
+    start = text.find("[")
+    if start < 0:
+        return -1, None, "no_array"
+
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "[{":
+            stack.append(char)
+        elif char in "]}":
+            expected = "[" if char == "]" else "{"
+            if not stack or stack[-1] != expected:
+                return start, None, "malformed_brackets"
+            stack.pop()
+            if not stack:
+                return start, index + 1, "complete"
+    return start, None, "incomplete_array"
+
+
+def has_complete_json_array(text: str) -> bool:
+    """Return whether text contains a lexically complete top-level JSON array."""
+    return _json_array_span(text)[2] == "complete"
+
+
+def parse_qa_pairs_result(text: str) -> QAPairParseResult:
+    """Parse one extraction without silently converting malformed output to no supervision."""
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     text = text.replace("```json", "").replace("```", "").strip()
-    start, end = text.find("["), text.rfind("]")
-    if start < 0 or end <= start:
+    start, end, span_status = _json_array_span(text)
+    if span_status != "complete" or end is None:
+        return QAPairParseResult([], span_status, f"Could not find a complete top-level JSON array ({span_status})")
+    try:
+        values = json.loads(text[start:end])
+    except json.JSONDecodeError as error:
+        return QAPairParseResult([], "invalid_json", str(error))
+    if not isinstance(values, list):
+        return QAPairParseResult([], "invalid_schema", "Top-level JSON value is not an array")
+    pairs = []
+    for value in values:
+        if (
+            not isinstance(value, dict)
+            or not isinstance(value.get("instruction"), str)
+            or not isinstance(value.get("output"), str)
+        ):
+            continue
+        instruction = value["instruction"].strip()
+        output = value["output"].strip()
+        if (
+            not instruction
+            or not output
+            or "?" not in instruction
+            or " ".join(instruction.split()).casefold() == " ".join(output.split()).casefold()
+        ):
+            continue
+        pairs.append({"instruction": instruction, "output": output})
+    dropped_items = len(values) - len(pairs)
+    if dropped_items and not pairs:
+        return QAPairParseResult(
+            [],
+            "invalid_schema",
+            f"All {len(values)} entries lack non-empty string instruction/output",
+            dropped_items=dropped_items,
+        )
+    if dropped_items:
+        return QAPairParseResult(
+            pairs,
+            "partial",
+            f"Dropped {dropped_items} of {len(values)} schema-invalid entries",
+            dropped_items=dropped_items,
+        )
+    return QAPairParseResult(pairs, "ok" if pairs else "empty")
+
+
+def parse_qa_pairs(text: str) -> list[dict[str, str]]:
+    """Compatibility parser; extraction training uses :func:`parse_qa_pairs_result`."""
+    result = parse_qa_pairs_result(text)
+    if result.valid:
+        return result.pairs
+
+    # Preserve the public helper's historical tolerance of individually invalid
+    # entries. The runner itself deliberately does not use this fallback.
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    text = text.replace("```json", "").replace("```", "").strip()
+    start, end, span_status = _json_array_span(text)
+    if span_status != "complete" or end is None:
         return []
     try:
-        values = json.loads(text[start : end + 1])
+        values = json.loads(text[start:end])
     except json.JSONDecodeError:
         return []
     if not isinstance(values, list):
@@ -144,6 +255,35 @@ def parse_qa_pairs(text: str) -> list[dict[str, str]]:
         and value["instruction"].strip()
         and value["output"].strip()
     ]
+
+
+def deduplicate_qa_pairs(
+    pairs: Iterable[dict[str, str]],
+    existing_pairs: Iterable[dict[str, str]] = (),
+) -> tuple[list[dict[str, str]], int]:
+    """Drop exact semantic duplicates without guessing at near-duplicate meaning.
+
+    Case and repeated whitespace are ignored when comparing pairs. The first
+    spelling of a pair is preserved so SFT targets are otherwise unchanged.
+    """
+
+    def key(pair: dict[str, str]) -> tuple[str, str]:
+        return (
+            " ".join(pair["instruction"].split()).casefold(),
+            " ".join(pair["output"].split()).casefold(),
+        )
+
+    seen = {key(pair) for pair in existing_pairs}
+    unique = []
+    duplicate_count = 0
+    for pair in pairs:
+        pair_key = key(pair)
+        if pair_key in seen:
+            duplicate_count += 1
+            continue
+        seen.add(pair_key)
+        unique.append(pair)
+    return unique, duplicate_count
 
 
 def reference_answer(qa: dict[str, Any]) -> str:

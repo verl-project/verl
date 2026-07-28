@@ -19,6 +19,9 @@ DRAFT_MODEL_PATH="${DRAFT_MODEL_PATH:-${DRAFT_OPD_ROOT}/models/Qwen3-4B-Thinking
 GPU_IDS="${GPU_IDS:-4,5}"
 SGLANG_MEM_FRACTION="${SGLANG_MEM_FRACTION:-0.60}"
 GENERATION_BATCH_SIZE="${GENERATION_BATCH_SIZE:-12}"
+MAX_EXTRACTION_TOKENS="${MAX_EXTRACTION_TOKENS:-4096}"
+EXTRACTION_RETRIES="${EXTRACTION_RETRIES:-2}"
+EXTRACTION_FAILURE_POLICY="${EXTRACTION_FAILURE_POLICY:-empty}"
 MAX_QUESTIONS="${MAX_QUESTIONS:-}"
 CUDA_TOOLKIT_ROOT="${TMEM_CUDA_HOME:-/usr/local/cuda-12.2}"
 
@@ -91,7 +94,9 @@ run_shard() {
     --rollout-device cuda:0 \
     --sglang-mem-fraction "${SGLANG_MEM_FRACTION}" \
     --generation-batch-size "${GENERATION_BATCH_SIZE}" \
-    --max-extraction-tokens 1024 \
+    --max-extraction-tokens "${MAX_EXTRACTION_TOKENS}" \
+    --extraction-retries "${EXTRACTION_RETRIES}" \
+    --extraction-failure-policy "${EXTRACTION_FAILURE_POLICY}" \
     --seeds "${SEED}" \
     --resume \
     "${sample_args[@]}" \
