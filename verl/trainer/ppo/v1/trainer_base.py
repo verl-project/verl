@@ -1489,6 +1489,7 @@ class PPOTrainer(ABC):
         rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
         bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
         if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
+            self._maybe_debug_rollout_actor_probs(batch, metrics, rollout_corr_config)
             data = tq.kv_batch_get(
                 keys=batch.keys, partition_id=batch.partition_id, select_fields=["rollout_log_probs"]
             )
@@ -1540,6 +1541,54 @@ class PPOTrainer(ABC):
             metrics.update(calculate_debug_metrics(data))
 
         return batch
+
+    def _maybe_debug_rollout_actor_probs(self, batch: KVBatchMeta, metrics: dict, rollout_corr_config) -> None:
+        """Opt-in bypass-mode diagnostic: recompute π_θ to emit rollout-vs-actor consistency metrics.
+
+        Bypass mode sets ``old_log_probs = rollout_log_probs`` and never recomputes the actor policy
+        π_θ, so the metrics produced by ``calculate_debug_metrics`` (Pearson correlation between the
+        rollout and actor probabilities, plus ``rollout_probs_diff_*``) are unavailable by default.
+
+        When ``algorithm.rollout_correction.debug_rollout_actor_probs`` is enabled, run one extra
+        no-grad inference forward (``compute_log_prob``) purely for observability and feed the result
+        to ``calculate_debug_metrics``. The training computation (``old_log_probs = rollout_log_probs``)
+        is left untouched, so training results are byte-identical whether or not this is enabled.
+        """
+        if not (rollout_corr_config and rollout_corr_config.get("debug_rollout_actor_probs", False)):
+            return
+        if not self.config.actor_rollout_ref.rollout.calculate_log_probs:
+            if not getattr(self, "_debug_rollout_actor_probs_warned", False):
+                logger.warning(
+                    "algorithm.rollout_correction.debug_rollout_actor_probs=True requires "
+                    "actor_rollout_ref.rollout.calculate_log_probs=True to access rollout_log_probs; "
+                    "skipping the rollout-vs-actor diagnostic."
+                )
+                self._debug_rollout_actor_probs_warned = True
+            return
+
+        # Recompute π_θ via a no-grad inference forward. Snapshot/restore extra_info so the bypass
+        # path's downstream stages are unaffected by the diagnostic's flags.
+        saved_extra_info = dict(batch.extra_info)
+        try:
+            batch.extra_info.update(
+                {
+                    "calculate_entropy": False,
+                    "compute_loss": False,
+                    "temperature": self.config.actor_rollout_ref.rollout.temperature,
+                }
+            )
+            self.actor_rollout_wg.compute_log_prob(batch)
+            dbg = tq.kv_batch_get(
+                keys=batch.keys,
+                partition_id=batch.partition_id,
+                select_fields=["log_probs", "response_mask", "responses", "rollout_log_probs"],
+            )
+        finally:
+            batch.extra_info.clear()
+            batch.extra_info.update(saved_extra_info)
+
+        dbg["old_log_probs"] = response_from_nested(dbg.pop("log_probs"), dbg["response_mask"])
+        metrics.update(calculate_debug_metrics(DataProto(batch=dbg.to_padded_tensor())))
 
     def _compute_ref_log_prob(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the reference log prob of the batch."""

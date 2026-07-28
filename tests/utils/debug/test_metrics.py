@@ -11,12 +11,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import unittest
 
 import torch
 
 from verl.protocol import DataProto
 from verl.utils.debug.metrics import calculate_debug_metrics
+
+DEBUG_METRIC_KEYS = {
+    "training/rollout_probs_diff_valid",
+    "training/rollout_probs_diff_max",
+    "training/rollout_probs_diff_mean",
+    "training/rollout_probs_diff_std",
+    "training/rollout_actor_probs_pearson_corr",
+}
+
+
+def _make_data(rollout_log_probs, old_log_probs, mask):
+    rollout_log_probs = torch.tensor(rollout_log_probs, dtype=torch.float32)
+    old_log_probs = torch.tensor(old_log_probs, dtype=torch.float32)
+    mask = torch.tensor(mask)
+    return DataProto.from_dict(
+        {
+            "rollout_log_probs": rollout_log_probs,
+            "old_log_probs": old_log_probs,
+            "response_mask": mask,
+            "responses": torch.zeros_like(rollout_log_probs),
+        }
+    )
 
 
 class TestMetrics(unittest.TestCase):
@@ -42,6 +65,32 @@ class TestMetrics(unittest.TestCase):
         metrics = calculate_debug_metrics(data)
         print(metrics)
         assert metrics["training/rollout_probs_diff_valid"] == 1
+        # all five debug metrics must be emitted, including the Pearson correlation
+        assert DEBUG_METRIC_KEYS.issubset(metrics.keys())
+
+    def test_pearson_corr_perfectly_correlated(self):
+        # identical rollout/actor log-probs => probs are identical => correlation == 1.0
+        log_probs = [[-0.1, -0.5, -1.0, -2.0]]
+        data = _make_data(log_probs, log_probs, [[1, 1, 1, 1]])
+        metrics = calculate_debug_metrics(data)
+        assert metrics["training/rollout_probs_diff_valid"] == 1
+        self.assertAlmostEqual(metrics["training/rollout_actor_probs_pearson_corr"], 1.0, places=4)
+
+    def test_pearson_corr_anti_correlated(self):
+        # probs [0.1,0.2,0.3,0.4] vs [0.4,0.3,0.2,0.1] are perfectly anti-correlated => -1.0
+        rollout = [[math.log(p) for p in (0.1, 0.2, 0.3, 0.4)]]
+        actor = [[math.log(p) for p in (0.4, 0.3, 0.2, 0.1)]]
+        data = _make_data(rollout, actor, [[1, 1, 1, 1]])
+        metrics = calculate_debug_metrics(data)
+        self.assertAlmostEqual(metrics["training/rollout_actor_probs_pearson_corr"], -1.0, places=4)
+
+    def test_empty_mask_returns_nan(self):
+        # no valid tokens => valid flag 0 and nan statistics (guards against div-by-zero)
+        log_probs = [[-0.1, -0.5, -1.0, -2.0]]
+        data = _make_data(log_probs, log_probs, [[0, 0, 0, 0]])
+        metrics = calculate_debug_metrics(data)
+        assert metrics["training/rollout_probs_diff_valid"] == 0
+        assert math.isnan(metrics["training/rollout_actor_probs_pearson_corr"])
 
 
 if __name__ == "__main__":

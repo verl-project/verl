@@ -856,6 +856,7 @@ algorithm:
     bypass_mode: false
     loss_type: ppo_clip
     rollout_is_batch_normalize: false
+    debug_rollout_actor_probs: false
   _target_: verl.trainer.config.AlgoConfig
   gamma: 1.0
   lam: 1.0

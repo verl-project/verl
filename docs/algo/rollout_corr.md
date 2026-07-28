@@ -2,7 +2,7 @@
 
 **Author:** [Yingru Li](https://richardli.xyz/)
 
-Last updated: 10/30/2025.
+Last updated: 07/29/2026.
 
 ---
 
@@ -281,6 +281,32 @@ Threshold specification for rejection sampling.
 - **K1 KL modes (`*k1`)**: Use `"lower_upper"` strings (e.g. `"0.7_1.3"`). Supplying a float implies only the upper bound; the lower bound defaults to its reciprocal.
 - **K2/K3 KL modes (`*k2`/`*k3`)**: Supply positive upper bounds (float or numeric string).
 - Set to `null` to disable thresholds entirely (only valid when `rollout_rs` is null).
+
+### `debug_rollout_actor_probs` (bool)
+
+Opt-in diagnostic for **bypass mode** (`bypass_mode: true`), default `false`.
+
+In bypass mode the trainer sets `old_log_probs = rollout_log_probs` and never recomputes the actor
+policy π_θ, so the rollout-vs-actor consistency metrics — the Pearson correlation
+`training/rollout_actor_probs_pearson_corr` and `training/rollout_probs_diff_{max,mean,std}` — are
+**not emitted**. These metrics are among the most useful async-RL diagnostics because they directly
+measure the training/inference (off-policy) gap and catch precision/tokenizer/temperature drift that
+KL magnitude alone can miss.
+
+When set to `true`, the trainer runs **one extra no-grad inference forward** per step to recompute
+π_θ purely for observability and feeds it to `calculate_debug_metrics`. The training computation is
+untouched, so results are byte-identical whether or not this is enabled — the only cost is the extra
+inference forward (roughly what the non-bypass path already pays every step).
+
+Requirements and notes:
+
+- Requires `actor_rollout_ref.rollout.calculate_log_probs: true` so that `rollout_log_probs` is
+  available; otherwise the diagnostic logs a one-time warning and is skipped.
+- The recompute divides logits by `actor_rollout_ref.rollout.temperature`, which matches vLLM's
+  default `logprobs_mode: processed_logprobs` (log-probs taken after the logits processors,
+  temperature included). The correlation is therefore meaningful at any temperature. If you override
+  `logprobs_mode` to a `raw_*` variant, the two sides are scaled differently and the reported
+  correlation partly reflects that mismatch.
 
 ## Understanding the Framework: Components and Combinations
 

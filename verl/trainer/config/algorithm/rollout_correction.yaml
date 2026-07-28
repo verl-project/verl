@@ -26,3 +26,9 @@ loss_type: ppo_clip
 
 # Batch normalize IS weights: false = raw weights, true = normalize to mean=1.0
 rollout_is_batch_normalize: false
+
+# Opt-in diagnostic for bypass mode (bypass_mode=true): recompute the actor policy π_θ via one
+# extra no-grad inference forward to emit rollout-vs-actor consistency metrics (Pearson
+# correlation and rollout_probs_diff_*). Training math is unchanged.
+# Requires actor_rollout_ref.rollout.calculate_log_probs=true.
+debug_rollout_actor_probs: false

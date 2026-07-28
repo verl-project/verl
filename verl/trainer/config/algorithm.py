@@ -137,6 +137,15 @@ class RolloutCorrectionConfig(BaseConfig):
               L = -E[min(r*A, clip(r)*A)] where r = π_current / π_rollout
             Default: "ppo_clip"
 
+        debug_rollout_actor_probs (bool): Opt-in diagnostic, only honored in bypass mode
+            (bypass_mode=True). Bypass mode never recomputes the actor policy π_θ, so the
+            rollout-vs-actor consistency metrics emitted by ``calculate_debug_metrics``
+            (``training/rollout_actor_probs_pearson_corr`` and ``training/rollout_probs_diff_*``)
+            are unavailable. When True, the trainer runs one extra no-grad inference forward per
+            step purely for observability; the training computation is unchanged.
+            Requires actor_rollout_ref.rollout.calculate_log_probs=True.
+            Default: False
+
     Example:
         # Create with defaults
         config = RolloutCorrectionConfig()
@@ -182,6 +191,10 @@ class RolloutCorrectionConfig(BaseConfig):
     rollout_rs_threshold: Optional[str | float] = None
     bypass_mode: bool = False
     loss_type: str = "ppo_clip"
+    # Opt-in diagnostic (bypass mode only): recompute the actor policy π_θ via one extra no-grad
+    # inference forward to emit rollout-vs-actor consistency metrics (Pearson correlation and
+    # rollout_probs_diff_*). Training math is unchanged. Requires rollout.calculate_log_probs=True.
+    debug_rollout_actor_probs: bool = False
 
     @classmethod
     def decoupled_token_is(cls, threshold: float = 2.0) -> "RolloutCorrectionConfig":
