@@ -19,7 +19,7 @@ from verl.utils.attention_utils import index_first_axis, pad_input, unpad_input
 
 def test_index_first_axis_preserves_shape_and_gradient():
     hidden_states = torch.arange(48, dtype=torch.float32).reshape(8, 2, 3).requires_grad_()
-    indices = torch.tensor([0, 3, 7])
+    indices = torch.tensor([0, 3, 7], dtype=torch.int32)
 
     selected = index_first_axis(hidden_states, indices)
 
@@ -34,8 +34,8 @@ def test_index_first_axis_preserves_shape_and_gradient():
 
 def test_pad_and_unpad_input_round_trip_with_unused_tokens():
     hidden_states = torch.arange(24, dtype=torch.float32).reshape(2, 4, 3).requires_grad_()
-    attention_mask = torch.tensor([[1, 1, 0, 0], [1, 0, 1, 0]])
-    unused_mask = torch.tensor([[0, 0, 1, 0], [0, 1, 0, 0]])
+    attention_mask = torch.tensor([[1, 1, 0, 0], [1, 0, 1, 0]], dtype=torch.bool)
+    unused_mask = torch.tensor([[0, 0, 1, 0], [0, 1, 0, 0]], dtype=torch.bool)
 
     unpadded, indices, cu_seqlens, max_seqlen, used_seqlens = unpad_input(
         hidden_states,
@@ -44,7 +44,7 @@ def test_pad_and_unpad_input_round_trip_with_unused_tokens():
     )
     padded = pad_input(unpadded, indices, batch=2, seqlen=4)
 
-    selected_mask = (attention_mask + unused_mask).bool().unsqueeze(-1)
+    selected_mask = (attention_mask | unused_mask).unsqueeze(-1)
     expected = torch.where(selected_mask, hidden_states.detach(), torch.zeros_like(hidden_states))
     torch.testing.assert_close(padded, expected)
     torch.testing.assert_close(indices, torch.tensor([0, 1, 2, 4, 5, 6]))

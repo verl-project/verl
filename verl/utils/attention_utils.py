@@ -22,6 +22,8 @@ from einops import rearrange, repeat
 class IndexFirstAxis(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, indices):
+        assert indices.ndim == 1
+        indices = indices.long()
         ctx.save_for_backward(indices)
         assert input.ndim >= 2
         ctx.first_axis_dim, other_shape = input.shape[0], input.shape[1:]
@@ -53,8 +55,9 @@ index_first_axis = IndexFirstAxis.apply
 class IndexPutFirstAxis(torch.autograd.Function):
     @staticmethod
     def forward(ctx, values, indices, first_axis_dim):
-        ctx.save_for_backward(indices)
         assert indices.ndim == 1
+        indices = indices.long()
+        ctx.save_for_backward(indices)
         assert values.ndim >= 2
         output = torch.zeros(first_axis_dim, *values.shape[1:], device=values.device, dtype=values.dtype)
         output[indices] = values
