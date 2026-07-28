@@ -55,7 +55,7 @@ except ImportError:
             def _raise(*args, **kwargs):
                 raise RuntimeError(
                     f"transfer_queue is not installed. Cannot use tq.{name}(). "
-                    "Please install it by calling `pip install TransferQueue==0.1.9`"
+                    "Please install it by calling `pip install TransferQueue==0.1.8`"
                 )
 
             return _raise
@@ -71,7 +71,6 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 TQ_INITIALIZED = False
 _ASYNC_BRIDGE_LOOP: asyncio.AbstractEventLoop | None = None
 _ASYNC_BRIDGE_THREAD: threading.Thread | None = None
-_ASYNC_BRIDGE_PID: int | None = None
 _ASYNC_BRIDGE_LOCK = threading.Lock()
 
 
@@ -81,9 +80,19 @@ def _run_event_loop_forever(loop: asyncio.AbstractEventLoop, ready: threading.Ev
     loop.run_forever()
 
 
-def _stop_async_bridge_runtime(loop: asyncio.AbstractEventLoop | None, thread: threading.Thread | None) -> None:
-    if loop is None:
-        return
+def _shutdown_async_bridge_runtime(
+    loop: asyncio.AbstractEventLoop | None = None,
+    thread: threading.Thread | None = None,
+) -> None:
+    global _ASYNC_BRIDGE_LOOP, _ASYNC_BRIDGE_THREAD
+
+    # No explicit runtime provided: shutdown the shared global runtime.
+    if loop is None and thread is None:
+        with _ASYNC_BRIDGE_LOCK:
+            loop = _ASYNC_BRIDGE_LOOP
+            thread = _ASYNC_BRIDGE_THREAD
+            _ASYNC_BRIDGE_LOOP = None
+            _ASYNC_BRIDGE_THREAD = None
 
     if thread is not None and thread.is_alive():
         try:
@@ -93,57 +102,18 @@ def _stop_async_bridge_runtime(loop: asyncio.AbstractEventLoop | None, thread: t
             pass
         thread.join()
 
-    if not loop.is_closed():
+    if loop is not None and not loop.is_closed():
         loop.close()
 
 
-def _shutdown_async_bridge_runtime() -> None:
-    global _ASYNC_BRIDGE_LOOP, _ASYNC_BRIDGE_THREAD, _ASYNC_BRIDGE_PID
-    with _ASYNC_BRIDGE_LOCK:
-        loop = _ASYNC_BRIDGE_LOOP
-        thread = _ASYNC_BRIDGE_THREAD
-        _ASYNC_BRIDGE_LOOP = None
-        _ASYNC_BRIDGE_THREAD = None
-        _ASYNC_BRIDGE_PID = None
-    _stop_async_bridge_runtime(loop, thread)
-
-
 def _get_async_bridge_loop() -> asyncio.AbstractEventLoop:
-    global _ASYNC_BRIDGE_LOOP, _ASYNC_BRIDGE_THREAD, _ASYNC_BRIDGE_PID
-    with _ASYNC_BRIDGE_LOCK:
-        pid = os.getpid()
-        loop = _ASYNC_BRIDGE_LOOP
-        thread = _ASYNC_BRIDGE_THREAD
-        is_healthy = (
-            loop is not None
-            and thread is not None
-            and _ASYNC_BRIDGE_PID == pid
-            and not loop.is_closed()
-            and thread.is_alive()
-        )
-        if is_healthy:
-            return loop
-
-        _ASYNC_BRIDGE_LOOP = None
-        _ASYNC_BRIDGE_THREAD = None
-        _ASYNC_BRIDGE_PID = None
-
-    _stop_async_bridge_runtime(loop, thread)
-
+    global _ASYNC_BRIDGE_LOOP, _ASYNC_BRIDGE_THREAD
     with _ASYNC_BRIDGE_LOCK:
         loop = _ASYNC_BRIDGE_LOOP
-        thread = _ASYNC_BRIDGE_THREAD
-        pid = os.getpid()
-        is_healthy = (
-            loop is not None
-            and thread is not None
-            and _ASYNC_BRIDGE_PID == pid
-            and not loop.is_closed()
-            and thread.is_alive()
-        )
-        if is_healthy:
+        if loop is not None:
             return loop
 
+        # lazy init the event loop & thread
         ready = threading.Event()
         loop = asyncio.new_event_loop()
         thread = threading.Thread(
@@ -153,12 +123,11 @@ def _get_async_bridge_loop() -> asyncio.AbstractEventLoop:
             daemon=True,
         )
         thread.start()
-        if not ready.wait(timeout=1):
-            _stop_async_bridge_runtime(loop, thread)
+        if not ready.wait(timeout=5):
+            _shutdown_async_bridge_runtime(loop, thread)
             raise RuntimeError("Failed to start TransferQueue async bridge event loop.")
         _ASYNC_BRIDGE_LOOP = loop
         _ASYNC_BRIDGE_THREAD = thread
-        _ASYNC_BRIDGE_PID = pid
         return loop
 
 
