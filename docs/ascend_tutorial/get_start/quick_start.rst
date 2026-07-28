@@ -122,6 +122,7 @@ Ascend Quickstart with SGLang Backend
 --------
 
 我们提供 `最佳实践 <../model_support/examples/ascend_sglang_best_practices.rst>`_ 作为参考。
+多节点任务拉起详见 `多节点任务拉起实践 <../../../verl/docs/ascend_tutorial/model_support/examples/multi-machine_task_startup_practice.rst>`_
 
 环境变量与参数
 --------------
