@@ -272,12 +272,17 @@ def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_lis
         [1, dynamic_bs_all, layer_num, topk] to mini_layer_topk_idx_list.
     """
     with torch.no_grad():
+        vp_rank = 0 if vp_rank is None else vp_rank
         expected_router_count = get_moe_num_layers_to_build(tf_config, vp_rank)
         recorded_router_indices = [
             idx for idx, router in enumerate(RouterReplay.router_instances) if router.recorded_topk_idx is not None
         ]
         if len(recorded_router_indices) == expected_router_count:
-            tf_config._verl_router_replay_local_router_indices = recorded_router_indices
+            local_router_indices_by_vp = getattr(tf_config, "_verl_router_replay_local_router_indices_by_vp", None)
+            if local_router_indices_by_vp is None:
+                local_router_indices_by_vp = {}
+                tf_config._verl_router_replay_local_router_indices_by_vp = local_router_indices_by_vp
+            local_router_indices_by_vp[vp_rank] = recorded_router_indices
             router_instances_list = [RouterReplay.router_instances[idx] for idx in recorded_router_indices]
         else:
             router_instances_list = RouterReplayHelper.get_micro_batch_router_list(tf_config, vp_rank)
@@ -386,6 +391,7 @@ def set_router_replay_data(
         raise RuntimeError("router_replay REPLAY requires routed_experts from the preceding RECORD forward.")
 
     with torch.no_grad():
+        vp_rank = 0 if vp_rank is None else vp_rank
         fp8 = tf_config.fp8
         use_fp8_padding = fp8 in ["e4m3", "hybrid"]
         min_local_rows = (
@@ -431,7 +437,8 @@ def set_router_replay_data(
         )  # layer_num, dynamic_bs_all, topk
         local_rank_info = get_current_rank_layer_info(tf_config, vp_rank)
         offset, end = local_rank_info["start"], local_rank_info["end"]
-        local_router_indices = getattr(tf_config, "_verl_router_replay_local_router_indices", None)
+        local_router_indices_by_vp = getattr(tf_config, "_verl_router_replay_local_router_indices_by_vp", {})
+        local_router_indices = local_router_indices_by_vp.get(vp_rank)
         if local_router_indices is not None:
             router_instances_list = [RouterReplay.router_instances[idx] for idx in local_router_indices]
         else:
