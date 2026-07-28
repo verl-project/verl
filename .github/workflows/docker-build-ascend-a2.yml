@@ -100,8 +100,8 @@ jobs:
           push: true
           outputs: type=image,name=${{ env.QUAY_REPO }},push-by-digest=true,name-canonical=true,push=true
           provenance: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=ascend-${{ matrix.tag }}
+          cache-to: type=gha,mode=max,scope=ascend-${{ matrix.tag }}
           build-args: |
             BUILDKIT_INLINE_CACHE=1
 
@@ -184,8 +184,8 @@ jobs:
           push: true
           outputs: type=image,name=${{ env.QUAY_REPO }},push-by-digest=true,name-canonical=true,push=true
           provenance: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=ascend-${{ matrix.tag }}
+          cache-to: type=gha,mode=max,scope=ascend-${{ matrix.tag }}
           build-args: |
             BUILDKIT_INLINE_CACHE=1
 
