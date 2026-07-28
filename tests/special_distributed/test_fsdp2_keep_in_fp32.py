@@ -19,10 +19,10 @@ Two independent degradations are covered.
 
 ``ISOLATION`` (runnable unmodified against the pre-fix tree, where it fails):
     verl builds the actor in fp32 and relies on ``MixedPrecisionPolicy`` for
-    bf16 compute. ``fully_shard`` all-gathers *every* parameter in
-    ``mp_policy.param_dtype``, so an fp32-keep module computes in bf16 even
-    though its sharded copy is fp32. The stored values look perfect -- only the
-    compute dtype is wrong, which is exactly why the bug is silent.
+    bf16 compute. ``fully_shard`` otherwise all-gathers every parameter in
+    ``mp_policy.param_dtype``, including parameters that Hugging Face kept in
+    fp32. The sharded values look perfect while the materialized parameter dtype
+    is wrong, which is exactly why the bug is silent.
 
 ``BUILD_CAST``:
     ``FSDPEngine._build_module`` calls ``module.to(torch_dtype)`` after
@@ -150,14 +150,17 @@ class ToyKeepFp32Model(PreTrainedModel):
 
 
 class SelfCastingSensitive(ToySensitive):
-    """Casts its own input, the way real fp32-keep HF modules do.
+    """Computes in its weight dtype while preserving the activation dtype.
 
-    Lets the same graph run unsharded (as a `from_pretrained` reference) and
-    under FSDP2, so the two can be compared bit for bit.
+    This mirrors modules such as Inkling's short convolution: the FSDP boundary
+    must not force its incoming activation to fp32.
     """
 
     def forward(self, x):
-        return super().forward(x.to(self.proj.weight.dtype))
+        self.input_dtype = x.dtype
+        output = super().forward(x.to(self.proj.weight.dtype)).to(self.input_dtype)
+        self.output_dtype = output.dtype
+        return output
 
 
 class ToySelfCastingModel(ToyKeepFp32Model):
@@ -323,8 +326,8 @@ def _wrap_fsdp2(module, param_dtype, mesh):
     return module
 
 
-def _compute_dtypes(module, input_ids):
-    """Record the dtype each leaf actually computes in (post all-gather)."""
+def _forward_parameter_dtypes(module, input_ids, autocast_dtype=torch.bfloat16):
+    """Record each leaf weight after all-gather under the engine autocast."""
     seen = {}
     handles = []
 
@@ -337,7 +340,8 @@ def _compute_dtypes(module, input_ids):
     for name, sub in module.named_modules():
         if isinstance(sub, nn.Linear):
             handles.append(sub.register_forward_pre_hook(make_hook(name)))
-    out = module(input_ids)
+    with torch.autocast(device_type=get_device_name(), dtype=autocast_dtype):
+        out = module(input_ids)
     for h in handles:
         h.remove()
     return seen, out
@@ -379,10 +383,10 @@ def _gather_state(module):
 
 
 def case_isolation(path, mesh, rank, model_cls, expected_fp32_prefixes, label, compute_dtype=torch.bfloat16):
-    """fp32 storage + bf16 mp_policy: keep-fp32 modules must compute in fp32.
+    """fp32 storage + low-precision policy: kept parameters all-gather in fp32.
 
     This case never downcasts the parameters, so it runs unmodified against the
-    pre-fix tree -- where it fails purely on the compute dtype.
+    pre-fix tree -- where it fails purely on the all-gather dtype.
     """
     module = _build_module(path, model_cls, torch.float32, mesh, keep_fp32_aware=False)
     reference = {k: v.clone() for k, v in module.state_dict().items()} if rank == 0 else None
@@ -390,8 +394,8 @@ def case_isolation(path, mesh, rank, model_cls, expected_fp32_prefixes, label, c
 
     # Checked first on purpose: the stored values are bit-identical, so a
     # value-only assertion passes both before and after the fix. Only the
-    # compute dtype below exposes the degradation -- that is what makes the
-    # bug silent in practice.
+    # The all-gather dtype below exposes the degradation -- that is what makes
+    # the bug silent in practice.
     for name, param in module.named_parameters():
         assert param.dtype == torch.float32, f"[{label}] {name}: sharded dtype {param.dtype}"
     gathered = _gather_state(module)
@@ -402,13 +406,13 @@ def case_isolation(path, mesh, rank, model_cls, expected_fp32_prefixes, label, c
 
     torch.manual_seed(SEED)
     input_ids = torch.randint(0, 64, (2, 8), device=get_device_id())
-    dtypes, out = _compute_dtypes(module, input_ids)
+    dtypes, out = _forward_parameter_dtypes(module, input_ids, compute_dtype)
 
     bad = []
     for name, dtype in sorted(dtypes.items()):
         want = torch.float32 if _matches(name, expected_fp32_prefixes) else compute_dtype
         if dtype != want:
-            bad.append(f"{name}: compute dtype {dtype}, expected {want}")
+            bad.append(f"{name}: all-gather dtype {dtype}, expected {want}")
     assert not bad, f"[{label}] fp32-keep modules degraded during forward:\n  " + "\n  ".join(bad)
 
     loss = out.float().pow(2).mean()
@@ -450,14 +454,14 @@ def case_build_cast(path, mesh, rank, torch_dtype, expected_fp32_prefixes, label
     module = _wrap_fsdp2(module, torch_dtype, mesh)
     torch.manual_seed(SEED)
     input_ids = torch.randint(0, 64, (2, 8), device=get_device_id())
-    dtypes, out = _compute_dtypes(module, input_ids)
+    dtypes, out = _forward_parameter_dtypes(module, input_ids, torch_dtype)
 
     bad = [
         f"{n}: {d}"
         for n, d in sorted(dtypes.items())
         if d != (torch.float32 if _matches(n, expected_fp32_prefixes) else torch_dtype)
     ]
-    assert not bad, f"[{label}] compute dtype wrong after fsdp2:\n  " + "\n  ".join(bad)
+    assert not bad, f"[{label}] all-gather dtype wrong after fsdp2:\n  " + "\n  ".join(bad)
     out.float().pow(2).mean().backward()
     if rank == 0:
         print(f"[{label}] build cast + fsdp2 forward/backward OK")
@@ -491,8 +495,8 @@ def case_no_keep_list(path, mesh, rank):
 
     torch.manual_seed(SEED)
     input_ids = torch.randint(0, 64, (2, 8), device=get_device_id())
-    dtypes, out = _compute_dtypes(module, input_ids)
-    assert set(dtypes.values()) == {torch.bfloat16}, f"[no-keep] compute dtypes {set(dtypes.values())}"
+    dtypes, out = _forward_parameter_dtypes(module, input_ids)
+    assert set(dtypes.values()) == {torch.bfloat16}, f"[no-keep] parameter dtypes {set(dtypes.values())}"
     out.float().pow(2).mean().backward()
     if rank == 0:
         print("[no-keep] baseline behaviour unchanged")
@@ -521,7 +525,7 @@ def case_single_wrapping(path, mesh, rank):
 
     torch.manual_seed(SEED)
     input_ids = torch.randint(0, 64, (2, 8), device=get_device_id())
-    dtypes, out = _compute_dtypes(module, input_ids)
+    dtypes, out = _forward_parameter_dtypes(module, input_ids)
     for name, dtype in sorted(dtypes.items()):
         want = torch.float32 if _matches(name, ["fp32_strict", "inner", "proj"]) else torch.bfloat16
         assert dtype == want, f"[overlap] {name}: {dtype} != {want}"
@@ -533,16 +537,22 @@ def case_single_wrapping(path, mesh, rank):
 def case_matches_unsharded_reference(path, mesh, rank):
     """FSDP2 must reproduce what plain `from_pretrained` computes, bit for bit.
 
-    This is what pins ``param_dtype=torch.float32`` on the fp32-keep child unit:
-    with ``param_dtype=None`` FSDP2 would not cast the unit's inputs at all
-    (``cast_forward_inputs`` is gated on ``param_dtype`` being set), which breaks
-    every fp32-keep module that relies on the framework for the cast.
+    The self-casting child preserves its low-precision activation boundary, so
+    this pins ``param_dtype=None``: forcing fp32 inputs changes its output
+    contract even though its parameters are correctly all-gathered in fp32.
     """
     torch.manual_seed(SEED)
     input_ids = torch.randint(0, 64, (2, 8), device=get_device_id())
 
     reference = ToySelfCastingModel.from_pretrained(path, torch_dtype=torch.bfloat16).to(get_device_id())
-    ref_logits = reference(input_ids)
+    with torch.autocast(device_type=get_device_name(), dtype=torch.bfloat16):
+        ref_logits = reference(input_ids)
+    ref_io_dtypes = {
+        name: (submodule.input_dtype, submodule.output_dtype)
+        for name, submodule in reference.named_modules()
+        if isinstance(submodule, SelfCastingSensitive)
+    }
+    assert set(ref_io_dtypes.values()) == {(torch.bfloat16, torch.bfloat16)}
     ref_loss = ref_logits.float().pow(2).mean()
     ref_loss.backward()
     ref_grads = {name: param.grad.detach().clone() for name, param in sorted(reference.named_parameters())}
@@ -550,7 +560,14 @@ def case_matches_unsharded_reference(path, mesh, rank):
 
     module = _build_module(path, ToySelfCastingModel, torch.bfloat16, mesh, keep_fp32_aware=True)
     module = _wrap_fsdp2(module, torch.bfloat16, mesh)
-    logits = module(input_ids)
+    with torch.autocast(device_type=get_device_name(), dtype=torch.bfloat16):
+        logits = module(input_ids)
+    io_dtypes = {
+        name: (submodule.input_dtype, submodule.output_dtype)
+        for name, submodule in module.named_modules()
+        if isinstance(submodule, SelfCastingSensitive)
+    }
+    assert io_dtypes == ref_io_dtypes, f"[reference] activation boundary dtypes differ: {io_dtypes} != {ref_io_dtypes}"
     loss = logits.float().pow(2).mean()
     loss.backward()
 
@@ -628,10 +645,10 @@ def case_keep_ancestor_absorbs_standard_targets(path, mesh, rank):
 
     torch.manual_seed(SEED)
     input_ids = torch.randint(0, 64, (2, 8), device=get_device_id())
-    dtypes, out = _compute_dtypes(module, input_ids)
+    dtypes, out = _forward_parameter_dtypes(module, input_ids)
     for name, dtype in sorted(dtypes.items()):
         want = torch.float32 if _matches(name, ["stack"]) else torch.bfloat16
-        assert dtype == want, f"[keep-ancestor] {name} computed in {dtype}, expected {want}"
+        assert dtype == want, f"[keep-ancestor] {name} all-gathered in {dtype}, expected {want}"
     out.float().pow(2).mean().backward()
     for name, param in sorted(module.named_parameters()):
         assert param.grad is not None, f"[keep-ancestor] {name} has no grad"
@@ -658,13 +675,13 @@ def case_no_forward_container_is_not_a_unit(path, mesh, rank):
 
     torch.manual_seed(SEED)
     input_ids = torch.randint(0, 64, (2, 8), device=get_device_id())
-    dtypes, out = _compute_dtypes(module, input_ids)
+    dtypes, out = _forward_parameter_dtypes(module, input_ids)
     assert dtypes["holder.child.proj"] == torch.float32, (
-        f"[no-forward] fp32-keep leaf computed in {dtypes['holder.child.proj']}"
+        f"[no-forward] fp32-keep leaf all-gathered in {dtypes['holder.child.proj']}"
     )
     for name, dtype in sorted(dtypes.items()):
         if not _matches(name, ["holder", "fp32_strict", "fp32_regular"]):
-            assert dtype == torch.bfloat16, f"[no-forward] control {name} computed in {dtype}"
+            assert dtype == torch.bfloat16, f"[no-forward] control {name} all-gathered in {dtype}"
 
     loss = out.float().pow(2).mean()
     loss.backward()
@@ -694,10 +711,10 @@ def case_keep_child_under_standard_parent(path, mesh, rank):
 
     torch.manual_seed(SEED)
     input_ids = torch.randint(0, 64, (2, 8), device=get_device_id())
-    dtypes, out = _compute_dtypes(module, input_ids)
+    dtypes, out = _forward_parameter_dtypes(module, input_ids)
     for name, dtype in sorted(dtypes.items()):
         want = torch.float32 if _matches(name, ["fp32_strict"]) else torch.bfloat16
-        assert dtype == want, f"[keep-child] {name} computed in {dtype}, expected {want}"
+        assert dtype == want, f"[keep-child] {name} all-gathered in {dtype}, expected {want}"
     out.float().pow(2).mean().backward()
     if rank == 0:
         print(f"[keep-child] keep child + standard parent + root all present: {units}")

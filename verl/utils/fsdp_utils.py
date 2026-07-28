@@ -587,7 +587,7 @@ def get_keep_in_fp32_module_names(model: nn.Module, target_dtype: Optional[torch
 
     Transformers declares two independent lists, with *different* activation
     rules. The gate below is verified identical in 4.56.1
-    (``modeling_utils.from_pretrained``) and 5.11.0
+    (``modeling_utils.from_pretrained``) and 5.10.0
     (``modeling_utils._get_dtype_plan``), which span verl's supported range:
 
     * ``_keep_in_fp32_modules`` guards against bf16 -> fp16 rounding only, so HF
@@ -602,7 +602,7 @@ def get_keep_in_fp32_module_names(model: nn.Module, target_dtype: Optional[torch
     does not build the FSDP2 path through ``hf_quantizer``.
 
     Only the top-most declaration is read, which is what both versions do:
-    4.56.1 consults the top-level model alone, and 5.11.0's ``post_init``
+    4.56.1 consults the top-level model alone, and 5.10.0's ``post_init``
     already folds every child's declaration into it. Collecting from nested
     models directly would widen 4.56.1's behaviour.
 
@@ -863,13 +863,13 @@ def apply_fsdp2(model, fsdp_kwargs, config):
 
     # Modules HF declares as fp32-keep must be their own units, wrapped *before*
     # any parent so that the parent no longer manages their parameters (FSDP2
-    # skips nested units when collecting managed modules). Only `param_dtype` is
-    # overridden -- reduce/output dtype and `cast_forward_inputs` keep the
-    # caller's semantics, and inputs are then cast to fp32 at the unit boundary.
+    # skips nested units when collecting managed modules). Leaving `param_dtype`
+    # unset preserves each parameter's original fp32 all-gather dtype without
+    # changing the module's input dtype. All other policy fields are retained.
     mp_policy = fsdp_kwargs.get("mp_policy")
     keep_fp32_modules = _select_keep_in_fp32_wrap_targets(model, getattr(mp_policy, "param_dtype", None))
     if keep_fp32_modules:
-        keep_fp32_kwargs = {**fsdp_kwargs, "mp_policy": replace(mp_policy, param_dtype=torch.float32)}
+        keep_fp32_kwargs = {**fsdp_kwargs, "mp_policy": replace(mp_policy, param_dtype=None)}
         for module in keep_fp32_modules:
             with maybe_patch_fsdp_module(module):
                 fully_shard(module, **keep_fp32_kwargs)
