@@ -240,7 +240,7 @@ RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linu
 # combination you want into .venv from it with `manage_envs.py sync`. Put uv on
 # PATH and copy across the uv tunables that vllm sets.
 # ---------------------------------------------------------------------------
-RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+COPY --from=ghcr.io/astral-sh/uv:0.11.16 /uv /uvx /bin/
 
 # UV_CACHE_DIR pins the cache to a known path; the `prefetch` stage bakes it
 # into the image there (no cache mount) so the runtime `uv sync` resolves
