@@ -518,6 +518,15 @@ class LLMServerManager:
         self.rollout_resource_pool = rollout_resource_pool
         self.start_rank = start_rank
         self._load_balancer_cls = load_balancer_cls or GlobalRequestLoadBalancer
+        self.flexkv_service_manager = None
+
+        flexkv_service = self.rollout_config.get("flexkv_service", {})
+        if bool(flexkv_service.get("auto_start", False)):
+            if self.rollout_config.name != "vllm" or self.rollout_config.get("kv_backend") != "flexkv":
+                raise ValueError("flexkv_service.auto_start requires rollout.name=vllm and kv_backend=flexkv")
+            from verl.workers.rollout.flexkv_service import FlexKVServiceManager
+
+            self.flexkv_service_manager = FlexKVServiceManager(self.rollout_config, self.model_config)
 
         assert worker_group is not None or self.rollout_config.nnodes > 0, "nnodes must be > 0 in standalone mode"
 
@@ -584,6 +593,8 @@ class LLMServerManager:
             )
             for replica_rank in range(num_replicas)
         ]
+        for replica in self.rollout_replicas:
+            replica.flexkv_service_manager = self.flexkv_service_manager
 
         if self.worker_group and self.rollout_config.name != "trtllm":
             await asyncio.gather(*[server.init_hybrid(self.worker_group) for server in self.rollout_replicas])
@@ -597,6 +608,11 @@ class LLMServerManager:
             )
         else:
             await asyncio.gather(*[server.init_standalone() for server in self.rollout_replicas])
+
+        # Replicas only need the manager while launching servers. Keeping it
+        # attached would make their later serialization capture asyncio state.
+        for replica in self.rollout_replicas:
+            replica.flexkv_service_manager = None
 
         self.server_handles = [server._server_handle for server in self.rollout_replicas]
         self.server_addresses = [server._server_address for server in self.rollout_replicas]
@@ -649,6 +665,10 @@ class LLMServerManager:
             load_balancer_handle=self.global_load_balancer,
             **kwargs,
         )
+
+    async def shutdown(self) -> None:
+        if self.flexkv_service_manager is not None:
+            await self.flexkv_service_manager.shutdown()
 
     def get_addresses(self) -> list[str]:
         """Get the OpenAI chat completion API http addresses of the LLM server replicas."""
