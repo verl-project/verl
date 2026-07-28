@@ -530,6 +530,12 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             except TrainingStopException:
                 print("[FullyAsyncTrainer] Training stopped by queue termination signal")
                 break
+            if self.current_param_version >= self.total_train_steps:
+                print(
+                    f"[FullyAsyncTrainer] Reached total_train_steps={self.total_train_steps}, "
+                    "stopping training"
+                )
+                break
 
         self.progress_bar.close()
         if self.current_param_version % self.config.trainer.test_freq != 0 or self.local_trigger_step > 1:
