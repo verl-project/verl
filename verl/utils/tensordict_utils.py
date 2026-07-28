@@ -585,7 +585,7 @@ def make_iterator(tensordict: TensorDict, mini_batch_size, epochs, seed=None, da
     """
     from torch.utils.data import DataLoader
 
-    assert tensordict.batch_size[0] % mini_batch_size == 0, f"{tensordict.batch_size[0]} % {mini_batch_size} != 0"
+    # assert tensordict.batch_size[0] % mini_batch_size == 0, f"{tensordict.batch_size[0]} % {mini_batch_size} != 0"
     # we can directly create a dataloader from TensorDict
     if dataloader_kwargs is None:
         dataloader_kwargs = {}

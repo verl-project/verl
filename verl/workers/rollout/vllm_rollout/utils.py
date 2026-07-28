@@ -254,7 +254,10 @@ class vLLMColocateWorkerExtension:
             logger.info("ModelOpt QAT: process_weights_after_loading completed")
         elif use_standard_weight_load:
             # Some post-load transforms are non-idempotent; run once after all buckets.
-            from vllm.model_executor.model_loader.utils import process_weights_after_loading
+            try:
+                from vllm.model_executor.model_loader.utils import process_weights_after_loading
+            except ImportError:
+                from vllm.model_executor.model_loader.loader import _process_weights_after_loading as process_weights_after_loading
 
             for model, model_config in self._iter_all_models_with_config():
                 process_weights_after_loading(model, model_config, self.device)

@@ -142,6 +142,8 @@ class DetachActorWorker(ActorRolloutRefWorker):
             strategy = self.config.actor.strategy
 
             if strategy in ["fsdp", "fsdp2", "veomni"]:
+                if hasattr(self.actor.engine.module, "reshard"):
+                    self.actor.engine.module.reshard()
                 cpu_sharded_state, global_spec = self.cpu_saved_models[n]
                 self.restore_handler(self.actor.engine.module, cpu_sharded_state, global_spec)
             else:

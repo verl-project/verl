@@ -358,7 +358,7 @@ class AgentLoopBase(ABC):
         return prompt_ids
 
     @abstractmethod
-    async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
+    async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput | list[AgentLoopOutput]:
         """Run agent loop to interact with LLM server and environment.
 
         Args:
@@ -366,7 +366,10 @@ class AgentLoopBase(ABC):
             **kwargs: dataset fields from `verl.utils.dataset.RLHFDataset`.
 
         Returns:
-            AgentLoopOutput: Agent loop output.
+            AgentLoopOutput or list[AgentLoopOutput]: Agent loop output(s).
+            Return a list of ``AgentLoopOutput`` for multi-step workflows
+            where each step should be an independent training sample (e.g.
+            MemAgent-style per-step GRPO).
         """
         raise NotImplementedError
 
@@ -549,6 +552,8 @@ class AgentLoopWorker:
         for i in range(len(batch)):
             trace_this_sample = i in traced_indices
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items() if k != "__do_sample__"}
+            kwargs["__sample_index_in_batch"] = i
+            kwargs["__global_sample_index"] = trajectory_info[i]["sample_index"]
             sample_sampling_params = dict(sampling_params)
             if not validate and per_sample_do_sample is not None and not bool(per_sample_do_sample[i]):
                 apply_greedy_sampling_params(sample_sampling_params)
@@ -559,8 +564,38 @@ class AgentLoopWorker:
             )
         outputs = await asyncio.gather(*tasks)
 
+        # ---- flatten multi-step workflow outputs ------------------------------
+        # Workflow agent loops may return one _InternalAgentLoopOutput per step.
+        # Flatten these into a single list and replicate the corresponding
+        # non-tensor-batch entries so every output row has aligned metadata.
+        flat_outputs: list[_InternalAgentLoopOutput] = []
+        if any(isinstance(o, list) for o in outputs):
+            flat_non_tensor_batch: dict[str, list] = {}
+            for i, o in enumerate(outputs):
+                if isinstance(o, list):
+                    for step_idx, sub_o in enumerate(o):
+                        flat_outputs.append(sub_o)
+                        for k in batch.non_tensor_batch:
+                            flat_non_tensor_batch.setdefault(k, [])
+                            flat_non_tensor_batch[k].append(
+                                batch.non_tensor_batch[k][i]
+                            )
+                else:
+                    flat_outputs.append(o)
+                    for k in batch.non_tensor_batch:
+                        flat_non_tensor_batch.setdefault(k, [])
+                        flat_non_tensor_batch[k].append(
+                            batch.non_tensor_batch[k][i]
+                        )
+            outputs = flat_outputs
+            input_non_tensor_batch = {
+                k: np.array(v, dtype=object) for k, v in flat_non_tensor_batch.items()
+            }
+        else:
+            input_non_tensor_batch = batch.non_tensor_batch
+
         output = self._postprocess(
-            outputs, input_non_tensor_batch=batch.non_tensor_batch, validate=batch.meta_info.get("validate", False)
+            outputs, input_non_tensor_batch=input_non_tensor_batch, validate=batch.meta_info.get("validate", False)
         )
         return output
 
@@ -572,7 +607,7 @@ class AgentLoopWorker:
         agent_name: str,
         trace: bool = True,
         **kwargs,
-    ) -> _InternalAgentLoopOutput:
+    ) -> _InternalAgentLoopOutput | list[_InternalAgentLoopOutput]:
         with rollout_trace_attr(
             step=trajectory["step"],
             sample_index=trajectory["sample_index"],
@@ -596,8 +631,28 @@ class AgentLoopWorker:
                 data_config=DictConfigWrap(self.config.data),
                 tools=ToolListWrap(self.tools),
             )
-            output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
-            return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
+            output_or_list = await agent_loop.run(sampling_params, **kwargs)
+
+            # ---- multi-step workflow: one AgentLoopOutput per step ------------
+            if isinstance(output_or_list, list):
+                internal_outputs: list[_InternalAgentLoopOutput] = []
+                for step_index, step_output in enumerate(output_or_list):
+                    step_output.extra_fields.setdefault(
+                        "workflow_step_index", step_index
+                    )
+                    step_output.extra_fields.setdefault(
+                        "total_workflow_steps", len(output_or_list)
+                    )
+                    internal = await self._agent_loop_postprocess(
+                        step_output, trajectory["validate"], **kwargs
+                    )
+                    internal_outputs.append(internal)
+                return internal_outputs
+
+            # ---- single conversation (current behaviour) ----------------------
+            return await self._agent_loop_postprocess(
+                output_or_list, trajectory["validate"], **kwargs
+            )
 
     def _pad_token_ids(
         self,
@@ -972,8 +1027,11 @@ class AgentLoopWorker:
         non_tensor_batch = {
             "__num_turns__": np.array([input.num_turns for input in inputs], dtype=np.int32),
         }
-        if self.reward_loop_worker_handles is None and input_non_tensor_batch:
-            non_tensor_batch.update(input_non_tensor_batch)
+        if input_non_tensor_batch:
+            if self.reward_loop_worker_handles is None:
+                non_tensor_batch.update(input_non_tensor_batch)
+            elif "__sample_index_in_batch" in input_non_tensor_batch:
+                non_tensor_batch["__sample_index_in_batch"] = input_non_tensor_batch["__sample_index_in_batch"]
 
         # add reward_extra_info to non_tensor_batch
         reward_extra_infos = [input.extra_fields.get("reward_extra_info", {}) for input in inputs]

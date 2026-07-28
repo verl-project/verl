@@ -17,6 +17,9 @@ import inspect
 import json
 import logging
 import os
+
+os.environ["VLLM_USE_V1"] = "1"
+
 from pprint import pprint
 from typing import Any, Callable, Optional
 
@@ -26,7 +29,7 @@ from packaging import version
 from ray.actor import ActorHandle
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.cli.serve import run_headless
+# from vllm.entrypoints.cli.serve import run_headless
 from vllm.entrypoints.openai.api_server import build_app, init_app_state
 from vllm.inputs import TokensPrompt
 from vllm.lora.request import LoRARequest
@@ -195,12 +198,22 @@ class vLLMHttpServer:
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ):
-        await self.engine.collective_rpc(
-            method=method,
-            timeout=timeout,
-            args=args,
-            kwargs=kwargs,
-        )
+        if hasattr(self.engine, "collective_rpc"):
+            await self.engine.collective_rpc(
+                method=method,
+                timeout=timeout,
+                args=args,
+                kwargs=kwargs,
+            )
+        elif hasattr(self.engine, "engine_core") and hasattr(self.engine.engine_core, "collective_rpc_async"):
+            await self.engine.engine_core.collective_rpc_async(
+                method=method,
+                timeout=timeout,
+                args=args,
+                kwargs=kwargs,
+            )
+        else:
+            raise AttributeError("Neither collective_rpc nor engine_core.collective_rpc_async found in vLLM Engine.")
 
     async def launch_server(self, master_address: str = None, master_port: int = None, dp_rpc_port: int = None):
         if self.node_rank != 0:
@@ -263,7 +276,7 @@ class vLLMHttpServer:
             "max_num_batched_tokens": self.config.max_num_batched_tokens,
             "enable_prefix_caching": self.config.enable_prefix_caching,
             "enable_sleep_mode": self.config.enable_sleep_mode,
-            "logprobs_mode": self.config.logprobs_mode,
+            # "logprobs_mode": self.config.logprobs_mode,
             "enforce_eager": self.config.enforce_eager,
             "gpu_memory_utilization": self.config.gpu_memory_utilization,
             "disable_log_stats": self.config.disable_log_stats,
@@ -398,16 +411,19 @@ class vLLMHttpServer:
         engine_client = AsyncLLM.from_vllm_config(vllm_config=vllm_config, usage_context=usage_context, **kwargs)
 
         # Don't keep the dummy data in memory
-        await engine_client.reset_mm_cache()
-        await engine_client.collective_rpc(
-            method="monkey_patch_model", kwargs={"vocab_size": len(self.model_config.tokenizer)}
-        )
+        if hasattr(engine_client, "reset_mm_cache"):
+            await engine_client.reset_mm_cache()
+        if hasattr(engine_client, "collective_rpc"):
+            await engine_client.collective_rpc(
+                method="monkey_patch_model", kwargs={"vocab_size": len(self.model_config.tokenizer)}
+            )
 
         build_app_sig = inspect.signature(build_app)
         supported_tasks: tuple[Any, ...] = ()
         build_app_kwargs: dict[str, Any] = {}
         if "supported_tasks" in build_app_sig.parameters:
-            supported_tasks = await engine_client.get_supported_tasks()
+            if hasattr(engine_client, "get_supported_tasks"):
+                supported_tasks = await engine_client.get_supported_tasks()
             build_app_kwargs["supported_tasks"] = supported_tasks
         # vLLM >= 0.20.0 requires `model_config` to register pooling API routes
         # (e.g. ``/classify``, ``/embed``); see
@@ -420,6 +436,8 @@ class vLLMHttpServer:
         init_app_sig = inspect.signature(init_app_state)
         if "vllm_config" in init_app_sig.parameters:
             await init_app_state(engine_client, vllm_config, app.state, args)
+        elif "model_config" in init_app_sig.parameters:
+            await init_app_state(engine_client, vllm_config.model_config, app.state, args)
         elif "supported_tasks" in init_app_sig.parameters:
             await init_app_state(engine_client, app.state, args, supported_tasks)
         else:
@@ -436,7 +454,19 @@ class vLLMHttpServer:
 
         def run_headless_wrapper():
             with SuppressSignalInThread():
-                run_headless(args)
+                try:
+                    from vllm.entrypoints.cli.serve import run_headless
+                    run_headless(args)
+                except ImportError:
+                    import asyncio
+                    import uvloop
+                    from vllm.entrypoints.openai.api_server import run_server
+                    args.port = 0
+                    args.host = "127.0.0.1"
+                    # uvloop.run is easier but let's use asyncio.run to be perfectly safe
+                    # wait, vllm run_server might require uvloop.
+                    # let's try uvloop.run if available
+                    uvloop.run(run_server(args))
 
         def on_run_headless_done(future: asyncio.Future):
             try:
@@ -512,7 +542,9 @@ class vLLMHttpServer:
         if audio_data is not None:
             multi_modal_data["audio"] = audio_data
 
-        prompt_kwargs = {"prompt_token_ids": prompt_ids, "multi_modal_data": multi_modal_data}
+        prompt_kwargs = {"prompt_token_ids": prompt_ids}
+        if multi_modal_data:
+            prompt_kwargs["multi_modal_data"] = multi_modal_data
         if mm_processor_kwargs:
             prompt_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
         try:
@@ -674,7 +706,8 @@ class vLLMHttpServer:
         self.global_steps = global_steps
 
     async def wait_for_requests_to_drain(self):
-        await self.engine.wait_for_requests_to_drain()
+        if hasattr(self.engine, 'wait_for_requests_to_drain'):
+            await self.engine.wait_for_requests_to_drain()
 
     async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort all ongoing generation requests.

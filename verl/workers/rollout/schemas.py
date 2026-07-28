@@ -244,7 +244,7 @@ class AsyncRolloutRequest(BaseModel):
         return_dict: bool = False,
     ):
         raw_prompt = processing_class.apply_chat_template(
-            messages, tools=tools, add_generation_prompt=add_generation_prompt, tokenize=False
+            messages, tools=tools, add_generation_prompt=add_generation_prompt, tokenize=False, enable_thinking=False
         )
         if not tokenize:
             return raw_prompt

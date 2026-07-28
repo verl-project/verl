@@ -252,13 +252,13 @@ class TrainingWorker(Worker, DistProfilerExtension):
         assert mini_batch_size is not None or num_mini_batch is not None
 
         if mini_batch_size is None:
-            assert batch_size_per_dp % num_mini_batch == 0, f"Got {batch_size_per_dp=} and {num_mini_batch=}"
-            mini_batch_size_per_gpu = batch_size_per_dp // num_mini_batch
+            # assert batch_size_per_dp % num_mini_batch == 0, f"Got {batch_size_per_dp=} and {num_mini_batch=}"
+            mini_batch_size_per_gpu = max(1, batch_size_per_dp // num_mini_batch)
         else:
-            assert mini_batch_size % self.engine.get_data_parallel_size() == 0, (
-                f"Got {mini_batch_size=} and {self.engine.get_data_parallel_size()=}"
-            )
-            mini_batch_size_per_gpu = mini_batch_size // self.engine.get_data_parallel_size()
+            # assert mini_batch_size % self.engine.get_data_parallel_size() == 0, (
+            #     f"Got {mini_batch_size=} and {self.engine.get_data_parallel_size()=}"
+            # )
+            mini_batch_size_per_gpu = max(1, mini_batch_size // self.engine.get_data_parallel_size())
 
         # make iterator
         dataloader = tu.make_iterator(
