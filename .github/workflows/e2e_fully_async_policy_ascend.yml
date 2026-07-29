@@ -79,6 +79,11 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # This image is not the uv.cu130 one: it ships its own torch-npu stack, so the
+  # shared e2e scripts must launch with ambient python instead of `uv run`.
+  VERL_USE_UV: 0
+
 jobs:
   # Test FSDP2 strategy
   e2e_fully_async_policy_fsdp2_ascend:

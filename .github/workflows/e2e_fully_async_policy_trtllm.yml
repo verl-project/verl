@@ -73,6 +73,9 @@ permissions:
 env:
   IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:trtllm-1.3.0rc15"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
+  # This image is not the uv.cu130 one: it ships its own torch/TensorRT-LLM stack, so
+  # the shared e2e scripts must launch with ambient python instead of `uv run`.
+  VERL_USE_UV: 0
 
 jobs:
   setup:
