@@ -111,3 +111,30 @@ teacher_models:
 
 # Key to route examples to the appropriate teacher model in multi-teacher setups. Should correspond to a field in the data proto, e.g., task.
 teacher_key: data_source
+
+# On-Policy Self-Distillation (OPSD): the teacher conditions on the ground-truth
+# solution (privileged context) while the student sees only the problem. Point a
+# single teacher at the student checkpoint (teacher_model.model_path == student
+# path) to make it a frozen self-teacher.
+self_distillation: false
+# Non-tensor batch field holding the ground-truth solution. verl stores it nested
+# at reward_model.ground_truth; a dotted key reaches into the nested dict.
+privileged_solution_key: reward_model.ground_truth
+# Marker text wrapping the privileged solution in the teacher input.
+privileged_prefix: "\n\nReference solution:\n"
+privileged_suffix: "\n\nUsing this as a reference, derive the answer yourself. Think step by step.\n"
+# Optional: insert the solution before the last occurrence of this marker text in
+# the prompt (e.g. the assistant-turn opener) instead of appending. Empty = append.
+privileged_insert_before: ""
+# How the teacher input is built. "append": splice prefix+solution+suffix into the
+# student's templated prompt (fields above). "chat_turn": rebuild the teacher user
+# message from the raw (problem, solution) pair via the chat template, matching the
+# OPSD reference implementation token-for-token.
+privileged_mode: append
+# chat_turn only: non-tensor batch field with the raw (untemplated) problem text.
+privileged_problem_key: extra_info.problem
+# chat_turn only: teacher user-message template with literal {problem}/{solution}
+# placeholders. Empty = the reference implementation's wording.
+privileged_user_template: ""
+# chat_turn only: enable_thinking kwarg for the teacher chat template (Qwen3).
+privileged_enable_thinking: true

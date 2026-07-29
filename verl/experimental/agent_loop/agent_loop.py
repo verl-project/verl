@@ -49,6 +49,13 @@ from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
 from verl.tools.tool_registry import load_all_tools
 from verl.trainer.distillation import is_distillation_enabled
+from verl.trainer.distillation.privileged_context import (
+    REFERENCE_USER_TEMPLATE,
+    build_privileged_chat_turn,
+    build_privileged_sequence,
+    resolve_privileged_solution,
+    slice_privileged_teacher_to_student,
+)
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.model import compute_position_id_with_mask
@@ -521,6 +528,33 @@ class AgentLoopWorker:
             from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
 
             self.teacher_key: str = config.distillation.teacher_key
+            self.self_distillation: bool = config.distillation.self_distillation
+            self.privileged_solution_key: str = config.distillation.privileged_solution_key
+            self.privileged_mode: str = config.distillation.privileged_mode
+            self.privileged_problem_key: str = config.distillation.privileged_problem_key
+            self._privileged_prefix_ids: list[int] = []
+            self._privileged_suffix_ids: list[int] = []
+            self._privileged_insert_before_ids: Optional[list[int]] = None
+            self._privileged_user_template: str = REFERENCE_USER_TEMPLATE
+            self._privileged_chat_kwargs: dict[str, Any] = {}
+            if self.self_distillation:
+                if self.privileged_mode == "chat_turn":
+                    if config.distillation.privileged_user_template:
+                        self._privileged_user_template = config.distillation.privileged_user_template
+                    self._privileged_chat_kwargs = {
+                        "enable_thinking": config.distillation.privileged_enable_thinking
+                    }
+                else:
+                    self._privileged_prefix_ids = self.tokenizer.encode(
+                        config.distillation.privileged_prefix, add_special_tokens=False
+                    )
+                    self._privileged_suffix_ids = self.tokenizer.encode(
+                        config.distillation.privileged_suffix, add_special_tokens=False
+                    )
+                    if config.distillation.privileged_insert_before:
+                        self._privileged_insert_before_ids = self.tokenizer.encode(
+                            config.distillation.privileged_insert_before, add_special_tokens=False
+                        )
             self.teacher_server_manager = AsyncTeacherLLMServerManager(
                 config=config,
                 teacher_client=teacher_client,
@@ -1019,12 +1053,52 @@ class AgentLoopWorker:
                 if routing_value is not None:
                     # Non-tensor batch values arrive as 0-d numpy objects / arrays; normalize to Python.
                     routing_key = routing_value.item() if hasattr(routing_value, "item") else routing_value
+            if self.self_distillation:
+                solution = resolve_privileged_solution(sample_kwargs, self.privileged_solution_key)
+                if not solution:
+                    raise ValueError(
+                        f"self_distillation is enabled but no privileged solution resolved at "
+                        f"'{self.privileged_solution_key}'; verl's ground truth is usually at "
+                        f"'reward_model.ground_truth'."
+                    )
+                if self.privileged_mode == "chat_turn":
+                    problem = resolve_privileged_solution(sample_kwargs, self.privileged_problem_key)
+                    if not problem:
+                        raise ValueError(
+                            f"privileged_mode='chat_turn' needs the raw problem text at "
+                            f"'{self.privileged_problem_key}' but nothing resolved there."
+                        )
+                    sequence_ids = build_privileged_chat_turn(
+                        self.tokenizer,
+                        problem,
+                        solution,
+                        response_ids,
+                        self._privileged_user_template,
+                        self._privileged_chat_kwargs,
+                    )
+                else:
+                    solution_ids = self.tokenizer.encode(solution, add_special_tokens=False)
+                    sequence_ids = build_privileged_sequence(
+                        prompt_ids,
+                        response_ids,
+                        solution_ids,
+                        self._privileged_prefix_ids,
+                        self._privileged_suffix_ids,
+                        self._privileged_insert_before_ids,
+                    )
+            else:
+                sequence_ids = prompt_ids + response_ids
             teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
-                sequence_ids=prompt_ids + response_ids,
+                sequence_ids=sequence_ids,
                 multi_modal_data=output.multi_modal_data,
                 mm_processor_kwargs=output.mm_processor_kwargs,
                 routing_key=routing_key,
             )
+            if self.self_distillation:
+                # Realign the teacher's privileged-context scores onto the student's positions.
+                teacher_ids, teacher_logprobs = slice_privileged_teacher_to_student(
+                    teacher_ids, teacher_logprobs, len(prompt_ids), len(response_ids), self.tokenizer.pad_token_id
+                )
             output.extra_fields["teacher_ids"] = teacher_ids
             output.extra_fields["teacher_logprobs"] = teacher_logprobs
 
