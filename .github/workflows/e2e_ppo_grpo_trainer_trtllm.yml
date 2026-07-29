@@ -129,6 +129,13 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      # Diagnostic: show whether this runner can reach the outside world at all
+      # before pip needs it. Never fails the job.
+      - name: Check network connectivity
+        run: |
+          echo "HTTPS_PROXY is ${#HTTPS_PROXY} chars long, NO_PROXY=${NO_PROXY:-unset}"
+          curl -sS -m 10 -o /dev/null -w 'google.com: %{http_code}\n' https://www.google.com || echo "google.com: unreachable"
+          curl -sS -m 20 -o /dev/null -r 0-0 -L -w 'github release asset: %{http_code}\n' https://github.com/ETOgaosion/verl-wheelhouse/releases/download/flash-attention-v2.8.3/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl || echo "github release asset: unreachable"
       - name: Reinstall FlashInfer for runtime GPU arch
         run: |
           unset TORCH_CUDA_ARCH_LIST
@@ -170,6 +177,13 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      # Diagnostic: show whether this runner can reach the outside world at all
+      # before pip needs it. Never fails the job.
+      - name: Check network connectivity
+        run: |
+          echo "HTTPS_PROXY is ${#HTTPS_PROXY} chars long, NO_PROXY=${NO_PROXY:-unset}"
+          curl -sS -m 10 -o /dev/null -w 'google.com: %{http_code}\n' https://www.google.com || echo "google.com: unreachable"
+          curl -sS -m 20 -o /dev/null -r 0-0 -L -w 'github release asset: %{http_code}\n' https://github.com/ETOgaosion/verl-wheelhouse/releases/download/flash-attention-v2.8.3/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl || echo "github release asset: unreachable"
       - name: Reinstall FlashInfer for runtime GPU arch
         run: |
           unset TORCH_CUDA_ARCH_LIST
@@ -231,6 +245,13 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      # Diagnostic: show whether this runner can reach the outside world at all
+      # before pip needs it. Never fails the job.
+      - name: Check network connectivity
+        run: |
+          echo "HTTPS_PROXY is ${#HTTPS_PROXY} chars long, NO_PROXY=${NO_PROXY:-unset}"
+          curl -sS -m 10 -o /dev/null -w 'google.com: %{http_code}\n' https://www.google.com || echo "google.com: unreachable"
+          curl -sS -m 20 -o /dev/null -r 0-0 -L -w 'github release asset: %{http_code}\n' https://github.com/ETOgaosion/verl-wheelhouse/releases/download/flash-attention-v2.8.3/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl || echo "github release asset: unreachable"
       - name: Reinstall FlashInfer for runtime GPU arch
         run: |
           unset TORCH_CUDA_ARCH_LIST
