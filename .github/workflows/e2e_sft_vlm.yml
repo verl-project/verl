@@ -104,11 +104,6 @@ jobs:
           fetch-depth: 0
       # Diagnostic: show whether this runner can reach the outside world at all
       # before uv needs it. Never fails the job.
-      - name: Check network connectivity
-        run: |
-          echo "HTTPS_PROXY is ${HTTPS_PROXY}, NO_PROXY=${NO_PROXY:-unset}"
-          curl google.com
-          curl -sS -m 20 -o /dev/null -r 0-0 -L -w 'wheelhouse asset: %{http_code}\n' https://github.com/ETOgaosion/verl-wheelhouse/releases/download/flash-attention-v2.8.3/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl || echo "wheelhouse asset: unreachable"
       - name: Keep the uv cache on the runner's persistent ${HOME}
         run: |
           echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
