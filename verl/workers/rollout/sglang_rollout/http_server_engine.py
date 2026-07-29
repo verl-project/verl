@@ -387,6 +387,22 @@ class HttpServerAdapter(EngineBase):
             },
         )
 
+    def post_process_weights(
+        self,
+        restore_weights_before_load: bool = False,
+        post_process_quantization: bool = False,
+        post_load_weights: bool = False,
+    ) -> dict[str, Any]:
+        """Run SGLang's post-update weight processing hooks."""
+        return self._make_request(
+            "post_process_weights",
+            {
+                "restore_weights_before_load": restore_weights_before_load,
+                "post_process_quantization": post_process_quantization,
+                "post_load_weights": post_load_weights,
+            },
+        )
+
     def shutdown(self) -> None:
         """Shutdown the HTTP server and clean up resources.
 
@@ -771,6 +787,22 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
                 "serialized_named_tensors": serialized_named_tensors,
                 "load_format": load_format,
                 "flush_cache": flush_cache,
+            },
+        )
+
+    async def post_process_weights(
+        self,
+        restore_weights_before_load: bool = False,
+        post_process_quantization: bool = False,
+        post_load_weights: bool = False,
+    ) -> dict[str, Any]:
+        """Run SGLang's post-update weight processing hooks asynchronously."""
+        return await self._make_async_request(
+            "post_process_weights",
+            {
+                "restore_weights_before_load": restore_weights_before_load,
+                "post_process_quantization": post_process_quantization,
+                "post_load_weights": post_load_weights,
             },
         )
 
