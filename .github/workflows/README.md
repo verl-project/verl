@@ -54,6 +54,17 @@ jobs:
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'default-runner' }}"]
     env:
+      # Volcengine runners reach the public internet only through this proxy.
+      # Without it `uv run` cannot fetch the wheelhouse wheels (hosted as GitHub
+      # release assets) on a cache miss, and hf downloads fail too. Both cases are
+      # set: python/curl read the lowercase names, most other tooling the upper.
+      HTTP_PROXY: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
+      HTTPS_PROXY: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
+      http_proxy: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
+      https_proxy: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
+      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      no_proxy: "localhost,127.0.0.1,hf-mirror.com"
+      HF_ENDPOINT: "https://hf-mirror.com"
       # With the uv image (verl:uv.cu130) there is no install step: `uv run` syncs
       # .venv from the committed uv.lock on first use, offline from the baked uv
       # cache. Pick one inference engine + one training backend, e.g. `vllm
@@ -69,6 +80,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # ${HOME} is the runner's persistent storage, the container filesystem is
+      # not: keep uv's cache there so a wheel the image did not bake is fetched
+      # once per machine instead of once per job. It has to be a `run:` step —
+      # a job `env:` entry would keep `$HOME` literal, GitHub does not expand it.
+      - name: Keep the uv cache on the runner's persistent ${HOME}
+        run: |
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
       - name: Run your tests
         run: |
           $UV_RUN xxxx # your jobs
@@ -145,3 +164,5 @@ Two cases the lock cannot express, and how they are handled:
 
 ### Model and Dataset
 To avoid CI relies on network, we pre-download dataset on a NFS on the CI machine. The path for models are \${HOME}/models and the path for dataset is \${HOME}/models/hf_data.
+
+Being persistent, that same \${HOME} is where every uv job points `UV_CACHE_DIR`.

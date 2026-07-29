@@ -76,9 +76,12 @@ async def test_inter_node_trtllm_rollout(init_config):
         assert len(server_handles) == num_replicas
         assert len(server_addresses) == num_replicas
 
-        os.environ.pop("HTTPS_PROXY", None)
-        os.environ.pop("HTTP_PROXY", None)
-        os.environ.pop("NO_PROXY", None)
+        # The rollout servers listen on Ray node addresses, which NO_PROXY does
+        # not cover, so CI's proxy must not apply here. httpx reads the lowercase
+        # names, so drop both spellings.
+        for var in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"):
+            os.environ.pop(var, None)
+            os.environ.pop(var.lower(), None)
 
         client = AsyncOpenAI(
             api_key="123-abc",

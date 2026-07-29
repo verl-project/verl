@@ -28,6 +28,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 import torch.distributed as dist
+
+# megatron-core is not part of the `cpu` extra (its stack is CUDA-only), so
+# cpu_unit_tests skips this module; gpu_unit_tests runs it in the megatron venv.
+pytest.importorskip("megatron.core")
+
 from megatron.core import parallel_state as mpu
 
 from verl.trainer.config import CheckpointConfig

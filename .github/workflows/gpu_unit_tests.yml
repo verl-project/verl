@@ -96,8 +96,12 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 60 # Increase this timeout value as needed
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      HTTP_PROXY: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
+      HTTPS_PROXY: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
+      http_proxy: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
+      https_proxy: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
       NO_PROXY: "localhost,127.0.0.1"
+      no_proxy: "localhost,127.0.0.1"
       HF_HUB_ENABLE_HF_TRANSFER: 1
       # No install step: every command below runs through uv, which syncs .venv
       # from the committed uv.lock (offline, from the image's baked cache).
@@ -107,6 +111,10 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      - name: Keep the uv cache on the runner's persistent ${HOME}
+        run: |
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
       # mlflow cannot live in the lock: it caps pandas<3 and cryptography<49, and
       # `ci` shares one resolution fork with every backend, so locking it would drag
       # the whole project back to pandas 2.x. Layer it into the synced .venv instead
@@ -120,6 +128,12 @@ jobs:
       - name: Run all GPU unit tests
         run: |
           $UV_RUN pytest -s -x --ignore-glob="*on_npu.py" --ignore-glob="*test_special_*.py" --ignore-glob='*on_cpu.py' --ignore-glob="*test_vllm*" --ignore-glob="*_sglang*" --ignore-glob="*_hf_rollout*" --ignore-glob="tests/models/" --ignore-glob='tests/special*' --ignore-glob="tests/experimental" --ignore-glob="tests/workers/reward_model" --ignore-glob="*test_shared_memory*" --ignore-glob="tests/workers/rollout/rollout_trtllm" --ignore-glob="*test_bucketed_weight_transfer*" tests/
+      # These tests need no GPU but do need megatron-core, which the `cpu` extra
+      # cannot provide (CUDA-only stack), so cpu_unit_tests skips them. Run them
+      # here, where the megatron extra is synced.
+      - name: Run megatron CPU unit tests
+        run: |
+          $UV_RUN pytest -s -x tests/utils/ckpt/test_megatron_checkpoint_manager_on_cpu.py tests/workers/test_megatron_distillation_only_on_cpu.py
       - name: Testing LinearCrossEntropyTP Correctness, Computation Time and Memory Consumption
         run: |
           LOW_MEMORY=True $UV_RUN torchrun --standalone --nnodes=1 --nproc-per-node=8 tests/utils/test_special_linear_cross_entropy_tp.py

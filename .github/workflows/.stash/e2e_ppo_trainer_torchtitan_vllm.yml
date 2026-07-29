@@ -101,8 +101,12 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 60 # Increase this timeout value as needed
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      HTTP_PROXY: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
+      HTTPS_PROXY: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
+      http_proxy: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
+      https_proxy: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      no_proxy: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
     steps:

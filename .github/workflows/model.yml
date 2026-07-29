@@ -86,8 +86,12 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 20 # Increase this timeout value as needed
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      HTTP_PROXY: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
+      HTTPS_PROXY: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
+      http_proxy: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
+      https_proxy: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      no_proxy: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       # No install step: every command below runs through uv, which syncs .venv
@@ -98,6 +102,10 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      - name: Keep the uv cache on the runner's persistent ${HOME}
+        run: |
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
       - name: Check final pip list
         run: |
           $UV_RUN uv pip list
@@ -129,8 +137,12 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 20 # Increase this timeout value as needed
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      HTTP_PROXY: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
+      HTTPS_PROXY: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
+      http_proxy: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
+      https_proxy: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      no_proxy: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       # No install step: every command below runs through uv, which syncs .venv
@@ -141,6 +153,10 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      - name: Keep the uv cache on the runner's persistent ${HOME}
+        run: |
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
       - name: Running FSDP2 rmpad model tests on 8 L20 GPUs + latest flash_attn
         run: |
           STRATEGY=fsdp2 $UV_RUN torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
@@ -150,8 +166,12 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 20 # Increase this timeout value as needed
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      HTTP_PROXY: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
+      HTTPS_PROXY: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
+      http_proxy: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
+      https_proxy: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      no_proxy: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       # No install step: every command below runs through uv, which syncs .venv
@@ -162,6 +182,10 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      - name: Keep the uv cache on the runner's persistent ${HOME}
+        run: |
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
       - name: Download model config files
         run: |
           $UV_RUN hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir $HOME/models/Qwen/Qwen2.5-0.5B-Instruct
