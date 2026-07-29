@@ -73,7 +73,8 @@ checkpoint engine (including the V1 ``separate_async`` trainer).
   ``get_per_tensor_param_delta_shard()`` — per-parameter entries ``(slots, dtype_str, counts,
   hf_idx, hf_val, gather_group)`` whose coordinates are already final HF coordinates. The engine
   only batches, gathers, buckets and ships.
-- **Diff (backend-owned)**: the default strategy (``verl.workers.engine.utils.hf_delta_export``) byte-diffs each rank's **own shard** against its
+- **Diff (backend-owned)**: the default strategy (shared by the FSDP and veomni backends via
+  ``verl.workers.engine.utils.hf_delta_export``) byte-diffs each rank's **own shard** against its
   pinned-CPU snapshot, refreshed on every export (no rank holds a full-model snapshot). The
   comparison is bit-exact (integer view inequality), so the reconstruction is lossless by
   construction — no thresholds, no drift. A backend that already keeps the previous step's weights
@@ -144,17 +145,22 @@ SGLang rollout, per-step steady-state weight sync. The ``nccl`` baseline is curr
 | Qwen2.5-32B (2+2 nodes) | **11.2-11.9 s** | 17.7-18.1 s | 1.55x |
 | Qwen2.5-32B (2+2 nodes, offload off) | **6.2 s** | 14.2 s | 2.3x |
 | Qwen2.5-72B (4+4 nodes, gen TP8, offload off) | **12.0-13.0 s** | 28.5-29.1 s | 2.3x |
+| Qwen3-30B-A3B (veomni ep8, 1+1 nodes, 50-step medians) | **7.1 s** | 32.2 s | **4.5x** |
+| Qwen3-235B-A22B (veomni ep8 x fsdp8, 8+2 nodes, gen TP16) | **11.4-14.9 s** | 246-266 s | **~21x** |
 
-The delta sync time grows far slower than parameter bytes -- the sharded sparse gather
+The delta sync time stays essentially flat from 32B through 235B -- the sharded sparse gather
 amortizes over the larger trainer world -- while the full broadcast pays a full-model
-materialization that grows linearly with parameter bytes, so the advantage widens with scale.
-The per-step changed ratio is ~1-3% of parameter bytes for dense models and stays there over
-long runs.
+materialization that grows linearly with parameter bytes, so the advantage widens with scale
+and with MoE sparsity. The per-step changed ratio is ~1-3% of parameter bytes for dense models
+(0.02-0.05% for the 235B MoE early steps) and stays there over long runs.
 
 Correctness evidence (details in the PR):
 
 - **200-step GRPO equivalence at 7B** (delta vs nccl, 400 syncs): reward trajectories track
   phase-for-phase, final rewards within sampling noise, zero receiver checksum failures.
+- **50-step GRPO equivalence at 30B-A3B (veomni ep8)**: score trajectories rise in step
+  (0.646->0.719 delta vs 0.639->0.697 nccl), per-step gap at the independent-sampling
+  noise floor, zero checksum failures.
 - **Bit-exact round-trip**: perturb -> apply as delta -> revert -> apply as delta reproduces
   greedy generations byte-identically on every prompt.
 

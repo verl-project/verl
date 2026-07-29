@@ -2,7 +2,7 @@
 # Qwen3.5-35B-A3B GRPO with Megatron backend + MTP + Fully Async Policy
 #
 # Requirements:
-#     pip install --upgrade transformers==5.3.0
+#     pip install --upgrade transformers==5.5.3
 #     mbridge: make sure https://github.com/ISEEKYAN/mbridge/pull/98 this pr has merged
 #
 # MTP (Multi-Token Prediction) notes:

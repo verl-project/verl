@@ -1,97 +1,126 @@
-
 Add models with the FSDP backend
-==================================
+================================
 
-Last updated: 02/09/2025.
+Last updated: 07/29/2026.
 
-Model
---------------------------
+The FSDP and FSDP2 engines use Hugging Face model implementations directly.
+If a checkpoint can be loaded by the installed ``transformers`` version, and
+the selected rollout backend supports the same architecture, adding the model
+usually does not require copying model code into verl.
 
-In principle, our FSDP backend can support any HF model and we can
-sychronoize the actor model weight with vLLM using `hf_weight_loader.py` under `third_party/vllm`.
-However, ``hf_weight_loader`` is will gather the full state_dict of a
-model during synchronization, which may cause OOM. We suggest using
-``dtensor_weight_loader`` which gather the full model parameter layer by
-layer to reduce the peak memory usage. We already support dtensor weight
-loader for the models below in `dtensor_weight_loader.py` under `third_party/vllm`:
+This page describes the compatibility boundaries to check and where
+model-specific changes belong when an extension is necessary.
 
-- ``GPT2LMHeadModel``
-- ``LlamaForCausalLM``
-- ``LLaMAForCausalLM``
-- ``MistralForCausalLM``
-- ``InternLMForCausalLM``
-- ``AquilaModel``
-- ``AquilaForCausalLM``
-- ``Phi3ForCausalLM``
-- ``GemmaForCausalLM``
-- ``Gemma2ForCausalLM``
-- ``GPTBigCodeForCausalLM``
-- ``Starcoder2ForCausalLM``
-- ``Qwen2ForCausalLM``
-- ``DeepseekV2ForCausalLM``
+Model loading
+-------------
 
-To implement ``dtensor_weight_loader`` of a model that's supported in
-vLLM, follow the guide of gemma model below:
+Set the model path and select an FSDP strategy in the training configuration:
 
-1. Copy the
-   ``load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]])`` from the vllm model class
-   to ``dtensor_weight_loaders.py``
-2. Modify the arguments to
-   ``(actor_weights: Dict, vllm_model: nn.Module)``
-3. Replace the ``self`` to ``vllm_model``
-4. Add the
-   ``local_loaded_weight = redistribute_dtensor(param_name=name, loaded_weights=loaded_weight)``
-   before each ``param = params_dict[name]`` and modify the following
-   weight loading using ``local_loaded_weight``.
-5. Register the implemented dtensor weight loader to ``__MODEL_DTENSOR_WEIGHT_LOADER_REGISTRY__``.
+.. code-block:: bash
 
-.. code-block:: diff
+   actor_rollout_ref.model.path=<huggingface-repo-or-local-path>
+   actor_rollout_ref.actor.strategy=fsdp2
 
-    - def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-    + def gemma_dtensor_weight_loader(actor_weights: Dict, vllm_model: nn.Module) -> nn.Module:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-    -   params_dict = dict(self.named_parameters())
-    +   params_dict = dict(vllm_model.named_parameters())
-        loaded_params = set()
-    -   for name, loaded_weight in weights:
-    +   for name, loaded_weight in actor_weights.items():
-            for (param_name, shard_name, shard_id) in stacked_params_mapping:
-                if shard_name not in name:
-                    continue
-                name = name.replace(shard_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-    +           local_loaded_weight = redistribute_dtensor(param_name=name, loaded_weights=loaded_weight)
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-    -           weight_loader(param, loaded_weight, shard_id)
-    +           weight_loader(param, local_loaded_weight.to(dtype=param.dtype), shard_id)
-                break
-            else:
-                # lm_head is not used in vllm as it is tied with embed_token.
-                # To prevent errors, skip loading lm_head.weight.
-                if "lm_head.weight" in name:
-                    continue
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-    +           local_loaded_weight = redistribute_dtensor(param_name=name, loaded_weights=loaded_weight)
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-    -           weight_loader(param, loaded_weight)
-    +           weight_loader(param, local_loaded_weight.to(dtype=param.dtype))
-            loaded_params.add(name)
-        unloaded_params = params_dict.keys() - loaded_params
-        if unloaded_params:
-            raise RuntimeError(
-                "Some weights are not initialized from checkpoints: "
-                f"{unloaded_params}")
+``FSDPEngine`` resolves the appropriate Hugging Face auto-model class and
+loads the checkpoint with ``from_pretrained``. The same path supplies the
+tokenizer, processor, and model configuration unless their paths are
+overridden separately.
+
+For a model implemented outside the installed ``transformers`` package:
+
+* Set ``actor_rollout_ref.model.trust_remote_code=True`` only when the model
+  repository contains code that you have reviewed and intend to execute.
+* Set ``actor_rollout_ref.model.external_lib=<importable-module>`` when a
+  separately installed Python package must be imported before Hugging Face
+  auto-class resolution. The value may also be a list of modules.
+
+Do not copy a complete upstream modeling file into ``verl/models`` merely to
+make the checkpoint discoverable. Prefer upstream ``transformers`` support, a
+reviewed remote-code model, or a separately packaged implementation.
+
+Training and rollout compatibility
+----------------------------------
+
+FSDP support on the training side does not imply that every rollout backend
+supports the same model. Verify both boundaries:
+
+1. ``transformers`` can construct the training model, tokenizer, and processor.
+2. The selected rollout backend (for example, vLLM, SGLang, or TensorRT-LLM)
+   supports the architecture and the checkpoint's parameter layout.
+
+During synchronous training, ``ActorRolloutRefWorker.update_weights`` asks the
+FSDP engine for a stream of named tensors. ``FSDPEngine.get_per_tensor_param``
+materializes each DTensor as needed and emits Hugging Face checkpoint names.
+The rollout adapter consumes that stream in buckets. For vLLM, the adapter
+passes the tensors to the rollout model's ``load_weights`` implementation and
+runs model post-processing after all buckets have arrived.
+
+The former per-model DTensor weight-loader registry is no longer part of the
+FSDP synchronization path. If weight synchronization fails, first determine
+which boundary owns the mismatch:
+
+* Training state names or packed tensors: inspect
+  ``verl/workers/engine/fsdp/transformer_impl.py`` and
+  ``verl/workers/engine/fsdp/utils.py``.
+* Generic trainer-to-rollout transfer: inspect
+  ``verl/workers/engine_workers.py``.
+* Rollout-specific loading or post-processing: inspect the selected adapter
+  under ``verl/workers/rollout/`` and the corresponding inference engine.
+
+Keep model-specific conversion code close to the boundary that requires it.
+Do not add a second full-state-dict loading path when the streaming interface
+can express the conversion.
+
+Extending Transformers behavior
+-------------------------------
+
+Some Hugging Face models load successfully but need verl-specific behavior for
+remove-padding execution, Ulysses sequence parallelism, multimodal inputs, or
+fused kernels. In that case:
+
+1. Add the smallest reusable implementation or patch under
+   ``verl/models/transformers/``.
+2. Dispatch it from ``verl.models.transformers.monkey_patch.apply_monkey_patch``
+   using the model configuration rather than duplicating the upstream model.
+3. Preserve the normal padded Hugging Face path when the feature is disabled.
+4. Add focused tests under ``tests/models/`` that compare the patched behavior
+   with the upstream implementation.
+
+Megatron model definitions and checkpoint conversion are separate from the
+FSDP path. See ``verl/models/mcore/`` and :doc:`../workers/model_engine` when
+the training backend is Megatron.
+
+Validation checklist
+--------------------
+
+Validate a new FSDP model in increasing order of cost:
+
+1. Load the tokenizer, processor, configuration, and model with the exact
+   ``trust_remote_code`` and ``external_lib`` settings intended for training.
+2. Add a forward or forward/backward comparison under ``tests/models/`` for
+   any verl-specific model patch.
+3. Run the FSDP and FSDP2 SFT smoke path with the model:
+
+   .. code-block:: bash
+
+      MODEL_PATH=<model-path> BACKEND=fsdp FSDP_STRATEGY=fsdp \
+        bash tests/special_e2e/sft/run_sft_engine.sh
+      MODEL_PATH=<model-path> BACKEND=fsdp FSDP_STRATEGY=fsdp2 \
+        bash tests/special_e2e/sft/run_sft_engine.sh
+
+4. Run at least two online-training optimizer steps with the intended rollout
+   backend. The second actor-to-rollout update exercises weight reload after
+   the rollout model has already completed its initial post-processing.
+5. Compare actor and rollout token log probabilities after synchronization,
+   then save and reload a training checkpoint.
+
+Source of truth
+---------------
+
+* ``verl/workers/config/model.py``: Hugging Face model configuration and
+  external implementation loading.
+* ``verl/workers/engine/fsdp/transformer_impl.py``: model construction,
+  FSDP/FSDP2 wrapping, and named-tensor export.
+* ``verl/workers/engine_workers.py``: trainer-to-rollout synchronization.
+* ``verl/workers/rollout/``: inference-backend-specific weight loading.
+* ``verl/models/transformers/``: narrow verl-specific Transformers patches.

@@ -72,7 +72,7 @@ jobs:
           push: true
           tags: |
             quay.io/ascend/verl:${{ steps.version.outputs.tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=ascend-sglang-a2
+          cache-to: type=gha,mode=max,scope=ascend-sglang-a2
           build-args: |
             BUILDKIT_INLINE_CACHE=1

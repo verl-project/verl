@@ -198,7 +198,7 @@ def hf_delta_export(gen, snaps: dict, entry_fn):
     pass."""
     from verl.checkpoint_engine.delta_sync.sparse_gather import shard_delta_indices
 
-    from .spec import derive_placement
+    from .spec import derive_dtensor_placement
 
     for name, local, spec in gen:
         local = local.detach().contiguous().view(-1)
@@ -206,7 +206,12 @@ def hf_delta_export(gen, snaps: dict, entry_fn):
         assert snap is not None and snap.numel() == local.numel(), (
             f"{name}: no seed snapshot for this shard; run the seed export first"
         )
-        place, contributes, pg = derive_placement(spec)
+        if spec.place is not None:
+            # explicit exporter override: the backend declared the whole triple
+            # (hybrid geometries are not derivable from DTensor facts alone).
+            place, contributes, pg = spec.place, spec.contributes, spec.gather_group
+        else:
+            place, contributes, pg = derive_dtensor_placement(spec)
         if contributes:
             base = snap.to(local.device, non_blocking=True)
             lidx, lval = shard_delta_indices(local, base, 0)

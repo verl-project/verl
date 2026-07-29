@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
     from torch.distributed.device_mesh import DeviceMesh
 
-__all__ = ["BlockPlacement", "ShardSpec", "derive_placement", "translate_flat_indices"]
+__all__ = ["BlockPlacement", "ShardSpec", "derive_dtensor_placement", "translate_flat_indices"]
 
 
 @dataclass
@@ -69,9 +69,11 @@ class ShardSpec:
     # int flat offset or a BlockPlacement in a *virtual* full tensor, and
     # ``gather_group`` is the ProcessGroup covering every rank that holds a block
     # (pass a real group object -- the engine treats ``None`` as "unsharded").
-    # Every rank is assumed to contribute.
+    # ``contributes=False`` marks a rank whose block is a replica owned by a
+    # peer (e.g. HSDP replicate dims): it keeps lockstep with an empty delta.
     place: Optional[int | BlockPlacement] = None
     gather_group: Optional[ProcessGroup] = None
+    contributes: bool = True
     # Optional dim-0-separable converter: ``to_hf_chunk(dim0_start, segment)`` converts a
     # contiguous dim-0 segment ``full[dim0_start : dim0_start + segment.shape[0]]`` of the
     # logical tensor to ``[(hf_name, hf_tensor)]``. When set on a block-converter spec the
@@ -113,7 +115,7 @@ def _row_major_strides(shape: tuple | list) -> tuple:
 class BlockPlacement:
     """This rank's local shard is one hyper-rectangular block of the full tensor:
     ``full[o0:o0+l0, o1:o1+l1, ...]`` with ``local_shape=(l0, l1, ...)`` and
-    ``global_offset=(o0, o1, ...)``. Produced by :func:`derive_placement` for every
+    ``global_offset=(o0, o1, ...)``. Produced by :func:`derive_dtensor_placement` for every
     sharded geometry, including the dim-0 cut (FSDP2 ``Shard(0)``): that block is
     flat-contiguous, and :func:`translate_flat_indices` detects it via
     ``is_flat_contiguous`` and keeps the single-add fast path."""
@@ -148,7 +150,8 @@ class BlockPlacement:
 def translate_flat_indices(lidx: torch.Tensor, place: int | BlockPlacement) -> torch.Tensor:
     """Map shard-local flat positions to full-tensor flat positions.
 
-    ``place`` is what :func:`derive_placement` returned: an ``int`` for the
+    ``place`` is what the caller's dispatch produced (``spec.place`` or
+    :func:`derive_dtensor_placement`): an ``int`` for the
     identity cases (unsharded / replicated / explicit exporter overrides, translate
     = add), or a :class:`BlockPlacement`. A flat-contiguous block (only dim 0 cut,
     e.g. FSDP2 ``Shard(0)``) keeps the single-add fast path; any other block does a
@@ -169,14 +172,19 @@ def translate_flat_indices(lidx: torch.Tensor, place: int | BlockPlacement) -> t
     return out
 
 
-def derive_placement(spec: ShardSpec) -> tuple[int | BlockPlacement, bool, Optional[ProcessGroup]]:
-    """Derive ``(place, contributes, gather_group)`` for THIS rank from the spec.
+def derive_dtensor_placement(spec: ShardSpec) -> tuple[int | BlockPlacement, bool, Optional[ProcessGroup]]:
+    """Derive ``(place, contributes, gather_group)`` for THIS rank from a spec
+    whose distribution is fully declared by ``mesh`` + ``placements`` (or is
+    unsharded). Specs carrying an explicit exporter override (``spec.place``)
+    never reach this function -- the caller dispatches on ``spec.place`` and
+    reads the exporter's own ``(place, contributes, gather_group)`` triple
+    verbatim, because a hybrid geometry (e.g. veomni's manual ep split) is not
+    derivable from the DTensor facts alone.
 
     ``place`` feeds :func:`translate_flat_indices`:
 
     * unsharded (``mesh is None``) or fully replicated: ``0``; no group (the local
-      tensor is already the full parameter). Explicit exporter overrides
-      (``spec.place``) may also be plain ``int`` offsets.
+      tensor is already the full parameter).
     * any sharded geometry: a :class:`BlockPlacement` computed from
       ``compute_local_shape_and_global_offset`` (pure math, no collective). For a
       single Shard dim, only ranks at coordinate 0 of every Replicate dim
@@ -192,8 +200,7 @@ def derive_placement(spec: ShardSpec) -> tuple[int | BlockPlacement, bool, Optio
     """
     import torch.distributed as dist
 
-    if spec.place is not None:
-        return spec.place, True, spec.gather_group
+    assert spec.place is None, "explicit-place specs are dispatched by the caller, not derived"
 
     if spec.mesh is None:
         return 0, (dist.get_rank() == 0 if dist.is_initialized() else True), None
