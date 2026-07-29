@@ -96,33 +96,24 @@ jobs:
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock (offline, from the image's baked cache).
+      # Keep these extras identical across the job so uv never re-syncs torch.
+      UV_RUN: "uv run --frozen --all-packages --extra megatron --extra veomni-sft"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      # uv migration: sync the project .venv from the committed uv.lock using
-      # the baked uv cache in the uv.cu130 image (offline), then expose .venv to
-      # subsequent steps. peft / transformers come from the synced extras; veomni
-      # is not in the lock, so add it on top. flash-attn-4 is pulled by the sglang
-      # extra and removed here, matching the previous behavior.
-      - name: Install the current repository
-        run: |
-          python3 manage_envs.py sync sglang megatron -- --frozen
-          echo "VIRTUAL_ENV=${GITHUB_WORKSPACE}/.venv" >> "$GITHUB_ENV"
-          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
-          source "${GITHUB_WORKSPACE}/.venv/bin/activate"
-          uv pip install veomni==0.1.11 --no-deps --index-url https://pypi.org/simple/
-          uv pip uninstall flash-attn-4
       - name: Check final pip list
         run: |
-          uv pip list
+          $UV_RUN uv pip list
       - name: Prepare pokemon-gpt4o-captions dataset
         run: |
-          ray stop --force
-          python3 examples/data_preprocess/pokemon.py --local_dataset_path ${HOME}/models/hf_data/pokemon-gpt4o-captions
+          $UV_RUN ray stop --force
+          $UV_RUN python3 examples/data_preprocess/pokemon.py --local_dataset_path ${HOME}/models/hf_data/pokemon-gpt4o-captions
       - name: Running Pokemon E2E training tests with multiturn and various configs and compare results
         run: |
-          MODEL_ID=Qwen/Qwen3-VL-2B-Instruct DATASET_DIR=~/data/pokemon-gpt4o-captions VPP_SIZE=null bash tests/special_e2e/sft/test_sft_engine_all.sh
+          MODEL_ID=Qwen/Qwen3-VL-2B-Instruct DATASET_DIR=~/data/pokemon-gpt4o-captions VPP_SIZE=null $UV_RUN bash tests/special_e2e/sft/test_sft_engine_all.sh
 
   cleanup:
     runs-on: ubuntu-latest

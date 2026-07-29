@@ -117,25 +117,21 @@ jobs:
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock. These extras must match what the e2e script
+      # picks for this backend combo, or each step would re-sync torch.
+      UV_RUN: "uv run --frozen --all-packages --extra sglang --extra fsdp"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      # uv migration: sync the project .venv from the committed uv.lock using
-      # the baked uv cache in the uv.cu130 image (offline), then expose .venv to
-      # subsequent steps.
-      - name: Install the current repository
-        run: |
-          python3 manage_envs.py sync sglang megatron -- --frozen
-          echo "VIRTUAL_ENV=${GITHUB_WORKSPACE}/.venv" >> "$GITHUB_ENV"
-          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
       - name: Prepare gsm8k dataset
         run: |
-          ray stop --force
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+          $UV_RUN ray stop --force
+          $UV_RUN python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm and save ckpt
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           ENGINE=sglang bash tests/special_e2e/ppo_trainer/run_function_reward.sh
 
   e2e_ppo_trainer_fsdp-qwen2_5vl-3b:
@@ -147,29 +143,25 @@ jobs:
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock. These extras must match what the e2e script
+      # picks for this backend combo, or each step would re-sync torch.
+      UV_RUN: "uv run --frozen --all-packages --extra sglang --extra fsdp"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      # uv migration: sync the project .venv from the committed uv.lock using
-      # the baked uv cache in the uv.cu130 image (offline), then expose .venv to
-      # subsequent steps.
-      - name: Install the current repository
-        run: |
-          python3 manage_envs.py sync sglang megatron -- --frozen
-          echo "VIRTUAL_ENV=${GITHUB_WORKSPACE}/.venv" >> "$GITHUB_ENV"
-          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
       - name: Check final pip list
         run: |
-          uv pip list
+          $UV_RUN uv pip list
       # Geo3k
       - name: Prepare GEO3K dataset
         run: |
-          ray stop --force
-          python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k/
+          $UV_RUN ray stop --force
+          $UV_RUN python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k/
       - name: Running GEO3K VLM E2E training tests on 8 L20 GPUs with rmpad using function rm
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
             MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
@@ -179,7 +171,7 @@ jobs:
             bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Running GEO3K VLM E2E with rmpad using torch fused kernel (Qwen2.5-VL)
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           FUSED_KERNELS=True TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
             MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
@@ -189,7 +181,7 @@ jobs:
             bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Running GEO3K VLM E2E with rmpad using triton fused kernel (Qwen2.5-VL)
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           FUSED_KERNELS=True FUSED_KERNEL_BACKEND=triton \
             TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \

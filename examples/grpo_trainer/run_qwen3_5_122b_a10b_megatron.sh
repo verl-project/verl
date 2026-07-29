@@ -253,12 +253,14 @@ esac
 
 ########################### Launch ###########################
 export HYDRA_FULL_ERROR=1
-# uv (set VERL_USE_UV=0 for system python): GPU vllm/sglang × megatron use the uv venv
-# (synced once from uv.lock, no re-sync); other backends / NPU fall back to ambient python.
+# uv (set VERL_USE_UV=0 for system python): GPU vllm/sglang × megatron run the driver and every Ray worker
+# (runtime_env.py_executable) through `uv run` on the matching extras of the committed uv.lock;
+# other backends / NPU fall back to ambient python. Run from the verl repo root.
 LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
 if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ] && { [ "${rollout_backend}" = vllm ] || [ "${rollout_backend}" = sglang ]; }; then
-    uv sync --extra "${rollout_backend}" --extra megatron --frozen
-    LAUNCH=(uv run --frozen --no-sync python3)
+    LAUNCH=(uv run --frozen --all-packages --extra "${rollout_backend}" --extra megatron python3)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages --extra ${rollout_backend} --extra megatron")
 fi
 PYTHONUNBUFFERED=1 "${LAUNCH[@]}" -m verl.trainer.main_ppo \
     "${ALGORITHM[@]}" \
@@ -270,4 +272,5 @@ PYTHONUNBUFFERED=1 "${LAUNCH[@]}" -m verl.trainer.main_ppo \
     "${ACTOR[@]}" \
     "${REF[@]}" \
     "${EXTRA[@]}" \
+    "${RAY[@]}" \
     "$@"

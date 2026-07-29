@@ -104,7 +104,13 @@ for that.
 This driver exposes one GPU torch "world" plus a CPU slice, all in one lock:
 the cu13.0 / torch-2.11 backends (vllm, sglang, fsdp, megatron) and the
 GPU-free ``cpu`` slice. They never mix in one ``.venv`` (see the conflict
-sets). ``prefetch`` scopes the cache warm via the ``cu130`` shortcut so the
+sets). On top of whichever one you pick sit the conflict-free *add-ons*
+(``math``, ``ci``, ``veomni-sft``) — extras that carry no torch of their own,
+so CI composes them freely, e.g.::
+
+    python manage_envs.py sync sglang megatron ci
+
+``prefetch`` scopes the cache warm via the ``cu130`` shortcut so the
 Docker image bakes only its backends. DEFERRED (commented out in
 pyproject.toml until they support torch-2.11 / cu130): the cu12.9 /
 torch-2.9.1 world (veomni, nemoautomodel) and trtllm (a CUDA-13 RC sdist).
@@ -144,7 +150,15 @@ TRAINING_BACKENDS: list[str] = ["fsdp", "megatron"]
 CU129_BACKENDS: list[str] = []
 # `cpu` is the GPU-free CI / unit-test / dev-sanity slice.
 DEV_BACKENDS: list[str] = ["cpu"]
-ALL_EXTRAS: list[str] = INFERENCE_BACKENDS + TRAINING_BACKENDS + CU129_BACKENDS + DEV_BACKENDS
+# Conflict-free add-ons layered ON TOP of a backend combo, never synced alone:
+# `math` (math-verify reward), `ci` (GitHub-workflow-only helpers) and
+# `veomni-sft` (the deps-free veomni wheel the SFT tests import — NOT the
+# DEFERRED cu12.9 `veomni` training backend above; this one carries no torch, so
+# it rides on whichever cu130 backend the job synced). They ride along with every
+# `prefetch` combo, so a CI `sync <backend...> ci` resolves from the baked cache
+# offline just like a plain backend sync does.
+ADDON_EXTRAS: list[str] = ["math", "ci", "veomni-sft"]
+ALL_EXTRAS: list[str] = INFERENCE_BACKENDS + TRAINING_BACKENDS + CU129_BACKENDS + DEV_BACKENDS + ADDON_EXTRAS
 
 # Mutually exclusive extras — must mirror [tool.uv].conflicts in pyproject.toml.
 # At most one member of each set may be synced into a single .venv. vllm / sglang
@@ -169,6 +183,7 @@ GROUPS: dict[str, list[str]] = {
     "inference": INFERENCE_BACKENDS,
     "training": TRAINING_BACKENDS,
     "dev": DEV_BACKENDS,
+    "addons": ADDON_EXTRAS,
     # CUDA-world shortcuts, used to scope `prefetch` per Docker image so each
     # image bakes only the backends it can actually run on its CUDA base.
     "cu130": INFERENCE_BACKENDS + TRAINING_BACKENDS,  # torch 2.11 GPU backends
@@ -424,12 +439,17 @@ def _covering_combos(extras: list[str] | None = None) -> list[list[str]]:
     ``prefetch inference``). (DEFERRED: the cu12.9 trainers veomni /
     nemoautomodel were also warmed standalone; they return with that world.)
 
+    ``ADDON_EXTRAS`` are not combos of their own: they are conflict-free and are
+    only ever synced on top of a backend, so they are appended to EVERY combo
+    (whatever the scope). That warms the exact compositions CI syncs — e.g.
+    ``sglang megatron ci`` — rather than a bare ``ci`` env nobody uses.
+
     Over ``cu130`` it yields ``[[vllm, fsdp], [vllm, megatron], [sglang, fsdp],
-    [sglang, megatron]]``; over ``ALL_EXTRAS`` it appends ``[cpu]``.
-    (Inference-only or training-only runs are not pre-warmed — sync one
-    inference engine + one trainer, per the RL flow.)
+    [sglang, megatron]]``, each with the add-ons appended; over ``ALL_EXTRAS`` it
+    appends ``[cpu]``. (Inference-only or training-only runs are not pre-warmed —
+    sync one inference engine + one trainer, per the RL flow.)
     """
-    pool = list(extras) if extras is not None else list(ALL_EXTRAS)
+    pool = [e for e in (extras if extras is not None else ALL_EXTRAS) if e not in ADDON_EXTRAS]
     pset = set(pool)
     inference = [e for e in INFERENCE_BACKENDS if e in pset]
     training = [e for e in TRAINING_BACKENDS if e in pset]
@@ -446,7 +466,11 @@ def _covering_combos(extras: list[str] | None = None) -> list[list[str]]:
     # Whatever the cross-product didn't consume is warmed on its own: the
     # cu12.9 trainers, the cpu slice, or a lone cu130 role with no partner.
     combos += [[e] for e in pool if e not in paired]
-    return combos
+    # Ride-alongs last, so each warmed env mirrors a real `sync <backend...> ci`.
+    # A scope of only add-ons (`prefetch addons`) still gets one env of its own.
+    if not combos:
+        return [list(ADDON_EXTRAS)]
+    return [combo + ADDON_EXTRAS for combo in combos]
 
 
 def cmd_lock(args: argparse.Namespace) -> int:
@@ -609,6 +633,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     print(f"  inference (cu130/torch-2.11) : {', '.join(INFERENCE_BACKENDS)}")
     print(f"  training  (cu130/torch-2.11) : {', '.join(TRAINING_BACKENDS)}")
     print(f"  dev       (cpu/torch-2.11)   : {', '.join(DEV_BACKENDS)}")
+    print(f"  addons    (any combo)        : {', '.join(ADDON_EXTRAS)}")
     print("  cu129     (torch-2.9.1)      : DEFERRED (veomni, nemoautomodel)")
     print("\nmutually exclusive (at most one per `sync`):")
     for cs in CONFLICT_SETS:
@@ -770,8 +795,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     extras_help = (
         "extra name(s); shortcuts: all, inference (vllm sglang), "
-        "training (fsdp megatron), dev (cpu). x86_64 Linux + Python 3.12 only. "
-        "Mutually exclusive sets (at most one each per sync): "
+        "training (fsdp megatron), dev (cpu), addons (math ci veomni-sft). "
+        "x86_64 Linux + Python 3.12 only. Add-ons are conflict-free and layer "
+        "on top of a backend combo. Mutually exclusive sets (at most one each per sync): "
         "{vllm, sglang, cpu}, {fsdp, cpu}, {megatron, cpu}. DEFERRED (see "
         "pyproject.toml): the cu12.9 world (veomni, nemoautomodel) and trtllm "
         "(a CUDA-13 RC)."

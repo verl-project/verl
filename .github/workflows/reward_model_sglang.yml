@@ -90,33 +90,27 @@ jobs:
       SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK: "True"
       NCCL_SHM_DISABLE: "1"
       NCCL_P2P_DISABLE: "1"
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock (offline, from the image's baked cache).
+      # Keep these extras identical across the job so uv never re-syncs torch.
+      UV_RUN: "uv run --frozen --all-packages --extra sglang --extra megatron --extra ci"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      # uv migration: sync the project .venv from the committed uv.lock using
-      # the baked uv cache in the uv.cu130 image (offline), then expose .venv to
-      # subsequent steps. sglang-router is not in the lock, so add it on top.
-      - name: Install the current repository
-        run: |
-          python3 manage_envs.py sync sglang megatron -- --frozen
-          echo "VIRTUAL_ENV=${GITHUB_WORKSPACE}/.venv" >> "$GITHUB_ENV"
-          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
-          source "${GITHUB_WORKSPACE}/.venv/bin/activate"
-          uv pip install sglang-router==0.2.2
       - name: Check final pip list
         run: |
-          uv pip list
+          $UV_RUN uv pip list
       - name: Prepare gsm8k dataset
         run: |
-          ray stop --force
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k --local_dir ${HOME}/data/gsm8k
+          $UV_RUN ray stop --force
+          $UV_RUN python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k --local_dir ${HOME}/data/gsm8k
       - name: Running sglang generative reward model tests on 8 L20 GPUs
         run: |
-          ROLLOUT_NAME=sglang pytest -s -x tests/experimental/reward_loop/test_reward_model_genrm.py
+          ROLLOUT_NAME=sglang $UV_RUN pytest -s -x tests/experimental/reward_loop/test_reward_model_genrm.py
       - name: Running sglang discriminative reward model tests on 8 L20 GPUs
         run: |
-          ROLLOUT_NAME=sglang pytest -s -x tests/experimental/reward_loop/test_reward_model_disrm.py
+          ROLLOUT_NAME=sglang $UV_RUN pytest -s -x tests/experimental/reward_loop/test_reward_model_disrm.py
       # FIXME(@yyDing1): broken
       # - name: Running sglang agent loop with reward manager tests on 8 L20 GPUs
       #   run: |

@@ -315,10 +315,14 @@ Example scripts and the ``VERL_USE_UV`` toggle
 ::::::::::::::::::::::::::::::::::::::::::::::::::
 
 The launch scripts under ``examples/`` (vllm/sglang × fsdp/megatron) use this
-``.venv`` automatically: run from the repo root, they ``uv sync`` the right
-extras from the committed ``uv.lock`` and then ``uv run --frozen --no-sync`` the
-trainer. During the transition you can opt out and use the ambient/system
-python instead by setting ``VERL_USE_UV=0``::
+``.venv`` automatically: run from the repo root, they start the trainer with
+``uv run --frozen --all-packages --extra <engine> --extra <trainer>``, which
+materializes the ``.venv`` from the committed ``uv.lock`` on first use, and they
+hand the same command to Ray as
+``ray_kwargs.ray_init.runtime_env.py_executable`` so the TaskRunner and every
+worker actor resolve that same environment. During the transition you can opt
+out and use the ambient/system python instead by setting ``VERL_USE_UV=0``, which
+also leaves ``py_executable`` at its ``null`` default::
 
     # default: run inside the uv-managed .venv
     bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
@@ -327,7 +331,13 @@ python instead by setting ``VERL_USE_UV=0``::
     VERL_USE_UV=0 bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
 
 NPU / trtllm and other non-uv backends already fall back to system python
-regardless of ``VERL_USE_UV``.
+regardless of ``VERL_USE_UV``: every uv branch is additionally gated on
+``[ "${DEVICE:-gpu}" = gpu ]``, so ``DEVICE=npu`` never reaches uv (the lockfile
+resolves the CUDA backends only) and Ascend runs keep the ambient interpreter,
+including for Ray workers. ``tests/special_sanity/check_uv_gpu_only.py`` (a
+pre-commit hook) enforces that: uv commands must sit inside that gate, and
+NPU-only trees such as ``examples/ascend_extras/`` and ``tests/special_npu/``
+must not reference uv at all.
 
 Troubleshooting
 :::::::::::::::

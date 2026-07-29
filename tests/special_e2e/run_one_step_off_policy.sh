@@ -12,6 +12,25 @@ echo "PYTHONPATH=${PYTHONPATH}"
 
 NUM_GPUS=${NUM_GPUS:-8}
 ACTOR_STRATEGY=${ACTOR_STRATEGY:-"fsdp2"}  # fsdp2 or megatron
+
+########################### launch ###########################
+# uv (set VERL_USE_UV=0 for system python, as the ascend image does): on GPU this
+# runs every python entrypoint here — including the Ray workers, via
+# runtime_env.py_executable — through `uv run` on the matching extras of the
+# committed uv.lock, so the job needs no install step. The rollout engine is vllm
+# throughout; the training extra follows ACTOR_STRATEGY (fsdp2 rides the `fsdp`
+# extra). NPU falls back to ambient python.
+LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ]; then
+    case "${ACTOR_STRATEGY}" in
+        megatron) TRAIN_EXTRA=megatron ;;
+        *)        TRAIN_EXTRA=fsdp ;;
+    esac
+    UV_EXTRAS=(--extra vllm --extra "${TRAIN_EXTRA}")
+    LAUNCH=(uv run --frozen --all-packages "${UV_EXTRAS[@]}" python3)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages ${UV_EXTRAS[*]}")
+fi
 VANILLA_MBRIDGE=${VANILLA_MBRIDGE:-"False"}  # True or False
 
 # Download model if not exists
@@ -121,7 +140,7 @@ common_params=(
 )
 
     # Detect device
-    device_name=$(python3 - <<'EOF'
+    device_name=$("${LAUNCH[@]}" - <<'EOF'
 from verl.utils.device import get_device_name
 print(get_device_name())
 EOF
@@ -145,7 +164,7 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
         actor_offload=True
     fi
 
-    python3 -m verl.experimental.one_step_off_policy.main_ppo \
+    "${LAUNCH[@]}" -m verl.experimental.one_step_off_policy.main_ppo \
         "${common_params[@]}" \
         actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
         actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
@@ -164,7 +183,7 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
         actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
         actor_rollout_ref.ref.fsdp_config.param_offload=${ref_offload} \
         actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
-        actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} $@
+        actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} "${RAY[@]}" $@
 
 elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     echo "Running with Megatron strategy..."
@@ -190,7 +209,7 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         actor_offload=True
     fi
 
-    python3 -m verl.experimental.one_step_off_policy.main_ppo \
+    "${LAUNCH[@]}" -m verl.experimental.one_step_off_policy.main_ppo \
         --config-path=config \
         --config-name='one_step_off_ppo_megatron_trainer.yaml' \
         "${common_params[@]}" \
@@ -208,7 +227,7 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
         actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${train_pp} \
         actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${train_tp} \
-        actor_rollout_ref.ref.megatron.param_offload=${ref_offload} $@
+        actor_rollout_ref.ref.megatron.param_offload=${ref_offload} "${RAY[@]}" $@
 else
     echo "Error: Unknown strategy ${ACTOR_STRATEGY}. Please use 'fsdp2' or 'megatron'"
     exit 1

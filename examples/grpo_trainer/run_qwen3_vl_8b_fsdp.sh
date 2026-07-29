@@ -141,12 +141,14 @@ else
 fi
 
 ########################### launch ###########################
-# uv (set VERL_USE_UV=0 for system python): on GPU, sync the vllm × fsdp venv from
-# uv.lock and run from it (no re-sync); NPU falls back to ambient python.
+# uv (set VERL_USE_UV=0 for system python): on GPU, the driver and every Ray worker
+# (runtime_env.py_executable) run through `uv run` on the vllm × fsdp extras of the committed uv.lock;
+# NPU falls back to ambient python. Run from the verl repo root.
 LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
 if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ]; then
-    uv sync --extra vllm --extra fsdp --frozen
-    LAUNCH=(uv run --frozen --no-sync python3)
+    LAUNCH=(uv run --frozen --all-packages --extra vllm --extra fsdp python3)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages --extra vllm --extra fsdp")
 fi
 "${LAUNCH[@]}" -m verl.trainer.main_ppo \
     "${DATA[@]}" \
@@ -156,4 +158,5 @@ fi
     "${REF[@]}" \
     "${TRAINER[@]}" \
     "${EXTRA[@]}" \
+    "${RAY[@]}" \
     "$@"

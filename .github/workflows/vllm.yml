@@ -100,21 +100,17 @@ jobs:
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock (offline, from the image's baked cache).
+      # Keep these extras identical across the job so uv never re-syncs torch.
+      UV_RUN: "uv run --frozen --all-packages --extra vllm --extra megatron"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      # uv migration: sync the project .venv from the committed uv.lock using
-      # the baked uv cache in the uv.cu130 image (offline), then expose .venv to
-      # subsequent steps.
-      - name: Install the current repository
-        run: |
-          python3 manage_envs.py sync vllm megatron -- --frozen
-          echo "VIRTUAL_ENV=${GITHUB_WORKSPACE}/.venv" >> "$GITHUB_ENV"
-          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
       - name: Check final pip list
         run: |
-          uv pip list
+          $UV_RUN uv pip list
       #      - name: Download Model to Use
       #        run: |
       #          hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir ${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct
@@ -124,25 +120,25 @@ jobs:
       #          export HF_HUB_OFFLINE=1
       - name: Prepare gsm8k dataset
         run: |
-          ray stop --force
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+          $UV_RUN ray stop --force
+          $UV_RUN python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
       - name: Test the latest vLLM Rollout async with agent loop
         run: |
-          ROLLOUT_NAME=vllm pytest -svvv tests/experimental/agent_loop
+          ROLLOUT_NAME=vllm $UV_RUN pytest -svvv tests/experimental/agent_loop
       - name: Test vLLM agent loop with Continuous Token
         run: |
-          ray stop --force
-          ENABLE_CONTINUOUS_TOKEN=1 ROLLOUT_NAME=vllm pytest -svvv \
+          $UV_RUN ray stop --force
+          ENABLE_CONTINUOUS_TOKEN=1 ROLLOUT_NAME=vllm $UV_RUN pytest -svvv \
             tests/experimental/agent_loop/test_basic_agent_loop.py::test_single_turn \
             tests/experimental/agent_loop/test_basic_agent_loop.py::test_tool_agent
       - name: Test vllm server abort functionality
         run: |
-          pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s
+          $UV_RUN pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s
       - name: Test vllm rollout generation determinism (same-instance + cross-instance + cross-instance AgentLoop)
         run: |
           VLLM_DETERMINISM_DENSE_MODEL_PATH=${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct \
           VLLM_DETERMINISM_N_GPUS=2 \
-          pytest tests/workers/rollout/rollout_vllm/test_vllm_generation_determinism.py -v -s
+          $UV_RUN pytest tests/workers/rollout/rollout_vllm/test_vllm_generation_determinism.py -v -s
 
   vllm_checkpoint_engine:
     needs: setup
@@ -153,26 +149,23 @@ jobs:
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock (offline, from the image's baked cache).
+      # Keep these extras identical across the job so uv never re-syncs torch.
+      UV_RUN: "uv run --frozen --all-packages --extra vllm --extra megatron"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      # uv migration: cupy / pytest-asyncio come from the megatron / verl-core
-      # extras, so the explicit installs are no longer needed.
-      - name: Install the current repository
-        run: |
-          python3 manage_envs.py sync vllm megatron -- --frozen
-          echo "VIRTUAL_ENV=${GITHUB_WORKSPACE}/.venv" >> "$GITHUB_ENV"
-          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
       - name: Check final pip list
         run: |
-          uv pip list
+          $UV_RUN uv pip list
       - name: Test vLLM ServerAdapter with Checkpoint Engine (NCCL)
         run: |
-          ROLLOUT_NAME=vllm pytest -svvv tests/checkpoint_engine/test_special_server_adapter.py
+          ROLLOUT_NAME=vllm $UV_RUN pytest -svvv tests/checkpoint_engine/test_special_server_adapter.py
       - name: Test bucketed weight transfer
         run: |
-          pytest -svvv tests/utils/test_bucketed_weight_transfer.py
+          $UV_RUN pytest -svvv tests/utils/test_bucketed_weight_transfer.py
 
   cleanup:
     runs-on: ubuntu-latest

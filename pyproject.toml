@@ -156,6 +156,26 @@ megatron = [
     # transformers NOT pinned here (see fsdp note): inherited via override-deps below.
 ]
 
+# ---- CI-only extras --------------------------------------------------------
+# Layered by .github/workflows on top of a backend combo so CI deps come from
+# the lock (`sync <backend...> ci`) instead of ad-hoc `uv pip install`. No
+# backend depends on these, so runtime images never carry them unless asked.
+#
+# mlflow is deliberately NOT here: it caps pandas<3 and cryptography<49, and
+# because `ci` shares one resolution fork with every backend those caps would
+# drag the whole project from pandas 3.0.3 to 2.3.3. gpu_unit_tests installs it
+# by hand for that reason — do not "fix" that by moving it in here.
+ci = [
+    "hf-transfer",           # HF_HUB_ENABLE_HF_TRANSFER=1 in the GPU test jobs
+    "sglang-router==0.2.2",  # router coverage in reward_model_sglang
+]
+
+# veomni drives the SFT engine tests. Installed deps-free (empty requires-dist
+# in [[tool.uv.dependency-metadata]] below): its real metadata pins
+# datasets<=2.21.0 and a cu129 torch, both of which fight the cu130 backends.
+# This mirrors the `--no-deps` install the SFT workflows did by hand.
+veomni-sft = ["veomni==0.1.11"]
+
 # CI / unit tests / dev sanity. No GPU runtime.
 cpu = [
     "verl[verl-core]",
@@ -301,6 +321,14 @@ requires-dist = []
 [[tool.uv.dependency-metadata]]
 name = "megatron-bridge"
 version = "0.5.2"
+requires-dist = []
+
+# veomni 0.1.11 (veomni-sft extra) is likewise installed deps-free: its metadata
+# pins datasets<=2.21.0 and a cu129 torch/torchvision/torchaudio set that cannot
+# coexist with the cu130 backends. The SFT tests only need veomni's own modules.
+[[tool.uv.dependency-metadata]]
+name = "veomni"
+version = "0.1.11"
 requires-dist = []
 
 # Heavy native packages come prebuilt from the verl wheelhouse (cu130 / torch 2.11

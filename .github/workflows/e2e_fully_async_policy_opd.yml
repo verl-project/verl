@@ -76,31 +76,24 @@ jobs:
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0"
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock. These extras must match what the e2e script
+      # picks for this backend combo, or each step would re-sync torch.
+      UV_RUN: "uv run --frozen --all-packages --extra vllm --extra megatron"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      # uv migration: sync the project .venv from the committed uv.lock using
-      # the baked uv cache in the uv.cu130 image (offline), then expose .venv to
-      # subsequent steps. cupy comes from the megatron extra; mbridge@main is
-      # reinstalled on top of the lock-pinned mbridge.
-      - name: Install the current repository
-        run: |
-          python3 manage_envs.py sync vllm megatron -- --frozen
-          echo "VIRTUAL_ENV=${GITHUB_WORKSPACE}/.venv" >> "$GITHUB_ENV"
-          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
-          source "${GITHUB_WORKSPACE}/.venv/bin/activate"
-          uv pip install --force-reinstall --no-deps --no-build-isolation git+https://github.com/ISEEKYAN/mbridge.git@main
       - name: Check final pip list
         run: |
-          uv pip list
+          $UV_RUN uv pip list
       - name: Prepare datasets
         run: |
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
-          python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k/ --local_save_dir ${HOME}/data/geo3k
+          $UV_RUN python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+          $UV_RUN python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k/ --local_save_dir ${HOME}/data/geo3k
       - name: Running the E2E test with fully_async_policy + Multi-Teacher OPD (Megatron)
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           bash tests/special_e2e/run_fully_async_policy_opd.sh
 
   cleanup:

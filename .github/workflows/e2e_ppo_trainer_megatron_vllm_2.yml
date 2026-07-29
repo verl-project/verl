@@ -118,32 +118,23 @@ jobs:
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock. These extras must match what the e2e script
+      # picks for this backend combo, or each step would re-sync torch.
+      UV_RUN: "uv run --frozen --all-packages --extra vllm --extra megatron --extra math"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      # uv migration: sync the project .venv from the committed uv.lock using
-      # the baked uv cache in the uv.cu130 image (offline), then expose .venv to
-      # subsequent steps. Megatron-Bridge / Megatron-LM@b2a8ec7 / nvidia-modelopt
-      # are not in the lock, so add them on top.
-      - name: Install the current repository
-        run: |
-          python3 manage_envs.py sync vllm megatron -- --frozen
-          echo "VIRTUAL_ENV=${GITHUB_WORKSPACE}/.venv" >> "$GITHUB_ENV"
-          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
-          source "${GITHUB_WORKSPACE}/.venv/bin/activate"
-          uv pip install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@0a21da4 --no-deps --no-build-isolation
-          uv pip install git+https://github.com/NVIDIA/Megatron-LM.git@b2a8ec7 --no-deps --no-build-isolation
-          uv pip install "nvidia-modelopt[torch]>=0.37.0"
       - name: Check final pip list
         run: |
-          uv pip list
+          $UV_RUN uv pip list
       - name: Prepare GSM8K dataset
         run: |
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+          $UV_RUN python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron-Bridge (Qwen3-30B-A3B-Instruct-2507)
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           ADV_ESTIMATOR=grpo USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen2moe_minimal.json \
           PPO_MAX_TOKEN_LEN=1024 FWD_MAX_TOKEN_LEN=1024 \
           MAX_PROMPT_LENGTH=512 MAX_RESPONSE_LENGTH=512 \
@@ -152,7 +143,7 @@ jobs:
           USE_DIST_CKPT=False ALL_OFFLOAD=True SKIP_SAVE_HF_MODEL=1 bash tests/special_e2e/run_ppo_trainer_megatron.sh
       - name: Running GSM8K E2E training tests with 3D parallelism with FP8 rollout on 8 L20 GPUs with Megatron-Bridge (Qwen3-30B-A3B-Instruct-2507)
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           ADV_ESTIMATOR=grpo USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen2moe_minimal.json \
           PPO_MAX_TOKEN_LEN=1024 FWD_MAX_TOKEN_LEN=1024 \
           MAX_PROMPT_LENGTH=512 MAX_RESPONSE_LENGTH=512 \
@@ -164,7 +155,7 @@ jobs:
           rm -rf checkpoints
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron-Bridge LoRA (Qwen3-30B-A3B-Instruct-2507)
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           ADV_ESTIMATOR=grpo USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen2moe_minimal.json \
           PPO_MAX_TOKEN_LEN=1024 FWD_MAX_TOKEN_LEN=1024 \
           MAX_PROMPT_LENGTH=512 MAX_RESPONSE_LENGTH=512 LORA_RANK=8 CRITIC_LORA_RANK=8 \
@@ -184,58 +175,54 @@ jobs:
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock. These extras must match what the e2e script
+      # picks for this backend combo, or each step would re-sync torch.
+      UV_RUN: "uv run --frozen --all-packages --extra vllm --extra fsdp"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      # uv migration: sync the project .venv from the committed uv.lock using
-      # the baked uv cache in the uv.cu130 image (offline), then expose .venv to
-      # subsequent steps.
-      - name: Install the current repository
-        run: |
-          python3 manage_envs.py sync vllm megatron -- --frozen
-          echo "VIRTUAL_ENV=${GITHUB_WORKSPACE}/.venv" >> "$GITHUB_ENV"
-          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
       - name: Prepare GSM8K dataset
         run: |
-          ray stop --force
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+          $UV_RUN ray stop --force
+          $UV_RUN python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
       # Function RM
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm with validation and saving (FSDP_SIZE=8)
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 SAVE_HF_MODEL=True VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-fsdp-size8" bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm after resuming
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           RESUME_MODE=auto VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-fsdp-size8" bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Test merging FSDP checkpoints (Qwen Actor)
         run: |
           exp_name="qwen2.5-0.5b-function-reward-minimal-fsdp-size8"
-          python -m verl.model_merger test --backend fsdp --local_dir checkpoints/verl-test/${exp_name}/global_step_1/actor --test_hf_dir checkpoints/verl-test/${exp_name}/global_step_1/actor/huggingface
+          $UV_RUN python3 -m verl.model_merger test --backend fsdp --local_dir checkpoints/verl-test/${exp_name}/global_step_1/actor --test_hf_dir checkpoints/verl-test/${exp_name}/global_step_1/actor/huggingface
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm with validation and saving (DDP_SIZE=2, FSDP_SIZE=4)
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 SAVE_HF_MODEL=True FSDP_SIZE=4 USE_KL=True VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-ddp-size2-fsdp-size4" bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Test merging DDP+FSDP checkpoints (Qwen Actor)
         run: |
           exp_name="qwen2.5-0.5b-function-reward-minimal-ddp-size2-fsdp-size4"
-          python -m verl.model_merger test --backend fsdp --local_dir checkpoints/verl-test/${exp_name}/global_step_1/actor --test_hf_dir checkpoints/verl-test/${exp_name}/global_step_1/actor/huggingface
+          $UV_RUN python3 -m verl.model_merger test --backend fsdp --local_dir checkpoints/verl-test/${exp_name}/global_step_1/actor --test_hf_dir checkpoints/verl-test/${exp_name}/global_step_1/actor/huggingface
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm with validation and saving (FSDP2)
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 SAVE_HF_MODEL=True VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-fsdp2-size8" STRATEGY=fsdp2 bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Test merging FSDP2 checkpoints (Qwen Actor)
         run: |
           exp_name="qwen2.5-0.5b-function-reward-minimal-fsdp2-size8"
-          python -m verl.model_merger test --backend fsdp --local_dir checkpoints/verl-test/${exp_name}/global_step_1/actor --test_hf_dir checkpoints/verl-test/${exp_name}/global_step_1/actor/huggingface
+          $UV_RUN python3 -m verl.model_merger test --backend fsdp --local_dir checkpoints/verl-test/${exp_name}/global_step_1/actor --test_hf_dir checkpoints/verl-test/${exp_name}/global_step_1/actor/huggingface
       - name: Running GSM8K E2E without rmpad using function rm
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           RM_PAD=False bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm (GRPO)
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           CUSTOM_REWARD_FN=True ADV_ESTIMATOR=grpo USE_KL=True bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       # - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm (ReMax)
       #   run: |
@@ -244,21 +231,21 @@ jobs:
       # LoRA tests
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with grpo lora using function rm with use_shm
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with grpo lora using function rm with use_shm and layered_summon
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True TOTAL_TRAIN_STEPS=1 SAVE_FREQ=1 FSDP_SIZE=4 VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal" bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Test GRPO LoRA checkpoints merging function
         run: |
           export EXP_NAME="qwen2.5-0.5b-function-reward-minimal"
           ls checkpoints/verl-test/${EXP_NAME}/global_step_1/actor
           cat checkpoints/verl-test/${EXP_NAME}/global_step_1/actor/huggingface/config.json
-          python3 -m verl.model_merger merge --backend fsdp --local_dir checkpoints/verl-test/${EXP_NAME}/global_step_1/actor/ --target_dir checkpoints/verl-test/${EXP_NAME}/global_step_1/actor/huggingface
+          $UV_RUN python3 -m verl.model_merger merge --backend fsdp --local_dir checkpoints/verl-test/${EXP_NAME}/global_step_1/actor/ --target_dir checkpoints/verl-test/${EXP_NAME}/global_step_1/actor/huggingface
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with grpo lora using function rm with use_shm and layered_summon with fsdp2
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True STRATEGY=fsdp2 bash tests/special_e2e/ppo_trainer/run_function_reward.sh
 
   e2e_ppo_trainer_fsdp-qwen2_5vl-3b:
@@ -270,25 +257,21 @@ jobs:
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock. These extras must match what the e2e script
+      # picks for this backend combo, or each step would re-sync torch.
+      UV_RUN: "uv run --frozen --all-packages --extra vllm --extra fsdp"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      # uv migration: sync the project .venv from the committed uv.lock using
-      # the baked uv cache in the uv.cu130 image (offline), then expose .venv to
-      # subsequent steps.
-      - name: Install the current repository
-        run: |
-          python3 manage_envs.py sync vllm megatron -- --frozen
-          echo "VIRTUAL_ENV=${GITHUB_WORKSPACE}/.venv" >> "$GITHUB_ENV"
-          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
       # Geo3k
       - name: Prepare GEO3K dataset
         run: |
-          python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k/
+          $UV_RUN python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k/
       - name: Running GEO3K VLM GRPO E2E training tests on 8 L20 GPUs with rmpad using function rm
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
             MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
@@ -298,7 +281,7 @@ jobs:
 
       - name: Running GEO3K VLM PPO E2E training tests on 8 L20 GPUs with rmpad using function rm
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
             MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
@@ -307,7 +290,7 @@ jobs:
             bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Running GEO3K VLM GRPO E2E lora training tests on 8 L20 GPUs with rmpad using function rm
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
             MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \

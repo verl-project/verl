@@ -93,43 +93,37 @@ jobs:
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock (offline, from the image's baked cache).
+      # Keep these extras identical across the job so uv never re-syncs torch.
+      UV_RUN: "uv run --frozen --all-packages --extra vllm --extra megatron"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      # uv migration: sync the project .venv from the committed uv.lock using
-      # the baked uv cache in the uv.cu130 image (offline), then expose .venv to
-      # subsequent steps.
-      - name: Install the current repository and upgrade to latest transformers
-        run: |
-          python3 manage_envs.py sync vllm megatron -- --frozen
-          echo "VIRTUAL_ENV=${GITHUB_WORKSPACE}/.venv" >> "$GITHUB_ENV"
-          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
       - name: Check final pip list
         run: |
-          uv pip list
+          $UV_RUN uv pip list
       - name: Running rmpad model tests on 8 L20 GPUs + flash_attn 2.5.8
         run: |
-          pytest -s tests/models/test_transformer.py
+          $UV_RUN pytest -s tests/models/test_transformer.py
       - name: Running rmpad model tests on 8 L20 GPUs + latest flash_attn
         run: |
-          pytest -s tests/models/test_transformer.py
+          $UV_RUN pytest -s tests/models/test_transformer.py
       - name: Running FSDP rmpad model tests on 8 L20 GPUs + latest flash_attn
         run: |
-          STRATEGY=fsdp torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
+          STRATEGY=fsdp $UV_RUN torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
       - name: Running transformers ulysses tests on 8 L20 GPUs + latest transformers
         run: |
-          torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
+          $UV_RUN torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
+      # `--with` layers 4.54.1 over the synced env for this step alone, so the
+      # downgrade no longer leaks into the steps below and needs no restore after.
       - name: Running transformers ulysses tests on 8 L20 GPUs + transformers 4.54.1
         run: |
-          uv pip install transformers==4.54.1
-          torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
+          $UV_RUN --with transformers==4.54.1 torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
       - name: Run distributed test
         run: |
-          bash tests/special_distributed/run_all.sh
-      - name: Clean up and recover transformers
-        run: |
-          uv pip install --upgrade "transformers==5.3.0"
+          $UV_RUN bash tests/special_distributed/run_all.sh
 
   # TODO: Move this back to model_rmpad once FSDP2 is stable.
   # NOTE: List as an independent job to make rerun easier.
@@ -142,18 +136,17 @@ jobs:
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock (offline, from the image's baked cache).
+      # Keep these extras identical across the job so uv never re-syncs torch.
+      UV_RUN: "uv run --frozen --all-packages --extra vllm --extra megatron"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - name: Install the current repository and upgrade to latest transformers/flash_attn
-        run: |
-          python3 manage_envs.py sync vllm megatron -- --frozen
-          echo "VIRTUAL_ENV=${GITHUB_WORKSPACE}/.venv" >> "$GITHUB_ENV"
-          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
       - name: Running FSDP2 rmpad model tests on 8 L20 GPUs + latest flash_attn
         run: |
-          STRATEGY=fsdp2 torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
+          STRATEGY=fsdp2 $UV_RUN torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
 
   model_engine:
     needs: setup
@@ -164,24 +157,21 @@ jobs:
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock (offline, from the image's baked cache).
+      # Keep these extras identical across the job so uv never re-syncs torch.
+      UV_RUN: "uv run --frozen --all-packages --extra vllm --extra megatron"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - name: Install the current repository
-        run: |
-          python3 manage_envs.py sync vllm megatron -- --frozen
-          echo "VIRTUAL_ENV=${GITHUB_WORKSPACE}/.venv" >> "$GITHUB_ENV"
-          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "$GITHUB_PATH"
-          source "${GITHUB_WORKSPACE}/.venv/bin/activate"
-          uv pip install --upgrade "accelerate>=1.13.0"
       - name: Download model config files
         run: |
-          hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir $HOME/models/Qwen/Qwen2.5-0.5B-Instruct
+          $UV_RUN hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir $HOME/models/Qwen/Qwen2.5-0.5B-Instruct
       - name: Running mcore engine tests on 8 L20 GPUs
         run: |
-          ray stop --force
-          pytest -s -x tests/models/test_engine.py
+          $UV_RUN ray stop --force
+          $UV_RUN pytest -s -x tests/models/test_engine.py
 
   cleanup:
     runs-on: ubuntu-latest
