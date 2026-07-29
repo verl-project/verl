@@ -24,8 +24,8 @@ import os
 from typing import Any, Optional
 from uuid import uuid4
 
+import numpy as np
 import ray
-import torch
 from cachetools import LRUCache
 from omegaconf import DictConfig
 
@@ -385,9 +385,8 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                 if final_output.routed_experts is None:
                     final_output.routed_experts = output.routed_experts
                 else:
-                    final_output.routed_experts = torch.cat(
-                        [final_output.routed_experts, output.routed_experts[-len(output.token_ids) :]],
-                        dim=0,
+                    final_output.routed_experts = np.concatenate(
+                        [final_output.routed_experts, output.routed_experts[-len(output.token_ids) :]]
                     )
             if output.num_preempted is not None:
                 final_output.num_preempted += output.num_preempted

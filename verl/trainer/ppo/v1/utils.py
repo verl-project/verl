@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any
 
 import numpy as np
@@ -20,6 +20,7 @@ import torch
 from verl.protocol import DataProto
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.ray_trainer import compute_advantage
+from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY
 
 
 class MetricsAggregator:
@@ -31,14 +32,21 @@ class MetricsAggregator:
     def __init__(self):
         self.metric_values: dict[str, list[float]] = defaultdict(list)
         self.metric_weights: dict[str, list[int]] = defaultdict(list)
+        self.dict_metrics: dict[str, Counter] = defaultdict(Counter)
         self.step_count = 0
         self.aggregation_rules = self._init_aggregation_rules()
 
     def _init_aggregation_rules(self) -> dict[str, list[str]]:
         return {
             "sum": [
-                "training/off_policy/dropped_samples",
-                "validation/off_policy/dropped_samples",
+                "training/off_policy/evicted_samples",
+                "validation/off_policy/evicted_samples",
+                "training/filter_groups/evicted_samples",
+                "validation/filter_groups/evicted_samples",
+                "training/filter_groups/discarded_surplus_samples",
+                "validation/filter_groups/discarded_surplus_samples",
+                "training/rollout_failure/evicted_samples",
+                "validation/rollout_failure/evicted_samples",
             ],
             "last": [
                 "training/global_step",
@@ -47,10 +55,13 @@ class MetricsAggregator:
         }
 
     def add_step_metrics(self, metrics: dict[str, Any], sample_count: int = 0):
-        """Record one iteration's metrics. Only scalar (int/float/np.number/0-d tensor) values are kept."""
+        """Record one iteration's metrics."""
         self.step_count += 1
         for key, value in metrics.items():
             if isinstance(value, bool):
+                continue
+            if key == DAPO_FILTERED_REWARD_COUNTS_KEY and isinstance(value, dict):
+                self.dict_metrics[key].update(value)
                 continue
             if isinstance(value, int | float | np.number):
                 self.metric_values[key].append(float(value))
@@ -61,13 +72,13 @@ class MetricsAggregator:
 
     def _get_metric_weight(self, metric_name: str, metrics: dict[str, Any], sample_count: int) -> int:
         """Return the sample weight used when reducing per-iteration average metrics."""
-        if metric_name.endswith("/off_policy/dropped_samples_staleness/mean"):
+        if metric_name.endswith("/off_policy/evicted_samples_staleness/mean"):
             prefix = metric_name.rsplit("_staleness/mean", 1)[0]
-            dropped_samples = metrics.get(prefix, sample_count)
-            if isinstance(dropped_samples, torch.Tensor):
-                return int(dropped_samples.item()) if dropped_samples.numel() == 1 else sample_count
-            if isinstance(dropped_samples, int | float | np.number):
-                return int(dropped_samples)
+            evicted_samples = metrics.get(prefix, sample_count)
+            if isinstance(evicted_samples, torch.Tensor):
+                return int(evicted_samples.item()) if evicted_samples.numel() == 1 else sample_count
+            if isinstance(evicted_samples, int | float | np.number):
+                return int(evicted_samples)
         return sample_count
 
     def _get_aggregation_type(self, metric_name: str) -> str:
@@ -115,6 +126,9 @@ class MetricsAggregator:
         if self.step_count == 0:
             return {}
         aggregated = {name: self._aggregate_single_metric(name, values) for name, values in self.metric_values.items()}
+        for name, counter in self.dict_metrics.items():
+            if counter:
+                aggregated[name] = dict(counter)
         return self._special_metrics_aggregate(aggregated)
 
     def _special_metrics_aggregate(self, aggregated: dict[str, Any]) -> dict[str, Any]:
@@ -127,6 +141,7 @@ class MetricsAggregator:
     def reset(self):
         self.metric_values.clear()
         self.metric_weights.clear()
+        self.dict_metrics.clear()
         self.step_count = 0
 
 

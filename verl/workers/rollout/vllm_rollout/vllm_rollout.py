@@ -38,11 +38,10 @@ from torch.distributed.device_mesh import DeviceMesh
 
 from verl import DataProto
 from verl.third_party.vllm import VLLM_SLEEP_LEVEL, get_version
-from verl.utils.device import get_device_id, is_support_ipc
+from verl.utils.device import is_support_ipc
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
 from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
-from verl.workers.rollout.vllm_rollout.utils import get_device_uuid
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -56,48 +55,6 @@ def _check_vllm_version_for_sleep_level():
         logger.warning("Could not determine vLLM version, assuming an older version for sleep_level configuration.")
         return False
     return vs.parse(current_version) >= vs.parse(minver)
-
-
-def _should_expand_vllm_moe_params() -> bool:
-    current_version = get_version("vllm")
-    if not current_version:
-        return False
-
-    try:
-        return vs.parse(current_version) <= vs.parse("0.24.0")
-    except vs.InvalidVersion:
-        return False
-
-
-async def _iter_vllm_compatible_moe_params(weights):
-    """Expand Transformers 5 packed MoE expert tensors to vLLM checkpoint keys.
-
-    Transformers 5 stores Qwen-style MoE experts as packed 3D parameters:
-    ``mlp.experts.gate_up_proj`` with shape
-    ``[num_experts, 2 * intermediate_size, hidden_size]`` and
-    ``mlp.experts.down_proj`` with shape
-    ``[num_experts, hidden_size, intermediate_size]``. vLLM's Qwen MoE reload
-    path still accepts the original per-expert checkpoint keys during live
-    weight sync, so stream those keys without materializing a full dict.
-    """
-    from verl.workers.rollout.utils import ensure_async_iterator
-
-    async for name, tensor in ensure_async_iterator(weights):
-        if name.endswith(".mlp.experts.gate_up_proj") and tensor.dim() == 3:
-            gate, up = tensor.chunk(2, dim=1)
-            base = name.removesuffix(".gate_up_proj")
-            for expert_id in range(tensor.size(0)):
-                yield f"{base}.{expert_id}.gate_proj.weight", gate[expert_id].contiguous()
-                yield f"{base}.{expert_id}.up_proj.weight", up[expert_id].contiguous()
-            continue
-
-        if name.endswith(".mlp.experts.down_proj") and tensor.dim() == 3:
-            base = name.removesuffix(".down_proj")
-            for expert_id in range(tensor.size(0)):
-                yield f"{base}.{expert_id}.down_proj.weight", tensor[expert_id].contiguous()
-            continue
-
-        yield name, tensor
 
 
 class ServerAdapter(BaseRollout):
@@ -182,7 +139,6 @@ class ServerAdapter(BaseRollout):
         else:
             self.sleep_level = VLLM_SLEEP_LEVEL
 
-        self.device_uuid = get_device_uuid(get_device_id())
         # Use replica_rank + node-local rank to form ZMQ handle instead of GPU UUID,
         # because CheckpointEngineWorker and vLLM worker may see different GPU UUIDs
         # when CUDA_VISIBLE_DEVICES differs between processes (common on ROCm/AMD).
@@ -286,12 +242,6 @@ class ServerAdapter(BaseRollout):
             bucket_size_mb=bucket_size_mb,
             use_shm=self.use_shm,
         )
-        # With LoRA enabled (peft_config), vLLM wraps FusedMoE so the per-expert
-        # checkpoint keys no longer resolve (`experts.w13_weight` becomes
-        # `experts.base_layer.w13_weight`); only the packed `experts.gate_up_proj`
-        # / `experts.down_proj` load path is wrapper-aware, so keep tensors packed.
-        if _should_expand_vllm_moe_params() and kwargs.get("peft_config") is None:
-            weights = _iter_vllm_compatible_moe_params(weights)
         await sender.async_send_weights(weights)
 
         if future is not None:

@@ -71,7 +71,7 @@ from verl.trainer.ppo.utils import (
     need_reference_policy,
     need_teacher_policy,
 )
-from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer
+from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY, ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.utils import MetricsAggregator, compute_advantage_for_multi_trajectories
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils import tensordict_utils as tu
@@ -86,7 +86,7 @@ from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.skip import SkipManager
-from verl.utils.tracking import Tracking, ValidationGenerationsLogger
+from verl.utils.tracking import DapoFilteredRewardTableLogger, Tracking, ValidationGenerationsLogger
 from verl.workers.config import CriticConfig, DistillationConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
 from verl.workers.rollout.llm_server import LLMServerClient, LLMServerManager
@@ -138,6 +138,8 @@ class PPOTrainer(ABC):
         self._rollout_moe_lb_metrics_accumulator = RolloutMoELoadBalanceMetricsAccumulator(
             model_config=self.config.actor_rollout_ref.model
         )
+        # track mini-batch index within a parameter_sync_step cycle for Decoupled PPO
+        self.local_trigger_step = 0
 
     def _build_replay_buffer(self) -> ReplayBuffer:
         """Instantiate the replay buffer (or a user-provided custom sampler).
@@ -147,11 +149,15 @@ class PPOTrainer(ABC):
         """
         sampler_config = self.config.trainer.v1.sampler
         custom_sampler = sampler_config.get("custom_sampler", None)
-        sampler_cls = ReplayBuffer
-        if custom_sampler is not None and custom_sampler.get("path") and custom_sampler.get("name"):
+        has_custom_sampler = bool(
+            custom_sampler is not None and custom_sampler.get("path") and custom_sampler.get("name")
+        )
+        if has_custom_sampler:
             sampler_cls = load_extern_type(custom_sampler.path, custom_sampler.name)
+        else:
+            sampler_cls = ReplayBuffer if self.trainer_mode == "sync" else ReplayBufferAsync
 
-        return sampler_cls(
+        replay_buffer_kwargs = dict(
             trainer_mode=self.trainer_mode,
             trainer_config=self.config.trainer.v1.get(self.trainer_mode, {}),
             max_off_policy_threshold=sampler_config.max_off_policy_threshold,
@@ -159,6 +165,56 @@ class PPOTrainer(ABC):
             sampler_kwargs=sampler_config.sampler_kwargs,
             refill_fn=self._add_prompts_to_generate,
         )
+        # Preserve the existing constructor contract for external samplers; custom implementations own
+        # their filtering semantics and can consume algorithm.filter_groups through their own config.
+        if not has_custom_sampler:
+            filter_groups_metric = self._resolve_filter_groups_metric()
+            sync_refill_failed_groups = bool(sampler_config.get("sync_refill_failed_groups", False))
+            replay_buffer_kwargs.update(
+                filter_groups_metric=filter_groups_metric,
+                sync_refill_failed_groups=sync_refill_failed_groups,
+            )
+            if sampler_cls is ReplayBuffer:
+                filter_groups = self.config.algorithm.get("filter_groups", None)
+                max_inflight_gen_batches = 1
+                if filter_groups_metric is not None:
+                    max_inflight_gen_batches = filter_groups.get("max_inflight_gen_batches", 1)
+                train_batch_size = self.config.data.train_batch_size
+                replay_buffer_kwargs.update(
+                    train_batch_size=train_batch_size,
+                    gen_batch_size=1
+                    if filter_groups_metric is not None or sync_refill_failed_groups
+                    else (self.config.data.get("gen_batch_size", None) or train_batch_size),
+                    max_inflight_gen_batches=max_inflight_gen_batches,
+                )
+        return sampler_cls(**replay_buffer_kwargs)
+
+    def _resolve_filter_groups_metric(self) -> str | None:
+        """Resolve DAPO's group metric and verify that rollout computes it before sampling."""
+        filter_groups = self.config.algorithm.get("filter_groups", None)
+        filter_enabled = bool(filter_groups is not None and filter_groups.get("enable", False))
+        if not filter_enabled:
+            return None
+
+        filter_metric = filter_groups.get("metric", None)
+        if not filter_metric:
+            raise ValueError("algorithm.filter_groups.metric must be set when group filtering is enabled")
+
+        reward_model = self.config.reward.reward_model
+        streaming_reward_path = not reward_model.enable or reward_model.enable_resource_pool
+        assert streaming_reward_path, (
+            "algorithm.filter_groups requires the reward metric at sampling time: use rule-based reward or "
+            "reward.reward_model.enable_resource_pool=True. A colocated reward model computes rewards only "
+            "after replay-buffer sampling."
+        )
+        max_num_gen_batches = filter_groups.get("max_num_gen_batches", 0)
+        if max_num_gen_batches > 0:
+            logger.warning(
+                "algorithm.filter_groups.max_num_gen_batches=%s is ignored by the built-in V1 ReplayBuffer; "
+                "use max_inflight_gen_batches to bound concurrent Sync DAPO generation.",
+                max_num_gen_batches,
+            )
+        return str(filter_metric)
 
     def init(self):
         """Initialize all components of the trainer.
@@ -351,6 +407,10 @@ class PPOTrainer(ABC):
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
         )
+        self.dapo_filtered_reward_logger = DapoFilteredRewardTableLogger(
+            project_name=self.config.trainer.project_name,
+            experiment_name=self.config.trainer.experiment_name,
+        )
 
         # perform validation before training
         if self.config.trainer.get("val_before_train", True):
@@ -428,7 +488,12 @@ class PPOTrainer(ABC):
             # 7. cleanup transfer queue
             tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
 
+            dapo_filtered_reward_counts = metrics.pop(DAPO_FILTERED_REWARD_COUNTS_KEY, None)
             self.logger.log(data=metrics, step=self.global_steps)
+            if dapo_filtered_reward_counts:
+                self.dapo_filtered_reward_logger.log(
+                    self.config.trainer.logger, dapo_filtered_reward_counts, self.global_steps
+                )
             progress_bar.update(1)
             self.global_steps += 1
             SkipManager.set_step(self.global_steps)
@@ -451,15 +516,14 @@ class PPOTrainer(ABC):
         )
         sample_batch_size = train_batch_size // self.parameter_sync_step
 
-        # regular feed: stream one train batch worth of prompts for this step
-        with marked_timer("feed", timing_raw):
-            self._add_batch_to_generate()
+        self._add_batch_to_generate()
 
         metrics_aggregator = MetricsAggregator()
         combined_keys: list = []
         combined_tags: list = []
         combined_partition_id = "train"
-        for _ in range(self.parameter_sync_step):
+        for trigger_idx in range(self.parameter_sync_step):
+            self.local_trigger_step = trigger_idx
             iter_metrics: dict = {}
             batch = self._step_once(iter_metrics, timing_raw, sample_batch_size)
             sample_count = sum(not tag.get("is_padding", False) for tag in batch.tags)
@@ -612,17 +676,17 @@ class PPOTrainer(ABC):
             max_samples=self.config.data.get("val_max_samples", -1),
         )
 
-        # Async drop refills an arbitrary number of dropped prompts, which must divide gen_batch_size,
-        # so force gen_batch_size=1.
-        if self.trainer_mode != "sync" and self.config.trainer.v1.sampler.max_off_policy_strategy == "drop":
+        # Exact refill counts require single-prompt dataloader fetches.
+        filter_groups = self.config.algorithm.get("filter_groups", None)
+        dapo_enabled = bool(filter_groups is not None and filter_groups.get("enable", False))
+        sync_refill_failed_groups = bool(self.config.trainer.v1.sampler.get("sync_refill_failed_groups", False))
+        requires_exact_refill = self.trainer_mode != "sync" or dapo_enabled or sync_refill_failed_groups
+        if requires_exact_refill:
             user_gen_batch_size = self.config.data.get("gen_batch_size", None)
             if user_gen_batch_size not in (None, 1):
-                logger.warning(
-                    f"data.gen_batch_size={user_gen_batch_size} is overridden to 1: the async 'drop' "
-                    f"off-policy strategy refills an arbitrary number of prompts, which requires gen_batch_size=1."
-                )
+                logger.warning(f"data.gen_batch_size={user_gen_batch_size} is overridden to 1.")
             elif user_gen_batch_size is None:
-                logger.info("data.gen_batch_size defaulted to 1 for the async 'drop' off-policy strategy.")
+                logger.info("data.gen_batch_size defaulted to 1.")
             with open_dict(self.config):
                 self.config.data.gen_batch_size = 1
 
@@ -1694,15 +1758,10 @@ class PPOTrainer(ABC):
                 partition_id=batch.partition_id,
                 select_fields=["extra_fields"],
             )
-            extra_fields = spec_data.pop("extra_fields").tolist()
-            # The rollout omits the spec_* stats when the backend does not report
-            # per-request spec-decode stats; leave all three as None in that case.
-            if extra_fields and all(
-                isinstance(extra_field, dict) and "spec_num_draft_tokens" in extra_field for extra_field in extra_fields
-            ):
-                spec_drafts = [extra_field["spec_num_draft_tokens"] for extra_field in extra_fields]
-                spec_accepts = [extra_field["spec_num_accepted_tokens"] for extra_field in extra_fields]
-                spec_verifies = [extra_field["spec_num_verify_steps"] for extra_field in extra_fields]
+            extra_fields = spec_data["extra_fields"].tolist()
+            spec_drafts = [extra_field["spec_num_draft_tokens"] for extra_field in extra_fields]
+            spec_accepts = [extra_field["spec_num_accepted_tokens"] for extra_field in extra_fields]
+            spec_verifies = [extra_field["spec_num_verify_steps"] for extra_field in extra_fields]
 
         data = data.to_padded_tensor()
         data["token_level_scores"] = data["rm_scores"]

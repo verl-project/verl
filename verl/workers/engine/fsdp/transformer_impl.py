@@ -19,7 +19,7 @@ import gc
 import logging
 import os
 import warnings
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from inspect import signature
 from typing import Callable, ContextManager, Optional
 
@@ -75,7 +75,7 @@ from verl.workers.utils.padding import build_attention_mask_from_nested
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
-from .utils import create_device_mesh, get_sharding_strategy
+from .utils import create_device_mesh, get_sharding_strategy, unfuse_moe_params
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -640,9 +640,38 @@ class FSDPEngine(BaseEngine):
     def get_context_parallel_group(self):
         raise NotImplementedError
 
+    @contextmanager
+    def _gradient_sync_context(self, *, is_last_micro_batch: bool):
+        """Skip FSDP gradient communication on non-final accumulation steps.
+
+        During gradient accumulation the optimizer only steps after the final
+        micro-batch, so gradients only need to be synchronized once per
+        mini-batch. Deferring synchronization on the non-final micro-batches
+        reduces FSDP gradient collectives from one reduce-scatter per
+        micro-batch to a single round, at the cost of temporarily retaining
+        unsharded gradients until the final backward.
+        """
+        if is_last_micro_batch:
+            yield
+            return
+
+        version = fsdp_version(self.module)
+        if version == 1:
+            with self.module.no_sync():
+                yield
+        elif version == 2:
+            self.module.set_requires_gradient_sync(False)
+            try:
+                yield
+            finally:
+                self.module.set_requires_gradient_sync(True)
+        else:
+            yield
+
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> list[TensorDict]:
         # note that the global_batch_size should include data on all the dp
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
+        return_model_output = tu.get_non_tensor_data(data=data, key="return_model_output", default=False)
 
         # compute num_tokens in global batch for loss normalization
         batch_num_tokens = data["loss_mask"].sum().to(get_device_id())
@@ -664,8 +693,13 @@ class FSDPEngine(BaseEngine):
         # and _build_fsdp_module, so self.scaler may not be set.
         scaler = getattr(self, "scaler", None)
 
-        for micro_batch in micro_batches:
-            with ctx:
+        for micro_batch_idx, micro_batch in enumerate(micro_batches):
+            sync_ctx = (
+                nullcontext()
+                if forward_only
+                else self._gradient_sync_context(is_last_micro_batch=micro_batch_idx == len(micro_batches) - 1)
+            )
+            with ctx, sync_ctx:
                 loss, meta_info = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
 
                 if not forward_only:
@@ -673,9 +707,11 @@ class FSDPEngine(BaseEngine):
                         scaler.scale(loss).backward()
                     else:
                         loss.backward()
-                    # Training discards model_output (train_batch pops it); keeping it accumulates
-                    # full-length nested tensors across the mini-batch (∝ ppo_mini_batch * rollout_n) → OOM.
-                    meta_info.pop("model_output", None)
+                    if not return_model_output:
+                        # Standard training discards model_output (train_batch pops it); keeping it accumulates
+                        # full-length nested tensors across the mini-batch (∝ ppo_mini_batch * rollout_n) → OOM.
+                        # Specialized callers such as Tinker may opt in when their response requires these outputs.
+                        meta_info.pop("model_output", None)
 
             output_lst.append(meta_info)
 
@@ -824,12 +860,9 @@ class FSDPEngine(BaseEngine):
 
     def get_per_tensor_param_shard(self, **kwargs):
         """Like :meth:`get_per_tensor_param`, but yields each rank's *local* FSDP shard
-        instead of all-gathering the full tensor -- used by the ``delta_sharded``
-        checkpoint engine, which diffs on shards and gathers only the changes.
-
-        Yields ``(name, local_flat_shard_bf16, within_param_flat_offset, full_numel,
-        full_shape, contributes)``. Non-LoRA base path only.
-        """
+        ``(name, local_flat_shard_bf16, ShardSpec)`` instead of all-gathering the full
+        tensor. Pure DTensor export, no side effects -- delta bookkeeping lives in
+        :meth:`get_per_tensor_param_delta_shard`. Non-LoRA base path only."""
 
         # FSDP1's (SHARDED_)STATE_DICT export runs through the unshard machinery and
         # asserts flat params are GPU-resident; FSDP2 state_dict() only collects
@@ -856,6 +889,33 @@ class FSDPEngine(BaseEngine):
                 yield name, local.reshape(-1), spec
 
         return _gen(), None
+
+    def _hf_delta_entry(self, name, spec, place, lidx, lval):
+        """Per-param HF delta entry builder: this engine handles DTensor identity
+        params only (weight name == HF name, coordinates translate). EP/converter
+        specs are the veomni engine's business -- it overrides this hook."""
+        from ..utils import _hf_entry_identity
+
+        if spec.to_hf_chunk is not None:
+            raise NotImplementedError(
+                f"{name}: the FSDP engine only handles DTensor identity params; "
+                "converter specs belong to the engine that declared them"
+            )
+        return _hf_entry_identity(name, spec, place, lidx, lval)
+
+    def get_per_tensor_param_delta_shard(self, **kwargs):
+        """Yield the delta engine's steady payloads -- FINAL HF-coordinate entries
+        ``(slots, dtype_str, counts, hf_idx, hf_val, gather_group)`` per parameter.
+        Weight->HF naming, to-HF conversion, diff and snapshot are all backend
+        business: the DTensor-generic pipeline lives in
+        :mod:`verl.workers.engine.utils`, the per-param entry builder is the
+        :meth:`_hf_delta_entry` hook. Requires a prior
+        :meth:`prime_delta_snapshots` call."""
+        from ..utils import hf_delta_export
+
+        self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
+        gen, _ = self.get_per_tensor_param_shard()
+        return hf_delta_export(gen, self._delta_shard_snap, self._hf_delta_entry), None
 
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
@@ -909,16 +969,14 @@ class FSDPEngine(BaseEngine):
             per_tensor_param = params.items()
         else:
             device = get_device_id()  # used when fsdp2 set cpu_offload_policy
-            # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
             per_tensor_param = (
                 (
                     name,
-                    param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
-                    if isinstance(param, DTensor)
-                    else param,
+                    param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param,
                 )
                 for name, param in params.items()
             )
+            per_tensor_param = unfuse_moe_params(per_tensor_param, self.model_config.hf_config.model_type)
 
         if self._qat_enabled:
             from verl.utils.qat.quantizer import QATQuantizer

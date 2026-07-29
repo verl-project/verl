@@ -54,7 +54,9 @@ async def test_hccl_checkpoint_engine(
 
     # initialize config
     checkpoint_engine_config = CheckpointEngineConfig(
-        backend="nccl", engine_kwargs={"nccl": {"rebuild_group": rebuild_group}}
+        backend="nccl",
+        engine_kwargs={"nccl": {"rebuild_group": rebuild_group}},
+        update_weights_bucket_megabytes=3072,
     )
     model_config = HFModelConfig(path=model_path, use_remove_padding=True)
     rollout_config = RolloutConfig(name="vllm", checkpoint_engine=checkpoint_engine_config)
