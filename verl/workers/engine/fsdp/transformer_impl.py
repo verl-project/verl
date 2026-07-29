@@ -29,7 +29,7 @@ from peft import LoraConfig, TaskType, get_peft_model
 from tensordict import TensorDict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Replicate, Shard
 
 import verl.utils.torch_functional as verl_F
 from verl.models.transformers.monkey_patch import apply_monkey_patch
@@ -969,11 +969,49 @@ class FSDPEngine(BaseEngine):
             per_tensor_param = params.items()
         else:
             device = get_device_id()  # used when fsdp2 set cpu_offload_policy
+
+            def materialize_dtensor(name: str, param: DTensor) -> torch.Tensor:
+                """Materialize a rollout weight while bounding 2-D reshard peak memory."""
+                source_placements = tuple(param.placements)
+                local = param.to(device, non_blocking=True)
+                # all_gather is a byte-preserving operation, so casting the
+                # local shard first is numerically equivalent to casting the
+                # replicated tensor and halves every collective temporary.
+                local = local.to(torch.bfloat16, non_blocking=True)
+
+                reshard_order: list[int] = []
+                shard_mesh_dims = [
+                    mesh_dim
+                    for mesh_dim, placement in enumerate(local.placements)
+                    if isinstance(placement, Shard)
+                ]
+                if len(shard_mesh_dims) > 1:
+                    # Replicate nonzero tensor dimensions first while the
+                    # tensor is small. Replicate Shard(0) last because
+                    # all_gather_tensor(gather_dim=0) avoids the additional
+                    # full-size torch.cat used for gather_dim != 0.
+                    reshard_order = sorted(
+                        shard_mesh_dims,
+                        key=lambda mesh_dim: (
+                            local.placements[mesh_dim].dim == 0,
+                            -local.placements[mesh_dim].dim,
+                        ),
+                    )
+
+                if reshard_order:
+                    replicated = local
+                    for mesh_dim in reshard_order:
+                        next_placements = list(replicated.placements)
+                        next_placements[mesh_dim] = Replicate()
+                        replicated = replicated.redistribute(placements=tuple(next_placements))
+                    full_tensor = replicated.to_local()
+                else:
+                    full_tensor = local.full_tensor()
+
+                return full_tensor
+
             per_tensor_param = (
-                (
-                    name,
-                    param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param,
-                )
+                (name, materialize_dtensor(name, param) if isinstance(param, DTensor) else param)
                 for name, param in params.items()
             )
             per_tensor_param = unfuse_moe_params(per_tensor_param, self.model_config.hf_config.model_type)
