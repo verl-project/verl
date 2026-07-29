@@ -69,9 +69,6 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 30
     env:
-      HTTP_PROXY: "http://100.68.174.87:3128"
-      HTTPS_PROXY: "http://100.68.174.87:3128"
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0"
       # No install step: every command below runs through uv, which syncs .venv

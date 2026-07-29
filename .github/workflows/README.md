@@ -61,9 +61,6 @@ jobs:
       # PRs, which left the proxy empty exactly on the runs that need it. Upper
       # case only: GitHub compares `env:` keys case-insensitively, so adding
       # `http_proxy` here is rejected as a redefinition of `HTTP_PROXY`.
-      HTTP_PROXY: "http://100.68.174.87:3128"
-      HTTPS_PROXY: "http://100.68.174.87:3128"
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       # With the uv image (verl:uv.cu130) there is no install step: `uv run` syncs
       # .venv from the committed uv.lock on first use, offline from the baked uv
