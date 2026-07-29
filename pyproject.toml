@@ -73,8 +73,8 @@ vllm = [
     "torch==2.11.0",
     "torchvision==0.26.0",
     "torchaudio==2.11.0",
-    # vllm 0.24.0 from the wheelhouse v0.24.0 tag; ships a real versioned wheel
-    # now, so pin directly.
+    # PyPI's 0.24.0 wheel is already a cu130 / torch-2.11 abi3 build, so it needs
+    # no wheelhouse routing and no source build.
     "vllm==0.24.0",
     # flashinfer is a transitive dep vllm 0.24 hard-pins to ==0.6.12 (pure-python
     # from PyPI); the wheelhouse's 0.6.13 doesn't match, so it isn't routed.
@@ -88,10 +88,11 @@ sglang = [
     "torch==2.11.0",
     "torchvision==0.26.0",
     "torchaudio==2.11.0",
-    # sglang + sglang-kernel come from the wheelhouse cu130 build (sglang-v0.5.12
-    # tag); see [tool.uv.sources].
+    # sglang + sglang-kernel come from PyPI; upstream's 0.5.12 wheels are cu130 /
+    # torch-2.11 builds already (sglang-kernel links libcudart.so.13).
     "sglang==0.5.12",
-    # Declared directly so [tool.uv.sources] routes it to the wheelhouse build.
+    # sglang pins the kernel itself (==0.4.2.post2); kept explicit so the backend
+    # still installs it if a future sglang loosens that pin.
     "sglang-kernel",
     # sglang hard-deps flash-attn-4 but we EXCLUDE it (only buggy betas ship); it
     # is imported lazily (fa4 backend only), so defaults work. See override-deps.
@@ -333,17 +334,19 @@ requires-dist = []
 
 # Heavy native packages come prebuilt from the verl wheelhouse (cu130 / torch 2.11
 # / cp312) — no source build here. megatron-bridge rides along (pure-python wheel
-# off the same wheelhouse, so no git clone / build either). (flashinfer NOT routed:
-# vllm/sglang pin their own, pulled pure-python from PyPI; the wheelhouse's 0.6.13
-# matches neither.)
+# off the same wheelhouse, so no git clone / build either).
+#
+# The inference engines are deliberately NOT routed: upstream publishes cu130 /
+# torch-2.11 wheels for the pinned vllm / sglang / sglang-kernel versions on PyPI,
+# so the wheelhouse copies bought nothing (same builds, same download size, same
+# install time) while costing a hash-less index entry. flashinfer stays on PyPI
+# for the same reason — vllm/sglang pin their own and the wheelhouse's 0.6.13
+# matches neither.
 [tool.uv.sources]
 apex                 = { index = "verl-wheelhouse" }
 flash-attn           = { index = "verl-wheelhouse" }
 transformer-engine   = { index = "verl-wheelhouse" }
 megatron-bridge      = { index = "verl-wheelhouse" }
-sglang               = { index = "verl-wheelhouse" }
-sglang-kernel        = { index = "verl-wheelhouse" }
-vllm                 = { index = "verl-wheelhouse" }
 
 # megatron-core / mbridge aren't in the wheelhouse; git-sourced (built at sync
 # time). The wheelhouse megatron-bridge 0.5.2 (r0.5.0 branch) pairs with

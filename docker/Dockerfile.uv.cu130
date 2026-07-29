@@ -283,10 +283,10 @@ RUN printf 'verl\n' > README.md
 # syncs the conflict-free runtime combos (vllm+fsdp, vllm+megatron, sglang+fsdp,
 # sglang+megatron, cpu) into throwaway envs purely to fill UV_CACHE_DIR
 # (/root/.cache/uv) with every wheel & built artifact those backends need from
-# uv.lock. The heavy native packages (apex / TransformerEngine / flash-attn /
-# vllm / sglang-kernel) and megatron-bridge come prebuilt from the verl
-# wheelhouse index, so only the git-sourced megatron-core / mbridge are compiled
-# here, once.
+# uv.lock. Nothing native is compiled here beyond the git-sourced megatron-core /
+# mbridge: apex / TransformerEngine / flash-attn and megatron-bridge come prebuilt
+# from the verl wheelhouse index, and vllm / sglang / sglang-kernel come prebuilt
+# from PyPI.
 # The `cu130 dev` scope keeps this image to its torch-2.11 world. (The deferred
 # cu12.9 / torch-2.9.1 world is commented out in pyproject.toml.) It passes
 # --no-install-project, so only deps are cached and this
@@ -339,7 +339,7 @@ FROM prefetch AS final
 #
 # `base` pins the default compiler to gcc-10 (mirrors vllm's basic stage), which
 # is fine for the prefetch git-source builds (megatron-core / mbridge compile
-# with it; the native backends ship prebuilt from the wheelhouse). But sglang
+# with it; every native backend ships prebuilt). But sglang
 # JIT-compiles its custom kernels (e.g. custom_all_reduce_push) at RUNTIME in
 # C++20, which uses std::bit_cast — a libstdc++ feature that only exists in
 # GCC >= 11. With gcc-10 as nvcc's host compiler that JIT dies with `namespace

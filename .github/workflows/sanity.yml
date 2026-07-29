@@ -63,7 +63,10 @@ jobs:
     timeout-minutes: 5 # Increase this timeout value as needed
     strategy:
       matrix:
-        python-version: ["3.10"]
+        # Must stay within the lock's single supported environment
+        # (see [tool.uv] environments in pyproject.toml): uv picks up this
+        # interpreter for .venv and refuses to sync a <3.12 one from the lock.
+        python-version: ["3.12"]
     env:
       # No install step: `uv run` syncs the cpu venv from the committed uv.lock on
       # first use. Unlike the GPU jobs this runs on a stock runner, so uv resolves
@@ -71,8 +74,6 @@ jobs:
       UV_RUN: "uv run --frozen --all-packages --extra cpu"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      # Runner Python only. The cpu venv itself is provisioned by uv at whatever
-      # version the lock's requires-python resolves to (currently 3.12).
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:

@@ -114,16 +114,17 @@ backends as **extras**:
 
 .. note::
 
-   Heavy native packages — ``apex``, ``transformer-engine``, ``flash-attn``,
-   ``vllm``, ``sglang-kernel`` — and the pure-python ``megatron-bridge`` are
-   pulled **prebuilt** from the verl wheelhouse index
+   ``uv sync`` never compiles a native package from source. ``apex``,
+   ``transformer-engine`` and ``flash-attn`` — plus the pure-python
+   ``megatron-bridge`` — are pulled **prebuilt** from the verl wheelhouse index
    (`etogaosion.github.io/verl-wheelhouse
    <https://etogaosion.github.io/verl-wheelhouse/simple/>`_, wired in
-   ``pyproject.toml`` under ``[tool.uv.index]`` / ``[tool.uv.sources]``), so
-   ``uv sync`` never compiles them from source. The native wheels are built for
-   cu130 / torch 2.11 / CPython 3.12; only the git-sourced ``megatron-core``
-   (``core_v0.18.0``, paired with ``megatron-bridge`` 0.5.2) and ``mbridge`` are
-   built at sync time.
+   ``pyproject.toml`` under ``[tool.uv.index]`` / ``[tool.uv.sources]``); those
+   wheels are built for cu130 / torch 2.11 / CPython 3.12. The inference engines
+   (``vllm``, ``sglang``, ``sglang-kernel``) come straight from PyPI, whose
+   wheels for the pinned versions are already cu130 / torch-2.11 builds. Only the
+   git-sourced ``megatron-core`` (``core_v0.18.0``, paired with
+   ``megatron-bridge`` 0.5.2) and ``mbridge`` are built at sync time.
 
 Run with the uv Docker image
 :::::::::::::::::::::::::::::::::::::::::::::::::::::
@@ -345,11 +346,14 @@ Troubleshooting
 - **``uv: command not found``** — ``curl -LsSf https://astral.sh/uv/install.sh | sh``.
 - **A combination is rejected** — you selected two inference engines; pick
   ``vllm`` **or** ``sglang``.
-- **``No solution found`` for ``apex`` / ``transformer-engine`` / ``flash-attn``
-  / ``vllm`` / ``sglang-kernel``** — these are pulled prebuilt from the verl
-  wheelhouse (see the note under *Install with uv*). It means the resolver found
-  no matching wheel for your platform or the wheelhouse was unreachable; the uv
-  flow supports only cu130 / torch 2.11 / CPython 3.12 on Linux x86_64.
+- **``No solution found`` for ``apex`` / ``transformer-engine`` /
+  ``flash-attn``** — these are pulled prebuilt from the verl wheelhouse (see the
+  note under *Install with uv*). It means the resolver found no matching wheel
+  for your platform or the wheelhouse was unreachable; the uv flow supports only
+  cu130 / torch 2.11 / CPython 3.12 on Linux x86_64.
+- **``No solution found`` for ``vllm`` / ``sglang`` / ``sglang-kernel``** — these
+  come from PyPI, which publishes them only for Linux x86_64 (and ``sglang``
+  only for glibc >= 2.34), so the same platform limits apply.
 - **``uv sync`` / ``uv lock`` fails on macOS** — the uv workflow is Linux
   x86_64 only; use a Linux host or the Docker image.
 - **Start over** — ``python manage_envs.py clean`` then sync again.

@@ -699,7 +699,8 @@ def cmd_prefetch(args: argparse.Namespace) -> int:
     ``uv lock`` reads only ``pyproject.toml`` + the declared
     ``[tool.uv.dependency-metadata]``, so it triggers NO source build — the
     git-sourced megatron-core / mbridge are compiled in step 2, not here (apex /
-    TE / flash-attn / vllm / sglang-kernel ship prebuilt from the wheelhouse).
+    TE / flash-attn ship prebuilt from the wheelhouse, vllm / sglang /
+    sglang-kernel prebuilt from PyPI).
 
     Use it once after cloning, or in a Docker layer so both the lock and the
     cache ship *inside* the image: bake it as a real layer (no
