@@ -56,14 +56,12 @@ jobs:
     env:
       # Volcengine runners reach the public internet only through this proxy.
       # Without it `uv run` cannot fetch the wheelhouse wheels (hosted as GitHub
-      # release assets) on a cache miss, and hf downloads fail too. Both cases are
-      # set: python/curl read the lowercase names, most other tooling the upper.
+      # release assets) on a cache miss, and hf downloads fail too. Upper case
+      # only: GitHub compares `env:` keys case-insensitively, so adding
+      # `http_proxy` here is rejected as a redefinition of `HTTP_PROXY`.
       HTTP_PROXY: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
       HTTPS_PROXY: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
-      http_proxy: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
-      https_proxy: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
-      no_proxy: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       # With the uv image (verl:uv.cu130) there is no install step: `uv run` syncs
       # .venv from the committed uv.lock on first use, offline from the baked uv

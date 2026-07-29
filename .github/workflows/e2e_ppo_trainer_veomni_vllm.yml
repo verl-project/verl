@@ -107,10 +107,7 @@ jobs:
     env:
       HTTP_PROXY: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
       HTTPS_PROXY: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
-      http_proxy: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
-      https_proxy: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
-      no_proxy: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
     steps:

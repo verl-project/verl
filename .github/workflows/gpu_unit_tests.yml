@@ -98,10 +98,7 @@ jobs:
     env:
       HTTP_PROXY: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
       HTTPS_PROXY: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
-      http_proxy: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
-      https_proxy: ${{ secrets.VOLCENGINE_HTTP_PROXY }}
       NO_PROXY: "localhost,127.0.0.1"
-      no_proxy: "localhost,127.0.0.1"
       HF_HUB_ENABLE_HF_TRANSFER: 1
       # No install step: every command below runs through uv, which syncs .venv
       # from the committed uv.lock (offline, from the image's baked cache).

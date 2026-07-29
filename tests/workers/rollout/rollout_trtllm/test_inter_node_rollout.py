@@ -77,8 +77,8 @@ async def test_inter_node_trtllm_rollout(init_config):
         assert len(server_addresses) == num_replicas
 
         # The rollout servers listen on Ray node addresses, which NO_PROXY does
-        # not cover, so CI's proxy must not apply here. httpx reads the lowercase
-        # names, so drop both spellings.
+        # not cover, so no proxy must apply here. CI sets the upper-case names and
+        # dev shells usually the lower-case ones; httpx honours either, drop both.
         for var in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"):
             os.environ.pop(var, None)
             os.environ.pop(var.lower(), None)

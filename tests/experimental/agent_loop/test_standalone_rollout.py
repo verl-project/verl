@@ -74,8 +74,8 @@ async def test_standalone_rollout(init_config, tp_size):
     assert len(server_addresses) == num_replicas
 
     # The rollout servers listen on Ray node addresses, which NO_PROXY does not
-    # cover, so CI's proxy must not apply here. httpx reads the lowercase names,
-    # so drop both spellings.
+    # cover, so no proxy must apply here. CI sets the upper-case names and dev
+    # shells usually the lower-case ones; httpx honours either, so drop both.
     for var in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"):
         os.environ.pop(var, None)
         os.environ.pop(var.lower(), None)
