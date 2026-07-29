@@ -584,14 +584,44 @@ class VeOmniEngine(FSDPEngine):
             offload_veomni_optimizer(self.optimizer)
 
     def get_per_tensor_param_shard(self, **kwargs):
-        # veomni splits grouped experts twice (manual ep split outside DTensor +
-        # FSDP-sharded local block); the inherited DTensor-identity export would
-        # declare the wrong full tensor for them and corrupt the rollout weights
-        # silently. The EP-aware export lands in the follow-up PR.
-        raise NotImplementedError(
-            "delta_sharded does not support the veomni backend yet (EP-aware shard "
-            "export lands in a follow-up PR); use a full-sync checkpoint backend"
-        )
+        """Yield each rank's *local* shard ``(name, local_shard, ShardSpec)`` -- the
+        DTensor export plus veomni's EP declarations. The mechanics live in
+        :func:`verl.workers.engine.veomni.utils.veomni_shard_export`; this wrapper
+        owns the offload dance (CPUOffloadPolicy manages placement itself -- see
+        #5995 -- and the delta path returns early in update_weights, so the
+        offload-back happens here, after the exporter is exhausted).
+        """
+        from .utils import veomni_shard_export
+
+        manual_offload = not getattr(self, "_uses_fsdp2_cpu_offload_policy", False)
+        if manual_offload:
+            load_veomni_model_to_gpu(self.module)
+        gen, meta = veomni_shard_export(self.module)
+
+        def _with_offload_back():
+            yield from gen
+            if manual_offload and self._is_offload_param:
+                offload_veomni_model_to_cpu(self.module)
+
+        return _with_offload_back(), meta
+
+    def _hf_delta_entry(self, name, spec, place, lidx, lval):
+        """veomni's per-param entry builder: EP/converter specs (fused expert
+        stacks) go through this backend's own converter machinery (see
+        :mod:`verl.workers.engine.veomni.utils`); everything else falls back to
+        the FSDP engine's DTensor identity handling."""
+        from ..spec import BlockPlacement
+        from .utils import NO_SLOTS_MSG, hf_entry_converter
+
+        if spec.to_hf_chunk is not None and isinstance(place, BlockPlacement) and spec.hf_slots is not None:
+            return hf_entry_converter(name, spec, place, lidx, lval)
+        if spec.to_hf_chunk is not None:
+            raise NotImplementedError(f"{name}: {NO_SLOTS_MSG}")
+        return super()._hf_delta_entry(name, spec, place, lidx, lval)
+
+    # get_per_tensor_param_delta_shard is inherited from FSDPEngine and
+    # prime_delta_snapshots from BaseEngine; both consume this class's
+    # get_per_tensor_param_shard and _hf_delta_entry overrides.
 
     def get_per_tensor_param(self, **kwargs):
         # FSDP2 CPUOffloadPolicy owns CPU<->accelerator placement; calling model.to(device)
@@ -624,11 +654,11 @@ class VeOmniEngine(FSDPEngine):
                     for src_ep_rank in range(ep_size):
                         tensor = unsharded_tensor if src_ep_rank == ep_rank else buffer
                         torch.distributed.broadcast(tensor, group_src=src_ep_rank, group=ps.ep_group)
-                        yield from process_func(name, tensor, ep_rank=src_ep_rank)
+                        yield from process_func(name, tensor, expert_id_base=src_ep_rank * tensor.size(0))
 
                 else:
                     if is_expert_layer:
-                        yield from process_func(name, unsharded_tensor, ep_rank=0)
+                        yield from process_func(name, unsharded_tensor, expert_id_base=0)
                     else:
                         yield name, unsharded_tensor
 

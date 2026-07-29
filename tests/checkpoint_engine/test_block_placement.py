@@ -224,19 +224,22 @@ def test_explicit_place_block_rebuild_veomni_style():
     assert seen == 2
 
 
-def test_explicit_place_passthrough():
-    """ShardSpec.place / gather_group short-circuit derive_placement."""
-    from verl.workers.engine.spec import ShardSpec, derive_placement
+def test_explicit_place_never_reaches_derive():
+    """Explicit-place specs are dispatched by the caller (which reads the
+    exporter's (place, contributes, gather_group) triple verbatim);
+    derive_dtensor_placement only accepts DTensor-declared specs."""
+    import pytest
+
+    from verl.workers.engine.spec import ShardSpec, derive_dtensor_placement
 
     block = BlockPlacement((2, 3), (4, 0), (8, 3))
-    sentinel = object()
-    spec = ShardSpec(full_shape=(8, 3), place=block, gather_group=sentinel)
-    place, contributes, group = derive_placement(spec)
-    assert place is block and contributes and group is sentinel
+    spec = ShardSpec(full_shape=(8, 3), place=block, gather_group=object())
+    with pytest.raises(AssertionError, match="dispatched by the caller"):
+        derive_dtensor_placement(spec)
 
 
 def test_flat_contiguous_block_matches_int_fast_path():
-    """A dim-0 cut expressed as a BlockPlacement (the unified derive_placement
+    """A dim-0 cut expressed as a BlockPlacement (the unified derive_dtensor_placement
     output for FSDP2 ``Shard(0)``) must translate exactly like the plain-int
     offset it replaces, via the ``is_flat_contiguous`` add fast path."""
     full_shape = (8, 4, 6)

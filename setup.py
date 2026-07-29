@@ -40,14 +40,15 @@ install_requires = [
     "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
     # 5.6.0 ships a broken flash-attention path (crashes on s_aux=None for
     # sink-less models); fixed in 5.6.1. See huggingface/transformers#45588.
-    "transformers<5.12.0,!=5.6.0",
+    "transformers>=5.5.3,!=5.6.0,<5.11",
     "wandb",
     "packaging>=20.0",
     "tensorboard",
 ]
 
 TEST_REQUIRES = ["pytest", "pre-commit", "py-spy", "pytest-asyncio", "pytest-rerunfailures"]
-PRIME_REQUIRES = ["pyext"]
+# Empty since PRIME code scoring dropped `pyext`; kept so `verl[prime]` stays installable.
+PRIME_REQUIRES = []
 GEO_REQUIRES = ["mathruler", "torchvision", "qwen_vl_utils"]
 GPU_REQUIRES = ["liger-kernel", "flash-attn"]
 MATH_REQUIRES = ["math-verify"]  # Add math-verify as an optional dependency

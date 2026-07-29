@@ -583,6 +583,11 @@ jobs:
         run: |
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
           npu-smi info
+      - name: Checkout verl-project/verl repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
       - name: Install uv
         run: pip install uv
       - name: Install the current repository
@@ -592,11 +597,6 @@ jobs:
       - name: Check initial pip list from image
         run: |
           uv pip list
-      - name: Checkout verl-project/verl repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          clean: true
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models

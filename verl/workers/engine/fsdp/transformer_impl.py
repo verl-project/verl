@@ -75,7 +75,7 @@ from verl.workers.utils.padding import build_attention_mask_from_nested
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
-from .utils import create_device_mesh, get_sharding_strategy
+from .utils import create_device_mesh, get_sharding_strategy, unfuse_moe_params
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -969,16 +969,14 @@ class FSDPEngine(BaseEngine):
             per_tensor_param = params.items()
         else:
             device = get_device_id()  # used when fsdp2 set cpu_offload_policy
-            # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
             per_tensor_param = (
                 (
                     name,
-                    param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
-                    if isinstance(param, DTensor)
-                    else param,
+                    param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param,
                 )
                 for name, param in params.items()
             )
+            per_tensor_param = unfuse_moe_params(per_tensor_param, self.model_config.hf_config.model_type)
 
         if self._qat_enabled:
             from verl.utils.qat.quantizer import QATQuantizer
