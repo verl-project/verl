@@ -45,6 +45,7 @@ import itertools
 import os
 import tempfile
 from collections import OrderedDict
+from contextlib import nullcontext
 
 import torch
 import torch.distributed
@@ -105,7 +106,7 @@ class ToyGate(nn.Module):
 class ToyBlock(nn.Module):
     def __init__(self, hidden_size):
         super().__init__()
-        # control module: must follow the low-precision compute dtype
+        # control module: its parameters follow the low-precision FSDP policy
         self.dense = nn.Linear(hidden_size, hidden_size, bias=False)
         # matched by ``_keep_in_fp32_modules`` (fp16 only, per HF semantics)
         self.fp32_regular = ToySensitive(hidden_size)
@@ -157,9 +158,15 @@ class SelfCastingSensitive(ToySensitive):
     """
 
     def forward(self, x):
-        self.input_dtype = x.dtype
-        output = super().forward(x.to(self.proj.weight.dtype)).to(self.input_dtype)
-        self.output_dtype = output.dtype
+        self.activation_input_dtype = x.dtype
+        operator_input = x.to(self.proj.weight.dtype)
+        self.operator_input_dtype = operator_input.dtype
+        projected = self.proj(operator_input)
+        self.operator_output_dtype = projected.dtype
+        computed = projected * self.running_scale.to(operator_input.dtype)
+        self.computation_result_dtype = computed.dtype
+        output = computed.to(self.activation_input_dtype)
+        self.activation_output_dtype = output.dtype
         return output
 
 
@@ -326,8 +333,15 @@ def _wrap_fsdp2(module, param_dtype, mesh):
     return module
 
 
+def _forward_context(autocast_dtype):
+    """Match FSDPEngine.forward_step: autocast for low precision, direct for fp32."""
+    if autocast_dtype is None or autocast_dtype == torch.float32:
+        return nullcontext()
+    return torch.autocast(device_type=get_device_name(), dtype=autocast_dtype)
+
+
 def _forward_parameter_dtypes(module, input_ids, autocast_dtype=torch.bfloat16):
-    """Record each leaf weight after all-gather under the engine autocast."""
+    """Record each leaf weight after materialization, separately from activations."""
     seen = {}
     handles = []
 
@@ -340,11 +354,27 @@ def _forward_parameter_dtypes(module, input_ids, autocast_dtype=torch.bfloat16):
     for name, sub in module.named_modules():
         if isinstance(sub, nn.Linear):
             handles.append(sub.register_forward_pre_hook(make_hook(name)))
-    with torch.autocast(device_type=get_device_name(), dtype=autocast_dtype):
+    with _forward_context(autocast_dtype):
         out = module(input_ids)
     for h in handles:
         h.remove()
     return seen, out
+
+
+def _self_casting_observations(module):
+    """Keep activation-boundary and internal tensor dtypes explicitly separate."""
+    return {
+        name: {
+            "activation": (submodule.activation_input_dtype, submodule.activation_output_dtype),
+            "internal": (
+                submodule.operator_input_dtype,
+                submodule.operator_output_dtype,
+                submodule.computation_result_dtype,
+            ),
+        }
+        for name, submodule in module.named_modules()
+        if isinstance(submodule, SelfCastingSensitive)
+    }
 
 
 def _matches(name, prefixes):
@@ -393,9 +423,8 @@ def case_isolation(path, mesh, rank, model_cls, expected_fp32_prefixes, label, c
     module = _wrap_fsdp2(module, compute_dtype, mesh)
 
     # Checked first on purpose: the stored values are bit-identical, so a
-    # value-only assertion passes both before and after the fix. Only the
-    # The all-gather dtype below exposes the degradation -- that is what makes
-    # the bug silent in practice.
+    # value-only assertion passes both before and after the fix. The all-gather
+    # dtype below exposes the degradation -- that is what makes the bug silent.
     for name, param in module.named_parameters():
         assert param.dtype == torch.float32, f"[{label}] {name}: sharded dtype {param.dtype}"
     gathered = _gather_state(module)
@@ -534,54 +563,67 @@ def case_single_wrapping(path, mesh, rank):
         print(f"[overlap] single wrapping OK, units={units}")
 
 
-def case_matches_unsharded_reference(path, mesh, rank):
-    """FSDP2 must reproduce what plain `from_pretrained` computes, bit for bit.
+def case_matches_unsharded_reference(path, mesh, rank, activation_dtype, use_autocast):
+    """FSDP2 must reproduce plain ``from_pretrained`` in the same context.
 
     The self-casting child preserves its low-precision activation boundary, so
     this pins ``param_dtype=None``: forcing fp32 inputs changes its output
-    contract even though its parameters are correctly all-gathered in fp32.
+    contract even though its parameters are correctly all-gathered in fp32. The
+    engine-style autocast and direct/no-autocast contexts are both covered.
     """
+    context_dtype = activation_dtype if use_autocast else None
+    context_label = "engine-autocast" if use_autocast else "direct"
+    dtype_label = str(activation_dtype).removeprefix("torch.")
+    label = f"reference/{dtype_label}/{context_label}"
+
     torch.manual_seed(SEED)
     input_ids = torch.randint(0, 64, (2, 8), device=get_device_id())
 
-    reference = ToySelfCastingModel.from_pretrained(path, torch_dtype=torch.bfloat16).to(get_device_id())
-    with torch.autocast(device_type=get_device_name(), dtype=torch.bfloat16):
-        ref_logits = reference(input_ids)
-    ref_io_dtypes = {
-        name: (submodule.input_dtype, submodule.output_dtype)
-        for name, submodule in reference.named_modules()
-        if isinstance(submodule, SelfCastingSensitive)
-    }
-    assert set(ref_io_dtypes.values()) == {(torch.bfloat16, torch.bfloat16)}
+    reference = ToySelfCastingModel.from_pretrained(path, torch_dtype=activation_dtype).to(get_device_id())
+    ref_parameter_dtypes, ref_logits = _forward_parameter_dtypes(reference, input_ids, context_dtype)
+    ref_observations = _self_casting_observations(reference)
+    assert {obs["activation"] for obs in ref_observations.values()} == {(activation_dtype, activation_dtype)}, (
+        f"[{label}] unexpected reference activation boundary: {ref_observations}"
+    )
     ref_loss = ref_logits.float().pow(2).mean()
     ref_loss.backward()
     ref_grads = {name: param.grad.detach().clone() for name, param in sorted(reference.named_parameters())}
     ref_dtypes = {name: param.dtype for name, param in reference.named_parameters()}
 
-    module = _build_module(path, ToySelfCastingModel, torch.bfloat16, mesh, keep_fp32_aware=True)
-    module = _wrap_fsdp2(module, torch.bfloat16, mesh)
-    with torch.autocast(device_type=get_device_name(), dtype=torch.bfloat16):
-        logits = module(input_ids)
-    io_dtypes = {
-        name: (submodule.input_dtype, submodule.output_dtype)
-        for name, submodule in module.named_modules()
-        if isinstance(submodule, SelfCastingSensitive)
-    }
-    assert io_dtypes == ref_io_dtypes, f"[reference] activation boundary dtypes differ: {io_dtypes} != {ref_io_dtypes}"
+    module = _build_module(path, ToySelfCastingModel, activation_dtype, mesh, keep_fp32_aware=True)
+    module = _wrap_fsdp2(module, activation_dtype, mesh)
+    parameter_dtypes, logits = _forward_parameter_dtypes(module, input_ids, context_dtype)
+    observations = _self_casting_observations(module)
+    assert observations == ref_observations, (
+        f"[{label}] activation/internal dtypes differ: {observations} != {ref_observations}"
+    )
+    assert parameter_dtypes == ref_parameter_dtypes, (
+        f"[{label}] materialized parameter dtypes differ: {parameter_dtypes} != {ref_parameter_dtypes}"
+    )
+    kept_parameter_dtypes = {name: dtype for name, dtype in parameter_dtypes.items() if dtype == torch.float32}
+    assert kept_parameter_dtypes, f"[{label}] no fp32 parameter was observed during forward"
+    assert all(dtype == torch.float32 for dtype in kept_parameter_dtypes.values())
+
     loss = logits.float().pow(2).mean()
     loss.backward()
 
-    assert logits.dtype == ref_logits.dtype, f"[reference] logits dtype {logits.dtype} != {ref_logits.dtype}"
-    assert torch.equal(logits, ref_logits), "[reference] logits differ from the unsharded model"
-    assert loss.item() == ref_loss.item(), f"[reference] loss {loss.item()!r} != {ref_loss.item()!r}"
+    assert logits.dtype == ref_logits.dtype, f"[{label}] logits dtype {logits.dtype} != {ref_logits.dtype}"
+    assert torch.equal(logits, ref_logits), f"[{label}] logits differ from the unsharded model"
+    assert loss.item() == ref_loss.item(), f"[{label}] loss {loss.item()!r} != {ref_loss.item()!r}"
 
     for name, param in sorted(module.named_parameters()):
-        assert param.dtype == ref_dtypes[name], f"[reference] {name}: dtype {param.dtype} != {ref_dtypes[name]}"
+        assert param.dtype == ref_dtypes[name], f"[{label}] {name}: dtype {param.dtype} != {ref_dtypes[name]}"
         grad = _full_tensor(param.grad)
-        assert grad.dtype == ref_grads[name].dtype, f"[reference] {name}: grad dtype {grad.dtype}"
-        assert torch.equal(grad, ref_grads[name]), f"[reference] {name}: gradient differs from the unsharded model"
+        assert grad.dtype == ref_grads[name].dtype, f"[{label}] {name}: grad dtype {grad.dtype}"
+        assert torch.equal(grad, ref_grads[name]), f"[{label}] {name}: gradient differs from the unsharded model"
     if rank == 0:
-        print(f"[reference] fsdp2 matches unsharded from_pretrained bit-for-bit (loss={loss.item():.10e})")
+        activation_observations = {name: obs["activation"] for name, obs in observations.items()}
+        internal_observations = {name: obs["internal"] for name, obs in observations.items()}
+        print(
+            f"[{label}] activation={activation_observations}; internal={internal_observations}; "
+            f"all-gathered-fp32={sorted(kept_parameter_dtypes)}"
+        )
+        print(f"[{label}] fsdp2 matches unsharded from_pretrained bit-for-bit (loss={loss.item():.10e})")
 
 
 def case_loader_does_not_mutate_full_state(path, mesh, rank):
@@ -855,9 +897,12 @@ def main():
     case_build_cast(path, mesh, rank, torch.float16, ["fp32_strict", "fp32_regular"], "build/fp16")
     get_torch_device().empty_cache()
 
-    # 5. parity with the unsharded `from_pretrained` graph.
-    case_matches_unsharded_reference(self_cast_path, mesh, rank)
-    get_torch_device().empty_cache()
+    # 5. BF16/FP16 parity with the unsharded `from_pretrained` graph, both in
+    #    FSDPEngine's autocast context and through a direct/no-autocast call.
+    for activation_dtype in (torch.bfloat16, torch.float16):
+        for use_autocast in (True, False):
+            case_matches_unsharded_reference(self_cast_path, mesh, rank, activation_dtype, use_autocast)
+            get_torch_device().empty_cache()
 
     # 5b. the loader must not touch the caller's state dict.
     case_loader_does_not_mutate_full_state(path, mesh, rank)
