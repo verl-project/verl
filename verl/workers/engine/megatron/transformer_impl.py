@@ -249,6 +249,14 @@ class MegatronEngine(BaseEngine):
             }
             for key, value in override_transformer_config.items():
                 provider_overrides[key] = value
+
+            from verl.models.mcore.mtp_support import configure_native_hybrid_mtp
+
+            configure_native_hybrid_mtp(
+                provider,
+                self.model_config.mtp,
+                provider_overrides,
+            )
             if (
                 self.model_config.hf_config.model_type == "deepseek_v4"
                 and not self.model_config.mtp.enable
@@ -1050,7 +1058,10 @@ class MegatronEngineWithLMHead(MegatronEngine):
             )
 
         batch = batch.to(get_device_id())
-        use_fused_kernels = tu.get_non_tensor_data(batch, key="use_fused_kernels", default=False)
+        use_fused_kernels = (
+            tu.get_non_tensor_data(batch, key="use_fused_kernels", default=False)
+            and self.engine_config.use_fused_kernels
+        )
         calculate_entropy = tu.get_non_tensor_data(batch, key="calculate_entropy", default=False)
         calculate_sum_pi_squared = tu.get_non_tensor_data(batch, key="calculate_sum_pi_squared", default=False)
         distillation_use_topk = tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
