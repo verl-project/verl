@@ -132,3 +132,26 @@ def default_moe_param_handler(name, tensor, ep_rank):
 
 # This is used to override the default mapping of MoE parameters
 MOE_PARAM_HANDERS = {}
+
+# GPT-OSS checkpoints keep all experts in fused tensors. vLLM expects the
+# complete expert dimension and applies its own TP/EP slicing while loading.
+FUSED_MOE_PARAM_MODELS = {"gpt_oss"}
+
+
+def gather_fused_moe_param(tensor, ep_size, ep_group, expected_num_experts):
+    """Reconstruct a fused MoE tensor sharded across the expert dimension."""
+    actual_num_experts = tensor.size(0) * ep_size
+    if actual_num_experts != expected_num_experts:
+        raise ValueError(
+            "Cannot reconstruct fused MoE parameter: "
+            f"local experts ({tensor.size(0)}) * EP size ({ep_size}) = {actual_num_experts}, "
+            f"expected {expected_num_experts}."
+        )
+
+    output = torch.empty(
+        (actual_num_experts, *tensor.shape[1:]),
+        dtype=tensor.dtype,
+        device=tensor.device,
+    )
+    torch.distributed.all_gather_into_tensor(output, tensor.contiguous(), group=ep_group)
+    return output

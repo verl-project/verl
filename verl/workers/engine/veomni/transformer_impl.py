@@ -48,9 +48,11 @@ from ..base import BaseEngineCtx, EngineRegistry
 from ..fsdp.transformer_impl import FSDPEngine, FSDPEngineWithLMHead, FSDPEngineWithValueHead
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
 from .utils import (
+    FUSED_MOE_PARAM_MODELS,
     MOE_PARAM_HANDERS,
     VL_TYPE2INDEX,
     default_moe_param_handler,
+    gather_fused_moe_param,
     load_veomni_model_to_gpu,
     load_veomni_optimizer,
     offload_veomni_model_to_cpu,
@@ -600,6 +602,7 @@ class VeOmniEngine(FSDPEngine):
         ps = parallel_state.get_parallel_state()
         model_type = getattr(self.module.config, "model_type", "default")
         process_func = MOE_PARAM_HANDERS.get(model_type, default_moe_param_handler)
+        keep_moe_params_fused = model_type in FUSED_MOE_PARAM_MODELS
 
         def param_generator():
             for name, param in params.items():
@@ -608,7 +611,16 @@ class VeOmniEngine(FSDPEngine):
                 is_expert_layer = "mlp.experts." in name
                 is_proj = any(p in name for p in ["down_proj", "gate_proj", "up_proj", "gate_up_proj"])
 
-                if is_expert_layer and is_proj and ps.ep_enabled:
+                if is_expert_layer and keep_moe_params_fused:
+                    if ps.ep_enabled:
+                        unsharded_tensor = gather_fused_moe_param(
+                            unsharded_tensor,
+                            ep_size=ps.ep_size,
+                            ep_group=ps.ep_group,
+                            expected_num_experts=self.module.config.num_local_experts,
+                        )
+                    yield name, unsharded_tensor
+                elif is_expert_layer and is_proj and ps.ep_enabled:
                     ep_rank, ep_size = ps.ep_rank, ps.ep_size
                     buffer = torch.empty_like(unsharded_tensor)  # [num_experts/ep_size, H, I]
                     for src_ep_rank in range(ep_size):
