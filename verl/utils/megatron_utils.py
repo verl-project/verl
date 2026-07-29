@@ -1843,17 +1843,26 @@ def patch_engine_mtp(module, model_config):
         module: The model module to patch. Can be a single module or a list of modules.
         model_config: The model configuration containing MTP settings.
     """
-    logger.warning("Applying mtp patch...")
-    from verl.models.mcore.mtp_patch import (
-        patch_mtp_layer_checkpointed_forward,
-        patch_mtp_layer_get_embeddings,
-        patch_postprocess,
-    )
-
-    print(module)
+    from verl.models.mcore.mtp_support import is_native_hybrid_model
 
     modules = module if isinstance(module, list) else [module]
     for m in modules:
+        if is_native_hybrid_model(unwrap_model(m)):
+            if not model_config.mtp.enable_train:
+                raise ValueError(
+                    "HybridModel does not support model.mtp.enable=True with model.mtp.enable_train=False "
+                    "in this Megatron-Core version."
+                )
+            logger.info("Using Megatron-Core native HybridModel MTP; legacy GPT MTP patches are disabled.")
+            continue
+
+        from verl.models.mcore.mtp_patch import (
+            patch_mtp_layer_checkpointed_forward,
+            patch_mtp_layer_get_embeddings,
+            patch_postprocess,
+        )
+
+        logger.warning("Applying legacy GPT MTP patches.")
         patch_postprocess(m)
         patch_mtp_layer_checkpointed_forward(m)
         if model_config.mtp.detach_encoder:
