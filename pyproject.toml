@@ -58,6 +58,14 @@ verl-core = [
     "uvicorn",
     "mathruler",
     "qwen_vl_utils",
+    # qwen-vl-utils' first-choice video decoder; it falls back to
+    # torchvision.io.read_video, which torchvision 0.26 removed, so without
+    # torchcodec every video sample dies with AttributeError. It reached only
+    # the sglang venv (a transitive sglang dep), leaving vllm / fsdp / megatron
+    # / cpu broken — hence verl-core. Left unpinned the way sglang has it: it is
+    # ABI-coupled to torch and every extra here pins the same torch 2.11.0.
+    # Decoding needs FFmpeg's shared libs (`ffmpeg`, docker/Dockerfile.uv.cu130).
+    "torchcodec",
     "cachetools",
     "nvtx",
     "pytest",
@@ -68,6 +76,13 @@ verl-core = [
 # Pins flash-attn once for the fsdp / megatron parents (wheelhouse-routed below).
 # Don't install alone — needs the parent extra's torch / cuDNN pins.
 flash-attn-cu130torch211 = ["flash-attn==2.8.3"]
+
+# Pins cupy once for the fsdp / megatron parents. Two unrelated consumers, both
+# on the training side: `ray.util.collective`'s NCCL backend is cupy-based, so
+# every disaggregated weight-sync engine (nccl / nixl / delta_sharded) imports
+# it; and Megatron MoE all-to-all uses it directly. Without it the engine module
+# fails to import and the backend never reaches CheckpointEngineRegistry.
+cupy-cu130 = ["cupy-cuda13x==14.0.1"]
 
 # ---- inference backends ----------------------------------------------------
 vllm = [
@@ -96,8 +111,9 @@ sglang = [
     # sglang pins the kernel itself (==0.4.2.post2); kept explicit so the backend
     # still installs it if a future sglang loosens that pin.
     "sglang-kernel",
-    # sglang hard-deps flash-attn-4 but we EXCLUDE it (only buggy betas ship); it
-    # is imported lazily (fa4 backend only), so defaults work. See override-deps.
+    # sglang hard-deps flash-attn-4 but we EXCLUDE it (it collides with the
+    # flash-attn 2.8.3 the training extras pin — see override-dependencies); it is
+    # imported lazily (fa4 backend only), so the default backends work.
     "mbridge",
     "transformers==5.3.0",
 ]
@@ -120,6 +136,7 @@ sglang = [
 fsdp = [
     "verl[verl-core]",
     "verl[flash-attn-cu130torch211]",
+    "verl[cupy-cu130]",
     "torch==2.11.0",
     "torchvision==0.26.0",
     "torchaudio==2.11.0",
@@ -130,11 +147,12 @@ fsdp = [
 ]
 
 # apex / TE / flash-attn / megatron-bridge come prebuilt from the wheelhouse;
-# megatron-core is git-sourced (built at sync time). cupy: Megatron MoE
-# all-to-all. onnxscript: works around an undeclared TE import.
+# megatron-core is git-sourced (built at sync time). onnxscript: works around an
+# undeclared TE import.
 megatron = [
     "verl[verl-core]",
     "verl[flash-attn-cu130torch211]",
+    "verl[cupy-cu130]",
     "torch==2.11.0",
     "torchvision==0.26.0",
     "torchaudio==2.11.0",
@@ -152,7 +170,6 @@ megatron = [
     "mbridge",
     "megatron-bridge==0.5.2",
     "megatron-core",
-    "cupy-cuda13x==14.0.1",
     # megatron-bridge hard-imports modelopt but is installed deps-free (below), so
     # megatron needs it explicitly. 0.44.0: PyPI stable of bridge r0.5.0's 0.44.x.
     "nvidia-modelopt==0.44.0",
@@ -305,6 +322,17 @@ conflicts = [
 #   * kernels>=0.10.2,<0.11 — sglang deps `kernels` unbounded; >=0.15 breaks
 #     transformers 5.3.0's hub_kernels.py (huggingface/transformers#46291), so
 #     pin to transformers 5.3.0's own window (satisfies sglang too).
+#   * flash-attn-4 (sglang's hard dep) is DROPPED — its marker is false in every
+#     declared environment, which removes the requirement outright. It ships the
+#     same `flash_attn/cute/` files as flash-attn 2.8.3 (the fsdp / megatron pin),
+#     so installing both leaves whichever landed last on disk. TransformerEngine
+#     imports flash_attn.cute.interface as soon as flash-attn-4's dist metadata
+#     exists, so once 2.8.3's older copy wins, `import megatron.core` dies with
+#     "No module named 'cutlass.utils.ampere_helpers'" — a module the
+#     nvidia-cutlass-dsl 4.5 that flashinfer pulls in no longer has.
+#     docker/Dockerfile.stable.sglang settles the same clash with
+#     `pip uninstall -y flash-attn-4`; sglang itself only imports fa4 for its
+#     non-default "fa4" attention backend.
 override-dependencies = [
     "transformers==5.5.3 ; extra == 'vllm'",
     "transformers==5.3.0 ; extra == 'sglang'",
@@ -312,6 +340,7 @@ override-dependencies = [
     "transformers>=5.3.0,<=5.5.3 ; extra == 'verl-core'",
     "numpy>=2.0.0",
     "kernels>=0.10.2,<0.11",
+    "flash-attn-4 ; platform_machine == 'flash-attn-4-excluded'",
 ]
 
 # Skip lock-time metadata builds for git-source packages with no [project] /
