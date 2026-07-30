@@ -140,6 +140,8 @@ def apply_prefix_grouper_model_forward_patch(model: PreTrainedModel):
 
         # Calling the LM-head module preserves its own FSDP2 unshard, reshard,
         # and pre-backward hooks while avoiding full-vocabulary logits.
+        # FusedLinearForPPO computes token log-probs and entropy only; the
+        # configured policy loss is still selected later by ppo_loss.
         flat_log_probs, flat_entropy = self.lm_head(
             flat_hidden,
             prefix_input_ids=flat_completion_ids,
