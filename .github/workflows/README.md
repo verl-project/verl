@@ -85,6 +85,11 @@ jobs:
         run: |
           echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
           echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
+      # Records the exact resolved environment in the job log, so a failure can be
+      # attributed to a version change without re-running the job.
+      - name: Check final pip list
+        run: |
+          $UV_RUN uv pip list
       - name: Run your tests
         run: |
           $UV_RUN xxxx # your jobs
