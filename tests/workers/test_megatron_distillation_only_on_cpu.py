@@ -33,10 +33,6 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-# megatron-core is not part of the `cpu` extra (its stack is CUDA-only), so
-# cpu_unit_tests skips this module; gpu_unit_tests runs it in the megatron venv.
-pytest.importorskip("megatron.core")
-
 from verl.workers.engine.megatron.transformer_impl import MegatronEngineWithLMHead
 
 _VOCAB_SIZE = 8

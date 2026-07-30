@@ -80,12 +80,12 @@ ARG DEBIAN_FRONTEND=noninteractive
 # These ARGs control the apt deb versions installed below and MUST match
 # whatever uv resolves into uv.lock. The backend extras don't pin cuDNN /
 # NCCL — torch's wheel pins them transitively (e.g. torch 2.11.0+cu130 ->
-# nvidia-cudnn-cu13==9.19.0.56, nvidia-nccl-cu13==2.28.3). After bumping a
+# nvidia-cudnn-cu13==9.19.0.56, nvidia-nccl-cu13==2.28.9). After bumping a
 # torch pin and re-running `python manage_envs.py lock`, grep the resolved
 # versions out of the lockfile and update these ARGs:
 #
 #     grep -E 'nvidia-(cudnn|nccl)-cu13' uv.lock
-ARG NCCL_VERSION=2.28.3-1
+ARG NCCL_VERSION=2.28.9-1
 
 # Source to build from. Override VERL_REF for tags / commits.
 ARG VERL_REPO=https://github.com/verl-project/verl.git
@@ -357,3 +357,30 @@ COPY . /workspace/verl
 ENV VIRTUAL_ENV="/workspace/verl/.venv" \
     PATH="/workspace/verl/.venv/bin:${PATH}"
 CMD ["bash"]
+
+
+# ---------------------------------------------------------------------------
+# Nsight Systems — same release the stable images ship (docker/Dockerfile.stable
+# .{vllm,sglang}), so profiles are comparable across them. verl's nsys profiler
+# (global_profiler.tool=nsys) shells out to `nsys` through Ray's nsight
+# runtime-env plugin, so the binary has to be on PATH; the CUDA base's own
+# /usr/local/cuda/bin/nsys is older and shadows the deb's /usr/local/bin/nsys,
+# so replace it. The symlink targets are the paths the deb's postinst registers
+# with update-alternatives (target-linux-x64/nsys, host-linux-x64/nsys-ui) —
+# `ln -s` happily creates dangling links, so the trailing `nsys --version`
+# fails the build loudly if that layout ever moves. apt resolves the deb's own
+# Qt / X11 dependencies (libxcb-cursor0 and friends) from the archive.
+# ---------------------------------------------------------------------------
+ARG NSIGHT_VERSION=2025.6.1
+ARG NSIGHT_BUILD=2025.6.1.190-1
+RUN NSIGHT_ARCH=$(if [ "$(uname -m)" = "aarch64" ]; then echo arm64; else echo amd64; fi) \
+    && NSIGHT_CHANNEL=$(echo ${NSIGHT_VERSION} | cut -d. -f1,2 | tr . _) \
+    && NSIGHT_DEB=nsight-systems-${NSIGHT_VERSION}_${NSIGHT_BUILD}_${NSIGHT_ARCH}.deb \
+    && curl --retry 3 --retry-delay 2 -fsSL -o /tmp/${NSIGHT_DEB} \
+        https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/${NSIGHT_CHANNEL}/${NSIGHT_DEB} \
+    && apt-get update && apt-get install -y /tmp/${NSIGHT_DEB} \
+    && rm -f /tmp/${NSIGHT_DEB} \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /opt/nvidia/nsight-systems/${NSIGHT_VERSION}/target-linux-x64/nsys /usr/local/cuda/bin/nsys \
+    && ln -sf /opt/nvidia/nsight-systems/${NSIGHT_VERSION}/host-linux-x64/nsys-ui /usr/local/cuda/bin/nsys-ui \
+    && nsys --version

@@ -46,6 +46,8 @@ verl-core = [
     "pyarrow>=19.0.0",
     "pybind11",
     "pylatexenc",
+    # Unversioned: override-dependencies below sets the version per backend.
+    "transformers",
     "ray[default]>=2.41.0",
     "torchdata",
     "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
@@ -124,7 +126,7 @@ fsdp = [
     "liger-kernel",
     "trl==0.27.0",
     # transformers NOT pinned here: trainers inherit the synced engine's version
-    # (vllm 5.5.3 / sglang 5.3.0; else 5.3.0). See override-dependencies below.
+    # (vllm 5.5.3 / sglang 5.3.0). See override-dependencies below.
 ]
 
 # apex / TE / flash-attn / megatron-bridge come prebuilt from the wheelhouse;
@@ -184,6 +186,17 @@ cpu = [
     "torchvision==0.26.0",
     "torchaudio==2.11.0",
     "transformers==5.3.0",
+    # Plain source package (torch / numpy / packaging + one pybind11 C++ ext, no
+    # CUDA toolchain), and it imports without TE / apex — both are optional there
+    # with pure-torch fallbacks. It is what lets the `*_on_cpu.py` tests that
+    # exercise verl's Megatron wiring run here instead of being skipped. The
+    # CUDA-only half of the megatron extra (apex / TE / megatron-bridge) stays out.
+    "megatron-core",
+    # megatron.core.transformer.moe.paged_stash `import triton` unguarded, and
+    # `import megatron.core` reaches it. megatron-core doesn't declare triton
+    # because on the GPU backends torch's cu130 wheel already pulls it in; the cpu
+    # wheel doesn't, so the cpu slice has to ask for it explicitly.
+    "triton",
     "pytest",
     "pre-commit",
     "py-spy",
@@ -283,9 +296,11 @@ conflicts = [
 
 # Global override pins:
 #   * transformers tracks the inference engine (overrides are absolute): vllm ->
-#     5.5.3, sglang/cpu -> 5.3.0. Trainers inherit the engine's version via the
-#     conflict fork; the trailing `extra != <engines/cpu>` marker pins
-#     trainer-only / bare verl to 5.3.0.
+#     5.5.3, sglang/cpu -> 5.3.0. An `extra` marker matches only a requirement
+#     verl declares under that extra, never a transitive one, and an override
+#     that matches nothing drops the requirement — so verl-core carries the
+#     baseline. Its entry is a range, not a pin, so it intersects with the
+#     engine pins above instead of clashing; keep it spanning both.
 #   * numpy>=2.0.0 floor.
 #   * kernels>=0.10.2,<0.11 — sglang deps `kernels` unbounded; >=0.15 breaks
 #     transformers 5.3.0's hub_kernels.py (huggingface/transformers#46291), so
@@ -294,7 +309,7 @@ override-dependencies = [
     "transformers==5.5.3 ; extra == 'vllm'",
     "transformers==5.3.0 ; extra == 'sglang'",
     "transformers==5.3.0 ; extra == 'cpu'",
-    "transformers==5.3.0 ; extra != 'vllm' and extra != 'sglang' and extra != 'cpu'",
+    "transformers>=5.3.0,<=5.5.3 ; extra == 'verl-core'",
     "numpy>=2.0.0",
     "kernels>=0.10.2,<0.11",
 ]
