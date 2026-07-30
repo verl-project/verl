@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import logging
 import os
 import time
@@ -76,7 +77,8 @@ class BroadcastOperation:
         self.socket = socket
         self.topic = topic
 
-        self._run()
+        loop = asyncio.get_running_loop()
+        self._task = loop.run_in_executor(None, self._run)
 
     def _run(self):
         # broadcast tensor meta via zeromq PUB/SUB
@@ -92,10 +94,12 @@ class BroadcastOperation:
 
     async def wait_for_complete(self) -> dict[str, TensorMeta]:
         """Wait for the broadcast operation to complete.
+        (This does not guarantee that the HCCL kernel has finished, only that it has been enqueued.)
 
         Returns:
             dict[str, TensorMeta]: The bucket meta after broadcast.
         """
+        await self._task
         return self.metadata
 
 
@@ -302,6 +306,12 @@ class HCCLCheckpointEngine(CheckpointEngine):
             topic=self.topic,
         )
         await broadcast_op.wait_for_complete()
+
+        # the wait_for_complete() function just waits for the HCCL kernel to be enqueued,
+        # not for the kernel to finish, hence we need to synchronize to make sure the
+        # buffer does not get freed before the kernel finishes.
+        torch.npu.synchronize()
+
         logger.info(f"Rank {self.rank} send weights done, time cost: {time.time() - start_time:.2f}s")
 
     @torch.no_grad()
@@ -340,6 +350,11 @@ class HCCLCheckpointEngine(CheckpointEngine):
         metadata = await broadcast_op.wait_for_complete()
         total_bytes += self.bucket_size
         total_params += len(metadata["bucket_meta"])
+
+        # wait for the HCCL broadcast kernel to finish before we yield the tensors
+        # otherwise if the buffer is clone using a non-blocking copy, it may
+        # lead to data corruption
+        torch.npu.synchronize()
 
         # swap send_buf and recv_buf
         send_buf, recv_buf = recv_buf, send_buf
