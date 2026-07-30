@@ -85,15 +85,16 @@ async def test_hccl_checkpoint_engine(
 @pytest.mark.skip(reason="temporary skip since our ci environment is not ready")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rebuild_group", [False])
-@pytest.mark.parametrize("num_trainer, num_rollout", [(4, 28)])
+@pytest.mark.parametrize("num_trainer, num_rollout", [(2, 6)])
+@auto_await
 async def test_kimi_checkpoint_engine(
     rebuild_group,
     num_trainer,
     num_rollout,
-    num_nodes=2,
-    num_gpus_per_node=16,
+    num_nodes=1,
+    num_gpus_per_node=8,
     check_allclose=True,
-    model_path="~/models/Qwen/Qwen3-32B",
+    model_path="~/models/Qwen/Qwen3-8B-Base",
 ):
     model_path = os.path.expanduser(model_path)
     ray.init(
@@ -131,8 +132,10 @@ async def test_kimi_checkpoint_engine(
 
 @pytest.mark.skip(reason="temporary skip since our ci environment is not ready")
 @pytest.mark.asyncio
+@pytest.mark.parametrize("rebuild_group", [False])
 @pytest.mark.parametrize("device", ["npu"])
 @pytest.mark.parametrize("num_trainer, num_rollout", [(2, 6)])
+@auto_await
 async def test_mooncake_checkpoint_engine(
     rebuild_group,
     num_trainer,
