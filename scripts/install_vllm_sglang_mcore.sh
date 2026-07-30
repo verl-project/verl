@@ -9,7 +9,7 @@ echo "1. install inference frameworks and pytorch they need"
 if [ $USE_SGLANG -eq 1 ]; then
     pip install "sglang[all]==0.5.2" --no-cache-dir && pip install torch-memory-saver --no-cache-dir
 fi
-pip install --no-cache-dir "vllm==0.11.0"
+pip install --no-cache-dir "vllm==0.24.0"
 
 echo "2. install basic packages"
 pip install "transformers[hf_xet]>=4.51.0" accelerate datasets peft hf-transfer \
@@ -20,12 +20,11 @@ pip install "transformers[hf_xet]>=4.51.0" accelerate datasets peft hf-transfer 
 pip install "nvidia-ml-py>=12.560.30" "fastapi[standard]>=0.115.0" "optree>=0.13.0" "pydantic>=2.9" "grpcio>=1.62.1"
 
 
-echo "3. install FlashAttention and FlashInfer"
-# Install flash-attn-2.8.1 (cxx11abi=False)
-wget -nv https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.1/flash_attn-2.8.1+cu12torch2.8cxx11abiFALSE-cp312-cp312-linux_x86_64.whl && \
-    pip install --no-cache-dir flash_attn-2.8.1+cu12torch2.8cxx11abiFALSE-cp312-cp312-linux_x86_64.whl
-
-pip install --no-cache-dir flashinfer-python==0.3.1
+echo "3. install FlashAttention"
+# Built from source rather than a prebuilt wheel, which is pinned to one torch
+# release. FlashInfer is not installed here: vLLM pins the version it needs.
+export FLASH_ATTENTION_FORCE_BUILD="TRUE"
+pip install --no-build-isolation flash_attn==2.8.3
 
 
 if [ $USE_MEGATRON -eq 1 ]; then
