@@ -100,6 +100,7 @@ def test_detached_embeddings_roll_with_dynamic_group(monkeypatch):
         return tensor, tensor.sum()
 
     monkeypatch.setattr(mtp_patch, "roll_tensor", fake_roll)
+    monkeypatch.setattr(mtp_patch, "_ROLL_TENSOR_HAS_FILL_VALUE", True)
     layer = SimpleNamespace(cp_group=object(), _get_embeddings_has_padding_mask=True)
     mtp_patch._patched_get_embeddings_for_detach(
         layer,
