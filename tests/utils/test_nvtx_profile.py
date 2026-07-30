@@ -104,6 +104,22 @@ class TestNsightSystemsProfiler(unittest.TestCase):
             self.assertFalse(self.profiler.check_this_step())
             mock_platform.profiler_stop.assert_called_once()
 
+    def test_step_is_noop_and_does_not_raise(self):
+        # Regression: the dispatcher DistProfiler.step() delegates to self._impl.step().
+        # NsightSystemsProfiler subclasses DistProfiler without running its __init__, so a
+        # missing step() override used to resolve to the inherited DistProfiler.step and
+        # crash with "AttributeError: 'NsightSystemsProfiler' object has no attribute
+        # '_enable'". It must now be a clean no-op.
+        with patch("verl.utils.profiler.nvtx_profile.get_platform") as mock_get_platform:
+            mock_platform = MagicMock()
+            mock_get_platform.return_value = mock_platform
+            self.profiler.start()
+            self.profiler.step()
+            self.profiler.stop()
+            # step() must not drive the underlying platform profiler.
+            mock_platform.profiler_start.assert_called_once()
+            mock_platform.profiler_stop.assert_called_once()
+
     # def test_discrete_profiling(self):
     #     discrete_config = ProfilerConfig(discrete=True, all_ranks=True)
     #     profiler = NsightSystemsProfiler(self.rank, discrete_config)

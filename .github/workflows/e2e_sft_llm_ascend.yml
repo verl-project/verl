@@ -74,7 +74,7 @@ jobs:
     runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 90 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-9.0.0-910b-ubuntu22.04-py3.11-latest
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
       options: >-
         --shm-size 16g
     env:
@@ -97,7 +97,7 @@ jobs:
         run: |
           pip install --no-deps -e .
           pip install veomni==0.1.11 --ignore-requires-python --no-deps --index-url https://pypi.org/simple/
-          pip install transformers==5.3.0
+          pip install transformers==5.5.3
           pip install pandas==2.3.3
           pip uninstall -y mbridge
           pip install git+https://github.com/ISEEKYAN/mbridge.git@89eb10

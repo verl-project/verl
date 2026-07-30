@@ -29,7 +29,9 @@ import ray
 import torch
 import transfer_queue as tq
 from omegaconf import DictConfig, OmegaConf, open_dict
+from packaging.version import InvalidVersion, Version
 from tensordict import TensorDict
+from tensordict.tensorclass import NonTensorData
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from transfer_queue import KVBatchMeta
@@ -69,7 +71,7 @@ from verl.trainer.ppo.utils import (
     need_reference_policy,
     need_teacher_policy,
 )
-from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer
+from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY, ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.utils import MetricsAggregator, compute_advantage_for_multi_trajectories
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils import tensordict_utils as tu
@@ -84,7 +86,7 @@ from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.skip import SkipManager
-from verl.utils.tracking import Tracking, ValidationGenerationsLogger
+from verl.utils.tracking import DapoFilteredRewardTableLogger, Tracking, ValidationGenerationsLogger
 from verl.workers.config import CriticConfig, DistillationConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
 from verl.workers.rollout.llm_server import LLMServerClient, LLMServerManager
@@ -100,6 +102,19 @@ def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
+
+
+def _tq_supports_checkpoint() -> bool:
+    """Whether the installed TransferQueue can snapshot/restore its state for checkpoint consistency."""
+    try:
+        version_supported = Version(getattr(tq, "__version__", "")) >= Version("0.1.9")
+    except InvalidVersion:
+        return False
+    return (
+        version_supported
+        and callable(getattr(tq, "save_checkpoint", None))
+        and callable(getattr(tq, "load_checkpoint", None))
+    )
 
 
 class PPOTrainer(ABC):
@@ -123,6 +138,8 @@ class PPOTrainer(ABC):
         self._rollout_moe_lb_metrics_accumulator = RolloutMoELoadBalanceMetricsAccumulator(
             model_config=self.config.actor_rollout_ref.model
         )
+        # track mini-batch index within a parameter_sync_step cycle for Decoupled PPO
+        self.local_trigger_step = 0
 
     def _build_replay_buffer(self) -> ReplayBuffer:
         """Instantiate the replay buffer (or a user-provided custom sampler).
@@ -132,17 +149,72 @@ class PPOTrainer(ABC):
         """
         sampler_config = self.config.trainer.v1.sampler
         custom_sampler = sampler_config.get("custom_sampler", None)
-        sampler_cls = ReplayBuffer
-        if custom_sampler is not None and custom_sampler.get("path") and custom_sampler.get("name"):
+        has_custom_sampler = bool(
+            custom_sampler is not None and custom_sampler.get("path") and custom_sampler.get("name")
+        )
+        if has_custom_sampler:
             sampler_cls = load_extern_type(custom_sampler.path, custom_sampler.name)
+        else:
+            sampler_cls = ReplayBuffer if self.trainer_mode == "sync" else ReplayBufferAsync
 
-        return sampler_cls(
+        replay_buffer_kwargs = dict(
             trainer_mode=self.trainer_mode,
             trainer_config=self.config.trainer.v1.get(self.trainer_mode, {}),
             max_off_policy_threshold=sampler_config.max_off_policy_threshold,
             max_off_policy_strategy=sampler_config.max_off_policy_strategy,
             sampler_kwargs=sampler_config.sampler_kwargs,
+            refill_fn=self._add_prompts_to_generate,
         )
+        # Preserve the existing constructor contract for external samplers; custom implementations own
+        # their filtering semantics and can consume algorithm.filter_groups through their own config.
+        if not has_custom_sampler:
+            filter_groups_metric = self._resolve_filter_groups_metric()
+            sync_refill_failed_groups = bool(sampler_config.get("sync_refill_failed_groups", False))
+            replay_buffer_kwargs.update(
+                filter_groups_metric=filter_groups_metric,
+                sync_refill_failed_groups=sync_refill_failed_groups,
+            )
+            if sampler_cls is ReplayBuffer:
+                filter_groups = self.config.algorithm.get("filter_groups", None)
+                max_inflight_gen_batches = 1
+                if filter_groups_metric is not None:
+                    max_inflight_gen_batches = filter_groups.get("max_inflight_gen_batches", 1)
+                train_batch_size = self.config.data.train_batch_size
+                replay_buffer_kwargs.update(
+                    train_batch_size=train_batch_size,
+                    gen_batch_size=1
+                    if filter_groups_metric is not None or sync_refill_failed_groups
+                    else (self.config.data.get("gen_batch_size", None) or train_batch_size),
+                    max_inflight_gen_batches=max_inflight_gen_batches,
+                )
+        return sampler_cls(**replay_buffer_kwargs)
+
+    def _resolve_filter_groups_metric(self) -> str | None:
+        """Resolve DAPO's group metric and verify that rollout computes it before sampling."""
+        filter_groups = self.config.algorithm.get("filter_groups", None)
+        filter_enabled = bool(filter_groups is not None and filter_groups.get("enable", False))
+        if not filter_enabled:
+            return None
+
+        filter_metric = filter_groups.get("metric", None)
+        if not filter_metric:
+            raise ValueError("algorithm.filter_groups.metric must be set when group filtering is enabled")
+
+        reward_model = self.config.reward.reward_model
+        streaming_reward_path = not reward_model.enable or reward_model.enable_resource_pool
+        assert streaming_reward_path, (
+            "algorithm.filter_groups requires the reward metric at sampling time: use rule-based reward or "
+            "reward.reward_model.enable_resource_pool=True. A colocated reward model computes rewards only "
+            "after replay-buffer sampling."
+        )
+        max_num_gen_batches = filter_groups.get("max_num_gen_batches", 0)
+        if max_num_gen_batches > 0:
+            logger.warning(
+                "algorithm.filter_groups.max_num_gen_batches=%s is ignored by the built-in V1 ReplayBuffer; "
+                "use max_inflight_gen_batches to bound concurrent Sync DAPO generation.",
+                max_num_gen_batches,
+            )
+        return str(filter_metric)
 
     def init(self):
         """Initialize all components of the trainer.
@@ -180,12 +252,21 @@ class PPOTrainer(ABC):
             critic_cfg: CriticConfig = omega_conf_to_dataclass(self.config.critic)
             critic_cfg.engine.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
             critic_cfg.engine.max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
+
+            # Wire the critic profiler config via the hydra path (real dataclass tool_config), so the
+            # standalone critic TrainingWorker gets a working DistProfiler instead of a silent no-op.
+            critic_omega_profiler_config = self.config.critic.get("profiler", {})
+            critic_profiler_config = (
+                omega_conf_to_dataclass(critic_omega_profiler_config) if critic_omega_profiler_config else None
+            )
+
             worker_cfg = TrainingWorkerConfig(
                 model_type="value_model",
                 model_config=critic_cfg.model,
                 engine_config=critic_cfg.engine,
                 optimizer_config=critic_cfg.optim,
                 checkpoint_config=critic_cfg.checkpoint,
+                profiler_config=critic_profiler_config,
             )
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
             critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=worker_cfg)
@@ -326,6 +407,10 @@ class PPOTrainer(ABC):
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
         )
+        self.dapo_filtered_reward_logger = DapoFilteredRewardTableLogger(
+            project_name=self.config.trainer.project_name,
+            experiment_name=self.config.trainer.experiment_name,
+        )
 
         # perform validation before training
         if self.config.trainer.get("val_before_train", True):
@@ -339,12 +424,14 @@ class PPOTrainer(ABC):
                 self._shutdown_dump_executor()
                 return
 
-        current_epoch = self.global_steps // len(self.train_dataloader)
+        current_epoch = self.global_steps // self.steps_per_epoch
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
 
         # we start from step 1
         self.global_steps += 1
+        # SkipManager skips warmup batches in async trainers, so it doesn't conflict with reissue.
         SkipManager.set_step(self.global_steps)
+        self._reissue_inflight_prompts()
         self.prev_step_profile = False
         self.curr_step_profile = (
             self.global_steps in self.config.global_profiler.steps
@@ -376,6 +463,7 @@ class PPOTrainer(ABC):
                         self._save_checkpoint()
 
                 self.on_step_end()
+                metrics.update(self._consume_sync_metrics())
 
             # 4. validate
             if self.config.trainer.test_freq > 0 and (
@@ -400,11 +488,16 @@ class PPOTrainer(ABC):
             # 7. cleanup transfer queue
             tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
 
+            dapo_filtered_reward_counts = metrics.pop(DAPO_FILTERED_REWARD_COUNTS_KEY, None)
             self.logger.log(data=metrics, step=self.global_steps)
+            if dapo_filtered_reward_counts:
+                self.dapo_filtered_reward_logger.log(
+                    self.config.trainer.logger, dapo_filtered_reward_counts, self.global_steps
+                )
             progress_bar.update(1)
             self.global_steps += 1
             SkipManager.set_step(self.global_steps)
-            current_epoch = (self.global_steps - 1) // len(self.train_dataloader)
+            current_epoch = (self.global_steps - 1) // self.steps_per_epoch
             if is_last_step:
                 self._shutdown_dump_executor()
                 pprint(f"Final validation metrics: {last_val_metrics}")
@@ -422,15 +515,15 @@ class PPOTrainer(ABC):
             f"parameter_sync_step ({self.parameter_sync_step})"
         )
         sample_batch_size = train_batch_size // self.parameter_sync_step
-        # TODO: use background feeder to add samples
-        # 1. add batch to generate
+
         self._add_batch_to_generate()
 
         metrics_aggregator = MetricsAggregator()
         combined_keys: list = []
         combined_tags: list = []
         combined_partition_id = "train"
-        for _ in range(self.parameter_sync_step):
+        for trigger_idx in range(self.parameter_sync_step):
+            self.local_trigger_step = trigger_idx
             iter_metrics: dict = {}
             batch = self._step_once(iter_metrics, timing_raw, sample_batch_size)
             sample_count = sum(not tag.get("is_padding", False) for tag in batch.tags)
@@ -525,6 +618,13 @@ class PPOTrainer(ABC):
         """Called at the end of each training step."""
         return
 
+    def _consume_sync_metrics(self) -> dict:
+        """Weight-sync stats stashed by ``on_step_end`` (e.g. the delta engines'
+        changed ratio / wire payload), merged into this step's logged metrics."""
+        metrics = getattr(self, "_pending_sync_metrics", None) or {}
+        self._pending_sync_metrics = {}
+        return metrics
+
     def on_sample_begin(self):
         """Called at the beginning of sampling batch from replay buffer."""
         return
@@ -535,6 +635,15 @@ class PPOTrainer(ABC):
         return
 
     # ------------------------------ common methods ------------------------------
+
+    def _get_n_gpus_for_throughput(self) -> int:
+        """Return the total number of GPUs used for throughput normalization.
+
+        By default this is the trainer-side GPU count from the resource pool
+        manager.  Modes that use additional dedicated GPUs (e.g. separate-async
+        standalone rollout) should override this to include them.
+        """
+        return self.resource_pool_manager.get_n_gpus()
 
     def _init_tokenizer(self):
         """Initialize tokenizer."""
@@ -567,9 +676,25 @@ class PPOTrainer(ABC):
             max_samples=self.config.data.get("val_max_samples", -1),
         )
 
+        # Exact refill counts require single-prompt dataloader fetches.
+        filter_groups = self.config.algorithm.get("filter_groups", None)
+        dapo_enabled = bool(filter_groups is not None and filter_groups.get("enable", False))
+        sync_refill_failed_groups = bool(self.config.trainer.v1.sampler.get("sync_refill_failed_groups", False))
+        requires_exact_refill = self.trainer_mode != "sync" or dapo_enabled or sync_refill_failed_groups
+        if requires_exact_refill:
+            user_gen_batch_size = self.config.data.get("gen_batch_size", None)
+            if user_gen_batch_size not in (None, 1):
+                logger.warning(f"data.gen_batch_size={user_gen_batch_size} is overridden to 1.")
+            elif user_gen_batch_size is None:
+                logger.info("data.gen_batch_size defaulted to 1.")
+            with open_dict(self.config):
+                self.config.data.gen_batch_size = 1
+
+        # use gen_batch_size as the batch size for the dataloader if set, otherwise use train_batch_size
+        gen_batch_size = self.config.data.get("gen_batch_size", None) or self.config.data.train_batch_size
         self.train_dataloader = StatefulDataLoader(
             dataset=self.train_dataset,
-            batch_size=self.config.data.train_batch_size,
+            batch_size=gen_batch_size,
             num_workers=self.config.data["dataloader_num_workers"],
             drop_last=True,
             collate_fn=collate_fn,
@@ -589,8 +714,10 @@ class PPOTrainer(ABC):
             f"{len(self.train_dataset)}, val dataset size: {len(self.val_dataset)}"
         )
 
+        self.steps_per_epoch = len(self.train_dataset) // self.config.data.train_batch_size
+
         # adjust total_training_steps
-        total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
+        total_training_steps = self.steps_per_epoch * self.config.trainer.total_epochs
         if self.config.trainer.total_training_steps is not None:
             total_training_steps = self.config.trainer.total_training_steps
         self.total_training_steps = total_training_steps
@@ -716,6 +843,52 @@ class PPOTrainer(ABC):
         else:
             logger.warning(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
+        # 5. restore TransferQueue state (async modes). Re-issuing the restored in-flight prompts is
+        # deferred to fit() to use the agent_loop_manager.
+        if self.trainer_mode != "sync" and _tq_supports_checkpoint():
+            tq_ckpt_path = os.path.join(global_step_folder, "transfer_queue")
+            if os.path.exists(tq_ckpt_path):
+                logger.info(f"Loading TransferQueue state from {tq_ckpt_path}")
+                tq.load_checkpoint(tq_ckpt_path)
+
+    def _reissue_inflight_prompts(self, partition_id: str = "train") -> int:
+        """Restart checkpointed pending/running prompt groups from their persisted prompt data."""
+        if self.trainer_mode == "sync" or not _tq_supports_checkpoint():
+            return 0
+        data = tq.kv_list(partition_id)
+        if not data:
+            return 0
+        items = data.get(partition_id, {})
+        inflight_uids = [
+            key
+            for key, tag in items.items()
+            if tag.get("is_prompt", False) and tag.get("status") in ("pending", "running")
+        ]
+        if not inflight_uids:
+            return 0
+
+        batch = tq.kv_batch_get(keys=inflight_uids, partition_id=partition_id)
+        inflight_uid_set = set(inflight_uids)
+        old_trajectory_keys = [
+            key
+            for key, tag in items.items()
+            if not tag.get("is_prompt", False) and key.split("_", 1)[0] in inflight_uid_set
+        ]
+        if old_trajectory_keys:
+            tq.kv_clear(keys=old_trajectory_keys, partition_id=partition_id)
+
+        # Treat this as a new dispatch attempt for the resumed training step.
+        tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
+        tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps} for _ in inflight_uids]
+        tq.kv_batch_put(keys=inflight_uids, partition_id=partition_id, tags=tags)
+        self.agent_loop_manager.generate_sequences(batch)
+
+        logger.info(
+            f"Re-issued {len(inflight_uids)} in-flight prompts for step {self.global_steps}; "
+            f"cleared {len(old_trajectory_keys)} old trajectories from partition {partition_id}"
+        )
+        return len(inflight_uids)
+
     def _save_checkpoint(self):
         """Save actor, critic, and dataloader checkpoints to local (and optionally remote) storage."""
         from verl.utils.fs import local_mkdir_safe
@@ -769,6 +942,16 @@ class PPOTrainer(ABC):
         dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
         torch.save(self.train_dataloader.state_dict(), dataloader_local_path)
 
+        # save TransferQueue state for async modes so in-flight prompts (already fetched from the
+        # dataloader but not yet trained into this checkpoint's weights) survive a restart:
+        # finished trajectories are restored as-is, pending/running prompts are re-issued on resume.
+        # Requires a TransferQueue release with checkpoint support (see _tq_supports_checkpoint).
+        if self.trainer_mode != "sync" and _tq_supports_checkpoint():
+            tq.save_checkpoint(
+                os.path.join(local_global_step_folder, "transfer_queue"),
+                metadata={"global_steps": self.global_steps},
+            )
+
         # write latest checkpointed iteration tracker for atomic resume
         actor_ckpt_cfg = self.config.actor_rollout_ref.actor.get("checkpoint", {})
         if actor_ckpt_cfg.get("async_save", False):
@@ -805,7 +988,9 @@ class PPOTrainer(ABC):
             tu.assign_non_tensor_data(batch, "validate", True)
             # Register each prompt (GRPO group) in TransferQueue as a tag-only status marker.
             # global_steps is required by ReplayBuffer's metadata sync / staleness ordering.
-            tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps}] * len(batch)
+            tags = [
+                {"is_prompt": True, "status": "pending", "global_steps": self.global_steps} for _ in range(len(batch))
+            ]
             tq.kv_batch_put(keys=list(batch["uid"]), partition_id="val", tags=tags)
             self.agent_loop_manager.generate_sequences(batch)
 
@@ -1134,21 +1319,8 @@ class PPOTrainer(ABC):
             if self.use_critic:
                 self.critic_wg.stop_profile()
 
-    @SkipManager.annotate_tq(role="rollout_tq", phase="submit")
-    def _add_batch_to_generate(self):
-        """Sample a batch from dataloader and add to AgentLoopManager.
-
-        When ``rollout_tq`` skip is enabled, the decorator intercepts: it calls
-        ``_next_train_batch`` first (keeping the dataloader aligned), then either
-        injects cached data (cache-hit) or delegates to ``_submit_batch_to_rollout``
-        (cache-miss).  This body only runs when skip is disabled or the current
-        step is outside ``skip.steps``.
-        """
-        batch = self._next_train_batch()
-        self._submit_batch_to_rollout(batch)
-
-    def _next_train_batch(self):
-        """Advance the dataloader and return a batch with fresh uids."""
+    def _fetch_one_gen_batch(self) -> TensorDict:
+        """Fetch one ``gen_batch_size`` chunk from the dataloader."""
         try:
             if self.train_dataloader_it is None:
                 self.train_dataloader_it = iter(self.train_dataloader)
@@ -1158,15 +1330,53 @@ class PPOTrainer(ABC):
             batch_dict = next(self.train_dataloader_it)
 
         batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
-        batch = tu.get_tensordict(batch_dict)
+        return tu.get_tensordict(batch_dict)
+
+    def _next_train_batch(self, num_prompts: int | None = None) -> TensorDict:
+        """Fetch and coalesce the requested number of prompts."""
+        train_batch_size = self.config.data.train_batch_size
+        if num_prompts is None:
+            num_prompts = train_batch_size
+        gen_batch_size = self.config.data.get("gen_batch_size", None) or train_batch_size
+        if num_prompts <= 0 or num_prompts % gen_batch_size != 0:
+            raise ValueError(
+                f"num_prompts ({num_prompts}) must be a positive multiple of gen_batch_size "
+                f"({gen_batch_size}); it is submitted in whole gen_batch_size dataloader fetches."
+            )
+
+        chunks = [self._fetch_one_gen_batch() for _ in range(num_prompts // gen_batch_size)]
+        batch = chunks[0] if len(chunks) == 1 else tu.concat_tensordict(chunks)
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
         return batch
 
-    def _submit_batch_to_rollout(self, batch):
-        """Register prompt tags in TransferQueue and dispatch to AgentLoopManager."""
-        tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps}] * len(batch)
-        tq.kv_batch_put(keys=list(batch["uid"]), partition_id="train", tags=tags)
+    def _submit_batch_to_rollout(self, batch: TensorDict) -> int:
+        """Register prompts in TransferQueue and dispatch them for generation."""
+        tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps} for _ in range(len(batch))]
+        if self.trainer_mode != "sync":
+            tq.kv_batch_put(
+                keys=list(batch["uid"]),
+                partition_id="train",
+                tags=tags,
+                # Persist prompt data for async checkpoint recovery.
+                # TODO: maybe let workers do it?
+                fields=batch.select(*[key for key in batch.keys() if not isinstance(batch.get(key), NonTensorData)]),
+            )
+        else:
+            tq.kv_batch_put(keys=list(batch["uid"]), partition_id="train", tags=tags)
+
         self.agent_loop_manager.generate_sequences(batch)
+        return len(batch)
+
+    def _add_prompts_to_generate(self, num_prompts: int) -> int:
+        """Add an exact number of prompts to the AgentLoopManager."""
+        batch = self._next_train_batch(num_prompts)
+        return self._submit_batch_to_rollout(batch)
+
+    @SkipManager.annotate_tq(role="rollout_tq", phase="submit")
+    def _add_batch_to_generate(self):
+        """Add one training batch to the AgentLoopManager."""
+        batch = self._next_train_batch()
+        self._submit_batch_to_rollout(batch)
 
     def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict | None = None) -> KVBatchMeta:
         """Compute the reward score with a colocated reward model."""
@@ -1574,7 +1784,7 @@ class PPOTrainer(ABC):
         )
         metrics.update(compute_data_metrics(batch=metrics_batch, use_critic=self.use_critic))
         metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
-        n_gpus = self.resource_pool_manager.get_n_gpus()
+        n_gpus = self._get_n_gpus_for_throughput()
         metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
         gradient_norm = metrics.get("actor/grad_norm", None)
         metrics.update(compute_variance_proxy_metrics(batch=metrics_batch, gradient_norm=gradient_norm))

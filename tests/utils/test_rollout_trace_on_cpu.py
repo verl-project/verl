@@ -24,7 +24,14 @@ from verl.utils.rollout_trace import RolloutTraceConfig, rollout_trace_attr, rol
 
 @pytest.fixture(autouse=True)
 def reset_rollout_trace_config_singleton():
-    """Fixture to reset the RolloutTraceConfig singleton before each test."""
+    """Reset the RolloutTraceConfig singleton around each test.
+
+    Resetting afterwards matters as much as before: the whole CPU suite runs in one
+    pytest process, so a leftover ``backend="weave"`` would make every later
+    ``@rollout_trace_op`` call in any test file import the real (uninstalled) weave.
+    """
+    RolloutTraceConfig.reset()
+    yield
     RolloutTraceConfig.reset()
 
 

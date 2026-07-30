@@ -206,7 +206,7 @@ outputs/profile/
 Observed output from a real run:
 
 * Outer `step_<global_step>` directories are created by verl.
-* Inner `step0/rank0/dump.json` directories are created by msprobe.
+* Inner `step0/rank0/` directories and `dump.json` files are created by msprobe.
 * With the current integration, each profiled stage is collected in an
   independent dump session, so stage-local output typically lands in `step0`.
 

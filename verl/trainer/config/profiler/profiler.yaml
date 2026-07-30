@@ -74,6 +74,27 @@ tool_config:
     # null means collect until the end (full collection).
     profile_token_end: null
 
+    # Optional torch.profiler.schedule. Enabled only when active > 0, in which case
+    # profiler.step() advances wait/warmup/active/repeat once per mini-batch.
+    schedule:
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+
+      # Number of steps to skip before the first cycle
+      skip_first: 0
+
+      # Idle steps (no collection) at the start of each cycle
+      wait: 0
+
+      # Warmup steps (tracing on, data discarded) each cycle
+      warmup: 0
+
+      # Active steps to record each cycle; <= 0 disables scheduling
+      active: 0
+
+      # Number of cycles to repeat; 0 repeats until profiling stops
+      repeat: 0
+
     name: torch
 
   torch_memory:

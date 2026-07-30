@@ -1,7 +1,7 @@
 Ascend Quickstart
 =================
 
-**Last updated:** 07/02/2026.
+**Last updated:** 2026/07/14.
 
 关键更新
 --------
@@ -56,7 +56,7 @@ Qwen3-0.6B GSM8K GRPO Quick Start
 
 权重需自行从huggingface上下载
 
-脚本中的默认读取权重路径为 ``~${HOME}/models/Qwen/Qwen3-0.6B``
+脚本中的默认读取权重路径为 ``~/models/Qwen/Qwen3-0.6B``
 
 建议将权重放在该路径下，或者修改脚本中MODEL_PATH指向本地路径
 
@@ -84,7 +84,7 @@ gsm8k原始数据集需自行从huggingface上下载
 
 首先进入verl路径： ``cd /your/path/verl``
 
-使能CANN环境: 如果您自定义了CANN的路径，请根据自定义路径修改以下使能命令
+使能CANN环境：如果您自定义了CANN的路径，请根据自定义路径修改以下使能命令
 
 .. code-block:: bash
 
@@ -119,13 +119,14 @@ Quick Start 当前提供四种常用训推后端组合。用户可根据训练�
      - bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_sglang_ascend.sh
 
 脚本内具体参数说明详见 `训练配置参数与指标说明 <https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/dev_guide/model_dev/parameter_and_metrics.md>`_
+多节点任务拉起详见 :doc:`多节点任务拉起实践 <../model_support/examples/multi-machine_task_startup_practice>`
 
 SGLang 后端使能说明
 -------------------------------------------
 
-当前 verl 已解析推理常见参数，详见 `async_sglang_server.py <https://github.com/verl-project/verl/blob/main/verl/workers/rollout/sglang_rollout/async_sglang_server.py>`_ 中 ``ServerArgs`` 初始化传参。
+当前 verl 已解析推理常见参数，详见 `async_sglang_server.py <../../../verl/workers/rollout/sglang_rollout/async_sglang_server.py>`_ 中 ``ServerArgs`` 初始化传参。
 
-其他 `SGLang 参数 <https://github.com/sgl-project/sglang/blob/main/docs/advanced_features/server_arguments.md>`_ 均可通过 ``engine_kwargs`` 进行参数传递。
+其他 `SGLang 参数 <https://github.com/sgl-project/sglang/blob/v0.5.10/docs/advanced_features/server_arguments.md>`_ 均可通过 ``engine_kwargs`` 进行参数传递。
 
 vLLM 后端脚本转换为 SGLang
 ~~~~~~~~
@@ -149,5 +150,4 @@ vLLM 后端脚本转换为 SGLang
 
    # chunked_prefill 默认关闭
    +actor_rollout_ref.rollout.engine_kwargs.sglang.chunked_prefill_size=-1
-
 

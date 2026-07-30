@@ -77,7 +77,10 @@ def create_role_worker_mapping(config):
     ray_worker_group_cls = RayWorkerGroup
 
     train_role = Role.Actor
-    if config.get("async_training", {}).get("use_trainer_do_validate", False):
+    async_training = config.get("async_training", {})
+    if async_training.get("use_trainer_do_validate", False) or async_training.get(
+        "use_dynamic_resource_scheduling", False
+    ):
         train_role = Role.ActorRollout
 
     role_worker_mapping = {

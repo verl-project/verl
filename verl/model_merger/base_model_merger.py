@@ -26,6 +26,8 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForTokenClas
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.transformers_compat import drop_tied_target_keys, get_auto_model_for_vision2seq
 
+from .output_validation import validate_hf_model_output
+
 AutoModelForVision2Seq = get_auto_model_for_vision2seq()
 
 
@@ -415,6 +417,8 @@ class BaseModelMerger(ABC):
         if tokenizer is not None:
             print(f"Saving tokenizer to {self.config.target_dir}")
             tokenizer.save_pretrained(self.config.target_dir)
+
+        validate_hf_model_output(self.config.target_dir)
 
     def upload_to_huggingface(self):
         import requests

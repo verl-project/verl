@@ -38,6 +38,7 @@ from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction, apply_router_replay_patch
 from verl.utils.megatron.router_replay_utils import (
     RouterReplayHelper,
+    build_r3_replay_mask,
     merge_router_topk_indices,
     pp_gather,
     reorder_and_merge_vpp_layers,
@@ -235,6 +236,15 @@ class MegatronEngine(BaseEngine):
             }
             for key, value in override_transformer_config.items():
                 provider_overrides[key] = value
+            if (
+                self.model_config.hf_config.model_type == "deepseek_v4"
+                and not self.model_config.mtp.enable
+                and getattr(provider, "mtp_num_layers", 0)
+            ):
+                provider_overrides["mtp_num_layers"] = 0
+                csa_compress_ratios = getattr(provider, "csa_compress_ratios", None)
+                if csa_compress_ratios is not None:
+                    provider_overrides["csa_compress_ratios"] = csa_compress_ratios[: provider.num_layers]
             if self.enable_routing_replay:
                 if hasattr(provider, "moe_enable_routing_replay"):
                     provider_overrides["moe_enable_routing_replay"] = True
@@ -257,12 +267,14 @@ class MegatronEngine(BaseEngine):
         if not self.bridge:
             self.weight_converter = get_mcore_weight_converter(self.model_config.hf_config, self.dtype)
 
-        # Set enable_routing_replay directly on tf_config instead of passing through
+        # Set router replay directly on tf_config instead of passing through
         # override_transformer_config, because dataclass subclasses like MLATransformerConfig
-        # generate their own __init__ and don't inherit the patched TransformerConfig.__init__
-        # that accepts this kwarg.
+        # generate their own __init__ and may not accept compatibility kwargs.
         if self.enable_routing_replay and tf_config is not None:
-            tf_config.enable_routing_replay = True
+            if hasattr(tf_config, "moe_enable_routing_replay"):
+                tf_config.moe_enable_routing_replay = True
+            else:
+                tf_config.enable_routing_replay = True
 
         if torch.distributed.get_rank() == 0:
             if tf_config is not None:
@@ -283,7 +295,11 @@ class MegatronEngine(BaseEngine):
         dtype, so inject ``grad_reduce_in_fp32=False`` unless the user set it
         explicitly via ``override_ddp_config``. Default (opt-out) leaves the fp32
         grad bucket untouched, preserving prior behavior.
+
+        For Muon + LayerWise, also enable ``use_layer_wise_param_layout`` on the
+        DDP config so master weights live in the param buffer (not fp32 clones).
         """
+        from verl.utils.megatron.optimizer import is_muon_layer_wise_config
         from verl.utils.torch_dtypes import PrecisionType
 
         override_ddp_config = dict(self.engine_config.override_ddp_config or {})
@@ -295,9 +311,12 @@ class MegatronEngine(BaseEngine):
             and "grad_reduce_in_fp32" not in override_ddp_config
         ):
             override_ddp_config["grad_reduce_in_fp32"] = False
+        if opt_cfg is not None and is_muon_layer_wise_config(opt_cfg):
+            override_ddp_config.setdefault("use_layer_wise_param_layout", True)
         return override_ddp_config
 
     def _build_megatron_module(self):
+        from verl.utils.megatron.optimizer import is_muon_layer_wise_config
         from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
         from verl.utils.model import print_model_size
 
@@ -306,10 +325,12 @@ class MegatronEngine(BaseEngine):
         else:
             wrap_with_ddp = True
 
+        layer_wise_muon = is_muon_layer_wise_config(self.optimizer_config)
         wrap_config = McoreModuleWrapperConfig(
             is_value_model=self.is_value_model,
             wrap_with_ddp=wrap_with_ddp,
             use_distributed_optimizer=self.engine_config.use_distributed_optimizer,
+            use_layer_wise_distributed_optimizer=layer_wise_muon,
             use_megatron_fsdp=self.engine_config.use_megatron_fsdp,
         )
         override_ddp_config = self._resolve_override_ddp_config()
@@ -992,7 +1013,16 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
         if RouterReplayHelper.is_replay_forward_action(self.tf_config, vp_rank):
             layers_topk_idx = model_inputs["routed_experts"]
-            set_router_replay_data(layers_topk_idx, None, self.tf_config, vp_rank)
+            replay_mask = None
+            if self.engine_config.router_replay.mode == "R3":
+                replay_mask = build_r3_replay_mask(input_ids, batch["response_mask"])
+            set_router_replay_data(
+                layers_topk_idx,
+                None,
+                self.tf_config,
+                vp_rank,
+                replay_mask=replay_mask,
+            )
 
         if pad_mode == DatasetPadMode.NO_PADDING:
             label = input_ids.clone()

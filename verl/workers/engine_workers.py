@@ -120,7 +120,15 @@ class TrainingWorker(Worker, DistProfilerExtension):
             self.profiler_tool_config = None
 
         DistProfilerExtension.__init__(
-            self, DistProfiler(rank=self.rank, config=self.profiler_config, tool_config=self.profiler_tool_config)
+            self,
+            DistProfiler(
+                rank=self.rank,
+                config=self.profiler_config,
+                tool_config=self.profiler_tool_config,
+                # Embed the model role (e.g. language_model/value_model) in trace filenames
+                # so standalone (e.g. SFT) traces are self-describing per process.
+                save_file_prefix=getattr(self.config, "model_type", None),
+            ),
         )
 
         self.model_config.model_type = self.config.model_type
@@ -301,6 +309,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 )
                 actor_output = self.train_batch(mini_batch_td)
                 output_lst.append(actor_output)
+                # Advance the profiler schedule once per mini-batch. No-op unless a
+                # torch profiler schedule (wait/warmup/active/repeat) is active.
+                self.profiler.step()
 
             if self.engine.is_mp_src_rank_with_outputs():
                 actor_output = [tu.get(output, "metrics") for output in output_lst]
@@ -487,8 +498,26 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             rr_mode = "disabled"
         self.enable_routing_replay = rr_mode != "disabled"
 
+        # Keep the raw (un-dataclassed) role profiler config so the inner actor
+        # TrainingWorker can build a matching DistProfiler in init_model. This lets
+        # train_mini_batch drive the (process-global) torch profiler schedule via
+        # profiler.step(), even though start/stop happen on this outer worker.
+        # NOTE: we must rebuild via the hydra path (omega_conf_to_dataclass without
+        # dataclass_type) so that tool_config entries are real dataclasses with
+        # attribute access; the dataclass_type=ProfilerConfig variant above yields a
+        # plain-dict tool_config that the inner torch profiler cannot consume.
+        self._omega_profiler_config = omega_profiler_config
+
         DistProfilerExtension.__init__(
-            self, DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config)
+            self,
+            DistProfiler(
+                rank=self.rank,
+                config=profiler_config,
+                tool_config=tool_config,
+                # Embed the worker role (actor/rollout/ref/...) in trace filenames so
+                # per-process results are distinguishable across roles and ranks.
+                save_file_prefix=self.role,
+            ),
         )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
@@ -521,6 +550,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             ref_config.model_config = deepcopy(model_config)
             ref_config.model_config.mtp = MtpConfig(enable=False)
 
+            # Build the inner ref profiler config via the hydra path (same as the actor / SFT),
+            # so its tool_config entries are real dataclass instances the torch profiler can read.
+            # This puts the reference model's inner TrainingWorker on par with the actor's, so the
+            # torch profiler (and the nsys/npu backends) support the reference model too, instead
+            # of the ref silently running with a disabled no-op profiler.
+            ref_omega_profiler_config = self.config.ref.get("profiler", {})
+            ref_profiler_config = (
+                omega_conf_to_dataclass(ref_omega_profiler_config) if ref_omega_profiler_config else None
+            )
+
             # construct TrainingWorkerConfig
             ref_training_config = TrainingWorkerConfig(
                 model_type=ref_config.model_config.get("model_type", "language_model"),
@@ -528,6 +567,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 engine_config=ref_config.engine,
                 optimizer_config=ref_config.optim,
                 checkpoint_config=ref_config.checkpoint,
+                profiler_config=ref_profiler_config,
             )
 
             # assign engine configs
@@ -550,12 +590,21 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 omega_conf_to_dataclass(self.distillation_config) if self.distillation_enabled else None
             )
 
+            # Build the inner actor profiler config via the hydra path (same as SFT), so
+            # its tool_config entries are real dataclass instances the torch profiler can
+            # read. This gives the inner TrainingWorker a DistProfiler that shares the
+            # process-global torch profiler, so per-mini-batch profiler.step() works.
+            actor_profiler_config = (
+                omega_conf_to_dataclass(self._omega_profiler_config) if self._omega_profiler_config else None
+            )
+
             actor_training_config = TrainingWorkerConfig(
                 model_type=actor_config.model_config.get("model_type", "language_model"),
                 model_config=actor_config.model_config,
                 engine_config=actor_config.engine,
                 optimizer_config=actor_config.optim,
                 checkpoint_config=actor_config.checkpoint,
+                profiler_config=actor_profiler_config,
             )
 
             assert self.config.actor.use_dynamic_bsz == self.config.rollout.log_prob_use_dynamic_bsz
@@ -699,9 +748,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if effective_mode != "naive":
+            if effective_mode == "delta_sharded":
+                # the delta engine owns the sync state machine (seed vs steady,
+                # snapshot prime), so it drives the training engine itself.
+                metrics = await self.checkpoint_engine.send_weights(self.actor.engine, global_steps=global_steps)
+                return metrics or {}
             per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
-            await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
-            return
+            metrics = await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
+            return metrics or {}
 
         set_expandable_segments(False)
         log_gpu_memory_usage("Before resume weights", logger=logger)

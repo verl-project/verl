@@ -84,9 +84,7 @@ def _compact_for_bucket(tensor: torch.Tensor) -> torch.Tensor:
     (e.g. ``[num_experts, ...]`` ``gate_up_proj``/``qkv``) while the actor params and rollout
     weights are both already resident. Skip the clone when the tensor already owns its storage.
     """
-    if tensor.is_contiguous() and tensor.untyped_storage().nbytes() == tensor.numel() * tensor.element_size():
-        return tensor
-    return tensor.clone()
+    return tensor.clone() if tensor._base is not None else tensor
 
 
 async def get_named_tensor_buckets(

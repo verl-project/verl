@@ -117,6 +117,7 @@ verl is fast with:
 
    advance/fsdp_extension
    advance/megatron_extension
+   advance/deepseek_v4_integration
    advance/megatron_lite_backend
 
 .. toctree::
@@ -124,8 +125,10 @@ verl is fast with:
    :caption: Async Training
 
    advance/one_step_off
+   advance/delta_weight_sync
    advance/fully_async
    advance/async-on-policy-distill
+   advance/dynamic_schedule
 
 .. toctree::
    :maxdepth: 1
@@ -147,6 +150,7 @@ verl is fast with:
    advance/dpo_extension
    examples/sandbox_fusion_example
    advance/rollout_trace.rst
+   advance/rl_insight.md
    advance/skip_manager.rst
    advance/agent_loop
    advance/reward_loop

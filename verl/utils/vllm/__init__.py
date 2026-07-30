@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .npu_vllm_patch import check_vllm_ascend_before_server_launch
+
+from .npu_vllm_patch import apply_npu_vllm_patches
 from .utils import TensorLoRARequest, VLLMHijack, is_version_ge
 
 # The contents of vllm/patch.py should not be imported here, because the contents of
@@ -20,9 +21,12 @@ from .utils import TensorLoRARequest, VLLMHijack, is_version_ge
 # wait until you actually start using it before importing the contents of
 # patch.py separately.
 
+# Apply NPU-specific vLLM patches when this module is imported.
+# Remove this when https://github.com/vllm-project/vllm-ascend/issues/5915 is fixed.
+apply_npu_vllm_patches()
+
 __all__ = [
     "TensorLoRARequest",
     "VLLMHijack",
     "is_version_ge",
-    "check_vllm_ascend_before_server_launch",
 ]

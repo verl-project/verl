@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
+# Megatron-LM is baked into the CI image but the vemlp runner / Ray workers do not inherit
+# the image's PYTHONPATH, so set it at runtime (main_ppo forwards it into the Ray runtime env).
+export PYTHONPATH="/workspace/Megatron-LM${PYTHONPATH:+:${PYTHONPATH}}"
+echo "PYTHONPATH=${PYTHONPATH}"
+
 # Test script for fully_async_policy E2E regression testing
 # This script runs fully async PPO training with both FSDP2 and Megatron backends
 # to ensure the asynchronous training mechanism works correctly
@@ -177,7 +182,7 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
         common_params+=(
             # Todo The checkpoint_engine.backend should be unified to nccl
             # actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
-            actor_rollout_ref.rollout.gpu_memory_utilization=0.70
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.50
         )
         actor_offload=True
     fi

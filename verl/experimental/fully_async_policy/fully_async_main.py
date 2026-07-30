@@ -157,13 +157,20 @@ class FullyAsyncTaskRunner:
         print("[ASYNC MAIN] FullyAsyncTrainer created and initialized successfully")
 
     def _setup_hybrid_worker_group(self, config) -> None:
-        """
-        Extract the trainer's actor_rollout_wg and store it for later injection
-        into the rollouter. This WG backs the hybrid rollout replicas
-        used during trainer-side validation (use_trainer_do_validate).
+        """Extract the trainer's actor_rollout_wg for hybrid rollout replicas.
+
+        Hybrid replicas are needed when *either*:
+        - ``use_trainer_do_validate`` is enabled (trainer-side validation), or
+        - ``use_dynamic_resource_scheduling`` is enabled (dynamic resource scheduling).
+
+        The extracted worker group is stored in ``self.components["hybrid_worker_group"]``
+        and injected into the rollouter before ``init_workers()`` is called.
         """
         trainer = self.components["trainer"]
-        if config.async_training.use_trainer_do_validate:
+        needs_hybrid = config.async_training.use_trainer_do_validate or config.async_training.get(
+            "use_dynamic_resource_scheduling", False
+        )
+        if needs_hybrid:
             trainer_wg = ray.get(trainer.get_actor_wg.remote())
             self.components["hybrid_worker_group"] = trainer_wg
             print(
@@ -171,7 +178,10 @@ class FullyAsyncTaskRunner:
                 f"(world_size={getattr(trainer_wg, 'world_size', '?')})"
             )
         else:
-            print("[ASYNC MAIN] use_trainer_do_validate=False, skipping hybrid worker group setup")
+            print(
+                "[ASYNC MAIN] Neither use_trainer_do_validate nor use_dynamic_resource_scheduling enabled, "
+                "skipping hybrid worker group setup"
+            )
 
     def _run_training_loop(self):
         self.running = True
