@@ -33,11 +33,10 @@ from typing import Any, Generator, Optional
 
 import ray
 import torch
-from packaging import version as vs
 from torch.distributed.device_mesh import DeviceMesh
 
 from verl import DataProto
-from verl.third_party.vllm import VLLM_SLEEP_LEVEL, get_version
+from verl.third_party.vllm import VLLM_SLEEP_LEVEL
 from verl.utils.device import is_support_ipc
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
@@ -45,16 +44,6 @@ from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedW
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
-
-
-def _check_vllm_version_for_sleep_level():
-    # https://github.com/vllm-project/vllm/issues/25171
-    minver = "0.11.0"
-    current_version = get_version("vllm")
-    if not current_version:
-        logger.warning("Could not determine vLLM version, assuming an older version for sleep_level configuration.")
-        return False
-    return vs.parse(current_version) >= vs.parse(minver)
 
 
 class ServerAdapter(BaseRollout):
@@ -133,7 +122,7 @@ class ServerAdapter(BaseRollout):
         else:
             self._has_server = self.rollout_rank == 0
 
-        if config.layered_summon or (config.expert_parallel_size > 1 and not _check_vllm_version_for_sleep_level()):
+        if config.layered_summon:
             logger.warning("Setting the sleep level to 1 may cause a memory overflow.")
             self.sleep_level = 1
         else:
