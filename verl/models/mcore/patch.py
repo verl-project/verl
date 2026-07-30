@@ -358,6 +358,19 @@ def apply_patch():
 
     if not mcore_ge_0162:
         MultiLatentAttention.forward = patch_forward
+    else:
+        # mcore >= 0.16.2 upstream _run_core_attention does not forward the x/qr
+        # extra kwargs that DSA (experimental_attention_variant="dsa") requires.
+        # Route DSA instances through the verl patch_forward so those tensors
+        # reach core_attention; leave standard MLA on the upstream forward.
+        _mcore_forward = MultiLatentAttention.forward
+
+        def _forward_dsa_compat(self, *args, **kwargs):
+            if getattr(self.config, "experimental_attention_variant", None) == "dsa":
+                return patch_forward(self, *args, **kwargs)
+            return _mcore_forward(self, *args, **kwargs)
+
+        MultiLatentAttention.forward = _forward_dsa_compat
 
 
 def apply_patch_mbridge():
