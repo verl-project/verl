@@ -30,11 +30,15 @@ from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutCo
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rebuild_group", [False])
 @pytest.mark.parametrize("num_trainer, num_rollout", [(2, 6)])
+# 128MB bucket is smaller than the largest weight of Qwen3-8B (embed_tokens, ~1.2GB in bf16),
+# so it exercises the chunked transfer path for weights larger than the bucket.
+@pytest.mark.parametrize("bucket_size_mb", [3072, 128])
 @auto_await
 async def test_hccl_checkpoint_engine(
     rebuild_group,
     num_trainer,
     num_rollout,
+    bucket_size_mb,
     num_nodes=1,
     num_gpus_per_node=8,
     check_allclose=True,
@@ -56,7 +60,7 @@ async def test_hccl_checkpoint_engine(
     checkpoint_engine_config = CheckpointEngineConfig(
         backend="nccl",
         engine_kwargs={"nccl": {"rebuild_group": rebuild_group}},
-        update_weights_bucket_megabytes=3072,
+        update_weights_bucket_megabytes=bucket_size_mb,
     )
     model_config = HFModelConfig(path=model_path, use_remove_padding=True)
     rollout_config = RolloutConfig(name="vllm", checkpoint_engine=checkpoint_engine_config)
