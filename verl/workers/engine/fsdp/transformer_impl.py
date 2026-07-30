@@ -295,6 +295,7 @@ class FSDPEngine(BaseEngine):
                 ulysses_sp_size=self.ulysses_sequence_parallel_size,
                 use_fused_kernels=use_fused_kernels,
                 fused_kernels_backend=fused_kernels_backend,
+                use_prefix_grouper=self.engine_config.use_prefix_grouper,
             )
 
             # some parameters may not in torch_dtype
@@ -924,6 +925,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
+        use_prefix_grouper = tu.get_non_tensor_data(data=micro_batch, key="use_prefix_grouper", default=False)
         temperature = micro_batch["temperature"]
         temperature_item = temperature
         if use_fused_kernels:
@@ -935,6 +937,53 @@ class FSDPEngineWithLMHead(FSDPEngine):
         multi_modal_inputs = extract_multi_modal_inputs(micro_batch.get("multi_modal_inputs", []))
         input_ids = micro_batch["input_ids"]
         position_ids = micro_batch["position_ids"]
+
+        if use_prefix_grouper:
+            from verl.trainer.ppo.prefix_grouper_utils import (
+                attach_prefix_grouper_forward_args,
+                build_pg_from_micro_batch,
+            )
+
+            if use_remove_padding or use_fused_kernels or self.use_ulysses_sp:
+                raise ValueError(
+                    "PrefixGrouper requires use_remove_padding=False, "
+                    "use_fused_kernels=False, and sequence parallel size 1"
+                )
+            if multi_modal_inputs:
+                raise ValueError("PrefixGrouper currently supports text-only models")
+
+            if isinstance(temperature, torch.Tensor):
+                if not torch.all(temperature == temperature.flatten()[0]):
+                    raise ValueError("PrefixGrouper requires a single temperature per microbatch")
+                temperature_item = float(temperature.flatten()[0].item())
+            else:
+                temperature_item = float(temperature)
+
+            calculate_entropy = tu.get_non_tensor_data(data=micro_batch, key="calculate_entropy", default=False)
+            pad_token_id = tu.get_non_tensor_data(data=micro_batch, key="pad_token_id", default=0)
+            (
+                prefix_grouper,
+                concat_input_ids,
+                prefix_attention_mask,
+                prefix_position_ids,
+                completion_ids,
+                completion_mask,
+            ) = build_pg_from_micro_batch(micro_batch, pad_token_id=pad_token_id)
+            attach_prefix_grouper_forward_args(
+                prefix_grouper=prefix_grouper,
+                completion_ids=completion_ids,
+                completion_mask=completion_mask,
+                temperature=temperature_item,
+                calculate_entropy=calculate_entropy,
+            )
+            model_inputs = {
+                "input_ids": concat_input_ids,
+                "attention_mask": prefix_attention_mask,
+                "position_ids": prefix_position_ids,
+                "prefix_grouper": prefix_grouper,
+                "return_prefix_fused_outputs": True,
+            }
+            return model_inputs, {}
 
         if not isinstance(temperature, torch.Tensor):
             temperature = torch.tensor([temperature] * input_ids.shape[0], device=input_ids.device)
@@ -1068,6 +1117,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
+        use_prefix_grouper = tu.get_non_tensor_data(data=micro_batch, key="use_prefix_grouper", default=False)
         calculate_entropy = tu.get_non_tensor_data(data=micro_batch, key="calculate_entropy", default=False)
         calculate_sum_pi_squared = tu.get_non_tensor_data(
             data=micro_batch, key="calculate_sum_pi_squared", default=False
@@ -1083,6 +1133,23 @@ class FSDPEngineWithLMHead(FSDPEngine):
         model_output = {}
 
         input_ids = micro_batch["input_ids"]
+
+        if use_prefix_grouper:
+            from verl.trainer.ppo.prefix_grouper_utils import response_output_to_nested
+
+            if calculate_sum_pi_squared:
+                raise NotImplementedError("PrefixGrouper does not materialize logits required for sum_pi_squared")
+            if distillation_use_topk:
+                raise NotImplementedError("PrefixGrouper does not yet support top-K distillation")
+
+            log_probs, entropy, suffix_mask = output
+            log_probs = log_probs.masked_fill(~suffix_mask.bool(), 0.0)
+            response_mask = micro_batch["response_mask"]
+            model_output["log_probs"] = response_output_to_nested(log_probs, response_mask, input_ids)
+            if calculate_entropy:
+                entropy = entropy.masked_fill(~suffix_mask.bool(), 0.0)
+                model_output["entropy"] = response_output_to_nested(entropy, response_mask, input_ids)
+            return model_output
 
         if use_remove_padding:
             input_ids_rmpad_rolled = output_args["input_ids_rmpad_rolled"]

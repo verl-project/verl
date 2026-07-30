@@ -168,7 +168,8 @@ class ActorConfig(BaseConfig):
     calculate_entropy: bool = False
     calculate_sum_pi_squared: bool = False
     use_kl_loss: bool = False
-    # Whether to enable PrefixGrouper-based shared-prefix forward
+    # Shared-prefix forward for repeated GRPO prompts. Requires
+    # `pip install "verl[prefix_grouper]"` and currently supports FSDP/FSDP2.
     use_prefix_grouper: bool = False
     use_torch_compile: bool = True
     kl_loss_coef: float = 0.001

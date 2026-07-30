@@ -72,6 +72,92 @@ def apply_prefix_grouper_patch():
     print(f"[PrefixGrouper] Patched: {patched}")
 
 
+def apply_prefix_grouper_model_forward_patch(model: PreTrainedModel):
+    """Compute response log-probs while outer distributed params are unsharded."""
+    if hasattr(model, "_prefix_grouper_original_forward"):
+        return
+
+    import functools
+    import types
+
+    original_forward = model.forward
+    original_lm_head_forward = model.lm_head.forward
+
+    @functools.wraps(original_lm_head_forward)
+    def wrapped_lm_head_forward(
+        self,
+        hidden_states,
+        *args,
+        prefix_input_ids=None,
+        prefix_temperature=1.0,
+        **kwargs,
+    ):
+        if prefix_input_ids is None:
+            return original_lm_head_forward(hidden_states, *args, **kwargs)
+
+        from verl.utils.experimental.torch_functional import FusedLinearForPPO
+
+        return FusedLinearForPPO().forward(
+            hidden_states=hidden_states,
+            vocab_weights=self.weight,
+            input_ids=prefix_input_ids,
+            temperature=prefix_temperature,
+        )
+
+    @functools.wraps(original_forward)
+    def wrapped_forward(self, *args, **kwargs):
+        if not kwargs.pop("return_prefix_fused_outputs", False):
+            return original_forward(*args, **kwargs)
+
+        prefix_grouper = kwargs["prefix_grouper"]
+        completion_ids = prefix_grouper._verl_completion_ids
+        completion_mask = prefix_grouper._verl_completion_mask
+        temperature = prefix_grouper._verl_temperature
+        calculate_entropy = prefix_grouper._verl_calculate_entropy
+
+        kwargs.pop("labels", None)
+        kwargs.pop("temperature", None)
+        kwargs.pop("logits_to_keep", None)
+        kwargs.pop("return_dict", None)
+        hidden_states = self.model(*args, **kwargs)[0]
+
+        _, _, suffix_hidden_raw, suffix_mask_raw = prefix_grouper.split_output(hidden_states, include_prefix_last=1)
+        completion_ids_right = prefix_grouper.convert_padding(
+            completion_ids,
+            completion_mask,
+            padding_mode="right",
+        )
+
+        # The repeated final-prefix hidden state predicts response token zero.
+        suffix_hidden = suffix_hidden_raw[:, :-1]
+        suffix_mask = suffix_mask_raw[:, 1:]
+        batch_size, response_length, hidden_size = suffix_hidden.shape
+
+        # Flatten outside the custom autograd Function. Flattening inside its
+        # forward runs under no_grad and drops the hidden-state gradient.
+        flat_hidden = suffix_hidden.reshape(-1, hidden_size)
+        flat_completion_ids = completion_ids_right.reshape(-1)
+
+        # Calling the LM-head module preserves its own FSDP2 unshard, reshard,
+        # and pre-backward hooks while avoiding full-vocabulary logits.
+        flat_log_probs, flat_entropy = self.lm_head(
+            flat_hidden,
+            prefix_input_ids=flat_completion_ids,
+            prefix_temperature=temperature,
+        )
+        log_probs = flat_log_probs.view(batch_size, response_length)
+        entropy = flat_entropy.view(batch_size, response_length)
+        if not calculate_entropy:
+            entropy = None
+
+        return log_probs, entropy, suffix_mask
+
+    model._prefix_grouper_original_forward = original_forward
+    model.forward = types.MethodType(wrapped_forward, model)
+    model.lm_head._prefix_grouper_original_forward = original_lm_head_forward
+    model.lm_head.forward = types.MethodType(wrapped_lm_head_forward, model.lm_head)
+
+
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
     This is the equivalent of torch.repeat_interleave(x, dim=2, repeats=n_rep). The hidden states go from (batch,
@@ -323,6 +409,7 @@ def apply_monkey_patch(
     # Apply PrefixGrouper patch if enabled
     if use_prefix_grouper:
         apply_prefix_grouper_patch()
+        apply_prefix_grouper_model_forward_patch(model)
 
     """Replace _flash_attention_forward to _ulysses_flash_attention_forward"""
     module = sys.modules[model.__module__]

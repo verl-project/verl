@@ -15,9 +15,9 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 from prefix_grouper import PrefixGrouper
-
-from verl.utils.torch_functional import logprobs_from_logits
+from tensordict.tensorclass import NonTensorData
 
 
 def build_position_ids_for_prefix_grouper(prefix_grouper: PrefixGrouper) -> torch.Tensor:
@@ -53,6 +53,8 @@ def build_pg_from_micro_batch(
     responses = micro_batch["responses"]
     response_mask = micro_batch["response_mask"]
     uids = micro_batch["uid"]
+    if isinstance(uids, NonTensorData):
+        uids = uids.data
 
     bs = responses.size(0)
 
@@ -100,6 +102,20 @@ def build_pg_from_micro_batch(
     )
 
 
+def attach_prefix_grouper_forward_args(
+    prefix_grouper: PrefixGrouper,
+    completion_ids: torch.Tensor,
+    completion_mask: torch.Tensor,
+    temperature: float,
+    calculate_entropy: bool,
+) -> None:
+    """Attach response-only fused projection inputs to a PrefixGrouper call."""
+    prefix_grouper._verl_completion_ids = completion_ids
+    prefix_grouper._verl_completion_mask = completion_mask
+    prefix_grouper._verl_temperature = max(float(temperature), 1e-8)
+    prefix_grouper._verl_calculate_entropy = calculate_entropy
+
+
 def pg_forward(
     model,
     prefix_grouper,
@@ -115,36 +131,53 @@ def pg_forward(
     calculate_entropy=False,
     entropy_fn=None,
 ):
-    logits = model(
+    if padding_mode != "right" or include_prefix_last != 1:
+        raise ValueError("Fused PrefixGrouper requires right padding and include_prefix_last=1")
+
+    attach_prefix_grouper_forward_args(
+        prefix_grouper=prefix_grouper,
+        completion_ids=completion_ids,
+        completion_mask=completion_mask,
+        temperature=temperature,
+        calculate_entropy=calculate_entropy,
+    )
+    return model(
         input_ids=concat_input_ids,
         attention_mask=attention_mask,
         position_ids=position_ids,
         use_cache=False,
         prefix_grouper=prefix_grouper,
-    ).logits
-
-    prefix_out, prefix_mask, suffix_out_raw, suffix_mask_raw = prefix_grouper.split_output(
-        logits, include_prefix_last=include_prefix_last
+        return_prefix_fused_outputs=True,
     )
 
-    completion_ids_right = prefix_grouper.convert_padding(
-        completion_ids,
-        completion_mask,
-        padding_mode=padding_mode,
-    )
 
-    suffix_out = suffix_out_raw[:, :-1].float()
-    suffix_mask = suffix_mask_raw[:, 1:]
+def response_output_to_nested(
+    output: torch.Tensor,
+    response_mask: torch.Tensor,
+    input_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Place response outputs into full-sequence jagged tensors.
 
-    suffix_out /= temperature
+    `no_padding_2_padding` expects model outputs aligned to every original
+    prompt+response sequence. PrefixGrouper computes response positions only,
+    so prepend prompt placeholders and append one final placeholder.
+    """
+    if not input_ids.is_nested:
+        raise ValueError("PrefixGrouper requires jagged input_ids")
 
-    log_probs = logprobs_from_logits(suffix_out, completion_ids_right)
+    sequence_lens = input_ids.offsets().diff()
+    response_lens = response_mask.sum(dim=-1).to(sequence_lens.device)
+    prompt_lens = sequence_lens - response_lens
+    if torch.any(prompt_lens <= 0):
+        raise ValueError(f"PrefixGrouper requires non-empty prompts, got {prompt_lens}")
 
-    entropy = None
-    if calculate_entropy and entropy_fn is not None:
-        entropy = entropy_fn(suffix_out)
+    rows = []
+    for row, (prompt_len, response_len) in enumerate(zip(prompt_lens.tolist(), response_lens.tolist(), strict=True)):
+        response_output = output[row, :response_len]
+        rows.append(F.pad(response_output, (prompt_len - 1, 1)))
 
-    return log_probs, entropy, suffix_mask
+    values = torch.cat(rows, dim=0)
+    return torch.nested.nested_tensor_from_jagged(values, input_ids.offsets())
 
 
 def forward_micro_batch_with_prefix_grouper(

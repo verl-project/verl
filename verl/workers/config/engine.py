@@ -83,6 +83,7 @@ class EngineConfig(BaseConfig):
         "infer_micro_batch_size_per_gpu",
         "use_fused_kernels",
         "use_remove_padding",
+        "use_prefix_grouper",
         "forward_only",
         "param_offload",
     }
@@ -110,6 +111,8 @@ class EngineConfig(BaseConfig):
     use_fused_kernels: bool = False
     # TODO (this may conflict with the one in model config)
     use_remove_padding: bool = True
+    # whether to share repeated GRPO prompt computation
+    use_prefix_grouper: bool = False
 
     seed: int = 42
 

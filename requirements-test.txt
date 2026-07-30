@@ -3,3 +3,4 @@ pre-commit
 py-spy
 pytest-asyncio
 pytest-rerunfailures
+prefix-grouper==0.0.1.post1

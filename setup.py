@@ -44,7 +44,14 @@ install_requires = [
     "tensorboard",
 ]
 
-TEST_REQUIRES = ["pytest", "pre-commit", "py-spy", "pytest-asyncio", "pytest-rerunfailures"]
+TEST_REQUIRES = [
+    "pytest",
+    "pre-commit",
+    "py-spy",
+    "pytest-asyncio",
+    "pytest-rerunfailures",
+    "prefix-grouper==0.0.1.post1",
+]
 PRIME_REQUIRES = ["pyext"]
 GEO_REQUIRES = ["mathruler", "torchvision", "qwen_vl_utils"]
 GPU_REQUIRES = ["liger-kernel", "flash-attn"]
@@ -58,6 +65,7 @@ SGLANG_REQUIRES = [
 ]
 TRL_REQUIRES = ["trl<=0.9.6"]
 MCORE_REQUIRES = ["mbridge"]
+PREFIX_GROUPER_REQUIRES = ["prefix-grouper==0.0.1.post1"]
 
 extras_require = {
     "test": TEST_REQUIRES,
@@ -70,6 +78,7 @@ extras_require = {
     "trl": TRL_REQUIRES,
     "mcore": MCORE_REQUIRES,
     "trtllm": TRTLLM_REQUIRES,
+    "prefix_grouper": PREFIX_GROUPER_REQUIRES,
 }
 
 

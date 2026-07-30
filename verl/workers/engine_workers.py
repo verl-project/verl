@@ -337,6 +337,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             max_token_len_per_gpu=self.engine_config.max_token_len_per_gpu,
             micro_batch_size_per_gpu=self.engine_config.micro_batch_size_per_gpu,
             use_fused_kernels=self.engine_config.use_fused_kernels,
+            use_prefix_grouper=self.engine_config.use_prefix_grouper,
         )
 
         for key, val in default_keys.items():
@@ -391,6 +392,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             max_token_len_per_gpu=self.engine_config.infer_max_token_len_per_gpu,
             micro_batch_size_per_gpu=self.engine_config.infer_micro_batch_size_per_gpu,
             use_fused_kernels=self.engine_config.use_fused_kernels,
+            use_prefix_grouper=self.engine_config.use_prefix_grouper,
         )
 
         for key, val in default_keys.items():
@@ -500,6 +502,50 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     def init_model(self):
         model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model)
 
+        if self.config.actor.use_prefix_grouper:
+            import importlib.util
+
+            if importlib.util.find_spec("prefix_grouper") is None:
+                raise ImportError(
+                    'PrefixGrouper is not installed. Install it with `pip install "verl[prefix_grouper]"`.'
+                )
+            if model_config.get("use_remove_padding", False):
+                raise ValueError("PrefixGrouper is incompatible with use_remove_padding=True")
+            if model_config.get("use_fused_kernels", False):
+                raise ValueError(
+                    "PrefixGrouper performs its own response-only fused LM-head projection; set use_fused_kernels=False"
+                )
+
+            group_size = self.config.rollout.n
+            micro_batch_sizes = []
+            if "actor" in self.role:
+                if self.config.actor.strategy not in ("fsdp", "fsdp2"):
+                    raise ValueError("PrefixGrouper currently supports only FSDP/FSDP2")
+                if self.config.actor.use_dynamic_bsz or self.config.rollout.log_prob_use_dynamic_bsz:
+                    raise ValueError("PrefixGrouper currently requires use_dynamic_bsz=False")
+                if self.config.actor.shuffle:
+                    raise ValueError("PrefixGrouper requires actor.shuffle=False to preserve contiguous groups")
+                micro_batch_sizes.extend(
+                    (
+                        self.config.actor.ppo_micro_batch_size_per_gpu,
+                        self.config.rollout.log_prob_micro_batch_size_per_gpu,
+                    )
+                )
+            if "ref" in self.role:
+                if self.config.ref.strategy not in ("fsdp", "fsdp2"):
+                    raise ValueError("PrefixGrouper currently supports only FSDP/FSDP2")
+                if self.config.ref.log_prob_use_dynamic_bsz:
+                    raise ValueError("PrefixGrouper currently requires use_dynamic_bsz=False")
+                micro_batch_sizes.append(self.config.ref.log_prob_micro_batch_size_per_gpu)
+
+            if any(micro_batch_size is None for micro_batch_size in micro_batch_sizes):
+                raise ValueError("PrefixGrouper requires fixed microbatch sizes")
+            if any(micro_batch_size % group_size != 0 for micro_batch_size in micro_batch_sizes):
+                raise ValueError(
+                    "PrefixGrouper microbatch sizes must be divisible by rollout.n "
+                    f"({group_size}), got {micro_batch_sizes}"
+                )
+
         # 1. build reference model
         if "ref" in self.role:
             # TODO: align ref config with actor config
@@ -533,6 +579,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.config.ref.ppo_micro_batch_size_per_gpu
             )
             ref_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
+            ref_training_config.engine_config.use_prefix_grouper = self.config.actor.use_prefix_grouper
 
             self.ref = TrainingWorker(config=ref_training_config)
             self.ref.reset()
@@ -569,6 +616,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.config.actor.ppo_micro_batch_size_per_gpu
             )
             actor_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
+            actor_training_config.engine_config.use_prefix_grouper = self.config.actor.use_prefix_grouper
 
             if self.config.actor.use_dynamic_bsz:
                 assert self.config.rollout.log_prob_max_token_len_per_gpu is not None
