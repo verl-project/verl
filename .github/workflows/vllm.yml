@@ -127,7 +127,10 @@ jobs:
       # them here, where the vllm extra is synced.
       - name: Run vllm CPU unit tests
         run: |
-          $UV_RUN pytest -s -x tests/workers/rollout/test_vllm_cli_args_on_cpu.py tests/workers/rollout/test_vision_placeholder_tokens_on_cpu.py
+          $UV_RUN pytest -s -x \
+            tests/workers/rollout/test_vllm_cli_args_on_cpu.py \
+            tests/workers/rollout/test_vision_placeholder_tokens_on_cpu.py \
+            tests/workers/rollout/test_vllm_pd_disaggregation_on_cpu.py
       - name: Prepare gsm8k dataset
         run: |
           $UV_RUN ray stop --force
