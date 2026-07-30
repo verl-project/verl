@@ -264,6 +264,38 @@ class vLLMHttpServer:
         # 1. setup vllm serve cli args
         engine_kwargs = self.config.get("engine_kwargs", {}).get(self._get_engine_kwargs_key(), {}) or {}
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
+        abort_kv_config = self.config.get("abort_kv_reuse", {}) or {}
+        if bool(abort_kv_config.get("enabled", False)):
+            kv_backend = self.config.get("kv_backend")
+            kv_transfer_config = engine_kwargs.get("kv_transfer_config") or {}
+            kv_connector = (
+                kv_transfer_config.get("kv_connector")
+                if isinstance(kv_transfer_config, dict)
+                else getattr(kv_transfer_config, "kv_connector", None)
+            )
+            kv_role = (
+                kv_transfer_config.get("kv_role")
+                if isinstance(kv_transfer_config, dict)
+                else getattr(kv_transfer_config, "kv_role", None)
+            )
+            expected_connectors = {"mooncake_store": "MooncakeStoreConnector"}
+            if kv_backend not in expected_connectors:
+                raise ValueError(
+                    "abort_kv_reuse requires kv_backend=mooncake_store in the first version; "
+                    f"got {kv_backend!r}"
+                )
+            expected_connector = expected_connectors[kv_backend]
+            if kv_connector != expected_connector or kv_role != "kv_both":
+                raise ValueError(
+                    "abort_kv_reuse configuration mismatch: "
+                    f"backend={kv_backend!r}, connector={kv_connector!r}, kv_role={kv_role!r}"
+                )
+            logger.info(
+                "abort KV reuse backend validated: backend=%s connector=%s role=%s",
+                kv_backend,
+                kv_connector,
+                kv_role,
+            )
         if self.config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": self.config.get("limit_images")}
 
