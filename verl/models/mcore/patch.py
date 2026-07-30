@@ -372,6 +372,34 @@ def apply_patch():
 
         MultiLatentAttention.forward = _forward_dsa_compat
 
+    # DSA imports fast_hadamard_transform at module load time and falls back to
+    # hadamard_transform=None when the CUDA package is absent.  Inject a pure-
+    # PyTorch Walsh-Hadamard fallback so DSA can run without the C extension.
+    # We import dsa here (triggering its module-level code if not yet imported),
+    # then overwrite the None directly in the module's namespace so that
+    # rotate_activation() picks it up on the next call.
+    try:
+        import megatron.core.transformer.experimental_attention_variant.dsa as _dsa_mod
+
+        if _dsa_mod.hadamard_transform is None:
+
+            def _pytorch_hadamard_transform(x, scale: float = 1.0):
+                """Walsh-Hadamard transform over the last dim (must be power of 2)."""
+                n = x.shape[-1]
+                h = x.to(torch.float32)
+                s = 1
+                while s < n:
+                    shape = h.shape[:-1]
+                    h = h.reshape(*shape, n // (2 * s), 2, s)
+                    left, right = h[..., 0, :], h[..., 1, :]
+                    h = torch.stack([left + right, left - right], dim=-2).reshape(*shape, n)
+                    s *= 2
+                return h.to(x.dtype) * scale
+
+            _dsa_mod.hadamard_transform = _pytorch_hadamard_transform
+    except ImportError:
+        pass  # not a DSA model, nothing to do
+
 
 def apply_patch_mbridge():
     try:
