@@ -25,7 +25,7 @@ from typing import Any, Literal, Optional, get_args
 import torch
 from vllm.outputs import RequestOutput
 
-from verl.utils.device import is_npu_available
+from verl.utils.device import get_device_name, is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches, is_fp8_model, load_quanted_weights
@@ -231,13 +231,12 @@ class vLLMColocateWorkerExtension:
 
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
-        from vllm.platforms import current_platform
-
         from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
 
-        if current_platform.device_type == "npu" and self.device is None:
-            self.device = torch.device(f"npu:{self.local_rank}")
-        assert self.device is not None
+        if self.device is None:
+            # vLLM workers may leave self.device unset on non-CUDA platforms (e.g. NPU);
+            # fall back to the worker's local rank on the current accelerator.
+            self.device = torch.device(f"{get_device_name()}:{self.local_rank}")
 
         # =========================== step 1: prepare for weight loading ===========================
         quant_reload_states = None
