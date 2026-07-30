@@ -547,6 +547,10 @@ class AgentLoopWorker:
             self.model_config.tokenizer.chat_template = self.model_config.custom_chat_template
 
         trace_config = self.rollout_config.trace
+        if trace_config.get("token2text", False):
+            # rollout_trace_op runs on the LLM client, so provide the tokenizer
+            # needed to decode each generate call's prompt and response tokens.
+            self.llm_client.tokenizer = self.tokenizer
         RolloutTraceConfig.init(
             self.rollout_config.trace.project_name,
             self.rollout_config.trace.experiment_name,
