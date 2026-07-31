@@ -113,6 +113,7 @@ class FlexKVNodeService:
         gpu_register_path = f"{server_path}_gpu_register"
         config_path = f"/tmp/verl_fk_{run_id}.yaml"
         mooncake_path = f"/tmp/verl_fk_{run_id}_mte.json"
+        rpc_port = int(cfg["rpc_port_base"]) + node_index
         for path in (
             server_path,
             gpu_register_path,
@@ -165,7 +166,7 @@ class FlexKVNodeService:
                 "FLEXKV_SERVER_RECV_PORT": f"ipc://{server_path}",
                 "VLLM_CUMEM_ENABLE_SHAREABLE_HANDLE": "1",
                 "FLEXKV_ENABLE_MPS": "0",
-                "MC_LEGACY_RPC_PORT_BINDING": "1",
+                "MC_LEGACY_RPC_PORT_BINDING": str(rpc_port),
             }
         )
         packed_kv = bool(cfg.get("packed_kv", True))
@@ -215,7 +216,7 @@ class FlexKVNodeService:
             "MOONCAKE_CONFIG_PATH": mooncake_path,
             "VLLM_CUMEM_ENABLE_SHAREABLE_HANDLE": "1",
             "FLEXKV_ENABLE_MPS": "0",
-            "MC_LEGACY_RPC_PORT_BINDING": "1",
+            "MC_LEGACY_RPC_PORT_BINDING": str(rpc_port),
         }
 
     def stop(self) -> None:

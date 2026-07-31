@@ -79,6 +79,7 @@ flexkv_service:
   flexkv_redis_port: 6393
   mooncake_redis_port: 6395
   local_zmq_port_base: 56800
+  rpc_port_base: 12841
   transfer_engine_port_base: 56900
   tokens_per_block: 16
   protocol: tcp
