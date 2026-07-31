@@ -109,11 +109,20 @@ Parameter Reference
   - ``actor_rollout_ref.model.path``:
     Path to the actor checkpoint in HuggingFace-compatible format.
   - ``actor_rollout_ref.actor.megatron.use_mbridge``:
-    Enable mbridge format conversion when the model was trained with Megatron. Use the latest mbridge release: https://github.com/ISEEKYAN/mbridge.
-    Now it must be True.
+    Selects the model-weight backend for the Megatron checkpoint manager. With ``True``
+    (default), model weights are saved/loaded in HuggingFace format via `Megatron Bridge
+    <https://github.com/NVIDIA-NeMo/Megatron-Bridge>`_ and ``hf_model`` in ``save_contents`` is
+    deduplicated against ``model``. With ``False``, model weights go through Megatron's
+    native ``dist_checkpointing`` and ``hf_model`` in ``save_contents`` is rejected
+    (use ``verl.model_merger`` after training instead). Optimizer / LR-scheduler / RNG
+    states always go through ``dist_checkpointing`` regardless of this flag.
+    The legacy alias ``actor_rollout_ref.actor.megatron.use_dist_checkpointing=True``
+    still works and is equivalent to ``use_mbridge=False``.
+    See :ref:`checkpoint-page` for the full save/load behaviour matrix.
   - ``actor_rollout_ref.actor.megatron.vanilla_mbridge``:
-    If set to True, use mbridge, else use Megatron-Bridge https://github.com/NVIDIA-NeMo/Megatron-Bridge.
-    Now it is True by default. and it will defaultly be set to False in the future(v0.8).
+    ``False`` (default) uses `Megatron-Bridge <https://github.com/NVIDIA-NeMo/Megatron-Bridge>`_.
+    ``True`` selects the legacy `mbridge <https://github.com/ISEEKYAN/mbridge>`_,
+    which is deprecated and will be removed in a future release.
 
 :math:`\pi`
   - ``actor_rollout_ref.rollout.name``:

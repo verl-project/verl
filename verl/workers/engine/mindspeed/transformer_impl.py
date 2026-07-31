@@ -35,6 +35,7 @@ from ..megatron import MegatronEngineWithLMHead, MegatronEngineWithValueHead
 from .utils import (
     apply_patch,
     gpt_model_provider,
+    reset_fp8_reuse_quantized_weight,
 )
 
 logger = logging.getLogger(__file__)
@@ -43,8 +44,15 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 def _mindspeed_repatch(engine_config):
     if repatch is not None:
-        repatch_config = dict(engine_config.get("override_transformer_config", {}))
-        repatch_config.setdefault("use_flash_attn", True)
+        from verl.utils.megatron_utils import mapping_string_to_attn_backend
+
+        repatch_config = mapping_string_to_attn_backend(dict(engine_config.get("override_transformer_config", {})))
+        # flash-attn-npu batch-invariant replaces DotProductAttention.forward; fusion attention
+        # registers the same patch when use_flash_attn=True and causes "the patch of forward exist".
+        if repatch_config.get("use_flash_attn_npu_batch_invariant"):
+            repatch_config["use_flash_attn"] = False
+        else:
+            repatch_config.setdefault("use_flash_attn", True)
         if engine_config.context_parallel_size > 1:
             repatch_config["context_parallel_size"] = engine_config.context_parallel_size
         repatch(repatch_config)
@@ -69,6 +77,19 @@ class MindspeedEngineWithLMHead(MegatronEngineWithLMHead):
         # so the CP ring-rank initialization wrapper is not registered on the first pass.
         _mindspeed_repatch(self.engine_config)
         super()._init_device_mesh()
+
+    def to(self, device: str, model: bool = True, optimizer: bool = True, grad: bool = True):
+        """
+        Move model parameters, optimizer states, or both to the specified device.
+        Note that this function executes irrespective of offload config. It serves as manual control
+
+        Args:
+            device: Target device identifier.
+            model: If True, move the model.
+            optimizer: If True, move the optimizer states.
+        """
+        reset_fp8_reuse_quantized_weight(self, device, model, optimizer, grad)
+        super().to(device=device, model=model, optimizer=optimizer, grad=grad)
 
 
 @EngineRegistry.register(model_type="value_model", backend="megatron", device="npu")
@@ -137,3 +158,16 @@ class MindSpeedMegatronEngineWithLMHead(MegatronEngineWithLMHead):
             print(f"routing replay layers: {len(RouterReplay.router_instances)}")
 
         return module
+
+    def to(self, device: str, model: bool = True, optimizer: bool = True, grad: bool = True):
+        """
+        Move model parameters, optimizer states, or both to the specified device.
+        Note that this function executes irrespective of offload config. It serves as manual control
+
+        Args:
+            device: Target device identifier.
+            model: If True, move the model.
+            optimizer: If True, move the optimizer states.
+        """
+        reset_fp8_reuse_quantized_weight(self, device, model, optimizer, grad)
+        super().to(device=device, model=model, optimizer=optimizer, grad=grad)

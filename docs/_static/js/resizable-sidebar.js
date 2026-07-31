@@ -129,6 +129,18 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 });
 
+// the sidebar will be scrolled when the cursor is hovered over it
+document.addEventListener('DOMContentLoaded', function() {
+    const nav = window.SphinxRtdTheme && window.SphinxRtdTheme.Navigation;
+
+    if (!nav) return;
+
+    nav.onScroll = function() {
+        this.winScroll = false;
+        this.winPosition = this.win.scrollTop();
+    };
+});
+
 // Fix navigation issues - Using MutationObserver for reliable initialization
 document.addEventListener('DOMContentLoaded', function() {
     let navigationFixed = false;

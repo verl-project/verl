@@ -15,6 +15,7 @@
 /verl/workers/engine @eric-haibin-lin @vermouth1992 @ZihengJiang @ArronHZG
 /verl/workers/roles @eric-haibin-lin @vermouth1992 @ZihengJiang
 /verl/workers/engine/fsdp @eric-haibin-lin @vermouth1992 @ZihengJiang
+/verl/workers/engine/veomni @wuxibin89 @Luosuu @FoolPlayer
 /verl/workers/rollout/vllm_rollout @wuxibin89 @PeterSH6 @chenhaiq @ArronHZG
 /verl/workers/rollout/sglang_rollout @zhaochenyang20 @SwordFaith @chenhaiq @ArronHZG
 /verl/workers/engine/megatron @ISEEKYAN @vermouth1992

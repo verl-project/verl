@@ -418,9 +418,11 @@ def apply_monkey_patch(
     try:
         num_attention_heads, num_key_value_heads = model.config.num_attention_heads, model.config.num_key_value_heads
     except AttributeError:
+        # Some multimodal configs nest text_config differently; fall back to get_text_config().
+        text_config = getattr(model.config, "text_config", None) or model.config.get_text_config()
         num_attention_heads, num_key_value_heads = (
-            model.config.text_config.num_attention_heads,
-            model.config.text_config.num_key_value_heads,
+            text_config.num_attention_heads,
+            text_config.num_key_value_heads,
         )
 
     assert num_attention_heads % ulysses_sp_size == 0, (
@@ -433,7 +435,10 @@ def apply_monkey_patch(
     )
 
     if is_trl_available():
-        from trl import AutoModelForCausalLMWithValueHead  # type: ignore
+        try:
+            from trl.experimental.ppo import AutoModelForCausalLMWithValueHead  # type: ignore
+        except ImportError:
+            from trl import AutoModelForCausalLMWithValueHead  # type: ignore
 
         def state_dict(self, *args, **kwargs):
             return torch.nn.Module.state_dict(self, *args, **kwargs)
@@ -580,13 +585,17 @@ def apply_monkey_patch(
     elif model.config.model_type in ["qwen3_5", "qwen3_5_moe"]:
         # Step 1: patch model to support image-text mixed data
         from transformers.models.qwen3_5.modeling_qwen3_5 import (
+            Qwen3_5DecoderLayer,
             Qwen3_5ForConditionalGeneration,
+            Qwen3_5GatedDeltaNet,
             Qwen3_5Model,
             Qwen3_5TextModel,
             Qwen3_5VisionModel,
         )
         from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+            Qwen3_5MoeDecoderLayer,
             Qwen3_5MoeForConditionalGeneration,
+            Qwen3_5MoeGatedDeltaNet,
             Qwen3_5MoeModel,
             Qwen3_5MoeTextModel,
             Qwen3_5MoeVisionModel,
@@ -596,10 +605,16 @@ def apply_monkey_patch(
             fast_pos_embed_interpolate,
             forward_with_normal_backend,
             qwen3_5_base_forward,
+            qwen3_5_decoder_layer_forward,
+            qwen3_5_gated_delta_net_forward,
         )
 
         Qwen3_5Model.forward = qwen3_5_base_forward
         Qwen3_5MoeModel.forward = qwen3_5_base_forward
+        Qwen3_5DecoderLayer.forward = qwen3_5_decoder_layer_forward
+        Qwen3_5MoeDecoderLayer.forward = qwen3_5_decoder_layer_forward
+        Qwen3_5GatedDeltaNet.forward = qwen3_5_gated_delta_net_forward
+        Qwen3_5MoeGatedDeltaNet.forward = qwen3_5_gated_delta_net_forward
         Qwen3_5ForConditionalGeneration.forward = forward_with_normal_backend
         Qwen3_5MoeForConditionalGeneration.forward = forward_with_normal_backend
         print(f"Monkey patch {model.__class__.__name__} model forward")

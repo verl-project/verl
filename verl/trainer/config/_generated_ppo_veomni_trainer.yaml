@@ -35,9 +35,12 @@ actor_rollout_ref:
       init_device: meta
       enable_full_shard: true
       ckpt_manager: dcp
+      load_checkpoint_path: null
       forward_prefetch: true
       strategy: veomni
       use_torch_compile: false
+      entropy_from_logits_with_chunking: false
+      entropy_checkpointing: false
       forward_only: false
       enable_fsdp_offload: false
       enable_reentrant: false
@@ -47,10 +50,13 @@ actor_rollout_ref:
       rms_norm_implementation: eager
       swiglu_mlp_implementation: eager
       rotary_pos_emb_implementation: eager
+      rms_norm_gated_implementation: eager
+      causal_conv1d_implementation: eager
+      chunk_gated_delta_rule_implementation: eager
       load_balancing_loss_implementation: eager
       force_use_huggingface: false
       activation_gpu_limit: 0.0
-      moe_load_balance_monitor_interval: 0
+      basic_modules: []
       router_replay:
         _target_: verl.workers.config.EngineRouterReplayConfig
         mode: disabled
@@ -98,7 +104,6 @@ actor_rollout_ref:
       - extra
       load_contents: ${.save_contents}
       async_save: false
-      mbridge_config: {}
       strict: true
     use_fused_kernels: ${oc.select:actor_rollout_ref.model.use_fused_kernels,false}
     profiler:
@@ -122,6 +127,13 @@ actor_rollout_ref:
           _target_: verl.utils.profiler.config.TorchProfilerToolConfig
           contents: []
           discrete: false
+          schedule:
+            _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+            skip_first: 0
+            wait: 0
+            warmup: 0
+            active: 0
+            repeat: 0
         torch_memory:
           _target_: verl.utils.profiler.config.TorchMemoryToolConfig
           trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
@@ -177,6 +189,13 @@ actor_rollout_ref:
           _target_: verl.utils.profiler.config.TorchProfilerToolConfig
           contents: []
           discrete: false
+          schedule:
+            _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+            skip_first: 0
+            wait: 0
+            warmup: 0
+            active: 0
+            repeat: 0
         torch_memory:
           _target_: verl.utils.profiler.config.TorchMemoryToolConfig
           trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
@@ -205,9 +224,12 @@ actor_rollout_ref:
       init_device: meta
       enable_full_shard: true
       ckpt_manager: dcp
+      load_checkpoint_path: null
       forward_prefetch: true
       strategy: veomni
       use_torch_compile: false
+      entropy_from_logits_with_chunking: false
+      entropy_checkpointing: false
       forward_only: true
       enable_fsdp_offload: false
       enable_reentrant: false
@@ -217,10 +239,13 @@ actor_rollout_ref:
       rms_norm_implementation: ${oc.select:actor_rollout_ref.actor.veomni.rms_norm_implementation,eager}
       swiglu_mlp_implementation: ${oc.select:actor_rollout_ref.actor.veomni.swiglu_mlp_implementation,eager}
       rotary_pos_emb_implementation: ${oc.select:actor_rollout_ref.actor.veomni.rotary_pos_emb_implementation,eager}
+      rms_norm_gated_implementation: eager
+      causal_conv1d_implementation: eager
+      chunk_gated_delta_rule_implementation: eager
       load_balancing_loss_implementation: ${oc.select:actor_rollout_ref.actor.veomni.load_balancing_loss_implementation,eager}
       force_use_huggingface: false
       activation_gpu_limit: 0.0
-      moe_load_balance_monitor_interval: 0
+      basic_modules: []
       router_replay:
         _target_: verl.workers.config.EngineRouterReplayConfig
         mode: disabled
@@ -234,6 +259,8 @@ actor_rollout_ref:
     temperature: 1.0
     top_k: -1
     top_p: 1
+    full_determinism: false
+    seed: 42
     prompt_length: ${oc.select:data.max_prompt_length,512}
     response_length: ${oc.select:data.max_response_length,512}
     dtype: bfloat16
@@ -289,7 +316,7 @@ actor_rollout_ref:
       tokenization_sanity_check_mode: strict
       format: hermes
       num_repeat_rollouts: null
-    calculate_log_probs: false
+    calculate_log_probs: true
     agent:
       _target_: verl.workers.config.AgentLoopConfig
       num_workers: 8
@@ -312,14 +339,9 @@ actor_rollout_ref:
       backend: null
       token2text: false
       max_samples_per_step_per_worker: null
-    skip:
-      _target_: verl.workers.config.SkipConfig
-      enable: false
-      dump_dir: ~/.verl/rollout_dump
-      max_dump_step: 1
-      action: cache
     skip_tokenizer_init: true
     enable_rollout_routing_replay: false
+    moe_load_balance_metrics_interval: 0
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
       tool: ${oc.select:global_profiler.tool,null}
@@ -334,10 +356,14 @@ actor_rollout_ref:
           level: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.level,level0}
           analysis: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.analysis,false}
           discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.npu.discrete,false}
+          profile_token_start: null
+          profile_token_end: null
         torch:
           _target_: verl.utils.profiler.config.TorchProfilerToolConfig
           contents: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.contents,[]}
           discrete: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.torch.discrete,false}
+          profile_token_start: null
+          profile_token_end: null
         precision_debugger:
           _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
           config_path: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.precision_debugger.config_path,${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}}
@@ -435,6 +461,7 @@ data:
   max_prompt_length: 512
   max_response_length: 512
   train_batch_size: 1024
+  gen_batch_size: null
   val_batch_size: null
   tool_config_path: ${oc.select:actor_rollout_ref.rollout.multi_turn.tool_config_path,
     null}
@@ -460,6 +487,9 @@ data:
     name: null
   return_multi_modal_inputs: true
   apply_chat_template_kwargs: {}
+  continuous_token:
+    enable: false
+    model_family: auto
   mm_processor_kwargs: {}
 critic:
   optim:
@@ -492,9 +522,12 @@ critic:
     init_device: meta
     enable_full_shard: true
     ckpt_manager: dcp
+    load_checkpoint_path: null
     forward_prefetch: true
     strategy: veomni
     use_torch_compile: false
+    entropy_from_logits_with_chunking: false
+    entropy_checkpointing: false
     forward_only: false
     enable_fsdp_offload: false
     enable_reentrant: false
@@ -504,10 +537,13 @@ critic:
     rms_norm_implementation: eager
     swiglu_mlp_implementation: eager
     rotary_pos_emb_implementation: eager
+    rms_norm_gated_implementation: eager
+    causal_conv1d_implementation: eager
+    chunk_gated_delta_rule_implementation: eager
     load_balancing_loss_implementation: eager
     force_use_huggingface: false
     activation_gpu_limit: 0.0
-    moe_load_balance_monitor_interval: 0
+    basic_modules: []
     router_replay:
       _target_: verl.workers.config.EngineRouterReplayConfig
       mode: disabled
@@ -526,6 +562,7 @@ critic:
   data_loader_seed: ${oc.select:actor_rollout_ref.actor.data_loader_seed,null}
   cliprange_value: 0.5
   loss_agg_mode: ${oc.select:actor_rollout_ref.actor.loss_agg_mode,token-mean}
+  loss_scale_factor: ${oc.select:actor_rollout_ref.actor.loss_scale_factor,null}
   checkpoint:
     _target_: verl.trainer.config.CheckpointConfig
     save_contents:
@@ -534,7 +571,6 @@ critic:
     - extra
     load_contents: ${.save_contents}
     async_save: false
-    mbridge_config: {}
   profiler:
     _target_: verl.utils.profiler.ProfilerConfig
     tool: ${oc.select:global_profiler.tool,null}
@@ -556,6 +592,13 @@ critic:
         _target_: verl.utils.profiler.config.TorchProfilerToolConfig
         contents: []
         discrete: false
+        schedule:
+          _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+          skip_first: 0
+          wait: 0
+          warmup: 0
+          active: 0
+          repeat: 0
       torch_memory:
         _target_: verl.utils.profiler.config.TorchMemoryToolConfig
         trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
@@ -707,6 +750,8 @@ reward:
       load_format: auto
       layered_summon: false
       scheduling_policy: fcfs
+      full_determinism: false
+      seed: 42
       multi_stage_wake_up: false
       engine_kwargs: {}
       limit_images: null
@@ -752,6 +797,12 @@ algorithm:
   lam: 1.0
   adv_estimator: gae
   norm_adv_by_std_in_grpo: true
+  filter_groups:
+    _target_: verl.trainer.config.FilterGroupsConfig
+    enable: false
+    metric: null
+    max_num_gen_batches: 0
+    max_inflight_gen_batches: 1
   use_kl_in_reward: false
   kl_penalty: kl
   kl_ctrl:
@@ -813,6 +864,25 @@ distillation:
         response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
         temperature: ${oc.select:actor_rollout_ref.rollout.temperature}
   teacher_key: data_source
+transfer_queue:
+  enable: false
+  metrics:
+    enabled: false
+    port: 0
+  backend:
+    storage_backend: SimpleStorage
+    SimpleStorage:
+      total_storage_size: 100000
+      num_data_storage_units: 8
+    MooncakeStore:
+      auto_init: false
+      metadata_server: localhost:50123
+      master_server_address: localhost:50124
+      local_hostname: localhost
+      protocol: tcp
+      global_segment_size: 4294967296
+      local_buffer_size: 1073741824
+      device_name: ''
 trainer:
   balance_batch: true
   total_epochs: 30
@@ -842,6 +912,23 @@ trainer:
   max_critic_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
   device: cuda
+  use_v1: true
+  v1:
+    trainer_mode: sync
+    sync: {}
+    colocate_async:
+      num_warmup_batches: 1
+    separate_async:
+      num_warmup_batches: 1
+      parameter_sync_step: 4
+    sampler:
+      max_off_policy_threshold: 8
+      max_off_policy_strategy: drop
+      sync_refill_failed_groups: false
+      custom_sampler:
+        path: null
+        name: null
+      sampler_kwargs: {}
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
   tool: null
@@ -875,25 +962,23 @@ global_profiler:
       steps: null
       stages: null
       strict: false
-transfer_queue:
-  enable: false
-  metrics:
-    enabled: false
-    port: 0
-  backend:
-    storage_backend: SimpleStorage
-    SimpleStorage:
-      total_storage_size: 100000
-      num_data_storage_units: 8
-    MooncakeStore:
-      auto_init: false
-      metadata_server: localhost:50123
-      master_server_address: localhost:50124
-      local_hostname: localhost
-      protocol: tcp
-      global_segment_size: 4294967296
-      local_buffer_size: 1073741824
-      device_name: ''
+skip:
+  _target_: verl.utils.skip.SkipManagerConfig
+  rollout:
+    enable: false
+    dump_dir: ~/.verl/rollout_dump
+    steps: []
+    action: cache
+  rollout_tq:
+    enable: false
+    dump_dir: ~/.verl/rollout_dump
+    steps: []
+    action: cache
+  async_rollout:
+    enable: false
+    dump_dir: ~/.verl/rollout_dump
+    steps: []
+    action: cache
 ray_kwargs:
   ray_init:
     num_cpus: null

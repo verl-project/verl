@@ -80,9 +80,12 @@ def _make_logits_processor(keys):
 
 
 @pytest.mark.parametrize("use_remove_padding", [True, False])
-def test_distillation_outputs_emitted_in_both_padding_modes(use_remove_padding):
+@pytest.mark.parametrize("distillation_only", [False, True])
+def test_distillation_outputs_emitted_in_both_padding_modes(use_remove_padding, distillation_only):
     """distillation_use_topk=True must populate distillation outputs into
-    model_output regardless of use_remove_padding. See verl#6293."""
+    model_output regardless of use_remove_padding. See verl#6293.
+
+    When distillation_only=True, log_probs must be omitted (supervised top-k path)."""
     bsz = 2
     seq_lengths_list = [3, 2]
     seq_lengths = torch.tensor(seq_lengths_list, dtype=torch.int64)
@@ -125,6 +128,7 @@ def test_distillation_outputs_emitted_in_both_padding_modes(use_remove_padding):
         calculate_entropy=False,
         calculate_sum_pi_squared=False,
         distillation_use_topk=True,
+        distillation_only=distillation_only,
         max_response_length=max(seq_lengths_list),
     )
 
@@ -146,9 +150,15 @@ def test_distillation_outputs_emitted_in_both_padding_modes(use_remove_padding):
             logits_processor_func=_make_logits_processor(_DISTILLATION_KEYS),
         )
 
-    assert "log_probs" in model_output, (
-        f"log_probs missing (use_remove_padding={use_remove_padding}); keys: {list(model_output.keys())}"
-    )
+    if distillation_only:
+        assert "log_probs" not in model_output, (
+            f"log_probs should be omitted when distillation_only=True "
+            f"(use_remove_padding={use_remove_padding}); keys: {list(model_output.keys())}"
+        )
+    else:
+        assert "log_probs" in model_output, (
+            f"log_probs missing (use_remove_padding={use_remove_padding}); keys: {list(model_output.keys())}"
+        )
 
     for k in _DISTILLATION_KEYS:
         assert k in model_output, (

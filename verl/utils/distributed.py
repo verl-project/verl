@@ -17,11 +17,13 @@ import ctypes
 import os
 import socket
 from datetime import timedelta
+from typing import Any
 
 import ray
 import torch.distributed
+from torch.distributed import TCPStore
 
-from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device, is_npu_available
+from verl.utils.device import get_device_name, get_nccl_backend, get_resource_name, get_torch_device, is_npu_available
 from verl.utils.net_utils import is_ipv6
 
 
@@ -40,7 +42,7 @@ def set_numa_affinity():
 
         pynvml.nvmlInit()
         initialized = True
-        device_name = "NPU" if is_npu_available else "GPU"
+        device_name = get_resource_name()
         # Avoid ray.init in SFT trainer.
         if ray.is_initialized():
             local_rank = int(ray.get_runtime_context().get_accelerator_ids()[device_name][0])
@@ -96,6 +98,29 @@ def initialize_global_process_group_ray(timeout_second=None, backend=None):
         )
 
 
+def create_tcp_store(
+    host: str,
+    port: int,
+    listen_socket: socket.socket | None = None,
+    **kwargs: Any,
+) -> TCPStore:
+    """Create a TCPStore, optionally taking ownership of ``listen_socket``."""
+    if listen_socket is None:
+        return TCPStore(host_name=host, port=port, **kwargs)
+
+    listen_fd = listen_socket.detach()
+    try:
+        return TCPStore(
+            host_name=host,
+            port=port,
+            master_listen_fd=listen_fd,
+            **kwargs,
+        )
+    except Exception:
+        socket.close(listen_fd)
+        raise
+
+
 def stateless_init_process_group(master_address, master_port, rank, world_size, device):
     """
     vLLM provides `StatelessProcessGroup` to create a process group
@@ -126,13 +151,13 @@ def stateless_init_process_group(master_address, master_port, rank, world_size, 
         world_size: int,
         data_expiration_seconds: int = 3600,
         store_timeout: int = 300,
+        listen_socket: socket.socket | None = None,
     ) -> "StatelessProcessGroup":
         """
         This is copied from vllm/distributed/utils.py:StatelessProcessGroup.create
         Modified to support ipv6 stateless communication groups."""
         launch_server = rank == 0
-        if launch_server:
-            # listen on the specified interface (instead of 0.0.0.0)
+        if launch_server and listen_socket is None:
             if is_ipv6(master_address):
                 listen_socket = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
             else:
@@ -145,23 +170,45 @@ def stateless_init_process_group(master_address, master_port, rank, world_size, 
             listen_socket = None
             listen_fd = None
 
-        store = TCPStore(
-            host_name=host,
-            port=port,
-            world_size=world_size,
-            is_master=launch_server,
-            timeout=timedelta(seconds=store_timeout),
-            use_libuv=False,  # for now: github.com/pytorch/pytorch/pull/150215
-            master_listen_fd=listen_fd,
-        )
+        import vllm
+        from packaging import version
 
-        return StatelessProcessGroup(
-            rank=rank,
-            world_size=world_size,
-            store=store,
-            socket=listen_socket,
-            data_expiration_seconds=data_expiration_seconds,
-        )
+        _VLLM_VERSION = version.parse(vllm.__version__)
+        if _VLLM_VERSION >= version.parse("0.19.0"):
+            store = create_tcp_store(
+                host=host,
+                port=port,
+                listen_socket=listen_socket,
+                world_size=world_size,
+                is_master=launch_server,
+                timeout=timedelta(seconds=store_timeout),
+                use_libuv=False,
+            )
+            pg = StatelessProcessGroup(
+                rank=rank,
+                world_size=world_size,
+                store=store,
+                data_expiration_seconds=data_expiration_seconds,
+            )
+        else:
+            store = TCPStore(
+                host_name=host,
+                port=port,
+                world_size=world_size,
+                is_master=launch_server,
+                timeout=timedelta(seconds=store_timeout),
+                use_libuv=False,  # for now: github.com/pytorch/pytorch/pull/150215
+                master_listen_fd=listen_fd,
+            )
+
+            pg = StatelessProcessGroup(
+                rank=rank,
+                world_size=world_size,
+                store=store,
+                socket=listen_socket,
+                data_expiration_seconds=data_expiration_seconds,
+            )
+        return pg
 
     pg = create_process_group(host=master_address, port=master_port, rank=rank, world_size=world_size)
 

@@ -136,13 +136,6 @@ checkpoint:
 
   # Whether to save checkpoints asynchronously. Only effective for Megatron as of now.
   async_save: False
-  
-  # Mbridge config extension.
-  # when vanilla_mbridge=True, and your filesystem is a distributed filesystem,(which means you write a file in node A
-  # and you can read the file in node B immediately)
-  # set `mbridge_config.distributed_filesystem=True` and `mbridge_config.memory_efficient=True` to 
-  # speed up the checkpoint saving by 10x speed.
-  mbridge_config: {}
 
   # Whether to perform strict validation during weight export
   strict: True
@@ -234,6 +227,28 @@ profiler:
 
       # True for each task has its own database, False for all tasks in one training step share one database.
       discrete: false
+
+      # Optional torch.profiler.schedule. Enabled only when active > 0, in which case
+      # profiler.step() advances wait/warmup/active/repeat once per mini-batch.
+      schedule:
+
+        # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+        _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+
+        # Number of steps to skip before the first cycle
+        skip_first: 0
+
+        # Idle steps (no collection) at the start of each cycle
+        wait: 0
+
+        # Warmup steps (tracing on, data discarded) each cycle
+        warmup: 0
+
+        # Active steps to record each cycle; <= 0 disables scheduling
+        active: 0
+
+        # Number of cycles to repeat; 0 repeats until profiling stops
+        repeat: 0
 
     # torch memory profiler config
     torch_memory:

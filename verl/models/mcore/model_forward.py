@@ -273,6 +273,7 @@ def gptmodel_forward_model_engine(
     data_format: str = "thd",
     mtp_enable_train: bool = False,
     local_cp_size: Optional[int] = None,
+    forced_max_seqlen: Optional[int] = None,
 ):
     """Default forward pass for GPT models with optional sequence packing."""
 
@@ -384,7 +385,10 @@ def gptmodel_forward_model_engine(
         assert local_cp_size is None, "dynamic_CP is not supported for bshd format"
 
         input_ids_bshd, attention_mask_bshd, position_ids_bshd = preprocess_bshd_engine(
-            input_ids, pre_process=pre_process or (post_process and mtp_enable_train), use_fp8_padding=use_fp8_padding
+            input_ids,
+            pre_process=pre_process or (post_process and mtp_enable_train),
+            use_fp8_padding=use_fp8_padding,
+            forced_max_seqlen=forced_max_seqlen,
         )
 
         if mtp_enable_train and post_process:
@@ -401,9 +405,13 @@ def gptmodel_forward_model_engine(
                 else:
                     v = _convert_to_nested_tensor(v, input_ids_lengths)
                 logits_processor_args[k] = v
-                args[k] = preprocess_bshd_engine(v, pre_process=True, need_roll=True, use_fp8_padding=use_fp8_padding)[
-                    0
-                ]
+                args[k] = preprocess_bshd_engine(
+                    v,
+                    pre_process=True,
+                    need_roll=True,
+                    use_fp8_padding=use_fp8_padding,
+                    forced_max_seqlen=forced_max_seqlen,
+                )[0]
             model_kwargs["labels"] = args["label"].contiguous()
             model_kwargs["loss_mask"] = args["loss_mask"].contiguous()
 
@@ -414,7 +422,9 @@ def gptmodel_forward_model_engine(
 
         # For VLM model, need to pass bshd format `input_ids` and `attention_mask`.
         if vision_model:
-            input_ids_bshd, attention_mask = build_vlm_attn_mask_bshd(input_ids, batch_size, pad_token_id)
+            input_ids_bshd, attention_mask = build_vlm_attn_mask_bshd(
+                input_ids, batch_size, pad_token_id, forced_max_seqlen=forced_max_seqlen
+            )
         else:
             attention_mask = attention_mask_bshd
 
@@ -427,7 +437,11 @@ def gptmodel_forward_model_engine(
         if post_process and logits_processor is not None:
             args = {
                 k: preprocess_bshd_engine(
-                    v, pre_process=True, need_roll=(k == "label"), use_fp8_padding=use_fp8_padding
+                    v,
+                    pre_process=True,
+                    need_roll=(k == "label"),
+                    use_fp8_padding=use_fp8_padding,
+                    forced_max_seqlen=forced_max_seqlen,
                 )[0]
                 for k, v in logits_processor_args.items()
             }

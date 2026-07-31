@@ -8,7 +8,7 @@ pip uninstall -y triton triton-ascend
 pip install torchvision==0.24.0
 pip install torchaudio==2.9.0
 pip install triton-ascend==3.2.1 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
-pip install "transformers==5.3.0" 
+pip install "transformers==5.5.3" 
 pip install setuptools-scm
 
 
@@ -49,5 +49,5 @@ git checkout main
 cd ..
 
 echo "5. May need to check other neccessary packages"
-pip install transformers==5.3.0 xgrammar==0.1.33
+pip install transformers==5.5.3 xgrammar==0.1.33
 echo "Successfully installed all packages"

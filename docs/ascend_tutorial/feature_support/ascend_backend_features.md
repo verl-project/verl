@@ -15,7 +15,7 @@ Last updated: 03/03/2026.
 
 昇腾通过vllm-ascend插件来支持vllm推理后端，该插件是 vLLM 社区支持 Ascend 后端的推荐方法。它遵循[[RFC]](https://github.com/vllm-project/vllm/issues/11162)，提供了一个可插拔接口，将 Ascend NPU 与 vLLM 解耦。
 
-##### 参数特性支持
+#### 参数特性支持
 
 | vllm参数| verl对应通用参数 | 简介 |
 | --- | --- | --- |
@@ -31,13 +31,13 @@ Last updated: 03/03/2026.
 | `node_rank`| `无，根据实际实例和卡数自动计算` |实例中的节点排序|
 | `load_format`|  `actor_rollout_ref.rollout.load_format` |要加载的模型权重格式|
 | `disable_log_stats`|  `actor_rollout_ref.rollout.disable_log_stats`|控制是否记录 rollout 统计日志 |
-| `nnodes `|  `无，根据实际实例和卡数自动计算` | 每个实例包含的节点数量` |
+| `nnodes`|  无，根据实际实例和卡数自动计算 | 每个实例包含的节点数量 |
 | `trust_remote_code`| `actor_rollout_ref.model.trust_remote_code`|是否允许在 Hub 上定义自定义模型，并将其写入自己的建模文件中|
 | `max_num_seqs` | `actor_rollout_ref.rollout.max_num_seqs` |正在运行的请求的最大数量|
 | `max_num_batched_tokens`| `actor_rollout_ref.rollout.max_num_batched_tokens` |在一次批处理（batch）中可以处理的最大总Token数|
 | `skip_tokenizer_init`| `actor_rollout_ref.rollout.skip_tokenizer_init` |跳过初始化分词器并将 input_ids 传递到推理请求中|
-| `enable_prefix_caching` | `actor_rollout_ref.rollout.enable_prefix_caching`|`用于启用自动前缀缓存` |
-| `quantization`| `actor_rollout_ref.rollout.quantization，默认为None`|`量化方法`|
+| `enable_prefix_caching` | `actor_rollout_ref.rollout.enable_prefix_caching` |用于启用自动前缀缓存 |
+| `quantization`| `actor_rollout_ref.rollout.quantization`，默认为None|`量化方法`|
 
 ### 2. sglang:
 
@@ -49,7 +49,7 @@ Last updated: 03/03/2026.
 | [sgl_kernel_npu](https://github.com/sgl-project/sgl-kernel-npu/blob/main/python/sgl_kernel_npu/README.md) | Ascend NPU  SGL 优化推理内核集合，包括注意力机制、归一化、激活函数、LoRA 适配器等。 |
 | [deepep](https://github.com/sgl-project/sgl-kernel-npu/blob/main/python/deep_ep/README.md) |  DeepEP的 Ascend 实现，为MoE模型提供高度优化的专家并行 (EP) 通信内核 |
 
-##### 参数特性支持
+#### 参数特性支持
 
 verl中通过rollout config管理推理后端参数使能，包含通用参数和engine_kwargs自定义传参。
 以下列举在verl中常见设置的sglang特性参数，更多参数介绍请参考 [sglang社区NPU特性支持](https://docs.sglang.io/docs/hardware-platforms/ascend-npus/ascend_npu_support_features)
@@ -60,7 +60,7 @@ verl中通过rollout config管理推理后端参数使能，包含通用参数�
 | mem_fraction_static| actor_rollout_ref.rollout.gpu_memory_utilization |用于静态分配（模型权重和键值缓存内存池）的内存比例|
 | disable_cuda_graph| actor_rollout_ref.rollout.enforce_eager|禁用图模式，verl默认为False|
 | enable_memory_saver| 无，verl中默认设置为True | 允许使用 release_memory_occupation 和 resume_memory_occupation 来节省内存
-| base_gpu_id| 无，根据实际实例和卡数自动计算  |用于分配每个实例上计算卡资源时的的初始ID
+| base_gpu_id| 无，根据实际实例和卡数自动计算  |用于分配每个实例上计算卡资源时的初始ID
 | gpu_id_step| 无，默认设置为1| 使用的连续计算卡ID 之间的差值
 | tp_size|  actor_rollout_ref.rollout.tensor_model_parallel_size * data_parallel_size|TP并行度|
 | dp_size| actor_rollout_ref.rollout.data_parallel_size|DP并行度|
@@ -93,10 +93,12 @@ verl中通过rollout config管理推理后端参数使能，包含通用参数�
 | `actor_rollout_ref.actor.fsdp_config.optimizer_offload` |是否卸载优化器状态到CPU，默认值为False|
 | `actor_rollout_ref.actor.fsdp_config.reshard_after_forward` |控制前向计算后的参数行为，平衡内存与通信。默认值为True：前向后重新分片参数，反向时重新全收集|
 | `actor_rollout_ref.actor.fsdp_config.fsdp_size` | 每个FSDP分片组中的NPU数量；默认值-1表示自动。|
+
 | `actor_rollout_ref.actor.fsdp_config.forward_prefetch`  |在前向计算完成前预取下一次前向传播的 all-gather，仅用于FSDP1，默认值为False|
 | `actor_rollout_ref.actor.fsdp_config.use_orig_params` | FSDP是否会使用module的原始参数来初始化，仅用于FSDP1，默认值为False|
 | `actor_rollout_ref.actor.ulysses_sequence_parallel_size`|Ulysses序列并行大小|
 | `actor_rollout_ref.actor.entropy_from_logits_with_chunking`|通过分块计算熵以减少显存峰值，默认值为False|
+| `actor_rollout_ref.actor.entropy_from_logits_chunk_size`|熵计算分块大小，默认值为2048|
 | `actor_rollout_ref.actor.fsdp_config.entropy_checkpointing`|在训练时对熵计算启用重计算,降低显存峰值，默认值为False|
 | `actor_rollout_ref.actor.fsdp_config.forward_only` |是否只进行前向计算，默认值为False|
 
@@ -121,7 +123,7 @@ Megatron 是 NVIDIA 推出的一个专注于模型并行的训练框架仓库。
 
 MindSpeed 底层的替换原理采用了 Monkey Patch 技术
 
-* MindSpeed 'Monkey Patch框架
+* MindSpeed Monkey Patch框架
 
 在verl里面通过`from mindspeed.megatron_adaptor import repatch  `触发patch，调用栈如下：
 
@@ -138,18 +140,18 @@ from mindspeed.megatron_adaptor import repatch
 `Patch`类是整个patch系统的核心，实现了函数/类的动态替换
 
 ~~~python
-class Patch
+class Patch:
 ~~~
 
 `parse_path`方法实现了动态模块导入和创建
 
 ~~~python
-def parse_path(module_path, function_name, create_dummy)
+def parse_path(module_path, function_name, create_dummy):
 ~~~
 
 patch系统支持多层装饰器叠加
 
-~~~
+~~~python
 def apply_patch(self):  
     final_patch_func = self.orig_func  
     if self.patch_func is not None:  
@@ -244,11 +246,11 @@ class MindSpeedFeature:
                 action.choices.append(new_choice)
 ~~~
 
-##### 参数特性支持
+#### 参数特性支持
 | verl参数 | 简介|
 | --- | --- |
 | `actor_rollout_ref.actor.megatron.optimizer_offload` |是否卸载模型优化器到CPU，默认值为False|
-| `actor_rollout_ref.actor.megatron.use_mbridge` |是否使用mbridge进行权重转换|
+| `actor_rollout_ref.actor.megatron.use_mbridge` |是否启用 mbridge：为 True（默认）时 engine 会构造 `bridge` 并交给 checkpoint manager，从而可读写 `model/huggingface/`；`save_contents` / `load_contents` 含 `hf_model` 时 manager 要求 `bridge` 非空（通常即此项为 True）。可与 `use_dist_checkpointing` 同时开启，在同一 checkpoint 中同时写入 HF 树与 `model/dist_ckpt/` 分片。为 False 时一般无 `hf_model`；仅 `model` 槽位走 `dist_checkpointing` 时需配合 `use_dist_checkpointing=True`|
 | `actor_rollout_ref.actor.megatron.param_offload` |是否卸载模型权重到CPU，默认值为False|
 | `actor_rollout_ref.actor.megatron.tensor_model_parallel_size` | 张量并行大小；默认值为1。|
 | `actor_rollout_ref.actor.megatron.pipeline_model_parallel_size`  |流水并行大小，默认值为1|
@@ -264,7 +266,7 @@ class MindSpeedFeature:
 | `actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity` |重新计算激活的粒度，可选项为'full', 'selective' and 'none'。其中full代表重新计算整个transformer layer，selective代表只计算transformer layer中的核心注意力部分。默认为'none'。|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method` |该参数需将recompute_granularity设置为'full'才生效，可选项为'uniform', 'block'。默认为None。|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers` |该参数需将recompute_granularity设置为'full'才生效，默认为None。若recompute_method设置为uniform，该参数含义为每个均匀划分的重新计算单元的transformer layers数量。例如你可以指定为--recompute_granularity full --recompute_method uniform --recompute_num_layers 4。recompute_num_layers越大，显存占用越小，计算成本越大。注意：当前进程中的模型层数需能被recompute_num_layers整除。默认为None。|
-| `actor_rollout_ref.actor.megatron.use_dist_checkpointing` |是否使用分布式权重，默认值为False|
+| `actor_rollout_ref.actor.megatron.use_dist_checkpointing` |为 True 时，`model` 槽位使用 Megatron `dist_checkpointing` 分片（`model/dist_ckpt/`）。与 `use_mbridge` 独立：两者可同时为 True 以保存/加载分片 + HF 导出。默认 False|
 | `actor_rollout_ref.actor.megatron.dist_checkpointing_path` |分布式权重路径，默认值为null|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn` |是否使用Flash Attention，默认值为true|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_rotary_pos_emb` |是否使用融合旋转位置编码，默认值为False|
@@ -272,4 +274,76 @@ class MindSpeedFeature:
 | `actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_first_pipeline_stage` |第一个pipeline stage 的层数，默认值为none|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_last_pipeline_stage` |最后一个pipeline stage 的层数，默认值为none|
 
-注：`actor_rollout_ref.actor.megatron.use_mbridge` 与 `actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size` (VPP) 暂不支持同时开启。由于 verl 默认开启 mbridge, 使用 VPP 参数时请手动将 `actor_rollout_ref.actor.megatron.use_mbridge` 置为 False。
+注：`actor_rollout_ref.actor.megatron.use_mbridge` 与 `actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size` (VPP) 暂不支持同时开启。由于 verl 默认开启 mbridge，使用 VPP 参数时请手动将 `actor_rollout_ref.actor.megatron.use_mbridge` 置为 False。
+
+### 3. VeOmni
+
+VeOmni 是一个统一的强化学习训练后端，专为大规模模型的高效训练而设计。它基于 FSDP 构建，提供了丰富的并行策略和优化功能，特别适合 MoE 模型和大规模分布式训练场景。
+
+#### 参数特性支持
+
+| verl参数 | 简介|
+| --- | --- |
+| `actor_rollout_ref.actor.veomni.param_offload` | 是否卸载模型权重到CPU，默认值为False|
+| `actor_rollout_ref.actor.veomni.optimizer_offload` | 是否卸载优化器状态到CPU，默认值为False|
+| `actor_rollout_ref.actor.veomni.fsdp_size` | 每个FSDP分片组中的NPU数量；默认值-1表示自动|
+| `actor_rollout_ref.actor.veomni.ulysses_parallel_size` | Ulysses序列并行大小，默认值为1|
+| `actor_rollout_ref.actor.veomni.expert_parallel_size` | 专家并行大小，默认值为1|
+| `actor_rollout_ref.actor.veomni.mixed_precision` | 是否启用混合精度训练，默认值为true|
+| `actor_rollout_ref.actor.veomni.enable_full_shard` | 是否启用完全分片（ZeRO-3），默认值为true|
+| `actor_rollout_ref.actor.veomni.forward_prefetch` | 是否在前向计算完成前预取下一次前向传播的all-gather，默认值为true|
+| `actor_rollout_ref.actor.veomni.attn_implementation` | Attention实现方式，支持eager、sdpa、flash_attention_2、flash_attention_3、veomni_flash_attention_2_with_sp、veomni_flash_attention_3_with_sp、native-sparse等|
+| `actor_rollout_ref.actor.veomni.moe_implementation` | MoE实现方式，支持eager或fused，默认值为fused|
+| `actor_rollout_ref.actor.veomni.cross_entropy_loss_implementation` | 交叉熵损失实现，默认值为eager|
+| `actor_rollout_ref.actor.veomni.rms_norm_implementation` | RMSNorm实现，默认值为eager|
+| `actor_rollout_ref.actor.veomni.swiglu_mlp_implementation` | SwiGLU MLP实现，默认值为eager|
+| `actor_rollout_ref.actor.veomni.rotary_pos_emb_implementation` | 旋转位置编码实现，默认值为eager|
+| `actor_rollout_ref.actor.veomni.load_balancing_loss_implementation` | MoE负载均衡损失实现，默认值为eager|
+| `actor_rollout_ref.actor.veomni.use_torch_compile` | 是否使用torch compile，默认值为false|
+| `actor_rollout_ref.actor.veomni.forward_only` | 是否只进行前向计算，默认值为false|
+| `actor_rollout_ref.actor.veomni.enable_fsdp_offload` | 是否启用FSDP的CPU卸载，默认值为false|
+| `actor_rollout_ref.actor.veomni.enable_reentrant` | 是否使用可重入的梯度检查点，默认值为false|
+| `actor_rollout_ref.actor.veomni.ckpt_manager` | 检查点管理器，默认值为dcp|
+| `actor_rollout_ref.actor.veomni.init_device` | 模型权重初始化设备，支持cpu、cuda、meta、npu，默认值为meta|
+| `actor_rollout_ref.actor.veomni.activation_gpu_limit` | 激活卸载时GPU上允许保留的激活显存限制（GB），默认值为0.0|
+| `actor_rollout_ref.rollout.moe_load_balance_metrics_interval` | Rollout侧MoE专家负载指标上报间隔，默认值为0（禁用）；需要同时开启`actor_rollout_ref.rollout.enable_rollout_routing_replay`以记录路由决策|
+
+#### Router Replay 支持
+
+VeOmni 后端支持 MoE 模型的 Router Replay 功能，通过 `actor_rollout_ref.actor.veomni.router_replay` 配置：
+
+| 参数 | 简介 |
+| --- | --- |
+| `mode` | Router replay模式，支持disabled（禁用）、R2（记录并重放路由决策）、R3（在rollout端记录并重放）|
+| `record_file` | 记录路由决策的文件路径，在R2/R3模式下必需|
+| `replay_file` | 加载路由决策进行重放的文件路径，在replay模式下必需|
+
+#### 使用示例
+
+VeOmni 后端特别适合大规模 MoE 模型的 GRPO 训练，典型配置如下：
+
+```bash
+# 设置 VeOmni 训练后端
+model_engine=veomni
+
+# 配置并行策略
+actor_rollout_ref.actor.veomni.fsdp_size=16
+actor_rollout_ref.actor.veomni.ulysses_parallel_size=1
+actor_rollout_ref.actor.veomni.expert_parallel_size=1
+
+# 配置内存优化
+actor_rollout_ref.actor.veomni.param_offload=True
+actor_rollout_ref.actor.veomni.optimizer_offload=True
+
+# 配置算子实现
+actor_rollout_ref.actor.veomni.attn_implementation=veomni_flash_attention_2_with_sp
+actor_rollout_ref.actor.veomni.moe_implementation=fused
+```
+
+#### 主要特性
+
+- **高效并行策略**：支持数据并行、Ulysses序列并行、专家并行的灵活组合
+- **内存优化**：支持参数卸载、优化器卸载和激活卸载，有效降低显存占用
+- **MoE优化**：提供融合的MoE实现和Router Replay功能，提升MoE模型训练效率
+- **算子优化**：支持多种attention和MLP算子实现，可根据硬件选择最优实现
+- **灵活部署**：支持NVIDIA GPU和华为Ascend NPU，具有良好的跨平台兼容性

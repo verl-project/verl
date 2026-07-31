@@ -19,8 +19,8 @@ The current convention (see ``examples/README.md``) is::
     run_<model>_<train-backend>.sh
 
 Where ``<train-backend>`` is one of ``fsdp``, ``fsdp2``, ``megatron``,
-``mindspeed``, ``automodel`` or ``veomni``, and **must be the last
-underscore-separated token before** ``.sh`` — nothing follows it. The legacy
+``megatron_lite``, ``mindspeed``, ``automodel`` or ``veomni``, and **must be
+the final suffix before** ``.sh`` — nothing follows it. The legacy
 convention used to embed the inference backend (``vllm``/``sglang``/``trtllm``),
 platform tokens (``_npu``/``_amd``), machine-type tokens (``_gb200``,
 ``_blackwell``), quantization variants (``_fp8``), and ad-hoc trailing
@@ -66,13 +66,15 @@ FORBIDDEN_TOKENS = (
 )
 
 # Recognised train-backend / engine markers. The filename must end with
-# ``_<one of these>.sh`` (i.e. the train-backend is the LAST underscore-
-# separated token). Generation-only scripts that do not run a trainer are
-# listed in ``DEFAULT_IGNORE_FILES`` instead.
+# ``_<one of these>.sh``. Some backends, such as ``megatron_lite``, contain an
+# underscore; validate the full suffix rather than only the last token.
+# Generation-only scripts that do not run a trainer are listed in
+# ``DEFAULT_IGNORE_FILES`` instead.
 ALLOWED_BACKENDS = (
     "fsdp",
     "fsdp2",
     "megatron",
+    "megatron_lite",
     "mindspeed",
     "automodel",
     "veomni",
@@ -114,6 +116,11 @@ def _split_tokens(stem: str) -> list[str]:
     return parts
 
 
+def _has_allowed_backend(stem: str) -> bool:
+    """Return whether ``stem`` ends with one of the allowed backend suffixes."""
+    return any(stem.endswith(f"_{backend}") for backend in ALLOWED_BACKENDS)
+
+
 def _is_ignored(path: Path, repo_root: Path, ignore_dirs: tuple[str, ...], ignore_files: tuple[str, ...]) -> bool:
     rel = path.relative_to(repo_root).as_posix()
     if rel in ignore_files:
@@ -153,7 +160,7 @@ def check_filename(path: Path, display: str | None = None) -> list[str]:
             f"the script, not embedded in the filename."
         )
 
-    if not tokens or tokens[-1] not in ALLOWED_BACKENDS:
+    if not tokens or not _has_allowed_backend(path.stem):
         errors.append(
             f"{shown}: filename must end with '_<train-backend>.sh' where "
             f"train-backend ∈ {list(ALLOWED_BACKENDS)} "

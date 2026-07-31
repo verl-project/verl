@@ -18,6 +18,10 @@ NPUS_PER_NODE=${NPUS_PER_NODE:-16}
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-8B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
 
+SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}" .sh)"
+LOG_DIR=/root/.cache/nightly_log/$SCRIPT_NAME
+mkdir -p $LOG_DIR
+
 # File System Paths
 TRAIN_FILE=$HOME/data/gsm8k/train.parquet
 TEST_FILE=$HOME/data/gsm8k/test.parquet
@@ -171,6 +175,7 @@ ROLLOUT_CONFIG=(
     actor_rollout_ref.rollout.val_kwargs.top_p=1.0
     actor_rollout_ref.rollout.val_kwargs.top_k=-1
     actor_rollout_ref.rollout.val_kwargs.temperature=1.0
+    actor_rollout_ref.rollout.calculate_log_probs=True
 )
 
 TRAINER_CONFIG=(
@@ -220,4 +225,4 @@ python3 -m verl.trainer.main_ppo \
     "${ALGORITHM_CONFIG[@]}" \
     "${TRAINER_CONFIG[@]}" \
     "${PROF_CONFIG[@]}" \
-    "$@"
+    "$@" | tee $LOG_DIR/$SCRIPT_NAME.log

@@ -39,6 +39,7 @@ verl is fast with:
    :maxdepth: 2
    :caption: Programming guide
 
+   extend_guide
    hybrid_flow
    single_controller
 
@@ -92,6 +93,7 @@ verl is fast with:
    workers/model_engine
    workers/engine_workers
    workers/automodel_workers
+   workers/torchtitan_workers
    workers/sglang_worker
    workers/trtllm_worker
 
@@ -115,14 +117,18 @@ verl is fast with:
 
    advance/fsdp_extension
    advance/megatron_extension
+   advance/deepseek_v4_integration
+   advance/megatron_lite_backend
 
 .. toctree::
    :maxdepth: 1
    :caption: Async Training
 
    advance/one_step_off
+   advance/delta_weight_sync
    advance/fully_async
    advance/async-on-policy-distill
+   advance/dynamic_schedule
 
 .. toctree::
    :maxdepth: 1
@@ -144,42 +150,22 @@ verl is fast with:
    advance/dpo_extension
    examples/sandbox_fusion_example
    advance/rollout_trace.rst
-   advance/rollout_skip.rst
+   advance/rl_insight.md
+   advance/skip_manager.rst
    advance/agent_loop
    advance/reward_loop
    data/transfer_queue.md
    advance/grafana_prometheus.md
    advance/mtp.md
+   advance/determinism.md
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: Hardware Support
 
-   amd_tutorial/amd_build_dockerfile_page.rst
-   amd_tutorial/amd_vllm_page.rst
-   amd_tutorial/amd_quick_start.rst
-   ascend_tutorial/README.md
-   ascend_tutorial/get_start/dockerfile_build_guidance.rst
-   ascend_tutorial/get_start/install_guidance.rst
-   ascend_tutorial/get_start/quick_start.rst
-   ascend_tutorial/feature_support/ascend_backend_features.md
-   ascend_tutorial/feature_support/npu_advance_features.md
-   ascend_tutorial/model_support/model_and_algorithm_support.md
-   ascend_tutorial/model_support/examples/ascend_retool_best_pratice.rst
-   ascend_tutorial/model_support/examples/ascend_sglang_best_practices.rst
-   ascend_tutorial/model_support/examples/dapo_multi_model_optimization_practice.md
-   ascend_tutorial/model_support/examples/gspo_optimization_practice.md
-   ascend_tutorial/dev_guide/model_dev/evaluation.md
-   ascend_tutorial/dev_guide/model_dev/parameter_and_metrics.md
-   ascend_tutorial/dev_guide/model_dev/transfer_to_npu_guide.md
-   ascend_tutorial/dev_guide/precision_analysis/precision_alignment_zh.md
-   ascend_tutorial/dev_guide/precision_analysis/precision_debugger_zh.md
-   ascend_tutorial/dev_guide/performance/ascend_performance_analysis_guide.md
-   ascend_tutorial/dev_guide/performance/perf_tuning_on_ascend.rst
-   ascend_tutorial/dev_guide/performance/ascend_profiling_zh.rst
-   ascend_tutorial/dev_guide/performance/ascend_profiling_en.rst
-   ascend_tutorial/faq/faq.rst
-   ascend_tutorial/contribution_guide/ascend_ci_guide_zh.rst
+   hardware/multi_chip_support
+   amd_tutorial/index.rst
+   ascend_tutorial/index.rst 
 
 .. toctree::
    :maxdepth: 1

@@ -8,6 +8,10 @@ export VLLM_USE_V1=1
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-30B-A3B-Instruct-2507}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
 
+SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}" .sh)"
+LOG_DIR=/root/.cache/nightly_log/$SCRIPT_NAME
+mkdir -p $LOG_DIR
+
 NNODES=${NNODES:-1}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-16}
 
@@ -82,6 +86,7 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.grad_offload=True
     actor_rollout_ref.actor.megatron.optimizer_offload=True
     actor_rollout_ref.actor.megatron.use_mbridge=True
+    actor_rollout_ref.actor.megatron.vanilla_mbridge=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
@@ -112,6 +117,7 @@ REF=(
     actor_rollout_ref.ref.megatron.expert_tensor_parallel_size=${actor_etp}
     actor_rollout_ref.ref.megatron.param_offload=True
     actor_rollout_ref.ref.megatron.use_mbridge=True
+    actor_rollout_ref.ref.megatron.vanilla_mbridge=True
 )
 
 TRAINER=(
@@ -142,4 +148,4 @@ python3 -m verl.trainer.main_ppo \
     "${REF[@]}" \
     "${TRAINER[@]}" \
     "${EXTRA[@]}" \
-    "$@"
+    "$@" | tee $LOG_DIR/$SCRIPT_NAME.log

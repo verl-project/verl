@@ -47,6 +47,7 @@ from verl.utils.megatron_utils import get_model
 from verl.utils.tokenizer import hf_processor, hf_tokenizer
 
 from .base_model_merger import BaseModelMerger, ModelMergerConfig
+from .output_validation import validate_hf_model_output
 
 
 @contextmanager
@@ -488,10 +489,12 @@ class MegatronModelMerger(BaseModelMerger):
                 print(f"Saving tokenizer to {self.config.target_dir}")
                 tokenizer.save_pretrained(self.config.target_dir)
 
-    def merge_and_save(self):
-        from verl.utils.megatron_utils import get_dist_checkpoint_path
+            validate_hf_model_output(self.config.target_dir)
 
-        model_ckpt_path = get_dist_checkpoint_path(self.config.local_dir)
+    def merge_and_save(self):
+        from verl.utils.megatron_utils import get_model_dist_checkpoint_path
+
+        model_ckpt_path = get_model_dist_checkpoint_path(self.config.local_dir)
 
         model_state_dict = self._load_state_dicts(model_ckpt_path)
         merged_state_dict = self._merge_state_dicts(model_state_dict)

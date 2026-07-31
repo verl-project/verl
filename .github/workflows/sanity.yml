@@ -73,9 +73,12 @@ jobs:
       - name: Install the current repository
         run: |
           pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          pip3 install -r requirements.txt
           pip3 install -r requirements-test.txt
+          pip3 install -r requirements.txt
           pip3 install --no-deps -e .
+      - name: Check final pip list
+        run: |
+          pip3 list
       # Most sanity checks now run via pre-commit (see .pre-commit-config.yaml
       # and .github/workflows/pre-commit.yml). Only checks that need the full
       # verl installation or CI-only context remain here.

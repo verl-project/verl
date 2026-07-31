@@ -15,8 +15,8 @@
 import functools
 from typing import Callable, Optional
 
-from ..memory_utils import MemorySnapshotSampler, clear_memory_history, enable_memory_visualize
-from .config import ProfilerConfig, TorchMemoryToolConfig
+from ..tracking import RLInsightLogger
+from .config import ProfilerConfig
 
 
 def mark_start_range(
@@ -81,17 +81,26 @@ class DistProfiler:
     """
 
     def __init__(
-        self, rank: int, config: Optional[ProfilerConfig] = None, tool_config: Optional[object] = None, **kwargs
+        self,
+        rank: int,
+        config: Optional[ProfilerConfig] = None,
+        tool_config: Optional[object] = None,
+        save_file_prefix: Optional[str] = None,
+        **kwargs,
     ):
         # Default config
-        if not config:
+        if config is None:
             config = ProfilerConfig(ranks=[], enable=False, tool_config=None)
 
         if tool_config is None:
             tool_config = config.tool_config
 
+        self.rank = rank
         self.config = config
         self.tool_config = tool_config
+        # Optional label (typically the worker role, e.g. "actor"/"critic"/"ref") embedded
+        # in per-process trace filenames so results from different roles are distinguishable.
+        self.save_file_prefix = save_file_prefix
 
         self._impl = None
         self._tool = getattr(config, "tool", None)
@@ -128,8 +137,10 @@ class DistProfiler:
         elif self._tool == "torch":
             from .torch_profile import Profiler as _Torch
 
-            self._impl = _Torch(rank=rank, config=config, tool_config=tool_config)
+            self._impl = _Torch(rank=rank, config=config, tool_config=tool_config, save_file_prefix=save_file_prefix)
         elif self._tool == "torch_memory":
+            from .torch_memory_profile import TorchMemoryProfiler
+
             self._impl = TorchMemoryProfiler(rank=rank, config=config, tool_config=tool_config)
         elif self._tool == "precision_debugger":
             from .precision_debugger_profile import PrecisionDebuggerProfiler as _Precision
@@ -140,26 +151,51 @@ class DistProfiler:
             self._impl = _NoOpProfiler()
 
     def check_enable(self):
+        """Return whether profiling is enabled by configuration."""
         return self._enable
 
     def check_this_rank(self):
+        """Return whether current rank should perform profiling."""
         return self._this_rank
 
     def check_this_step(self):
+        """Return whether current global step is marked for profiling."""
         return self._this_step
 
     def is_discrete_mode(self):
+        """Return whether profiler backend runs in discrete mode."""
         return self._discrete
 
     def start(self, **kwargs):
+        """Profiler switch for the Ray main flow; sets `this_step=True`.
+
+        Args:
+            **kwargs: Runtime arguments forwarded to backend `start`.
+        """
         if self.check_enable() and self.check_this_rank():
             self._this_step = True
             return getattr(self._impl, "start", lambda **_: None)(**kwargs)
 
     def stop(self):
+        """Profiler switch for the Ray main flow; sets `this_step=False`."""
         if self.check_enable() and self.check_this_rank():
             self._this_step = False
             return getattr(self._impl, "stop", lambda: None)()
+
+    def step(self):
+        """Advance the profiler schedule by one step, intended to be called per mini-batch.
+
+        Delegates to the backend `step` when the tool supports scheduling (currently the
+        torch profiler with a configured `wait/warmup/active/repeat` schedule); for all
+        other backends this is a no-op.
+
+        Gated on enable/rank only (not `this_step`): the training loop may run inside a
+        nested worker whose profiler was never explicitly started, while the underlying
+        torch profiler is process-global. The backend keeps `step` safe (no-op) whenever
+        no profiler is actively running.
+        """
+        if self.check_enable() and self.check_this_rank():
+            return getattr(self._impl, "step", lambda: None)()
 
     @classmethod
     def annotate(
@@ -170,29 +206,40 @@ class DistProfiler:
         category: Optional[str] = None,
         **kwargs_outer,
     ) -> Callable:
+        """Decorate instance methods with backend profiler annotations.
+
+        The wrapped function is executed directly if profiling is disabled,
+        not selected for current rank/step, or backend annotate fails.
+        """
+
         def decorator(func):
             @functools.wraps(func)
             def wrapper(self_instance, *args, **kwargs_inner):
                 profiler = getattr(self_instance, "profiler", None)
-                if (
-                    not profiler
-                    or not profiler.check_enable()
-                    or not profiler.check_this_step()
-                    or not profiler.check_this_rank()
-                ):
+                if profiler is None:
                     return func(self_instance, *args, **kwargs_inner)
 
-                impl = profiler._impl
-                if hasattr(impl, "annotate"):
-                    try:
-                        actual_decorator = impl.annotate(
-                            message=message, color=color, domain=domain, category=category, **kwargs_outer
-                        )
-
-                        return actual_decorator(func)(self_instance, *args, **kwargs_inner)
-                    except Exception:
+                with RLInsightLogger.trace_state(
+                    kwargs_outer.get("role", func.__qualname__), state_lane_id=f"rank_{profiler.rank}"
+                ):
+                    if not profiler.check_enable() or not profiler.check_this_step() or not profiler.check_this_rank():
                         return func(self_instance, *args, **kwargs_inner)
-                return func(self_instance, *args, **kwargs_inner)
+
+                    impl = profiler._impl
+                    if hasattr(impl, "annotate"):
+                        try:
+                            actual_decorator = impl.annotate(
+                                message=message, color=color, domain=domain, category=category, **kwargs_outer
+                            )
+                            wrapped = actual_decorator(func)
+                        except Exception:
+                            # Only fall back when *setting up* backend profiling fails.
+                            # Never guard the call to func itself here: doing so would
+                            # swallow real stage errors and re-run func (executing the
+                            # stage twice with duplicated side effects).
+                            wrapped = func
+                        return wrapped(self_instance, *args, **kwargs_inner)
+                    return func(self_instance, *args, **kwargs_inner)
 
             return wrapper
 
@@ -206,85 +253,8 @@ class _NoOpProfiler:
     def stop(self):
         return
 
-
-class TorchMemoryProfiler:
-    """Profiler that dumps CUDA memory snapshots at step boundaries.
-
-    Behavior:
-    - On first construction (per process), enable memory history recording if CUDA is available
-    - On start(step=X), remember sub_dir for this step
-    - On stop(), dump a memory snapshot into config.save_path under the remembered sub_dir
-    """
-
-    _memory_history_enabled: bool = False
-
-    def __init__(
-        self, rank: int, config: Optional[ProfilerConfig], tool_config: Optional[TorchMemoryToolConfig] = None
-    ):
-        # Always respond to explicit start/stop calls for torch_memory tool,
-        # regardless of per-role enable flag, to align with global step control.
-        self.enable = True
-        if not config:
-            config = ProfilerConfig(ranks=[])
-        self.config = config
-        self.rank = rank
-        self.this_step = False
-        self.sub_dir = None
-        self.sampler = MemorySnapshotSampler()
-
-        # Get parameters from tool_config, with fallback to defaults
-        if tool_config:
-            self.trace_alloc_max_entries = tool_config.trace_alloc_max_entries
-            self.stack_depth = tool_config.stack_depth
-        else:
-            self.trace_alloc_max_entries = 100_000
-            self.stack_depth = 32
-
-        # Best-effort enable memory history once
-        if not TorchMemoryProfiler._memory_history_enabled:
-            try:
-                enable_memory_visualize(
-                    trace_alloc_max_entries=self.trace_alloc_max_entries, stack_depth=self.stack_depth
-                )
-            except Exception:
-                # silently ignore if not supported
-                pass
-            TorchMemoryProfiler._memory_history_enabled = True
-
-    def start(self, **kwargs):
-        if not self.enable:
-            return
-        if not self._should_profile_this_rank():
-            return
-        profile_step = kwargs.get("profile_step", None)
-        # Keep ranks aligned under same folder name
-        self.sub_dir = f"step{profile_step}" if profile_step is not None else None
-        self.this_step = True
-
-    def stop(self):
-        if not self.enable or not self.this_step:
-            return
-        self.this_step = False
-        if not self._should_profile_this_rank():
-            return
-        out_dir = self.config.save_path or "outputs/profile"
-        tag = "torch_memory"
-        # Dump snapshot; all ranks write into same sub_dir
-        try:
-            self.sampler.dump_memory_snapshot(out_dir=out_dir, tag=tag, sub_dir=self.sub_dir)
-        except Exception:
-            pass
-        # Clear memory history
-        if TorchMemoryProfiler._memory_history_enabled:
-            clear_memory_history(trace_alloc_max_entries=self.trace_alloc_max_entries, stack_depth=self.stack_depth)
-
-    def _should_profile_this_rank(self) -> bool:
-        if self.config.all_ranks:
-            return True
-        if self.config.ranks:
-            return self.rank in self.config.ranks
-        # default rank 0
-        return self.rank == 0
+    def step(self):
+        return
 
 
 class DistProfilerExtension:
@@ -313,3 +283,8 @@ class DistProfilerExtension:
     def stop_profile(self) -> None:
         """Stop profiling for the current rank in the current training step."""
         self.profiler.stop()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def step_profile(self) -> None:
+        """Advance the profiler schedule by one step (typically once per mini-batch)."""
+        self.profiler.step()

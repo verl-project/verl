@@ -5,22 +5,24 @@ set -x
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-8B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
-
-SAVE_PATH=tests/utils/ci/profiler_data
+SAVE_PATH=${SAVE_PATH:-./profiler_data-dis}
 rm -rf "$SAVE_PATH"
 
-LEVEL="level0"
-CONTENTS=['npu','cpu']
-ANALYSIS=False
-PROFILE_STEPS=[1]
-PROFILE_RANKS_ALL=False
-PROFILE_RANKS=[0]
-DISCRETE=True
+LEVEL=${LEVEL:-"level0"}
+CONTENTS=${CONTENTS:-['npu','cpu']}
+ANALYSIS=${ANALYSIS:-True}
+PROFILE_STEPS=${PROFILE_STEPS:-[1]}
+PROFILE_RANKS_ALL=${PROFILE_RANKS_ALL:-False}
+PROFILE_RANKS=${PROFILE_RANKS:-[2,4]}
+DISCRETE=${DISCRETE:-True}
+TRAIN_FILE=${TRAIN_FILE:-${HOME}/data/gsm8k/train.parquet}
+TEST_FILE=${TEST_FILE:-${HOME}/data/gsm8k/test.parquet}
+total_training_steps=${total_training_steps:-1}
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
-    data.train_files=$HOME/data/gsm8k/train.parquet \
-    data.val_files=$HOME/data/gsm8k/test.parquet \
+    data.train_files="${TRAIN_FILE}" \
+    data.val_files="${TEST_FILE}" \
     data.train_batch_size=32 \
     data.max_prompt_length=1024 \
     data.max_response_length=2048 \
@@ -68,24 +70,22 @@ python3 -m verl.trainer.main_ppo \
     trainer.val_before_train=False \
     trainer.max_actor_ckpt_to_keep=1 \
     trainer.max_critic_ckpt_to_keep=1 \
-    trainer.total_training_steps=1 \
+    trainer.total_training_steps="$total_training_steps" \
     actor_rollout_ref.actor.profiler.enable=True \
-    actor_rollout_ref.actor.profiler.all_ranks=$PROFILE_RANKS_ALL \
-    actor_rollout_ref.actor.profiler.ranks=$PROFILE_RANKS \
-    actor_rollout_ref.actor.profiler.tool_config.npu.discrete=$DISCRETE \
-    actor_rollout_ref.actor.profiler.tool_config.npu.contents=$CONTENTS \
-    actor_rollout_ref.actor.profiler.tool_config.npu.level=$LEVEL \
-    actor_rollout_ref.actor.profiler.tool_config.npu.analysis=$ANALYSIS \
+    actor_rollout_ref.actor.profiler.all_ranks="$PROFILE_RANKS_ALL" \
+    actor_rollout_ref.actor.profiler.ranks="$PROFILE_RANKS" \
+    actor_rollout_ref.actor.profiler.tool_config.npu.discrete="$DISCRETE" \
+    actor_rollout_ref.actor.profiler.tool_config.npu.contents="$CONTENTS" \
+    actor_rollout_ref.actor.profiler.tool_config.npu.level="$LEVEL" \
+    actor_rollout_ref.actor.profiler.tool_config.npu.analysis="$ANALYSIS" \
     actor_rollout_ref.ref.profiler.enable=True \
-    actor_rollout_ref.ref.profiler.all_ranks=$PROFILE_RANKS_ALL \
-    actor_rollout_ref.ref.profiler.ranks=$PROFILE_RANKS \
-    actor_rollout_ref.ref.profiler.tool_config.npu.discrete=$DISCRETE \
-    actor_rollout_ref.ref.profiler.tool_config.npu.contents=$CONTENTS \
-    actor_rollout_ref.ref.profiler.tool_config.npu.level=$LEVEL \
-    actor_rollout_ref.ref.profiler.tool_config.npu.analysis=$ANALYSIS \
+    actor_rollout_ref.ref.profiler.all_ranks="$PROFILE_RANKS_ALL" \
+    actor_rollout_ref.ref.profiler.ranks="$PROFILE_RANKS" \
+    actor_rollout_ref.ref.profiler.tool_config.npu.discrete="$DISCRETE" \
+    actor_rollout_ref.ref.profiler.tool_config.npu.contents="$CONTENTS" \
+    actor_rollout_ref.ref.profiler.tool_config.npu.level="$LEVEL" \
+    actor_rollout_ref.ref.profiler.tool_config.npu.analysis="$ANALYSIS" \
     global_profiler.tool=npu \
-    global_profiler.steps=$PROFILE_STEPS \
+    global_profiler.steps="$PROFILE_STEPS" \
     global_profiler.save_path="$SAVE_PATH" $@
 
-python3 "tests/utils/test_check_profiler_output.py" --profiler_dir="$SAVE_PATH" --device="npu"
-rm -rf "$SAVE_PATH"

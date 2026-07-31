@@ -33,7 +33,6 @@ from omegaconf import OmegaConf
 
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
-from verl.utils.megatron_utils import get_hf_model_checkpoint_path
 from verl.workers.engine_workers import ActorRolloutRefWorker
 
 os.environ["NCCL_DEBUG"] = "WARN"
@@ -117,8 +116,13 @@ def main_task(config):
     )
     worker.init_model()
 
+    # ``adapter_path`` points at the model/dist_ckpt/ tree that holds the
+    # PEFT adapter shards.  The merged HF weights are written as the sibling
+    # huggingface/ subtree inside the same model/ directory.
     adapter_path = config.actor_rollout_ref.model.lora.adapter_path
-    hf_ckpt_path = get_hf_model_checkpoint_path(os.path.dirname(adapter_path))
+    model_dir = os.path.dirname(os.path.normpath(adapter_path))
+    hf_ckpt_path = os.path.join(model_dir, "huggingface")
+    os.makedirs(hf_ckpt_path, exist_ok=True)
     worker.save_merged_weights(hf_ckpt_path)
 
 

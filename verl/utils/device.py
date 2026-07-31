@@ -8,6 +8,13 @@
 #
 # This source code is licensed under the BSD-style license in https://github.com/pytorch/torchtune/blob/main/LICENSE
 
+"""Backward-compatible device utilities.
+
+All public names in this module are preserved for existing callers (80+ import
+sites).  Internally every function now delegates to the platform abstraction
+layer in :mod:`verl.plugin.platform`.
+"""
+
 import logging
 import os
 import platform
@@ -16,7 +23,14 @@ import subprocess
 import torch
 from packaging import version
 
+from verl.plugin.platform import get_platform
+
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Module-level availability flags (kept for backward compatibility)
+# ---------------------------------------------------------------------------
 
 
 def is_torch_npu_available(check_device=True) -> bool:
@@ -50,58 +64,50 @@ is_npu_available = is_torch_npu_available()
 def get_resource_name() -> str:
     """Function that return ray resource name based on the device type.
     Returns:
-        ray resource name string, either "GPU" or "NPU".
+        ray resource name string, e.g. "GPU", "NPU".
     """
-    return "GPU" if is_cuda_available else "NPU"
+    return get_platform().ray_resource_name()
+
+
+def get_vendor() -> str:
+    """Return the hardware vendor name for the current platform.
+
+    Returns:
+        Vendor name string, e.g. "nvidia", "metax", "huawei", "intel".
+    """
+    return get_platform().vendor_name
+
+
+# ---------------------------------------------------------------------------
+# Device info helpers
+# ---------------------------------------------------------------------------
 
 
 def get_visible_devices_keyword() -> str:
     """Get the environment variable name for visible device selection.
 
-    Returns the appropriate environment variable name based on the available
-    accelerator type (CUDA or Ascend NPU).
-
     Returns:
-        str: 'CUDA_VISIBLE_DEVICES' if CUDA is available,
-            'ASCEND_RT_VISIBLE_DEVICES' otherwise.
+        str: e.g. 'CUDA_VISIBLE_DEVICES', 'ASCEND_RT_VISIBLE_DEVICES'.
     """
-    return "CUDA_VISIBLE_DEVICES" if not is_torch_npu_available(check_device=False) else "ASCEND_RT_VISIBLE_DEVICES"
+    return get_platform().visible_devices_envvar()
 
 
 def get_device_name() -> str:
     """Get the device type string based on available accelerators.
 
-    Detects the available accelerator and returns the corresponding PyTorch
-    device type string. Currently supports CUDA, Ascend NPU, and CPU.
-
     Returns:
-        str: Device type string ('cuda', 'npu', or 'cpu').
+        str: Device type string ('cuda', 'npu', 'cpu', …).
     """
-    if is_cuda_available:
-        device = "cuda"
-    elif is_npu_available:
-        device = "npu"
-    else:
-        device = "cpu"
-    return device
+    return get_platform().device_name
 
 
 def get_torch_device():
     """Get the PyTorch device module for the current accelerator.
 
-    Returns the torch device namespace (e.g., torch.cuda, torch.npu) based on
-    the detected accelerator type. Falls back to torch.cuda if the namespace
-    is not found.
-
     Returns:
         module: The PyTorch device module (torch.cuda, torch.npu, etc.).
     """
-    device_name = get_device_name()
-    try:
-        return getattr(torch, device_name)
-    except AttributeError:
-        logger.warning(f"Device namespace '{device_name}' not found in torch, try to load torch.cuda.")
-        return torch.cuda
+    return get_platform().device_module
 
 
 def get_device_id() -> int:
@@ -110,86 +116,70 @@ def get_device_id() -> int:
     Returns:
         int: The current device index (e.g., 0 for 'cuda:0').
     """
-    return get_torch_device().current_device()
+    return get_platform().current_device()
 
 
 def get_nccl_backend() -> str:
     """Get the distributed communication backend based on device type.
 
-    Returns the appropriate collective communication backend for the
-    detected accelerator (HCCL for Ascend NPU, NCCL for CUDA).
-
     Returns:
-        str: Backend name ('hccl' for NPU, 'nccl' for CUDA/default).
+        str: Backend name ('nccl', 'hccl', 'gloo', …).
     """
-    if is_npu_available:
-        return "hccl"
-    else:
-        # default to nccl
-        return "nccl"
+    return get_platform().communication_backend_name()
+
+
+# ---------------------------------------------------------------------------
+# Memory / allocator
+# ---------------------------------------------------------------------------
 
 
 def set_expandable_segments(enable: bool) -> None:
-    """Configure CUDA memory allocator expandable segments setting.
-
-    Expandable segments can help avoid out-of-memory (OOM) errors by allowing
-    the memory allocator to expand existing memory segments rather than
-    allocating new ones.
+    """Configure memory allocator expandable segments setting.
 
     Args:
         enable: If True, enable expandable segments. If False, disable them.
-
-    Note:
-        This function only has an effect when CUDA is available.
     """
-    if is_cuda_available:
-        torch.cuda.memory._set_allocator_settings(f"expandable_segments:{enable}")
-    elif is_npu_available:
-        try:
-            torch.npu.memory._set_allocator_settings(f"expandable_segments:{enable}")
-        except Exception:
-            logger.warning(
-                "Current version of torch-npu does not support `_set_allocator_settings`, "
-                "please upgrade torch-npu to 2.9.0 or later"
-            )
+    get_platform().set_allocator_settings(f"expandable_segments:{enable}")
+
+
+# ---------------------------------------------------------------------------
+# Device auto-configuration
+# ---------------------------------------------------------------------------
 
 
 def auto_set_device(config) -> None:
     """Automatically configure device name for different accelerators.
 
-    For example, on Ascend NPU, this function defaults the trainer device to "npu"
-    unless explicitly set to "cpu".
-
     Args:
         config: Configuration object with trainer.device attribute.
     """
     if config and hasattr(config, "trainer") and hasattr(config.trainer, "device"):
-        if is_torch_npu_available():
-            if config.trainer.device not in ["cpu", "npu"]:
+        detected = get_platform().device_name
+        # Only override when the config value doesn't match the detected platform
+        if detected != "cpu" and config.trainer.device != detected:
+            if config.trainer.device != "cpu":
                 logger.warning(
-                    f"Detect setting config.trainer.device to {config.trainer.device} for Ascend NPU, maybe"
-                    f"from default value in config file, automatically set to `npu` instead."
+                    f"Detect setting config.trainer.device to {config.trainer.device} for "
+                    f"{detected}, automatically set to `{detected}` instead."
                 )
+            config.trainer.device = detected
 
-            config.trainer.device = "npu"
-        # Other cases: set device to "cuda" via config file, no need to change.
+
+# ---------------------------------------------------------------------------
+# Device properties
+# ---------------------------------------------------------------------------
 
 
 def get_device_capability(device_id: int = 0) -> tuple[int | None, int | None]:
-    """Get the compute capability of a CUDA device.
+    """Get the compute capability of the current accelerator device.
 
     Args:
-        device_id: The CUDA device index to query. Defaults to 0.
+        device_id: The device index to query. Defaults to 0.
 
     Returns:
-        tuple: A tuple of (major, minor) compute capability version,
-            or (None, None) if CUDA is not available.
+        tuple: (major, minor) or (None, None) if not applicable.
     """
-    major, minor = None, None
-    if is_cuda_available:
-        major, minor = torch.cuda.get_device_capability(device_id)
-
-    return major, minor
+    return get_platform().get_device_capability(device_id)
 
 
 def get_npu_versions() -> tuple[str, str]:
@@ -336,27 +326,41 @@ def check_ipc_version_support(software_version: str, cann_version: str) -> bool:
 def is_support_ipc() -> bool:
     """Check if the device supports IPC (Inter-Process Communication).
 
-    For GPU devices, always returns True.
-    For NPU devices, checks the software version and CANN toolkit version
-    to determine if IPC is supported.
+    Delegates to the platform abstraction layer.
 
     Returns:
         bool: True if IPC is supported, False otherwise.
     """
-    # If CUDA is available, it's a GPU device
-    if is_cuda_available:
-        return True
+    return get_platform().is_ipc_supported()
 
-    # For NPU devices, check the software version and CANN toolkit version
-    if is_npu_available:
-        try:
-            software_version, cann_version = get_npu_versions()
-            return check_ipc_version_support(software_version, cann_version)
 
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to execute npu-smi command: {e}") from e
-        except Exception as e:
-            raise RuntimeError(f"Error checking IPC support: {e}") from e
+def is_device_available() -> bool:
+    """Check if any accelerator device is available.
 
-    # For other devices (CPU), return False
-    return False
+    Returns:
+        bool: True if any accelerator is available.
+    """
+    return get_platform().is_available()
+
+
+# ---------------------------------------------------------------------------
+# RNG helpers
+# ---------------------------------------------------------------------------
+
+
+def manual_seed(seed: int) -> None:
+    """Set the seed for the current accelerator device.
+
+    Args:
+        seed: The desired seed.
+    """
+    get_platform().manual_seed(seed)
+
+
+def manual_seed_all(seed: int) -> None:
+    """Set the seed for all accelerator devices.
+
+    Args:
+        seed: The desired seed.
+    """
+    get_platform().manual_seed_all(seed)

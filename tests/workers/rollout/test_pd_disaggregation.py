@@ -71,8 +71,8 @@ def test_rollout_config_sglang_with_disagg_enabled_ok():
     assert cfg.disaggregation.enabled is True
 
 
-@pytest.mark.parametrize("name", ["vllm", "trtllm"])
-def test_rollout_config_non_sglang_rejects_pd(name):
+@pytest.mark.parametrize("name", ["trtllm"])
+def test_rollout_config_non_pd_backend_rejects_pd(name):
     with pytest.raises(ValueError, match="disaggregation.enabled=True"):
         RolloutConfig(
             name=name,
@@ -123,11 +123,11 @@ def test_dispatch_sglang_returns_pd_replica_when_flag_set():
     assert issubclass(pd_cls, plain_cls)
 
 
-def test_dispatch_non_sglang_with_flag_raises():
+def test_dispatch_non_pd_backend_with_flag_raises():
     from verl.workers.rollout.replica import get_rollout_replica_class
 
     with pytest.raises(NotImplementedError, match="PD disaggregation"):
-        get_rollout_replica_class("vllm", disaggregation_enabled=True)
+        get_rollout_replica_class("trtllm", disaggregation_enabled=True)
 
 
 def _assign_pd_role(rollout_rank: int, prefill_tp: int, decode_replicas: int, decode_tp: int):

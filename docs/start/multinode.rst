@@ -1,7 +1,7 @@
 Multinode Training
 ==================
 
-Last updated: 06/10/2025.
+Last updated: 07/29/2026.
 
 .. _wuxibin89: https://github.com/wuxibin89
 
@@ -73,8 +73,11 @@ Option 2: Launch via SkyPilot on Kubernetes or clouds
    Ready-to-use SkyPilot example configurations are available in the `examples/tutorial/skypilot/ <https://github.com/verl-project/verl/tree/main/examples/tutorial/skypilot>`_ directory:
    
    - ``verl-ppo.yaml`` - PPO training with GSM8K dataset
-   - ``verl-grpo.yaml`` - GRPO training with MATH dataset  
-   - ``verl-multiturn-tools.yaml`` - Multi-turn tool usage training
+   - ``verl-grpo.yaml`` - GRPO training with MATH dataset
+
+   Agent Loop and tool-use training is covered by the `Agent Loop tutorial
+   <https://github.com/verl-project/verl/blob/main/examples/tutorial/agent_loop_get_started/agent_loop_tutorial.ipynb>`_.
+   It does not currently include a preconfigured SkyPilot task.
    
    See the `SkyPilot examples README <https://github.com/verl-project/verl/tree/main/examples/tutorial/skypilot>`_ for detailed usage instructions.
 
@@ -818,4 +821,3 @@ Just sbatch your slurm_script.sh
 .. code-block:: bash
 
     sbatch slurm_script.sh
-

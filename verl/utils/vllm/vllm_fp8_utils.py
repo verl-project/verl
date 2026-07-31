@@ -13,13 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.metadata
 import inspect
 import logging
 from dataclasses import dataclass, field
 from unittest.mock import patch
 
 import torch
-import vllm
 from packaging import version
 
 try:
@@ -29,8 +29,20 @@ except ImportError as e:
     raise ImportError("FP8 quantization not available") from e
 
 from verl.utils.kernel.fp8_kernel import scaled_fp8_blockwise
+from verl.utils.vllm.vllm_dsv4_fp8_utils import (
+    cache_deepseek_v4_dense_fp8_scales,
+    is_deepseek_v4_model,
+    iter_deepseek_v4_weights,
+    prepare_deepseek_v4_weights_for_loading,
+    process_deepseek_v4_weights_after_loading,
+    reload_deepseek_v4_dense_fp8_scales,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _get_vllm_version():
+    return version.parse(importlib.metadata.version("vllm"))
 
 
 # Ref: https://github.com/NVIDIA-NeMo/RL/commit/bc24887c72a6e1b2699a228bc87c588546dfe6b7
@@ -46,6 +58,24 @@ class FP8State:
 fp8_state: FP8State = FP8State()
 
 
+def _copy_param_subclass_attrs(dst_param, src_param):
+    if src_param is None:
+        return
+
+    base_param_attrs = dir(torch.nn.Parameter)
+    for attr in dir(src_param):
+        if attr in base_param_attrs or attr.startswith("__"):
+            continue
+        try:
+            setattr(dst_param, attr, getattr(src_param, attr))
+        except AttributeError:
+            pass
+
+    subclass_type = getattr(src_param, "subclass_type", type(src_param))
+    if subclass_type is not torch.nn.Parameter:
+        dst_param.subclass_type = subclass_type
+
+
 def is_fp8_model(vllm_config):
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 
@@ -56,6 +86,73 @@ def is_fp8_model(vllm_config):
             return True
 
     return False
+
+
+# vLLM 0.24.0 (MoE refactor, vllm-project/vllm#41184) removed the ``FusedMoE``
+# ``nn.Module`` class. ``FusedMoE`` is now a factory *function* that builds a
+# ``MoERunner``, and the fused expert weight tensors (``w13_weight`` /
+# ``w2_weight``) moved onto a ``RoutedExperts`` submodule owned by the runner
+# (i.e. ``experts`` -> ``experts.routed_experts``). Resolve the concrete module
+# classes once so ``isinstance`` checks keep working across vLLM versions --
+# calling ``isinstance(x, FusedMoE)`` when ``FusedMoE`` is a function raises
+# ``TypeError: isinstance() arg 2 must be a type``.
+if isinstance(FusedMoE, type):
+    # vLLM < 0.24: ``FusedMoE`` is itself the expert-weight-holding module.
+    _MOE_STOP_CLASSES = (FusedMoE,)
+    _EXPERT_WEIGHT_CLASSES = (FusedMoE,)
+else:
+    _stop_classes: list[type] = []
+    _weight_classes: list[type] = []
+    try:
+        from vllm.model_executor.layers.fused_moe import RoutedExperts
+
+        _stop_classes.append(RoutedExperts)
+        _weight_classes.append(RoutedExperts)
+    except ImportError:
+        pass
+    try:
+        from vllm.model_executor.layers.fused_moe import MoERunner
+
+        _stop_classes.append(MoERunner)
+    except ImportError:
+        pass
+    _MOE_STOP_CLASSES = tuple(_stop_classes)
+    _EXPERT_WEIGHT_CLASSES = tuple(_weight_classes)
+
+
+def _is_expert_weight_module(module) -> bool:
+    """Return whether ``module`` directly owns fused expert weights.
+
+    True for the pre-0.24 ``FusedMoE`` module and the post-0.24 ``RoutedExperts``
+    module (both expose ``w13_weight`` / ``w2_weight``). Falls back to duck typing
+    so the check keeps working even if the concrete classes cannot be imported.
+    """
+    if _EXPERT_WEIGHT_CLASSES and isinstance(module, _EXPERT_WEIGHT_CLASSES):
+        return True
+    return hasattr(module, "w13_weight") and hasattr(module, "w2_weight")
+
+
+def _is_fused_moe_block(module) -> bool:
+    """Return whether ``module`` is the fused-MoE block reached while walking the
+    module tree, so traversal must stop before descending into per-expert name
+    parts (e.g. the expert index) that are not real submodules."""
+    if _MOE_STOP_CLASSES and isinstance(module, _MOE_STOP_CLASSES):
+        return True
+    # ``MoERunner`` owns a ``routed_experts`` child; the weight holder owns the
+    # expert weight tensors directly.
+    return hasattr(module, "routed_experts") or _is_expert_weight_module(module)
+
+
+def _resolve_expert_weight_module(module):
+    """Return the submodule that actually owns the fused expert weights.
+
+    On vLLM >= 0.24 the walked module is a ``MoERunner`` whose ``routed_experts``
+    child holds the weights; on older vLLM the module already holds them.
+    """
+    routed_experts = getattr(module, "routed_experts", None)
+    if routed_experts is not None:
+        return routed_experts
+    return module
 
 
 def get_module_from_param_name(model, name: str):
@@ -77,15 +174,18 @@ def get_module_from_param_name(model, name: str):
     try:
         # Traverse the model hierarchy
         for part in module_path:
-            if isinstance(current_module, FusedMoE):
-                return current_module
+            if _is_fused_moe_block(current_module):
+                # Reached the fused-MoE block: the remaining name parts (expert
+                # index, per-expert proj name, ...) are handled by vLLM's fused
+                # weight loader, so return the module owning the expert weights.
+                return _resolve_expert_weight_module(current_module)
             elif isinstance(current_module, torch.nn.ModuleList):
                 current_module = current_module[int(part)]
             else:
                 current_module = getattr(current_module, part)
     except (AttributeError, IndexError, ValueError) as e:
         print(f"Warning: Could not find module for parameter '{name}'. Error: {e}")
-    return current_module
+    return _resolve_expert_weight_module(current_module)
 
 
 def is_fp8_weight(name, model):
@@ -94,13 +194,14 @@ def is_fp8_weight(name, model):
         # Filter out bias params
         if name.endswith("weight"):
             module = get_module_from_param_name(model, name)
-            # We currently only quantize linear layers
-
-            if (isinstance(module, LinearBase) and module.weight.dtype == torch.float8_e4m3fn) or (
-                isinstance(module, FusedMoE)
+            # We currently only quantize linear and fused-MoE expert layers.
+            is_fp8_linear = isinstance(module, LinearBase) and module.weight.dtype == torch.float8_e4m3fn
+            is_fp8_moe = (
+                _is_expert_weight_module(module)
                 and module.w13_weight.dtype == torch.float8_e4m3fn
                 and module.w2_weight.dtype == torch.float8_e4m3fn
-            ):
+            )
+            if is_fp8_linear or is_fp8_moe:
                 fp8_state.fp8_param_names.add(name)
     return name in fp8_state.fp8_param_names
 
@@ -108,9 +209,8 @@ def is_fp8_weight(name, model):
 def is_mxfp8_vllm_ascend(quant_config):
     try:
         from vllm_ascend.quantization.modelslim_config import AscendModelSlimConfig
-        from vllm_ascend.quantization.quant_config import AscendQuantConfig
 
-        if isinstance(quant_config, AscendModelSlimConfig) or isinstance(quant_config, AscendQuantConfig):
+        if isinstance(quant_config, AscendModelSlimConfig):
             quant_method = quant_config.quant_description.get("quant_method")
             return quant_method in ["ascend"]
         return False
@@ -146,7 +246,7 @@ def apply_mxfp8_transformation_after_loading(model):
         return
 
     for name, module in model.named_modules():
-        if (isinstance(module, LinearBase) or isinstance(module, FusedMoE)) and hasattr(
+        if (isinstance(module, LinearBase) or _is_expert_weight_module(module)) and hasattr(
             module, "_mxfp8_original_shapes"
         ):
             if hasattr(module, "quant_method") and hasattr(module.quant_method, "process_weights_after_loading"):
@@ -168,15 +268,15 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
         Tuples of (name, tensor) for each weight and its scale
     """
 
+    if is_deepseek_v4_model(model):
+        yield from iter_deepseek_v4_weights(weights)
+        return
+
     fp8_state.seen_params.clear()
     fp8_state.fp8_param_names.clear()
     is_mxfp8_npu = is_mxfp8_vllm_ascend(quant_config)
     if is_mxfp8_npu:
         import torch_npu
-    # vLLM v0.11-v0.12 renamed weight_scale_inv → weight_scale in process_weights_after_loading,
-    # so load_weights expects "_scale" suffix. v0.14+ keeps weight_scale_inv, so expects "_scale_inv".
-    _use_scale_not_scale_inv = version.parse("0.11.0") <= version.parse(vllm.__version__) < version.parse("0.14.0")
-
     for k, v in weights:
         if not is_fp8_weight(k, model):
             yield (k, v)
@@ -202,16 +302,34 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
         # Yield the quantized weight
         yield (k, param_lp)
 
-        # Yield the scale with appropriate naming based on vLLM version
         if is_mxfp8_npu:
-            yield (k + "_scale", param_scale)
-        elif _use_scale_not_scale_inv and "expert" not in k:
             yield (k + "_scale", param_scale)
         else:
             yield (k + "_scale_inv", param_scale)
 
         # Explicitly delete original tensor reference to help GC
         del v, param_lp, param_scale
+
+
+def prepare_quanted_weights_for_loading(model):
+    """Restore quantized params to the layout their ``weight_loader`` expects.
+
+    Must run once before the first bucket, and pairs with
+    ``process_quanted_weights_after_loading``, which re-applies the inference
+    layout once the last bucket has landed. Both helpers select work by
+    inspecting the model, so they are no-ops for quantization schemes that need
+    no restore. The returned value is opaque reload state for the paired call.
+    """
+    restore_mxfp8_weights_for_loading(model)
+    if not is_deepseek_v4_model(model):
+        return False
+    return prepare_deepseek_v4_weights_for_loading(model, _copy_param_subclass_attrs)
+
+
+def process_quanted_weights_after_loading(model, reload_state):
+    """Re-apply the inference layout undone by ``prepare_quanted_weights_for_loading``."""
+    apply_mxfp8_transformation_after_loading(model)
+    process_deepseek_v4_weights_after_loading(model, reload_state)
 
 
 def load_quanted_weights(weights, model_runner, is_drafter=False):
@@ -227,15 +345,8 @@ def load_quanted_weights(weights, model_runner, is_drafter=False):
     quant_config = model_runner.vllm_config.quant_config
     vllm_dtype = model_runner.vllm_config.model_config.dtype
 
-    is_mxfp8_npu = is_mxfp8_vllm_ascend(quant_config)
-
-    if is_mxfp8_npu:
-        # For MXFP8 on NPU, we need to restore weights to original shapes
-        # before loading, then re-apply transformation after loading.
-        # This is because process_weights_after_loading transposes the weights,
-        # but the weight_loader expects original shapes.
-        restore_mxfp8_weights_for_loading(model)
-
+    weights = list(weights)
+    cache_deepseek_v4_dense_fp8_scales(model, weights)
     weights_quantized = quant_weights(weights, model, quant_config, dtype=vllm_dtype)
 
     # Monkey patch the param class to their subclass, as certain models
@@ -245,35 +356,17 @@ def load_quanted_weights(weights, model_runner, is_drafter=False):
             param.orig_type = param.__class__
             param.__class__ = param.subclass_type
     # Finally load the weights into vllm
-    loaded_params = model.load_weights(weights_quantized)
-    # Undo the type change above to the original type
-    for name, param in model.named_parameters():
-        if hasattr(param, "subclass_type"):
-            param.__class__ = param.orig_type
-
-    if is_mxfp8_npu:
-        # Re-apply MXFP8 transformations after weight loading
-        apply_mxfp8_transformation_after_loading(model)
+    try:
+        loaded_params = model.load_weights(weights_quantized)
+        reload_deepseek_v4_dense_fp8_scales(model)
+    finally:
+        # Undo the type change above to the original type
+        for name, param in model.named_parameters():
+            if hasattr(param, "orig_type"):
+                param.__class__ = param.orig_type
+                del param.orig_type
 
     return loaded_params
-
-
-def _copy_param_subclass_attrs(param, source_param):
-    if source_param is None:
-        return
-
-    base_param_dir = dir(torch.nn.Parameter)
-    source_param_dir = dir(source_param)
-    custom_attributes = [attr for attr in source_param_dir if attr not in base_param_dir and not attr.startswith("__")]
-    for attr in custom_attributes:
-        try:
-            setattr(param, attr, getattr(source_param, attr))
-        except AttributeError:
-            pass
-
-    subclass_type = getattr(source_param, "subclass_type", type(source_param))
-    if subclass_type is not torch.nn.Parameter:
-        param.subclass_type = subclass_type
 
 
 def replace_parameter_preserve_subclass(layer: torch.nn.Module, param_name: str, new_data: torch.Tensor | None):
@@ -309,125 +402,8 @@ def _make_process_weights_after_loading_for_vllm20(original_fn):
     return _patched_process_weights_after_loading
 
 
-def process_weights_after_loading_for_vllm10(self, layer) -> None:
-    """This function is used to process the weights after loading for a Linear layer, it is used for vllm v0.10
-
-    Compared to the original process_weights_after_loading in vllm, we just avoid creation of
-    new torch.nn.Parameter objects, because that removes the weight_loader attribute which we need for refit.
-    """
-    logger.debug("Applying patch process_weights_after_loading")
-    try:
-        from vllm.model_executor.parameter import (
-            BlockQuantScaleParameter,
-            ModelWeightParameter,
-        )
-    except Exception:
-        print("error")
-    from torch.nn import Parameter
-
-    def _create_param_from_subclass_attributes(custom_param):
-        param = Parameter(custom_param.data, requires_grad=False)
-        base_param_dir = dir(torch.nn.Parameter)
-        custom_param_dir = dir(custom_param)
-        # Find the attributes that are unique to the custom parameter
-        custom_attributes = [
-            attr for attr in custom_param_dir if attr not in base_param_dir and not attr.startswith("__")
-        ]
-        # Set the custom attributes into the base parameter object
-        for attr in custom_attributes:
-            setattr(param, attr, getattr(custom_param, attr))
-
-        param.subclass_type = type(custom_param)
-        return param
-
-    assert self.block_quant and self.quant_config.is_checkpoint_fp8_serialized
-    assert self.quant_config.activation_scheme == "dynamic"
-    weight = layer.weight.data
-    weight_scale_inv = layer.weight_scale_inv.data
-    weight = self._maybe_pad_weight(weight)
-
-    layer.weight = _create_param_from_subclass_attributes(
-        ModelWeightParameter(
-            data=weight,
-            output_dim=0,
-            input_dim=1,
-            weight_loader=layer.weight.weight_loader,
-        )
-    )
-    layer.weight_scale_inv = _create_param_from_subclass_attributes(
-        BlockQuantScaleParameter(
-            data=weight_scale_inv,
-            output_dim=0,
-            input_dim=1,
-            weight_loader=layer.weight_scale_inv.weight_loader,
-        )
-    )
-
-
-def process_weights_after_loading_for_vllm11(self, layer) -> None:
-    """This function is used to process the weights after loading for a Linear layer, it is used for vllm 0.11
-
-    Compared to the original process_weights_after_loading in vllm, we just avoid creation of
-    new torch.nn.Parameter objects, because that removes the weight_loader attribute which we need for refit.
-    """
-    from torch.nn import Parameter
-    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-        maybe_post_process_fp8_weight_block,
-        process_fp8_weight_block_strategy,
-    )
-    from vllm.model_executor.parameter import (
-        BlockQuantScaleParameter,
-        ModelWeightParameter,
-    )
-
-    assert self.block_quant and self.quant_config.is_checkpoint_fp8_serialized
-    assert self.quant_config.activation_scheme == "dynamic"
-
-    def _create_param_from_subclass_attributes(custom_param):
-        param = Parameter(custom_param.data, requires_grad=False)
-        base_param_dir = dir(torch.nn.Parameter)
-        custom_param_dir = dir(custom_param)
-        # Find the attributes that are unique to the custom parameter
-        custom_attributes = [
-            attr for attr in custom_param_dir if attr not in base_param_dir and not attr.startswith("__")
-        ]
-        # Set the custom attributes into the base parameter object
-        for attr in custom_attributes:
-            setattr(param, attr, getattr(custom_param, attr))
-
-        param.subclass_type = type(custom_param)
-        return param
-
-    weight_scale = layer.weight_scale_inv if hasattr(layer, "weight_scale_inv") else layer.weight_scale
-    weight, weight_scale = process_fp8_weight_block_strategy(layer.weight, weight_scale)
-
-    layer.weight = _create_param_from_subclass_attributes(
-        ModelWeightParameter(
-            data=weight.data,
-            output_dim=0,
-            input_dim=1,
-            weight_loader=layer.weight.weight_loader,
-        )
-    )
-    layer.weight_scale = _create_param_from_subclass_attributes(
-        BlockQuantScaleParameter(
-            data=weight_scale.data,
-            output_dim=0,
-            input_dim=1,
-            weight_loader=layer.weight_scale_inv.weight_loader,
-        )
-    )
-
-    del layer.weight_scale_inv
-
-    if version.parse(vllm.__version__) == version.parse("0.11.0"):
-        maybe_post_process_fp8_weight_block(layer, self.cutlass_block_fp8_supported)
-    else:
-        maybe_post_process_fp8_weight_block(layer)
-
-
 def process_weights_after_loading_for_vllm14(self, layer) -> None:
-    """This function is used to process the weights after loading for a Linear layer, it is used for vllm v0.14-v0.19.
+    """This function is used to process the weights after loading for a Linear layer, it is used for vllm v0.18-v0.19.
 
     Compared to the original process_weights_after_loading in vllm, we just avoid creation of
     new torch.nn.Parameter objects, because that removes the weight_loader attribute which we need for refit.
@@ -486,140 +462,6 @@ def process_weights_after_loading_for_vllm14(self, layer) -> None:
         layer.input_scale = None
 
     maybe_post_process_fp8_weight_block(layer)
-
-
-def process_weights_after_loading_moe_for_vllm10(self, layer) -> None:
-    """This function is used to process the weights after loading for a FusedMoE layer, it is used for vllm v0.10"""
-    from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
-    from vllm.model_executor.layers.quantization.fp8 import _is_col_major, _swap_w13_to_w31
-    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-        get_col_major_tma_aligned_tensor,
-        requant_weight_ue8m0_inplace,
-    )
-    from vllm.utils.deep_gemm import is_blackwell_deep_gemm_used
-
-    self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
-    assert self.quant_config.activation_scheme == "dynamic"
-    if self.flashinfer_moe_enabled:
-        w13_weight = _swap_w13_to_w31(layer.w13_weight.data)
-        w13_weight_scale_inv = _swap_w13_to_w31(layer.w13_weight_scale_inv.data)
-        w2_weight = layer.w2_weight.data
-        w2_weight_scale_inv = layer.w2_weight_scale_inv.data
-    else:
-        w13_weight = layer.w13_weight.data
-        w13_weight_scale_inv = layer.w13_weight_scale_inv.data
-        w2_weight = layer.w2_weight
-        w2_weight_scale_inv = layer.w2_weight_scale_inv
-
-    from torch.nn import Parameter
-
-    def _create_param_from_subclass_attributes(custom_data, custom_weight):
-        param = Parameter(custom_data, requires_grad=False)
-        base_param_dir = dir(torch.nn.Parameter)
-        custom_weight_dir = dir(custom_weight)
-        # Find the attributes that are unique to the custom parameter
-        custom_attributes = [
-            attr for attr in custom_weight_dir if attr not in base_param_dir and not attr.startswith("__")
-        ]
-        # Set the custom attributes into the base parameter object
-        for attr in custom_attributes:
-            setattr(param, attr, getattr(custom_weight, attr))
-
-        return param
-
-    layer.w13_weight = _create_param_from_subclass_attributes(w13_weight, layer.w13_weight)
-    layer.w13_weight_scale_inv = _create_param_from_subclass_attributes(
-        w13_weight_scale_inv, layer.w13_weight_scale_inv
-    )
-    layer.w2_weight = _create_param_from_subclass_attributes(w2_weight, layer.w2_weight)
-    layer.w2_weight_scale_inv = _create_param_from_subclass_attributes(w2_weight_scale_inv, layer.w2_weight_scale_inv)
-
-    # DeepGemm scales need to be transposed and aligned.  We try to do
-    # it ahead of time for performance reasons.
-    if self.allow_deep_gemm and not is_blackwell_deep_gemm_used():
-        # Lazy import to avoid CUDA initialization problems.
-        if _is_col_major(layer.w13_weight_scale_inv):
-            layer.w13_weight_scale_inv = get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv).contiguous()
-        if _is_col_major(layer.w2_weight_scale_inv):
-            layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv).contiguous()
-
-    if is_blackwell_deep_gemm_used():
-        assert layer.weight_block_size is not None
-        # Re-quantise the expert weights so their scales are UE8M0.
-        block_sz = tuple(layer.weight_block_size)
-        requant_weight_ue8m0_inplace(
-            layer.w13_weight.data,
-            layer.w13_weight_scale_inv.data,
-            block_sz,
-        )
-        requant_weight_ue8m0_inplace(
-            layer.w2_weight.data,
-            layer.w2_weight_scale_inv.data,
-            block_sz,
-        )
-
-        if _is_col_major(layer.w13_weight_scale_inv):
-            layer.w13_weight_scale_inv = get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv).contiguous()
-        if _is_col_major(layer.w2_weight_scale_inv):
-            layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv).contiguous()
-
-
-def process_weights_after_loading_moe_for_vllm11(self, layer) -> None:
-    """This function is used to process the weights after loading for a FusedMoE layer, it is used for vllm 0.11"""
-    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-        swap_w13_to_w31,
-    )
-    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-        expert_weight_is_col_major,
-        requant_weight_ue8m0_inplace,
-    )
-    from vllm.utils.deep_gemm import (
-        get_col_major_tma_aligned_tensor,
-        is_deep_gemm_e8m0_used,
-    )
-
-    try:
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
-
-        self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
-    except ImportError:
-        from vllm._aiter_ops import rocm_aiter_ops
-
-        self.rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
-
-    assert self.block_quant and self.quant_config.is_checkpoint_fp8_serialized
-    assert self.quant_config.activation_scheme == "dynamic"
-
-    if self.flashinfer_moe_backend is not None:
-        layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
-        layer.w13_weight_scale_inv.data = swap_w13_to_w31(layer.w13_weight_scale_inv.data)
-
-    if self.allow_deep_gemm and not is_deep_gemm_e8m0_used():
-        if expert_weight_is_col_major(layer.w13_weight_scale_inv):
-            layer.w13_weight_scale_inv = get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv)
-        if expert_weight_is_col_major(layer.w2_weight_scale_inv):
-            layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv)
-
-    if is_deep_gemm_e8m0_used():
-        assert layer.weight_block_size is not None
-        # Re-quantise the expert weights so their scales are UE8M0.
-        block_sz = tuple(layer.weight_block_size)
-        requant_weight_ue8m0_inplace(
-            layer.w13_weight.data,
-            layer.w13_weight_scale_inv.data,
-            block_sz,
-        )
-        requant_weight_ue8m0_inplace(
-            layer.w2_weight.data,
-            layer.w2_weight_scale_inv.data,
-            block_sz,
-        )
-
-        # Ensure column-major TMA alignment expected by DeepGEMM.
-        if expert_weight_is_col_major(layer.w13_weight_scale_inv):
-            layer.w13_weight_scale_inv = get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv)
-        if expert_weight_is_col_major(layer.w2_weight_scale_inv):
-            layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv)
 
 
 def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
@@ -700,7 +542,7 @@ def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
 
 def apply_vllm_fp8_patches():
     logger.info("Applying vllm fp8 patches for blockwise quantization")
-    vllm_ver = version.parse(vllm.__version__)
+    vllm_ver = _get_vllm_version()
     if fp8_state.vllm_patches:
         logger.debug("vLLM FP8 patches already applied")
         return
@@ -730,23 +572,9 @@ def apply_vllm_fp8_patches():
         fp8_state.vllm_patches.extend([patcher1, patcher2])
         return
 
-    # Linear patch: v0.14+ keeps weight_scale_inv, v0.11-v0.12 renames to weight_scale
-    if vllm_ver >= version.parse("0.14.0"):
-        linear_patch_fn = process_weights_after_loading_for_vllm14
-    elif vllm_ver >= version.parse("0.11.0"):
-        linear_patch_fn = process_weights_after_loading_for_vllm11
-    else:
-        linear_patch_fn = process_weights_after_loading_for_vllm10
-    patcher1 = patch(func1_path, linear_patch_fn)
+    patcher1 = patch(func1_path, process_weights_after_loading_for_vllm14)
     patcher1.start()
 
-    # MoE patch
-    if vllm_ver >= version.parse("0.14.0"):
-        moe_patch_fn = process_weights_after_loading_moe_for_vllm14
-    elif vllm_ver >= version.parse("0.11.0"):
-        moe_patch_fn = process_weights_after_loading_moe_for_vllm11
-    else:
-        moe_patch_fn = process_weights_after_loading_moe_for_vllm10
-    patcher2 = patch(func2_path, moe_patch_fn)
+    patcher2 = patch(func2_path, process_weights_after_loading_moe_for_vllm14)
     patcher2.start()
     fp8_state.vllm_patches.extend([patcher1, patcher2])

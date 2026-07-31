@@ -63,6 +63,10 @@ cliprange_value: 0.5
 # Loss aggregation mode: "token-mean", "seq-mean-token-sum", or "seq-mean-token-mean"
 loss_agg_mode: ${oc.select:actor_rollout_ref.actor.loss_agg_mode,token-mean}
 
+# Scale factor for "seq-mean-token-sum-norm" loss aggregation mode.
+# If null, uses response_length. Set to a constant to ensure consistent normalization.
+loss_scale_factor: ${oc.select:actor_rollout_ref.actor.loss_scale_factor,null}
+
 # checkpoint configs
 checkpoint:
 
@@ -78,9 +82,6 @@ checkpoint:
 
   # Whether to save checkpoints asynchronously. Only effective for Megatron as of now.
   async_save: False
-
-  # Mbridge config extension.
-  mbridge_config: {}
 
 # profile the critic model in `update_critic`
 profiler:
@@ -147,6 +148,28 @@ profiler:
 
       # True for each task has its own database, False for all tasks in one training step share one database.
       discrete: false
+
+      # Optional torch.profiler.schedule. Enabled only when active > 0, in which case
+      # profiler.step() advances wait/warmup/active/repeat once per mini-batch.
+      schedule:
+
+        # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+        _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+
+        # Number of steps to skip before the first cycle
+        skip_first: 0
+
+        # Idle steps (no collection) at the start of each cycle
+        wait: 0
+
+        # Warmup steps (tracing on, data discarded) each cycle
+        warmup: 0
+
+        # Active steps to record each cycle; <= 0 disables scheduling
+        active: 0
+
+        # Number of cycles to repeat; 0 repeats until profiling stops
+        repeat: 0
 
     # torch memory profiler config
     torch_memory:

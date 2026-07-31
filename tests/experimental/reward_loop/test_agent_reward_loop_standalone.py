@@ -20,7 +20,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from verl.experimental.agent_loop import AgentLoopManager
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.protocol import DataProto
-from verl.trainer.main_ppo import create_rl_sampler
+from verl.trainer.ppo.utils import create_rl_sampler
 from verl.utils import hf_tokenizer
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 from verl.workers.rollout.llm_server import LLMServerManager

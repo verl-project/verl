@@ -53,6 +53,8 @@ reward_model:
     load_format: auto
     layered_summon: false
     scheduling_policy: fcfs
+    full_determinism: false
+    seed: 42
     multi_stage_wake_up: false
     engine_kwargs: {}
     limit_images: null

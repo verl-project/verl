@@ -21,7 +21,7 @@ import torch
 import torch.distributed as dist
 from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
-from veomni.arguments import OpsImplementationConfig
+from veomni.arguments import MixedPrecisionConfig, OpsImplementationConfig
 from veomni.distributed import parallel_state
 from veomni.distributed.offloading import build_activation_offloading_context
 from veomni.distributed.torch_parallelize import build_parallelize_model
@@ -50,6 +50,7 @@ from ..utils import enable_full_determinism, postprocess_batch_func, prepare_mic
 from .utils import (
     MOE_PARAM_HANDERS,
     VL_TYPE2INDEX,
+    default_moe_param_handler,
     load_veomni_model_to_gpu,
     load_veomni_optimizer,
     offload_veomni_model_to_cpu,
@@ -144,6 +145,11 @@ class VeOmniEngine(FSDPEngine):
         self._is_offload_param = self.engine_config.param_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
         self._is_lora = self.model_config.lora_rank > 0
+        # When VeOmni parallelizes with enable_fsdp_offload, FSDP2 uses CPUOffloadPolicy and
+        # owns CPU<->accelerator placement. Manually calling model.to(device) then crashes
+        # state_dict() with a DTensor storage device mismatch (see #5995 / #6604, which fixed
+        # the FSDP engine; the VeOmni engine has the same paths and needs the same guard).
+        self._uses_fsdp2_cpu_offload_policy = self.engine_config.enable_fsdp_offload
 
         self.use_ulysses_sp = parallel_state.get_parallel_state().sp_enabled
         self.ulysses_sequence_parallel_size = self.engine_config.ulysses_parallel_size
@@ -179,11 +185,7 @@ class VeOmniEngine(FSDPEngine):
         Applies device, dtype, and precision configurations, including mixed precision.
         Sets up checkpoint manager and FLOPs counter.
         """
-        self._moe_monitor = None
-        self._moe_monitor_step = 0
-
         self._build_model_optimizer()
-        self._init_moe_monitor()
 
         if self.enable_routing_replay:
             # Defense in depth: the VeOmniActorConfig check is the primary
@@ -277,13 +279,18 @@ class VeOmniEngine(FSDPEngine):
             swiglu_mlp_implementation=self.engine_config.swiglu_mlp_implementation,
             rotary_pos_emb_implementation=self.engine_config.rotary_pos_emb_implementation,
             load_balancing_loss_implementation=self.engine_config.load_balancing_loss_implementation,
+            rms_norm_gated_implementation=self.engine_config.rms_norm_gated_implementation,
+            causal_conv1d_implementation=self.engine_config.causal_conv1d_implementation,
+            chunk_gated_delta_rule_implementation=self.engine_config.chunk_gated_delta_rule_implementation,
         )
+
+        veomni_mixed_precision_config = MixedPrecisionConfig(enable=self.engine_config.mixed_precision)
 
         # Load base model with specified configuration and dtype
         module = build_foundation_model(
             config_path=self._get_model_config_path(),
             weights_path=self.model_config.local_path,
-            torch_dtype="float32" if self.engine_config.mixed_precision else "bfloat16",
+            torch_dtype="float32" if veomni_mixed_precision_config.enable else "bfloat16",
             attn_implementation=self.engine_config.attn_implementation,
             ops_implementation=ops_implementation,
             init_device=self.engine_config.init_device,
@@ -297,7 +304,7 @@ class VeOmniEngine(FSDPEngine):
             init_device=self.engine_config.init_device,
             weights_path=self.model_config.local_path,
             enable_full_shard=self.engine_config.enable_full_shard,
-            enable_mixed_precision=self.engine_config.mixed_precision,
+            mixed_precision=veomni_mixed_precision_config,
             enable_gradient_checkpointing=self.model_config.enable_gradient_checkpointing,
             enable_fsdp_offload=self.engine_config.enable_fsdp_offload,
             basic_modules=list(
@@ -325,64 +332,6 @@ class VeOmniEngine(FSDPEngine):
             self.model_config.enable_gradient_checkpointing,
             self.engine_config.activation_gpu_limit,
         )
-
-    # ------------------------------------------------------------------ #
-    # MoE expert-load monitor                                            #
-    # ------------------------------------------------------------------ #
-
-    def _init_moe_monitor(self) -> None:
-        """Construct, attach hooks, and activate the MoE load-balance monitor."""
-        interval = self.engine_config.moe_load_balance_monitor_interval
-        if interval <= 0:
-            return
-        num_experts = getattr(self.module.config, "num_experts", None)
-        if num_experts is None:
-            logger.warning("moe_load_balance_monitor_interval > 0 but model has no num_experts; skipping.")
-            return
-
-        from veomni.utils.moe_monitor import MoERouterMonitor, attach_moe_router_monitor, set_active_monitor
-
-        ps = parallel_state.get_parallel_state()
-        self._moe_monitor = MoERouterMonitor(num_experts=num_experts, dp_group=ps.fsdp_group)
-        set_active_monitor(self._moe_monitor)
-        attached = attach_moe_router_monitor(self.module, self._moe_monitor)
-        if attached == 0:
-            logger.warning("MoE monitor: no recognized routers found; disabling.")
-            self._moe_monitor.disable()
-            set_active_monitor(None)
-            self._moe_monitor = None
-        else:
-            logger.info(f"MoE monitor: attached to {attached} router(s), interval={interval}.")
-
-    def _log_moe_metrics(self, outputs: Any) -> None:
-        """All-reduce counts and log MoE metrics.
-
-        Scalars and heatmap are logged directly via ``wandb.log`` on rank 0
-        to avoid verl's ``allgather_dict_into_dict`` wrapping them in lists
-        (which breaks wandb chart rendering).
-        """
-        moe_metrics = self._moe_monitor.compute_metrics(current_step=self._moe_monitor_step)
-        if not moe_metrics:
-            return
-
-        if self.rank != 0:
-            return
-
-        try:
-            import wandb
-        except ImportError:
-            return
-        if wandb.run is None:
-            return
-
-        log_dict = {}
-        for k, v in moe_metrics.items():
-            if k.endswith("expert_load_heatmap"):
-                start, end = self._moe_monitor._last_step_range
-                log_dict[k] = wandb.Image(v, caption=f"Steps {start}-{end}")
-            else:
-                log_dict[k] = v
-        wandb.log(log_dict, step=self._moe_monitor_step)
 
     def optimizer_step(self):
         """
@@ -416,12 +365,6 @@ class VeOmniEngine(FSDPEngine):
         Returns:
             Any: The output of the forward pass, which can be used for loss computation or other purposes.
         """
-        if self._moe_monitor is not None:
-            if forward_only:
-                self._moe_monitor.pause()
-            else:
-                self._moe_monitor.resume()
-
         tu.assign_non_tensor(data, sp_size=parallel_state.get_parallel_state().ulysses_size)
 
         # compute num_tokens in global batch for loss normalization
@@ -518,11 +461,6 @@ class VeOmniEngine(FSDPEngine):
                     )
 
             result = postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
-            if not forward_only and self._moe_monitor is not None:
-                self._moe_monitor_step += 1
-                interval = self.engine_config.moe_load_balance_monitor_interval
-                if interval > 0 and self._moe_monitor_step % interval == 0:
-                    self._log_moe_metrics(result)
             return result
         finally:
             if rr_active:
@@ -612,7 +550,9 @@ class VeOmniEngine(FSDPEngine):
         Save VeOmni checkpoint, handling parameter offload as needed.
         """
         origin_module_device = next(self.module.parameters()).device.type
-        if self._is_offload_param or origin_module_device == "cpu":
+        if (self._is_offload_param or origin_module_device == "cpu") and not getattr(
+            self, "_uses_fsdp2_cpu_offload_policy", False
+        ):
             load_veomni_model_to_gpu(self.module)
 
         self.checkpoint_manager.save_checkpoint(
@@ -629,7 +569,7 @@ class VeOmniEngine(FSDPEngine):
         """
         Load VeOmni checkpoint, restoring parameters and optimizer state.
         """
-        if self._is_offload_param:
+        if self._is_offload_param and not getattr(self, "_uses_fsdp2_cpu_offload_policy", False):
             load_veomni_model_to_gpu(self.module)
 
         self.checkpoint_manager.load_checkpoint(
@@ -643,8 +583,53 @@ class VeOmniEngine(FSDPEngine):
         if self._is_offload_optimizer:
             offload_veomni_optimizer(self.optimizer)
 
+    def get_per_tensor_param_shard(self, **kwargs):
+        """Yield each rank's *local* shard ``(name, local_shard, ShardSpec)`` -- the
+        DTensor export plus veomni's EP declarations. The mechanics live in
+        :func:`verl.workers.engine.veomni.utils.veomni_shard_export`; this wrapper
+        owns the offload dance (CPUOffloadPolicy manages placement itself -- see
+        #5995 -- and the delta path returns early in update_weights, so the
+        offload-back happens here, after the exporter is exhausted).
+        """
+        from .utils import veomni_shard_export
+
+        manual_offload = not getattr(self, "_uses_fsdp2_cpu_offload_policy", False)
+        if manual_offload:
+            load_veomni_model_to_gpu(self.module)
+        gen, meta = veomni_shard_export(self.module)
+
+        def _with_offload_back():
+            yield from gen
+            if manual_offload and self._is_offload_param:
+                offload_veomni_model_to_cpu(self.module)
+
+        return _with_offload_back(), meta
+
+    def _hf_delta_entry(self, name, spec, place, lidx, lval):
+        """veomni's per-param entry builder: EP/converter specs (fused expert
+        stacks) go through this backend's own converter machinery (see
+        :mod:`verl.workers.engine.veomni.utils`); everything else falls back to
+        the FSDP engine's DTensor identity handling."""
+        from ..spec import BlockPlacement
+        from .utils import NO_SLOTS_MSG, hf_entry_converter
+
+        if spec.to_hf_chunk is not None and isinstance(place, BlockPlacement) and spec.hf_slots is not None:
+            return hf_entry_converter(name, spec, place, lidx, lval)
+        if spec.to_hf_chunk is not None:
+            raise NotImplementedError(f"{name}: {NO_SLOTS_MSG}")
+        return super()._hf_delta_entry(name, spec, place, lidx, lval)
+
+    # get_per_tensor_param_delta_shard is inherited from FSDPEngine and
+    # prime_delta_snapshots from BaseEngine; both consume this class's
+    # get_per_tensor_param_shard and _hf_delta_entry overrides.
+
     def get_per_tensor_param(self, **kwargs):
-        load_veomni_model_to_gpu(self.module)
+        # FSDP2 CPUOffloadPolicy owns CPU<->accelerator placement; calling model.to(device)
+        # here leaves the module half-moved and crashes state_dict() below (#5995). The
+        # per-DTensor full_tensor() in param_generator() below still yields accelerator
+        # tensors, so the manual whole-model move is unnecessary under CPU offload.
+        if not getattr(self, "_uses_fsdp2_cpu_offload_policy", False):
+            load_veomni_model_to_gpu(self.module)
 
         params = self.module.state_dict()
         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
@@ -652,10 +637,9 @@ class VeOmniEngine(FSDPEngine):
         if self._is_offload_param:
             offload_veomni_model_to_cpu(self.module)
 
-        device = get_device_id()
         ps = parallel_state.get_parallel_state()
         model_type = getattr(self.module.config, "model_type", "default")
-        process_func = MOE_PARAM_HANDERS.get(model_type, lambda n, t: iter([(n, t)]))
+        process_func = MOE_PARAM_HANDERS.get(model_type, default_moe_param_handler)
 
         def param_generator():
             for name, param in params.items():
@@ -665,18 +649,16 @@ class VeOmniEngine(FSDPEngine):
                 is_proj = any(p in name for p in ["down_proj", "gate_proj", "up_proj", "gate_up_proj"])
 
                 if is_expert_layer and is_proj and ps.ep_enabled:
-                    output_shape = list(unsharded_tensor.shape)
-                    output_shape[0] *= ps.extra_parallel_sizes["ep"]
-                    stacked_tensor = torch.empty(output_shape, dtype=unsharded_tensor.dtype, device=device)
+                    ep_rank, ep_size = ps.ep_rank, ps.ep_size
+                    buffer = torch.empty_like(unsharded_tensor)  # [num_experts/ep_size, H, I]
+                    for src_ep_rank in range(ep_size):
+                        tensor = unsharded_tensor if src_ep_rank == ep_rank else buffer
+                        torch.distributed.broadcast(tensor, group_src=src_ep_rank, group=ps.ep_group)
+                        yield from process_func(name, tensor, expert_id_base=src_ep_rank * tensor.size(0))
 
-                    # all gather expert tensors [32, H, I] -> [128, H, I]
-                    torch.distributed.all_gather_into_tensor(stacked_tensor, unsharded_tensor, group=ps.ep_group)
-                    yield from process_func(name, stacked_tensor)
-
-                    del stacked_tensor
                 else:
                     if is_expert_layer:
-                        yield from process_func(name, unsharded_tensor)
+                        yield from process_func(name, unsharded_tensor, expert_id_base=0)
                     else:
                         yield name, unsharded_tensor
 
@@ -726,7 +708,8 @@ class EngineTrainModeCtx(BaseEngineCtx):
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, VeOmniEngine)
         set_ulysses_sequence_parallel_group(self.prev_sp_group)
-        self.engine.optimizer_zero_grad()
+        if self.zero_grad_on_exit or exc_type is not None:
+            self.engine.optimizer_zero_grad()
         super().__exit__(exc_type, exc_value, traceback)
 
 
@@ -1054,7 +1037,7 @@ class VeOmniEngineWithValueHead(VeOmniEngine, FSDPEngineWithValueHead):
         config.hidden_dropout = "0"
         config.summary_dropout_prob = 0.0
         config.tie_word_embeddings = False
-        token_cls = AutoModelForTokenClassification._model_mapping.get(type(config))
+        token_cls = AutoModelForTokenClassification._model_mapping.get(type(config), None)
         if token_cls is None:
             raise ValueError(f"No ForTokenClassification class in transformers for {type(config).__name__}.")
         config.architectures = [token_cls.__name__]

@@ -47,6 +47,9 @@ ulysses_sequence_parallel_size: 1
 # Whether to use entropy_from_logits_with_chunking in fsdp.
 entropy_from_logits_with_chunking: false
 
+# Chunk size for entropy from logits with chunking in fsdp.
+entropy_from_logits_chunk_size: 2048
+
 # Whether to use torch compile in fsdp.
 use_torch_compile: true
 

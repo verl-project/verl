@@ -1,34 +1,33 @@
 Ascend SGLang Best Practice
 ===================================
 
-Last updated: 01/27/2026.
+Last updated: 06/02/2026.
 
-.. _Qwen3-30B: https://github.com/verl-project/verl/blob/c98cb8cc/examples/grpo_trainer/run_qwen3moe-30b_sglang_megatron_npu.sh
-.. _Qwen2.5-32B: https://github.com/verl-project/verl/blob/c98cb8cc/examples/grpo_trainer/run_qwen2-32b_sglang_fsdp_npu.sh
+.. _Qwen3-30B: https://github.com/verl-project/verl/blob/main/examples/ascend_extras/grpo_trainer/run_qwen3_30b_a3b_megatron.sh
 .. _doclink: https://github.com/verl-project/verl/blob/c98cb8cc/docs/ascend_tutorial/examples/ascend_sglang_best_practices.rst
 引言
 ----------------------------------
 
 SGLang 是当前主流的高性能开源推理引擎, 昇腾已经全面原生支持该推理引擎在verl中使用,
-仅需简单的构建流程，开发者即可完成环境构建，本文将提供两个经典用例来帮助开发者了解以下内容：
+仅需简单的构建流程，开发者即可完成环境构建，本文将帮助开发者了解以下内容：
 
 1. 环境构建
 2. 模型训练与评估
 3. 性能采集
 
-两个用例模型脚本以及其需要的硬件条件各自如下：
-(注:verl近期进行了脚本清理与命名变更, 请根据实际commit id 对应文档`doclink`_ 及对应脚本进行构建避免链接失效)
+用例模型脚本以及其需要的硬件条件如下：
+
+- 注:verl近期进行了脚本清理与命名变更, 推荐根据 commit id c98cb8cc 对应文档 `doclink`_  及对应脚本进行构建避免链接失效
+
 +----------------------+---------------------+----------+------------------------+
 | 模型                 | NPU型号             | 节点数量 | 训推后端               |
 +======================+=====================+==========+========================+
 | `Qwen3-30B`_         | Atlas 800T A3       | 1        | SGLang + Megatron      |
 +----------------------+---------------------+----------+------------------------+
-| `Qwen2.5-32B`_       | Atlas 900 A2        | 2        | SGLang + FSDP          |
-+----------------------+---------------------+----------+------------------------+
 
 环境构建
 -----------------------------------
-我们在quickstart中提供了两种构建环境的方法, 1.从镜像文件DockerFile进行构建 2.从自定义Conda环境进行构建
+我们在 `install_guidance <../../get_start/install_guidance.rst>`_ 中提供了两种构建环境的方法, 1.从镜像文件Dockerfile进行构建 2.从自定义Conda环境进行构建
 
 在本实践中, 我们额外指定verl 的commit id 以避免引入其他问题
 
@@ -72,24 +71,6 @@ SGLang 是当前主流的高性能开源推理引擎, 昇腾已经全面原生�
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=False
     actor_rollout_ref.actor.megatron.use_mbridge=True
 
-`Qwen2.5-32B`_
-^^^^^^^^^^^
-**下载模型权重**
-
---local-dir: 模型保存路径
-
-.. code-block:: bash
-
-  export HF_ENDPOINT=https://hf-mirror.com
-  huggingface-cli download --resume-download Qwen/Qwen2.5-32B --local-dir /path/to/local_dir
-
-**下载及处理数据集**
-
-.. code-block:: bash
-
-    wget https://huggingface.co/datasets/agentica-org/DeepScaleR-Preview-Dataset/resolve/main/deepscaler.json
-    python recipe/r1_ascend/json_to_parquet.py --output_dir ./data/deepscaler --json_path path/to/deepscaler.json --train_data_ratio 0.9
-
 2.训练
 ^^^^^^^^^^^
 根据开发者实际路径配置情况修改模型训练脚本中的以下参数
@@ -114,7 +95,7 @@ SGLang 是当前主流的高性能开源推理引擎, 昇腾已经全面原生�
 .. code-block:: bash 
 
   bash examples/grpo_trainer/run_qwen3moe-30b_sglang_megatron_npu.sh
-对于多节点任务 `Qwen2.5-32B`_ ，我们推荐使用以下脚本进行大规模多节点训练拉起
+如果您想扩展至多节点，我们推荐使用以下脚本进行大规模多节点训练拉起
 
 .. code-block:: bash
 
@@ -132,7 +113,7 @@ SGLang 是当前主流的高性能开源推理引擎, 昇腾已经全面原生�
   export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
   export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
   export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
-  export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8
+  export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
   # 修改为当前需要跑的用例路径
   DEFAULT_SH="./run_*.sh"
   echo "Use $DEFAULT_SH"
@@ -191,7 +172,7 @@ SGLang 是当前主流的高性能开源推理引擎, 昇腾已经全面原生�
   
   sleep 600
 
-DEFAULT_SH:修改为训练所用配置 sh 文件路径。在此案例中修改为 `Qwen2.5-32B`_ 路径。
+DEFAULT_SH:修改为训练所用配置 sh 文件路径。
           
 NNODES 和 NPUS_PER_NODE:修改为使用节点数量和每个节点 NPU 数量。在此案例中分别为2和8。
           
@@ -217,6 +198,7 @@ SOCKET_IFNAME, HCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME: 修改为对应通信网�
   git clone https://gitee.com/aisbench/benchmark.git
   cd benchmark
   pip install -e .
+  pip install math_verify latex2sympy2_extended
 
 **下载评估数据集**
 
@@ -288,7 +270,7 @@ SOCKET_IFNAME, HCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME: 修改为对应通信网�
 
 性能采集
 -----------------------------------
-关于NPU profiling的详细文档请参考 `ascend_profiling_zh <https://github.com/volcengine/verl/blob/c98cb8cc/docs/ascend_tutorial/ascend_profiling_zh.rst>`_
+关于NPU profiling的详细文档请参考 `ascend_profiling_zh <../../dev_guide/performance/ascend_profiling_zh.rst>`_
 
 在 `Qwen3-30B`_ 的脚本中提供了基本的采集性能选项PROF_CONFIG，默认设置 global_profiler.steps=null 关闭采集， 开发者可根据实际需要进行参数修改
 

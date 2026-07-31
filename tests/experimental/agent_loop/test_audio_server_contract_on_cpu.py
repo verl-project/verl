@@ -19,7 +19,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LLM_SERVER_SOURCE = REPO_ROOT / "verl/workers/rollout/llm_server.py"
-FULLY_ASYNC_ROLLOUTER_SOURCE = REPO_ROOT / "verl/experimental/fully_async_policy/fully_async_rollouter.py"
+SINGLE_TURN_AGENT_LOOP_SOURCE = REPO_ROOT / "verl/experimental/agent_loop/single_turn_agent_loop.py"
+TOOL_AGENT_LOOP_SOURCE = REPO_ROOT / "verl/experimental/agent_loop/tool_agent_loop.py"
 VLLM_SERVER_SOURCE = REPO_ROOT / "verl/workers/rollout/vllm_rollout/vllm_async_server.py"
 
 
@@ -51,9 +52,13 @@ def test_async_server_manager_generate_forwards_audio_and_mm_kwargs() -> None:
 
 
 def test_fully_async_server_manager_generate_forwards_audio_and_mm_kwargs() -> None:
-    source = FULLY_ASYNC_ROLLOUTER_SOURCE.read_text(encoding="utf-8")
-    assert "audio_data=audio_data" in source
-    assert "mm_processor_kwargs=mm_processor_kwargs" in source
+    single_turn_source = SINGLE_TURN_AGENT_LOOP_SOURCE.read_text(encoding="utf-8")
+    assert "audio_data=audios" in single_turn_source
+    assert "mm_processor_kwargs=mm_processor_kwargs" in single_turn_source
+
+    tool_source = TOOL_AGENT_LOOP_SOURCE.read_text(encoding="utf-8")
+    assert "audio_data=agent_data.audio_data" in tool_source
+    assert "mm_processor_kwargs=agent_data.mm_processor_kwargs" in tool_source
 
 
 def test_vllm_generate_includes_audio_and_mm_processor_kwargs() -> None:

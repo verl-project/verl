@@ -385,12 +385,10 @@ def test_install_without_veomni_raises(ctrl):
     typed RuntimeError pointing the user at the dependency, not a raw
     ImportError."""
     with pytest.MonkeyPatch.context() as mp:
-        # Drop both the package and the submodule from sys.modules to
-        # force a real ImportError inside install().
-        mp.delitem(sys.modules, "veomni.utils.moe_router_replay", raising=False)
-        mp.delitem(sys.modules, "veomni.utils", raising=False)
-        mp.delitem(sys.modules, "veomni", raising=False)
-        # Also poison the import path so a fresh import attempt fails.
-        mp.setattr("sys.path", [p for p in sys.path if "veomni" not in p.lower()])
+        # Setting sys.modules[name] = None makes Python's import machinery
+        # raise ImportError on `from veomni.utils.moe_router_replay import ...`
+        # without needing to manipulate sys.path (which doesn't help when
+        # veomni is installed in site-packages).
+        mp.setitem(sys.modules, "veomni.utils.moe_router_replay", None)
         with pytest.raises(RuntimeError, match="VeOmni build"):
             ctrl.install(nn.Linear(1, 1))

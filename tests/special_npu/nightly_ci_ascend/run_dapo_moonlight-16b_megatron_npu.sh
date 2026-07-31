@@ -28,6 +28,10 @@ infer_ppo_micro_batch_size_per_gpu=2
 MODEL_ID=${MODEL_ID:-moonshotai/Moonlight-16B-A3B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
 
+SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}" .sh)"
+LOG_DIR=/root/.cache/nightly_log/$SCRIPT_NAME
+mkdir -p $LOG_DIR
+
 TRAIN_FILE=$HOME/.cache/datasets/dapo-math-17k.parquet
 TEST_FILE=$HOME/.cache/datasets/dapo-math-17k.parquet
 
@@ -128,6 +132,7 @@ python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.ref.megatron.param_offload=True \
     ++actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=fused \
     actor_rollout_ref.actor.megatron.use_mbridge=$USE_MBRIDGE \
+    actor_rollout_ref.actor.megatron.vanilla_mbridge=True \
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=$USE_DIST_CKPT \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${ACTOR_TP} \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${ACTOR_PP} \
@@ -188,4 +193,4 @@ python3 -m recipe.dapo.main_dapo \
     trainer.save_freq=-1 \
     trainer.resume_mode=auto \
     trainer.log_val_generations=10 \
-    trainer.total_training_steps=15 2>&1 | tee /root/.cache/nightly_log/moonlight/dapo_moonlight16b_megatron_npu-$(date +%Y%m%d_%H%M).log
+    trainer.total_training_steps=15 2>&1 | tee $LOG_DIR/$SCRIPT_NAME.log

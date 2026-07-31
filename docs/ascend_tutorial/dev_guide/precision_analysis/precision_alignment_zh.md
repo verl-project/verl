@@ -57,7 +57,7 @@ seed_all(mode=True)
 
 在多卡通信情况下：
 
-- HCCL通信下(默认场景):
+- HCCL通信下（默认场景）：
   
   -  export CLOSE_MATMUL_K_SHIFT=1
   -  export ATB_MATMUL_SHUFFLE_K_ENABLE=0
@@ -100,8 +100,8 @@ trainer.rollout_data_dir='/path/dump/data_json'
 NPU上开启如下参数，复用上一步生成的序列，端到端运行：
 
 ```bash
-actor_rollout_ref.rollout.skip_rollout=True \
-actor_rollout_ref.rollout.skip_dump_dir="/path/dump/data_json" \
+skip.rollout.enable=True \
+skip.rollout.dump_dir=/path/to/rollout_dump \
 ```
 
 **第三步：对比指标**

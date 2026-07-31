@@ -136,6 +136,7 @@ ACTOR_CONFIG=(
     # Model Weights Management
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=False
     actor_rollout_ref.actor.megatron.use_mbridge=True
+    actor_rollout_ref.actor.megatron.vanilla_mbridge=True
     # Transformer Architecture Optimizations
     +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
@@ -161,6 +162,7 @@ REF_CONFIG=(
     # Model Weights Management
     actor_rollout_ref.ref.megatron.use_dist_checkpointing=False
     actor_rollout_ref.ref.megatron.use_mbridge=True
+    actor_rollout_ref.ref.megatron.vanilla_mbridge=True
 )
 
 ROLLOUT_CONFIG=(
@@ -241,4 +243,4 @@ python3 -m verl.trainer.main_ppo \
     "${ALGORITHM_CONFIG[@]}" \
     "${TRAINER_CONFIG[@]}" \
     "${PROF_CONFIG[@]}" \
-    "$@" | tee $LOG_DIR/$SCRIPT_NAME-$(date +%Y%m%d_%H%M).log
+    "$@" | tee $LOG_DIR/$SCRIPT_NAME.log

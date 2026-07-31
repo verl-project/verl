@@ -15,4 +15,13 @@ _target_: verl.workers.config.MindSpeedActorConfig
 
 strategy: mindspeed
 
-load_weight: True
+# MindSpeed checkpoint overrides: swap the base CheckpointConfig for
+# MindSpeedCheckpointConfig which inherits ``mbridge_config`` from
+# McoreCheckpointConfig (MindSpeed reuses the Megatron checkpoint manager).
+checkpoint:
+
+  # Target dataclass for this configuration
+  _target_: verl.workers.config.MindSpeedCheckpointConfig
+
+  # Mbridge config extension.
+  mbridge_config: {}

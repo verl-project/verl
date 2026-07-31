@@ -18,7 +18,18 @@ import pytest
 
 from verl.utils.flops_counter import FlopsCounter
 
-VALID_CONFIG_TYPE = {"llama", "qwen2", "qwen3", "qwen3_moe", "deepseek_v3", "mistral", "gemma3_text", "apertus"}
+VALID_CONFIG_TYPE = {
+    "llama",
+    "qwen2",
+    "qwen3",
+    "qwen3_moe",
+    "qwen3_5",
+    "qwen3_5_moe",
+    "deepseek_v3",
+    "mistral",
+    "gemma3_text",
+    "apertus",
+}
 
 
 class Config:
@@ -302,6 +313,85 @@ CONFIG = {
         # S*(2*V*H + L*(4*H**2 + k_mlp*H*I + k_qkn*H)) * (SUM[seqlen]) + 6*SUM[seqlen**2]*L*H
         "expected_flops_tuple": (194825353691136 / 1e12, 692711652851712 / 1e12),
     },
+    "qwen3_5": {
+        "config": {  # Qwen/Qwen3.5-27B
+            "model_type": "qwen3_5",
+            "text_config": {
+                "vocab_size": 248320,
+                "hidden_size": 4096,
+                "intermediate_size": 12288,
+                "num_hidden_layers": 32,
+                "num_attention_heads": 16,
+                "num_key_value_heads": 4,
+                "head_dim": 256,
+                "linear_conv_kernel_dim": 4,
+                "linear_key_head_dim": 128,
+                "linear_value_head_dim": 128,
+                "linear_num_key_heads": 16,
+                "linear_num_value_heads": 32,
+                "layer_types": ["linear_attention" if bool((i + 1) % 4) else "full_attention" for i in range(32)],
+            },
+            "vision_config": {
+                "num_heads": 16,
+                "depth": 27,
+                "hidden_size": 1152,
+                "intermediate_size": 4304,
+                "out_hidden_size": 4096,
+                "spatial_merge_size": 2,
+                "temporal_patch_size": 2,
+                "in_channels": 3,
+                "patch_size": 16,
+            },
+        },
+        "batch_seqlens_tuple": ([512, 1024, 2048], [4096, 4096, 4096]),
+        "images_seqlens_tuple": ([512, 1024, 2048], [4096, 4096, 4096]),
+        # Text FLOPs include dense MLP, hybrid full attention/GatedDeltaNet projections, embeddings/lm_head,
+        # full-attention quadratic terms, and GatedDeltaNet recurrence. ViT FLOPs reuse Qwen3-VL accounting.
+        "expected_flops_tuple": (
+            206090394402816 / 1e12,
+            724521757704192 / 1e12,
+        ),
+    },
+    "qwen3_5_moe": {
+        "config": {  # Qwen/Qwen3.5-35B-A3B
+            "model_type": "qwen3_5_moe",
+            "text_config": {
+                "vocab_size": 248320,
+                "hidden_size": 2048,
+                "num_hidden_layers": 40,
+                "num_attention_heads": 16,
+                "num_key_value_heads": 2,
+                "head_dim": 256,
+                "linear_conv_kernel_dim": 4,
+                "linear_key_head_dim": 128,
+                "linear_value_head_dim": 128,
+                "linear_num_key_heads": 16,
+                "linear_num_value_heads": 32,
+                "moe_intermediate_size": 512,
+                "shared_expert_intermediate_size": 512,
+                "num_experts_per_tok": 8,
+                "num_experts": 256,
+                "layer_types": ["linear_attention" if bool((i + 1) % 4) else "full_attention" for i in range(40)],
+            },
+            "vision_config": {
+                "num_heads": 16,
+                "depth": 27,
+                "hidden_size": 1152,
+                "intermediate_size": 4304,
+                "out_hidden_size": 2048,
+                "spatial_merge_size": 2,
+                "temporal_patch_size": 2,
+                "in_channels": 3,
+                "patch_size": 16,
+            },
+        },
+        "batch_seqlens_tuple": ([512, 1024, 2048], [4096, 4096, 4096]),
+        "images_seqlens_tuple": ([512, 1024, 2048], [4096, 4096, 4096]),
+        "expected_flops_tuple": (
+            88082762170368 / 1e12,
+            321470349705216 / 1e12,
+        ),
+    },
     "qwen3_vl": {
         "config": {  # Qwen/Qwen3-VL-8B
             "model_type": "qwen3_vl",
@@ -447,6 +537,8 @@ CONFIG = {
         "gemma3_text",
         "apertus",
         "gpt_oss",
+        "qwen3_5",
+        "qwen3_5_moe",
         "qwen3_vl",
         "qwen3_vl_moe",
     ],

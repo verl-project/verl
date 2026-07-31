@@ -36,12 +36,66 @@ class NsightToolConfig(BaseConfig):
 
 
 @dataclass
+class TorchProfilerScheduleConfig(BaseConfig):
+    """Schedule for ``torch.profiler.schedule``.
+
+    Field names mirror the official ``torch.profiler.schedule`` API. The profiler
+    cycles through ``skip_first`` -> (``wait`` -> ``warmup`` -> ``active``) x ``repeat``.
+    Scheduling is only enabled when ``active > 0``; otherwise the profiler runs in
+    continuous mode (collect everything between start and stop).
+    """
+
+    # Number of steps to skip at the very beginning (not counted in the cycle).
+    skip_first: int = 0
+    # Number of steps to idle (no collection) at the start of each cycle.
+    wait: int = 0
+    # Number of steps to warm up (tracing on, data discarded) each cycle.
+    warmup: int = 0
+    # Number of steps to actively record each cycle. <= 0 disables scheduling.
+    active: int = 0
+    # Number of cycles to repeat. 0 means repeat until profiling stops.
+    repeat: int = 0
+    name: str = "torch_schedule"
+
+    def __post_init__(self) -> None:
+        """config validation logics go here"""
+        for field_name in ("skip_first", "wait", "warmup", "active", "repeat"):
+            value = getattr(self, field_name)
+            assert isinstance(value, int), f"{field_name} must be int, got {type(value)}"
+            assert value >= 0, f"{field_name} must be >= 0, got {value}"
+
+    @property
+    def enabled(self) -> bool:
+        """Scheduling only takes effect when at least one active step is requested."""
+        return self.active > 0
+
+    def to_torch_kwargs(self) -> dict:
+        """Return kwargs for ``torch.profiler.schedule``."""
+        return {
+            "skip_first": self.skip_first,
+            "wait": self.wait,
+            "warmup": self.warmup,
+            "active": self.active,
+            "repeat": self.repeat,
+        }
+
+
+@dataclass
 class TorchProfilerToolConfig(BaseConfig):
     """Torch profiler tool config."""
 
     # options: cuda, cpu, memory, shapes, stack
     contents: list[str] = field(default_factory=list)
     discrete: bool = False
+    # Start collecting profiler data from this response-token index.
+    # None means collect from the beginning.
+    profile_token_start: Optional[int] = None
+    # Stop collecting profiler data at this response-token index (exclusive).
+    # None means collect until the end.
+    profile_token_end: Optional[int] = None
+    # Optional torch.profiler.schedule (wait/warmup/active/repeat/skip_first).
+    # When set with active > 0, DistProfiler.step() drives the schedule per mini-batch.
+    schedule: Optional[TorchProfilerScheduleConfig] = None
     name: str = "torch"
 
     def __post_init__(self) -> None:
@@ -52,6 +106,14 @@ class TorchProfilerToolConfig(BaseConfig):
                 f"Profiler contents only supports {__support_contents}, but gets {content}"
             )
         assert isinstance(self.contents, list), f"Profiler contents must be of type list, got {type(self.contents)}"
+        start = self.profile_token_start
+        stop = self.profile_token_end
+        for name, value in (("profile_token_start", start), ("profile_token_end", stop)):
+            if value is not None:
+                assert isinstance(value, int), f"{name} must be int or None, got {type(value)}"
+                assert value >= 0, f"{name} must be >= 0, got {value}"
+        if start is not None and stop is not None:
+            assert stop > start, f"profile_token_end must be > profile_token_start, got start={start}, stop={stop}"
 
 
 @dataclass
@@ -116,6 +178,12 @@ class NPUToolConfig(NsightToolConfig):
 
     # Whether to automatically parse the data.
     analysis: bool = False
+    # Start collecting profiler data from this response-token index.
+    # None means collect from the beginning.
+    profile_token_start: Optional[int] = None
+    # Stop collecting profiler data at this response-token index (exclusive).
+    # None means collect until the end.
+    profile_token_end: Optional[int] = None
 
     name: str = "npu"
 
@@ -131,6 +199,14 @@ class NPUToolConfig(NsightToolConfig):
         assert self.level in ["level_none", "level0", "level1", "level2"], (
             f"Profiler level only supports level0, 1, 2, and level_none, but gets {self.level}"
         )
+        start = self.profile_token_start
+        stop = self.profile_token_end
+        for name, value in (("profile_token_start", start), ("profile_token_end", stop)):
+            if value is not None:
+                assert isinstance(value, int), f"{name} must be int or None, got {type(value)}"
+                assert value >= 0, f"{name} must be >= 0, got {value}"
+        if start is not None and stop is not None:
+            assert stop > start, f"profile_token_end must be > profile_token_start, got start={start}, stop={stop}"
 
 
 @dataclass
@@ -221,6 +297,13 @@ def build_vllm_profiler_args(profiler_config: ProfilerConfig, tool_config: BaseC
     # vLLM >= 0.13.0 supports controlling profiler via arguments.
     # While it maintains backward compatibility with environment variables,
     # we provide arguments explicitly to align with the new API style.
+    profile_token_start = getattr(tool_config, "profile_token_start", None)
+    profile_token_end = getattr(tool_config, "profile_token_end", None)
+
+    # vLLM uses 0 to indicate immediate start / no upper bound.
+    delay_iterations = profile_token_start if profile_token_start is not None else 0
+    max_iterations = (profile_token_end - delay_iterations) if profile_token_end is not None else 0
+
     return {
         "profiler_config": json.dumps(
             {
@@ -229,6 +312,9 @@ def build_vllm_profiler_args(profiler_config: ProfilerConfig, tool_config: BaseC
                 "torch_profiler_with_memory": with_memory,
                 "torch_profiler_with_stack": with_stack,
                 "torch_profiler_record_shapes": record_shapes,
+                "delay_iterations": delay_iterations,
+                "max_iterations": max_iterations,
+                "ignore_frontend": "true",
             }
         )
     }
@@ -253,8 +339,20 @@ def build_sglang_profiler_args(profiler_config: ProfilerConfig, tool_config: Bas
     if "memory" in contents:
         warnings.warn("SGLang profiler does not support memory profiling. Ignoring memory content.", stacklevel=2)
 
+    profile_token_start = getattr(tool_config, "profile_token_start", None)
+    profile_token_end = getattr(tool_config, "profile_token_end", None)
+    # SGLang API uses Optional[int], keep None for "not set" and map 0 to "no upper bound".
+    start_step = profile_token_start
+    num_steps = (
+        profile_token_end - (profile_token_start if profile_token_start is not None else 0)
+        if profile_token_end is not None
+        else None
+    )
+
     return {
         "output_dir": os.path.join(profiler_config.save_path, f"agent_loop_rollout_replica_{rank}"),
         "with_stack": "stack" in contents or "module" in contents,
         "record_shapes": "shapes" in contents,
+        "start_step": start_step,
+        "num_steps": num_steps,
     }

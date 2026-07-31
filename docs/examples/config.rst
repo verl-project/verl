@@ -158,7 +158,11 @@ Actor/Rollout/Reference Policy
         fsdp_size: -1
       checkpoint:
         # What to include in saved checkpoints
-        # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
+        # 'hf_model' saves the full model in HuggingFace format. For Megatron this requires
+        # actor.megatron.use_mbridge=True (the default); 'model' and 'hf_model' then produce
+        # the same HF checkpoint and are deduplicated (saved once). With mbridge disabled,
+        # only the sharded 'model' is supported -- use verl.model_merger after training to
+        # convert it to HF format.
         save_contents: ['model', 'optimizer', 'extra']
         # For more flexibility, you can specify the contents to load from the checkpoint.
         load_contents: ${actor_rollout_ref.actor.checkpoint.save_contents}
@@ -324,11 +328,30 @@ Actor/Rollout/Reference Policy
 
 - ``actor_rollout_ref.actor.checkpoint``: The configurations of checkpoint function in actor
 
-  - ``save_contents``: The contents to save in the checkpoint. By default, we save model, optimizer and extra information in the checkpoint.
-    The extra information includes Rng states currently, FSDP supported lr_scheduler, and Megatron opt_param_scheduler will coming soon.
-    We do not store hf_model in checkpoint by default, but we provide a tool in ``scripts/model_merge.py`` to convert checkpoint format to hf format.
+  - ``save_contents``: The contents to save in the checkpoint. Accepts any subset of
+    ``model``, ``optimizer``, ``extra`` and ``hf_model``. Default is
+    ``['model', 'optimizer', 'extra']``. The extra information includes RNG states (and the
+    LR scheduler for FSDP, the ``opt_param_scheduler`` for Megatron).
+    For Megatron, the meaning of ``model`` depends on the active backend
+    (``actor.megatron.use_mbridge``):
+
+    - With ``use_mbridge=True`` (default): both ``model`` and ``hf_model`` save the full model
+      in HuggingFace format under ``${ckpt_path}/model/huggingface/`` via mbridge; if both are
+      listed, the model is saved once (deduplicated).
+    - With ``use_mbridge=False``: ``model`` saves Megatron sharded weights via
+      ``dist_checkpointing`` under ``${ckpt_path}/model/dist_ckpt/``; ``hf_model`` is **not**
+      supported in this mode -- use ``python -m verl.model_merger merge --backend megatron``
+      to convert sharded checkpoints to HF format after training.
+
+    For FSDP, ``hf_model`` saves the full HF model on rank 0 in addition to the sharded
+    ``model`` shards.
 
   - ``load_contents``: The contents to load in the checkpoint, you can specify different checkpoint loading contents. By default, it is the same with ``save_checkpoint``.
+
+  - ``save_lora_only`` (bool, default ``False``): When ``True`` and the model has LoRA adapters,
+    only LoRA/adapter weights are saved instead of the full model state dict. On load, LoRA-only
+    checkpoints are auto-detected and merged into the base model via ``strict=False``.
+    Reduces checkpoint size dramatically (e.g. ~150 MiB vs ~54 GiB for a 27B model).
 
 **Reference Model**
 
@@ -588,7 +611,7 @@ Trainer
 - ``trainer.total_epochs``: Number of epochs in training.
 - ``trainer.project_name``: For wandb, swanlab, mlflow
 - ``trainer.experiment_name``: For wandb, swanlab, mlflow
-- ``trainer.logger``: Support console and wandb, swanlab, mlflow, tensorboard, trackio
+- ``trainer.logger``: Support console, wandb, swanlab, mlflow, tensorboard, trackio, and rl_insight.
 - ``trainer.log_val_generations``: The number of logged generation during validation (default ``0``)
 - ``trainer.nnodes``: Number of nodes used in the training.
 - ``trainer.n_gpus_per_node``: Number of GPUs per node.
