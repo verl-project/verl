@@ -295,7 +295,28 @@ def gptmodel_forward_model_engine(
         model_kwargs["video_grid_thw"] = multi_modal_inputs["video_grid_thw"].to(input_ids.device)
 
     batch_size = input_ids.shape[0]
+
     if data_format == "thd":
+        use_prefix_tree = (logits_processor_args or {}).get("use_prefix_tree", False)
+        prefix_tree_attention = (logits_processor_args or {}).get("prefix_tree_attention", "flex")
+
+        if use_prefix_tree:
+            from verl.utils.prefix_tree.forward import unfuse_try_forward_prefix_tree
+
+            output = unfuse_try_forward_prefix_tree(
+                model,
+                input_ids,
+                logits_processor_args,
+                prefix_tree_attention,
+                logits_processor,
+                post_process,
+                model_kwargs,
+                vision_model,
+                mtp_enable_train,
+            )
+            if output is not None:
+                return output
+
         input_ids_rmpad, packed_seq_params, position_ids_rmpad = preprocess_thd_engine(
             input_ids,
             pre_process=pre_process or (post_process and mtp_enable_train),
@@ -420,7 +441,6 @@ def gptmodel_forward_model_engine(
         if logits_processor_args and "response_attention_mask" in logits_processor_args:
             logits_processor_args.pop("response_attention_mask")
 
-        # For VLM model, need to pass bshd format `input_ids` and `attention_mask`.
         if vision_model:
             input_ids_bshd, attention_mask = build_vlm_attn_mask_bshd(
                 input_ids, batch_size, pad_token_id, forced_max_seqlen=forced_max_seqlen

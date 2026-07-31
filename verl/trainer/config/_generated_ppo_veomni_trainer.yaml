@@ -401,6 +401,8 @@ actor_rollout_ref:
     enable_gradient_checkpointing: true
     enable_activation_offload: false
     use_remove_padding: true
+    use_prefix_tree: false
+    prefix_tree_attention: magi
     lora_rank: 0
     lora_alpha: 16
     target_modules: all-linear
@@ -622,6 +624,8 @@ critic:
     enable_gradient_checkpointing: true
     enable_activation_offload: false
     use_remove_padding: true
+    use_prefix_tree: false
+    prefix_tree_attention: magi
     lora_rank: 0
     lora_alpha: 16
     target_modules: all-linear

@@ -157,6 +157,7 @@ verl is fast with:
    data/transfer_queue.md
    advance/grafana_prometheus.md
    advance/mtp.md
+   advance/prefix_tree.md
    advance/determinism.md
 
 .. toctree::

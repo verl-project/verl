@@ -41,6 +41,7 @@ from verl.experimental.agent_loop import AgentLoopManager
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.experimental.teacher_loop import MultiTeacherModelManager
 from verl.protocol import DataProto, DataProtoFuture
+from verl.utils.prefix_tree.trainer import build_global_trie
 from verl.single_controller.ray import (
     RayClassWithInitArgs,
     RayWorkerGroup,
@@ -556,6 +557,16 @@ class PPOTrainer(ABC):
 
         # 3. balance batch across data parallel groups
         batch = self._balance_batch(batch, metrics=metrics)
+
+        # 3b. build the global prefix trie ONCE on the driver and attach it to
+        # batch.extra_info so every worker reuses it (workers' prepare_prefix_tree_
+        # micro_batches reads prefix_tree + leaf_idx via NonTensorData). Without this,
+        # each worker rebuilds the trie per micro-batch (~13s/step, starving the GPU)
+        # — and per-mb rebuild is wrong (local-only prefix sharing). See
+        # verl/utils/prefix_tree/{dynamic,magi}.py (rebuild fallbacks removed -> raise).
+        if self.config.actor_rollout_ref.model.get("use_prefix_tree", False):
+            with marked_timer("build_global_trie", timing_raw, color="magenta"):
+                batch = self._build_and_attach_global_trie(batch, metrics=metrics)
 
         # 4. compute old_log_prob
         with marked_timer("old_log_prob", timing_raw, color="blue"):
@@ -1483,6 +1494,64 @@ class PPOTrainer(ABC):
         metrics.update(global_balance_stats)
         return batch
 
+    def _build_and_attach_global_trie(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
+        """Build the global prefix trie once on the driver and attach to the batch.
+
+        - prefix_tree (a shared Python TrieNode object) -> batch.extra_info, which the
+          worker converts to NonTensorData (preserved unchanged across micro-batch
+          index_select, which is correct: the global trie is shared by all samples).
+        - leaf_idx (a per-sample torch.long tensor) -> written back to TQ as a real
+          tensor field, so the worker's TensorDict has it as a true tensor that
+          index_select slices per micro-batch. (Storing leaf_idx in extra_info/NonTensorData
+          breaks micro-batch slicing -> "Boolean value of Tensor is ambiguous" in
+          mbs_groups_from_leaf_idx.)
+
+        Mirrors v0's build_global_trie (ray_trainer.py) which v1's trainer_base had
+        dropped — causing every worker to rebuild the trie per micro-batch (13s/step,
+        GPU-starved) and incorrectly (local sharing instead of global).
+        """
+        # Materialize input_ids (+ attention_mask if present) from TQ to build the trie.
+        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=["input_ids"])
+        input_ids = data["input_ids"]
+        attn = data.get("attention_mask", None) if hasattr(data, "get") else None
+        # Wrap in a throwaway DataProto so build_global_trie (expects batch.batch[...]) runs unchanged.
+        proto = DataProto()
+        proto.batch = TensorDict({"input_ids": input_ids}, batch_size=[len(input_ids)])
+        if attn is not None:
+            proto.batch["attention_mask"] = attn
+        build_global_trie(proto, metrics=metrics, rollout_n=None)
+        trie = proto.meta_info.get("prefix_tree", None)
+        leaf_idx = proto.batch.get("leaf_idx", None)
+        if trie is None or leaf_idx is None:
+            raise RuntimeError(
+                "_build_and_attach_global_trie: build_global_trie did not attach prefix_tree/leaf_idx."
+            )
+        # Shared trie object -> extra_info (NonTensorData on worker, preserved across slicing).
+        batch.extra_info["prefix_tree"] = trie
+        # Cache on self: batch.extra_info is lost when subsequent kv_batch_put reassigns
+        # `batch` (e.g. _compute_old_log_prob does `batch = kv_batch_put(...)`), so each
+        # compute method re-injects prefix_tree before its RPC via _inject_prefix_tree().
+        self._global_prefix_tree = trie
+        # Per-sample leaf_idx -> TQ tensor field (true tensor, sliced per micro-batch).
+        from verl.utils import tensordict_utils as tu
+        leaf_td = tu.get_tensordict({"leaf_idx": leaf_idx})
+        tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=leaf_td)
+        return batch
+
+    def _inject_prefix_tree(self, batch: KVBatchMeta) -> KVBatchMeta:
+        """Re-attach the cached global trie to batch.extra_info before a worker RPC.
+
+        extra_info does not persist across RPCs (kv_batch_put returns a fresh KVBatchMeta),
+        so _compute_old_log_prob / _update_actor / _compute_ref_log_prob each re-inject.
+        leaf_idx lives in TQ (persists), only the shared trie object needs re-attaching.
+        """
+        trie = getattr(self, "_global_prefix_tree", None)
+        if trie is not None:
+            batch.extra_info["prefix_tree"] = trie
+        return batch
+
+
+
     def _compute_old_log_prob(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the old log prob of the batch."""
         # Operating Mode Selection:
@@ -1507,6 +1576,7 @@ class PPOTrainer(ABC):
                 "temperature": self.config.actor_rollout_ref.rollout.temperature,
             }
         )
+        self._inject_prefix_tree(batch)
         output: KVBatchMeta = self.actor_rollout_wg.compute_log_prob(batch)
         assert len(output) == len(batch)
 
@@ -1708,6 +1778,7 @@ class PPOTrainer(ABC):
             "temperature": self.config.actor_rollout_ref.rollout.temperature,
         }
         batch.extra_info.update(extra_info)
+        self._inject_prefix_tree(batch)
 
         output: TensorDict = self.actor_rollout_wg.update_actor(batch)
         output = rename_dict(output["metrics"], "actor/")

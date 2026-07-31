@@ -39,6 +39,10 @@ enable_activation_offload: False
 # whether to use remove padding. Only valid when we use hf model definition
 use_remove_padding: True
 
+# Prefix-tree shared-prefix deduplication for actor/SFT training.
+use_prefix_tree: false
+prefix_tree_attention: magi
+
 # Set to positive value to enable LoRA (e.g., 32)
 lora_rank: 0
 
