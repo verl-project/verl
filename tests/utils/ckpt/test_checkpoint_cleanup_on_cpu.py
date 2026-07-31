@@ -12,11 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import multiprocessing
 import os
 import shutil
 import tempfile
 
 import pytest
+
+
+def _distributed_cleanup_worker(rank, world_size, init_method, checkpoint_path, results):
+    import torch.distributed as dist
+
+    from verl.utils.checkpoint.checkpoint_manager import BaseCheckpointManager
+
+    dist.init_process_group("gloo", init_method=init_method, rank=rank, world_size=world_size)
+    try:
+        manager = BaseCheckpointManager.__new__(BaseCheckpointManager)
+        manager.rank = rank
+        manager._cleanup_local_checkpoint_after_load(checkpoint_path, enabled=True)
+        results.put((rank, os.path.exists(checkpoint_path)))
+    finally:
+        dist.destroy_process_group()
 
 
 class TestCheckpointCleanupLogic:
@@ -137,3 +153,76 @@ class TestCheckpointCleanupLogic:
         manager.register_checkpoint(ckpt_300, 1)
         assert not os.path.exists(ckpt_200)
         assert manager.previous_saved_paths == [ckpt_300]
+
+    def test_cleanup_after_load_removes_role_dir_on_rank_zero(self, manager, monkeypatch):
+        checkpoint_path = self._create_checkpoint_dir(100)
+        events = []
+        remove_path = manager.remove_previous_save_local_path
+
+        def record_remove(path):
+            events.append("remove")
+            remove_path(path)
+
+        monkeypatch.setattr("torch.distributed.barrier", lambda: events.append("barrier"))
+        monkeypatch.setattr(manager, "remove_previous_save_local_path", record_remove)
+
+        manager._cleanup_local_checkpoint_after_load(checkpoint_path, enabled=True)
+
+        assert not os.path.exists(checkpoint_path)
+        assert events == ["barrier", "remove", "barrier"]
+
+    def test_cleanup_after_load_is_rank_zero_only(self, manager, monkeypatch):
+        checkpoint_path = self._create_checkpoint_dir(100)
+        manager.rank = 1
+        events = []
+        monkeypatch.setattr("torch.distributed.barrier", lambda: events.append("barrier"))
+        monkeypatch.setattr(
+            manager,
+            "remove_previous_save_local_path",
+            lambda path: events.append("remove"),
+        )
+
+        manager._cleanup_local_checkpoint_after_load(checkpoint_path, enabled=True)
+
+        assert os.path.exists(checkpoint_path)
+        assert events == ["barrier", "barrier"]
+
+    def test_cleanup_after_load_disabled_preserves_role_dir(self, manager, monkeypatch):
+        checkpoint_path = self._create_checkpoint_dir(100)
+        events = []
+        monkeypatch.setattr("torch.distributed.barrier", lambda: events.append("barrier"))
+
+        manager._cleanup_local_checkpoint_after_load(checkpoint_path, enabled=False)
+
+        assert os.path.exists(checkpoint_path)
+        assert events == []
+
+    def test_cleanup_after_load_with_two_gloo_processes(self):
+        checkpoint_path = self._create_checkpoint_dir(100)
+        init_file = os.path.join(self.test_dir, "gloo-init")
+        init_method = f"file://{init_file}"
+        context = multiprocessing.get_context("spawn")
+        results = context.Queue()
+        processes = [
+            context.Process(
+                target=_distributed_cleanup_worker,
+                args=(rank, 2, init_method, checkpoint_path, results),
+            )
+            for rank in range(2)
+        ]
+
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=15)
+
+        exitcodes = [process.exitcode for process in processes]
+        try:
+            assert exitcodes == [0, 0]
+            assert sorted(results.get(timeout=1) for _ in range(2)) == [(0, False), (1, False)]
+            assert not os.path.exists(checkpoint_path)
+        finally:
+            for process in processes:
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=1)

@@ -22,7 +22,9 @@ Uses real megatron.core with gloo backend on a single CPU process.
 
 import os
 import shutil
+import sys
 import tempfile
+import types
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -109,6 +111,7 @@ def _make_manager(
     bridge="auto",
     peft_cls=None,
     use_distributed_optimizer=False,
+    use_megatron_fsdp=False,
 ):
     if save_contents is None:
         save_contents = ["model", "optimizer", "extra"]
@@ -148,6 +151,7 @@ def _make_manager(
         optimizer_scheduler=lr_scheduler,
         use_distributed_optimizer=use_distributed_optimizer,
         use_dist_checkpointing=use_dist_checkpointing,
+        use_megatron_fsdp=use_megatron_fsdp,
         bridge=bridge,
         peft_cls=peft_cls,
     )
@@ -537,6 +541,73 @@ class TestLoadCheckpointDispatch:
         assert set(calls) == {"extra"}
         assert "rng_state" in calls["extra"]
         mgr.model[0].sharded_state_dict.assert_not_called()
+
+    @patch(_PATCH_LOAD_META, return_value=None)
+    @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
+    def test_load_checkpoint_removes_role_directory_when_enabled(self, mock_load_dc, _mock_meta):
+        _make_v2_layout(self.ckpt_path, "extra")
+        mock_load_dc.return_value = {"rng_state": [{"random_rng_state": None}]}
+        manager = _make_manager(load_contents=["extra"])
+
+        with patch.object(manager, "load_rng_states"):
+            manager.load_checkpoint(self.ckpt_path, del_local_after_load=True)
+
+        assert not os.path.exists(self.ckpt_path)
+
+    @patch(_PATCH_LOAD_META, return_value=None)
+    @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
+    def test_load_checkpoint_disabled_does_not_add_barrier(self, mock_load_dc, _mock_meta):
+        manager = _make_manager(load_contents=[])
+
+        with patch("torch.distributed.barrier") as mock_barrier:
+            manager.load_checkpoint(self.ckpt_path)
+
+        mock_barrier.assert_not_called()
+        assert os.path.exists(self.ckpt_path)
+
+    def test_megatron_fsdp_load_removes_role_directory_when_enabled(self):
+        model_dist_path = os.path.join(self.ckpt_path, "model", "dist_ckpt")
+        os.makedirs(model_dist_path, exist_ok=True)
+        with open(os.path.join(model_dist_path, ".metadata"), "w") as f:
+            f.write("")
+
+        manager = _make_manager(load_contents=[], use_megatron_fsdp=True)
+        checkpointing = types.ModuleType("megatron.bridge.training.checkpointing")
+        checkpointing.load_fsdp_dtensor_checkpoint = MagicMock(return_value=({}, None, None, None))
+
+        with (
+            patch.dict(sys.modules, {"megatron.bridge.training.checkpointing": checkpointing}),
+            patch.object(manager, "_build_sharded_state_dict_metadata", return_value={}),
+            patch.object(manager, "_build_model_sharded_state_dict", return_value={}),
+            patch.object(manager, "_build_optimizer_state_dict", return_value={}),
+            patch.object(manager, "_build_extra_state_dict", return_value={}),
+        ):
+            manager._load_megatron_fsdp_checkpoint(self.ckpt_path, del_local_after_load=True)
+
+        assert not os.path.exists(self.ckpt_path)
+
+    def test_megatron_fsdp_load_disabled_does_not_add_barrier(self):
+        model_dist_path = os.path.join(self.ckpt_path, "model", "dist_ckpt")
+        os.makedirs(model_dist_path, exist_ok=True)
+        with open(os.path.join(model_dist_path, ".metadata"), "w") as f:
+            f.write("")
+
+        manager = _make_manager(load_contents=[], use_megatron_fsdp=True)
+        checkpointing = types.ModuleType("megatron.bridge.training.checkpointing")
+        checkpointing.load_fsdp_dtensor_checkpoint = MagicMock(return_value=({}, None, None, None))
+
+        with (
+            patch.dict(sys.modules, {"megatron.bridge.training.checkpointing": checkpointing}),
+            patch.object(manager, "_build_sharded_state_dict_metadata", return_value={}),
+            patch.object(manager, "_build_model_sharded_state_dict", return_value={}),
+            patch.object(manager, "_build_optimizer_state_dict", return_value={}),
+            patch.object(manager, "_build_extra_state_dict", return_value={}),
+            patch("torch.distributed.barrier") as mock_barrier,
+        ):
+            manager._load_megatron_fsdp_checkpoint(self.ckpt_path)
+
+        mock_barrier.assert_not_called()
+        assert os.path.exists(self.ckpt_path)
 
     @patch(_PATCH_LOAD_META, return_value=None)
     @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")

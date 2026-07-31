@@ -29,7 +29,7 @@ from transformers import GenerationConfig, PreTrainedTokenizer, ProcessorMixin
 from transformers.dynamic_module_utils import custom_object_save
 
 from verl.utils.device import is_cuda_available
-from verl.utils.fs import copy_to_local, is_non_local, local_mkdir_safe
+from verl.utils.fs import copy_to_local, local_mkdir_safe
 from verl.utils.fsdp_utils import fsdp_version, get_fsdp_full_state_dict, get_fsdp_state_ctx
 from verl.utils.logger import log_with_rank
 from verl.utils.transformers_compat import drop_tied_target_keys, get_auto_model_for_vision2seq
@@ -219,20 +219,11 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 self.lr_scheduler.load_state_dict(lr_scheduler_state_dict)
                 log_with_rank(f"Loaded lr_scheduler from {remote_extra_state_path}", rank=self.rank, logger=logger)
 
-        if self.rank == 0 and del_local_after_load:
-            try:
-                os.remove(local_model_path) if is_non_local(local_model_path) else None
-                os.remove(local_optim_path) if is_non_local(local_optim_path) else None
-                os.remove(local_extra_state_path) if is_non_local(local_extra_state_path) else None
-            except Exception as e:
-                log_with_rank(
-                    f"remove local resume ckpt file after loading failed, exception {e} will be ignored",
-                    rank=self.rank,
-                    logger=logger,
-                )
-
-        # wait for everyone to load checkpoints
-        torch.distributed.barrier()
+        if del_local_after_load:
+            self._cleanup_local_checkpoint_after_load(local_path, enabled=True)
+        else:
+            # Preserve the existing end-of-load synchronization when cleanup is disabled.
+            torch.distributed.barrier()
 
     def save_checkpoint(self, local_path: str, hdfs_path: str = None, global_step: int = 0, max_ckpt_to_keep=None):
         """

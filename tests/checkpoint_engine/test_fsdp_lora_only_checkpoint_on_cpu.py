@@ -228,6 +228,54 @@ class TestFSDPCheckpointManagerLoraOnly:
 
         assert model_after._fsdp_wrapped_module.base_weight.item() == 42.0
 
+    def test_load_checkpoint_preserves_barrier_when_cleanup_disabled(self, tmp_path, monkeypatch):
+        model = _FakeFSDPModel(has_lora=True)
+        manager = self._make_fsdp_manager(
+            checkpoint_config={"save_contents": ["model"]},
+            model=model,
+        )
+        checkpoint_path = tmp_path / "actor"
+        manager.save_checkpoint(local_path=str(checkpoint_path), global_step=1)
+
+        barriers = []
+        monkeypatch.setattr("torch.distributed.barrier", lambda: barriers.append("barrier"))
+        loading_manager = self._make_fsdp_manager(
+            checkpoint_config={"load_contents": ["model"]},
+            model=_FakeFSDPModel(has_lora=True),
+        )
+        loading_manager.load_checkpoint(local_path=str(checkpoint_path))
+
+        assert barriers == ["barrier"]
+        assert checkpoint_path.exists()
+
+    def test_load_checkpoint_removes_only_role_directory_when_enabled(self, tmp_path):
+        model = _FakeFSDPModel(has_lora=True)
+        manager = self._make_fsdp_manager(
+            checkpoint_config={"save_contents": ["model"]},
+            model=model,
+        )
+        step_path = tmp_path / "global_step_1"
+        checkpoint_path = step_path / "actor"
+        critic_path = step_path / "critic"
+        critic_path.mkdir(parents=True)
+        data_path = step_path / "data.pt"
+        data_path.write_bytes(b"driver state")
+        manager.save_checkpoint(local_path=str(checkpoint_path), global_step=1)
+
+        loaded_model = _FakeFSDPModel(has_lora=True)
+        loading_manager = self._make_fsdp_manager(
+            checkpoint_config={"load_contents": ["model"]},
+            model=loaded_model,
+        )
+        loading_manager.load_checkpoint(
+            local_path=str(checkpoint_path),
+            del_local_after_load=True,
+        )
+
+        assert not checkpoint_path.exists()
+        assert critic_path.exists()
+        assert data_path.exists()
+
 
 class _FakeConfig:
     """Minimal config mock that supports save_pretrained."""
