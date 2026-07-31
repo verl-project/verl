@@ -84,7 +84,7 @@ Last updated: 07/28/2026.
 
   # NPU 可见设备配置
   export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
-  export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+  export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 
   # 通信网卡配置, 替换为当前节点实际的网卡名称
   export HCCL_SOCKET_IFNAME="SOCKET IFNAME FOR CURRENT NODE"
@@ -116,7 +116,7 @@ Last updated: 07/28/2026.
 
   # 节点数量与单节点 NPU 数量
   NNODES=2
-  NPUS_PER_NODE=8
+  NPUS_PER_NODE=16
 
   # 主节点 IP
   MASTER_ADDR="IP FOR MASTER NODE"
@@ -178,7 +178,7 @@ Last updated: 07/28/2026.
    * - ``NNODES``
      - 参与训练的节点数量
    * - ``NPUS_PER_NODE``
-     - 每个节点的 NPU 数量, 如 Atlas 800T A3 通常为8
+     - 每个节点的 NPU 数量, 如 Atlas 800T A3 通常为16
    * - ``MASTER_ADDR``
      - 主节点 IP, 所有节点的该参数必须相同
    * - ``SOCKET_IFNAME``
