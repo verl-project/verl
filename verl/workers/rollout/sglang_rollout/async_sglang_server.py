@@ -44,7 +44,7 @@ from sglang.srt.managers.tokenizer_manager import ServerStatus
 
 from verl.plugin.platform import get_platform
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import get_visible_devices_keyword
+from verl.utils.device import get_resource_name, get_visible_devices_keyword
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import (
     build_rollout_dist_profiler,
@@ -154,6 +154,10 @@ class SGLangHttpServer:
             f"{nnodes=}, {cuda_visible_devices=}, role={disaggregation_role}"
         )
         os.environ[visible_devices_keyword] = cuda_visible_devices
+        os.environ["VERL_REPLICA_RANK"] = str(replica_rank)
+        flexkv_instance_num = int(os.getenv("FLEXKV_INSTANCE_NUM", "1"))
+        if flexkv_instance_num > 1:
+            os.environ["FLEXKV_INSTANCE_ID"] = str(replica_rank % flexkv_instance_num)
 
         assert disaggregation_role in ("null", "prefill", "decode"), (
             f"disaggregation_role must be 'null'|'prefill'|'decode', got {disaggregation_role!r}"
@@ -274,6 +278,17 @@ class SGLangHttpServer:
                 self._master_port = master_port
 
         engine_kwargs = self.config.get("engine_kwargs", {}).get("sglang", {}) or {}
+        abort_kv_config = self.config.get("abort_kv_reuse", {}) or {}
+        kv_backend = self.config.get("kv_backend")
+        if bool(abort_kv_config.get("enabled", False)) and kv_backend != "flexkv":
+            raise ValueError(
+                "SGLang abort_kv_reuse requires kv_backend=flexkv, "
+                f"got {kv_backend!r}"
+            )
+        if kv_backend == "flexkv":
+            engine_kwargs["enable_flexkv"] = True
+            engine_kwargs["flexkv_config_file"] = os.environ.get("FLEXKV_CONFIG_PATH")
+            engine_kwargs.setdefault("page_size", int(self.config.flexkv_service["tokens_per_block"]))
         attention_backend = engine_kwargs.pop("attention_backend", None)
         mm_attention_backend = engine_kwargs.pop("mm_attention_backend", None)
         # Delta checkpoint engines apply sparse weight updates in place through SGLang's
@@ -422,10 +437,9 @@ class SGLangHttpServer:
         sglang.srt.entrypoints.engine._set_envs_and_config = _set_envs_and_config
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
         server_args = ServerArgs(**args)
-        # For SGLang main branch or version >= 0.5.10
-        # The latest main branch of SGLang has wrapped the _launch_subprocesses function inside the Engine class
-        if version.parse(sglang.__version__) >= version.parse("0.5.10"):
-            from sglang.srt.entrypoints.http_server import Engine
+        # Prefer feature detection because development branches may retain an older version string.
+        if hasattr(sglang.srt.entrypoints.engine.Engine, "_launch_subprocesses"):
+            from sglang.srt.entrypoints.engine import Engine
 
             self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = Engine._launch_subprocesses(
                 server_args=server_args,
@@ -501,7 +515,7 @@ class SGLangHttpServer:
         """See :func:`verl.workers.rollout.sglang_rollout.utils.lora_served_as_adapter`."""
         return lora_served_as_adapter(self.model_config)
 
-    async def sleep(self):
+    async def sleep(self, reset_connector: bool = True):
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
 
@@ -514,14 +528,14 @@ class SGLangHttpServer:
             tags = ["kv_cache", "weights"]
 
         if self.rollout_mode == RolloutMode.HYBRID:
-            obj = ReleaseMemoryOccupationReqInput(tags=tags)
+            obj = ReleaseMemoryOccupationReqInput(tags=tags, reset_connector=reset_connector)
             await self.tokenizer_manager.release_memory_occupation(obj, None)
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            obj = ReleaseMemoryOccupationReqInput(tags=tags)
+            obj = ReleaseMemoryOccupationReqInput(tags=tags, reset_connector=reset_connector)
             await self.tokenizer_manager.release_memory_occupation(obj, None)
         elif self.rollout_mode == RolloutMode.STANDALONE:
             # In standalone mode, resume kv_cache if free_cache_engine is enabled
-            obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
+            obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"], reset_connector=reset_connector)
             await self.tokenizer_manager.release_memory_occupation(obj, None)
 
     async def clear_kv_cache(self):
@@ -725,10 +739,14 @@ class SGLangHttpServer:
         """Set the global steps of the model weights."""
         self.global_steps = global_steps
 
-    async def abort_all_requests(self):
+    async def abort_all_requests(self, checkpoint_kv: bool = False, timeout_s: float = 30.0):
         if self.node_rank != 0:
             return
-        await self.tokenizer_manager.pause_generation(PauseGenerationReqInput(mode="abort"))
+        await self.tokenizer_manager.pause_generation(
+            PauseGenerationReqInput(
+                mode="abort", checkpoint_aborted_kv=checkpoint_kv, checkpoint_timeout_s=timeout_s
+            )
+        )
 
     async def resume_generation(self):
         if self.node_rank != 0:
@@ -797,13 +815,18 @@ class SGLangReplica(RolloutReplica):
         worker_infos = await asyncio.gather(
             *[
                 worker.__ray_call__.remote(
-                    lambda self: (ray.get_runtime_context().get_node_id(), os.environ[visible_devices_keyword])
+                    lambda self: (
+                        ray.get_runtime_context().get_node_id(),
+                        os.environ[visible_devices_keyword],
+                        ray.get_runtime_context().get_accelerator_ids()[get_resource_name()][0],
+                    )
                 )
                 for worker in self.workers
             ]
         )
         worker_cuda_visible_devices = [worker_info[1] for worker_info in worker_infos]
         worker_node_ids = [worker_info[0] for worker_info in worker_infos]
+        worker_service_gpu_ids = [worker_info[2] for worker_info in worker_infos]
         base_gpu_id = 0
         infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
         replica_world_size = infer_tp * self.config.pipeline_model_parallel_size
@@ -833,6 +856,10 @@ class SGLangReplica(RolloutReplica):
             )
 
             node_id = worker_node_ids[node_rank * self.gpus_per_replica_node]
+            node_gpu_ids = worker_service_gpu_ids[
+                node_rank * self.gpus_per_replica_node : (node_rank + 1) * self.gpus_per_replica_node
+            ]
+            service_env = await self._get_flexkv_service_env(node_id, node_gpu_ids)
             if self.is_reward_model:
                 name = f"sglang_server_reward_{self.replica_rank}_{node_rank}{self.name_suffix}"
             elif self.is_teacher_model:
@@ -848,6 +875,7 @@ class SGLangReplica(RolloutReplica):
                     "env_vars": {
                         **{var: "1" for var in get_platform().ray_noset_envvars()},
                         **get_platform().rollout_env_vars(),
+                        **service_env,
                     }
                 },
                 name=name,
@@ -885,13 +913,13 @@ class SGLangReplica(RolloutReplica):
             else f"{server_address}:{server_port}"
         )
 
-    async def abort_all_requests(self):
+    async def abort_all_requests(self, checkpoint_kv: bool = False, timeout_s: float = 30.0):
         """Abort all ongoing generation requests on the primary server.
 
         SGLang control RPCs are only served by the node-rank 0 server for a
         multi-node replica, so avoid broadcasting this call to every server.
         """
-        await self.servers[0].abort_all_requests.remote()
+        await self.servers[0].abort_all_requests.remote(checkpoint_kv=checkpoint_kv, timeout_s=timeout_s)
 
     async def resume_generation(self):
         """Resume generation on the primary server after abort_all_requests."""

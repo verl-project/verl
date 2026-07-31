@@ -522,8 +522,11 @@ class LLMServerManager:
 
         flexkv_service = self.rollout_config.get("flexkv_service", {})
         if bool(flexkv_service.get("auto_start", False)):
-            if self.rollout_config.name != "vllm" or self.rollout_config.get("kv_backend") != "flexkv":
-                raise ValueError("flexkv_service.auto_start requires rollout.name=vllm and kv_backend=flexkv")
+            supported_rollouts = {"vllm", "sglang"}
+            if self.rollout_config.name not in supported_rollouts or self.rollout_config.get("kv_backend") != "flexkv":
+                raise ValueError(
+                    "flexkv_service.auto_start requires rollout.name in {vllm, sglang} and kv_backend=flexkv"
+                )
             from verl.workers.rollout.flexkv_service import FlexKVServiceManager
 
             self.flexkv_service_manager = FlexKVServiceManager(self.rollout_config, self.model_config)

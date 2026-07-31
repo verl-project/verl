@@ -1259,13 +1259,10 @@ class vLLMReplica(RolloutReplica):
                 worker_cuda_visible_devices[node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node]
             )
             node_id = worker_node_ids[node_rank * gpus_per_replica_node]
-            service_env = {}
-            flexkv_service_manager = getattr(self, "flexkv_service_manager", None)
-            if flexkv_service_manager is not None:
-                node_gpu_ids = worker_cuda_visible_devices[
-                    node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node
-                ]
-                service_env = await flexkv_service_manager.register_node(node_id, node_gpu_ids)
+            node_gpu_ids = worker_cuda_visible_devices[
+                node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node
+            ]
+            service_env = await self._get_flexkv_service_env(node_id, node_gpu_ids)
             prefix = self._get_server_name_prefix()
             if self.is_reward_model:
                 name = f"{prefix}server_reward_{self.replica_rank}_{node_rank}{self.name_suffix}"
