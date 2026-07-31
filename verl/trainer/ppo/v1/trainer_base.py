@@ -1505,6 +1505,7 @@ class PPOTrainer(ABC):
                 "calculate_entropy": True,
                 "compute_loss": False,
                 "temperature": self.config.actor_rollout_ref.rollout.temperature,
+                "pad_token_id": self.tokenizer.pad_token_id,
             }
         )
         output: KVBatchMeta = self.actor_rollout_wg.compute_log_prob(batch)
@@ -1551,6 +1552,7 @@ class PPOTrainer(ABC):
             "calculate_entropy": False,
             "compute_loss": False,
             "temperature": self.config.actor_rollout_ref.rollout.temperature,
+            "pad_token_id": self.tokenizer.pad_token_id,
         }
         if self.ref_in_actor:
             metadata["no_lora_adapter"] = True
@@ -1706,6 +1708,7 @@ class PPOTrainer(ABC):
             "seed": self.config.actor_rollout_ref.actor.data_loader_seed,
             "dataloader_kwargs": {"shuffle": self.config.actor_rollout_ref.actor.shuffle},
             "temperature": self.config.actor_rollout_ref.rollout.temperature,
+            "pad_token_id": self.tokenizer.pad_token_id,
         }
         batch.extra_info.update(extra_info)
 

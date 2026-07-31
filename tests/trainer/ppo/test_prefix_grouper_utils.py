@@ -190,6 +190,45 @@ def test_build_pg_uses_nonzero_pad_token_id():
     assert prefix_grouper.ungrouped_suffix_lens.tolist() == [2, 1]
 
 
+def test_build_pg_accepts_jagged_transfer_queue_tensors():
+    prompts = torch.nested.as_nested_tensor(
+        [
+            torch.tensor([3, 4]),
+            torch.tensor([3, 4]),
+        ],
+        layout=torch.jagged,
+    )
+    responses = torch.nested.as_nested_tensor(
+        [
+            torch.tensor([5, 6]),
+            torch.tensor([7]),
+        ],
+        layout=torch.jagged,
+    )
+    response_mask = torch.nested.as_nested_tensor(
+        [
+            torch.tensor([True, True]),
+            torch.tensor([True]),
+        ],
+        layout=torch.jagged,
+    )
+
+    prefix_grouper, concat_input_ids, _, _, completion_ids, completion_mask = build_pg_from_micro_batch(
+        {
+            "prompts": prompts,
+            "responses": responses,
+            "response_mask": response_mask,
+            "uid": ["group-0", "group-0"],
+        },
+        pad_token_id=99,
+    )
+
+    assert prefix_grouper.prefix_lens.tolist() == [2]
+    assert prefix_grouper.ungrouped_suffix_lens.tolist() == [2, 1]
+    assert concat_input_ids.shape == (1, 5)
+    assert completion_ids.shape == completion_mask.shape == (2, 2)
+
+
 def test_prefix_grouper_temperature_matches_existing_clamp():
     grouper = SimpleNamespace()
     attach_prefix_grouper_forward_args(

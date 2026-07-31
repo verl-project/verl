@@ -22,6 +22,12 @@ from tensordict.tensorclass import NonTensorData
 from verl.utils.torch_functional import logprobs_from_logits
 
 
+def _to_padded_tensor(tensor: torch.Tensor, padding_value: int | bool) -> torch.Tensor:
+    if tensor.is_nested:
+        return tensor.to_padded_tensor(padding=padding_value)
+    return tensor
+
+
 def build_position_ids_for_prefix_grouper(prefix_grouper: PrefixGrouper) -> torch.Tensor:
     """Build position_ids for PrefixGrouper where each response restarts from prefix_len."""
     num_samples = len(prefix_grouper.group_info)
@@ -51,9 +57,9 @@ def build_pg_from_micro_batch(
     padding_mode: str = "right",
 ):
     """Build PrefixGrouper from micro_batch dict containing prompts, responses, response_mask, uid."""
-    prompts = micro_batch["prompts"]
-    responses = micro_batch["responses"]
-    response_mask = micro_batch["response_mask"]
+    prompts = _to_padded_tensor(micro_batch["prompts"], pad_token_id)
+    responses = _to_padded_tensor(micro_batch["responses"], pad_token_id)
+    response_mask = _to_padded_tensor(micro_batch["response_mask"], False)
     uids = micro_batch["uid"]
     # Engine dispatch wraps non-tensor fields; unwrap UIDs before comparing group boundaries.
     if isinstance(uids, NonTensorData):
