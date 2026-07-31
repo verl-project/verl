@@ -137,3 +137,44 @@ class TestCheckpointCleanupLogic:
         manager.register_checkpoint(ckpt_300, 1)
         assert not os.path.exists(ckpt_200)
         assert manager.previous_saved_paths == [ckpt_300]
+
+    def test_cleanup_after_load_removes_checkpoint_on_rank_zero(self, manager, monkeypatch):
+        """The opt-in cleanup removes the role checkpoint only after all ranks finish loading."""
+        checkpoint_path = self._create_checkpoint_dir(100)
+        events = []
+        remove_checkpoint = manager.remove_previous_save_local_path
+
+        def record_remove(path):
+            events.append("remove")
+            remove_checkpoint(path)
+
+        monkeypatch.setattr("torch.distributed.barrier", lambda: events.append("barrier"))
+        monkeypatch.setattr(manager, "remove_previous_save_local_path", record_remove)
+
+        manager._cleanup_local_checkpoint_after_load(checkpoint_path, enabled=True)
+
+        assert not os.path.exists(checkpoint_path)
+        assert events == ["barrier", "remove", "barrier"]
+
+    def test_cleanup_after_load_is_rank_zero_only(self, manager, monkeypatch):
+        """Nonzero ranks synchronize but never race rank zero to delete the shared directory."""
+        checkpoint_path = self._create_checkpoint_dir(100)
+        manager.rank = 1
+        barriers = []
+        monkeypatch.setattr("torch.distributed.barrier", lambda: barriers.append("barrier"))
+
+        manager._cleanup_local_checkpoint_after_load(checkpoint_path, enabled=True)
+
+        assert os.path.exists(checkpoint_path)
+        assert barriers == ["barrier", "barrier"]
+
+    def test_cleanup_after_load_disabled_preserves_checkpoint(self, manager, monkeypatch):
+        """Disabled cleanup keeps the checkpoint and preserves the existing load barrier."""
+        checkpoint_path = self._create_checkpoint_dir(100)
+        barriers = []
+        monkeypatch.setattr("torch.distributed.barrier", lambda: barriers.append("barrier"))
+
+        manager._cleanup_local_checkpoint_after_load(checkpoint_path, enabled=False)
+
+        assert os.path.exists(checkpoint_path)
+        assert barriers == ["barrier"]

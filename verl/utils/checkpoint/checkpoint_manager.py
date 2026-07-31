@@ -163,6 +163,16 @@ class BaseCheckpointManager:
                 continue
             shutil.rmtree(abs_path, ignore_errors=True)
 
+    def _cleanup_local_checkpoint_after_load(self, local_path: str, enabled: bool) -> None:
+        """Synchronize checkpoint loading and optionally remove the shared local directory."""
+        torch.distributed.barrier()
+        if not enabled:
+            return
+
+        if self.rank == 0:
+            self.remove_previous_save_local_path(local_path)
+        torch.distributed.barrier()
+
     def ensure_checkpoint_capacity(self, max_ckpt_to_keep: int):
         """
         Remove old checkpoints to make room for a new one, keeping a safety buffer.

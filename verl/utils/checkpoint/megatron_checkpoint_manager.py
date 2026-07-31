@@ -30,7 +30,7 @@ from packaging import version
 from transformers import GenerationConfig
 
 from verl.utils.device import get_device_name, get_torch_device
-from verl.utils.fs import is_non_local, local_mkdir_safe
+from verl.utils.fs import local_mkdir_safe
 from verl.utils.logger import log_with_rank
 from verl.utils.megatron.dist_checkpointing import load_dist_checkpointing, save_dist_checkpointing
 from verl.utils.megatron_utils import (
@@ -760,15 +760,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             log_with_rank(f"Loaded RNG states from {local_path}", rank=self.rank, logger=logger)
         log_with_rank(f"Loaded Megatron-FSDP checkpoint from {local_path}", rank=self.rank, logger=logger)
 
-        if del_local_after_load:
-            try:
-                os.remove(local_path) if is_non_local(local_path) else None
-            except Exception as e:
-                log_with_rank(
-                    f"remove local resume ckpt file after loading failed, exception {e} will be ignored",
-                    rank=self.rank,
-                    logger=logger,
-                )
+        self._cleanup_local_checkpoint_after_load(local_path, enabled=del_local_after_load)
 
     def _save_megatron_fsdp_checkpoint(self, dist_checkpoint_path: str):
         """Save a Megatron-FSDP (DTensor) checkpoint.
@@ -974,15 +966,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             self.load_rng_states(loaded_extra["rng_state"])
             log_with_rank(f"Loaded RNG states from {extra_dist_path}", rank=self.rank, logger=logger)
 
-        if del_local_after_load:
-            try:
-                os.remove(local_path) if is_non_local(local_path) else None
-            except Exception as e:
-                log_with_rank(
-                    f"remove local resume ckpt file after loading failed, exception {e} will be ignored",
-                    rank=self.rank,
-                    logger=logger,
-                )
+        self._cleanup_local_checkpoint_after_load(local_path, enabled=del_local_after_load)
 
     # -- Save ------------------------------------------------------------------
 
