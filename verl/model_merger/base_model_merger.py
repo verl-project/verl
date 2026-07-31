@@ -245,20 +245,21 @@ class BaseModelMerger(ABC):
                 model.generation_config = generation_config
         return model
 
-    def load_generation_config(self):
+    def load_generation_config(self, warn_if_missing: bool = True):
         """Load the generation config stored alongside the pretrained model config."""
-        try:
-            return GenerationConfig.from_pretrained(self.hf_model_config_path)
-        except OSError:
-            print(
-                f"Warning: Generation config file not found in {self.hf_model_config_path}, using a "
-                f"generation config created from the model config."
-            )
+        generation_config_path = os.path.join(self.hf_model_config_path, "generation_config.json")
+        if not os.path.isfile(generation_config_path):
+            if warn_if_missing:
+                print(
+                    f"Warning: Generation config file not found in {self.hf_model_config_path}, using a "
+                    f"generation config created from the model config."
+                )
             return None
+        return GenerationConfig.from_pretrained(self.hf_model_config_path)
 
     def save_generation_config(self, target_dir):
         """Preserve the pretrained generation config in a merged model directory."""
-        generation_config = self.load_generation_config()
+        generation_config = self.load_generation_config(warn_if_missing=False)
         if generation_config is not None:
             generation_config.save_pretrained(target_dir)
         else:
