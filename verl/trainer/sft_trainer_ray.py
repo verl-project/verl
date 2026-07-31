@@ -32,6 +32,13 @@ from torch.utils.data import DistributedSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
+from verl.plugin.platform import get_platform
+from verl.plugin.platform.platform_tpu_workarounds import (
+    aggregate_sft_metrics_tpu,
+    extract_validation_loss,
+    get_ray_init_kwargs,
+    run_trainer_on_tpu,
+)
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint import CheckpointHandler, OrchestrationMode
 from verl.utils.dataset.dataset_utils import SFTTensorCollator
@@ -279,6 +286,7 @@ class SFTTrainer:
             "use_remove_padding": self.config.model.use_remove_padding,
             "use_dynamic_bsz": self.config.data.use_dynamic_bsz,
             "max_token_len_per_gpu": self.config.data.max_token_len_per_gpu,
+            "max_length": self.config.data.max_length,
             "micro_batch_size_per_gpu": self.config.data.micro_batch_size_per_gpu,
             "temperature": 1.0,
             "global_batch_size": self.global_batch_size,
@@ -338,13 +346,15 @@ class SFTTrainer:
                     self.training_client.stop_profile()
 
                 metrics = tu.get(output, "metrics")
+                if get_platform().device_name == "tpu":
+                    metrics = aggregate_sft_metrics_tpu(metrics)
 
                 # TODO: we can actual accumulate metrics for N steps and perform aggregate metrics
                 metrics["train/loss"] = metrics.pop("loss")
-                metrics["train/grad_norm"] = metrics.pop("grad_norm")
-                metrics["train/lr"] = metrics.pop("lr")
-                metrics["train/mfu"] = metrics.pop("mfu")
-                metrics["train/global_tokens"] = torch.sum(torch.tensor(batch_seqlens, device=self.device_name)).item()
+                metrics["train/grad_norm"] = metrics.pop("grad_norm", 0.0)
+                metrics["train/lr"] = metrics.pop("lr", 0.0)
+                metrics["train/mfu"] = metrics.pop("mfu", 0.0)
+                metrics["train/global_tokens"] = sum(batch_seqlens)
                 total_tokens += metrics["train/global_tokens"]
                 metrics["train/total_tokens(B)"] = total_tokens / 1e9
                 tracking.log(data=metrics, step=global_step)
@@ -362,9 +372,14 @@ class SFTTrainer:
                         output = self.training_client.infer_batch(val_data)
                         output = output.get()
                         metrics = tu.get(output, "metrics")
-                        val_losses.append(metrics["loss"])
+                        val_loss_val = extract_validation_loss(metrics)
+                        val_losses.append(val_loss_val)
 
-                    val_loss = torch.mean(torch.tensor(val_losses, device=self.device_name))
+                    if len(val_losses) > 0:
+                        val_loss = torch.mean(torch.tensor(val_losses, dtype=torch.float32))
+                    else:
+                        logger.warning("val_losses is empty. Check if val_max_samples is too small.")
+                        val_loss = torch.tensor(0.0)
 
                     metric = {"val/loss": val_loss.detach().item()}
                     tracking.log(data=metric, step=global_step)
@@ -380,9 +395,14 @@ class SFTTrainer:
 
 
 def run_sft(config):
-    ray.init()
-    trainer = SFTTrainer(config=config)
-    trainer.fit()
+    ray_init_kwargs = get_ray_init_kwargs()
+    ray.init(**ray_init_kwargs)
+
+    if get_platform().device_name == "tpu":
+        run_trainer_on_tpu(SFTTrainer, config)
+    else:
+        trainer = SFTTrainer(config=config)
+        trainer.fit()
 
 
 @hydra.main(config_path="config", config_name="sft_trainer_engine", version_base=None)
