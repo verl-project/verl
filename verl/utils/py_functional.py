@@ -20,6 +20,7 @@ import multiprocessing
 import os
 import queue  # Import the queue module for exception type hint
 import signal
+import time
 from contextlib import contextmanager
 from functools import wraps
 from types import SimpleNamespace
@@ -110,35 +111,59 @@ def timeout_limit(seconds: float, use_signals: bool = False):
                 q = multiprocessing.Queue(maxsize=1)
                 process = multiprocessing.Process(target=_mp_target_wrapper, args=(func, q, args, kwargs))
                 process.start()
-                process.join(timeout=seconds)
+                deadline = time.monotonic() + seconds
 
-                if process.is_alive():
-                    process.terminate()
-                    process.join(timeout=0.5)  # Give it a moment to terminate
+                def terminate_process():
                     if process.is_alive():
-                        print(f"Warning: Process {process.pid} did not terminate gracefully after timeout.")
-                    # Update function name in error message if needed (optional but good practice)
-                    raise TimeoutError(f"Function {func.__name__} timed out after {seconds} seconds (multiprocessing)!")
+                        process.terminate()
+                        process.join(timeout=0.5)  # Give it a moment to terminate
+                        if process.is_alive():
+                            print(f"Warning: Process {process.pid} did not terminate gracefully after timeout.")
 
                 try:
-                    success, result_or_exc = q.get(timeout=0.1)  # Small timeout for queue read
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            terminate_process()
+                            raise TimeoutError(
+                                f"Function {func.__name__} timed out after {seconds} seconds (multiprocessing)!"
+                            )
+
+                        try:
+                            success, result_or_exc = q.get(timeout=min(0.1, remaining))
+                            break
+                        except queue.Empty as err:
+                            if process.is_alive():
+                                continue
+
+                            process.join()
+                            exitcode = process.exitcode
+                            if exitcode is not None and exitcode != 0:
+                                raise RuntimeError(
+                                    f"Child process exited with error (exitcode: {exitcode}) before returning result."
+                                ) from err
+                            raise TimeoutError(
+                                f"Operation timed out or process finished unexpectedly without result "
+                                f"(exitcode: {exitcode})."
+                            ) from err
+
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        terminate_process()
+                        raise TimeoutError(
+                            f"Function {func.__name__} timed out after {seconds} seconds (multiprocessing)!"
+                        )
+
+                    process.join(timeout=remaining)
+                    if process.is_alive():
+                        terminate_process()
+                        raise TimeoutError(
+                            f"Function {func.__name__} timed out after {seconds} seconds (multiprocessing)!"
+                        )
+
                     if success:
                         return result_or_exc
-                    else:
-                        raise result_or_exc  # Reraise exception from child
-                except queue.Empty as err:
-                    exitcode = process.exitcode
-                    if exitcode is not None and exitcode != 0:
-                        raise RuntimeError(
-                            f"Child process exited with error (exitcode: {exitcode}) before returning result."
-                        ) from err
-                    else:
-                        # Should have timed out if queue is empty after join unless process died unexpectedly
-                        # Update function name in error message if needed (optional but good practice)
-                        raise TimeoutError(
-                            f"Operation timed out or process finished unexpectedly without result "
-                            f"(exitcode: {exitcode})."
-                        ) from err
+                    raise result_or_exc  # Reraise exception from child
                 finally:
                     q.close()
                     q.join_thread()

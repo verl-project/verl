@@ -24,6 +24,19 @@ from verl.utils.py_functional import timeout_limit as timeout
 # --- Test Task Functions ---
 TEST_TIMEOUT_SECONDS = 1.5  # Timeout duration for tests
 LONG_TASK_DURATION = TEST_TIMEOUT_SECONDS + 0.5  # Duration slightly longer than timeout
+LARGE_RESULT_SIZE = 4 * 1024 * 1024
+DESERIALIZATION_TIMEOUT_SECONDS = 0.5
+DESERIALIZATION_DELAY_SECONDS = DESERIALIZATION_TIMEOUT_SECONDS + 0.25
+
+
+def rebuild_slow_result():
+    time.sleep(DESERIALIZATION_DELAY_SECONDS)
+    return "slow_result"
+
+
+class SlowResult:
+    def __reduce__(self):
+        return rebuild_slow_result, ()
 
 
 @timeout(seconds=TEST_TIMEOUT_SECONDS)  # Keep global decorator for mp tests
@@ -31,6 +44,16 @@ def quick_task(x):
     """A task that completes quickly."""
     time.sleep(0.1)
     return "quick_ok"
+
+
+@timeout(seconds=TEST_TIMEOUT_SECONDS)
+def large_result_task():
+    return b"x" * LARGE_RESULT_SIZE
+
+
+@timeout(seconds=DESERIALIZATION_TIMEOUT_SECONDS)
+def slow_deserialization_task():
+    return SlowResult()
 
 
 @timeout(seconds=TEST_TIMEOUT_SECONDS)  # Keep global decorator for mp tests
@@ -99,6 +122,21 @@ def test_quick_task():  # Renamed from test_multiprocessing_quick_task
     # Call the globally decorated function directly
     result = quick_task(1)
     assert result == "quick_ok"  # Use pytest assert
+
+
+def test_large_result():
+    result = large_result_task()
+
+    assert len(result) == LARGE_RESULT_SIZE
+    assert result[:1] == b"x"
+    assert result[-1:] == b"x"
+
+
+def test_result_deserialization_respects_timeout():
+    with pytest.raises(TimeoutError) as excinfo:
+        slow_deserialization_task()
+
+    assert f"timed out after {DESERIALIZATION_TIMEOUT_SECONDS} seconds" in str(excinfo.value)
 
 
 def test_slow_task_timeout():  # Renamed from test_multiprocessing_slow_task_timeout
