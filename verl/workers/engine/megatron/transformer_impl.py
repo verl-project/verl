@@ -1065,6 +1065,11 @@ class MegatronEngineWithLMHead(MegatronEngine):
         loss_mask = model_inputs["loss_mask"]
 
         unwrapped_model = unwrap_model(model)
+        cp_layout = (
+            "contiguous"
+            if getattr(unwrapped_model.config, "experimental_attention_variant", None) == "dsv4_hybrid"
+            else "zigzag"
+        )
         if hasattr(unwrapped_model, "vp_stage"):
             vp_rank = unwrapped_model.vp_stage
         else:
@@ -1122,6 +1127,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 temperature=temperature_value,
                 calculate_entropy=calculate_entropy,
                 pad_token_id=self.model_config.tokenizer.pad_token_id,
+                cp_layout=cp_layout,
             )
         else:
             if not isinstance(temperature, torch.Tensor):
@@ -1168,6 +1174,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
                 local_cp_size=local_cp_size,
                 forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
+                cp_layout=cp_layout,
             )
 
         # Router replay: record routing decisions for R2 mode

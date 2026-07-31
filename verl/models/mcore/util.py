@@ -16,7 +16,7 @@
 import logging
 import math
 import os
-from typing import Optional
+from typing import Literal, Optional
 
 import torch
 from megatron.core import parallel_state as mpu
@@ -27,6 +27,8 @@ from verl.utils.model import CausalLMOutputForPPO
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+ContextParallelLayout = Literal["zigzag", "contiguous"]
 
 
 def _compute_fp8_thd_align_size(align_size: int) -> tuple[int, int]:
@@ -321,13 +323,19 @@ def preprocess_thd_engine(
     use_fp8_padding: bool = False,
     local_cp_size: Optional[int] = None,
     min_local_rows: Optional[int] = None,
+    cp_layout: ContextParallelLayout = "zigzag",
 ) -> tuple[torch.Tensor, PackedSeqParams, Optional[torch.Tensor]]:
+    """Pack nested THD sequences and shard their rows across CP ranks.
+
+    ``zigzag`` is the default causal-attention layout: each rank receives a
+    chunk from both ends of every sequence. ``contiguous`` assigns each rank
+    one consecutive interval of the *global padded THD buffer*. The latter is
+    required by attention variants whose CP kernels address rows through one
+    rank-local ``global_start``.
     """
-    Preprocess packed sequences
-    CP splits sequence into CP*2 chunks, and each GPU gets 2 chunks (GPU0 gets first and last chunks, GPU1
-    gets second and second last chunks, and so on), this is for load balancing with causal masking.
-    See https://github.com/NVIDIA/TransformerEngine/issues/1368
-    """
+    if cp_layout not in ("zigzag", "contiguous"):
+        raise ValueError(f"Unsupported context parallel layout: {cp_layout}")
+
     batch_size = input_ids.shape[0]
 
     tp_size = mpu.get_tensor_model_parallel_world_size()
@@ -342,7 +350,8 @@ def preprocess_thd_engine(
     else:
         cp_size = mpu.get_context_parallel_world_size()
         cp_rank = mpu.get_context_parallel_rank()
-    align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
+    cp_layout_factor = 2 if cp_layout == "zigzag" and cp_size > 1 else 1
+    align_size = tp_size * cp_size * cp_layout_factor
     seqlens_in_batch = input_ids.offsets().diff()
 
     if use_fp8_padding:
@@ -391,8 +400,35 @@ def preprocess_thd_engine(
         if need_roll:
             saved_roll_dict = {}
             saved_position_roll_dict = {}
+        local_global_start = shape[0] * cp_rank
+        local_global_end = local_global_start + shape[0]
         for i in range(batch_size):
             # Use Python int, so no GPU→CPU sync in the loop
+            if cp_layout == "contiguous":
+                seq_global_start = cu_seqlens_padded_cpu[i]
+                seq_valid_end = seq_global_start + seqlens_in_batch_cpu[i]
+                copy_global_start = max(local_global_start, seq_global_start)
+                copy_global_end = min(local_global_end, seq_valid_end)
+                if copy_global_start >= copy_global_end:
+                    continue
+
+                source_start = copy_global_start - seq_global_start
+                source_end = copy_global_end - seq_global_start
+                destination_start = copy_global_start - local_global_start
+                destination_end = copy_global_end - local_global_start
+                d = input_ids[i]
+                if need_roll:
+                    source_indices = torch.arange(source_start, source_end, device=d.device)
+                    source_indices = (source_indices + 1) % seqlens_in_batch_cpu[i]
+                    input_ids_rmpad[destination_start:destination_end] = torch.index_select(d, 0, source_indices)
+                    position_ids_rmpad[destination_start:destination_end] = source_indices
+                else:
+                    input_ids_rmpad[destination_start:destination_end] = d[source_start:source_end]
+                    position_ids_rmpad[destination_start:destination_end] = torch.arange(
+                        source_start, source_end, dtype=torch.long, device=input_ids.device
+                    )
+                continue
+
             if cp_size <= 1:
                 seqlen = seqlens_in_batch_cpu[i]
                 start_idx = cu_seqlens_padded_cpu[i]
@@ -463,7 +499,7 @@ def preprocess_thd_engine(
                             start_idx + half_seqlen + remain_len - 1
                         ]
 
-        if need_roll:
+        if need_roll and cp_layout == "zigzag":
             input_ids_rmpad = torch.roll(input_ids_rmpad, shifts=-1, dims=0)
             position_ids_rmpad = torch.roll(position_ids_rmpad, shifts=-1, dims=0)
             if len(saved_roll_dict) > 0:
@@ -495,10 +531,13 @@ def postprocess_thd_engine(
     batch_size: int,
     post_process: bool = True,
     local_cp_size: Optional[int] = None,
+    cp_layout: ContextParallelLayout = "zigzag",
 ) -> torch.Tensor:
     """
     Postprocess packed sequences
     """
+    if cp_layout not in ("zigzag", "contiguous"):
+        raise ValueError(f"Unsupported context parallel layout: {cp_layout}")
     if not post_process:
         return output
 
@@ -531,6 +570,13 @@ def postprocess_thd_engine(
         output_list[cp_rank] = output
     else:
         output_list = [output]
+
+    if cp_layout == "contiguous":
+        packed_output = torch.cat([rank_output[0] for rank_output in output_list], dim=0)
+        for i in range(batch_size):
+            sequence_start = cu_padded_cpu[i]
+            output_new.append(packed_output[sequence_start : sequence_start + seq_lens_cpu[i]])
+        return torch.nested.as_nested_tensor(output_new, layout=torch.jagged)
 
     for i in range(batch_size):
         if cp_size <= 1:
