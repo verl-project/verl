@@ -13,52 +13,42 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import importlib.metadata
+"""Refit support for vLLM's ``Fp8LinearMethod`` and ``Fp8MoEMethod``.
+
+Two problems have to be solved for an RL weight refit to land correctly on a
+block-FP8 layer:
+
+* vLLM's post-load hooks rebuild parameters as plain ``torch.nn.Parameter``,
+  dropping the subclass metadata (``ModelWeightParameter`` and friends) that
+  the weight loaders dispatch on. The patches here keep that metadata.
+* Kernel post-processing rewrites weights and scales into an inference layout
+  the checkpoint tensors no longer fit. The staging helpers hand
+  ``load_weights`` a checkpoint-layout buffer and then fold the re-derived
+  result back into the original storage, so pointers captured by a CUDA graph
+  stay valid.
+
+``verl/utils/vllm/vllm_quant_utils.py`` is the entry point that drives these.
+"""
+
 import inspect
 import logging
-from dataclasses import dataclass, field
+import math
 from unittest.mock import patch
 
 import torch
 from packaging import version
 
-try:
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-    from vllm.model_executor.layers.linear import LinearBase
-except ImportError as e:
-    raise ImportError("FP8 quantization not available") from e
-
-from verl.utils.kernel.fp8_kernel import scaled_fp8_blockwise
-from verl.utils.vllm.vllm_dsv4_fp8_utils import (
-    cache_deepseek_v4_dense_fp8_scales,
-    is_deepseek_v4_model,
-    iter_deepseek_v4_weights,
-    prepare_deepseek_v4_weights_for_loading,
-    process_deepseek_v4_weights_after_loading,
-    reload_deepseek_v4_dense_fp8_scales,
-)
-
 logger = logging.getLogger(__name__)
 
 
-def _get_vllm_version():
-    return version.parse(importlib.metadata.version("vllm"))
-
-
-# Ref: https://github.com/NVIDIA-NeMo/RL/commit/bc24887c72a6e1b2699a228bc87c588546dfe6b7
-@dataclass()
-class FP8State:
-    # A cache of fp8 parameter names, we can check this cache to see if a
-    # param name corresponds to a fp8 weight
-    seen_params: set = field(default_factory=lambda: set())
-    fp8_param_names: set = field(default_factory=lambda: set())
-    vllm_patches: list = field(default_factory=lambda: [])
-
-
-fp8_state: FP8State = FP8State()
-
-
 def _copy_param_subclass_attrs(dst_param, src_param):
+    """Carry vLLM's parameter metadata across a parameter rebuild.
+
+    vLLM stores loader dispatch information (``output_dim``, ``weight_loader``,
+    tp state, ...) as plain attributes on ``Parameter`` subclasses. Anything
+    that re-wraps a tensor has to bring them along or the next refit will not
+    know how to shard the incoming weight.
+    """
     if src_param is None:
         return
 
@@ -76,300 +66,61 @@ def _copy_param_subclass_attrs(dst_param, src_param):
         dst_param.subclass_type = subclass_type
 
 
-def is_fp8_model(vllm_config):
-    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+_FP8_PRISTINE_ATTR = "_verl_fp8_pristine"
+_FP8_LIVE_ATTR = "_verl_fp8_live_params"
 
-    if hasattr(vllm_config, "quant_config"):
-        if isinstance(vllm_config.quant_config, Fp8Config):
-            return True
-        elif is_mxfp8_vllm_ascend(vllm_config.quant_config):
-            return True
-
-    return False
-
-
-# vLLM 0.24.0 (MoE refactor, vllm-project/vllm#41184) removed the ``FusedMoE``
-# ``nn.Module`` class. ``FusedMoE`` is now a factory *function* that builds a
-# ``MoERunner``, and the fused expert weight tensors (``w13_weight`` /
-# ``w2_weight``) moved onto a ``RoutedExperts`` submodule owned by the runner
-# (i.e. ``experts`` -> ``experts.routed_experts``). Resolve the concrete module
-# classes once so ``isinstance`` checks keep working across vLLM versions --
-# calling ``isinstance(x, FusedMoE)`` when ``FusedMoE`` is a function raises
-# ``TypeError: isinstance() arg 2 must be a type``.
-if isinstance(FusedMoE, type):
-    # vLLM < 0.24: ``FusedMoE`` is itself the expert-weight-holding module.
-    _MOE_STOP_CLASSES = (FusedMoE,)
-    _EXPERT_WEIGHT_CLASSES = (FusedMoE,)
-else:
-    _stop_classes: list[type] = []
-    _weight_classes: list[type] = []
-    try:
-        from vllm.model_executor.layers.fused_moe import RoutedExperts
-
-        _stop_classes.append(RoutedExperts)
-        _weight_classes.append(RoutedExperts)
-    except ImportError:
-        pass
-    try:
-        from vllm.model_executor.layers.fused_moe import MoERunner
-
-        _stop_classes.append(MoERunner)
-    except ImportError:
-        pass
-    _MOE_STOP_CLASSES = tuple(_stop_classes)
-    _EXPERT_WEIGHT_CLASSES = tuple(_weight_classes)
+# ``Fp8LinearMethod`` owns the first group, ``Fp8MoEMethod`` the second. The MoE
+# scale is named ``w13_weight_scale_inv`` under block quant and
+# ``w13_weight_scale`` otherwise (``self.weight_scale_name``), so both spellings
+# are listed; only the names a layer actually has get recorded.
+_FP8_LINEAR_PARAM_NAMES = ("weight", "weight_scale_inv", "weight_scale")
+_FP8_MOE_PARAM_NAMES = (
+    "w13_weight",
+    "w2_weight",
+    "w13_weight_scale_inv",
+    "w2_weight_scale_inv",
+    "w13_weight_scale",
+    "w2_weight_scale",
+)
+_FP8_REFIT_PARAM_NAMES = (*_FP8_LINEAR_PARAM_NAMES, *_FP8_MOE_PARAM_NAMES)
 
 
-def _is_expert_weight_module(module) -> bool:
-    """Return whether ``module`` directly owns fused expert weights.
+def _fold_into_live_param(layer, param_name, param, new_data):
+    """Move post-processing output into the storage the CUDA graph captured."""
+    if isinstance(new_data, torch.nn.Parameter):
+        new_data = new_data.data
 
-    True for the pre-0.24 ``FusedMoE`` module and the post-0.24 ``RoutedExperts``
-    module (both expose ``w13_weight`` / ``w2_weight``). Falls back to duck typing
-    so the check keeps working even if the concrete classes cannot be imported.
-    """
-    if _EXPERT_WEIGHT_CLASSES and isinstance(module, _EXPERT_WEIGHT_CLASSES):
-        return True
-    return hasattr(module, "w13_weight") and hasattr(module, "w2_weight")
-
-
-def _is_fused_moe_block(module) -> bool:
-    """Return whether ``module`` is the fused-MoE block reached while walking the
-    module tree, so traversal must stop before descending into per-expert name
-    parts (e.g. the expert index) that are not real submodules."""
-    if _MOE_STOP_CLASSES and isinstance(module, _MOE_STOP_CLASSES):
-        return True
-    # ``MoERunner`` owns a ``routed_experts`` child; the weight holder owns the
-    # expert weight tensors directly.
-    return hasattr(module, "routed_experts") or _is_expert_weight_module(module)
-
-
-def _resolve_expert_weight_module(module):
-    """Return the submodule that actually owns the fused expert weights.
-
-    On vLLM >= 0.24 the walked module is a ``MoERunner`` whose ``routed_experts``
-    child holds the weights; on older vLLM the module already holds them.
-    """
-    routed_experts = getattr(module, "routed_experts", None)
-    if routed_experts is not None:
-        return routed_experts
-    return module
-
-
-def get_module_from_param_name(model, name: str):
-    # Split the name into parts (e.g., 'layers', '0', 'self_attn', 'q_proj', 'weight')
-    # The module path is all but the last part (the parameter's own name)
-    path_parts = name.split(".")
-    module_path = path_parts[:-1]
-    # Replace with the fused model name
-    packed_modules_mapping = model.packed_modules_mapping
-    reversed_mapping = {
-        original_name: fused_name
-        for fused_name, original_names_list in packed_modules_mapping.items()
-        for original_name in original_names_list
-    }
-    if module_path[-1] in reversed_mapping.keys():
-        module_path[-1] = reversed_mapping[module_path[-1]]
-
-    current_module = model
-    try:
-        # Traverse the model hierarchy
-        for part in module_path:
-            if _is_fused_moe_block(current_module):
-                # Reached the fused-MoE block: the remaining name parts (expert
-                # index, per-expert proj name, ...) are handled by vLLM's fused
-                # weight loader, so return the module owning the expert weights.
-                return _resolve_expert_weight_module(current_module)
-            elif isinstance(current_module, torch.nn.ModuleList):
-                current_module = current_module[int(part)]
-            else:
-                current_module = getattr(current_module, part)
-    except (AttributeError, IndexError, ValueError) as e:
-        print(f"Warning: Could not find module for parameter '{name}'. Error: {e}")
-    return _resolve_expert_weight_module(current_module)
-
-
-def is_fp8_weight(name, model):
-    if name not in fp8_state.seen_params:
-        fp8_state.seen_params.add(name)
-        # Filter out bias params
-        if name.endswith("weight"):
-            module = get_module_from_param_name(model, name)
-            # We currently only quantize linear and fused-MoE expert layers.
-            is_fp8_linear = isinstance(module, LinearBase) and module.weight.dtype == torch.float8_e4m3fn
-            is_fp8_moe = (
-                _is_expert_weight_module(module)
-                and module.w13_weight.dtype == torch.float8_e4m3fn
-                and module.w2_weight.dtype == torch.float8_e4m3fn
-            )
-            if is_fp8_linear or is_fp8_moe:
-                fp8_state.fp8_param_names.add(name)
-    return name in fp8_state.fp8_param_names
-
-
-def is_mxfp8_vllm_ascend(quant_config):
-    try:
-        from vllm_ascend.quantization.modelslim_config import AscendModelSlimConfig
-
-        if isinstance(quant_config, AscendModelSlimConfig):
-            quant_method = quant_config.quant_description.get("quant_method")
-            return quant_method in ["ascend"]
-        return False
-    except ImportError:
-        # vllm_ascend not installed, so this can't be an Ascend MXFP8 config
-        return False
-
-
-def restore_mxfp8_weights_for_loading(model):
-    for name, module in model.named_modules():
-        if (
-            hasattr(module, "_mxfp8_transformed")
-            and hasattr(module, "quant_method")
-            and hasattr(module.quant_method, "quant_method")
-            and hasattr(module.quant_method.quant_method, "restore_weights_for_rl_loading")
-        ):
-            module.quant_method.quant_method.restore_weights_for_rl_loading(module)
-
-
-def apply_mxfp8_transformation_after_loading(model):
-    """Re-apply MXFP8 transformations after weight loading.
-
-    This function iterates through all linear modules in the model and applies
-    the MXFP8 transformations (transpose, reshape) that are required for NPU
-    inference.
-
-    Must be called AFTER model.load_weights() in RL training loops.
-    """
-    try:
-        from vllm.model_executor.layers.linear import LinearBase
-    except ImportError:
-        logger.warning("Could not import LinearBase, skipping MXFP8 transformation")
-        return
-
-    for name, module in model.named_modules():
-        if (isinstance(module, LinearBase) or _is_expert_weight_module(module)) and hasattr(
-            module, "_mxfp8_original_shapes"
-        ):
-            if hasattr(module, "quant_method") and hasattr(module.quant_method, "process_weights_after_loading"):
-                logger.debug(f"Applying MXFP8 transformation for module: {name}")
-                module.quant_method.process_weights_after_loading(module)
-
-
-def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
-    """Quantize weights to FP8 format using a memory-efficient generator.
-
-
-    Args:
-        weights: Generator or iterable of (name, tensor) pairs
-        model: The model to check for FP8 weight names
-        quant_config: Quantization configuration with weight_block_size
-        dtype: Data type for intermediate computation (default: bfloat16)
-
-    Yields:
-        Tuples of (name, tensor) for each weight and its scale
-    """
-
-    if is_deepseek_v4_model(model):
-        yield from iter_deepseek_v4_weights(weights)
-        return
-
-    fp8_state.seen_params.clear()
-    fp8_state.fp8_param_names.clear()
-    is_mxfp8_npu = is_mxfp8_vllm_ascend(quant_config)
-    if is_mxfp8_npu:
-        import torch_npu
-    for k, v in weights:
-        if not is_fp8_weight(k, model):
-            yield (k, v)
-            continue
-
-        # Cast the weight into fp8 and its scale factor
-        if torch.distributed.get_rank() == 0:
-            logger.debug(f"Quantizing to FP8 blockwise: {k}")
-        if is_mxfp8_npu:
-            param_lp, param_scale = torch_npu.npu_dynamic_mx_quant(
-                v.to(dtype),
-                axis=-1,
-                dst_type=torch_npu.float8_e4m3fn,
-            )
-            param_scale = param_scale.flatten(-2, -1)
-        else:
-            param_lp, param_scale = scaled_fp8_blockwise(
-                v.to(dtype),
-                weight_block_size=quant_config.weight_block_size,
-            )
-        param_scale = param_scale.squeeze(-1)
-
-        # Yield the quantized weight
-        yield (k, param_lp)
-
-        if is_mxfp8_npu:
-            yield (k + "_scale", param_scale)
-        else:
-            yield (k + "_scale_inv", param_scale)
-
-        # Explicitly delete original tensor reference to help GC
-        del v, param_lp, param_scale
-
-
-def prepare_quanted_weights_for_loading(model):
-    """Restore quantized params to the layout their ``weight_loader`` expects.
-
-    Must run once before the first bucket, and pairs with
-    ``process_quanted_weights_after_loading``, which re-applies the inference
-    layout once the last bucket has landed. Both helpers select work by
-    inspecting the model, so they are no-ops for quantization schemes that need
-    no restore. The returned value is opaque reload state for the paired call.
-    """
-    restore_mxfp8_weights_for_loading(model)
-    if not is_deepseek_v4_model(model):
-        return False
-    return prepare_deepseek_v4_weights_for_loading(model, _copy_param_subclass_attrs)
-
-
-def process_quanted_weights_after_loading(model, reload_state):
-    """Re-apply the inference layout undone by ``prepare_quanted_weights_for_loading``."""
-    apply_mxfp8_transformation_after_loading(model)
-    process_deepseek_v4_weights_after_loading(model, reload_state)
-
-
-def load_quanted_weights(weights, model_runner, is_drafter=False):
-    if is_drafter:
-        drafter = getattr(model_runner, "drafter", None)
-        model = drafter.model if drafter is not None and hasattr(drafter, "model") else None
-        assert model is not None, (
-            "load_quanted_weights(is_drafter=True) requires model_runner.drafter.model "
-            "to be present and non-None for FP8 weight loading."
+    if new_data.shape != param.shape or new_data.dtype != param.dtype:
+        raise RuntimeError(
+            f"FP8 refit re-derived {param_name} as {tuple(new_data.shape)}/{new_data.dtype}, "
+            f"but the live parameter is {tuple(param.shape)}/{param.dtype}; "
+            "its storage cannot be updated in place."
         )
-    else:
-        model = model_runner.model
-    quant_config = model_runner.vllm_config.quant_config
-    vllm_dtype = model_runner.vllm_config.model_config.dtype
-
-    weights = list(weights)
-    cache_deepseek_v4_dense_fp8_scales(model, weights)
-    weights_quantized = quant_weights(weights, model, quant_config, dtype=vllm_dtype)
-
-    # Monkey patch the param class to their subclass, as certain models
-    # will check the param type to call the proper weightloader
-    for name, param in model.named_parameters():
-        if hasattr(param, "subclass_type"):
-            param.orig_type = param.__class__
-            param.__class__ = param.subclass_type
-    # Finally load the weights into vllm
-    try:
-        loaded_params = model.load_weights(weights_quantized)
-        reload_deepseek_v4_dense_fp8_scales(model)
-    finally:
-        # Undo the type change above to the original type
-        for name, param in model.named_parameters():
-            if hasattr(param, "orig_type"):
-                param.__class__ = param.orig_type
-                del param.orig_type
-
-    return loaded_params
+    if new_data.data_ptr() != param.data_ptr():
+        param.data.copy_(new_data)
+    setattr(layer, param_name, param)
 
 
-def replace_parameter_preserve_subclass(layer: torch.nn.Module, param_name: str, new_data: torch.Tensor | None):
+def replace_parameter_preserve_subclass(
+    layer: torch.nn.Module, param_name: str, new_data: torch.Tensor | None, prefer_copy: bool = False
+):
+    """Stand-in for vLLM's ``replace_parameter`` inside the fp8 quant module.
+
+    During a refit of a staged layer this folds the result into the live
+    parameter and reinstates it immediately, rather than after
+    ``process_weights_after_loading`` returns. That timing is required for MoE:
+    the tail of ``Fp8MoEMethod._setup_kernel`` rebuilds ``moe_quant_config`` and
+    ``moe_kernel`` from whatever is on the layer at that moment, and those cache
+    tensor references, so a later swap would leave the kernel pointing at the
+    staging buffers.
+    """
+    live = getattr(layer, _FP8_LIVE_ATTR, None) or {}
+    param = live.get(param_name)
+    if param is not None and new_data is not None:
+        _fold_into_live_param(layer, param_name, param, new_data)
+        del live[param_name]
+        return
+
     if new_data is None:
         setattr(layer, param_name, None)
         return
@@ -390,9 +141,120 @@ def _restore_layer_param_subclass_attrs(layer: torch.nn.Module, old_params: dict
             _copy_param_subclass_attrs(new_param, old_param)
 
 
+def _record_pristine_fp8_layout(layer, params):
+    """Remember the checkpoint layout of a layer's FP8 weights and scales.
+
+    Kernel post-processing rewrites these into inference layouts that the
+    checkpoint tensors no longer fit. DeepGEMM, for instance, packs a
+    ``(N/128, K/128)`` block scale into an ``(N, K/512)`` int32 UE8M0 tensor,
+    so a refit feeding checkpoint-layout scales hits a shape assert. Keep
+    enough state to rebuild the original buffers before each reload.
+
+    Scales get a persistent staging buffer seeded with the checkpoint values.
+    Even for MoE they are a few thousandths of the weight, so one buffer per
+    layer costs little, and reusing it both avoids per-refit allocation and
+    lets a layer that is absent from the refit stream keep its previous values
+    instead of reading uninitialized memory.
+    """
+    if hasattr(layer, _FP8_PRISTINE_ATTR):
+        return
+
+    pristine = {}
+    for name in _FP8_REFIT_PARAM_NAMES:
+        param = params.get(name)
+        if not isinstance(param, torch.nn.Parameter):
+            continue
+        staging = param.data.detach().clone() if "scale" in name else None
+        pristine[name] = (tuple(param.shape), param.dtype, staging)
+
+    if pristine:
+        setattr(layer, _FP8_PRISTINE_ATTR, pristine)
+
+
+def _layer_needs_fp8_staging(layer, pristine) -> bool:
+    for name, (shape, dtype, _) in pristine.items():
+        param = getattr(layer, name, None)
+        if isinstance(param, torch.nn.Parameter) and (tuple(param.shape) != shape or param.dtype != dtype):
+            return True
+    return False
+
+
+def _fp8_staging_data(param, shape, dtype, staging):
+    """Checkpoint-layout tensor that ``load_weights`` can write into.
+
+    Reuses the live storage whenever the kernel transform only reshaped it, so
+    those writes land straight in the tensor the CUDA graph points at.
+    """
+    if staging is not None:
+        return staging
+    if param.dtype == dtype and param.numel() == math.prod(shape):
+        return param.data.reshape(shape)
+    return torch.empty(shape, dtype=dtype, device=param.device)
+
+
+def stage_fp8_params_for_loading(model):
+    """Expose checkpoint-layout buffers so ``load_weights`` can write into them.
+
+    Covers both quant methods: ``Fp8LinearMethod`` layers keyed on ``weight`` /
+    ``weight_scale*`` and ``Fp8MoEMethod`` expert modules keyed on ``w13_*`` /
+    ``w2_*``. The live parameters are set aside and reinstated by
+    ``process_fp8_weights_after_loading``, which puts the re-derived inference
+    layout back into their original storage. No storage the CUDA graph captured
+    is reallocated -- only tensor contents change -- and no forward pass runs
+    between the two calls.
+    """
+    staged_layers = []
+    for layer in model.modules():
+        pristine = getattr(layer, _FP8_PRISTINE_ATTR, None)
+        # A layer left in checkpoint layout (its kernel did not repack, e.g. a
+        # Triton or vLLM-CUTLASS MoE backend) already loads as-is.
+        if not pristine or not _layer_needs_fp8_staging(layer, pristine):
+            continue
+
+        live = {}
+        for name, (shape, dtype, staging) in pristine.items():
+            param = getattr(layer, name, None)
+            if not isinstance(param, torch.nn.Parameter):
+                continue
+            live[name] = param
+            staged = torch.nn.Parameter(_fp8_staging_data(param, shape, dtype, staging), requires_grad=False)
+            _copy_param_subclass_attrs(staged, param)
+            setattr(layer, name, staged)
+
+        setattr(layer, _FP8_LIVE_ATTR, live)
+        staged_layers.append(layer)
+
+    # A zero here means no layer ever recorded a pristine layout, so the
+    # post-processing hook never ran and the refit is unprotected.
+    logger.info("Staged %d FP8 layers for refit", len(staged_layers))
+    return staged_layers
+
+
+def process_fp8_weights_after_loading(layers):
+    """Re-derive the inference layout in place and reinstate the live params."""
+    for layer in layers:
+        live = getattr(layer, _FP8_LIVE_ATTR, None) or {}
+
+        quant_method = getattr(layer, "quant_method", None)
+        process = getattr(quant_method, "process_weights_after_loading", None)
+        if process is not None:
+            process(layer)
+
+        # Anything routed through the patched ``replace_parameter`` has already
+        # been folded and dropped from ``live``; what remains was rewritten by a
+        # kernel that imported ``replace_parameter`` into its own module, out of
+        # reach of the patch. The block-scaled linear kernels all do that.
+        for name, param in list(live.items()):
+            _fold_into_live_param(layer, name, param, getattr(layer, name))
+
+        if hasattr(layer, _FP8_LIVE_ATTR):
+            delattr(layer, _FP8_LIVE_ATTR)
+
+
 def _make_process_weights_after_loading_for_vllm20(original_fn):
     def _patched_process_weights_after_loading(self, layer) -> None:
         old_params = dict(layer.named_parameters(recurse=False))
+        _record_pristine_fp8_layout(layer, old_params)
         with patch(
             "vllm.model_executor.layers.quantization.fp8.replace_parameter", replace_parameter_preserve_subclass
         ):
@@ -540,41 +402,31 @@ def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
             )
 
 
-def apply_vllm_fp8_patches():
-    logger.info("Applying vllm fp8 patches for blockwise quantization")
-    vllm_ver = _get_vllm_version()
-    if fp8_state.vllm_patches:
-        logger.debug("vLLM FP8 patches already applied")
-        return
+def build_fp8_method_patchers(vllm_version):
+    """Patchers that make the FP8 quant methods survive a refit, not yet started.
 
-    func1_path = "vllm.model_executor.layers.quantization.fp8.Fp8LinearMethod.process_weights_after_loading"
-    func2_path = "vllm.model_executor.layers.quantization.fp8.Fp8MoEMethod.process_weights_after_loading"
+    The caller owns starting and tracking them so all patch lifetime lives in
+    one place.
+    """
+    linear_path = "vllm.model_executor.layers.quantization.fp8.Fp8LinearMethod.process_weights_after_loading"
+    moe_path = "vllm.model_executor.layers.quantization.fp8.Fp8MoEMethod.process_weights_after_loading"
 
     # vLLM 0.20 refactored FP8 post-load handling and removed
     # maybe_post_process_fp8_weight_block. Keep its native transformation logic,
     # but preserve parameter subclass metadata for RL weight reloads.
-    if vllm_ver >= version.parse("0.20.0"):
+    if vllm_version >= version.parse("0.20.0"):
         from vllm.model_executor.layers.quantization.fp8 import (
             Fp8LinearMethod,
             Fp8MoEMethod,
         )
 
-        patcher1 = patch(
-            func1_path,
-            _make_process_weights_after_loading_for_vllm20(Fp8LinearMethod.process_weights_after_loading),
-        )
-        patcher2 = patch(
-            func2_path,
-            _make_process_weights_after_loading_for_vllm20(Fp8MoEMethod.process_weights_after_loading),
-        )
-        patcher1.start()
-        patcher2.start()
-        fp8_state.vllm_patches.extend([patcher1, patcher2])
-        return
+        wrap = _make_process_weights_after_loading_for_vllm20
+        return [
+            patch(linear_path, wrap(Fp8LinearMethod.process_weights_after_loading)),
+            patch(moe_path, wrap(Fp8MoEMethod.process_weights_after_loading)),
+        ]
 
-    patcher1 = patch(func1_path, process_weights_after_loading_for_vllm14)
-    patcher1.start()
-
-    patcher2 = patch(func2_path, process_weights_after_loading_moe_for_vllm14)
-    patcher2.start()
-    fp8_state.vllm_patches.extend([patcher1, patcher2])
+    return [
+        patch(linear_path, process_weights_after_loading_for_vllm14),
+        patch(moe_path, process_weights_after_loading_moe_for_vllm14),
+    ]

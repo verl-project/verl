@@ -44,7 +44,7 @@ from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tracking import RLInsightLogger
-from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches
+from verl.utils.vllm.vllm_quant_utils import apply_vllm_quant_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.utils import (
@@ -1041,15 +1041,14 @@ class vLLMHttpServer:
                     "ignored_layers": all_mlp_gate_layers,
                 }
                 hf_overrides["quantization_config"] = dict(FP8_BLOCK_QUANT_KWARGS)
-                # Apply vllm fp8 patches
                 # Will remove the patch after vllm support on-the-fly quant for rollout natively.
-                apply_vllm_fp8_patches()
+                apply_vllm_quant_patches()
                 # for subprocesses patching
                 os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
 
         model_quantization_config = getattr(self.model_config.hf_config, "quantization_config", {}) or {}
         if quantization is None and model_quantization_config.get("quant_method") == "fp8":
-            apply_vllm_fp8_patches()
+            apply_vllm_quant_patches()
             os.environ["VERL_VLLM_FP8_QUANT_ENABLED"] = "1"
 
         if quantization is not None and self.config.quantization_config_file is not None:
