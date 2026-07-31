@@ -49,6 +49,7 @@ from verl.utils.device import get_device_name, get_nccl_backend, get_torch_devic
 from verl.utils.model import compute_position_id_with_mask, create_random_mask
 from verl.utils.torch_functional import logprobs_from_logits_naive
 from verl.workers.config import (
+    WEIGHT_DECAY_SCALE_KEY,
     ActorConfig,
     CriticConfig,
     FSDPEngineConfig,
@@ -88,6 +89,21 @@ def test_tinker_workers_expose_split_training_primitives():
         assert name in TinkerTrainingWorker.__dict__
         assert name not in ActorRolloutRefWorker.__dict__
         assert name in TinkerActorRolloutRefWorker.__dict__
+
+
+def test_tinker_weight_decay_override_preserves_group_policy():
+    parameters = [torch.nn.Parameter(torch.ones(1)) for _ in range(2)]
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": [parameters[0]], WEIGHT_DECAY_SCALE_KEY: 1.0},
+            {"params": [parameters[1]], WEIGHT_DECAY_SCALE_KEY: 0.0},
+        ],
+        weight_decay=0.0,
+    )
+
+    _apply_optim_step_params(optimizer, {"weight_decay": 0.2})
+
+    assert [group["weight_decay"] for group in optimizer.param_groups] == pytest.approx([0.2, 0.0])
 
 
 def create_training_config(model_type, strategy, device_count, model):
@@ -693,11 +709,15 @@ def _split_training_primitives_fsdp_worker(
         grad_norm = engine.optimizer_step()
 
     assert grad_norm > 0
+    weight_decay_scales = set()
     for param_group in engine.optimizer.param_groups:
         assert param_group["lr"] == pytest.approx(optim_step_params["lr"])
         assert param_group["betas"] == pytest.approx(optim_step_params["betas"])
         assert param_group["eps"] == pytest.approx(optim_step_params["eps"])
-        assert param_group["weight_decay"] == pytest.approx(optim_step_params["weight_decay"])
+        weight_decay_scale = param_group.get(WEIGHT_DECAY_SCALE_KEY, 1.0)
+        weight_decay_scales.add(weight_decay_scale)
+        assert param_group["weight_decay"] == pytest.approx(optim_step_params["weight_decay"] * weight_decay_scale)
+    assert weight_decay_scales == {0.0, 1.0}
     assert _param_delta_norm(engine.module, before).item() > 0
     assert not _has_any_grad(engine.module)
 
