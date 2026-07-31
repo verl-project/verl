@@ -400,25 +400,6 @@ def apply_patch():
     except ImportError:
         pass  # not a DSA model, nothing to do
 
-    # On GH200 (95 GiB HBM), training with param/grad offloads leaves ~85 GiB
-    # allocated.  The distributed optimizer's _copy_model_grads_to_main_grads
-    # allocates a temporary FP32 shard (12–24 MiB) via shard_model_grad.float().
-    # The CUDA allocator's free memory is fragmented into sub-12 MiB holes and
-    # the allocation fails.  empty_cache() releases reserved-but-unallocated pages
-    # back to CUDA as a fresh contiguous block before the loop starts.
-    try:
-        from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer as _DistOptimizer
-
-        _orig_copy_grads = _DistOptimizer._copy_model_grads_to_main_grads
-
-        def _copy_grads_with_cache_clear(self):
-            torch.cuda.empty_cache()
-            return _orig_copy_grads(self)
-
-        _DistOptimizer._copy_model_grads_to_main_grads = _copy_grads_with_cache_clear
-    except (ImportError, AttributeError):
-        pass
-
 
 def apply_patch_mbridge():
     try:
