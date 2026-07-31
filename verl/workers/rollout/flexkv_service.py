@@ -168,6 +168,7 @@ class FlexKVNodeService:
                 "MC_LEGACY_RPC_PORT_BINDING": "1",
             }
         )
+        packed_kv = bool(cfg.get("packed_kv", True))
         cmd = [
             sys.executable,
             "-m",
@@ -187,8 +188,9 @@ class FlexKVNodeService:
             cfg["model_path"],
             "--tokens-per-block",
             str(cfg["tokens_per_block"]),
-            "--packed-kv",
         ]
+        if packed_kv:
+            cmd.append("--packed-kv")
         self.process = subprocess.Popen(
             cmd,
             env=env,
@@ -242,11 +244,12 @@ class FlexKVNodeService:
 
 
 class FlexKVServiceManager:
-    """Driver-side coordinator shared by all vLLM replicas."""
+    """Driver-side coordinator shared by vLLM or SGLang rollout replicas."""
 
     def __init__(self, rollout_config, model_config):
         self.config = OmegaConf.to_container(rollout_config.flexkv_service, resolve=True)
         self.model_path = getattr(model_config, "path")
+        self.rollout_name = str(rollout_config.name)
         self.tp_size = int(rollout_config.tensor_model_parallel_size)
         self.expected_gpus = int(self.config["expected_gpus_per_node"] or rollout_config.n_gpus_per_node)
         if self.expected_gpus % self.tp_size:
@@ -298,6 +301,7 @@ class FlexKVServiceManager:
                         "instance_num": self.expected_gpus // self.tp_size,
                         "tp_size": self.tp_size,
                         "model_path": self.model_path,
+                        "packed_kv": self.rollout_name == "vllm",
                         "metadata_host": self.metadata["host"],
                     }
                 )

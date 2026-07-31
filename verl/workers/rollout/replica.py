@@ -128,6 +128,13 @@ class RolloutReplica(ABC):
         self._server_address: str = None
         self._server_handle: ActorHandle = None
 
+    async def _get_flexkv_service_env(self, node_id: str, gpu_ids: list[str]) -> dict[str, str]:
+        """Register a rollout node with the shared FlexKV service, when enabled."""
+        manager = getattr(self, "flexkv_service_manager", None)
+        if manager is None:
+            return {}
+        return await manager.register_node(node_id, gpu_ids)
+
     async def init_hybrid(self, worker_group: RayWorkerGroup):
         """Init hybrid rollout server, rollout engine and training engine(fsdp/megatron) fused in same process.
 
