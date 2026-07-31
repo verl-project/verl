@@ -222,6 +222,36 @@ class vLLMColocateWorkerExtension:
             if draft_cfg is not None:
                 yield self._get_drafter_model(), draft_cfg
 
+    @staticmethod
+    def _iter_base_sync_weights_for_reload(weights):
+        """Clone weights out of the IPC bucket before vLLM retains them."""
+        for name, tensor in weights:
+            yield name, tensor.clone()
+
+    def _maybe_reload_standard_weights_from_ipc(self, receiver) -> bool:
+        """Use vLLM's checkpoint-aware reload protocol when available.
+
+        vLLM restores checkpoint parameter layouts before loading and applies
+        backend-specific packing exactly once afterwards. This is required for
+        non-idempotent FusedMoE layout transforms such as FlashInfer CUTLASS.
+        """
+        if self._use_mtp_drafter_weight_sync():
+            return False
+
+        reload_weights = getattr(self, "reload_weights", None)
+        if not callable(reload_weights):
+            return False
+
+        from vllm.config import set_current_vllm_config
+
+        logger.info("Reloading standard weights with vLLM's checkpoint-aware layerwise reload")
+        with set_current_vllm_config(self.model_runner.vllm_config):
+            reload_weights(
+                weights_iterator=self._iter_base_sync_weights_for_reload(receiver.iter_weights()),
+                is_checkpoint_format=True,
+            )
+        return True
+
     def monkey_patch_model(self, vocab_size: int, banned_token_ids: Optional[list[int]] = None):
         for model in self._iter_all_models():
             # patch compute_logits to avoid sampling OOV and other illegal tokens
@@ -241,6 +271,8 @@ class vLLMColocateWorkerExtension:
 
         # =========================== step 1: prepare for weight loading ===========================
         quant_reload_states = None
+        is_lora_sync = bool(peft_config and base_sync_done)
+        is_fp8_sync = is_fp8_model(self.model_runner.vllm_config)
 
         if self._is_qat_model:
             # QAT (compressed-tensors): Prepare for weight loading BEFORE receiving any buckets
@@ -254,12 +286,12 @@ class vLLMColocateWorkerExtension:
 
             prepare_modelopt_for_weight_reload(self.model_runner.model, device=self.device)
             logger.info("ModelOpt: prepare_modelopt_for_weight_reload completed")
-        elif peft_config and base_sync_done:
+        elif is_lora_sync:
             # In async mode, make sure the old lora is removed before adding the new one
             # TODO: this is buggy if lora span multiple buckets.
             self.remove_lora(VLLM_LORA_INT_ID)
             logger.info("LoRA adapter sync: remove old lora and prepare new lora")
-        elif is_fp8_model(self.model_runner.vllm_config):
+        elif is_fp8_sync:
             from verl.utils.vllm.vllm_fp8_utils import prepare_quanted_weights_for_loading
 
             quant_reload_states = [
@@ -276,13 +308,16 @@ class vLLMColocateWorkerExtension:
             device=self.device,
             use_shm=use_shm,
         )
-        receiver.receive_weights(
-            on_bucket_received=lambda weights: self._update_weights(
-                weights,
-                peft_config=peft_config,
-                base_sync_done=base_sync_done,
+        use_standard_reload = not (self._is_qat_model or self._is_modelopt_qat or is_lora_sync or is_fp8_sync)
+        used_layerwise_reload = use_standard_reload and self._maybe_reload_standard_weights_from_ipc(receiver)
+        if not used_layerwise_reload:
+            receiver.receive_weights(
+                on_bucket_received=lambda weights: self._update_weights(
+                    weights,
+                    peft_config=peft_config,
+                    base_sync_done=base_sync_done,
+                )
             )
-        )
 
         # =========================== step 3: process weights after loading ===========================
         if self._is_qat_model:
@@ -297,14 +332,14 @@ class vLLMColocateWorkerExtension:
 
             modelopt_process_weights_after_loading(self.model_runner.model)
             logger.info("ModelOpt QAT: process_weights_after_loading completed")
-        elif peft_config and base_sync_done:
+        elif is_lora_sync:
             logger.info("LoRA adapter sync, no post-process needed")
-        elif is_fp8_model(self.model_runner.vllm_config):
+        elif is_fp8_sync:
             from verl.utils.vllm.vllm_fp8_utils import process_quanted_weights_after_loading
 
             for model, reload_state in quant_reload_states:
                 process_quanted_weights_after_loading(model, reload_state)
-        else:
+        elif not used_layerwise_reload:
             # Some post-load transforms are non-idempotent; run once after all buckets.
             from vllm.model_executor.model_loader.utils import process_weights_after_loading
 

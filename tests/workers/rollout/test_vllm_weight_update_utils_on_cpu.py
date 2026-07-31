@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import importlib.util
 import sys
 import types
 from pathlib import Path
 
+import pytest
 import torch
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -242,3 +244,61 @@ def test_vllm_update_weights_syncs_buffers_to_mtp_drafter():
     expected = torch.tensor([5, 6, 7, 8], dtype=torch.float32)
     torch.testing.assert_close(main_model.model.layers[0].e_score_correction_bias, expected)
     torch.testing.assert_close(drafter_model.model.layers[0].e_score_correction_bias, expected)
+
+
+def test_standard_reload_uses_checkpoint_layout_and_clones_ipc_weights():
+    model = _ToyModel()
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    worker.model_runner = _FakeModelRunner(model)
+
+    source = torch.arange(4, dtype=torch.float32)
+
+    class _Receiver:
+        def iter_weights(self):
+            yield "weight", source
+
+    reload_call = {}
+
+    def _reload_weights(*, weights_iterator, is_checkpoint_format):
+        reload_call["weights"] = list(weights_iterator)
+        reload_call["is_checkpoint_format"] = is_checkpoint_format
+
+    worker.reload_weights = _reload_weights
+
+    fake_vllm_config = types.ModuleType("vllm.config")
+    fake_vllm_config.set_current_vllm_config = lambda config: contextlib.nullcontext()
+    previous = sys.modules.get("vllm.config")
+    sys.modules["vllm.config"] = fake_vllm_config
+    try:
+        used_reload = worker._maybe_reload_standard_weights_from_ipc(_Receiver())
+    finally:
+        if previous is None:
+            sys.modules.pop("vllm.config", None)
+        else:
+            sys.modules["vllm.config"] = previous
+
+    assert used_reload
+    assert reload_call["is_checkpoint_format"] is True
+    name, received = reload_call["weights"][0]
+    assert name == "weight"
+    torch.testing.assert_close(received, source)
+    assert received.data_ptr() != source.data_ptr()
+
+
+def test_standard_reload_falls_back_when_mtp_drafter_is_synced():
+    model = _ToyModel()
+
+    class _SpecConfig:
+        method = "mtp"
+        draft_model_config = object()
+
+    class _Drafter:
+        def __init__(self):
+            self.model = _ToyModel()
+
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    worker.model_runner = _FakeModelRunner(model, speculative_config=_SpecConfig())
+    worker.model_runner.drafter = _Drafter()
+    worker.reload_weights = lambda **kwargs: pytest.fail("checkpoint reload should not run for MTP")
+
+    assert not worker._maybe_reload_standard_weights_from_ipc(object())

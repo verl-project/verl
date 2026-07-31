@@ -74,6 +74,73 @@ class _FakeTorchDevice:
         pass
 
 
+class _FakeReceiverSocket:
+    def __init__(self, messages):
+        self.messages = iter(messages)
+        self.acknowledgements = []
+
+    def recv_pyobj(self):
+        return next(self.messages)
+
+    def send(self, message):
+        self.acknowledgements.append(message)
+
+
+def test_receiver_iter_weights_acknowledges_after_each_bucket(monkeypatch):
+    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
+
+    messages = [
+        {
+            "bucket_meta": {
+                "first": {
+                    "shape": torch.Size([2]),
+                    "dtype": torch.float32,
+                    "offset": 0,
+                    "handle": None,
+                }
+            },
+            "is_last": False,
+        },
+        {
+            "bucket_meta": {
+                "second": {
+                    "shape": torch.Size([2]),
+                    "dtype": torch.float32,
+                    "offset": 0,
+                    "handle": None,
+                }
+            },
+            "is_last": True,
+        },
+    ]
+    socket = _FakeReceiverSocket(messages)
+    buffer = torch.tensor([1.0, 2.0], dtype=torch.float32).view(torch.uint8)
+    receiver = bucketed_weight_transfer.BucketedWeightReceiver(
+        zmq_handle="ipc:///tmp/test-bwt-unused.sock",
+        device=torch.device("cpu"),
+    )
+
+    monkeypatch.setattr(receiver, "_init_socket", lambda: setattr(receiver, "socket", socket))
+    monkeypatch.setattr(receiver, "_init_buffer", lambda: setattr(receiver, "buffer", buffer))
+    monkeypatch.setattr(receiver, "_cleanup", lambda: None)
+    monkeypatch.setattr(bucketed_weight_transfer, "get_torch_device", lambda: _FakeTorchDevice())
+
+    weights = receiver.iter_weights()
+    first_name, first = next(weights)
+    assert first_name == "first"
+    torch.testing.assert_close(first, torch.tensor([1.0, 2.0]))
+    assert socket.acknowledgements == []
+
+    second_name, second = next(weights)
+    assert second_name == "second"
+    torch.testing.assert_close(second, torch.tensor([1.0, 2.0]))
+    assert socket.acknowledgements == [b""]
+
+    with pytest.raises(StopIteration):
+        next(weights)
+    assert socket.acknowledgements == [b"", b""]
+
+
 def test_sender_accepts_strided_tensor(monkeypatch):
     from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
 

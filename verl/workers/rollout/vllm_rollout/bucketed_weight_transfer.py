@@ -274,27 +274,56 @@ class BucketedWeightReceiver:
 
             # receive bucket and update weights
             while True:
-                metadata = self.socket.recv_pyobj()
-                weights, tensor = [], None
-                for name, meta in metadata["bucket_meta"].items():
-                    shape, dtype, offset, handle = meta["shape"], meta["dtype"], meta["offset"], meta["handle"]
-                    if handle is not None:
-                        tensor = rebuild_ipc(handle, self.device.index)
-                        weights.append((name, tensor))
-                        continue
-                    size = dtype.itemsize * shape.numel()
-                    tensor = self.buffer[offset : offset + size].view(dtype=dtype).view(shape)
-                    if self.use_shm:
-                        tensor = tensor.to(self.device)
-                    weights.append((name, tensor))
+                weights, is_last = self._receive_bucket()
                 on_bucket_received(weights)
-                get_torch_device().synchronize()
-                self.socket.send(b"")
-                del weights, tensor
-                if metadata["is_last"]:
+                self._acknowledge_bucket()
+                del weights
+                if is_last:
                     break
         finally:
             self._cleanup()
+
+    def iter_weights(self):
+        """Yield received weights while preserving bucket-level backpressure.
+
+        The current bucket remains valid until all of its weights have been
+        consumed. Callers that retain a tensor after advancing the iterator
+        must clone it because the communication buffer is reused.
+        """
+        try:
+            self._init_socket()
+            self._init_buffer()
+
+            while True:
+                weights, is_last = self._receive_bucket()
+                yield from weights
+                self._acknowledge_bucket()
+                del weights
+                if is_last:
+                    break
+        finally:
+            self._cleanup()
+
+    def _receive_bucket(self):
+        """Receive metadata and reconstruct every tensor in one bucket."""
+        metadata = self.socket.recv_pyobj()
+        weights = []
+        for name, meta in metadata["bucket_meta"].items():
+            shape, dtype, offset, handle = meta["shape"], meta["dtype"], meta["offset"], meta["handle"]
+            if handle is not None:
+                tensor = rebuild_ipc(handle, self.device.index)
+            else:
+                size = dtype.itemsize * shape.numel()
+                tensor = self.buffer[offset : offset + size].view(dtype=dtype).view(shape)
+                if self.use_shm:
+                    tensor = tensor.to(self.device)
+            weights.append((name, tensor))
+        return weights, metadata["is_last"]
+
+    def _acknowledge_bucket(self):
+        """Wait for tensor uses to finish before allowing buffer reuse."""
+        get_torch_device().synchronize()
+        self.socket.send(b"")
 
     def _init_socket(self):
         """Initialize ZMQ REP socket and connect."""
