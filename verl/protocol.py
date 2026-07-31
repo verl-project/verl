@@ -80,7 +80,7 @@ def pad_dataproto_to_divisor(data: "DataProto", size_divisor: int):
         data: (DataProto): the padded DataProto
         pad_size (int)
     """
-    assert isinstance(data, DataProto), "data must be a DataProto"
+    assert BatchData(data).is_chunkable(), "data must be a supported batch container"
     if len(data) % size_divisor != 0:
         pad_size = size_divisor - len(data) % size_divisor
         padding_protos = []
@@ -89,7 +89,7 @@ def pad_dataproto_to_divisor(data: "DataProto", size_divisor: int):
             take_size = min(remaining_pad, len(data))
             padding_protos.append(data[:take_size])
             remaining_pad -= take_size
-        data_padded = DataProto.concat([data] + padding_protos)
+        data_padded = type(data).concat([data] + padding_protos)
     else:
         if len(data) == 0:
             logging.warning("padding a DataProto with no item, no changed made")
@@ -1211,10 +1211,10 @@ class DataProtoFuture:
     def get(self):
         output = ray.get(self.futures)  # dp_size.
         for o in output:
-            assert isinstance(o, DataProto | TensorDict)
+            assert isinstance(o, DataProto | TensorDict) or getattr(o, "__neoproto__", False)
 
-        if isinstance(output[0], DataProto):
-            output = DataProto.concat(output)  # select dp, concat
+        if isinstance(output[0], DataProto) or getattr(output[0], "__neoproto__", False):
+            output = type(output[0]).concat(output)  # select dp, concat
         elif isinstance(output[0], TensorDict):
             from verl.utils.tensordict_utils import concat_tensordict
 
@@ -1256,14 +1256,14 @@ class BatchData:
 
     def is_chunkable(self) -> bool:
         """Return True if the wrapped data supports chunk dispatch."""
-        return isinstance(self._data, self._chunkable_types())
+        return isinstance(self._data, self._chunkable_types()) or getattr(self._data, "__neoproto__", False)
 
     def is_concatable(self) -> bool:
         """Return True if the wrapped list of data supports concat collect."""
         data = self._data
         if not isinstance(data, list | tuple) or len(data) == 0:
             return False
-        return isinstance(data[0], self._concatable_types())
+        return isinstance(data[0], self._concatable_types()) or getattr(data[0], "__neoproto__", False)
 
     # ---- operations ----------------------------------------------------------
 

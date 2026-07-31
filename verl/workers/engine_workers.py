@@ -64,7 +64,10 @@ def _with_routing_replay_flag(enabled: bool):
     def decorator(func):
         @functools.wraps(func)
         def wrapper(self, data: TensorDict, *args, **kwargs):
-            if self.enable_routing_replay:
+            from verl.experimental.neoproto.dispatch import is_neo_batch
+
+            # NeoProto is coerced inside TrainingWorker via neo_engine_call; skip here.
+            if not is_neo_batch(data) and self.enable_routing_replay:
                 tu.assign_non_tensor_data(data, "enable_routing_replay", enabled)
             return func(self, data, *args, **kwargs)
 
@@ -240,6 +243,24 @@ class TrainingWorker(Worker, DistProfilerExtension):
         Returns:
 
         """
+        from verl.experimental.neoproto.worker_bridge import (
+            NEO_TRAIN_OPTIONAL_KEYS,
+            NEO_TRAIN_REQUIRED_KEYS,
+            neo_engine_call,
+        )
+
+        def _run(td: TensorDict):
+            return self._train_mini_batch_impl(td)
+
+        return neo_engine_call(
+            data,
+            _run,
+            required_keys=NEO_TRAIN_REQUIRED_KEYS,
+            optional_keys=NEO_TRAIN_OPTIONAL_KEYS,
+            restore_padding_keys=(),
+        )
+
+    def _train_mini_batch_impl(self, data: TensorDict) -> TensorDict:
         maybe_fix_3d_position_ids(data)
         batch_size_per_dp = data.shape[0]
         disable_auto_offload = tu.pop(data, key="disable_auto_offload", default=False)
@@ -379,6 +400,25 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
     def infer_batch(self, data: TensorDict) -> TensorDict:
+        from verl.experimental.neoproto.worker_bridge import (
+            NEO_INFER_OPTIONAL_KEYS,
+            NEO_INFER_REQUIRED_KEYS,
+            neo_engine_call,
+        )
+
+        def _run(td: TensorDict):
+            return self._infer_batch_impl(td)
+
+        # values / log_probs tensors are restored to padded layout before return
+        return neo_engine_call(
+            data,
+            _run,
+            required_keys=NEO_INFER_REQUIRED_KEYS,
+            optional_keys=NEO_INFER_OPTIONAL_KEYS,
+            restore_padding_keys=("values", "log_probs", "entropy", "sum_pi_squared"),
+        )
+
+    def _infer_batch_impl(self, data: TensorDict) -> TensorDict:
         # add mfu calculator
         global_token_num = tu.get(data, key="global_token_num")
         compute_loss = tu.get(data, key="compute_loss", default=True)
@@ -635,27 +675,62 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # Free cached GPU memory so colocated vLLM processes can see it via cudaMemGetInfo
         aggressive_empty_cache(force_sync=True)
 
+    @staticmethod
+    def _maybe_cpu(output):
+        from verl.experimental.neoproto.dispatch import is_neo_batch
+
+        if output is None:
+            return None
+        # NeoProto already holds CPU refs/tensors from worker materialize.
+        if is_neo_batch(output):
+            return output
+        return output.cpu()
+
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     @_with_routing_replay_flag(enabled=False)
     def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
+        from verl.experimental.neoproto.dispatch import is_neo_batch
+
+        # Pass NeoProto through so TrainingWorker materializes in-process.
+        if is_neo_batch(data):
+            data.meta_info["enable_routing_replay"] = False
         output = self.ref.infer_batch(data=data)
-        return output.cpu() if output is not None else None
+        return self._maybe_cpu(output)
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
     @_with_routing_replay_flag(enabled=True)
     def compute_log_prob(self, data: TensorDict) -> TensorDict:
-        output = self.actor.infer_batch(data)
+        from verl.experimental.neoproto.dispatch import is_neo_batch
 
-        return output.cpu() if output is not None else None
+        if is_neo_batch(data):
+            if self.enable_routing_replay:
+                data.meta_info["enable_routing_replay"] = True
+            output = self.actor.infer_batch(data)
+            return self._maybe_cpu(output)
+
+        if self.enable_routing_replay:
+            tu.assign_non_tensor_data(data, "enable_routing_replay", True)
+        output = self.actor.infer_batch(data)
+        return self._maybe_cpu(output)
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
     @_with_routing_replay_flag(enabled=True)
     def update_actor(self, data: TensorDict) -> TensorDict:
+        from verl.experimental.neoproto.dispatch import is_neo_batch
+
+        if is_neo_batch(data):
+            if self.enable_routing_replay:
+                data.meta_info["enable_routing_replay"] = True
+            output = self.actor.train_mini_batch(data=data)
+            return self._maybe_cpu(output)
+
+        if self.enable_routing_replay:
+            tu.assign_non_tensor_data(data, "enable_routing_replay", True)
         output = self.actor.train_mini_batch(data=data)
-        return output.cpu() if output is not None else None
+        return self._maybe_cpu(output)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):

@@ -351,7 +351,7 @@ class RewardLoopManager:
         if self.reward_model_manager is not None:
             self.reward_model_manager.sleep()
 
-        return DataProto(
+        return type(data)(
             batch=batch, non_tensor_batch=non_tensor_batch, meta_info={"reward_extra_keys": reward_extra_keys}
         )
 

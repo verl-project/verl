@@ -505,6 +505,9 @@ class AgentLoopWorker:
         self.llm_client = llm_client
         self.teacher_client = teacher_client
         self.reward_loop_worker_handles = reward_loop_worker_handles
+        # Set per generate_sequences call from type(batch) so reward/postprocess
+        # reconstruct with the same container (NeoProto view when use_neoproto).
+        self._data_proto_cls: type[DataProto] = DataProto
 
         rollout_config, model_config = config.actor_rollout_ref.rollout, config.actor_rollout_ref.model
         self.rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_config)
@@ -586,6 +589,7 @@ class AgentLoopWorker:
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
         config = self.rollout_config
+        self._data_proto_cls = type(batch)
         validate = batch.meta_info.get("validate", False)
         sampling_params = dict(
             temperature=config.temperature,
@@ -654,7 +658,10 @@ class AgentLoopWorker:
         outputs = await asyncio.gather(*tasks)
 
         output = self._postprocess(
-            outputs, input_non_tensor_batch=batch.non_tensor_batch, validate=batch.meta_info.get("validate", False)
+            outputs,
+            input_non_tensor_batch=batch.non_tensor_batch,
+            validate=batch.meta_info.get("validate", False),
+            data_proto_cls=self._data_proto_cls,
         )
         return output
 
@@ -993,7 +1000,9 @@ class AgentLoopWorker:
                     "response_len": np.array([len(o.response_ids) for o in outputs]),
                 }
 
-                data = DataProto(
+                # Use the same container class as the inbound generate_sequences batch
+                # (NeoProto-backed DataProto when trainer.use_neoproto=True).
+                data = self._data_proto_cls(
                     batch=batch,
                     non_tensor_batch=non_tensor_batch,
                 )
@@ -1033,6 +1042,7 @@ class AgentLoopWorker:
         inputs: list[_InternalAgentLoopOutput],
         input_non_tensor_batch: dict | None = None,
         validate: bool = False,
+        data_proto_cls: type[DataProto] = DataProto,
     ) -> DataProto:
         """Process the padded outputs from _run_agent_loop and combine them into a batch."""
         # Convert lists back to tensors and stack them to create a batch.
@@ -1115,7 +1125,7 @@ class AgentLoopWorker:
         else:
             meta_info = {"metrics": metrics}
 
-        return DataProto(
+        return data_proto_cls(
             batch=batch,
             non_tensor_batch=non_tensor_batch,
             meta_info=meta_info,
@@ -1225,7 +1235,7 @@ class AgentLoopManager:
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
         )
-        output = DataProto.concat(outputs)
+        output = type(outputs[0]).concat(outputs)
 
         # calculate performance metrics
         metrics = [output.meta_info.pop("metrics") for output in outputs]  # List[List[Dict[str, str]]]
