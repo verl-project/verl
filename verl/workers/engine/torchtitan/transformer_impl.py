@@ -854,7 +854,9 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
         device_name = get_device_name()
         micro_batch = micro_batch.to(get_device_id())
 
-        reconstruct_tpu_packed_metadata_tensors(micro_batch, get_device_id())
+        # Guard TPU-specific packed metadata reconstruction to run only on TPU devices
+        if device_name == "tpu":
+            reconstruct_tpu_packed_metadata_tensors(micro_batch, get_device_id())
 
         input_ids, extra_inputs, extra_kwargs, output_args = self.prepare_model_inputs(micro_batch=micro_batch)
 

@@ -71,7 +71,13 @@ def patch_ray_worker():
         def patched_func(self, resource_name, resource_regex):
             try:
                 return original_func(self, resource_name, resource_regex)
-            except IndexError:
+            except IndexError as e:
+                import traceback
+
+                print(
+                    f"[patch_ray_worker] Intercepted Ray accelerator lookup IndexError for resource '{resource_name}': {e}\n"
+                    f"{traceback.format_exc()}"
+                )
                 return []
 
         ray._private.worker.Worker.get_accelerator_ids_for_accelerator_resource = patched_func
