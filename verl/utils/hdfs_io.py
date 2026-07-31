@@ -15,6 +15,8 @@
 import logging
 import os
 import shutil
+import signal
+import subprocess
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "WARN"))
@@ -102,7 +104,7 @@ def copy(src: str, dst: str, **kwargs) -> bool:
         # TODO(haibin.lin):
         # - handle SameFileError for hdfs files(?)
         # - return file destination for hdfs files
-        return _copy(src, dst)
+        return _copy(src, dst, timeout=kwargs.get("timeout"))
     else:
         if os.path.isdir(src):
             return shutil.copytree(src, dst, **kwargs)
@@ -110,7 +112,7 @@ def copy(src: str, dst: str, **kwargs) -> bool:
             return shutil.copy(src, dst, **kwargs)
 
 
-def _copy(from_path: str, to_path: str, timeout: int = None) -> bool:
+def _copy(from_path: str, to_path: str, timeout: float | None = None) -> bool:
     if to_path.startswith("hdfs"):
         if from_path.startswith("hdfs"):
             returncode = _run_cmd(_hdfs_cmd(f"-cp -f {from_path} {to_path}"), timeout=timeout)
@@ -137,8 +139,28 @@ def _copy(from_path: str, to_path: str, timeout: int = None) -> bool:
     return returncode == 0
 
 
-def _run_cmd(cmd: str, timeout=None):
-    return os.system(cmd)
+def _terminate_process_tree(process: subprocess.Popen) -> None:
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    else:
+        process.kill()
+    process.wait()
+
+
+def _run_cmd(cmd: str, timeout: float | None = None) -> int:
+    process = subprocess.Popen(cmd, shell=True, start_new_session=os.name == "posix")
+    try:
+        return process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(process)
+        logger.warning("HDFS command timed out after %s seconds: %s", timeout, cmd)
+        return -1
+    except BaseException:
+        _terminate_process_tree(process)
+        raise
 
 
 def _hdfs_cmd(cmd: str) -> str:
