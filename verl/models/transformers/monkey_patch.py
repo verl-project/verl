@@ -23,6 +23,7 @@ import torch
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.modeling_utils import PreTrainedModel
 
+from verl.utils.experimental.torch_functional import FusedLinearForPPO
 from verl.utils.import_utils import is_trl_available
 from verl.utils.transformers_compat import is_transformers_version_in_range
 from verl.utils.ulysses import (
@@ -94,8 +95,6 @@ def apply_prefix_grouper_model_forward_patch(model: PreTrainedModel):
     ):
         if prefix_input_ids is None:
             return original_lm_head_forward(hidden_states, *args, **kwargs)
-
-        from verl.utils.experimental.torch_functional import FusedLinearForPPO
 
         return FusedLinearForPPO().forward(
             hidden_states=hidden_states,

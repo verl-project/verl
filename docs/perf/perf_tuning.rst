@@ -158,53 +158,6 @@ Here're some tips to tune the above parameters:
    
 .. :math:`\text{critic.ppo_max_token_len_per_gpu}  = 2 \times  \text{actor.ppo_max_token_len_per_gpu})`.
 
-PrefixGrouper for repeated prompts
-----------------------------------
-
-PrefixGrouper computes a repeated rollout prompt once and shares its attention
-keys and values across the corresponding responses. Install the optional
-dependency with ``pip install "verl[prefix_grouper]"``.
-
-The current implementation supports text-only FSDP/FSDP2 actors with fixed
-microbatches:
-
-.. code-block:: yaml
-
-   actor_rollout_ref:
-     model:
-       use_remove_padding: false
-       use_fused_kernels: false
-     actor:
-       strategy: fsdp2
-       use_prefix_grouper: true
-       use_dynamic_bsz: false
-       shuffle: false
-       ppo_micro_batch_size_per_gpu: 64
-     ref:
-       log_prob_use_dynamic_bsz: false
-       log_prob_micro_batch_size_per_gpu: 64
-     rollout:
-       log_prob_use_dynamic_bsz: false
-       log_prob_micro_batch_size_per_gpu: 64
-
-Actor, reference, and rollout microbatch sizes must be divisible by
-``rollout.n``.
-
-``use_fused_kernels`` remains disabled because that option replaces the entire
-model forward before PrefixGrouper can split grouped outputs. PrefixGrouper
-instead performs a response-only ``FusedLinearForPPO`` projection after
-splitting grouped hidden states. Despite its name, ``FusedLinearForPPO`` only
-computes token log-probabilities and entropy. The configured policy loss
-(``vanilla``, ``gspo``, ``gpg``, ``clip_cov``, and other registered modes) is
-selected later and is unchanged.
-
-PrefixGrouper is independent of the advantage estimator and can be used with
-GRPO variants, RLOO, REINFORCE++, GPG, and other estimators when the batch
-contains repeated prompt groups. It provides no compute benefit when
-``rollout.n=1``. Modes requiring full logits, including
-``calculate_sum_pi_squared`` and top-K distillation, are not currently
-supported.
-
 Ulysses Sequence Parallel for Long Context Training
 ----------------------------------------------------
 

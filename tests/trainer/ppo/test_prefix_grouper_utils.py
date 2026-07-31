@@ -16,7 +16,6 @@ from verl.models.transformers.monkey_patch import apply_prefix_grouper_model_for
 from verl.trainer.ppo.prefix_grouper_utils import (
     attach_prefix_grouper_forward_args,
     build_pg_from_micro_batch,
-    pg_forward,
     response_output_to_nested,
 )
 from verl.utils import tensordict_utils as tu
@@ -96,14 +95,19 @@ def test_fused_prefix_grouper_matches_repeated_prefix_gradients(monkeypatch):
         completion_ids,
         completion_mask,
     ) = build_pg_from_micro_batch(micro_batch, pad_token_id=0)
-    grouped_log_probs, _, suffix_mask = pg_forward(
-        model=grouped_model,
+    attach_prefix_grouper_forward_args(
         prefix_grouper=prefix_grouper,
-        concat_input_ids=concat_input_ids,
-        attention_mask=attention_mask,
-        position_ids=position_ids,
         completion_ids=completion_ids,
         completion_mask=completion_mask,
+        temperature=1.0,
+        calculate_entropy=False,
+    )
+    grouped_log_probs, _, suffix_mask = grouped_model(
+        input_ids=concat_input_ids,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        prefix_grouper=prefix_grouper,
+        return_prefix_fused_outputs=True,
     )
     grouped_loss = -(grouped_log_probs * suffix_mask).sum()
     grouped_loss.backward()
@@ -155,6 +159,35 @@ def test_response_output_to_nested_preserves_alignment():
         nested.values(),
         torch.tensor([0.0, 0.0, 0.0, 10.0, 11.0, 0.0, 0.0, 20.0, 21.0, 22.0, 0.0]),
     )
+
+
+def test_build_pg_uses_nonzero_pad_token_id():
+    prompts = torch.tensor(
+        [
+            [99, 99, 3, 4],
+            [99, 99, 3, 4],
+        ]
+    )
+    responses = torch.tensor(
+        [
+            [5, 6, 99],
+            [7, 99, 99],
+        ]
+    )
+    response_mask = responses.ne(99)
+
+    prefix_grouper, *_ = build_pg_from_micro_batch(
+        {
+            "prompts": prompts,
+            "responses": responses,
+            "response_mask": response_mask,
+            "uid": ["group-0", "group-0"],
+        },
+        pad_token_id=99,
+    )
+
+    assert prefix_grouper.prefix_lens.tolist() == [2]
+    assert prefix_grouper.ungrouped_suffix_lens.tolist() == [2, 1]
 
 
 def test_prefix_grouper_temperature_matches_existing_clamp():

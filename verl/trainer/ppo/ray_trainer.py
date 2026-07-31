@@ -1235,7 +1235,11 @@ class RayPPOTrainer:
         # step 2: convert from padding to nopadding
         batch_td = left_right_2_no_padding(batch_td)
         # step 3: add meta info
-        metadata = {"calculate_entropy": False, "compute_loss": False}
+        metadata = {
+            "calculate_entropy": False,
+            "compute_loss": False,
+            "pad_token_id": self.tokenizer.pad_token_id,
+        }
         if self.ref_in_actor:
             metadata["no_lora_adapter"] = True
         tu.assign_non_tensor(batch_td, **metadata)
@@ -1266,6 +1270,7 @@ class RayPPOTrainer:
             calculate_entropy=True,
             calculate_sum_pi_squared=calculate_sum_pi_squared,
             compute_loss=False,
+            pad_token_id=self.tokenizer.pad_token_id,
         )
         output = self.actor_rollout_wg.compute_log_prob(batch_td)
         # gather output
@@ -1322,6 +1327,7 @@ class RayPPOTrainer:
             seed=seed,
             dataloader_kwargs={"shuffle": shuffle},
             compute_loss=True,
+            pad_token_id=self.tokenizer.pad_token_id,
         )
         actor_output = self.actor_rollout_wg.update_actor(batch_td)
         actor_output = tu.get(actor_output, "metrics")

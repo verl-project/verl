@@ -19,6 +19,8 @@ import torch.nn.functional as F
 from prefix_grouper import PrefixGrouper
 from tensordict.tensorclass import NonTensorData
 
+from verl.utils.torch_functional import logprobs_from_logits
+
 
 def build_position_ids_for_prefix_grouper(prefix_grouper: PrefixGrouper) -> torch.Tensor:
     """Build position_ids for PrefixGrouper where each response restarts from prefix_len."""
@@ -53,6 +55,7 @@ def build_pg_from_micro_batch(
     responses = micro_batch["responses"]
     response_mask = micro_batch["response_mask"]
     uids = micro_batch["uid"]
+    # Engine dispatch wraps non-tensor fields; unwrap UIDs before comparing group boundaries.
     if isinstance(uids, NonTensorData):
         uids = uids.data
 
@@ -131,24 +134,36 @@ def pg_forward(
     calculate_entropy=False,
     entropy_fn=None,
 ):
-    if padding_mode != "right" or include_prefix_last != 1:
-        raise ValueError("Fused PrefixGrouper requires right padding and include_prefix_last=1")
-
-    attach_prefix_grouper_forward_args(
-        prefix_grouper=prefix_grouper,
-        completion_ids=completion_ids,
-        completion_mask=completion_mask,
-        temperature=temperature,
-        calculate_entropy=calculate_entropy,
-    )
-    return model(
+    logits = model(
         input_ids=concat_input_ids,
         attention_mask=attention_mask,
         position_ids=position_ids,
         use_cache=False,
         prefix_grouper=prefix_grouper,
-        return_prefix_fused_outputs=True,
+    ).logits
+
+    prefix_out, prefix_mask, suffix_out_raw, suffix_mask_raw = prefix_grouper.split_output(
+        logits, include_prefix_last=include_prefix_last
     )
+
+    completion_ids_right = prefix_grouper.convert_padding(
+        completion_ids,
+        completion_mask,
+        padding_mode=padding_mode,
+    )
+
+    suffix_out = suffix_out_raw[:, :-1].float()
+    suffix_mask = suffix_mask_raw[:, 1:]
+
+    suffix_out /= temperature
+
+    log_probs = logprobs_from_logits(suffix_out, completion_ids_right)
+
+    entropy = None
+    if calculate_entropy and entropy_fn is not None:
+        entropy = entropy_fn(suffix_out)
+
+    return log_probs, entropy, suffix_mask
 
 
 def response_output_to_nested(
