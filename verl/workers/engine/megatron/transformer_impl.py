@@ -83,6 +83,12 @@ class MegatronEngine(BaseEngine):
     # default here.
     delta_pin_snapshots = False
 
+    @staticmethod
+    def _get_context_parallel_layout(unwrapped_model) -> str:
+        if getattr(unwrapped_model.config, "experimental_attention_variant", None) == "dsv4_hybrid":
+            return "contiguous"
+        return "zigzag"
+
     def __init__(
         self,
         model_config: HFModelConfig,
@@ -1065,11 +1071,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         loss_mask = model_inputs["loss_mask"]
 
         unwrapped_model = unwrap_model(model)
-        cp_layout = (
-            "contiguous"
-            if getattr(unwrapped_model.config, "experimental_attention_variant", None) == "dsv4_hybrid"
-            else "zigzag"
-        )
+        cp_layout = self._get_context_parallel_layout(unwrapped_model)
         if hasattr(unwrapped_model, "vp_stage"):
             vp_rank = unwrapped_model.vp_stage
         else:
@@ -1287,6 +1289,7 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
         model_inputs = self.prepare_model_inputs(batch)
         input_ids = model_inputs["input_ids"]
         multi_modal_inputs = model_inputs["multi_modal_inputs"]
+        cp_layout = self._get_context_parallel_layout(unwrap_model(model))
 
         from verl.models.mcore import get_mcore_engine_forward_fn
 
@@ -1301,6 +1304,7 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
             pad_token_id=self.model_config.tokenizer.pad_token_id,
             data_format="thd" if self.engine_config.use_remove_padding else "bshd",
             forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
+            cp_layout=cp_layout,
         )
 
         return output, partial(postprocess_micro_batch_func, data=batch)
