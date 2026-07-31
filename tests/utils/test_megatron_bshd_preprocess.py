@@ -174,8 +174,18 @@ def test_preprocess_thd_engine_contiguous_uses_global_packed_intervals(
     )
 
     assert packed_seq_params.cu_seqlens_q_padded.tolist() == [0, 6, 10]
+    # A zigzag-only factor of two would incorrectly pad these rows to 8 and 4.
+    assert packed_seq_params.cu_seqlens_q_padded.tolist() != [0, 8, 12]
     torch.testing.assert_close(local_ids[0], torch.tensor(expected_ids, dtype=torch.long))
     torch.testing.assert_close(local_positions[0], torch.tensor(expected_positions, dtype=torch.long))
+
+
+def test_preprocess_thd_engine_rejects_unknown_cp_layout(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1, cp_size=2)
+    input_ids = _nested_tensor([torch.tensor([10, 11], dtype=torch.long)])
+
+    with pytest.raises(ValueError, match="Unsupported context parallel layout: interleaved"):
+        mcore_util.preprocess_thd_engine(input_ids, cp_layout="interleaved")
 
 
 def test_preprocess_thd_engine_contiguous_rolls_each_sequence_independently(monkeypatch):
@@ -227,3 +237,17 @@ def test_postprocess_thd_engine_contiguous_inverts_global_intervals(monkeypatch)
 
     torch.testing.assert_close(restored[0], torch.tensor([100, 101, 102, 103, 104], dtype=torch.float32))
     torch.testing.assert_close(restored[1], torch.tensor([106, 107, 108], dtype=torch.float32))
+
+
+def test_postprocess_thd_engine_rejects_unknown_cp_layout(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1, cp_size=2)
+
+    with pytest.raises(ValueError, match="Unsupported context parallel layout: interleaved"):
+        mcore_util.postprocess_thd_engine(
+            torch.empty(1, 1),
+            packed_seq_params=None,
+            input_ids=torch.empty(1),
+            batch_size=1,
+            post_process=False,
+            cp_layout="interleaved",
+        )
