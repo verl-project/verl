@@ -9,7 +9,7 @@
 # Dependency snapshot verified against recent upstream main (2026-07-29):
 #   Base container: nvcr.io/nvidia/pytorch:26.06-py3 (CUDA 13.3, Python 3.12)
 #   Megatron-Bridge: 1f12931e2f34ec26f578a4cffe15adc06f71a5a2
-#   Megatron Core submodule: cd4afffa648426a959dc7cb1e24b5ce7d0c3ff54
+#   Megatron Core: 0.19.0 at cd4afffa648426a959dc7cb1e24b5ce7d0c3ff54
 #   Transformer Engine: e7c550c5f80636cf841a8204b1d6f85a5f3f28b7 (2.18.0)
 #   Transformers: 5.10.4 (within both verl and Megatron-Bridge constraints)
 #
@@ -42,14 +42,7 @@ NNODES=${NNODES:-4}
 NODE_RANK=${NODE_RANK:-0}
 MASTER_ADDR=${MASTER_ADDR:-localhost}
 MASTER_PORT=${MASTER_PORT:-29500}
-
-# HybridEP topology for an 8-GPU NVLink domain (for example, one H100 node).
-# The pinned MBridge Dockerfile also consumes HYBRID_EP_MULTINODE=1 while
-# compiling DeepEP, enabling its inter-node RDMA path.
-export NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN=${NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN:-8}
-export NVLINK_DOMAIN_SIZE=${NVLINK_DOMAIN_SIZE:-8}
-export USE_MNNVL=${USE_MNNVL:-0}
-export HYBRID_EP_MULTINODE=${HYBRID_EP_MULTINODE:-1}
+PYTHON_BIN=${PYTHON_BIN:-python}
 
 # ============================================================
 # Data and model
@@ -64,14 +57,14 @@ TOKENIZER_PATH=${TOKENIZER_PATH:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}
 # ============================================================
 # Parallelism and training
 # ============================================================
-TP_SIZE=${TP_SIZE:-1}
+TP_SIZE=${TP_SIZE:-2}
 PP_SIZE=${PP_SIZE:-1}
 VPP_SIZE=${VPP_SIZE:-null}
 CP_SIZE=${CP_SIZE:-1}
-EP_SIZE=${EP_SIZE:-8}
+EP_SIZE=${EP_SIZE:-16}
 ETP_SIZE=${ETP_SIZE:-1}
 
-TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-64}
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-32}
 MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-1}
 MAX_LENGTH=${MAX_LENGTH:-2048}
 MAX_TOKEN_LEN_PER_GPU=${MAX_TOKEN_LEN_PER_GPU:-${MAX_LENGTH}}
@@ -117,7 +110,16 @@ MEGATRON_ENGINE_CONFIG=(
     "engine.vanilla_mbridge=False"
     "engine.dtype=${DTYPE}"
     "engine.use_remove_padding=True"
+    "+engine.override_ddp_config.data_parallel_sharding_strategy=optim_grads_params"
+    "+engine.override_ddp_config.overlap_param_gather=True"
+    "+engine.override_ddp_config.overlap_grad_reduce=False"
+    "+engine.override_ddp_config.grad_reduce_in_fp32=False"
+    "+engine.override_ddp_config.check_for_nan_in_grad=True"
     "engine.override_transformer_config.attention_backend=fused"
+    "engine.override_transformer_config.recompute_granularity=full"
+    "engine.override_transformer_config.recompute_modules=[core_attn]"
+    "engine.override_transformer_config.recompute_method=uniform"
+    "engine.override_transformer_config.recompute_num_layers=1"
     "+engine.override_transformer_config.apply_rope_fusion=False"
     "+engine.override_transformer_config.gradient_accumulation_fusion=True"
     "+engine.override_transformer_config.init_method_std=0.014"
@@ -126,7 +128,13 @@ MEGATRON_ENGINE_CONFIG=(
     "+engine.override_transformer_config.use_te_rng_tracker=True"
     "+engine.override_transformer_config.moe_token_dispatcher_type=alltoall"
     "+engine.override_transformer_config.moe_shared_expert_overlap=False"
-    "+engine.override_transformer_config.moe_flex_dispatcher_backend=hybridep"
+    "+engine.override_transformer_config.moe_router_dtype=fp32"
+    "+engine.override_transformer_config.moe_router_load_balancing_type=seq_aux_loss"
+    "+engine.override_transformer_config.moe_router_bias_update_rate=0.001"
+    "+engine.override_transformer_config.moe_permute_fusion=True"
+    "+engine.override_transformer_config.moe_enable_deepep=False"
+    "+engine.override_transformer_config.moe_aux_loss_coeff=0.0001"
+    "+engine.override_transformer_config.moe_router_enable_expert_bias=True"
     "+engine.override_transformer_config.cuda_graph_impl=none"
     "+engine.override_transformer_config.cuda_graph_scope=[]"
     "+engine.override_transformer_config.mtp_num_layers=${MTP_NUM_LAYERS}"
@@ -136,7 +144,7 @@ MEGATRON_ENGINE_CONFIG=(
 
 # CUDA graphs stay disabled above: packed-sequence SFT supplies explicit masks
 # that cannot be safely captured/replayed by the model's Mamba layers.
-torchrun \
+"${PYTHON_BIN}" -m torch.distributed.run \
     --nproc_per_node="${NUM_GPUS}" \
     --nnodes="${NNODES}" \
     --node_rank="${NODE_RANK}" \
@@ -172,4 +180,5 @@ torchrun \
     "trainer.default_local_dir=${CHECKPOINT_DIR}" \
     "trainer.resume_mode=${RESUME_MODE}" \
     "trainer.max_ckpt_to_keep=10" \
-    "checkpoint.save_contents=[model,optimizer,extra]"
+    "checkpoint.save_contents=[model,optimizer,extra]" \
+    "$@"

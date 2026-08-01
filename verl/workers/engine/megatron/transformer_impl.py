@@ -1058,10 +1058,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
             )
 
         batch = batch.to(get_device_id())
-        use_fused_kernels = (
-            tu.get_non_tensor_data(batch, key="use_fused_kernels", default=False)
-            and self.engine_config.use_fused_kernels
-        )
+        use_fused_kernels = tu.get_non_tensor_data(batch, key="use_fused_kernels", default=False)
         calculate_entropy = tu.get_non_tensor_data(batch, key="calculate_entropy", default=False)
         calculate_sum_pi_squared = tu.get_non_tensor_data(batch, key="calculate_sum_pi_squared", default=False)
         distillation_use_topk = tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
