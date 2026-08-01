@@ -22,7 +22,12 @@ import pytest
 import torch
 
 
-def _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size: int = 4, cp_size: int = 1, cp_rank: int = 0):
+def _load_mcore_util_with_stubbed_megatron(
+    monkeypatch,
+    tp_size: int = 4,
+    cp_size: int = 1,
+    cp_rank: int = 0,
+):
     megatron = types.ModuleType("megatron")
     core = types.ModuleType("megatron.core")
     parallel_state = types.ModuleType("megatron.core.parallel_state")
@@ -366,6 +371,32 @@ def test_preprocess_thd_engine_builds_packed_sequence_indices(monkeypatch):
     torch.testing.assert_close(
         packed_seq_params.seq_idx,
         torch.tensor([[0, 0, 0, 1, 1]], dtype=torch.int32),
+    )
+
+
+def test_preprocess_thd_engine_builds_global_sequence_indices_with_context_parallelism(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1, cp_size=2)
+    input_ids = _nested_tensor(
+        [
+            torch.tensor([11, 12, 13, 14], dtype=torch.long),
+            torch.tensor([21, 22, 23, 24, 25, 26, 27, 28], dtype=torch.long),
+        ]
+    )
+
+    local_ids, packed_seq_params, _ = mcore_util.preprocess_thd_engine(
+        input_ids,
+        include_total_tokens=True,
+    )
+
+    assert local_ids.shape == (1, 6)
+    assert packed_seq_params.cu_seqlens_q_padded.tolist() == [0, 4, 12]
+    torch.testing.assert_close(
+        local_ids,
+        torch.tensor([[11, 14, 21, 22, 27, 28]], dtype=torch.long),
+    )
+    torch.testing.assert_close(
+        packed_seq_params.seq_idx,
+        torch.tensor([[0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1]], dtype=torch.int32),
     )
 
 

@@ -6,13 +6,19 @@ Last updated: 08/11/2026
 
 ## 1. Scope of Support
 
-Currently, RL training can be performed on mimo-7B-RL, Qwen-next, and Deepseek series models based on the MTP architecture. The support rules for training and inference engines are as follows:
+Currently, RL training can be performed on mimo-7B-RL, Qwen-next, and Deepseek series models based on the MTP architecture. SFT also supports NVIDIA Nemotron 3 Super through Megatron-Core's native `HybridModel` MTP implementation. The support rules for training and inference engines are as follows:
 
 - **Training Engine**: Only supports the `mbridge/Megatron-Bridge + megatron` combination; other training engines are not compatible at this time;
 
 - **Inference Engine**: Compatible with all engines, but the model must be in the corresponding engine's compatibility list;
 
 - **Dependency Versions**:
+
+    - NVIDIA Nemotron 3 Super native `HybridModel` MTP requires this exact dependency snapshot:
+
+        - Megatron Bridge commit [`1f12931e2f34ec26f578a4cffe15adc06f71a5a2`](https://github.com/NVIDIA-NeMo/Megatron-Bridge/commit/1f12931e2f34ec26f578a4cffe15adc06f71a5a2);
+
+        - Megatron Core **0.19.0** at commit [`cd4afffa648426a959dc7cb1e24b5ce7d0c3ff54`](https://github.com/NVIDIA/Megatron-LM/commit/cd4afffa648426a959dc7cb1e24b5ce7d0c3ff54). A Git checkout reports this as `0.19.0+cd4afff`. Pin the commit, rather than relying on the `0.19.0` version number alone;
 
     - mbridge: Apply the patches and review suggestions from PR: [#62](https://github.com/ISEEKYAN/mbridge/pull/62) (Already merged into the main branch);
 
@@ -28,10 +34,14 @@ The MTP training process can be flexibly controlled through the following config
 
 | Configuration Scenario | Core Parameters                                                                                                                                                                                                                                                                                               | Description                                             |
 |------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------|
-| Load MTP Parameters Only | `enable=True`                                                                                                                                                                                                                                                                                              | VRAM usage will increase, but the exported parameters include the MTP module and can be directly used for online deployment              |
+| Load MTP Parameters Only | `enable=True`                                                                                                                                                                                                                                                                                              | VRAM usage will increase, but the exported parameters include the MTP module and can be directly used for online deployment. This mode is not supported for native Megatron-Core `HybridModel` MTP; set `enable_train=True` or disable MTP.              |
 | Full-Parameter MTP Training | `enable=True`<br>`enable_train=True`<br>`mtp_loss_scaling_factor=0.1`                                                                                                                                                                                                                              | MTP Loss will apply to all model parameters                            |
-| MTP Parameter-Only Training | `enable=True`<br>`enable_train=True`<br>`detach_encoder=True`                                                                                                                                                                                                                                      | Freeze the Encoder layer, update only MTP module parameters, MTP Loss applies only to MTP parameters |
+| Detached MTP Auxiliary Training | `enable=True`<br>`enable_train=True`<br>`detach_encoder=True`                                                                                                                                                                                                                                      | Detach the hidden state consumed by MTP so the auxiliary MTP loss updates only the MTP module. The normal SFT loss still updates the base model. |
 | MTP Accelerated Rollout | 1. vLLM configuration:<br>`enable=True`<br>`enable_rollout=True`<br>`method="mtp"`<br>`num_speculative_tokens=1`<br>2. SGLang configuration:<br>`enable=True`<br>`enable_rollout=True`<br>`speculative_algorithm="EAGLE"`<br>`speculative_num_steps=2`<br>`speculative_eagle_topk=2`<br>`speculative_num_draft_tokens=4` | Achieve inference acceleration during the Rollout phase based on MTP                      |
+
+For native Megatron-Core `HybridModel` models, `enable=True` requires `enable_train=True`. The load-without-training combination is rejected because this path uses Megatron-Core's native MTP implementation instead of verl's legacy GPT MTP patches.
+
+`detach_encoder=True` applies only to the auxiliary MTP branch. It prevents MTP-loss gradients from flowing back through the base-model hidden states, but it does not freeze the base model: the ordinary SFT language-model loss continues to train it.
 
 ## 3. Experimental Results
 
@@ -67,7 +77,7 @@ Only the following configuration will have a noticeable impact on training resul
 
 **Recommended Training Method**
 
-It is recommended to adopt the `detach_encoder=True` approach for MTP training.
+It is recommended to adopt the `detach_encoder=True` approach for MTP training. This isolates auxiliary MTP gradients; it does not freeze base-model training from the main loss.
 
 ## 4. Performance Notes for MTP in Rollout Inference
 
@@ -96,9 +106,13 @@ Taking the mimo-7B model deployed separately on H20 hardware using SGLang as an 
 
 ## 5. SFT training
 
-The SFT training with MTP is supported, using the same MTP training configuration as RL training.
+SFT training with MTP is supported, using the same MTP training configuration as RL training. The relevant prefix is `model.mtp` for SFT and `actor_rollout_ref.model.mtp` for RL.
 
-An example configuration for running SFT can be found in `examples/sft/gsm8k/run_mimo_7b_mtp_megatron.sh`
+Example launchers:
+
+- `examples/sft/gsm8k/run_mimo_7b_mtp_megatron.sh` for MiMo-7B;
+
+- `examples/sft/gsm8k/run_nemotron_3_super_megatron.sh` for NVIDIA Nemotron 3 Super with native Megatron-Core `HybridModel` MTP. This launcher uses Megatron Bridge (`engine.use_mbridge=True`, `engine.vanilla_mbridge=False`) and enables MTP training.
 
 **SFT result**
 
@@ -109,4 +123,3 @@ The experiment was conducted using following data:
 The result: [wandb link](https://wandb.ai/hou-zg-meituan/mimo-7b-sft-mtp?nw=nwuserhouzg)
 
 The presence of mtp layer has limited effect on main loss. However, when MTP layer is detached, the mtp_loss converges to a higher value.
-

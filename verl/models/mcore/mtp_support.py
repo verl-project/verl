@@ -33,8 +33,8 @@ def has_native_mtp_support() -> bool:
 
 def configure_native_hybrid_mtp(provider, mtp_config, transformer_overrides: dict) -> bool:
     """Validate and configure native HybridModel MTP before model construction."""
-    is_hybrid_provider = bool(
-        getattr(provider, "is_hybrid_model", False) or type(provider).__name__ == "HybridModelProvider"
+    is_hybrid_provider = bool(getattr(provider, "is_hybrid_model", False)) or any(
+        provider_type.__name__ == "HybridModelProvider" for provider_type in type(provider).__mro__
     )
     if not mtp_config.enable or not is_hybrid_provider:
         return False
