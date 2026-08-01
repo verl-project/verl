@@ -19,6 +19,7 @@ from enum import Enum
 from typing import Any, Optional
 from uuid import uuid4
 
+import numpy as np
 import torch
 from PIL import Image
 
@@ -44,6 +45,79 @@ SPEC_DECODE_EXTRA_KEYS = (
     "spec_num_accepted_tokens",
     "spec_num_verify_steps",
 )
+
+
+def _merge_routed_experts(
+    previous: Optional[Any],
+    current: Optional[Any],
+    *,
+    prompt_length: int,
+) -> Optional[Any]:
+    """Preserve routed experts already captured by earlier agent turns.
+
+    A rollout backend returns a full-sequence routing snapshot for the current
+    prompt and response. In fully async training, an earlier prefix may have
+    been evaluated by older model weights, so only the not-yet-covered suffix
+    from the current snapshot should be appended.
+    """
+    if current is None:
+        return previous
+
+    supported_types = (np.ndarray, torch.Tensor)
+    if not isinstance(current, supported_types):
+        raise TypeError(f"Unsupported type for routed_experts: {type(current)}")
+    if current.ndim != 3:
+        raise ValueError(f"Expected routed_experts with 3 dimensions, got shape {tuple(current.shape)}")
+
+    if previous is None:
+        return current
+    if not isinstance(previous, supported_types):
+        raise TypeError(f"Unsupported type for previous routed_experts: {type(previous)}")
+    if type(previous) is not type(current):
+        raise TypeError(
+            "routed_experts type changed across agent turns: "
+            f"previous={type(previous).__name__}, current={type(current).__name__}"
+        )
+    if previous.ndim != 3:
+        raise ValueError(f"Expected previous routed_experts with 3 dimensions, got shape {tuple(previous.shape)}")
+    if previous.shape[1:] != current.shape[1:]:
+        raise ValueError(
+            "routed_experts layer/top-k dimensions changed across agent turns: "
+            f"previous={tuple(previous.shape)}, current={tuple(current.shape)}"
+        )
+    if previous.dtype != current.dtype:
+        raise ValueError(
+            f"routed_experts dtype changed across agent turns: previous={previous.dtype}, current={current.dtype}"
+        )
+
+    covered_length = previous.shape[0]
+    if covered_length > prompt_length:
+        raise ValueError(
+            "Previously captured routed_experts exceed the current generation prompt: "
+            f"covered_length={covered_length}, prompt_length={prompt_length}"
+        )
+    if covered_length > current.shape[0]:
+        raise ValueError(
+            "Current routed_experts snapshot is shorter than the already captured prefix: "
+            f"covered_length={covered_length}, current_length={current.shape[0]}"
+        )
+    if covered_length == 0:
+        return current
+    if covered_length == current.shape[0]:
+        return previous
+
+    if isinstance(previous, np.ndarray):
+        return np.concatenate([previous, current[covered_length:]], axis=0)
+    return torch.cat([previous, current[covered_length:]], dim=0)
+
+
+def _trim_routed_experts_to_prefix(routed_experts: Optional[Any], prefix_length: int) -> Optional[Any]:
+    """Drop captured routing rows removed from the runtime token prefix."""
+    if prefix_length < 0:
+        raise ValueError(f"prefix_length must be non-negative, got {prefix_length}")
+    if routed_experts is None or routed_experts.shape[0] <= prefix_length:
+        return routed_experts
+    return routed_experts[:prefix_length]
 
 
 class AgentState(Enum):
@@ -231,6 +305,7 @@ class ToolAgentLoop(AgentLoopBase):
             stop_token_ids = list(set((sampling_params.get("stop_token_ids") or []) + self.tool_parser.stop_token_ids))
             sampling_params = {**sampling_params, "stop_token_ids": stop_token_ids}
 
+        generation_prompt_length = len(agent_data.prompt_ids)
         with simple_timer("generate_sequences", agent_data.metrics):
             output: TokenOutput = await self.server_manager.generate(
                 request_id=agent_data.request_id,
@@ -241,6 +316,11 @@ class ToolAgentLoop(AgentLoopBase):
                 audio_data=agent_data.audio_data,
                 mm_processor_kwargs=agent_data.mm_processor_kwargs,
             )
+        agent_data.routed_experts = _merge_routed_experts(
+            agent_data.routed_experts,
+            output.routed_experts,
+            prompt_length=generation_prompt_length,
+        )
         # first time to set num_preempted
         if agent_data.metrics.get("num_preempted") is None:
             agent_data.metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
@@ -278,9 +358,6 @@ class ToolAgentLoop(AgentLoopBase):
             agent_data.response_mask += [1] * len(agent_data.response_ids)
             if output.log_probs:
                 agent_data.response_logprobs += output.log_probs
-
-        if output.routed_experts is not None:
-            agent_data.routed_experts = output.routed_experts
 
         # Check termination conditions
         if not ignore_termination and len(agent_data.response_mask) >= self.response_length:
@@ -386,6 +463,12 @@ class ToolAgentLoop(AgentLoopBase):
             )
             if len(response_mask) >= self.response_length:
                 return AgentState.TERMINATED
+            # Newly inserted boundary/tool tokens have not been evaluated yet. Keep routing only for the
+            # retained old prefix; the next generation snapshot will fill the uncovered suffix.
+            retained_prefix_length = len(agent_data.prompt_ids) - merge_result.removed_prefix_token_count
+            agent_data.routed_experts = _trim_routed_experts_to_prefix(
+                agent_data.routed_experts, retained_prefix_length
+            )
             agent_data.prompt_ids = merge_result.token_ids
             agent_data.response_mask = response_mask
             if agent_data.response_logprobs:
