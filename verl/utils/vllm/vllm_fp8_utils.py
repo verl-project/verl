@@ -41,6 +41,35 @@ from packaging import version
 logger = logging.getLogger(__name__)
 
 
+def _iter_transferable_param_attrs(src_param):
+    """Yield the attributes worth moving onto a rebuilt parameter.
+
+    Methods bound to a tensor are excluded, and that exclusion is the whole
+    point of this helper. ``dir()`` reports vLLM's loader entry points
+    (``load_merged_column_weight`` and friends) alongside the data attributes,
+    and copying one lands a method whose ``self`` is some *other* tensor in the
+    destination's instance dict, where it shadows the class. Every later load
+    then writes into that stale tensor instead of the parameter it was handed --
+    silently, because the shapes still agree.
+
+    Note the test is "bound to a tensor", not "bound to the source": these
+    methods are copied forward from rebuild to rebuild, so by the time one does
+    damage its ``self`` is usually a temporary from several rebuilds back.
+    ``weight_loader`` is bound to the layer, so it survives.
+    """
+    base_param_attrs = dir(torch.nn.Parameter)
+    for attr in dir(src_param):
+        if attr in base_param_attrs or attr.startswith("__"):
+            continue
+        try:
+            value = getattr(src_param, attr)
+        except AttributeError:
+            continue
+        if inspect.ismethod(value) and isinstance(value.__self__, torch.Tensor):
+            continue
+        yield attr, value
+
+
 def _copy_param_subclass_attrs(dst_param, src_param):
     """Carry vLLM's parameter metadata across a parameter rebuild.
 
@@ -52,12 +81,9 @@ def _copy_param_subclass_attrs(dst_param, src_param):
     if src_param is None:
         return
 
-    base_param_attrs = dir(torch.nn.Parameter)
-    for attr in dir(src_param):
-        if attr in base_param_attrs or attr.startswith("__"):
-            continue
+    for attr, value in _iter_transferable_param_attrs(src_param):
         try:
-            setattr(dst_param, attr, getattr(src_param, attr))
+            setattr(dst_param, attr, value)
         except AttributeError:
             pass
 
@@ -150,11 +176,10 @@ def _record_pristine_fp8_layout(layer, params):
     so a refit feeding checkpoint-layout scales hits a shape assert. Keep
     enough state to rebuild the original buffers before each reload.
 
-    Scales get a persistent staging buffer seeded with the checkpoint values.
-    Even for MoE they are a few thousandths of the weight, so one buffer per
-    layer costs little, and reusing it both avoids per-refit allocation and
-    lets a layer that is absent from the refit stream keep its previous values
-    instead of reading uninitialized memory.
+    Only the layout is recorded, never a tensor. This runs during model load,
+    inside the memory pool vLLM tags as ``weights``, so any buffer kept here
+    would be subject to that pool's discard-and-rezero across a sleep and would
+    not survive to the next refit anyway.
     """
     if hasattr(layer, _FP8_PRISTINE_ATTR):
         return
@@ -164,32 +189,39 @@ def _record_pristine_fp8_layout(layer, params):
         param = params.get(name)
         if not isinstance(param, torch.nn.Parameter):
             continue
-        staging = param.data.detach().clone() if "scale" in name else None
-        pristine[name] = (tuple(param.shape), param.dtype, staging)
+        pristine[name] = (tuple(param.shape), param.dtype)
 
     if pristine:
         setattr(layer, _FP8_PRISTINE_ATTR, pristine)
 
 
 def _layer_needs_fp8_staging(layer, pristine) -> bool:
-    for name, (shape, dtype, _) in pristine.items():
+    for name, (shape, dtype) in pristine.items():
         param = getattr(layer, name, None)
         if isinstance(param, torch.nn.Parameter) and (tuple(param.shape) != shape or param.dtype != dtype):
             return True
     return False
 
 
-def _fp8_staging_data(param, shape, dtype, staging):
+def _fp8_staging_data(param, shape, dtype):
     """Checkpoint-layout tensor that ``load_weights`` can write into.
 
     Reuses the live storage whenever the kernel transform only reshaped it, so
     those writes land straight in the tensor the CUDA graph points at.
+    Otherwise the buffer is allocated fresh for this refit and dropped with it,
+    which keeps nothing alive across the engine's sleep.
+
+    An all-ones fill is NaN in every dtype staged here, so a buffer the incoming
+    stream fails to write blows up on the first forward instead of being repacked
+    into the live weights. Uninitialized memory would carry whatever the caching
+    allocator last held, which for a scale is most likely a plausible-looking
+    value from a previous refit.
     """
-    if staging is not None:
-        return staging
     if param.dtype == dtype and param.numel() == math.prod(shape):
         return param.data.reshape(shape)
-    return torch.empty(shape, dtype=dtype, device=param.device)
+    staging = torch.empty(shape, dtype=dtype, device=param.device)
+    staging.view(torch.uint8).fill_(0xFF)
+    return staging
 
 
 def stage_fp8_params_for_loading(model):
@@ -212,12 +244,12 @@ def stage_fp8_params_for_loading(model):
             continue
 
         live = {}
-        for name, (shape, dtype, staging) in pristine.items():
+        for name, (shape, dtype) in pristine.items():
             param = getattr(layer, name, None)
             if not isinstance(param, torch.nn.Parameter):
                 continue
             live[name] = param
-            staged = torch.nn.Parameter(_fp8_staging_data(param, shape, dtype, staging), requires_grad=False)
+            staged = torch.nn.Parameter(_fp8_staging_data(param, shape, dtype), requires_grad=False)
             _copy_param_subclass_attrs(staged, param)
             setattr(layer, name, staged)
 
@@ -285,17 +317,7 @@ def process_weights_after_loading_for_vllm14(self, layer) -> None:
 
     def _create_param_from_subclass_attributes(custom_param):
         param = Parameter(custom_param.data, requires_grad=False)
-        base_param_dir = dir(torch.nn.Parameter)
-        custom_param_dir = dir(custom_param)
-        # Find the attributes that are unique to the custom parameter
-        custom_attributes = [
-            attr for attr in custom_param_dir if attr not in base_param_dir and not attr.startswith("__")
-        ]
-        # Set the custom attributes into the base parameter object
-        for attr in custom_attributes:
-            setattr(param, attr, getattr(custom_param, attr))
-
-        param.subclass_type = type(custom_param)
+        _copy_param_subclass_attrs(param, custom_param)
         return param
 
     weight, weight_scale_inv = process_fp8_weight_block_strategy(layer.weight, layer.weight_scale_inv)
@@ -356,16 +378,8 @@ def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
 
     def _create_param_from_subclass_attributes(custom_data, custom_weight):
         param = Parameter(custom_data, requires_grad=False)
-        base_param_dir = dir(torch.nn.Parameter)
-        custom_weight_dir = dir(custom_weight)
-        # Find the attributes that are unique to the custom parameter
-        custom_attributes = [
-            attr for attr in custom_weight_dir if attr not in base_param_dir and not attr.startswith("__")
-        ]
-        # Set the custom attributes into the base parameter object
-        for attr in custom_attributes:
-            setattr(param, attr, getattr(custom_weight, attr))
-
+        for attr, value in _iter_transferable_param_attrs(custom_weight):
+            setattr(param, attr, value)
         return param
 
     # Replace parameters with updated versions. Note that this helper
