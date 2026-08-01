@@ -34,6 +34,7 @@ from verl.utils.tokenizer.continuous_token_wiring import (
     list_continuous_token_builder_families,
     resolve_continuous_token_model_family,
 )
+from verl.utils.tokenizer.deepseek import DeepSeekV4ContinuousTokenBuilder
 
 
 class _DummyTokenizer:
@@ -234,6 +235,7 @@ def test_builtin_family_surface():
         "glm5",
         "gemma4",
         "gptoss",
+        "deepseekv4",
     )
     assert list_continuous_token_builder_families() == CONTINUOUS_TOKEN_BUILDER_FAMILIES
 
@@ -254,6 +256,7 @@ def test_builtin_family_surface():
         (ContinuousTokenModelFamily.GLM5, GLMContinuousTokenBuilder),
         (ContinuousTokenModelFamily.GEMMA4, Gemma4ContinuousTokenBuilder),
         (ContinuousTokenModelFamily.GPTOSS, GptOssContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.DEEPSEEKV4, DeepSeekV4ContinuousTokenBuilder),
     ],
 )
 def test_builtin_family_class_mapping(family, builder_cls):
@@ -274,6 +277,8 @@ def test_builtin_family_class_mapping(family, builder_cls):
         ("Qwen/Qwen3.5-35B-A3B", ContinuousTokenModelFamily.QWEN35),
         ("Qwen/Qwen2.5-7B-Instruct", ContinuousTokenModelFamily.QWEN25),
         ("Qwen/Qwen3-8B", ContinuousTokenModelFamily.QWEN3),
+        ("deepseek-ai/DeepSeek-V4-Pro", ContinuousTokenModelFamily.DEEPSEEKV4),
+        ("deepseek-ai/DeepSeek-V4-Flash", ContinuousTokenModelFamily.DEEPSEEKV4),
         ("deepseek-ai/DeepSeek-R1", ContinuousTokenModelFamily.DEFAULT),
     ],
 )
@@ -853,6 +858,9 @@ def test_model_specific_builders_validate_required_special_tokens():
 
     with pytest.raises(ValueError, match="required token '<\\|tool_response>'"):
         Gemma4ContinuousTokenBuilder(_MissingSpecialTokenTokenizer())
+
+    with pytest.raises(ValueError, match="required token '<｜end▁of▁sentence｜>'"):
+        DeepSeekV4ContinuousTokenBuilder(_MissingSpecialTokenTokenizer())
 
 
 def test_model_specific_builders_validate_special_token_id_shape():
