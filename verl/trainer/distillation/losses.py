@@ -286,6 +286,12 @@ def distillation_loss(
         # Directly backpropagate distillation loss as a supervised loss, as in https://arxiv.org/abs/2306.13649.
         if response_mask.is_nested:
             response_mask = response_mask.to_padded_tensor(False)
+
+        # global batch info for loss aggregation
+        config.global_batch_info["dp_size"] = data["dp_size"]
+        config.global_batch_info["batch_num_tokens"] = data["batch_num_tokens"]
+        config.global_batch_info["global_batch_size"] = data["global_batch_size"]
+        config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
         distillation_loss = agg_loss(
             loss_mat=distillation_losses,
             loss_mask=response_mask,
