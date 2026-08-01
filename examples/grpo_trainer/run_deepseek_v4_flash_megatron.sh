@@ -20,8 +20,8 @@ export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:Tr
 
 ############################### configs ################################
 
-MODEL_PATH=${MODEL_PATH:-deepseek-ai/DeepSeek-V4-Flash}
-NNODES=${NNODES:-11}
+MODEL_PATH=$HDFS_ROOT/model/DeepSeek-V4-Flash
+NNODES=${NNODES:-4}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-8}
@@ -36,12 +36,12 @@ ACTOR_LR=${ACTOR_LR:-1e-6}
 OPTIMIZER_OFFLOAD_FRACTION=${OPTIMIZER_OFFLOAD_FRACTION:-1.0}
 
 ACTOR_TP=${ACTOR_TP:-1}
-ACTOR_PP=${ACTOR_PP:-11}
+ACTOR_PP=${ACTOR_PP:-4}
 ACTOR_VPP=${ACTOR_VPP:-null}
 ACTOR_EP=${ACTOR_EP:-8}
 ACTOR_ETP=${ACTOR_ETP:-1}
 ACTOR_CP=${ACTOR_CP:-1}
-PIPELINE_MODEL_PARALLEL_LAYOUT=${PIPELINE_MODEL_PARALLEL_LAYOUT:-"Et*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*3L"}
+PIPELINE_MODEL_PARALLEL_LAYOUT=${PIPELINE_MODEL_PARALLEL_LAYOUT:-"Et*11|t*11|t*11|t*10L"}
 
 REF_TP=${REF_TP:-${ACTOR_TP}}
 REF_PP=${REF_PP:-${ACTOR_PP}}
@@ -50,9 +50,9 @@ REF_EP=${REF_EP:-${ACTOR_EP}}
 REF_ETP=${REF_ETP:-${ACTOR_ETP}}
 REF_CP=${REF_CP:-${ACTOR_CP}}
 
-ROLLOUT_TP=${ROLLOUT_TP:-8}
-ROLLOUT_N=${ROLLOUT_N:-2}
-ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.40}
+ROLLOUT_EP=${ROLLOUT_EP:-4}
+ROLLOUT_N=${ROLLOUT_N:-8}
+ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.50}
 ROLLOUT_MAX_MODEL_LEN=${ROLLOUT_MAX_MODEL_LEN:-${PPO_MAX_TOKEN_LEN_PER_GPU}}
 ROLLOUT_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-${PPO_MAX_TOKEN_LEN_PER_GPU}}
 ROLLOUT_MAX_NUM_SEQS=${ROLLOUT_MAX_NUM_SEQS:-1}
@@ -63,23 +63,22 @@ ROUTER_REPLAY_MODE=${ROUTER_REPLAY_MODE:-R3}
 ALL_OFFLOAD=${ALL_OFFLOAD:-True}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-400}
-SAVE_FREQ=${SAVE_FREQ:-5}
+SAVE_FREQ=${SAVE_FREQ:--1}
 TEST_FREQ=${TEST_FREQ:--1}
 
-PROJECT_NAME=${PROJECT_NAME:-verl_grpo}
+PROJECT_NAME=${PROJECT_NAME:-wuxibin_dapo}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-deepseek_v4_flash_grpo_vllm_megatron}
 CKPTS_DIR=${CKPTS_DIR:-"${HOME}/verl/ckpts/${PROJECT_NAME}/${EXPERIMENT_NAME}"}
 
-TRAIN_FILE=${TRAIN_FILE:-$HOME/data/dapo-math-17k.parquet}
-TEST_FILE=${TEST_FILE:-$HOME/data/aime-2024.parquet}
+TRAIN_FILE=$DATA_ROOT/dataset/BytedTsinghua-SIA/DAPO-Math-17k/data/dapo-math-17k.parquet
+TEST_FILE=$DATA_ROOT/dataset/aime25_test.parquet
 OVERLONG_BUFFER_LEN=${OVERLONG_BUFFER_LEN:-${MAX_RESPONSE_LENGTH}}
 OVERLONG_BUFFER_ENABLE=${OVERLONG_BUFFER_ENABLE:-False}
 OVERLONG_PENALTY_FACTOR=${OVERLONG_PENALTY_FACTOR:-1.0}
 
 ########################### parameter arrays ###########################
 
-DEFAULT_CHAT_TEMPLATE='{% for message in messages %}{% if message["content"] is string %}{{ message["content"] }}{% else %}{% for content in message["content"] %}{% if content["type"] == "text" %}{{ content["text"] }}{% endif %}{% endfor %}{% endif %}{% if not loop.last %}{{ "\n\n" }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ "\n" }}{% endif %}'
-CUSTOM_CHAT_TEMPLATE=${DEEPSEEK_V4_FLASH_CHAT_TEMPLATE:-${DEFAULT_CHAT_TEMPLATE}}
+ENABLE_THINKING=${ENABLE_THINKING:-True}
 
 ALGORITHM=(
     algorithm.adv_estimator=grpo
@@ -96,12 +95,14 @@ DATA=(
     data.filter_overlong_prompts=False
     data.truncation=left
     data.dataloader_num_workers=${DATALOADER_NUM_WORKERS}
+    +data.apply_chat_template_kwargs.enable_thinking=${ENABLE_THINKING}
+    data.continuous_token.enable=True
+    data.continuous_token.model_family=deepseekv4
 )
 
 MODEL=(
     actor_rollout_ref.model.path="$MODEL_PATH"
     actor_rollout_ref.model.trust_remote_code=True
-    "actor_rollout_ref.model.custom_chat_template='${CUSTOM_CHAT_TEMPLATE}'"
     actor_rollout_ref.model.use_fused_kernels=True
     actor_rollout_ref.model.use_remove_padding=True
     actor_rollout_ref.model.enable_gradient_checkpointing=True
@@ -132,17 +133,19 @@ ACTOR=(
     ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
     ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
     ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_mhc=False
     "++actor_rollout_ref.actor.megatron.override_transformer_config.pipeline_model_parallel_layout='${PIPELINE_MODEL_PARALLEL_LAYOUT}'"
 )
 
 ROLLOUT=(
     actor_rollout_ref.rollout.name=vllm
-    actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP}
+    actor_rollout_ref.rollout.tensor_model_parallel_size=1
+    actor_rollout_ref.rollout.data_parallel_size=${ROLLOUT_EP}
+    actor_rollout_ref.rollout.expert_parallel_size=${ROLLOUT_EP}
     actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL}
     actor_rollout_ref.rollout.n=${ROLLOUT_N}
     actor_rollout_ref.rollout.calculate_log_probs=True
     actor_rollout_ref.rollout.enable_rollout_routing_replay=True
-    actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU}
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
@@ -151,23 +154,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.max_model_len=${ROLLOUT_MAX_MODEL_LEN}
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=${ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB}
     +actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype=${ROLLOUT_KV_CACHE_DTYPE}
-)
-
-REF=(
-    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True
-    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU}
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1
-    actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${REF_TP}
-    actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${REF_PP}
-    actor_rollout_ref.ref.megatron.virtual_pipeline_model_parallel_size=${REF_VPP}
-    actor_rollout_ref.ref.megatron.expert_model_parallel_size=${REF_EP}
-    actor_rollout_ref.ref.megatron.expert_tensor_parallel_size=${REF_ETP}
-    actor_rollout_ref.ref.megatron.context_parallel_size=${REF_CP}
-    actor_rollout_ref.ref.megatron.param_offload=${ALL_OFFLOAD}
-    ++actor_rollout_ref.ref.megatron.override_transformer_config.apply_dsa_kernel_fusion=True
-    ++actor_rollout_ref.ref.megatron.override_transformer_config.dsa_indexer_use_sparse_loss=True
-    ++actor_rollout_ref.ref.megatron.override_transformer_config.dsa_indexer_loss_coeff=0.0
-    "++actor_rollout_ref.ref.megatron.override_transformer_config.pipeline_model_parallel_layout='${PIPELINE_MODEL_PARALLEL_LAYOUT}'"
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.moe_backend=deep_gemm
 )
 
 REWARD=(
@@ -180,9 +167,7 @@ REWARD=(
 )
 
 TRAINER=(
-    trainer.balance_batch=True
     trainer.logger='["console","wandb"]'
-    trainer.use_v1=False
     trainer.project_name=${PROJECT_NAME}
     trainer.experiment_name=${EXPERIMENT_NAME}
     trainer.n_gpus_per_node=${NGPUS_PER_NODE}
@@ -210,7 +195,6 @@ python3 -m verl.trainer.main_ppo \
     "${MODEL[@]}" \
     "${ACTOR[@]}" \
     "${ROLLOUT[@]}" \
-    "${REF[@]}" \
     "${REWARD[@]}" \
     "${TRAINER[@]}" \
     "${EXTRA[@]}" \
