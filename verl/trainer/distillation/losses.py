@@ -292,7 +292,6 @@ def distillation_loss(
         # Directly backpropagate distillation loss as a supervised loss, as in https://arxiv.org/abs/2306.13649.
         if response_mask.is_nested:
             response_mask = response_mask.to_padded_tensor(False)
-
         distillation_loss = agg_loss(
             loss_mat=distillation_losses,
             loss_mask=response_mask,
