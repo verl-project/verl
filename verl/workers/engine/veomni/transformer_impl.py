@@ -28,6 +28,7 @@ from veomni.distributed.torch_parallelize import build_parallelize_model
 from veomni.models.auto import build_foundation_model
 from veomni.optim import build_lr_scheduler, build_optimizer
 from veomni.utils.seqlen_pos_transform_utils import prepare_fa_kwargs_from_position_ids
+from veomni.models.checkpoint_tensor_loading import get_checkpoint_tensor_converter
 
 import verl.utils.torch_functional as verl_F
 from verl.trainer.config import CheckpointConfig
@@ -629,6 +630,11 @@ class VeOmniEngine(FSDPEngine):
         # tensors, so the manual whole-model move is unnecessary under CPU offload.
         if not getattr(self, "_uses_fsdp2_cpu_offload_policy", False):
             load_veomni_model_to_gpu(self.module)
+
+        # TODO: currently only for DeepseekV4, unify all models to export weights by converter.
+        converter = get_checkpoint_tensor_converter(self.module)
+        if converter is not None and hasattr(converter, "export_weights"):
+            return converter.export_weights(self.module), None
 
         params = self.module.state_dict()
         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
