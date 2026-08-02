@@ -1,7 +1,8 @@
 # requirements.txt records the full set of dependencies for development
 accelerate
 codetiming
-datasets
+# <2.18.0 subclasses `pa.PyExtensionType`, removed in pyarrow 23. See verl-project/verl#5073.
+datasets>=2.18.0
 dill
 hydra-core
 liger-kernel
