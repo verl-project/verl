@@ -60,11 +60,11 @@ class BaseRollout(ABC):
         """Update the weights of the rollout model.
 
         Args:
-            weights: A generator that yields the name of the weight tensor and the tensor itself.
+            weights: A generator whose item shape is defined by ``wire_format``.
             wire_format: How the generator packages weights -- "named_tensors" (full
-                tensors, the default) or "delta_flush" (per-flush sparse payloads from
-                the delta checkpoint engine; sglang only). Implementations must consume
-                this explicitly and never forward it to engine-specific extensions.
+                tensors, the default) or "delta_flush" (per-flush delta payloads from
+                the delta checkpoint engine). Adapters must branch on this value instead
+                of treating a delta flush as an ordinary named-weight stream.
         """
         pass
 

@@ -119,6 +119,37 @@ def test_sender_accepts_strided_tensor(monkeypatch):
     assert torch.equal(recovered, weight)
 
 
+def test_sender_aligns_mixed_dtype_offsets(monkeypatch):
+    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
+
+    weights = [
+        ("__delta_spec__", torch.arange(5, dtype=torch.uint8)),
+        ("__positions__", torch.arange(8, dtype=torch.uint8)),
+        ("__values__", torch.tensor([1.5, -2.0], dtype=torch.bfloat16)),
+    ]
+    buffer = torch.empty(32, dtype=torch.uint8)
+    socket = _FakeSocket()
+    sender = bucketed_weight_transfer.BucketedWeightSender(
+        zmq_handle="ipc:///tmp/test-bwt-unused.sock",
+        bucket_size_mb=1,
+        use_shm=True,
+    )
+
+    monkeypatch.setattr(sender, "_init_socket", lambda: setattr(sender, "socket", socket))
+    monkeypatch.setattr(sender, "_init_buffer", lambda: setattr(sender, "buffer", buffer))
+    monkeypatch.setattr(sender, "_cleanup", lambda: None)
+    monkeypatch.setattr(bucketed_weight_transfer, "get_torch_device", lambda: _FakeTorchDevice())
+
+    asyncio.run(sender.async_send_weights(iter(weights)))
+
+    metadata = socket.messages[0]["bucket_meta"]
+    assert [metadata[name]["offset"] for name, _ in weights] == [0, 5, 14]
+    for name, expected in weights:
+        offset = metadata[name]["offset"]
+        recovered = buffer[offset : offset + expected.nbytes].view(expected.dtype).view(expected.shape)
+        assert torch.equal(recovered, expected)
+
+
 # ---------------------------------------------------------------------------
 # Process entry points (must be module-level for pickling with spawn)
 # ---------------------------------------------------------------------------

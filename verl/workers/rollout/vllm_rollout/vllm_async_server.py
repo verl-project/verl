@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import uuid
+from collections.abc import Mapping
 from pprint import pprint
 from typing import Any, Callable, Optional
 
@@ -1023,6 +1024,53 @@ class vLLMHttpServer:
             # Work around multimodal processor cache desync across pause/resume.
             # See: https://github.com/vllm-project/vllm/pull/43001/
             engine_kwargs.setdefault("mm_processor_cache_gb", 0)
+
+        checkpoint_config = getattr(self.config, "checkpoint_engine", None)
+        if getattr(checkpoint_config, "backend", None) == "delta_sharded":
+            from verl.workers.rollout.vllm_rollout.delta_weight_transfer import (
+                VERL_DELTA_WEIGHT_TRANSFER_BACKEND,
+                is_moe_model,
+                require_vllm_delta_support,
+            )
+
+            require_vllm_delta_support()
+            delta_engine_kwargs = getattr(checkpoint_config, "engine_kwargs", {}).get("delta_sharded", {})
+            if int(delta_engine_kwargs.get("verify_every", 0)) > 0:
+                raise NotImplementedError("delta_sharded with vLLM does not support verify_every > 0")
+            if self.config.data_parallel_size != 1:
+                raise NotImplementedError("delta_sharded with vLLM requires data_parallel_size=1")
+            if self.config.disaggregation.enabled:
+                raise NotImplementedError("delta_sharded with vLLM does not support PD disaggregation")
+            # config.pipeline_model_parallel_size > 1 is already rejected globally;
+            # engine_kwargs is forwarded verbatim to vLLM, so close that path too.
+            if int(engine_kwargs.get("pipeline_parallel_size") or 1) > 1:
+                raise NotImplementedError("delta_sharded with vLLM requires pipeline_parallel_size=1")
+
+            if is_moe_model(self.model_config.hf_config):
+                moe_backend = engine_kwargs.get("moe_backend")
+                if moe_backend not in {None, "auto", "triton"}:
+                    raise NotImplementedError(
+                        f"delta_sharded with vLLM MoE requires moe_backend='triton'; got {moe_backend!r}"
+                    )
+                engine_kwargs["moe_backend"] = "triton"
+                if engine_kwargs.get("enable_eplb", False):
+                    raise NotImplementedError("delta_sharded with vLLM MoE does not support EPLB")
+
+            weight_transfer_config = engine_kwargs.get("weight_transfer_config")
+            if weight_transfer_config is None:
+                weight_transfer_backend = None
+            elif isinstance(weight_transfer_config, Mapping):
+                weight_transfer_backend = weight_transfer_config.get("backend")
+            else:
+                raise TypeError("weight_transfer_config must be a mapping when using delta_sharded")
+
+            if weight_transfer_backend not in {None, VERL_DELTA_WEIGHT_TRANSFER_BACKEND}:
+                raise ValueError(
+                    "checkpoint_engine.backend='delta_sharded' requires vLLM "
+                    f"weight transfer backend {VERL_DELTA_WEIGHT_TRANSFER_BACKEND!r}, "
+                    f"but got {weight_transfer_backend!r}"
+                )
+            engine_kwargs["weight_transfer_config"] = {"backend": VERL_DELTA_WEIGHT_TRANSFER_BACKEND}
 
     def _get_override_generation_config(self) -> dict:
         """Return the override_generation_config dict."""

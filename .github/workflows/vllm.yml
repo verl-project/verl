@@ -188,6 +188,9 @@ jobs:
       - name: Test bucketed weight transfer
         run: |
           $UV_RUN pytest -svvv tests/utils/test_bucketed_weight_transfer.py
+      - name: Test vLLM delta weight transfer
+        run: |
+          $UV_RUN pytest -svvv tests/workers/rollout/test_vllm_delta_weight_transfer.py
 
   cleanup:
     runs-on: ubuntu-latest
