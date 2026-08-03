@@ -51,6 +51,7 @@ from ..utils import enable_full_determinism, postprocess_batch_func, prepare_mic
 from .utils import (
     VL_TYPE2INDEX,
     get_moe_param_handler,
+    load_safetensors_index,
     load_veomni_model_to_gpu,
     load_veomni_optimizer,
     offload_veomni_model_to_cpu,
@@ -335,6 +336,7 @@ class VeOmniEngine(FSDPEngine):
             ),
             enable_reentrant=self.engine_config.enable_reentrant,
             enable_forward_prefetch=self.engine_config.forward_prefetch,
+            fqn_to_index_mapping=load_safetensors_index(self.model_config.local_path),
         )
         log_gpu_memory_usage("After parallelize model", logger=logger)
 

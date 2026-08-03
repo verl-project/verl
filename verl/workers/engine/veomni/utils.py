@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
+import os
 
 import torch
 
@@ -39,6 +41,14 @@ VL_TYPE2INDEX = {
         "VIDEO_INPUT_INDEX": 248057,
     },
 }
+
+
+def load_safetensors_index(model_path: str) -> dict[str, int]:
+    path = os.path.join(os.path.dirname(model_path), "model.safetensors.index.json")
+    with open(path) as f:
+        weight_map = json.load(f)["weight_map"]
+    index = {fqn: int(filename.split("-")[1]) for fqn, filename in weight_map.items()}
+    return index
 
 
 @torch.no_grad()
