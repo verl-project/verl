@@ -135,15 +135,38 @@ jobs:
       - name: Prepare GSM8K dataset
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
-      - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron-Bridge (Qwen3-30B-A3B-Instruct-2507)
+      - name: Running GSM8K E2E training tests with fused kernels and 3D parallelism on 8 L20 GPUs with Megatron-Bridge (Qwen3-30B-A3B-Instruct-2507)
         run: |
           ray stop --force
+          log_file="${RUNNER_TEMP}/fused-kernel-e2e.log"
+          set +e
           ADV_ESTIMATOR=grpo USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen2moe_minimal.json \
           PPO_MAX_TOKEN_LEN=1024 FWD_MAX_TOKEN_LEN=1024 \
           MAX_PROMPT_LENGTH=512 MAX_RESPONSE_LENGTH=512 \
           MODEL_ID=Qwen/Qwen3-30B-A3B-Instruct-2507 USE_MBRIDGE=True VANILLA_MBRIDGE=False VALUE_VANILLA_MBRIDGE=False \
+          USE_FUSED_KERNELS=True USE_REMOVE_PADDING=True \
           COMMON_PP=2 COMMON_VPP=null COMMON_CP=1 COMMON_TP=4 COMMON_EP=4 COMMON_ETP=1 INFER_TP=8 \
-          USE_DIST_CKPT=False ALL_OFFLOAD=True SKIP_SAVE_HF_MODEL=1 bash tests/special_e2e/run_ppo_trainer_megatron.sh
+          USE_DIST_CKPT=False ALL_OFFLOAD=True SKIP_SAVE_HF_MODEL=1 bash tests/special_e2e/run_ppo_trainer_megatron.sh \
+            2>&1 | tee "${log_file}"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+
+          if (( statuses[1] != 0 )); then
+            echo "::error::Failed to capture the complete fused-kernel E2E log."
+            exit "${statuses[1]}"
+          fi
+
+          grep_status=0
+          grep -Fq "Falling back to non-fused" "${log_file}" || grep_status=$?
+          if (( grep_status == 0 )); then
+            echo "::error::Fused-kernel E2E fell back to the non-fused path."
+            exit 1
+          elif (( grep_status != 1 )); then
+            echo "::error::Failed to inspect the fused-kernel E2E log."
+            exit "${grep_status}"
+          fi
+
+          exit "${statuses[0]}"
       - name: Running GSM8K E2E training tests with 3D parallelism with FP8 rollout on 8 L20 GPUs with Megatron-Bridge (Qwen3-30B-A3B-Instruct-2507)
         run: |
           ray stop --force
