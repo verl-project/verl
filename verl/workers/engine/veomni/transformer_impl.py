@@ -14,7 +14,7 @@
 
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Callable, Optional, Sequence
 
 import torch
@@ -26,9 +26,9 @@ from veomni.distributed import parallel_state
 from veomni.distributed.offloading import build_activation_offloading_context
 from veomni.distributed.torch_parallelize import build_parallelize_model
 from veomni.models.auto import build_foundation_model
+from veomni.models.checkpoint_tensor_loading import get_checkpoint_tensor_converter
 from veomni.optim import build_lr_scheduler, build_optimizer
 from veomni.utils.seqlen_pos_transform_utils import prepare_fa_kwargs_from_position_ids
-from veomni.models.checkpoint_tensor_loading import get_checkpoint_tensor_converter
 
 import verl.utils.torch_functional as verl_F
 from verl.trainer.config import CheckpointConfig
@@ -58,6 +58,40 @@ from .utils import (
 )
 
 logger = logging.getLogger(__file__)
+
+
+def _build_ops_implementation_config(engine_config: VeOmniEngineConfig) -> OpsImplementationConfig:
+    """Forward every ``*_implementation`` selector that the installed VeOmni accepts.
+
+    ``VeOmniEngineConfig`` mirrors VeOmni's ``OpsImplementationConfig`` field by field, so a
+    verl build newer than the installed VeOmni would pass unknown keyword arguments and fail
+    in the constructor. A selector the installed VeOmni does not know is skipped while it is
+    still at its verl default, and rejected otherwise, so a kernel the user explicitly asked
+    for is never silently downgraded to whatever that VeOmni version does by default.
+    """
+    accepted = {f.name for f in fields(OpsImplementationConfig)}
+
+    kwargs, unsupported, skipped = {}, {}, []
+    for f in fields(engine_config):
+        if not f.name.endswith("_implementation"):
+            continue
+        value = getattr(engine_config, f.name)
+        if f.name in accepted:
+            kwargs[f.name] = value
+        elif value != f.default:
+            unsupported[f.name] = value
+        else:
+            skipped.append(f.name)
+
+    if unsupported:
+        raise ValueError(
+            f"The installed VeOmni's OpsImplementationConfig has no {sorted(unsupported)}, but "
+            f"they were explicitly set to {unsupported}. Upgrade VeOmni or unset these options."
+        )
+    if skipped:
+        logger.info(f"Skipping {sorted(skipped)}: unknown to the installed VeOmni, left at the verl default.")
+
+    return OpsImplementationConfig(**kwargs)
 
 
 class VeOmniEngine(FSDPEngine):
@@ -271,18 +305,7 @@ class VeOmniEngine(FSDPEngine):
         # build_foundation_model runs apply_ops_config(ops_implementation)
         # before constructing the model, so per-model device_patch files see
         # the resolved kernel backends.
-        ops_implementation = OpsImplementationConfig(
-            attn_implementation=self.engine_config.attn_implementation,
-            moe_implementation=self.engine_config.moe_implementation,
-            cross_entropy_loss_implementation=self.engine_config.cross_entropy_loss_implementation,
-            rms_norm_implementation=self.engine_config.rms_norm_implementation,
-            swiglu_mlp_implementation=self.engine_config.swiglu_mlp_implementation,
-            rotary_pos_emb_implementation=self.engine_config.rotary_pos_emb_implementation,
-            load_balancing_loss_implementation=self.engine_config.load_balancing_loss_implementation,
-            rms_norm_gated_implementation=self.engine_config.rms_norm_gated_implementation,
-            causal_conv1d_implementation=self.engine_config.causal_conv1d_implementation,
-            chunk_gated_delta_rule_implementation=self.engine_config.chunk_gated_delta_rule_implementation,
-        )
+        ops_implementation = _build_ops_implementation_config(self.engine_config)
 
         veomni_mixed_precision_config = MixedPrecisionConfig(enable=self.engine_config.mixed_precision)
 
