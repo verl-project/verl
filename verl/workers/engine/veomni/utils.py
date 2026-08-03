@@ -139,6 +139,24 @@ def default_moe_param_handler(name, tensor, expert_id_base):
 MOE_PARAM_HANDERS = {}
 
 
+def passthrough_moe_param_handler(name, tensor, expert_id_base):
+    """Keep a fused MoE checkpoint tensor unchanged."""
+    del expert_id_base
+    yield name, tensor
+
+
+def get_moe_param_handler(model_type, ep_enabled):
+    """Resolve the checkpoint export handler for the current MoE layout."""
+    # GPT-OSS stores all experts in fused tensors with gate/up values interleaved
+    # along the last dimension. When EP is disabled, the tensor is already global
+    # and vLLM expects this packed checkpoint layout unchanged. The EP path still
+    # needs a shard-aware vLLM loader and intentionally keeps the existing handler.
+    if model_type == "gpt_oss" and not ep_enabled:
+        return passthrough_moe_param_handler
+
+    return MOE_PARAM_HANDERS.get(model_type, default_moe_param_handler)
+
+
 # ---- EP delta export (veomni-specific converter machinery) ----------------
 # The NaN row probe and the converter entry builder for fused expert params;
 # the DTensor-generic delta pipeline lives in verl.workers.engine.utils.
@@ -286,8 +304,11 @@ def veomni_shard_export(module):
     params = module.state_dict()
     params = convert_weight_keys(params, getattr(module, "_fsdp_wrapped_module", module))
 
-    ps = parallel_state.get_parallel_state()
     model_type = getattr(module.config, "model_type", "default")
+    if model_type == "gpt_oss":
+        raise NotImplementedError("VeOmni GPT-OSS does not support delta_sharded weight updates")
+
+    ps = parallel_state.get_parallel_state()
     process_func = MOE_PARAM_HANDERS.get(model_type, default_moe_param_handler)
 
     from torch.distributed.tensor import DTensor
