@@ -134,25 +134,25 @@ def default_moe_param_handler(name, tensor, expert_id_base):
         yield from _map_moe_params_common(key, value, expert_id_base)
 
 
-# Overrides the default MoE parameter mapping per model_type. Handlers follow the
-# ``default_moe_param_handler`` contract: (name, stacked_tensor, expert_id_base).
-MOE_PARAM_HANDERS = {}
-
-
 def passthrough_moe_param_handler(name, tensor, expert_id_base):
     """Keep a fused MoE checkpoint tensor unchanged."""
     del expert_id_base
     yield name, tensor
 
 
+# Overrides the default MoE parameter mapping per model_type. Handlers follow the
+# ``default_moe_param_handler`` contract: (name, stacked_tensor, expert_id_base).
+MOE_PARAM_HANDERS = {"gpt_oss": passthrough_moe_param_handler}
+
+
 def get_moe_param_handler(model_type, ep_enabled):
     """Resolve the checkpoint export handler for the current MoE layout."""
     # GPT-OSS stores all experts in fused tensors with gate/up values interleaved
     # along the last dimension. When EP is disabled, the tensor is already global
-    # and vLLM expects this packed checkpoint layout unchanged. The EP path still
-    # needs a shard-aware vLLM loader and intentionally keeps the existing handler.
-    if model_type == "gpt_oss" and not ep_enabled:
-        return passthrough_moe_param_handler
+    # and vLLM expects this packed checkpoint layout unchanged. EP requires a
+    # shard-aware vLLM loader and must not pass local shards under the same name.
+    if model_type == "gpt_oss" and ep_enabled:
+        raise NotImplementedError("VeOmni GPT-OSS does not support EP weight updates")
 
     return MOE_PARAM_HANDERS.get(model_type, default_moe_param_handler)
 

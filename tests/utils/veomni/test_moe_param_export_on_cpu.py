@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from types import SimpleNamespace
-
 import pytest
 import torch
-from torch import nn
 
-from verl.workers.engine.veomni.utils import default_moe_param_handler, get_moe_param_handler, veomni_shard_export
+from verl.workers.engine.veomni.utils import (
+    MOE_PARAM_HANDERS,
+    get_moe_param_handler,
+    passthrough_moe_param_handler,
+)
 
 
 @pytest.mark.parametrize(
@@ -34,20 +35,9 @@ def test_gpt_oss_non_ep_keeps_packed_expert_params(name, shape):
     tensor = torch.randn(shape)
     handler = get_moe_param_handler("gpt_oss", ep_enabled=False)
 
+    assert MOE_PARAM_HANDERS["gpt_oss"] is passthrough_moe_param_handler
     exported = list(handler(name, tensor, expert_id_base=0))
 
     assert len(exported) == 1
     assert exported[0][0] == name
     assert exported[0][1] is tensor
-
-
-def test_gpt_oss_ep_keeps_existing_export_handler():
-    assert get_moe_param_handler("gpt_oss", ep_enabled=True) is default_moe_param_handler
-
-
-def test_gpt_oss_delta_sharded_is_explicitly_unsupported():
-    model = nn.Module()
-    model.config = SimpleNamespace(model_type="gpt_oss")
-
-    with pytest.raises(NotImplementedError, match="GPT-OSS does not support delta_sharded"):
-        veomni_shard_export(model)

@@ -379,9 +379,7 @@ def mcore_hf_delta_entry(rec: McoreParamExport, _place, lidx: torch.Tensor, lval
         # owned by another pipeline stage: pure lockstep row. The slot table
         # was pre-seeded from the owner stage (fail loud if not -- an
         # unsized entry would silently misalign the batched gather).
-        assert cached is not None, (
-            f"{rec.megatron_name}: slot table not pre-seeded for a non-owned PP param"
-        )
+        assert cached is not None, f"{rec.megatron_name}: slot table not pre-seeded for a non-owned PP param"
         assert lidx.numel() == 0, f"{rec.megatron_name}: delta reported for a param this rank does not own"
     if lidx.numel() == 0 and cached is not None:
         # empty delta: the slot table froze after the first probe, so the
