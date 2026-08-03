@@ -44,7 +44,7 @@ VL_TYPE2INDEX = {
 
 
 def load_safetensors_index(model_path: str) -> dict[str, int]:
-    path = os.path.join(os.path.dirname(model_path), "model.safetensors.index.json")
+    path = os.path.join(model_path, "model.safetensors.index.json")
     with open(path) as f:
         weight_map = json.load(f)["weight_map"]
     index = {fqn: int(filename.split("-")[1]) for fqn, filename in weight_map.items()}
