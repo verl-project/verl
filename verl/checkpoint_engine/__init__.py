@@ -71,3 +71,10 @@ try:
     __all__ += ["DeltaShardedCheckpointEngine"]
 except ImportError:
     DeltaShardedCheckpointEngine = None
+
+try:
+    from .tpu_checkpoint_engine import TPUCheckpointEngine
+
+    __all__ += ["TPUCheckpointEngine"]
+except ImportError:
+    TPUCheckpointEngine = None

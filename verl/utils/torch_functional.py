@@ -95,6 +95,8 @@ def logprobs_from_logits(logits, labels, inplace_backward=True):
         output = output.view(*batch_dim)
     elif NPU_CROSS_ENTROPY_LOSS_AVAILABLE:
         output = logprobs_from_logits_torch_npu(logits, labels)
+    elif logits.device.type == "tpu":
+        output = logprobs_from_logits_naive(logits, labels)
     else:
         output = logprobs_from_logits_v2(logits, labels)
     return output

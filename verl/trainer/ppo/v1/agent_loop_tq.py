@@ -107,7 +107,12 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
     async def _run_prompt(self, prompt: dict, sampling_params: dict, trajectory: dict, trace: bool = False) -> None:
         """Spawn multiple agent loops in parallel according to rollout.n or rollout.val_kwargs.n."""
         uid, partition_id = prompt["uid"], "train" if not trajectory["validate"] else "val"
-        await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
+        global_steps = prompt.get("global_steps", 0)
+        await tq.async_kv_put(
+            key=uid,
+            partition_id=partition_id,
+            tag={"is_prompt": True, "status": "running", "global_steps": global_steps},
+        )
         tasks = []
         try:
             # NOTE: user can dynamically adjust n for each sample here, e.g according to task difficulty.
@@ -140,12 +145,20 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 status = "failure"
             else:
                 status = "finished"
-            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": status})
+            await tq.async_kv_put(
+                key=uid,
+                partition_id=partition_id,
+                tag={"is_prompt": True, "status": status, "global_steps": global_steps},
+            )
         except Exception as e:
             logger.exception(f"Error in _run_prompt: {e}")
             if tasks:
                 await _settle_session_tasks(tasks)
-            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
+            await tq.async_kv_put(
+                key=uid,
+                partition_id=partition_id,
+                tag={"is_prompt": True, "status": "failure", "global_steps": global_steps},
+            )
 
     async def _agent_loop_postprocess(
         self, output: AgentLoopOutput | list[AgentLoopOutput], validate, **kwargs

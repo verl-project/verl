@@ -28,7 +28,7 @@ from tensordict import NonTensorData, TensorDict
 from torch.distributed.device_mesh import init_device_mesh
 
 from verl.checkpoint_engine import CheckpointEngineRegistry
-from verl.plugin.platform.platform_tpu_workarounds import convert_tensors_to_scalars
+from verl.plugin.platform import get_platform
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
 from verl.trainer.distillation import distillation_ppo_loss, is_distillation_enabled
@@ -214,9 +214,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         lr = metrics.pop("lr", None)
 
         # For other metrics, we perform all gather in dp group (only if DP > 1)
-        if self.device_name == "tpu":
-            # Convert device-bound TPU tensors in the metrics dict to standard Python scalars.
-            metrics = convert_tensors_to_scalars(metrics)
+        metrics = get_platform().sanitize_metrics(metrics)
 
         if self.device_name == "tpu":
             final_metrics = metrics
@@ -248,9 +246,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             final_metrics["mfu"] = estimated_flops / promised_flops / torch.distributed.get_world_size()
             if forward_only:
                 final_metrics["mfu"] /= 3.0
-        if self.device_name == "tpu":
-            # Convert any tensors in final_metrics to scalars/cpu before moving to cpu inside TensorDict
-            final_metrics = convert_tensors_to_scalars(final_metrics)
+        final_metrics = get_platform().sanitize_metrics(final_metrics)
         # model outputs
         model_output = output.pop("model_output", {})
         # We only return final_metrics
@@ -347,8 +343,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
                                 output[key] = sum(val) / len(val) if isinstance(val[0], int | float) else val[0]
                     append_to_dict(metrics, output)
 
-                if self.device_name == "tpu":
-                    metrics = convert_tensors_to_scalars(metrics)
+                metrics = get_platform().sanitize_metrics(metrics)
                 output = tu.get_tensordict(tensor_dict={}, non_tensor_dict={"metrics": metrics}).cpu()
             else:
                 output = None
@@ -718,7 +713,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @_with_routing_replay_flag(enabled=True)
     def compute_log_prob(self, data: TensorDict) -> TensorDict:
         output = self.actor.infer_batch(data)
-
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))

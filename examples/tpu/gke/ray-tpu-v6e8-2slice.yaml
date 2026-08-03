@@ -1,0 +1,128 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ray-ksa 
+  namespace: default # Change this if your Ray cluster is in a different namespace
+  annotations:
+      iam.gke.io/gcp-service-account: ray-tpu-gsa@tpu-pytorch.iam.gserviceaccount.com
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ray-ksa-admin-binding
+subjects:
+- kind: ServiceAccount
+  name: ray-ksa
+  namespace: default # Must match the namespace of the ServiceAccount above
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin # Only for testing, should use a more restrictive role in prod
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: ray-tpu-v6e-cluster
+spec:
+  headGroupSpec:
+    rayStartParams: {}
+    template:
+      metadata:
+        annotations:
+          gke-gcsfuse/volumes: "true"
+      spec:
+        serviceAccountName: ray-ksa
+        containers:
+          - name: ray-head
+            image: us-west2-docker.pkg.dev/tpu-pytorch/raycluster/verl-tpu:v20260630-159c2e3e
+            imagePullPolicy: Always
+            env:
+            - name: RAY_TRAIN_V2_ENABLED
+              value: "1"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-secret
+                  key: hf_token
+                  optional: true
+            ports:
+              - containerPort: 8265  # Dashboard
+              - containerPort: 10001 # Client
+              - containerPort: 8888  # gRPC
+              - containerPort: 8000  # OpenAI API
+            resources:
+              limits:
+                cpu: "12"
+                memory: "48Gi"
+              requests:
+                cpu: "12"
+                memory: "48Gi"
+            volumeMounts:
+            - name: gcs-volume
+              mountPath: /data
+            - name: host-tmp
+              mountPath: /tmp
+        volumes:
+        - name: gcs-volume
+          csi:
+            driver: gcsfuse.csi.storage.gke.io
+            volumeAttributes:
+              bucketName: torchprime
+              mountOptions: "implicit-dirs"
+        - name: host-tmp
+          hostPath:
+            path: /tmp
+  workerGroupSpecs:
+    - replicas: 2 # use 2 slices
+      numOfHosts: 2 # 2 host v6e8 chips 
+      groupName: tpu-group
+      rayStartParams: {}
+      template:
+        metadata:
+          annotations:
+            gke-gcsfuse/volumes: "true"
+        spec:
+          serviceAccountName: ray-ksa
+          containers:
+            - name: ray-worker
+              image: us-west2-docker.pkg.dev/tpu-pytorch/raycluster/verl-tpu:v20260630-159c2e3e
+              imagePullPolicy: Always
+              resources:
+                limits:
+                  memory: "200Gi"
+                  # Each Worker node has 4 TPU chips.
+                  google.com/tpu: "4"
+                requests:
+                  cpu: "48"
+                  memory: "200Gi"
+                  # Each Worker node has 4 TPU chips.
+                  google.com/tpu: "4"
+              env:
+                - name: RAY_TRAIN_V2_ENABLED
+                  value: "1"
+                - name: HF_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: hf-secret
+                      key: hf_token
+                      optional: true
+              volumeMounts:
+              - name: gcs-volume
+                mountPath: /data
+              - name: host-tmp
+                mountPath: /tmp
+          volumes:
+          - name: gcs-volume
+            csi:
+              driver: gcsfuse.csi.storage.gke.io
+              volumeAttributes:
+                bucketName: torchprime
+                mountOptions: "implicit-dirs"
+          - name: host-tmp
+            hostPath:
+              path: /tmp
+          nodeSelector:
+            # Change this according to the TPU slice topology.
+            cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+            cloud.google.com/gke-tpu-topology: 2x4  # v6e8 chips 

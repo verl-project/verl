@@ -68,6 +68,11 @@ class PPOTrainerSeparateAsync(PPOTrainer):
 
         super().__init__(config)
 
+    @property
+    def use_hybrid_engine(self) -> bool:
+        """Returns True if the hybrid engine (colocated trainer and rollout) is enabled."""
+        return self.config.actor_rollout_ref.get("hybrid_engine", True)
+
     def _init_resource_pool_mgr(self):
         super()._init_resource_pool_mgr()
         # Replace ActorRolloutRefWorker with DetachActorWorker to get CPU save/restore
@@ -82,19 +87,28 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         super()._setup()
 
         # initialize standalone rollout
-        # TODO: make initialization parallel with super().init()
-        hybrid_num_replicas = len(self.llm_server_manager.rollout_replicas)
-        self.standalone_server_manager: LLMServerManager = LLMServerManager.create(
-            config=self.config, start_rank=hybrid_num_replicas
-        )
+        if self.llm_server_manager is not None and not self.use_hybrid_engine:
+            self.standalone_server_manager = self.llm_server_manager
+            self.standalone_checkpoint_manager = self.checkpoint_manager
+        else:
+            hybrid_num_replicas = len(self.llm_server_manager.rollout_replicas) if self.llm_server_manager else 0
+            self.standalone_server_manager: LLMServerManager = LLMServerManager.create(
+                config=self.config, start_rank=hybrid_num_replicas
+            )
 
-        # create checkpoint engine manager for trainer and standalone rollout
-        checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
-        self.standalone_checkpoint_manager = CheckpointEngineManager(
-            config=checkpoint_engine_config,
-            actor_wg=self.actor_rollout_wg,
-            replicas=self.standalone_server_manager.get_replicas(),
-        )
+            # create checkpoint engine manager for trainer and standalone rollout
+            checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
+            from verl.plugin.platform import get_platform
+
+            if get_platform().device_name == "tpu" or self.config.trainer.device == "tpu":
+                if not checkpoint_engine_config.backend or checkpoint_engine_config.backend == "naive":
+                    checkpoint_engine_config.backend = "tpu"
+
+            self.standalone_checkpoint_manager = CheckpointEngineManager(
+                config=checkpoint_engine_config,
+                actor_wg=self.actor_rollout_wg,
+                replicas=self.standalone_server_manager.get_replicas(),
+            )
 
         # hybrid engine is in rollout mode after initialization
         self.current_mode = HybridEngineMode.ROLLOUT
@@ -112,7 +126,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         """
         rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
         bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
-        if bypass_recomputing_logprobs:
+        if not self.use_hybrid_engine or bypass_recomputing_logprobs:
             return super()._compute_old_log_prob(batch, metrics)
 
         if self.local_trigger_step == 0:
@@ -133,7 +147,8 @@ class PPOTrainerSeparateAsync(PPOTrainer):
     def on_init_end(self):
         # update weights after loading checkpoint
         self.standalone_checkpoint_manager.update_weights(self.global_steps)
-        self.checkpoint_manager.update_weights(self.global_steps)
+        if self.checkpoint_manager is not None and self.use_hybrid_engine:
+            self.checkpoint_manager.update_weights(self.global_steps)
 
     def on_train_begin(self):
         if self.config.skip.rollout_tq.enable:
@@ -154,7 +169,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
             self.switch_to_rollout()
 
     def on_sample_end(self):
-        if self.current_mode == HybridEngineMode.ROLLOUT:
+        if self.use_hybrid_engine and self.current_mode == HybridEngineMode.ROLLOUT:
             logger.info("Switching hybrid engine to trainer mode for training")
             self.switch_to_trainer()
 
@@ -178,6 +193,8 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         return trainer_gpus + rollout_gpus
 
     def switch_to_rollout(self):
+        if not self.use_hybrid_engine:
+            return
         # TODO: disable auto offload in config and offload according to the switch strategy
         self.checkpoint_manager.update_weights(self.global_steps)
         self.checkpoint_manager.resume_generation_replicas()
@@ -185,6 +202,8 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         self.current_mode = HybridEngineMode.ROLLOUT
 
     def switch_to_trainer(self):
+        if not self.use_hybrid_engine:
+            return
         # TODO: disable auto offload in config and offload according to the switch strategy
         self.remove_replicas_from_balancer()
         self.checkpoint_manager.abort_replicas()
@@ -192,13 +211,30 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         self.current_mode = HybridEngineMode.TRAINER
 
     def add_replicas_to_balancer(self):
+        if (
+            self.standalone_server_manager is None
+            or getattr(self.standalone_server_manager, "global_load_balancer", None) is None
+        ):
+            return
+        if self.llm_server_manager is None:
+            return
         global_load_balancer = self.standalone_server_manager.global_load_balancer
         servers = dict(
             zip(self.llm_server_manager.server_addresses, self.llm_server_manager.server_handles, strict=True)
         )
-        ray.get(global_load_balancer.add_servers.remote(servers))
+        if servers:
+            ray.get(global_load_balancer.add_servers.remote(servers))
 
     def remove_replicas_from_balancer(self):
+        if not self.use_hybrid_engine:
+            return
+        if (
+            self.standalone_server_manager is None
+            or getattr(self.standalone_server_manager, "global_load_balancer", None) is None
+        ):
+            return
+        if self.llm_server_manager is None or not self.llm_server_manager.server_addresses:
+            return
         global_load_balancer = self.standalone_server_manager.global_load_balancer
         ray.get(global_load_balancer.remove_servers.remote(self.llm_server_manager.server_addresses))
 

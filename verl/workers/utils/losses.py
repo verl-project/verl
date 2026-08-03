@@ -120,6 +120,13 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     return loss, {}
 
 
+def _extract_scalar_value(value, default=None):
+    """Extract a scalar integer or float from a metadata container or sequence."""
+    if isinstance(value, list | tuple):
+        return value[0] if len(value) > 0 else default
+    return value if value is not None else default
+
+
 def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
     """Compute PPO policy gradient loss, entropy bonus, and KL divergence penalty.
 
@@ -144,8 +151,10 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         entropy = no_padding_2_padding(entropy, data)
 
     # global batch info for loss aggregation
-    dp_size = tu.get_non_tensor_data(data=data, key="dp_size", default=1)
-    batch_num_tokens = tu.get_non_tensor_data(data=data, key="batch_num_tokens", default=None)
+    dp_size = _extract_scalar_value(tu.get_non_tensor_data(data=data, key="dp_size", default=1), default=1)
+    batch_num_tokens = _extract_scalar_value(
+        tu.get_non_tensor_data(data=data, key="batch_num_tokens", default=None), default=None
+    )
     config.global_batch_info["dp_size"] = dp_size
     config.global_batch_info["batch_num_tokens"] = batch_num_tokens
     config.global_batch_info["global_batch_size"] = data["global_batch_size"]

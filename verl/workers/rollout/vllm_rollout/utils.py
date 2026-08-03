@@ -235,8 +235,10 @@ class vLLMColocateWorkerExtension:
 
         from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
 
-        if current_platform.device_type == "npu" and self.device is None:
+        if current_platform.device_type == "npu" and getattr(self, "device", None) is None:
             self.device = torch.device(f"npu:{self.local_rank}")
+        elif current_platform.device_type == "tpu" and getattr(self, "device", None) is None:
+            self.device = torch.device("tpu")
         assert self.device is not None
 
         # =========================== step 1: prepare for weight loading ===========================

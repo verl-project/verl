@@ -20,13 +20,14 @@ device-specific environment configuration, resource options, and memory manageme
 
 import logging
 import os
-from typing import Any
+from typing import Any, Optional
 
 import ray
 import torch
 
 from .platform_cuda import PlatformCUDA
 from .platform_manager import PlatformRegistry, get_platform
+from .platform_tpu_workarounds import convert_tensors_to_scalars, patch_ray_worker
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -39,6 +40,22 @@ TRAINER_BASE_PORT = 8471
 HBM_BYTES_TPU_V5P = 95 * 1024 * 1024 * 1024  # 95 GB
 HBM_BYTES_TPU_V6E = 32 * 1024 * 1024 * 1024  # 32 GB
 HBM_BYTES_TPU_V7X = 192 * 1024 * 1024 * 1024  # 192 GB
+
+TPU_HBM_BYTES_MAP = {
+    "v5p": HBM_BYTES_TPU_V5P,
+    "v6e": HBM_BYTES_TPU_V6E,
+    "v7x": HBM_BYTES_TPU_V7X,
+}
+
+# TPU default 3D mesh topology mappings by pod type or total chips
+TPU_TOPOLOGY_MAP = {
+    "v6e-32": "4,8,1",
+    "v6e-8": "2,4,1",
+    "v6e-4": "2,2,1",
+    32: "4,8,1",
+    8: "2,4,1",
+    4: "2,2,1",
+}
 
 
 def get_tpu_chip_hbm_bytes() -> int:
@@ -53,7 +70,7 @@ def get_tpu_chip_hbm_bytes() -> int:
                 labels = tpu_nodes[0].get("Labels", {})
                 tpu_type = (labels.get("ray.io/accelerator-type") or labels.get("ray.io/tpu-pod-type") or "").lower()
     except Exception as e:
-        logger.debug(f"Unable to query Ray node labels for TPU chip type: {e}")
+        logger.warning(f"Unable to query Ray node labels for TPU chip type: {e}")
 
     # Fallback to environment variables
     if not tpu_type:
@@ -64,15 +81,12 @@ def get_tpu_chip_hbm_bytes() -> int:
             or ""
         ).lower()
 
-    if "v5p" in tpu_type:
-        return HBM_BYTES_TPU_V5P
-    elif "v6e" in tpu_type:
-        return HBM_BYTES_TPU_V6E
-    elif "v7x" in tpu_type:
-        return HBM_BYTES_TPU_V7X
-    else:
-        logger.warning(f"Unable to determine TPU chip HBM bytes for tpu_type='{tpu_type}'. Returning -1.")
-        return -1
+    for chip_gen, hbm_bytes in TPU_HBM_BYTES_MAP.items():
+        if chip_gen in tpu_type:
+            return hbm_bytes
+
+    logger.warning(f"Unable to determine TPU chip HBM bytes for tpu_type='{tpu_type}'. Returning -1.")
+    return -1
 
 
 # Enforce static compilation graph for torch.compile on TPU
@@ -132,22 +146,81 @@ class TPUDeviceModuleProxy:
     def __getattr__(self, name):
         if name == "set_device":
             return self.set_device
-        elif name in ("memory_reserved", "memory_allocated", "max_memory_reserved", "max_memory_allocated"):
+
+        if hasattr(self._original_module, name):
+            return getattr(self._original_module, name)
+
+        if name == "memory_reserved":
             return lambda *args, **kwargs: 0
-        elif name in ("reset_peak_memory_stats", "reset_accumulated_memory_stats"):
+        elif name == "memory_allocated":
+            return lambda *args, **kwargs: 0
+        elif name == "max_memory_reserved":
+            return lambda *args, **kwargs: 0
+        elif name == "max_memory_allocated":
+            return lambda *args, **kwargs: 0
+        elif name == "reset_peak_memory_stats":
             return lambda *args, **kwargs: None
-        elif name == "empty_cache":
-            return self.empty_cache
         elif name == "get_device_properties":
+
+            class DummyDeviceProperties:
+                def __init__(self, total_memory=32 * 1024 * 1024 * 1024):
+                    self.total_memory = total_memory
+                    self.name = "Google TPU"
+                    self.major = 1
+                    self.minor = 0
+
             hbm_bytes = get_tpu_chip_hbm_bytes()
-            return lambda device_index=None: type("DeviceProps", (), {"total_memory": hbm_bytes})()
+            total_mem = hbm_bytes if hbm_bytes > 0 else 32 * 1024 * 1024 * 1024
+            return lambda *args, **kwargs: DummyDeviceProperties(total_memory=total_mem)
         elif name == "mem_get_info":
             hbm_bytes = get_tpu_chip_hbm_bytes()
-            return lambda *args, **kwargs: (hbm_bytes, hbm_bytes)
-        return getattr(self._original_module, name)
+            total_mem = hbm_bytes if hbm_bytes > 0 else 32 * 1024 * 1024 * 1024
+            return lambda *args, **kwargs: (total_mem, total_mem)
+
+        raise AttributeError(f"'TPUDeviceModuleProxy' object has no attribute '{name}'")
+
+    def __setattr__(self, name, value):
+        if name.startswith("_"):
+            super().__setattr__(name, value)
+        else:
+            setattr(self._original_module, name, value)
+
+    def is_available(self) -> bool:
+        if hasattr(self._original_module, "is_available"):
+            try:
+                return self._original_module.is_available()
+            except Exception as e:
+                logger.warning(f"torch.tpu.is_available() check failed: {e}")
+                return False
+        return False
 
     def set_device(self, device_index: Any) -> None:
         pass
+
+    def current_device(self) -> int:
+        if hasattr(self._original_module, "current_device"):
+            try:
+                return self._original_module.current_device()
+            except Exception as e:
+                logger.warning(f"torch.tpu.current_device() failed: {e}")
+                return 0
+        return 0
+
+    def device_count(self) -> int:
+        if hasattr(self._original_module, "device_count"):
+            try:
+                return self._original_module.device_count()
+            except Exception as e:
+                logger.warning(f"torch.tpu.device_count() failed: {e}")
+                return 0
+        return 0
+
+    def synchronize(self, device_index: int | None = None) -> None:
+        if hasattr(self._original_module, "synchronize"):
+            try:
+                self._original_module.synchronize()
+            except Exception as e:
+                logger.warning(f"torch.tpu.synchronize() failed: {e}")
 
     def empty_cache(self) -> None:
         if hasattr(self._original_module, "_clear_cache"):
@@ -161,6 +234,11 @@ class TPUDeviceModuleProxy:
 class PlatformTPU(PlatformCUDA):
     """Platform backend for Google TPUs (subclasses PlatformCUDA for API compatibility)."""
 
+    def __init__(self):
+        super().__init__()
+        original_tpu = getattr(torch, "tpu", DummyTpuDeviceModule())
+        self._device_module = TPUDeviceModuleProxy(original_tpu)
+
     @property
     def vendor_name(self) -> str:
         return "google"
@@ -171,8 +249,7 @@ class PlatformTPU(PlatformCUDA):
 
     @property
     def device_module(self):
-        original_tpu = getattr(torch, "tpu", DummyTpuDeviceModule())
-        return TPUDeviceModuleProxy(original_tpu)
+        return self._device_module
 
     def current_device(self) -> int:
         return self.device_module.current_device()
@@ -232,27 +309,55 @@ class PlatformTPU(PlatformCUDA):
         pgs: list,
     ) -> dict[str, str]:
         """Generates TPU-specific distributed environment variables for PJRT mesh initialization."""
-        node_ip_map = {node["NodeID"]: node["NodeManagerAddress"] for node in ray.nodes()}
-        pg_ips = []
-        for pg in pgs:
+        node_ip_map = {node["NodeID"]: node["NodeManagerAddress"] for node in ray.nodes() if node.get("Alive", False)}
+        bundle_ips = []
+        local_ip = ray.util.get_node_ip_address()
+        clean_prefix = name_prefix.lower().split("_")[0] if name_prefix else ""
+        matching_pgs = []
+
+        # 1. Primary filter: Select placement group containing current worker's node IP
+        for p in pgs:
+            specs = ray._private.state.state.placement_group_table(p.id)
+            if specs.get("state") != "CREATED":
+                continue
+            bundles_map = specs.get("bundles_to_node_id", {})
+            pg_ips = [node_ip_map[node_id] for b_idx, node_id in sorted(bundles_map.items()) if node_id in node_ip_map]
+            if local_ip in pg_ips:
+                matching_pgs.append(p)
+
+        # 2. Secondary fallback: Filter by clean_prefix if placement group names are explicitly set
+        if not matching_pgs and clean_prefix:
+            for p in pgs:
+                p_name = ray._private.state.state.placement_group_table(p.id).get("name", "").lower()
+                if clean_prefix in p_name:
+                    matching_pgs.append(p)
+
+        target_pgs = matching_pgs if matching_pgs else pgs
+
+        for pg in target_pgs:
             specs = ray._private.state.state.placement_group_table(pg.id)
-            node_id = specs["bundles_to_node_id"][0]
-            pg_ips.append(node_ip_map[node_id])
+            if specs.get("state") != "CREATED":
+                continue
+            bundles_map = specs.get("bundles_to_node_id", {})
+            for b_idx in sorted(bundles_map.keys()):
+                node_id = bundles_map[b_idx]
+                if node_id in node_ip_map:
+                    bundle_ips.append(node_ip_map[node_id])
 
         is_rollout = "rollout" in name_prefix.lower()
         base_port = ROLLOUT_BASE_PORT if is_rollout else TRAINER_BASE_PORT
 
-        sb_addresses = []
-        for ip in pg_ips:
-            for lr in range(local_world_size):
-                sb_addresses.append(f"{ip}:{base_port + lr}")
+        sb_addresses = [f"{ip}:{base_port + (b_idx % local_world_size)}" for b_idx, ip in enumerate(bundle_ips)]
+
+        # Extract unique worker hostnames preserving rank order
+        unique_hostnames = list(dict.fromkeys(bundle_ips))
 
         env_vars = {
             "TORCH_TPU_SLICEBUILDER_ADDRESSES": ",".join(sb_addresses),
             "TPU_PROCESS_ADDRESSES": ",".join(sb_addresses),
             "TPU_PROCESS_PORT": str(base_port + local_rank),
             "CLOUD_TPU_TASK_ID": str(rank // local_world_size),
-            "TPU_WORKER_HOSTNAMES": ",".join(pg_ips),
+            "TPU_WORKER_HOSTNAMES": ",".join(unique_hostnames),
             "TPU_VISIBLE_CHIPS": str(local_rank),
         }
 
@@ -260,18 +365,7 @@ class PlatformTPU(PlatformCUDA):
         tpu_nodes = [node for node in ray.nodes() if "TPU" in node.get("Resources", {}) and node.get("Alive")]
         tpu_type = tpu_nodes[0].get("Labels", {}).get("ray.io/tpu-pod-type", "") if tpu_nodes else ""
 
-        if tpu_type == "v6e-32":
-            topo = "4,8,1"
-        elif tpu_type == "v6e-8":
-            topo = "2,4,1"
-        elif tpu_type == "v6e-4":
-            topo = "2,2,1"
-        else:
-            topo = (
-                "4,8,1"
-                if world_size == 32
-                else ("2,4,1" if world_size == 8 else ("2,2,1" if world_size == 4 else "1,1,1"))
-            )
+        topo = TPU_TOPOLOGY_MAP.get(tpu_type, TPU_TOPOLOGY_MAP.get(world_size, "1,1,1"))
 
         env_vars.update(
             {
@@ -293,3 +387,77 @@ class PlatformTPU(PlatformCUDA):
                 env_vars["TPU_MULTIHOST_BACKEND"] = "ray"
 
         return env_vars
+
+    def auto_assign_accelerator_type(self, name_prefix: str, accelerator_type: Optional[str]) -> Optional[str]:
+        """Dynamically assign a TPU slice/group affinity to a resource pool on multi-slice clusters."""
+        if accelerator_type is not None:
+            return accelerator_type
+
+        try:
+            if ray.is_initialized():
+                tpu_slices = set()
+                for node in ray.nodes():
+                    if node.get("Alive"):
+                        for res in node.get("Resources", {}).keys():
+                            if res.startswith("tpu-group-"):
+                                tpu_slices.add(res)
+                tpu_slices = sorted(list(tpu_slices))
+                if len(tpu_slices) >= 2:
+                    if any(k in name_prefix.lower() for k in ["rollout", "reward", "teacher"]):
+                        return tpu_slices[1]
+                    elif any(k in name_prefix.lower() for k in ["trainer", "actor", "global"]):
+                        return tpu_slices[0]
+        except Exception:
+            pass
+
+        return accelerator_type
+
+    def configure_placement_group_bundle(
+        self, bundle: dict, use_gpu: bool, device_name: str, name_prefix: str, accelerator_type: Optional[str] = None
+    ) -> None:
+        """Configure placement group bundle resources to prevent vLLM resource lockups on GKE TPU."""
+        is_rollout_pool = any(k in name_prefix.lower() for k in ["rollout", "reward", "teacher"])
+        if use_gpu and not is_rollout_pool:
+            bundle[device_name] = 1
+        if accelerator_type is not None:
+            bundle[accelerator_type] = 1e-4
+
+    def get_worker_env_vars(
+        self,
+        resource_pool,
+        rank: int,
+        world_size: int,
+        local_rank: int,
+        local_world_size: int,
+        name_prefix: str,
+        device_name: str,
+    ) -> dict[str, str]:
+        """Return platform-specific TPU environment variables for worker nodes."""
+        env_vars = {}
+        if "VERL_PLATFORM" in os.environ:
+            env_vars["VERL_PLATFORM"] = os.environ["VERL_PLATFORM"]
+        for var in self.ray_noset_envvars():
+            env_vars[var] = "1"
+        pgs = resource_pool.get_placement_groups(device_name=device_name)
+        tpu_env = self.get_tpu_env_vars(
+            rank=rank,
+            world_size=world_size,
+            local_rank=local_rank,
+            local_world_size=local_world_size,
+            name_prefix=name_prefix,
+            pgs=pgs,
+        )
+        env_vars.update(tpu_env)
+        return env_vars
+
+    def sanitize_metrics(self, metrics: Any) -> Any:
+        """Convert any TPU tensor in metrics to a standard Python scalar before Ray RPC transfer."""
+        return convert_tensors_to_scalars(metrics)
+
+    def get_ray_init_kwargs(self) -> dict[str, Any]:
+        """Return Ray initialization arguments with runtime_env configured for GKE TPU workers."""
+        return {
+            "runtime_env": {
+                "worker_process_setup_hook": patch_ray_worker,
+            }
+        }

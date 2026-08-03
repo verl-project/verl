@@ -40,6 +40,7 @@ from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.experimental.teacher_loop import MultiTeacherModelManager
+from verl.plugin.platform import get_platform
 from verl.protocol import DataProto, DataProtoFuture
 from verl.single_controller.ray import (
     RayClassWithInitArgs,
@@ -81,7 +82,7 @@ from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.debug import marked_timer
 from verl.utils.debug.metrics import calculate_debug_metrics
 from verl.utils.fs import copy_to_local
-from verl.utils.import_utils import load_extern_type
+from verl.utils.import_utils import load_class_from_fqn, load_extern_type
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
@@ -237,7 +238,12 @@ class PPOTrainer(ABC):
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
         # 1. define actor and rollout class
-        actor_role = Role.ActorRolloutRef if Role.ActorRolloutRef in self.role_worker_mapping else Role.ActorRollout
+        if Role.ActorRolloutRef in self.role_worker_mapping:
+            actor_role = Role.ActorRolloutRef
+        elif Role.ActorRollout in self.role_worker_mapping:
+            actor_role = Role.ActorRollout
+        else:
+            actor_role = Role.Actor
         actor_rollout_resource_pool = self.resource_pool_manager.get_resource_pool(actor_role)
         actor_rollout_cls = RayClassWithInitArgs(
             cls=self.role_worker_mapping[actor_role],
@@ -319,9 +325,17 @@ class PPOTrainer(ABC):
         lora_rank = self.config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
         if lora_rank <= 0:
             lora_rank = self.config.actor_rollout_ref.model.get("lora_rank", 0)
-        self.ref_in_actor = lora_rank > 0 or self.config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        self.ref_in_actor = (
+            self.config.actor_rollout_ref.get("ref_in_actor", False)
+            or lora_rank > 0
+            or self.config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        )
         if self.use_reference_policy and not self.ref_in_actor:
-            self.ref_policy_wg = all_wg[str(actor_role)]
+            if str(Role.RefPolicy) in all_wg:
+                self.ref_policy_wg = all_wg[str(Role.RefPolicy)]
+                self.ref_policy_wg.init_model()
+            elif str(actor_role) in all_wg:
+                self.ref_policy_wg = all_wg[str(actor_role)]
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
 
@@ -350,14 +364,28 @@ class PPOTrainer(ABC):
             self.distillation_config = None
 
         # 9. initialize agent loop manager
+        worker_group = self.actor_rollout_wg if self.config.actor_rollout_ref.get("hybrid_engine", True) else None
         self.llm_server_manager: LLMServerManager = LLMServerManager.create(
-            config=self.config, worker_group=self.actor_rollout_wg, rollout_resource_pool=actor_rollout_resource_pool
+            config=self.config, worker_group=worker_group, rollout_resource_pool=actor_rollout_resource_pool
         )
 
         # 10. initialize checkpoint engine manager
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
-        checkpoint_engine_config.backend = "naive"
-        self.checkpoint_manager: CheckpointEngineManager = CheckpointEngineManager(
+
+        is_tpu = get_platform().device_name == "tpu" or self.config.trainer.device == "tpu"
+        if is_tpu:
+            if not checkpoint_engine_config.backend or checkpoint_engine_config.backend == "naive":
+                checkpoint_engine_config.backend = "tpu"
+        elif self.trainer_mode in ["sync", "colocate_async"] and not checkpoint_engine_config.backend:
+            checkpoint_engine_config.backend = "naive"
+
+        checkpoint_manager_class_fqn = self.config.actor_rollout_ref.rollout.get("checkpoint_manager_class")
+        if checkpoint_manager_class_fqn:
+            CheckpointEngineManagerCls = load_class_from_fqn(checkpoint_manager_class_fqn, "CheckpointEngineManager")
+        else:
+            CheckpointEngineManagerCls = CheckpointEngineManager
+
+        self.checkpoint_manager: CheckpointEngineManager = CheckpointEngineManagerCls(
             config=checkpoint_engine_config,
             actor_wg=self.actor_rollout_wg,
             replicas=self.llm_server_manager.get_replicas(),
@@ -490,6 +518,7 @@ class PPOTrainer(ABC):
 
             dapo_filtered_reward_counts = metrics.pop(DAPO_FILTERED_REWARD_COUNTS_KEY, None)
             self.logger.log(data=metrics, step=self.global_steps)
+
             if dapo_filtered_reward_counts:
                 self.dapo_filtered_reward_logger.log(
                     self.config.trainer.logger, dapo_filtered_reward_counts, self.global_steps
@@ -748,9 +777,23 @@ class PPOTrainer(ABC):
         lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
         if lora_rank <= 0:
             lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
-        ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        ref_in_actor = (
+            config.actor_rollout_ref.get("ref_in_actor", False)
+            or lora_rank > 0
+            or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        )
 
-        role = Role.ActorRolloutRef if need_reference_policy(config) and not ref_in_actor else Role.ActorRollout
+        hybrid_engine = config.actor_rollout_ref.get("hybrid_engine", True)
+        if not hybrid_engine:
+            role = Role.Actor
+            if need_reference_policy(config) and not ref_in_actor:
+                self.role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
+                self.mapping[Role.RefPolicy] = "global_pool"
+        elif need_reference_policy(config) and not ref_in_actor:
+            role = Role.ActorRolloutRef
+        else:
+            role = Role.ActorRollout
+
         self.role_worker_mapping[role] = ray.remote(ActorRolloutRefWorker)
         self.mapping[role] = "global_pool"
 
@@ -1003,7 +1046,7 @@ class PPOTrainer(ABC):
             if self.reward_loop_manager.reward_loop_worker_handles is None:
                 self.checkpoint_manager.sleep_replicas()
                 batch = self._compute_reward_colocate(batch)
-                self.checkpoint_manager.update_weights()
+                self.checkpoint_manager.update_weights(self.global_steps)
 
             # 4. collect necessary data for logging
             # For multi-output agent loops, only use the final output per session for metrics.
@@ -1746,8 +1789,20 @@ class PPOTrainer(ABC):
         prompt_length = data["prompts"].offsets().diff()
         response_length = data["responses"].offsets().diff()
         global_token_num = (prompt_length + response_length).tolist()
-        min_global_steps = np.array([tag["min_global_steps"] for tag in batch.tags], dtype=int)[non_padding_mask]
-        max_global_steps = np.array([tag["max_global_steps"] for tag in batch.tags], dtype=int)[non_padding_mask]
+        min_steps_list = [
+            tag.get("min_global_steps", 0) if isinstance(tag, dict) and tag.get("min_global_steps") is not None else 0
+            for tag in (batch.tags or [])
+        ]
+        max_steps_list = [
+            tag.get("max_global_steps", 0) if isinstance(tag, dict) and tag.get("max_global_steps") is not None else 0
+            for tag in (batch.tags or [])
+        ]
+        if len(min_steps_list) == 0:
+            min_steps_list = [0] * len(non_padding_mask)
+        if len(max_steps_list) == 0:
+            max_steps_list = [0] * len(non_padding_mask)
+        min_global_steps = np.array(min_steps_list, dtype=int)[non_padding_mask]
+        max_global_steps = np.array(max_steps_list, dtype=int)[non_padding_mask]
 
         # Only fetch speculative decoding stats when rollout writes them.
         spec_drafts = spec_accepts = spec_verifies = None

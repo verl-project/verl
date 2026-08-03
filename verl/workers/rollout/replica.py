@@ -25,7 +25,7 @@ from ray.actor import ActorHandle
 
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ResourcePoolManager
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import get_device_name
+from verl.utils.device import get_device_name, get_resource_name
 from verl.workers.config import HFModelConfig, RolloutConfig
 
 logger = logging.getLogger(__file__)
@@ -165,8 +165,10 @@ class RolloutReplica(ABC):
             resource_pool: RayResourcePool, ray placement group where hybrid engine processes have been launched.
         """
         self.rollout_mode = RolloutMode.COLOCATED
-        self.resource_pool = resource_pool
+        # On TPU platforms, disable GPU resource allocation for colocated rollout workers
         use_gpu = self.rollout_worker_use_gpu()
+        if get_resource_name() == "TPU":
+            use_gpu = False
 
         if self.is_reward_model:
             name_prefix = f"rollout_reward_colocate_{self.replica_rank}{self.name_suffix}"
@@ -214,12 +216,15 @@ class RolloutReplica(ABC):
             name_prefix = f"rollout_teacher_standalone_{self.replica_rank}{self.name_suffix}"
         else:
             name_prefix = f"rollout_standalone_{self.replica_rank}{self.name_suffix}"
+        from verl.plugin.platform import get_platform
+
+        use_gpu = get_platform().device_name != "tpu"
         worker_group = RayWorkerGroup(
             resource_pool=self.resource_pool,
             ray_cls_with_init=self.get_ray_class_with_init_args(),
             bin_pack=False,
             name_prefix=name_prefix,
-            use_gpu=True,
+            use_gpu=use_gpu,
             device_name=get_device_name(),
         )
         self.workers = worker_group.workers

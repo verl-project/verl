@@ -1,0 +1,86 @@
+# Use the latest Ray master as base.
+FROM rayproject/ray:nightly.260501.1c7c90-py312-tpu
+
+RUN sudo apt-get update && sudo apt-get install -y libopenblas-base libopenmpi-dev libomp-dev
+RUN pip uninstall -y torch torchvision
+
+RUN pip install keyrings.google-artifactregistry-auth
+RUN pip install pandas==2.3.3
+
+ARG AUTH_TOKEN
+# Set the PIP_INDEX_URL environment variable to point to the Torch TPU virtual registry
+ENV PIP_INDEX_URL="https://oauth2accesstoken:${AUTH_TOKEN}@us-python.pkg.dev/ml-oss-artifacts-transient/torch-tpu-virtual-registry/simple/"
+
+# --- Add torchtitan setup from Dockerfile ---
+USER root
+WORKDIR /
+
+RUN pip install "jax[tpu]==0.9.1" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+RUN pip install git+https://github.com/openxla/tokamax.git@8cba6a6a1e52e9efbb7ff8facb66f18f0bfcbe4c
+RUN pip install torch==2.12.0 --index-url https://download.pytorch.org/whl/cpu
+RUN pip install libtpu==0.0.41 -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+
+RUN pip install --pre --no-deps torch_tpu
+
+RUN pip install 'typeguard==2.13.3'
+RUN pip install portpicker absl-py numpy gcsfs frozendict triton fairscale tamm
+
+# --- Install torchtitan, vllm and torchtpu-vllm ---
+ARG GITHUB_USER
+ARG GITHUB_TOKEN
+RUN git clone https://${GITHUB_USER}:${GITHUB_TOKEN}@github.com/google-pytorch/torchtitan.git
+WORKDIR /torchtitan
+RUN git checkout 971dd82ceb3dd191088a2a74cdec594682c95ef1
+RUN pip install -r requirements.txt
+# RUN pip install -r .ci/docker/requirements-flux.txt
+WORKDIR /
+
+RUN git clone --depth 1 --branch v0.19.0 https://github.com/vllm-project/vllm.git
+RUN git clone https://${GITHUB_USER}:${GITHUB_TOKEN}@github.com/google-pytorch/torchtpu-vllm.git
+
+WORKDIR /torchtpu-vllm
+RUN git checkout 98536189411258e7307f261759edfb6fc8df8a60
+WORKDIR /
+
+# Patch vLLM's TPU requirements to accept our local workspace in torchtpu-vllm instead of overriding it
+RUN sed -i '/tpu-inference/d' vllm/requirements/tpu.txt
+
+# Install vLLM in editable mode (forcing the 0.19.0 base version to prevent .dev prerelease mismatch during dependency resolution)
+WORKDIR /torchtpu-vllm
+
+# Hack pyproject.toml to pin versions
+RUN sed -i 's/torch-tpu==[0-9a-zA-Z.]*/torch-tpu==0.1.1.dev20260527102151/' pyproject.toml
+RUN sed -i 's/libtpu==[0-9a-zA-Z.]*/libtpu==0.0.41/' pyproject.toml
+
+RUN pip install --upgrade pip && SETUPTOOLS_SCM_PRETEND_VERSION=0.19.0 VLLM_TARGET_DEVICE="tpu" pip install -e ../vllm
+RUN pip install --pre -e .
+
+# --- Install verl Dependencies ---
+# Pre-installing these ensures that Ray Job Submission doesn't have to download
+# packages on the fly, which drastically reduces GKE node startup and rollout times.
+RUN pip install --no-cache-dir \
+    accelerate \
+    codetiming \
+    datasets \
+    dill \
+    hydra-core \
+    peft \
+    "pyarrow>=19.0.0" \
+    pybind11 \
+    pylatexenc \
+    "tensordict>=0.8.0,<=0.10.0,!=0.9.0" \
+    torchdata \
+    "transformers!=5.6.0" \
+    wandb \
+    "packaging>=20.0" \
+    uvicorn \
+    fastapi \
+    latex2sympy2_extended \
+    math_verify \
+    tensorboard \
+    TransferQueue==0.1.8
+
+WORKDIR /app
+
+# Add /app to PYTHONPATH to allow standard fully qualified 'import verl.*' imports.
+ENV PYTHONPATH="${PYTHONPATH}:/app:/torchtitan:/torchtitan/torchtitan"

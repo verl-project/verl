@@ -19,6 +19,7 @@ import hydra
 import ray
 from omegaconf import DictConfig, OmegaConf
 
+from verl.plugin.platform import get_platform
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
@@ -72,7 +73,13 @@ def run_ppo(config, task_runner_class) -> None:
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
         print(f"ray init kwargs: {ray_init_kwargs}")
-        ray.init(**OmegaConf.to_container(ray_init_kwargs))
+
+        ray_init_dict = OmegaConf.to_container(ray_init_kwargs, resolve=True)
+        platform_ray_kwargs = get_platform().get_ray_init_kwargs()
+        if platform_ray_kwargs and "runtime_env" in platform_ray_kwargs:
+            for k, v in platform_ray_kwargs["runtime_env"].items():
+                ray_init_dict["runtime_env"][k] = v
+        ray.init(**ray_init_dict)
 
     # Create a remote instance of the TaskRunner class, and
     # Execute the `run` method of the TaskRunner instance remotely and wait for it to complete
@@ -89,15 +96,25 @@ def run_ppo(config, task_runner_class) -> None:
             config.global_profiler.global_tool_config.nsys.controller_nsight_options
         )
         runner = task_runner_class.options(runtime_env={"nsight": nsight_options}).remote()
+    elif get_platform().device_name == "tpu":
+        from verl.plugin.platform.platform_tpu_workarounds import (
+            DEFAULT_TASK_RUNNER_CONCURRENCY,
+            DEFAULT_TASK_RUNNER_CPUS,
+        )
+
+        runner = task_runner_class.options(
+            num_cpus=DEFAULT_TASK_RUNNER_CPUS, max_concurrency=DEFAULT_TASK_RUNNER_CONCURRENCY
+        ).remote()
     else:
         runner = task_runner_class.remote()
-    ray.get(runner.run.remote(config))
 
-    # [Optional] get the path of the timeline trace file from the configuration, default to None
-    # This file is used for performance analysis
-    timeline_json_file = config.ray_kwargs.get("timeline_json_file", None)
-    if timeline_json_file:
-        ray.timeline(filename=timeline_json_file)
+    try:
+        ray.get(runner.run.remote(config))
+    finally:
+        timeline_json_file = config.ray_kwargs.get("timeline_json_file", None)
+        if timeline_json_file:
+            ray.timeline(filename=timeline_json_file)
+        ray.shutdown()
 
 
 @ray.remote
