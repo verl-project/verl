@@ -52,7 +52,7 @@ jobs:
     runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -98,7 +98,7 @@ jobs:
     runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -144,7 +144,7 @@ jobs:
     runs-on: linux-aarch64-a3-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann8.5.0-torch_npu2.8.0post2-a3-ubuntu22.04-py3.11-sglang
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -212,7 +212,7 @@ jobs:
     runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -266,7 +266,7 @@ jobs:
     runs-on: linux-aarch64-a3-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-a3-ubuntu22.04-py3.11-vllm
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 60g
     env:
@@ -318,7 +318,7 @@ jobs:
     runs-on: linux-aarch64-a3-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-cann8.5.0-torch_npu2.8.0post2-a3-ubuntu22.04-py3.11-sglang
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
       options: >-
         --shm-size 60g
     env:
@@ -363,7 +363,7 @@ jobs:
     runs-on: linux-aarch64-a3-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-a3-ubuntu22.04-py3.11-vllm
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -412,7 +412,7 @@ jobs:
     runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -454,7 +454,7 @@ jobs:
     runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -490,7 +490,7 @@ jobs:
     runs-on: linux-aarch64-a3-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-cann8.5.0-torch_npu2.8.0post2-a3-ubuntu22.04-py3.11-sglang
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -526,7 +526,7 @@ jobs:
     runs-on: linux-aarch64-a3-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-cann8.5.0-torch_npu2.8.0post2-a3-ubuntu22.04-py3.11-sglang
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -563,7 +563,7 @@ jobs:
     runs-on: linux-aarch64-a3-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-a3-ubuntu22.04-py3.11-vllm
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 60g
     env:
@@ -614,7 +614,7 @@ jobs:
     runs-on: linux-aarch64-a3-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-a3-ubuntu22.04-py3.11-vllm
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -653,7 +653,7 @@ jobs:
   #   runs-on: linux-aarch64-a3-16
   #   timeout-minutes: 180 # Increase this timeout value as needed
   #   container:
-  #     image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-a3-ubuntu22.04-py3.11-vllm
+  #     image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
   #     options: >-
   #       --shm-size 16g
   #   env:
