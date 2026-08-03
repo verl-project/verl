@@ -652,8 +652,8 @@ class VeOmniEngine(FSDPEngine):
     def get_per_tensor_param(self, **kwargs):
         # FSDP2 CPUOffloadPolicy owns CPU<->accelerator placement; calling model.to(device)
         # here leaves the module half-moved and crashes state_dict() below (#5995). The
-        # per-DTensor full_tensor() in param_generator() below still yields accelerator
-        # tensors, so the manual whole-model move is unnecessary under CPU offload.
+        # per-DTensor .to(device).full_tensor() in param_generator() below stages each
+        # shard instead, so the manual whole-model move is unnecessary under CPU offload.
         if not getattr(self, "_uses_fsdp2_cpu_offload_policy", False):
             load_veomni_model_to_gpu(self.module)
 
@@ -672,9 +672,13 @@ class VeOmniEngine(FSDPEngine):
         model_type = getattr(self.module.config, "model_type", "default")
         process_func = get_moe_param_handler(model_type, ps.ep_enabled)
 
+        device = get_device_id()  # used when fsdp2 set cpu_offload_policy
+
         def param_generator():
             for name, param in params.items():
-                unsharded_tensor = param.full_tensor() if isinstance(param, DTensor) else param
+                unsharded_tensor = (
+                    param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
+                )
 
                 is_expert_layer = "mlp.experts." in name
                 is_proj = any(p in name for p in ["down_proj", "gate_proj", "up_proj", "gate_up_proj"])

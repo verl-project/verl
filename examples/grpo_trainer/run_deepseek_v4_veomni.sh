@@ -68,8 +68,9 @@ gpu_memory_utilization=0.8
 # VeOmni config
 ENGINE_CONFIG=(
     model_engine=veomni
-    actor_rollout_ref.actor.veomni.param_offload=True
-    actor_rollout_ref.actor.veomni.optimizer_offload=True
+    actor_rollout_ref.actor.veomni.enable_fsdp_offload=True
+    # actor_rollout_ref.actor.veomni.param_offload=True
+    # actor_rollout_ref.actor.veomni.optimizer_offload=True
     actor_rollout_ref.actor.veomni.enable_full_shard=True
     actor_rollout_ref.actor.veomni.ulysses_parallel_size=$usp_size
     actor_rollout_ref.actor.veomni.expert_parallel_size=$expert_size
