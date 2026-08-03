@@ -53,6 +53,7 @@ from verl.workers.rollout.utils import (
     qwen2_5_vl_dedup_image_tokens,
     run_uvicorn,
 )
+from verl.workers.rollout.vllm_rollout.race_free_multiproc_executor import RaceFreeMultiprocExecutor
 from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
     VLLM_LORA_NAME,
@@ -436,6 +437,8 @@ class vLLMHttpServer:
         usage_context = UsageContext.OPENAI_API_SERVER
         vllm_config = engine_args.create_engine_config(usage_context=usage_context)
         vllm_config.parallel_config.data_parallel_master_port = self._dp_master_port
+        if self.nnodes == 1 and vllm_config.parallel_config.distributed_executor_backend == "mp":
+            vllm_config.parallel_config.distributed_executor_backend = RaceFreeMultiprocExecutor
 
         fn_args = set(dict(inspect.signature(AsyncLLM.from_vllm_config).parameters).keys())
         kwargs = {}
