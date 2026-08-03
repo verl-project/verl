@@ -12,14 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
+from pathlib import Path
+
 import pytest
 import torch
 
-from verl.workers.engine.veomni.utils import (
-    MOE_PARAM_HANDERS,
-    get_moe_param_handler,
-    passthrough_moe_param_handler,
-)
+_UTILS_PATH = Path(__file__).parents[3] / "verl" / "workers" / "engine" / "veomni" / "utils.py"
+_SPEC = importlib.util.spec_from_file_location("_veomni_moe_export_utils", _UTILS_PATH)
+assert _SPEC is not None and _SPEC.loader is not None
+_UTILS = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_UTILS)
+
+MOE_PARAM_HANDERS = _UTILS.MOE_PARAM_HANDERS
+get_moe_param_handler = _UTILS.get_moe_param_handler
+passthrough_moe_param_handler = _UTILS.passthrough_moe_param_handler
 
 
 @pytest.mark.parametrize(
