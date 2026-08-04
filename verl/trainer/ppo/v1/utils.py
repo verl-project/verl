@@ -38,6 +38,9 @@ class MetricsAggregator:
 
     def _init_aggregation_rules(self) -> dict[str, list[str]]:
         return {
+            "min": ["timing_s/agent_loop/compute_score/min"],
+            "weighted_avg": ["timing_s/agent_loop/compute_score/mean"],
+            "max": ["timing_s/agent_loop/compute_score/max"],
             "sum": [
                 "training/off_policy/evicted_samples",
                 "validation/off_policy/evicted_samples",
