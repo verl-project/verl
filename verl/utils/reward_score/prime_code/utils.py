@@ -43,18 +43,21 @@ def check_correctness(in_outs: Optional[dict], generation, timeout=10, debug=Tru
     The global timeout is to catch some extreme/rare cases not handled by the timeouts
     inside `run_test`"""
 
-    manager = multiprocessing.Manager()
-    result = manager.list()
-    metadata_list = manager.list()
-    p = multiprocessing.Process(target=_temp_run, args=(in_outs, generation, debug, result, metadata_list, timeout))
-    p.start()
-    p.join(timeout=timeout + 1)
-    if p.is_alive():
-        p.kill()
-        # p.terminate()
-    if not result:
-        # consider that all tests failed
-        result = [[-1 for i in range(len(in_outs["inputs"]))]]
-        if debug:
-            print("global timeout")
-    return result[0], metadata_list
+    with multiprocessing.Manager() as manager:
+        result = manager.list()
+        metadata_list = manager.list()
+        p = multiprocessing.Process(target=_temp_run, args=(in_outs, generation, debug, result, metadata_list, timeout))
+        p.start()
+        p.join(timeout=timeout + 1)
+        if p.is_alive():
+            p.kill()
+            p.join()
+        if result:
+            result_value = result[0]
+        else:
+            # consider that all tests failed
+            result_value = [-1 for _ in range(len(in_outs["inputs"]))]
+            if debug:
+                print("global timeout")
+        metadata_value = list(metadata_list)
+    return result_value, metadata_value
