@@ -446,9 +446,6 @@ def preprocess_thd_engine(
             start_idx = cu_seqlens_padded_cpu[i] // cp_size
             # split to 2 chunks
             d = input_ids[i]
-            # Keep the legacy 1-D padding boundary used by need_roll below.
-            # Dense per-token metadata must instead pad the sequence dimension
-            # while preserving its trailing dimensions.
             pad_target = align_size if d.dim() == 1 else seqlen_padded_i
             if d.shape[0] < pad_target:
                 original_seqlen = d.shape[0]
