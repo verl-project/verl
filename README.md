@@ -94,7 +94,7 @@ verl is fast with:
 - **vLLM**, **SGLang** and **HF Transformers** for rollout generation.
 - Compatible with Hugging Face Transformers and Modelscope Hub: Qwen3.5, Qwen3, Qwen-2.5, Llama3.1, Gemma2, DeepSeek-LLM, etc
 - Supervised fine-tuning.
-- Reinforcement learning with [PPO](examples/ppo_trainer/), [GRPO](examples/grpo_trainer/), [GSPO](https://github.com/verl-project/verl-recipe/tree/main/gspo/), [ReMax](examples/remax_trainer/), [REINFORCE++](https://verl.readthedocs.io/en/latest/examples/config.html#algorithm), [RLOO](examples/rloo_trainer/), [PRIME](https://github.com/verl-project/verl-recipe/tree/main/prime/), [DAPO](https://github.com/verl-project/verl-recipe/tree/main/dapo/), [DrGRPO](https://github.com/verl-project/verl-recipe/tree/main/drgrpo), [KL_Cov & Clip_Cov](https://github.com/verl-project/verl-recipe/tree/main/entropy) etc.
+- Reinforcement learning with [PPO](examples/ppo_trainer/), [GRPO](examples/grpo_trainer/), [UP-GRPO](https://verl.readthedocs.io/en/latest/algo/up.html), [GSPO](https://github.com/verl-project/verl-recipe/tree/main/gspo/), [ReMax](examples/remax_trainer/), [REINFORCE++](https://verl.readthedocs.io/en/latest/examples/config.html#algorithm), [RLOO](examples/rloo_trainer/), [PRIME](https://github.com/verl-project/verl-recipe/tree/main/prime/), [DAPO](https://github.com/verl-project/verl-recipe/tree/main/dapo/), [DrGRPO](https://github.com/verl-project/verl-recipe/tree/main/drgrpo), [KL_Cov & Clip_Cov](https://github.com/verl-project/verl-recipe/tree/main/entropy) etc.
   - Support model-based reward and function-based reward (verifiable reward) for math, [coding](https://github.com/verl-project/verl-recipe/tree/main/dapo), etc
   - Support vision-language models (VLMs) and [multi-modal RL](examples/grpo_trainer/run_qwen2_5_vl_7b_fsdp.sh) with Qwen2.5-vl, Kimi-VL
   - [Multi-turn with tool calling](examples/tutorial/agent_loop_get_started/)
@@ -116,6 +116,7 @@ verl is fast with:
 - [Programming Guide](https://verl.readthedocs.io/en/latest/hybrid_flow.html) & [Tech Talk](https://hcqnc.xetlk.com/sl/3vACOK) (in Chinese)
 - [PPO in verl](https://verl.readthedocs.io/en/latest/algo/ppo.html)
 - [GRPO in verl](https://verl.readthedocs.io/en/latest/algo/grpo.html)
+- [UP-GRPO in verl](https://verl.readthedocs.io/en/latest/algo/up.html)
 
 **Running a PPO example step-by-step:**
 
