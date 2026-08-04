@@ -154,7 +154,6 @@ ROLLOUT=(
     actor_rollout_ref.rollout.max_model_len=${ROLLOUT_MAX_MODEL_LEN}
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=${ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB}
     +actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype=${ROLLOUT_KV_CACHE_DTYPE}
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.moe_backend=deep_gemm
 )
 
 REWARD=(

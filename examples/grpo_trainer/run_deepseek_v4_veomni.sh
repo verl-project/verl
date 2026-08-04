@@ -9,8 +9,8 @@
 set -xeuo pipefail
 
 # ---- user-adjustable ----
-n_gpus_per_node=${n_gpus_per_node:-$ARNOLD_WORKER_GPU}
-trainer_nnodes=${trainer_nnodes:-$ARNOLD_WORKER_NUM}
+n_gpus_per_node=${n_gpus_per_node:-8}
+trainer_nnodes=${trainer_nnodes:-8}
 rollout_nnodes=${rollout_nnodes:-0}
 
 project_name='wuxibin_dapo'
@@ -36,7 +36,7 @@ gae_lam=0.95
 critic_warmup=0
 
 # ===================================== Data/Model =====================================
-model_path=$HDFS_ROOT/model/DeepSeek-V4-Flash
+model_path=$HDFS_ROOT/model/deepseek-ai/DeepSeek-V4-Flash
 train_files=$DATA_ROOT/dataset/BytedTsinghua-SIA/DAPO-Math-17k/data/dapo-math-17k.parquet
 test_files=$DATA_ROOT/dataset/aime25_test.parquet
 checkpoint_dir=$DATA_ROOT/checkpoint/$project_name/$exp_name
@@ -59,9 +59,9 @@ actor_max_token_len_per_gpu=$(((max_prompt_length + max_response_length) / usp_s
 # Inference config
 rollout_name=vllm
 infer_tp=1
-infer_dp=4
-infer_ep=4
-gpu_memory_utilization=0.8
+infer_dp=8
+infer_ep=8
+gpu_memory_utilization=0.5
 # ---- end user-adjustable ----
 
 # ---- no user adjustment needed below ----
@@ -112,7 +112,6 @@ ROLLOUT_CONFIG=(
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=$use_dynamic_bsz
     +actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype=fp8
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.moe_backend=deep_gemm
 )
 
 DATA=(
