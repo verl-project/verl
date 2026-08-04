@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import multiprocessing
+import os
+import signal
 import sys
 import threading
 import time
@@ -38,6 +40,14 @@ def slow_task(x):
     """A task that takes longer than the timeout."""
     time.sleep(LONG_TASK_DURATION)
     return "slow_finished"  # This return value indicates it didn't time out
+
+
+def task_ignores_sigterm(pid_queue):
+    """Keep running after SIGTERM so timeout cleanup must escalate."""
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    pid_queue.put(os.getpid())
+    while True:
+        time.sleep(0.1)
 
 
 # REMOVE global decorator here
@@ -108,6 +118,33 @@ def test_slow_task_timeout():  # Renamed from test_multiprocessing_slow_task_tim
         slow_task(1)
     # Check the error message from the multiprocessing implementation
     assert f"timed out after {TEST_TIMEOUT_SECONDS} seconds" in str(excinfo.value)  # Use pytest assert
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX signal handling")
+def test_timeout_kills_task_that_ignores_sigterm():
+    """A timed-out child must not survive after ignoring graceful termination."""
+    pid_queue = multiprocessing.Queue()
+    task = timeout(seconds=0.2)(task_ignores_sigterm)
+    pid = None
+
+    try:
+        with pytest.raises(TimeoutError):
+            task(pid_queue)
+        pid = pid_queue.get(timeout=1)
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+    finally:
+        pid_queue.close()
+        pid_queue.join_thread()
+        if pid is not None:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                os.waitpid(pid, 0)
+            except ChildProcessError:
+                pass
 
 
 def test_internal_exception():  # Renamed from test_multiprocessing_internal_exception

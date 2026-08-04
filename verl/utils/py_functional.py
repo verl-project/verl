@@ -113,10 +113,15 @@ def timeout_limit(seconds: float, use_signals: bool = False):
                 process.join(timeout=seconds)
 
                 if process.is_alive():
-                    process.terminate()
-                    process.join(timeout=0.5)  # Give it a moment to terminate
-                    if process.is_alive():
-                        print(f"Warning: Process {process.pid} did not terminate gracefully after timeout.")
+                    try:
+                        process.terminate()
+                        process.join(timeout=0.5)  # Give it a moment to terminate
+                        if process.is_alive():
+                            process.kill()
+                            process.join()
+                    finally:
+                        q.close()
+                        q.join_thread()
                     # Update function name in error message if needed (optional but good practice)
                     raise TimeoutError(f"Function {func.__name__} timed out after {seconds} seconds (multiprocessing)!")
 
