@@ -66,6 +66,8 @@ for _mod in (
     "veomni.utils",
     "veomni.utils.moe_router_replay",
     "veomni.utils.seqlen_pos_transform_utils",
+    "veomni.models.checkpoint_tensor_loading",
+    "veomni.models.checkpoint_tensor_loading.get_checkpoint_tensor_converter",
 ):
     sys.modules.setdefault(_mod, MagicMock())
 
