@@ -75,7 +75,8 @@ policy_loss:
   # KL divergence penalty coefficient
   ppo_kl_coef: 0.1
 
-# Constant C in Dual-clip PPO; clips when advantage < 0 and ratio > C
+# Constant C in Dual-clip PPO; clips when advantage < 0 and ratio > C.
+# Set to null to use standard PPO without the additional dual-clipping branch.
 clip_ratio_c: 3.0
 
 # Loss aggregation mode: "token-mean", "seq-mean-token-sum", "seq-mean-token-mean", or "seq-mean-token-sum-norm"
@@ -332,4 +333,3 @@ qat:
 
   # Path to vLLM quantization config JSON file
   quantization_config_path: null
-
