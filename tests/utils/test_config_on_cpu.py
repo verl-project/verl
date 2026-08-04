@@ -14,11 +14,14 @@
 
 import unittest
 from dataclasses import dataclass, field
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from omegaconf import OmegaConf
 
 from verl.base_config import BaseConfig
 from verl.utils import omega_conf_to_dataclass
+from verl.utils.config import validate_config
 
 
 @dataclass
@@ -91,6 +94,60 @@ class TestPrintCfgCommand(unittest.TestCase):
         # Verify the output contains expected config information
         self.assertIn("critic", result.stdout)
         self.assertIn("profiler", result.stdout)
+
+
+class TestStaticMicroBatchValidation(unittest.TestCase):
+    @staticmethod
+    def _config(train_batch_size, sp_size=1):
+        return OmegaConf.create(
+            {
+                "trainer": {"n_gpus_per_node": 8, "nnodes": 1},
+                "data": {"train_batch_size": train_batch_size},
+                "actor_rollout_ref": {
+                    "actor": {
+                        "strategy": "fsdp",
+                        "use_dynamic_bsz": False,
+                        "ppo_micro_batch_size": None,
+                        "ppo_micro_batch_size_per_gpu": 3,
+                        "ulysses_sequence_parallel_size": sp_size,
+                        "fsdp_config": {"ulysses_sequence_parallel_size": sp_size},
+                        "use_kl_loss": False,
+                    },
+                    "rollout": {
+                        "n": 1,
+                        "name": "sglang",
+                        "log_prob_micro_batch_size": None,
+                        "log_prob_micro_batch_size_per_gpu": 1,
+                        "val_kwargs": {"do_sample": False},
+                    },
+                    "ref": {
+                        "log_prob_micro_batch_size": None,
+                        "log_prob_micro_batch_size_per_gpu": 1,
+                    },
+                    "model": {"lora": {}, "lora_rank": 0},
+                },
+                "algorithm": {"use_kl_in_reward": False},
+            }
+        )
+
+    @patch("verl.utils.config.omega_conf_to_dataclass")
+    def test_rejects_batch_smaller_than_per_gpu_micro_batch_product(self, to_dataclass):
+        to_dataclass.return_value = SimpleNamespace(validate=lambda *args: None)
+
+        with self.assertRaisesRegex(AssertionError, r"minimal possible batch size \(24\)"):
+            validate_config(self._config(train_batch_size=8), use_reference_policy=False, use_critic=False)
+
+    @patch("verl.utils.config.omega_conf_to_dataclass")
+    def test_accepts_batch_divisible_by_per_gpu_micro_batch_product(self, to_dataclass):
+        to_dataclass.return_value = SimpleNamespace(validate=lambda *args: None)
+
+        validate_config(self._config(train_batch_size=24), use_reference_policy=False, use_critic=False)
+
+    @patch("verl.utils.config.omega_conf_to_dataclass")
+    def test_accounts_for_ulysses_sequence_parallel_size(self, to_dataclass):
+        to_dataclass.return_value = SimpleNamespace(validate=lambda *args: None)
+
+        validate_config(self._config(train_batch_size=12, sp_size=2), use_reference_policy=False, use_critic=False)
 
 
 if __name__ == "__main__":

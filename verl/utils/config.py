@@ -103,7 +103,17 @@ def validate_config(
             )
             minimal_bsz = megatron_dp * config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu
         else:
-            minimal_bsz = n_gpus
+            micro_batch_size_per_gpu = config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu
+            if micro_batch_size_per_gpu is None:
+                minimal_bsz = n_gpus
+            else:
+                sp_size = config.actor_rollout_ref.actor.get("ulysses_sequence_parallel_size", 1)
+                fsdp_config = config.actor_rollout_ref.actor.get("fsdp_config", {})
+                sp_size = max(sp_size, fsdp_config.get("ulysses_sequence_parallel_size", 1))
+                assert n_gpus % sp_size == 0, (
+                    f"n_gpus ({n_gpus}) must be divisible by ulysses_sequence_parallel_size ({sp_size})"
+                )
+                minimal_bsz = n_gpus // sp_size * micro_batch_size_per_gpu
 
         # 1. Check total batch size for data correctness
         real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n
