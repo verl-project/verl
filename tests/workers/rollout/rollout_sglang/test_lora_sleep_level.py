@@ -38,6 +38,11 @@ class _StubModelConfig:
 
     lora_rank: int = 0
     lora: dict[str, Any] = field(default_factory=dict)
+    modules_to_save: list[str] | None = None
+
+    @property
+    def should_merge_lora(self) -> bool:
+        return self.lora.get("merge", False) or bool(self.modules_to_save)
 
 
 @dataclass
@@ -64,7 +69,7 @@ class _LoraAsAdapterMixin:
     def lora_as_adapter(self) -> bool:
         return (
             self.model_config.lora_rank > 0 or self.model_config.lora.get("rank", 0) > 0
-        ) and not self.model_config.lora.get("merge", False)
+        ) and not self.model_config.should_merge_lora
 
 
 class _FakeServer(_LoraAsAdapterMixin):
@@ -99,6 +104,10 @@ class TestLoraAsAdapter:
 
     def test_lora_rank_in_dict_with_merge(self):
         server = _FakeServer(_StubModelConfig(lora_rank=0, lora={"rank": 16, "merge": True}))
+        assert server.lora_as_adapter is False
+
+    def test_modules_to_save_uses_merged_weights(self):
+        server = _FakeServer(_StubModelConfig(lora_rank=8, modules_to_save=["visual.merger"]))
         assert server.lora_as_adapter is False
 
 
@@ -187,19 +196,24 @@ class TestSGLangHttpServerSleepTags:
 
 
 class TestActorRolloutRefWorkerPeftMerge:
-    """Test that ActorRolloutRefWorker reads peft_merge from model.lora.merge."""
+    """Test that ActorRolloutRefWorker uses the shared full-sync decision."""
 
     def test_merge_true(self):
         mc = _StubModelConfig(lora_rank=8, lora={"merge": True})
-        peft_merge = mc.lora.get("merge", False)
+        peft_merge = mc.should_merge_lora
         assert peft_merge is True
 
     def test_merge_false(self):
         mc = _StubModelConfig(lora_rank=8, lora={"merge": False})
-        peft_merge = mc.lora.get("merge", False)
+        peft_merge = mc.should_merge_lora
         assert peft_merge is False
 
     def test_merge_absent_defaults_false(self):
         mc = _StubModelConfig(lora_rank=8, lora={})
-        peft_merge = mc.lora.get("merge", False)
+        peft_merge = mc.should_merge_lora
         assert peft_merge is False
+
+    def test_modules_to_save_enables_full_sync(self):
+        mc = _StubModelConfig(lora_rank=8, modules_to_save=["visual.merger"])
+        peft_merge = mc.should_merge_lora
+        assert peft_merge is True

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # GRPO + LoRA | vision | vLLM rollout | FSDP training | NVIDIA GPUs
-# LoRA freezes the vision tower by excluding `.*visual.*` modules.
+# LoRA freezes the vision tower while fully training its multimodal projector.
 
 set -xeuo pipefail
 
@@ -56,6 +56,7 @@ MODEL=(
     actor_rollout_ref.model.lora_alpha=${lora_alpha}
     actor_rollout_ref.model.target_modules=all-linear
     actor_rollout_ref.model.exclude_modules='.*visual.*'
+    actor_rollout_ref.model.modules_to_save='["visual.merger"]'
 )
 
 ACTOR=(

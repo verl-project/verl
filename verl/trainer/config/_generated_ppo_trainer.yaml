@@ -407,6 +407,7 @@ actor_rollout_ref:
     lora_alpha: 16
     target_modules: all-linear
     exclude_modules: null
+    modules_to_save: null
     lora_adapter_path: null
     use_liger: false
     use_fused_kernels: false
@@ -629,6 +630,7 @@ critic:
     lora_alpha: 16
     target_modules: all-linear
     exclude_modules: null
+    modules_to_save: null
     lora_adapter_path: null
     use_liger: false
     use_fused_kernels: false

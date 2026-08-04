@@ -340,6 +340,7 @@ class FSDPEngine(BaseEngine):
                 "target_modules": convert_to_regular_types(self.model_config.target_modules),
                 "target_parameters": convert_to_regular_types(self.model_config.target_parameters),
                 "exclude_modules": convert_to_regular_types(self.model_config.exclude_modules),
+                "modules_to_save": convert_to_regular_types(self.model_config.modules_to_save),
                 "bias": "none",
             }
             module = get_peft_model(module, LoraConfig(**lora_config))
@@ -935,13 +936,14 @@ class FSDPEngine(BaseEngine):
 
         log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
 
-        peft_config = None
-        merge_lora = self.model_config.lora.get("merge", False)
-
         peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
+        peft_config = peft_model.peft_config.get("default", None) if hasattr(peft_model, "peft_config") else None
+        # PEFT modules_to_save are full-rank parameters, not LoRA deltas. Rollout
+        # engines therefore need the merged full weights to receive their updates.
+        merge_lora = self.model_config.should_merge_lora
+
         if hasattr(peft_model, "peft_config"):  # LoRA
             if not merge_lora:
-                peft_config = peft_model.peft_config.get("default", None)
                 params = collect_lora_params(
                     module=self.module,
                     layered_summon=layered_summon,

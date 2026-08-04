@@ -38,6 +38,11 @@ class _StubModelConfig:
 
     lora_rank: int = 0
     lora: dict[str, Any] = field(default_factory=dict)
+    modules_to_save: list[str] | None = None
+
+    @property
+    def should_merge_lora(self) -> bool:
+        return self.lora.get("merge", False) or bool(self.modules_to_save)
 
 
 class TestLoraServedAsAdapter:
@@ -56,6 +61,10 @@ class TestLoraServedAsAdapter:
 
     def test_fsdp_adapter(self):
         assert lora_served_as_adapter(_StubModelConfig(lora_rank=8)) is True
+
+    def test_fsdp_modules_to_save_uses_merged_weights(self):
+        config = _StubModelConfig(lora_rank=8, modules_to_save=["visual.merger"])
+        assert lora_served_as_adapter(config) is False
 
     def test_merge_absent_defaults_to_adapter(self):
         assert lora_served_as_adapter(_StubModelConfig(lora_rank=8, lora={})) is True

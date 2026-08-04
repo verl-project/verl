@@ -51,6 +51,9 @@ target_modules: all-linear
 # Exclude modules from LoRA adaptation
 exclude_modules: null
 
+# Modules to train fully and save alongside the LoRA adapter
+modules_to_save: null
+
 # Path to pre-trained LoRA adapter to load for continued training
 lora_adapter_path: null
 

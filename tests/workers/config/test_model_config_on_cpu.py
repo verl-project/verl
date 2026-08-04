@@ -94,3 +94,18 @@ class TestHFModelConfigCPU:
         merged_config = OmegaConf.merge(base_config, invalid_cli_config)
         with pytest.raises(TypeError):
             OmegaConf.to_object(merged_config)
+
+    @pytest.mark.parametrize(
+        ("lora", "modules_to_save", "expected"),
+        [
+            ({"merge": False}, None, False),
+            ({"merge": True}, None, True),
+            ({"merge": False}, ["visual.merger"], True),
+        ],
+    )
+    def test_should_merge_lora(self, lora, modules_to_save, expected):
+        model_config = object.__new__(HFModelConfig)
+        object.__setattr__(model_config, "lora", lora)
+        object.__setattr__(model_config, "modules_to_save", modules_to_save)
+
+        assert model_config.should_merge_lora is expected

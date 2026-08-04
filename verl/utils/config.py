@@ -192,7 +192,7 @@ def validate_config(
     lora_rank = lora_config.get("rank", 0)
     if lora_rank <= 0:
         lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
-    if lora_config.get("merge", False):
+    if lora_config.get("merge", False) or config.actor_rollout_ref.model.get("modules_to_save"):
         lora_rank = 0
     if lora_rank > 0 and config.actor_rollout_ref.rollout.name == "vllm":
         from verl.workers.rollout.vllm_rollout.utils import get_vllm_max_lora_rank

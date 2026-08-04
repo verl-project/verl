@@ -1,7 +1,7 @@
 RL(HF) algorithms with LoRA Support
 ===========================================
 
-Last updated: 02/03/2026.
+Last updated: 07/29/2026.
 
 We support LoRA (Low-Rank Adaptation) for reinforcement learning algorithms such as PPO, GRPO, and others.
 
@@ -45,6 +45,11 @@ FSDP Backend Usage Guide
 - `actor_rollout_ref.model.lora.merge`: bool, whether to merge LoRA adapters into the base model weights before transferring to the rollout engine (vLLM or SGLang).
    If True, LoRA adapters are merged into base weights and full merged weights are synced. If False, only LoRA adapter deltas are transferred natively.
    For SGLang, ``merge=True`` is currently required. Native adapter loading (``merge=False``) for SGLang is planned.
+- `actor_rollout_ref.model.modules_to_save`: list of module names to train fully and save with the PEFT adapter.
+   This is useful for VLM projectors or aligners that should remain fully trainable while the other target modules use LoRA.
+   Modules listed here are excluded from LoRA injection by PEFT. Because rollout engines cannot apply arbitrary full-rank
+   modules as LoRA deltas, verl automatically merges LoRA and synchronizes full weights when this option is set. This is
+   more expensive than native LoRA delta synchronization, so keep the listed modules small.
 
 5. Recommend options:
 
