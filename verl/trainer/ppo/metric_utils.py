@@ -832,12 +832,12 @@ def bootstrap_metric(
         >>> bootstrap_metric(data, 3, reduce_fns)
         [(3.0, 0.5), (4.5, 0.3)]  # Example values
     """
-    np.random.seed(seed)
+    rng = np.random.RandomState(seed)
     data_np = np.array(data, dtype=object)
     n_data = len(data_np)
 
     # generate bootstrap indices, shape: (n_bootstrap, subset_size)
-    bootstrap_idxs = np.random.choice(n_data, size=(n_bootstrap, subset_size), replace=True)
+    bootstrap_idxs = rng.choice(n_data, size=(n_bootstrap, subset_size), replace=True)
 
     # pre-allocate result array, shape: (n_fns, n_bootstrap)
     n_fns = len(reduce_fns)

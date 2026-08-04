@@ -491,6 +491,17 @@ class TestBootstrapMetric(unittest.TestCase):
         with self.assertRaises(ValueError):
             bootstrap_metric([], subset_size=1, reduce_fns=[np.mean])
 
+    def test_bootstrap_metric_does_not_reset_global_numpy_rng(self):
+        """Bootstrap sampling must not perturb unrelated NumPy randomness."""
+        np.random.seed(1234)
+        expected = np.random.random(3)
+
+        np.random.seed(1234)
+        bootstrap_metric([1, 2, 3], subset_size=2, reduce_fns=[np.mean], n_bootstrap=5, seed=42)
+        actual = np.random.random(3)
+
+        np.testing.assert_array_equal(actual, expected)
+
 
 class TestCalcMajVal(unittest.TestCase):
     """Tests for the calc_maj_val function."""
