@@ -94,13 +94,13 @@ MindSpeed-LLM：MindSpeed-LLM是基于昇腾生态的大语言模型分布式训
 HDK           ``26.0.rc1``                            NPU硬件驱动与固件
 CANN          ``9.0.0``                               CANN软件，帮助开发者实现在昇腾软硬件平台上开发和运行AI业务
 Python        ``>=3.10, <3.12``\ ，推荐 ``3.11``      
-torch         ``2.10.0``                               PyTorch 深度学习框架基础包
-torch_npu     ``2.10.0.post2``                         NPU PyTorch 适配插件        
-torchvision   ``0.24.0``                              PyTorch 图像处理库
-torchaudio    ``2.9.0``                               PyTorch 音频处理库
+torch         ``2.10.0``                              PyTorch 深度学习框架基础包
+torch_npu     ``2.10.0.post2``                        NPU PyTorch 适配插件        
+torchvision   ``0.25.0``                              PyTorch 图像处理库
+torchaudio    ``2.10.0``                              PyTorch 音频处理库
 triton        ``3.5.0``                               Triton，用于编写自定义算子
 triton-ascend ``3.2.1``                               NPU Triton 适配 
-transformers  ``5.10.4``                               Hugging Face 大模型库，提供模型架构与预训练权重
+transformers  ``5.10.4``                              Hugging Face 大模型库，提供模型架构与预训练权重
 vLLM          ``0.23.0``                              高性能 LLM 推理与服务引擎
 vLLM-Ascend   ``0.23.0``                              NPU vLLM 后端适配  
 Megatron-LM   ``core_r0.16.0``                        大规模分布式训练框架
