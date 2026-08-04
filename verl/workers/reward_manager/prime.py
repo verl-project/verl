@@ -89,6 +89,11 @@ async def parallel_compute_score_async(
 
 
 def run_reward_scoring(evaluation_func, completions, references, tasks, extra_info=None, num_processes=64):
+    try:
+        previous_loop = asyncio.get_event_loop()
+    except RuntimeError:
+        previous_loop = None
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -97,6 +102,7 @@ def run_reward_scoring(evaluation_func, completions, references, tasks, extra_in
         )
     finally:
         loop.close()
+        asyncio.set_event_loop(previous_loop)
 
 
 @register("prime")
