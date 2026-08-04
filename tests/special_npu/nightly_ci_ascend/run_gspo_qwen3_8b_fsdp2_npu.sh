@@ -3,7 +3,6 @@
 
 set -xeuo pipefail
 
-export RAY_DEDUP_LOGS=0
 export HYDRA_FULL_ERROR=1
 export TASK_QUEUE_ENABLE=1
 export HCCL_EXEC_TIMEOUT=3600
