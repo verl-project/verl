@@ -37,6 +37,13 @@ from verl.utils.hdfs_io import makedirs
 from verl.workers.rollout.replica import get_rollout_replica_class
 
 
+def _chat_list_to_object_array(chat_list: list) -> np.ndarray:
+    """Build a one-dimensional object array without coercing nested chat turns."""
+    chat_array = np.empty(len(chat_list), dtype=object)
+    chat_array[:] = chat_list
+    return chat_array
+
+
 async def start_server(config):
     tp_size = config.actor_rollout_ref.rollout.tensor_model_parallel_size
     num_replicas = (config.trainer.n_gpus_per_node * config.trainer.nnodes) // tp_size
@@ -156,7 +163,7 @@ def main(config):
     dataset = pd.concat(datasets, axis=0, ignore_index=True)
     chat_lst = dataset[config.data.prompt_key].tolist()
     chat_lst = [chat.tolist() for chat in chat_lst]
-    chat_numpy = np.array(chat_lst)
+    chat_numpy = _chat_list_to_object_array(chat_lst)
 
     # start native server
     server_handles, server_addresses = asyncio.run(start_server(config))
