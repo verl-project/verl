@@ -2003,6 +2003,74 @@ def compute_policy_loss_geo_mean(
     return pg_loss, pg_metrics
 
 
+@register_policy_loss("importance_sampling")
+def compute_policy_loss_importance_sampling(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[ActorConfig] = None,
+    rollout_is_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Compute an unclipped token-level importance-sampling objective.
+
+    ``old_log_prob`` is the behavior-policy log probability and ``log_prob``
+    is the learner-policy log probability. The optional rollout correction
+    weights compose multiplicatively with the policy ratio, matching the
+    convention used by the other registered policy losses.
+    """
+    assert config is not None
+
+    log_ratio = log_prob - old_log_prob
+    ratio = torch.exp(log_ratio)
+    pg_losses = -(ratio * advantages)
+
+    if rollout_is_weights is not None:
+        pg_losses = pg_losses * rollout_is_weights
+
+    pg_loss = agg_loss(
+        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
+    )
+    pg_metrics = {
+        "actor/ppo_kl": verl_F.masked_mean(-log_ratio, response_mask).detach().item(),
+    }
+    return pg_loss, pg_metrics
+
+
+@register_policy_loss("dro")
+def compute_policy_loss_dro(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[ActorConfig] = None,
+    rollout_is_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Compute Direct Reward Optimization with a quadratic log-ratio penalty."""
+    assert config is not None
+    assert config.policy_loss is not None
+
+    beta = config.policy_loss.dro_beta
+    if beta is None or beta <= 0:
+        raise ValueError("policy_loss.dro_beta must be a positive value when using DRO")
+
+    log_ratio = log_prob - old_log_prob
+    pg_losses = -(log_prob * advantages - 0.5 * beta * log_ratio.square())
+
+    if rollout_is_weights is not None:
+        pg_losses = pg_losses * rollout_is_weights
+
+    pg_loss = agg_loss(
+        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
+    )
+    pg_metrics = {
+        "actor/ppo_kl": verl_F.masked_mean(-log_ratio, response_mask).detach().item(),
+    }
+    return pg_loss, pg_metrics
+
+
 @register_policy_loss("cispo")
 def compute_policy_loss_cispo(
     old_log_prob: torch.Tensor,

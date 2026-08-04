@@ -75,6 +75,10 @@ policy_loss:
   # KL divergence penalty coefficient
   ppo_kl_coef: 0.1
 
+  # Quadratic log-ratio penalty coefficient for Direct Reward Optimization.
+  # Must be set to a positive value when policy_loss.loss_mode is "dro".
+  dro_beta: null
+
 # Constant C in Dual-clip PPO; clips when advantage < 0 and ratio > C
 clip_ratio_c: 3.0
 
@@ -332,4 +336,3 @@ qat:
 
   # Path to vLLM quantization config JSON file
   quantization_config_path: null
-
