@@ -151,6 +151,7 @@ def launch_server_process(
     with requests.Session() as session:
         while time.time() - start_time < max_wait_time:
             if not p.is_alive():
+                p.join()
                 raise RuntimeError("Server process terminated unexpectedly during startup")
 
             try:
@@ -166,12 +167,14 @@ def launch_server_process(
             time.sleep(2)
         else:
             p.terminate()
+            p.join()
             logger.error(f"Server in {base_url} failed to become healthy within timeout period")
             raise TimeoutError("Server failed to become healthy within timeout period")
 
         # Ensure cache is ready
         while time.time() - start_time < max_wait_time:
             if not p.is_alive():
+                p.join()
                 raise RuntimeError("Server process terminated unexpectedly during cache flush")
 
             try:
@@ -184,6 +187,7 @@ def launch_server_process(
             time.sleep(2)
         else:
             p.terminate()
+            p.join()
             raise TimeoutError("Server cache flush failed within timeout period")
 
     return p
