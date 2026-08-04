@@ -55,49 +55,41 @@ def apply_fast_hadamard_transform_shim():
 
     Register ``pure_torch_hadamard_transform`` under the real import name so any
     importer picks it up, and back-fill modules that already captured ``None``
-    (e.g. Megatron's ``dsa`` module at import time). When the real package is
-    installed its kernel is kept and only the back-fill runs.
+    (e.g. Megatron's ``dsa`` module at import time). This is a no-op once the name
+    imports, be it the real package or the stub an earlier call installed.
     """
     import importlib
     import logging
     import sys
     import types
 
-    # Import rather than probe ``sys.modules``: an entry under that name only means
-    # *something* is registered (a partially initialized module, a stub from another
-    # framework, an earlier run of this shim), which says nothing about whether a
-    # usable kernel is there. A broken CUDA extension can also fail the import with
-    # OSError/RuntimeError, not just ImportError.
+    # Catch every exception, not just ImportError: a CUDA extension built against
+    # another toolkit fails to load with OSError. An import that goes through means
+    # every importer of the name resolves to that same module, so none of them can
+    # be left holding a None binding.
     try:
-        module = importlib.import_module("fast_hadamard_transform")
+        importlib.import_module("fast_hadamard_transform")
+        return
     except Exception:
-        module = None
+        pass
 
-    hadamard_transform = getattr(module, "hadamard_transform", None)
-    use_fallback = hadamard_transform is None
-    if use_fallback:
-        hadamard_transform = pure_torch_hadamard_transform
-        if module is None:
-            module = types.ModuleType("fast_hadamard_transform")
-        module.hadamard_transform = hadamard_transform
-        sys.modules["fast_hadamard_transform"] = module
+    module = types.ModuleType("fast_hadamard_transform")
+    module.hadamard_transform = pure_torch_hadamard_transform
+    sys.modules["fast_hadamard_transform"] = module
 
     # Back-fill modules that already ran `from fast_hadamard_transform import
     # hadamard_transform` and captured None (e.g. Megatron's dsa.py at import).
-    # This must run even when the real package is importable now, because those
-    # importers ran at a point when it was not, and they keep their own binding.
     # Read `__dict__` directly: `getattr` would trigger PEP-562 module-level
     # `__getattr__` hooks, which can raise or force lazy imports.
     for mod in list(sys.modules.values()):
         mod_dict = getattr(mod, "__dict__", None)
         if mod_dict is not None and mod_dict.get("hadamard_transform", "keep") is None:
-            mod_dict["hadamard_transform"] = hadamard_transform
+            mod_dict["hadamard_transform"] = pure_torch_hadamard_transform
 
-    if use_fallback:
-        logging.getLogger(__name__).warning(
-            "fast_hadamard_transform is unavailable; falling back to a pure-torch Fast "
-            "Walsh-Hadamard transform. Results match the CUDA kernel but DSA forward will be slower."
-        )
+    logging.getLogger(__name__).warning(
+        "fast_hadamard_transform is unavailable; falling back to a pure-torch Fast "
+        "Walsh-Hadamard transform. Results match the CUDA kernel but DSA forward will be slower."
+    )
 
 
 def apply_patch():
