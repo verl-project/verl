@@ -268,7 +268,10 @@ class MooncakeCheckpointEngine(CheckpointEngine):
             prev_magic_ptr = info.get("magic_ptr")
 
             ret = self.engine.transfer_sync_read(
-                self.buffer_info["session_id"], current.data_ptr(), prev_ptr, info["len"],
+                self.buffer_info["session_id"],
+                current.data_ptr(),
+                prev_ptr,
+                info["len"],
             )
             assert ret == 0
 
@@ -289,12 +292,18 @@ class MooncakeCheckpointEngine(CheckpointEngine):
 
             if prev_magic_ptr is not None:
                 ret = self.engine.transfer_sync_write(
-                    self.buffer_info["session_id"], self.magic_buf.data_ptr(), prev_magic_ptr, 4,
+                    self.buffer_info["session_id"],
+                    self.magic_buf.data_ptr(),
+                    prev_magic_ptr,
+                    4,
                 )
                 assert ret == 0
             else:
                 ret = self.engine.transfer_sync_write(
-                    self.buffer_info["session_id"], self.magic_buf.data_ptr(), prev_ptr, 4,
+                    self.buffer_info["session_id"],
+                    self.magic_buf.data_ptr(),
+                    prev_ptr,
+                    4,
                 )
                 assert ret == 0
 
