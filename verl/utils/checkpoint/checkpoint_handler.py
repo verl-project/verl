@@ -31,7 +31,8 @@ from verl.workers.engine import BaseEngine
 
 
 def extract_step(path):
-    match = re.search(r"global_step_(\d+)", path)
+    checkpoint_dir = os.path.basename(os.path.normpath(path))
+    match = re.fullmatch(r"global_step_(\d+)", checkpoint_dir)
     if match:
         return int(match.group(1))
     return None
