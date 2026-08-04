@@ -96,8 +96,9 @@ override_mcore_model_config: {}
 # oc.select: default val for ref.megatron.use_mbridge
 use_mbridge: True
 
+# Whether to use the deprecated legacy mbridge backend instead of Megatron-Bridge
 # oc.select: default val for ref.megatron.vanilla_mbridge
-vanilla_mbridge: True
+vanilla_mbridge: False
 
 # whether to use thd format (sequence packing), if not, use bshd format, padding the input_ids to the longest sequence length
 use_remove_padding: True

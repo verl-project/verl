@@ -36,7 +36,13 @@ You can customize the PyTorch Profiler behavior using the following fields under
     *   **`stack`**: Record source code file and line number.
 * **`profile_token_start`**: Effective only for the rollout role; defines the start response-token index for rollout decoding collection. It is applied only when valid (0-based, `profile_token_end > profile_token_start`, and within response length).
 * **`profile_token_end`**: Effective only for the rollout role; defines the stop response-token index (exclusive) for rollout decoding collection. It is applied only when valid (0-based, `profile_token_end > profile_token_start`, and within response length).
-* **`schedule`**: (Advanced) configuration for `wait`, `warmup`, `active`, `repeat` cycles.
+* **`schedule`**: (Advanced) Enables [`torch.profiler.schedule`](https://pytorch.org/docs/stable/profiler.html#torch.profiler.schedule) so that only part of each profiling window is recorded. It only takes effect when `active > 0`; otherwise the profiler collects continuously (the default). verl advances the schedule by calling `profiler.step()` once per mini-batch in the Actor update loop (and once per step in SFT), so a scheduled cycle is measured in mini-batches. The fields mirror the official PyTorch API:
+    *   **`skip_first`**: Number of initial steps to ignore before the first cycle begins.
+    *   **`wait`**: Steps to idle (no collection) at the start of each cycle.
+    *   **`warmup`**: Steps to trace but discard, letting the profiler stabilize, each cycle.
+    *   **`active`**: Steps to actively record each cycle. Set `<= 0` (default) to disable scheduling.
+    *   **`repeat`**: Number of cycles to record. `0` (default) repeats until profiling stops.
+
 
 ## Examples
 
@@ -106,6 +112,51 @@ When Rollout runs in [Agent Loop](../advance/agent_loop.rst) mode, performance d
 
    *   **vLLM Engine**: Automatically collects AsyncLLM scheduling stacks and inference process performance data.
    *   **SGLang Engine**: Automatically collects inference process performance data. Does not support the memory option in contents.
+
+### 3. Scheduled Collection (`wait`/`warmup`/`active`/`repeat`)
+
+For long update loops with many mini-batches (e.g. large gradient accumulation), you usually don't need to trace every mini-batch. A `schedule` records only a few mini-batches per cycle, keeping traces small while still capturing steady-state behavior. verl calls `profiler.step()` once per mini-batch so the schedule advances automatically.
+
+```yaml
+actor_rollout_ref:
+  actor:
+    profiler:
+      enable: True
+      all_ranks: True
+      tool_config:
+        torch:
+          discrete: False
+          contents: [cpu, cuda]
+          schedule:
+            skip_first: 1  # ignore the very first mini-batch
+            wait: 1        # then idle 1 mini-batch at the start of each cycle
+            warmup: 1      # warm up 1 mini-batch (traced but discarded)
+            active: 3      # record 3 mini-batches
+            repeat: 2      # capture 2 such cycles, then stop collecting
+  # rollout & ref follow actor settings
+```
+
+With the configuration above, within each profiled training step verl skips the first mini-batch, then runs two cycles of `wait(1) -> warmup(1) -> active(3)`, producing two trace files (the second suffixed with `_cycle1`). If a training step has fewer mini-batches than the schedule needs, only the mini-batches that were reached are recorded.
+
+`schedule` only applies to the training update loop (Actor RL update and SFT). It is a no-op for the rollout engine side, which uses `profile_token_start`/`profile_token_end` instead.
+
+## Output file naming
+
+Because profiling runs in every training process, each trace file is named so it can be
+attributed to a specific process without opening it. The stem is:
+
+```
+[<role>_][<scope>_]rank<r>[-of-<world>][_tp<..>-pp<..>-dp<..>-cp<..>]_pid<pid>_<timestamp>[_cycle<N>].json.gz
+```
+
+* **`role`**: the worker role (e.g. `actor`, `ref`, `value-model` for the critic), so results
+  from different roles at the same rank are distinguishable.
+* **`scope`**: the profiled region passed to `start_profile`/`annotate` (e.g. `e2e`); it is also
+  used as a sub-directory under `save_path`.
+* **`rank`/`world`**: the global `torch.distributed` rank and world size.
+* **`tp/pp/dp/cp`**: tensor/pipeline/data/context parallel ranks, included when Megatron's
+  parallel state is initialized (plain FSDP data parallelism only reports `rank`).
+* **`cycle<N>`**: added for the 2nd+ cycle of a scheduled run (see above).
 
 ## Visualization
 

@@ -137,6 +137,36 @@ def test_prepare_model_inputs_uses_full_sequence_attention_mask_on_gpu():
     assert output_args["input_ids_rmpad_rolled"].shape == (8,)
 
 
+def test_prepare_model_inputs_passes_declared_packed_sequence_boundaries_on_gpu():
+    from verl.utils import tensordict_utils as tu
+    from verl.utils.dataset.dataset_utils import DatasetPadMode
+
+    device = "cuda"
+    FSDPEngineWithLMHead = _fsdp_engine_with_lm_head_cls()
+    engine = FSDPEngineWithLMHead.__new__(FSDPEngineWithLMHead)
+    engine.use_ulysses_sp = False
+    engine.pass_packed_cu_seqlens = True
+    micro_batch = _make_micro_batch(device)
+    tu.assign_non_tensor(
+        micro_batch,
+        use_remove_padding=True,
+        use_fused_kernels=False,
+        pad_mode=DatasetPadMode.NO_PADDING,
+        pad_token_id=0,
+        max_response_len=2,
+        max_response_length=2,
+    )
+
+    model_inputs, output_args = engine.prepare_model_inputs(micro_batch)
+
+    expected_cu_seqlens = torch.tensor([0, 5, 8], device=device, dtype=torch.long)
+    torch.testing.assert_close(model_inputs["cu_seqlens"], expected_cu_seqlens)
+    torch.testing.assert_close(model_inputs["cu_seqlens_cpu"], expected_cu_seqlens.cpu())
+    assert model_inputs["input_ids"].shape == (1, 8)
+    assert model_inputs["attention_mask"] is None
+    assert output_args["input_ids_rmpad_rolled"].shape == (8,)
+
+
 def test_prepare_model_outputs_can_be_sliced_back_to_response_shape_on_gpu():
     from verl.utils.torch_functional import logprobs_from_logits
     from verl.workers.utils.padding import no_padding_2_padding

@@ -214,6 +214,10 @@ jobs:
         run: |
           pip install --no-deps -e .
           pip install --no-deps TransferQueue==0.1.8
+          pip uninstall -y mbridge
+          pip install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@e2cfe7e --ignore-requires-python --no-deps --no-build-isolation
+          pip install git+https://github.com/NVIDIA/Megatron-LM.git@0823c73 --ignore-requires-python --no-deps --no-build-isolation
+          pip install "nvidia-modelopt>=0.37.0"
       - name: Check final pip list
         run: |
           pip list
@@ -227,7 +231,7 @@ jobs:
           ADV_ESTIMATOR=grpo USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen2moe_minimal.json \
           PPO_MAX_TOKEN_LEN=1024 FWD_MAX_TOKEN_LEN=1024 \
           MAX_PROMPT_LENGTH=512 MAX_RESPONSE_LENGTH=512 \
-          MODEL_ID=Qwen/Qwen3-30B-A3B-Instruct-2507 USE_MBRIDGE=True VANILLA_MBRIDGE=True VALUE_VANILLA_MBRIDGE=True \
+          MODEL_ID=Qwen/Qwen3-30B-A3B-Instruct-2507 USE_MBRIDGE=True VANILLA_MBRIDGE=False VALUE_VANILLA_MBRIDGE=False \
           COMMON_PP=2 COMMON_VPP=null COMMON_CP=1 COMMON_TP=4 COMMON_EP=4 COMMON_ETP=1 INFER_TP=8 \
           USE_DIST_CKPT=False ALL_OFFLOAD=True SKIP_SAVE_HF_MODEL=1 \
           bash tests/special_e2e/run_ppo_trainer_megatron.sh \
@@ -238,7 +242,7 @@ jobs:
           ADV_ESTIMATOR=grpo USE_DUMMY_MODEL=True DUMMY_MODEL_CONFIG_PATH=tests/special_e2e/ppo_trainer/expert_parallel/qwen2moe_minimal.json \
           PPO_MAX_TOKEN_LEN=1024 FWD_MAX_TOKEN_LEN=1024 \
           MAX_PROMPT_LENGTH=512 MAX_RESPONSE_LENGTH=512 \
-          MODEL_ID=Qwen/Qwen3-30B-A3B-Instruct-2507 USE_MBRIDGE=True VANILLA_MBRIDGE=True VALUE_VANILLA_MBRIDGE=True \
+          MODEL_ID=Qwen/Qwen3-30B-A3B-Instruct-2507 USE_MBRIDGE=True VANILLA_MBRIDGE=False VALUE_VANILLA_MBRIDGE=False \
           COMMON_PP=2 COMMON_VPP=null COMMON_CP=1 COMMON_TP=4 COMMON_EP=4 COMMON_ETP=1 INFER_TP=2 \
           USE_DIST_CKPT=False ALL_OFFLOAD=True SKIP_SAVE_HF_MODEL=1 ROLLOUT_QUANTIZATION=fp8 \
           bash tests/special_e2e/run_ppo_trainer_megatron.sh \

@@ -22,19 +22,20 @@ EP_SIZE=${EP_SIZE:-1}
 
 # torchtitan attention backend (sdpa is not a valid language-model backend):
 #   "flex"       - FlexAttention; needs torch.compile to be fast (eager is slow)
-#   "flex_flash" - FlexAttention FLASH kernel; needs flash-attn-4/CUTE, Hopper/Blackwell only
-#   "varlen"     - fast eager, flash-style; needs FA3 (flash_attn_interface)
+#   "flex_flash" - FlexAttention FLASH kernel; Hopper/Blackwell (CUDA capability >= 9.0) only
+#   "varlen"     - torch built-in variable-length attention; FA3 on Hopper (SM 9.0), FA2 on older GPUs
 ATTN_TYPE=${ATTN_TYPE:-flex}
 # activation checkpointing: "selective" | "full" | "none".
 # Use "none" for spmd_backend=spmd_types with use_torch_compile=False (eager AC
 # recompute runs off the SPMD mesh context and crashes in spmd.assert_type).
-AC_MODE=${AC_MODE:-none}
+AC_MODE=${AC_MODE:-selective}
 # torchtitan SPMD backend:
 #   "default"      - legacy per-parallelism sharding (no full-DTensor mesh)
 #   "full_dtensor" - all params/buffers/inputs are DTensors on a dense multi-axis mesh
 #   "spmd_types"   - spmd_types typed collectives on a dense mesh
 SPMD_BACKEND=${SPMD_BACKEND:-spmd_types}
 
+TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-100}
 VERL_EXP_NAME=${VERL_EXP_NAME:-qwen3-0.6b-torchtitan}
 
 common_params=(
@@ -78,13 +79,13 @@ common_params=(
     critic.model.path="${MODEL_PATH}"
     critic.ppo_micro_batch_size_per_gpu=4
     algorithm.kl_ctrl.kl_coef=0.001
-    trainer.logger=['console','file','wandb']
+    trainer.logger=['console','file']
     trainer.project_name='verl_grpo_example_gsm8k_0217'
     trainer.experiment_name="${VERL_EXP_NAME}"
     trainer.val_before_train="${VAL_BEFORE_TRAIN}"
     trainer.n_gpus_per_node="${NUM_GPUS}"
     trainer.nnodes=1
-    trainer.total_training_steps=100
+    trainer.total_training_steps=${TOTAL_TRAIN_STEPS}
 )
 
 python3 -m verl.trainer.main_ppo "${common_params[@]}" $@

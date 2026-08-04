@@ -78,7 +78,7 @@ policy_loss:
 # Constant C in Dual-clip PPO; clips when advantage < 0 and ratio > C
 clip_ratio_c: 3.0
 
-# Loss aggregation mode: "token-mean", "seq-mean-token-sum", "seq-mean-token-mean", or "seq-mean-token-sum-norm"
+# Loss aggregation mode: "token-mean", "token-sum", "seq-mean-token-sum", "seq-mean-token-mean", or "seq-mean-token-sum-norm"
 loss_agg_mode: token-mean
 
 # Scale factor for "seq-mean-token-sum-norm" loss aggregation mode.
@@ -228,6 +228,28 @@ profiler:
       # True for each task has its own database, False for all tasks in one training step share one database.
       discrete: false
 
+      # Optional torch.profiler.schedule. Enabled only when active > 0, in which case
+      # profiler.step() advances wait/warmup/active/repeat once per mini-batch.
+      schedule:
+
+        # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+        _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+
+        # Number of steps to skip before the first cycle
+        skip_first: 0
+
+        # Idle steps (no collection) at the start of each cycle
+        wait: 0
+
+        # Warmup steps (tracing on, data discarded) each cycle
+        warmup: 0
+
+        # Active steps to record each cycle; <= 0 disables scheduling
+        active: 0
+
+        # Number of cycles to repeat; 0 repeats until profiling stops
+        repeat: 0
+
     # torch memory profiler config
     torch_memory:
 
@@ -310,4 +332,3 @@ qat:
 
   # Path to vLLM quantization config JSON file
   quantization_config_path: null
-

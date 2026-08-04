@@ -26,6 +26,8 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForTokenClas
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.transformers_compat import drop_tied_target_keys, get_auto_model_for_vision2seq
 
+from .output_validation import validate_hf_model_output
+
 AutoModelForVision2Seq = get_auto_model_for_vision2seq()
 
 
@@ -238,14 +240,32 @@ class BaseModelMerger(ABC):
         This function patch the generation_config created from model config to the pretrained model.
         """
         if model.can_generate():
-            try:
-                model.generation_config = GenerationConfig.from_pretrained(self.hf_model_config_path)
-            except OSError:
+            generation_config = self.load_generation_config()
+            if generation_config is not None:
+                model.generation_config = generation_config
+        return model
+
+    def load_generation_config(self, warn_if_missing: bool = True):
+        """Load the generation config stored alongside the pretrained model config."""
+        generation_config_path = os.path.join(self.hf_model_config_path, "generation_config.json")
+        if not os.path.isfile(generation_config_path):
+            if warn_if_missing:
                 print(
                     f"Warning: Generation config file not found in {self.hf_model_config_path}, using a "
                     f"generation config created from the model config."
                 )
-        return model
+            return None
+        return GenerationConfig.from_pretrained(self.hf_model_config_path)
+
+    def save_generation_config(self, target_dir):
+        """Preserve the pretrained generation config in a merged model directory."""
+        generation_config = self.load_generation_config(warn_if_missing=False)
+        if generation_config is not None:
+            generation_config.save_pretrained(target_dir)
+        else:
+            stale_config_path = os.path.join(target_dir, "generation_config.json")
+            if os.path.isfile(stale_config_path):
+                os.remove(stale_config_path)
 
     def _load_lora_train_meta(self) -> Optional[dict[str, object]]:
         if not self.config.local_dir:
@@ -415,6 +435,8 @@ class BaseModelMerger(ABC):
         if tokenizer is not None:
             print(f"Saving tokenizer to {self.config.target_dir}")
             tokenizer.save_pretrained(self.config.target_dir)
+
+        validate_hf_model_output(self.config.target_dir)
 
     def upload_to_huggingface(self):
         import requests

@@ -21,7 +21,9 @@ In this section, we will discuss how to tune the performance of all the stages i
 
 7. Forward prefetch in FSDP training backend
 
-8. Memory optimization for entropy calculation from logits
+8. Reduce FSDP gradient synchronization during gradient accumulation
+
+9. Memory optimization for entropy calculation from logits
 
 Rollout Generation Tuning
 --------------------------
@@ -190,6 +192,28 @@ During the training phase, users can enable forward prefetching in FSDP by setti
 
 .. note::
     Backward prefetch is unsupported because the ``BACKWARD_POST`` policy may prefetch incorrectly in nested-module cases. For details, see the `FSDP documentation <https://github.com/pytorch/torchtitan/blob/main/docs/fsdp.md?plain=1#L70>`_
+
+Reduce FSDP gradient synchronization during gradient accumulation
+------------------------------------------------------------------
+
+When a PPO mini-batch is split into multiple micro-batches, the optimizer only
+steps after the final micro-batch, so gradients only need to be synchronized
+once per mini-batch. The FSDP engine automatically defers gradient
+synchronization on the non-final micro-batches and synchronizes only before the
+final backward. This applies to both the actor and the critic, and requires no
+configuration.
+
+With :math:`M` micro-batches per mini-batch, this reduces gradient
+synchronization from :math:`M` rounds to one round. It does not remove parameter
+all-gathers. The optimization is implemented for both FSDP1 (using ``no_sync``)
+and FSDP2 (using ``set_requires_gradient_sync``), and the optimizer update is
+numerically identical to synchronizing every micro-batch.
+
+.. note::
+    Deferring synchronization retains unsharded gradients until the final
+    micro-batch, which slightly increases peak device memory during gradient
+    accumulation. Forward-only passes are unaffected and always keep the default
+    behavior.
 
 Migrating to FSDP2
 ----------------------

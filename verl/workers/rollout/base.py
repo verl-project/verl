@@ -54,12 +54,17 @@ class BaseRollout(ABC):
     async def update_weights(
         self,
         weights: Generator[tuple[str, torch.Tensor], None, None],
+        wire_format: str = "named_tensors",
         **kwargs,
     ):
         """Update the weights of the rollout model.
 
         Args:
             weights: A generator that yields the name of the weight tensor and the tensor itself.
+            wire_format: How the generator packages weights -- "named_tensors" (full
+                tensors, the default) or "delta_flush" (per-flush sparse payloads from
+                the delta checkpoint engine; sglang only). Implementations must consume
+                this explicitly and never forward it to engine-specific extensions.
         """
         pass
 

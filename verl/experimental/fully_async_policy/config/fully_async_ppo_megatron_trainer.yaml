@@ -25,6 +25,29 @@ async_training:
   # whether to use trainer do_validate
   use_trainer_do_validate: False
 
+  # Whether to enable dynamic resource scheduling.
+  # When True, hybrid rollout replicas are initialised on Trainer-node GPUs at
+  # startup (sleeping, memory returned to the training engine), and are kept
+  # active so that Trainer GPUs participate in rollout alongside standalone GPUs.
+  use_dynamic_resource_scheduling: False
+
+  # Name of the dynamic scheduling policy ("default" or custom registered name).
+  dynamic_schedule_policy: "default"
+
+  # Sample-collection ratio threshold for deactivating hybrid replicas.
+  # At each fit_step, the controller waits until
+  #   deactivate_ratio * required_samples * trigger_parameter_sync_step
+  # samples are buffered before deactivating hybrid replicas.
+  # Set lower (e.g. 0.3) to deactivate earlier; set to 1.0 for a full batch.
+  dynamic_schedule_deactivate_ratio: 0.3
+
+  # Whether to rebalance (abort + clear sticky cache + resume) in-flight requests
+  # across newly activated hybrid replicas via least-loaded routing.
+  dynamic_schedule_enable_rebalance: True
+
+  # Maximum number of concurrent generation requests per replica.
+  concurrent_samples_per_replica: 16
+
 # Rollout config
 rollout:
 
@@ -49,6 +72,12 @@ actor_rollout_ref:
   rollout:
     # Must be enabled! Otherwise, log_probs cannot be calculated.
     calculate_log_probs: True
+
+    # When use_dynamic_resource_scheduling is enabled, hybrid replicas share the GPU with
+    # the training engine, so gpu_memory_utilization should be kept low (e.g. 0.3-0.5).
+    # standalone_gpu_memory_utilization applies only to standalone replicas (dedicated
+    # rollout GPUs); null means fall back to gpu_memory_utilization.
+    standalone_gpu_memory_utilization: null
 
     checkpoint_engine:
       backend: "nccl"

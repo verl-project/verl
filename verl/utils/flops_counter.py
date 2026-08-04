@@ -634,6 +634,47 @@ def _estimate_unknown_flops(config, tokens_sum, batch_seqlens, delta_time):
     return 0
 
 
+def _estimate_hy_v3_flops(config, tokens_sum, batch_seqlens, delta_time):
+    hidden_size = config.hidden_size
+    vocab_size = config.vocab_size
+    # Hy V3 uses expert_hidden_dim as the legacy alias for moe_intermediate_size.
+    # Prefer the standard name and fall back.
+    moe_intermediate_size = getattr(config, "moe_intermediate_size", None)
+    if moe_intermediate_size is None:
+        moe_intermediate_size = config.expert_hidden_dim
+    num_hidden_layers = config.num_hidden_layers
+    num_experts = config.num_experts
+    moe_topk = config.num_experts_per_tok
+    share_expert_num = config.num_shared_experts
+
+    num_attention_heads = config.num_attention_heads
+    num_key_value_heads = config.num_key_value_heads
+    head_dim = config.head_dim
+    q_size = num_attention_heads * head_dim
+    k_size = num_key_value_heads * head_dim
+    v_size = num_key_value_heads * head_dim
+
+    # non-attn per layer parm: router gate + moe experts (topk routed + shared)
+    moe_gata_N = hidden_size * num_experts
+    moe_expertmlp_N = hidden_size * moe_intermediate_size * (moe_topk + share_expert_num) * 3
+    moe_mlp_N = moe_gata_N + moe_expertmlp_N
+
+    attn_linear_N = hidden_size * (q_size + k_size + v_size + num_attention_heads * head_dim)
+    emd_and_lm_head_N = vocab_size * hidden_size * 2
+
+    dense_N = (moe_mlp_N + attn_linear_N) * num_hidden_layers + emd_and_lm_head_N
+    dense_N_flops = 6 * dense_N * tokens_sum
+
+    seqlen_square_sum = 0
+    for seqlen in batch_seqlens:
+        seqlen_square_sum += seqlen * seqlen
+    attn_qkv_flops = 6 * seqlen_square_sum * head_dim * num_attention_heads * num_hidden_layers
+
+    flops_all_token = dense_N_flops + attn_qkv_flops
+    flops_achieved = flops_all_token * (1.0 / delta_time) / 1e12
+    return flops_achieved
+
+
 ESTIMATE_FUNC = {
     "qwen2": _estimate_qwen2_flops,
     "llama": _estimate_qwen2_flops,
@@ -656,6 +697,7 @@ ESTIMATE_FUNC = {
     "glm4v": _estimate_qwen2_flops,
     "gpt_oss": _estimate_gpt_oss_flops,
     "mimo": _estimate_qwen2_flops,
+    "hy_v3": _estimate_hy_v3_flops,
 }
 
 

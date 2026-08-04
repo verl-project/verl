@@ -289,7 +289,11 @@ class ServerAdapter(BaseRollout):
             await self._engine.release_memory_occupation(tags=tags)
 
     async def update_weights(
-        self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs
+        self,
+        weights: Generator[tuple[str, torch.Tensor], None, None],
+        global_steps: int = None,
+        wire_format: str = "named_tensors",
+        **kwargs,
     ):
         """
         Update model weights using tensor buckets, similar to THUDM/slime's implementation.
@@ -304,6 +308,15 @@ class ServerAdapter(BaseRollout):
             - runtime envs: https://github.com/THUDM/slime/blob/fb7605cc5fb09af0f9369d37f7192f12bddee577/slime/ray/ppo_actor.py#L39
         """
         await self._init_server_adapter()
+
+        # Delta checkpoint-engine wire (standalone replicas): the generator yields
+        # per-flush sparse payloads, applied in place through the verl custom
+        # weight loader. Hybrid replicas pass full (name, tensor) pairs with no
+        # wire_format kwarg and take the bucketed path below.
+        if wire_format == "delta_flush":
+            await self._update_weights_delta(weights, global_steps=global_steps)
+            return
+
         # All ranks MUST iterate the weights generator below — DTensor.full_tensor()
         # all_gather's across the FSDP group and skipping deadlocks the others.
         # Only HTTP dispatch is gated on self._engine.
@@ -354,6 +367,71 @@ class ServerAdapter(BaseRollout):
             await self._engine.flush_cache()
             if global_steps is not None:
                 await self.server_actor.set_global_steps.remote(global_steps)
+
+    async def _update_weights_delta(self, flushes, global_steps: int = None) -> None:
+        """Apply the delta engine's sparse flushes in place.
+
+        ``flushes`` is ``CheckpointEngine.receive_weights``'s generator of
+        ``(named_tensors, is_last)`` items: one sentinel-encoded flush at a time,
+        already resident on this worker's GPU. Every rank of the replica consumes
+        the generator (the gather below is collective); TP0 posts one
+        ``update_weights_from_tensor`` per flush with ``load_format`` pointing at
+        the verl delta loader, and the radix cache is flushed only on the last
+        flush of the stream.
+        """
+        assert self._pd_role is None, "delta checkpoint engine does not support PD disaggregation"
+        applied = 0
+        for named, is_last in flushes:
+            await self._update_weights_delta_flush(named, flush_cache=is_last)
+            applied += 1
+            del named
+        if self._engine is not None and self._is_server_tp_leader() and global_steps is not None:
+            await self.server_actor.set_global_steps.remote(global_steps)
+        logger.info("delta apply v=%s flushes=%d (in-place via sglang loader)", global_steps, applied)
+
+    async def _update_weights_delta_flush(self, params_batch, flush_cache: bool) -> None:
+        """Hand one sparse flush to the colocated SGLang server via same-GPU CUDA IPC.
+
+        SPMD across the replica's CheckpointEngineWorkers: every rank serializes its
+        local GPU copy, TP0 gathers the IPC handles and posts one
+        ``update_weights_from_tensor`` with ``load_format`` pointing at the verl
+        loader. Same flow as ``sglang.srt.weight_sync.utils.update_weights``, inlined
+        so the radix cache is flushed only on the stream's last flush instead of on
+        every bucket. Checksum is re-verified inside each SGLang worker (fail loud).
+        """
+        import torch.distributed as dist
+        from sglang.srt.managers.io_struct import UpdateWeightsFromTensorReqInput
+        from sglang.srt.model_executor.model_runner import LocalSerializedTensor
+        from sglang.srt.utils import MultiprocessingSerializer
+        from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
+
+        from verl.workers.rollout.sglang_rollout.delta_loader import LOADER_FQN
+
+        monkey_patch_torch_reductions()
+        mesh = self.device_mesh["infer_tp"]
+        tp_size = mesh.mesh.size()[0]
+        serialized = [(name, MultiprocessingSerializer.serialize(t.detach())) for name, t in params_batch]
+
+        gathered = [None for _ in range(tp_size)] if mesh.get_local_rank() == 0 else None
+        dist.gather_object(
+            obj=serialized,
+            object_gather_list=gathered,
+            dst=mesh.mesh.tolist()[0],
+            group=mesh.get_group(),
+        )
+        if mesh.get_local_rank() != 0:
+            return
+
+        named_tensors = [
+            (group[0][0], LocalSerializedTensor(values=[part[1] for part in group]))
+            for group in zip(*gathered, strict=True)
+        ]
+        req = UpdateWeightsFromTensorReqInput(
+            serialized_named_tensors=[MultiprocessingSerializer.serialize(named_tensors) for _ in range(tp_size)],
+            load_format=LOADER_FQN,
+            flush_cache=flush_cache,
+        )
+        await self._engine.update_weights_from_tensor(req)
 
     def wrap_lora_params(self, peft_config: LoraConfig, weights: Generator[tuple[str, torch.Tensor]]):
         # peft config

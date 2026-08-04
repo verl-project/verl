@@ -129,6 +129,42 @@ class TestNPUProfilerStartStopInteraction(unittest.TestCase):
         self.assertEqual(NPUProfiler._define_count, 0)
 
 
+class TestNPUProfilerStep(unittest.TestCase):
+    """Regression tests for the per-mini-batch ``step()`` hook.
+
+    ``DistProfiler.step()`` delegates to ``self._impl.step()``. Because ``NPUProfiler``
+    subclasses ``DistProfiler`` without running its ``__init__``, a missing ``step()``
+    override used to resolve to the inherited ``DistProfiler.step`` and crash with
+    ``AttributeError: 'NPUProfiler' object has no attribute '_enable'``.
+    """
+
+    def setUp(self):
+        NPUProfiler._define_count = 0
+        self.config = ProfilerConfig(enable=True, ranks=[0], tool="npu")
+        self.tool_config = NPUToolConfig(discrete=False)
+
+    def test_step_is_noop_and_does_not_raise(self):
+        profiler = DistProfiler(rank=0, config=self.config, tool_config=self.tool_config)
+        # Must be a clean no-op (no active profiler started) and must not raise.
+        profiler.step()
+        self.assertEqual(NPUProfiler._define_count, 0)
+
+    @patch("verl.utils.profiler.mstx_profile.get_npu_profiler")
+    def test_step_after_start_does_not_drive_backend(self, mock_get_profiler):
+        mock_profile_npu = MagicMock()
+        mock_get_profiler.return_value = mock_profile_npu
+
+        profiler = DistProfiler(rank=0, config=self.config, tool_config=self.tool_config)
+        profiler.start(role="worker")
+        profiler.step()
+        # NPU profiler has no step schedule, so step() must not advance the backend.
+        mock_profile_npu.step.assert_not_called()
+        profiler.stop()
+        # stop() still emits the single trailing step/stop on the backend.
+        mock_profile_npu.step.assert_called_once()
+        mock_profile_npu.stop.assert_called_once()
+
+
 class TestNPUProfilerAnnotate(unittest.TestCase):
     def setUp(self):
         self.config = ProfilerConfig(enable=True, all_ranks=True, tool="npu")

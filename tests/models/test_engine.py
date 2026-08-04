@@ -114,6 +114,7 @@ def create_training_config(model_type, strategy, device_count, model):
         engine_config = McoreEngineConfig(
             forward_only=False,
             use_mbridge=True,
+            vanilla_mbridge=os.environ.get("VANILLA_MBRIDGE", "False").lower() == "true",
             tensor_model_parallel_size=tp,
             pipeline_model_parallel_size=pp,
             context_parallel_size=cp,
@@ -408,6 +409,7 @@ def _worker(rank: int, world_size: int, rendezvous_file: str, strategy: str, mod
         engine_config = McoreEngineConfig(
             forward_only=False,
             use_mbridge=True,
+            vanilla_mbridge=os.environ.get("VANILLA_MBRIDGE", "False").lower() == "true",
             tensor_model_parallel_size=2,
             pipeline_model_parallel_size=2,
             context_parallel_size=1,
@@ -438,10 +440,8 @@ def _worker(rank: int, world_size: int, rendezvous_file: str, strategy: str, mod
     # get per tensor parameter
     per_tensor_params, _ = engine.get_per_tensor_param()
 
-    if strategy == "megatron" and revert_weight_conversion is not None:
+    if revert_weight_conversion is not None:
         ref_state_dict = revert_weight_conversion(ref_model, ref_model.state_dict())
-    else:
-        ref_state_dict = ref_model.state_dict()
 
     # load ground truth and compare
     for key, value in per_tensor_params:
@@ -655,13 +655,16 @@ def _split_training_primitives_fsdp_worker(
 
     with engine.train_mode(zero_grad_on_exit=False):
         engine.optimizer_zero_grad()
+        first_batch = _make_split_step_batch(model_config, engine_config, world_size)
+        tu.assign_non_tensor(first_batch, return_model_output=True)
         output_1 = engine.forward_backward_batch(
-            _make_split_step_batch(model_config, engine_config, world_size),
+            first_batch,
             loss_function=loss_fn,
             forward_only=False,
         )
     if engine.is_mp_src_rank_with_outputs():
         assert "grad_norm" not in output_1["metrics"]
+        assert "log_probs" in output_1["model_output"]
     grad_norm_1 = _grad_norm(engine.module)
     assert grad_norm_1.item() > 0
     assert _param_delta_norm(engine.module, before).item() == pytest.approx(0.0, abs=0.0)
@@ -674,6 +677,7 @@ def _split_training_primitives_fsdp_worker(
         )
     if engine.is_mp_src_rank_with_outputs():
         assert "grad_norm" not in output_2["metrics"]
+        assert output_2["model_output"] == {}
     grad_norm_2 = _grad_norm(engine.module)
     assert grad_norm_2.item() > grad_norm_1.item() * 1.5
     assert _param_delta_norm(engine.module, before).item() == pytest.approx(0.0, abs=0.0)

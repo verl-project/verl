@@ -52,8 +52,26 @@ class AsyncRolloutSkipConfig(BaseConfig):
 
 
 @dataclass
+class RolloutTqSkipConfig(BaseConfig):
+    """Config for V1 TransferQueue-based rollout skip behavior."""
+
+    enable: bool = False
+    dump_dir: str = "~/.verl/rollout_dump"
+    steps: list[int] = field(default_factory=list)
+    action: str = "cache"  # cache | repeat, refer to SkipAction in base_skip.py
+
+    def __post_init__(self) -> None:
+        assert isinstance(self.enable, bool), f"`enable` must be bool, got {type(self.enable)}"
+        assert isinstance(self.dump_dir, str), f"`dump_dir` must be str, got {type(self.dump_dir)}"
+        assert isinstance(self.steps, list), f"`steps` must be list[int], got {type(self.steps)}"
+        assert all(isinstance(step, int) for step in self.steps), "`steps` must contain int only"
+        assert self.action in {"cache", "repeat"}, f"`action` must be one of cache/repeat, got {self.action}"
+
+
+@dataclass
 class SkipManagerConfig(BaseConfig):
     """Top-level config for skip modules."""
 
     rollout: RolloutSkipConfig = field(default_factory=RolloutSkipConfig)
     async_rollout: AsyncRolloutSkipConfig = field(default_factory=AsyncRolloutSkipConfig)
+    rollout_tq: RolloutTqSkipConfig = field(default_factory=RolloutTqSkipConfig)
