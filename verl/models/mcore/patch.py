@@ -17,6 +17,33 @@
 # 1. `get_query_key_value_tensors` in `multi_latent_attention.py` works wrong when packed_seq_params is not None
 
 
+def pure_torch_hadamard_transform(x, scale=1.0):
+    """Fast Walsh-Hadamard transform along the last dim (size must be 2**k).
+
+    Vectorized butterfly accumulated in fp32, numerically equivalent to
+    ``F.linear(x, scipy.linalg.hadamard(dim)) * scale`` and bit-for-bit identical to
+    the Dao-AILab CUDA kernel it stands in for.
+    """
+    import torch
+
+    n = x.shape[-1]
+    if n < 1 or n & (n - 1) != 0:
+        raise ValueError(f"hadamard_transform requires last dim to be a power of 2, got {n}")
+    orig_dtype = x.dtype
+    orig_shape = x.shape
+    # Accumulate in fp32 for numerical stability, cast back at the end.
+    y = x.to(torch.float32).reshape(-1, n)
+    h = 1
+    while h < n:
+        y = y.view(-1, n // (2 * h), 2, h)
+        a = y[:, :, 0, :]
+        b = y[:, :, 1, :]
+        y = torch.stack((a + b, a - b), dim=2).reshape(-1, n)
+        h *= 2
+    y = y * scale
+    return y.reshape(orig_shape).to(orig_dtype)
+
+
 def apply_fast_hadamard_transform_shim():
     """Provide a pure-torch ``fast_hadamard_transform`` when the CUDA package is absent.
 
@@ -26,58 +53,39 @@ def apply_fast_hadamard_transform_shim():
     Dao-AILab package only ships nvcc kernels and cannot be built on ROCm, so that
     import yields ``None`` there and every DSA forward crashes.
 
-    Register a vectorized Fast Walsh-Hadamard Transform under the real import name
-    (fp32 butterfly accumulation, numerically equivalent to
-    ``F.linear(x, scipy.linalg.hadamard(dim)) * scale``) so any importer picks it
-    up, and back-fill modules that already captured ``None`` (e.g. Megatron's
-    ``dsa`` module at import time). No-op when the real package is installed.
+    Register ``pure_torch_hadamard_transform`` under the real import name so any
+    importer picks it up, and back-fill modules that already captured ``None``
+    (e.g. Megatron's ``dsa`` module at import time). When the real package is
+    installed its kernel is kept and only the back-fill runs.
     """
+    import importlib
     import logging
     import sys
     import types
 
-    import torch
+    # Import rather than probe ``sys.modules``: an entry under that name only means
+    # *something* is registered (a partially initialized module, a stub from another
+    # framework, an earlier run of this shim), which says nothing about whether a
+    # usable kernel is there. A broken CUDA extension can also fail the import with
+    # OSError/RuntimeError, not just ImportError.
+    try:
+        module = importlib.import_module("fast_hadamard_transform")
+    except Exception:
+        module = None
 
-    # Real CUDA package present and working -> leave it alone.
-    existing = sys.modules.get("fast_hadamard_transform")
-    if existing is not None and getattr(existing, "hadamard_transform", None) is not None:
-        return
-    if existing is None:
-        try:
-            import fast_hadamard_transform as existing
-
-            if getattr(existing, "hadamard_transform", None) is not None:
-                return
-        except Exception:
-            # A broken CUDA extension can fail with OSError/RuntimeError, not just ImportError.
-            existing = None
-
-    def hadamard_transform(x, scale=1.0):
-        """Fast Walsh-Hadamard transform along the last dim (size must be 2**k)."""
-        n = x.shape[-1]
-        if n < 1 or n & (n - 1) != 0:
-            raise ValueError(f"hadamard_transform requires last dim to be a power of 2, got {n}")
-        orig_dtype = x.dtype
-        orig_shape = x.shape
-        # Accumulate in fp32 for numerical stability, cast back at the end.
-        y = x.to(torch.float32).reshape(-1, n)
-        h = 1
-        while h < n:
-            y = y.view(-1, n // (2 * h), 2, h)
-            a = y[:, :, 0, :]
-            b = y[:, :, 1, :]
-            y = torch.stack((a + b, a - b), dim=2).reshape(-1, n)
-            h *= 2
-        y = y * scale
-        return y.reshape(orig_shape).to(orig_dtype)
-
-    module = existing if existing is not None else types.ModuleType("fast_hadamard_transform")
-    module.hadamard_transform = hadamard_transform
-    module.hadamard_transform_ref = hadamard_transform
-    sys.modules["fast_hadamard_transform"] = module
+    hadamard_transform = getattr(module, "hadamard_transform", None)
+    use_fallback = hadamard_transform is None
+    if use_fallback:
+        hadamard_transform = pure_torch_hadamard_transform
+        if module is None:
+            module = types.ModuleType("fast_hadamard_transform")
+        module.hadamard_transform = hadamard_transform
+        sys.modules["fast_hadamard_transform"] = module
 
     # Back-fill modules that already ran `from fast_hadamard_transform import
     # hadamard_transform` and captured None (e.g. Megatron's dsa.py at import).
+    # This must run even when the real package is importable now, because those
+    # importers ran at a point when it was not, and they keep their own binding.
     # Read `__dict__` directly: `getattr` would trigger PEP-562 module-level
     # `__getattr__` hooks, which can raise or force lazy imports.
     for mod in list(sys.modules.values()):
@@ -85,10 +93,11 @@ def apply_fast_hadamard_transform_shim():
         if mod_dict is not None and mod_dict.get("hadamard_transform", "keep") is None:
             mod_dict["hadamard_transform"] = hadamard_transform
 
-    logging.getLogger(__name__).warning(
-        "fast_hadamard_transform is unavailable; falling back to a pure-torch Fast Walsh-Hadamard "
-        "transform. Results match the CUDA kernel but DSA forward will be slower."
-    )
+    if use_fallback:
+        logging.getLogger(__name__).warning(
+            "fast_hadamard_transform is unavailable; falling back to a pure-torch Fast "
+            "Walsh-Hadamard transform. Results match the CUDA kernel but DSA forward will be slower."
+        )
 
 
 def apply_patch():
