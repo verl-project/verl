@@ -162,6 +162,7 @@ actor_rollout_ref:
     entropy_from_logits_chunk_size: 2048
     entropy_checkpointing: false
     use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
+    use_length_grouped_bsz: ${oc.select:actor_rollout_ref.model.use_length_grouped_bsz,false}
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: ${actor_rollout_ref.actor.strategy}
@@ -402,6 +403,7 @@ actor_rollout_ref:
     enable_gradient_checkpointing: true
     enable_activation_offload: false
     use_remove_padding: true
+    use_length_grouped_bsz: false
     lora_rank: 0
     lora_alpha: 16
     target_modules: all-linear
@@ -624,6 +626,7 @@ critic:
     enable_gradient_checkpointing: true
     enable_activation_offload: false
     use_remove_padding: true
+    use_length_grouped_bsz: false
     lora_rank: 0
     lora_alpha: 16
     target_modules: all-linear
