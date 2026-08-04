@@ -337,6 +337,68 @@ class _FakeTokenizerCustomPad:
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_postprocess_rm_scores_present_when_use_task_rewards_false():
+    """When use_task_rewards=False, reward_score must be set to 0.0 so _postprocess emits rm_scores.
+
+    Regression test for: https://github.com/verl-project/verl/pull/6870
+    """
+
+    class _DummyWorker:
+        _compute_multi_modal_inputs = AgentLoopWorker._compute_multi_modal_inputs
+        _compute_position_ids = AgentLoopWorker._compute_position_ids
+        _get_mm_processor_kwargs = AgentLoopWorker._get_mm_processor_kwargs
+        _compute_score = AgentLoopWorker._compute_score
+        _compute_teacher_logprobs = AgentLoopWorker._compute_teacher_logprobs
+        _pad_token_ids = AgentLoopWorker._pad_token_ids
+        distillation_enabled = False
+        use_task_rewards = False
+
+        def __init__(self):
+            self.tokenizer = _FakeTokenizer()
+            self.rollout_config = OmegaConf.create({"prompt_length": 4, "response_length": 4})
+            self.processor = None
+            self.mm_processor_kwargs = {}
+            self.reward_loop_worker_handles = None
+
+    output = AgentLoopOutput(
+        prompt_ids=[101, 102],
+        response_ids=[11, 12],
+        response_mask=[1, 1],
+        metrics=AgentLoopMetrics(),
+        extra_fields={},
+    )
+
+    internal = await AgentLoopWorker._agent_loop_postprocess(
+        _DummyWorker(),
+        output,
+        validate=False,
+        raw_prompt=[{"role": "user", "content": "hi"}],
+    )
+
+    # reward_score must be 0.0 (not None) so that _postprocess can build rm_scores
+    assert internal.reward_score == 0.0
+
+    postprocess_worker = type(
+        "_PostprocessWorker",
+        (),
+        {"reward_loop_worker_handles": None},
+    )()
+    merged = AgentLoopWorker._postprocess(
+        postprocess_worker,
+        inputs=[internal],
+        input_non_tensor_batch={
+            "index": np.array([0], dtype=object),
+            "agent_name": np.array(["single_turn_agent"], dtype=object),
+        },
+    )
+
+    # rm_scores must be present in the batch and be all zeros
+    assert "rm_scores" in merged.batch
+    assert merged.batch["rm_scores"].shape == merged.batch["responses"].shape
+    assert merged.batch["rm_scores"].sum().item() == 0.0
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_pad_token_ids_empty_with_non_zero_pad_id():
     """Regression test: empty token list uses tokenizer's pad_token_id (not hardcoded 0)."""
     worker = type(
