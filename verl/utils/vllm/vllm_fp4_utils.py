@@ -15,12 +15,18 @@
 
 """Refit support for vLLM's ``Mxfp4MoEMethod`` (DeepSeek V4 routed experts).
 
-Only the DeepGEMM backend (``--moe-backend deep_gemm``) is refit in place. It
-is the one backend whose weight conversion leaves the expert weights in
-checkpoint layout, so the live parameters can absorb a reload directly and only
-the block scales need a detour through a temporary buffer. The other backends
-reshuffle the weights themselves, which would require a full-size staging
-allocation per layer, so they are left alone here.
+Reloading these experts means undoing the kernel's weight conversion: the refit
+stream carries checkpoint-layout tensors while the live parameters hold whatever
+layout the selected backend rewrote them into. Each expert param is handed a
+checkpoint-layout buffer to absorb the reload, then the backend's conversion is
+replayed and folded back into the live storage, so the addresses the CUDA graph
+captured stay put.
+
+Backends differ only in how much of that buffer has to be a real allocation.
+A param whose kernel layout spans the same bytes as the checkpoint one -- the
+expert weights under both DeepGEMM and Marlin -- stages as a reinterpret of its
+own storage and costs nothing. Only the block scales, which change element
+count, need an allocation, and those are a sixteenth of the weights.
 
 ``verl/utils/vllm/vllm_quant_utils.py`` is the entry point that drives these.
 """
@@ -68,12 +74,25 @@ def _is_mxfp4_fused_moe_module(module):
     return isinstance(module, RoutedExperts) and isinstance(module.quant_method, Mxfp4MoEMethod)
 
 
-def _is_deepgemm_mxfp4_moe_module(module):
+def _refittable_mxfp4_backends():
+    """Backends whose weight conversion can be replayed onto live storage.
+
+    Two properties qualify a backend. Its conversion must be a pure function of
+    the checkpoint layout, so replaying it after a reload reproduces the same
+    inference layout. And it must publish the result through
+    ``replace_parameter``, which is the hook ``_replace_parameter_in_place``
+    intercepts to redirect the write into the captured storage.
+
+    Triton is the notable exclusion: it assigns the weights as non-Parameter
+    wrappers and parks the scales on the quant method, so the buffers its kernel
+    reads are not reachable as parameters at all.
+    """
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 
     return (
-        _is_mxfp4_fused_moe_module(module)
-        and getattr(module.quant_method, "mxfp4_backend", None) == Mxfp4MoeBackend.DEEPGEMM_MXFP4
+        Mxfp4MoeBackend.DEEPGEMM_MXFP4,
+        Mxfp4MoeBackend.MARLIN,
+        Mxfp4MoeBackend.BATCHED_MARLIN,
     )
 
 
@@ -95,18 +114,49 @@ def _mxfp4_checkpoint_layout(module):
         "w2_weight": ((num_experts, hidden, intermediate // 2), torch.uint8, None),
         "w13_weight_scale": ((num_experts, 2 * intermediate, hidden // _MXFP4_SF_BLOCK), torch.uint8, "block"),
         "w2_weight_scale": ((num_experts, hidden, intermediate // _MXFP4_SF_BLOCK), torch.uint8, "block"),
+        # Listed unconditionally: models without MoE bias never registered these
+        # and are skipped when the parameter turns up missing. Leaving them out
+        # would instead let Marlin's bias permute fall through to the real
+        # ``replace_parameter`` and quietly move the buffer.
+        "w13_bias": ((num_experts, 2 * intermediate), torch.bfloat16, None),
+        "w2_bias": ((num_experts, hidden), torch.bfloat16, None),
     }
+
+
+def _mxfp4_staging_data(param, shape, dtype):
+    """Checkpoint-layout tensor for ``load_weights`` to write into.
+
+    Reuses the live storage whenever it spans the same number of bytes, which
+    covers more than the params a backend left alone. Marlin's repack is a
+    permutation of 4-bit values, so its int32 tiles occupy exactly the bytes the
+    uint8 checkpoint weight did; reinterpreting them costs nothing and keeps the
+    reload landing where the kernel reads. That is what stops a refit from
+    needing a second copy of the experts, which for the expert weights is the
+    difference between a negligible allocation and doubling MoE memory.
+
+    Replaying the conversion reads this buffer in full and builds its result in a
+    fresh tensor before ``_replace_parameter_in_place`` writes back, so aliasing
+    the destination is safe.
+    """
+    data = param.data
+    shape = torch.Size(shape)
+    if data.dtype == dtype and data.shape == shape:
+        return data
+    if data.is_contiguous() and data.numel() * data.element_size() == shape.numel() * dtype.itemsize:
+        return data.flatten().view(dtype).reshape(shape)
+    # Zero rather than empty: a param the refit stream happens to skip then
+    # collapses the layer's output instead of feeding the kernel whatever was
+    # left in the freed memory.
+    return torch.zeros(shape, dtype=dtype, device=param.device)
 
 
 def _stage_mxfp4_moe_params(module):
     """Expose checkpoint-layout buffers without moving any live storage.
 
-    Under the DeepGEMM backend ``convert_weight_to_mxfp4_moe_kernel_format``
-    returns the expert weights untouched, so their live parameters already
-    accept checkpoint data and only need their loader attributes back. The
-    scales are repacked into DeepGEMM's layout, so those get a temporary buffer
-    to land in; ``_process_mxfp4_moe_params`` folds the repacked result back
-    into the live storage and drops the buffer.
+    Each expert param is handed a buffer in the layout its ``weight_loader``
+    expects, preferring a reinterpret of the param's own storage so the reload
+    lands where the kernel reads. ``_process_mxfp4_moe_params`` then replays the
+    backend's conversion and folds the result back into the live storage.
     """
     live = {}
     for name, (shape, dtype, scale_kind) in _mxfp4_checkpoint_layout(module).items():
@@ -115,15 +165,7 @@ def _stage_mxfp4_moe_params(module):
             continue
         live[name] = param
 
-        if param.shape == torch.Size(shape) and param.dtype == dtype:
-            data = param.data
-        else:
-            # Zero rather than empty: a scale the refit stream happens to skip
-            # then collapses the layer's output instead of reading whatever was
-            # in the freed memory.
-            data = torch.zeros(shape, dtype=dtype, device=param.device)
-
-        staged = torch.nn.Parameter(data, requires_grad=False)
+        staged = torch.nn.Parameter(_mxfp4_staging_data(param, shape, dtype), requires_grad=False)
         staged.weight_loader = module.weight_loader
         if scale_kind is not None:
             staged.quant_method = scale_kind
@@ -175,8 +217,9 @@ def _process_mxfp4_moe_params(module):
     delattr(module, _MXFP4_LIVE_ATTR)
     if leftover:
         raise RuntimeError(
-            f"mxfp4 refit left {sorted(leftover)} un-reinstated; the DeepGEMM path is expected to "
-            "route every expert param through replace_parameter."
+            f"mxfp4 refit left {sorted(leftover)} un-reinstated; every backend listed in "
+            "_refittable_mxfp4_backends is expected to route each expert param through "
+            "replace_parameter."
         )
 
 
@@ -187,28 +230,37 @@ def stage_mxfp4_moe_params_for_loading(model):
     A model with no mxfp4 experts yields an empty list, which makes this safe
     to call unconditionally.
     """
+    supported = _refittable_mxfp4_backends()
     staged_modules = []
+    backends = set()
     for module in model.modules():
         if not _is_mxfp4_fused_moe_module(module):
             continue
-        if not _is_deepgemm_mxfp4_moe_module(module):
-            # Refusing beats skipping: the other backends reshuffle the expert
-            # weights, so a refit would quietly load checkpoint-layout data
-            # into rewritten parameters and the rollout would drift.
+
+        backend = getattr(module.quant_method, "mxfp4_backend", None)
+        if backend not in supported:
+            # Refusing beats skipping: an unsupported backend would quietly load
+            # checkpoint-layout data into rewritten parameters, and the rollout
+            # would drift with nothing pointing at the cause.
             raise NotImplementedError(
-                "mxfp4 MoE refit only supports the DeepGEMM backend, but "
-                f"{type(module).__name__} selected "
-                f"{getattr(module.quant_method, 'mxfp4_backend', None)}. "
-                "Launch the rollout engine with --moe-backend deep_gemm."
+                f"mxfp4 MoE refit does not support the {backend} backend selected by "
+                f"{type(module).__name__}. Supported backends: "
+                f"{', '.join(str(b) for b in supported)}."
             )
+
         _stage_mxfp4_moe_params(module)
         staged_modules.append(module)
+        backends.add(backend)
 
-    logger.info("Staged %d DeepGEMM mxfp4 MoE modules for in-place refit", len(staged_modules))
+    logger.info(
+        "Staged %d mxfp4 MoE modules for in-place refit (backends: %s)",
+        len(staged_modules),
+        ", ".join(sorted(str(b) for b in backends)) or "none",
+    )
     return staged_modules
 
 
 def process_mxfp4_moe_weights_after_loading(modules):
-    """Repack the loaded experts into DeepGEMM layout inside the live storage."""
+    """Repack the loaded experts into the kernel layout inside the live storage."""
     for module in modules:
         _process_mxfp4_moe_params(module)
