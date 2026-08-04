@@ -241,7 +241,10 @@ def _execute_user_function():
     _args = []
     if _raw_input_str.strip(): # If there's input
         try:
-            _args = [json.loads(line) for line in _raw_input_str.split('\\n')]
+            if '\\n' in _raw_input_str:
+                _args = [json.loads(line) for line in _raw_input_str.split('\\n')]
+            else:
+                _args = json.loads(_raw_input_str.strip())
         except json.JSONDecodeError as _je:
             sys.stderr.write(f"WrapperError: Invalid JSON input for '{{_SANDBOX_FN_NAME}}': {{_je}}\\nInput was: "
                               f"{{_raw_input_str[:200]}}\\n")
