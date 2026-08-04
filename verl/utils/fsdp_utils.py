@@ -1090,6 +1090,36 @@ def merged_lora_context(actor, backup_adapters=False):
             fsdp_merge_unmerge(actor, do_merge=False)
 
 
+def fsdp1_sharded_save_to_cpu(model: FSDP) -> dict[str, object]:
+    """Save each rank's FSDP1 model shard to CPU memory."""
+    from torch.distributed.fsdp import ShardedStateDictConfig, StateDictType
+
+    assert fsdp_version(model) == 1, "fsdp1_sharded_save_to_cpu requires an FSDP1 model"
+    state_dict_config = ShardedStateDictConfig(offload_to_cpu=True)
+    with get_fsdp_state_ctx(
+        model,
+        state_type=StateDictType.SHARDED_STATE_DICT,
+        state_cfg=state_dict_config,
+        optim_cfg=None,
+    ):
+        return model.state_dict()
+
+
+def fsdp1_sharded_load_from_cpu(model: FSDP, cpu_sharded_state: dict[str, object]) -> None:
+    """Restore each rank's FSDP1 model shard from CPU memory."""
+    from torch.distributed.fsdp import ShardedStateDictConfig, StateDictType
+
+    assert fsdp_version(model) == 1, "fsdp1_sharded_load_from_cpu requires an FSDP1 model"
+    state_dict_config = ShardedStateDictConfig(offload_to_cpu=True)
+    with get_fsdp_state_ctx(
+        model,
+        state_type=StateDictType.SHARDED_STATE_DICT,
+        state_cfg=state_dict_config,
+        optim_cfg=None,
+    ):
+        model.load_state_dict(cpu_sharded_state)
+
+
 def fsdp2_sharded_save_to_cpu(
     model: torch.nn.Module,
 ) -> tuple[dict[str, tuple[torch.Tensor, DTensorSpec]], DTensorSpec]:
