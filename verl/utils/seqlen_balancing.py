@@ -324,6 +324,37 @@ def ceildiv(a: int, b: int) -> int:
     return -(a // -b)
 
 
+def balanced_chunk_range(num_items: int, num_chunks: int, chunk_idx: int) -> tuple[int, int]:
+    """Return the contiguous ``[start, end)`` range for ``chunk_idx`` of a balanced split.
+
+    Splits ``num_items`` into ``num_chunks`` contiguous, order-preserving chunks. The first
+    ``num_items % num_chunks`` chunks get one extra item, so chunk sizes differ by at most
+    one and no chunk is empty as long as ``num_items >= num_chunks``. This avoids the starvation of
+    trailing chunks caused by ceil-based sizing (``ceil(num_items / num_chunks) * num_chunks`` can
+    exceed ``num_items``).
+
+    Args:
+        num_items: Number of items to split.
+        num_chunks: Number of chunks to split into, must be positive.
+        chunk_idx: Index of the chunk to return the range for, in ``[0, num_chunks)``.
+
+    Returns:
+        tuple[int, int]: The ``(start, end)`` half-open range for ``chunk_idx``.
+
+    Example:
+        >>> [balanced_chunk_range(9, 4, i) for i in range(4)]  # sizes [3, 2, 2, 2], no empty chunk
+        [(0, 3), (3, 5), (5, 7), (7, 9)]
+    """
+    if num_chunks <= 0:
+        raise ValueError(f"num_chunks must be positive, got {num_chunks}")
+    if not 0 <= chunk_idx < num_chunks:
+        raise ValueError(f"chunk_idx {chunk_idx} out of range [0, {num_chunks})")
+    base, remainder = divmod(num_items, num_chunks)
+    start = chunk_idx * base + min(chunk_idx, remainder)
+    end = start + base + (1 if chunk_idx < remainder else 0)
+    return start, end
+
+
 def roundup_divisible(a: int, b: int) -> int:
     """Round up a to the nearest multiple of b.
 
