@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rendered Messages - rollouts_6.jsonl</title>
+    <style>
+        body { font-family: sans-serif; line-height: 1.6; margin: 20px; }
+        details { border: 1px solid #ccc; border-radius: 4px; margin-bottom: 15px; }
+        summary {
+            font-weight: bold;
+            padding: 10px;
+            background-color: #f0f0f0;
+            cursor: pointer;
+            border-radius: 4px 4px 0 0;
+            border-bottom: 1px solid #ccc;
+            outline: none; /* Remove default focus outline if needed */
+        }
+        details[open] summary { border-bottom: 1px solid #ccc; }
+        .group-content { padding: 15px; }
+        .item {
+            border: 1px solid #eee;
+            border-radius: 3px;
+            margin-bottom: 10px;
+            padding: 10px;
+            transition: background-color 0.3s ease, box-shadow 0.2s ease; /* Smooth transitions */
+            scroll-margin-top: 10px; /* Space when scrolling into view */
+        }
+        .item h4 { margin-top: 0; margin-bottom: 5px; font-size: 1.1em; }
+        .content-block { background-color: #fff; padding: 8px; border-radius: 3px; margin-bottom: 5px; overflow-x: auto; }
+        /* Use :focus-within for better accessibility on container focus */
+        .item:focus, .item.active {
+             box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.5); /* Highlight active/focused item */
+             outline: none; /* Remove default outline */
+        }
+
+        /* Score Backgrounds (Faint) */
+        .reward-positive { background-color: rgba(144, 238, 144, 0.3); } /* Faint light green */
+        .reward-zero { background-color: rgba(255, 215, 0, 0.3); }    /* Faint gold/orange */
+        .reward-negative { background-color: rgba(255, 182, 193, 0.4); } /* Faint light pink/red */
+
+        /* Markdown specific styles */
+        .content-block pre {
+            background-color: #f5f5f5;
+            border: 1px solid #ddd;
+            border-radius: 3px;
+            padding: 10px;
+            overflow-x: auto; /* Allow horizontal scrolling for long code lines */
+            white-space: pre-wrap; /* Wrap long lines within pre */
+            word-wrap: break-word; /* Break long words if necessary */
+        }
+        .content-block code {
+             background-color: #f0f0f0; /* Slightly different for inline code */
+             padding: 0.2em 0.4em;
+             border-radius: 3px;
+             font-size: 0.9em;
+        }
+        .content-block pre code {
+            background-color: transparent; /* Don't double-background code in pre blocks */
+            padding: 0;
+            border-radius: 0;
+            font-size: inherit; /* Inherit pre font size */
+        }
+        .content-block blockquote {
+            border-left: 4px solid #ccc;
+            padding-left: 10px;
+            margin-left: 0;
+            color: #555;
+        }
+        .content-block table {
+            border-collapse: collapse;
+            width: auto; /* Don't force full width */
+            margin-bottom: 1em;
+        }
+        .content-block th, .content-block td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        .content-block th {
+            background-color: #f2f2f2;
+        }
+    </style>
+</head>
+<body>
+    <h1>Rendered Messages - rollouts_6.jsonl</h1>
+    <div id="groups-container">
+                <details>
+            <summary>Group 0</summary>
+            <div class="group-content">
+                            <div class="item reward-negative" id="group-0-item-0">
+                <h4>Content 0</h4>
+                <div class="content-block">
+                    <p>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;system&lt;|end_header_id|&gt;</p>
+<p>You are a deep thinking AI, specialized in generating detailed use cases. You may use extremely long chains of thought to deeply consider the problem and deliberate with yourself via systematic reasoning processes to come up with comprehensive use cases. You should enclose your thoughts and internal monologue inside <think> </think> tags, and then provide your solution or response to the problem.</p>
+<p>You are allocated a maximum of 2048 tokens, please strive to use less.</p>
+<p>Your task is to generate detailed use cases based on the provided description. Each use case should include:<br />
+1. A descriptive title<br />
+2. User goals and objectives<br />
+3. Step-by-step flow of actions<br />
+4. Expected outcomes<br />
+5. Edge cases or alternative paths</p>
+<p>Format each use case clearly with appropriate headers and structure.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;user&lt;|end_header_id|&gt;</p>
+<p>Create comprehensive use cases for a mobile banking system with emphasis on chat support, innovative payment solutions, and voice control.&lt;|eot_id|&gt;&lt;|start_header_id|&gt;assistant&lt;|end_header_id|&gt;</p>
+<p><think><br />
+Alright, to generate comprehensive use cases for a mobile banking system emphasizing chat support, innovative payment solutions, and voice control, I must consider various user interactions, system responses, and edge cases. The use cases should encompass typical scenarios, alternative flows, and exceptional situations to ensure robustness.</p>
+<p>I'll structure each use case with a title, user goals, step-by-step actions, expected outcomes, and potential edge cases. Given the three focus areas—chat support, innovative payment solutions, and voice control—I will develop separate use cases for each domain, ensuring coverage of key features.</p>
+<p>Let's start by identifying core functionalities:</p>
+<ul>
+<li>Chat support:</li>
+<li>User inquiries (e.g., account info, transaction disputes, FAQs)</li>
+<li>Live agent escalation</li>
+<li>Innovative payment solutions:</li>
+<li>Peer-to-peer payments</li>
+<li>Contactless/QR code payments</li>
+<li>Scheduled and recurring payments</li>
+<li>Integration with digital wallets</li>
+<li>Voice control:</li>
+<li>Balance inquiry via voice</li>
+<li>Initiating payments verbally</li>
+<li>Transaction status updates</li>
+<li>Authentication via voice</li>
+</ul>
+<p>Now, onto detailed use cases:</p>
+<hr />
+<h3>Use Case 1: Chat Support - Resolving User Inquiry About Recent Transaction</h3>
+<p><strong>Title:</strong> User Queries Recent Transaction via Chat Support</p>
+<p><strong>User Goals &amp; Objectives:</strong><br />
+- Obtain detailed information about a recent transaction<br />
+- Clarify any discrepancies or errors<br />
+- Get guidance on dispute process if needed</p>
+<p><strong>Step-by-Step Flow:</strong></p>
+<ol>
+<li>User opens the mobile banking app and navigates to chat support.  </li>
+<li>User initiates a chat session and types: "I want details about my last transaction."  </li>
+<li>System recognizes intent and presents recent transaction history.  </li>
+<li>User selects a specific transaction or types transaction details (e.g., date, amount).  </li>
+<li>System displays comprehensive details (merchant, date, amount, location).  </li>
+<li>User inquires about a discrepancy: "Why was I charged twice?"  </li>
+<li>System prompts user to specify which transaction to dispute.  </li>
+<li>User confirms and requests to dispute the transaction.  </li>
+<li>System guides user through dispute process or escalates to a live agent if needed.  </li>
+<li>User receives confirmation of dispute initiation, with estimated resolution time.</li>
+</ol>
+<p><strong>Expected Outcomes:</strong><br />
+- User successfully retrieves transaction info.<br />
+- Dispute is recorded and processed.<br />
+- Support interaction is logged for future reference.</p>
+<p><strong>Edge Cases / Alternative Paths:</strong><br />
+- User's transaction not found (older transaction, incorrect details). System suggests alternative search criteria or escalates to live agent.<br />
+- Chatbot cannot understand user's query. Option to escalate to human support.<br />
+- User disconnects during the process; system saves chat context for future.</p>
+<hr />
+<h3>Use Case 2: Innovative Payment - Peer-to-Peer Money Transfer Using QR Code</h3>
+<p><strong>Title:</strong> User Sends Money to Friend via QR Code</p>
+<p><strong>User Goals &amp; Objectives:</strong><br />
+- Quickly transfer funds to a trusted contact<br />
+- Use contactless method for convenience and security</p>
+<p><strong>Step-by-Step Flow:</strong>  </p>
+<ol>
+<li>User logs into the mobile banking app.  </li>
+<li>User navigates to "Transfer" &gt; "Send via QR Code."  </li>
+<li>System displays QR code representing user’s payment info.  </li>
+<li>Friend opens their app, scans the QR code.  </li>
+<li>System verifies the recipient's identity and confirms the amount (or prompts user to specify amount).  </li>
+<li>User enters the transfer amount, reviews details.  </li>
+<li>User authorizes the transaction via biometric authentication or PIN.  </li>
+<li>System processes payment, updates both accounts, and sends confirmation notifications.  </li>
+<li>Both users receive transaction confirmation via app and optional email/SMS.</li>
+</ol>
+<p><strong>Expected Outcomes:</strong><br />
+- Funds are transferred securely and promptly.<br />
+- Transaction is reflected in both users’ account histories.</p>
+<p><strong>Edge Cases / Alternative Paths:</strong><br />
+- QR code expired or invalid (e.g., scanned after expiry). System prompts to generate a new code.<br />
+- Insufficient funds in sender's account. System notifies and offers options.<br />
+- User cancels before completing payment.<br />
+- Connectivity issues during scanning or processing.</p>
+<hr />
+<h3>Use Case 3: Voice Control - Checking Account Balance with Voice Command</h3>
+<p><strong>Title:</strong> User Checks Account Balance Using Voice Control</p>
+<p><strong>User Goals &amp; Objectives:</strong><br />
+- Obtain account balance hands-free<br />
+- Quickly access financial info without manual navigation</p>
+<p><strong>Step-by-Step Flow:</strong>  </p>
+<ol>
+<li>User activates voice assistant (e.g., "Hey Banking") or presses voice control button.  </li>
+<li>User states: "What is my current balance?"  </li>
+<li>Voice system authenticates user via voice recognition or prompts for PIN/Biometric verification.  </li>
+<li>System verifies identity.  </li>
+<li>System retrieves latest account balance data.  </li>
+<li>System responds verbally: "Your current balance is $3,250."  </li>
+<li>User may ask follow-up questions, e.g., "Show recent transactions," which are read aloud or displayed on screen if visual confirmation is enabled.</li>
+</ol>
+<p><strong>Expected Outcomes:</strong><br />
+- User obtains accurate balance info securely.<br />
+- The process is seamless, natural, and quick.</p>
+<p><strong>Edge Cases / Alternative Paths:</strong><br />
+- Voice recognition fails; system prompts for manual authentication.<br />
+- App does not recognize command or misinterprets; prompts user to repeat.<br />
+- Network issues delaying data retrieval; user advised to try later.</p>
+<hr />
+<h3>Use Case 4: Voice Control - Initiating a Scheduled Payment via Voice Command</h3>
+<p><strong>Title:</strong> User Schedules a Bill Payment Using Voice Command</p>
+<p><strong>User Goals &amp; Objectives:</strong><br />
+- Set up a recurring bill payment without manual entry<br />
+- Use voice for convenience and efficiency</p>
+<p><strong>Step-by-Step Flow:</strong>  </p>
+<ol>
+<li>User activates voice command feature.  </li>
+<li>User says: "Schedule a monthly payment of $200 to electricity company starting next Monday."  </li>
+<li>System confirms understanding: "You want to set a recurring payment of $200 to Electricity Co. starting next Monday, each month. Is that correct?"  </li>
+<li>User confirms via voice or touch.  </li>
+<li>System prompts for authentication if not already verified.  </li>
+<li>Upon successful verification, system schedules the payment and confirms: "Your recurring payment has been scheduled."  </li>
+<li>User can ask: "Show my scheduled payments."  </li>
+<li>System lists upcoming scheduled payments.</li>
+</ol>
+<p><strong>Expected Outcomes:</strong><br />
+- Recurring payment is configured and stored securely.<br />
+- User can manage or cancel via voice commands later.</p>
+<p><strong>Edge Cases / Alternative Paths:</strong><br />
+- Voice command misinterpreted; system asks for clarification.<br />
+- Payment amount or date ambiguous; system requests clarification.<br />
+- Authentication fails; prompts for manual login.<br />
+- Network or system errors during scheduling.</p>
+<hr />
+<h3>Use Case 5: Multi-Modal Support - Combining Chat and Voice for Fraud Alert Resolution</h3>
+<p><strong>Title:</strong> User Reports Suspicious Activity via Voice and Confirms Details via Chat</p>
+<p><strong>User Goals &amp; Objectives:</strong><br />
+- Rapidly report fraudulent activity.<br />
+- Use multi-modal inputs for clarity and confirmation.</p>
+<p><strong>Step-by-Step Flow:</strong>  </p>
+<ol>
+<li>User notices suspicious activity; activates voice assistant: "Report unauthorized transaction."  </li>
+<li>System confirms: "Please confirm, do you want to report a suspicious transaction?"  </li>
+<li>User confirms.  </li>
+<li>System gathers info: "Please describe the transaction or specify the date."  </li>
+<li>User reports details via voice.  </li>
+<li>System records info and offers to escalate: "Would you like to chat with a support agent for further assistance?"  </li>
+<li>User switches to chat support, where detailed info is reviewed, and support action is initiated.  </li>
+<li>User receives confirmation of report submission and next steps.</li>
+</ol>
+<p><strong>Expected Outcomes:</strong><br />
+- Fraud report is accurately logged.<br />
+- User is guided through subsequent steps, including possible account freezes or further support.</p>
+<p><strong>Edge Cases / Alternative Paths:</strong><br />
+- Voice command not understood; user switches to chat.<br />
+- User aborts the process.<br />
+- Support team cannot verify details remotely; manual verification required.  </p>
+<hr />
+<p><think><br />
+I've detailed use cases across the three focus areas, covering common actions, system responses, and alternative flows. These scenarios reflect real-world interactions emphasizing security, convenience, and innovative features. Each includes explicit steps, outcomes, and considerations for exceptions, making them suitable for comprehensive system design or testing documentation.  </p>
+<p>I can now compile these into a clean, concise list if needed, or expand further with additional scenarios. For now, this covers a broad, detailed set aligned with the prompt.&lt;|eot_id|&gt;</p>
+                </div>
+                <p><strong>Reward:</strong> -0.03097743812904008</p>
+            </div>
+
+            </div>
+        </details>
+
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const items = document.querySelectorAll('.item');
+            let activeIndex = -1; // No item active initially
+
+            // Function to set active item
+            function setActiveItem(index) {
+                if (activeIndex >= 0 && activeIndex < items.length) {
+                    items[activeIndex].classList.remove('active');
+                    items[activeIndex].removeAttribute('tabindex'); // Remove from tab order when not active
+                }
+                if (index >= 0 && index < items.length) {
+                    items[index].classList.add('active');
+                    items[index].setAttribute('tabindex', '0'); // Make active item focusable
+                    items[index].focus(); // Focus the element
+                    // Ensure the parent <details> is open
+                    const detailsParent = items[index].closest('details');
+                    if (detailsParent && !detailsParent.open) {
+                        detailsParent.open = true;
+                    }
+                    // Scroll into view with options if needed (focus should handle this mostly)
+                    // items[index].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                    activeIndex = index;
+                } else {
+                    activeIndex = -1; // Deactivate if index is out of bounds
+                }
+            }
+
+            // Add click listener to activate items
+            items.forEach((item, index) => {
+                item.addEventListener('click', () => {
+                    setActiveItem(index);
+                });
+                // Make items focusable initially only if we want tab navigation
+                // item.setAttribute('tabindex', '0');
+            });
+
+            // Add keydown listener for arrow navigation
+            document.addEventListener('keydown', (event) => {
+                let targetIndex = -1;
+                if (event.key === 'ArrowDown') {
+                    event.preventDefault(); // Prevent default page scroll
+                    targetIndex = (activeIndex === -1) ? 0 : Math.min(activeIndex + 1, items.length - 1);
+                } else if (event.key === 'ArrowUp') {
+                    event.preventDefault(); // Prevent default page scroll
+                    targetIndex = (activeIndex === -1) ? items.length - 1 : Math.max(activeIndex - 1, 0);
+                }
+
+                if (targetIndex !== -1) {
+                    setActiveItem(targetIndex);
+                }
+            });
+
+            // Make first item focusable initially if you want immediate keyboard nav
+             if (items.length > 0) {
+                 // items[0].setAttribute('tabindex', '0');
+                 // Optionally activate the first item on load:
+                 // setActiveItem(0);
+             }
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+pybullet>=3.2.5
+numpy>=1.24.0
+websockets>=11.0.3
+python-dotenv>=1.0.0
+wandb>=0.15.0
+openai>=1.0.0
+# pydantic (if using for data classes, otherwise standard dataclasses are fine for MVP)
+# fastapi # Not needed for this combined MVP script approach
+# uvicorn # Not needed for this combined MVP script approach

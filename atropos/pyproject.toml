@@ -1,0 +1,73 @@
+[project]
+name = "atroposlib"
+version = "0.2.1"
+description = "Atropos: An Environment and Rollout handler for LLM RL"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "transformers",
+    "datasets",
+    "openai",
+    "aiohttp",
+    "tqdm",
+    "fastapi",
+    "uvicorn[standard]",
+    "tenacity",
+    "markdown",
+    "numpy",
+    "wandb",
+    "gymnasium",
+    "math-verify==0.7.0",
+    "jinja2",
+    "nltk",
+    "rich",
+    "polars",
+    "aiofiles",
+    "jsonlines",
+    "pydantic-cli",
+    "hf_transfer",
+    "torch>=2.7.0",
+]
+
+[project.scripts]
+run-api = "atroposlib.cli.run_api:main"
+inference-node-wandb-watcher = "atroposlib.cli.inference_node_wandb_watcher:main"
+view-run = "atroposlib.cli.view_run:main"
+view-run-multimodal = "atroposlib.cli.view_run_multimodal:main"
+atropos-sft-gen = "atroposlib.cli.sft:main"
+atropos-dpo-gen = "atroposlib.cli.dpo:main"
+
+[project.optional-dependencies]
+all = [
+    "atroposlib[dev,examples]"
+]
+rewardfns = [
+    "torch"
+]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pre-commit",
+    "black",
+    "flake8",
+    "isort",
+    "mypy",
+    "rich",
+]
+examples = [
+    "gradio",
+    "atroposlib[rewardfns]",
+    "langdetect"
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["atroposlib"]
+
+[tool.uv.workspace]
+members = [
+    "environments/hack0",
+]
