@@ -172,6 +172,85 @@ def test_distillation_outputs_emitted_in_both_padding_modes(use_remove_padding, 
         )
 
 
+_FUSED_DISTILLATION_KEYS = ("distillation_losses", "student_mass", "teacher_mass")
+
+
+def test_fused_topk_distillation_aux_outputs_are_required_and_emitted():
+    """Fused top-k distillation must surface VeOmni aux outputs.
+
+    If the model forward did not receive teacher_topk_ids / teacher_topk_log_probs,
+    VeOmni's fused loss will not populate fused_linear_aux; failing closed here is
+    better than silently dropping the distillation loss.
+    """
+    total_nnz = 5
+    cu_seqlens = torch.tensor([0, 2, total_nnz], dtype=torch.int64)
+    input_ids_nested = torch.nested.nested_tensor_from_jagged(torch.arange(total_nnz), offsets=cu_seqlens)
+
+    output = SimpleNamespace(
+        log_probs=torch.zeros(1, total_nnz),
+        entropy=torch.zeros(1, total_nnz),
+        fused_linear_aux=SimpleNamespace(
+            distillation_losses=(torch.arange(total_nnz, dtype=torch.float32) + 10).unsqueeze(0),
+            student_mass=(torch.arange(total_nnz, dtype=torch.float32) + 20).unsqueeze(0),
+            teacher_mass=(torch.arange(total_nnz, dtype=torch.float32) + 30).unsqueeze(0),
+        ),
+    )
+    micro_batch = TensorDict({"input_ids": input_ids_nested}, batch_size=[])
+    tu.assign_non_tensor(
+        micro_batch,
+        use_remove_padding=True,
+        pad_mode=DatasetPadMode.NO_PADDING,
+        use_fused_kernels=True,
+        calculate_entropy=False,
+        calculate_sum_pi_squared=False,
+        distillation_use_topk=True,
+    )
+
+    model_output = FSDPEngineWithLMHead.prepare_model_outputs(
+        _make_engine_stub(),
+        output=output,
+        output_args={"input_ids_rmpad_rolled": torch.arange(total_nnz), "temperature_rmpad": torch.ones(total_nnz)},
+        micro_batch=micro_batch,
+        logits_processor_func=_make_logits_processor(()),
+    )
+
+    for k in _FUSED_DISTILLATION_KEYS:
+        assert k in model_output
+        assert model_output[k].is_nested
+    torch.testing.assert_close(model_output["distillation_losses"].values(), torch.arange(total_nnz) + 10)
+
+
+def test_fused_topk_distillation_missing_aux_outputs_raises():
+    total_nnz = 3
+    cu_seqlens = torch.tensor([0, total_nnz], dtype=torch.int64)
+    input_ids_nested = torch.nested.nested_tensor_from_jagged(torch.arange(total_nnz), offsets=cu_seqlens)
+    micro_batch = TensorDict({"input_ids": input_ids_nested}, batch_size=[])
+    tu.assign_non_tensor(
+        micro_batch,
+        use_remove_padding=True,
+        pad_mode=DatasetPadMode.NO_PADDING,
+        use_fused_kernels=True,
+        calculate_entropy=False,
+        calculate_sum_pi_squared=False,
+        distillation_use_topk=True,
+    )
+    output = SimpleNamespace(
+        log_probs=torch.zeros(1, total_nnz), entropy=torch.zeros(1, total_nnz), fused_linear_aux=None
+    )
+
+    with pytest.raises(AssertionError, match="teacher_topk_ids/teacher_topk_log_probs"):
+        FSDPEngineWithLMHead.prepare_model_outputs(
+            _make_engine_stub(),
+            output=output,
+            output_args={
+                "input_ids_rmpad_rolled": torch.arange(total_nnz),
+                "temperature_rmpad": torch.ones(total_nnz),
+            },
+            micro_batch=micro_batch,
+            logits_processor_func=_make_logits_processor(()),
+        )
+
+
 def _nested_from_rows(rows):
     values = torch.tensor(rows)
     offsets = torch.tensor([0, len(rows)], dtype=torch.int64)

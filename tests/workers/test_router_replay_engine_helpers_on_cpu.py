@@ -37,7 +37,8 @@ multi-rank SP all-gather, end-to-end forward through the patched
 """
 
 import sys
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -108,6 +109,75 @@ def _make_engine_with_controller(
 @pytest.fixture
 def controller():
     return VeOmniRouterReplay()
+
+
+class TestVeOmniTopKDistillationInputs:
+    """Teacher top-k passthrough for VeOmni's fused distillation path."""
+
+    @staticmethod
+    def _make_engine() -> VeOmniEngineWithLMHead:
+        engine = _make_engine_with_controller(controller=None)
+        engine.use_ulysses_sp = False
+        engine.module = SimpleNamespace(config=SimpleNamespace(model_type="dummy"))
+        return engine
+
+    @staticmethod
+    def _base_prepare_outputs(total_nnz: int):
+        model_inputs = {
+            "input_ids": torch.arange(total_nnz, dtype=torch.int64).unsqueeze(0),
+            "attention_mask": None,
+            "position_ids": None,
+        }
+        output_args = {"input_ids_rmpad_rolled": torch.arange(total_nnz, dtype=torch.int64)}
+        return model_inputs, output_args
+
+    def test_prepare_model_inputs_forwards_nested_teacher_topk_and_clamp(self):
+        total_nnz, topk = 4, 2
+        offsets = torch.tensor([0, total_nnz], dtype=torch.int64)
+        teacher_ids_values = torch.arange(total_nnz * topk, dtype=torch.int64).reshape(total_nnz, topk)
+        teacher_logprobs_values = torch.randn(total_nnz, topk)
+        teacher_ids = torch.nested.nested_tensor_from_jagged(teacher_ids_values, offsets=offsets)
+        teacher_logprobs = torch.nested.nested_tensor_from_jagged(teacher_logprobs_values, offsets=offsets)
+        micro_batch = TensorDict(
+            {"teacher_ids": teacher_ids, "teacher_logprobs": teacher_logprobs},
+            batch_size=[],
+        )
+        micro_batch.set_non_tensor("use_remove_padding", True)
+        micro_batch.set_non_tensor("use_fused_kernels", True)
+        micro_batch.set_non_tensor("distillation_use_topk", True)
+        micro_batch.set_non_tensor("log_prob_min_clamp", -7.0)
+
+        with patch(
+            "verl.workers.engine.fsdp.transformer_impl.FSDPEngineWithLMHead.prepare_model_inputs",
+            return_value=self._base_prepare_outputs(total_nnz),
+        ):
+            model_inputs, _ = VeOmniEngineWithLMHead.prepare_model_inputs(self._make_engine(), micro_batch)
+
+        assert model_inputs["return_log_probs"] is True
+        assert torch.equal(model_inputs["teacher_topk_ids"], teacher_ids_values.unsqueeze(0))
+        assert torch.equal(model_inputs["teacher_topk_log_probs"], teacher_logprobs_values.unsqueeze(0))
+        assert model_inputs["log_prob_min_clamp"] == -7.0
+
+    def test_prepare_model_inputs_accepts_prermpad_teacher_topk_tensors(self):
+        total_nnz, topk = 4, 2
+        teacher_ids = torch.arange(total_nnz * topk, dtype=torch.int64).reshape(1, total_nnz, topk)
+        teacher_logprobs = torch.randn(1, total_nnz, topk)
+        micro_batch = TensorDict(
+            {"teacher_ids": teacher_ids, "teacher_logprobs": teacher_logprobs},
+            batch_size=[],
+        )
+        micro_batch.set_non_tensor("use_remove_padding", True)
+        micro_batch.set_non_tensor("use_fused_kernels", True)
+        micro_batch.set_non_tensor("distillation_use_topk", True)
+
+        with patch(
+            "verl.workers.engine.fsdp.transformer_impl.FSDPEngineWithLMHead.prepare_model_inputs",
+            return_value=self._base_prepare_outputs(total_nnz),
+        ):
+            model_inputs, _ = VeOmniEngineWithLMHead.prepare_model_inputs(self._make_engine(), micro_batch)
+
+        assert model_inputs["teacher_topk_ids"] is teacher_ids
+        assert model_inputs["teacher_topk_log_probs"] is teacher_logprobs
 
 
 # ===========================================================
