@@ -30,6 +30,13 @@ from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+DEFAULT_ALLOWED_ENDPOINTS = (
+    "classify",
+    "v1/embeddings",
+    "v1/chat/completions",
+    "v1/completions",
+)
+
 
 async def _read_async_response(resp: aiohttp.ClientResponse) -> dict[str, Any]:
     if resp.status == 204 or (resp.content_length == 0):
@@ -50,6 +57,7 @@ async def _read_async_response(resp: aiohttp.ClientResponse) -> dict[str, Any]:
 
 def launch_router_process(
     worker_urls: list[str],
+    allowed_endpoints: list[str] | tuple[str, ...] | None = None,
 ):
     router_ip = ray.util.get_node_ip_address().strip("[]")
     router_port, _ = get_free_port(router_ip)
@@ -63,6 +71,7 @@ def launch_router_process(
             router_ip,
             router_port,
             worker_urls,
+            allowed_endpoints,
         ),
     )
     router_process.daemon = True
@@ -74,8 +83,13 @@ def launch_router_process(
     return router_address, router_process
 
 
-def run_router(router_ip: str, router_port: int, worker_urls: list[str]):
-    router = NaiveRouter(worker_urls=worker_urls, verbose=False)
+def run_router(
+    router_ip: str,
+    router_port: int,
+    worker_urls: list[str],
+    allowed_endpoints: list[str] | tuple[str, ...] | None = None,
+):
+    router = NaiveRouter(worker_urls=worker_urls, allowed_endpoints=allowed_endpoints, verbose=False)
     uvicorn.run(router.app, host=router_ip, port=router_port, log_level="warning")
 
 
@@ -87,11 +101,11 @@ class NaiveRouter:
         timeout: int = 60,
         max_attempts: int = 3,
         retry_delay: float = 2.0,
+        allowed_endpoints: list[str] | tuple[str, ...] | None = None,
         verbose: bool = False,
     ) -> None:
         """A minimal async load-balancing router."""
         self.verbose = verbose
-        self.app = FastAPI()
         self.worker_urls = worker_urls
         self.request_counts = {url: 0 for url in worker_urls}
 
@@ -99,6 +113,9 @@ class NaiveRouter:
         self.timeout = timeout
         self.max_attempts = max_attempts
         self.retry_delay = retry_delay
+        self.allowed_endpoints = self._normalize_allowed_endpoints(
+            allowed_endpoints if allowed_endpoints is not None else DEFAULT_ALLOWED_ENDPOINTS
+        )
 
         self.app = FastAPI()
 
@@ -111,6 +128,28 @@ class NaiveRouter:
 
         # Placeholder for aiohttp client
         self.client = None
+
+    @staticmethod
+    def _normalize_allowed_endpoints(allowed_endpoints: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+        normalized_endpoints = []
+        for endpoint in allowed_endpoints:
+            endpoint = endpoint.strip().strip("/")
+            if endpoint:
+                normalized_endpoints.append(endpoint)
+        return tuple(normalized_endpoints)
+
+    def _is_endpoint_allowed(self, endpoint: str) -> bool:
+        endpoint = endpoint.strip("/")
+        for allowed in self.allowed_endpoints:
+            if allowed == "*":
+                return True
+            elif allowed.endswith("/*"):
+                prefix = allowed[:-1]
+                if endpoint.startswith(prefix):
+                    return True
+            elif endpoint == allowed:
+                return True
+        return False
 
     async def _on_startup(self):
         """Initialize aiohttp client safely inside the event loop"""
@@ -134,6 +173,9 @@ class NaiveRouter:
 
     async def _make_async_request(self, request: Request, endpoint: str):
         """Proxy single request to a worker URL."""
+        if not self._is_endpoint_allowed(endpoint):
+            return JSONResponse(status_code=403, content={"error": f"Endpoint '{endpoint}' is not allowed"})
+
         if not self.worker_urls:
             return JSONResponse(status_code=503, content={"error": "No available workers"})
 
