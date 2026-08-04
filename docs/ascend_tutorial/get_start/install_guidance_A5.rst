@@ -11,9 +11,9 @@ torch         ``2.10.0``                                        PyTorch 深度�
 torch_npu     待Q2 torch_npu版本正式商发后更新链接               NPU PyTorch 适配插件                                       
 triton        ``3.5.0``                                         Triton，用于编写自定义算子                                 
 triton-ascend ``3.2.2``                                         NPU Triton 适配                                            
-transformers  ``5.5.4``                                        Hugging Face 大模型库，提供模型架构与预训练权重            
+transformers  ``5.5.4``                                         Hugging Face 大模型库，提供模型架构与预训练权重            
 vLLM          ``0.23.0``                                        高性能 LLM 推理与服务引擎                                  
-vLLM-Ascend   ``0.23.0``      NPU vLLM 后端适配                                          
+vLLM-Ascend   ``0.23.0``                                        NPU vLLM 后端适配                                          
 Megatron-LM   ``core_r0.12.0``                                  大规模分布式训练框架                                       
 MindSpeed     ``0c6c0ceaa523a96032dee1539a52032155e6404e``      Megatron-LM 在昇腾 NPU 上的适配和优化组件                  
 ============= ================================================= ===================
