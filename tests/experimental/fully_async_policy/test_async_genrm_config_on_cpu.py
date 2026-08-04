@@ -12,17 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for async GenRM config validation logic (no GPU required).
+"""CPU unit tests for fully async policy utilities and GenRM config validation.
 
-Tests the config parsing and assertion logic added to FullyAsyncRollouter
-to support GenRM/DisRM in fully async training mode.
+Tests GenRM/DisRM config validation and rollout metric aggregation.
 """
 
 import unittest
 
+import numpy as np
 import pytest
+import torch
 from omegaconf import OmegaConf
+from tensordict import TensorDict
 
+from verl import DataProto
+from verl.experimental.fully_async_policy.detach_utils import (
+    MetricsAggregator,
+    RolloutSample,
+    assemble_batch_from_rollout_samples,
+)
 from verl.trainer.ppo.utils import need_reward_model
 
 
@@ -100,6 +108,48 @@ class TestAsyncRollouterRMAssert(unittest.TestCase):
         config = _make_config(reward_model_enable=True, enable_resource_pool=False)
         with pytest.raises(AssertionError, match="standalone mode"):
             self._validate_async_rm_config(config)
+
+
+def test_compute_score_metrics_are_preserved_and_aggregated():
+    compute_score_times = [0.25, 0.75]
+    full_batch = DataProto(
+        batch=TensorDict(
+            {"response_mask": torch.ones(2, 1, dtype=torch.long)},
+            batch_size=[2],
+        ),
+        non_tensor_batch={
+            "min_global_steps": np.array([1, 1]),
+            "max_global_steps": np.array([1, 2]),
+        },
+        meta_info={
+            "metrics": [
+                {"generate_sequences": 1.0, "tool_calls": 0.0, "compute_score": value} for value in compute_score_times
+            ]
+        },
+    )
+    rollout_sample = RolloutSample(full_batch, sample_id="sample-0", epoch=0, rollout_status={})
+
+    result = assemble_batch_from_rollout_samples([rollout_sample], tokenizer=None, config=None)
+
+    assert result.non_tensor_batch["compute_score_times"] == pytest.approx(compute_score_times)
+    assert result.meta_info["timing_s/agent_loop/compute_score/min"] == pytest.approx(0.25)
+    assert result.meta_info["timing_s/agent_loop/compute_score/mean"] == pytest.approx(0.5)
+    assert result.meta_info["timing_s/agent_loop/compute_score/max"] == pytest.approx(0.75)
+
+    aggregator = MetricsAggregator(total_gpus=1)
+    aggregator.add_step_metrics(result.meta_info, sample_count=2)
+    aggregator.add_step_metrics(
+        {
+            "timing_s/agent_loop/compute_score/min": 0.5,
+            "timing_s/agent_loop/compute_score/mean": 1.0,
+            "timing_s/agent_loop/compute_score/max": 1.5,
+        },
+        sample_count=2,
+    )
+    aggregated = aggregator.get_aggregated_metrics()
+    assert aggregated["timing_s/agent_loop/compute_score/min"] == pytest.approx(0.25)
+    assert aggregated["timing_s/agent_loop/compute_score/mean"] == pytest.approx(0.75)
+    assert aggregated["timing_s/agent_loop/compute_score/max"] == pytest.approx(1.5)
 
 
 if __name__ == "__main__":

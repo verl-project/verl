@@ -76,8 +76,10 @@ def addition_process(output: DataProto):
     metrics = output.meta_info.pop("metrics")  # List[Dict[str, str]]
     processing_times_list = [item["generate_sequences"] for item in metrics]
     tool_calls_times_list = [item["tool_calls"] for item in metrics]
+    compute_score_times_list = [item["compute_score"] for item in metrics]
     output.non_tensor_batch["processing_times"] = processing_times_list
     output.non_tensor_batch["tool_calls_times"] = tool_calls_times_list
+    output.non_tensor_batch["compute_score_times"] = compute_score_times_list
     return output
 
 
@@ -130,6 +132,7 @@ def assemble_batch_from_rollout_samples(
 
     processing_times = final_batch.non_tensor_batch["processing_times"]
     tool_calls = final_batch.non_tensor_batch["tool_calls_times"]
+    compute_score = final_batch.non_tensor_batch["compute_score_times"]
     # Collect statistics
     processing_time_stats = {
         "processing_time/avg": np.mean(processing_times),
@@ -145,6 +148,13 @@ def assemble_batch_from_rollout_samples(
             "timing_s/agent_loop/tool_calls/max": np.max(tool_calls),
             "timing_s/agent_loop/tool_calls/min": np.min(tool_calls),
             "timing_s/agent_loop/tool_calls/mean": np.mean(tool_calls),
+        }
+    compute_score_stats = {}
+    if len(compute_score) > 0:
+        compute_score_stats = {
+            "timing_s/agent_loop/compute_score/max": np.max(compute_score),
+            "timing_s/agent_loop/compute_score/min": np.min(compute_score),
+            "timing_s/agent_loop/compute_score/mean": np.mean(compute_score),
         }
     processing_time_stats = {f"fully_async/{key}": value for key, value in processing_time_stats.items()}
 
@@ -168,6 +178,7 @@ def assemble_batch_from_rollout_samples(
             **rollout_status,
             **partial_stats,
             **tool_calls_stats,
+            **compute_score_stats,
         }
     )
 
@@ -207,9 +218,18 @@ class MetricsAggregator:
         return {
             # Time-Based metrics, can add metrics here
             "time_sum": ["perf/time_per_step"],
-            "min": ["timing_s/agent_loop/tool_calls/min"],
-            "avg": ["timing_s/agent_loop/tool_calls/mean"],
-            "max": ["timing_s/agent_loop/tool_calls/max"],
+            "min": [
+                "timing_s/agent_loop/tool_calls/min",
+                "timing_s/agent_loop/compute_score/min",
+            ],
+            "avg": [
+                "timing_s/agent_loop/tool_calls/mean",
+                "timing_s/agent_loop/compute_score/mean",
+            ],
+            "max": [
+                "timing_s/agent_loop/tool_calls/max",
+                "timing_s/agent_loop/compute_score/max",
+            ],
             "last": [
                 "fully_async/count/total_generated_samples",
                 "fully_async/count/stale_samples_processed",
