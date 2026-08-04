@@ -172,6 +172,28 @@ def test_preprocess_thd_engine_pads_multidimensional_router_data(monkeypatch, cp
 
 
 @pytest.mark.parametrize(
+    ("cp_rank", "expected"),
+    [
+        (0, [2, 3, 1, 1]),
+        (1, [4, 5, 6, 7]),
+    ],
+)
+def test_preprocess_thd_engine_preserves_1d_zigzag_roll_alignment(monkeypatch, cp_rank, expected):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(
+        monkeypatch,
+        tp_size=1,
+        cp_size=2,
+        cp_rank=cp_rank,
+    )
+    labels = _nested_tensor([torch.arange(1, 8, dtype=torch.long)])
+
+    local_labels, packed_seq_params, _ = mcore_util.preprocess_thd_engine(labels, need_roll=True)
+
+    assert packed_seq_params.cu_seqlens_q_padded.tolist() == [0, 8]
+    torch.testing.assert_close(local_labels[0], torch.tensor(expected, dtype=torch.long))
+
+
+@pytest.mark.parametrize(
     ("cp_rank", "expected_ids", "expected_positions"),
     [
         (0, [10, 11, 12, 13, 14], [0, 1, 2, 3, 4]),
