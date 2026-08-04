@@ -82,7 +82,7 @@ class PolicyLossConfig(BaseConfig):
     The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
 
     Args:
-        loss_mode (str): Registered policy loss name, such as 'vanilla', 'importance_sampling', 'dro', or 'cispo'.
+        loss_mode (str): Registered policy loss name, such as 'vanilla', 'dro', or 'cispo'.
         clip_cov_ratio (float): Ratio of tokens to be clipped for clip-cov loss.
         clip_cov_lb (float): Lower bound for clip-cov loss.
         clip_cov_ub (float): Upper bound for clip-cov loss.

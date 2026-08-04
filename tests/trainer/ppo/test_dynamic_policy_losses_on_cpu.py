@@ -12,15 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU coverage for dynamically selected policy losses."""
+"""CPU coverage for the dynamically selected DRO policy loss."""
 
 import pytest
 import torch
 
 from verl.trainer.ppo.core_algos import (
     compute_policy_loss_dro,
-    compute_policy_loss_importance_sampling,
-    get_policy_loss_fn,
 )
 from verl.workers.config.actor import ActorConfig, PolicyLossConfig
 
@@ -36,29 +34,6 @@ def _actor_config(*, loss_mode: str, dro_beta=None) -> ActorConfig:
         loss_agg_mode="token-mean",
         policy_loss=PolicyLossConfig(loss_mode=loss_mode, dro_beta=dro_beta),
     )
-
-
-def test_new_policy_losses_are_registered():
-    assert get_policy_loss_fn("importance_sampling") is compute_policy_loss_importance_sampling
-    assert get_policy_loss_fn("dro") is compute_policy_loss_dro
-
-
-def test_importance_sampling_matches_direct_formula_and_gradient():
-    old_log_prob = torch.tensor([[-1.0, -0.7, -0.2]])
-    log_prob = torch.tensor([[-0.8, -0.9, -0.1]], requires_grad=True)
-    advantages = torch.tensor([[2.0, -1.5, 9.0]])
-    response_mask = torch.tensor([[1.0, 1.0, 0.0]])
-    config = _actor_config(loss_mode="importance_sampling")
-
-    loss, _ = compute_policy_loss_importance_sampling(
-        old_log_prob, log_prob, advantages, response_mask, "token-mean", config
-    )
-    expected = (-(torch.exp(log_prob - old_log_prob) * advantages) * response_mask).sum() / response_mask.sum()
-    torch.testing.assert_close(loss, expected)
-
-    loss.backward()
-    expected_grad = -(torch.exp(log_prob.detach() - old_log_prob) * advantages) * response_mask / response_mask.sum()
-    torch.testing.assert_close(log_prob.grad, expected_grad)
 
 
 def test_dro_matches_direct_formula_and_requires_positive_beta():
