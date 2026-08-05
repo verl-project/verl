@@ -1741,8 +1741,9 @@ class PPOTrainer(ABC):
         )
 
         num_turns = np.array(data.pop("num_turns").tolist())
+        raw_agent_loop_metrics = data.pop("metrics").tolist()
         agent_loop_metrics = [
-            metric for metric, is_valid in zip(data.pop("metrics"), non_padding_mask, strict=True) if is_valid
+            metric for metric, is_valid in zip(raw_agent_loop_metrics, non_padding_mask, strict=True) if is_valid
         ]
         prompt_length = data["prompts"].offsets().diff()
         response_length = data["responses"].offsets().diff()
