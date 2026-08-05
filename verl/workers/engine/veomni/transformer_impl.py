@@ -213,7 +213,7 @@ class VeOmniEngine(FSDPEngine):
         if self.enable_routing_replay:
             logger.info("VeOmniEngine: router_replay enabled, mode=%s", self._router_replay_mode)
 
-        self._init_packed_pad_state()
+        self.pad_to_length: bool = self.engine_config.pad_to_length
 
     def initialize(self):
         """

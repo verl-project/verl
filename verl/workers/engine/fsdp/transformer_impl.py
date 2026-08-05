@@ -166,7 +166,7 @@ class FSDPEngine(BaseEngine):
             else entropy_from_logits
         )
 
-        self._init_packed_pad_state()
+        self.pad_to_length: bool = self.engine_config.pad_to_length
 
     @property
     def is_param_offload_enabled(self) -> bool:
@@ -642,62 +642,13 @@ class FSDPEngine(BaseEngine):
     def get_context_parallel_group(self):
         raise NotImplementedError
 
-    def _init_packed_pad_state(self):
-        """Latch and validate ``pad_to_length``.
-
-        Called from each engine's ``__init__`` rather than done here once, because
-        ``VeOmniEngine`` subclasses ``FSDPEngine`` without going through its ``__init__``.
-        """
-        self.pad_to_length: bool = self.engine_config.pad_to_length
-        self._packed_pad_overflow_warned = False
-        if not self.pad_to_length:
-            return
-        if not self.use_remove_padding:
-            raise ValueError(
-                "pad_to_length requires use_remove_padding=True: without it the batch is "
-                "collated as dense (bsz, seqlen) rows, which have no packed length to pad."
-            )
-        if not self.engine_config.use_dynamic_bsz:
-            raise ValueError(
-                "pad_to_length requires use_dynamic_bsz=True: the static length is the "
-                "dynamic-batching token budget (max_token_len_per_gpu * sp_size), which only "
-                "exists under dynamic batching."
-            )
-
     def _get_packed_pad_size(self, micro_batch: TensorDict, packed_length: int) -> int:
-        """Extra right-padding that makes a packed micro-batch's shape static.
-
-        ``prepare_micro_batches`` splits a batch under a ``max_token_len_per_gpu * sp_size``
-        budget, which makes that budget the natural static length: it is identical for every
-        micro-batch of a pass, it is a multiple of ``sp_size`` so the Ulysses pad adds nothing on
-        top, and it follows the train / inference caps separately because the worker stores
-        whichever one applies under the same ``max_token_len_per_gpu`` key.
-
-        Sequence-length balancing partitions by attention workload rather than by token count, so
-        a skewed micro-batch can still overshoot the budget. Those keep their natural length --
-        one oddly-shaped micro-batch is cheaper than failing the step.
-        """
         if not self.pad_to_length:
             return 0
 
         max_token_len_per_gpu = tu.get_non_tensor_data(micro_batch, "max_token_len_per_gpu", default=None)
-        if max_token_len_per_gpu is None:
-            return 0
-
         target_length = int(max_token_len_per_gpu) * self.ulysses_sequence_parallel_size
         if packed_length > target_length:
-            if not self._packed_pad_overflow_warned:
-                self._packed_pad_overflow_warned = True
-                logger.warning(
-                    "pad_to_length: a micro-batch packs %d tokens, more than the %d-token budget "
-                    "(max_token_len_per_gpu=%d x sp_size=%d), so it is left unpadded and its shape "
-                    "stays dynamic. Raising max_token_len_per_gpu removes the overshoot. Further "
-                    "occurrences are not logged.",
-                    packed_length,
-                    target_length,
-                    max_token_len_per_gpu,
-                    self.ulysses_sequence_parallel_size,
-                )
             return 0
         return target_length - packed_length
 
