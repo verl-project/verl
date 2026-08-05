@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import logging
 import os
 from abc import ABC, abstractmethod
@@ -57,6 +58,20 @@ class RewardManagerBase(ABC):
     @abstractmethod
     async def run_single(self, data: DataProto):
         raise NotImplementedError
+
+    async def run_batch(self, data: DataProto) -> list[dict]:
+        """Compute reward for every sample in ``data`` and return a list aligned
+        with the input order.
+
+        Default implementation fans out to :meth:`run_single` per sample, so
+        subclasses that only implement ``run_single`` inherit batch semantics
+        equivalent to the legacy ``RewardLoopWorker.compute_score_batch``
+        per-sample fan-out. Subclasses can override this to consume the full
+        batch in one call (e.g. to leverage ``tokenizer.batch_decode`` and a
+        batched user ``compute_score``).
+        """
+        tasks = [asyncio.create_task(self.run_single(data[i : i + 1])) for i in range(len(data))]
+        return list(await asyncio.gather(*tasks))
 
     @classmethod
     def assemble_rm_scores(cls, data: DataProto, scores: list[float]) -> torch.Tensor:
