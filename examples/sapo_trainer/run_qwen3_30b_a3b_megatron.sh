@@ -125,9 +125,19 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.param_offload=True
     actor_rollout_ref.actor.megatron.optimizer_offload=True
     actor_rollout_ref.actor.megatron.grad_offload=True
+    # megatron.optimizer_offload alone does not move the distributed optimizer
+    # state off-device: without these, Adam lazily allocates exp_avg/exp_avg_sq
+    # on the accelerator during the first step() and a 30B MoE runs out of
+    # memory there.
+    +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=True
+    +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=1
+    +actor_rollout_ref.actor.optim.override_optimizer_config.overlap_cpu_optimizer_d2h_h2d=True
+    +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
+    +actor_rollout_ref.actor.megatron.override_transformer_config.gradient_accumulation_fusion=True
+    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=True
     # 128 experts without fp32 routing is numerically fragile (Megatron warns).
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32
 )
