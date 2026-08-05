@@ -14,13 +14,11 @@
 
 """Static packed-sequence padding (``pad_to_length``) for the FSDP and VeOmni engines.
 
-Covers the four pieces that make a packed micro-batch shape-stable:
+Covers the three pieces that make a packed micro-batch shape-stable:
 
 * ``pad_packed_inputs`` — the tensor-level right-pad, including the
   ``position_ids`` convention that turns the pad into its own varlen
   segment instead of an extension of the last real sequence.
-* ``FSDPEngine._init_packed_pad_state`` — the config validation both
-  engines share.
 * ``FSDPEngine._get_packed_pad_size`` — how the target length is
   derived from the dynamic-batching token budget, and the overshoot
   fallback. Lives on the FSDP base, so ``VeOmniEngine`` inherits it.
@@ -34,7 +32,6 @@ plain CPU unit-test image.
 """
 
 import sys
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -66,8 +63,7 @@ from verl.workers.engine.veomni.transformer_impl import VeOmniEngineWithLMHead  
 
 def _make_micro_batch(max_token_len_per_gpu) -> TensorDict:
     td = TensorDict({}, batch_size=[])
-    if max_token_len_per_gpu is not None:
-        td.set_non_tensor("max_token_len_per_gpu", max_token_len_per_gpu)
+    td.set_non_tensor("max_token_len_per_gpu", max_token_len_per_gpu)
     return td
 
 
@@ -79,24 +75,11 @@ ENGINE_CLASSES = pytest.mark.parametrize(
 
 
 def _make_engine(engine_cls, pad_to_length: bool, sp_size: int = 1):
-    """Bare instance — ``_get_packed_pad_size`` only reads the three attributes set here,
+    """Bare instance — ``_get_packed_pad_size`` only reads the two attributes set here,
     and a real ``__init__`` would need a process group and VeOmni's parallel_state."""
     engine = engine_cls.__new__(engine_cls)
     engine.pad_to_length = pad_to_length
     engine.ulysses_sequence_parallel_size = sp_size
-    engine._packed_pad_overflow_warned = False
-    return engine
-
-
-def _init_pad_state(engine_cls, **config_overrides):
-    """Run the shared validation with a stub engine_config."""
-    engine = engine_cls.__new__(engine_cls)
-    engine.use_remove_padding = config_overrides.pop("use_remove_padding", True)
-    engine.engine_config = SimpleNamespace(
-        pad_to_length=config_overrides.pop("pad_to_length", True),
-        use_dynamic_bsz=config_overrides.pop("use_dynamic_bsz", True),
-    )
-    engine._init_packed_pad_state()
     return engine
 
 
@@ -143,26 +126,10 @@ class TestPadPackedInputs:
 
 
 @ENGINE_CLASSES
-class TestInitPackedPadState:
-    """Both engines run the same validation — ``VeOmniEngine`` subclasses ``FSDPEngine``
-    without going through its ``__init__``, so each calls the helper itself."""
-
-    def test_disabled_skips_validation(self, engine_cls):
-        engine = _init_pad_state(engine_cls, pad_to_length=False, use_dynamic_bsz=False)
-
-        assert engine.pad_to_length is False
-
-    def test_requires_remove_padding(self, engine_cls):
-        with pytest.raises(ValueError, match="requires use_remove_padding"):
-            _init_pad_state(engine_cls, use_remove_padding=False)
-
-    def test_requires_dynamic_bsz(self, engine_cls):
-        with pytest.raises(ValueError, match="requires use_dynamic_bsz"):
-            _init_pad_state(engine_cls, use_dynamic_bsz=False)
-
-
-@ENGINE_CLASSES
 class TestGetPackedPadSize:
+    """``VeOmniEngine`` subclasses ``FSDPEngine`` without going through its ``__init__``,
+    so both engines are checked against the same inherited helper."""
+
     def test_disabled_returns_zero(self, engine_cls):
         engine = _make_engine(engine_cls, pad_to_length=False)
 
@@ -185,21 +152,14 @@ class TestGetPackedPadSize:
 
         assert engine._get_packed_pad_size(_make_micro_batch(1024), 1024) == 0
 
-    def test_overshooting_micro_batch_is_left_unpadded_and_warns_once(self, engine_cls, caplog):
+    def test_overshooting_micro_batch_is_left_unpadded(self, engine_cls):
         """Sequence-length balancing partitions by attention workload, not token count, so a
-        skewed micro-batch can exceed the budget. That must not fail the step."""
+        skewed micro-batch can exceed the budget. Those keep their natural length — one
+        oddly-shaped micro-batch is cheaper than failing the step."""
         engine = _make_engine(engine_cls, pad_to_length=True)
 
-        with caplog.at_level("WARNING"):
-            assert engine._get_packed_pad_size(_make_micro_batch(1024), 1100) == 0
-            assert engine._get_packed_pad_size(_make_micro_batch(1024), 1200) == 0
-
-        assert sum("pad_to_length" in record.message for record in caplog.records) == 1
-
-    def test_missing_budget_returns_zero(self, engine_cls):
-        engine = _make_engine(engine_cls, pad_to_length=True)
-
-        assert engine._get_packed_pad_size(_make_micro_batch(None), 700) == 0
+        assert engine._get_packed_pad_size(_make_micro_batch(1024), 1100) == 0
+        assert engine._get_packed_pad_size(_make_micro_batch(1024), 1200) == 0
 
 
 @ENGINE_CLASSES
