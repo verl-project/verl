@@ -25,11 +25,10 @@ from typing import Any, Literal, Optional, get_args
 import torch
 from vllm.outputs import RequestOutput
 
-from verl.plugin.platform import get_platform
-from verl.utils.device import is_npu_available
+from verl.utils.device import get_device_name, is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
-from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches, is_fp8_model, load_quanted_weights
+from verl.utils.vllm.vllm_quant_utils import apply_vllm_quant_patches, is_fp8_model, load_quanted_weights
 from verl.workers.rollout.vllm_rollout.weight_update_utils import apply_buffer_updates, split_buffer_updates
 
 logger = logging.getLogger(__file__)
@@ -77,24 +76,6 @@ def set_death_signal():
     libc.prctl(1, signal.SIGKILL)
     if os.getppid() == 1:
         os.kill(os.getpid(), signal.SIGKILL)
-
-
-def get_device_uuid(device_id: int) -> str:
-    from vllm.platforms import current_platform
-
-    # Convert torch.npu.current_device to its corresponding ASCEND_RT_VISIBLE_DEVICES.
-    if is_npu_available:
-        if os.getenv("ASCEND_RT_VISIBLE_DEVICES") is not None:
-            npu_visible_devices = os.environ["ASCEND_RT_VISIBLE_DEVICES"].split(",")
-            assert device_id < len(npu_visible_devices), f"device_id {device_id} must less than {npu_visible_devices}"
-            return "NPU-" + npu_visible_devices[device_id]
-        else:
-            return f"NPU-{device_id}"
-    else:
-        try:
-            return current_platform.get_device_uuid(device_id)
-        except Exception:
-            return get_platform().get_device_uuid(device_id=device_id)
 
 
 def get_vllm_max_lora_rank(lora_rank: int):
@@ -179,7 +160,7 @@ class vLLMColocateWorkerExtension:
         # 2. patch online fp8 quant. Some models, including DeepSeek-V4, get
         # fp8 from the HF config rather than an explicit rollout quantization arg.
         if os.environ.get("VERL_VLLM_FP8_QUANT_ENABLED", "0") == "1" or is_fp8_model(vllm_config):
-            apply_vllm_fp8_patches()
+            apply_vllm_quant_patches()
         # 3. patch QAT (compressed-tensors NVFP4) for dynamic weight loading
         quant_config = getattr(vllm_config, "quant_config", None) if vllm_config else None
         _is_qat_model = getattr(quant_config, "quant_format", None) == "nvfp4-pack-quantized"
@@ -250,13 +231,12 @@ class vLLMColocateWorkerExtension:
 
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
-        from vllm.platforms import current_platform
-
         from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
 
-        if current_platform.device_type == "npu" and self.device is None:
-            self.device = torch.device(f"npu:{self.local_rank}")
-        assert self.device is not None
+        if self.device is None:
+            # vLLM workers may leave self.device unset on non-CUDA platforms (e.g. NPU);
+            # fall back to the worker's local rank on the current accelerator.
+            self.device = torch.device(f"{get_device_name()}:{self.local_rank}")
 
         # =========================== step 1: prepare for weight loading ===========================
         quant_reload_states = None
@@ -279,7 +259,7 @@ class vLLMColocateWorkerExtension:
             self.remove_lora(VLLM_LORA_INT_ID)
             logger.info("LoRA adapter sync: remove old lora and prepare new lora")
         elif is_fp8_model(self.model_runner.vllm_config):
-            from verl.utils.vllm.vllm_fp8_utils import prepare_quanted_weights_for_loading
+            from verl.utils.vllm.vllm_quant_utils import prepare_quanted_weights_for_loading
 
             quant_reload_states = [
                 (model, prepare_quanted_weights_for_loading(model)) for model in self._iter_all_models()
@@ -319,7 +299,7 @@ class vLLMColocateWorkerExtension:
         elif peft_config and base_sync_done:
             logger.info("LoRA adapter sync, no post-process needed")
         elif is_fp8_model(self.model_runner.vllm_config):
-            from verl.utils.vllm.vllm_fp8_utils import process_quanted_weights_after_loading
+            from verl.utils.vllm.vllm_quant_utils import process_quanted_weights_after_loading
 
             for model, reload_state in quant_reload_states:
                 process_quanted_weights_after_loading(model, reload_state)

@@ -51,7 +51,7 @@ from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_config
-from verl.workers.rollout.sglang_rollout.utils import SGLANG_LORA_NAME
+from verl.workers.rollout.sglang_rollout.utils import SGLANG_LORA_NAME, lora_served_as_adapter
 from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
 
 logger = logging.getLogger(__file__)
@@ -322,7 +322,7 @@ class SGLangHttpServer:
         }
 
         # update lora-related args
-        if self.model_config.lora_rank > 0:
+        if self.lora_as_adapter:
             args.update(
                 {
                     "enable_lora": True,
@@ -478,9 +478,8 @@ class SGLangHttpServer:
 
     @property
     def lora_as_adapter(self) -> bool:
-        return (
-            self.model_config.lora_rank > 0 or self.model_config.lora.get("rank", 0) > 0
-        ) and not self.model_config.lora.get("merge", False)
+        """See :func:`verl.workers.rollout.sglang_rollout.utils.lora_served_as_adapter`."""
+        return lora_served_as_adapter(self.model_config)
 
     async def sleep(self):
         if self.node_rank != 0 or not self.config.free_cache_engine:
@@ -629,7 +628,7 @@ class SGLangHttpServer:
         generate_request = GenerateReqInput(**request)
 
         # Add lora request
-        if self.model_config.lora_rank > 0:
+        if self.lora_as_adapter:
             generate_request.lora_path = SGLANG_LORA_NAME
 
         with RLInsightLogger.trace_state("sglang_generate", state_lane_id=f"replica_{self.replica_rank}"):

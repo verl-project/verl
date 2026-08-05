@@ -758,6 +758,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             return metrics or {}
 
         set_expandable_segments(False)
+        aggressive_empty_cache(force_sync=True)
         log_gpu_memory_usage("Before resume weights", logger=logger)
 
         # 1. resume rollout memory (weights were released during sleep)

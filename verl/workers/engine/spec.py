@@ -76,10 +76,11 @@ class ShardSpec:
     contributes: bool = True
     # Optional dim-0-separable converter: ``to_hf_chunk(dim0_start, segment)`` converts a
     # contiguous dim-0 segment ``full[dim0_start : dim0_start + segment.shape[0]]`` of the
-    # logical tensor to ``[(hf_name, hf_tensor)]``. When set on a block-converter spec the
-    # engine rebuilds and converts in bounded dim-0 segments instead of materializing the
-    # whole logical tensor on rank 0 (e.g. a fused expert stack: each segment is a run of
-    # whole experts and the converter only needs the segment plus its starting expert id).
+    # logical tensor to ``[(hf_name, hf_tensor)]``. Consumed by the SENDER-side NaN row
+    # probe (see the veomni backend's ``convert_row_to_hf``): each rank converts only its
+    # own touched dim-0 rows, so no rank ever materializes the whole logical tensor (e.g.
+    # a fused expert stack: each segment is a run of whole experts and the converter only
+    # needs the segment plus its starting expert id).
     to_hf_chunk: Optional[Callable[[int, torch.Tensor], list[tuple[str, torch.Tensor]]]] = None
     # Optional full slot enumeration for dim-0-separable converters: one
     # ``(hf_name, hf_shape)`` per converter output, in dim-0 order and matching

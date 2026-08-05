@@ -365,7 +365,11 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             # If we have a custom model, we copy the file defining it in the folder and set the attributes so it can be
             # loaded from the Hub.
             if hasattr(model_config, "auto_map"):
-                custom_object_save(unwrap_model, hf_config_tokenizer_path, config=model_config)
+                # custom_object_save copies the source of type(obj).__module__, so it needs the base
+                # model's module. For a PEFT model unwrap_model is the PeftModel wrapper, so unwrap it
+                # first; get_base_model() is peft-only (a plain model lacks it and is passed through).
+                save_obj = unwrap_model.get_base_model() if hasattr(unwrap_model, "get_base_model") else unwrap_model
+                custom_object_save(save_obj, hf_config_tokenizer_path, config=model_config)
 
             # Also save runtime FSDP config
             fsdp_config_path = os.path.join(local_path, "fsdp_config.json")

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU tests for fused-MoE handling in ``verl/utils/vllm/vllm_fp8_utils.py``.
+"""CPU tests for fused-MoE handling in ``verl/utils/vllm/vllm_quant_utils.py``.
 
 vLLM 0.24.0 (MoE refactor, vllm-project/vllm#41184) turned ``FusedMoE`` from an
 ``nn.Module`` class into a factory *function* that returns a ``MoERunner``, and
@@ -32,15 +32,16 @@ from pathlib import Path
 import torch
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_MODULE_PATH = _REPO_ROOT / "verl/utils/vllm/vllm_fp8_utils.py"
+_VLLM_UTILS_DIR = _REPO_ROOT / "verl/utils/vllm"
+_MODULE_PATH = _VLLM_UTILS_DIR / "vllm_quant_utils.py"
 
 
 def _make_module(name: str) -> types.ModuleType:
     return types.ModuleType(name)
 
 
-def _load_fp8_utils(fused_moe_is_function: bool):
-    """Load ``vllm_fp8_utils`` with vLLM/verl heavyweight deps stubbed.
+def _load_quant_utils(fused_moe_is_function: bool):
+    """Load ``vllm_quant_utils`` with vLLM/verl heavyweight deps stubbed.
 
     Args:
         fused_moe_is_function: when True, emulate vLLM >= 0.24 where ``FusedMoE``
@@ -103,16 +104,12 @@ def _load_fp8_utils(fused_moe_is_function: bool):
     fake_kernel = _make_module("verl.utils.kernel.fp8_kernel")
     fake_kernel.scaled_fp8_blockwise = lambda *a, **k: (None, None)
 
-    fake_dsv4 = _make_module("verl.utils.vllm.vllm_dsv4_fp8_utils")
-    for fn in (
-        "cache_deepseek_v4_dense_fp8_scales",
-        "is_deepseek_v4_model",
-        "iter_deepseek_v4_weights",
-        "prepare_deepseek_v4_weights_for_loading",
-        "process_deepseek_v4_weights_after_loading",
-        "reload_deepseek_v4_dense_fp8_scales",
-    ):
-        setattr(fake_dsv4, fn, lambda *a, **k: None)
+    # The vllm_fp8_utils / vllm_fp4_utils siblings only touch vLLM inside
+    # function bodies, so they can be imported for real. Stub the package
+    # ``__init__`` (which does pull heavyweight deps) but point its search path
+    # at the real directory so the submodule imports still resolve.
+    fake_vllm_pkg = _make_module("verl.utils.vllm")
+    fake_vllm_pkg.__path__ = [str(_VLLM_UTILS_DIR)]
 
     fakes = {
         "vllm": _make_module("vllm"),
@@ -123,18 +120,23 @@ def _load_fp8_utils(fused_moe_is_function: bool):
         "vllm.model_executor.layers.linear": linear_mod,
         "verl.utils.kernel": _make_module("verl.utils.kernel"),
         "verl.utils.kernel.fp8_kernel": fake_kernel,
-        "verl.utils.vllm": _make_module("verl.utils.vllm"),
-        "verl.utils.vllm.vllm_dsv4_fp8_utils": fake_dsv4,
+        "verl.utils.vllm": fake_vllm_pkg,
     }
 
     saved = {name: sys.modules.get(name) for name in fakes}
+    preexisting = set(sys.modules)
     try:
         sys.modules.update(fakes)
-        spec = importlib.util.spec_from_file_location("verl_vllm_fp8_utils_under_test", _MODULE_PATH)
+        spec = importlib.util.spec_from_file_location("verl_vllm_quant_utils_under_test", _MODULE_PATH)
         module = importlib.util.module_from_spec(spec)
         assert spec is not None and spec.loader is not None
         spec.loader.exec_module(module)
     finally:
+        # The sibling modules imported above are bound to the stubbed package,
+        # so drop them rather than leave them for the next importer.
+        for name in set(sys.modules) - preexisting:
+            if name.startswith("verl.utils.vllm."):
+                sys.modules.pop(name, None)
         for name, prev in saved.items():
             if prev is None:
                 sys.modules.pop(name, None)
@@ -176,7 +178,7 @@ def _build_model(ns: dict, moe_dtype=torch.float8_e4m3fn):
 
 def test_new_vllm_resolves_routed_experts_and_does_not_crash():
     """vLLM >= 0.24: per-expert names must resolve to RoutedExperts, no TypeError."""
-    mod, ns = _load_fp8_utils(fused_moe_is_function=True)
+    mod, ns = _load_quant_utils(fused_moe_is_function=True)
     model = _build_model(ns)
 
     routed_experts = model.model.layers[0].mlp.experts.routed_experts
@@ -198,7 +200,7 @@ def test_new_vllm_resolves_routed_experts_and_does_not_crash():
 
 
 def test_new_vllm_is_fp8_weight_detects_moe_and_linear():
-    mod, ns = _load_fp8_utils(fused_moe_is_function=True)
+    mod, ns = _load_quant_utils(fused_moe_is_function=True)
     model = _build_model(ns, moe_dtype=torch.float8_e4m3fn)
 
     mod.fp8_state.seen_params.clear()
@@ -213,7 +215,7 @@ def test_new_vllm_is_fp8_weight_detects_moe_and_linear():
 
 
 def test_new_vllm_bf16_experts_not_flagged_fp8():
-    mod, ns = _load_fp8_utils(fused_moe_is_function=True)
+    mod, ns = _load_quant_utils(fused_moe_is_function=True)
     model = _build_model(ns, moe_dtype=torch.bfloat16)
 
     mod.fp8_state.seen_params.clear()
@@ -224,7 +226,7 @@ def test_new_vllm_bf16_experts_not_flagged_fp8():
 
 def test_old_vllm_fusedmoe_class_still_supported():
     """vLLM < 0.24: FusedMoE is an nn.Module class holding the weights."""
-    mod, ns = _load_fp8_utils(fused_moe_is_function=False)
+    mod, ns = _load_quant_utils(fused_moe_is_function=False)
     model = _build_model(ns, moe_dtype=torch.float8_e4m3fn)
 
     assert ns["FusedMoE"] in mod._EXPERT_WEIGHT_CLASSES

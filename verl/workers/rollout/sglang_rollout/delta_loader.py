@@ -41,11 +41,14 @@ Register at server launch (verl config)::
 from __future__ import annotations
 
 import json
+import logging
 import math
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 # Cap on the densified tensors handed to one model.load_weights call, matching
 # SGLang's own delta-apply chunking default.
@@ -74,6 +77,9 @@ def apply_delta(model: torch.nn.Module, named_tensors: Iterable[tuple[str, torch
         )
 
     if spec["encoding"] == "dense":
+        if spec.get("verify"):
+            _verify_dense(model, spec["params"], values, bool(spec.get("is_last")))
+            return
         _apply_dense(model, spec["params"], values)
         return
 
@@ -108,6 +114,64 @@ def _apply_dense(model: torch.nn.Module, params: list[dict], values: torch.Tenso
         chunk_bytes += nbytes
     if chunk:
         model.load_weights(chunk)
+
+
+_VERIFY_STATS: dict = {"params": 0, "pieces": []}
+
+
+def _verify_dense(model: torch.nn.Module, params: list[dict], values: torch.Tensor, is_last: bool) -> None:
+    """State-equivalence sweep, phrased as an IDEMPOTENCE check: replaying the
+    trainer's FULL current weights onto an in-sync server must be a no-op. For
+    each parameter we snapshot every ``copy_`` destination (the exact internal
+    slices sglang's own ``load_weights`` name-mapping resolves) BEFORE the
+    load, run the real load path -- including multi-stage loaders that first
+    write raw values and then transform in place (e.g. mamba's
+    ``A = -exp(A_log)`` composed loader) -- and bit-compare the post-load state
+    against the snapshot. Any changed element means the server's
+    delta-accumulated state disagreed with the trainer's; that fails loud.
+    Comparing per copy_ call instead would false-positive on every
+    transform-loaded param (raw-vs-transformed at each stage)."""
+    orig_copy = torch.Tensor.copy_
+
+    by_param = _VERIFY_STATS.setdefault("by_param", {})
+    for p in params:
+        touched: dict = {}
+
+        def snap_then_copy_(self: torch.Tensor, src: torch.Tensor, *args, _touched=touched, **kwargs) -> torch.Tensor:
+            key = (self.data_ptr(), self.numel(), self.dtype)
+            if key not in _touched:
+                _touched[key] = (self, self.detach().clone())
+            return orig_copy(self, src, *args, **kwargs)
+
+        torch.Tensor.copy_ = snap_then_copy_
+        try:
+            _apply_dense(model, [p], values)
+        finally:
+            torch.Tensor.copy_ = orig_copy
+        bad = 0
+        for dst, pre in touched.values():
+            if dst.is_floating_point() and dst.element_size() == 2:
+                bad += int((dst.view(torch.int16) != pre.view(torch.int16)).sum())
+            else:
+                bad += int((dst != pre).sum())
+        if bad:
+            by_param[p["name"]] = by_param.get(p["name"], 0) + bad
+        _VERIFY_STATS["pieces"].append(bad)
+    _VERIFY_STATS["params"] += len(params)
+    if is_last:
+        total = sum(_VERIFY_STATS["pieces"])
+        n = _VERIFY_STATS["params"]
+        _VERIFY_STATS["params"] = 0
+        _VERIFY_STATS["pieces"] = []
+        offenders = _VERIFY_STATS.pop("by_param", {})
+        top = sorted(offenders.items(), key=lambda kv: -kv[1])[:12]
+        logger.warning("DELTA-VERIFY sweep: params=%d mismatch_elems=%d offenders=%s", n, total, top)
+        if total:
+            raise RuntimeError(
+                f"delta state verification FAILED: {total} elements differ between the "
+                f"server's delta-accumulated weights and the trainer's full export; "
+                f"top offenders: {top}"
+            )
 
 
 def _decode_one(encoding: str, positions: torch.Tensor, values: torch.Tensor, p: dict) -> torch.Tensor:

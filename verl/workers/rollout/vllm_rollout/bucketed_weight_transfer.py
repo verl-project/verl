@@ -27,7 +27,7 @@ import torch
 import zmq
 from torch.multiprocessing.reductions import reduce_tensor
 
-from verl.utils.device import get_device_id, get_device_name, get_torch_device
+from verl.utils.device import get_device_id, get_device_name, get_torch_device, is_support_ipc
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -212,7 +212,8 @@ class BucketedWeightSender:
             del self.shm
             self.shm = None
         gc.collect()
-        get_torch_device().ipc_collect()
+        if is_support_ipc():
+            get_torch_device().ipc_collect()
         get_torch_device().empty_cache()
 
     def _direct_send_large_weight(self, name: str, weight: torch.Tensor):
@@ -331,5 +332,6 @@ class BucketedWeightReceiver:
             del self.shm
             self.shm = None
         gc.collect()
-        get_torch_device().ipc_collect()
+        if is_support_ipc():
+            get_torch_device().ipc_collect()
         get_torch_device().empty_cache()

@@ -14,7 +14,7 @@
 
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Callable, Optional, Sequence
 
 import torch
@@ -26,6 +26,7 @@ from veomni.distributed import parallel_state
 from veomni.distributed.offloading import build_activation_offloading_context
 from veomni.distributed.torch_parallelize import build_parallelize_model
 from veomni.models.auto import build_foundation_model
+from veomni.models.checkpoint_tensor_loading import get_checkpoint_tensor_converter
 from veomni.optim import build_lr_scheduler, build_optimizer
 from veomni.utils.seqlen_pos_transform_utils import prepare_fa_kwargs_from_position_ids
 
@@ -48,9 +49,9 @@ from ..base import BaseEngineCtx, EngineRegistry
 from ..fsdp.transformer_impl import FSDPEngine, FSDPEngineWithLMHead, FSDPEngineWithValueHead
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
 from .utils import (
-    MOE_PARAM_HANDERS,
     VL_TYPE2INDEX,
-    default_moe_param_handler,
+    get_moe_param_handler,
+    load_safetensors_index,
     load_veomni_model_to_gpu,
     load_veomni_optimizer,
     offload_veomni_model_to_cpu,
@@ -58,6 +59,40 @@ from .utils import (
 )
 
 logger = logging.getLogger(__file__)
+
+
+def _build_ops_implementation_config(engine_config: VeOmniEngineConfig) -> OpsImplementationConfig:
+    """Forward every ``*_implementation`` selector that the installed VeOmni accepts.
+
+    ``VeOmniEngineConfig`` mirrors VeOmni's ``OpsImplementationConfig`` field by field, so a
+    verl build newer than the installed VeOmni would pass unknown keyword arguments and fail
+    in the constructor. A selector the installed VeOmni does not know is skipped while it is
+    still at its verl default, and rejected otherwise, so a kernel the user explicitly asked
+    for is never silently downgraded to whatever that VeOmni version does by default.
+    """
+    accepted = {f.name for f in fields(OpsImplementationConfig)}
+
+    kwargs, unsupported, skipped = {}, {}, []
+    for f in fields(engine_config):
+        if not f.name.endswith("_implementation"):
+            continue
+        value = getattr(engine_config, f.name)
+        if f.name in accepted:
+            kwargs[f.name] = value
+        elif value != f.default:
+            unsupported[f.name] = value
+        else:
+            skipped.append(f.name)
+
+    if unsupported:
+        raise ValueError(
+            f"The installed VeOmni's OpsImplementationConfig has no {sorted(unsupported)}, but "
+            f"they were explicitly set to {unsupported}. Upgrade VeOmni or unset these options."
+        )
+    if skipped:
+        logger.info(f"Skipping {sorted(skipped)}: unknown to the installed VeOmni, left at the verl default.")
+
+    return OpsImplementationConfig(**kwargs)
 
 
 class VeOmniEngine(FSDPEngine):
@@ -271,18 +306,7 @@ class VeOmniEngine(FSDPEngine):
         # build_foundation_model runs apply_ops_config(ops_implementation)
         # before constructing the model, so per-model device_patch files see
         # the resolved kernel backends.
-        ops_implementation = OpsImplementationConfig(
-            attn_implementation=self.engine_config.attn_implementation,
-            moe_implementation=self.engine_config.moe_implementation,
-            cross_entropy_loss_implementation=self.engine_config.cross_entropy_loss_implementation,
-            rms_norm_implementation=self.engine_config.rms_norm_implementation,
-            swiglu_mlp_implementation=self.engine_config.swiglu_mlp_implementation,
-            rotary_pos_emb_implementation=self.engine_config.rotary_pos_emb_implementation,
-            load_balancing_loss_implementation=self.engine_config.load_balancing_loss_implementation,
-            rms_norm_gated_implementation=self.engine_config.rms_norm_gated_implementation,
-            causal_conv1d_implementation=self.engine_config.causal_conv1d_implementation,
-            chunk_gated_delta_rule_implementation=self.engine_config.chunk_gated_delta_rule_implementation,
-        )
+        ops_implementation = _build_ops_implementation_config(self.engine_config)
 
         veomni_mixed_precision_config = MixedPrecisionConfig(enable=self.engine_config.mixed_precision)
 
@@ -312,6 +336,8 @@ class VeOmniEngine(FSDPEngine):
             ),
             enable_reentrant=self.engine_config.enable_reentrant,
             enable_forward_prefetch=self.engine_config.forward_prefetch,
+            broadcast_model_weights_from_rank0=True,
+            fqn_to_index_mapping=load_safetensors_index(self.model_config.local_path),
         )
         log_gpu_memory_usage("After parallelize model", logger=logger)
 
@@ -626,10 +652,15 @@ class VeOmniEngine(FSDPEngine):
     def get_per_tensor_param(self, **kwargs):
         # FSDP2 CPUOffloadPolicy owns CPU<->accelerator placement; calling model.to(device)
         # here leaves the module half-moved and crashes state_dict() below (#5995). The
-        # per-DTensor full_tensor() in param_generator() below still yields accelerator
-        # tensors, so the manual whole-model move is unnecessary under CPU offload.
+        # per-DTensor .to(device).full_tensor() in param_generator() below stages each
+        # shard instead, so the manual whole-model move is unnecessary under CPU offload.
         if not getattr(self, "_uses_fsdp2_cpu_offload_policy", False):
             load_veomni_model_to_gpu(self.module)
+
+        # TODO: currently only for DeepseekV4, unify all models to export weights by converter.
+        converter = get_checkpoint_tensor_converter(self.module)
+        if converter is not None and hasattr(converter, "export_weights"):
+            return converter.export_weights(self.module), None
 
         params = self.module.state_dict()
         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
@@ -639,11 +670,15 @@ class VeOmniEngine(FSDPEngine):
 
         ps = parallel_state.get_parallel_state()
         model_type = getattr(self.module.config, "model_type", "default")
-        process_func = MOE_PARAM_HANDERS.get(model_type, default_moe_param_handler)
+        process_func = get_moe_param_handler(model_type, ps.ep_enabled)
+
+        device = get_device_id()  # used when fsdp2 set cpu_offload_policy
 
         def param_generator():
             for name, param in params.items():
-                unsharded_tensor = param.full_tensor() if isinstance(param, DTensor) else param
+                unsharded_tensor = (
+                    param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
+                )
 
                 is_expert_layer = "mlp.experts." in name
                 is_proj = any(p in name for p in ["down_proj", "gate_proj", "up_proj", "gate_up_proj"])

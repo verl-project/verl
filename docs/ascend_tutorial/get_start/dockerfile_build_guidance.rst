@@ -9,9 +9,9 @@ Last updated: 06/23/2026.
 
 昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3 镜像，基于 `Dockerfile <../../../docker/ascend>`_ 构建，具体说明见 :ref:`Dockerfile构建镜像脚本清单 <ascend-dockerfile-list>`。
 
-每日构建镜像名格式：latest-{CANN版本}-{torch_npu版本}[-{适用产品信息}-{操作系统}]-{Python版本}[-{推理后端}-{其他字段}]
+每日构建镜像名格式：latest-{推理后端}-{适用产品信息}-{操作系统}-{其他字段}
 
-verl release版本镜像名格式：{verl release版本号}-{CANN版本}-{torch_npu版本}[-{适用产品信息}-{操作系统}]-{Python版本}[-{推理后端}-{其他字段}]
+verl release版本镜像名格式：{verl release版本号}-{CANN版本}-{TorchNPU版本}[-{适用产品信息}-{操作系统}]-{Python版本}[-{推理后端}-{其他字段}]
 
 
 

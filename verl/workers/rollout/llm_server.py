@@ -319,6 +319,18 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                 else:
                     raise
 
+    def _configured_response_length(self) -> Optional[int]:
+        """Per-response token budget from the rollout config, or ``None`` when unavailable.
+
+        Tests and lightweight callers may pass a config stub without the rollout section; in that
+        case the resume loop keeps its previous behaviour of deferring to the server default.
+        """
+        rollout_config = getattr(getattr(self.config, "actor_rollout_ref", None), "rollout", None)
+        response_length = getattr(rollout_config, "response_length", None)
+        if isinstance(response_length, int) and response_length > 0:
+            return response_length
+        return None
+
     @rollout_trace_op
     async def generate(
         self,
@@ -354,6 +366,22 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         elif "max_new_tokens" in sampling_params:
             limit_key = "max_new_tokens"
         original_max_tokens = sampling_params.get(limit_key) if limit_key else None
+
+        # The budget below is rewritten on every attempt, and the caller reuses its dict across
+        # turns, so never mutate the caller's copy.
+        sampling_params = dict(sampling_params)
+
+        if original_max_tokens is None:
+            # Without an explicit limit each attempt falls back to the server-side default, which is
+            # derived from len(prompt_ids) and is only correct on the first attempt: a resume passes
+            # prompt + tokens generated so far, so the default charges generated tokens against the
+            # *prompt* budget and re-permits close to a full response_length every time. Pin the
+            # cumulative budget here instead, which also makes the bookkeeping in step 3 effective.
+            response_length = self._configured_response_length()
+            if response_length is not None:
+                limit_key = "max_tokens"
+                original_max_tokens = response_length
+                sampling_params[limit_key] = response_length
 
         final_output = TokenOutput(
             token_ids=[],
