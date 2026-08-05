@@ -978,6 +978,21 @@ def process_validation_metrics(
             var_dict = uid_dict.setdefault(uid, {})
 
             for var_name, var_vals in var2vals.items():
+                # Drop None entries before aggregating. Sparse reward_extra_info
+                # keys (emitted for only some samples) are null-filled to a
+                # uniform schema in `_validate`, so a uid group can contain None;
+                # np.mean([..., None, ...]) would raise TypeError. Keep the
+                # aligned predictions in sync so majority voting still zips
+                # 1:1. See https://github.com/volcengine/verl/issues/6830.
+                vote_pred_vals = pred_vals
+                if any(v is None for v in var_vals):
+                    if pred_vals is not None and len(pred_vals) == len(var_vals):
+                        kept = [(v, p) for v, p in zip(var_vals, pred_vals, strict=True) if v is not None]
+                        var_vals = [v for v, _ in kept]
+                        vote_pred_vals = [p for _, p in kept]
+                    else:
+                        var_vals = [v for v in var_vals if v is not None]
+
                 # skip empty or string values
                 if not var_vals or isinstance(var_vals[0], str):
                     continue
@@ -1013,7 +1028,8 @@ def process_validation_metrics(
                         if has_pred:
                             # create vote_data
                             vote_data = [
-                                {"val": val, "pred": pred} for val, pred in zip(var_vals, pred_vals, strict=True)
+                                {"val": val, "pred": pred}
+                                for val, pred in zip(var_vals, vote_pred_vals, strict=True)
                             ]
                             # compute maj metrics
                             [(maj_n_mean, maj_n_std)] = bootstrap_metric(
