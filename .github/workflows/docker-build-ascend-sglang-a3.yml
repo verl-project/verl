@@ -47,7 +47,7 @@ jobs:
       - name: Get image tag
         id: version
         run: |
-          echo "tag=latest-cann8.5.0-torch_npu2.8.0post2-a3-ubuntu22.04-py3.11-sglang" >> "$GITHUB_OUTPUT"
+          echo "tag=latest-sglang-a3-ubuntu" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

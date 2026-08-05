@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
+import os
 
 import torch
 
@@ -39,6 +41,16 @@ VL_TYPE2INDEX = {
         "VIDEO_INPUT_INDEX": 248057,
     },
 }
+
+
+def load_safetensors_index(model_path: str) -> dict[str, int]:
+    path = os.path.join(model_path, "model.safetensors.index.json")
+    if not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        weight_map = json.load(f)["weight_map"]
+    index = {fqn: int(filename.split("-")[1]) for fqn, filename in weight_map.items()}
+    return index
 
 
 @torch.no_grad()
@@ -134,9 +146,27 @@ def default_moe_param_handler(name, tensor, expert_id_base):
         yield from _map_moe_params_common(key, value, expert_id_base)
 
 
+def passthrough_moe_param_handler(name, tensor, expert_id_base):
+    """Keep a fused MoE checkpoint tensor unchanged."""
+    del expert_id_base
+    yield name, tensor
+
+
 # Overrides the default MoE parameter mapping per model_type. Handlers follow the
 # ``default_moe_param_handler`` contract: (name, stacked_tensor, expert_id_base).
-MOE_PARAM_HANDERS = {}
+MOE_PARAM_HANDERS = {"gpt_oss": passthrough_moe_param_handler}
+
+
+def get_moe_param_handler(model_type, ep_enabled):
+    """Resolve the checkpoint export handler for the current MoE layout."""
+    # GPT-OSS stores all experts in fused tensors with gate/up values interleaved
+    # along the last dimension. When EP is disabled, the tensor is already global
+    # and vLLM expects this packed checkpoint layout unchanged. EP requires a
+    # shard-aware vLLM loader and must not pass local shards under the same name.
+    if model_type == "gpt_oss" and ep_enabled:
+        raise NotImplementedError("VeOmni GPT-OSS does not support EP weight updates")
+
+    return MOE_PARAM_HANDERS.get(model_type, default_moe_param_handler)
 
 
 # ---- EP delta export (veomni-specific converter machinery) ----------------
@@ -286,8 +316,11 @@ def veomni_shard_export(module):
     params = module.state_dict()
     params = convert_weight_keys(params, getattr(module, "_fsdp_wrapped_module", module))
 
-    ps = parallel_state.get_parallel_state()
     model_type = getattr(module.config, "model_type", "default")
+    if model_type == "gpt_oss":
+        raise NotImplementedError("VeOmni GPT-OSS does not support delta_sharded weight updates")
+
+    ps = parallel_state.get_parallel_state()
     process_func = MOE_PARAM_HANDERS.get(model_type, default_moe_param_handler)
 
     from torch.distributed.tensor import DTensor

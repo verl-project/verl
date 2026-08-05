@@ -17,9 +17,11 @@ from enum import Enum
 
 import ray
 from omegaconf import DictConfig
+from transfer_queue import KVBatchMeta
 
 from verl.checkpoint_engine import CheckpointEngineManager
-from verl.trainer.ppo.utils import need_reward_model
+from verl.experimental.separation.engine_workers import DetachActorWorker
+from verl.trainer.ppo.utils import Role, need_reward_model
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, register_trainer
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
@@ -66,8 +68,15 @@ class PPOTrainerSeparateAsync(PPOTrainer):
 
         super().__init__(config)
 
-        # TODO: Support Decoupled PPO: https://arxiv.org/abs/2505.24298
-        self.config.algorithm.rollout_correction.bypass_mode = True
+    def _init_resource_pool_mgr(self):
+        super()._init_resource_pool_mgr()
+        # Replace ActorRolloutRefWorker with DetachActorWorker to get CPU save/restore
+        # capability needed for Decoupled PPO when parameter_sync_step > 1.
+        # The base class adds exactly one of ActorRolloutRef or ActorRollout to the mapping.
+        if Role.ActorRolloutRef in self.role_worker_mapping:
+            self.role_worker_mapping[Role.ActorRolloutRef] = ray.remote(DetachActorWorker)
+        elif Role.ActorRollout in self.role_worker_mapping:
+            self.role_worker_mapping[Role.ActorRollout] = ray.remote(DetachActorWorker)
 
     def _setup(self):
         super()._setup()
@@ -90,6 +99,32 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         # hybrid engine is in rollout mode after initialization
         self.current_mode = HybridEngineMode.ROLLOUT
         self.add_replicas_to_balancer()
+
+    def _compute_old_log_prob(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
+        """Version-aware old_log_probs computation for Decoupled PPO.
+
+        In bypass mode, delegates to the base class (copies rollout_log_probs directly).
+        In Decoupled mode, uses save_model_to_cpu / restore_model_from_cpu to ensure
+        all mini-batches within a parameter_sync_step cycle use the same stable π_old.
+
+        - local_trigger_step == 0: Current weights are π_old → save to CPU, compute directly.
+        - local_trigger_step >= 1: Save current weights → restore π_old → compute → restore current.
+        """
+        rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
+        bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
+        if bypass_recomputing_logprobs:
+            return super()._compute_old_log_prob(batch, metrics)
+
+        if self.local_trigger_step == 0:
+            self.actor_rollout_wg.save_model_to_cpu(0)
+            return super()._compute_old_log_prob(batch, metrics)
+        else:
+            self.actor_rollout_wg.save_model_to_cpu(self.local_trigger_step)
+            self.actor_rollout_wg.restore_model_from_cpu(0)
+            result = super()._compute_old_log_prob(batch, metrics)
+            self.actor_rollout_wg.restore_model_from_cpu(self.local_trigger_step)
+            self.actor_rollout_wg.clear_cpu_model(self.local_trigger_step)
+            return result
 
     def get_llm_client(self):
         # get server client from standalone rollout
