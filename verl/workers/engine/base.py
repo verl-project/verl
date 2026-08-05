@@ -15,6 +15,7 @@
 The abstract base class defining the interface for model training engines.
 """
 
+import os
 from abc import abstractmethod
 from contextlib import nullcontext
 from typing import Any, Callable, ContextManager, Generator, Optional
@@ -22,7 +23,7 @@ from typing import Any, Callable, ContextManager, Generator, Optional
 import torch
 from tensordict import TensorDict
 
-from verl.utils.device import get_device_name
+from verl.utils.device import get_device_name, get_vendor
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 
 
@@ -157,6 +158,74 @@ class BaseEngine:
         """
         raise NotImplementedError
 
+    def get_per_tensor_param_shard(self, **kwargs) -> tuple[Generator, Optional[dict]]:
+        """
+        Like :meth:`get_per_tensor_param`, but yields each rank's *local* parameter shard
+        instead of all-gathering full tensors.
+
+        Used by checkpoint engines that operate on shards (e.g. the ``delta_sharded``
+        backends, which byte-diff each rank's shard locally and only gather the changed
+        elements), so the export never materializes full tensors on any rank.
+
+        Implementations yield ``(name, local_shard, ShardSpec)`` -- the spec (see
+        :mod:`verl.workers.engine.spec`) carries all placement knowledge
+        (offset translation or a dense rebuild callable), so the consuming checkpoint
+        engine stays trainer-agnostic.
+
+        Returns:
+            Generator: A generator that yields per-parameter local shards with placement metadata.
+            Optional[dict]: Optional peft config.
+        """
+        raise NotImplementedError
+
+    # Host-memory policy for the delta diff base: pinned (cudaHostAlloc) gives a
+    # faster H2D on the diff read-back but competes with every other pinned pool
+    # on the node; backends whose memory profile makes that competition
+    # dangerous override this to False (see MegatronEngine).
+    delta_pin_snapshots: bool = True
+
+    def prime_delta_snapshots(self) -> None:
+        """
+        Snapshot this rank's CURRENT shards as the delta diff base. Called right after the
+        seed sync (which streams :meth:`get_per_tensor_param`'s full HF export):
+        weights do not move during the sync, so the snapshots equal exactly what the
+        rollout side received and the first
+        :meth:`get_per_tensor_param_delta_shard` diff is correct.
+
+        Concrete here: it only consumes :meth:`get_per_tensor_param_shard`, so any
+        engine that implements the shard export gets it for free.
+        """
+        from verl.utils.device import is_cuda_available
+        from verl.workers.engine.utils import prime_delta_snapshots
+
+        self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
+        gen, _ = self.get_per_tensor_param_shard()
+        prime_delta_snapshots(gen, self._delta_shard_snap, pin=is_cuda_available and self.delta_pin_snapshots)
+
+    def get_per_tensor_param_delta_shard(self, **kwargs) -> tuple[Generator, Optional[dict]]:
+        """
+        Yield the delta engine's per-parameter payloads in FINAL HF coordinates:
+        ``(slots, dtype_str, counts, hf_idx, hf_val, gather_group)``, in an order
+        identical on every rank (non-contributing replicas yield zero-count entries
+        but stay in the lockstep sequence). ``slots`` enumerates the HF tensors this
+        parameter maps to (identity params: itself; fused params: their hf_slots),
+        and ``hf_idx``/``hf_val`` are the changed elements since the previous export,
+        already converted to HF coordinates.
+
+        Everything backend-specific lives behind this call: the weight->HF naming,
+        the to-HF conversion, the diff and its base. A backend that already keeps the
+        previous step's weights (e.g. Decoupled PPO) can diff against that instead of
+        a dedicated snapshot; :func:`verl.workers.engine.utils.hf_delta_export`
+        implements the default pinned-CPU-snapshot strategy (primed by
+        :meth:`prime_delta_snapshots`). The consuming delta engine only batches,
+        gathers and ships.
+
+        Returns:
+            Generator: A generator that yields per-parameter HF-coordinate delta entries.
+            Optional[dict]: Optional peft config.
+        """
+        raise NotImplementedError
+
     def get_data_parallel_size(self):
         raise NotImplementedError
 
@@ -176,8 +245,8 @@ class BaseEngine:
             optimizer: If True, move the optimizer states.
             grad: If True, move the gradient buffer.
         """
-        if not model:
-            assert not optimizer and not grad, "Model must be moved to device along with optimizer and grad"
+        if grad:
+            assert model, "Gradient buffers must be moved to device along with model parameters"
 
     def save_checkpoint(
         self,
@@ -238,25 +307,27 @@ class BaseEngineCtx:
         self.mode = mode
         assert self.mode in ("train", "eval")
         self.disable_auto_offload = kwargs.pop("disable_auto_offload", False)
+        self.zero_grad_on_exit = kwargs.pop("zero_grad_on_exit", True)
 
     def _context_switch(self, device):
         if self.disable_auto_offload:
             return
-        should_move_model = self.engine.is_param_offload_enabled if device == "cpu" else True
-        should_move_optimizer = self.engine.is_optimizer_offload_enabled if device == "cpu" else True
+        if device != "cpu":
+            if not self.engine.is_param_offload_enabled and not self.engine.is_optimizer_offload_enabled:
+                return
         if self.mode == "eval":
-            self.engine.to(device=device, model=should_move_model, optimizer=False, grad=False)
+            self.engine.to(device=device, model=self.engine.is_param_offload_enabled, optimizer=False, grad=False)
         elif self.mode == "train":
             self.engine.to(
                 device=device,
-                model=should_move_model,
-                optimizer=should_move_optimizer,
-                grad=should_move_model,
+                model=self.engine.is_param_offload_enabled,
+                optimizer=self.engine.is_optimizer_offload_enabled,
+                grad=self.engine.is_param_offload_enabled,
             )
 
     def __enter__(self):
-        self._context_switch(get_device_name())
         self.engine.mode = self.mode
+        self._context_switch(get_device_name())
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self._context_switch("cpu")
@@ -275,7 +346,13 @@ class EngineRegistry:
     _engines = {}
 
     @classmethod
-    def register(cls, model_type: str, backend: list[str] | str, device: list[str] | str = "cuda"):
+    def register(
+        cls,
+        model_type: str,
+        backend: list[str] | str,
+        device: list[str] | str = "cuda",
+        vendor: list[str] | str | None = None,
+    ):
         """
         A class method decorator that registers an engine class with a given key.
 
@@ -286,6 +363,8 @@ class EngineRegistry:
             backend (list[str] | str): The backend to use for the model type
             device (list[str] | str): The device type (e.g., "cuda", "npu", "cpu") this engine supports,
                 default is "cuda"
+            vendor (list[str] | str | None): The hardware vendor (e.g., "nvidia", "metax") this engine
+                supports. If None, the engine is registered as the default for the device type.
 
         Returns:
             A decorator function that takes an engine class and registers it.
@@ -298,12 +377,17 @@ class EngineRegistry:
 
             backends = backend if isinstance(backend, list) else [backend]
             devices = device if isinstance(device, list) else [device]
+            vendors = vendor if isinstance(vendor, list) else ([vendor] if vendor else [None])
             for current_backend in backends:
                 for current_device in devices:
                     if current_backend not in cls._engines[model_type]:
                         cls._engines[model_type][current_backend] = {}
-                    if current_device not in cls._engines[model_type][current_backend]:
-                        cls._engines[model_type][current_backend][current_device] = engine_class
+                    for current_vendor in vendors:
+                        key = (current_device, current_vendor) if current_vendor else current_device
+                        assert key not in cls._engines[model_type][current_backend], (
+                            f"The key(device-vendor: {key}) has been already registed!"
+                        )
+                        cls._engines[model_type][current_backend][key] = engine_class
 
             return engine_class
 
@@ -314,10 +398,33 @@ class EngineRegistry:
         assert model_type in cls._engines, f"Unknown model_type: {model_type}"
         assert backend in cls._engines[model_type], f"Unknown backend: {backend}"
         device = get_device_name()
-        assert device in cls._engines[model_type][backend], (
-            f"Unknown device: {device} for model_type: {model_type} and backend: {backend}"
+        vendor = get_vendor()
+        # Allow environment variables to override detected device and vendor for engine selection, if set
+        if os.getenv("VERL_ENGINE_DEVICE"):
+            device = os.getenv("VERL_ENGINE_DEVICE")
+        if os.getenv("VERL_ENGINE_VENDOR"):
+            vendor = os.getenv("VERL_ENGINE_VENDOR")
+        registry = cls._engines[model_type][backend]
+
+        # Try vendor-specific lookup: (device, vendor)
+        vendor_key = (device, vendor)
+        if vendor_key in registry:
+            return registry[vendor_key]
+
+        # Fallback to device-only key (registered without vendor)
+        if device in registry:
+            return registry[device]
+
+        # For cuda-compatible vendors without a specific registration, try nvidia
+        if device == "cuda" and vendor != "nvidia":
+            nvidia_key = (device, "nvidia")
+            if nvidia_key in registry:
+                return registry[nvidia_key]
+
+        raise ValueError(
+            f"No engine registered for device={device!r}, vendor={vendor!r}, "
+            f"model_type={model_type!r}, backend={backend!r}"
         )
-        return cls._engines[model_type][backend][device]
 
     @classmethod
     def new(cls, model_type, backend, *args, **kwargs):

@@ -26,6 +26,10 @@ from pathlib import Path
 CUDA_KEYWORD_CHECK_WHITELIST = [
     "verl/utils/device.py",
     "verl/utils/torch_functional.py",  # import flash_attn only on cuda
+    "verl/plugin/platform/platform_base.py",  # docstring mentions torch.cuda
+    "verl/plugin/platform/platform_cuda.py",  # CUDA platform implementation
+    "verl/plugin/platform/platform_rocm.py",  # ROCm platform reuses torch.cuda via hipify
+    "verl/plugin/platform/platform_manager.py",  # platform auto-detection probes torch.cuda
     "verl/utils/profiler/nvtx_profile.py",  # appear in NsightSystemsProfiler
     "verl/utils/profiler/torch_profile.py",  # appear in TorchProfiler
     "verl/utils/profiler/config.py",  # appear in TorchProfilerToolConfig
@@ -44,18 +48,21 @@ CUDA_KEYWORD_CHECK_WHITELIST = [
     "verl/workers/engine/veomni/transformer_impl.py",  # appear in default device_name
     "verl/workers/engine/torchtitan/transformer_impl.py",  # appear in default device_name
     "verl/workers/engine/torchtitan/utils.py",  # appear in torch.cuda.empty_cache()
+    "verl/workers/engine/automodel/transformer_impl.py",  # appear in default device_name
     "verl/workers/rollout/vllm_rollout/vllm_async_server.py",  # appear in config.cudagraph_capture_sizes
     "verl/workers/rollout/sglang_rollout/async_sglang_server.py",  # manually set CUDA_VISIBLE_DEVICES
     "verl/workers/rollout/trtllm_rollout/trtllm_async_server.py",  # appear in config.cudagraph_capture_sizes
     "verl/workers/rollout/replica.py",  # appear in default device_name
     "verl/checkpoint_engine",  # checkpoint engine backend are device specific
+    "verl/utils/modelopt/megatron_qat_patch.py",  # appear in torch.cuda.empty_cache()
+    "verl/models/mcore/patch.py",  # checkpoint patch only on cuda
 ]
 
 # directory or file path must contain keyword "nccl"
 NCCL_KEYWORD_CHECK_WHITELIST = [
     "verl/utils/device.py",
+    "verl/plugin/platform/platform_cuda.py",  # CUDA platform returns "nccl" backend
     "verl/third_party/sglang/parallel_state.py",  # appear in default backend
-    "verl/recipe/fully_async_policy/param_sync.py",  # fully_async_policy in default backend
 ]
 
 SEARCH_WHITELIST = CUDA_KEYWORD_CHECK_WHITELIST + NCCL_KEYWORD_CHECK_WHITELIST

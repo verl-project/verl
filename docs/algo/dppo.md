@@ -32,15 +32,15 @@ hf download Qwen/Qwen3-30B-A3B-Base --local-dir ${HOME}/verl/models/Qwen3-30B-A3
 
 ```bash
 # run DPPO-Binary-KL
-LOSS_MODE=dppo_kl bash examples/dppo_trainer/run_qwen30b_dppo.sh
+LOSS_MODE=dppo_kl bash examples/dppo_trainer/run_qwen3_30b_a3b_megatron.sh
 
 # run DPPO-Binary-TV
-LOSS_MODE=dppo_tv bash examples/dppo_trainer/run_qwen30b_dppo.sh
+LOSS_MODE=dppo_tv bash examples/dppo_trainer/run_qwen3_30b_a3b_megatron.sh
 
 # run GRPO baseline
-LOSS_MODE=vanilla CLIP_LOW=0.2 CLIP_HIGH=0.2 bash examples/dppo_trainer/run_qwen30b_dppo.sh
+LOSS_MODE=vanilla CLIP_LOW=0.2 CLIP_HIGH=0.2 bash examples/dppo_trainer/run_qwen3_30b_a3b_megatron.sh
 # or GRPO with clip higher
-LOSS_MODE=vanilla CLIP_LOW=0.2 CLIP_HIGH=0.28 bash examples/dppo_trainer/run_qwen30b_dppo.sh
+LOSS_MODE=vanilla CLIP_LOW=0.2 CLIP_HIGH=0.28 bash examples/dppo_trainer/run_qwen3_30b_a3b_megatron.sh
 ```
 
 ## 📖Introduction
@@ -93,4 +93,4 @@ If you find our works useful for your research, please consider citing:
 ```
 
 ## 🌻Acknowledgement
-We implement our reinforcement learning algorithm extending from [verl](https://github.com/volcengine/verl). We utilize [vLLM](https://github.com/vllm-project/vllm) and [sglang](https://github.com/sgl-project/sglang) for inference. Our models are trained primarily on [Qwen3 family](https://huggingface.co/collections/Qwen/qwen3). Our training data is built from [DAPO-MATH](https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k). Thanks for their great contributions!
+We implement our reinforcement learning algorithm extending from [verl](https://github.com/verl-project/verl). We utilize [vLLM](https://github.com/vllm-project/vllm) and [sglang](https://github.com/sgl-project/sglang) for inference. Our models are trained primarily on [Qwen3 family](https://huggingface.co/collections/Qwen/qwen3). Our training data is built from [DAPO-MATH](https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k). Thanks for their great contributions!

@@ -89,8 +89,8 @@ RM_TP=${RM_TP:-$TRAIN_TP}
 RM_EP=${RM_EP:-$COMMON_EP}
 RM_ETP=${RM_ETP:-$COMMON_ETP}
 
-# install mbridge
-# pip3 install git+https://github.com/ISEEKYAN/mbridge
+# install Megatron-Bridge
+# pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
 USE_MBRIDGE=True
 USE_DIST_CKPT=False
 
@@ -229,8 +229,8 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     rollout.nnodes="${NNODES_ROLLOUT}" \
     rollout.n_gpus_per_node="${NGPUS_PER_NODE}" \
     rollout.total_rollout_steps="${total_rollout_steps}" \
-    rollout.total_epochs=10 \
-    rollout.test_freq="${test_freq}" \
+    trainer.total_epochs=10 \
+    trainer.test_freq="${test_freq}" \
     async_training.staleness_threshold="${staleness_threshold}" \
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}" \
     async_training.require_batches="${require_batches}" \

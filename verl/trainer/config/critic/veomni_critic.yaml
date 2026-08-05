@@ -18,12 +18,6 @@ _target_: verl.workers.config.VeOmniCriticConfig
 
 strategy: veomni
 
-# model config for the critic
-model:
-
-  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
-  _target_: verl.trainer.config.BaseModelConfig
-
 # seed for data loader
 data_loader_seed: ${oc.select:actor_rollout_ref.actor.data_loader_seed,null}
 

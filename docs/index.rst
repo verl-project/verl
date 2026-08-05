@@ -39,6 +39,7 @@ verl is fast with:
    :maxdepth: 2
    :caption: Programming guide
 
+   extend_guide
    hybrid_flow
    single_controller
 
@@ -61,6 +62,7 @@ verl is fast with:
 
    examples/ppo_code_architecture
    examples/gsm8k_example
+   examples/megatron_fsdp_example
    examples/multi_modal_example
    examples/skypilot_examples
 
@@ -70,7 +72,6 @@ verl is fast with:
 
    algo/ppo.md
    algo/grpo.md
-   algo/collabllm.md
    algo/dapo.md
    algo/spin.md
    algo/sppo.md
@@ -82,17 +83,20 @@ verl is fast with:
    algo/rollout_corr_math.md
    algo/otb.md
    algo/dppo.md
+   algo/opd.md
+   algo/dro.md
 
 .. toctree::
    :maxdepth: 1
    :caption: PPO Trainer and Workers
 
    workers/ray_trainer
-   workers/fsdp_workers
-   workers/megatron_workers
+   workers/model_engine
+   workers/engine_workers
+   workers/automodel_workers
+   workers/torchtitan_workers
    workers/sglang_worker
    workers/trtllm_worker
-   workers/model_engine
 
 .. toctree::
    :maxdepth: 1
@@ -101,7 +105,7 @@ verl is fast with:
    perf/dpsk.md
    perf/best_practices
    perf/perf_tuning
-   perf/perf_tuning_on_ascend.rst
+   perf/rollout_kv_offload.md
    README_vllm0.8.md
    perf/device_tuning
    perf/verl_profiler_system.md
@@ -114,6 +118,25 @@ verl is fast with:
 
    advance/fsdp_extension
    advance/megatron_extension
+   advance/deepseek_v4_integration
+   advance/megatron_lite_backend
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Async Training
+
+   advance/one_step_off
+   advance/delta_weight_sync
+   advance/fully_async
+   advance/async-on-policy-distill
+   advance/dynamic_schedule
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Low Precision
+
+   low_precision/fp8.md
+   low_precision/nvfp4_qat.md
 
 .. toctree::
    :maxdepth: 1
@@ -124,42 +147,26 @@ verl is fast with:
    advance/attention_implementation
    advance/ppo_lora.rst
    sglang_multiturn/multiturn.rst
-   sglang_multiturn/interaction_system.rst
    advance/placement
    advance/dpo_extension
    examples/sandbox_fusion_example
    advance/rollout_trace.rst
-   advance/rollout_skip.rst
-   advance/one_step_off
+   advance/rl_insight.md
+   advance/skip_manager.rst
    advance/agent_loop
    advance/reward_loop
-   advance/fully_async
    data/transfer_queue.md
    advance/grafana_prometheus.md
-   advance/fp8.md
-   advance/async-on-policy-distill
    advance/mtp.md
+   advance/determinism.md
 
 .. toctree::
    :maxdepth: 1
    :caption: Hardware Support
 
-   amd_tutorial/amd_build_dockerfile_page.rst
-   amd_tutorial/amd_vllm_page.rst
-   ascend_tutorial/ascend_ci_guide_zh.rst
-   ascend_tutorial/ascend_quick_start.rst
-   ascend_tutorial/ascend_consistency.rst
-   ascend_tutorial/ascend_profiling_zh.rst
-   ascend_tutorial/ascend_profiling_en.rst
-   ascend_tutorial/dockerfile_build_guidance.rst
-   ascend_tutorial/ascend_sglang_quick_start.rst
-   ascend_tutorial/examples/gspo_optimization_practice.md
-   ascend_tutorial/examples/ascend_performance_analysis_guide.md
-   ascend_tutorial/examples/dapo_multi_model_optimization_practice.md
-   ascend_tutorial/examples/ascend_sglang_best_practices.rst
-   ascend_tutorial/examples/ascend_retool_best_pratice.rst
-   ascend_tutorial/features/ascend_backend_features.md
-   ascend_tutorial/examples/run_qwen3_32B_megatron_1k_256k_npu.md
+   hardware/multi_chip_support
+   amd_tutorial/index.rst
+   ascend_tutorial/index.rst 
 
 .. toctree::
    :maxdepth: 1
@@ -184,6 +191,12 @@ verl is fast with:
 
 .. toctree::
    :maxdepth: 1
+   :caption: Contributing
+
+   contributing/editing-agent-instructions.md
+
+.. toctree::
+   :maxdepth: 1
    :caption: Development Notes
 
    sglang_multiturn/sandbox_fusion.rst
@@ -193,9 +206,9 @@ Contribution
 
 verl is free software; you can redistribute it and/or modify it under the terms
 of the Apache License 2.0. We welcome contributions.
-Join us on `GitHub <https://github.com/volcengine/verl>`_, `Slack <https://join.slack.com/t/verlgroup/shared_invite/zt-2w5p9o4c3-yy0x2Q56s_VlGLsJ93A6vA>`_ and `Wechat <https://raw.githubusercontent.com/eric-haibin-lin/verl-community/refs/heads/main/WeChat.JPG>`_ for discussions.
+Join us on `GitHub <https://github.com/verl-project/verl>`_, `Slack <https://join.slack.com/t/verlgroup/shared_invite/zt-2w5p9o4c3-yy0x2Q56s_VlGLsJ93A6vA>`_ and `Wechat <https://raw.githubusercontent.com/eric-haibin-lin/verl-community/refs/heads/main/WeChat.JPG>`_ for discussions.
 
-Contributions from the community are welcome! Please check out our `project roadmap <https://github.com/volcengine/verl/issues/710>`_ and `good first issues <https://github.com/volcengine/verl/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22>`_ to see where you can contribute.
+Contributions from the community are welcome! Please check out our `project roadmap <https://github.com/verl-project/verl/issues/710>`_ and `good first issues <https://github.com/verl-project/verl/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22>`_ to see where you can contribute.
 
 Code Linting and Formatting
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^

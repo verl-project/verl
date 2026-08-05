@@ -91,7 +91,7 @@ Codebase walkthrough (PPO)
 
 Entry function
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Code: https://github.com/volcengine/verl/blob/main/verl/trainer/main_ppo.py
+Code: https://github.com/verl-project/verl/blob/main/verl/trainer/main_ppo.py
 
 In this file, we define a remote function `main_task` that serves as the controller (driver) process as shown in the above figure. We also define a ``RewardManager``, where users can customize their reward function based on the data source in the dataset. Note that `RewardManager` should return the final token-level reward that is optimized by RL algorithms. Note that users can combine model-based rewards and rule-based rewards.
 The ``main_task`` constructs a RayPPOTrainer instance and launch the fit. Note that ``main_task`` **runs as a single process**.
@@ -100,7 +100,7 @@ We highly recommend that the ``main_task`` is NOT scheduled on the head of the r
 
 Ray trainer
 ~~~~~~~~~~~~~~~~~~~~
-Code: https://github.com/volcengine/verl/blob/main/verl/trainer/ppo/ray_trainer.py
+Code: https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/ray_trainer.py
 
 The RayPPOTrainer manages 
 
@@ -126,9 +126,9 @@ The worker group will be constructed on the resource pool it designates. The res
 Worker definition
 ~~~~~~~~~~~~~~~~~~~~
 
-.. _ActorRolloutRefWorker: https://github.com/volcengine/verl/blob/main/verl/workers/fsdp_workers.py
+.. _ActorRolloutRefWorker: https://github.com/verl-project/verl/blob/main/verl/workers/engine_workers.py
 
-We take `ActorRolloutRefWorker <https://github.com/volcengine/verl/blob/main/verl/workers/fsdp_workers.py>`_ for an example.
+We take `ActorRolloutRefWorker <https://github.com/verl-project/verl/blob/main/verl/workers/engine_workers.py>`_ for an example.
 The APIs it should expose to the controller process are:
 
 - init_model: build the underlying model
@@ -174,7 +174,7 @@ In verl, we design a syntax sugar to encapsulate the 3 processes into a single c
    # on the driver
    output = actor_rollout_ref_wg.generate_sequences(data)
 
-We decorate the method of the worker with a ``register`` that explicitly defines how the input data should be split and dispatched to each worker, and how the output data should be collected and concatenated by the controller. For example, ``Dispatch.DP_COMPUTE_PROTO`` splits the input data into dp chunks, dispatch each data to each worker, collect the output and concatenate the results. Note that this function requires the input and output to be a DataProto defined here (https://github.com/volcengine/verl/blob/main/verl/protocol.py).
+We decorate the method of the worker with a ``register`` that explicitly defines how the input data should be split and dispatched to each worker, and how the output data should be collected and concatenated by the controller. For example, ``Dispatch.DP_COMPUTE_PROTO`` splits the input data into dp chunks, dispatch each data to each worker, collect the output and concatenate the results. Note that this function requires the input and output to be a DataProto defined here (https://github.com/verl-project/verl/blob/main/verl/protocol.py).
 
 
 PPO main loop
@@ -223,25 +223,18 @@ Important code files in the repository are organized as below:
        ppo_trainer.yaml  # configuration template for the RL trainer
      workers
        protocol.py  # the interface of DataProto
-       fsdp_workers.py   # the FSDP worker interfaces: ActorRolloutRefWorker, CriticWorker, RewardModelWorker
-       megatron_workers.py  # the Megatron worker interfaces: ActorRolloutRefWorker, CriticWorker, RewardModelWorker
-       actor
-         dp_actor.py  #  data parallel actor with FSDP backend
-         megatron_actor.py  # nD parallel actor with Megatron backend
-       critic
-         dp_critic.py  # data parallel critic with FSDP backend
-         megatron_critic.py  # nD parallel critic with FSDP backend
-       reward_model
-         megatron
-           reward_model.py  # reward model with Megatron backend
+       engine_workers.py  # unified ActorRolloutRefWorker / TrainingWorker implementations
+       engine
+         fsdp                  # FSDP / FSDP2 actor+critic engine implementations
+         megatron              # Megatron-LM actor+critic engine implementations
+         torchtitan            # torchtitan engine implementation
+         veomni                # veomni engine implementation
+         mcore                 # shared mcore helpers
        rollout
          vllm
            vllm_rollout.py  # rollout with vllm backend
          hf_rollout.py  # rollout with huggingface TGI backend
-       sharding_manager
-         fsdp_ulysses.py  # data and model resharding when using FSDP + ulysses
-         fsdp_vllm.py  # data and model resharding when using FSDP + ulysses + vllm
-         megatron_vllm.py  # data and model resharding when using Megatron + vllm
+         sglang_rollout        # rollout with SGLang backend
      utils
        dataset  # datasets for SFT/RM/RL
        reward_score  # function based reward

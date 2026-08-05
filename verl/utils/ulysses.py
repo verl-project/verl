@@ -17,12 +17,16 @@ DeepSpeed Ulysses Paper: https://arxiv.org/abs/2309.14509
 Inspired from: https://github.com/deepspeedai/DeepSpeed/blob/master/deepspeed/sequence/layer.py
 """
 
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 import torch.distributed as dist
 from torch import Tensor
 from torch.distributed import ProcessGroup
+from torch.distributed.device_mesh import DeviceMesh
+
+if TYPE_CHECKING:
+    from verl import DataProto
 
 _ULYSSES_SEQUENCE_PARALLEL_GROUP = None
 
@@ -335,3 +339,66 @@ def validate_ulysses_config(num_heads, ulysses_sequence_size):
         assert num_heads % ulysses_sequence_size == 0, (
             f"num_heads ({num_heads}) must be divisible by ulysses sequence size({ulysses_sequence_size})"
         )
+
+
+class BaseShardingManager:
+    """Base sharding manager used for resharding weights/data across parallel groups."""
+
+    def __init__(self):
+        self.timing = {}
+
+    def __enter__(self):
+        pass
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        pass
+
+    def preprocess_data(self, data: "DataProto") -> "DataProto":
+        return data
+
+    def postprocess_data(self, data: "DataProto") -> "DataProto":
+        return data
+
+
+class FSDPUlyssesShardingManager(BaseShardingManager):
+    """
+    Sharding manager to support data resharding when using FSDP + Ulysses sequence parallelism.
+    """
+
+    def __init__(self, device_mesh: DeviceMesh):
+        super().__init__()
+        self.device_mesh = device_mesh
+        self.seed_offset = 12345
+
+    def __enter__(self):
+        if self.device_mesh is not None:
+            self.prev_sp_group = get_ulysses_sequence_parallel_group()
+            set_ulysses_sequence_parallel_group(self.device_mesh["sp"].get_group())
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self.device_mesh is not None:
+            set_ulysses_sequence_parallel_group(self.prev_sp_group)
+
+    def preprocess_data(self, data: "DataProto") -> "DataProto":
+        """
+        AllGather data from sp region.
+
+        This is because the data is first sharded along the FSDP dimension as we utilize the DP_COMPUTE.
+        In Ulysses, we need to make sure the same data is used across a SP group.
+        """
+        if self.device_mesh is not None:
+            from verl.protocol import all_gather_data_proto
+
+            group = self.device_mesh["sp"].get_group()
+            all_gather_data_proto(data=data, process_group=group)
+        return data
+
+    def postprocess_data(self, data: "DataProto") -> "DataProto":
+        """
+        Split the data to follow FSDP partition.
+        """
+        if self.device_mesh is not None:
+            sp_size = self.device_mesh["sp"].size()
+            sp_rank = self.device_mesh["sp"].get_local_rank()
+            data = data.chunk(chunks=sp_size)[sp_rank]
+        return data

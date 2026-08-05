@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-In this test, we instantiate a data parallel worker with 8 GPUs
+In this test, we instantiate a data parallel worker with N GPUs (auto-detected).
 """
 
 import ray
@@ -48,7 +48,8 @@ class DummyWorker(Worker):
 def test_data_transfer():
     ray.init()
     # construct resource pool
-    resource_pool = RayResourcePool([8])
+    ngpus = torch.cuda.device_count()
+    resource_pool = RayResourcePool([ngpus])
     cls_with_init = RayClassWithInitArgs(cls=DummyWorker)
     # construct worker group
     wg = RayWorkerGroup(resource_pool, cls_with_init, device_name=get_device_name())

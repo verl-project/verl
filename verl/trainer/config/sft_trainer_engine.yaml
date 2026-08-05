@@ -55,8 +55,6 @@ checkpoint:
 
   # For more flexibility, you can specify the contents to load from the checkpoint.
   load_contents: ${checkpoint.save_contents}
-  # Mbridge config extension.
-  mbridge_config: {}
 
 trainer:
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
@@ -70,6 +68,7 @@ trainer:
   save_freq: -1
   test_freq: -1
   max_ckpt_to_keep: null  # Maximum number of checkpoints to keep, set to null to keep all
+  balance_batch: True
 
   # Resume mode: "auto", "disable", or "resume_path"
   # "auto": resume from last checkpoint if available

@@ -17,7 +17,90 @@
 # 1. `get_query_key_value_tensors` in `multi_latent_attention.py` works wrong when packed_seq_params is not None
 
 
+def pure_torch_hadamard_transform(x, scale=1.0):
+    """Fast Walsh-Hadamard transform along the last dim (size must be 2**k).
+
+    Vectorized butterfly accumulated in fp32, numerically equivalent to
+    ``F.linear(x, scipy.linalg.hadamard(dim)) * scale`` and bit-for-bit identical to
+    the Dao-AILab CUDA kernel it stands in for.
+    """
+    import torch
+
+    n = x.shape[-1]
+    if n < 1 or n & (n - 1) != 0:
+        raise ValueError(f"hadamard_transform requires last dim to be a power of 2, got {n}")
+    orig_dtype = x.dtype
+    orig_shape = x.shape
+    # Accumulate in fp32 for numerical stability, cast back at the end.
+    y = x.to(torch.float32).reshape(-1, n)
+    h = 1
+    while h < n:
+        y = y.view(-1, n // (2 * h), 2, h)
+        a = y[:, :, 0, :]
+        b = y[:, :, 1, :]
+        y = torch.stack((a + b, a - b), dim=2).reshape(-1, n)
+        h *= 2
+    y = y * scale
+    return y.reshape(orig_shape).to(orig_dtype)
+
+
+def apply_fast_hadamard_transform_shim():
+    """Provide a pure-torch ``fast_hadamard_transform`` when the CUDA package is absent.
+
+    DeepSeek-V4 / V3.2 sparse-attention (DSA) in Megatron-LM does
+    ``from fast_hadamard_transform import hadamard_transform`` at import time and
+    asserts it is not None inside the indexer's ``rotate_activation``. The upstream
+    Dao-AILab package only ships nvcc kernels and cannot be built on ROCm, so that
+    import yields ``None`` there and every DSA forward crashes.
+
+    Register ``pure_torch_hadamard_transform`` under the real import name so any
+    importer picks it up, and back-fill modules that already captured ``None``
+    (e.g. Megatron's ``dsa`` module at import time). This is a no-op once the name
+    imports, be it the real package or the stub an earlier call installed.
+    """
+    import importlib
+    import logging
+    import sys
+    import types
+
+    # Catch every exception, not just ImportError: a CUDA extension built against
+    # another toolkit fails to load with OSError. An import that goes through means
+    # every importer of the name resolves to that same module, so none of them can
+    # be left holding a None binding.
+    try:
+        importlib.import_module("fast_hadamard_transform")
+        return
+    except Exception:
+        pass
+
+    module = types.ModuleType("fast_hadamard_transform")
+    module.hadamard_transform = pure_torch_hadamard_transform
+    sys.modules["fast_hadamard_transform"] = module
+
+    # Back-fill modules that already ran `from fast_hadamard_transform import
+    # hadamard_transform` and captured None (e.g. Megatron's dsa.py at import).
+    # Read `__dict__` directly: `getattr` would trigger PEP-562 module-level
+    # `__getattr__` hooks, which can raise or force lazy imports.
+    for mod in list(sys.modules.values()):
+        mod_dict = getattr(mod, "__dict__", None)
+        if mod_dict is not None and mod_dict.get("hadamard_transform", "keep") is None:
+            mod_dict["hadamard_transform"] = pure_torch_hadamard_transform
+
+    logging.getLogger(__name__).warning(
+        "fast_hadamard_transform is unavailable; falling back to a pure-torch Fast "
+        "Walsh-Hadamard transform. Results match the CUDA kernel but DSA forward will be slower."
+    )
+
+
 def apply_patch():
+    # DeepSeek sparse-attention (DSA) needs ``fast_hadamard_transform``, which
+    # cannot be built on ROCm (its setup requires nvcc). Install a pure-torch
+    # fallback from the central mcore patch entry so every DSA importer picks it
+    # up without engine-specific wiring. Callers run this both before model
+    # creation (hf_to_mcore_config_dpskv3) and after it (the mbridge path in
+    # megatron_utils.get_model), which is why the shim also back-fills importers.
+    apply_fast_hadamard_transform_shim()
+
     import megatron.core
     import torch
     import torch.nn.functional as F
@@ -34,6 +117,7 @@ def apply_patch():
     from packaging import version
 
     mcore_ge_013 = version.parse(megatron.core.__version__) >= version.parse("0.13.0")
+    mcore_ge_0162 = version.parse(megatron.core.__version__) >= version.parse("0.16.2")
 
     def patch_get_query_key_value_tensors(
         self,
@@ -294,14 +378,17 @@ def apply_patch():
         # core attention computation
         # ==================================
         # Need corresponding TE change
-        non_dsa_thd_qkv_format = (
-            packed_seq_params
-            and packed_seq_params.qkv_format == "thd"
+        orig_v_dim = value.shape[-1] if value is not None else None
+        thd_packed_seq = packed_seq_params is not None and packed_seq_params.qkv_format == "thd"
+        need_v_pad = (
+            thd_packed_seq
             and getattr(self.config, "experimental_attention_variant", None) is None
+            and value is not None
+            and query.shape[-1] != orig_v_dim
         )
-        v_dim = value.shape[-1]
-        if non_dsa_thd_qkv_format and query.shape[-1] != v_dim:
-            value = F.pad(value, [0, query.shape[-1] - v_dim])
+        if need_v_pad:
+            # Pad V so THD attention can run when Q/V head dims differ.
+            value = F.pad(value, [0, query.shape[-1] - orig_v_dim])
             self.core_attention.hidden_size_per_attention_head_v = value.shape[-1]
         if self.checkpoint_core_attention and self.training:
             core_attn_out = self._checkpointed_attention_forward(
@@ -323,11 +410,11 @@ def apply_patch():
                 attn_mask_type=attn_mask_type,
                 **extra_kwargs,
             )
-        if non_dsa_thd_qkv_format:
-            if core_attn_out.ndim == 2:
-                core_attn_out = core_attn_out.reshape(*core_attn_out.shape[:-1], -1, value.shape[-1])
-            if query.shape[-1] != v_dim:
-                core_attn_out = core_attn_out[..., :v_dim]
+        if thd_packed_seq:
+            if need_v_pad:
+                if core_attn_out.ndim == 2:
+                    core_attn_out = core_attn_out.reshape(*core_attn_out.shape[:-1], -1, value.shape[-1])
+                core_attn_out = core_attn_out[..., :orig_v_dim]
             # reshape to same output shape as unpacked case
             # (t, np, hn) -> (t, b=1, h=np*hn)
             # t is the pack size = sum (sq_i)
@@ -352,7 +439,8 @@ def apply_patch():
     if not mcore_ge_013:
         MLASelfAttention.get_query_key_value_tensors = patch_get_query_key_value_tensors
 
-    MultiLatentAttention.forward = patch_forward
+    if not mcore_ge_0162:
+        MultiLatentAttention.forward = patch_forward
 
 
 def apply_patch_mbridge():
@@ -385,7 +473,7 @@ def apply_patch_mbridge():
         megatron.core.utils.get_tensor_model_parallel_group_if_none = get_tensor_model_parallel_group_if_none
 
 
-def apply_patch_megatron_v012_with_torch_v28():
+def apply_patch_megatron_v012_with_torch_v28_v29() -> None:
     # Error due to missing serialization_format in _write_item of megatron v012;
     # resolved by using megatron v013's implementation.
     import inspect
@@ -402,7 +490,7 @@ def apply_patch_megatron_v012_with_torch_v28():
     from torch.distributed.checkpoint.filesystem import _write_item
 
     if (
-        version.parse(torch.__version__).base_version != "2.8.0"
+        version.parse(torch.__version__).base_version not in ("2.8.0", "2.9.0")
         or version.parse(megatron.core.__version__).base_version != "0.12.1"
     ):
         return
@@ -484,3 +572,85 @@ def apply_patch_megatron_v012_with_torch_v28():
     from megatron.core.dist_checkpointing.strategies.filesystem_async import FileSystemWriterAsync
 
     FileSystemWriterAsync.write_preloaded_data = write_preloaded_data_patch
+
+
+def apply_mtp_inference_patch():
+    from megatron.core.models.gpt.gpt_model import GPTModel
+
+    _original_postprocess = GPTModel._postprocess
+
+    def _patched(self, *args, **kwargs):
+        original_mtp_num_layers = self.config.mtp_num_layers
+        if not self.config.mtp_num_layers:
+            self.config.mtp_num_layers = None
+        try:
+            return _original_postprocess(self, *args, **kwargs)
+        finally:
+            self.config.mtp_num_layers = original_mtp_num_layers
+
+    GPTModel._postprocess = _patched
+
+
+# When using checkpoint + MoE models (like Qwen3-30B-A3B and Qwen3-VL-30B-A3B),
+# input tensors and their grads will stay in gpu memory after forward_backward completes.
+# see https://github.com/NVIDIA/Megatron-LM/pull/3267
+def apply_patch_megatron_recomputation_backward():
+    import megatron.core.tensor_parallel.random as rd
+    import torch
+
+    _fork_rng = rd._fork_rng
+    _set_all_rng_states = rd._set_all_rng_states
+    detach_variable = rd.detach_variable
+    gather_split_1d_tensor = rd.gather_split_1d_tensor
+    safely_set_viewless_tensor_data = rd.safely_set_viewless_tensor_data
+
+    @staticmethod
+    def patch_backward(ctx, *args):
+        """Backward pass."""
+        if not torch.autograd._is_checkpoint_valid():
+            raise RuntimeError("Checkpointing is not compatible with .grad(), please use .backward() if possible")
+        inputs = ctx.saved_tensors
+        if ctx.distribute_saved_activations:
+            safely_set_viewless_tensor_data(inputs[0], gather_split_1d_tensor(inputs[0].data).view(ctx.input_0_shape))
+
+        with _fork_rng():
+            # Set the states to what it used to be before the forward pass.
+            _set_all_rng_states(*ctx.rng_states)
+
+            # Compute the forward pass.
+            detached_inputs = detach_variable(inputs)
+
+            with torch.enable_grad():
+                outputs = ctx.run_function(*detached_inputs)
+
+        if isinstance(outputs, torch.Tensor):
+            outputs = (outputs,)
+
+        # filter out non tensor outputs for backward pass
+        outputs, args = zip(
+            *filter(lambda x: torch.is_tensor(x[0]) and x[0].requires_grad, zip(outputs, args, strict=False)),
+            strict=False,
+        )
+        torch.autograd.backward(outputs, args)
+        # Clone grads to return
+        grads = tuple(
+            inp.grad.clone()
+            if isinstance(inp, torch.Tensor) and inp.grad is not None
+            else inp.grad
+            if isinstance(inp, torch.Tensor)
+            else inp
+            for inp in detached_inputs
+        )
+        cur_stream = torch.cuda.current_stream()
+        # Release original input and grad tensors
+        for t in detached_inputs:
+            if isinstance(t, torch.Tensor) and t.requires_grad:
+                t.record_stream(cur_stream)
+                t.untyped_storage().resize_(0)
+                if t.grad is not None:
+                    t.grad.record_stream(cur_stream)
+                    t.grad.untyped_storage().resize_(0)
+        # ctx.saved_tensors = None
+        return (None, None) + grads
+
+    rd.CheckpointFunction.backward = patch_backward

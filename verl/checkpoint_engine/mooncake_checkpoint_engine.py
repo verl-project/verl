@@ -21,7 +21,11 @@ from typing import Any, AsyncGenerator, Generator
 import ray
 import torch
 from mooncake.engine import TransferEngine
-from vllm.distributed.utils import StatelessProcessGroup
+
+try:
+    from vllm.distributed.utils import StatelessProcessGroup
+except ImportError:
+    from sglang.srt.distributed.utils import StatelessProcessGroup
 
 from verl.checkpoint_engine.base import CheckpointEngine, CheckpointEngineRegistry, TensorMeta
 from verl.utils.device import get_torch_device
@@ -78,9 +82,12 @@ class MooncakeCheckpointEngine(CheckpointEngine):
 
         self.buf = torch.empty(2 * self.bucket_size, dtype=torch.uint8, device=self.device)
         self.magic_buf = torch.empty(4 * 1024, dtype=torch.uint8, device=self.device)
+        # Separate buffer for receiving magic completion signals (one 4-byte slot per double-buffer)
+        # This prevents the next rank's magic write from corrupting data buffer contents.
+        self.magic_recv = torch.zeros(8, dtype=torch.uint8, device=self.device)
         ret = self.engine.batch_register_memory(
-            [self.buf.data_ptr(), self.magic_buf.data_ptr()],
-            [2 * self.bucket_size, 4 * 1024],
+            [self.buf.data_ptr(), self.magic_buf.data_ptr(), self.magic_recv.data_ptr()],
+            [2 * self.bucket_size, 4 * 1024, 8],
         )
         assert ret == 0, f"batch_register_memory failed ret={ret}"
         logger.info(f"__init__ session_id={self.session_id}")
@@ -95,18 +102,18 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         return {"addr": self.hostname, "port": port}
 
     @classmethod
-    def build_topology(cls, trainer_world_size: int, rollout_world_size: int, metadatas: list[dict]):
-        trainer_kwargs = {
-            "rank": [0] + [-1] * (trainer_world_size - 1),
-            "world_size": [rollout_world_size + 1] * trainer_world_size,
-            "metadata": [metadatas[0]] * trainer_world_size,
+    def build_topology(cls, actor_wg_world_size: int, rollout_world_size: int, metadatas: list[dict]):
+        actor_wg_kwargs = {
+            "rank": [0] + [-1] * (actor_wg_world_size - 1),
+            "world_size": [rollout_world_size + 1] * actor_wg_world_size,
+            "metadata": [metadatas[0]] * actor_wg_world_size,
         }
         rollout_kwargs = {
             "rank": list(range(1, rollout_world_size + 1)),
             "world_size": [rollout_world_size + 1] * rollout_world_size,
             "metadata": [metadatas[0]] * rollout_world_size,
         }
-        return trainer_kwargs, rollout_kwargs
+        return actor_wg_kwargs, rollout_kwargs
 
     def init_process_group(self, rank: int, world_size: int, metadata: dict[str, Any]):
         self.rank = rank
@@ -143,11 +150,16 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         magic = torch.tensor([0xAB, 0xDC, 0xEF, 0x88], dtype=torch.uint8, device=self.device)
         while True:
             if torch.equal(buf[:4], magic):
+                buf[:4] = 0  # reset for next use
                 break
             await asyncio.sleep(0)
 
     @torch.no_grad()
-    async def send_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None]):
+    async def send_weights(
+        self,
+        weights: Generator[tuple[str, torch.Tensor], None, None],
+        global_steps: int | None = None,
+    ):
         """Send weights using Mooncake TransferEngine"""
         if self.rank < 0:
             for name, weight in weights:
@@ -161,6 +173,7 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         offset = 0
         should_wait = False
         bufs = [self.buf[: self.bucket_size], self.buf[self.bucket_size :]]
+        magic_slots = [self.magic_recv[:4], self.magic_recv[4:]]
         idx = 0
         current = bufs[idx]
 
@@ -173,6 +186,7 @@ class MooncakeCheckpointEngine(CheckpointEngine):
                 info = {
                     "bucket_meta": bucket_meta,
                     "ptr": current.data_ptr(),
+                    "magic_ptr": magic_slots[idx].data_ptr(),
                     "len": offset,
                     "is_last": False,
                 }
@@ -185,7 +199,7 @@ class MooncakeCheckpointEngine(CheckpointEngine):
                 offset = 0
 
                 if should_wait:
-                    await self.wait_for_complete(current)
+                    await self.wait_for_complete(magic_slots[idx])
                 should_wait = True
 
             assert offset + weight.nbytes <= self.bucket_size, (
@@ -205,11 +219,12 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         info = {
             "bucket_meta": bucket_meta,
             "ptr": current.data_ptr(),
+            "magic_ptr": magic_slots[idx].data_ptr(),
             "len": offset,
             "is_last": True,
         }
         self.store.send_obj(info, 1)
-        await self.wait_for_complete(current)
+        await self.wait_for_complete(magic_slots[idx])
 
         time_cost = time.time() - start_time
         bandwidth = total_bytes / time_cost / (1024 * 1024 * 1024)
@@ -219,53 +234,79 @@ class MooncakeCheckpointEngine(CheckpointEngine):
         )
 
     @torch.no_grad()
-    async def receive_weights(self) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
-        """Receive weights using Mooncake TransferEngine"""
+    async def receive_weights(
+        self,
+        global_steps: int | None = None,
+    ) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
+        """Receive weights from the previous rank via RDMA.
+
+        Protocol:
+        1. Recv metadata from prev rank via TCPStore
+        2. RDMA-read data from prev rank's buffer
+        3. Forward metadata to next rank (if not last)
+        4. Yield weights to consumer
+        5. Write magic completion signal to prev rank's magic_ptr
+           (a dedicated magic_recv slot, NOT the data buffer, to avoid
+           transfer_sync_write local GPU side-effect corruption)
+        """
+        _magic = torch.tensor([0xAB, 0xDC, 0xEF, 0x88], dtype=torch.uint8, device=self.device)
+
         start_time = time.time()
         total_bytes = 0
         bufs = [self.buf[: self.bucket_size], self.buf[self.bucket_size :]]
+        magic_slots = [self.magic_recv[:4], self.magic_recv[4:]]
         idx = 0
         current = bufs[idx]
-        self.magic_buf[:4] = torch.tensor([0xAB, 0xDC, 0xEF, 0x88], dtype=torch.uint8, device=self.device)
+        self.magic_buf[:4] = _magic.clone()
 
         while True:
-            # 1 receive info from previous rank
             info = self.store.recv_obj(self.rank - 1)
             if idx >= 2 and self.rank < self.world_size - 1:
-                await self.wait_for_complete(current)
+                await self.wait_for_complete(magic_slots[idx % 2])
 
-            ptr = info["ptr"]
+            prev_ptr = info["ptr"]
+            prev_magic_ptr = info.get("magic_ptr")
+
             ret = self.engine.transfer_sync_read(
                 self.buffer_info["session_id"],
                 current.data_ptr(),
-                ptr,
+                prev_ptr,
                 info["len"],
             )
-            assert ret == 0, f"transfer_sync_read failed {ret}"
+            assert ret == 0
+
             total_bytes += info["len"]
 
-            # 2 send info to next rank
             info["ptr"] = current.data_ptr()
+            info["magic_ptr"] = magic_slots[idx % 2].data_ptr()
             if self.rank < self.world_size - 1:
                 self.store.send_obj(info, self.rank + 1)
 
-            # 3 yield tensor from current buffer
             for name, meta in info["bucket_meta"].items():
                 dtype, shape = meta["dtype"], meta["shape"]
                 size = dtype.itemsize * shape.numel()
                 tensor = current[meta["offset"] : meta["offset"] + size].view(dtype=dtype).view(shape)
                 yield name, tensor
 
-            # 4 write magic data to previous rank
-            ret = self.engine.transfer_sync_write(
-                self.buffer_info["session_id"],
-                self.magic_buf.data_ptr(),
-                ptr,
-                4,
-            )
-            assert ret == 0, f"transfer_sync_write failed {ret}"
+            get_torch_device().synchronize()
 
-            # 5 swap buffer
+            if prev_magic_ptr is not None:
+                ret = self.engine.transfer_sync_write(
+                    self.buffer_info["session_id"],
+                    self.magic_buf.data_ptr(),
+                    prev_magic_ptr,
+                    4,
+                )
+                assert ret == 0
+            else:
+                ret = self.engine.transfer_sync_write(
+                    self.buffer_info["session_id"],
+                    self.magic_buf.data_ptr(),
+                    prev_ptr,
+                    4,
+                )
+                assert ret == 0
+
             idx += 1
             current = bufs[idx % 2]
             get_torch_device().synchronize()

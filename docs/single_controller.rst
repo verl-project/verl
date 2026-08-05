@@ -68,7 +68,7 @@ The first step is to define the ``generate_sequences`` and decorate it
 with ``@register`` as it will be called in driver script.
 
 **Source:**
-`fsdp_workers.py <https://github.com/volcengine/verl/blob/c59ab2f4788f9a910836a9f2f53dcdb62dfa314e/verl/workers/fsdp_workers.py#L528>`__
+`engine_workers.py <https://github.com/verl-project/verl/blob/main/verl/workers/engine_workers.py>`__
 
 .. code:: python
 
@@ -84,7 +84,7 @@ method. Currently, it doesn’t alter functionality, but attaches
 attributes via a magic key (``MAGIC_ATTR``):
 
 **Source:**
-`decorator.py <https://github.com/volcengine/verl/blob/c59ab2f4788f9a910836a9f2f53dcdb62dfa314e/verl/single_controller/base/decorator.py#L411>`__
+`decorator.py <https://github.com/verl-project/verl/blob/c59ab2f4788f9a910836a9f2f53dcdb62dfa314e/verl/single_controller/base/decorator.py#L411>`__
 
 .. code:: python
 
@@ -116,7 +116,7 @@ These attached attributes are extracted and utilized when
 into a ``RayWorkerGroup``.
 
 **Source:**
-`main_generation.py <https://github.com/volcengine/verl/blob/4ae9a0fdab229f75f080e9478807783ed4c97154/verl/trainer/main_generation.py#L82>`__
+`main_generation.py <https://github.com/verl-project/verl/blob/4ae9a0fdab229f75f080e9478807783ed4c97154/verl/trainer/main_generation.py#L82>`__
 
 .. code:: python
 
@@ -125,13 +125,13 @@ into a ``RayWorkerGroup``.
    wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init)
 
 During the
-`initialization <https://github.com/volcengine/verl/blob/c59ab2f4788f9a910836a9f2f53dcdb62dfa314e/verl/single_controller/ray/base.py#L184>`__
+`initialization <https://github.com/verl-project/verl/blob/c59ab2f4788f9a910836a9f2f53dcdb62dfa314e/verl/single_controller/ray/base.py#L184>`__
 of ``RayWorkerGroup``, two key steps occur:
 
 1. Worker instances (Ray actors) are created:
-   `RayWorkerGroup._init_with_resource_pool <https://github.com/volcengine/verl/blob/c59ab2f4788f9a910836a9f2f53dcdb62dfa314e/verl/single_controller/ray/base.py#L211>`__
+   `RayWorkerGroup._init_with_resource_pool <https://github.com/verl-project/verl/blob/c59ab2f4788f9a910836a9f2f53dcdb62dfa314e/verl/single_controller/ray/base.py#L211>`__
 2. Methods decorated with ``@register`` are bound to ``RayWorkerGroup``:
-   `RayWorkerGroup._bind_worker_method <https://github.com/volcengine/verl/blob/c59ab2f4788f9a910836a9f2f53dcdb62dfa314e/verl/single_controller/ray/base.py#L214>`__
+   `RayWorkerGroup._bind_worker_method <https://github.com/verl-project/verl/blob/c59ab2f4788f9a910836a9f2f53dcdb62dfa314e/verl/single_controller/ray/base.py#L214>`__
 
 .. figure:: https://github.com/eric-haibin-lin/verl-community/blob/main/docs/worker_group_init.png?raw=true
    :alt: initialization_and_binding_of_worker_group
@@ -141,7 +141,7 @@ of ``RayWorkerGroup``, two key steps occur:
 The binding procedure is the heart of ``verl.single_controller``.
 
 **Key function:**
-`WorkerGroup._bind_worker_method <https://github.com/volcengine/verl/blob/c59ab2f4788f9a910836a9f2f53dcdb62dfa314e/verl/single_controller/base/worker_group.py#L143>`__
+`WorkerGroup._bind_worker_method <https://github.com/verl-project/verl/blob/c59ab2f4788f9a910836a9f2f53dcdb62dfa314e/verl/single_controller/base/worker_group.py#L143>`__
 
 .. code:: python
 
@@ -174,7 +174,7 @@ As show in the flow chart above, these attributes are fed into
 ``dispatch_fn``, ``collect_fn``, ``execute_fn``, ``blocking``. We need
 to find the corresponding ``dispatch_fn`` and ``collect_fn`` associated
 with the ``dispatch_mode`` (``DP_COMPUTE_PROTO``) from
-`DISPATCH_MODE_FN_REGISTRY <https://github.com/volcengine/verl/blob/c59ab2f4788f9a910836a9f2f53dcdb62dfa314e/verl/single_controller/base/decorator.py#L387>`__:
+`DISPATCH_MODE_FN_REGISTRY <https://github.com/verl-project/verl/blob/c59ab2f4788f9a910836a9f2f53dcdb62dfa314e/verl/single_controller/base/decorator.py#L387>`__:
 
 .. code:: python3
 
@@ -226,7 +226,7 @@ arguments, each of which will be fed into a worker attached to the
 ``WorkerGroup``.
 
 ``dispatch_fn`` of ``ONE_TO_ALL`` is
-`dispatch_one_to_all <https://github.com/volcengine/verl/blob/c59ab2f4788f9a910836a9f2f53dcdb62dfa314e/verl/single_controller/base/decorator.py#L119>`__,
+`dispatch_one_to_all <https://github.com/verl-project/verl/blob/c59ab2f4788f9a910836a9f2f53dcdb62dfa314e/verl/single_controller/base/decorator.py#L119>`__,
 which just duplicates all the input arguments into N replicas, where N
 equals the number of Workers attached to the ``worker_group``:
 
@@ -238,7 +238,7 @@ equals the number of Workers attached to the ``worker_group``:
        return args, kwargs
 
 ``dispatch_fn`` of ``DP_COMPUTE_PROTO`` is
-`dispatch_dp_compute_data_proto <https://github.com/volcengine/verl/blob/c59ab2f4788f9a910836a9f2f53dcdb62dfa314e/verl/single_controller/base/decorator.py#L350>`__,
+`dispatch_dp_compute_data_proto <https://github.com/verl-project/verl/blob/c59ab2f4788f9a910836a9f2f53dcdb62dfa314e/verl/single_controller/base/decorator.py#L350>`__,
 which uses ``DataProto.chunk`` to split a large ``DataProto`` into N
 smaller ``DataProto``, where N equals the world_size (number of the
 workers) of the ``worker_group``:

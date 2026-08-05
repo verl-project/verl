@@ -151,6 +151,53 @@ def vocab_parallel_entropy(vocab_parallel_logits: torch.Tensor) -> torch.Tensor:
     return _VocabParallelEntropy.apply(vocab_parallel_logits)
 
 
+def vocab_parallel_entropy_with_chunking(vocab_parallel_logits: torch.Tensor, chunk_size: int = 2048) -> torch.Tensor:
+    """Memory-efficient entropy calculation using chunked processing when logits are sharded in tp ranks.
+    Args:
+        vocab_parallel_logits: (batch_size, seq_len, vocab_size // tp_size) or (total_nnz, vocab_size // tp_size)
+        chunk_size: Number of sequence tokens to process at once. Defaults to 2048.
+    Returns: (batch_size, seq_len)
+    """
+
+    output_shape = list(vocab_parallel_logits.shape[:-1])
+    entropy = torch.zeros(output_shape, device=vocab_parallel_logits.device)
+
+    for i in range(0, vocab_parallel_logits.shape[1], chunk_size):
+        logits_chunk = vocab_parallel_logits[:, i : i + chunk_size, :]
+        entropy_chunk = _VocabParallelEntropy.apply(logits_chunk)
+        entropy[:, i : i + chunk_size] = entropy_chunk
+
+    return entropy
+
+
+def vocab_parallel_sum_pi_squared(vocab_parallel_logits: torch.Tensor) -> torch.Tensor:
+    """Compute Σπ² (sum of squared probabilities) when logits are sharded across tp ranks.
+
+    Used by ``optimal_token_baseline`` advantage estimators as the path-variance proxy:
+    ``w_t = 1 - 2*π_t + Σπ²``.
+
+    Args:
+        vocab_parallel_logits: (..., vocab_size // tp_size)
+
+    Returns: (...,)
+
+    Implementation is non-destructive (does not mutate ``vocab_parallel_logits``) so it
+    can be safely called before ``vocab_parallel_entropy`` / ``vocab_parallel_log_probs``
+    which would otherwise consume the same tensor.
+    """
+    tp_group = mpu.get_tensor_model_parallel_group()
+
+    logits_max = vocab_parallel_logits.max(dim=-1, keepdim=True).values
+    dist.all_reduce(logits_max, op=dist.ReduceOp.MAX, group=tp_group)
+    shifted = vocab_parallel_logits - logits_max
+    exp_shifted = shifted.exp()
+    sum_exp = exp_shifted.sum(dim=-1, keepdim=True)
+    dist.all_reduce(sum_exp, group=tp_group)
+    sum_exp_squared = exp_shifted.pow(2).sum(dim=-1, keepdim=True)
+    dist.all_reduce(sum_exp_squared, group=tp_group)
+    return (sum_exp_squared / sum_exp.pow(2)).squeeze(dim=-1)
+
+
 def vocab_parallel_log_probs_from_logits(logits, labels):
     """TODO(zhangchi.usc1992): We may change the implementation later"""
     from megatron.core import tensor_parallel

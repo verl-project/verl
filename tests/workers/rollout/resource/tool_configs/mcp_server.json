@@ -1,8 +1,0 @@
-{
-    "mcpServers": {
-        "Tavily Expert": {
-            "url": "https://tavily.api.tadata.com/mcp/tavily/your_expert",
-            "auth_token": "your_tavily_token"
-        }
-    }
-}

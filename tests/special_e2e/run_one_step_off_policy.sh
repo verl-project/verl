@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
+# Megatron-LM is baked into the CI image but the vemlp runner / Ray workers do not inherit
+# the image's PYTHONPATH, so set it at runtime (main_ppo forwards it into the Ray runtime env).
+export PYTHONPATH="/workspace/Megatron-LM${PYTHONPATH:+:${PYTHONPATH}}"
+echo "PYTHONPATH=${PYTHONPATH}"
+
 # Test script for one_step_off_policy E2E regression testing
 # This script runs one_step_off_policy with both FSDP2 and Megatron backends
 # to ensure the asynchronous training mechanism works correctly
 
 NUM_GPUS=${NUM_GPUS:-8}
 ACTOR_STRATEGY=${ACTOR_STRATEGY:-"fsdp2"}  # fsdp2 or megatron
+VANILLA_MBRIDGE=${VANILLA_MBRIDGE:-"False"}  # True or False
 
 # Download model if not exists
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
@@ -130,9 +136,21 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     ref_offload=True
     actor_offload=False
 
+    if [ "$device_name" ] && [ "$device_name" == "npu" ]; then
+        common_params+=(
+            # Todo The checkpoint_engine.backend should be unified to nccl
+            # actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.60
+        )
+        actor_offload=True
+    fi
+
     python3 -m verl.experimental.one_step_off_policy.main_ppo \
         "${common_params[@]}" \
         actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
+        actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+        actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2 \
+        actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
         critic.strategy=fsdp2 \
         actor_rollout_ref.actor.grad_clip=1.0 \
         actor_rollout_ref.model.use_remove_padding=True \
@@ -152,18 +170,24 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     echo "Running with Megatron strategy..."
     # Megatron specific parameters
     gen_tp=2
-    train_tp=1
-    train_pp=2
+    train_tp=2
+    train_pp=3
     ref_offload=True
     actor_offload=False
 
-    extra_flash_args=()
-
-    if [ "$device_name" == "npu" ]; then
-        echo "Detect NPU device, enabling FlashAttention..."
-        extra_flash_args+=(
-            ++actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
+    if [ "$device_name" ] && [ "$device_name" == "npu" ]; then
+        common_params+=(
+            # Todo The checkpoint_engine.backend should be unified to nccl
+            # actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.70
+            actor_rollout_ref.model.use_remove_padding=True \
+            actor_rollout_ref.model.enable_gradient_checkpointing=True \
+            actor_rollout_ref.actor.use_dynamic_bsz=True \
+            actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
+            actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
         )
+        train_tp=2
+        actor_offload=True
     fi
 
     python3 -m verl.experimental.one_step_off_policy.main_ppo \
@@ -172,9 +196,10 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         "${common_params[@]}" \
         actor_rollout_ref.actor.strategy=megatron \
         critic.strategy=megatron \
-        actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
-        actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
-        actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
+        actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+        actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2 \
+        actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
+        actor_rollout_ref.actor.megatron.vanilla_mbridge=${VANILLA_MBRIDGE} \
         actor_rollout_ref.actor.megatron.param_offload=${actor_offload} \
         actor_rollout_ref.actor.megatron.optimizer_offload=${actor_offload} \
         actor_rollout_ref.actor.megatron.grad_offload=${actor_offload} \
@@ -183,7 +208,6 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
         actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
         actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${train_pp} \
         actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${train_tp} \
-        "${extra_flash_args[@]}" \
         actor_rollout_ref.ref.megatron.param_offload=${ref_offload} $@
 else
     echo "Error: Unknown strategy ${ACTOR_STRATEGY}. Please use 'fsdp2' or 'megatron'"

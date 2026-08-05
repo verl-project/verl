@@ -5,7 +5,9 @@
 # IS aggregation level: null (disabled), "token" (per-token), "sequence" (per-sequence)
 rollout_is: null
 
-# Upper threshold for IS weight truncation (typical: 2.0-5.0)
+# Threshold for IS weighting:
+# - float / float-like string: TIS upper bound
+# - "lower_upper" string: IcePop bounds
 rollout_is_threshold: 2.0
 
 # RS aggregation level: null (disabled), e.g. "token_k1", "seq_sum_k1", "seq_mean_k3"

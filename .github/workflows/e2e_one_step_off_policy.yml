@@ -80,8 +80,11 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm012.dev3"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm024.dev2"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
+  # The image bakes Megatron-LM at /workspace/Megatron-LM onto PYTHONPATH, but the vemlp
+  # dynamic runner does not inherit the image ENV, so re-declare it for the job steps.
+  PYTHONPATH: "/workspace/Megatron-LM"
 
 jobs:
   setup:
@@ -105,7 +108,6 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 10 # Increase timeout for async training
     env:
-      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
@@ -119,6 +121,11 @@ jobs:
         run: |
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
+          pip3 install --no-deps TransferQueue==0.1.8
+          pip3 install cupy-cuda13x==13.6.0
+      - name: Check final pip list
+        run: |
+          pip3 list
       - name: Prepare GSM8K dataset
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
@@ -129,11 +136,10 @@ jobs:
 
   # Test Megatron strategy
   e2e_one_step_off_policy_megatron:
-    needs: setup
+    needs: [setup, e2e_one_step_off_policy_fsdp2]
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 10 # Increase timeout for async training
     env:
-      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
@@ -146,7 +152,13 @@ jobs:
       - name: Install the current repository
         run: |
           pip3 install -r requirements-test.txt
+          pip3 install -r requirements.txt
           pip3 install --no-deps -e .
+          pip3 install cupy-cuda13x==13.6.0
+          pip3 install "nvidia-modelopt>=0.37.0"
+      - name: Check final pip list
+        run: |
+          pip3 list
       - name: Prepare GSM8K dataset
         run: |
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k

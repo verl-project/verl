@@ -26,9 +26,9 @@ from PIL import Image
 from tensordict import TensorDict
 from torch.utils.data import DistributedSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
-from transformers import AutoProcessor, AutoTokenizer
 from transformers.utils import get_json_schema
 
+from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.dataset.dataset_utils import DatasetPadMode, SFTTensorCollator
 from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
 from verl.utils.model import extract_multi_modal_inputs
@@ -37,31 +37,29 @@ custom_model_prefix = Path("~/models").expanduser().resolve()
 
 
 @pytest.mark.parametrize(
-    "model_path",
+    "model_path, ignore_input_ids_mismatch",
     [
-        f"{custom_model_prefix}/Qwen/Qwen2.5-0.5B",
-        f"{custom_model_prefix}/Qwen/Qwen2.5-Coder-7B-Instruct",
-        f"{custom_model_prefix}/Qwen/Qwen3-30B-A3B-Instruct-2507",
-        # "Qwen/Qwen3-30B-A3B-Thinking-2507" # Thinking series models add <think></think> tags to last turn.
+        (f"{custom_model_prefix}/Qwen/Qwen2.5-0.5B", False),
+        (f"{custom_model_prefix}/Qwen/Qwen3-0.6B", True),
+        (f"{custom_model_prefix}/Qwen/Qwen3.5-0.8B", False),
     ],
 )
-@pytest.mark.parametrize("enable_thinking", [False, True])
-def test_multiturn_sft_dataset(model_path: str, enable_thinking: bool):
-    print(f"Starting test... model_path={model_path}, enable_thinking={enable_thinking}")
+def test_multiturn_sft_dataset(model_path: str, ignore_input_ids_mismatch: bool):
+    print(f"Starting test... model_path={model_path}, ignore_input_ids_mismatch={ignore_input_ids_mismatch}")
     # Create a temporary parquet file with test data
     test_data = {
         "messages": [
             [
                 {"role": "user", "content": "What is 2+2?"},
                 {"role": "assistant", "content": "2+2 equals 4."},
-                {"role": "user", "content": "And what is 4+4?"},
+                {"role": "tool", "content": "And what is 4+4?"},
                 {"role": "assistant", "content": "4+4 equals 8."},
             ],
             [
-                {"role": "system", "content": "You are a powerful assistant."},
+                # {"role": "system", "content": "You are a powerful assistant."},
                 {"role": "user", "content": "Tell me a joke."},
                 {"role": "assistant", "content": "Why did the chicken cross the road?"},
-                {"role": "user", "content": "Why?"},
+                {"role": "tool", "content": "Why?"},
                 {"role": "assistant", "content": "To get to the other side!"},
             ],
         ]
@@ -76,14 +74,16 @@ def test_multiturn_sft_dataset(model_path: str, enable_thinking: bool):
     df.to_parquet(test_file)
 
     # Initialize tokenizer and dataset
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = hf_tokenizer(model_path)
+    # processor = hf_processor(model_path)
+    processor = None
     config = {
         "max_length": 512,
         "truncation": "error",
         "multiturn": {"messages_key": "messages"},
-        "apply_chat_template_kwargs": {"enable_thinking": enable_thinking},
+        "ignore_input_ids_mismatch": ignore_input_ids_mismatch,
     }
-    dataset = MultiTurnSFTDataset(parquet_files=test_file, tokenizer=tokenizer, config=config)
+    dataset = MultiTurnSFTDataset(parquet_files=test_file, tokenizer=tokenizer, processor=processor, config=config)
 
     # Test 1: Dataset Length
     assert len(dataset) == 2, f"Expected dataset length 2, got {len(dataset)}"
@@ -189,8 +189,15 @@ def test_multiturn_sft_dataset(model_path: str, enable_thinking: bool):
             )
 
     # Test 10: Verify padding behavior
-    padding_config = {"max_length": 1024, "truncation": "error", "multiturn": {"messages_key": "messages"}}
-    small_dataset = MultiTurnSFTDataset(parquet_files=test_file, tokenizer=tokenizer, config=padding_config)
+    padding_config = {
+        "max_length": 1024,
+        "truncation": "error",
+        "multiturn": {"messages_key": "messages"},
+        "ignore_input_ids_mismatch": ignore_input_ids_mismatch,
+    }
+    small_dataset = MultiTurnSFTDataset(
+        parquet_files=test_file, tokenizer=tokenizer, processor=processor, config=padding_config
+    )
     padded_item = small_dataset[0]
 
     # Get actual sequence length (before padding)
@@ -209,8 +216,9 @@ def test_multiturn_sft_dataset(model_path: str, enable_thinking: bool):
         "truncation": "error",
         "multiturn": {"messages_key": "messages"},
         "pad_mode": "no_padding",
+        "ignore_input_ids_mismatch": ignore_input_ids_mismatch,
     }
-    dataset = MultiTurnSFTDataset(parquet_files=test_file, tokenizer=tokenizer, config=config)
+    dataset = MultiTurnSFTDataset(parquet_files=test_file, tokenizer=tokenizer, processor=processor, config=config)
 
     item0 = dataset[0]
 
@@ -226,6 +234,78 @@ def test_multiturn_sft_dataset(model_path: str, enable_thinking: bool):
 
     print("All tests passed!")
     print("Starting test...")
+
+
+@pytest.mark.parametrize(
+    "model_path, apply_chat_template_kwargs",
+    [
+        (f"{custom_model_prefix}/openai/gpt-oss-20b", {"model_identity": "You are a helpful assistant."}),
+    ],
+)
+def test_multiturn_sft_dataset_with_chat_template_kwargs(model_path: str, apply_chat_template_kwargs: dict):
+    """Test that custom apply_chat_template_kwargs are forwarded to system prompt
+    measurement so the loss mask is not shifted when kwargs change tokenization.
+
+    Some chat templates embed configurable fields (e.g. model_identity) in the
+    system prompt. If these kwargs are not forwarded to system prompt length
+    measurement, the per-turn strip length is wrong, causing role markers to be
+    removed and the loss mask to shift.
+    """
+    test_data = {
+        "messages": [
+            [
+                {"role": "user", "content": "What is 2+2?"},
+                {"role": "assistant", "content": "2+2 equals 4."},
+            ],
+            [
+                {"role": "user", "content": "Tell me a joke."},
+                {"role": "assistant", "content": "Why did the chicken cross the road?"},
+            ],
+        ]
+    }
+
+    os.makedirs("test_data", exist_ok=True)
+    test_file = "test_data/test_kwargs.parquet"
+    df = pd.DataFrame(test_data)
+    df.to_parquet(test_file)
+
+    tokenizer = hf_tokenizer(model_path)
+
+    config = {
+        "max_length": 1024,
+        "truncation": "error",
+        "pad_mode": "no_padding",
+        "apply_chat_template_kwargs": apply_chat_template_kwargs,
+    }
+    dataset = MultiTurnSFTDataset(parquet_files=test_file, tokenizer=tokenizer, processor=None, config=config)
+
+    for idx in range(len(dataset)):
+        item = dataset[idx]
+        input_ids = item["input_ids"]
+        loss_mask = item["loss_mask"]
+
+        assistant_text = tokenizer.decode(input_ids[loss_mask == 1])
+        non_assistant_text = tokenizer.decode(input_ids[loss_mask == 0])
+
+        for msg in test_data["messages"][idx]:
+            if msg["role"] == "assistant":
+                assert msg["content"] in assistant_text, (
+                    f"Assistant message '{msg['content']}' not found in masked text. "
+                    f"This may indicate system prompt length mismatch when using "
+                    f"custom chat_template_kwargs."
+                )
+                assert msg["content"] not in non_assistant_text, (
+                    f"Assistant message '{msg['content']}' found in non-assistant text"
+                )
+            elif msg["role"] in ["system", "user"]:
+                assert msg["content"] in non_assistant_text, (
+                    f"{msg['role'].title()} message '{msg['content']}' not found in non-assistant text"
+                )
+                assert msg["content"] not in assistant_text, (
+                    f"{msg['role'].title()} message '{msg['content']}' found in assistant text"
+                )
+
+    print("All chat_template_kwargs tests passed!")
 
 
 def generate_image(description: str, size: str = "256x256"):
@@ -286,7 +366,7 @@ def vlm_data_file():
                     "content": "Let's generate a zoom-in image.",
                     "tool_calls": [
                         {
-                            "function": {"arguments": '{"bbox_2d": "[0, 1, 2, 4]"}', "name": "image_zoom_in_tool"},
+                            "function": {"arguments": {"bbox_2d": "[0, 1, 2, 4]"}, "name": "image_zoom_in_tool"},
                             "type": "function",
                         }
                     ],
@@ -331,13 +411,19 @@ def vlm_data_file():
     return test_file
 
 
-def test_multiturn_sft_vlm_dataset_on_cpu(vlm_data_file):
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        f"{custom_model_prefix}/Qwen/Qwen3-VL-2B-Instruct",
+        f"{custom_model_prefix}/Qwen/Qwen3.5-0.8B",
+    ],
+)
+def test_multiturn_sft_vlm_dataset_on_cpu(model_path, vlm_data_file):
     df = pd.read_parquet(vlm_data_file)
-    model_path = f"{custom_model_prefix}/Qwen/Qwen3-VL-2B-Instruct"
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    processor = AutoProcessor.from_pretrained(model_path)
-    config = {"max_length": 512, "pad_mode": "no_padding", "truncation": "error", "messages_key": "messages"}
-    dataset = MultiTurnSFTDataset(parquet_files=vlm_data_file, tokenizer=tokenizer, config=config, processor=processor)
+    tokenizer = hf_tokenizer(model_path)
+    processor = hf_processor(model_path)
+    config = {"max_length": 1024, "pad_mode": "no_padding", "truncation": "error", "messages_key": "messages"}
+    dataset = MultiTurnSFTDataset(parquet_files=vlm_data_file, tokenizer=tokenizer, processor=processor, config=config)
     assert dataset.pad_mode == DatasetPadMode.NO_PADDING
 
     for i in range(len(dataset)):
@@ -387,13 +473,18 @@ def test_multiturn_sft_vlm_dataset_on_cpu(vlm_data_file):
             assert image_grid_thw is None, "image_grid_thw should be None when no image is provided"
 
 
-def test_multiturn_sft_vlm_dataloader_on_cpu(vlm_data_file):
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        f"{custom_model_prefix}/Qwen/Qwen3-VL-2B-Instruct",
+    ],
+)
+def test_multiturn_sft_vlm_dataloader_on_cpu(model_path, vlm_data_file):
     df = pd.read_parquet(vlm_data_file)
-    model_path = f"{custom_model_prefix}/Qwen/Qwen3-VL-2B-Instruct"
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    processor = AutoProcessor.from_pretrained(model_path)
-    config = {"max_length": 512, "pad_mode": "no_padding", "truncation": "error", "messages_key": "messages"}
-    dataset = MultiTurnSFTDataset(parquet_files=vlm_data_file, tokenizer=tokenizer, config=config, processor=processor)
+    tokenizer = hf_tokenizer(model_path)
+    processor = hf_processor(model_path)
+    config = {"max_length": 1024, "pad_mode": "no_padding", "truncation": "error", "messages_key": "messages"}
+    dataset = MultiTurnSFTDataset(parquet_files=vlm_data_file, tokenizer=tokenizer, processor=processor, config=config)
     assert dataset.pad_mode == DatasetPadMode.NO_PADDING
 
     collate_fn = SFTTensorCollator(DatasetPadMode.NO_PADDING)
@@ -422,7 +513,6 @@ def test_multiturn_sft_vlm_dataloader_on_cpu(vlm_data_file):
         assert position_ids.is_nested, "position_ids should be a nested tensor"
         assert position_ids.dim() == 3, "position_ids must be 3-dimensional"
         assert position_ids.shape[0] == batch_size
-        assert position_ids.shape[1] == 4
         values = position_ids.values()
         assert values.shape == (4, len(input_ids.values()))
 

@@ -33,8 +33,6 @@ The final advantage is `(G_t - B*_t) · mask_t`, so padding tokens stay at zero.
 - `ActorRolloutRefWorker.compute_log_prob` emits an additional tensor `sum_pi_squared` (Σπ² per token) when `actor.calculate_sum_pi_squared=True`. This requires disabling fused log-prob kernels, because they do not surface logits.
 - Trainers assert `sum_pi_squared` exists, regroup trajectories by `non_tensor_batch["uid"]`, and run the OTB calculation. If rollout IS is active, they rescale the weights by `rollout_is_weights**2` before aggregating.
 - In Ulysses sequence-parallel setups, the actor gathers, unpads, and returns Σπ² in the same way it handles log-probabilities, so OTB supports sharded sequence-parallel models out of the box.
-- `sum_pi_squared_checkpointing` is available to trade compute for memory when Σπ² tensors become large (e.g., lengthy chain-of-thought reasoning).
-
 ## Configuration checklist
 
 - `actor_rollout_ref.actor.calculate_sum_pi_squared: true` (mandatory).
@@ -51,14 +49,13 @@ algorithm:
 actor_rollout_ref:
   actor:
     calculate_sum_pi_squared: true
-    sum_pi_squared_checkpointing: false # optional memory saver
   rollout:
     n: 8
 ```
 
 ## Example script
 
-See `examples/otb_trainer/run_qwen2_5-7b.sh` for a reference training loop.
+See `examples/otb_trainer/run_qwen3_8b_fsdp.sh` for a reference training loop.
 
 ## Gradient Variance Proxy Metrics
 

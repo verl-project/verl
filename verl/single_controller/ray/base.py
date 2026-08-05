@@ -25,6 +25,7 @@ from ray.experimental.state.api import get_actor
 from ray.util.placement_group import PlacementGroup, placement_group
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy, PlacementGroupSchedulingStrategy
 
+from verl.plugin.platform import get_platform
 from verl.protocol import DataProto, _padding_size_key
 from verl.single_controller.base import ClassWithInitArgs, ResourcePool, Worker, WorkerGroup
 from verl.single_controller.base.decorator import MAGIC_ATTR, Dispatch
@@ -137,10 +138,12 @@ class RayResourcePool(ResourcePool):
             name if name else f"{self.name_prefix}verl_group_{'_'.join([str(count) for count in self._store])}:"
         )
         # print(f"pg_name_prefix = {pg_name_prefix}")
-        if device_name == "npu":
-            device_name = "NPU"
-        elif device_name == "cuda":
-            device_name = "GPU"
+        current_platform = get_platform()
+        if device_name != current_platform.device_name:
+            logger.warning(
+                f"Requested device {device_name} does not match current platform device {current_platform.device_name}"
+            )
+        device_name = current_platform.ray_resource_name()
 
         bundle = {"CPU": self.max_colocate_count}
         if self.use_gpu:
@@ -190,6 +193,7 @@ class ResourcePoolManager:
 
     resource_pool_spec: dict[str, list[int]]
     mapping: dict[int, str]
+    max_colocate_count: int = 3
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
 
     def create_resource_pool(self):
@@ -206,7 +210,10 @@ class ResourcePoolManager:
             # For Megatron backend, we recommend using max_colocate_count>1
             # that can utilize different WorkerGroup for differnt models
             resource_pool = RayResourcePool(
-                process_on_nodes=process_on_nodes, use_gpu=True, max_colocate_count=3, name_prefix=resource_pool_name
+                process_on_nodes=process_on_nodes,
+                use_gpu=True,
+                max_colocate_count=self.max_colocate_count,
+                name_prefix=resource_pool_name,
             )
             self.resource_pool_dict[resource_pool_name] = resource_pool
 
@@ -298,7 +305,8 @@ def split_resource_pool(
         start_bundle_idx_list = np.cumsum([0] + split_size_list[:-1])
 
     # ensure resource_pool.pgs has been initialized
-    placement_groups = resource_pool.get_placement_groups()
+    device = get_device_name()
+    placement_groups = resource_pool.get_placement_groups(device_name=device)
     split_resource_pools = [
         SubRayResourcePool(
             process_on_nodes=resource_pool.store,
@@ -397,10 +405,9 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         }
         options.update(self._options)
 
-        if use_gpu and device_name == "cuda":
-            options["num_gpus"] = num_gpus
-        if use_gpu and device_name == "npu":
-            options["resources"] = {"NPU": num_gpus}
+        if use_gpu:
+            resource_opts = get_platform().ray_resource_options(num_gpus)
+            options.update(resource_opts)
 
         if len(self._additional_resource) > 1:
             for k, v in self._additional_resource.items():

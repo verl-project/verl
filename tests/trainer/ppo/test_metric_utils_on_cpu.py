@@ -301,7 +301,8 @@ class TestComputeDataMetrics(unittest.TestCase):
             "token_level_rewards": torch.tensor([[0.5, 1.0], [1.5, 2.0]]),
             "advantages": torch.tensor([[0.1, 0.2], [0.3, 0.4]]),
             "returns": torch.tensor([[1.1, 1.2], [1.3, 1.4]]),
-            "responses": torch.zeros((2, 2)),  # 2 samples, 2 tokens each
+            "prompts": torch.zeros((2, 2)),  # 2 samples, 2 tokens for each prompt
+            "responses": torch.zeros((2, 2)),  # 2 samples, 2 tokens for each response
             "attention_mask": torch.tensor(
                 [
                     [1, 1, 1, 1],  # 2 prompt tokens, 2 response tokens
@@ -398,6 +399,32 @@ class TestComputeTimingMetrics(unittest.TestCase):
         # ref and values use all tokens (12 tokens)
         self.assertAlmostEqual(metrics["timing_per_token_ms/ref"], 0.3 * 1000 / 12, places=5)
         self.assertAlmostEqual(metrics["timing_per_token_ms/values"], 0.2 * 1000 / 12, places=5)
+
+    @patch("verl.trainer.ppo.metric_utils._compute_response_info")
+    def test_compute_timing_metrics_zero_tokens(self, mock_compute_response_info):
+        """Regression test: zero tokens should return 0.0, not crash or report misleading values."""
+        zero_response_info = {
+            "prompt_length": torch.tensor([0.0, 0.0]),
+            "response_length": torch.tensor([0.0, 0.0]),
+            "response_mask": torch.zeros((2, 3)),
+        }
+        mock_compute_response_info.return_value = zero_response_info
+
+        timing_raw = {
+            "gen": 0.5,
+            "ref": 0.3,
+            "values": 0.2,
+        }
+
+        metrics = compute_timing_metrics(self.batch, timing_raw)
+
+        # All per-token metrics should be 0.0 when there are no tokens
+        self.assertEqual(metrics["timing_per_token_ms/gen"], 0.0)
+        self.assertEqual(metrics["timing_per_token_ms/ref"], 0.0)
+        self.assertEqual(metrics["timing_per_token_ms/values"], 0.0)
+
+        # Raw timing should still be reported
+        self.assertEqual(metrics["timing_s/gen"], 0.5)
 
 
 class TestComputeThroughputMetrics(unittest.TestCase):

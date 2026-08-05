@@ -41,11 +41,17 @@ max_response_length: 512
 # Batch size sampled for one training iteration of different RL algorithms.
 train_batch_size: 1024
 
+# Number of prompts fetched from the dataloader per fetch.
+gen_batch_size: null
+
 # Batch size used during validation. Can be null.
 val_batch_size: null
 
 # use tool config to calculate true prompt length
 tool_config_path: ${oc.select:actor_rollout_ref.rollout.multi_turn.tool_config_path, null}
+
+# for @function_tool entries
+function_tool_path: ${oc.select:actor_rollout_ref.rollout.multi_turn.function_tool_path, null}
 
 # Whether to return the original input_ids without adding chat template.
 # This is used when the reward model's chat template differs from the policy.
@@ -91,6 +97,9 @@ image_key: images
 # The field in the multi-modal dataset where the video is located.
 video_key: videos
 
+# The field in the multi-modal dataset where the audio is located.
+audio_key: audios
+
 # If the remote tokenizer has a Python file, this flag determines whether to allow using it.
 trust_remote_code: False
 
@@ -106,26 +115,19 @@ custom_cls:
 # Whether to return multi-modal inputs in the dataset. Set to False if rollout generates new multi-modal inputs.
 return_multi_modal_inputs: True
 
-# settings related to data sampler
-sampler:
-
-  # the path to the module containing a curriculum class which implements the
-  # AbstractSampler interface
-  class_path: null
-
-  # the name of the curriculum class like `MySampler`
-  class_name: null
-
-# Data generation configuration for augmenting the dataset.
-datagen:
-
-  # The path to the file containing your customized data generation class.
-  # E.g. 'pkg://verl.experimental.dynamic_dataset.dynamicgen_dataset'
-  path: null
-
-  # The class name of the data generation class within the specified file.
-  # E.g. 'MockDataGenerator'
-  name: null
-
 # Additional kwargs when calling tokenizer.apply_chat_template
 apply_chat_template_kwargs: {}
+
+# Continuous Token keeps the runtime token stream across multi-turn rollout instead of reconstructing previous assistant turns from text.
+# Disabled by default for compatibility.
+continuous_token:
+
+  # Enable Continuous Token for text-only multi-turn PPO rollout.
+  enable: False
+
+  # Model-family specific boundary handling. auto infers from model path/tokenizer name.
+  # Options: auto, default, qwen, qwen25, qwen3, qwen35, minimax, minimaxm2, minimaxm25, minimaxm27, glm47, glm5, gemma4, gptoss
+  model_family: auto
+
+# Additional kwargs passed to multimodal processors/backends.
+mm_processor_kwargs: {}

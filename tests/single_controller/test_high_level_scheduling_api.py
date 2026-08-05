@@ -32,11 +32,15 @@ class TestActor(Worker):
 
 
 def test():
+    import torch
+
     ray.init()
+    ngpus = torch.cuda.device_count()
+    half = ngpus // 2
 
     # test single-node-no-partition
     print("test single-node-no-partition")
-    resource_pool = RayResourcePool([8], use_gpu=True)
+    resource_pool = RayResourcePool([ngpus], use_gpu=True)
 
     class_with_args = RayClassWithInitArgs(cls=TestActor)
 
@@ -53,9 +57,9 @@ def test():
         resource_pool, class_with_args, name_prefix="high_level_api_ref", device_name=get_device_name()
     )
 
-    assert actor_wg.execute_all_sync("get_cuda_visible_devices") == [str(i) for i in range(8)]
-    assert critic_wg.execute_all_sync("get_cuda_visible_devices") == [str(i) for i in range(8)]
-    assert ref_wg.execute_all_sync("get_cuda_visible_devices") == [str(i) for i in range(8)]
+    assert actor_wg.execute_all_sync("get_cuda_visible_devices") == [str(i) for i in range(ngpus)]
+    assert critic_wg.execute_all_sync("get_cuda_visible_devices") == [str(i) for i in range(ngpus)]
+    assert ref_wg.execute_all_sync("get_cuda_visible_devices") == [str(i) for i in range(ngpus)]
 
     del actor_wg
     del critic_wg
@@ -68,13 +72,13 @@ def test():
     # test single-node-multi-partition
 
     print("test single-node-multi-partition")
-    rm_resource_pool = RayResourcePool([4], use_gpu=True, name_prefix="rm")
-    ref_resource_pool = RayResourcePool([4], use_gpu=True, name_prefix="ref")
+    rm_resource_pool = RayResourcePool([half], use_gpu=True, name_prefix="rm")
+    ref_resource_pool = RayResourcePool([half], use_gpu=True, name_prefix="ref")
     total_resource_pool = merge_resource_pool(rm_resource_pool, ref_resource_pool)
 
-    assert rm_resource_pool.world_size == 4
-    assert ref_resource_pool.world_size == 4
-    assert total_resource_pool.world_size == 8
+    assert rm_resource_pool.world_size == half
+    assert ref_resource_pool.world_size == half
+    assert total_resource_pool.world_size == ngpus
 
     actor_wg = RayWorkerGroup(
         total_resource_pool, class_with_args, name_prefix="high_level_api_actor", device_name=get_device_name()
@@ -86,8 +90,8 @@ def test():
         ref_resource_pool, class_with_args, name_prefix="high_level_api_ref", device_name=get_device_name()
     )
 
-    assert actor_wg.execute_all_sync("get_cuda_visible_devices") == [str(i) for i in range(8)]
-    assert critic_wg.execute_all_sync("get_cuda_visible_devices") == [str(i) for i in range(8)]
-    assert ref_wg.execute_all_sync("get_cuda_visible_devices") == [str(i) for i in range(4, 8)]
+    assert actor_wg.execute_all_sync("get_cuda_visible_devices") == [str(i) for i in range(ngpus)]
+    assert critic_wg.execute_all_sync("get_cuda_visible_devices") == [str(i) for i in range(ngpus)]
+    assert ref_wg.execute_all_sync("get_cuda_visible_devices") == [str(i) for i in range(half, ngpus)]
 
     ray.shutdown()

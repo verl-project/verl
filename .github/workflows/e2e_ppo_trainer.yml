@@ -68,6 +68,9 @@ jobs:
         run: |
           pip install pre-commit hydra-core
           pip3 install --no-deps -e .
+      - name: Check final pip list
+        run: |
+          pip3 list
       - name: Set ruff --output-format=github
         run: |
           sed -i 's/--output-format=full/--output-format=github/' .pre-commit-config.yaml

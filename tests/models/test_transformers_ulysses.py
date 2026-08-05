@@ -29,12 +29,12 @@ from verl.utils.device import get_device_name, get_torch_device
 from verl.utils.distributed import initialize_global_process_group
 from verl.utils.model import compute_position_id_with_mask, create_random_mask
 from verl.utils.ulysses import (
+    FSDPUlyssesShardingManager,
     gather_outputs_and_unpad,
     get_ulysses_sequence_parallel_world_size,
     set_ulysses_sequence_parallel_group,
     ulysses_pad_and_slice_inputs,
 )
-from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
 if get_device_name() == "cuda":
     from flash_attn.bert_padding import index_first_axis, rearrange, unpad_input

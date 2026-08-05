@@ -14,16 +14,25 @@
 
 import os
 import sys
+import types
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import BaseModel
 
 from verl.utils.rollout_trace import RolloutTraceConfig, rollout_trace_attr, rollout_trace_op
 
 
 @pytest.fixture(autouse=True)
 def reset_rollout_trace_config_singleton():
-    """Fixture to reset the RolloutTraceConfig singleton before each test."""
+    """Reset the RolloutTraceConfig singleton around each test.
+
+    Resetting afterwards matters as much as before: the whole CPU suite runs in one
+    pytest process, so a leftover ``backend="weave"`` would make every later
+    ``@rollout_trace_op`` call in any test file import the real (uninstalled) weave.
+    """
+    RolloutTraceConfig.reset()
+    yield
     RolloutTraceConfig.reset()
 
 
@@ -41,6 +50,33 @@ def mock_weave_client():
 
     with patch.dict(sys.modules, {"weave": mock_weave, "weave.trace.context": mock_weave.trace.context}):
         yield mock_client
+
+
+@pytest.fixture
+def mock_trackio_client():
+    """Mocks the trackio module, yielding the mock module."""
+    mock_trackio = MagicMock()
+    mock_trackio.context_vars = types.SimpleNamespace(current_run=MagicMock())
+    mock_trackio.context_vars.current_run.get.return_value = None
+    mock_trackio.Trace.side_effect = lambda messages, metadata=None: {
+        "_type": "trackio.trace",
+        "messages": messages,
+        "metadata": metadata or {},
+    }
+
+    with patch.dict(sys.modules, {"trackio": mock_trackio}):
+        yield mock_trackio
+
+
+@pytest.fixture
+def mock_mlflow_client():
+    """Mocks the mlflow module, yielding the mock module and active span."""
+    mock_mlflow = MagicMock()
+    mock_span = MagicMock()
+    mock_mlflow.start_span.return_value.__enter__.return_value = mock_span
+
+    with patch.dict(sys.modules, {"mlflow": mock_mlflow}):
+        yield mock_mlflow, mock_span
 
 
 class TracedClass:
@@ -74,6 +110,35 @@ class UntracedClass:
         return x * 2
 
 
+class ChatTraceClass:
+    @rollout_trace_op
+    async def run(self, messages, sampling_params):
+        return {
+            "prompt_ids": [1, 2, 3],
+            "response_ids": [4],
+            "response_text": "4",
+            "reward": 1.0,
+        }
+
+
+class GeneratedTokenOutput(BaseModel):
+    token_ids: list[int]
+
+
+class FakeTokenizer:
+    def decode(self, token_ids):
+        return "decoded:" + ",".join(str(token_id) for token_id in token_ids)
+
+
+class LLMGenerateTraceClass:
+    def __init__(self):
+        self.tokenizer = FakeTokenizer()
+
+    @rollout_trace_op
+    async def generate(self, *, prompt_ids):
+        return GeneratedTokenOutput(token_ids=[3, 4])
+
+
 async def test_rollout_trace_on_untraced_class():
     """Tests that the decorator works correctly when no backend is configured."""
     instance = UntracedClass()
@@ -97,6 +162,30 @@ async def test_rollout_trace_with_tracer(mock_weave_client):
 
     mock_call = mock_weave_client.create_call.return_value
     mock_weave_client.finish_call.assert_called_once_with(mock_call, output=result)
+
+
+async def test_token2text_decodes_llm_generate_input_and_output(mock_mlflow_client):
+    """Per-turn LLM traces decode prompt input ids and generated output ids."""
+    _, mock_span = mock_mlflow_client
+    RolloutTraceConfig.init(
+        project_name="my-project",
+        experiment_name="my-experiment",
+        backend="mlflow",
+        token2text=True,
+    )
+
+    instance = LLMGenerateTraceClass()
+    result = await instance.generate(prompt_ids=[1, 2])
+
+    assert result == GeneratedTokenOutput(token_ids=[3, 4])
+    mock_span.set_inputs.assert_called_once_with({"prompt_ids": [1, 2]})
+    mock_span.set_outputs.assert_called_once_with(
+        {
+            "token_ids": [3, 4],
+            "prompt_text": "decoded:1,2",
+            "response_text": "decoded:3,4",
+        }
+    )
 
 
 async def test_rollout_trace_with_exception(mock_weave_client):
@@ -126,6 +215,52 @@ async def test_rollout_trace_with_dummy_backend(mock_weave_client):
     await instance.my_method("test_a")
 
     mock_weave_client.create_call.assert_not_called()
+
+
+async def test_rollout_trace_with_trackio_backend(mock_trackio_client):
+    """Tests that the trackio backend logs a Trackio Trace."""
+    RolloutTraceConfig.init(project_name="my-project", experiment_name="my-experiment", backend="trackio")
+    instance = TracedClass()
+
+    with rollout_trace_attr(step=1, sample_index=2, rollout_n=3):
+        result = await instance.my_method("test_a", b="test_b")
+
+    assert result == "result: test_a, test_b"
+    mock_trackio_client.init.assert_called_once_with(
+        project="my-project", name="my-experiment", config={"framework": "verl"}
+    )
+    mock_trackio_client.Trace.assert_called_once()
+    trace_kwargs = mock_trackio_client.Trace.call_args.kwargs
+    assert trace_kwargs["messages"][0]["content"] == "verl rollout trace operation: TracedClass.my_method"
+    assert trace_kwargs["metadata"]["step"] == 1
+    assert trace_kwargs["metadata"]["sample_index"] == 2
+    mock_trackio_client.log.assert_called_once()
+    log_kwargs = mock_trackio_client.log.call_args.kwargs
+    assert log_kwargs["step"] == 1
+
+
+async def test_trackio_backend_uses_chat_messages_when_available(mock_trackio_client):
+    RolloutTraceConfig.init(project_name="my-project", experiment_name="my-experiment", backend="trackio")
+    instance = ChatTraceClass()
+    input_messages = [
+        {"role": "system", "content": "You are a concise math assistant."},
+        {"role": "user", "content": "What is 2 + 2?"},
+    ]
+
+    with rollout_trace_attr(step=1, sample_index=2, rollout_n=3):
+        await instance.run(
+            messages=input_messages,
+            sampling_params={"temperature": 0.0, "max_tokens": 16},
+        )
+
+    trace_kwargs = mock_trackio_client.Trace.call_args.kwargs
+    assert trace_kwargs["messages"] == [
+        *input_messages,
+        {"role": "assistant", "content": "4"},
+    ]
+    assert trace_kwargs["metadata"]["inputs"] == {"sampling_params": {"temperature": 0.0, "max_tokens": 16}}
+    assert trace_kwargs["metadata"]["output"]["prompt_ids"] == [1, 2, 3]
+    assert trace_kwargs["metadata"]["output"]["response_text"] == "4"
 
 
 async def test_trace_disabled_with_trace_false(mock_weave_client):

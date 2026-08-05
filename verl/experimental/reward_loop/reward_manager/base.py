@@ -17,6 +17,7 @@ import os
 from abc import ABC, abstractmethod
 from typing import Any, Callable
 
+import torch
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 
@@ -56,3 +57,26 @@ class RewardManagerBase(ABC):
     @abstractmethod
     async def run_single(self, data: DataProto):
         raise NotImplementedError
+
+    @classmethod
+    def assemble_rm_scores(cls, data: DataProto, scores: list[float]) -> torch.Tensor:
+        """Assemble per-sample reward scores into the ``rm_scores`` tensor for a batch.
+
+        Args:
+            data: The concatenated batch passed to :meth:`run_single`.
+                ``data.batch["prompts"]``, ``data.batch["responses"]`` and
+                ``data.batch["attention_mask"]`` are expected to be present
+                for the default implementation.
+            scores: List of scalar reward scores, one per sample in ``data``.
+
+        Returns:
+            torch.Tensor: The ``rm_scores`` tensor with leading dimension equal to
+            ``len(data)``.
+        """
+        prompt_length = data.batch["prompts"].size(1)
+        valid_response_length = data.batch["attention_mask"][:, prompt_length:].sum(dim=1)
+        rm_scores = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
+        rm_scores[torch.arange(rm_scores.size(0), device=rm_scores.device), valid_response_length - 1] = (
+            rm_scores.new_tensor(scores)
+        )
+        return rm_scores

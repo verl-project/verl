@@ -21,6 +21,7 @@ import torch.multiprocessing as mp
 
 from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 from verl.utils.torch_functional import (
+    calculate_sum_pi_squared_from_logits,
     distributed_masked_mean,
     distributed_mean_max_min_std,
     expand_as_nested,
@@ -120,6 +121,33 @@ def test_distributed_masked_mean(world_size, tmp_path):
         nprocs=world_size,
         join=True,
     )
+
+
+@pytest.mark.parametrize("shape", [(8, 17), (3, 5, 32), (1, 1024)])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_calculate_sum_pi_squared_from_logits(shape, dtype):
+    """Σπ² computed from the logsumexp identity must match the naive softmax-then-square."""
+    torch.manual_seed(0)
+    logits = torch.randn(*shape, dtype=dtype) * 5.0  # broaden range to expose numerical issues
+
+    actual = calculate_sum_pi_squared_from_logits(logits)
+    expected = torch.softmax(logits, dim=-1).pow(2).sum(dim=-1)
+
+    assert actual.shape == expected.shape
+    torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+    # Σπ² is always in (0, 1] for any non-empty distribution.
+    assert torch.all(actual > 0)
+    assert torch.all(actual <= 1.0 + 1e-5)
+
+
+def test_calculate_sum_pi_squared_from_logits_extreme_values():
+    """Stable under large-magnitude logits where naive exp would overflow."""
+    # fp64 so the comparison isn't dominated by fp32 precision near |z|=1000
+    logits = torch.tensor([[1000.0, 1001.0, 999.0], [-1000.0, -999.0, -998.0]], dtype=torch.float64)
+    actual = calculate_sum_pi_squared_from_logits(logits)
+    expected = torch.softmax(logits, dim=-1).pow(2).sum(dim=-1)
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
 
 
 def test_expand_as_nested():

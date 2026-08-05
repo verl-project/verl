@@ -13,13 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from verl.models.mcore.patch import apply_patch_megatron_v012_with_torch_v28
+from verl.models.mcore.patch import apply_patch_megatron_v012_with_torch_v28_v29
 
 from .registry import (
+    get_mcore_engine_forward_fn,
     get_mcore_forward_fn,
     get_mcore_forward_fused_fn,
-    get_mcore_forward_fused_no_padding_fn,
-    get_mcore_forward_no_padding_fn,
+    get_mcore_forward_fused_model_engine_fn,
     get_mcore_weight_converter,
     hf_to_mcore_config,
     init_mcore_model,
@@ -31,8 +31,8 @@ __all__ = [
     "get_mcore_forward_fn",
     "get_mcore_weight_converter",
     "get_mcore_forward_fused_fn",
-    "get_mcore_forward_fused_no_padding_fn",
-    "get_mcore_forward_no_padding_fn",
+    "get_mcore_engine_forward_fn",
+    "get_mcore_forward_fused_model_engine_fn",
 ]
 
-apply_patch_megatron_v012_with_torch_v28()
+apply_patch_megatron_v012_with_torch_v28_v29()

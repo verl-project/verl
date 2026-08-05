@@ -13,7 +13,7 @@ While the current design factors in multi-node use cases, more extensive multi-n
 
 ```bash
 # GRPO with FSDP training engine and TP1
->> bash examples/grpo_trainer/run_qwen2-7b_math_trtllm.sh 1
+>> INFER_BACKEND=trtllm ROLLOUT_TP=1 bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
 ```
 
 Note that using the TRT-LLM rollout requires setting the following environment variables before launching the Ray cluster, as included in the above script.

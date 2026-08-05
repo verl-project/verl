@@ -64,6 +64,6 @@ RUN pip install -U git+https://github.com/ISEEKYAN/mbridge.git
 
 RUN pip install --no-deps --no-cache-dir git+https://github.com/NVIDIA/Megatron-LM.git@1d462bd37dac21cfa14177405d4921eedb987052 # latest dev branch on 20251209
 
-RUN pip install git+https://github.com/volcengine/verl.git@v0.6.1
+RUN pip install git+https://github.com/verl-project/verl.git@v0.6.1
 
 RUN pip uninstall -y verl

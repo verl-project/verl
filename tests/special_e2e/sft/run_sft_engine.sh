@@ -16,6 +16,7 @@ fi
 DATASET_DIR=${DATASET_DIR:-~/data/gsm8k_sft}
 TRAIN_FILES=${DATASET_DIR}/train.parquet
 VAL_FILES=${DATASET_DIR}/test.parquet
+VANILLA_MBRIDGE=${VANILLA_MBRIDGE:-False}
 
 backend=${BACKEND:-fsdp}
 
@@ -91,7 +92,9 @@ MEGATRON_ENGINE_CONFIG="\
     engine.virtual_pipeline_model_parallel_size=${VPP_SIZE} \
     engine.context_parallel_size=${CP_SIZE} \
     +engine.override_transformer_config.context_parallel_size=${CP_SIZE} \
-    engine.use_mbridge=True"
+    engine.use_mbridge=True \
+    engine.vanilla_mbridge=${VANILLA_MBRIDGE} \
+    "
 
 TORCHTITAN_ENGINE_CONFIG="\
     engine=${backend} \
@@ -112,6 +115,22 @@ TORCHTITAN_ENGINE_CONFIG="\
     engine.data_parallel_shard_size=${FSDP_SIZE} \
     engine.use_torch_compile=False"
 
+AUTOMODEL_ENGINE_CONFIG="\
+    engine=${backend} \
+    model=hf_model \
+    model.path=${MODEL_PATH} \
+    optim=${backend} \
+    optim.lr=1e-5 \
+    optim.lr_warmup_steps_ratio=0.2 \
+    optim.weight_decay=0.1 \
+    optim.betas="[0.9,0.95]" \
+    optim.clip_grad=1.0 \
+    optim.min_lr_ratio=0.1 \
+    optim.lr_scheduler_type=cosine \
+    engine.tp_size=${TP_SIZE} \
+    engine.cp_size=${CP_SIZE} \
+    engine.use_torch_compile=False"
+
 
 if [ "$backend" = "fsdp" ]; then
     ENGINE_CONFIG="$FSDP_ENGINE_CONFIG"
@@ -125,6 +144,10 @@ elif [ "$backend" = "torchtitan" ]; then
     ENGINE_CONFIG="$TORCHTITAN_ENGINE_CONFIG"
     echo "Using torchtitan engine"
     exp_name=gsm8k-${backend}-tp${TP_SIZE}-pp${PP_SIZE}-cp${CP_SIZE}-dp${FSDP_SIZE}-pad-${PAD_MODE}-use_remove_padding-${USE_REMOVE_PADDING}-mode-${mode}
+elif [ "$backend" = "automodel" ]; then
+    ENGINE_CONFIG="$AUTOMODEL_ENGINE_CONFIG"
+    echo "Using automodel engine"
+    exp_name=gsm8k-${backend}-tp${TP_SIZE}-pp${PP_SIZE}-cp${CP_SIZE}-pad-${PAD_MODE}-use_remove_padding-${USE_REMOVE_PADDING}-mode-${mode}
 else
     ENGINE_CONFIG="$MEGATRON_ENGINE_CONFIG"
     echo "Using megatron engine"

@@ -29,7 +29,7 @@ install_requires = [
     "datasets",
     "dill",
     "hydra-core",
-    "numpy<2.0.0",
+    "numpy>=2.0.0",
     "pandas",
     "peft",
     "pyarrow>=19.0.0",
@@ -38,26 +38,30 @@ install_requires = [
     "ray[default]>=2.41.0",
     "torchdata",
     "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
-    "transformers",
+    # 5.6.0 ships a broken flash-attention path (crashes on s_aux=None for
+    # sink-less models); fixed in 5.6.1. See huggingface/transformers#45588.
+    "transformers>=5.5.3,!=5.6.0,<5.11",
     "wandb",
     "packaging>=20.0",
     "tensorboard",
 ]
 
 TEST_REQUIRES = ["pytest", "pre-commit", "py-spy", "pytest-asyncio", "pytest-rerunfailures"]
-PRIME_REQUIRES = ["pyext"]
+# Empty since PRIME code scoring dropped `pyext`; kept so `verl[prime]` stays installable.
+PRIME_REQUIRES = []
 GEO_REQUIRES = ["mathruler", "torchvision", "qwen_vl_utils"]
 GPU_REQUIRES = ["liger-kernel", "flash-attn"]
 MATH_REQUIRES = ["math-verify"]  # Add math-verify as an optional dependency
-VLLM_REQUIRES = ["tensordict>=0.8.0,<=0.10.0,!=0.9.0", "vllm>=0.8.5,<=0.12.0"]
+VLLM_REQUIRES = ["tensordict>=0.8.0,<=0.10.0,!=0.9.0", "vllm>=0.18.0"]
 TRTLLM_REQUIRES = ["tensorrt-llm>=1.2.0rc6"]
 SGLANG_REQUIRES = [
     "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
-    "sglang[srt,openai]==0.5.6",
+    "sglang[srt,openai]==0.5.8",
     "torch==2.9.1",
 ]
 TRL_REQUIRES = ["trl<=0.9.6"]
-MCORE_REQUIRES = ["mbridge"]
+# Keep the legacy mbridge dependency available during its deprecation window.
+MCORE_REQUIRES = ["megatron-bridge", "mbridge"]
 
 extras_require = {
     "test": TEST_REQUIRES,
@@ -81,7 +85,7 @@ setup(
     version=__version__,
     package_dir={"": "."},
     packages=find_packages(where="."),
-    url="https://github.com/volcengine/verl",
+    url="https://github.com/verl-project/verl",
     license="Apache 2.0",
     author="Bytedance - Seed - MLSys",
     author_email="zhangchi.usc1992@bytedance.com, gmsheng@connect.hku.hk",

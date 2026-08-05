@@ -48,7 +48,7 @@ manager available on your cluster or use other container runtimes (e.g. through 
 
 2. Follow :doc:`GSM8K example<../examples/gsm8k_example>` to prepare the dataset and model checkpoints.
 
-3. Modify `examples/slurm/ray_on_slurm.slurm <https://github.com/volcengine/verl/blob/main/examples/slurm/ray_on_slurm.slurm>`_ with your cluster's own information.
+3. Modify `examples/tutorial/slurm/ray_on_slurm.slurm <https://github.com/verl-project/verl/blob/main/examples/tutorial/slurm/ray_on_slurm.slurm>`_ with your cluster's own information.
 
 4. Submit the job script to the Slurm cluster with `sbatch`.
 

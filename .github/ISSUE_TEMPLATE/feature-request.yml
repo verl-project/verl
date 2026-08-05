@@ -29,4 +29,4 @@ body:
     attributes:
       label: Your contribution
       description: |
-        Is there any way that you could help, e.g. by submitting a PR? Make sure to read the CONTRIBUTING.MD [readme](https://github.com/volcengine/verl/blob/main/CONTRIBUTING.md)
+        Is there any way that you could help, e.g. by submitting a PR? Make sure to read the CONTRIBUTING.MD [readme](https://github.com/verl-project/verl/blob/main/CONTRIBUTING.md)

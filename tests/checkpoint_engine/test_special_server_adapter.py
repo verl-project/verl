@@ -21,13 +21,13 @@ from transformers import PreTrainedTokenizer
 
 from tests.checkpoint_engine.test_utils import create_trainer_worker_group
 from verl.checkpoint_engine import CheckpointEngineManager
-from verl.experimental.agent_loop.agent_loop import AgentLoopManager, AsyncLLMServerManager
-from verl.experimental.fully_async_policy.agent_loop.agent_loop import FullyAsyncLLMServerManager
 from verl.single_controller.ray import (
     RayResourcePool,
 )
 from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig
+from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient, LLMServerClient, LLMServerManager
 
 
 @pytest.fixture
@@ -38,7 +38,7 @@ def init_config() -> DictConfig:
         config = compose(
             config_name="ppo_trainer",
             overrides=[
-                "+async_training.partial_rollout_resume=True",
+                "+async_training.partial_rollout=True",
             ],
         )
 
@@ -55,13 +55,13 @@ def init_config() -> DictConfig:
 
 
 async def _run_update_weights_with_global_steps_none(
-    server_manager: AsyncLLMServerManager,
+    server_manager: LLMServerClient,
     checkpoint_manager: CheckpointEngineManager,
     tokenizer: PreTrainedTokenizer,
 ):
     await checkpoint_manager.update_weights(global_steps=None)
     prompt = [{"role": "user", "content": "How to make a sandwich?"}]
-    prompt_ids = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True)
+    prompt_ids = normalize_token_ids(tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True))
     output = await server_manager.generate(
         request_id="test_0",
         prompt_ids=prompt_ids,
@@ -73,8 +73,8 @@ async def _run_update_weights_with_global_steps_none(
     assert output.stop_reason not in ("aborted", "abort"), (
         f"output.stop_reason is {output.stop_reason}, expected not abort"
     )
-    assert output.extra_info["global_steps"] is None, (
-        f"output.extra_info['global_steps'] is {output.extra_info['global_steps']}, expected None"
+    assert output.extra_fields["global_steps"] is None, (
+        f"output.extra_fields['global_steps'] is {output.extra_fields['global_steps']}, expected None"
     )
     print("========== [update_weights with global_steps=None] ==========")
     print("[RESPONSE]", tokenizer.decode(output.token_ids, skip_special_tokens=True))
@@ -83,7 +83,7 @@ async def _run_update_weights_with_global_steps_none(
 async def _run_server_manager_without_resume(
     initial_steps: int,
     train_steps: int,
-    server_manager: AsyncLLMServerManager,
+    server_manager: LLMServerClient,
     checkpoint_manager: CheckpointEngineManager,
     prompts: list[list[dict]],
     tokenizer: PreTrainedTokenizer,
@@ -91,7 +91,9 @@ async def _run_server_manager_without_resume(
     for global_steps in range(initial_steps, initial_steps + train_steps):
         tasks = []
         for i, prompt in enumerate(prompts):
-            prompt_ids = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True)
+            prompt_ids = normalize_token_ids(
+                tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True)
+            )
             tasks.append(
                 asyncio.create_task(
                     server_manager.generate(
@@ -106,13 +108,13 @@ async def _run_server_manager_without_resume(
             )
 
         # wait a while and update weights to interrupt the generation
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
         await checkpoint_manager.update_weights(global_steps=global_steps)
 
         outputs = await asyncio.gather(*tasks)
         expected_steps = global_steps - 1
         for output in outputs:
-            global_steps = output.extra_info["global_steps"]
+            global_steps = output.extra_fields["global_steps"]
             assert output.stop_reason in ("aborted", "abort"), (
                 f"output.stop_reason is {output.stop_reason}, expected in abort"
             )
@@ -124,7 +126,7 @@ async def _run_server_manager_without_resume(
 async def _run_server_manager_with_resume(
     initial_steps: int,
     train_steps: int,
-    server_manager: FullyAsyncLLMServerManager,
+    server_manager: FullyAsyncLLMServerClient,
     checkpoint_manager: CheckpointEngineManager,
     prompts: list[list[dict]],
     tokenizer: PreTrainedTokenizer,
@@ -132,7 +134,9 @@ async def _run_server_manager_with_resume(
     # 1. rollout generate responses
     tasks = []
     for i, prompt in enumerate(prompts):
-        prompt_ids = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True)
+        prompt_ids = normalize_token_ids(
+            tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True)
+        )
         tasks.append(
             asyncio.create_task(
                 server_manager.generate(
@@ -149,15 +153,15 @@ async def _run_server_manager_with_resume(
     # 2. trainer update weights to rollout multiple times
     for global_steps in range(initial_steps, initial_steps + train_steps):
         # wait a while and update weights to interrupt the generation
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
         await checkpoint_manager.update_weights(global_steps=global_steps)
 
     # 3. wait for rollout generate responses finished
     outputs = await asyncio.gather(*tasks)
     expected_min_steps = initial_steps - 1
     for output in outputs:
-        min_global_steps = output.extra_info["min_global_steps"]
-        max_global_steps = output.extra_info["max_global_steps"]
+        min_global_steps = output.extra_fields["min_global_steps"]
+        max_global_steps = output.extra_fields["max_global_steps"]
         assert min_global_steps == expected_min_steps, (
             f"output.min_global_steps is {min_global_steps}, expected {expected_min_steps}"
         )
@@ -191,23 +195,15 @@ async def test_server_adapter(init_config):
         init_config.actor_rollout_ref.rollout.checkpoint_engine
     )
     trainer_pool = RayResourcePool(process_on_nodes=[init_config.trainer.n_gpus_per_node], max_colocate_count=3)
-    trainer = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
-    trainer.reset()
+    actor_wg = create_trainer_worker_group(trainer_pool, model_config, checkpoint_engine_config)
+    actor_wg.reset()
 
     # 2. create standalone rollout with AgentLoopManager
-    agent_loop_manager = await AgentLoopManager.create(config=init_config)
-    servers = list(
-        zip(
-            agent_loop_manager.server_addresses,
-            [server._server_handle for server in agent_loop_manager.rollout_replicas],
-            strict=True,
-        )
-    )
-    load_balancer_handle = agent_loop_manager.global_load_balancer
+    llm_server_manager = await LLMServerManager.create(config=init_config)
 
     # 3. create checkpoint engine manager
     checkpoint_manager = CheckpointEngineManager(
-        config=checkpoint_engine_config, trainer=trainer, replicas=agent_loop_manager.rollout_replicas
+        config=checkpoint_engine_config, actor_wg=actor_wg, replicas=llm_server_manager.get_replicas()
     )
 
     n = 4
@@ -218,36 +214,29 @@ async def test_server_adapter(init_config):
         [{"role": "user", "content": "Please write an article about the geography of America, at least 1000 words."}],
     ] * n
 
-    server_manager = AsyncLLMServerManager(
-        config=init_config, servers=servers, load_balancer_handle=load_balancer_handle
-    )
-
     # 4. test update_weights with global_steps=None
     await _run_update_weights_with_global_steps_none(
-        server_manager=server_manager,
+        server_manager=llm_server_manager.get_client(),
         checkpoint_manager=checkpoint_manager,
         tokenizer=model_config.tokenizer,
     )
 
-    # 5. test AsyncLLMServerManager without partial rollout resume
+    # 5. test LLMServerClient without partial rollout resume
     await checkpoint_manager.update_weights(global_steps=0)
     await _run_server_manager_without_resume(
         initial_steps=1,
         train_steps=3,
-        server_manager=server_manager,
+        server_manager=llm_server_manager.get_client(),
         checkpoint_manager=checkpoint_manager,
         prompts=prompts,
         tokenizer=model_config.tokenizer,
     )
 
-    # 6. test FullyAsyncLLMServerManager with partial rollout resume
-    server_manager = FullyAsyncLLMServerManager(
-        config=init_config, servers=servers, load_balancer_handle=load_balancer_handle
-    )
+    # 6. test FullyLLMServerClient with partial rollout resume
     await _run_server_manager_with_resume(
         initial_steps=4,
         train_steps=3,
-        server_manager=server_manager,
+        server_manager=llm_server_manager.get_client(client_cls=FullyAsyncLLMServerClient),
         checkpoint_manager=checkpoint_manager,
         prompts=prompts,
         tokenizer=model_config.tokenizer,

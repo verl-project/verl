@@ -28,6 +28,7 @@ defaults:
 
   # Critic model config.
   - critic@critic: ${model_engine}_critic
+  - model@critic.model: hf_model
 
   # legacy reward impl config, for backward compatibility
   - legacy_reward_impl
@@ -37,6 +38,12 @@ defaults:
 
   # Rollout correction config.
   - algorithm@algorithm.rollout_correction: rollout_correction
+
+  # distillation config
+  - distillation@distillation: distillation
+
+  # TransferQueue configuration.
+  - transfer_queue@transfer_queue: transfer_queue
 
   # load the reference default config, then apply the fields in the current yaml
   # self config override anything above
@@ -50,12 +57,6 @@ actor_rollout_ref:
 
   # Timeout for operations executed against the process group
   nccl_timeout: 600
-
-  # Rollout model config.
-  rollout:
-
-    # for huge model, layered summon can save memory (prevent OOM) but make it slower
-    layered_summon: False
 
 # config for the algorithm
 algorithm:
@@ -74,6 +75,24 @@ algorithm:
 
   # Whether to normalize advantages by std (specific to GRPO)
   norm_adv_by_std_in_grpo: True
+
+  # Group filtering configuration used by DAPO and entropy-based sampling
+  filter_groups:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.trainer.config.FilterGroupsConfig
+
+    # Whether to enable group filtering
+    enable: False
+
+    # Metric used to identify groups with uniform rewards, acc / score / seq_reward / seq_final_reward / ...
+    metric: null
+
+    # Maximum number of generation batches; non-positive values mean no upper limit
+    max_num_gen_batches: 0
+
+    # Maximum Sync DAPO prompt batches concurrently in flight, measured in train-batch units
+    max_inflight_gen_batches: 1
 
   # Whether to enable in-reward KL penalty
   use_kl_in_reward: False
@@ -199,9 +218,58 @@ trainer:
   # Device to run training on (e.g., "cuda", "cpu")
   device: cuda
 
-  # whether to use legacy worker implementation
-  #  mode: "auto", "enable", or "disable"
-  use_legacy_worker_impl: auto
+  # Whether to use V1 trainer
+  use_v1: true
+
+  # V1 trainer mode configs
+  v1:
+
+    # Trainer mode: "sync", "colocate_async", "separate_async"
+    trainer_mode: sync
+
+    # Synchronous PPO trainer
+    sync: {}
+
+    # Asynchronous PPO trainer with colocated trainer and rollout
+    colocate_async:
+
+      # Number of warmup batches to add before training loop starts
+      num_warmup_batches: 1
+
+    # Asynchronous PPO trainer with separate trainer and rollout
+    separate_async:
+
+      # Number of warmup batches to add before training loop starts
+      num_warmup_batches: 1
+
+      # Frequency of parameter synchronization between trainer and rollout
+      parameter_sync_step: 4
+
+    # Replay buffer sampling strategy
+    sampler:
+
+      # Maximum number of model versions that trajectory can span
+      max_off_policy_threshold: 8
+
+      # How to handle trajectory that exceeds the maximum number of model versions
+      # drop: drop the trajectory
+      # wait: dropless, wait all trajectories that reach threshold to finish
+      max_off_policy_strategy: drop
+
+      # Whether sync trainers replace failed groups that have no trajectories
+      sync_refill_failed_groups: False
+
+      # Custom sampler config
+      custom_sampler:
+
+        # Path to the custom sampler class
+        path: null
+
+        # Name of the custom sampler class
+        name: null
+
+      # Additional kwargs for the custom sampler
+      sampler_kwargs: {}
 
 # profiler configs
 global_profiler:
@@ -209,7 +277,7 @@ global_profiler:
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl.utils.profiler.ProfilerConfig
 
-  # Profiling tool: choose between nsys, npu, torch, torch_memory
+  # Profiling tool: choose between nsys, npu, torch, torch_memory, precision_debugger
   tool: null
 
   # profile steps
@@ -293,11 +361,76 @@ global_profiler:
       # devices, record_context etc.
       kw_args: {}
 
-# configs for TransferQueue
-transfer_queue:
+    # msprobe precision debugger
+    precision_debugger:
 
-  # Whether to enable transfer queue
-  enable: False
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+
+      # Path to msprobe config json
+      config_path: null
+
+      # Deprecated and ignored. Use global_profiler.steps.
+      steps: null
+
+      # Profile stages
+      # Supported stages: actor_update, actor_compute_log_prob, ref_compute_log_prob,
+      # compute_values, critic_update, compute_rm_score
+      stages: null
+
+      # Whether to fail on unknown stage or missing msprobe
+      strict: False
+
+# configs for SkipManager
+skip:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.utils.skip.SkipManagerConfig
+
+  # configs for RolloutSkip 
+  rollout:
+
+    # Whether to enable RolloutSkip
+    enable: False
+
+    # Directory to save rollout data
+    dump_dir: "~/.verl/rollout_dump"
+
+    # Steps to skip rollout
+    steps: []
+
+  # Action to take when rollout is skipped, refer to verl.utils.skip.base_skip.SkipAction
+    action: cache
+
+  # configs for RolloutTqSkip (V1 TransferQueue-based trainer)
+  rollout_tq:
+
+    # Whether to enable RolloutTqSkip
+    enable: False
+
+    # Directory to save rollout data
+    dump_dir: "~/.verl/rollout_dump"
+
+    # Steps to skip rollout
+    steps: []
+
+    # Action to take when rollout is skipped (cache | repeat)
+    action: cache
+
+  # configs for AsyncRolloutSkip (fully async policy)
+  async_rollout:
+
+    # Whether to enable AsyncRolloutSkip
+    enable: False
+
+    # Directory to save rollout data
+    dump_dir: "~/.verl/rollout_dump"
+
+    # Steps to skip rollout (rollouter global_steps from sample_id)
+    steps: []
+
+    # Action to take when rollout is skipped, refer to verl.utils.skip.base_skip.SkipAction
+    action: cache
 
 # configs related to ray
 ray_kwargs:

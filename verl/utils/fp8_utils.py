@@ -19,6 +19,7 @@ import os
 import torch
 
 from verl.utils.kernel.fp8_kernel import scaled_fp8_blockwise
+from verl.workers.rollout.utils import ensure_async_iterator
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -82,12 +83,12 @@ class FP8QuantizerHelper:
         logger.debug(f"Skip quantization: {param_name}")
         return False
 
-    def quant_weights_by_name(self, weights, dtype=torch.bfloat16):
+    async def quant_weights_by_name(self, weights, dtype=torch.bfloat16):
         """FP8 quantization based on parameter name using a memory-efficient generator.
 
 
         Args:
-            weights: Generator or iterable of (name, tensor) pairs
+            weights: Generator, AsyncGenerator, or iterable of (name, tensor) pairs
             dtype: Data type for intermediate computation
 
         Yields:
@@ -101,7 +102,7 @@ class FP8QuantizerHelper:
         if weight_block_size is None:
             raise ValueError("weight_block_size not found in quant_config")
 
-        for k, v in weights:
+        async for k, v in ensure_async_iterator(weights):
             # Check if quantization is needed
             if not self.should_quantize_param(k):
                 yield (k, v)

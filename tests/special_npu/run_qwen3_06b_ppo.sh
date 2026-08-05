@@ -1,7 +1,12 @@
 set -x
 
-MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}  # TODO: change to Qwen3-0.6B when CI server is ready
+MODEL_ID=${MODEL_ID:-Qwen/Qwen3-0.6B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
+
+SKIP_ENABLE=True
+SKIP_DUMP_DIR=${SKIP_DUMP_DIR:-${HOME}/data/rollout_dump_sync}
+SKIP_STEPS='[1]'
+SKIP_ACTION=cache
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=gae \
@@ -37,8 +42,8 @@ python3 -m verl.trainer.main_ppo \
     critic.model.enable_gradient_checkpointing=True \
     critic.ppo_micro_batch_size_per_gpu=1 \
     critic.ulysses_sequence_parallel_size=2 \
-    critic.model.fsdp_config.param_offload=True \
-    critic.model.fsdp_config.optimizer_offload=True \
+    critic.fsdp.param_offload=True \
+    critic.fsdp.optimizer_offload=True \
     critic.use_dynamic_bsz=True \
     trainer.critic_warmup=0 \
     trainer.logger='["console"]' \
@@ -49,4 +54,9 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=-1 \
     trainer.test_freq=-1 \
     trainer.total_epochs=1 \
-    trainer.total_training_steps=1 $@
+    trainer.total_training_steps=2 \
+    skip.rollout.enable=${SKIP_ENABLE} \
+    skip.rollout.dump_dir=${SKIP_DUMP_DIR} \
+    skip.rollout.steps=${SKIP_STEPS} \
+    skip.rollout.action=${SKIP_ACTION} \
+    "$@"

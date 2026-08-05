@@ -19,7 +19,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Optional, cast
 
 from verl import DataProto
-from verl.utils.reward_score import default_compute_score
+from verl.utils.reward_score import get_default_compute_score
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
@@ -86,6 +86,28 @@ def get_custom_reward_fn(config: DictConfig) -> Optional[RawRewardFn]:
         return partial(_call_with_kwargs_async, raw_fn, reward_kwargs)
 
 
+def resolve_reward_manager_cls(config: DictConfig) -> type[RewardManagerBase]:
+    """Resolve the reward manager class from ``config`` without instantiating it."""
+    reward_manager_cfg: RewardManagerConfig = config.reward.reward_manager
+    if reward_manager_cfg.source == "register":
+        from verl.experimental.reward_loop.reward_manager import get_reward_manager_cls
+
+        return get_reward_manager_cls(reward_manager_cfg.name)
+    elif reward_manager_cfg.source == "importlib":
+        from verl.utils.import_utils import load_extern_object
+
+        module_cfg: ModuleConfig | None = reward_manager_cfg.module
+        assert module_cfg is not None and module_cfg.path is not None, (
+            f"Module path is required when {reward_manager_cfg.source=}, but got {module_cfg=}"
+        )
+        return cast(
+            "type[RewardManagerBase]",
+            load_extern_object(module_path=module_cfg.path, object_name=reward_manager_cfg.name),
+        )
+    else:
+        raise ValueError(f"Unknown reward manager source: {reward_manager_cfg.source}")
+
+
 def load_reward_manager(config: DictConfig, tokenizer: Any, **reward_kwargs: Any) -> RewardManagerBase:
     """
     Load and initialize a reward manager based on the configuration.
@@ -105,23 +127,9 @@ def load_reward_manager(config: DictConfig, tokenizer: Any, **reward_kwargs: Any
     final_compute_score = compute_score
 
     reward_manager_cfg: RewardManagerConfig = config.reward.reward_manager
-    reward_manager_cls: type[RewardManagerBase]
-    if reward_manager_cfg.source == "register":
-        from verl.experimental.reward_loop.reward_manager import get_reward_manager_cls
+    reward_manager_cls = resolve_reward_manager_cls(config)
 
-        reward_manager_cls = get_reward_manager_cls(reward_manager_cfg.name)
-    elif reward_manager_cfg.source == "importlib":
-        from verl.utils.import_utils import load_extern_object
-
-        module_cfg: ModuleConfig | None = reward_manager_cfg.module
-        assert module_cfg is not None and module_cfg.path is not None, (
-            f"Module path is required when {reward_manager_cfg.source=}, but got {module_cfg=}"
-        )
-        reward_manager_cls_name = reward_manager_cfg.name
-        reward_manager_cls = cast(
-            "type[RewardManagerBase]",
-            load_extern_object(module_path=module_cfg.path, object_name=reward_manager_cls_name),
-        )
+    default_compute_score_ = get_default_compute_score(reward_manager_cfg.name)
 
     if compute_score is None:
         sandbox_config = config.reward.get("sandbox_fusion")
@@ -132,13 +140,13 @@ def load_reward_manager(config: DictConfig, tokenizer: Any, **reward_kwargs: Any
             # Create a semaphore to control concurrent access to the sandbox
             _concurrent_semaphore = sandbox_manager.Semaphore(sandbox_config.get("max_concurrent", 64))
             final_compute_score = partial(
-                default_compute_score,
+                default_compute_score_,
                 sandbox_fusion_url=sandbox_url,
                 concurrent_semaphore=_concurrent_semaphore,
                 memory_limit_mb=memory_limit_mb,
             )
         else:
-            final_compute_score = default_compute_score
+            final_compute_score = default_compute_score_
 
     # Instantiate and return the reward manager with the specified parameters
     return reward_manager_cls(

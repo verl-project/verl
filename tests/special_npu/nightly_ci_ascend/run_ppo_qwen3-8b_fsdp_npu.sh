@@ -6,6 +6,10 @@ set -x
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-8B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
 
+SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}" .sh)"
+LOG_DIR=/root/.cache/nightly_log/$SCRIPT_NAME
+mkdir -p $LOG_DIR
+
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=gae \
     data.train_files=$HOME/data/gsm8k/train.parquet \
@@ -43,8 +47,8 @@ python3 -m verl.trainer.main_ppo \
     critic.model.enable_gradient_checkpointing=True \
     critic.ppo_micro_batch_size_per_gpu=1 \
     critic.ulysses_sequence_parallel_size=2 \
-    critic.model.fsdp_config.param_offload=True \
-    critic.model.fsdp_config.optimizer_offload=True \
+    critic.fsdp.param_offload=True \
+    critic.fsdp.optimizer_offload=True \
     critic.use_dynamic_bsz=True \
     trainer.critic_warmup=0 \
     trainer.logger=console \
@@ -57,4 +61,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.val_before_train=False \
     trainer.max_actor_ckpt_to_keep=1 \
     trainer.max_critic_ckpt_to_keep=1 \
-    trainer.total_training_steps=15 $@
+    trainer.total_training_steps=15 2>&1 | tee $LOG_DIR/$SCRIPT_NAME.log

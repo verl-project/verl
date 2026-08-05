@@ -98,6 +98,20 @@ class BaseCheckpointManager:
         return "hf_model" in self.checkpoint_save_contents
 
     @property
+    def should_save_lora_only(self) -> bool:
+        if not self.checkpoint_config:
+            return False
+        if isinstance(self.checkpoint_config, dict):
+            return self.checkpoint_config.get("save_lora_only", False)
+        return getattr(self.checkpoint_config, "save_lora_only", False)
+
+    @staticmethod
+    def is_lora_only_state_dict(state_dict: dict) -> bool:
+        if not state_dict:
+            return False
+        return all("lora_" in k or ".adapter_" in k for k in state_dict)
+
+    @property
     def should_load_model(self) -> bool:
         """
         Returns True if 'model' is in checkpoint_load_contents, indicating the model state should be loaded.
@@ -117,6 +131,14 @@ class BaseCheckpointManager:
         Returns True if 'extra' is in checkpoint_load_contents, indicating the extra state should be loaded.
         """
         return "extra" in self.checkpoint_load_contents
+
+    @property
+    def should_load_hf_model(self) -> bool:
+        """
+        Returns True if 'hf_model' is in checkpoint_load_contents, indicating an HF-format model
+        checkpoint should be loaded (e.g. via a bridge).
+        """
+        return "hf_model" in self.checkpoint_load_contents
 
     def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load: bool = False):
         raise NotImplementedError

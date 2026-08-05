@@ -2,7 +2,7 @@
 
 **Author:** `https://github.com/meituan-search`
 
-Last updated: 02/05/2026.
+Last updated: 05/25/2026.
 
 This document introduces a fully asynchronous PPO training system that completely decouples the Trainer and Rollouter,
 supporting asynchronous sample generation and training.
@@ -299,7 +299,7 @@ trigger_parameter_sync_step=16
 partial_rollout=False
 
 
-python -m recipe.fully_async_policy.fully_async_main \
+python -m verl.experimental.fully_async_policy.fully_async_main \
 	train_batch_size=${train_prompt_bsz} \
     data.gen_batch_size=${gen_prompt_bsz} \
     data.return_raw_chat=${return_raw_chat} \
@@ -566,14 +566,3 @@ To validate the performance of `fully_async_policy` on multi-turn tool-calling t
 | fully_async_policy 	 | 16: 16              	 | 221.36 	  | 40.59   	 | \            	 | 179.58       	 | 6h 19m<br>(1.55x)      	 | 14h 4m<br>(1.60x)      	 |   start:0.11<br>last:0.2044 	   |
 
 > source data: https://wandb.ai/hou-zg-meituan/fully-async-policy-multiturn-tool?nw=nwuserhouzg
-
-## Future Plans
-
-* GRPO experiments
-* Megatron adaptation
-* SGLang integration
-* Transfer queue integration
-* Asynchronous parameter synchronization
-* AReaL asynchronous algorithm implementation
-* TPPO algorithm implementation
-* Multi-turn and Tool support

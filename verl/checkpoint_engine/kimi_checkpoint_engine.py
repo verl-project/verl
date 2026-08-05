@@ -265,27 +265,27 @@ class KIMICheckpointEngine(CheckpointEngine):
             self.initialized = False
 
     @classmethod
-    def build_topology(cls, trainer_world_size: int, rollout_world_size: int, metadata: list[dict]):
-        trainer_kwargs = {
-            "method": ["init_process_group"] * trainer_world_size,
-            "rank": list(range(0, trainer_world_size)),
-            "trainer_world_size": [trainer_world_size] * trainer_world_size,
-            "rollout_world_size": [rollout_world_size] * trainer_world_size,
-            "master_metadata": [metadata[0]] * trainer_world_size,
+    def build_topology(cls, actor_wg_world_size: int, rollout_world_size: int, metadata: list[dict]):
+        actor_wg_kwargs = {
+            "method": ["init_process_group"] * actor_wg_world_size,
+            "rank": list(range(0, actor_wg_world_size)),
+            "actor_wg_world_size": [actor_wg_world_size] * actor_wg_world_size,
+            "rollout_world_size": [rollout_world_size] * actor_wg_world_size,
+            "master_metadata": [metadata[0]] * actor_wg_world_size,
         }
         rollout_kwargs = {
             "method": ["init_process_group"] * rollout_world_size,
-            "rank": list(range(trainer_world_size, trainer_world_size + rollout_world_size)),
-            "trainer_world_size": [trainer_world_size] * rollout_world_size,
+            "rank": list(range(actor_wg_world_size, actor_wg_world_size + rollout_world_size)),
+            "actor_wg_world_size": [actor_wg_world_size] * rollout_world_size,
             "rollout_world_size": [rollout_world_size] * rollout_world_size,
             "master_metadata": [metadata[0]] * rollout_world_size,
         }
-        return trainer_kwargs, rollout_kwargs
+        return actor_wg_kwargs, rollout_kwargs
 
     def init_process_group(
         self,
         rank: int,
-        trainer_world_size: int,
+        actor_wg_world_size: int,
         rollout_world_size: int,
         master_metadata: MasterMetadata,
     ):
@@ -296,9 +296,9 @@ class KIMICheckpointEngine(CheckpointEngine):
             world_size (int): The total number of processes.
         """
         self.rank = rank
-        self.trainer_world_size = trainer_world_size
+        self.actor_wg_world_size = actor_wg_world_size
         self.rollout_world_size = rollout_world_size
-        self.world_size = trainer_world_size + rollout_world_size
+        self.world_size = actor_wg_world_size + rollout_world_size
 
         if not self.initialized:
             self.parameter_server = ParameterServer(
@@ -313,12 +313,16 @@ class KIMICheckpointEngine(CheckpointEngine):
             dist.use_backend(f"vllm_{get_nccl_backend()}")
             self.parameter_server.init_process_group()
 
-            self.rollout_ranks = list(range(self.trainer_world_size, self.world_size))
+            self.rollout_ranks = list(range(self.actor_wg_world_size, self.world_size))
             self.rollout_group = dist.new_group(self.rollout_ranks)
             self.initialized = True
 
     @torch.no_grad()
-    async def send_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None]):
+    async def send_weights(
+        self,
+        weights: Generator[tuple[str, torch.Tensor], None, None],
+        global_steps: int | None = None,
+    ):
         """Send the weights of the model.
 
         Args:
@@ -331,7 +335,7 @@ class KIMICheckpointEngine(CheckpointEngine):
         start_time = time.time()
         named_tensors = {}
         for named_tensors_gpu in ckpt_get_named_tensor_buckets(
-            weights, self.bucket_size, self.trainer_world_size, self.rank, self.rollout_dtype
+            weights, self.bucket_size, self.actor_wg_world_size, self.rank, self.rollout_dtype
         ):
             with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
                 futures = [
@@ -359,7 +363,10 @@ class KIMICheckpointEngine(CheckpointEngine):
         logger.info(f"Rank {self.rank} send weights done, time cost: {time.time() - start_time:.2f}s")
 
     @torch.no_grad()
-    async def receive_weights(self) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
+    async def receive_weights(
+        self,
+        global_steps: int | None = None,
+    ) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
         """Receive the weights of the model.
 
         Yields:

@@ -166,7 +166,7 @@ def validate_config(
             "actor_rollout_ref.rollout",
         )
 
-    if config.algorithm.use_kl_in_reward and config.actor_rollout_ref.actor.use_kl_loss:
+    if config.algorithm.get("use_kl_in_reward", False) and config.actor_rollout_ref.actor.use_kl_loss:
         print("NOTICE: You have both enabled in-reward kl and kl loss.")
 
     # critic

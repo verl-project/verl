@@ -33,29 +33,17 @@ from typing import Any, Generator, Optional
 
 import ray
 import torch
-from packaging import version as vs
 from torch.distributed.device_mesh import DeviceMesh
 
 from verl import DataProto
-from verl.third_party.vllm import VLLM_SLEEP_LEVEL, get_version
-from verl.utils.device import get_device_id, is_support_ipc
+from verl.third_party.vllm import VLLM_SLEEP_LEVEL
+from verl.utils.device import is_support_ipc
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
 from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
-from verl.workers.rollout.vllm_rollout.utils import get_device_uuid
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
-
-
-def _check_vllm_version_for_sleep_level():
-    # https://github.com/vllm-project/vllm/issues/25171
-    minver = "0.11.0"
-    current_version = get_version("vllm")
-    if not current_version:
-        logger.warning("Could not determine vLLM version, assuming an older version for sleep_level configuration.")
-        return False
-    return vs.parse(current_version) >= vs.parse(minver)
 
 
 class ServerAdapter(BaseRollout):
@@ -76,11 +64,21 @@ class ServerAdapter(BaseRollout):
 
         rank = int(os.environ["RANK"])
         local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
-        rollout_world_size = (
-            self.config.tensor_model_parallel_size
-            * self.config.data_parallel_size
-            * self.config.pipeline_model_parallel_size
-        )
+        # PD asymmetric layout inflates per-replica footprint; must match
+        # llm_server.py:_initialize_llm_servers or trainer-to-replica mapping breaks.
+        prefill_tp = self.config.tensor_model_parallel_size
+        disagg = getattr(self.config, "disaggregation", None)
+        if disagg is not None and getattr(disagg, "enabled", False):
+            decode_tp = (
+                disagg.decode_tensor_model_parallel_size
+                if disagg.decode_tensor_model_parallel_size is not None
+                else prefill_tp
+            )
+            per_replica = prefill_tp * disagg.prefill_replicas + decode_tp * disagg.decode_replicas
+        else:
+            decode_tp = prefill_tp
+            per_replica = prefill_tp
+        rollout_world_size = per_replica * self.config.data_parallel_size * self.config.pipeline_model_parallel_size
         if replica_rank == -1:
             self.replica_rank = rank // rollout_world_size
         else:
@@ -88,14 +86,59 @@ class ServerAdapter(BaseRollout):
         self.rollout_rank = rank % rollout_world_size
         self.node_rank = self.rollout_rank // local_world_size
 
-        if config.layered_summon or (config.expert_parallel_size > 1 and not _check_vllm_version_for_sleep_level()):
+        # Map each trainer rank to its co-located vLLM server so weight-update
+        # IPC handles stay on the GPU where they were created. Offset math
+        # assumes prefill_replicas == 1 (enforced by vLLMPDReplica); if that
+        # ever lifts, update both this block and vLLMPDReplica.launch_servers.
+        self._pd_role: Optional[str] = None
+        self._pd_server_index: Optional[int] = None
+        self._pd_tp_local_rank: Optional[int] = None
+        if disagg is not None and getattr(disagg, "enabled", False):
+            footprint = prefill_tp + disagg.decode_replicas * decode_tp
+            local = self.rollout_rank % footprint
+            if local < prefill_tp:
+                self._pd_role = "prefill"
+                self._pd_server_index = 0
+                self._pd_tp_local_rank = local
+            else:
+                off = local - prefill_tp
+                self._pd_role = "decode"
+                self._pd_server_index = off // decode_tp
+                self._pd_tp_local_rank = off % decode_tp
+            # Each role's TP-rank-0 owns the adapter (vs colocated where every
+            # rollout_rank=0 owns it). One log line per PD rank at startup so
+            # a deadlock report can be traced back to the role mapping.
+            self._has_server = self._pd_tp_local_rank == 0
+            logger.info(
+                "vllm PD ServerAdapter: rank=%d replica=%d rollout=%d role=%s server_idx=%s tp_local=%s has_server=%s",
+                rank,
+                self.replica_rank,
+                self.rollout_rank,
+                self._pd_role,
+                self._pd_server_index,
+                self._pd_tp_local_rank,
+                self._has_server,
+            )
+        else:
+            self._has_server = self.rollout_rank == 0
+
+        if config.layered_summon:
             logger.warning("Setting the sleep level to 1 may cause a memory overflow.")
             self.sleep_level = 1
         else:
             self.sleep_level = VLLM_SLEEP_LEVEL
 
-        self.device_uuid = get_device_uuid(get_device_id())
-        self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
+        # Use replica_rank + node-local rank to form ZMQ handle instead of GPU UUID,
+        # because CheckpointEngineWorker and vLLM worker may see different GPU UUIDs
+        # when CUDA_VISIBLE_DEVICES differs between processes (common on ROCm/AMD).
+        # Must use node-local rank (not rollout_rank) so it matches vLLM worker's
+        # local_rank on every node. Include replica_rank to avoid collisions when
+        # multiple replicas share a node, and the Ray job id so two independent
+        # verl jobs on the same host (or a new run after a crashed one with a
+        # stale socket file) cannot collide on the shared /tmp namespace.
+        local_rank = self.rollout_rank % local_world_size
+        job_id = ray.get_runtime_context().get_job_id()
+        self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{self.replica_rank}-rank-{local_rank}.sock"
 
         self.use_shm = not is_support_ipc()
         if self.use_shm:
@@ -105,6 +148,22 @@ class ServerAdapter(BaseRollout):
                 "your software and CANN toolkit versions meet the requirements for IPC support. (Ascend HDK version "
                 ">= 25.3.rc1 and CANN toolkit version >= 8.3.RC1)"
             )
+
+    def _ensure_server_handle(self) -> bool:
+        """Lazy-init server handle. Returns False if this rank should not proceed."""
+        if not self._has_server:
+            return False
+        # Lazy init http server adapter because http server is launched after hybrid engine.
+        if self.server_handle is None:
+            prefix = self._get_server_name_prefix()
+            if self._pd_role == "prefill":
+                actor_name = f"{prefix}server_{self.replica_rank}_0"
+            elif self._pd_role == "decode":
+                actor_name = f"{prefix}server_decode_{self.replica_rank}_{self._pd_server_index}"
+            else:
+                actor_name = f"{prefix}server_{self.replica_rank}_{self.node_rank}"
+            self.server_handle = ray.get_actor(actor_name)
+        return True
 
     async def _execute_method(
         self,
@@ -126,12 +185,8 @@ class ServerAdapter(BaseRollout):
         Returns:
             The result of the method execution, or None if non_block=True.
         """
-        if self.rollout_rank != 0:
+        if not self._ensure_server_handle():
             return None
-
-        # Lazy init http server adapter because http server is launched after hybrid engine.
-        if self.server_handle is None:
-            self.server_handle = ray.get_actor(f"vllm_server_{self.replica_rank}_{self.node_rank}")
 
         future = self.server_handle.collective_rpc.remote(method, timeout=timeout, args=args, kwargs=kwargs)
         return future if non_block else await future
@@ -142,19 +197,26 @@ class ServerAdapter(BaseRollout):
         Args:
             tags: weights or kv_cache.
         """
-        if self.config.free_cache_engine:
-            await self._execute_method("wake_up", kwargs={"tags": tags})
+        if self.config.free_cache_engine and self._ensure_server_handle():
+            await self.server_handle.wake_up.remote(tags=tags)
 
     async def release(self):
         """Release weights and kv cache in GPU memory."""
-        if self.config.free_cache_engine:
-            await self._execute_method("sleep", kwargs={"level": self.sleep_level})
+        if self.config.free_cache_engine and self._ensure_server_handle():
+            await self.server_handle.sleep.remote()
 
     @torch.no_grad()
     async def update_weights(
-        self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int = None, **kwargs
+        self,
+        weights: Generator[tuple[str, torch.Tensor], None, None],
+        global_steps: int = None,
+        wire_format: str = "named_tensors",
+        **kwargs,
     ):
         """Update model weights via CUDA IPC (fallback to shared memory if IPC not supported) to inference workers."""
+        assert wire_format == "named_tensors", (
+            f"vLLM rollout only consumes full named tensors; got wire_format={wire_format!r}"
+        )
         start_time = time.time()
 
         future = await self._execute_method(
@@ -174,14 +236,18 @@ class ServerAdapter(BaseRollout):
         if future is not None:
             await future
 
-        # reset prefix cache after updating weights
-        if self.rollout_rank == 0:
+        # reset caches after updating weights
+        if self._has_server:
             await self.server_handle.clear_kv_cache.remote()
             if global_steps is not None:
                 await self.server_handle.set_global_steps.remote(global_steps)
 
         if self.replica_rank == 0 and self.rollout_rank == 0:
             logger.info(f"update_weights done, time cost: {time.time() - start_time:.2f}s")
+
+    def _get_server_name_prefix(self) -> str:
+        """Return the Ray actor name prefix matching the rollout type (e.g. 'vllm_')."""
+        return f"{self.config.get('name', 'vllm')}_"
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         """Batch generate sequences in sync mode.
@@ -196,7 +262,7 @@ class ServerAdapter(BaseRollout):
         raise NotImplementedError(
             "ServerAdapter does not support synchronous generate_sequences(). "
             "The vLLM SPMD mode was retired in PR #4411. For batch generation, "
-            "please use the async server interface via vLLMReplica and AsyncLLMServerManager, "
+            "please use the async server interface via vLLMReplica and LLMServerClient, "
             "or use HFRollout for synchronous generation. "
-            "See https://github.com/volcengine/verl/issues/4682 for more details."
+            "See https://github.com/verl-project/verl/issues/4682 for more details."
         )

@@ -1,0 +1,27 @@
+# mindspeed actor config, inheriting from trainer/config/actor/actor.yaml
+defaults:
+  - ../optim@optim: megatron
+
+  - ../engine@mindspeed:
+      - megatron
+      - mindspeed
+
+  - actor
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+_target_: verl.workers.config.MindSpeedActorConfig
+
+strategy: mindspeed
+
+# MindSpeed checkpoint overrides: swap the base CheckpointConfig for
+# MindSpeedCheckpointConfig which inherits ``mbridge_config`` from
+# McoreCheckpointConfig (MindSpeed reuses the Megatron checkpoint manager).
+checkpoint:
+
+  # Target dataclass for this configuration
+  _target_: verl.workers.config.MindSpeedCheckpointConfig
+
+  # Mbridge config extension.
+  mbridge_config: {}

@@ -33,6 +33,7 @@ import torch
 
 from verl.trainer.ppo.rollout_corr_helper import (
     SUPPORTED_ROLLOUT_RS_OPTIONS,
+    compute_is_metrics,
     compute_offpolicy_metrics,
     compute_rollout_correction_and_rejection_mask,
 )
@@ -363,6 +364,82 @@ def test_mask_mode():
     print(f"   Second seq mask: {modified_response_mask[1, 0]:.0f} (expected 1 - accepted)")
     print(f"   Masked fraction: {metrics['rollout_corr/rollout_rs_masked_fraction']:.2f}")
     print("   ✓ Mask mode correctly separates IS weights from rejection")
+
+
+def test_exact_icepop_zeroes_weights_without_changing_mask():
+    """IcePop should zero OOB IS weights while preserving response_mask."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    raw_is_weights = torch.tensor([[0.4, 0.8, 6.0]], device=device)
+    old_log_prob = torch.zeros_like(raw_is_weights)
+    rollout_log_prob = -torch.log(raw_is_weights)
+    response_mask = torch.ones_like(raw_is_weights)
+
+    weights_proto, modified_response_mask, metrics = compute_rollout_correction_and_rejection_mask(
+        old_log_prob=old_log_prob,
+        rollout_log_prob=rollout_log_prob,
+        response_mask=response_mask,
+        rollout_is="token",
+        rollout_is_threshold="0.5_5.0",
+        rollout_rs=None,
+    )
+
+    weights = weights_proto.batch["rollout_is_weights"]
+    expected_weights = torch.tensor([[0.0, 0.8, 0.0]], device=device)
+
+    torch.testing.assert_close(weights, expected_weights, atol=1e-6, rtol=1e-6)
+    assert torch.equal(modified_response_mask, response_mask)
+    assert metrics["rollout_corr/rollout_is_oob_ratio"] == pytest.approx(2.0 / 3.0, abs=1e-6)
+    assert metrics["rollout_corr/rollout_is_std"] == pytest.approx(0.3771236, abs=1e-6)
+    assert metrics["rollout_corr/rollout_is_eff_sample_size"] == pytest.approx(1.0 / 3.0, abs=1e-6)
+
+
+def test_bool_rollout_is_threshold_is_rejected():
+    """Boolean thresholds should not be silently accepted via bool <: int."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    old_log_prob = torch.zeros(1, 2, device=device)
+    rollout_log_prob = torch.zeros(1, 2, device=device)
+    response_mask = torch.ones(1, 2, device=device)
+
+    with pytest.raises(TypeError, match="not a boolean"):
+        compute_rollout_correction_and_rejection_mask(
+            old_log_prob=old_log_prob,
+            rollout_log_prob=rollout_log_prob,
+            response_mask=response_mask,
+            rollout_is="token",
+            rollout_is_threshold=True,
+            rollout_rs=None,
+        )
+
+
+def test_seq_fraction_high_uses_raw_weights():
+    """rollout_is_seq_fraction_high must be driven by the raw (pre-truncation) weights.
+
+    Truncation clamps every weight to <= rollout_is_threshold, so a per-sequence mean of
+    clamped weights can never exceed the threshold. The high fraction therefore has to come
+    from the raw per-sequence mean to remain a live diagnostic.
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    threshold = 2.0
+
+    # Sequence 0: raw mean (1.0 + 6.0) / 2 = 3.5 > threshold, but clamped mean
+    # (1.0 + 2.0) / 2 = 1.5 <= threshold. Sequence 1 stays well under the threshold.
+    raw_rollout_is_weights = torch.tensor([[1.0, 6.0], [0.9, 1.1]], device=device)
+    rollout_is_weights = raw_rollout_is_weights.clamp(max=threshold)
+    response_mask = torch.ones_like(raw_rollout_is_weights)
+    log_ratio_for_metrics = torch.log(raw_rollout_is_weights)
+
+    metrics = compute_is_metrics(
+        rollout_is_weights=rollout_is_weights,
+        raw_rollout_is_weights=raw_rollout_is_weights,
+        log_ratio_for_metrics=log_ratio_for_metrics,
+        response_mask=response_mask,
+        rollout_is="token",
+        rollout_is_threshold=threshold,
+    )
+
+    assert metrics["rollout_is_seq_fraction_high"] == pytest.approx(0.5)
 
 
 if __name__ == "__main__":

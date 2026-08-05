@@ -37,18 +37,28 @@ except ImportError:
     VeOmniEngine = None
     VeOmniEngineWithLMHead = None
 
+try:
+    from .automodel import AutomodelEngine, AutomodelEngineWithLMHead
+
+    __all__ += ["AutomodelEngine", "AutomodelEngineWithLMHead"]
+except ImportError:
+    AutomodelEngine = None
+    AutomodelEngineWithLMHead = None
+
 # Mindspeed must be imported before Megatron to ensure the related monkey patches take effect as expected
 try:
-    from .mindspeed import MindspeedEngineWithLMHead
+    from .mindspeed import MindspeedEngineWithLMHead, MindspeedEngineWithValueHead, MindSpeedMegatronEngineWithLMHead
 
-    __all__ += ["MindspeedEngineWithLMHead"]
+    __all__ += ["MindspeedEngineWithLMHead", "MindspeedEngineWithValueHead", "MindSpeedMegatronEngineWithLMHead"]
 except ImportError:
     MindspeedEngineWithLMHead = None
+    MindspeedEngineWithValueHead = None
+    MindSpeedMegatronEngineWithLMHead = None
 
 try:
-    from .megatron import MegatronEngine, MegatronEngineWithLMHead
+    from .megatron import MegatronEngine, MegatronEngineWithLMHead, MegatronEngineWithValueHead
 
-    __all__ += ["MegatronEngine", "MegatronEngineWithLMHead"]
+    __all__ += ["MegatronEngine", "MegatronEngineWithLMHead", "MegatronEngineWithValueHead"]
 except ImportError:
     MegatronEngine = None
     MegatronEngineWithLMHead = None

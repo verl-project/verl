@@ -13,7 +13,8 @@
 # limitations under the License.
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Any, Generator, TypedDict
+from dataclasses import dataclass
+from typing import Any, AsyncGenerator, Generator
 
 import ray
 import torch
@@ -22,16 +23,27 @@ from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.utils.distributed import initialize_global_process_group_ray
+from verl.utils.import_utils import import_external_libs
 from verl.utils.ray_utils import auto_await
 from verl.workers.config import CheckpointEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.rollout import BaseRollout, RolloutReplica, get_rollout_class
+from verl.workers.rollout.utils import ensure_async_iterator
 
 
-class TensorMeta(TypedDict):
+@dataclass
+class TensorMeta:
     name: str
+    """The name of the weight tensor."""
     shape: torch.Size
+    """The shape of the weight tensor."""
     dtype: torch.dtype
+    """The dtype of the weight tensor."""
+    chunk_offset: int
+    """The chunk offset of the weight tensor."""
+    chunk_size: int
+    """The chunk size of the weight tensor."""
     offset: int
+    """The offset of the weight tensor in the bucket."""
 
 
 class CheckpointEngineRegistry:
@@ -82,18 +94,23 @@ class CheckpointEngineRegistry:
 
 
 class CheckpointEngine(ABC):
-    """CheckpointEngine is an abstraction to transfer weights from trainer to rollout.
+    """CheckpointEngine is an abstraction to transfer weights from actor to rollout.
 
-    In trainer process:
-    >>> trainer = EngineRegistry.new(...) # FSDP, Megatron, VeOmini, TorchTitan, ...
+    In actor process:
+    >>> actor = EngineRegistry.new(...) # FSDP, Megatron, VeOmini, TorchTitan, ...
     >>> engine = CheckpointEngine.new(...) # NCCLCheckpointEngine, NIXLCheckpointEngine, ...
-    >>> await engine.send_weights(trainer.get_per_tensor_param())
+    >>> await engine.send_weights(actor.get_per_tensor_param())
 
     In rollout process:
     >>> engine = CheckpointEngine.new(...)
     >>> server_adapter = ServerAdapter()
     >>> await server_adapter.update_weights(engine.get_weights()) # update weights via cuda ipc
     """
+
+    # How receive_weights yields weights to the server adapter:
+    #   "named_tensors" -- (name, tensor) pairs, bucketed into full-tensor loads.
+    #   "delta_flush"   -- per-flush sparse payloads applied via a custom loader.
+    wire_format = "named_tensors"
 
     @abstractmethod
     def prepare(self) -> dict[str, Any]:
@@ -114,22 +131,22 @@ class CheckpointEngine(ABC):
     @classmethod
     @abstractmethod
     def build_topology(
-        cls, trainer_world_size: int, rollout_world_size: int, metadata: list[dict]
+        cls, actor_wg_world_size: int, rollout_world_size: int, metadata: list[dict]
     ) -> tuple[dict[str, list[Any]], dict[str, list[Any]]]:
         """Build communication topology between all workers.
 
         Args:
-            trainer_world_size: The world size of the trainer worker group.
+            actor_wg_world_size: The world size of the actor worker group.
             rollout_world_size: The world size of the rollout replica.
             metadata: A list of metadata `prepare` from all workers.
 
         Returns:
-            A tuple of two dictionaries that contains the communication topology for trainer and rollout worker group.
+            A tuple of two dictionaries that contains the communication topology for actor and rollout worker group.
             Each dict value should be a list argument equal to the world size of the worker group to dispatch to
             `init_process_group`.
 
             ```
-            world_size = rollout.world_size + trainer.world_size
+            world_size = rollout.world_size + actor_wg.world_size
             kwargs = {
                 "rank": list(range(world_size)),
                 "world_size": [world_size] * world_size,
@@ -159,17 +176,28 @@ class CheckpointEngine(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def send_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None]):
+    async def send_weights(
+        self,
+        weights: Generator[tuple[str, torch.Tensor], None, None],
+        global_steps: int | None = None,
+    ):
         """Send the weights of the model.
 
         Args:
             weights: A generator that yields the name of the weight tensor and the tensor itself.
+            global_steps: Optional trainer step/version associated with this weight update.
         """
         raise NotImplementedError
 
     @abstractmethod
-    async def receive_weights(self) -> Generator[tuple[str, torch.Tensor], None, None]:
+    async def receive_weights(
+        self,
+        global_steps: int | None = None,
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Receive the weights of the model.
+
+        Args:
+            global_steps: Optional trainer step/version associated with this weight update.
 
         Yields:
             A tuple of the name of the weight tensor and the tensor itself.
@@ -196,13 +224,13 @@ class CheckpointEngineWithCache(CheckpointEngine):
 
 @CheckpointEngineRegistry.register("naive")
 class ColocatedCheckpointEngine(CheckpointEngine):
-    """Checkpoint engine for trainer and rollout colocated on same GPU.
+    """Checkpoint engine for actor and rollout colocated on same GPU.
 
-    In trainer process:
+    In actor process:
     >>> engine = ColocatedCheckpointEngine()
-    >>> trainer = Trainer()
+    >>> actor = Actor()
     >>> server_adapter = ServerAdapter()
-    >>> engine.send_weights(trainer.get_per_tensor_param())
+    >>> engine.send_weights(actor.get_per_tensor_param())
     >>> server_adapter.update_weights(engine.receive_weights())
     """
 
@@ -223,16 +251,27 @@ class ColocatedCheckpointEngine(CheckpointEngine):
     def build_topology(cls, *args, **kwargs):
         raise NotImplementedError
 
-    def send_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None]):
+    def send_weights(
+        self,
+        weights: Generator[tuple[str, torch.Tensor], None, None],
+        global_steps: int | None = None,
+    ):
         """Send the weights of the model.
 
         Args:
             weights: A generator that yields the name of the weight tensor and the tensor itself.
+            global_steps: Optional trainer step/version associated with this weight update.
         """
         self.weights = weights
 
-    def receive_weights(self) -> Generator[tuple[str, torch.Tensor], None, None]:
+    def receive_weights(
+        self,
+        global_steps: int | None = None,
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Receive the weights of the model.
+
+        Args:
+            global_steps: Optional trainer step/version associated with this weight update.
 
         Yields:
             A tuple of the name of the weight tensor and the tensor itself.
@@ -264,8 +303,18 @@ class CheckpointEngineWorker(Worker):
 
         self.server_adapter: BaseRollout = server_adapter
         backend = self.rollout_config.checkpoint_engine.backend
+        if backend == "delta_sharded" and self.rollout_config.name != "sglang":
+            raise NotImplementedError(
+                f"checkpoint_engine.backend={backend!r} currently supports only the sglang rollout "
+                f"(got rollout.name={self.rollout_config.name!r}): the sparse apply is dispatched "
+                "through sglang's custom-weight-loader hook. Other backends need a per-backend "
+                "apply interface, planned as a follow-up."
+            )
         bucket_size = self.rollout_config.checkpoint_engine.update_weights_bucket_megabytes << 20
         engine_kwargs = self.rollout_config.checkpoint_engine.engine_kwargs.get(backend, {})
+        # If custom_backend_module is set, import it so plugins can register
+        # in CheckpointEngineRegistry before the backend is instantiated.
+        import_external_libs(self.rollout_config.checkpoint_engine.custom_backend_module or None)
         self.checkpoint_engine: CheckpointEngine = CheckpointEngineRegistry.new(
             backend, bucket_size=bucket_size, **engine_kwargs
         )
@@ -284,8 +333,12 @@ class CheckpointEngineWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None):
-        weights = self.checkpoint_engine.receive_weights()
-        await self.server_adapter.update_weights(weights, global_steps=global_steps)
+        weights = self.checkpoint_engine.receive_weights(global_steps=global_steps)
+        await self.server_adapter.update_weights(
+            weights,
+            global_steps=global_steps,
+            wire_format=getattr(self.checkpoint_engine, "wire_format", "named_tensors"),
+        )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):
@@ -306,12 +359,12 @@ _worker_cls = ray.remote(CheckpointEngineWorker)
 
 
 class CheckpointEngineManager:
-    """Checkpoint engine manager to coordinate weight synchronization between trainer and rollout replicas.
+    """Checkpoint engine manager to coordinate weight synchronization between actor and rollout replicas.
 
     - ME: model engine, FSDP, MCore, VeOmni, export full tensor generator `get_per_tensor_param`
     - CE: checkpoint engine, NCCL, NIXL, etc
 
-    In trainer, model engine and checkpoint engine are in same process.
+    In actor, model engine and checkpoint engine are in same process.
     In rollout, checkpoint engine and rollout worker are in separate process, update weights via cuda ipc.
 
     ```
@@ -330,47 +383,48 @@ class CheckpointEngineManager:
 
     Args:
         config: The checkpoint engine config.
-        trainer: The trainer worker group.
+        actor_wg: The actor worker group (the training side that produces weights).
         replicas: The list of rollout replicas.
     """
 
     def __init__(
         self,
         config: CheckpointEngineConfig,
-        trainer: RayWorkerGroup,
+        actor_wg: RayWorkerGroup,
         replicas: list[RolloutReplica],
     ) -> None:
         self.config = config
         self.backend = config.backend
+        import_external_libs(self.config.custom_backend_module or None)
         self.backend_cls = CheckpointEngineRegistry.get(config.backend)
-        self.trainer = trainer
+        self.actor_wg = actor_wg
         self.replicas = replicas
 
     def build_process_group(self, rollout: RayWorkerGroup):
-        """Build process group for trainer and rollout replicas."""
-        trainer = self.trainer
+        """Build process group for actor worker group and rollout replicas."""
+        actor_wg = self.actor_wg
 
         # 1. prepare all workers
         metadata = ray.get(
-            trainer.execute_checkpoint_engine(["prepare"] * trainer.world_size)
+            actor_wg.execute_checkpoint_engine(["prepare"] * actor_wg.world_size)
             + rollout.execute_checkpoint_engine(["prepare"] * rollout.world_size)
         )
 
         # 2. build communication topology between all workers
-        trainer_kwargs, rollout_kwargs = self.backend_cls.build_topology(
-            trainer.world_size, rollout.world_size, metadata
+        actor_wg_kwargs, rollout_kwargs = self.backend_cls.build_topology(
+            actor_wg.world_size, rollout.world_size, metadata
         )
-        for k, v in trainer_kwargs.items():
-            assert len(v) == trainer.world_size, f"trainer_kwargs[{k}] must have length of {trainer.world_size}"
+        for k, v in actor_wg_kwargs.items():
+            assert len(v) == actor_wg.world_size, f"actor_wg_kwargs[{k}] must have length of {actor_wg.world_size}"
         for k, v in rollout_kwargs.items():
             assert len(v) == rollout.world_size, f"rollout_kwargs[{k}] must have length of {rollout.world_size}"
 
-        trainer_kwargs["method"] = ["init_process_group"] * trainer.world_size
+        actor_wg_kwargs["method"] = ["init_process_group"] * actor_wg.world_size
         rollout_kwargs["method"] = ["init_process_group"] * rollout.world_size
 
         # 3. init process group between all workers
         ray.get(
-            trainer.execute_checkpoint_engine(**trainer_kwargs) + rollout.execute_checkpoint_engine(**rollout_kwargs)
+            actor_wg.execute_checkpoint_engine(**actor_wg_kwargs) + rollout.execute_checkpoint_engine(**rollout_kwargs)
         )
 
     def add_replicas(self, replicas: list[RolloutReplica]):
@@ -393,45 +447,163 @@ class CheckpointEngineManager:
     @auto_await
     async def sleep_replicas(self):
         """Sleep all rollout replicas: free weight and kv_cache device memory."""
-        # skip sleep replicas for disaggregated rollout
-        if self.backend != "naive":
-            return
         await asyncio.gather(*[r.sleep() for r in self.replicas])
 
     @auto_await
+    async def wake_up_replicas(self):
+        """Resume all rollout replicas: recover kv_cache and weights device memory."""
+        await asyncio.gather(*[r.wake_up() for r in self.replicas])
+
+    @auto_await
+    async def abort_replicas(self):
+        """Abort all in-flight requests on every replica."""
+        await asyncio.gather(*[r.abort_all_requests() for r in self.replicas])
+
+    @auto_await
+    async def resume_generation_replicas(self):
+        """Resume generation on all replicas after abort_all_requests."""
+        await asyncio.gather(*[r.resume_generation() for r in self.replicas])
+
+    @auto_await
+    async def release_kv_cache_replicas(self):
+        """Release kv_cache of all rollout replicas before NCCL weight sync.
+
+        Unlike sleep_replicas(), this only frees the kv_cache and leaves model
+        weights untouched, so the NCCL transfer can write directly into the
+        existing weight buffers.  Call resume_kv_cache_replicas() after sync.
+        """
+        await asyncio.gather(*[r.release_kv_cache() for r in self.replicas])
+
+    @auto_await
+    async def resume_kv_cache_replicas(self):
+        """Restore kv_cache of all rollout replicas after NCCL weight sync.
+
+        Counterpart to release_kv_cache_replicas().
+        """
+        await asyncio.gather(*[r.resume_kv_cache() for r in self.replicas])
+
+    @auto_await
     async def update_weights(self, global_steps: int = None):
-        """Update weights from trainer to rollout replicas.
+        """Update weights from actor worker group to rollout replicas.
 
         Args:
-            global_steps: The global steps of the trainer.
+            global_steps: The global steps of the actor worker group.
         """
 
-        # 0. update weights for sync training with colocated trainer and rollout
+        # 0. update weights for sync training with colocated actor and rollout
         if self.backend == "naive":
-            ray.get(self.trainer.update_weights(global_steps=global_steps))
-            return
+            ray.get(self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
+            return {}
 
         # 1. abort and save all unfinished requests for partial rollout
-        await asyncio.gather(*[r.abort_all_requests() for r in self.replicas])
+        await self.abort_replicas()
 
         # 2. create a temporay worker group for all replicas
         workers = []
         for replica in self.replicas:
             workers.extend(replica.workers)
         rollout = RayWorkerGroup(worker_handles=workers, ray_cls_with_init=RayClassWithInitArgs(cls=_worker_cls))
-        trainer = self.trainer
+        actor_wg = self.actor_wg
 
-        # 3. build process group
+        # 3. release kv_cache before weight sync (weights stay in place)
+        await self.release_kv_cache_replicas()
+
+        # 4. build process group
         self.build_process_group(rollout)
 
-        # 4. update weights of all workers
-        ray.get(trainer.update_weights(global_steps=global_steps) + rollout.update_weights(global_steps=global_steps))
+        # 5. update weights of all workers
+        results = ray.get(
+            actor_wg.update_weights(global_steps=global_steps, mode=self.backend)
+            + rollout.update_weights(global_steps=global_steps)
+        )
+        # The sender workers return the engine's per-sync metrics (empty for
+        # backends that don't track any); merge and hand them to the trainer.
+        sync_metrics: dict = {}
+        for result in results[: actor_wg.world_size]:
+            if isinstance(result, dict):
+                sync_metrics.update(result)
 
-        # 5. finalize all workers
+        # 6. finalize all workers
         ray.get(
-            trainer.execute_checkpoint_engine(["finalize"] * trainer.world_size)
+            actor_wg.execute_checkpoint_engine(["finalize"] * actor_wg.world_size)
             + rollout.execute_checkpoint_engine(["finalize"] * rollout.world_size)
         )
 
-        # 6. resume all unfinished requests for partial rollout
-        await asyncio.gather(*[r.resume_generation() for r in self.replicas])
+        # 7. restore kv_cache after weight sync
+        await self.resume_kv_cache_replicas()
+
+        # 8. resume all unfinished requests for partial rollout
+        await self.resume_generation_replicas()
+
+        return sync_metrics
+
+
+async def split_weight_chunks(
+    weights: Generator[tuple[str, torch.Tensor], None, None], bucket_size: int
+) -> AsyncGenerator[tuple[TensorMeta, torch.Tensor], None]:
+    """Split the weight into chunks.
+
+    Args:
+        weights: The weights generator.
+        bucket_size: Max bucket size in bytes.
+
+    Yields:
+        A tuple of the weight chunk metadata and the buffer.
+    """
+    async for name, weight in ensure_async_iterator(weights):
+        buffer = weight.view(-1).view(torch.uint8)
+        chunk_offset = 0
+        while chunk_offset < weight.nbytes:
+            chunk_size = min(bucket_size, weight.nbytes - chunk_offset)
+            tensor_meta = TensorMeta(
+                name=name,
+                shape=weight.shape,
+                dtype=weight.dtype,
+                chunk_offset=chunk_offset,
+                chunk_size=chunk_size,
+                offset=None,
+            )
+            yield (tensor_meta, buffer[chunk_offset : chunk_offset + chunk_size])
+            chunk_offset += chunk_size
+
+
+async def merge_weight_chunks(
+    chunks: Generator[tuple[TensorMeta, torch.Tensor], None, None], bucket_size: int
+) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
+    """Merge the weight chunks into the original weight.
+
+    Args:
+        chunks: The chunks generator.
+        bucket_size: Max bucket size in bytes.
+
+    Yields:
+        A tuple of the name of the weight tensor and the tensor itself.
+    """
+    merge_name, merge_weight, merge_buffer, merge_offset = None, None, None, 0
+    async for tensor_meta, chunk in chunks:
+        assert chunk.dtype == torch.uint8, f"Chunk dtype must be uint8, but got {chunk.dtype}"
+        nbytes = tensor_meta.shape.numel() * tensor_meta.dtype.itemsize
+
+        # weight is small enough to fit in one bucket
+        if nbytes <= bucket_size:
+            assert merge_weight is None, f"Weight must be None, but got {merge_name}"
+            name, weight = tensor_meta.name, chunk.view(tensor_meta.dtype).view(tensor_meta.shape)
+            yield (name, weight)
+            continue
+
+        if merge_weight is None:
+            assert tensor_meta.chunk_offset == 0, f"Chunk offset must be 0, but got {tensor_meta}"
+            merge_name, merge_weight = (
+                tensor_meta.name,
+                torch.empty(tensor_meta.shape, dtype=tensor_meta.dtype, device=chunk.device),
+            )
+            merge_buffer = merge_weight.view(-1).view(torch.uint8)
+            merge_offset = 0
+
+        assert tensor_meta.name == merge_name
+        assert merge_offset == tensor_meta.chunk_offset
+        merge_buffer[tensor_meta.chunk_offset : tensor_meta.chunk_offset + tensor_meta.chunk_size] = chunk
+        merge_offset += tensor_meta.chunk_size
+        if tensor_meta.chunk_offset + tensor_meta.chunk_size == nbytes:
+            yield (merge_name, merge_weight)
+            merge_name, merge_weight, merge_buffer, merge_offset = None, None, None, 0

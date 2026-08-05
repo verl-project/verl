@@ -107,6 +107,7 @@ class AdvantageEstimator(str, Enum):
     GRPO_VECTORIZED = "grpo_vectorized"
     OPTIMAL_TOKEN_BASELINE = "optimal_token_baseline"
     TIR_OPTIMAL_TOKEN_BASELINE = "tir_optimal_token_baseline"
+    GDPO = "gdpo"
 
 
 ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -348,13 +349,123 @@ def compute_grpo_vectorized_outcome_advantage(
     with torch.no_grad():
         scores = token_level_rewards.sum(dim=-1)
         g = as_torch_index(index, device=scores.device)
-        mean_g, std_g, _ = group_mean_std(scores, g, eps=epsilon, device=scores.device)
+        mean_g, std_g, _ = group_mean_std(scores, g, eps=0.0, device=scores.device)
         if norm_adv_by_std_in_grpo:
             scalars = (scores - mean_g[g]) / (std_g[g] + epsilon)
         else:
             scalars = scores - mean_g[g]
         advantages = scalars.unsqueeze(-1) * response_mask
         return advantages, advantages
+
+
+@register_adv_est(AdvantageEstimator.GDPO)  # or simply: @register_adv_est("gdpo")
+def compute_gdpo_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: bool = True,
+    config: Optional[AlgoConfig] = None,
+    non_tensor_batch: Optional[dict] = None,
+    batch: Optional[dict] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    GDPO: Group reward-Decoupled Normalization Policy Optimization.
+
+    Instead of summing all reward dimensions first (like GRPO), GDPO normalizes
+    each reward dimension independently within each group before aggregation.
+    This prevents a dominant reward signal from drowning out weaker ones.
+
+    Mathematical formulation:
+        Step 1 – Group-wise decoupled normalization (via GRPO per dimension):
+            For each reward dimension k, within each group g:
+            A_k = (r_k - μ_group(r_k)) / (σ_group(r_k) + ε)
+
+        Step 2 – Weighted aggregation:
+            A_sum = Σ_k w_k · A_k
+
+        Step 3 – Batch-level normalization (via masked_whiten):
+            A_final = whiten(A_sum, response_mask)
+
+    Args:
+        token_level_rewards: (bs, response_length) – standard token-level rewards.
+            Used as fallback when per-dimension rewards are not provided.
+        response_mask: (bs, response_length)
+        index: (bs,) – group id per sample (from ``uid``).
+        epsilon: Numerical stability constant.
+        norm_adv_by_std_in_grpo: Whether to normalize by std in GRPO.
+        config: Algorithm configuration (optional).
+        non_tensor_batch: Non-tensor batch data containing per-dimension reward scores.
+        batch: Batch data containing prompts, attention_mask, etc.
+
+    Note:
+        Ref GDPO (https://arxiv.org/abs/2601.05242).
+
+    Returns:
+        advantages: (bs, response_length)
+        returns: (bs, response_length) – same as advantages (outcome-only).
+    """
+    score_list = None
+    reward_weights = None
+
+    if config is not None and non_tensor_batch is not None and batch is not None:
+        gdpo_reward_keys = config.get("gdpo_reward_keys", None)
+        assert gdpo_reward_keys, (
+            "GDPO requires 'algorithm.gdpo_reward_keys' listing the individual reward "
+            "component keys returned by compute_score (e.g. ['format_reward', 'accuracy_reward'])."
+        )
+        device = token_level_rewards.device
+        prompt_length = batch["prompts"].size(1)
+        valid_response_length = batch["attention_mask"][:, prompt_length:].sum(dim=1) - 1
+
+        score_list = []
+        for key in gdpo_reward_keys:
+            assert key in non_tensor_batch, (
+                f"GDPO reward key '{key}' not found in non_tensor_batch. "
+                f"Available keys: {list(non_tensor_batch.keys())}. "
+                f"Make sure your compute_score returns a dict containing '{key}'."
+            )
+            comp = non_tensor_batch[key]
+            rm_score = torch.tensor(np.asarray(comp, dtype=np.float32), device=device)
+            rm_scores = torch.zeros_like(response_mask, dtype=torch.float32)
+            rm_scores[torch.arange(rm_scores.size(0), device=device), valid_response_length] = rm_score
+            score_list.append(rm_scores)
+
+        gdpo_weights = config.get("gdpo_reward_weights", None)
+        if gdpo_weights is not None:
+            reward_weights = list(gdpo_weights)
+
+    if score_list is None:
+        score_list = [token_level_rewards]
+
+    num_scores = len(score_list)
+
+    if reward_weights is not None:
+        weights = torch.tensor(reward_weights, dtype=torch.float32, device=token_level_rewards.device)
+    else:
+        weights = torch.ones(num_scores, dtype=torch.float32, device=token_level_rewards.device)
+
+    new_advantage = None
+
+    for i in range(num_scores):
+        normalized_score, _ = compute_grpo_outcome_advantage(
+            token_level_rewards=score_list[i],
+            response_mask=response_mask,
+            index=index,
+            epsilon=epsilon,
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            config=config,
+        )
+
+        if new_advantage is None:
+            new_advantage = weights[i] * normalized_score
+        else:
+            new_advantage += weights[i] * normalized_score
+
+    advantages = verl_F.masked_whiten(new_advantage, response_mask) * response_mask
+
+    return advantages, advantages
 
 
 @register_adv_est(AdvantageEstimator.GRPO_PASSK)  # or simply: @register_adv_est("grpo_passk")
@@ -765,6 +876,7 @@ def compute_optimal_token_baseline_advantage(
     rollout_is_weights: torch.Tensor = None,
     handle_zero_tail: bool = True,
     epsilon: float = 1e-8,
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute advantages using Optimal Token Baseline (OTB).
@@ -883,6 +995,7 @@ def compute_multi_turn_optimal_token_baseline_advantage(
     rollout_is_weights: torch.Tensor = None,
     handle_zero_tail: bool = True,
     epsilon: float = 1e-8,
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute advantages using Optimal Token Baseline (OTB).
@@ -1058,6 +1171,11 @@ def agg_loss(
                 raise ValueError("(global) batch_num_tokens is required when dp_size > 1")
             batch_num_tokens = loss_mask.sum()
         loss = verl_F.masked_sum(loss_mat, loss_mask) / batch_num_tokens * dp_size
+    elif loss_agg_mode == "token-sum":
+        # DDP/FSDP average gradients across data-parallel ranks. Scaling each
+        # rank's local token sum by dp_size makes the reduced gradient equal to
+        # the sum over all valid tokens in the global batch.
+        loss = verl_F.masked_sum(loss_mat, loss_mask) * dp_size
     elif loss_agg_mode in ["seq-mean-token-sum", "seq-mean-token-sum-norm"]:
         seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)  # token-sum
         seq_mask = (torch.sum(loss_mask, dim=-1) > 0).float()  # exclude fully masked sequences
@@ -1653,7 +1771,7 @@ def compute_policy_loss_clip_cov(
             Upper clip range for dual-clip PPO. Defaults to same as `cliprange`.
         loss_agg_mode (str, optional):
             Aggregation mode for `agg_loss`. Defaults to "token-mean".
-        clip_cvo_ratio (float, optional):
+        clip_cov_ratio (float, optional):
             Ratio for clipping the covariance. Defaults to 0.0002.
         clip_cov_lb (float, optional):
             Lower bound for clipping covariance. Defaults to 1.0.
@@ -1890,6 +2008,39 @@ def compute_policy_loss_geo_mean(
     return pg_loss, pg_metrics
 
 
+@register_policy_loss("dro")
+def compute_policy_loss_dro(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[ActorConfig] = None,
+    rollout_is_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Compute Direct Reward Optimization with a quadratic log-ratio penalty."""
+    assert config is not None
+    assert config.policy_loss is not None
+
+    beta = config.policy_loss.dro_beta
+    if beta is None or beta <= 0:
+        raise ValueError("policy_loss.dro_beta must be a positive value when using DRO")
+
+    log_ratio = log_prob - old_log_prob
+    pg_losses = -(log_prob * advantages - 0.5 * beta * log_ratio.square())
+
+    if rollout_is_weights is not None:
+        pg_losses = pg_losses * rollout_is_weights
+
+    pg_loss = agg_loss(
+        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
+    )
+    pg_metrics = {
+        "actor/ppo_kl": verl_F.masked_mean(-log_ratio, response_mask).detach().item(),
+    }
+    return pg_loss, pg_metrics
+
+
 @register_policy_loss("cispo")
 def compute_policy_loss_cispo(
     old_log_prob: torch.Tensor,
@@ -1975,6 +2126,10 @@ def compute_value_loss(
     response_mask: torch.Tensor,
     cliprange_value: float,
     loss_agg_mode: str = "token-mean",
+    dp_size: int = 1,
+    batch_num_tokens: Optional[int] = None,
+    global_batch_size: Optional[int] = None,
+    loss_scale_factor: Optional[int] = None,
 ):
     """
     Compute the clipped value-function loss for PPO.
@@ -1994,6 +2149,15 @@ def compute_value_loss(
             Clip range for value prediction updates.
         loss_agg_mode (str, optional):
             Aggregation mode for `agg_loss`. Defaults to "token-mean".
+        dp_size (int, optional):
+            Data parallel size, forwarded to `agg_loss` for global-batch normalization. Defaults to 1.
+        batch_num_tokens (Optional[int], optional):
+            Number of valid tokens in the global batch, forwarded to `agg_loss`. Defaults to None
+            (normalize by the local micro-batch token count).
+        global_batch_size (Optional[int], optional):
+            Global batch size, forwarded to `agg_loss` for the seq-mean modes. Defaults to None.
+        loss_scale_factor (Optional[int], optional):
+            Scale factor for the "seq-mean-token-sum-norm" mode, forwarded to `agg_loss`. Defaults to None.
 
     Returns:
         vf_loss (torch.FloatTensor):
@@ -2005,7 +2169,15 @@ def compute_value_loss(
     vf_losses1 = (vpreds - returns) ** 2
     vf_losses2 = (vpredclipped - returns) ** 2
     clipped_vf_losses = torch.max(vf_losses1, vf_losses2)
-    vf_loss = 0.5 * agg_loss(loss_mat=clipped_vf_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+    vf_loss = 0.5 * agg_loss(
+        loss_mat=clipped_vf_losses,
+        loss_mask=response_mask,
+        loss_agg_mode=loss_agg_mode,
+        dp_size=dp_size,
+        batch_num_tokens=batch_num_tokens,
+        global_batch_size=global_batch_size,
+        loss_scale_factor=loss_scale_factor,
+    )
     vf_clipfrac = verl_F.masked_mean(torch.gt(vf_losses2, vf_losses1).float(), response_mask)
     return vf_loss, vf_clipfrac
 
@@ -2022,7 +2194,9 @@ def kl_penalty(logprob: torch.FloatTensor, ref_logprob: torch.FloatTensor, kl_pe
     Returns:
         kl_estimate
     """
-    forward_score = kl_penalty_forward(logprob, ref_logprob, kl_penalty)
+    # Strip the optional '+' suffix so e.g. "k3+" dispatches to "k3".
+    base_kl_penalty = kl_penalty[:-1] if kl_penalty.endswith("+") else kl_penalty
+    forward_score = kl_penalty_forward(logprob, ref_logprob, base_kl_penalty)
     if not kl_penalty.endswith("+") or kl_penalty in ("mse", "k2"):
         return forward_score
 

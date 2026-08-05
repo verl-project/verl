@@ -15,7 +15,7 @@ verl Implementation Authors: [Yuhao Yang](https://github.com/yhyang201), [Chenya
 We evaluate the performance of SPPO on the MATH dataset. Starting from an initial score of 46.6 with Qwen2.5-7B-Instruct, we achieve a score of 65.6 after 20 epochs of training, placing our model approximately in the top 20 on the [MATH leaderboard](https://paperswithcode.com/sota/math-word-problem-solving-on-math). It's important to note that verl's internal evaluation metrics may not perfectly align with the official evaluation methodology for Qwen2.5-7B-Instruct. Therefore, for consistency and fair comparison, we report only the results based on verl's evaluation framework.
 
 ```
-git clone git@github.com:volcengine/verl.git
+git clone git@github.com:verl-project/verl.git
 cd verl
 python3 -m uv pip install -e ".[sglang]"
 

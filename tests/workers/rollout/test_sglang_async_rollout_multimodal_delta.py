@@ -78,7 +78,6 @@ def _test_add_tool_response_messages_image_delta(processor, image_list, descript
         multi_modal_data=multi_modal_data.copy(),
         tool_schemas=[],
         tools_kwargs={},
-        interaction_kwargs={},
         input_ids=None,
         prompt_ids=None,
         response_ids=None,

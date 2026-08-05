@@ -15,10 +15,11 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
-from omegaconf import MISSING
+from omegaconf import MISSING, DictConfig, OmegaConf
 
 from verl.base_config import BaseConfig
 from verl.utils.profiler import ProfilerConfig
+from verl.workers.config.disaggregation import DisaggregationConfig
 from verl.workers.config.model import MtpConfig
 
 __all__ = [
@@ -50,11 +51,11 @@ class MultiTurnConfig(BaseConfig):
     enable: bool = False
     max_assistant_turns: Optional[int] = None
     tool_config_path: Optional[str] = None
+    function_tool_path: Optional[str] = None
     max_user_turns: Optional[int] = None
     max_parallel_calls: int = 1
     max_tool_response_length: int = 256
     tool_response_truncate_side: str = "middle"
-    interaction_config_path: Optional[str] = None
     use_inference_chat_template: bool = False
     tokenization_sanity_check_mode: str = "strict"
     format: str = "hermes"
@@ -126,17 +127,33 @@ class CheckpointEngineConfig(BaseConfig):
     Configuration for checkpoint engine to update weights from trainer to rollout
     """
 
+    _mutable_fields = {"backend"}
+
     # Backend for checkpoint engine: naive, nccl, nixl, hccl
     backend: Optional[str] = "naive"
     # Bucket size in MB to transfer multiple weights at one time
     update_weights_bucket_megabytes: int = 2048
     # Additional keyword arguments for checkpoint engine
     engine_kwargs: dict = field(default_factory=dict)
+    # If set, this Python module is imported on every worker process before the
+    # backend is instantiated, allowing custom backends to register themselves
+    # in CheckpointEngineRegistry.
+    custom_backend_module: Optional[str] = None
 
 
 @dataclass
 class RolloutConfig(BaseConfig):
-    _mutable_fields = {"max_model_len", "load_format", "expert_parallel_size", "moe_tensor_parallel_size"}
+    _mutable_fields = {
+        "max_model_len",
+        "load_format",
+        "engine_kwargs",
+        "prompt_length",
+        "response_length",
+        "expert_parallel_size",
+        "moe_tensor_parallel_size",
+        "full_determinism",
+        "max_num_seqs",
+    }
 
     name: Optional[str] = MISSING
     mode: str = "async"
@@ -150,6 +167,13 @@ class RolloutConfig(BaseConfig):
     n: int = 1
     repetition_penalty: float = 1.0
 
+    # Whether to enable full determinism for reproducibility.
+    full_determinism: bool = False
+
+    # Random seed for rollout. Used as the seed for vLLM sampling and
+    # enable_full_determinism() when full_determinism is True.
+    seed: int = 42
+
     # Early termination threshold for multi-turn rollout in sglang.
     # Abort remaining requests when (1 - over_sample_rate) * total_requests are completed.
     over_sample_rate: float = 0.0
@@ -159,8 +183,9 @@ class RolloutConfig(BaseConfig):
 
     dtype: str = "bfloat16"
     gpu_memory_utilization: float = 0.5
+    standalone_gpu_memory_utilization: Optional[float] = None
     ignore_eos: bool = False
-    enforce_eager: bool = True
+    enforce_eager: bool = False
     cudagraph_capture_sizes: Optional[list] = None
     free_cache_engine: bool = True
     data_parallel_size: int = 1
@@ -208,12 +233,12 @@ class RolloutConfig(BaseConfig):
     # Extension point for custom configurations
     custom: Optional[dict] = None
 
+    # Fully qualified class name for a custom CheckpointEngineManager. When set, the trainer
+    # loads this class instead of the built-in CheckpointEngineManager.
+    checkpoint_manager_class: Optional[str] = None
+
     # Checkpoint Engine config for update weights from trainer to rollout
     checkpoint_engine: CheckpointEngineConfig = field(default_factory=CheckpointEngineConfig)
-
-    skip_rollout: bool = False
-
-    skip_dump_dir: str = "/tmp/rollout_dump"
 
     profiler: Optional[ProfilerConfig] = None
 
@@ -231,19 +256,22 @@ class RolloutConfig(BaseConfig):
 
     limit_images: Optional[int] = None
 
-    skip_tokenizer_init: bool = False
+    skip_tokenizer_init: bool = True
 
     quantization: Optional[str] = None
 
     quantization_config_file: Optional[str] = None
 
     enable_rollout_routing_replay: bool = False
+    moe_load_balance_metrics_interval: int = 0
 
     enable_sleep_mode: bool = True
 
     mtp: MtpConfig = field(default_factory=MtpConfig)
 
     qat: Optional[dict] = None
+
+    disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
 
     def __post_init__(self):
         """Validate the rollout config"""
@@ -291,3 +319,24 @@ class RolloutConfig(BaseConfig):
                 raise NotImplementedError(
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
+
+        # Hydra passes this as dict/DictConfig; coerce to dataclass so
+        # downstream .enabled etc. work. BaseConfig is frozen, hence object.__setattr__.
+        if isinstance(self.disaggregation, dict):
+            object.__setattr__(self, "disaggregation", DisaggregationConfig(**self.disaggregation))
+        elif not isinstance(self.disaggregation, DisaggregationConfig):
+            if not isinstance(self.disaggregation, DictConfig):
+                raise TypeError(
+                    f"rollout.disaggregation must be dict, DictConfig, or DisaggregationConfig; "
+                    f"got {type(self.disaggregation).__name__}."
+                )
+            object.__setattr__(
+                self,
+                "disaggregation",
+                DisaggregationConfig(**OmegaConf.to_container(self.disaggregation, resolve=True)),
+            )
+
+        if self.disaggregation.enabled and self.name not in ("sglang", "vllm"):
+            raise ValueError(
+                f"rollout.disaggregation.enabled=True requires rollout.name in ('sglang', 'vllm'); got {self.name!r}."
+            )

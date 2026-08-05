@@ -14,7 +14,6 @@
 
 
 import torch
-import torch.nn.functional as F
 from tensordict import TensorDict
 
 from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
@@ -55,45 +54,6 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     return loss, {}
 
 
-def _slice_response_from_unpad_output(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor:
-    """Slice response from unpad model output.
-
-    Args:
-        tensor: model output tensor of shape [bsz, 1]
-        data: TensorDict with "prompt_ids", "response_ids", "attention_mask"
-
-    Returns:
-        tensor: sliced response tensor of shape [bsz, max_response_len]
-    """
-    values = tensor.values() if tensor.is_nested else tensor
-    prompt_ids = data["prompts"]
-    response_ids = data["responses"]
-    attention_mask = data["attention_mask"]
-
-    if prompt_ids.is_nested:
-        prompt_lens = prompt_ids.offsets().diff()
-        response_lens = response_ids.offsets().diff()
-        max_response_len = response_ids.offsets().max().item()
-    else:
-        assert not attention_mask.is_nested
-        prompt_lens = attention_mask[:, : prompt_ids.shape[1]].sum(dim=1)
-        response_lens = attention_mask[:, prompt_ids.shape[1] :].sum(dim=1)
-        max_response_len = response_ids.shape[1]
-
-    sequence_lens = prompt_lens + response_lens
-    sequence_offsets = sequence_lens.cumsum(dim=0)
-    assert sequence_offsets[-1].item() == values.shape[0]
-
-    response_list = []
-    for resp_len, seq_offset in zip(response_lens, sequence_offsets, strict=True):
-        pad_size = max_response_len - resp_len
-        # left-shift model output by one token for log_probs/values
-        response_list.append(F.pad(values[seq_offset - resp_len - 1 : seq_offset - 1], (0, pad_size)))
-
-    output = torch.stack(response_list, dim=0)
-    return output
-
-
 def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
     """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data."""
     log_prob = no_padding_2_padding(model_output["log_probs"], data)
@@ -121,6 +81,14 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         metric_aggregation = AggregationType.MEAN
 
     metrics = {}
+
+    # select fields and convert to padded tensor
+    fields = ["response_mask", "old_log_probs", "advantages"]
+    if "rollout_is_weights" in data:
+        fields.append("rollout_is_weights")
+    if "ref_log_prob" in data:
+        fields.append("ref_log_prob")
+    data = data.select(*fields).to_padded_tensor()
 
     response_mask = data["response_mask"].to(bool)
     # compute policy loss
@@ -188,8 +156,29 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
     Returns:
         value loss
     """
-    vpreds = _slice_response_from_unpad_output(model_output["values"], data)  # (bsz, response_length)
+    vpreds = no_padding_2_padding(model_output["values"], data)  # (bsz, response_length)
 
+    # Normalize the value loss over the global mini-batch (dp_size / batch_num_tokens /
+    # global_batch_size) instead of the local micro-batch, so the accumulated critic gradient is
+    # invariant to how the mini-batch is split into micro-batches (as the actor's ppo_loss does).
+    dp_size = data["dp_size"]
+    batch_num_tokens = data["batch_num_tokens"]
+    global_batch_size = data["global_batch_size"]
+
+    # When the loss is normalized over the global batch, each micro-batch contributes a partial sum,
+    # so the loss metric must be aggregated with SUM to reflect the global-batch mean.
+    if (
+        dp_size > 1
+        or batch_num_tokens is not None
+        or global_batch_size is not None
+        or config.loss_scale_factor is not None
+    ):
+        metric_aggregation = AggregationType.SUM
+    else:
+        metric_aggregation = AggregationType.MEAN
+
+    # select fields and convert to padded tensor
+    data = data.select("values", "returns", "response_mask").to_padded_tensor()
     values = data["values"]
     returns = data["returns"]
     response_mask = data["response_mask"].to(bool)
@@ -201,16 +190,16 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
         response_mask=response_mask,
         cliprange_value=config.cliprange_value,
         loss_agg_mode=config.loss_agg_mode,
+        dp_size=dp_size,
+        batch_num_tokens=batch_num_tokens,
+        global_batch_size=global_batch_size,
+        loss_scale_factor=config.loss_scale_factor,
     )
 
-    metrics = {}
-
-    metrics.update(
-        {
-            "critic/vf_loss": vf_loss.detach().item(),
-            "critic/vf_clipfrac": vf_clipfrac.detach().item(),
-            "critic/vpred_mean": masked_mean(vpreds, response_mask).detach().item(),
-        }
-    )
+    metrics = {
+        "critic/vf_loss": Metric(value=vf_loss, aggregation=metric_aggregation),
+        "critic/vf_clipfrac": vf_clipfrac.detach().item(),
+        "critic/vpred_mean": masked_mean(vpreds, response_mask).detach().item(),
+    }
 
     return vf_loss, metrics
