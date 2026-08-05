@@ -43,6 +43,7 @@ actor_rollout_ref:
       entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_chunk_size,2048}
       use_torch_compile: true
       entropy_checkpointing: ${oc.select:actor_rollout_ref.actor.entropy_checkpointing,False}
+      pad_to_length: ${oc.select:actor_rollout_ref.actor.pad_to_length,False}
       forward_only: false
       strategy: fsdp
       dtype: bfloat16
@@ -162,6 +163,7 @@ actor_rollout_ref:
     entropy_from_logits_with_chunking: false
     entropy_from_logits_chunk_size: 2048
     entropy_checkpointing: false
+    pad_to_length: false
     use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
@@ -233,6 +235,7 @@ actor_rollout_ref:
       entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.ref.entropy_from_logits_chunk_size,2048}
       use_torch_compile: true
       entropy_checkpointing: ${oc.select:actor_rollout_ref.ref.entropy_checkpointing,False}
+      pad_to_length: ${oc.select:actor_rollout_ref.ref.pad_to_length,False}
       forward_only: true
       strategy: fsdp
       dtype: bfloat16
@@ -252,6 +255,7 @@ actor_rollout_ref:
     entropy_from_logits_with_chunking: false
     entropy_from_logits_chunk_size: 2048
     entropy_checkpointing: false
+    pad_to_length: ${oc.select:actor_rollout_ref.actor.pad_to_length,False}
   rollout:
     _target_: verl.workers.config.RolloutConfig
     name: ???
@@ -532,6 +536,7 @@ critic:
     entropy_from_logits_chunk_size: 2048
     use_torch_compile: true
     entropy_checkpointing: false
+    pad_to_length: false
     forward_only: false
     strategy: fsdp
     dtype: bfloat16

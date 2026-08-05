@@ -249,6 +249,13 @@ class FSDPEngineConfig(EngineConfig):
             debugging.
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
         dtype (str): Mixed precision training param dtype, default "bfloat16"
+        pad_to_length (bool): Pad every packed micro-batch to a fixed number of tokens so the
+            packed shape stops varying between micro-batches, which avoids repeated kernel
+            recompilation / autotuning. The target length is the dynamic-batching token budget
+            (``max_token_len_per_gpu * ulysses_sequence_parallel_size``), so it requires
+            ``use_dynamic_bsz=True``. Pad tokens carry their own ``position_ids`` segment and are
+            stripped before the outputs reach the loss, but they still cost a full forward pass.
+            default False
         qat (QATEngineConfig): QAT configuration, default disabled
     """
 
@@ -270,6 +277,7 @@ class FSDPEngineConfig(EngineConfig):
     use_torch_compile: bool = True
     entropy_checkpointing: bool = False
     strategy: str = "fsdp"
+    pad_to_length: bool = False
     qat: QATEngineConfig = field(default_factory=QATEngineConfig)
 
     def __post_init__(self):
@@ -338,6 +346,14 @@ class VeOmniEngineConfig(EngineConfig):
             in distributed training. Important: this will negatively impact performance, so only use it for
             debugging.
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
+        pad_to_length (bool): Pad every packed micro-batch to a fixed number of tokens so the
+            packed shape stops varying between micro-batches, which avoids repeated kernel
+            recompilation / autotuning (the verl counterpart of VeOmni's ``train.pad_to_length``).
+            The target length is the dynamic-batching token budget
+            (``max_token_len_per_gpu * ulysses_parallel_size``), so it requires
+            ``use_dynamic_bsz=True``. Pad tokens carry their own ``position_ids`` segment and are
+            stripped before the outputs reach the loss, but they still cost a full forward pass.
+            default False
         rms_norm_gated_implementation (str): Gated RMSNorm implementation (Qwen3.5 GatedDeltaNet
             ``self.norm``). ``"fla"`` uses fla.modules.FusedRMSNormGated (requires flash-linear-attention,
             GPU). ``"eager"`` (default) uses the HuggingFace Qwen3_5RMSNormGated. Qwen3.5 has no NPU
@@ -397,6 +413,7 @@ class VeOmniEngineConfig(EngineConfig):
     force_use_huggingface: bool = False
     activation_gpu_limit: float = 0.0
     basic_modules: Optional[list[str]] = field(default_factory=list)
+    pad_to_length: bool = False
 
     def __post_init__(self):
         super().__post_init__()

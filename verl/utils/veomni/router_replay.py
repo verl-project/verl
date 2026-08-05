@@ -386,6 +386,10 @@ class VeOmniRouterReplay:
         RECORD captures the actor's full-sequence routing (prompt +
         response), so applying a response-only gate would leak prompt-
         token routing divergence into the bit-equal forward guarantee.
+        The one exception is ``pad_to_length``, where the driver passes
+        a mask that is True on every real token and False only on the
+        static pad suffix — those positions have no recorded routing at
+        all and their outputs never reach the loss.
         """
         if self._action is not RouterReplayAction.REPLAY:
             raise RuntimeError(f"set_microbatch_targets requires REPLAY action, got {self._action}")

@@ -56,6 +56,11 @@ use_torch_compile: true
 # Whether to use entropy checkpointing in fsdp.
 entropy_checkpointing: false
 
+# Pad every packed micro-batch to `max_token_len_per_gpu * ulysses_sequence_parallel_size` tokens so
+# the packed shape stops varying between micro-batches (avoids kernel recompilation / re-autotuning).
+# Requires use_dynamic_bsz=True. Pad tokens are stripped before the loss but still cost a forward.
+pad_to_length: false
+
 # Whether to use forward only in fsdp.
 forward_only: false
 

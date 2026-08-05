@@ -84,6 +84,11 @@ activation_gpu_limit: 0.0
 # List of basic modules to use
 basic_modules: []
 
+# Pad every packed micro-batch to `max_token_len_per_gpu * ulysses_parallel_size` tokens so the
+# packed shape stops varying between micro-batches (avoids kernel recompilation / re-autotuning).
+# Requires use_dynamic_bsz=True. Pad tokens are stripped before the loss but still cost a forward.
+pad_to_length: false
+
 router_replay:
 
   # Target dataclass for this configuration

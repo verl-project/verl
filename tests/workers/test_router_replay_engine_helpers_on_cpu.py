@@ -297,6 +297,65 @@ class TestMaybePushRouterReplayState:
             f"replay_mask mismatch: got {controller._replay_mask.tolist()}, expected {expected.tolist()}"
         )
 
+    def test_r2_pad_to_length_extends_targets_and_gates_the_pad_tail(self, controller):
+        """With ``pad_to_length`` the packed sequence the routers see is longer than the
+        recorded routing, so the targets have to grow by ``pad_size``. The pad tail gets a
+        False mask: those positions have no recorded routing and their outputs never reach
+        the loss, so they route natively."""
+        L, topk = 3, 2
+        controller.begin_replay()
+        engine = _make_engine_with_controller(controller, mode="R2")
+
+        seq_lens = [4, 6]
+        pad_size = 5
+        td = TensorDict(
+            {
+                "input_ids": _make_jagged_input_ids(seq_lens),
+                "routed_experts": _make_jagged_routed_experts(seq_lens, L, topk),
+            },
+            batch_size=[2],
+        )
+        engine._maybe_push_router_replay_state(td, {"pad_size": pad_size})
+
+        padded_nnz = sum(seq_lens) + pad_size
+        assert len(controller._targets) == L
+        for t in controller._targets:
+            assert t.shape == (padded_nnz, topk)
+        expected = torch.zeros(padded_nnz, dtype=torch.bool)
+        expected[: sum(seq_lens)] = True
+        assert torch.equal(controller._replay_mask, expected)
+
+    def test_r3_pad_to_length_gates_both_prompt_and_pad(self, controller):
+        """The R3 response-only gate and the pad gate compose: prompt tokens carry rollout
+        placeholders, pad tokens carry nothing, and both fall through to native routing."""
+        L, topk = 2, 1
+        controller.begin_replay()
+        engine = _make_engine_with_controller(controller, mode="R3")
+
+        seq_lens = [5, 7]
+        pad_size = 4
+        response_mask = torch.zeros(2, 4, dtype=torch.int64)
+        response_mask[0, :2] = 1
+        response_mask[1, :3] = 1
+        td = TensorDict(
+            {
+                "input_ids": _make_jagged_input_ids(seq_lens),
+                "routed_experts": _make_jagged_routed_experts(seq_lens, L, topk),
+                "response_mask": response_mask,
+            },
+            batch_size=[2],
+        )
+        engine._maybe_push_router_replay_state(td, {"pad_size": pad_size})
+
+        expected = torch.tensor(
+            # sample 0: 3 prompt + 2 response | sample 1: 4 prompt + 3 response | 4 pad
+            [0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0],
+            dtype=torch.bool,
+        )
+        assert torch.equal(controller._replay_mask, expected)
+        for t in controller._targets:
+            assert t.shape == (sum(seq_lens) + pad_size, topk)
+
     def test_r3_missing_response_mask_raises(self, controller):
         """R3 needs response_mask to know which tokens to substitute.
         Missing it is a plumbing bug, not a soft-fallback case."""

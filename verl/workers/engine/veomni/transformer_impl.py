@@ -213,6 +213,8 @@ class VeOmniEngine(FSDPEngine):
         if self.enable_routing_replay:
             logger.info("VeOmniEngine: router_replay enabled, mode=%s", self._router_replay_mode)
 
+        self._init_packed_pad_state()
+
     def initialize(self):
         """
         Build the model, optimizer, and learning rate scheduler under VeOmni.
@@ -424,9 +426,9 @@ class VeOmniEngine(FSDPEngine):
         # down the worker after the failure.
         try:
             output_lst = []
-            # Per-microbatch metadata for RECORD aggregation (pad_size for SP pad trim,
-            # cu_seqlens for per-sample split). Collected via side-channel on the
-            # micro_batch TensorDict during prepare_model_inputs.
+            # Per-microbatch metadata for RECORD aggregation (pad_size to trim the SP-alignment
+            # and pad_to_length suffixes, cu_seqlens for per-sample split). Collected via
+            # side-channel on the micro_batch TensorDict during prepare_model_inputs.
             pad_size_per_mb: list[int] = []
             cu_seqlens_per_mb: list[torch.Tensor] = []
 
@@ -905,7 +907,7 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
                 model_inputs["teacher_topk_log_probs"] = teacher_topk_log_probs
 
         # Router replay plumbing. Two responsibilities:
-        #   (1) snapshot the ulysses pad_size for this micro-batch so
+        #   (1) snapshot the total pad_size for this micro-batch so
         #       forward_backward_batch can trim it during RECORD aggregation;
         #   (2) during REPLAY, slice this micro-batch's routed_experts along
         #       the same pad+SP rule that super().prepare_model_inputs used
@@ -967,9 +969,9 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
             # mirror the exact pad+slice rule super().prepare_model_inputs
             # already applied to input_ids.
             flat = routed.values() if hasattr(routed, "values") else routed
-            per_layer = rr.slice_microbatch_replay_targets(flat)
+            real_nnz = flat.size(0)
 
-            # Per-token replay mask — R3 only.
+            # Per-token replay mask — R3, plus any run with padded tokens.
             #
             # R2 RECORD captures the actor's full-sequence routing
             # (prompt + response) in compute_log_prob, so REPLAY
@@ -988,7 +990,7 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
             # every prompt token's topk slots to expert 0, corrupting
             # the EP all-to-all token distribution. R3 must mask
             # prompt tokens out and let them go through native routing.
-            replay_mask = None
+            mask_flat = None
             if self._router_replay_mode == "R3":
                 response_mask = micro_batch.get("response_mask", None)
                 if response_mask is None:
@@ -1035,15 +1037,30 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
                 # downstream ``torch.where(mask, target, native)`` would
                 # silently misalign and the EP all-to-all would still
                 # blow up. Fail-fast here with a clearer message.
-                if mask_flat.numel() != flat.size(0):
+                if mask_flat.numel() != real_nnz:
                     raise RuntimeError(
                         f"router_replay R3: constructed replay_mask has "
                         f"{mask_flat.numel()} entries but routed_experts.values() "
-                        f"has {flat.size(0)}. response_mask + input_ids.offsets() "
+                        f"has {real_nnz}. response_mask + input_ids.offsets() "
                         "do not describe the same total token count."
                     )
-                # Mirror the same pad+slice rule used for routed_experts.
-                replay_mask = rr.slice_microbatch_replay_mask(mask_flat)
+
+            # Static pad_to_length (and, for the last shard, the Ulysses alignment pad) appended
+            # tokens to input_ids that no RECORD pass ever saw, so ``flat`` is short of what the
+            # routers will be asked to route. Extend it to the padded length and gate the tail
+            # off: pad tokens route natively. That is safe where masking a *real* token would not
+            # be -- their outputs are discarded before the loss, and their expert choice cannot
+            # change which experts the real tokens are assigned to.
+            pad_size = int(output_args.get("pad_size", 0))
+            if pad_size:
+                if mask_flat is None:
+                    mask_flat = torch.ones(real_nnz, dtype=torch.bool, device=flat.device)
+                mask_flat = torch.cat([mask_flat, mask_flat.new_zeros(pad_size)])
+                flat = torch.cat([flat, flat.new_zeros((pad_size, *flat.shape[1:]))])
+
+            per_layer = rr.slice_microbatch_replay_targets(flat)
+            # Mirror the same pad+slice rule used for routed_experts.
+            replay_mask = rr.slice_microbatch_replay_mask(mask_flat) if mask_flat is not None else None
 
             rr.set_microbatch_targets(per_layer, replay_mask=replay_mask)
 
