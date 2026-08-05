@@ -22,6 +22,7 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
+from verl.experimental.agent_loop import agent_loop as agent_loop_module
 from verl.experimental.agent_loop.agent_loop import (
     AgentLoopMetrics,
     AgentLoopOutput,
@@ -136,6 +137,7 @@ def _to_internal(
     num_turns: int,
     prompt_len: int,
     response_len: int,
+    reward_score: float | None = None,
 ) -> _InternalAgentLoopOutput:
     prompt_ids = _pad_1d(output_prompt_ids, length=prompt_len, pad_id=0)
     response_ids = _pad_1d(output_response_ids, length=response_len, pad_id=0)
@@ -164,7 +166,7 @@ def _to_internal(
         routed_experts=None,
         multi_modal_inputs=None,
         multi_modal_data=None,
-        reward_score=None,
+        reward_score=reward_score,
         num_turns=num_turns,
         metrics=metrics,
         extra_fields=extra_fields,
@@ -256,6 +258,48 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
     # And the list-typed fields are actually lists (not missing / scalar).
     assert merged.non_tensor_batch["turn_scores"][0] == []
     assert merged.non_tensor_batch["tool_rewards"][0] == []
+
+
+def test_agent_loop_postprocess_uses_shared_reward_extra_info_assembly(monkeypatch):
+    rich_info = {"score": 1.0, "acc": True, "pred": "42"}
+    poor_info = {"acc": 0.0}
+    inputs = [
+        _to_internal(
+            output_prompt_ids=[101],
+            output_response_ids=[11],
+            output_response_mask=[1],
+            metrics=AgentLoopMetrics(),
+            extra_fields={"reward_extra_info": info},
+            num_turns=1,
+            prompt_len=1,
+            response_len=1,
+            reward_score=info["acc"],
+        )
+        for info in (rich_info, poor_info)
+    ]
+
+    calls = []
+    shared_assembler = agent_loop_module.assemble_reward_extra_info
+
+    def assembly_spy(reward_extra_infos):
+        calls.append(reward_extra_infos)
+        return shared_assembler(reward_extra_infos)
+
+    monkeypatch.setattr(agent_loop_module, "assemble_reward_extra_info", assembly_spy)
+    dummy_worker = type(
+        "_DummyWorker",
+        (),
+        {"reward_loop_worker_handles": None, "distillation_enabled": False},
+    )()
+
+    merged = AgentLoopWorker._postprocess(dummy_worker, inputs)
+
+    assert calls == [[rich_info, poor_info]]
+    assert merged.meta_info["reward_extra_keys"] == ["score", "acc", "pred"]
+    assert merged.non_tensor_batch["score"].tolist() == [1.0, None]
+    assert merged.non_tensor_batch["acc"].tolist() == [1.0, 0.0]
+    assert merged.non_tensor_batch["pred"].tolist() == ["42", None]
+    assert merged.non_tensor_batch["score"].dtype == object
 
 
 @pytest.mark.asyncio

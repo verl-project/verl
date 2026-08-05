@@ -19,11 +19,17 @@ sample 0 only (``list(reward_extra_infos[0].keys())``), which either crashed wit
 e.g. a reward function that adds a diagnostic key only on parse success, or a
 mixed-dataset batch where ``default_compute_score`` returns a dict for one data
 source (``math_dapo``) and a bare float for another (``openai/gsm8k``).
+
+These tests import the NumPy-only shared helper, not the Ray-backed reward loop.
+They cover assembly and alignment only; downstream handling of ``None`` values
+belongs to validation metric processing.
 """
 
 import numpy as np
+import pytest
 
-from verl.experimental.reward_loop.reward_loop import assemble_reward_extra_info
+from verl.utils.reward_score import default_compute_score
+from verl.utils.reward_score.reward_extra_info import assemble_reward_extra_info
 
 
 def test_uniform_keys_preserve_alignment_and_dtype():
@@ -76,6 +82,7 @@ def test_key_order_is_first_seen():
 
 
 def test_all_empty_infos():
+    assert assemble_reward_extra_info([]) == {}
     assert assemble_reward_extra_info([{}, {}, {}]) == {}
 
 
@@ -84,3 +91,25 @@ def test_explicit_none_value_is_kept_dense():
     infos = [{"cp": None}, {"cp": 1.0}]
     out = assemble_reward_extra_info(infos)
     assert out["cp"].tolist() == [None, 1.0]
+
+
+@pytest.mark.parametrize("rich_first", [True, False])
+def test_builtin_scorer_schema_difference_is_aligned_in_either_order(rich_first):
+    """Built-in float and dict scorers produce heterogeneous extra-info schemas."""
+    float_result = default_compute_score("openai/gsm8k", "The answer is #### 42", "42")
+    dict_result = default_compute_score("math_dapo", "Answer: 42", "42")
+
+    assert float_result == 1.0
+    assert set(dict_result) == {"score", "acc", "pred"}
+
+    poor = {"acc": float_result}
+    rich = dict_result
+    labeled_infos = [("rich", rich), ("poor", poor)] if rich_first else [("poor", poor), ("rich", rich)]
+    out = assemble_reward_extra_info([info for _, info in labeled_infos])
+
+    assert set(out) == {"score", "acc", "pred"}
+    aligned = {label: {key: out[key][index] for key in out} for index, (label, _) in enumerate(labeled_infos)}
+    assert aligned["rich"] == {"score": 1.0, "acc": True, "pred": "42"}
+    assert aligned["poor"] == {"score": None, "acc": 1.0, "pred": None}
+    assert out["score"].dtype == object
+    assert out["pred"].dtype == object

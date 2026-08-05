@@ -17,7 +17,6 @@ import logging
 import os
 
 import aiohttp
-import numpy as np
 import ray
 from omegaconf import DictConfig, open_dict
 from ray.actor import ActorHandle
@@ -29,40 +28,12 @@ from verl.trainer.ppo.reward import load_reward_manager, resolve_reward_manager_
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
 from verl.utils.ray_utils import get_event_loop
+from verl.utils.reward_score.reward_extra_info import assemble_reward_extra_info
 
 from .reward_model import RewardModelManager
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
-
-
-def assemble_reward_extra_info(reward_extra_infos: list[dict]) -> dict[str, np.ndarray]:
-    """Assemble per-sample ``reward_extra_info`` dicts into batch-level arrays.
-
-    The key set is the union over all samples (in first-seen order), not the keys of
-    sample 0: reward functions may emit a key only for some samples (e.g. a diagnostic
-    that exists only on parse success), and ``default_compute_score`` returns a dict for
-    some data sources but a bare float for others, so mixed-dataset batches routinely
-    have per-sample schemas. Samples that did not emit a key are filled with ``None``,
-    matching the null-fill convention used for sparse keys elsewhere in the trainer.
-    """
-    reward_extra_keys: list[str] = []
-    seen: set[str] = set()
-    for info in reward_extra_infos:
-        for key in info:
-            if key not in seen:
-                seen.add(key)
-                reward_extra_keys.append(key)
-
-    non_tensor_batch = {}
-    for key in reward_extra_keys:
-        values = [info.get(key) for info in reward_extra_infos]
-        if all(key in info for info in reward_extra_infos):
-            non_tensor_batch[key] = np.array(values)
-        else:
-            # sparse key: keep object dtype so the None fills survive
-            non_tensor_batch[key] = np.array(values, dtype=object)
-    return non_tensor_batch
 
 
 def migrate_legacy_reward_impl(config):
