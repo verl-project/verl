@@ -14,6 +14,7 @@
 
 import random
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -24,6 +25,7 @@ from verl.trainer.ppo.core_algos import (
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
     compute_grpo_vectorized_outcome_advantage,
+    compute_reinforce_plus_plus_outcome_advantage,
     compute_rloo_outcome_advantage,
     compute_rloo_vectorized_outcome_advantage,
     get_adv_estimator_fn,
@@ -196,6 +198,55 @@ def test_multi_turn_compute_gae_advantage_return():
     assert torch.equal(adv1, adv2), f"{adv1=}, {adv2=}"
     assert torch.equal(ret1, ret2), f"{ret1=}, {ret2=}"
     print(f" [CORRECT] \n\n{adv1=}, \n\n{ret1=}")
+
+
+@pytest.mark.parametrize("gamma", [1.0, 0.5])
+def test_multi_turn_compute_reinforce_plus_plus_advantage(gamma):
+    """Observation tokens must not interrupt returns between assistant turns."""
+    config = SimpleNamespace(gamma=gamma)
+    compact_rewards = torch.tensor([[0.0, 0.0, 0.0, 1.0]])
+    compact_mask = torch.ones_like(compact_rewards)
+    expanded_rewards = torch.tensor([[0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]])
+    expanded_mask = torch.tensor([[1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]])
+
+    compact_advantages, compact_returns = compute_reinforce_plus_plus_outcome_advantage(
+        compact_rewards, compact_mask, config=config
+    )
+    expanded_advantages, expanded_returns = compute_reinforce_plus_plus_outcome_advantage(
+        expanded_rewards, expanded_mask, config=config
+    )
+
+    expected_returns = torch.tensor([[gamma**3, gamma**2, gamma, 1.0]])
+    torch.testing.assert_close(compact_returns, expected_returns)
+    torch.testing.assert_close(expanded_returns[expanded_mask.bool()], compact_returns.flatten())
+    torch.testing.assert_close(expanded_advantages[expanded_mask.bool()], compact_advantages.flatten())
+    torch.testing.assert_close(expanded_returns[:, -2:], torch.zeros(1, 2))
+
+
+def test_batched_reinforce_plus_plus_handles_observations_and_padding():
+    rewards = torch.tensor(
+        [
+            [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.5, 0.0, 1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ]
+    )
+    response_mask = torch.tensor(
+        [
+            [1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0],
+            [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ]
+    )
+
+    advantages, returns = compute_reinforce_plus_plus_outcome_advantage(
+        rewards, response_mask, config=SimpleNamespace(gamma=0.5)
+    )
+
+    torch.testing.assert_close(returns[0][response_mask[0].bool()], torch.tensor([0.125, 0.25, 0.5, 1.0]))
+    torch.testing.assert_close(returns[1][response_mask[1].bool()], torch.tensor([0.5, 1.0, 1.0]))
+    torch.testing.assert_close(returns[2], torch.zeros(8))
+    torch.testing.assert_close(advantages * (1 - response_mask), torch.zeros_like(advantages))
 
 
 def _make_group_index(batch_size: int, num_groups: int) -> np.ndarray:

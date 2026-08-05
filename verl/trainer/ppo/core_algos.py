@@ -718,10 +718,16 @@ def compute_reinforce_plus_plus_outcome_advantage(
         running_return = 0
 
         for t in reversed(range(token_level_rewards.shape[1])):
-            running_return = token_level_rewards[:, t] + gamma * running_return
+            # Observation tokens use the same zero mask as trailing padding. Because
+            # the scan starts from zero, padding naturally keeps a zero return, while
+            # observation spans must preserve the return from later assistant turns.
+            is_response_token = response_mask[:, t].bool()
+            running_return = torch.where(
+                is_response_token,
+                token_level_rewards[:, t] + gamma * running_return,
+                running_return,
+            )
             returns[:, t] = running_return
-            # Reset after EOS
-            running_return = running_return * response_mask[:, t]
 
         advantages = verl_F.masked_whiten(returns, response_mask)
         advantages = advantages * response_mask
