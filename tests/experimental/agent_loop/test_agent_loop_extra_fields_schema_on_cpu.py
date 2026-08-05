@@ -248,6 +248,7 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
         "min_global_steps",
         "max_global_steps",
         "extras",
+        "reward_extra_info",
     )
     for key in stable_keys:
         assert key in merged.non_tensor_batch, f"missing key in merged batch: {key}"
@@ -260,46 +261,100 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
     assert merged.non_tensor_batch["tool_rewards"][0] == []
 
 
-def test_agent_loop_postprocess_uses_shared_reward_extra_info_assembly(monkeypatch):
+@pytest.mark.parametrize("rich_first", [True, False])
+def test_agent_loop_assembles_reward_extra_info_after_worker_concat(rich_first):
     rich_info = {"score": 1.0, "acc": True, "pred": "42"}
     poor_info = {"acc": 0.0}
-    inputs = [
-        _to_internal(
-            output_prompt_ids=[101],
-            output_response_ids=[11],
-            output_response_mask=[1],
-            metrics=AgentLoopMetrics(),
-            extra_fields={"reward_extra_info": info},
-            num_turns=1,
-            prompt_len=1,
-            response_len=1,
-            reward_score=info["acc"],
-        )
-        for info in (rich_info, poor_info)
-    ]
-
-    calls = []
-    shared_assembler = agent_loop_module.assemble_reward_extra_info
-
-    def assembly_spy(reward_extra_infos):
-        calls.append(reward_extra_infos)
-        return shared_assembler(reward_extra_infos)
-
-    monkeypatch.setattr(agent_loop_module, "assemble_reward_extra_info", assembly_spy)
+    infos = [rich_info, poor_info] if rich_first else [poor_info, rich_info]
     dummy_worker = type(
         "_DummyWorker",
         (),
         {"reward_loop_worker_handles": None, "distillation_enabled": False},
     )()
+    worker_outputs = [
+        AgentLoopWorker._postprocess(
+            dummy_worker,
+            [
+                _to_internal(
+                    output_prompt_ids=[101],
+                    output_response_ids=[11],
+                    output_response_mask=[1],
+                    metrics=AgentLoopMetrics(),
+                    extra_fields={"reward_extra_info": info},
+                    num_turns=1,
+                    prompt_len=1,
+                    response_len=1,
+                    reward_score=info["acc"],
+                )
+            ],
+        )
+        for info in infos
+    ]
 
-    merged = AgentLoopWorker._postprocess(dummy_worker, inputs)
+    # Each worker carries the raw dict in one stable object column. Assembly before
+    # this point would leave worker chunks with incompatible flattened schemas.
+    for worker_output in worker_outputs:
+        assert "reward_extra_info" in worker_output.non_tensor_batch
+        assert "score" not in worker_output.non_tensor_batch
 
-    assert calls == [[rich_info, poor_info]]
-    assert merged.meta_info["reward_extra_keys"] == ["score", "acc", "pred"]
-    assert merged.non_tensor_batch["score"].tolist() == [1.0, None]
-    assert merged.non_tensor_batch["acc"].tolist() == [1.0, 0.0]
-    assert merged.non_tensor_batch["pred"].tolist() == ["42", None]
+    merged = agent_loop_module.DataProto.concat(worker_outputs)
+    prompts = agent_loop_module.DataProto(
+        batch=merged.batch.select(),
+        non_tensor_batch={"uid": np.array(["a", "b"], dtype=object)},
+    )
+    agent_loop_module._finalize_agent_loop_reward_extra_info(merged, prompts)
+
+    expected_keys = ["score", "acc", "pred"] if rich_first else ["acc", "score", "pred"]
+    assert merged.meta_info["reward_extra_keys"] == expected_keys
+    assert "reward_extra_info" not in merged.non_tensor_batch
+    assert merged.non_tensor_batch["score"].tolist() == ([1.0, None] if rich_first else [None, 1.0])
+    assert merged.non_tensor_batch["acc"].tolist() == ([1.0, 0.0] if rich_first else [0.0, 1.0])
+    assert merged.non_tensor_batch["pred"].tolist() == (["42", None] if rich_first else [None, "42"])
     assert merged.non_tensor_batch["score"].dtype == object
+
+
+def test_agent_loop_rejects_reward_extra_info_key_collisions():
+    dummy_worker = type(
+        "_DummyWorker",
+        (),
+        {"reward_loop_worker_handles": None, "distillation_enabled": False},
+    )()
+    worker_output = AgentLoopWorker._postprocess(
+        dummy_worker,
+        [
+            _to_internal(
+                output_prompt_ids=[101],
+                output_response_ids=[11],
+                output_response_mask=[1],
+                metrics=AgentLoopMetrics(),
+                extra_fields={"reward_extra_info": {"turn_scores": 1.0}},
+                num_turns=1,
+                prompt_len=1,
+                response_len=1,
+                reward_score=1.0,
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="turn_scores"):
+        agent_loop_module._assemble_agent_loop_reward_extra_info(worker_output)
+
+
+def test_agent_loop_rejects_reward_key_colliding_with_source_field():
+    output = agent_loop_module.DataProto(
+        batch=agent_loop_module.TensorDict(
+            {"rm_scores": torch.zeros((1, 1), dtype=torch.float32)},
+            batch_size=1,
+        ),
+        non_tensor_batch={"reward_extra_info": np.array([{"uid": "shadow"}], dtype=object)},
+    )
+    prompts = agent_loop_module.DataProto(
+        batch=agent_loop_module.TensorDict({}, batch_size=1),
+        non_tensor_batch={"uid": np.array(["original"], dtype=object)},
+    )
+
+    with pytest.raises(ValueError, match="uid"):
+        agent_loop_module._finalize_agent_loop_reward_extra_info(output, prompts)
 
 
 @pytest.mark.asyncio
