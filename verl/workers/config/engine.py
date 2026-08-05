@@ -249,13 +249,19 @@ class FSDPEngineConfig(EngineConfig):
             debugging.
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
         dtype (str): Mixed precision training param dtype, default "bfloat16"
-        pad_to_length (bool): Pad every packed micro-batch to a fixed number of tokens so the
-            packed shape stops varying between micro-batches, which avoids repeated kernel
-            recompilation / autotuning. The target length is the dynamic-batching token budget
-            (``max_token_len_per_gpu * ulysses_sequence_parallel_size``), so it requires
-            ``use_dynamic_bsz=True``. Pad tokens carry their own ``position_ids`` segment and are
-            stripped before the outputs reach the loss, but they still cost a full forward pass.
-            default False
+        pad_to_length (bool): Round every packed micro-batch up to a multiple of
+            ``pad_to_length_bucket`` tokens, so the packed shape only takes a handful of distinct
+            values instead of a new one per micro-batch, which avoids repeated kernel
+            recompilation / autotuning. Requires ``use_remove_padding=True``. Pad tokens carry
+            their own ``position_ids`` segment and are stripped before the outputs reach the loss,
+            but they still cost a full forward pass. default False
+        pad_to_length_bucket (int): Padding granularity in tokens, on the *global* packed sequence
+            (before the sequence-parallel split). Rounded up internally to a multiple of
+            ``ulysses_sequence_parallel_size``. Smaller values waste fewer tokens per micro-batch
+            but admit more distinct shapes; setting it to the dynamic-batching token budget
+            (``max_token_len_per_gpu * ulysses_sequence_parallel_size``) collapses every
+            within-budget micro-batch onto a single shape. Only read when ``pad_to_length=True``.
+            default 1024
         qat (QATEngineConfig): QAT configuration, default disabled
     """
 
@@ -278,6 +284,7 @@ class FSDPEngineConfig(EngineConfig):
     entropy_checkpointing: bool = False
     strategy: str = "fsdp"
     pad_to_length: bool = False
+    pad_to_length_bucket: int = 1024
     qat: QATEngineConfig = field(default_factory=QATEngineConfig)
 
     def __post_init__(self):
@@ -346,14 +353,21 @@ class VeOmniEngineConfig(EngineConfig):
             in distributed training. Important: this will negatively impact performance, so only use it for
             debugging.
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
-        pad_to_length (bool): Pad every packed micro-batch to a fixed number of tokens so the
-            packed shape stops varying between micro-batches, which avoids repeated kernel
-            recompilation / autotuning (the verl counterpart of VeOmni's ``train.pad_to_length``).
-            The target length is the dynamic-batching token budget
-            (``max_token_len_per_gpu * ulysses_parallel_size``), so it requires
-            ``use_dynamic_bsz=True``. Pad tokens carry their own ``position_ids`` segment and are
-            stripped before the outputs reach the loss, but they still cost a full forward pass.
-            default False
+        pad_to_length (bool): Round every packed micro-batch up to a multiple of
+            ``pad_to_length_bucket`` tokens, so the packed shape only takes a handful of distinct
+            values instead of a new one per micro-batch, which avoids repeated kernel
+            recompilation / autotuning (the verl counterpart of VeOmni's ``train.pad_to_length``,
+            which pads to a single length because its dyn-bsz collator caps the packed length --
+            verl's workload-balanced ``rearrange_micro_batches`` does not, hence the buckets).
+            Requires ``use_remove_padding=True``. Pad tokens carry their own ``position_ids``
+            segment and are stripped before the outputs reach the loss, but they still cost a full
+            forward pass. default False
+        pad_to_length_bucket (int): Padding granularity in tokens, on the *global* packed sequence
+            (before the sequence-parallel split). Rounded up internally to a multiple of
+            ``ulysses_parallel_size``. Smaller values waste fewer tokens per micro-batch but admit
+            more distinct shapes; setting it to the dynamic-batching token budget
+            (``max_token_len_per_gpu * ulysses_parallel_size``) collapses every within-budget
+            micro-batch onto a single shape. Only read when ``pad_to_length=True``. default 1024
         rms_norm_gated_implementation (str): Gated RMSNorm implementation (Qwen3.5 GatedDeltaNet
             ``self.norm``). ``"fla"`` uses fla.modules.FusedRMSNormGated (requires flash-linear-attention,
             GPU). ``"eager"`` (default) uses the HuggingFace Qwen3_5RMSNormGated. Qwen3.5 has no NPU
@@ -414,6 +428,7 @@ class VeOmniEngineConfig(EngineConfig):
     activation_gpu_limit: float = 0.0
     basic_modules: Optional[list[str]] = field(default_factory=list)
     pad_to_length: bool = False
+    pad_to_length_bucket: int = 1024
 
     def __post_init__(self):
         super().__post_init__()

@@ -12,16 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Static packed-sequence padding (``pad_to_length``) for the FSDP and VeOmni engines.
+"""Bucket-aligned packed-sequence padding (``pad_to_length``) for the FSDP and VeOmni engines.
 
 Covers the three pieces that make a packed micro-batch shape-stable:
 
 * ``pad_packed_inputs`` — the tensor-level right-pad, including the
   ``position_ids`` convention that turns the pad into its own varlen
   segment instead of an extension of the last real sequence.
-* ``FSDPEngine._get_packed_pad_size`` — how the target length is
-  derived from the dynamic-batching token budget, and the overshoot
-  fallback. Lives on the FSDP base, so ``VeOmniEngine`` inherits it.
+* ``FSDPEngine._get_packed_pad_size`` — rounding the packed length up to
+  the next bucket boundary. Lives on the FSDP base, so ``VeOmniEngine``
+  inherits it.
 * ``FSDPEngine._gather_and_unpad_packed`` — the no-SP branch that trims
   the pad back off before the outputs are re-jagged.
 
@@ -60,13 +60,6 @@ from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead  # no
 from verl.workers.engine.utils import pad_packed_inputs  # noqa: E402
 from verl.workers.engine.veomni.transformer_impl import VeOmniEngineWithLMHead  # noqa: E402
 
-
-def _make_micro_batch(max_token_len_per_gpu) -> TensorDict:
-    td = TensorDict({}, batch_size=[])
-    td.set_non_tensor("max_token_len_per_gpu", max_token_len_per_gpu)
-    return td
-
-
 ENGINE_CLASSES = pytest.mark.parametrize(
     "engine_cls",
     [FSDPEngineWithLMHead, VeOmniEngineWithLMHead],
@@ -74,12 +67,12 @@ ENGINE_CLASSES = pytest.mark.parametrize(
 )
 
 
-def _make_engine(engine_cls, pad_to_length: bool, sp_size: int = 1):
+def _make_engine(engine_cls, pad_to_length: bool, bucket: int = 1024):
     """Bare instance — ``_get_packed_pad_size`` only reads the two attributes set here,
     and a real ``__init__`` would need a process group and VeOmni's parallel_state."""
     engine = engine_cls.__new__(engine_cls)
     engine.pad_to_length = pad_to_length
-    engine.ulysses_sequence_parallel_size = sp_size
+    engine.pad_to_length_bucket = bucket
     return engine
 
 
@@ -133,40 +126,39 @@ class TestGetPackedPadSize:
     def test_disabled_returns_zero(self, engine_cls):
         engine = _make_engine(engine_cls, pad_to_length=False)
 
-        assert engine._get_packed_pad_size(_make_micro_batch(1024), 700) == 0
+        assert engine._get_packed_pad_size(700) == 0
 
-    def test_pads_up_to_the_token_budget(self, engine_cls):
-        engine = _make_engine(engine_cls, pad_to_length=True)
+    def test_rounds_up_to_the_next_bucket(self, engine_cls):
+        engine = _make_engine(engine_cls, pad_to_length=True, bucket=1024)
 
-        assert engine._get_packed_pad_size(_make_micro_batch(1024), 700) == 324
+        assert engine._get_packed_pad_size(700) == 324
 
-    def test_budget_scales_with_sequence_parallel_size(self, engine_cls):
-        """``prepare_micro_batches`` packs up to ``max_token_len_per_gpu * sp_size`` tokens
-        before the SP split, so the pre-split target has to scale the same way."""
-        engine = _make_engine(engine_cls, pad_to_length=True, sp_size=4)
+    def test_exact_multiple_needs_no_pad(self, engine_cls):
+        engine = _make_engine(engine_cls, pad_to_length=True, bucket=1024)
 
-        assert engine._get_packed_pad_size(_make_micro_batch(1024), 700) == 4096 - 700
+        assert engine._get_packed_pad_size(2048) == 0
 
-    def test_exactly_at_budget_needs_no_pad(self, engine_cls):
-        engine = _make_engine(engine_cls, pad_to_length=True)
+    def test_micro_batch_over_the_token_budget_is_still_padded(self, engine_cls):
+        """The reason for bucketing rather than a single target length: ``rearrange_micro_batches``
+        sizes the micro-batch count from the token budget but partitions samples to balance
+        attention workload, so a skewed micro-batch can exceed the budget. It still lands on a
+        bucket boundary instead of keeping an arbitrary shape."""
+        engine = _make_engine(engine_cls, pad_to_length=True, bucket=1024)
 
-        assert engine._get_packed_pad_size(_make_micro_batch(1024), 1024) == 0
+        assert engine._get_packed_pad_size(12000) == 12288 - 12000
 
-    def test_overshooting_micro_batch_is_left_unpadded(self, engine_cls):
-        """Sequence-length balancing partitions by attention workload, not token count, so a
-        skewed micro-batch can exceed the budget. Those keep their natural length — one
-        oddly-shaped micro-batch is cheaper than failing the step."""
-        engine = _make_engine(engine_cls, pad_to_length=True)
+    def test_padded_length_is_always_a_bucket_multiple(self, engine_cls):
+        engine = _make_engine(engine_cls, pad_to_length=True, bucket=640)
 
-        assert engine._get_packed_pad_size(_make_micro_batch(1024), 1100) == 0
-        assert engine._get_packed_pad_size(_make_micro_batch(1024), 1200) == 0
+        for packed in (1, 639, 640, 641, 10239, 10240, 12000):
+            assert (packed + engine._get_packed_pad_size(packed)) % 640 == 0
 
 
 @ENGINE_CLASSES
 class TestDistillationGuard:
     def test_topk_distillation_micro_batch_is_rejected(self, engine_cls):
         engine = _make_engine(engine_cls, pad_to_length=True)
-        micro_batch = _make_micro_batch(1024)
+        micro_batch = TensorDict({}, batch_size=[])
         micro_batch.set_non_tensor("distillation_use_topk", True)
 
         with pytest.raises(RuntimeError, match="not supported with top-K distillation"):

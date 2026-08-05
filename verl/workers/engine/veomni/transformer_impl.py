@@ -214,6 +214,7 @@ class VeOmniEngine(FSDPEngine):
             logger.info("VeOmniEngine: router_replay enabled, mode=%s", self._router_replay_mode)
 
         self.pad_to_length: bool = self.engine_config.pad_to_length
+        self.pad_to_length_bucket: int = self.engine_config.pad_to_length_bucket
 
     def initialize(self):
         """

@@ -62,6 +62,7 @@ from verl.utils.fsdp_utils import (
 )
 from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
 from verl.utils.py_functional import convert_to_regular_types
+from verl.utils.seqlen_balancing import ceildiv
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import (
     gather_outputs_and_unpad,
@@ -167,6 +168,7 @@ class FSDPEngine(BaseEngine):
         )
 
         self.pad_to_length: bool = self.engine_config.pad_to_length
+        self.pad_to_length_bucket: int = self.engine_config.pad_to_length_bucket
 
     @property
     def is_param_offload_enabled(self) -> bool:
@@ -642,15 +644,19 @@ class FSDPEngine(BaseEngine):
     def get_context_parallel_group(self):
         raise NotImplementedError
 
-    def _get_packed_pad_size(self, micro_batch: TensorDict, packed_length: int) -> int:
+    def _get_packed_pad_size(self, packed_length: int) -> int:
+        """Right-padding that rounds a packed micro-batch up to the next bucket boundary.
+
+        ``rearrange_micro_batches`` derives the *number* of micro-batches from the token budget but
+        chooses their *contents* to balance attention workload (Σ seqlen²), so a micro-batch's token
+        count is neither constant nor bounded by that budget. Bucketing therefore beats padding to
+        the budget itself, which would leave every over-budget micro-batch fully dynamic while
+        making every under-budget one pay a full-budget forward.
+        """
         if not self.pad_to_length:
             return 0
-
-        max_token_len_per_gpu = tu.get_non_tensor_data(micro_batch, "max_token_len_per_gpu", default=None)
-        target_length = int(max_token_len_per_gpu) * self.ulysses_sequence_parallel_size
-        if packed_length > target_length:
-            return 0
-        return target_length - packed_length
+        bucket = self.pad_to_length_bucket
+        return ceildiv(packed_length, bucket) * bucket - packed_length
 
     def _gather_and_unpad_packed(self, tensor: torch.Tensor, pad_size: int) -> torch.Tensor:
         """Strip what ``prepare_model_inputs`` appended to the packed sequence.
@@ -1165,11 +1171,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
             # for compute the log_prob
             input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=1)  # (1, total_nnz)
 
-            # Optional static packed length. This has to happen after the roll (which must see the
-            # true global sequence) and before the SP split, so the pad stays a suffix of the
-            # *global* packed sequence -- that is what prepare_model_outputs strips back off after
-            # the all-gather.
-            static_pad_size = self._get_packed_pad_size(micro_batch, input_ids_rmpad.size(-1))
+            # Optional bucket-aligned packed length. This has to happen after the roll (which must
+            # see the true global sequence) and before the SP split, so the pad stays a suffix of
+            # the *global* packed sequence -- that is what prepare_model_outputs strips back off
+            # after the all-gather.
+            static_pad_size = self._get_packed_pad_size(input_ids_rmpad.size(-1))
             if static_pad_size:
                 input_ids_rmpad, position_ids_rmpad = pad_packed_inputs(
                     input_ids_rmpad, position_ids_rmpad, static_pad_size

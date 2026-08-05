@@ -44,6 +44,7 @@ actor_rollout_ref:
       use_torch_compile: true
       entropy_checkpointing: ${oc.select:actor_rollout_ref.actor.entropy_checkpointing,False}
       pad_to_length: ${oc.select:actor_rollout_ref.actor.pad_to_length,False}
+      pad_to_length_bucket: 1024
       forward_only: false
       strategy: fsdp
       dtype: bfloat16
@@ -236,6 +237,7 @@ actor_rollout_ref:
       use_torch_compile: true
       entropy_checkpointing: ${oc.select:actor_rollout_ref.ref.entropy_checkpointing,False}
       pad_to_length: ${oc.select:actor_rollout_ref.ref.pad_to_length,False}
+      pad_to_length_bucket: ${oc.select:actor_rollout_ref.actor.fsdp_config.pad_to_length_bucket,1024}
       forward_only: true
       strategy: fsdp
       dtype: bfloat16
@@ -537,6 +539,7 @@ critic:
     use_torch_compile: true
     entropy_checkpointing: false
     pad_to_length: false
+    pad_to_length_bucket: 1024
     forward_only: false
     strategy: fsdp
     dtype: bfloat16
