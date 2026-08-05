@@ -71,8 +71,8 @@ MODEL=(
 
 ACTOR=(
     actor_rollout_ref.actor.policy_loss.loss_mode=sapo
-    +actor_rollout_ref.actor.policy_loss.tau_pos=${tau_pos}
-    +actor_rollout_ref.actor.policy_loss.tau_neg=${tau_neg}
+    actor_rollout_ref.actor.tau_pos=${tau_pos}
+    actor_rollout_ref.actor.tau_neg=${tau_neg}
     actor_rollout_ref.actor.strategy=fsdp2
     actor_rollout_ref.actor.optim.lr=${actor_lr}
     actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size}

@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+# SAPO | Qwen3-30B-A3B (MoE) | Megatron training | vLLM rollout | GPU or Ascend NPU
+# SAPO replaces ratio clipping with a smooth tau-parameterized surrogate (arXiv:2511.20347).
+#
+# Platform and inference backend are runtime toggles, not separate scripts:
+#   DEVICE=npu INFER_BACKEND=vllm NDEVICES_PER_NODE=16 bash examples/sapo_trainer/run_qwen3_30b_a3b_megatron.sh
+
+set -xeuo pipefail
+
+########################### user-adjustable ###########################
+# DEVICE is auto-detected by probing torch_npu; override only for special cases.
+DEVICE=${DEVICE:-$(python3 -c 'import torch_npu' 2>/dev/null && echo npu || echo gpu)}
+INFER_BACKEND=${INFER_BACKEND:-vllm}
+
+MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-30B-A3B-Base}
+# Optional pre-converted Megatron dist checkpoint. Produce it with:
+#   python3 scripts/converter_hf_to_mcore.py --hf_model_path "$MODEL_PATH" \
+#       --output_path "$MCORE_MODEL_PATH" --use_cpu_initialization
+# Leave empty to let mbridge load the HF weights directly.
+MCORE_MODEL_PATH=${MCORE_MODEL_PATH:-}
+
+NNODES=${NNODES:-1}
+NDEVICES_PER_NODE=${NDEVICES_PER_NODE:-}
+
+# SAPO smoothing temperatures (paper defaults for Qwen3-30B-A3B-Base).
+TAU_POS=${TAU_POS:-1.0}
+TAU_NEG=${TAU_NEG:-1.05}
+
+# Megatron parallelism.
+TP=${TP:-4}
+PP=${PP:-1}
+CP=${CP:-1}
+EP=${EP:-4}
+ETP=${ETP:-4}
+
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-32}
+PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-32}
+PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}
+LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-1}
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-2048}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-8192}
+
+ACTOR_LR=${ACTOR_LR:-1e-6}
+ENTROPY_COEFF=${ENTROPY_COEFF:-0}
+
+ROLLOUT_N=${ROLLOUT_N:-8}
+
+TRAIN_FILE=${TRAIN_FILE:-$HOME/data/dapo-math-17k/train.parquet}
+VAL_FILE=${VAL_FILE:-$HOME/data/aime-2024/test.parquet}
+
+PROJECT_NAME=${PROJECT_NAME:-verl_sapo_qwen3_moe}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_30b_a3b_megatron}
+SAVE_FREQ=${SAVE_FREQ:-50}
+TEST_FREQ=${TEST_FREQ:--1}
+TOTAL_EPOCHS=${TOTAL_EPOCHS:-10}
+########################### end user-adjustable ###########################
+
+########################### per-device defaults ###########################
+case "${DEVICE}" in
+    gpu)
+        export CUDA_DEVICE_MAX_CONNECTIONS=1  # for megatron comm/compute overlap
+        n_devices_per_node=${NDEVICES_PER_NODE:-8}
+        gen_tp=${GEN_TP:-4}
+        rollout_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.8}
+        ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-20480}
+        ;;
+    npu)
+        export CUDA_DEVICE_MAX_CONNECTIONS=1
+        export HCCL_CONNECT_TIMEOUT=${HCCL_CONNECT_TIMEOUT:-1500}
+        export HCCL_OP_EXPANSION_MODE=${HCCL_OP_EXPANSION_MODE:-AIV}  # more streams than FFTS+
+        export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
+        export TASK_QUEUE_ENABLE=${TASK_QUEUE_ENABLE:-1}
+        n_devices_per_node=${NDEVICES_PER_NODE:-16}
+        gen_tp=${GEN_TP:-4}
+        # Rollout and training share device memory; leave headroom for the
+        # offload traffic Megatron generates on Ascend.
+        rollout_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.5}
+        ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-10240}
+        ;;
+    *)
+        echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
+        exit 1
+        ;;
+esac
+
+########################### parameter arrays ###########################
+
+DATA=(
+    algorithm.adv_estimator=grpo
+    algorithm.use_kl_in_reward=False
+    data.train_files="${TRAIN_FILE}"
+    data.val_files="${VAL_FILE}"
+    data.train_batch_size=${TRAIN_BATCH_SIZE}
+    data.max_prompt_length=${MAX_PROMPT_LENGTH}
+    data.max_response_length=${MAX_RESPONSE_LENGTH}
+    data.filter_overlong_prompts=True
+    data.truncation='error'
+)
+
+MODEL=(
+    actor_rollout_ref.model.path="${MODEL_PATH}"
+    actor_rollout_ref.model.use_remove_padding=True
+)
+
+# SAPO: tau_pos/tau_neg are ActorConfig fields, NOT policy_loss fields.
+# compute_policy_loss_sapo reads config.tau_pos off ActorConfig, so overriding
+# them under policy_loss silently has no effect.
+ACTOR=(
+    actor_rollout_ref.actor.policy_loss.loss_mode=sapo
+    actor_rollout_ref.actor.tau_pos=${TAU_POS}
+    actor_rollout_ref.actor.tau_neg=${TAU_NEG}
+    actor_rollout_ref.actor.optim.lr=${ACTOR_LR}
+    actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE}
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${PPO_MICRO_BATCH_SIZE_PER_GPU}
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${ppo_max_token_len_per_gpu}
+    # SAPO drops ratio clipping, and the paper trains without a KL penalty.
+    actor_rollout_ref.actor.use_kl_loss=False
+    actor_rollout_ref.actor.entropy_coeff=${ENTROPY_COEFF}
+    actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TP}
+    actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${PP}
+    actor_rollout_ref.actor.megatron.context_parallel_size=${CP}
+    actor_rollout_ref.actor.megatron.expert_model_parallel_size=${EP}
+    actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${ETP}
+    actor_rollout_ref.actor.megatron.use_mbridge=True
+    actor_rollout_ref.actor.megatron.param_offload=True
+    actor_rollout_ref.actor.megatron.optimizer_offload=True
+    actor_rollout_ref.actor.megatron.grad_offload=True
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
+    # 128 experts without fp32 routing is numerically fragile (Megatron warns).
+    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32
+)
+
+ROLLOUT=(
+    actor_rollout_ref.rollout.name=${INFER_BACKEND}
+    actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp}
+    actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_mem_util}
+    actor_rollout_ref.rollout.n=${ROLLOUT_N}
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU}
+    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${ppo_max_token_len_per_gpu}
+)
+
+REF=(
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU}
+    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${ppo_max_token_len_per_gpu}
+    actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${TP}
+    actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${PP}
+    actor_rollout_ref.ref.megatron.context_parallel_size=${CP}
+    actor_rollout_ref.ref.megatron.expert_model_parallel_size=${EP}
+    actor_rollout_ref.ref.megatron.expert_tensor_parallel_size=${ETP}
+    actor_rollout_ref.ref.megatron.use_mbridge=True
+    actor_rollout_ref.ref.megatron.param_offload=True
+)
+
+TRAINER=(
+    trainer.critic_warmup=0
+    trainer.logger='["console"]'
+    trainer.project_name="${PROJECT_NAME}"
+    trainer.experiment_name="${EXPERIMENT_NAME}"
+    trainer.nnodes=${NNODES}
+    trainer.n_gpus_per_node=${n_devices_per_node}
+    trainer.device=${DEVICE}
+    trainer.val_before_train=False
+    trainer.save_freq=${SAVE_FREQ}
+    trainer.test_freq=${TEST_FREQ}
+    trainer.total_epochs=${TOTAL_EPOCHS}
+)
+
+# Trailing extras array; stays non-empty-safe under `set -u`.
+EXTRA=(
+    model_engine=megatron
+)
+
+# Load from a pre-converted Megatron dist checkpoint when one is supplied.
+if [ -n "${MCORE_MODEL_PATH}" ]; then
+    EXTRA+=(
+        actor_rollout_ref.actor.megatron.use_dist_checkpointing=True
+        actor_rollout_ref.actor.megatron.dist_checkpointing_path="${MCORE_MODEL_PATH}"
+        actor_rollout_ref.ref.megatron.use_dist_checkpointing=True
+        actor_rollout_ref.ref.megatron.dist_checkpointing_path="${MCORE_MODEL_PATH}"
+    )
+fi
+
+if [ "${DEVICE}" = npu ]; then
+    EXTRA+=(
+        actor_rollout_ref.actor.use_torch_compile=False
+        actor_rollout_ref.ref.use_torch_compile=False
+    )
+fi
+
+########################### launch ###########################
+python3 -m verl.trainer.main_ppo \
+    "${DATA[@]}" \
+    "${MODEL[@]}" \
+    "${ACTOR[@]}" \
+    "${ROLLOUT[@]}" \
+    "${REF[@]}" \
+    "${TRAINER[@]}" \
+    "${EXTRA[@]}" \
+    "$@"
