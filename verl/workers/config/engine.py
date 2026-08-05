@@ -391,6 +391,9 @@ class VeOmniEngineConfig(EngineConfig):
     rms_norm_gated_implementation: str = "eager"
     causal_conv1d_implementation: str = "eager"
     chunk_gated_delta_rule_implementation: str = "eager"
+    dsa_indexer_implementation: str = "eager"
+    dsa_attention_implementation: str = "eager"
+    mhc_implementation: str = "eager"
     force_use_huggingface: bool = False
     activation_gpu_limit: float = 0.0
     basic_modules: Optional[list[str]] = field(default_factory=list)

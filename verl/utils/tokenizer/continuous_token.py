@@ -399,7 +399,7 @@ class QwenContinuousTokenBuilder(ContinuousTokenBuilder):
         if len(newline_ids) != 1:
             raise ValueError(f"Expected Qwen newline to tokenize to one token, got {newline_ids!r}")
         self._newline_id = int(newline_ids[0])
-        self._im_end_id = _require_token_id(tokenizer, "<|im_end|>")
+        self._im_end_id = require_token_id(tokenizer, "<|im_end|>")
 
     def _merge_non_assistant_token_ids(
         self, runtime_token_ids: list[int], appended_token_ids: list[int]
@@ -431,7 +431,7 @@ class MiniMaxContinuousTokenBuilder(ContinuousTokenBuilder):
         if len(newline_ids) != 1:
             raise ValueError(f"Expected MiniMax newline to tokenize to one token, got {newline_ids!r}")
         self._newline_id = int(newline_ids[0])
-        self._eos_id = _require_token_id(tokenizer, "[e~[")
+        self._eos_id = require_token_id(tokenizer, "[e~[")
 
     def _merge_non_assistant_token_ids(
         self, runtime_token_ids: list[int], appended_token_ids: list[int]
@@ -459,8 +459,8 @@ class GLMContinuousTokenBuilder(ContinuousTokenBuilder):
 
     def __init__(self, tokenizer: Any, **kwargs: Any):
         super().__init__(tokenizer, **kwargs)
-        self._observation_id = _require_token_id(tokenizer, "<|observation|>")
-        self._user_id = _require_token_id(tokenizer, "<|user|>")
+        self._observation_id = require_token_id(tokenizer, "<|observation|>")
+        self._user_id = require_token_id(tokenizer, "<|user|>")
         self._ambiguous_boundary_ids = {self._observation_id, self._user_id}
 
     def _merge_non_assistant_token_ids(
@@ -484,7 +484,7 @@ class Gemma4ContinuousTokenBuilder(ContinuousTokenBuilder):
 
     def __init__(self, tokenizer: Any, **kwargs: Any):
         super().__init__(tokenizer, **kwargs)
-        self._tool_response_id = _require_token_id(tokenizer, "<|tool_response>")
+        self._tool_response_id = require_token_id(tokenizer, "<|tool_response>")
 
     def _tokenize_tool_group(
         self,
@@ -556,7 +556,7 @@ class Gemma4ContinuousTokenBuilder(ContinuousTokenBuilder):
         )
 
 
-def _require_token_id(tokenizer: Any, token: str) -> int:
+def require_token_id(tokenizer: Any, token: str) -> int:
     token_id = tokenizer.convert_tokens_to_ids(token)
     if token_id is None:
         raise ValueError(f"Tokenizer does not define required token {token!r}")

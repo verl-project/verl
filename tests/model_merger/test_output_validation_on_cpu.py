@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from transformers import AutoModelForCausalLM, Qwen2Config
+from transformers import AutoModelForCausalLM, GenerationConfig, Qwen2Config
 
 from verl.model_merger import base_model_merger
 from verl.model_merger.base_model_merger import BaseModelMerger
@@ -96,6 +96,67 @@ def test_save_accepts_actual_hf_model_output(monkeypatch, tmp_path):
 
     assert (tmp_path / "config.json").is_file()
     assert (tmp_path / "model.safetensors").is_file()
+
+
+def test_save_generation_config_preserves_pretrained_values(tmp_path):
+    source_dir = tmp_path / "source"
+    target_dir = tmp_path / "target"
+    source_dir.mkdir()
+    target_dir.mkdir()
+    GenerationConfig(
+        eos_token_id=[151643, 151645],
+        max_new_tokens=4096,
+    ).save_pretrained(source_dir)
+
+    merger = _TestModelMerger.__new__(_TestModelMerger)
+    merger.hf_model_config_path = source_dir
+    merger.save_generation_config(target_dir)
+
+    saved_config = GenerationConfig.from_pretrained(target_dir)
+    assert saved_config.eos_token_id == [151643, 151645]
+    assert saved_config.max_new_tokens == 4096
+
+
+def test_save_generation_config_allows_missing_file(capsys, tmp_path):
+    source_dir = tmp_path / "source"
+    target_dir = tmp_path / "target"
+    source_dir.mkdir()
+    target_dir.mkdir()
+    stale_config_path = target_dir / "generation_config.json"
+    stale_config_path.write_text('{"eos_token_id": 0}', encoding="utf-8")
+
+    merger = _TestModelMerger.__new__(_TestModelMerger)
+    merger.hf_model_config_path = source_dir
+    merger.save_generation_config(target_dir)
+
+    assert not stale_config_path.exists()
+    assert capsys.readouterr().out == ""
+
+
+def test_load_generation_config_warns_when_file_is_missing(capsys, tmp_path):
+    merger = _TestModelMerger.__new__(_TestModelMerger)
+    merger.hf_model_config_path = tmp_path
+
+    assert merger.load_generation_config() is None
+    assert f"Warning: Generation config file not found in {tmp_path}" in capsys.readouterr().out
+
+
+def test_save_generation_config_rejects_invalid_source(tmp_path):
+    source_dir = tmp_path / "source"
+    target_dir = tmp_path / "target"
+    source_dir.mkdir()
+    target_dir.mkdir()
+    (source_dir / "generation_config.json").write_text("{invalid", encoding="utf-8")
+    stale_config_path = target_dir / "generation_config.json"
+    stale_config_path.write_text('{"eos_token_id": 0}', encoding="utf-8")
+
+    merger = _TestModelMerger.__new__(_TestModelMerger)
+    merger.hf_model_config_path = source_dir
+
+    with pytest.raises(OSError, match="not a valid JSON file"):
+        merger.save_generation_config(target_dir)
+
+    assert stale_config_path.is_file()
 
 
 @pytest.mark.parametrize("weight_name", ("model.safetensors", "pytorch_model.bin"))

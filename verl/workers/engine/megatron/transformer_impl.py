@@ -83,6 +83,12 @@ class MegatronEngine(BaseEngine):
     # default here.
     delta_pin_snapshots = False
 
+    @staticmethod
+    def _get_context_parallel_layout(unwrapped_model) -> str:
+        if getattr(unwrapped_model.config, "experimental_attention_variant", None) == "dsv4_hybrid":
+            return "contiguous"
+        return "zigzag"
+
     def __init__(
         self,
         model_config: HFModelConfig,
@@ -867,22 +873,27 @@ class MegatronEngine(BaseEngine):
                 "the deprecated vanilla mbridge flavor is not supported"
             )
             assert self.peft_cls is None, "megatron delta_sharded does not support LoRA"
-            index = build_export_index(self.bridge, self.module)
+            self._delta_slot_cache: dict = {}
+            index = build_export_index(self.bridge, self.module, self._delta_slot_cache)
             self._delta_export_index = index
             self._delta_export_by_name = {rec.megatron_name: rec for rec in index}
-            self._delta_slot_cache: dict = {}
         return index
 
     def get_per_tensor_param_shard(self, **kwargs):
         """Yield each rank's *local* mcore shard ``(name, local_flat_bf16,
         ShardSpec)`` -- the spec carries only the wire merge group (the
         comm-stubbed probe owns all shard geometry). Pure export, no side
-        effects. TP+EP only (PP=1 asserted in the index builder)."""
+        effects. Params owned by another pipeline stage yield an empty shard
+        (zero-count lockstep rows; see the index builder)."""
         load_megatron_model_to_gpu(self.module, load_grad=False)
         index = self._mcore_export_index()
 
         def _gen():
+            empty = torch.empty(0, dtype=torch.bfloat16, device=get_device_id())
             for rec in index:
+                if rec.param is None:
+                    yield rec.megatron_name, empty, rec.spec
+                    continue
                 local = rec.param.data
                 if local.is_floating_point() and local.dtype != torch.bfloat16:
                     local = local.to(torch.bfloat16)
@@ -1065,6 +1076,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         loss_mask = model_inputs["loss_mask"]
 
         unwrapped_model = unwrap_model(model)
+        cp_layout = self._get_context_parallel_layout(unwrapped_model)
         if hasattr(unwrapped_model, "vp_stage"):
             vp_rank = unwrapped_model.vp_stage
         else:
@@ -1122,6 +1134,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 temperature=temperature_value,
                 calculate_entropy=calculate_entropy,
                 pad_token_id=self.model_config.tokenizer.pad_token_id,
+                cp_layout=cp_layout,
             )
         else:
             if not isinstance(temperature, torch.Tensor):
@@ -1168,6 +1181,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
                 local_cp_size=local_cp_size,
                 forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
+                cp_layout=cp_layout,
             )
 
         # Router replay: record routing decisions for R2 mode
@@ -1280,6 +1294,7 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
         model_inputs = self.prepare_model_inputs(batch)
         input_ids = model_inputs["input_ids"]
         multi_modal_inputs = model_inputs["multi_modal_inputs"]
+        cp_layout = self._get_context_parallel_layout(unwrap_model(model))
 
         from verl.models.mcore import get_mcore_engine_forward_fn
 
@@ -1294,6 +1309,7 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
             pad_token_id=self.model_config.tokenizer.pad_token_id,
             data_format="thd" if self.engine_config.use_remove_padding else "bshd",
             forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
+            cp_layout=cp_layout,
         )
 
         return output, partial(postprocess_micro_batch_func, data=batch)

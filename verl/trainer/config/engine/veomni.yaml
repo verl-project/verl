@@ -73,6 +73,9 @@ rms_norm_gated_implementation: eager
 causal_conv1d_implementation: eager
 chunk_gated_delta_rule_implementation: eager
 load_balancing_loss_implementation: eager
+dsa_indexer_implementation: eager
+dsa_attention_implementation: eager
+mhc_implementation: eager
 
 force_use_huggingface: false
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
-from enum import StrEnum
+from enum import Enum
 from typing import Any
 
 from .continuous_token import (
@@ -28,11 +28,17 @@ from .continuous_token import (
     MiniMaxContinuousTokenBuilder,
     QwenContinuousTokenBuilder,
 )
+from .deepseek import DeepSeekV4ContinuousTokenBuilder
 
 logger = logging.getLogger(__name__)
 
 
-class ContinuousTokenModelFamily(StrEnum):
+class ContinuousTokenModelFamily(str, Enum):
+    # ``enum.StrEnum`` needs Python 3.11, but verl supports 3.10, so mix in ``str`` and keep its
+    # ``__str__``/``__format__`` to render a member as its value.
+    __str__ = str.__str__
+    __format__ = str.__format__
+
     AUTO = "auto"
     DEFAULT = "default"
     QWEN = "qwen"
@@ -47,6 +53,7 @@ class ContinuousTokenModelFamily(StrEnum):
     GLM5 = "glm5"
     GEMMA4 = "gemma4"
     GPTOSS = "gptoss"
+    DEEPSEEKV4 = "deepseekv4"
 
 
 _CONTINUOUS_TOKEN_BUILDER_REGISTRY: dict[ContinuousTokenModelFamily, type[Any]] = {
@@ -63,6 +70,7 @@ _CONTINUOUS_TOKEN_BUILDER_REGISTRY: dict[ContinuousTokenModelFamily, type[Any]] 
     ContinuousTokenModelFamily.GLM5: GLMContinuousTokenBuilder,
     ContinuousTokenModelFamily.GEMMA4: Gemma4ContinuousTokenBuilder,
     ContinuousTokenModelFamily.GPTOSS: GptOssContinuousTokenBuilder,
+    ContinuousTokenModelFamily.DEEPSEEKV4: DeepSeekV4ContinuousTokenBuilder,
 }
 
 CONTINUOUS_TOKEN_BUILDER_FAMILIES = tuple(family.value for family in _CONTINUOUS_TOKEN_BUILDER_REGISTRY)
@@ -135,6 +143,9 @@ def infer_continuous_token_model_family(
         return ContinuousTokenModelFamily.GEMMA4
     if any(marker in haystack for marker in ("gpt-oss", "gpt_oss")) or "gptoss" in compact:
         return ContinuousTokenModelFamily.GPTOSS
+    # Only the V4 series uses the DSML turn format; earlier DeepSeek models fall back to default.
+    if any(marker in compact for marker in ("deepseekv4", "dsv4")):
+        return ContinuousTokenModelFamily.DEEPSEEKV4
     if "minimaxm27" in compact:
         return ContinuousTokenModelFamily.MINIMAX_M27
     if "minimaxm25" in compact:
