@@ -245,7 +245,19 @@ def _create_varlen_metadata_for_document(input_batch: torch.Tensor, positions: t
                 torch.tensor([seq_len], dtype=torch.int32, device=device),
             ]
         )
-        sample_cu_seqlens = torch.unique_consecutive(sample_cu_seqlens)
+        if sample_cu_seqlens.device.type == "tpu":
+            # HACK: torch.unique_consecutive (aten::unique_consecutive) is not implemented on TPU (torch_tpu).
+            # Fall back to mask indexing for TPU compatibility.
+            # TODO: Remove HACK once aten::unique_consecutive is supported natively on TPU.
+            mask = torch.cat(
+                [
+                    torch.tensor([True], device=sample_cu_seqlens.device),
+                    sample_cu_seqlens[1:] != sample_cu_seqlens[:-1],
+                ]
+            )
+            sample_cu_seqlens = sample_cu_seqlens[mask]
+        else:
+            sample_cu_seqlens = torch.unique_consecutive(sample_cu_seqlens)
 
         seq_lengths = torch.diff(sample_cu_seqlens)
         all_seq_lengths.append(seq_lengths)
