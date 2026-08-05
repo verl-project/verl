@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -20,12 +21,47 @@ from verl import DataProto
 from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 from verl.utils.model import create_random_mask
 from verl.utils.seqlen_balancing import (
+    calculate_workload,
+    calculate_workload_as_list,
     ceildiv,
     get_reverse_idx,
+    get_seqlen_balanced_partitions,
     prepare_dynamic_batch,
     rearrange_micro_batches,
     restore_dynamic_batch,
 )
+
+
+def test_calculate_workload_as_list_uses_host_scalars():
+    for dtype, scalar_type in ((torch.int64, int), (torch.float32, np.float32)):
+        seqlens = torch.tensor([64, 128, 256, 512, 1024, 2048, 4096, 8192], dtype=dtype)
+        workload_lst = calculate_workload_as_list(seqlens)
+
+        assert workload_lst == calculate_workload(seqlens).tolist()
+        assert all(type(workload) is scalar_type for workload in workload_lst)
+        assert get_seqlen_balanced_partitions(workload_lst, k_partitions=4, equal_size=True) == (
+            get_seqlen_balanced_partitions(calculate_workload(seqlens), k_partitions=4, equal_size=True)
+        )
+
+
+def test_calculate_workload_as_list_preserves_float32_partitioning():
+    seqlens = torch.tensor(
+        [3765, 30817, 14350, 9825, 28544, 25697, 7113, 20034, 14106, 13834, 10, 7534, 3612, 532, 32621, 15886],
+        dtype=torch.float32,
+    )
+    workload_tensor = calculate_workload(seqlens)
+    original_workloads = workload_tensor.clone()
+
+    for equal_size in (True, False):
+        expected = get_seqlen_balanced_partitions(workload_tensor, k_partitions=2, equal_size=equal_size)
+        assert (
+            get_seqlen_balanced_partitions(calculate_workload_as_list(seqlens), k_partitions=2, equal_size=equal_size)
+            == expected
+        )
+        assert torch.equal(workload_tensor, original_workloads)
+
+    expected = get_seqlen_balanced_partitions(workload_tensor, k_partitions=2, equal_size=True)
+    assert get_seqlen_balanced_partitions(workload_tensor.tolist(), k_partitions=2, equal_size=True) != expected
 
 
 def test_seqlen_balancing():
