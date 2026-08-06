@@ -16,6 +16,7 @@ import inspect
 import json
 import logging
 import os
+import shutil
 import random
 from dataclasses import fields, is_dataclass
 from enum import Enum
@@ -760,12 +761,18 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             log_with_rank(f"Loaded RNG states from {local_path}", rank=self.rank, logger=logger)
         log_with_rank(f"Loaded Megatron-FSDP checkpoint from {local_path}", rank=self.rank, logger=logger)
 
-        if del_local_after_load:
+        if self.rank == 0 and del_local_after_load:
             try:
-                os.remove(local_path) if is_non_local(local_path) else None
+                if os.path.isdir(local_path):
+                    shutil.rmtree(local_path)
+                    log_with_rank(
+                        f"Removed local checkpoint directory after loading: {local_path}",
+                        rank=self.rank,
+                        logger=logger,
+                    )
             except Exception as e:
                 log_with_rank(
-                    f"remove local resume ckpt file after loading failed, exception {e} will be ignored",
+                    f"remove local resume ckpt after loading failed, exception {e} will be ignored",
                     rank=self.rank,
                     logger=logger,
                 )
@@ -974,12 +981,18 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             self.load_rng_states(loaded_extra["rng_state"])
             log_with_rank(f"Loaded RNG states from {extra_dist_path}", rank=self.rank, logger=logger)
 
-        if del_local_after_load:
+        if self.rank == 0 and del_local_after_load:
             try:
-                os.remove(local_path) if is_non_local(local_path) else None
+                if os.path.isdir(local_path):
+                    shutil.rmtree(local_path)
+                    log_with_rank(
+                        f"Removed local checkpoint directory after loading: {local_path}",
+                        rank=self.rank,
+                        logger=logger,
+                    )
             except Exception as e:
                 log_with_rank(
-                    f"remove local resume ckpt file after loading failed, exception {e} will be ignored",
+                    f"remove local resume ckpt after loading failed, exception {e} will be ignored",
                     rank=self.rank,
                     logger=logger,
                 )

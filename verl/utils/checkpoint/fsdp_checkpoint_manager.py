@@ -15,6 +15,7 @@
 import json
 import logging
 import os
+import shutil
 import warnings
 from dataclasses import asdict, dataclass
 from typing import Optional
@@ -254,20 +255,24 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 self.lr_scheduler.load_state_dict(lr_scheduler_state_dict)
                 log_with_rank(f"Loaded lr_scheduler from {remote_extra_state_path}", rank=self.rank, logger=logger)
 
+        # wait for everyone to load checkpoints
+        torch.distributed.barrier()
+
         if self.rank == 0 and del_local_after_load:
             try:
-                os.remove(local_model_path) if is_non_local(local_model_path) else None
-                os.remove(local_optim_path) if is_non_local(local_optim_path) else None
-                os.remove(local_extra_state_path) if is_non_local(local_extra_state_path) else None
+                if os.path.isdir(local_path):
+                    shutil.rmtree(local_path)
+                    log_with_rank(
+                        f"Removed local checkpoint directory after loading: {local_path}",
+                        rank=self.rank,
+                        logger=logger,
+                    )
             except Exception as e:
                 log_with_rank(
-                    f"remove local resume ckpt file after loading failed, exception {e} will be ignored",
+                    f"remove local resume ckpt after loading failed, exception {e} will be ignored",
                     rank=self.rank,
                     logger=logger,
                 )
-
-        # wait for everyone to load checkpoints
-        torch.distributed.barrier()
 
     def save_checkpoint(self, local_path: str, hdfs_path: str = None, global_step: int = 0, max_ckpt_to_keep=None):
         """
