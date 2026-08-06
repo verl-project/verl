@@ -567,6 +567,29 @@ async def split_weight_chunks(
             chunk_offset += chunk_size
 
 
+async def get_weight_chunks_size(
+    weights: Generator[tuple[str, torch.Tensor], None, None], bucket_size: int
+) -> AsyncGenerator[int, None]:
+    """Yield the size of each weight chunk, without slicing the chunk itself.
+
+    Splits on exactly the same boundaries as `split_weight_chunks`, so a caller that only needs to
+    keep in step with a peer walking that generator can use this instead and skip the buffers.
+
+    Args:
+        weights: The weights generator.
+        bucket_size: Max bucket size in bytes.
+
+    Yields:
+        The size of the weight chunks.
+    """
+    async for _name, weight in ensure_async_iterator(weights):
+        chunk_offset = 0
+        while chunk_offset < weight.nbytes:
+            chunk_size = min(bucket_size, weight.nbytes - chunk_offset)
+            yield chunk_size
+            chunk_offset += chunk_size
+
+
 async def merge_weight_chunks(
     chunks: Generator[tuple[TensorMeta, torch.Tensor], None, None], bucket_size: int
 ) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
