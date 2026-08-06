@@ -2,7 +2,7 @@
 set -xeuo pipefail
 
 NUM_GPUS=${NUM_GPUS:-8}
-USE_NEOPROTO=${USE_NEOPROTO:-False}
+DATA_PLANE=${DATA_PLANE:-classic}
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
@@ -182,7 +182,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.resume_mode="${RESUME_MODE}" \
     trainer.rollout_data_dir="${ROLLOUT_DATA_DIR}" \
     trainer.correctness_dump_dir="${CORRECTNESS_DUMP_DIR}" \
-    trainer.use_neoproto="${USE_NEOPROTO}" \
+    trainer.data_plane="${DATA_PLANE}" \
     trainer.neoproto_strict_mode="${NEOPROTO_STRICT_MODE}" \
     trainer.total_epochs=2 \
     trainer.device=cuda \

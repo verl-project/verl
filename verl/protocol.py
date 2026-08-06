@@ -215,7 +215,7 @@ def fold_batch_dim(data: "DataProto", new_batch_size):
     for key, val in non_tensor.items():
         non_tensor[key] = np.reshape(val, (new_batch_size, -1, *val.shape[1:]))
 
-    return type(data)(batch=tensor, non_tensor_batch=non_tensor, meta_info=data.meta_info)
+    return data.new_like(batch=tensor, non_tensor_batch=non_tensor, meta_info=data.meta_info)
 
 
 def unfold_batch_dim(data: "DataProto", batch_dims=2):
@@ -234,7 +234,7 @@ def unfold_batch_dim(data: "DataProto", batch_dims=2):
     for key, val in non_tensor.items():
         non_tensor_new[key] = np.reshape(val, (batch_size, *val.shape[batch_dims:]))
 
-    return type(data)(batch=tensor, non_tensor_batch=non_tensor_new, meta_info=data.meta_info)
+    return data.new_like(batch=tensor, non_tensor_batch=non_tensor_new, meta_info=data.meta_info)
 
 
 def serialize_single_tensor(obj: torch.Tensor) -> tuple[str, tuple[int, ...], int | memoryview]:
@@ -329,6 +329,50 @@ class DataProto:
     def __post_init__(self):
         # perform necessary checking
         self.check_consistency()
+
+    def new_like(self, batch=None, non_tensor_batch=None, meta_info=None) -> "DataProto":
+        """Construct an output container with the same concrete data-plane type."""
+        return type(self)(
+            batch=batch,
+            non_tensor_batch={} if non_tensor_batch is None else non_tensor_batch,
+            meta_info={} if meta_info is None else meta_info,
+        )
+
+    def prefetch(self, keys=None, *, device: str = "cpu") -> dict[str, Any]:
+        """Eagerly cache selected fields when supported by the data plane.
+
+        Classic :class:`DataProto` is already materialized, so this is a no-op.
+        """
+        del keys, device
+        return {}
+
+    def clear_cache(self) -> None:
+        """Drop optional lazy materialization caches."""
+
+    @classmethod
+    def reset_materialize_stats(cls) -> None:
+        """Reset optional data-plane materialization counters."""
+
+    @classmethod
+    def pop_materialize_stats(cls) -> dict[str, float]:
+        """Return optional data-plane materialization counters."""
+        return {}
+
+    def prepare_dispatch(self, chunks) -> None:
+        """Prepare chunk metadata before transport.
+
+        The classic data plane requires no extra transport metadata.
+        """
+        del chunks
+
+    def set_control_fields(self, **kwargs) -> "DataProto":
+        """Attach transient worker control fields to this batch."""
+        self.meta_info.update(kwargs)
+        return self
+
+    def cpu(self) -> "DataProto":
+        """Move materialized tensors to CPU."""
+        return self.to("cpu")
 
     def __len__(self):
         if self.batch is not None:
@@ -1211,9 +1255,9 @@ class DataProtoFuture:
     def get(self):
         output = ray.get(self.futures)  # dp_size.
         for o in output:
-            assert isinstance(o, DataProto | TensorDict) or getattr(o, "__neoproto__", False)
+            assert isinstance(o, DataProto | TensorDict)
 
-        if isinstance(output[0], DataProto) or getattr(output[0], "__neoproto__", False):
+        if isinstance(output[0], DataProto):
             output = type(output[0]).concat(output)  # select dp, concat
         elif isinstance(output[0], TensorDict):
             from verl.utils.tensordict_utils import concat_tensordict
@@ -1256,14 +1300,14 @@ class BatchData:
 
     def is_chunkable(self) -> bool:
         """Return True if the wrapped data supports chunk dispatch."""
-        return isinstance(self._data, self._chunkable_types()) or getattr(self._data, "__neoproto__", False)
+        return isinstance(self._data, self._chunkable_types())
 
     def is_concatable(self) -> bool:
         """Return True if the wrapped list of data supports concat collect."""
         data = self._data
         if not isinstance(data, list | tuple) or len(data) == 0:
             return False
-        return isinstance(data[0], self._concatable_types()) or getattr(data[0], "__neoproto__", False)
+        return isinstance(data[0], self._concatable_types())
 
     # ---- operations ----------------------------------------------------------
 
@@ -1280,6 +1324,33 @@ class BatchData:
             return tuple(contiguous(val).consolidate() for val in raw_chunks)
         # DataProto, DataProtoFuture, etc. all expose .chunk()
         return data.chunk(chunks=chunks)
+
+    def prepare_dispatch(self, chunks) -> None:
+        """Allow a batch implementation to attach transport-specific metadata."""
+        prepare = getattr(self._data, "prepare_dispatch", None)
+        if prepare is not None:
+            prepare(chunks)
+
+    def set_control_fields(self, **kwargs):
+        """Set worker control fields without branching on a concrete data plane."""
+        data = self._data
+        if isinstance(data, TensorDict):
+            from verl.utils import tensordict_utils as tu
+
+            for key, value in kwargs.items():
+                tu.assign_non_tensor_data(data, key, value)
+            return data
+        setter = getattr(data, "set_control_fields", None)
+        if setter is None:
+            raise TypeError(f"Batch type {type(data)!r} does not support control fields")
+        return setter(**kwargs)
+
+    def cpu(self):
+        """Move output to CPU when the batch implementation requires it."""
+        if self._data is None:
+            return None
+        move = getattr(self._data, "cpu", None)
+        return move() if move is not None else self._data
 
     def concat(self):
         """Concat the wrapped list of data items into a single result.

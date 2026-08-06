@@ -7,7 +7,6 @@
 #     http://www.apache.org/licenses/LICENSE-2.0
 """Experimental NeoProto data plane for the v0 trainer."""
 
-from .dispatch import enable_neo_dispatch, is_neo_batch, is_neo_dispatch_enabled, maybe_attach_neo_ref_tables
 from .neo import IndexView, NeoProto
 from .storage import (
     DefaultStorageEngine,
@@ -41,11 +40,7 @@ __all__ = [
     "RefTable",
     "StorageEngine",
     "StorageRef",
-    "enable_neo_dispatch",
     "get_default_storage_engine",
     "get_engine_for_backend",
-    "is_neo_batch",
-    "is_neo_dispatch_enabled",
-    "maybe_attach_neo_ref_tables",
     "set_default_storage_engine",
 ]

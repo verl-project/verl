@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 import torch
 
+from verl import DataProto as ClassicDataProto
 from verl.experimental.neoproto import DataProto, InMemoryStorageEngine, set_default_storage_engine
 from verl.protocol import BatchData, pad_dataproto_to_divisor
 from verl.single_controller.base.decorator import _split_args_kwargs_data_proto_with_auto_padding
@@ -62,6 +63,37 @@ def _make_data(storage, offset=0, *, auto_padding=False):
         auto_padding=auto_padding,
         storage=storage,
     )
+
+
+@pytest.mark.parametrize("data_plane", ["classic", "neoproto"])
+def test_common_data_proto_surface_matches(data_plane, storage):
+    tensors = {
+        "input_ids": torch.arange(12).reshape(4, 3),
+        "attention_mask": torch.ones(4, 3, dtype=torch.int64),
+    }
+    non_tensors = {"uid": np.asarray([f"id-{index}" for index in range(4)], dtype=object)}
+    if data_plane == "classic":
+        data = ClassicDataProto.from_dict(tensors=tensors, non_tensors=non_tensors)
+    else:
+        data = DataProto.from_dict(tensors=tensors, non_tensors=non_tensors, storage=storage)
+
+    selected = data.select_idxs([3, 1])
+    selected.batch["values"] = torch.tensor([[30.0], [10.0]])
+    repeated = selected.repeat(2, interleave=True)
+    chunks = repeated.chunk(2)
+    merged = chunks[0].concat(chunks)
+    merged.reorder(torch.tensor([3, 0, 2, 1]))
+    output = merged.new_like(
+        batch=merged.batch,
+        non_tensor_batch=merged.non_tensor_batch,
+        meta_info={"source": data_plane},
+    )
+
+    assert type(output) is type(data)
+    assert output.batch["input_ids"][:, 0].tolist() == [3, 9, 3, 9]
+    assert output.batch["values"].squeeze(-1).tolist() == [10.0, 30.0, 10.0, 30.0]
+    assert output.non_tensor_batch["uid"].tolist() == ["id-1", "id-3", "id-1", "id-3"]
+    assert output.meta_info["source"] == data_plane
 
 
 def test_driver_operations_are_metadata_only(storage):
@@ -153,6 +185,21 @@ def test_union_aligns_independent_fields_after_reorder(storage):
     assert storage.get_count == 0  # equal inline metadata is inspected, tensor payloads are not
     assert output.batch["input_ids"][:, 0].tolist() == [6, 0, 9, 3]
     assert output.batch["responses"][:, 0].tolist() == [20, 0, 30, 10]
+
+
+def test_assign_to_gather_view_preserves_existing_shared_fields(storage):
+    data = _make_data(storage)
+    view = data.select_idxs([3, 1])
+    generated = DataProto.from_dict(
+        tensors={"responses": torch.tensor([[30], [10]])},
+        storage=storage,
+    )
+
+    view.batch.update(generated.batch)
+
+    assert set(view.batch.keys()) >= {"input_ids", "responses"}
+    assert view.batch["input_ids"][:, 0].tolist() == [9, 3]
+    assert view.batch["responses"][:, 0].tolist() == [30, 10]
 
 
 def test_union_rejects_conflicting_tensor_values(storage):

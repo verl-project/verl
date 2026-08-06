@@ -203,8 +203,8 @@ trainer:
   # Whether to use V1 trainer
   use_v1: false
 
-  # Whether to use the experimental ref-only NeoProto DataProto view in the V0 trainer
-  use_neoproto: false
+  # V0 trainer data plane: "classic" or experimental "neoproto"
+  data_plane: classic
 
   # Fail instead of silently falling back when a NeoProto worker result is malformed
   neoproto_strict_mode: false

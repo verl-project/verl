@@ -41,6 +41,7 @@ from verl.trainer.config import AlgoConfig
 from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
+from verl.trainer.ppo.data_plane import build_data_plane
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
@@ -59,7 +60,6 @@ from verl.trainer.ppo.utils import (
     need_reward_model,
     need_teacher_policy,
 )
-from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
@@ -72,7 +72,6 @@ from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import DistillationConfig, EngineConfig
 from verl.workers.rollout.llm_server import LLMServerManager
-from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
@@ -226,22 +225,9 @@ def compute_advantage(
         )
         advantages = advantages.detach().contiguous().clone()
         returns = returns.detach().contiguous().clone()
-        # NeoProto: after repeat+balance the batch often carries a non-identity
-        # ``dim0_index``. Rebind to logical identity first, then write with plain
-        # ``batch[k]=...`` so driver GAE fields are stored as shared refs without
-        # permutation slice-alignment.
-        if getattr(data, "__neoproto__", False):
-            if hasattr(data, "_rebind_to_logical_identity"):
-                data = data._rebind_to_logical_identity()
-            if hasattr(data, "clear_cache"):
-                data.clear_cache()
-            data.batch["advantages"] = advantages
-            data.batch["returns"] = returns
-            if hasattr(data, "clear_cache"):
-                data.clear_cache()
-        else:
-            data.batch["advantages"] = advantages
-            data.batch["returns"] = returns
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+        data.clear_cache()
         if config.get("use_pf_ppo", False):
             data = core_algos.compute_pf_ppo_reweight_data(
                 data,
@@ -344,31 +330,10 @@ class RayPPOTrainer:
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
-        self.data_proto_cls = DataProto
-        self.use_neoproto = bool(self.config.trainer.get("use_neoproto", False))
-        self.neoproto_strict_mode = bool(self.config.trainer.get("neoproto_strict_mode", False))
-        if self.use_neoproto:
-            from verl.experimental.neoproto import (
-                DataProto as NeoProtoDataProto,
-            )
-            from verl.experimental.neoproto import (
-                DefaultStorageEngine,
-                enable_neo_dispatch,
-                is_neo_dispatch_enabled,
-                set_default_storage_engine,
-            )
-
-            self.data_proto_cls = NeoProtoDataProto
-            # Explicit Ray object-store engine + neo ref-table dispatch for worker RPCs.
-            set_default_storage_engine(DefaultStorageEngine())
-            enable_neo_dispatch(True)
-            print(f"RayPPOTrainer data_proto_cls={self.data_proto_cls.__module__}.{self.data_proto_cls.__name__}")
-            if self.neoproto_strict_mode:
-                if os.environ.get("NEO_BRIDGE_FULL_MATERIALIZE", "0") != "0":
-                    raise RuntimeError("NeoProto strict mode forbids NEO_BRIDGE_FULL_MATERIALIZE")
-                if not is_neo_dispatch_enabled():
-                    raise RuntimeError("NeoProto strict mode requires ref-table dispatch")
-                print("NEOPROTO_STRICT_MODE=enabled dispatch=enabled full_materialize=disabled")
+        # dataplane switch
+        self.data_plane = build_data_plane(config)
+        self.data_proto_cls = self.data_plane.data_proto_cls
+        print(f"RayPPOTrainer data_proto_cls={self.data_proto_cls.__module__}.{self.data_proto_cls.__name__}")
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
@@ -1252,37 +1217,6 @@ class RayPPOTrainer:
         )
         metrics.update(global_balance_stats)
 
-    def _neo_set_meta(self, batch: DataProto, **kwargs) -> DataProto:
-        """Attach compute flags to NeoProto meta_info for worker-side materialize."""
-        for key, val in kwargs.items():
-            batch.meta_info[key] = val
-        return batch
-
-    def _neo_select_rename(self, output: DataProto, key_map: dict[str, str]) -> DataProto:
-        """Keep worker tensor refs and rename — no driver materialize / re-put."""
-        src_keys = [src for src in key_map if src in getattr(output, "ref_table", {})]
-        if not src_keys:
-            if self.neoproto_strict_mode:
-                raise RuntimeError(
-                    "NeoProto strict mode received an empty/non-Neo worker payload; "
-                    f"expected one of {sorted(key_map)}, got {type(output)!r}"
-                )
-            # Compatibility fallback for unexpected empty worker payloads.
-            return self.data_proto_cls.from_dict(tensors={})
-        selected = output.select(batch_keys=src_keys, meta_info_keys=[])
-        old_keys = [src for src in src_keys if key_map[src] != src]
-        new_keys = [key_map[src] for src in src_keys if key_map[src] != src]
-        if old_keys:
-            selected = selected.rename(old_keys=old_keys, new_keys=new_keys)
-        return selected
-
-    def _neo_prefetch(self, batch: DataProto, keys: list[str]) -> None:
-        """One-shot materialize into NeoProto cache for subsequent ``.batch[k]`` reads."""
-        prefetch = getattr(batch, "prefetch", None)
-        if prefetch is None:
-            return
-        prefetch(keys)
-
     def _dump_correctness_tensors(self, batch: DataProto, dump_dir: str) -> None:
         """Persist a test-only semantic snapshot immediately before PPO updates."""
         tensor_keys = (
@@ -1334,112 +1268,61 @@ class RayPPOTrainer:
         print(f"NEOPROTO_CORRECTNESS_DUMP={output_path} tensor_keys={sorted(tensors)}")
 
     def _compute_values(self, batch: DataProto) -> DataProto:
-        if self.use_neoproto:
-            self._neo_set_meta(batch, compute_loss=False)
-            output = self.critic_wg.infer_batch(batch)
-            output = output.get()
-            # Ref-only: worker already restored padding into NeoProto ``values``.
-            return self._neo_select_rename(output, {"values": "values"})
-
-        batch_td = batch.to_tensordict()
-        # step 2: convert from padding to nopadding
-        batch_td = left_right_2_no_padding(batch_td)
-        # step 3: add meta info
-        tu.assign_non_tensor(batch_td, compute_loss=False)
-        output = self.critic_wg.infer_batch(batch_td)
+        prepared = self.data_plane.prepare_inference(batch, {"compute_loss": False})
+        output = self.critic_wg.infer_batch(prepared.payload)
         output = output.get()
-        values = tu.get(output, "values")
-        values = no_padding_2_padding(values, batch_td)
-        values = tu.get_tensordict({"values": values.float()})
-        values = self.data_proto_cls.from_tensordict(values)
-        return values
+        return self.data_plane.collect_inference(
+            output,
+            prepared,
+            {"values": "values"},
+            restore_keys=("values",),
+            fp32_keys=("values",),
+        )
 
     def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
         metadata = {"calculate_entropy": False, "compute_loss": False}
         if self.ref_in_actor:
             metadata["no_lora_adapter"] = True
 
-        if self.use_neoproto:
-            self._neo_set_meta(batch, **metadata)
-            if self.ref_in_actor:
-                output = self.actor_rollout_wg.compute_log_prob(batch)
-            else:
-                output = self.ref_policy_wg.compute_ref_log_prob(batch)
-            return self._neo_select_rename(output, {"log_probs": "ref_log_prob"})
-
-        # step 1: convert dataproto to tensordict.
-        batch_td = batch.to_tensordict()
-        # step 2: convert from padding to nopadding
-        batch_td = left_right_2_no_padding(batch_td)
-        # step 3: add meta info
-        tu.assign_non_tensor(batch_td, **metadata)
+        prepared = self.data_plane.prepare_inference(batch, metadata)
         if self.ref_in_actor:
-            output = self.actor_rollout_wg.compute_log_prob(batch_td)
+            output = self.actor_rollout_wg.compute_log_prob(prepared.payload)
         else:
-            output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
-        # gather output
-        log_probs = tu.get(output, "log_probs")
-        # step 4. No padding to padding
-        log_probs = no_padding_2_padding(log_probs, batch_td)
-        # step 5: rebuild a tensordict and convert to dataproto
-        ref_log_prob = tu.get_tensordict({"ref_log_prob": log_probs.float()})
-        ref_log_prob = self.data_proto_cls.from_tensordict(ref_log_prob)
-
-        return ref_log_prob
+            output = self.ref_policy_wg.compute_ref_log_prob(prepared.payload)
+        return self.data_plane.collect_inference(
+            output,
+            prepared,
+            {"log_probs": "ref_log_prob"},
+            restore_keys=("log_probs",),
+            fp32_keys=("log_probs",),
+        )
 
     def _compute_old_log_prob(self, batch: DataProto):
         calculate_sum_pi_squared = self.config.actor_rollout_ref.actor.get("calculate_sum_pi_squared", False)
 
-        if self.use_neoproto:
-            self._neo_set_meta(
-                batch,
-                calculate_entropy=True,
-                calculate_sum_pi_squared=calculate_sum_pi_squared,
-                compute_loss=False,
-            )
-            output = self.actor_rollout_wg.compute_log_prob(batch)
-            key_map = {"log_probs": "old_log_probs", "entropy": "entropys"}
-            if "routed_experts" in output.batch.keys():
-                key_map["routed_experts"] = "routed_experts"
-            if calculate_sum_pi_squared and "sum_pi_squared" in output.batch.keys():
-                key_map["sum_pi_squared"] = "sum_pi_squared"
-            old_log_prob = self._neo_select_rename(output, key_map)
-            old_log_prob_mfu = output.meta_info["metrics"]["mfu"]
-            return old_log_prob, old_log_prob_mfu
-
-        # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
-        # step 1: convert dataproto to tensordict.
-        batch_td = batch.to_tensordict()
-        # step 2: convert from padding to nopadding
-        batch_td = left_right_2_no_padding(batch_td)
-        # step 3: add meta info
-        tu.assign_non_tensor(
-            batch_td,
-            calculate_entropy=True,
-            calculate_sum_pi_squared=calculate_sum_pi_squared,
-            compute_loss=False,
+        prepared = self.data_plane.prepare_inference(
+            batch,
+            {
+                "calculate_entropy": True,
+                "calculate_sum_pi_squared": calculate_sum_pi_squared,
+                "compute_loss": False,
+            },
         )
-        output = self.actor_rollout_wg.compute_log_prob(batch_td)
-        # gather output
-        entropy = tu.get(output, "entropy")
-        log_probs = tu.get(output, "log_probs")
-        routed_experts = tu.get(output, "routed_experts")
-        sum_pi_squared = tu.get(output, "sum_pi_squared") if calculate_sum_pi_squared else None
-
-        old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
-        # step 4. No padding to padding
-        entropy = no_padding_2_padding(entropy, batch_td)
-        log_probs = no_padding_2_padding(log_probs, batch_td)
-        if sum_pi_squared is not None:
-            sum_pi_squared = no_padding_2_padding(sum_pi_squared, batch_td)
-        # step 5: rebuild a tensordict and convert to dataproto
-        result = {"old_log_probs": log_probs.float(), "entropys": entropy.float()}
-        if routed_experts is not None:
-            result["routed_experts"] = routed_experts
-        if sum_pi_squared is not None:
-            result["sum_pi_squared"] = sum_pi_squared.float()
-        old_log_prob = tu.get_tensordict(result)
-        old_log_prob = self.data_proto_cls.from_tensordict(old_log_prob)
+        output = self.actor_rollout_wg.compute_log_prob(prepared.payload)
+        output_keys = set(output.keys())
+        key_map = {"log_probs": "old_log_probs", "entropy": "entropys"}
+        if "routed_experts" in output_keys:
+            key_map["routed_experts"] = "routed_experts"
+        if calculate_sum_pi_squared and "sum_pi_squared" in output_keys:
+            key_map["sum_pi_squared"] = "sum_pi_squared"
+        old_log_prob = self.data_plane.collect_inference(
+            output,
+            prepared,
+            key_map,
+            restore_keys=("log_probs", "entropy", "sum_pi_squared"),
+            fp32_keys=("log_probs", "entropy", "sum_pi_squared"),
+        )
+        old_log_prob_mfu = self.data_plane.collect_metrics(output)["mfu"]
         return old_log_prob, old_log_prob_mfu
 
     def _update_actor(self, batch: DataProto) -> DataProto:
@@ -1480,23 +1363,14 @@ class RayPPOTrainer:
             compute_loss=True,
         )
 
-        if self.use_neoproto:
-            self._neo_set_meta(batch, **actor_meta)
-            actor_output = self.actor_rollout_wg.update_actor(batch)
-            actor_output = actor_output.meta_info["metrics"]
-        else:
-            # update actor
-            batch_td = batch.to_tensordict()
-            # step 2: convert from padding to no-padding
-            batch_td = left_right_2_no_padding(batch_td)
-            tu.assign_non_tensor(batch_td, **actor_meta)
-            actor_output = self.actor_rollout_wg.update_actor(batch_td)
-            actor_output = tu.get(actor_output, "metrics")
+        prepared = self.data_plane.prepare_training(batch, actor_meta)
+        actor_output = self.actor_rollout_wg.update_actor(prepared.payload)
+        actor_output = self.data_plane.collect_metrics(actor_output)
 
         actor_output = rename_dict(actor_output, "actor/")
         # modify key name
         actor_output["perf/mfu/actor"] = actor_output.pop("actor/mfu")
-        actor_output = self.data_proto_cls.from_single_dict(data={}, meta_info={"metrics": actor_output})
+        actor_output = batch.new_like(meta_info={"metrics": actor_output})
 
         return actor_output
 
@@ -1514,25 +1388,15 @@ class RayPPOTrainer:
             dataloader_kwargs={"shuffle": shuffle},
         )
 
-        if self.use_neoproto:
-            self._neo_set_meta(batch, **critic_meta)
-            output = self.critic_wg.train_mini_batch(batch)
-            output = output.get()
-            output = output.meta_info["metrics"]
-        else:
-            batch_td = batch.to_tensordict()
-            # step 2: convert from padding to no-padding
-            batch_td = left_right_2_no_padding(batch_td)
-            tu.assign_non_tensor(batch_td, **critic_meta)
-
-            output = self.critic_wg.train_mini_batch(batch_td)
-            output = output.get()
-            output = tu.get(output, "metrics")
+        prepared = self.data_plane.prepare_training(batch, critic_meta)
+        output = self.critic_wg.train_mini_batch(prepared.payload)
+        output = output.get()
+        output = self.data_plane.collect_metrics(output)
 
         output = rename_dict(output, "critic/")
         # modify key name
         output["perf/mfu/critic"] = output.pop("critic/mfu")
-        critic_output = self.data_proto_cls.from_single_dict(data={}, meta_info={"metrics": output})
+        critic_output = batch.new_like(meta_info={"metrics": output})
         return critic_output
 
     def fit(self):
@@ -1608,8 +1472,7 @@ class RayPPOTrainer:
                         if self.config.global_profiler.profile_continuous_steps
                         else curr_step_profile
                     )
-                if getattr(self.data_proto_cls, "reset_materialize_stats", None) is not None:
-                    self.data_proto_cls.reset_materialize_stats()
+                self.data_plane.reset_materialize_stats()
 
                 with marked_timer("dataplane/from_single_dict", timing_raw):
                     batch: DataProto = self.data_proto_cls.from_single_dict(batch_dict)
@@ -1639,7 +1502,7 @@ class RayPPOTrainer:
                         gen_baseline_batch.non_tensor_batch["__do_sample__"] = np.zeros(
                             len(gen_baseline_batch), dtype=bool
                         )
-                        combined_gen_batch = self.data_proto_cls.concat([gen_batch_output, gen_baseline_batch])
+                        combined_gen_batch = gen_batch_output.concat([gen_batch_output, gen_baseline_batch])
                         num_sampled_prompts = len(gen_batch_output)
                     else:
                         combined_gen_batch = gen_batch_output
@@ -1691,13 +1554,11 @@ class RayPPOTrainer:
                     if self.config.trainer.balance_batch:
                         self._balance_batch(batch, metrics=metrics)
 
-                    # Neo: prefetch after balance/reorder (those clear the lazy cache).
-                    if self.use_neoproto:
-                        with marked_timer("dataplane/prefetch_gen", timing_raw):
-                            self._neo_prefetch(
-                                batch,
-                                ["responses", "attention_mask", "input_ids", "response_mask"],
-                            )
+                    with marked_timer("dataplane/prefetch_gen", timing_raw):
+                        self.data_plane.prefetch(
+                            batch,
+                            ["responses", "attention_mask", "input_ids", "response_mask"],
+                        )
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
@@ -1734,9 +1595,8 @@ class RayPPOTrainer:
                     else:  # Recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
                             old_log_prob, old_log_prob_mfu = self._compute_old_log_prob(batch)
-                            if self.use_neoproto:
-                                self._neo_prefetch(old_log_prob, ["entropys"])
-                                self._neo_prefetch(batch, ["response_mask"])
+                            self.data_plane.prefetch(old_log_prob, ["entropys"])
+                            self.data_plane.prefetch(batch, ["response_mask"])
                             entropys = old_log_prob.batch["entropys"]
                             response_masks = batch.batch["response_mask"]
                             actor_config = self.config.actor_rollout_ref.actor
@@ -1789,30 +1649,29 @@ class RayPPOTrainer:
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
-                        # Neo: pull adv inputs once before driver-side GAE/KL touches
-                        # several columns. GAE intentionally stays on the driver so
-                        # whitening keeps the classic global-batch semantics.
+                        # Pull advantage inputs before driver-side GAE/KL touches
+                        # several columns. GAE stays on the driver so whitening
+                        # keeps the classic global-batch semantics.
                         adv_estimator = self.config.algorithm.adv_estimator
-                        if self.use_neoproto:
-                            with marked_timer("dataplane/prefetch_adv", timing_raw):
-                                self._neo_prefetch(
-                                    batch,
-                                    [
-                                        "token_level_scores",
-                                        "token_level_rewards",
-                                        "values",
-                                        "response_mask",
-                                        "old_log_probs",
-                                        "ref_log_prob",
-                                        "attention_mask",
-                                        "responses",
-                                        "advantages",
-                                        "returns",
-                                        "sum_pi_squared",
-                                        "rollout_is_weights",
-                                        "reward_baselines",
-                                    ],
-                                )
+                        with marked_timer("dataplane/prefetch_adv", timing_raw):
+                            self.data_plane.prefetch(
+                                batch,
+                                [
+                                    "token_level_scores",
+                                    "token_level_rewards",
+                                    "values",
+                                    "response_mask",
+                                    "old_log_probs",
+                                    "ref_log_prob",
+                                    "attention_mask",
+                                    "responses",
+                                    "advantages",
+                                    "returns",
+                                    "sum_pi_squared",
+                                    "rollout_is_weights",
+                                    "reward_baselines",
+                                ],
+                            )
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
@@ -1852,8 +1711,7 @@ class RayPPOTrainer:
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )
-                        if self.use_neoproto and hasattr(batch, "clear_cache"):
-                            batch.clear_cache()
+                        batch.clear_cache()
 
                     correctness_dump_dir = self.config.trainer.get("correctness_dump_dir", None)
                     if correctness_dump_dir:
@@ -1936,8 +1794,7 @@ class RayPPOTrainer:
                 steps_duration = timing_raw["step"]
                 self.max_steps_duration = max(self.max_steps_duration, steps_duration)
 
-                if getattr(self.data_proto_cls, "pop_materialize_stats", None) is not None:
-                    timing_raw.update(self.data_proto_cls.pop_materialize_stats())
+                timing_raw.update(self.data_plane.pop_materialize_stats())
 
                 # training metrics
                 metrics.update(
@@ -1949,22 +1806,21 @@ class RayPPOTrainer:
                 # Collect metrics with the classic global reductions. Averaging
                 # per-rank masked means / explained variance is not equivalent
                 # when ranks contain different numbers of valid response tokens.
-                if self.use_neoproto:
-                    with marked_timer("dataplane/prefetch_metrics", timing_raw):
-                        self._neo_prefetch(
-                            batch,
-                            [
-                                "token_level_scores",
-                                "token_level_rewards",
-                                "advantages",
-                                "returns",
-                                "values",
-                                "prompts",
-                                "responses",
-                                "response_mask",
-                                "attention_mask",
-                            ],
-                        )
+                with marked_timer("dataplane/prefetch_metrics", timing_raw):
+                    self.data_plane.prefetch(
+                        batch,
+                        [
+                            "token_level_scores",
+                            "token_level_rewards",
+                            "advantages",
+                            "returns",
+                            "values",
+                            "prompts",
+                            "responses",
+                            "response_mask",
+                            "attention_mask",
+                        ],
+                    )
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 # GDPO per-component reward metrics
                 gdpo_reward_keys = self.config.algorithm.get("gdpo_reward_keys", None)

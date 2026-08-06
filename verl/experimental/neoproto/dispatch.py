@@ -15,36 +15,19 @@
 
 Before Ray pickles a chunked NeoProto, attach per-rank ``OBJ_REF`` /
 ``LOCAL_REF`` ObjectRefs so ``NeoProto.__getstate__`` ships masked ref tables
-instead of the full column. This is a connection between ``NeoProto`` and
-``StorageEngine`` for cheap Ray pickle.
+instead of the full column.
 """
 
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Sequence
+from typing import Sequence
 
 import numpy as np
 import ray
 
 from verl.experimental.neoproto.neo import NeoProto
 from verl.experimental.neoproto.storage.engine import Ref, RefTable
-
-_NEO_DISPATCH_ENABLED = False
-
-
-def enable_neo_dispatch(enabled: bool = True) -> None:
-    """Toggle NeoProto ref-table preserialize on dataproto dispatch paths."""
-    global _NEO_DISPATCH_ENABLED
-    _NEO_DISPATCH_ENABLED = bool(enabled)
-
-
-def is_neo_dispatch_enabled() -> bool:
-    return _NEO_DISPATCH_ENABLED
-
-
-def is_neo_batch(obj: Any) -> bool:
-    return getattr(obj, "__neoproto__", False) or isinstance(obj, NeoProto)
 
 
 def attach_preserialized_ref_tables(
@@ -105,13 +88,3 @@ def attach_preserialized_ref_tables(
     for i, ref_table in enumerate(rank_ref_tables):
         neo_chunk_list[i].OBJ_REF = ref_table
         neo_chunk_list[i].LOCAL_REF = local_ref_table
-
-
-def maybe_attach_neo_ref_tables(original: Any, chunks: Sequence[Any], *, sp_size: int = 1) -> None:
-    """No-op unless neo dispatch is enabled and ``original`` is a NeoProto batch."""
-    # Avoid Ray's implicit auto-init in local/offline paths. Production worker
-    # dispatch already runs under an initialized Ray driver, while unit tests
-    # and in-memory debugging should remain usable without starting a cluster.
-    if not _NEO_DISPATCH_ENABLED or not is_neo_batch(original) or not ray.is_initialized():
-        return
-    attach_preserialized_ref_tables(original, chunks, sp_size=sp_size)

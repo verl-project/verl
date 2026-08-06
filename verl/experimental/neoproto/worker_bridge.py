@@ -26,73 +26,17 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Optional, Sequence
+from typing import Any, Iterable, Optional, Sequence
 
 import numpy as np
 import torch
 from tensordict import TensorDict
 
-from verl.experimental.neoproto.dispatch import is_neo_batch
+from verl.workers.utils.batch_adapter import EngineBatchContext, EngineBatchSpec
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 _FORCE_FULL_MATERIALIZE = os.environ.get("NEO_BRIDGE_FULL_MATERIALIZE", "0") == "1"
 _FP32_ENGINE_OUTPUT_KEYS = frozenset({"values", "log_probs", "entropy", "sum_pi_squared"})
-
-# ---------------------------------------------------------------------------
-# Per-entrypoint materialize whitelists
-# ---------------------------------------------------------------------------
-
-# Hard requirements of left_right_2_no_padding / no_padding_2_padding.
-NEO_BASE_TENSOR_KEYS: tuple[str, ...] = (
-    "input_ids",
-    "attention_mask",
-    "position_ids",
-    "response_mask",
-    "prompts",
-    "responses",
-)
-
-# Meta / control flags commonly set by the trainer; pull if present.
-NEO_COMMON_OPTIONAL_KEYS: tuple[str, ...] = (
-    "temperature",
-    "compute_loss",
-    "calculate_entropy",
-    "calculate_sum_pi_squared",
-    "no_lora_adapter",
-    "disable_auto_offload",
-    "enable_routing_replay",
-    "global_token_num",
-    "images_seqlens",
-    "multi_modal_inputs",
-    "routed_experts",
-    "teacher_ids",
-    "teacher_logprobs",
-)
-
-NEO_INFER_REQUIRED_KEYS: tuple[str, ...] = NEO_BASE_TENSOR_KEYS
-NEO_INFER_OPTIONAL_KEYS: tuple[str, ...] = NEO_COMMON_OPTIONAL_KEYS
-
-# Actor/critic share train_mini_batch: keep train-specific tensors optional so
-# actor batches without values/returns (and vice versa) still work.
-NEO_TRAIN_REQUIRED_KEYS: tuple[str, ...] = NEO_BASE_TENSOR_KEYS
-NEO_TRAIN_OPTIONAL_KEYS: tuple[str, ...] = NEO_COMMON_OPTIONAL_KEYS + (
-    "old_log_probs",
-    "advantages",
-    "values",
-    "returns",
-    "ref_log_prob",
-    "rollout_is_weights",
-    "mini_batch_size",
-    "num_mini_batch",
-    "epochs",
-    "seed",
-    "dataloader_kwargs",
-    "global_batch_size",
-    "multi_turn",
-    "update_lr_scheduler",
-    "distillation_use_topk",
-    "distillation_only",
-)
 
 
 @dataclass
@@ -159,21 +103,19 @@ def prepare_engine_input(
     restore_padding_keys: Optional[Iterable[str]] = None,
     required_keys: Optional[Iterable[str]] = None,
     optional_keys: Optional[Iterable[str]] = None,
-) -> tuple[TensorDict, Optional[_NeoEngineCtx]]:
+) -> tuple[TensorDict, _NeoEngineCtx]:
     """Convert inbound RPC data to an engine TensorDict.
 
-    NeoProto batches are materialized and converted with ``left_right_2_no_padding``
-    inside the worker. Classic TensorDict inputs are returned unchanged (driver
-    already prepared them).
+    NeoProto batches are materialized and converted with
+    ``left_right_2_no_padding`` inside the worker. The generic worker adapter
+    passes classic TensorDict inputs directly to the engine without calling
+    this function.
 
     Args:
         required_keys: If ``None``, full ``to_tensordict()`` (legacy). Otherwise
             these keys must exist on the Neo batch and will be materialized.
         optional_keys: Extra keys materialized only when present on the batch.
     """
-    if not is_neo_batch(data):
-        return data, None
-
     if required_keys is None or _FORCE_FULL_MATERIALIZE:
         padded_td = data.to_tensordict()
     else:
@@ -198,10 +140,10 @@ def prepare_engine_input(
 
 def finalize_engine_output(
     output: Any,
-    ctx: Optional[_NeoEngineCtx],
+    ctx: _NeoEngineCtx,
 ) -> Any:
     """Restore padding on tensor outputs and wrap as NeoProto when input was Neo."""
-    if ctx is None or output is None:
+    if output is None:
         return output
 
     if torch.is_tensor(output):
@@ -223,29 +165,22 @@ def finalize_engine_output(
         if isinstance(output, TensorDict):
             return NeoDataProto.from_tensordict(output)
         # Already a batch container
-        if getattr(output, "__neoproto__", False):
+        if isinstance(output, NeoDataProto):
             return output
         return NeoDataProto.from_tensordict(TensorDict(dict(output), batch_size=output.batch_size))
 
     return output
 
 
-def neo_engine_call(
-    data: Any,
-    fn: Callable[[TensorDict], Any],
-    *,
-    restore_padding_keys: Optional[Iterable[str]] = None,
-    required_keys: Optional[Iterable[str]] = None,
-    optional_keys: Optional[Iterable[str]] = None,
-) -> Any:
-    engine_td, ctx = prepare_engine_input(
+def prepare_neo_engine_batch(data: Any, spec: EngineBatchSpec) -> EngineBatchContext:
+    """Build the generic worker adapter context for a NeoProto batch."""
+    engine_td, neo_ctx = prepare_engine_input(
         data,
-        restore_padding_keys=restore_padding_keys,
-        required_keys=required_keys,
-        optional_keys=optional_keys,
+        restore_padding_keys=spec.restore_padding_keys,
+        required_keys=spec.required_keys,
+        optional_keys=spec.optional_keys,
     )
-    # If restore keys were not known at prepare time, allow fn to set them later — N/A.
-    if ctx is not None and restore_padding_keys is not None:
-        ctx.restore_keys = tuple(restore_padding_keys)
-    out = fn(engine_td)
-    return finalize_engine_output(out, ctx)
+    return EngineBatchContext(
+        payload=engine_td,
+        finalize=lambda output: finalize_engine_output(output, neo_ctx),
+    )

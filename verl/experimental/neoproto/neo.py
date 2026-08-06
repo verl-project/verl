@@ -9,7 +9,7 @@
 :class:`NeoProto` -- ref/index-only base container.
 
 This is the backbone behind the NeoProto :class:`~verl.experimental.neoproto.views.data_proto.DataProto`
-compatibility view used by the V0 trainer when ``trainer.use_neoproto=true``.
+compatibility view used by the V0 trainer when ``trainer.data_plane=neoproto``.
 
 Design principles
 -----------------
@@ -222,8 +222,6 @@ class NeoProto:
     typed helpers and *do not* change this contract.
     """
 
-    # Duck-type marker used by verl.protocol.BatchData / concat helpers.
-    __neoproto__ = True
     _materialize_time_s: float = 0.0
     _materialize_calls: int = 0
 

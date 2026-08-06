@@ -853,7 +853,7 @@ trainer:
   ray_wait_register_center_timeout: 300
   device: cuda
   use_v1: false
-  use_neoproto: false
+  data_plane: classic
   neoproto_strict_mode: false
   v1:
     trainer_mode: sync

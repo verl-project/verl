@@ -27,7 +27,7 @@ attention_backend="${ATTENTION_BACKEND:-FLASH_ATTN}"
 
 run_case() {
     local name="$1"
-    local use_neoproto="$2"
+    local data_plane="$2"
     local strict_mode="$3"
     local case_dir="${result_dir}/${name}"
 
@@ -37,7 +37,7 @@ run_case() {
     fi
 
     NUM_GPUS="${num_gpus}" \
-    USE_NEOPROTO="${use_neoproto}" \
+    DATA_PLANE="${data_plane}" \
     NEOPROTO_STRICT_MODE="${strict_mode}" \
     ADV_ESTIMATOR=gae \
     USE_KL=True \
@@ -74,8 +74,8 @@ run_case() {
 }
 
 echo "NEOPROTO_CORRECTNESS_RESULT_DIR=${result_dir}"
-run_case dataproto False False
-run_case neoproto True True
+run_case dataproto classic False
+run_case neoproto neoproto True
 
 checker_args=()
 if [ "${num_nodes}" -gt 1 ]; then

@@ -12,31 +12,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for NeoProto-only v0 transfer plane (dispatch + worker bridge)."""
-
-from pathlib import Path
+"""Tests for the V0 data-plane dispatch and worker adapter."""
 
 import numpy as np
 import pytest
 import torch
+from omegaconf import OmegaConf
 from tensordict import TensorDict
 
+from verl import DataProto as ClassicDataProto
 from verl.experimental.neoproto import (
     DataProto,
     DefaultStorageEngine,
     InMemoryStorageEngine,
-    enable_neo_dispatch,
-    is_neo_dispatch_enabled,
     set_default_storage_engine,
 )
-from verl.experimental.neoproto.dispatch import attach_preserialized_ref_tables, is_neo_batch
-from verl.experimental.neoproto.worker_bridge import (
-    NEO_INFER_OPTIONAL_KEYS,
-    NEO_INFER_REQUIRED_KEYS,
-    finalize_engine_output,
-    prepare_engine_input,
-)
+from verl.experimental.neoproto.worker_bridge import finalize_engine_output, prepare_engine_input
 from verl.single_controller.base.decorator import _split_args_kwargs_data_proto
+from verl.trainer.ppo.data_plane import ClassicPPODataPlane, build_data_plane
+from verl.workers.utils.batch_adapter import EngineBatchSpec, run_engine_batch, set_batch_control_fields
+
+_BASE_KEYS = ("input_ids", "attention_mask", "position_ids", "response_mask", "prompts", "responses")
+_INFER_SPEC = EngineBatchSpec(
+    required_keys=_BASE_KEYS,
+    optional_keys=("compute_loss", "temperature"),
+    restore_padding_keys=("values", "log_probs"),
+)
 
 
 class CountingStorageEngine(InMemoryStorageEngine):
@@ -56,9 +57,7 @@ class CountingStorageEngine(InMemoryStorageEngine):
 def storage():
     engine = InMemoryStorageEngine()
     set_default_storage_engine(engine)
-    enable_neo_dispatch(True)
     yield engine
-    enable_neo_dispatch(False)
     set_default_storage_engine(None)
 
 
@@ -66,9 +65,7 @@ def storage():
 def counting_storage():
     engine = CountingStorageEngine()
     set_default_storage_engine(engine)
-    enable_neo_dispatch(True)
     yield engine
-    enable_neo_dispatch(False)
     set_default_storage_engine(None)
 
 
@@ -98,10 +95,73 @@ def _bridge_batch(storage, *, extra_tensors=None):
     return data
 
 
-def test_is_neo_batch_and_dispatch_flag(storage):
+def test_neoproto_implements_common_data_proto_contract(storage):
     data = DataProto.from_dict(tensors={"input_ids": torch.arange(8).view(4, 2)}, storage=storage)
-    assert is_neo_batch(data)
-    assert is_neo_dispatch_enabled()
+    assert isinstance(data, ClassicDataProto)
+    assert callable(data.prepare_dispatch)
+    assert data.new_like(batch=TensorDict({}, batch_size=[0])).__class__ is DataProto
+
+
+@pytest.mark.parametrize(
+    ("name", "expected_class"),
+    [("classic", ClassicDataProto), ("neoproto", DataProto)],
+)
+def test_data_plane_factory_selects_once(name, expected_class):
+    config = OmegaConf.create({"trainer": {"data_plane": name, "neoproto_strict_mode": False}})
+
+    strategy = build_data_plane(config)
+
+    assert strategy.name == name
+    assert strategy.data_proto_cls is expected_class
+    set_default_storage_engine(None)
+
+
+def test_data_plane_factory_accepts_legacy_neoproto_flag():
+    config = OmegaConf.create({"trainer": {"use_neoproto": True, "neoproto_strict_mode": False}})
+
+    strategy = build_data_plane(config)
+
+    assert strategy.name == "neoproto"
+    set_default_storage_engine(None)
+
+
+def test_neoproto_request_controls_do_not_mutate_source(storage):
+    from verl.experimental.neoproto.data_plane import NeoPPODataPlane
+
+    data = _bridge_batch(storage)
+    strategy = NeoPPODataPlane()
+
+    prepared = strategy.prepare_inference(data, {"no_lora_adapter": True})
+
+    assert "no_lora_adapter" not in data.meta_info
+    assert prepared.payload.meta_info["no_lora_adapter"] is True
+
+
+def test_classic_strategy_prepares_and_collects_without_trainer_branches(monkeypatch):
+    monkeypatch.setattr("verl.trainer.ppo.data_plane.left_right_2_no_padding", lambda data: data)
+    monkeypatch.setattr("verl.trainer.ppo.data_plane.no_padding_2_padding", lambda value, data: value)
+    data = ClassicDataProto.from_dict(
+        tensors={
+            "input_ids": torch.ones(2, 2, dtype=torch.long),
+            "attention_mask": torch.ones(2, 2, dtype=torch.long),
+        }
+    )
+    strategy = ClassicPPODataPlane()
+
+    prepared = strategy.prepare_inference(data, {"compute_loss": False})
+    output = TensorDict({"log_probs": torch.zeros(2, 1, dtype=torch.bfloat16)}, batch_size=[2])
+    collected = strategy.collect_inference(
+        output,
+        prepared,
+        {"log_probs": "old_log_probs"},
+        restore_keys=("log_probs",),
+        fp32_keys=("log_probs",),
+    )
+
+    compute_loss = prepared.payload["compute_loss"]
+    assert compute_loss is False or getattr(compute_loss, "data", None) is False
+    assert isinstance(collected, ClassicDataProto)
+    assert collected.batch["old_log_probs"].dtype == torch.float32
 
 
 def test_split_args_attaches_obj_ref_local_ref(storage):
@@ -112,14 +172,21 @@ def test_split_args_attaches_obj_ref_local_ref(storage):
         non_tensors={"uid": np.array([f"u{i}" for i in range(8)], dtype=object)},
         storage=storage,
     )
-    enable_neo_dispatch(True)
     args, kwargs = _split_args_kwargs_data_proto(4, data)
     chunks = args[0]
     assert len(chunks) == 4
     # Local-backend columns may leave OBJ_REF unset; attaching must not crash.
     for c in chunks:
-        assert is_neo_batch(c)
+        assert isinstance(c, DataProto)
         assert len(c) == 2
+
+
+def test_classic_dispatch_hook_is_noop():
+    data = ClassicDataProto.from_dict(tensors={"input_ids": torch.arange(16).view(8, 2)})
+    chunks = _split_args_kwargs_data_proto(4, data)[0][0]
+
+    assert len(chunks) == 4
+    assert all(not hasattr(chunk, "OBJ_REF") for chunk in chunks)
 
 
 def test_attach_preserialized_ref_tables_with_ray_object_store():
@@ -133,7 +200,6 @@ def test_attach_preserialized_ref_tables_with_ray_object_store():
 
     engine = DefaultStorageEngine()
     set_default_storage_engine(engine)
-    enable_neo_dispatch(True)
     try:
         raw_prompts = np.asarray([{"prompt": f"sample-{i}"} for i in range(8)], dtype=object)
         reward_models = np.asarray([{"ground_truth": str(i)} for i in range(8)], dtype=object)
@@ -166,8 +232,7 @@ def test_attach_preserialized_ref_tables_with_ray_object_store():
         )
         assert small_batch.ref_table["responses"].backend == "local"
         assert large_batch.ref_table["responses"].backend == "object_store"
-        chunks = data.chunk(chunks=4)
-        attach_preserialized_ref_tables(data, chunks, sp_size=1)
+        chunks = _split_args_kwargs_data_proto(4, data)[0][0]
         for c in chunks:
             assert hasattr(c, "OBJ_REF")
             assert hasattr(c, "LOCAL_REF")
@@ -175,7 +240,6 @@ def test_attach_preserialized_ref_tables_with_ray_object_store():
             state = c.__getstate__()
             assert isinstance(state[1], tuple)
     finally:
-        enable_neo_dispatch(False)
         set_default_storage_engine(None)
 
 
@@ -209,7 +273,7 @@ def test_worker_bridge_materialize_and_wrap(storage, identity_padding_bridge):
         batch_size=[4],
     )
     wrapped = finalize_engine_output(fake_out, ctx)
-    assert is_neo_batch(wrapped)
+    assert isinstance(wrapped, DataProto)
     assert "log_probs" in wrapped.batch.keys()
     assert wrapped.batch["log_probs"].dtype == torch.float32
     assert wrapped.batch["values"].dtype == torch.float32
@@ -223,8 +287,8 @@ def test_worker_bridge_subset_skips_unused_columns(counting_storage, identity_pa
     engine_td, ctx = prepare_engine_input(
         data,
         restore_padding_keys=(),
-        required_keys=NEO_INFER_REQUIRED_KEYS,
-        optional_keys=NEO_INFER_OPTIONAL_KEYS,
+        required_keys=_INFER_SPEC.required_keys,
+        optional_keys=_INFER_SPEC.optional_keys,
     )
     assert ctx is not None
     assert "input_ids" in engine_td.keys()
@@ -249,8 +313,8 @@ def test_worker_bridge_subset_fetches_fewer_than_full(counting_storage, identity
     prepare_engine_input(
         data_sub,
         restore_padding_keys=(),
-        required_keys=NEO_INFER_REQUIRED_KEYS,
-        optional_keys=NEO_INFER_OPTIONAL_KEYS,
+        required_keys=_INFER_SPEC.required_keys,
+        optional_keys=_INFER_SPEC.optional_keys,
     )
     subset_gets = counting_storage.get_count
     assert subset_gets < full_gets
@@ -265,17 +329,40 @@ def test_worker_bridge_missing_required_key_raises(counting_storage):
         prepare_engine_input(
             data,
             restore_padding_keys=(),
-            required_keys=NEO_INFER_REQUIRED_KEYS,
-            optional_keys=NEO_INFER_OPTIONAL_KEYS,
+            required_keys=_INFER_SPEC.required_keys,
+            optional_keys=_INFER_SPEC.optional_keys,
         )
 
 
-def test_agent_loop_uses_inbound_data_proto_cls():
-    """Ensure AgentLoopWorker stores type(batch) for reward reconstruction."""
-    # Lightweight source contract: avoid importing the complete agent runtime.
-    repo_root = Path(__file__).resolve().parents[3]
-    src = (repo_root / "verl/experimental/agent_loop/agent_loop.py").read_text()
-    assert "self._data_proto_cls" in src
-    # And the reward path uses it.
-    assert "self._data_proto_cls(" in src
-    assert "data = DataProto(\n                    batch=batch," not in src
+def test_generic_engine_adapter_passes_tensordict_through():
+    data = TensorDict({"x": torch.ones(2, 1)}, batch_size=[2])
+
+    output = run_engine_batch(data, lambda td: td + 1, EngineBatchSpec())
+
+    torch.testing.assert_close(output["x"], torch.full((2, 1), 2.0))
+
+
+def test_generic_control_fields_support_both_batch_types(storage):
+    classic = TensorDict({"x": torch.ones(2, 1)}, batch_size=[2])
+    neo = DataProto.from_dict(tensors={"x": torch.ones(2, 1)}, storage=storage)
+
+    set_batch_control_fields(classic, compute_loss=False)
+    set_batch_control_fields(neo, compute_loss=False)
+
+    classic_value = classic["compute_loss"]
+    assert classic_value is False or getattr(classic_value, "data", None) is False
+    assert neo.meta_info["compute_loss"] is False
+
+
+def test_generic_engine_adapter_materializes_neoproto(storage, identity_padding_bridge):
+    data = _bridge_batch(storage)
+    spec = EngineBatchSpec(required_keys=_BASE_KEYS, optional_keys=("compute_loss", "temperature"))
+
+    output = run_engine_batch(
+        data,
+        lambda td: TensorDict({"log_probs": torch.zeros(4, 2)}, batch_size=[4]),
+        spec,
+    )
+
+    assert isinstance(output, DataProto)
+    assert "log_probs" in output.batch

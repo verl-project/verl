@@ -624,6 +624,26 @@ class DataProto(NeoProto, RLDataProto):
         if hasattr(self, "_non_tensor_batch_cache"):
             self._non_tensor_batch_cache.clear()
 
+    def prepare_dispatch(self, chunks) -> None:
+        """Attach rank-local ref tables before Ray serializes chunked views."""
+        import ray
+
+        if not ray.is_initialized():
+            return
+        from verl.experimental.neoproto.dispatch import attach_preserialized_ref_tables
+
+        attach_preserialized_ref_tables(self, chunks)
+
+    def prepare_engine_batch(self, spec):
+        """Materialize this ref-backed batch for a worker engine call."""
+        from verl.experimental.neoproto.worker_bridge import prepare_neo_engine_batch
+
+        return prepare_neo_engine_batch(self, spec)
+
+    def cpu(self) -> DataProto:
+        """NeoProto payload refs already resolve to CPU tensors on workers."""
+        return self
+
     def prefetch(self, keys: Optional[list[str]] = None, *, device: str = "cpu") -> dict[str, Any]:
         """Materialize ``keys`` once and seed the lazy ``.batch`` cache.
 
