@@ -437,5 +437,5 @@ explicit = true
 # packages routed above are pulled here (explicit = true); the rest stay on PyPI.
 [[tool.uv.index]]
 name = "verl-wheelhouse"
-url = "https://etogaosion.github.io/verl-wheelhouse/simple/"
+url = "https://verl-project.github.io/verl-wheelhouse/simple/"
 explicit = true

@@ -117,8 +117,8 @@ backends as **extras**:
    ``uv sync`` never compiles a native package from source. ``apex``,
    ``transformer-engine`` and ``flash-attn`` — plus the pure-python
    ``megatron-bridge`` — are pulled **prebuilt** from the verl wheelhouse index
-   (`etogaosion.github.io/verl-wheelhouse
-   <https://etogaosion.github.io/verl-wheelhouse/simple/>`_, wired in
+   (`verl-project.github.io/verl-wheelhouse
+   <https://verl-project.github.io/verl-wheelhouse/simple/>`_, wired in
    ``pyproject.toml`` under ``[tool.uv.index]`` / ``[tool.uv.sources]``); those
    wheels are built for cu130 / torch 2.11 / CPython 3.12. The inference engines
    (``vllm``, ``sglang``, ``sglang-kernel``) come straight from PyPI, whose

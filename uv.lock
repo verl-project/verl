@@ -218,12 +218,12 @@ wheels = [
 [[package]]
 name = "apex"
 version = "0.1"
-source = { registry = "https://etogaosion.github.io/verl-wheelhouse/simple/" }
+source = { registry = "https://verl-project.github.io/verl-wheelhouse/simple/" }
 dependencies = [
     { name = "packaging", marker = "(python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
 ]
 wheels = [
-    { url = "https://github.com/ETOgaosion/verl-wheelhouse/releases/download/apex-master/apex-0.1-cp312-cp312-linux_x86_64.whl" },
+    { url = "https://github.com/verl-project/verl-wheelhouse/releases/download/apex-master/apex-0.1-cp312-cp312-linux_x86_64.whl" },
 ]
 
 [[package]]
@@ -903,14 +903,14 @@ wheels = [
 [[package]]
 name = "flash-attn"
 version = "2.8.3"
-source = { registry = "https://etogaosion.github.io/verl-wheelhouse/simple/" }
+source = { registry = "https://verl-project.github.io/verl-wheelhouse/simple/" }
 dependencies = [
     { name = "einops", marker = "(python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (python_full_version < '3.12' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (python_full_version < '3.12' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (python_full_version < '3.12' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (python_full_version < '3.12' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (sys_platform != 'linux' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (sys_platform != 'linux' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (sys_platform != 'linux' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "torch", version = "2.11.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-4-verl-cpu') or (python_full_version < '3.12' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (python_full_version < '3.12' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (python_full_version < '3.12' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (python_full_version < '3.12' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (python_full_version < '3.12' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (sys_platform != 'linux' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (sys_platform != 'linux' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (sys_platform != 'linux' and extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra != 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "(python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-4-verl-cpu') or (python_full_version < '3.12' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm')" },
 ]
 wheels = [
-    { url = "https://github.com/ETOgaosion/verl-wheelhouse/releases/download/flash-attention-v2.8.3/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl" },
+    { url = "https://github.com/verl-project/verl-wheelhouse/releases/download/flash-attention-v2.8.3/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl" },
 ]
 
 [[package]]
@@ -1751,9 +1751,9 @@ wheels = [
 [[package]]
 name = "megatron-bridge"
 version = "0.5.2"
-source = { registry = "https://etogaosion.github.io/verl-wheelhouse/simple/" }
+source = { registry = "https://verl-project.github.io/verl-wheelhouse/simple/" }
 wheels = [
-    { url = "https://github.com/ETOgaosion/verl-wheelhouse/releases/download/megatron-bridge-r0.5.0/megatron_bridge-0.5.2-py3-none-any.whl" },
+    { url = "https://github.com/verl-project/verl-wheelhouse/releases/download/megatron-bridge-r0.5.0/megatron_bridge-0.5.2-py3-none-any.whl" },
 ]
 
 [[package]]
@@ -4251,8 +4251,8 @@ dependencies = [
 
 [[package]]
 name = "transformer-engine"
-version = "2.15.0+42b8400"
-source = { registry = "https://etogaosion.github.io/verl-wheelhouse/simple/" }
+version = "2.16.1"
+source = { registry = "https://verl-project.github.io/verl-wheelhouse/simple/" }
 dependencies = [
     { name = "einops", marker = "(python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "importlib-metadata", marker = "(python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
@@ -4264,7 +4264,7 @@ dependencies = [
     { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "(python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux') or (python_full_version < '3.12' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (platform_machine != 'x86_64' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (sys_platform != 'linux' and extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
 ]
 wheels = [
-    { url = "https://github.com/ETOgaosion/verl-wheelhouse/releases/download/transformer-engine-v2.15/transformer_engine-2.15.0%2B42b8400-cp312-cp312-linux_x86_64.whl" },
+    { url = "https://github.com/verl-project/verl-wheelhouse/releases/download/transformer-engine-v2.16.1/transformer_engine-2.16.1-cp312-cp312-linux_x86_64.whl" },
 ]
 
 [[package]]
@@ -4719,7 +4719,7 @@ vllm = [
 requires-dist = [
     { name = "accelerate" },
     { name = "accelerate", marker = "extra == 'verl-core'" },
-    { name = "apex", marker = "extra == 'megatron'", index = "https://etogaosion.github.io/verl-wheelhouse/simple/" },
+    { name = "apex", marker = "extra == 'megatron'", index = "https://verl-project.github.io/verl-wheelhouse/simple/" },
     { name = "cachetools", marker = "extra == 'verl-core'" },
     { name = "codetiming" },
     { name = "codetiming", marker = "extra == 'verl-core'" },
@@ -4729,7 +4729,7 @@ requires-dist = [
     { name = "dill" },
     { name = "dill", marker = "extra == 'verl-core'" },
     { name = "fastapi", marker = "extra == 'verl-core'" },
-    { name = "flash-attn", marker = "extra == 'flash-attn-cu130torch211'", specifier = "==2.8.3", index = "https://etogaosion.github.io/verl-wheelhouse/simple/" },
+    { name = "flash-attn", marker = "extra == 'flash-attn-cu130torch211'", specifier = "==2.8.3", index = "https://verl-project.github.io/verl-wheelhouse/simple/" },
     { name = "hf-transfer", marker = "extra == 'ci'" },
     { name = "hydra-core" },
     { name = "hydra-core", marker = "extra == 'verl-core'" },
@@ -4742,7 +4742,7 @@ requires-dist = [
     { name = "mbridge", marker = "extra == 'megatron'", git = "https://github.com/ISEEKYAN/mbridge.git?rev=641a5a0" },
     { name = "mbridge", marker = "extra == 'sglang'", git = "https://github.com/ISEEKYAN/mbridge.git?rev=641a5a0" },
     { name = "mbridge", marker = "extra == 'vllm'", git = "https://github.com/ISEEKYAN/mbridge.git?rev=641a5a0" },
-    { name = "megatron-bridge", marker = "extra == 'megatron'", specifier = "==0.5.2", index = "https://etogaosion.github.io/verl-wheelhouse/simple/" },
+    { name = "megatron-bridge", marker = "extra == 'megatron'", specifier = "==0.5.2", index = "https://verl-project.github.io/verl-wheelhouse/simple/" },
     { name = "megatron-core", marker = "extra == 'cpu'", git = "https://github.com/NVIDIA/Megatron-LM.git?tag=core_v0.18.0" },
     { name = "megatron-core", marker = "extra == 'megatron'", git = "https://github.com/NVIDIA/Megatron-LM.git?tag=core_v0.18.0" },
     { name = "numpy", specifier = ">=2.0.0" },
@@ -4805,7 +4805,7 @@ requires-dist = [
     { name = "torchvision", marker = "extra == 'sglang'", specifier = "==0.26.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "verl", extra = "sglang" } },
     { name = "torchvision", marker = "extra == 'vllm'", specifier = "==0.26.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "verl", extra = "vllm" } },
     { name = "transferqueue", marker = "extra == 'transferqueue'", git = "https://github.com/Ascend/TransferQueue.git?rev=main" },
-    { name = "transformer-engine", marker = "extra == 'megatron'", index = "https://etogaosion.github.io/verl-wheelhouse/simple/" },
+    { name = "transformer-engine", marker = "extra == 'megatron'", index = "https://verl-project.github.io/verl-wheelhouse/simple/" },
     { name = "transformers", specifier = ">=5.5.3,!=5.6.0,<5.11" },
     { name = "transformers", marker = "extra == 'cpu'", specifier = "==5.3.0" },
     { name = "transformers", marker = "extra == 'sglang'", specifier = "==5.3.0" },
