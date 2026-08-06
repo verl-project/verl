@@ -898,11 +898,16 @@ class PPOTrainer(ABC):
                 "remove_previous_ckpt_in_save is deprecated, "
                 "set max_actor_ckpt_to_keep=1 and max_critic_ckpt_to_keep=1 instead"
             )
+        max_ckpt_to_keep = self.config.trainer.get("max_ckpt_to_keep", None)
         max_actor_ckpt_to_keep = (
-            self.config.trainer.get("max_actor_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
+            (self.config.trainer.get("max_actor_ckpt_to_keep", None) or max_ckpt_to_keep)
+            if not remove_previous_ckpt_in_save
+            else 1
         )
         max_critic_ckpt_to_keep = (
-            self.config.trainer.get("max_critic_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
+            (self.config.trainer.get("max_critic_ckpt_to_keep", None) or max_ckpt_to_keep)
+            if not remove_previous_ckpt_in_save
+            else 1
         )
 
         # save actor
