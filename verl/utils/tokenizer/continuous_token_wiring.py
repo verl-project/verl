@@ -256,6 +256,8 @@ def infer_continuous_token_model_family(
         return ContinuousTokenModelFamily.QWEN25
     if "qwen3" in compact:
         return ContinuousTokenModelFamily.QWEN3
+    if "qwen2" in compact:
+        return ContinuousTokenModelFamily.QWEN
     logger.warning(
         "No model-specific Continuous Token builder matched model_path=%r, tokenizer_name_or_path=%r; "
         "falling back to the default ContinuousTokenBuilder.",
