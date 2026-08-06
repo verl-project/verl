@@ -44,6 +44,15 @@ _LEGACY_MODE = "legacy"
 
 
 def _supports_output_processor_hook(patching_model: torch.nn.Module) -> bool:
+    """Check whether the model supports Megatron's native output-processor hook.
+
+    The ``output_processor`` / ``output_processor_context`` contract was
+    introduced in Megatron Core 0.18.0. Models without this contract fall back
+    to the legacy ``forward`` monkey patch.
+
+    TODO: Remove this check and the legacy patch once all supported Megatron
+    stacks require Megatron Core 0.18.0 or newer.
+    """
     parameters = inspect.signature(patching_model.forward).parameters
     return {"output_processor", "output_processor_context"}.issubset(parameters)
 
