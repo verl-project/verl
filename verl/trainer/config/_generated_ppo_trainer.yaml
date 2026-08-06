@@ -919,6 +919,7 @@ trainer:
   default_hdfs_dir: null
   del_local_ckpt_after_load: false
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  max_ckpt_to_keep: null
   max_actor_ckpt_to_keep: null
   max_critic_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300

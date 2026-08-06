@@ -206,6 +206,10 @@ trainer:
   # Default local directory for saving checkpoints
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
 
+  # Maximum number of checkpoints to keep (applies to both actor and critic when
+  # max_actor_ckpt_to_keep / max_critic_ckpt_to_keep are not set)
+  max_ckpt_to_keep: null
+
   # Maximum number of actor checkpoints to keep
   max_actor_ckpt_to_keep: null
 
