@@ -109,7 +109,7 @@ class TestToolCallIdOnCpu(unittest.IsolatedAsyncioTestCase):
             del tool_call, tools_kwargs, agent_data
             return ToolResponse(text='{"temperature": 26.1}'), 1.0, {}
 
-        async def ct_merge_non_assistant_msg(
+        async def ct_merge_context_msg(
             previous_messages: list[dict[str, Any]],
             updated_messages: list[dict[str, Any]],
             runtime_token_ids: list[int],
@@ -130,7 +130,7 @@ class TestToolCallIdOnCpu(unittest.IsolatedAsyncioTestCase):
             response_length=128,
             tool_schemas=[],
             _assert_mm_supported=lambda has_multi_modal: None,
-            ct_merge_non_assistant_msg=ct_merge_non_assistant_msg,
+            ct_merge_context_msg=ct_merge_context_msg,
             _call_tool=call_tool,
         )
         agent_data = SimpleNamespace(
