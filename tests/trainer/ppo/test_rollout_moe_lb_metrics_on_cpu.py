@@ -23,7 +23,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_moe_lb_metrics,
     compute_rollout_moe_load_balance_metrics,
     get_hf_config_override_kwargs,
-    get_metric_data_with_optional_routed_field,
+    get_metric_data_with_optional_routed_experts,
     infer_moe_num_experts,
     infer_rollout_moe_num_experts,
 )
@@ -192,24 +192,21 @@ def test_compute_moe_lb_metrics_accumulates_until_interval():
     assert accumulator.total_assignments() == 0
 
 
-def test_get_metric_data_with_optional_fields_falls_back():
+def test_get_metric_data_with_optional_routed_experts_falls_back():
     calls = []
 
     def fake_kv_batch_get(keys, partition_id, select_fields):
         calls.append(select_fields)
-        if "metrics" in select_fields:
-            raise ValueError("field metrics not found")
         if "routed_experts" in select_fields:
             raise ValueError("field routed_experts not found")
         return {"responses": "ok"}
 
     accumulator = RolloutMoELoadBalanceMetricsAccumulator()
 
-    data = get_metric_data_with_optional_routed_field(
+    data = get_metric_data_with_optional_routed_experts(
         keys=["k"],
         partition_id="train",
         fields=["responses"],
-        optional_fields=["routed_experts", "metrics"],
         moe_lb_metrics_interval=1,
         global_steps=1,
         accumulator=accumulator,
@@ -217,19 +214,14 @@ def test_get_metric_data_with_optional_fields_falls_back():
     )
 
     assert data == {"responses": "ok"}
-    assert calls == [
-        ["responses", "routed_experts", "metrics"],
-        ["responses", "routed_experts"],
-        ["responses"],
-    ]
+    assert calls == [["responses", "routed_experts"], ["responses"]]
     assert accumulator.routed_experts_retry_after_step == 2
     assert "missing_routed_experts" in accumulator.warned_skip_keys
 
-    data = get_metric_data_with_optional_routed_field(
+    data = get_metric_data_with_optional_routed_experts(
         keys=["k"],
         partition_id="train",
         fields=["responses"],
-        optional_fields=["routed_experts", "metrics"],
         moe_lb_metrics_interval=1,
         global_steps=1,
         accumulator=accumulator,
@@ -237,19 +229,12 @@ def test_get_metric_data_with_optional_fields_falls_back():
     )
 
     assert data == {"responses": "ok"}
-    assert calls == [
-        ["responses", "routed_experts", "metrics"],
-        ["responses", "routed_experts"],
-        ["responses"],
-        ["responses", "metrics"],
-        ["responses"],
-    ]
+    assert calls == [["responses", "routed_experts"], ["responses"], ["responses"]]
 
-    data = get_metric_data_with_optional_routed_field(
+    data = get_metric_data_with_optional_routed_experts(
         keys=["k"],
         partition_id="train",
         fields=["responses"],
-        optional_fields=["routed_experts", "metrics"],
         moe_lb_metrics_interval=1,
         global_steps=2,
         accumulator=accumulator,
@@ -258,12 +243,9 @@ def test_get_metric_data_with_optional_fields_falls_back():
 
     assert data == {"responses": "ok"}
     assert calls == [
-        ["responses", "routed_experts", "metrics"],
         ["responses", "routed_experts"],
         ["responses"],
-        ["responses", "metrics"],
         ["responses"],
-        ["responses", "routed_experts", "metrics"],
         ["responses", "routed_experts"],
         ["responses"],
     ]

@@ -58,7 +58,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_throughout_metrics,
     compute_timing_metrics,
     compute_variance_proxy_metrics,
-    get_metric_data_with_optional_routed_field,
+    get_metric_data_with_optional_routed_experts,
     process_validation_metrics,
 )
 from verl.trainer.ppo.padding_utils import upsample_batch_to_divisible_size
@@ -1727,14 +1727,13 @@ class PPOTrainer(ABC):
             "rm_scores",
             "token_level_rewards",
             "num_turns",
+            "metrics",
         ]
-        optional_fields = ["routed_experts", "metrics"]
         moe_lb_metrics_interval = self.config.actor_rollout_ref.rollout.get("moe_load_balance_metrics_interval", 0)
-        data = get_metric_data_with_optional_routed_field(
+        data = get_metric_data_with_optional_routed_experts(
             keys=batch.keys,
             partition_id=batch.partition_id,
             fields=fields,
-            optional_fields=optional_fields,
             moe_lb_metrics_interval=moe_lb_metrics_interval,
             global_steps=global_steps,
             accumulator=self._rollout_moe_lb_metrics_accumulator,
