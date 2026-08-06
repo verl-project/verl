@@ -26,6 +26,33 @@ from verl.workers.rollout.utils import ensure_async_iterator
 SGLANG_LORA_NAME = "verl_actor_lora_name"
 
 
+def normalize_peft_config_for_sglang(peft_config: dict) -> dict:
+    """Normalize an engine's adapter config into what SGLang's adapter loader accepts.
+
+    ``BaseEngine.get_per_tensor_param`` declares this value ``Optional[dict]``, and the
+    FSDP engine honours that with ``LoraConfig.to_dict()`` -- which leaves ``task_type``
+    and ``peft_type`` as enum members rather than the strings the wire format needs, so
+    unwrap them. The input is not mutated.
+
+    The megatron engine returns a differently shaped dict: ``build_peft_config_for_vllm()``
+    carries no ``peft_type`` key at all. Rather than guess a value for a path that has not
+    been exercised, reject it with a message that says so. Nothing regresses -- that
+    combination cannot reach SGLang today either, since the caller crashes further up.
+    """
+    normalized = dict(peft_config)
+    for key in ("task_type", "peft_type"):
+        if key in normalized:
+            normalized[key] = getattr(normalized[key], "value", normalized[key])
+    if "peft_type" not in normalized:
+        raise ValueError(
+            "adapter config has no 'peft_type', which SGLang's adapter loader requires. "
+            "The megatron engine's build_peft_config_for_vllm() omits it; that pairing is "
+            "not covered by this code path. Keys present: " + ", ".join(sorted(normalized))
+        )
+    normalized["target_modules"] = list(normalized["target_modules"])
+    return normalized
+
+
 def lora_served_as_adapter(model_config) -> bool:
     """Whether SGLang should serve LoRA as a hot-swappable adapter.
 

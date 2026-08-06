@@ -70,6 +70,8 @@ DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_RETRY_DELAY = 2.0
 DEFAULT_MAX_CONNECTIONS = 2000
 DEFAULT_MAX_WAIT_TIME = 300.0
+# Cap on how much of a failed response body reaches the log.
+_ERROR_BODY_CHARS = 2000
 
 
 def _read_response(response: requests.Response):
@@ -82,6 +84,16 @@ def _read_response(response: requests.Response):
             "content_type": response.headers.get("Content-Type", ""),
             "text": response.text,
         }
+
+
+def _log_error_body(endpoint: str, status: int, body: str) -> None:
+    """Log a failed response's body.
+
+    `raise_for_status()` reports only the status line, but SGLang returns the actual
+    reason -- a pydantic validation report, a scheduler traceback -- in the body, so
+    without this a 400 is indistinguishable from any other 400.
+    """
+    logger.error(f"HTTP {status} from {endpoint}: {body[:_ERROR_BODY_CHARS]}")
 
 
 async def _read_async_response(resp: aiohttp.ClientResponse) -> dict[str, Any]:
@@ -325,6 +337,8 @@ class HttpServerAdapter(EngineBase):
                 else:
                     response = requests.post(url, json=payload or {}, timeout=self.timeout)
 
+                if response.status_code >= 400:
+                    _log_error_body(endpoint, response.status_code, response.text)
                 response.raise_for_status()
                 return _read_response(response)
 
@@ -691,10 +705,14 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
                 async with self._get_session() as session:
                     if method.upper() == "GET":
                         async with session.get(url, timeout=timeout) as response:
+                            if response.status >= 400:
+                                _log_error_body(endpoint, response.status, await response.text())
                             response.raise_for_status()
                             return await _read_async_response(response)
                     else:
                         async with session.post(url, json=payload or {}, timeout=timeout) as response:
+                            if response.status >= 400:
+                                _log_error_body(endpoint, response.status, await response.text())
                             response.raise_for_status()
                             return await _read_async_response(response)
 
