@@ -286,27 +286,43 @@ def compute_rollout_moe_load_balance_metrics(
     return _compute_rollout_moe_load_balance_metrics_from_counts(load_counts, prefix=prefix)
 
 
-def get_metric_data_with_optional_routed_experts(
+def get_metric_data_with_optional_routed_field(
     keys: list[str],
     partition_id: str,
     fields: list[str],
+    optional_fields: list[str],
     moe_lb_metrics_interval: int,
     global_steps: int,
     accumulator: "RolloutMoELoadBalanceMetricsAccumulator",
     kv_batch_get: Callable[..., Any],
 ):
-    if moe_lb_metrics_interval <= 0 or not accumulator.should_request_routed_experts(global_steps):
-        return kv_batch_get(keys=keys, partition_id=partition_id, select_fields=fields)
-
-    fields_with_routed_experts = [*fields, "routed_experts"]
-    try:
-        return kv_batch_get(keys=keys, partition_id=partition_id, select_fields=fields_with_routed_experts)
-    except ValueError as exc:
-        if "routed_experts" not in str(exc):
-            raise
-        accumulator.defer_routed_experts_retry(global_steps, moe_lb_metrics_interval)
-        accumulator.warn_skip_once("missing_routed_experts", f"Skipping rollout MoE load-balance metrics: {exc}")
-        return kv_batch_get(keys=keys, partition_id=partition_id, select_fields=fields)
+    active_optional_fields = [
+        field
+        for field in optional_fields
+        if field != "routed_experts"
+        or (
+            moe_lb_metrics_interval > 0
+            and accumulator.should_request_routed_experts(global_steps)
+        )
+    ]
+    while True:
+        try:
+            return kv_batch_get(
+                keys=keys,
+                partition_id=partition_id,
+                select_fields=[*fields, *active_optional_fields],
+            )
+        except ValueError as exc:
+            missing_optional_fields = [field for field in active_optional_fields if field in str(exc)]
+            if not missing_optional_fields:
+                raise
+            for field in missing_optional_fields:
+                active_optional_fields.remove(field)
+                if field == "routed_experts":
+                    accumulator.defer_routed_experts_retry(global_steps, moe_lb_metrics_interval)
+                    accumulator.warn_skip_once(
+                        "missing_routed_experts", f"Skipping rollout MoE load-balance metrics: {exc}"
+                    )
 
 
 def compute_moe_lb_metrics(

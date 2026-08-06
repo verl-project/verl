@@ -58,7 +58,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_throughout_metrics,
     compute_timing_metrics,
     compute_variance_proxy_metrics,
-    get_metric_data_with_optional_routed_experts,
+    get_metric_data_with_optional_routed_field,
     process_validation_metrics,
 )
 from verl.trainer.ppo.padding_utils import upsample_batch_to_divisible_size
@@ -1728,31 +1728,18 @@ class PPOTrainer(ABC):
             "token_level_rewards",
             "num_turns",
         ]
+        optional_fields = ["routed_experts", "metrics"]
         moe_lb_metrics_interval = self.config.actor_rollout_ref.rollout.get("moe_load_balance_metrics_interval", 0)
-        # External agent frameworks may not publish the optional per-trajectory metrics field.
-        # Try to fetch it with the required fields, then fall back only when that field is missing.
-        try:
-            data = get_metric_data_with_optional_routed_experts(
-                keys=batch.keys,
-                partition_id=batch.partition_id,
-                fields=[*fields, "metrics"],
-                moe_lb_metrics_interval=moe_lb_metrics_interval,
-                global_steps=global_steps,
-                accumulator=self._rollout_moe_lb_metrics_accumulator,
-                kv_batch_get=tq.kv_batch_get,
-            )
-        except ValueError as exc:
-            if "metrics" not in str(exc):
-                raise
-            data = get_metric_data_with_optional_routed_experts(
-                keys=batch.keys,
-                partition_id=batch.partition_id,
-                fields=fields,
-                moe_lb_metrics_interval=moe_lb_metrics_interval,
-                global_steps=global_steps,
-                accumulator=self._rollout_moe_lb_metrics_accumulator,
-                kv_batch_get=tq.kv_batch_get,
-            )
+        data = get_metric_data_with_optional_routed_field(
+            keys=batch.keys,
+            partition_id=batch.partition_id,
+            fields=fields,
+            optional_fields=optional_fields,
+            moe_lb_metrics_interval=moe_lb_metrics_interval,
+            global_steps=global_steps,
+            accumulator=self._rollout_moe_lb_metrics_accumulator,
+            kv_batch_get=tq.kv_batch_get,
+        )
 
         num_turns = np.array(data.pop("num_turns").tolist())
         raw_agent_loop_metrics = data.pop("metrics", None)
