@@ -33,6 +33,44 @@ from verl.utils.ulysses import (
     slice_input_tensor,
 )
 
+_PREFIX_GROUPER_PATCHED = False
+_PREFIX_GROUPER_SUPPORTED_ATTENTIONS = {"flash_attention_2", "flash_attention_3", "sdpa", "flex_attention", "eager"}
+
+
+def _create_prefix_grouper_wrapper(original_fn):
+    """Wrap attention function to support prefix_grouper in kwargs."""
+
+    def wrapped(module, query, key, value, attention_mask, *args, **kwargs):
+        prefix_grouper = kwargs.pop("prefix_grouper", None)
+        if prefix_grouper is None:
+            return original_fn(module, query, key, value, attention_mask, *args, **kwargs)
+
+        def attn_func(q, k, v, attn_mask, *inner_args, **inner_kwargs):
+            out, _ = original_fn(module, q, k, v, attn_mask, *inner_args, **inner_kwargs)
+            return out
+
+        return prefix_grouper.forward(attn_func, query, key, value, *args, **kwargs), None
+
+    return wrapped
+
+
+def apply_prefix_grouper_patch():
+    """Patch ALL_ATTENTION_FUNCTIONS to support prefix_grouper parameter."""
+    global _PREFIX_GROUPER_PATCHED
+    if _PREFIX_GROUPER_PATCHED:
+        return
+
+    from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+    patched = []
+    for name in list(ALL_ATTENTION_FUNCTIONS.keys()):
+        if name in _PREFIX_GROUPER_SUPPORTED_ATTENTIONS:
+            ALL_ATTENTION_FUNCTIONS[name] = _create_prefix_grouper_wrapper(ALL_ATTENTION_FUNCTIONS[name])
+            patched.append(name)
+
+    _PREFIX_GROUPER_PATCHED = True
+    print(f"[PrefixGrouper] Patched: {patched}")
+
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
@@ -229,6 +267,11 @@ def patch_forward_with_backends(
 
         forward_with_torch_backend_function = forward_with_torch_backend
         forward_with_triton_backend_function = forward_with_triton_backend
+    elif model.config.model_type in ["qwen3_5", "qwen3_5_moe"]:
+        from verl.models.transformers.qwen3_5 import forward_with_torch_backend, forward_with_triton_backend
+
+        forward_with_torch_backend_function = forward_with_torch_backend
+        forward_with_triton_backend_function = forward_with_triton_backend
     else:
         from verl.models.transformers.dense_common import forward_with_torch_backend, forward_with_triton_backend
 
@@ -251,13 +294,35 @@ def apply_monkey_patch(
     use_remove_padding: bool = True,
     use_fused_kernels: bool = False,
     fused_kernels_backend: str = None,
+    use_prefix_grouper: bool = False,
+    use_tiled_mlp: bool = False,
+    tiled_mlp_shards: int = 4,
 ):
     """
-    Apply monkey patch to the models for ulysses sequence parallel and fused kernel.
+    Apply monkey patch to the models for ulysses sequence parallel, fused kernel, tiled MLP and prefix grouper.
 
     In the end of this function forward function of the model is patched for fused kernel.
     If the model is not supported with fused kernel, please return after patch.
+
+    Args:
+        model: The model to apply the monkey patch.
+        ulysses_sp_size: The size of ulysses sequence parallel.
+        use_remove_padding: Whether to use remove padding.
+        use_fused_kernels: Whether to use fused kernels.
+        fused_kernels_backend: The backend to use for fused kernels.
+        use_tiled_mlp: Whether to use TiledMLP for memory-efficient MLP computation.
+        tiled_mlp_shards: Number of shards for TiledMLP (higher = lower memory, slightly slower).
     """
+
+    # Apply TiledMLP monkey patch for memory-efficient MLP computation
+    if use_tiled_mlp:
+        from verl.models.transformers.tiled_mlp import apply_tiled_mlp_monkey_patch
+
+        model_type = getattr(model.config, "model_type", None)
+        apply_tiled_mlp_monkey_patch(num_shards=tiled_mlp_shards, model_type=model_type)
+    # Apply PrefixGrouper patch if enabled
+    if use_prefix_grouper:
+        apply_prefix_grouper_patch()
 
     """Replace _flash_attention_forward to _ulysses_flash_attention_forward"""
     module = sys.modules[model.__module__]
@@ -265,9 +330,11 @@ def apply_monkey_patch(
     try:
         num_attention_heads, num_key_value_heads = model.config.num_attention_heads, model.config.num_key_value_heads
     except AttributeError:
+        # Some multimodal configs nest text_config differently; fall back to get_text_config().
+        text_config = getattr(model.config, "text_config", None) or model.config.get_text_config()
         num_attention_heads, num_key_value_heads = (
-            model.config.text_config.num_attention_heads,
-            model.config.text_config.num_key_value_heads,
+            text_config.num_attention_heads,
+            text_config.num_key_value_heads,
         )
 
     assert num_attention_heads % ulysses_sp_size == 0, (
@@ -280,7 +347,10 @@ def apply_monkey_patch(
     )
 
     if is_trl_available():
-        from trl import AutoModelForCausalLMWithValueHead  # type: ignore
+        try:
+            from trl.experimental.ppo import AutoModelForCausalLMWithValueHead  # type: ignore
+        except ImportError:
+            from trl import AutoModelForCausalLMWithValueHead  # type: ignore
 
         def state_dict(self, *args, **kwargs):
             return torch.nn.Module.state_dict(self, *args, **kwargs)
@@ -349,20 +419,33 @@ def apply_monkey_patch(
             Qwen3VLForConditionalGeneration,
             Qwen3VLModel,
             Qwen3VLTextModel,
+            Qwen3VLVisionModel,
         )
         from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
             Qwen3VLMoeForConditionalGeneration,
             Qwen3VLMoeModel,
             Qwen3VLMoeTextModel,
+            Qwen3VLMoeVisionModel,
         )
 
-        from verl.models.transformers.qwen3_vl import forward_with_normal_backend, qwen3_vl_base_forward
+        from verl.models.transformers.qwen3_vl import (
+            fast_pos_embed_interpolate,
+            forward_with_normal_backend,
+            patch_qwen3_vl_moe_sparse_moe_block_forward,
+            qwen3_vl_base_forward,
+        )
 
         Qwen3VLModel.forward = qwen3_vl_base_forward
         Qwen3VLMoeModel.forward = qwen3_vl_base_forward
         Qwen3VLForConditionalGeneration.forward = forward_with_normal_backend
         Qwen3VLMoeForConditionalGeneration.forward = forward_with_normal_backend
+        Qwen3VLMoeVisionModel.fast_pos_embed_interpolate = fast_pos_embed_interpolate
+        Qwen3VLVisionModel.fast_pos_embed_interpolate = fast_pos_embed_interpolate
         print(f"Monkey patch {model.__class__.__name__} model forward")
+
+        # Step 1.5: patch Qwen3VLMoeTextSparseMoeBlock to fix transformers 4.57.3 bug
+        if model.config.model_type == "qwen3_vl_moe" and is_transformers_version_in_range(max_version="4.57.3"):
+            patch_qwen3_vl_moe_sparse_moe_block_forward()
 
         # Step 2: patch input for multimodal sequence parallelism
         if ulysses_sp_size > 1:
@@ -411,6 +494,49 @@ def apply_monkey_patch(
             print("Not support fused kernels for KimiVL")
 
         return
+    elif model.config.model_type in ["qwen3_5", "qwen3_5_moe"]:
+        # Step 1: patch model to support image-text mixed data
+        from transformers.models.qwen3_5.modeling_qwen3_5 import (
+            Qwen3_5DecoderLayer,
+            Qwen3_5ForConditionalGeneration,
+            Qwen3_5GatedDeltaNet,
+            Qwen3_5Model,
+            Qwen3_5TextModel,
+            Qwen3_5VisionModel,
+        )
+        from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+            Qwen3_5MoeDecoderLayer,
+            Qwen3_5MoeForConditionalGeneration,
+            Qwen3_5MoeGatedDeltaNet,
+            Qwen3_5MoeModel,
+            Qwen3_5MoeTextModel,
+            Qwen3_5MoeVisionModel,
+        )
+
+        from verl.models.transformers.qwen3_5 import (
+            fast_pos_embed_interpolate,
+            forward_with_normal_backend,
+            qwen3_5_base_forward,
+            qwen3_5_decoder_layer_forward,
+            qwen3_5_gated_delta_net_forward,
+        )
+
+        Qwen3_5Model.forward = qwen3_5_base_forward
+        Qwen3_5MoeModel.forward = qwen3_5_base_forward
+        Qwen3_5DecoderLayer.forward = qwen3_5_decoder_layer_forward
+        Qwen3_5MoeDecoderLayer.forward = qwen3_5_decoder_layer_forward
+        Qwen3_5GatedDeltaNet.forward = qwen3_5_gated_delta_net_forward
+        Qwen3_5MoeGatedDeltaNet.forward = qwen3_5_gated_delta_net_forward
+        Qwen3_5ForConditionalGeneration.forward = forward_with_normal_backend
+        Qwen3_5MoeForConditionalGeneration.forward = forward_with_normal_backend
+        print(f"Monkey patch {model.__class__.__name__} model forward")
+
+        # Step 2: patch vision model to fix fsdp2 cpu_offload bug.
+        Qwen3_5VisionModel.fast_pos_embed_interpolate = fast_pos_embed_interpolate
+        Qwen3_5MoeVisionModel.fast_pos_embed_interpolate = fast_pos_embed_interpolate
+        if ulysses_sp_size > 1:
+            patch_vlm_for_ulysses_input_slicing(Qwen3_5TextModel)
+            patch_vlm_for_ulysses_input_slicing(Qwen3_5MoeTextModel)
 
     if use_remove_padding or ulysses_sp_size > 1:
         if hasattr(module, "_flash_attention_forward"):  # transformers <= 4.47.1 or legacy models

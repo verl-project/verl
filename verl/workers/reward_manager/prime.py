@@ -22,13 +22,14 @@ import torch
 from transformers import PreTrainedTokenizer
 
 from verl import DataProto
+from verl.utils.ray_utils import get_event_loop
 from verl.utils.reward_score import default_compute_score
 from verl.workers.reward_manager import register
 from verl.workers.reward_manager.abstract import AbstractRewardManager
 
 
 async def single_compute_score(evaluation_func, completion, reference, task, task_extra_info, executor, timeout=300.0):
-    loop = asyncio.get_running_loop()
+    loop = get_event_loop()
     try:
         # Ensure process_completion is called properly
         future = loop.run_in_executor(executor, partial(evaluation_func, task, completion, reference, task_extra_info))
@@ -152,13 +153,9 @@ class PrimeRewardManager(AbstractRewardManager):
         """We will expand this function gradually based on the available datasets"""
 
         # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
-        if "rm_scores" in data.batch.keys():
-            if return_dict:
-                reward_extra_keys = data.meta_info.get("reward_extra_keys", [])
-                reward_extra_info = {key: data.non_tensor_batch[key] for key in reward_extra_keys}
-                return {"reward_tensor": data.batch["rm_scores"], "reward_extra_info": reward_extra_info}
-            else:
-                return data.batch["rm_scores"]
+        reward_from_rm_scores = self._extract_reward_from_rm_scores(data, return_dict)
+        if reward_from_rm_scores is not None:
+            return reward_from_rm_scores
 
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
 

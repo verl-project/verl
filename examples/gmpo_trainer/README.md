@@ -30,15 +30,12 @@ clip_ratio_high=0.4
 loss_mode=geo_mean
 ```
 We observed that using a large clip ratio during Mixture-of-Experts (MoE) model training often leads to optimization instability. When training MoE models, consider lowering the clip ratio to achieve more stable convergence.
-To get started quickly, run:
-```
-bash examples/gmpo_trainer/run_qwen2_5-7b_math.sh
-```
 
-GMPO can be combined with other methods such as DAPO (experimental - not fully tested):
-```
-bash examples/gmpo_trainer/test_dapo_7b_math.sh 
-bash examples/gmpo_trainer/test_dapo_qwen3_30b_math.sh
+To get started quickly:
+
+```bash
+bash examples/gmpo_trainer/run_qwen3_8b_fsdp.sh
+# override any of MODEL_PATH, CLIP_RATIO, ROLLOUT_N, etc. via env vars
 ```
 
 ## 4. Contacts

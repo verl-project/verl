@@ -20,14 +20,14 @@ _index_first_axis, _pad_input, _rearrange, _unpad_input = None, None, None, None
 def _get_attention_functions() -> tuple[Callable, Callable, Callable, Callable]:
     """Dynamically import attention functions based on available hardware."""
 
-    from verl.utils.device import is_cuda_available, is_npu_available
+    from verl.utils.device import is_torch_npu_available
 
     global _index_first_axis, _pad_input, _rearrange, _unpad_input
 
-    if is_cuda_available:
+    if is_torch_npu_available(check_device=False):
+        from verl.utils.npu_flash_attn_utils import index_first_axis, pad_input, rearrange, unpad_input
+    else:
         from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
-    elif is_npu_available:
-        from verl.utils.npu_utils import index_first_axis, pad_input, rearrange, unpad_input
 
     _index_first_axis, _pad_input, _rearrange, _unpad_input = index_first_axis, pad_input, rearrange, unpad_input
 

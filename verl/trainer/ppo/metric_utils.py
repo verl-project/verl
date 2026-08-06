@@ -15,15 +15,25 @@
 Metrics related to the PPO trainer.
 """
 
+import logging
 from collections import defaultdict
 from functools import partial
 from typing import Any, Callable
 
 import numpy as np
 import torch
+from omegaconf import DictConfig, OmegaConf
+from transformers import AutoConfig
 
+import verl.utils.torch_functional as verl_F
 from verl import DataProto
+from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import deprecated
+from verl.utils.model import update_model_config
+
+logger = logging.getLogger(__name__)
+
+_NUM_LOCAL_EXPERTS_MODEL_TYPES = {"gpt_oss", "mixtral"}
 
 
 @deprecated("verl.utils.metric.reduce_metrics")
@@ -62,6 +72,12 @@ def _compute_response_info(batch: DataProto) -> dict[str, Any]:
             - prompt_length: Tensor of prompt lengths for each item in the batch
             - response_length: Tensor of response lengths for each item in the batch
     """
+    if "prompt_length" in batch.batch and "response_length" in batch.batch:
+        return dict(
+            prompt_length=batch.batch["prompt_length"],
+            response_length=batch.batch["response_length"],
+        )
+
     response_length = batch.batch["responses"].shape[-1]
 
     prompt_mask = batch.batch["attention_mask"][:, :-response_length]
@@ -71,10 +87,343 @@ def _compute_response_info(batch: DataProto) -> dict[str, Any]:
     response_length = response_mask.sum(-1).float()  # (batch_size,)
 
     return dict(
-        response_mask=response_mask,
         prompt_length=prompt_length,
         response_length=response_length,
     )
+
+
+def _get_nested_attr(obj: Any, name: str) -> Any:
+    if hasattr(obj, "get"):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def get_hf_config_override_kwargs(override_config: Any) -> dict[str, Any]:
+    if isinstance(override_config, DictConfig):
+        override_config = OmegaConf.to_container(override_config, resolve=True)
+    if not override_config:
+        return {}
+    if "model_config" in override_config:
+        return override_config["model_config"]
+    return override_config
+
+
+def _get_config_value(config: Any, key: str, default: Any = None) -> Any:
+    if hasattr(config, "get"):
+        return config.get(key, default)
+    return getattr(config, key, default)
+
+
+def infer_moe_num_experts(model_config: Any) -> int | None:
+    """Infer the global number of routed experts from an in-memory config-like object."""
+    candidates = [model_config]
+    hf_config = _get_nested_attr(model_config, "hf_config")
+    text_config = _get_nested_attr(model_config, "text_config")
+    override_config = _get_nested_attr(model_config, "override_config")
+    if hf_config is not None:
+        candidates.append(hf_config)
+        hf_text_config = _get_nested_attr(hf_config, "text_config")
+        if hf_text_config is not None:
+            candidates.append(hf_text_config)
+    if text_config is not None:
+        candidates.append(text_config)
+    if override_config is not None:
+        candidates.append(override_config)
+        override_model_config = _get_nested_attr(override_config, "model_config")
+        if override_model_config is not None:
+            candidates.append(override_model_config)
+        override_text_config = _get_nested_attr(override_config, "text_config")
+        if override_text_config is not None:
+            candidates.append(override_text_config)
+
+    for candidate in candidates:
+        for attr in ("num_experts", "n_routed_experts"):
+            value = _get_nested_attr(candidate, attr)
+            if value is not None:
+                return int(value)
+        if _get_nested_attr(candidate, "model_type") in _NUM_LOCAL_EXPERTS_MODEL_TYPES:
+            value = _get_nested_attr(candidate, "num_local_experts")
+            if value is not None:
+                return int(value)
+    return None
+
+
+def infer_rollout_moe_num_experts(model_config: Any) -> int | None:
+    """Infer rollout MoE num_experts, loading the HF config only when needed."""
+    num_experts = infer_moe_num_experts(model_config)
+    if num_experts is not None:
+        return num_experts
+
+    hf_config_path = (
+        _get_config_value(model_config, "local_hf_config_path")
+        or _get_config_value(model_config, "hf_config_path")
+        or _get_config_value(model_config, "path")
+    )
+    if hf_config_path is None:
+        return None
+
+    local_hf_config_path = copy_to_local(hf_config_path, use_shm=_get_config_value(model_config, "use_shm", False))
+    hf_config = AutoConfig.from_pretrained(
+        local_hf_config_path,
+        trust_remote_code=_get_config_value(model_config, "trust_remote_code", False),
+    )
+    override_config = get_hf_config_override_kwargs(_get_config_value(model_config, "override_config", {}))
+    if override_config:
+        update_model_config(hf_config, override_config)
+    return infer_moe_num_experts(hf_config)
+
+
+def _compute_rollout_moe_load_balance_metrics_from_counts(
+    load_counts: torch.Tensor | None,
+    prefix: str = "rollout/moe",
+) -> dict[str, Any]:
+    if load_counts is None or load_counts.numel() == 0:
+        return {}
+
+    load_matrix = load_counts.float()
+    load_matrix = load_matrix / load_matrix.sum(dim=1, keepdim=True).clamp_min(1.0)
+    num_experts = load_matrix.shape[1]
+    deviation = load_matrix * num_experts - 1.0
+    max_vio = deviation.max(dim=1).values
+    min_vio = deviation.min(dim=1).values
+    avg_vio = deviation.abs().mean(dim=1)
+
+    metrics: dict[str, Any] = {}
+    for i in range(load_matrix.shape[0]):
+        metrics[f"{prefix}/max_vio/layer_{i}"] = max_vio[i].detach().item()
+        metrics[f"{prefix}/min_vio/layer_{i}"] = min_vio[i].detach().item()
+        metrics[f"{prefix}/avg_vio/layer_{i}"] = avg_vio[i].detach().item()
+    metrics[f"{prefix}/max_vio/max"] = max_vio.max().detach().item()
+    metrics[f"{prefix}/max_vio/avg"] = max_vio.mean().detach().item()
+    metrics[f"{prefix}/min_vio/max"] = min_vio.max().detach().item()
+    metrics[f"{prefix}/min_vio/avg"] = min_vio.mean().detach().item()
+    metrics[f"{prefix}/avg_vio/max"] = avg_vio.max().detach().item()
+    metrics[f"{prefix}/avg_vio/avg"] = avg_vio.mean().detach().item()
+    return metrics
+
+
+def _compute_rollout_moe_load_counts(
+    routed_experts: torch.Tensor | None,
+    response_mask: torch.Tensor | None,
+    num_experts: int | None,
+) -> torch.Tensor | None:
+    """Count routed experts in response tokens as [num_layers, num_experts].
+
+    Each sequence's last valid response position is excluded: that token is
+    sampled but never fed back through the model, so it carries no routing
+    record (its slot is filler, not data).
+    """
+    if routed_experts is None or response_mask is None or num_experts is None or num_experts <= 0:
+        return None
+    if routed_experts.dim() != 4:
+        logger.warning("Expected routed_experts with shape [bsz, seqlen, layers, topk], got %s", routed_experts.shape)
+        return None
+    if response_mask.dim() != 2 or response_mask.shape[0] != routed_experts.shape[0]:
+        logger.warning(
+            "Response mask shape %s is incompatible with routed_experts %s", response_mask.shape, routed_experts.shape
+        )
+        return None
+
+    response_len = response_mask.shape[1]
+    if response_len == 0:
+        return None
+    if routed_experts.shape[1] < response_len:
+        logger.warning(
+            "routed_experts sequence length %s is shorter than response length %s",
+            routed_experts.shape[1],
+            response_len,
+        )
+        return None
+
+    response_routed_experts = routed_experts[:, -response_len:]
+    response_mask = response_mask.to(device=response_routed_experts.device, dtype=torch.bool)
+    # The final response token is sampled but never fed back through the model,
+    # so it has no routing record; its slot holds filler from batch assembly
+    # (zeros, see AgentLoopWorker._postprocess). Counting it would credit
+    # expert 0 with num_layers * topk phantom assignments per sequence, so drop
+    # each sequence's last valid position. This is the metrics counterpart of
+    # build_r3_replay_mask, which skips the same row on the replay side.
+    positions = torch.arange(response_len, device=response_mask.device)
+    last_valid = torch.where(response_mask, positions, positions.new_full((), -1)).amax(dim=-1)
+    has_valid = last_valid >= 0
+    is_last_valid = (positions.unsqueeze(0) == last_valid.unsqueeze(1)) & has_valid.unsqueeze(1)
+    response_mask = response_mask & ~is_last_valid
+    selected = response_routed_experts[response_mask]
+    selected = selected.detach().to(device="cpu", dtype=torch.long)
+    if selected.numel() == 0:
+        return None
+    if selected.min() < 0 or selected.max() >= num_experts:
+        logger.warning(
+            "Skipping rollout MoE load-balance metrics because routed expert ids are outside [0, %s): min=%s max=%s",
+            num_experts,
+            selected.min().item(),
+            selected.max().item(),
+        )
+        return None
+
+    # selected: [num_response_tokens, num_layers, topk]. Count every top-k slot
+    # without materializing a large [tokens, layers, topk, experts] one-hot tensor.
+    return torch.stack(
+        [
+            torch.bincount(selected[:, layer_idx, :].flatten(), minlength=num_experts)
+            for layer_idx in range(selected.shape[1])
+        ]
+    )
+
+
+def compute_rollout_moe_load_balance_metrics(
+    routed_experts: torch.Tensor | None,
+    response_mask: torch.Tensor | None,
+    num_experts: int | None,
+    prefix: str = "rollout/moe",
+) -> dict[str, Any]:
+    """Compute rollout MoE load-balance metrics from returned routed expert ids."""
+    load_counts = _compute_rollout_moe_load_counts(
+        routed_experts=routed_experts,
+        response_mask=response_mask,
+        num_experts=num_experts,
+    )
+    return _compute_rollout_moe_load_balance_metrics_from_counts(load_counts, prefix=prefix)
+
+
+def get_metric_data_with_optional_routed_experts(
+    keys: list[str],
+    partition_id: str,
+    fields: list[str],
+    moe_lb_metrics_interval: int,
+    global_steps: int,
+    accumulator: "RolloutMoELoadBalanceMetricsAccumulator",
+    kv_batch_get: Callable[..., Any],
+):
+    if moe_lb_metrics_interval <= 0 or not accumulator.should_request_routed_experts(global_steps):
+        return kv_batch_get(keys=keys, partition_id=partition_id, select_fields=fields)
+
+    fields_with_routed_experts = [*fields, "routed_experts"]
+    try:
+        return kv_batch_get(keys=keys, partition_id=partition_id, select_fields=fields_with_routed_experts)
+    except ValueError as exc:
+        if "routed_experts" not in str(exc):
+            raise
+        accumulator.defer_routed_experts_retry(global_steps, moe_lb_metrics_interval)
+        accumulator.warn_skip_once("missing_routed_experts", f"Skipping rollout MoE load-balance metrics: {exc}")
+        return kv_batch_get(keys=keys, partition_id=partition_id, select_fields=fields)
+
+
+def compute_moe_lb_metrics(
+    metrics_batch: DataProto,
+    moe_lb_metrics_interval: int,
+    global_steps: int,
+    accumulator: "RolloutMoELoadBalanceMetricsAccumulator",
+) -> dict[str, Any]:
+    if moe_lb_metrics_interval <= 0:
+        return {}
+
+    updated_moe_lb_metrics = accumulator.update(
+        routed_experts=metrics_batch.batch.get("routed_experts", None),
+        response_mask=metrics_batch.batch.get("response_mask", None),
+    )
+    if global_steps % moe_lb_metrics_interval != 0:
+        return {}
+
+    routed_expert_assignments = accumulator.total_assignments()
+    metrics = accumulator.pop_metrics()
+    metrics["rollout/moe/routed_experts_found"] = float(routed_expert_assignments > 0)
+    metrics["rollout/moe/routed_expert_assignments"] = routed_expert_assignments
+    if not updated_moe_lb_metrics and routed_expert_assignments == 0:
+        accumulator.warn_skip_once(
+            "no_routed_expert_counts",
+            "Skipping rollout MoE load-balance metrics because no routed expert counts were found.",
+        )
+    return metrics
+
+
+class RolloutMoELoadBalanceMetricsAccumulator:
+    """Accumulate rollout MoE routed expert counts across a logging interval."""
+
+    def __init__(self, model_config: Any | None = None):
+        self.model_config = model_config
+        self.load_counts: torch.Tensor | None = None
+        self.num_experts: int | None = None
+        self.num_experts_initialized = False
+        self.routed_experts_retry_after_step = 0
+        self.warned_skip_keys: set[str] = set()
+
+    def should_request_routed_experts(self, global_steps: int) -> bool:
+        return global_steps >= self.routed_experts_retry_after_step
+
+    def defer_routed_experts_retry(self, global_steps: int, interval: int) -> None:
+        self.routed_experts_retry_after_step = global_steps + max(interval, 1)
+
+    def _infer_num_experts(self) -> int | None:
+        if self.num_experts_initialized:
+            return self.num_experts
+
+        if self.model_config is not None:
+            try:
+                self.num_experts = infer_rollout_moe_num_experts(self.model_config)
+            except Exception as exc:
+                self.warn_skip_once(
+                    "num_experts_exception", f"Failed to infer rollout MoE num_experts from model config: {exc}"
+                )
+
+        self.num_experts_initialized = True
+        if self.num_experts is None:
+            self.warn_skip_once(
+                "num_experts_missing",
+                "Skipping rollout MoE load-balance metrics because num_experts could not be inferred "
+                "from actor_rollout_ref.model or the Hugging Face config.",
+            )
+        return self.num_experts
+
+    def warn_skip_once(self, key: str, message: str) -> None:
+        if key in self.warned_skip_keys:
+            return
+        logger.warning(message)
+        self.warned_skip_keys.add(key)
+
+    def update(
+        self,
+        routed_experts: torch.Tensor | None,
+        response_mask: torch.Tensor | None,
+        num_experts: int | None = None,
+    ) -> bool:
+        if num_experts is None:
+            num_experts = self._infer_num_experts()
+        load_counts = _compute_rollout_moe_load_counts(
+            routed_experts=routed_experts,
+            response_mask=response_mask,
+            num_experts=num_experts,
+        )
+        if load_counts is None:
+            return False
+        if self.load_counts is None:
+            self.load_counts = load_counts
+        elif self.load_counts.shape == load_counts.shape:
+            self.load_counts += load_counts
+        else:
+            logger.warning(
+                "Resetting rollout MoE load-balance accumulator because count shape changed from %s to %s",
+                self.load_counts.shape,
+                load_counts.shape,
+            )
+            self.load_counts = load_counts
+        return True
+
+    def compute(self, prefix: str = "rollout/moe") -> dict[str, Any]:
+        return _compute_rollout_moe_load_balance_metrics_from_counts(self.load_counts, prefix=prefix)
+
+    def total_assignments(self) -> int:
+        if self.load_counts is None:
+            return 0
+        return int(self.load_counts.sum().item())
+
+    def reset(self) -> None:
+        self.load_counts = None
+
+    def pop_metrics(self, prefix: str = "rollout/moe") -> dict[str, Any]:
+        metrics = self.compute(prefix=prefix)
+        self.reset()
+        return metrics
 
 
 def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str, Any]:
@@ -107,12 +456,10 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     advantages = batch.batch["advantages"]
     returns = batch.batch["returns"]
 
+    max_prompt_length = batch.batch["prompts"].shape[-1]
     max_response_length = batch.batch["responses"].shape[-1]
 
-    prompt_mask = batch.batch["attention_mask"][:, :-max_response_length].bool()
     response_mask = batch.batch["response_mask"].bool()
-
-    max_prompt_length = prompt_mask.size(-1)
 
     response_info = _compute_response_info(batch)
     prompt_length = response_info["prompt_length"]
@@ -124,22 +471,40 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     non_aborted_sequence_score = sequence_score[non_aborted_mask]
     non_aborted_sequence_reward = sequence_reward[non_aborted_mask]
 
-    score_mean = torch.mean(non_aborted_sequence_score).detach().item()
-    score_max = torch.max(non_aborted_sequence_score).detach().item()
-    score_min = torch.min(non_aborted_sequence_score).detach().item()
+    if non_aborted_sequence_score.numel() > 0:
+        score_mean = torch.mean(non_aborted_sequence_score).detach().item()
+        score_max = torch.max(non_aborted_sequence_score).detach().item()
+        score_min = torch.min(non_aborted_sequence_score).detach().item()
+    else:
+        logger.warning("All samples are aborted, returning default score metrics")
+        score_mean = score_max = score_min = float("nan")
 
-    reward_mean = torch.mean(non_aborted_sequence_reward).detach().item()
-    reward_max = torch.max(non_aborted_sequence_reward).detach().item()
-    reward_min = torch.min(non_aborted_sequence_reward).detach().item()
+    if non_aborted_sequence_reward.numel() > 0:
+        reward_mean = torch.mean(non_aborted_sequence_reward).detach().item()
+        reward_max = torch.max(non_aborted_sequence_reward).detach().item()
+        reward_min = torch.min(non_aborted_sequence_reward).detach().item()
+    else:
+        logger.warning("All samples are aborted, returning default reward metrics")
+        reward_mean = reward_max = reward_min = float("nan")
 
     valid_adv = torch.masked_select(advantages, response_mask)
     valid_returns = torch.masked_select(returns, response_mask)
 
-    if use_critic:
-        values = batch.batch["values"]
-        valid_values = torch.masked_select(values, response_mask)
-        return_diff_var = torch.var(valid_returns - valid_values)
-        return_var = torch.var(valid_returns)
+    if valid_adv.numel() > 0:
+        adv_mean = torch.mean(valid_adv).detach().item()
+        adv_max = torch.max(valid_adv).detach().item()
+        adv_min = torch.min(valid_adv).detach().item()
+    else:
+        logger.warning("Response mask is all False, returning default advantage metrics")
+        adv_mean = adv_max = adv_min = float("nan")
+
+    if valid_returns.numel() > 0:
+        returns_mean = torch.mean(valid_returns).detach().item()
+        returns_max = torch.max(valid_returns).detach().item()
+        returns_min = torch.min(valid_returns).detach().item()
+    else:
+        logger.warning("Response mask is all False, returning default return metrics")
+        returns_mean = returns_max = returns_min = float("nan")
 
     # Aborted samples and non-aborted response length statistics
     # response_length_non_aborted/*: statistics computed on non-aborted samples only
@@ -154,7 +519,37 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
             torch.mean(torch.eq(non_aborted_response_length, max_response_length).float()).detach().item()
         )
     else:
-        raise ValueError("All samples are aborted, this should not happen.")
+        logger.warning("All samples are aborted, returning default response length metrics")
+        non_aborted_response_length_mean = float("nan")
+        non_aborted_response_length_max = float("nan")
+        non_aborted_response_length_min = float("nan")
+        non_aborted_response_length_clip_ratio = float("nan")
+
+    if use_critic:
+        values = batch.batch["values"]
+        valid_values = torch.masked_select(values, response_mask)
+        if valid_returns.numel() > 0 and valid_values.numel() > 0:
+            return_diff_var = torch.var(valid_returns - valid_values)
+            return_var = torch.var(valid_returns)
+            critic_value_metrics = {
+                # values
+                "critic/values/mean": torch.mean(valid_values).detach().item(),
+                "critic/values/max": torch.max(valid_values).detach().item(),
+                "critic/values/min": torch.min(valid_values).detach().item(),
+                # vf explained var
+                "critic/vf_explained_var": (1.0 - return_diff_var / (return_var + 1e-5)).detach().item(),
+            }
+        else:
+            logger.warning("Response mask is all False, returning default value metrics")
+            critic_value_metrics = {
+                "critic/values/mean": float("nan"),
+                "critic/values/max": float("nan"),
+                "critic/values/min": float("nan"),
+                # vf explained var
+                "critic/vf_explained_var": float("nan"),
+            }
+    else:
+        critic_value_metrics = {}
 
     metrics = {
         # score
@@ -166,25 +561,14 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         "critic/rewards/max": reward_max,
         "critic/rewards/min": reward_min,
         # adv
-        "critic/advantages/mean": torch.mean(valid_adv).detach().item(),
-        "critic/advantages/max": torch.max(valid_adv).detach().item(),
-        "critic/advantages/min": torch.min(valid_adv).detach().item(),
+        "critic/advantages/mean": adv_mean,
+        "critic/advantages/max": adv_max,
+        "critic/advantages/min": adv_min,
         # returns
-        "critic/returns/mean": torch.mean(valid_returns).detach().item(),
-        "critic/returns/max": torch.max(valid_returns).detach().item(),
-        "critic/returns/min": torch.min(valid_returns).detach().item(),
-        **(
-            {
-                # values
-                "critic/values/mean": torch.mean(valid_values).detach().item(),
-                "critic/values/max": torch.max(valid_values).detach().item(),
-                "critic/values/min": torch.min(valid_values).detach().item(),
-                # vf explained var
-                "critic/vf_explained_var": (1.0 - return_diff_var / (return_var + 1e-5)).detach().item(),
-            }
-            if use_critic
-            else {}
-        ),
+        "critic/returns/mean": returns_mean,
+        "critic/returns/max": returns_max,
+        "critic/returns/min": returns_min,
+        **critic_value_metrics,
         # response length
         "response_length/mean": torch.mean(response_length).detach().item(),
         "response_length/max": torch.max(response_length).detach().item(),
@@ -272,7 +656,9 @@ def compute_timing_metrics(batch: DataProto, timing_raw: dict[str, float]) -> di
     return {
         **{f"timing_s/{name}": value for name, value in timing_raw.items()},
         **{
-            f"timing_per_token_ms/{name}": timing_raw[name] * 1000 / num_tokens_of_section[name]
+            f"timing_per_token_ms/{name}": (
+                timing_raw[name] * 1000 / num_tokens_of_section[name] if num_tokens_of_section[name] > 0 else 0.0
+            )
             for name in set(num_tokens_of_section.keys()) & set(timing_raw.keys())
         },
     }
@@ -314,6 +700,120 @@ def compute_throughout_metrics(batch: DataProto, timing_raw: dict[str, float], n
     }
 
 
+def compute_variance_proxy_metrics(batch: DataProto, gradient_norm: float = None) -> dict[str, float]:
+    """
+    Compute variance proxy metrics using the simplified expected squared norm approach.
+
+    This metric provides a computationally efficient way to monitor gradient variance
+    during training. It works for any advantage estimator as long as sum_pi_squared
+    is available from the actor.
+
+    Theory:
+    - Full variance: Var(g̃) = E[||g̃||²] - ||g_true||²
+    - Simplified proxy (when ||g_true||² ≈ 0): Var(g̃) ≈ E[||g̃||²]
+    - Using W-score approximation: E[||g̃||²] ≈ E[A² × W(τ)]
+
+    Where W(τ) = Σ_t[1 - 2π_t(y_t) + Σπ²] is the score-norm proxy.
+    """
+    metrics = {}
+
+    # Check if we have the necessary data (sum_pi_squared is required for W-score)
+    if "sum_pi_squared" not in batch.batch or "old_log_probs" not in batch.batch or "advantages" not in batch.batch:
+        return metrics
+
+    # Compute W(τ) = Σ_t[1 - 2π_t(y_t) + Σπ²]
+    pi_t = torch.exp(batch.batch["old_log_probs"])
+    w_per_timestep = 1 - 2 * pi_t + batch.batch["sum_pi_squared"]
+
+    # Get response mask to only consider valid tokens
+    response_mask = batch.batch["response_mask"]
+
+    # Use pre-computed rollout IS weights from batch (for variance proxy consistency with training loss)
+    # IS weights are computed centrally in ray_trainer.py to avoid duplication
+    rollout_is_weights = None
+    if "rollout_is_weights" in batch.batch:
+        # Extract pre-computed IS weights from batch (already computed in trainer)
+        rollout_is_weights = batch.batch["rollout_is_weights"]
+
+        # Scale W by (rollout IS weight)² for optimal baseline under biased estimation
+        w_per_timestep = w_per_timestep * (rollout_is_weights**2).detach()
+
+        # Note: IS weight statistics and mismatch metrics are logged in ray_trainer.py
+
+    # Get scalar advantages (mean over timesteps)
+    advantages = batch.batch["advantages"]
+    # Compute mean advantage per trajectory using masked_mean
+    advantages_scalar = verl_F.masked_mean(advantages, response_mask, axis=-1)
+
+    # Compute W values (sum over timesteps)
+    w_values = verl_F.masked_sum(w_per_timestep, response_mask, axis=-1)
+
+    # ====== COMPUTE VARIANCE PROXIES ======
+    # Variance proxy should match the actual gradient computation:
+    # - If IS weights were computed/applied: use them in variance proxy calculation
+    # - Otherwise: compute on-policy variance proxy
+
+    # ====== PROXY 1: Signal Strength ||ḡ||² ======
+    # The squared norm of the mean gradient (provided from training loop)
+    proxy1_signal_strength = gradient_norm**2 if gradient_norm is not None else None
+
+    # ====== PROXY 2: Total Power E[||ĝ_τ||²] ======
+    # Measures the average of squared gradient norms (Signal + Noise)
+    if rollout_is_weights is not None:
+        # Off-policy with IS correction applied: use clamped weights consistently with actual gradient computation
+        rollout_is_weights_scalar = verl_F.masked_mean(rollout_is_weights, response_mask, axis=-1)
+        # Recover original W (before IS correction was applied in line 657)
+        # Clamp to avoid division by zero when IS weights are zero
+        w_original = verl_F.masked_sum(
+            w_per_timestep / torch.clamp((rollout_is_weights**2).detach(), min=1e-10), response_mask, axis=-1
+        )
+        # Clamp W to avoid negative values (which would cause NaN in sqrt)
+        w_original = torch.clamp(w_original, min=0.0)
+        # Proxy 2 for off-policy: E[ρ̄² × A² × W]
+        proxy2_total_power = ((rollout_is_weights_scalar**2) * (advantages_scalar**2) * w_original).mean()
+
+    else:
+        # On-policy Proxy 2: E[A² × W]
+        # Clamp W to avoid negative values (which would cause NaN in sqrt)
+        w_values_clamped = torch.clamp(w_values, min=0.0)
+        proxy2_total_power = (advantages_scalar**2 * w_values_clamped).mean()
+
+    # ====== PROXY 3: Pure Noise - Variance of Mean Vector ======
+    # Requires ||ḡ||² from actual batch gradient
+    # Formula: (1/(N-1)) × (Proxy2 - Proxy1)
+    proxy3_pure_noise = None
+    if proxy1_signal_strength is not None:
+        batch_size = advantages_scalar.shape[0]
+        if batch_size > 1:
+            proxy3_pure_noise = (1.0 / (batch_size - 1)) * (proxy2_total_power - proxy1_signal_strength)
+            # Ensure non-negative (can be negative due to numerical errors)
+            proxy3_pure_noise = max(
+                0.0, proxy3_pure_noise.item() if torch.is_tensor(proxy3_pure_noise) else proxy3_pure_noise
+            )
+
+    # Decompose into components for analysis
+    expected_a_squared = (advantages_scalar**2).mean()
+    expected_w = w_values.mean()
+
+    metrics.update(
+        {
+            # Proxy 1: Signal Strength ||ḡ||²
+            "variance_proxy/proxy1_signal_strength": (
+                proxy1_signal_strength if proxy1_signal_strength is not None else 0.0
+            ),
+            # Proxy 2: Total Power E[||ĝ_τ||²]
+            "variance_proxy/proxy2_total_power": proxy2_total_power.detach().item(),
+            # Proxy 3: Pure Noise - Variance of Mean Vector
+            "variance_proxy/proxy3_pure_noise": proxy3_pure_noise if proxy3_pure_noise is not None else 0.0,
+            # Component metrics for debugging
+            "variance_proxy/expected_a_squared": expected_a_squared.detach().item(),
+            "variance_proxy/expected_w": expected_w.detach().item(),
+        }
+    )
+
+    return metrics
+
+
 def bootstrap_metric(
     data: list[Any],
     subset_size: int,
@@ -345,14 +845,28 @@ def bootstrap_metric(
         [(3.0, 0.5), (4.5, 0.3)]  # Example values
     """
     np.random.seed(seed)
+    data_np = np.array(data, dtype=object)
+    n_data = len(data_np)
 
-    bootstrap_metric_lsts = [[] for _ in range(len(reduce_fns))]
-    for _ in range(n_bootstrap):
-        bootstrap_idxs = np.random.choice(len(data), size=subset_size, replace=True)
-        bootstrap_data = [data[i] for i in bootstrap_idxs]
-        for i, reduce_fn in enumerate(reduce_fns):
-            bootstrap_metric_lsts[i].append(reduce_fn(bootstrap_data))
-    return [(np.mean(lst), np.std(lst)) for lst in bootstrap_metric_lsts]
+    # generate bootstrap indices, shape: (n_bootstrap, subset_size)
+    bootstrap_idxs = np.random.choice(n_data, size=(n_bootstrap, subset_size), replace=True)
+
+    # pre-allocate result array, shape: (n_fns, n_bootstrap)
+    n_fns = len(reduce_fns)
+    metric_results = np.empty((n_fns, n_bootstrap), dtype=np.float64)
+
+    # compute metric results for each bootstrap sample
+    for fn_idx, reduce_fn in enumerate(reduce_fns):
+        # bootstrap sample and compute metric
+        for boot_idx in range(n_bootstrap):
+            sample = data_np[bootstrap_idxs[boot_idx]]
+            metric_results[fn_idx, boot_idx] = reduce_fn(sample)
+
+    # compute mean and std for each metric function
+    result = [
+        (float(np.mean(metric_results[fn_idx])), float(np.std(metric_results[fn_idx]))) for fn_idx in range(n_fns)
+    ]
+    return result
 
 
 def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> float:
@@ -443,47 +957,88 @@ def process_validation_metrics(
         for var_name, var_vals in infos_dict.items():
             var2vals[var_name].append(var_vals[sample_idx])
 
-    # Calculate metrics for each group
-    data_src2uid2var2metric = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
+    np_mean = np.mean
+    np_std = np.std
+    reduce_fns_best_worst = [np.max, np.min]
+    n_bootstrap = 1000
+
+    # 2. cache ns list
+    def gen_ns(n_resps: int) -> list[int]:
+        if n_resps <= 1:
+            return []
+        ns = []
+        n = 2
+        while n < n_resps:
+            ns.append(n)
+            n *= 2
+        ns.append(n_resps)
+        return ns
+
+    ns_cache = {}
+
+    # 3. cache metric results
+    data_src2uid2var2metric = {}
+
+    # 4. flatten loop
     for data_source, uid2var2vals in data_src2uid2var2vals.items():
+        # create uid dict
+        uid_dict = data_src2uid2var2metric.setdefault(data_source, {})
+
         for uid, var2vals in uid2var2vals.items():
+            pred_vals = var2vals.get("pred")
+            has_pred = pred_vals is not None
+            var_dict = uid_dict.setdefault(uid, {})
+
             for var_name, var_vals in var2vals.items():
-                if isinstance(var_vals[0], str):
+                # skip empty or string values
+                if not var_vals or isinstance(var_vals[0], str):
                     continue
 
-                metric = {}
+                # compute mean and std
                 n_resps = len(var_vals)
-                metric[f"mean@{n_resps}"] = np.mean(var_vals)
+                metric = {f"mean@{n_resps}": float(np_mean(var_vals))}
 
                 if n_resps > 1:
-                    metric[f"std@{n_resps}"] = np.std(var_vals)
+                    metric[f"std@{n_resps}"] = float(np_std(var_vals))
 
-                    ns = []
-                    n = 2
-                    while n < n_resps:
-                        ns.append(n)
-                        n *= 2
-                    ns.append(n_resps)
+                    # cache ns list
+                    if n_resps not in ns_cache:
+                        ns_cache[n_resps] = gen_ns(n_resps)
+                    ns = ns_cache[n_resps]
 
+                    # compute best/worst metrics
                     for n in ns:
-                        [(bon_mean, bon_std), (won_mean, won_std)] = bootstrap_metric(
-                            data=var_vals, subset_size=n, reduce_fns=[np.max, np.min], seed=seed
+                        # compute best/worst metrics
+                        (bon_mean, bon_std), (won_mean, won_std) = bootstrap_metric(
+                            data=var_vals,
+                            subset_size=n,
+                            reduce_fns=reduce_fns_best_worst,
+                            n_bootstrap=n_bootstrap,
+                            seed=seed,
                         )
-                        metric[f"best@{n}/mean"], metric[f"best@{n}/std"] = bon_mean, bon_std
-                        metric[f"worst@{n}/mean"], metric[f"worst@{n}/std"] = won_mean, won_std
-                        if var2vals.get("pred", None) is not None:
+                        metric[f"best@{n}/mean"] = bon_mean
+                        metric[f"best@{n}/std"] = bon_std
+                        metric[f"worst@{n}/mean"] = won_mean
+                        metric[f"worst@{n}/std"] = won_std
+
+                        # compute maj metrics
+                        if has_pred:
+                            # create vote_data
                             vote_data = [
-                                {"val": val, "pred": pred} for val, pred in zip(var_vals, var2vals["pred"], strict=True)
+                                {"val": val, "pred": pred} for val, pred in zip(var_vals, pred_vals, strict=True)
                             ]
+                            # compute maj metrics
                             [(maj_n_mean, maj_n_std)] = bootstrap_metric(
                                 data=vote_data,
                                 subset_size=n,
                                 reduce_fns=[partial(calc_maj_val, vote_key="pred", val_key="val")],
+                                n_bootstrap=n_bootstrap,
                                 seed=seed,
                             )
-                            metric[f"maj@{n}/mean"], metric[f"maj@{n}/std"] = maj_n_mean, maj_n_std
+                            metric[f"maj@{n}/mean"] = maj_n_mean
+                            metric[f"maj@{n}/std"] = maj_n_std
 
-                data_src2uid2var2metric[data_source][uid][var_name] = metric
+                var_dict[var_name] = metric
 
     # Aggregate metrics across uids
     data_src2var2metric2uid_vals = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
@@ -498,5 +1053,4 @@ def process_validation_metrics(
         for var_name, metric2uid_vals in var2metric2uid_vals.items():
             for metric_name, uid_vals in metric2uid_vals.items():
                 data_src2var2metric2val[data_source][var_name][metric_name] = np.mean(uid_vals)
-
     return data_src2var2metric2val

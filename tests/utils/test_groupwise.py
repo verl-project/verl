@@ -65,8 +65,46 @@ def test_group_mean_std_simple():
     assert pytest.approx(std_g[0].item(), rel=1e-6) == (2.0**0.5)
 
 
+def test_group_mean_std_low_variance_matches_torch_std():
+    scores = torch.tensor([1.0, 1.00001, 2.0, 2.00001], dtype=torch.float32)
+    gidx = as_torch_index(["prompt-a", "prompt-a", "prompt-b", "prompt-b"])
+
+    mean_g, std_g, cnt_g = group_mean_std(scores, gidx, eps=0.0)
+
+    assert torch.allclose(mean_g, torch.tensor([1.000005, 2.000005]), rtol=1e-5, atol=1e-6)
+    assert torch.equal(cnt_g, torch.tensor([2.0, 2.0]))
+    assert torch.allclose(std_g[0], torch.std(scores[:2]), rtol=1e-5, atol=1e-6)
+    assert torch.allclose(std_g[1], torch.std(scores[2:]), rtol=1e-5, atol=1e-6)
+
+
 def test_group_mean_std_empty():
     scores = torch.tensor([], dtype=torch.float32)
     gidx = torch.tensor([], dtype=torch.long)
     mean_g, std_g, cnt_g = group_mean_std(scores, gidx)
     assert mean_g.numel() == 0 and std_g.numel() == 0 and cnt_g.numel() == 0
+
+
+def test_group_mean_std_default_device_no_force_env(monkeypatch):
+    """
+    Regression test:
+    - group_mean_std(device=None) must not pass a device *module* (e.g., torch.cuda)
+      into Tensor.to(device=...), which crashes with:
+      TypeError: to() received an invalid combination of arguments - got (..., device=module, ...)
+    """
+    # Simulate a non-pytest environment (training code path) while keeping the test CPU-only.
+    monkeypatch.delenv("VERL_FORCE_DEVICE", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+
+    # Force device selection to CPU even if CUDA is available on the test machine.
+    # Must patch the reference in groupwise module directly (it uses `from ... import get_device_name`).
+    import verl.utils.groupwise as groupwise_mod
+
+    monkeypatch.setattr(groupwise_mod, "get_device_name", lambda: "cpu")
+
+    scores = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)
+    gidx = torch.tensor([0, 1, 0], dtype=torch.long)
+
+    mean_g, std_g, cnt_g = group_mean_std(scores, gidx)
+    assert mean_g.device.type == "cpu"
+    assert std_g.device.type == "cpu"
+    assert cnt_g.device.type == "cpu"

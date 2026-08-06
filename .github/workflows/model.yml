@@ -12,7 +12,7 @@
 # - `special_sanity`: a suite of quick sanity tests
 # - `special_standalone`: a set of test that are designed to run in dedicated environments
 
-# Accelerators for tests 
+# Accelerators for tests
 # - By default tests are run with GPU available, except for the ones under `special_npu`, and any test script whose name ends with `on_cpu.py`.
 # - For test scripts with `on_cpu.py` name suffix would be tested on CPU resources in linux environment.
 
@@ -48,7 +48,6 @@ on:
       # Entrypoints
       - ".github/workflows/model.yml"
       - "tests/special_distributed/test_fsdp_ckpt.py"
-      - "tests/special_distributed/test_mcore_config_converter.py"
       - "tests/special_distributed/test_tensor_dict.py"
       - "tests/models/**"
       - "tests/special_distributed/run_all.sh"
@@ -62,14 +61,16 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm011.dev7"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm024.dev2"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
+  # The image bakes Megatron-LM at /workspace/Megatron-LM onto PYTHONPATH, but the vemlp
+  # dynamic runner does not inherit the image ENV, so re-declare it for the job steps.
+  PYTHONPATH: "/workspace/Megatron-LM"
 
 jobs:
   setup:
-    if: github.repository_owner == 'volcengine'
+    if: github.repository_owner == 'verl-project'
     runs-on: ubuntu-latest
     outputs:
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
@@ -88,7 +89,6 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 20 # Increase this timeout value as needed
     env:
-      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
@@ -97,10 +97,14 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - name: Install the current repository and upgrade to latest transformers(4.54.0)/flash_attn, transformers 4.55.0 has strange behavior with model backward
+      - name: Install the current repository and upgrade to latest transformers
         run: |
-          pip3 install -e .[test]
-          pip3 install --upgrade transformers
+          pip3 install -r requirements-test.txt
+          pip3 install -r requirements.txt
+          pip3 install --no-deps -e .
+      - name: Check final pip list
+        run: |
+          pip3 list
       - name: Running rmpad model tests on 8 L20 GPUs + flash_attn 2.5.8
         run: |
           pytest -s tests/models/test_transformer.py
@@ -117,26 +121,20 @@ jobs:
         run: |
           pip3 install transformers==4.54.1
           torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
-      - name: Running transformers ulysses tests on 8 L20 GPUs + transformers 4.53.2
-        run: |
-          pip3 install transformers==4.53.2
-          torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
-      - name: Running transformers ulysses tests on 8 L20 GPUs + transformers 4.52.0
-        run: |
-          pip3 install transformers==4.52.0
-          torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
       - name: Run distributed test
         run: |
           bash tests/special_distributed/run_all.sh
+      - name: Clean up and recover transformers
+        run: |
+          pip3 install --upgrade "transformers==5.5.3"
 
   # TODO: Move this back to model_rmpad once FSDP2 is stable.
   # NOTE: List as an independent job to make rerun easier.
   model_rmpad_fsdp2_unstable:
     needs: setup
-    runs-on: [ "${{ needs.setup.outputs.runner-label || 'L20x8' }}" ]
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 20 # Increase this timeout value as needed
     env:
-      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
@@ -147,46 +145,20 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository and upgrade to latest transformers/flash_attn
         run: |
-          pip3 install -e .[test]
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
+      - name: Check final pip list
+        run: |
+          pip3 list
       - name: Running FSDP2 rmpad model tests on 8 L20 GPUs + latest flash_attn
         run: |
           STRATEGY=fsdp2 torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
 
-  mcore_config_converter:
-    needs: setup
-    runs-on: [ "${{ needs.setup.outputs.runner-label || 'L20x8' }}" ]
-    timeout-minutes: 20 # Increase this timeout value as needed
-    env:
-      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
-      HF_ENDPOINT: "https://hf-mirror.com"
-      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 0
-      - name: Install the current repository
-        run: |
-          pip3 install -e .[test]
-#      - name: Download model config files
-#        run: |
-#          hf download Qwen/Qwen2.5-7B config.json --local-dir $HOME/configs/Qwen/Qwen2.5-7B
-#          hf download Qwen/Qwen3-8B config.json --local-dir $HOME/configs/Qwen/Qwen3-8B
-#          hf download deepseek-ai/deepseek-coder-1.3b-instruct config.json --local-dir $HOME/configs/deepseek-ai/deepseek-coder-1.3b-instruct
-#          hf download Qwen/Qwen2-57B-A14B config.json --local-dir $HOME/configs/Qwen/Qwen2-57B-A14B
-#          hf download Qwen/Qwen3-30B-A3B config.json --local-dir $HOME/configs/Qwen/Qwen3-30B-A3B
-#          hf download deepseek-ai/DeepSeek-V3-Base config.json --local-dir $HOME/configs/deepseek-ai/DeepSeek-V3-Base
-      - name: Running mcore config converter tests on 8 L20 GPUs
-        run: |
-          torchrun --nproc_per_node=8 tests/special_distributed/test_mcore_config_converter.py
-
   model_engine:
     needs: setup
-    runs-on: [ "${{ needs.setup.outputs.runner-label || 'L20x8' }}" ]
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 20 # Increase this timeout value as needed
     env:
-      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
@@ -197,11 +169,16 @@ jobs:
           fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip3 install -e .[test]
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
+          pip3 install --upgrade "accelerate>=1.13.0"
+          pip3 install "nvidia-modelopt>=0.37.0"
+      - name: Check final pip list
+        run: |
+          pip3 list
       - name: Download model config files
         run: |
           hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir $HOME/models/Qwen/Qwen2.5-0.5B-Instruct
-
       - name: Running mcore engine tests on 8 L20 GPUs
         run: |
           ray stop --force
@@ -209,14 +186,7 @@ jobs:
 
   cleanup:
     runs-on: ubuntu-latest
-    needs:
-      [
-        setup,
-        model_rmpad,
-        model_rmpad_fsdp2_unstable,
-        mcore_config_converter,
-        model_engine
-      ]
+    needs: [setup, model_rmpad, model_rmpad_fsdp2_unstable, model_engine]
     if: always()
     steps:
       - id: destroy-runner

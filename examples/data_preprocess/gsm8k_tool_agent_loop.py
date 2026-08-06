@@ -102,10 +102,6 @@ if __name__ == "__main__":
                             # "release_kwargs": {},
                         },
                     },
-                    "interaction_kwargs": {
-                        "query": question,
-                        "ground_truth": solution,
-                    },
                 },
             }
             return data

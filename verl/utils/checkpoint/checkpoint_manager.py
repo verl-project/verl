@@ -98,6 +98,20 @@ class BaseCheckpointManager:
         return "hf_model" in self.checkpoint_save_contents
 
     @property
+    def should_save_lora_only(self) -> bool:
+        if not self.checkpoint_config:
+            return False
+        if isinstance(self.checkpoint_config, dict):
+            return self.checkpoint_config.get("save_lora_only", False)
+        return getattr(self.checkpoint_config, "save_lora_only", False)
+
+    @staticmethod
+    def is_lora_only_state_dict(state_dict: dict) -> bool:
+        if not state_dict:
+            return False
+        return all("lora_" in k or ".adapter_" in k for k in state_dict)
+
+    @property
     def should_load_model(self) -> bool:
         """
         Returns True if 'model' is in checkpoint_load_contents, indicating the model state should be loaded.
@@ -117,6 +131,14 @@ class BaseCheckpointManager:
         Returns True if 'extra' is in checkpoint_load_contents, indicating the extra state should be loaded.
         """
         return "extra" in self.checkpoint_load_contents
+
+    @property
+    def should_load_hf_model(self) -> bool:
+        """
+        Returns True if 'hf_model' is in checkpoint_load_contents, indicating an HF-format model
+        checkpoint should be loaded (e.g. via a bridge).
+        """
+        return "hf_model" in self.checkpoint_load_contents
 
     def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load: bool = False):
         raise NotImplementedError
@@ -140,6 +162,36 @@ class BaseCheckpointManager:
             if not os.path.exists(abs_path):
                 continue
             shutil.rmtree(abs_path, ignore_errors=True)
+
+    def ensure_checkpoint_capacity(self, max_ckpt_to_keep: int):
+        """
+        Remove old checkpoints to make room for a new one, keeping a safety buffer.
+
+        With max_ckpt_to_keep=1, this does nothing - we keep the existing checkpoint
+        until the new save completes successfully (handled by register_checkpoint).
+        For max_ckpt_to_keep >= 2, we keep (max_ckpt_to_keep - 1) checkpoints before save.
+        """
+        if not (max_ckpt_to_keep and isinstance(max_ckpt_to_keep, int) and max_ckpt_to_keep > 1):
+            return
+        if len(self.previous_saved_paths) >= max_ckpt_to_keep:
+            keep_start = len(self.previous_saved_paths) - max_ckpt_to_keep + 1
+            self.remove_previous_save_local_path(self.previous_saved_paths[:keep_start])
+            self.previous_saved_paths = self.previous_saved_paths[keep_start:]
+
+    def register_checkpoint(self, new_path: str, max_ckpt_to_keep: int):
+        """
+        Register a successfully saved checkpoint and enforce retention limit.
+
+        Adds the new checkpoint path to tracking and removes excess old
+        checkpoints beyond max_ckpt_to_keep.
+        """
+        self.previous_saved_paths.append(new_path)
+        if not (max_ckpt_to_keep and isinstance(max_ckpt_to_keep, int) and max_ckpt_to_keep > 0):
+            return
+        if len(self.previous_saved_paths) > max_ckpt_to_keep:
+            keep_start = len(self.previous_saved_paths) - max_ckpt_to_keep
+            self.remove_previous_save_local_path(self.previous_saved_paths[:keep_start])
+            self.previous_saved_paths = self.previous_saved_paths[keep_start:]
 
     @staticmethod
     def get_rng_state():

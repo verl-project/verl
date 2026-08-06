@@ -55,3 +55,67 @@ def is_transformers_version_in_range(min_version: Optional[str] = None, max_vers
         upper_bound_check = transformers_version <= version.parse(max_version)
 
     return lower_bound_check and upper_bound_check
+
+
+@lru_cache
+def get_auto_model_for_vision2seq():
+    """Return the available VL auto model class across transformers versions."""
+
+    try:
+        # Prefer the newer class when available. In transformers 4.x this class has
+        # a broader mapping than AutoModelForVision2Seq, and AutoModelForVision2Seq
+        # is deprecated for removal in v5.
+        from transformers import AutoModelForImageTextToText
+    except ImportError:
+        from transformers import AutoModelForVision2Seq
+
+        return AutoModelForVision2Seq
+
+    return AutoModelForImageTextToText
+
+
+def unpack_visual_output(visual_output):
+    """Unpack the output from the visual encoder, handling both tuple and object return types.
+
+    Newer versions of transformers return an object with `pooler_output` and `deepstack_features`
+    attributes instead of a plain tuple.
+    """
+    if hasattr(visual_output, "pooler_output"):
+        # For newer versions(>=5.0.0) of transformers, return the pooler_output and deepstack_features
+        if hasattr(visual_output, "deepstack_features"):
+            return visual_output.pooler_output, visual_output.deepstack_features
+        else:
+            return visual_output.pooler_output, None
+    if isinstance(visual_output, tuple):
+        return visual_output
+    else:
+        return visual_output, None
+
+
+def drop_tied_target_keys(state_dict, model, model_config) -> None:
+    """Drop tied alias keys (e.g. ``lm_head.weight``) from ``state_dict``.
+
+    FSDP gather and the model merger materialise one independent CPU tensor
+    per state_dict key, which defeats ``save_pretrained``'s storage-pointer-
+    based dedup. When both keys end up in safetensors, ``transformers>=5``
+    silently refuses to re-tie on reload. Detects aliases by ``Parameter``
+    identity after ``tie_weights()``.
+
+    Only drops the alias when the canonical name has been confirmed to exist
+    in ``state_dict``; otherwise the alias is promoted to canonical so we
+    never accidentally remove every entry for a tied parameter.
+    """
+    if not getattr(model_config, "tie_word_embeddings", False):
+        return
+    model.tie_weights()
+    canonical_by_id: dict[int, str] = {}
+    for name, param in model.named_parameters(remove_duplicate=False):
+        pid = id(param)
+        if pid not in canonical_by_id:
+            canonical_by_id[pid] = name
+            continue
+        if canonical_by_id[pid] in state_dict:
+            state_dict.pop(name, None)
+        else:
+            # Canonical name absent: promote the alias instead of erasing it.
+            canonical_by_id[pid] = name

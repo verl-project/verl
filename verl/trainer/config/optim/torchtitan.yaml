@@ -1,0 +1,35 @@
+# Target class for this configuration
+_target_: verl.workers.config.TorchtitanOptimizerConfig
+
+# Optimizer name
+name: AdamW
+
+# Learning rate
+lr: 1e-3
+
+# LR warmup steps ratio
+lr_warmup_steps_ratio: 0.0
+
+# Total training steps
+total_training_steps: -1
+
+# Weight decay
+weight_decay: 0.01
+
+# LR warmup steps
+lr_warmup_steps: -1
+
+# Betas for Adam optimizer
+betas: [0.9, 0.999]
+
+# Clip gradient
+clip_grad: 1.0
+
+# Epsilon for Adam optimizer
+eps: 1e-8
+
+# Decay type: "linear", "sqrt", or "cosine"
+decay_type: linear
+
+# Minimum LR factor for cosine schedule
+min_lr_factor: 0.0

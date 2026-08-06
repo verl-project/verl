@@ -536,7 +536,7 @@ def enable_activation_offloading(model, strategy, enable_ckpt=False):
 
     get_layers(model)
     if len(layers) < 3:
-        logger.warning(f"Find only {len(layers)} fsdp layers, not neccessary to enable async activation offloading")
+        logger.warning(f"Find only {len(layers)} fsdp layers, not necessary to enable async activation offloading")
         return
 
     tensor_filter = FSDPParameterFilter()

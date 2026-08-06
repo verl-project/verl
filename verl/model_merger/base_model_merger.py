@@ -14,21 +14,21 @@
 
 import argparse
 import os
+import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional
 
 import torch
 from accelerate import init_empty_weights
-from transformers import (
-    AutoConfig,
-    AutoModelForCausalLM,
-    AutoModelForTokenClassification,
-    AutoModelForVision2Seq,
-    GenerationConfig,
-)
+from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForTokenClassification, GenerationConfig
 
 from verl.utils import hf_processor, hf_tokenizer
+from verl.utils.transformers_compat import drop_tied_target_keys, get_auto_model_for_vision2seq
+
+from .output_validation import validate_hf_model_output
+
+AutoModelForVision2Seq = get_auto_model_for_vision2seq()
 
 
 def parse_args():
@@ -124,6 +124,21 @@ class ModelMergerConfig:
             self.private = False
 
 
+def _default_hf_model_config_path(backend: str, local_dir: str) -> str:
+    """Return the default path to HuggingFace config/tokenizer artifacts.
+
+    - FSDP: ``<local_dir>/huggingface`` (unchanged, single-tree layout).
+    - Megatron (v2 layout): ``<local_dir>/model/huggingface`` — the HF tree
+      is nested under ``model/`` alongside the optional ``model/dist_ckpt/``
+      shards.  Checkpoints produced before the v2 refactor will therefore
+      not resolve here; run ``scripts/migrate_megatron_checkpoint_layout.py``
+      first.
+    """
+    if backend == "megatron":
+        return os.path.join(local_dir, "model", "huggingface")
+    return os.path.join(local_dir, "huggingface")
+
+
 def generate_config_from_args(args: argparse.Namespace) -> ModelMergerConfig:
     common_config_args = {
         "operation": args.operation,
@@ -132,7 +147,7 @@ def generate_config_from_args(args: argparse.Namespace) -> ModelMergerConfig:
         "trust_remote_code": args.trust_remote_code,
         "is_value_model": args.is_value_model,
         "local_dir": args.local_dir,
-        "hf_model_config_path": os.path.join(args.local_dir, "huggingface"),
+        "hf_model_config_path": _default_hf_model_config_path(args.backend, args.local_dir),
         "use_cpu_initialization": args.use_cpu_initialization,
     }
 
@@ -203,6 +218,8 @@ class BaseModelMerger(ABC):
                     return AutoModelForTokenClassification
                 case "AutoModelForVision2Seq":
                     return AutoModelForVision2Seq
+                case "AutoModelForImageTextToText":
+                    return AutoModelForVision2Seq
                 case _:
                     raise NotImplementedError(f"Unknown auto class {auto_class}")
         else:
@@ -218,19 +235,78 @@ class BaseModelMerger(ABC):
     def patch_model_generation_config(self, model):
         """
         The generation_config created from model config may be different to the pretrained model,
-        this may lead to error when generating: https://github.com/volcengine/verl/issues/1246
+        this may lead to error when generating: https://github.com/verl-project/verl/issues/1246
 
         This function patch the generation_config created from model config to the pretrained model.
         """
         if model.can_generate():
-            try:
-                model.generation_config = GenerationConfig.from_pretrained(self.hf_model_config_path)
-            except OSError:
+            generation_config = self.load_generation_config()
+            if generation_config is not None:
+                model.generation_config = generation_config
+        return model
+
+    def load_generation_config(self, warn_if_missing: bool = True):
+        """Load the generation config stored alongside the pretrained model config."""
+        generation_config_path = os.path.join(self.hf_model_config_path, "generation_config.json")
+        if not os.path.isfile(generation_config_path):
+            if warn_if_missing:
                 print(
                     f"Warning: Generation config file not found in {self.hf_model_config_path}, using a "
                     f"generation config created from the model config."
                 )
-        return model
+            return None
+        return GenerationConfig.from_pretrained(self.hf_model_config_path)
+
+    def save_generation_config(self, target_dir):
+        """Preserve the pretrained generation config in a merged model directory."""
+        generation_config = self.load_generation_config(warn_if_missing=False)
+        if generation_config is not None:
+            generation_config.save_pretrained(target_dir)
+        else:
+            stale_config_path = os.path.join(target_dir, "generation_config.json")
+            if os.path.isfile(stale_config_path):
+                os.remove(stale_config_path)
+
+    def _load_lora_train_meta(self) -> Optional[dict[str, object]]:
+        if not self.config.local_dir:
+            return None
+
+        meta_path = os.path.join(self.config.local_dir, "lora_train_meta.json")
+        if not os.path.exists(meta_path):
+            return None
+
+        import json
+
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                lora_meta = json.load(f)
+        except Exception as e:
+            warnings.warn(f"Failed to read LoRA metadata from {meta_path}: {e}", stacklevel=2)
+            return None
+
+        result = {}
+        if "r" in lora_meta:
+            try:
+                result["r"] = int(lora_meta["r"])
+            except (TypeError, ValueError):
+                warnings.warn(f"Invalid LoRA rank in {meta_path}: {lora_meta['r']}", stacklevel=2)
+
+        if "lora_alpha" in lora_meta:
+            try:
+                result["lora_alpha"] = int(lora_meta["lora_alpha"])
+            except (TypeError, ValueError):
+                warnings.warn(f"Invalid lora_alpha in {meta_path}: {lora_meta['lora_alpha']}", stacklevel=2)
+
+        if "task_type" in lora_meta:
+            task_type = lora_meta["task_type"]
+            if task_type is None:
+                pass
+            elif isinstance(task_type, str):
+                result["task_type"] = task_type
+            else:
+                warnings.warn(f"Invalid task_type in {meta_path}: {task_type}", stacklevel=2)
+
+        return result if len(result) > 0 else None
 
     def save_lora_adapter(self, state_dict: dict[str, torch.Tensor]):
         """
@@ -262,15 +338,57 @@ class BaseModelMerger(ABC):
             target_modules.add(lora_key.split(".")[-3])
             lora_params[lora_key] = state_dict.pop(name)
 
-        lora_rank = min(lora_params[lora_key].shape[0], lora_params[lora_key].shape[1])
+        inferred_lora_rank = min(lora_params[lora_key].shape[0], lora_params[lora_key].shape[1])
+        lora_meta = self._load_lora_train_meta()
+
+        lora_rank = inferred_lora_rank
+        lora_alpha = 0
+        task_type = None
+
+        if lora_meta is not None:
+            meta_rank = lora_meta.get("r")
+            if meta_rank is not None and meta_rank > 0:
+                if meta_rank != inferred_lora_rank:
+                    warnings.warn(
+                        f"LoRA rank mismatch between metadata ({meta_rank}) and adapter weights "
+                        f"({inferred_lora_rank}); using metadata rank.",
+                        stacklevel=2,
+                    )
+                lora_rank = meta_rank
+
+            meta_alpha = lora_meta.get("lora_alpha")
+            if meta_alpha is not None:
+                lora_alpha = meta_alpha
+
+            meta_task_type = lora_meta.get("task_type")
+            if meta_task_type is not None:
+                task_type = meta_task_type
+
+        if lora_alpha == 0:
+            warnings.warn(
+                "LoRA alpha metadata is missing or equals 0; falling back to lora_alpha=0. "
+                "Please verify checkpoint LoRA metadata (lora_train_meta.json).",
+                stacklevel=2,
+            )
+
         peft_dict = {
             "r": lora_rank,
-            "lora_alpha": 0,  # lora_alpha is not set. An error should be raised to inform the user to set it manually.
+            "lora_alpha": lora_alpha,
             "target_modules": list(target_modules),
         }
+        if task_type is not None:
+            peft_dict["task_type"] = task_type
         peft_config = peft.LoraConfig(**peft_dict).to_dict()
-        peft_config["task_type"] = peft_config["task_type"].value if peft_config["task_type"] else None
-        peft_config["peft_type"] = peft_config["peft_type"].value if peft_config["peft_type"] else None
+        peft_config["task_type"] = (
+            peft_config["task_type"].value
+            if hasattr(peft_config["task_type"], "value")
+            else (peft_config["task_type"] or None)
+        )
+        peft_config["peft_type"] = (
+            peft_config["peft_type"].value
+            if hasattr(peft_config["peft_type"], "value")
+            else (peft_config["peft_type"] or None)
+        )
         peft_config["target_modules"] = list(peft_config["target_modules"])
 
         lora_path = os.path.join(self.config.target_dir, "lora_adapter")
@@ -302,6 +420,8 @@ class BaseModelMerger(ABC):
         if lora_path:
             print(f"Saving lora adapter to {lora_path}")
 
+        drop_tied_target_keys(state_dict, model, self.model_config)
+
         print(f"Saving model to {self.config.target_dir}")
         model.save_pretrained(self.config.target_dir, state_dict=state_dict)
         del state_dict
@@ -315,6 +435,8 @@ class BaseModelMerger(ABC):
         if tokenizer is not None:
             print(f"Saving tokenizer to {self.config.target_dir}")
             tokenizer.save_pretrained(self.config.target_dir)
+
+        validate_hf_model_output(self.config.target_dir)
 
     def upload_to_huggingface(self):
         import requests

@@ -1,0 +1,207 @@
+# Copyright 2024 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import logging
+import os
+from enum import Enum
+
+import ray
+from omegaconf import DictConfig
+from transfer_queue import KVBatchMeta
+
+from verl.checkpoint_engine import CheckpointEngineManager
+from verl.experimental.separation.engine_workers import DetachActorWorker
+from verl.trainer.ppo.utils import Role, need_reward_model
+from verl.trainer.ppo.v1.trainer_base import PPOTrainer, register_trainer
+from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.debug import marked_timer
+from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient, LLMServerManager
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
+
+
+class HybridEngineMode(Enum):
+    TRAINER = "trainer"
+    ROLLOUT = "rollout"
+
+
+@register_trainer("separate_async")
+class PPOTrainerSeparateAsync(PPOTrainer):
+    """Asynchronous PPO trainer
+    1. Trainer and rollout are separate, trainer may switch to rollout if idle.
+    2. Partial rollout is enabled.
+    """
+
+    def __init__(self, config: DictConfig):
+        train_batch_size = config.data.train_batch_size
+        ppo_mini_batch_size = config.actor_rollout_ref.actor.ppo_mini_batch_size
+        parameter_sync_step = config.trainer.v1.separate_async.parameter_sync_step
+        assert train_batch_size == parameter_sync_step * ppo_mini_batch_size, (
+            f"train_batch_size must equal parameter_sync_step * ppo_mini_batch_size in separate async "
+            f"training, but got train_batch_size={train_batch_size}, "
+            f"parameter_sync_step={parameter_sync_step}, ppo_mini_batch_size={ppo_mini_batch_size}"
+        )
+        assert config.actor_rollout_ref.rollout.nnodes > 0, "nnodes must be > 0 in separate async training"
+        assert config.actor_rollout_ref.rollout.n_gpus_per_node > 0, (
+            "n_gpus_per_node must be > 0 in separate async training"
+        )
+        assert config.actor_rollout_ref.rollout.checkpoint_engine.backend != "naive", (
+            "please use nccl/nixl/mooncake, etc. backend for separate async training"
+        )
+        if need_reward_model(config):
+            assert config.reward.reward_model.enable_resource_pool, (
+                "Colocate reward model (reward.reward_model.enable_resource_pool=False) is not supported "
+                "in separate async mode, because the standalone rollout never pauses to free GPU memory. "
+                "Use standalone mode (reward.reward_model.enable_resource_pool=True) instead."
+            )
+
+        super().__init__(config)
+
+    def _init_resource_pool_mgr(self):
+        super()._init_resource_pool_mgr()
+        # Replace ActorRolloutRefWorker with DetachActorWorker to get CPU save/restore
+        # capability needed for Decoupled PPO when parameter_sync_step > 1.
+        # The base class adds exactly one of ActorRolloutRef or ActorRollout to the mapping.
+        if Role.ActorRolloutRef in self.role_worker_mapping:
+            self.role_worker_mapping[Role.ActorRolloutRef] = ray.remote(DetachActorWorker)
+        elif Role.ActorRollout in self.role_worker_mapping:
+            self.role_worker_mapping[Role.ActorRollout] = ray.remote(DetachActorWorker)
+
+    def _setup(self):
+        super()._setup()
+
+        # initialize standalone rollout
+        # TODO: make initialization parallel with super().init()
+        hybrid_num_replicas = len(self.llm_server_manager.rollout_replicas)
+        self.standalone_server_manager: LLMServerManager = LLMServerManager.create(
+            config=self.config, start_rank=hybrid_num_replicas
+        )
+
+        # create checkpoint engine manager for trainer and standalone rollout
+        checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
+        self.standalone_checkpoint_manager = CheckpointEngineManager(
+            config=checkpoint_engine_config,
+            actor_wg=self.actor_rollout_wg,
+            replicas=self.standalone_server_manager.get_replicas(),
+        )
+
+        # hybrid engine is in rollout mode after initialization
+        self.current_mode = HybridEngineMode.ROLLOUT
+        self.add_replicas_to_balancer()
+
+    def _compute_old_log_prob(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
+        """Version-aware old_log_probs computation for Decoupled PPO.
+
+        In bypass mode, delegates to the base class (copies rollout_log_probs directly).
+        In Decoupled mode, uses save_model_to_cpu / restore_model_from_cpu to ensure
+        all mini-batches within a parameter_sync_step cycle use the same stable π_old.
+
+        - local_trigger_step == 0: Current weights are π_old → save to CPU, compute directly.
+        - local_trigger_step >= 1: Save current weights → restore π_old → compute → restore current.
+        """
+        rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
+        bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
+        if bypass_recomputing_logprobs:
+            return super()._compute_old_log_prob(batch, metrics)
+
+        if self.local_trigger_step == 0:
+            self.actor_rollout_wg.save_model_to_cpu(0)
+            return super()._compute_old_log_prob(batch, metrics)
+        else:
+            self.actor_rollout_wg.save_model_to_cpu(self.local_trigger_step)
+            self.actor_rollout_wg.restore_model_from_cpu(0)
+            result = super()._compute_old_log_prob(batch, metrics)
+            self.actor_rollout_wg.restore_model_from_cpu(self.local_trigger_step)
+            self.actor_rollout_wg.clear_cpu_model(self.local_trigger_step)
+            return result
+
+    def get_llm_client(self):
+        # get server client from standalone rollout
+        return self.standalone_server_manager.get_client(client_cls=FullyAsyncLLMServerClient)
+
+    def on_init_end(self):
+        # update weights after loading checkpoint
+        self.standalone_checkpoint_manager.update_weights(self.global_steps)
+        self.checkpoint_manager.update_weights(self.global_steps)
+
+    def on_train_begin(self):
+        if self.config.skip.rollout_tq.enable:
+            return
+        num_warmup_batches = self.config.trainer.v1.separate_async.num_warmup_batches
+        for _ in range(num_warmup_batches):
+            self._add_batch_to_generate()
+        logger.info(f"Added {num_warmup_batches} warmup batches to the agent loop manager")
+
+    def on_validate_begin(self):
+        if self.current_mode == HybridEngineMode.TRAINER:
+            logger.info("Switching hybrid engine to rollout mode for validation")
+            self.switch_to_rollout()
+
+    def on_sample_begin(self):
+        if self.current_mode == HybridEngineMode.TRAINER and self.should_switch_to_rollout():
+            logger.info("Switching hybrid engine to rollout mode for generation")
+            self.switch_to_rollout()
+
+    def on_sample_end(self):
+        if self.current_mode == HybridEngineMode.ROLLOUT:
+            logger.info("Switching hybrid engine to trainer mode for training")
+            self.switch_to_trainer()
+
+    def on_step_end(self):
+        with marked_timer("update_weights", self.timing_raw, color="red"):
+            # wake up all replicas to update weights; the manager returns the
+            # engines' per-sync metrics (empty for backends that track none)
+            self._pending_sync_metrics = self.standalone_checkpoint_manager.update_weights(self.global_steps)
+
+    def _get_n_gpus_for_throughput(self) -> int:
+        """Include standalone rollout GPUs in the throughput denominator.
+
+        The standalone rollout runs on GPUs that are not part of the trainer
+        resource pool, so ``resource_pool_manager.get_n_gpus()`` alone
+        undercounts the total hardware footprint.
+        """
+        trainer_gpus = self.resource_pool_manager.get_n_gpus()
+        rollout_gpus = (
+            self.config.actor_rollout_ref.rollout.n_gpus_per_node * self.config.actor_rollout_ref.rollout.nnodes
+        )
+        return trainer_gpus + rollout_gpus
+
+    def switch_to_rollout(self):
+        # TODO: disable auto offload in config and offload according to the switch strategy
+        self.checkpoint_manager.update_weights(self.global_steps)
+        self.checkpoint_manager.resume_generation_replicas()
+        self.add_replicas_to_balancer()
+        self.current_mode = HybridEngineMode.ROLLOUT
+
+    def switch_to_trainer(self):
+        # TODO: disable auto offload in config and offload according to the switch strategy
+        self.remove_replicas_from_balancer()
+        self.checkpoint_manager.abort_replicas()
+        self.checkpoint_manager.sleep_replicas()
+        self.current_mode = HybridEngineMode.TRAINER
+
+    def add_replicas_to_balancer(self):
+        global_load_balancer = self.standalone_server_manager.global_load_balancer
+        servers = dict(
+            zip(self.llm_server_manager.server_addresses, self.llm_server_manager.server_handles, strict=True)
+        )
+        ray.get(global_load_balancer.add_servers.remote(servers))
+
+    def remove_replicas_from_balancer(self):
+        global_load_balancer = self.standalone_server_manager.global_load_balancer
+        ray.get(global_load_balancer.remove_servers.remote(self.llm_server_manager.server_addresses))
+
+    def should_switch_to_rollout(self):
+        # TODO: Implement switch strategy by checking replay buffer and switch overhead
+        return False

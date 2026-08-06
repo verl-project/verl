@@ -48,7 +48,7 @@ manager available on your cluster or use other container runtimes (e.g. through 
 
 2. Follow :doc:`GSM8K example<../examples/gsm8k_example>` to prepare the dataset and model checkpoints.
 
-3. Modify `examples/slurm/ray_on_slurm.slurm <https://github.com/volcengine/verl/blob/main/examples/slurm/ray_on_slurm.slurm>`_ with your cluster's own information.
+3. Modify `examples/tutorial/slurm/ray_on_slurm.slurm <https://github.com/verl-project/verl/blob/main/examples/tutorial/slurm/ray_on_slurm.slurm>`_ with your cluster's own information.
 
 4. Submit the job script to the Slurm cluster with `sbatch`.
 
@@ -153,12 +153,12 @@ https://excalidraw.com/#json=pfhkRmiLm1jnnRli9VFhb,Ut4E8peALlgAUpr7E5pPCA
 How to generate ray timeline to analyse performance of a training job?
 ------------------------------------------------------------------------------------------
 
-To generate the ray timeline file, you can set the config term ``ray_init.timeline_file`` to a json file path.
+To generate the ray timeline file, you can set the config term ``ray_init.timeline_json_file`` to a json file path.
 For example:
 
 .. code:: bash
 
-    ray_init.timeline_file=/tmp/ray_timeline.json
+    ray_init.timeline_json_file=/tmp/ray_timeline.json
   
 The file will be generated in the specified path at the end of a training job.
 You can use tools like chrome://tracing or the Perfetto UI and view the ray timeline file.

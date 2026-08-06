@@ -1,4 +1,0 @@
-interaction:
-  - name: "gsm8k"
-    class_name: "verl.interactions.gsm8k_interaction.Gsm8kInteraction"
-    config: {}

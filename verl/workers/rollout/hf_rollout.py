@@ -86,7 +86,7 @@ class HFRollout(BaseRollout):
                 "top_k": top_k,
                 "temperature": temperature,
                 # already repeat in ray_trainer
-                # https://github.com/volcengine/verl/blob/2fdfbdcba6f2e076f64bc47922d8fe6cf7dc7da5/verl/trainer/ppo/ray_trainer.py#L1117
+                # https://github.com/verl-project/verl/blob/2fdfbdcba6f2e076f64bc47922d8fe6cf7dc7da5/verl/trainer/ppo/ray_trainer.py#L1117
                 "num_return_sequences": 1,
             }
 

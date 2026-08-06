@@ -1,3 +1,6 @@
+# Number of rollouts per update (mirrors actor rollout_n)
+rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
+
 # actor_rollout_ref.ref: FSDP config same as actor. For models larger than 7B, it’s recommended to turn on offload for ref by default
 strategy: ${actor_rollout_ref.actor.strategy}
 
@@ -49,10 +52,10 @@ profiler:
 
       # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
       _target_: verl.utils.profiler.config.NsightToolConfig
-    
+
       # True for each task has its own database, False for all tasks in one training step share one database.
       discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete}
-    
+
     # npu config
     npu:
 
@@ -64,27 +67,48 @@ profiler:
       contents: []
 
       # Collection level, optional values: level_none, level0, level1, level2.
-      level: "level1"
+      level: "level0"
 
       # Whether to automatically parse the data.
       analysis: True
 
       # True for each task has its own database, False for all tasks in one training step share one database.
       discrete: False
-    
+
     # torch profiler config
     torch:
 
       # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
       _target_: verl.utils.profiler.config.TorchProfilerToolConfig
 
-      # start profile mini-batch in training
-      # NOTICE: different with global steps config which refers to iteration
-      # This field only related with mini-batch
-      step_start: 0
+      # Contents to profile, can be empty
+      # options: cuda, cpu, memory, shapes, stack
+      contents: []
 
-      # stop profile mini-batch in training
-      step_end: null
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: false
+
+      # Optional torch.profiler.schedule. Enabled only when active > 0, in which case
+      # profiler.step() advances wait/warmup/active/repeat once per mini-batch.
+      schedule:
+
+        # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+        _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+
+        # Number of steps to skip before the first cycle
+        skip_first: 0
+
+        # Idle steps (no collection) at the start of each cycle
+        wait: 0
+
+        # Warmup steps (tracing on, data discarded) each cycle
+        warmup: 0
+
+        # Active steps to record each cycle; <= 0 disables scheduling
+        active: 0
+
+        # Number of cycles to repeat; 0 repeats until profiling stops
+        repeat: 0
 
     # torch memory profiler config
     torch_memory:
@@ -97,3 +121,42 @@ profiler:
 
       # Stack trace depth for memory allocations
       stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+
+    # msprobe precision debugger config
+    precision_debugger:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
+
+      # Path to msprobe config json
+      config_path: ${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}
+
+      # Deprecated and ignored. Use global_profiler.steps.
+      steps: null
+
+      # Profile stages
+      # Supported stages: actor_update, actor_compute_log_prob, ref_compute_log_prob,
+      # compute_values, critic_update, compute_rm_score
+      stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
+
+      # Whether to fail on unknown stage or missing msprobe
+      strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
+
+# Router replay configuration for MoE models
+router_replay:
+
+  # Target dataclass for this configuration
+  _target_: verl.workers.config.RouterReplayConfig
+
+  # Router replay mode: disabled, R2, R3
+  # - R2: Use R2 routing strategy (record mode)
+  # - R3: Use R3 routing strategy (record mode)
+  mode: disabled
+
+  # File path to save recorded routing decisions
+  # Required when mode is 'record', 'R2', or 'R3'
+  record_file: null
+
+  # File path to load recorded routing decisions for replay
+  # Required when mode is 'replay'
+  replay_file: null

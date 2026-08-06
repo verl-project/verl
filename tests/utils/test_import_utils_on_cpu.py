@@ -16,15 +16,15 @@ import os
 
 import pytest
 
-from verl.utils.import_utils import load_extern_type
+from verl.utils.import_utils import load_extern_object
 
 # Path to the test module
 TEST_MODULE_PATH = os.path.join(os.path.dirname(__file__), "_test_module.py")
 
 
-def test_load_extern_type_class():
+def test_load_extern_object_class():
     """Test loading a class from an external file"""
-    TestClass = load_extern_type(TEST_MODULE_PATH, "TestClass")
+    TestClass = load_extern_object(TEST_MODULE_PATH, "TestClass")
 
     # Verify the class was loaded correctly
     assert TestClass is not None
@@ -39,9 +39,9 @@ def test_load_extern_type_class():
     assert custom_instance.get_value() == "custom"
 
 
-def test_load_extern_type_function():
+def test_load_extern_object_function():
     """Test loading a function from an external file"""
-    test_function = load_extern_type(TEST_MODULE_PATH, "test_function")
+    test_function = load_extern_object(TEST_MODULE_PATH, "test_function")
 
     # Verify the function was loaded correctly
     assert test_function is not None
@@ -52,34 +52,34 @@ def test_load_extern_type_function():
     assert result == "test_function_result"
 
 
-def test_load_extern_type_constant():
+def test_load_extern_object_constant():
     """Test loading a constant from an external file"""
-    constant = load_extern_type(TEST_MODULE_PATH, "TEST_CONSTANT")
+    constant = load_extern_object(TEST_MODULE_PATH, "TEST_CONSTANT")
 
     # Verify the constant was loaded correctly
     assert constant is not None
     assert constant == "test_constant_value"
 
 
-def test_load_extern_type_nonexistent_file():
+def test_load_extern_object_nonexistent_file():
     """Test behavior when file doesn't exist"""
     with pytest.raises(FileNotFoundError):
-        load_extern_type("/nonexistent/path.py", "SomeType")
+        load_extern_object("/nonexistent/path.py", "SomeType")
 
 
-def test_load_extern_type_nonexistent_type():
+def test_load_extern_object_nonexistent_type():
     """Test behavior when type doesn't exist in the file"""
     with pytest.raises(AttributeError):
-        load_extern_type(TEST_MODULE_PATH, "NonExistentType")
+        load_extern_object(TEST_MODULE_PATH, "NonExistentType")
 
 
-def test_load_extern_type_none_path():
+def test_load_extern_object_none_path():
     """Test behavior when file path is None"""
-    result = load_extern_type(None, "SomeType")
-    assert result is None
+    with pytest.raises(AttributeError):
+        load_extern_object(None, "SomeType")
 
 
-def test_load_extern_type_invalid_module():
+def test_load_extern_object_invalid_module():
     """Test behavior when module has syntax errors"""
     # Create a temporary file with syntax errors
     import tempfile
@@ -90,7 +90,7 @@ def test_load_extern_type_invalid_module():
 
     try:
         with pytest.raises(RuntimeError):
-            load_extern_type(temp_path, "SomeType")
+            load_extern_object(temp_path, "SomeType")
     finally:
         # Clean up the temporary file
         if os.path.exists(temp_path):

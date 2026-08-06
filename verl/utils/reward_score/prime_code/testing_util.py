@@ -28,12 +28,25 @@ from enum import Enum
 
 # for capturing the stdout
 from io import StringIO
+from types import ModuleType
 
 # used for testing the code that reads from input
 from unittest.mock import mock_open, patch
 
 import numpy as np
-from pyext import RuntimeModule
+
+
+def module_from_string(name: str, code: str) -> ModuleType:
+    """Compile ``code`` into a new in-memory module registered under ``name``.
+
+    Replaces ``pyext.RuntimeModule.from_string``, since ``pyext`` is unmaintained and cannot be
+    installed on Python 3.12+. The ``<string>`` filename is what :func:`clean_traceback` looks for
+    when trimming the traceback of a failing generated solution.
+    """
+    module = ModuleType(name)
+    exec(compile(code, "<string>", "exec"), module.__dict__)
+    sys.modules[name] = module
+    return module
 
 
 def truncatefn(s, length=300):
@@ -121,7 +134,7 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
                 print(f"sol = {sol}")
             signal.alarm(timeout)
             try:
-                tmp_sol = RuntimeModule.from_string("tmp_sol", "", sol)
+                tmp_sol = module_from_string("tmp_sol", sol)
                 tmp = tmp_sol if "class Solution" not in test else tmp_sol.Solution()
                 signal.alarm(0)
             except Exception as e:
@@ -181,7 +194,7 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
             method_name = "code"
             signal.alarm(timeout)
             try:
-                tmp_sol = RuntimeModule.from_string("tmp_sol", "", sol)
+                tmp_sol = module_from_string("tmp_sol", sol)
                 tmp = tmp_sol
                 signal.alarm(0)
             except Exception as e:

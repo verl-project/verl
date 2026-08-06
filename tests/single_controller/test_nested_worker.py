@@ -18,6 +18,7 @@ import ray
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.base.worker import Worker
 from verl.single_controller.ray.base import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
+from verl.utils.device import get_device_name
 
 
 class TestActor(Worker):
@@ -49,7 +50,10 @@ def test_nested_worker():
     class_with_args = RayClassWithInitArgs(cls=ray.remote(TestActor), x=2)
 
     worker_group = RayWorkerGroup(
-        resource_pool=resource_pool, ray_cls_with_init=class_with_args, name_prefix="worker_group_basic"
+        resource_pool=resource_pool,
+        ray_cls_with_init=class_with_args,
+        name_prefix="worker_group_basic",
+        device_name=get_device_name(),
     )
 
     output = worker_group.get()
@@ -58,7 +62,10 @@ def test_nested_worker():
 
     class_with_args = RayClassWithInitArgs(cls=ray.remote(TestHighLevelActor), x=2)
     high_level_worker_group = RayWorkerGroup(
-        resource_pool=resource_pool, ray_cls_with_init=class_with_args, name_prefix="worker_group_basic_2"
+        resource_pool=resource_pool,
+        ray_cls_with_init=class_with_args,
+        name_prefix="worker_group_basic_2",
+        device_name=get_device_name(),
     )
 
     output_1 = high_level_worker_group.get()

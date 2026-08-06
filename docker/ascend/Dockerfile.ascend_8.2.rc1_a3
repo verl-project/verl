@@ -1,33 +1,31 @@
-# 1. Base Image
+# Pull base image
 FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:8.2.rc1-a3-ubuntu22.04-py3.11
 
-# 2. Pre-installation foundation vllm with architecture echo
-RUN ARCH=$(uname -m) && \
-    echo "export ARCH=$ARCH" >> ~/.bashrc && \
-    echo "[LOG INFO] Current system architecture: $ARCH"
+# Prepare required system dependencies
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends gcc g++ cmake libnuma-dev wget git curl jq vim build-essential && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
+    pip install --upgrade pip setuptools packaging && \
+    pip cache purge
 
-# 3. Install system dependencies
-RUN apt-get update -y && apt-get install -y --no-install-recommends \
-    gcc g++ cmake libnuma-dev wget git curl jq vim build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-# 4. Install vllm
+# Prepare repositories with low update frequency
 RUN ARCH=$(uname -m) && \
+    # Set extra pip index for x86_64 platform
     echo "[LOG INFO] Detected architecture: $ARCH" && \
     if [ "$ARCH" = "x86_64" ]; then \
-        echo "[LOG INFO] Entering x86_64 branch: Setting pip extra index url"; \
         pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"; \
-    else \
-        echo "[LOG INFO] Entering aarch64 branch: No extra pip index url set"; \
     fi && \
+    # Clone libs
     git clone --depth 1 --branch v0.9.1 https://github.com/vllm-project/vllm && \
-    cd vllm && \
-    VLLM_TARGET_DEVICE=empty pip install -v -e . && \
-    cd ..
+    git clone --depth 1 --branch v0.9.1 https://github.com/vllm-project/vllm-ascend.git && \
+    git clone https://gitcode.com/Ascend/MindSpeed.git && \
+    cd MindSpeed && git checkout f2b0977e && cd .. && \
+    git clone --depth 1 --branch core_v0.12.1 https://github.com/NVIDIA/Megatron-LM.git
 
-# 5. Install vllm_ascend
+# Install repositories with low update frequency
 RUN ARCH=$(uname -m) && \
-    echo "[LOG INFO] Configuring LD_LIBRARY_PATH for $ARCH" && \
+    # Export and source env
     if [ "$ARCH" = "aarch64" ]; then \
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/8.2.RC1/aarch64-linux/devlib/linux/aarch64:$LD_LIBRARY_PATH; \
     elif [ "$ARCH" = "x86_64" ]; then \
@@ -35,35 +33,29 @@ RUN ARCH=$(uname -m) && \
     fi && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    git clone --depth 1 --branch v0.9.1 https://github.com/vllm-project/vllm-ascend.git && \
-    cd vllm-ascend && \
-    pip install -v -e . && \
-    cd ..
+    # Install torch & torch_npu & torchvision
+    pip install torch==2.5.1 torch_npu==2.5.1 torchvision==0.20.1 && \
+    # Install vllm
+    cd vllm && VLLM_TARGET_DEVICE=empty pip install -v -e . && cd .. && \
+    # Install vllm-ascend
+    cd vllm-ascend && pip install -v -e . && cd .. && \
+    # Install MindSpeed & Megatron
+    pip install -e MindSpeed && \
+    # Clear extra files
+    rm -rf /tmp/* /var/tmp/* && \
+    pip cache purge
 
-# 6. Install verl
-RUN git clone https://github.com/volcengine/verl.git && \
-    cd verl && \
-    git checkout main && \
-    pip install -r requirements-npu.txt && \
-    pip install -e . && \
-    cd ..
+ENV PYTHONPATH="/Megatron-LM${PYTHONPATH:+:${PYTHONPATH}}"
 
-# 7. Install MindSpeed
-RUN git clone https://gitcode.com/Ascend/MindSpeed.git && \
-    cd MindSpeed && \
-    git checkout f2b0977e && \
-    cd .. && \
-    pip install -e MindSpeed
+# Prepare and install verl (update frequently)
+RUN git clone --depth 1 https://github.com/verl-project/verl.git && \
+    cd verl && pip install -r requirements-npu.txt && pip install -v -e . && cd .. && \
+    # Clear extra files
+    rm -rf /tmp/* /var/tmp/* && \
+    pip cache purge
 
-# 8. Install Megatron-LM and configure PYTHONPATH
-RUN git clone https://github.com/NVIDIA/Megatron-LM.git && \
-    cd Megatron-LM && \
-    git checkout core_v0.12.1 && \
-    cd .. && \
-    echo "export PYTHONPATH=\$PYTHONPATH:/Megatron-LM" >> ~/.bashrc
-
-# Show pip list and clear pip cache to reduce image size
-RUN pip list && pip cache purge
+# Show install results
+RUN pip list
 
 # Setting Default Commands
 CMD ["/bin/bash"]

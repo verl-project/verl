@@ -1,5 +1,6 @@
 # requirements.txt records the full set of dependencies for development
 accelerate
+bytecode
 codetiming
 datasets
 dill
@@ -7,15 +8,16 @@ hydra-core
 numpy<2.0.0
 pandas
 peft>=0.15.2
-pyarrow>=15.0.0
+pyarrow>=15.0.0,<=24.0.0
 pybind11
 pylatexenc
 tensordict>=0.8.0,<=0.10.0,!=0.9.0
-transformers==4.52.4
-ray==2.46.0
+ray[default]
 wandb
 mathruler
 torchdata
 einops
 qwen_vl_utils
-torchvision==0.20.1
+hf_transfer
+triton-ascend==3.2.1
+TransferQueue==0.1.8

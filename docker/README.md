@@ -2,45 +2,58 @@
 
 We provide pre-built Docker images for quick setup. And from this version, we utilize a new image release hierarchy for productivity and stability.
 
-The image types are divided into three large categories:
+Start from v0.6.0, we use vllm and sglang release image as our base image.
 
-- **Base Image**: Without inference and training frameworks, only basic dependencies are installed. Can directly install vllm or SGLang on top of it, without need of reinstall torch or CUDA.
-- **Application Image**: Stable version with inference and training frameworks installed.
-- **Preview Image**: Unstable version with the latest frameworks and features.
-
-The first two types of images are hosted on dockerhub [verlai/verl](https://hub.docker.com/r/verlai/verl) repository, while the preview images are hosted on community repository.
-
-> The image versions are mapped with verl releases, for example, image with tag ``verl0.4`` is built for verl release ``v0.4.x``.
+Start from v0.7.0, since vllm/vllm-openai:v0.12.0 is a minimal image without some essential libraries, we use nvidia/cuda:12.9.1-devel-ubuntu22.04 as our base image for vllm.
 
 ## Base Image
 
-The stable base image is ``verlai/verl:base-verl0.5-cu126-cudnn9.8-torch2.7.1-fa2.7.4`` with different CUDA versions.
-
-The update of base image is not frequent, and the app image can be built on top of it without reinstalling base packages.
+- vLLM: https://hub.docker.com/r/nvidia/cuda
+- SGLang: https://hub.docker.com/r/lmsysorg/sglang
 
 ## Application Image
 
-From this version, we divide images built for vLLM and SGLang as the divergence of dependent packages like FlashInfer.
-There are 2 types of application images available:
+Upon base image, the following packages are added:
+- flash_attn
+- Megatron-LM
+- Apex
+- TransformerEngine
+- DeepEP
 
-- **vLLM with FSDP and Megatron**: ``verlai/verl:app-verl0.5-transformers4.55.4-vllm0.10.0-mcore0.13.0-te2.2``
-- **SGLang with FSDP and Megatron**: `verlai/verl:app-verl0.5-transformers4.55.4-sglang0.4.10.post2-mcore0.13.0-te2.2`
+Latest docker file:
+- [Dockerfile.stable.vllm](https://github.com/verl-project/verl/blob/main/docker/Dockerfile.stable.vllm)
+- [Dockerfile.stable.sglang](https://github.com/verl-project/verl/blob/main/docker/Dockerfile.stable.sglang)
 
-Docker images with Megatron backends are runnable with large language model like ``Qwen/Qwen3-235B-A22B``, ``deepseek-ai/DeepSeek-V3-0324`` post-training. Refer to the :doc:`Large Language Model Post-Training documentation<../perf/dpsk>` for more details.
+All pre-built images are available in dockerhub: https://hub.docker.com/r/verlai/verl. For example, `verlai/verl:sgl0512.latest`, `verlai/verl:vllm024.latest`.
 
-Application images can be updated frequently, and the Dockerfile can be found in ``docker/verl[version]-[packages]/Dockerfile.app.[frameworks]``. Based on the base image, it is easy to build your own application image with the desired inference and training frameworks.
+You can find the latest images used for development and ci in our github workflows:
+- [.github/workflows/vllm.yml](https://github.com/verl-project/verl/blob/main/.github/workflows/vllm.yml)
+- [.github/workflows/sgl.yml](https://github.com/verl-project/verl/blob/main/.github/workflows/sgl.yml)
 
-## Community Image
 
-For vLLM with FSDP, please refer to [hiyouga/verl](https://hub.docker.com/r/hiyouga/verl) repository and the latest version is ``hiyouga/verl:ngc-th2.6.0-cu126-vllm0.8.4-flashinfer0.2.2-cxx11abi0``.
+## Building Locally
 
-For SGLang with FSDP, please refer to [ocss884/verl-sglang](https://hub.docker.com/r/ocss884/verl-sglang) repository and the latest version is ``ocss884/verl-sglang:ngc-th2.6.0-cu126-sglang0.4.6.post5`` which is provided by SGLang RL Group.
+To build an image from source:
 
-For latest vLLM with Megatron, please refer to [iseekyan/verl](https://hub.docker.com/r/iseekyan/verl) repository and the latest version is ``iseekyan/verl:nemo.gptoss_vllm0.11.0``.
+```sh
+docker build -f docker/Dockerfile.stable.vllm -t verl:vllm-local .
+```
 
-See files under ``docker/`` for NGC-based image or if you want to build your own.
+For users in China who need an apt mirror to speed up package downloads, pass `APT_MIRROR`:
 
-Note that For aws instances with EFA net interface (Sagemaker AI Pod), you need to install EFA driver as shown in ``docker/Dockerfile.extenstion.awsefa``
+```sh
+docker build -f docker/Dockerfile.stable.vllm \
+    --build-arg APT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn \
+    -t verl:vllm-local .
+```
+
+### GB200 / aarch64
+
+Pre-built images for GB200 (aarch64) are not yet published. Users should build locally on an aarch64 machine. Pre-built images will be added once available.
+
+```sh
+docker build -f docker/Dockerfile.stable.vllm -t verl:vllm-arm64 .
+```
 
 ## Installation from Docker
 
@@ -58,7 +71,7 @@ docker exec -it verl bash
 
 ```sh
 # install the nightly version (recommended)
-git clone https://github.com/volcengine/verl && cd verl
+git clone https://github.com/verl-project/verl && cd verl
 pip3 install --no-deps -e .
 ```
 
@@ -66,7 +79,16 @@ pip3 install --no-deps -e .
 
 ```sh
 # install the nightly version (recommended)
-git clone https://github.com/volcengine/verl && cd verl
+git clone https://github.com/verl-project/verl && cd verl
 pip3 install -e .[vllm]
 pip3 install -e .[sglang]
 ```
+
+## Release History
+
+- 2026/07/21: update vllm stable image to vllm==0.24.0 (torch==2.11.0, CUDA 13.0.2, Ubuntu 24.04); update sglang stable image to sglang==0.5.12
+- 2026/03/10: update vllm stable image to vllm==0.17.0; update sglang stable image to sglang==0.5.9
+- 2026/01/17: update vllm stable image to torch==2.9.1, cudnn==9.16, deepep==1.2.1
+- 2025/12/23: update vllm stable image to vllm==0.12.0; update sglang stable image to sglang==0.5.6
+- 2025/11/18: update vllm stable image to vllm==0.11.1; update sglang stable image to sglang==0.5.5
+

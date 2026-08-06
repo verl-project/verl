@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
+# Megatron-LM is baked into the CI image but the vemlp runner / Ray workers do not inherit
+# the image's PYTHONPATH, so set it at runtime (main_ppo forwards it into the Ray runtime env).
+export PYTHONPATH="/workspace/Megatron-LM${PYTHONPATH:+:${PYTHONPATH}}"
+echo "PYTHONPATH=${PYTHONPATH}"
+
 # Test script for one_step_off_policy E2E regression testing
 # This script runs one_step_off_policy with both FSDP2 and Megatron backends
 # to ensure the asynchronous training mechanism works correctly
 
 NUM_GPUS=${NUM_GPUS:-8}
 ACTOR_STRATEGY=${ACTOR_STRATEGY:-"fsdp2"}  # fsdp2 or megatron
+VANILLA_MBRIDGE=${VANILLA_MBRIDGE:-"False"}  # True or False
 
 # Download model if not exists
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
-#huggingface-cli download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
+#hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
 
 # Algorithm parameters
 adv_estimator=grpo
@@ -88,18 +94,20 @@ common_params=(
     actor_rollout_ref.rollout.val_kwargs.top_k=${top_k}
     actor_rollout_ref.rollout.val_kwargs.do_sample=True
     actor_rollout_ref.rollout.val_kwargs.n=1
-    actor_rollout_ref.rollout.enable_chunked_prefill=True \
-    actor_rollout_ref.rollout.name=vllm \
-    reward_model.reward_manager=dapo
-    +reward_model.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer}
-    +reward_model.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len}
-    +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor}
-    +reward_model.reward_kwargs.overlong_buffer_cfg.log=False
-    +reward_model.reward_kwargs.max_resp_len=${max_response_length}
+    actor_rollout_ref.rollout.enable_chunked_prefill=True
+    actor_rollout_ref.rollout.name=vllm
+    actor_rollout_ref.rollout.checkpoint_engine.backend='nccl'
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
+    reward.reward_manager.name=dapo
+    +reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer}
+    +reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len}
+    +reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor}
+    +reward.reward_kwargs.overlong_buffer_cfg.log=False
+    +reward.reward_kwargs.max_resp_len=${max_response_length}
     trainer.logger=['console']
     trainer.project_name='verl-test'
     trainer.experiment_name="${exp_name}"
-    trainer.val_before_train=False
+    trainer.val_before_train=True
     trainer.test_freq=-1
     trainer.save_freq=-1
     trainer.total_epochs=2
@@ -112,6 +120,13 @@ common_params=(
 
 )
 
+    # Detect device
+    device_name=$(python3 - <<'EOF'
+from verl.utils.device import get_device_name
+print(get_device_name())
+EOF
+)
+
 if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     echo "Running with FSDP2 strategy..."
     # FSDP2 specific parameters
@@ -121,9 +136,21 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     ref_offload=True
     actor_offload=False
 
-    python3 -m recipe.one_step_off_policy.main_ppo \
+    if [ "$device_name" ] && [ "$device_name" == "npu" ]; then
+        common_params+=(
+            # Todo The checkpoint_engine.backend should be unified to nccl
+            # actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.60
+        )
+        actor_offload=True
+    fi
+
+    python3 -m verl.experimental.one_step_off_policy.main_ppo \
         "${common_params[@]}" \
-        actor_rollout_ref.actor.strategy=fsdp2 \
+        actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
+        actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+        actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2 \
+        actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
         critic.strategy=fsdp2 \
         actor_rollout_ref.actor.grad_clip=1.0 \
         actor_rollout_ref.model.use_remove_padding=True \
@@ -143,20 +170,36 @@ elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     echo "Running with Megatron strategy..."
     # Megatron specific parameters
     gen_tp=2
-    train_tp=1
-    train_pp=2
+    train_tp=2
+    train_pp=3
     ref_offload=True
     actor_offload=False
 
-    python3 -m recipe.one_step_off_policy.main_ppo \
+    if [ "$device_name" ] && [ "$device_name" == "npu" ]; then
+        common_params+=(
+            # Todo The checkpoint_engine.backend should be unified to nccl
+            # actor_rollout_ref.rollout.checkpoint_engine.backend='hccl'
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.70
+            actor_rollout_ref.model.use_remove_padding=True \
+            actor_rollout_ref.model.enable_gradient_checkpointing=True \
+            actor_rollout_ref.actor.use_dynamic_bsz=True \
+            actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
+            actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
+        )
+        train_tp=2
+        actor_offload=True
+    fi
+
+    python3 -m verl.experimental.one_step_off_policy.main_ppo \
         --config-path=config \
         --config-name='one_step_off_ppo_megatron_trainer.yaml' \
         "${common_params[@]}" \
         actor_rollout_ref.actor.strategy=megatron \
         critic.strategy=megatron \
-        actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
-        actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
-        actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
+        actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+        actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2 \
+        actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
+        actor_rollout_ref.actor.megatron.vanilla_mbridge=${VANILLA_MBRIDGE} \
         actor_rollout_ref.actor.megatron.param_offload=${actor_offload} \
         actor_rollout_ref.actor.megatron.optimizer_offload=${actor_offload} \
         actor_rollout_ref.actor.megatron.grad_offload=${actor_offload} \

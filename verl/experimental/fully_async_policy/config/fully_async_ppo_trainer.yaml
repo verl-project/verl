@@ -1,0 +1,98 @@
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+async_training:
+
+  # Maximum samples staleness threshold
+  staleness_threshold: 0.1
+
+  # Frequency of parameter synchronization between rollouter and trainer, 
+  # One step means trainer obtains a batch of required samples
+  trigger_parameter_sync_step: 4
+  
+  # The number of ppo_mini_batches that the FullyAsyncTrainer obtains once
+  require_batches: 1
+
+  # When synchronizing parameters, Whether to resume generation when rollout is interrupted.
+  # If True, LLMServerClient auto resume generation, making rollout interruption invisible to the AgentLoop.
+  partial_rollout: True
+
+  # whether to use trainer do_validate
+  use_trainer_do_validate: False
+
+  # Whether to enable dynamic resource scheduling.
+  # When True, hybrid rollout replicas are initialised on Trainer-node GPUs at
+  # startup (sleeping, memory returned to the training engine), and are kept
+  # active so that Trainer GPUs participate in rollout alongside standalone GPUs.
+  use_dynamic_resource_scheduling: False
+
+  # Name of the dynamic scheduling policy ("default" or custom registered name).
+  dynamic_schedule_policy: "default"
+
+  # Sample-collection ratio threshold for deactivating hybrid replicas.
+  # At each fit_step, the controller waits until
+  #   deactivate_ratio * required_samples * trigger_parameter_sync_step
+  # samples are buffered before deactivating hybrid replicas.
+  # Set lower (e.g. 0.3) to deactivate earlier; set to 1.0 for a full batch.
+  dynamic_schedule_deactivate_ratio: 0.3
+
+  # Whether to rebalance (abort + clear sticky cache + resume) in-flight requests
+  # across newly activated hybrid replicas via least-loaded routing.
+  dynamic_schedule_enable_rebalance: True
+
+  # Maximum number of concurrent generation requests per replica.
+  concurrent_samples_per_replica: 16
+
+# Rollout config
+rollout:
+
+  # Number of nodes used in the rollout
+  nnodes: 1
+
+  # Number of GPUs per node                     
+  n_gpus_per_node: 8
+
+  # number of responses (i.e. num sample times). > 1 for grpo
+  n: 4
+
+  # total rollout samples # TODO rename to total_rollout_samples
+  total_rollout_steps: 100
+
+data:
+  # Number of samples generated, currently only support 1
+  gen_batch_size: 1
+
+actor_rollout_ref:
+
+  rollout:
+    # Must be enabled! Otherwise, log_probs cannot be calculated.
+    calculate_log_probs: True
+
+    # When use_dynamic_resource_scheduling is enabled, hybrid replicas share the GPU with
+    # the training engine, so gpu_memory_utilization should be kept low (e.g. 0.3-0.5).
+    # standalone_gpu_memory_utilization applies only to standalone replicas (dedicated
+    # rollout GPUs); null means fall back to gpu_memory_utilization.
+    standalone_gpu_memory_utilization: null
+
+    checkpoint_engine:
+      backend: "nccl"
+
+  actor:
+    # Must use rollout log probs for training
+    use_rollout_log_probs: True
+
+  model:
+    # To use remove padding (thd)
+    use_remove_padding: True
+
+
+# Only then will the use of log probs be correct.
+# And it can be used in conjunction with other rollout_correction algorithms.
+algorithm:
+  rollout_correction:
+    bypass_mode: True

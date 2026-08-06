@@ -1,2 +1,0 @@
-- name: collabllm_agent
-  _target_: recipe.collabllm.collabllm_agent_loop.CollabLLMAgentLoop

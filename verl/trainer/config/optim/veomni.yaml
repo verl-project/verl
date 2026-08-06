@@ -1,0 +1,39 @@
+# Target class for this configuration
+_target_: verl.workers.config.VeOmniOptimizerConfig
+
+optimizer: adamw
+
+# Learning rate
+lr: 1e-3
+
+# Minimum learning rate
+lr_min: 0.0
+
+# Starting learning rate for warmup
+lr_start: 0.0
+
+# LR warmup steps ratio
+lr_warmup_steps_ratio: 0.0
+
+# LR decay steps ratio
+lr_decay_ratio: 1.0
+
+# Total training steps
+total_training_steps: -1
+
+# Weight decay
+weight_decay: 0.01
+
+# LR warmup steps
+lr_warmup_steps: -1
+
+# Betas for Adam optimizer
+betas: [0.9, 0.999]
+
+# Clip gradient
+clip_grad: 1.0
+
+# LR scheduler type: "constant" or "cosine"
+lr_scheduler_type: cosine
+
+override_optimizer_config: {}

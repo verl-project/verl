@@ -32,6 +32,7 @@ from verl.utils.device import is_cuda_available
 from verl.utils.fs import copy_to_local, is_non_local, local_mkdir_safe
 from verl.utils.fsdp_utils import fsdp_version, get_fsdp_full_state_dict, get_fsdp_state_ctx
 from verl.utils.logger import log_with_rank
+from verl.utils.transformers_compat import drop_tied_target_keys, get_auto_model_for_vision2seq
 
 from .checkpoint_manager import BaseCheckpointManager
 
@@ -70,6 +71,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         checkpoint_contents DictConfig: Configuration for checkpoint contents.
             - 'load': Components to load; must contain 'model'. Defaults to ['model', 'optimizer', 'extra'].
             - 'save': Components to save; must contain 'model'. Defaults to ['model', 'optimizer', 'extra'].
+        trust_remote_code: Whether to trust_remote_code when loading the model configuration
     """
 
     def __init__(
@@ -79,6 +81,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         lr_scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
         processing_class: PreTrainedTokenizer | ProcessorMixin = None,
         checkpoint_config: DictConfig = None,
+        trust_remote_code: bool = False,
         **kwargs,
     ):
         if processing_class is None and "tokenizer" in kwargs:
@@ -94,6 +97,47 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             processing_class=processing_class,
             checkpoint_config=checkpoint_config,
         )
+        self.trust_remote_code = trust_remote_code
+
+    def _get_lora_train_meta(self, unwrap_model):
+        peft_config = getattr(unwrap_model, "peft_config", None)
+        if not peft_config:
+            return None
+        if isinstance(peft_config, dict):
+            peft_config = peft_config.get("default") or next(iter(peft_config.values()), None)
+        if peft_config is None:
+            return None
+
+        lora_rank = int(getattr(peft_config, "r", 0) or 0)
+        if lora_rank <= 0:
+            return None
+
+        lora_alpha = int(getattr(peft_config, "lora_alpha", lora_rank) or 0)
+        task_type = getattr(peft_config, "task_type", None) or "CAUSAL_LM"
+        if hasattr(task_type, "value"):
+            task_type = task_type.value
+
+        return {"r": lora_rank, "lora_alpha": lora_alpha, "task_type": str(task_type)}
+
+    def _save_lora_train_meta(self, local_path: str, unwrap_model):
+        lora_train_meta = self._get_lora_train_meta(unwrap_model)
+        if lora_train_meta is None:
+            return None
+
+        lora_meta_path = os.path.join(local_path, "lora_train_meta.json")
+        with open(lora_meta_path, "w", encoding="utf-8") as f:
+            json.dump(lora_train_meta, f, ensure_ascii=False, indent=4)
+        log_with_rank(
+            f"Saved LoRA rank/alpha metadata to {os.path.abspath(lora_meta_path)}",
+            rank=self.rank,
+            logger=logger,
+            log_only_rank_0=True,
+        )
+        return lora_meta_path
+
+    def _has_lora(self) -> bool:
+        unwrap = getattr(self.model, "_fsdp_wrapped_module", self.model)
+        return hasattr(unwrap, "peft_config")
 
     def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load=False):
         """
@@ -135,8 +179,21 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 remote_model_path = os.path.join(local_path, f"model_world_size_{self.world_size}_rank_{self.rank}.pt")
                 local_model_path = copy_to_local(remote_model_path)
                 model_state_dict = torch.load(local_model_path, weights_only=False)
-                self.model.load_state_dict(model_state_dict)
-                log_with_rank(f"Loaded model from {remote_model_path}", rank=self.rank, logger=logger)
+                if self.is_lora_only_state_dict(model_state_dict):
+                    result = self.model.load_state_dict(model_state_dict, strict=False)
+                    if result is not None and result.unexpected_keys:
+                        raise ValueError(
+                            f"Failed to load LoRA-only checkpoint: unexpected keys {result.unexpected_keys}. "
+                            f"Ensure the model has the correct LoRA adapters configured."
+                        )
+                    log_with_rank(
+                        f"Loaded LoRA-only checkpoint ({len(model_state_dict)} keys) from {remote_model_path}",
+                        rank=self.rank,
+                        logger=logger,
+                    )
+                else:
+                    self.model.load_state_dict(model_state_dict)
+                    log_with_rank(f"Loaded model from {remote_model_path}", rank=self.rank, logger=logger)
 
             if self.should_load_optimizer:
                 remote_optim_path = os.path.join(local_path, f"optim_world_size_{self.world_size}_rank_{self.rank}.pt")
@@ -201,17 +258,8 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         # record the previous global step
         self.previous_global_step = global_step
 
-        # remove previous local_path, only rank 0 should do this
-        if (
-            self.rank == 0
-            and max_ckpt_to_keep
-            and isinstance(max_ckpt_to_keep, int)
-            and max_ckpt_to_keep > 0
-            and len(self.previous_saved_paths) >= max_ckpt_to_keep
-        ):
-            keep_start = len(self.previous_saved_paths) - max_ckpt_to_keep + 1
-            self.remove_previous_save_local_path(self.previous_saved_paths[:keep_start])
-            self.previous_saved_paths = self.previous_saved_paths[keep_start:]
+        if self.rank == 0:
+            self.ensure_checkpoint_capacity(max_ckpt_to_keep)
 
         local_path = local_mkdir_safe(local_path)
         torch.distributed.barrier()
@@ -236,6 +284,31 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
                 if self.should_save_model:
                     model_state_dict = self.model.state_dict()
+                    if self.should_save_lora_only and self._has_lora():
+                        n_total = len(model_state_dict)
+                        model_state_dict = {
+                            k: v for k, v in model_state_dict.items() if "lora_" in k or ".adapter_" in k
+                        }
+                        if not model_state_dict:
+                            raise ValueError(
+                                f"save_lora_only is True and the model has a peft_config, "
+                                f"but no LoRA/adapter parameters were found in the state dict. "
+                                f"Total params checked: {n_total}."
+                            )
+                        lora_bytes = 0
+                        for v in model_state_dict.values():
+                            if hasattr(v, "numel") and hasattr(v, "element_size"):
+                                lora_bytes += v.numel() * v.element_size()
+                            elif hasattr(v, "local_shards"):
+                                for shard in v.local_shards():
+                                    lora_bytes += shard.tensor.numel() * shard.tensor.element_size()
+                        lora_mib = lora_bytes / 1024**2
+                        log_with_rank(
+                            f"LoRA-only save: {len(model_state_dict)}/{n_total} params ({lora_mib:.1f} MiB)",
+                            rank=self.rank,
+                            logger=logger,
+                            log_only_rank_0=True,
+                        )
                     torch.save(model_state_dict, model_path)
                     log_with_rank(f"Saved model to {os.path.abspath(model_path)}", rank=self.rank, logger=logger)
 
@@ -276,6 +349,9 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                     # if the generation config isn't available, we don't save it
                     pass
 
+            if hasattr(model_config, "auto_map") and None in model_config.auto_map:
+                model_config.auto_map = {k: v for k, v in model_config.auto_map.items() if k is not None}
+
             model_config.save_pretrained(hf_config_tokenizer_path)
             if self.processing_class is not None:
                 self.processing_class.save_pretrained(hf_config_tokenizer_path)
@@ -289,7 +365,11 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             # If we have a custom model, we copy the file defining it in the folder and set the attributes so it can be
             # loaded from the Hub.
             if hasattr(model_config, "auto_map"):
-                custom_object_save(unwrap_model, hf_config_tokenizer_path, config=model_config)
+                # custom_object_save copies the source of type(obj).__module__, so it needs the base
+                # model's module. For a PEFT model unwrap_model is the PeftModel wrapper, so unwrap it
+                # first; get_base_model() is peft-only (a plain model lacks it and is passed through).
+                save_obj = unwrap_model.get_base_model() if hasattr(unwrap_model, "get_base_model") else unwrap_model
+                custom_object_save(save_obj, hf_config_tokenizer_path, config=model_config)
 
             # Also save runtime FSDP config
             fsdp_config_path = os.path.join(local_path, "fsdp_config.json")
@@ -299,6 +379,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             )
             with open(fsdp_config_path, "w") as f:
                 json.dump(asdict(fsdp_config), f, indent=4)
+            self._save_lora_train_meta(local_path, unwrap_model)
 
         # wait for everyone to dump to local
         torch.distributed.barrier()
@@ -321,25 +402,15 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
                     auto_model_cls = AutoModelForCausalLM
                 elif "ForConditionalGeneration" in model_config.architectures[0]:
-                    # Handle different transformers versions for Vision2Seq models
-                    import transformers
-                    from packaging import version
-
-                    if version.parse(transformers.__version__) >= version.parse("4.54.0"):
-                        # transformers >= 4.54.0 uses AutoModelForImageTextToText
-                        from transformers import AutoModelForImageTextToText
-
-                        auto_model_cls = AutoModelForImageTextToText
-                    else:
-                        # transformers < 4.54.0 uses AutoModelForVision2Seq
-                        from transformers import AutoModelForVision2Seq
-
-                        auto_model_cls = AutoModelForVision2Seq
+                    auto_model_cls = get_auto_model_for_vision2seq()
                 else:
                     raise NotImplementedError(f"Unknown architecture {model_config['architectures']}")
 
                 with init_empty_weights():
-                    save_model = auto_model_cls.from_config(model_config, torch_dtype=torch.bfloat16)
+                    save_model = auto_model_cls.from_config(
+                        model_config, torch_dtype=torch.bfloat16, trust_remote_code=self.trust_remote_code
+                    )
+
                 save_model.to_empty(device="cpu")
 
                 if save_model.can_generate():
@@ -350,6 +421,8 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                             f"Warning: {self.__class__.__name__}.save_checkpoint: Generation config file not found "
                             f"in, using a generation config created from the model config when saving hf_model."
                         )
+
+                drop_tied_target_keys(state_dict, save_model, model_config)
 
                 save_model.save_pretrained(hf_local_path, state_dict=state_dict)
                 log_with_rank(
@@ -364,4 +437,5 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             # wait for rank0 to dump hf_model to local
             torch.distributed.barrier()
 
-        self.previous_saved_paths.append(local_path)
+        if self.rank == 0:
+            self.register_checkpoint(local_path, max_ckpt_to_keep)

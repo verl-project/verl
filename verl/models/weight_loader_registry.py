@@ -48,6 +48,7 @@ def get_weight_saver(arch: str):
         "Qwen3ForCausalLM": merge_megatron_ckpt_gptmodel,
         "Qwen3ForTokenClassification": merge_megatron_ckpt_gptmodel,
         "Qwen3MoeForCausalLM": merge_megatron_ckpt_gptmodel_qwen_moe,
+        "LlamaForTokenClassification": merge_megatron_ckpt_gptmodel,
     }
     if arch in _MODEL_WEIGHT_MEGATRON_SAVER_REGISTRY:
         return _MODEL_WEIGHT_MEGATRON_SAVER_REGISTRY[arch]

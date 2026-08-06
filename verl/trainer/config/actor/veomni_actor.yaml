@@ -1,0 +1,28 @@
+# veomni actor config, inheriting from trainer/config/actor/actor.yaml
+defaults:
+  # veomni optimizer config
+  - ../optim@optim: veomni
+
+  # veomni engine config
+  - ../engine@veomni: veomni
+
+  - actor
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+_target_: verl.workers.config.VeOmniActorConfig
+
+strategy: veomni
+
+use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
+
+# round every packed micro-batch up to a veomni.pad_to_length_bucket multiple, so kernel shapes
+# take only a few distinct values
+# oc.select: the default val for ref.pad_to_length
+pad_to_length: False
+
+veomni:
+
+  # Whether to pad packed micro-batches to a bucket-aligned length
+  pad_to_length: ${oc.select:actor_rollout_ref.actor.pad_to_length,False}

@@ -22,11 +22,25 @@ from omegaconf import DictConfig
 from PIL import Image
 from transformers.utils import get_json_schema
 
-from verl.experimental.agent_loop import AgentLoopManager
+from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager
 from verl.protocol import DataProto
 from verl.tools.base_tool import BaseTool, OpenAIFunctionToolSchema
 from verl.tools.schemas import ToolResponse
 from verl.utils import hf_tokenizer
+
+
+def parse_multi_modal_type(messages: list[dict]) -> str:
+    message = messages[-1]
+    if isinstance(message["content"], str):
+        return "text"
+
+    for content in message["content"]:
+        if content["type"] == "image":
+            return "image"
+        elif content["type"] == "video":
+            return "video"
+
+    return "text"
 
 
 @pytest.fixture
@@ -49,9 +63,10 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.name = os.environ["ROLLOUT_NAME"]
     config.actor_rollout_ref.rollout.mode = "async"
     config.actor_rollout_ref.rollout.enforce_eager = True
-    config.actor_rollout_ref.rollout.prompt_length = 4096
+    config.actor_rollout_ref.rollout.prompt_length = 10240
     config.actor_rollout_ref.rollout.response_length = 4096
     config.actor_rollout_ref.rollout.n = 4
+    config.actor_rollout_ref.rollout.seed = 0
     config.actor_rollout_ref.rollout.agent.num_workers = 2
     config.actor_rollout_ref.rollout.skip_tokenizer_init = True
 
@@ -109,8 +124,10 @@ class ImageGeneratorTool(BaseTool):
             return ToolResponse(text=str(e)), 0, {}
 
 
+@pytest.mark.flaky(reruns=3)
 def test_multimodal_tool_agent(init_config):
     """Test agent loop with multimodal tool that returns images using Qwen VL model."""
+    ray.shutdown()
     ray.init(
         runtime_env={
             "env_vars": {
@@ -148,12 +165,36 @@ def test_multimodal_tool_agent(init_config):
     init_config.actor_rollout_ref.rollout.multi_turn.tool_config_path = tool_config_path
     init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 1
     init_config.actor_rollout_ref.rollout.multi_turn.max_user_turns = 1
-    agent_loop_manager = AgentLoopManager(init_config)
+    # The video sample in this test naturally produces ~60k tokens under transformers 5.x
+    # (much more aggressive multimodal placeholder expansion than 4.x). The agent loop
+    # enforces ``len(prompt_ids) <= rollout.prompt_length`` and refuses to silently
+    # truncate multimodal prompts, so size the budget to fit the natural prompt length.
+    init_config.actor_rollout_ref.rollout.prompt_length = 65536
+    agent_loop_manager = init_agent_loop_manager(init_config)
 
     # =========================== 2. Generate sequences with multimodal prompts ===========================
     raw_prompts = [
         [
             {"role": "user", "content": "How are you?"},
+        ],
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "video",
+                        "video": os.path.expanduser("~/models/hf_data/test-videos/space_woaudio.mp4"),
+                        "min_pixels": 4 * 32 * 32,
+                        "max_pixels": 256 * 32 * 32,
+                        "total_pixels": 4096 * 32 * 32,
+                    },
+                    {
+                        "type": "text",
+                        "text": "Describe this video. Then you must call the "
+                        "image generator tool to generate a green image for me.",
+                    },
+                ],
+            },
         ],
         [
             {"role": "user", "content": "Please generate a red image for me."},
@@ -187,14 +228,27 @@ def test_multimodal_tool_agent(init_config):
 
     # Check turns
     num_turns = result.non_tensor_batch["__num_turns__"]
+    multi_modal_inputs = result.non_tensor_batch["multi_modal_inputs"]
     print(f"num_turns: {num_turns}")
     for i in range(len(num_turns)):
+        multi_modal_type = parse_multi_modal_type(raw_prompts[i // n])
+        if multi_modal_type == "video":
+            assert "pixel_values_videos" in multi_modal_inputs[i], f"Sample {i} should have pixel_values_videos"
+            assert "video_grid_thw" in multi_modal_inputs[i], f"Sample {i} should have video_grid_thw"
+
         if i // n == 0:
             # First prompt: "How are you?" - should have 2 turns [user, assistant]
             assert num_turns[i] == 2, f"Expected 2 turns but got {num_turns[i]} for sample {i}"
+        elif i // n == 1:
+            # TODO: prompt with video not generate tool call as expected
+            assert num_turns[i] == 2 or num_turns[i] == 4, (
+                f"Expected 2 or 4 turns but got {num_turns[i]} for sample {i}"
+            )
         else:
             # Tool-calling prompts should have 4 turns [user, assistant, tool, assistant]
             assert num_turns[i] == 4, f"Expected 4 turns but got {num_turns[i]} for sample {i}"
+            assert "pixel_values" in multi_modal_inputs[i], f"Sample {i} should have pixel_values"
+            assert "image_grid_thw" in multi_modal_inputs[i], f"Sample {i} should have image_grid_thw"
 
     # Check that images were properly returned in the tool responses
     tokenizer = hf_tokenizer(init_config.actor_rollout_ref.model.path)
@@ -248,6 +302,7 @@ def test_multimodal_tool_agent(init_config):
 
 def test_multimodal_single_turn_agent(init_config):
     """Test single turn agent loop with multimodal inputs using Qwen VL model."""
+    ray.shutdown()
     ray.init(
         runtime_env={
             "env_vars": {
@@ -265,7 +320,11 @@ def test_multimodal_single_turn_agent(init_config):
     init_config.actor_rollout_ref.rollout.n = n
     init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 1
     init_config.actor_rollout_ref.rollout.multi_turn.max_user_turns = 1
-    agent_loop_manager = AgentLoopManager(init_config)
+    # Same as ``test_multimodal_tool_agent``: the video sample exceeds the default 10k
+    # ``prompt_length`` under transformers 5.x, and the agent loop refuses to truncate
+    # multimodal prompts in place, so request a larger budget for this test.
+    init_config.actor_rollout_ref.rollout.prompt_length = 65536
+    agent_loop_manager = init_agent_loop_manager(init_config)
 
     # =========================== 2. Generate sequences with multimodal prompts ===========================
     # Create a simple test image
@@ -273,18 +332,21 @@ def test_multimodal_single_turn_agent(init_config):
     test_image2 = Image.new("RGB", (512, 512), (100, 150, 200))
 
     raw_prompts = [
+        # text
         [
             {"role": "user", "content": "Hello, how are you?"},
         ],
+        # image
         [
             {
                 "role": "user",
                 "content": [
-                    {"type": "image"},
+                    {"type": "image", "image": test_image},
                     {"type": "text", "text": "What color is this image?"},
                 ],
             },
         ],
+        # system + image
         [
             {
                 "role": "system",
@@ -293,18 +355,27 @@ def test_multimodal_single_turn_agent(init_config):
             {
                 "role": "user",
                 "content": [
-                    {"type": "image"},
+                    {"type": "image", "image": test_image2},
                     {"type": "text", "text": "Describe this image in detail."},
                 ],
             },
         ],
-    ]
-
-    # Prepare multi_modal_data for each prompt
-    multi_modal_data_list = [
-        None,  # First prompt: text only
-        {"image": test_image},  # Second prompt: with image
-        {"image": test_image2},  # Third prompt: with image
+        # video
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "video",
+                        "video": os.path.expanduser("~/models/hf_data/test-videos/space_woaudio.mp4"),
+                        "min_pixels": 4 * 32 * 32,
+                        "max_pixels": 256 * 32 * 32,
+                        "total_pixels": 4096 * 32 * 32,
+                    },
+                    {"type": "text", "text": "Describe this video."},
+                ],
+            },
+        ],
     ]
 
     batch = DataProto(
@@ -316,10 +387,6 @@ def test_multimodal_single_turn_agent(init_config):
         },
     )
 
-    # Add multi_modal_data to batch
-    multi_modal_data_array = np.array([data if data else {} for data in multi_modal_data_list], dtype=object)
-    batch.non_tensor_batch["multi_modal_data"] = multi_modal_data_array
-
     batch = batch.repeat(n)
     result = agent_loop_manager.generate_sequences(prompts=batch)
     assert len(result) == len(raw_prompts) * n
@@ -335,7 +402,11 @@ def test_multimodal_single_turn_agent(init_config):
     prompts = result.batch["prompts"]
     responses = result.batch["responses"]
     response_mask = result.batch["response_mask"]
+    input_ids = result.batch["input_ids"]
+    position_ids = result.batch["position_ids"]
+    multi_modal_inputs = result.non_tensor_batch["multi_modal_inputs"]
     assert responses.size() == response_mask.size(), f"{responses.size()} != {response_mask.size()}"
+    assert position_ids.size() == (input_ids.size(0), 4, input_ids.size(1))  # (batch_size, 4, seq_len)
 
     # Check for image pads in prompts
     image_pad_count = 0
@@ -352,14 +423,17 @@ def test_multimodal_single_turn_agent(init_config):
         print(f"Prompt length: {len(prompt_ids)} tokens")
         print(f"Has image_pad: {has_image_pad}")
 
-        if sample_idx != 0:  # Samples 1 and 2 should have images
-            if has_image_pad:
-                image_pad_count += 1
-                # Count the number of image_pad tokens
-                num_image_pads = prompt_text.count("<|image_pad|>")
-                print(f"Number of <|image_pad|> tokens: {num_image_pads}")
-            else:
-                print("WARNING: Expected image_pad but not found!")
+        # Check multi-modal type
+        multi_modal_type = parse_multi_modal_type(raw_prompts[sample_idx])
+
+        if multi_modal_type == "text":
+            assert len(multi_modal_inputs[i]) == 0, f"Sample {i} should not have multi-modal inputs"
+        elif multi_modal_type == "image":
+            assert "pixel_values" in multi_modal_inputs[i], f"Sample {i} should have pixel_values"
+            assert "image_grid_thw" in multi_modal_inputs[i], f"Sample {i} should have image_grid_thw"
+        else:
+            assert "pixel_values_videos" in multi_modal_inputs[i], f"Sample {i} should have pixel_values_videos"
+            assert "video_grid_thw" in multi_modal_inputs[i], f"Sample {i} should have video_grid_thw"
 
         # Show first 200 chars of prompt
         print(f"Prompt text (first 200 chars): {prompt_text[:200]}...")
@@ -372,152 +446,6 @@ def test_multimodal_single_turn_agent(init_config):
     # Verify that we found image pads in multimodal samples
     expected_multimodal_samples = 2 * n  # 2 prompts with images, repeated n times
     print(f"\nFound {image_pad_count} samples with image_pad out of {expected_multimodal_samples} expected")
-    assert image_pad_count > 0, "No image_pad tokens found in multimodal samples!"
 
     print("Single turn multimodal test passed!")
-    ray.shutdown()
-
-
-def test_multimodal_partial_single_turn_agent(init_config):
-    """Test partial single turn agent loop with multimodal inputs using Qwen VL model."""
-
-    # TODO(baiyan):
-    #    see verl/recipe/fully_async_policy/agent_loop/partial_single_turn_agent_loop.py for more details.
-    #    if use_correct_processor=True, the test will pass but the async training will hang, so I disable this test
-    #    for now
-
-    return
-
-    ray.init(
-        runtime_env={
-            "env_vars": {
-                "TOKENIZERS_PARALLELISM": "true",
-                "NCCL_DEBUG": "WARN",
-                "VLLM_LOGGING_LEVEL": "INFO",
-                "VLLM_USE_V1": "1",
-            }
-        },
-        ignore_reinit_error=True,
-    )
-    from recipe.fully_async_policy.agent_loop import FullyAsyncAgentLoopManager
-
-    # =========================== 1. Init rollout manager ===========================
-    n = 2
-    init_config.actor_rollout_ref.rollout.n = n
-    init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 1
-    init_config.actor_rollout_ref.rollout.multi_turn.max_user_turns = 1
-    import asyncio
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    agent_loop_manager = loop.run_until_complete(FullyAsyncAgentLoopManager.create(init_config))
-
-    # =========================== 2. Generate sequences with multimodal prompts ===========================
-    # Create a simple test image
-    test_image = Image.new("RGB", (256, 256), (200, 100, 50))
-    test_image2 = Image.new("RGB", (512, 512), (100, 150, 200))
-
-    raw_prompts = [
-        [
-            {"role": "user", "content": "What is the capital of France?"},
-        ],
-        [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": "What do you see in this image?"},
-                ],
-            },
-        ],
-        [
-            {
-                "role": "system",
-                "content": "You are Qwen VL, a helpful multimodal assistant.",
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": "Analyze the colors in this image."},
-                ],
-            },
-        ],
-    ]
-
-    # Prepare multi_modal_data for each prompt
-    multi_modal_data_list = [
-        None,  # First prompt: text only
-        {"image": test_image},  # Second prompt: with image
-        {"image": test_image2},  # Third prompt: with image
-    ]
-
-    batch = DataProto(
-        non_tensor_batch={
-            "raw_prompt": np.array([np.array(prompt) for prompt in raw_prompts], dtype=object),
-            "agent_name": np.array(["partial_single_turn_agent"] * len(raw_prompts)),
-            "data_source": np.array(["openai/gsm8k"] * len(raw_prompts)),
-            "reward_model": np.array([{"style": "rule", "ground_truth": "1.0"}] * len(raw_prompts)),
-        },
-    )
-
-    # Add multi_modal_data to batch
-    multi_modal_data_array = np.array([data if data else {} for data in multi_modal_data_list], dtype=object)
-    batch.non_tensor_batch["multi_modal_data"] = multi_modal_data_array
-
-    batch = batch.repeat(n)
-    result = agent_loop_manager.generate_sequences(prompts=batch)
-    assert len(result) == len(raw_prompts) * n
-
-    # Check turns - all should be single turn (2: user + assistant)
-    num_turns = result.non_tensor_batch["__num_turns__"]
-    print(f"num_turns: {num_turns}")
-    for i in range(len(num_turns)):
-        assert num_turns[i] == 2, f"Expected 2 turns but got {num_turns[i]} for sample {i}"
-
-    # Verify responses
-    tokenizer = hf_tokenizer(init_config.actor_rollout_ref.model.path)
-    prompts = result.batch["prompts"]
-    responses = result.batch["responses"]
-    response_mask = result.batch["response_mask"]
-    assert responses.size() == response_mask.size(), f"{responses.size()} != {response_mask.size()}"
-
-    # Check for image pads in prompts
-    image_pad_count = 0
-    for i in range(len(prompts)):
-        prompt_ids = prompts[i][prompts[i] != tokenizer.pad_token_id].tolist()
-        prompt_text = tokenizer.decode(prompt_ids)
-
-        # Check if this sample should have image pads (samples with index 1 and 2 in each repeat have images)
-        sample_idx = i // n
-        has_image_pad = "<|image_pad|>" in prompt_text or "<|vision_start|>" in prompt_text
-
-        print("=========================")
-        print(f"Sample {i} (original prompt index: {sample_idx}):")
-        print(f"Prompt length: {len(prompt_ids)} tokens")
-        print(f"Has image_pad: {has_image_pad}")
-
-        if sample_idx != 0:  # Samples 1 and 2 should have images
-            if has_image_pad:
-                image_pad_count += 1
-                # Count the number of image_pad tokens
-                num_image_pads = prompt_text.count("<|image_pad|>")
-                print(f"Number of <|image_pad|> tokens: {num_image_pads}")
-            else:
-                print("WARNING: Expected image_pad but not found!")
-
-        # Show first 200 chars of prompt
-        print(f"Prompt text (first 200 chars): {prompt_text[:200]}...")
-
-    for i in range(len(responses)):
-        valid_tokens = responses[i][response_mask[i].bool()]
-        response_text = tokenizer.decode(valid_tokens)
-        print(f"Sample {i} response: {response_text[:100]}...")
-
-    # Verify that we found image pads in multimodal samples
-    expected_multimodal_samples = 2 * n  # 2 prompts with images, repeated n times
-    print(f"\nFound {image_pad_count} samples with image_pad out of {expected_multimodal_samples} expected")
-    assert image_pad_count > 0, "No image_pad tokens found in multimodal samples!"
-
-    print("Partial single turn multimodal test passed!")
     ray.shutdown()

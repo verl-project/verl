@@ -25,13 +25,15 @@ Usage:
 This tests:
 - Basic rollout correction functionality (IS weights + rejection sampling)
 - Metrics completeness (IS metrics + rejection metrics + off-policy metrics)
-- Veto mechanism
 - Edge cases
 """
 
+import pytest
 import torch
 
 from verl.trainer.ppo.rollout_corr_helper import (
+    SUPPORTED_ROLLOUT_RS_OPTIONS,
+    compute_is_metrics,
     compute_offpolicy_metrics,
     compute_rollout_correction_and_rejection_mask,
 )
@@ -59,7 +61,6 @@ def test_basic_rollout_correction():
         rollout_is="token",  # Compute IS weights at token level
         rollout_is_threshold=2.0,
         rollout_rs=None,  # No rejection sampling (truncate mode)
-        rollout_token_veto_threshold=1e-4,
     )
 
     weights = weights_proto.batch["rollout_is_weights"]
@@ -67,7 +68,6 @@ def test_basic_rollout_correction():
     print(f"   Mean weight: {metrics['rollout_corr/rollout_is_mean']:.4f}")
     print(f"   Max weight: {metrics['rollout_corr/rollout_is_max']:.4f}")
     print(f"   Min weight: {metrics['rollout_corr/rollout_is_min']:.4f}")
-    print(f"   Veto fraction: {metrics['rollout_corr/rollout_is_veto_fraction']:.4f}")
     assert weights.shape == old_log_prob.shape
     assert weights.max() <= 2.0, "Weights should be capped at threshold"
     print("   ✓ Token-level truncate mode passed")
@@ -81,7 +81,6 @@ def test_basic_rollout_correction():
         rollout_is="sequence",  # Compute IS weights at sequence level
         rollout_is_threshold=5.0,
         rollout_rs=None,  # No rejection sampling (truncate mode)
-        rollout_token_veto_threshold=1e-4,
     )
 
     weights_seq = weights_seq_proto.batch["rollout_is_weights"]
@@ -93,61 +92,28 @@ def test_basic_rollout_correction():
         assert torch.allclose(seq_weights, seq_weights[0]), "All tokens in sequence should have same weight"
     print("   ✓ Sequence-level mode passed")
 
-    # Test geometric mean rejection sampling (mask mode)
-    print("\n3. Testing geometric mean rejection sampling...")
+    # Test K1 sequence mean rejection sampling (mask mode)
+    print("\n3. Testing K1 (sequence mean) rejection sampling...")
     weights_geo_proto, modified_mask_geo, metrics_geo = compute_rollout_correction_and_rejection_mask(
         old_log_prob=old_log_prob,
         rollout_log_prob=rollout_log_prob,
         response_mask=eos_mask,
         rollout_is=None,  # No IS weights (pure mask mode)
-        rollout_rs="geometric",  # Rejection sampling with geometric mean
-        rollout_rs_threshold=1.5,
-        rollout_rs_threshold_lower=0.5,
-        rollout_token_veto_threshold=1e-4,
+        rollout_rs="seq_mean_k1",  # Rejection sampling with sequence-mean log ratio bounds
+        rollout_rs_threshold="0.5_1.5",
     )
 
     print(f"   Masked fraction: {metrics_geo['rollout_corr/rollout_rs_masked_fraction']:.4f}")
-    print(f"   Veto fraction: {metrics_geo['rollout_corr/rollout_is_veto_fraction']:.4f}")
-    print("   ✓ Geometric mean rejection sampling passed")
-
-    # Test veto mechanism
-    print("\n4. Testing veto mechanism...")
-    # Create data with catastrophic outliers
-    old_log_prob_veto = torch.randn(2, 5, device=device)
-    rollout_log_prob_veto = old_log_prob_veto.clone()
-    # Make one token have catastrophically low ratio
-    rollout_log_prob_veto[0, 2] = old_log_prob_veto[0, 2] + 15.0  # ratio ~= 3e-7
-    eos_mask_veto = torch.ones(2, 5, device=device)
-
-    weights_veto_proto, modified_response_mask_veto, metrics_veto = compute_rollout_correction_and_rejection_mask(
-        old_log_prob=old_log_prob_veto,
-        rollout_log_prob=rollout_log_prob_veto,
-        response_mask=eos_mask_veto,
-        rollout_is="token",
-        rollout_is_threshold=2.0,
-        rollout_rs=None,
-        rollout_token_veto_threshold=1e-4,
-    )
-
-    weights_veto = weights_veto_proto.batch["rollout_is_weights"]
-    print(f"   Veto fraction: {metrics_veto['rollout_corr/rollout_is_veto_fraction']:.4f}")
-    # KEY FIX: Veto is applied via response_mask, not by zeroing weights
-    # Check that weights are NON-ZERO (safety-bounded ratios preserved, not zeroed)
-    assert weights_veto[0].sum() > 0, "Weights should be non-zero (not zeroed by veto)"
-    # Check that response_mask has veto applied
-    assert modified_response_mask_veto[0].sum() == 0, "Vetoed sequence should have response_mask zeroed"
-    assert modified_response_mask_veto[1].sum() > 0, "Normal sequence should have response_mask unchanged"
-    print("   ✓ Veto mechanism passed")
+    print("   ✓ K1 sequence mean rejection sampling passed")
 
     # Test disabled IS (rollout_is=None, rollout_rs=None)
-    print("\n5. Testing disabled IS...")
+    print("\n4. Testing disabled IS...")
     weights_disabled, modified_response_mask_disabled, metrics_disabled = compute_rollout_correction_and_rejection_mask(
         old_log_prob=old_log_prob,
         rollout_log_prob=rollout_log_prob,
         response_mask=eos_mask,
         rollout_is=None,
         rollout_rs=None,
-        rollout_token_veto_threshold=None,
     )
 
     assert weights_disabled is None, "Should return None when IS is disabled"
@@ -157,6 +123,73 @@ def test_basic_rollout_correction():
     print("   ✓ Disabled IS passed")
 
     print("\n✓ All tests passed!")
+
+
+@pytest.mark.parametrize(
+    ("option", "threshold"),
+    [
+        ("token_k1", "0.5_1.5"),
+        ("token_k2", 2.0),
+        ("token_k3", 2.0),
+        ("seq_sum_k1", "0.6_1.4"),
+        ("seq_sum_k2", 2.5),
+        ("seq_sum_k3", 2.5),
+        ("seq_mean_k1", "0.5_1.5"),
+        ("seq_mean_k2", 2.0),
+        ("seq_mean_k3", 2.0),
+        ("seq_max_k2", 2.0),
+        ("seq_max_k3", 2.0),
+    ],
+)
+def test_each_supported_rollout_rs_option(option: str, threshold):
+    """Ensure every supported RS option produces metrics without error."""
+    assert option in SUPPORTED_ROLLOUT_RS_OPTIONS
+
+    batch_size, seq_length = 3, 7
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    old_log_prob = torch.randn(batch_size, seq_length, device=device)
+    rollout_log_prob = old_log_prob + torch.randn(batch_size, seq_length, device=device) * 0.15
+    response_mask = torch.ones(batch_size, seq_length, device=device)
+
+    _, modified_mask, metrics = compute_rollout_correction_and_rejection_mask(
+        old_log_prob=old_log_prob,
+        rollout_log_prob=rollout_log_prob,
+        response_mask=response_mask,
+        rollout_is=None,
+        rollout_rs=option,
+        rollout_rs_threshold=threshold,
+    )
+
+    expected_key = f"rollout_corr/rollout_rs_{option}_mean"
+    assert expected_key in metrics, f"Missing metric for {option}"
+    assert modified_mask.shape == response_mask.shape
+
+
+def test_rollout_rs_multiple_options():
+    """Verify multiple RS options with mixed threshold formats."""
+    batch_size, seq_length = 2, 6
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    old_log_prob = torch.randn(batch_size, seq_length, device=device)
+    rollout_log_prob = old_log_prob + torch.randn(batch_size, seq_length, device=device) * 0.2
+    response_mask = torch.ones(batch_size, seq_length, device=device)
+
+    rollout_rs = "token_k1,seq_max_k3"
+    rollout_rs_threshold = "0.4_1.8,3.0"
+
+    _, _, metrics = compute_rollout_correction_and_rejection_mask(
+        old_log_prob=old_log_prob,
+        rollout_log_prob=rollout_log_prob,
+        response_mask=response_mask,
+        rollout_is=None,
+        rollout_rs=rollout_rs,
+        rollout_rs_threshold=rollout_rs_threshold,
+    )
+
+    for option in rollout_rs.split(","):
+        key = f"rollout_corr/rollout_rs_{option}_mean"
+        assert key in metrics, f"Metrics missing for chained option {option}"
 
 
 def test_metrics_completeness():
@@ -186,8 +219,6 @@ def test_metrics_completeness():
         "rollout_corr/rollout_is_min",
         "rollout_corr/rollout_is_std",
         "rollout_corr/rollout_is_eff_sample_size",
-        "rollout_corr/rollout_is_veto_fraction",
-        "rollout_corr/rollout_is_catastrophic_token_fraction",
         "rollout_corr/rollout_is_ratio_fraction_high",
         "rollout_corr/rollout_is_ratio_fraction_low",
     ]
@@ -304,10 +335,8 @@ def test_mask_mode():
         response_mask=response_mask,
         rollout_is="token",  # Compute IS weights
         rollout_is_threshold=2.0,
-        rollout_rs="token",  # Also apply rejection sampling (mask mode)
-        rollout_rs_threshold=2.0,
-        rollout_rs_threshold_lower=0.5,
-        rollout_token_veto_threshold=None,
+        rollout_rs="token_k1",  # Also apply rejection sampling (mask mode)
+        rollout_rs_threshold="0.5_2.0",
     )
 
     weights = weights_proto.batch["rollout_is_weights"]
@@ -335,6 +364,82 @@ def test_mask_mode():
     print(f"   Second seq mask: {modified_response_mask[1, 0]:.0f} (expected 1 - accepted)")
     print(f"   Masked fraction: {metrics['rollout_corr/rollout_rs_masked_fraction']:.2f}")
     print("   ✓ Mask mode correctly separates IS weights from rejection")
+
+
+def test_exact_icepop_zeroes_weights_without_changing_mask():
+    """IcePop should zero OOB IS weights while preserving response_mask."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    raw_is_weights = torch.tensor([[0.4, 0.8, 6.0]], device=device)
+    old_log_prob = torch.zeros_like(raw_is_weights)
+    rollout_log_prob = -torch.log(raw_is_weights)
+    response_mask = torch.ones_like(raw_is_weights)
+
+    weights_proto, modified_response_mask, metrics = compute_rollout_correction_and_rejection_mask(
+        old_log_prob=old_log_prob,
+        rollout_log_prob=rollout_log_prob,
+        response_mask=response_mask,
+        rollout_is="token",
+        rollout_is_threshold="0.5_5.0",
+        rollout_rs=None,
+    )
+
+    weights = weights_proto.batch["rollout_is_weights"]
+    expected_weights = torch.tensor([[0.0, 0.8, 0.0]], device=device)
+
+    torch.testing.assert_close(weights, expected_weights, atol=1e-6, rtol=1e-6)
+    assert torch.equal(modified_response_mask, response_mask)
+    assert metrics["rollout_corr/rollout_is_oob_ratio"] == pytest.approx(2.0 / 3.0, abs=1e-6)
+    assert metrics["rollout_corr/rollout_is_std"] == pytest.approx(0.3771236, abs=1e-6)
+    assert metrics["rollout_corr/rollout_is_eff_sample_size"] == pytest.approx(1.0 / 3.0, abs=1e-6)
+
+
+def test_bool_rollout_is_threshold_is_rejected():
+    """Boolean thresholds should not be silently accepted via bool <: int."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    old_log_prob = torch.zeros(1, 2, device=device)
+    rollout_log_prob = torch.zeros(1, 2, device=device)
+    response_mask = torch.ones(1, 2, device=device)
+
+    with pytest.raises(TypeError, match="not a boolean"):
+        compute_rollout_correction_and_rejection_mask(
+            old_log_prob=old_log_prob,
+            rollout_log_prob=rollout_log_prob,
+            response_mask=response_mask,
+            rollout_is="token",
+            rollout_is_threshold=True,
+            rollout_rs=None,
+        )
+
+
+def test_seq_fraction_high_uses_raw_weights():
+    """rollout_is_seq_fraction_high must be driven by the raw (pre-truncation) weights.
+
+    Truncation clamps every weight to <= rollout_is_threshold, so a per-sequence mean of
+    clamped weights can never exceed the threshold. The high fraction therefore has to come
+    from the raw per-sequence mean to remain a live diagnostic.
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    threshold = 2.0
+
+    # Sequence 0: raw mean (1.0 + 6.0) / 2 = 3.5 > threshold, but clamped mean
+    # (1.0 + 2.0) / 2 = 1.5 <= threshold. Sequence 1 stays well under the threshold.
+    raw_rollout_is_weights = torch.tensor([[1.0, 6.0], [0.9, 1.1]], device=device)
+    rollout_is_weights = raw_rollout_is_weights.clamp(max=threshold)
+    response_mask = torch.ones_like(raw_rollout_is_weights)
+    log_ratio_for_metrics = torch.log(raw_rollout_is_weights)
+
+    metrics = compute_is_metrics(
+        rollout_is_weights=rollout_is_weights,
+        raw_rollout_is_weights=raw_rollout_is_weights,
+        log_ratio_for_metrics=log_ratio_for_metrics,
+        response_mask=response_mask,
+        rollout_is="token",
+        rollout_is_threshold=threshold,
+    )
+
+    assert metrics["rollout_is_seq_fraction_high"] == pytest.approx(0.5)
 
 
 if __name__ == "__main__":

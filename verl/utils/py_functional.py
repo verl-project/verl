@@ -25,6 +25,10 @@ from functools import wraps
 from types import SimpleNamespace
 from typing import Any, Callable, Iterator, Optional
 
+import numpy as np
+
+from verl.utils.metric import Metric
+
 
 # --- Top-level helper for multiprocessing timeout ---
 # This function MUST be defined at the top level to be pickleable
@@ -162,6 +166,24 @@ def union_two_dict(dict1: dict, dict2: dict):
     return dict1
 
 
+def rename_dict(data: dict, prefix: str = "") -> dict:
+    """Add a prefix to all the keys in the data dict if it's name is not started with prefix
+
+    Args:
+        data: a dictionary
+        prefix: prefix
+
+    Returns:
+        dictionary with modified name
+
+    """
+    new_data = {}
+    for key, val in data.items():
+        new_key = f"{prefix}{key}" if not key.startswith(prefix) else key
+        new_data[new_key] = val
+    return new_data
+
+
 def append_to_dict(data: dict, new_data: dict, prefix: str = ""):
     """Append values from new_data to lists in data.
 
@@ -176,10 +198,13 @@ def append_to_dict(data: dict, new_data: dict, prefix: str = ""):
         None: The function modifies data in-place.
     """
     for key, val in new_data.items():
-        new_key = f"{prefix}{key}"
+        new_key = f"{prefix}{key}" if not key.startswith(prefix) else key
         if new_key not in data:
-            data[new_key] = []
-        data[new_key].append(val)
+            data[new_key] = val.init_list() if isinstance(val, Metric) else []
+        if isinstance(val, list):
+            data[new_key].extend(val)
+        else:
+            data[new_key].append(val)
 
 
 class NestedNamespace(SimpleNamespace):
@@ -316,3 +341,28 @@ def convert_to_regular_types(obj):
     elif isinstance(obj, dict):
         return {k: convert_to_regular_types(v) for k, v in obj.items()}
     return obj
+
+
+def convert_nested_value_to_list_recursive(data_item):
+    if isinstance(data_item, dict):
+        return {k: convert_nested_value_to_list_recursive(v) for k, v in data_item.items()}
+    elif isinstance(data_item, list):
+        return [convert_nested_value_to_list_recursive(elem) for elem in data_item]
+    elif isinstance(data_item, np.ndarray):
+        # Convert to list, then recursively process the elements of the new list
+        return convert_nested_value_to_list_recursive(data_item.tolist())
+    else:
+        # Base case: item is already a primitive type (int, str, float, bool, etc.)
+        return data_item
+
+
+def list_of_dict_to_dict_of_list(list_of_dict: list[dict]):
+    if len(list_of_dict) == 0:
+        return {}
+    keys = list_of_dict[0].keys()
+    output = {key: [] for key in keys}
+    for data in list_of_dict:
+        for key, item in data.items():
+            assert key in output, f"Key '{key}' is not present in the keys of the first dictionary in the list."
+            output[key].append(item)
+    return output

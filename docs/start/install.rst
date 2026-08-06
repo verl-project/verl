@@ -17,14 +17,12 @@ Choices of Backend Engines
 
 1. Training:
 
-We recommend using **FSDP** backend to investigate, research and prototype different models, datasets and RL algorithms. The guide for using FSDP backend can be found in :doc:`FSDP Workers<../workers/fsdp_workers>`.
-
-For users who pursue better scalability, we recommend using **Megatron-LM** backend. Currently, we support `Megatron-LM v0.13.1 <https://github.com/NVIDIA/Megatron-LM/tree/core_v0.13.1>`_. The guide for using Megatron-LM backend can be found in :doc:`Megatron-LM Workers<../workers/megatron_workers>`.
+We recommend using the **FSDP / FSDP2** backend to investigate, research and prototype different models, datasets and RL algorithms. For users who pursue better scalability, we recommend the **Megatron-LM** backend. Currently, we support `Megatron-LM v0.13.1 <https://github.com/NVIDIA/Megatron-LM/tree/core_v0.13.1>`_. Both backends are served through the same unified worker layer – see :doc:`Engine Workers<../workers/engine_workers>` for the worker-level API and :doc:`Model Engine<../workers/model_engine>` for the engine-level design.
 
 
 2. Inference:
 
-For inference, vllm 0.8.3 and later versions have been tested for stability. We recommend turning on env var `VLLM_USE_V1=1` for optimal performance.
+For inference, vllm 0.18.0 and later versions are supported; older releases are no longer usable with verl.
 
 For SGLang, refer to the :doc:`SGLang Backend<../workers/sglang_worker>` for detailed installation and usage instructions. SGLang rollout is under extensive development and offers many advanced features and optimizations. We encourage users to report any issues or provide feedback via the `SGLang Issue Tracker <https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/issues/106>`_.
 
@@ -33,58 +31,37 @@ For huggingface TGI integration, it is usually used for debugging and single GPU
 Install from docker image
 -------------------------
 
-We provide pre-built Docker images for quick setup. And from this version,
-we utilize a new image release hierarchy for productivity and stability.
-
-The image types are divided into three large categories:
-
-- **Base Image**: Without inference and training frameworks, only basic dependencies are installed.
-  Can directly install vllm or SGLang on top of it, without need of reinstall torch or CUDA.
-- **Application Image**: Stable version with inference and training frameworks installed.
-- **Community Image**: Unstable version with the latest frameworks and features.
-
-The first two types of images are hosted on dockerhub `verlai/verl <https://hub.docker.com/r/verlai/verl>`_ repository, while the preview images are hosted on community repository.
-
-.. note::
-
-    The image versions are mapped with verl releases, for example, image with tag ``verl0.4`` is built for verl release ``v0.4.x``.
+Start from v0.6.0, we use vllm and sglang release image as our base image.
 
 Base Image
 ::::::::::
 
-The stable base image is ``verlai/verl:base-verl0.6-cu128-cudnn9.8-torch2.8.0-fa2.7.4`` for vLLM and sglang. The installed package versions can be found from tags, and the Dockerfile can be found in ``docker/verl[version]-[packages]/Dockerfile.base``.
-
-The update of base image is not frequent, and the app image can be built on top of it without reinstalling base packages.
+- vLLM: https://hub.docker.com/r/vllm/vllm-openai
+- SGLang: https://hub.docker.com/r/lmsysorg/sglang
 
 Application Image
 :::::::::::::::::
 
-From this version, we divide images built for vLLM and SGLang as the divergence of dependent packages like Pytorch and FlashInfer.
+Upon base image, the following packages are added:
 
-There are 2 types of application images available:
+- flash_attn
+- Megatron-LM
+- Apex
+- TransformerEngine
+- DeepEP
 
-- **vLLM with FSDP and Megatron**: ``verlai/verl:app-verl0.5-transformers4.55.4-vllm0.10.0-mcore0.13.0-te2.2``
-- **SGLang with FSDP and Megatron**: ``verlai/verl:app-verl0.6-transformers4.56.1-sglang0.5.2-mcore0.13.0-te2.2``
+Latest docker file:
 
-Docker images with Megatron backends are runnable with large language model like ``Qwen/Qwen3-235B-A22B``, ``deepseek-ai/DeepSeek-V3-0324`` post-training. Refer to the :doc:`Large Language Model Post-Training documentation<../perf/dpsk>` for more details.
+- `Dockerfile.stable.vllm <https://github.com/verl-project/verl/blob/main/docker/Dockerfile.stable.vllm>`_
+- `Dockerfile.stable.sglang <https://github.com/verl-project/verl/blob/main/docker/Dockerfile.stable.sglang>`_
 
-Application images can be updated frequently, and the Dockerfile can be found in ``docker/verl[version]-[packages]/Dockerfile.app.[frameworks]``. Based on the base image, it is easy to build your own application image with the desired inference and training frameworks.
+All pre-built images are available in dockerhub: `verlai/verl <https://hub.docker.com/r/verlai/verl>`_. For example, ``verlai/verl:sgl055.latest``, ``verlai/verl:vllm011.latest``.
 
-Community Image
-:::::::::::::::
+You can find the latest images used for development and ci in our github workflows:
 
-Community images are provided by the community, including the latest versions of vLLM and SGLang, and may include experimental features or configurations. And also works for other hardwares or platforms like AMD GPUs with ROCM or AWS EFA and Sagemaker.
+- `.github/workflows/vllm.yml <https://github.com/verl-project/verl/blob/main/.github/workflows/vllm.yml>`_
+- `.github/workflows/sgl.yml <https://github.com/verl-project/verl/blob/main/.github/workflows/sgl.yml>`_
 
-For latest vLLM with FSDP, please refer to `hiyouga/verl <https://hub.docker.com/r/hiyouga/verl>`_ repository and the latest version is ``hiyouga/verl:ngc-th2.8.0-cu12.9-vllm0.11.0``.
-
-For latest SGLang with FSDP, please refer to `hebiaobuaa/verl <https://hub.docker.com/r/hebiaobuaa/verl>`_ repository and the latest version is ``hebiaobuaa/verl:app-verl0.5-sglang0.4.9.post6-mcore0.12.2-te2.2`` which is provided by SGLang RL Group.
-
-For latest vLLM with Megatron, please refer to `iseekyan/verl <https://hub.docker.com/r/iseekyan/verl>`_ repository and the latest version is ``iseekyan/verl:megatron0.13_vllm0.11``.
-
-See files under ``docker/`` for NGC-based image or if you want to build your own.
-
-Note that For aws instances with EFA net interface (Sagemaker AI Pod),
-you need to install EFA driver as shown in ``docker/Dockerfile.extenstion.awsefa``
 
 Installation from Docker
 ::::::::::::::::::::::::
@@ -105,7 +82,7 @@ After pulling the desired Docker image and installing desired inference and trai
 .. code:: bash
 
     # install the nightly version (recommended)
-    git clone https://github.com/volcengine/verl && cd verl
+    git clone https://github.com/verl-project/verl && cd verl
     pip3 install --no-deps -e .
 
 [Optional] If you hope to switch between different frameworks, you can install verl with the following command:
@@ -113,9 +90,9 @@ After pulling the desired Docker image and installing desired inference and trai
 .. code:: bash
 
     # install the nightly version (recommended)
-    git clone https://github.com/volcengine/verl && cd verl
-    pip3 install -e .[vllm]
-    pip3 install -e .[sglang]
+    git clone https://github.com/verl-project/verl && cd verl
+    pip3 install -e ".[vllm]"
+    pip3 install -e ".[sglang]"
 
 
 Install from custom environment
@@ -125,7 +102,7 @@ We recommend to use docker images for convenience. However, if your environment 
 
 .. note::
 
-    - Dockerfile provides more details than this installation instructions. You can find examples in each Dockerfile, for example `verl0.6-cu128-torch2.8.0-fa2.7.4 Dockerfile.base <https://github.com/volcengine/verl/blob/v0.6.0/docker/verl0.6-cu128-torch2.8.0-fa2.7.4/Dockerfile.base>`_ .
+    - Dockerfile provides more details than this installation instructions. You can find examples in each Dockerfile, for example `verl0.6-cu128-torch2.8.0-fa2.7.4 Dockerfile.base <https://github.com/verl-project/verl/blob/v0.6.0/docker/verl0.6-cu128-torch2.8.0-fa2.7.4/Dockerfile.base>`_ .
 
 
 Pre-requisites
@@ -229,7 +206,7 @@ own post-training jobs.
 
 .. code:: bash
 
-   git clone https://github.com/volcengine/verl.git
+   git clone https://github.com/verl-project/verl.git
    cd verl
    pip install --no-deps -e .
 
@@ -257,7 +234,7 @@ Install with AMD GPUs - ROCM kernel support
 When you run on AMD GPUs (MI300) with ROCM platform, you cannot use the previous quickstart to run verl. You should follow the following steps to build a docker and run it.
 If you encounter any issues in using AMD GPUs running verl, feel free to contact me - `Yusheng Su <https://yushengsu-thu.github.io/>`_.
 
-Find the docker for AMD ROCm: `docker/Dockerfile.rocm <https://github.com/volcengine/verl/blob/main/docker/Dockerfile.rocm>`_
+Find the docker for AMD ROCm: `docker/Dockerfile.rocm <https://github.com/verl-project/verl/blob/main/docker/Dockerfile.rocm>`_
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 
 .. code-block:: bash

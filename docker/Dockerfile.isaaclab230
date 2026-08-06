@@ -1,0 +1,150 @@
+
+#FROM nvcr.nju.edu.cn/nvidia/isaac-lab:2.3.0
+FROM isaac-lab-base:latest
+
+ENV ACCEPT_EULA=Y
+ENTRYPOINT []
+
+# desktop
+RUN --mount=type=cache,target=/var/cache/apt \
+    sed -i 's/archive.ubuntu.com/mirrors.ivolces.com/g' /etc/apt/sources.list && \
+    sed -i 's/security.ubuntu.com/mirrors.ivolces.com/g' /etc/apt/sources.list && \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y locales && \
+    locale-gen en_US.UTF-8 && \
+    update-locale LANG=en_US.UTF-8 LC_CTYPE=en_US.UTF-8 && \
+    apt-get install -y wget curl \
+        xfce4 \
+        xfce4-goodies \
+        xorg \
+        dbus-x11 \
+        x11-xserver-utils \
+        tigervnc-standalone-server \
+        tigervnc-common \
+        tigervnc-tools \
+        fonts-dejavu \
+        fonts-liberation
+# cuda 12.2
+RUN --mount=type=cache,target=/var/cache/apt \
+    cd /tmp && \
+    wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/3bf863cc.pub && \
+    apt-key add 3bf863cc.pub && \
+    echo "deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64 /" > /etc/apt/sources.list.d/cuda.list && \
+    apt-get update && \
+    apt-get install -y libcusparselt0 libnccl2=2.27.3-1+cuda12.2 libglfw3 libgl1-mesa-glx libosmesa6 && \
+    rm -f 3bf863cc.pub
+
+# libero
+RUN --mount=type=cache,target=/root/.cache/pip \
+    /workspace/isaaclab/_isaac_sim/python.sh -m pip install easydict==1.9 robosuite==1.4.0 bddl==1.0.1 future==0.18.2 cloudpickle==2.1.0
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    /workspace/isaaclab/_isaac_sim/python.sh -m pip install transformers[hf_xet]
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    /workspace/isaaclab/_isaac_sim/python.sh -m pip install --upgrade numpy==1.26.4 ray[default] \
+    accelerate codetiming datasets dill hydra-core pandas peft pyarrow>=19.0.0 pybind11 pylatexenc
+
+# openvla-oft
+RUN --mount=type=cache,target=/root/.cache/pip \
+    /workspace/isaaclab/_isaac_sim/python.sh -m pip install pre-commit torchdata packaging>=20.0 uvicorn fastapi latex2sympy2_extended math_verify tensorboard
+
+
+# flash_attn
+RUN cd /tmp && \
+    wget -nv https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp311-cp311-linux_x86_64.whl && \
+    /workspace/isaaclab/_isaac_sim/python.sh -m pip install /tmp/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp311-cp311-linux_x86_64.whl && \
+    rm -f /tmp/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    /workspace/isaaclab/_isaac_sim/python.sh -m pip install --upgrade protobuf==3.20.3 timm==0.9.16
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    /workspace/isaaclab/_isaac_sim/python.sh -m pip install orjson==3.11.3 pyvers==0.1.0 tensordict==0.10.0 --force --no-deps
+
+
+RUN mkdir -p /root/.vnc && \
+    cat <<'EOP' > /root/.vnc/xstartup 
+#!/bin/sh
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+[ -r \$HOME/.Xresources ] && xrdb \$HOME/.Xresources
+xsetroot -solid grey
+exec startxfce4
+EOP
+
+RUN cat <<'EOP' > /root/.vnc/config
+geometry=1920x1080
+depth=24
+desktop=Isaac-Sim-Desktop
+dpi=96
+localhost=no
+EOP
+
+RUN cat <<'EOP' > /root/start_isaac_vnc.sh
+#!/bin/bash
+# 设置显示变量
+export DISPLAY=:1
+
+# 检查VNC是否运行
+if ! pgrep -f "Xvnc.*:1" > /dev/null; then
+    echo "Starting VNC server..."
+    vncserver :1 -localhost no -geometry 1920x1080 -depth 24 -desktop "Isaac-Sim-Desktop"
+    sleep 3
+fi
+
+# 启动Isaac Sim
+echo "Starting Isaac Sim..."
+/workspace/isaaclab/_isaac_sim/isaac-sim.sh --allow-root
+EOP
+
+RUN chmod +x /root/.vnc/xstartup && \
+    chmod +x /root/start_isaac_vnc.sh
+
+RUN /workspace/isaaclab/_isaac_sim/isaac-sim.sh --allow-root --ext-precache-mode
+
+RUN cd /root && \
+    git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git && \
+    cd LIBERO && \
+    git apply <<'EOP'
+diff --git a/setup.py b/setup.py
+index 59d4900..dbe9811 100644
+--- a/setup.py
++++ b/setup.py
+@@ -13,7 +13,8 @@ long_description = "".join(lines)
+
+ setup(
+     name="libero",
+-    packages=[package for package in find_packages() if package.startswith("libero")],
++    #packages=[package for package in find_packages() if package.startswith("libero")],
++    packages=["libero"],
+     install_requires=[],
+     eager_resources=["*"],
+     include_package_data=True,
+EOP
+
+RUN cd /root/LIBERO && \
+    /workspace/isaaclab/_isaac_sim/python.sh -m pip install -e .
+
+# libero config
+RUN mkdir -p /root/.libero && \
+cat <<'EOP' > /root/.libero/config.yaml
+assets: /root/LIBERO/libero/libero/./assets
+bddl_files: /root/LIBERO/libero/libero/./bddl_files
+benchmark_root: /root/LIBERO/libero/libero
+datasets: /root/LIBERO/libero/libero/../datasets
+init_states: /root/LIBERO/libero/libero/./init_files
+EOP
+
+# from https://github.com/nvidia-china-sae/RobotLearningLab
+COPY RobotLearningLab/ /root/RobotLearningLab/
+
+RUN cd /workspace/isaaclab/ && \
+    rm -rf source && \
+    ln -s /root/RobotLearningLab/source source && \
+    /workspace/isaaclab/_isaac_sim/python.sh -m pip install -e ./source/isaaclab
+# Ray cmd
+RUN /workspace/isaaclab/_isaac_sim/python.sh -m pip install colorama && \
+cat <<'EOP' >> /root/.bashrc
+alias ray='/workspace/isaaclab/_isaac_sim/python.sh /workspace/isaaclab/_isaac_sim/kit/python/lib/python3.11/site-packages/ray/scripts/scripts.py'
+EOP
