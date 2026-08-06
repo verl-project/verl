@@ -213,6 +213,15 @@ class ActorConfig(BaseConfig):
                     "'actor.ppo_micro_batch_size_per_gpu' if use_dynamic_bsz is not enabled."
                 )
 
+        if self.calculate_sum_pi_squared and self.use_fused_kernels:
+            import warnings
+            warnings.warn(
+                "calculate_sum_pi_squared=True is not supported with use_fused_kernels=True. "
+                "Automatically disabling use_fused_kernels to allow Sigma pi^2 computation.",
+                UserWarning
+            )
+            self.use_fused_kernels = False
+
         valid_loss_agg_modes = [
             "token-mean",
             "token-sum",
