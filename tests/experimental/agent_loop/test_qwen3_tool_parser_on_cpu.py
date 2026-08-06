@@ -79,3 +79,32 @@ def test_array_param_does_not_execute_arbitrary_code(tmp_path):
     assert not marker.exists(), "ast.literal_eval must not execute arbitrary code"
     # ... and the unparseable value degenerates to the original string unchanged.
     assert json.loads(result.arguments)["items"] == payload
+
+
+def test_malformed_parameter_is_skipped_but_valid_parameter_is_preserved():
+    """A truncated parameter must not discard preceding valid parameters."""
+    parser = Qwen3XMLToolParser(tokenizer=None)
+    tool = _make_tool("items", "string")
+    function_call_str = "list_tool><parameter=items>valid</parameter><parameter=truncated"
+
+    result = parser._parse_xml_function_call(function_call_str, [tool])
+
+    assert result is not None
+    assert json.loads(result.arguments) == {"items": "valid"}
+
+
+def test_malformed_function_header_returns_none():
+    """A truncated function header must be ignored without raising."""
+    parser = Qwen3XMLToolParser(tokenizer=None)
+
+    assert parser._parse_xml_function_call("list_tool", []) is None
+
+
+def test_missing_tools_defaults_to_empty_list():
+    """Tool-call parsing must tolerate the public API's default tools value."""
+    parser = Qwen3XMLToolParser(tokenizer=None)
+
+    result = parser._parse_xml_function_call("list_tool><parameter=items>value</parameter>", None)
+
+    assert result is not None
+    assert json.loads(result.arguments) == {"items": "value"}

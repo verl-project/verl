@@ -41,6 +41,7 @@ on:
   pull_request:
     branches:
       - main
+      - v0.*
     paths:
       - ".github/workflows/e2e_ascend.yml"
       - "examples/data_preprocess/**"
@@ -70,7 +71,7 @@ jobs:
     runs-on: linux-aarch64-a3-8
     timeout-minutes: 120
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-9.0.0-a3-ubuntu22.04-py3.11-latest
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-a3-ubuntu22.04-py3.11-vllm
       options: >-
         --shm-size 16g
     env:
@@ -103,6 +104,7 @@ jobs:
       - name: Install the current repository
         run: |
           uv pip install --no-deps -e .
+          uv pip install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
         run: |
           uv pip list
@@ -138,7 +140,7 @@ jobs:
     runs-on: linux-aarch64-a3-8
     timeout-minutes: 120
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-sglang-8.3.rc1-a3-ubuntu22.04-py3.11-latest
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann8.5.0-torch_npu2.8.0post2-a3-ubuntu22.04-py3.11-sglang
       options: >-
         --shm-size 16g
     env:
@@ -171,6 +173,7 @@ jobs:
       - name: Install the current repository
         run: |
           uv pip install --no-deps --no-build-isolation -e .
+          uv pip install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
         run: |
           uv pip list
@@ -207,9 +210,9 @@ jobs:
     runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 120
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-9.0.0-910b-ubuntu22.04-py3.11-latest
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
       options: >-
-        --shm-size 16g
+        --shm-size 80g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
@@ -229,6 +232,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
+          pip install --no-deps TransferQueue==0.1.8
       - name: Check final pip list
         run: |
           pip list
@@ -238,5 +242,5 @@ jobs:
       - name: Running geo3k e2e training tests with GRPO on ASCEND NPU
         run: |
           ray stop --force
-          TOTAL_TRAINING_STEPS=1 bash tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh
+          SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 bash tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh
           rm -rf $HOME/ckpts

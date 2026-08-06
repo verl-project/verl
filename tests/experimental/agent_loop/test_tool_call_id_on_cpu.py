@@ -126,6 +126,7 @@ class TestToolCallIdOnCpu(unittest.IsolatedAsyncioTestCase):
             enable_continuous_token=False,
             tool_parser_name="qwen3_coder",
             response_length=128,
+            turn_separator=[],
             apply_chat_template=apply_chat_template,
             _call_tool=call_tool,
         )

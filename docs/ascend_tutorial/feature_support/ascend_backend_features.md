@@ -15,7 +15,7 @@ Last updated: 03/03/2026.
 
 昇腾通过vllm-ascend插件来支持vllm推理后端，该插件是 vLLM 社区支持 Ascend 后端的推荐方法。它遵循[[RFC]](https://github.com/vllm-project/vllm/issues/11162)，提供了一个可插拔接口，将 Ascend NPU 与 vLLM 解耦。
 
-##### 参数特性支持
+#### 参数特性支持
 
 | vllm参数| verl对应通用参数 | 简介 |
 | --- | --- | --- |
@@ -31,13 +31,13 @@ Last updated: 03/03/2026.
 | `node_rank`| `无，根据实际实例和卡数自动计算` |实例中的节点排序|
 | `load_format`|  `actor_rollout_ref.rollout.load_format` |要加载的模型权重格式|
 | `disable_log_stats`|  `actor_rollout_ref.rollout.disable_log_stats`|控制是否记录 rollout 统计日志 |
-| `nnodes `|  `无，根据实际实例和卡数自动计算` | 每个实例包含的节点数量` |
+| `nnodes`|  无，根据实际实例和卡数自动计算 | 每个实例包含的节点数量 |
 | `trust_remote_code`| `actor_rollout_ref.model.trust_remote_code`|是否允许在 Hub 上定义自定义模型，并将其写入自己的建模文件中|
 | `max_num_seqs` | `actor_rollout_ref.rollout.max_num_seqs` |正在运行的请求的最大数量|
 | `max_num_batched_tokens`| `actor_rollout_ref.rollout.max_num_batched_tokens` |在一次批处理（batch）中可以处理的最大总Token数|
 | `skip_tokenizer_init`| `actor_rollout_ref.rollout.skip_tokenizer_init` |跳过初始化分词器并将 input_ids 传递到推理请求中|
-| `enable_prefix_caching` | `actor_rollout_ref.rollout.enable_prefix_caching`|`用于启用自动前缀缓存` |
-| `quantization`| `actor_rollout_ref.rollout.quantization，默认为None`|`量化方法`|
+| `enable_prefix_caching` | `actor_rollout_ref.rollout.enable_prefix_caching` |用于启用自动前缀缓存 |
+| `quantization`| `actor_rollout_ref.rollout.quantization`，默认为None|`量化方法`|
 
 ### 2. sglang:
 
@@ -49,7 +49,7 @@ Last updated: 03/03/2026.
 | [sgl_kernel_npu](https://github.com/sgl-project/sgl-kernel-npu/blob/main/python/sgl_kernel_npu/README.md) | Ascend NPU  SGL 优化推理内核集合，包括注意力机制、归一化、激活函数、LoRA 适配器等。 |
 | [deepep](https://github.com/sgl-project/sgl-kernel-npu/blob/main/python/deep_ep/README.md) |  DeepEP的 Ascend 实现，为MoE模型提供高度优化的专家并行 (EP) 通信内核 |
 
-##### 参数特性支持
+#### 参数特性支持
 
 verl中通过rollout config管理推理后端参数使能，包含通用参数和engine_kwargs自定义传参。
 以下列举在verl中常见设置的sglang特性参数，更多参数介绍请参考 [sglang社区NPU特性支持](https://docs.sglang.io/docs/hardware-platforms/ascend-npus/ascend_npu_support_features)
@@ -60,7 +60,7 @@ verl中通过rollout config管理推理后端参数使能，包含通用参数�
 | mem_fraction_static| actor_rollout_ref.rollout.gpu_memory_utilization |用于静态分配（模型权重和键值缓存内存池）的内存比例|
 | disable_cuda_graph| actor_rollout_ref.rollout.enforce_eager|禁用图模式，verl默认为False|
 | enable_memory_saver| 无，verl中默认设置为True | 允许使用 release_memory_occupation 和 resume_memory_occupation 来节省内存
-| base_gpu_id| 无，根据实际实例和卡数自动计算  |用于分配每个实例上计算卡资源时的的初始ID
+| base_gpu_id| 无，根据实际实例和卡数自动计算  |用于分配每个实例上计算卡资源时的初始ID
 | gpu_id_step| 无，默认设置为1| 使用的连续计算卡ID 之间的差值
 | tp_size|  actor_rollout_ref.rollout.tensor_model_parallel_size * data_parallel_size|TP并行度|
 | dp_size| actor_rollout_ref.rollout.data_parallel_size|DP并行度|
@@ -123,7 +123,7 @@ Megatron 是 NVIDIA 推出的一个专注于模型并行的训练框架仓库。
 
 MindSpeed 底层的替换原理采用了 Monkey Patch 技术
 
-* MindSpeed 'Monkey Patch框架
+* MindSpeed Monkey Patch框架
 
 在verl里面通过`from mindspeed.megatron_adaptor import repatch  `触发patch，调用栈如下：
 
@@ -140,18 +140,18 @@ from mindspeed.megatron_adaptor import repatch
 `Patch`类是整个patch系统的核心，实现了函数/类的动态替换
 
 ~~~python
-class Patch
+class Patch:
 ~~~
 
 `parse_path`方法实现了动态模块导入和创建
 
 ~~~python
-def parse_path(module_path, function_name, create_dummy)
+def parse_path(module_path, function_name, create_dummy):
 ~~~
 
 patch系统支持多层装饰器叠加
 
-~~~
+~~~python
 def apply_patch(self):  
     final_patch_func = self.orig_func  
     if self.patch_func is not None:  
@@ -246,7 +246,7 @@ class MindSpeedFeature:
                 action.choices.append(new_choice)
 ~~~
 
-##### 参数特性支持
+#### 参数特性支持
 | verl参数 | 简介|
 | --- | --- |
 | `actor_rollout_ref.actor.megatron.optimizer_offload` |是否卸载模型优化器到CPU，默认值为False|
@@ -274,7 +274,7 @@ class MindSpeedFeature:
 | `actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_first_pipeline_stage` |第一个pipeline stage 的层数，默认值为none|
 | `actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_last_pipeline_stage` |最后一个pipeline stage 的层数，默认值为none|
 
-注：`actor_rollout_ref.actor.megatron.use_mbridge` 与 `actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size` (VPP) 暂不支持同时开启。由于 verl 默认开启 mbridge, 使用 VPP 参数时请手动将 `actor_rollout_ref.actor.megatron.use_mbridge` 置为 False。
+注：`actor_rollout_ref.actor.megatron.use_mbridge` 与 `actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size` (VPP) 暂不支持同时开启。由于 verl 默认开启 mbridge，使用 VPP 参数时请手动将 `actor_rollout_ref.actor.megatron.use_mbridge` 置为 False。
 
 ### 3. VeOmni
 
@@ -306,7 +306,7 @@ VeOmni 是一个统一的强化学习训练后端，专为大规模模型的高�
 | `actor_rollout_ref.actor.veomni.ckpt_manager` | 检查点管理器，默认值为dcp|
 | `actor_rollout_ref.actor.veomni.init_device` | 模型权重初始化设备，支持cpu、cuda、meta、npu，默认值为meta|
 | `actor_rollout_ref.actor.veomni.activation_gpu_limit` | 激活卸载时GPU上允许保留的激活显存限制（GB），默认值为0.0|
-| `actor_rollout_ref.actor.veomni.moe_load_balance_monitor_interval` | MoE专家负载监控间隔，默认值为0（禁用）|
+| `actor_rollout_ref.rollout.moe_load_balance_metrics_interval` | Rollout侧MoE专家负载指标上报间隔，默认值为0（禁用）；需要同时开启`actor_rollout_ref.rollout.enable_rollout_routing_replay`以记录路由决策|
 
 #### Router Replay 支持
 

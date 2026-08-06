@@ -64,7 +64,7 @@ from verl.utils.tokenizer import (
     get_processor_token_id,
     normalize_token_ids,
 )
-from verl.utils.tokenizer.chat_template import apply_chat_template, initialize_system_prompt
+from verl.utils.tokenizer.chat_template import apply_chat_template, initialize_system_prompt, initialize_turn_separator
 from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
 from verl.workers.config import (
     HFModelConfig,
@@ -127,7 +127,17 @@ class AgentLoopOutput(BaseModel):
 
         routed_experts = output.pop("routed_experts", None)
         if routed_experts is not None:
-            output["routed_experts"] = torch.tensor(routed_experts, dtype=torch.int64)
+            routed_experts = torch.tensor(routed_experts, dtype=torch.int64)
+            # Router replay indexes this field by absolute token position, so it must
+            # span the whole sequence. The rollout engine records fewer rows than that:
+            # it only sees tokens fed through the model, and multi-turn loops stop
+            # recording at the last generation. Trailing rows stay zero; replay masks
+            # them out instead of consuming them.
+            total_length = output["prompts"].size(0) + output["responses"].size(0)
+            aligned = routed_experts.new_zeros((total_length, *routed_experts.shape[1:]))
+            num_rows = min(routed_experts.size(0), total_length)
+            aligned[:num_rows] = routed_experts[:num_rows]
+            output["routed_experts"] = aligned
 
         # rm_scores: reward score for each token
         reward_score = output.pop("reward_score", None)
@@ -240,6 +250,9 @@ class AgentLoopBase(ABC):
             self.enable_continuous_token = True
             # Continuous Token doesn't use the legacy removable system prompt.
             self.system_prompt = None
+            # Continuous Token re-renders non-assistant turns from the full message list, so it does
+            # not need the incremental turn separator.
+            self.turn_separator = []
         else:
             if continuous_token_config.enable and self.processor is not None:
                 logger.warning(
@@ -247,6 +260,9 @@ class AgentLoopBase(ABC):
                 )
             processing_class = self.processor if self.processor is not None else self.tokenizer
             self.system_prompt = initialize_system_prompt(processing_class, **self.apply_chat_template_kwargs)
+            # Turn separator dropped when the model stops at the assistant close token; restored at
+            # turn boundaries in ``ToolAgentLoop._handle_processing_tools_state``.
+            self.turn_separator = initialize_turn_separator(processing_class, **self.apply_chat_template_kwargs)
         self.loop = get_event_loop()
 
     def _get_mm_processor_kwargs(self, audio_data: Optional[list[Any]] = None) -> dict[str, Any]:
@@ -541,6 +557,10 @@ class AgentLoopWorker:
             self.model_config.tokenizer.chat_template = self.model_config.custom_chat_template
 
         trace_config = self.rollout_config.trace
+        if trace_config.get("token2text", False):
+            # rollout_trace_op runs on the LLM client, so provide the tokenizer
+            # needed to decode each generate call's prompt and response tokens.
+            self.llm_client.tokenizer = self.tokenizer
         RolloutTraceConfig.init(
             self.rollout_config.trace.project_name,
             self.rollout_config.trace.experiment_name,
@@ -917,6 +937,11 @@ class AgentLoopWorker:
             if video_token_id is not None:
                 mm_token_type_ids[0][input_ids[0] == video_token_id] = 2
             multi_modal_kwargs["mm_token_type_ids"] = mm_token_type_ids
+
+        # Allow model-specific processors to contribute additional RoPE inputs.
+        get_rope_index_kwargs = getattr(self.processor, "get_rope_index_kwargs", None)
+        if get_rope_index_kwargs is not None:
+            multi_modal_kwargs.update(get_rope_index_kwargs(multi_modal_inputs))
 
         # Model's get_rope_index has been dynamically bind to the processor.
         vision_position_ids, _ = self.processor.get_rope_index(

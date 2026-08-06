@@ -69,7 +69,7 @@ on:
       - "!verl/model_merger/fsdp_model_merger.py"
       # Entrypoints
       - "verl/worksers/rollout/sglang_rollout/*"
-      - ".github/workflows/e2e_ppo_trainer_megatron_sglang_2_ascend.ym"
+      - ".github/workflows/e2e_ppo_trainer_megatron_sglang_2_ascend.yml"
       - "examples/data_preprocess/gsm8k.py"
       - "examples/data_preprocess/geo3k.py"
       - "tests/special_e2e/run_ppo_trainer_megatron.sh"
@@ -91,7 +91,7 @@ jobs:
     runs-on: linux-aarch64-a3-8
     timeout-minutes: 90 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-sglang-8.5.0-a3-ubuntu22.04-py3.11-latest
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann8.5.0-torch_npu2.8.0post2-a3-ubuntu22.04-py3.11-sglang
       options: >-
         --shm-size 16g
     env:

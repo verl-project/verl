@@ -208,7 +208,7 @@ SOCKET_IFNAME, HCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME: 修改为对应通信网�
   cd /examples/benchmark/ais_bench/datasets
   mkdir aime/
   cd aime/
-  wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/aime.zip
+  wget https://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/aime.zip
   unzip aime.zip
   rm aime.zip
 

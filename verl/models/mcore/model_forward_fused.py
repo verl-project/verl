@@ -146,15 +146,24 @@ def fused_forward_model_engine(vision_model: bool = False):
         temperature: float,
         calculate_entropy: bool,
         pad_token_id: int,
+        cp_layout: str = "zigzag",
     ):
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
 
         fp8 = unwrap_model(model).config.fp8
         use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+        config = unwrap_model(model).config
+        min_local_rows = (
+            config.csa_window_size if getattr(config, "experimental_attention_variant", None) == "dsv4_hybrid" else None
+        )
 
         input_ids_rmpad, packed_seq_params, _ = preprocess_thd_engine(
-            input_ids, pre_process=pre_process, use_fp8_padding=use_fp8_padding
+            input_ids,
+            pre_process=pre_process,
+            use_fp8_padding=use_fp8_padding,
+            min_local_rows=min_local_rows,
+            cp_layout=cp_layout,
         )
         input_ids_rmpad = input_ids_rmpad.contiguous()
 
@@ -178,7 +187,12 @@ def fused_forward_model_engine(vision_model: bool = False):
             ) < seqlens_in_batch.unsqueeze(1)
 
         labels_rmpad, _, _ = preprocess_thd_engine(
-            labels, pre_process=True, need_roll=True, use_fp8_padding=use_fp8_padding
+            labels,
+            pre_process=True,
+            need_roll=True,
+            use_fp8_padding=use_fp8_padding,
+            min_local_rows=min_local_rows,
+            cp_layout=cp_layout,
         )
         labels_rmpad = labels_rmpad.contiguous()
         output_orig: CausalLMOutputForPPO = model(
@@ -198,7 +212,12 @@ def fused_forward_model_engine(vision_model: bool = False):
         if log_probs.dim() == 1:
             log_probs = log_probs.unsqueeze(0)
         log_probs = postprocess_thd_engine(
-            log_probs, packed_seq_params, input_ids, input_ids.shape[0], post_process=post_process
+            log_probs,
+            packed_seq_params,
+            input_ids,
+            input_ids.shape[0],
+            post_process=post_process,
+            cp_layout=cp_layout,
         )
 
         output = {"log_probs": log_probs}
@@ -208,7 +227,12 @@ def fused_forward_model_engine(vision_model: bool = False):
             if entropy.dim() == 1:
                 entropy = entropy.unsqueeze(0)
             entropy = postprocess_thd_engine(
-                entropy, packed_seq_params, input_ids, input_ids.shape[0], post_process=post_process
+                entropy,
+                packed_seq_params,
+                input_ids,
+                input_ids.shape[0],
+                post_process=post_process,
+                cp_layout=cp_layout,
             )
             output["entropy"] = entropy
 
@@ -254,8 +278,12 @@ def _fused_GPTModel_forward(
 
     (decoder_input, rotary_pos_emb, rotary_pos_cos, rotary_pos_sin, sequence_len_offset) = preproc_output[:5]
 
+    decoder_extra_block_kwargs = extra_block_kwargs or {}
+    if getattr(model.config, "moe_n_hash_layers", 0) > 0 and input_ids is not None:
+        decoder_extra_block_kwargs["input_ids"] = input_ids
+
     # Run decoder.
-    hidden_states = model.decoder(
+    decoder_output = model.decoder(
         hidden_states=decoder_input,
         attention_mask=attention_mask,
         inference_context=inference_context,
@@ -264,9 +292,10 @@ def _fused_GPTModel_forward(
         rotary_pos_sin=rotary_pos_sin,
         packed_seq_params=packed_seq_params,
         sequence_len_offset=sequence_len_offset,
-        **(extra_block_kwargs or {}),
+        **decoder_extra_block_kwargs,
         **kwargs,
     )
+    hidden_states = decoder_output[0] if isinstance(decoder_output, tuple) else decoder_output
 
     if not model.post_process:
         return hidden_states

@@ -158,6 +158,74 @@ class BaseEngine:
         """
         raise NotImplementedError
 
+    def get_per_tensor_param_shard(self, **kwargs) -> tuple[Generator, Optional[dict]]:
+        """
+        Like :meth:`get_per_tensor_param`, but yields each rank's *local* parameter shard
+        instead of all-gathering full tensors.
+
+        Used by checkpoint engines that operate on shards (e.g. the ``delta_sharded``
+        backends, which byte-diff each rank's shard locally and only gather the changed
+        elements), so the export never materializes full tensors on any rank.
+
+        Implementations yield ``(name, local_shard, ShardSpec)`` -- the spec (see
+        :mod:`verl.workers.engine.spec`) carries all placement knowledge
+        (offset translation or a dense rebuild callable), so the consuming checkpoint
+        engine stays trainer-agnostic.
+
+        Returns:
+            Generator: A generator that yields per-parameter local shards with placement metadata.
+            Optional[dict]: Optional peft config.
+        """
+        raise NotImplementedError
+
+    # Host-memory policy for the delta diff base: pinned (cudaHostAlloc) gives a
+    # faster H2D on the diff read-back but competes with every other pinned pool
+    # on the node; backends whose memory profile makes that competition
+    # dangerous override this to False (see MegatronEngine).
+    delta_pin_snapshots: bool = True
+
+    def prime_delta_snapshots(self) -> None:
+        """
+        Snapshot this rank's CURRENT shards as the delta diff base. Called right after the
+        seed sync (which streams :meth:`get_per_tensor_param`'s full HF export):
+        weights do not move during the sync, so the snapshots equal exactly what the
+        rollout side received and the first
+        :meth:`get_per_tensor_param_delta_shard` diff is correct.
+
+        Concrete here: it only consumes :meth:`get_per_tensor_param_shard`, so any
+        engine that implements the shard export gets it for free.
+        """
+        from verl.utils.device import is_cuda_available
+        from verl.workers.engine.utils import prime_delta_snapshots
+
+        self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
+        gen, _ = self.get_per_tensor_param_shard()
+        prime_delta_snapshots(gen, self._delta_shard_snap, pin=is_cuda_available and self.delta_pin_snapshots)
+
+    def get_per_tensor_param_delta_shard(self, **kwargs) -> tuple[Generator, Optional[dict]]:
+        """
+        Yield the delta engine's per-parameter payloads in FINAL HF coordinates:
+        ``(slots, dtype_str, counts, hf_idx, hf_val, gather_group)``, in an order
+        identical on every rank (non-contributing replicas yield zero-count entries
+        but stay in the lockstep sequence). ``slots`` enumerates the HF tensors this
+        parameter maps to (identity params: itself; fused params: their hf_slots),
+        and ``hf_idx``/``hf_val`` are the changed elements since the previous export,
+        already converted to HF coordinates.
+
+        Everything backend-specific lives behind this call: the weight->HF naming,
+        the to-HF conversion, the diff and its base. A backend that already keeps the
+        previous step's weights (e.g. Decoupled PPO) can diff against that instead of
+        a dedicated snapshot; :func:`verl.workers.engine.utils.hf_delta_export`
+        implements the default pinned-CPU-snapshot strategy (primed by
+        :meth:`prime_delta_snapshots`). The consuming delta engine only batches,
+        gathers and ships.
+
+        Returns:
+            Generator: A generator that yields per-parameter HF-coordinate delta entries.
+            Optional[dict]: Optional peft config.
+        """
+        raise NotImplementedError
+
     def get_data_parallel_size(self):
         raise NotImplementedError
 

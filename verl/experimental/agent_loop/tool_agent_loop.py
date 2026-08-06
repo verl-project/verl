@@ -423,6 +423,12 @@ class ToolAgentLoop(AgentLoopBase):
                 videos=videos,
                 remove_system_prompt=True,
             )
+            # The model stopped at the assistant close token and never emitted the template's
+            # trailing turn separator (e.g. "\n" for Qwen); rendering this tool turn in isolation
+            # also omits it. Restore it so the incremental sequence matches apply_chat_template of
+            # the full conversation (see verl issue #6501 comment). ``turn_separator`` is [] for
+            # templates without one, so this is a no-op there.
+            response_ids = self.turn_separator + response_ids
 
         if len(agent_data.response_mask) + len(response_ids) >= self.response_length:
             return AgentState.TERMINATED

@@ -135,6 +135,20 @@ TRAINER=(
     trainer.total_epochs=15
 )
 
+case "${DEVICE}" in
+    gpu)
+        ;;
+    npu)
+        ROLLOUT+=(
+            +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
+        )
+        ;;
+    *)
+        echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
+        exit 1
+        ;;
+esac
+
 ########################### launch ###########################
 python3 -m verl.trainer.main_ppo \
     "${DATA[@]}" \

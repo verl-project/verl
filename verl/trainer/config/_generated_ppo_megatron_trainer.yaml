@@ -29,6 +29,18 @@ actor_rollout_ref:
       main_grads_dtype: fp32
       exp_avg_dtype: fp32
       exp_avg_sq_dtype: fp32
+      use_layer_wise_distributed_optimizer: false
+      muon_momentum: 0.95
+      muon_nesterov: false
+      muon_split_qkv: true
+      muon_scale_mode: spectral
+      muon_coefficient_type: quintic
+      muon_num_ns_steps: 5
+      muon_tp_mode: blockwise
+      muon_fp32_matmul_prec: medium
+      muon_extra_scale_factor: 1.0
+      muon_scalar_optimizer: adam
+      muon_match_adamw_update_rms: false
       override_optimizer_config: {}
     megatron:
       _target_: verl.workers.config.McoreEngineConfig
@@ -63,8 +75,9 @@ actor_rollout_ref:
         attention_backend: flash
       override_mcore_model_config: {}
       use_mbridge: true
-      vanilla_mbridge: true
+      vanilla_mbridge: false
       use_remove_padding: true
+      pad_bshd_to_minibatch_max: true
       use_megatron_fsdp: false
       forward_only: false
       dtype: bfloat16
@@ -105,6 +118,7 @@ actor_rollout_ref:
       clip_cov_ub: 5.0
       kl_cov_ratio: 0.0002
       ppo_kl_coef: 0.1
+      dro_beta: null
     clip_ratio_c: 3.0
     loss_agg_mode: token-mean
     loss_scale_factor: null
@@ -151,6 +165,13 @@ actor_rollout_ref:
           _target_: verl.utils.profiler.config.TorchProfilerToolConfig
           contents: []
           discrete: false
+          schedule:
+            _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+            skip_first: 0
+            wait: 0
+            warmup: 0
+            active: 0
+            repeat: 0
         torch_memory:
           _target_: verl.utils.profiler.config.TorchMemoryToolConfig
           trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
@@ -207,6 +228,13 @@ actor_rollout_ref:
           _target_: verl.utils.profiler.config.TorchProfilerToolConfig
           contents: []
           discrete: false
+          schedule:
+            _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+            skip_first: 0
+            wait: 0
+            warmup: 0
+            active: 0
+            repeat: 0
         torch_memory:
           _target_: verl.utils.profiler.config.TorchMemoryToolConfig
           trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
@@ -249,8 +277,9 @@ actor_rollout_ref:
       override_transformer_config: ${oc.select:actor_rollout_ref.actor.megatron.override_transformer_config,{}}
       override_mcore_model_config: {}
       use_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.use_mbridge,False}
-      vanilla_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.vanilla_mbridge,True}
+      vanilla_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.vanilla_mbridge,False}
       use_remove_padding: ${oc.select:actor_rollout_ref.actor.megatron.use_remove_padding,True}
+      pad_bshd_to_minibatch_max: true
       use_megatron_fsdp: false
       forward_only: true
       dtype: bfloat16
@@ -297,7 +326,7 @@ actor_rollout_ref:
     pipeline_model_parallel_size: 1
     max_num_batched_tokens: 8192
     max_model_len: null
-    max_num_seqs: 1024
+    max_num_seqs: 256
     enable_chunked_prefill: true
     enable_prefix_caching: true
     logprobs_mode: processed_logprobs
@@ -363,6 +392,7 @@ actor_rollout_ref:
       max_samples_per_step_per_worker: null
     skip_tokenizer_init: true
     enable_rollout_routing_replay: false
+    moe_load_balance_metrics_interval: 0
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
       tool: ${oc.select:global_profiler.tool,null}
@@ -482,6 +512,7 @@ data:
   max_prompt_length: 512
   max_response_length: 512
   train_batch_size: 1024
+  gen_batch_size: null
   val_batch_size: null
   tool_config_path: ${oc.select:actor_rollout_ref.rollout.multi_turn.tool_config_path,
     null}
@@ -536,6 +567,18 @@ critic:
     main_grads_dtype: fp32
     exp_avg_dtype: fp32
     exp_avg_sq_dtype: fp32
+    use_layer_wise_distributed_optimizer: false
+    muon_momentum: 0.95
+    muon_nesterov: false
+    muon_split_qkv: true
+    muon_scale_mode: spectral
+    muon_coefficient_type: quintic
+    muon_num_ns_steps: 5
+    muon_tp_mode: blockwise
+    muon_fp32_matmul_prec: medium
+    muon_extra_scale_factor: 1.0
+    muon_scalar_optimizer: adam
+    muon_match_adamw_update_rms: false
     override_optimizer_config: {}
   megatron:
     _target_: verl.workers.config.McoreEngineConfig
@@ -570,8 +613,9 @@ critic:
       attention_backend: flash
     override_mcore_model_config: {}
     use_mbridge: true
-    vanilla_mbridge: true
+    vanilla_mbridge: false
     use_remove_padding: true
+    pad_bshd_to_minibatch_max: true
     use_megatron_fsdp: false
     forward_only: false
     dtype: bfloat16
@@ -605,6 +649,7 @@ critic:
   data_loader_seed: ${oc.select:actor_rollout_ref.actor.data_loader_seed,null}
   cliprange_value: 0.5
   loss_agg_mode: ${oc.select:actor_rollout_ref.actor.loss_agg_mode,token-mean}
+  loss_scale_factor: ${oc.select:actor_rollout_ref.actor.loss_scale_factor,null}
   checkpoint:
     _target_: verl.workers.config.McoreCheckpointConfig
     save_contents:
@@ -635,6 +680,13 @@ critic:
         _target_: verl.utils.profiler.config.TorchProfilerToolConfig
         contents: []
         discrete: false
+        schedule:
+          _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
+          skip_first: 0
+          wait: 0
+          warmup: 0
+          active: 0
+          repeat: 0
       torch_memory:
         _target_: verl.utils.profiler.config.TorchMemoryToolConfig
         trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
@@ -834,6 +886,12 @@ algorithm:
   lam: 1.0
   adv_estimator: gae
   norm_adv_by_std_in_grpo: true
+  filter_groups:
+    _target_: verl.trainer.config.FilterGroupsConfig
+    enable: false
+    metric: null
+    max_num_gen_batches: 0
+    max_inflight_gen_batches: 1
   use_kl_in_reward: false
   kl_penalty: kl
   kl_ctrl:
@@ -895,6 +953,25 @@ distillation:
         response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
         temperature: ${oc.select:actor_rollout_ref.rollout.temperature}
   teacher_key: data_source
+transfer_queue:
+  enable: false
+  metrics:
+    enabled: false
+    port: 0
+  backend:
+    storage_backend: SimpleStorage
+    SimpleStorage:
+      total_storage_size: 100000
+      num_data_storage_units: 8
+    MooncakeStore:
+      auto_init: false
+      metadata_server: localhost:50123
+      master_server_address: localhost:50124
+      local_hostname: localhost
+      protocol: tcp
+      global_segment_size: 4294967296
+      local_buffer_size: 1073741824
+      device_name: ''
 trainer:
   balance_batch: true
   total_epochs: 30
@@ -924,18 +1001,19 @@ trainer:
   max_critic_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
   device: cuda
-  use_v1: false
+  use_v1: true
   v1:
     trainer_mode: sync
     sync: {}
     colocate_async:
       num_warmup_batches: 1
     separate_async:
-      num_warmup_batches: 4
+      num_warmup_batches: 1
       parameter_sync_step: 4
     sampler:
       max_off_policy_threshold: 8
       max_off_policy_strategy: drop
+      sync_refill_failed_groups: false
       custom_sampler:
         path: null
         name: null
@@ -973,28 +1051,14 @@ global_profiler:
       steps: null
       stages: null
       strict: false
-transfer_queue:
-  enable: false
-  metrics:
-    enabled: false
-    port: 0
-  backend:
-    storage_backend: SimpleStorage
-    SimpleStorage:
-      total_storage_size: 100000
-      num_data_storage_units: 8
-    MooncakeStore:
-      auto_init: false
-      metadata_server: localhost:50123
-      master_server_address: localhost:50124
-      local_hostname: localhost
-      protocol: tcp
-      global_segment_size: 4294967296
-      local_buffer_size: 1073741824
-      device_name: ''
 skip:
   _target_: verl.utils.skip.SkipManagerConfig
   rollout:
+    enable: false
+    dump_dir: ~/.verl/rollout_dump
+    steps: []
+    action: cache
+  rollout_tq:
     enable: false
     dump_dir: ~/.verl/rollout_dump
     steps: []

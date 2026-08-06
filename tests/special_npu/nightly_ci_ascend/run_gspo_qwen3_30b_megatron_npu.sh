@@ -86,6 +86,7 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.grad_offload=True
     actor_rollout_ref.actor.megatron.optimizer_offload=True
     actor_rollout_ref.actor.megatron.use_mbridge=True
+    actor_rollout_ref.actor.megatron.vanilla_mbridge=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
@@ -116,6 +117,7 @@ REF=(
     actor_rollout_ref.ref.megatron.expert_tensor_parallel_size=${actor_etp}
     actor_rollout_ref.ref.megatron.param_offload=True
     actor_rollout_ref.ref.megatron.use_mbridge=True
+    actor_rollout_ref.ref.megatron.vanilla_mbridge=True
 )
 
 TRAINER=(

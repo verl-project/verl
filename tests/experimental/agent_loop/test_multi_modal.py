@@ -66,6 +66,7 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.prompt_length = 10240
     config.actor_rollout_ref.rollout.response_length = 4096
     config.actor_rollout_ref.rollout.n = 4
+    config.actor_rollout_ref.rollout.seed = 0
     config.actor_rollout_ref.rollout.agent.num_workers = 2
     config.actor_rollout_ref.rollout.skip_tokenizer_init = True
 

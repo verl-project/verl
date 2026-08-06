@@ -45,6 +45,7 @@ from verl import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
+from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 from verl.utils.model import compute_position_id_with_mask, create_random_mask
 from verl.utils.torch_functional import logprobs_from_logits_naive
 from verl.workers.config import (
@@ -65,6 +66,8 @@ from verl.workers.engine_workers_tinker import (
 )
 from verl.workers.utils.losses import ppo_loss, sft_loss, value_loss
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
+
+device_name = get_device_name()
 
 
 def get_test_language_model(device_count):
@@ -111,6 +114,7 @@ def create_training_config(model_type, strategy, device_count, model):
         engine_config = McoreEngineConfig(
             forward_only=False,
             use_mbridge=True,
+            vanilla_mbridge=os.environ.get("VANILLA_MBRIDGE", "False").lower() == "true",
             tensor_model_parallel_size=tp,
             pipeline_model_parallel_size=pp,
             context_parallel_size=cp,
@@ -138,7 +142,7 @@ def create_training_config(model_type, strategy, device_count, model):
 @pytest.mark.parametrize("strategy", ["fsdp", "fsdp2", "megatron"])
 def test_actor_engine(strategy):
     ray.init()
-    device_count = torch.cuda.device_count()
+    device_count = get_torch_device().device_count()
     config = create_training_config(
         model_type="language_model",
         strategy=strategy,
@@ -211,7 +215,7 @@ def test_actor_engine(strategy):
     hf_logprobs_mean = torch.mean(hf_logprobs * response_mask)
     mcore_logprobs_mean = torch.mean(output.batch["old_log_probs"] * response_mask)
 
-    torch.testing.assert_close(hf_logprobs_mean, mcore_logprobs_mean, atol=1e-3, rtol=1e-2)
+    torch.testing.assert_close(hf_logprobs_mean, mcore_logprobs_mean, atol=1e-3, rtol=1e-2, check_dtype=False)
 
     data = data.union(output)
 
@@ -273,7 +277,7 @@ def create_value_model(language_model_path, output_path):
 
 @pytest.mark.parametrize("strategy", ["fsdp", "fsdp2"])
 def test_critic_engine(strategy):
-    device_count = torch.cuda.device_count()
+    device_count = get_torch_device().device_count()
     value_model_path = os.path.expanduser("~/models/test_model")
     language_model_path = get_test_language_model(device_count=device_count)
     create_value_model(language_model_path, value_model_path)
@@ -336,11 +340,11 @@ def test_critic_engine(strategy):
     output = DataProto.from_single_dict({"values": values})
 
     # load hf model and compare results with hf model
-    with torch.device("cuda"), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+    with torch.device(device_name), torch.autocast(device_type=device_name, dtype=torch.bfloat16):
         hf_model = AutoModelForTokenClassification.from_pretrained(
             value_model_path, torch_dtype=torch.float32, attn_implementation="flash_attention_2"
         )
-        hf_output = hf_model(input_ids.cuda(), attention_mask=attention_mask.cuda())
+        hf_output = hf_model(input_ids.to(device=device_name), attention_mask=attention_mask.to(device=device_name))
         hf_values = hf_output.logits[:, -response_length - 1 : -1, :].float().squeeze(-1).cpu()
 
     hf_values_mean = torch.mean(hf_values * response_mask)
@@ -384,9 +388,9 @@ def create_actor_model(tmp_path, config):
 
 
 def _worker(rank: int, world_size: int, rendezvous_file: str, strategy: str, model_path: str):
-    torch.cuda.set_device(rank)
+    get_torch_device().set_device(rank)
     dist.init_process_group(
-        backend="nccl",
+        backend=get_nccl_backend(),
         init_method=f"file://{rendezvous_file}",
         rank=rank,
         world_size=world_size,
@@ -405,6 +409,7 @@ def _worker(rank: int, world_size: int, rendezvous_file: str, strategy: str, mod
         engine_config = McoreEngineConfig(
             forward_only=False,
             use_mbridge=True,
+            vanilla_mbridge=os.environ.get("VANILLA_MBRIDGE", "False").lower() == "true",
             tensor_model_parallel_size=2,
             pipeline_model_parallel_size=2,
             context_parallel_size=1,
@@ -435,10 +440,8 @@ def _worker(rank: int, world_size: int, rendezvous_file: str, strategy: str, mod
     # get per tensor parameter
     per_tensor_params, _ = engine.get_per_tensor_param()
 
-    if strategy == "megatron" and revert_weight_conversion is not None:
+    if revert_weight_conversion is not None:
         ref_state_dict = revert_weight_conversion(ref_model, ref_model.state_dict())
-    else:
-        ref_state_dict = ref_model.state_dict()
 
     # load ground truth and compare
     for key, value in per_tensor_params:
@@ -473,9 +476,9 @@ def test_per_tensor_generator(world_size, tmp_path, config, strategy):
 def _autocast_dtype_worker(rank: int, world_size: int, rendezvous_file: str, model_path: str):
     # Regression test for #5932: FSDP engine must resolve autocast dtype from
     # mixed_precision.param_dtype rather than hardcoding bfloat16.
-    torch.cuda.set_device(rank)
+    get_torch_device().set_device(rank)
     dist.init_process_group(
-        backend="nccl",
+        backend=get_nccl_backend(),
         init_method=f"file://{rendezvous_file}",
         rank=rank,
         world_size=world_size,
@@ -540,7 +543,7 @@ def _snapshot_trainable_params(module):
 
 
 def _param_delta_norm(module, before) -> torch.Tensor:
-    device = torch.device("cuda", torch.cuda.current_device())
+    device = torch.device(device_name, get_torch_device().current_device())
     total = torch.zeros((), device=device)
     for param, param_before in zip((p for p in module.parameters() if p.requires_grad), before, strict=True):
         param_local = _local_tensor(param).detach().float()
@@ -550,7 +553,7 @@ def _param_delta_norm(module, before) -> torch.Tensor:
 
 
 def _grad_norm(module) -> torch.Tensor:
-    device = torch.device("cuda", torch.cuda.current_device())
+    device = torch.device(device_name, get_torch_device().current_device())
     total = torch.zeros((), device=device)
     for param in module.parameters():
         if param.grad is None:
@@ -652,13 +655,16 @@ def _split_training_primitives_fsdp_worker(
 
     with engine.train_mode(zero_grad_on_exit=False):
         engine.optimizer_zero_grad()
+        first_batch = _make_split_step_batch(model_config, engine_config, world_size)
+        tu.assign_non_tensor(first_batch, return_model_output=True)
         output_1 = engine.forward_backward_batch(
-            _make_split_step_batch(model_config, engine_config, world_size),
+            first_batch,
             loss_function=loss_fn,
             forward_only=False,
         )
     if engine.is_mp_src_rank_with_outputs():
         assert "grad_norm" not in output_1["metrics"]
+        assert "log_probs" in output_1["model_output"]
     grad_norm_1 = _grad_norm(engine.module)
     assert grad_norm_1.item() > 0
     assert _param_delta_norm(engine.module, before).item() == pytest.approx(0.0, abs=0.0)
@@ -671,6 +677,7 @@ def _split_training_primitives_fsdp_worker(
         )
     if engine.is_mp_src_rank_with_outputs():
         assert "grad_norm" not in output_2["metrics"]
+        assert output_2["model_output"] == {}
     grad_norm_2 = _grad_norm(engine.module)
     assert grad_norm_2.item() > grad_norm_1.item() * 1.5
     assert _param_delta_norm(engine.module, before).item() == pytest.approx(0.0, abs=0.0)

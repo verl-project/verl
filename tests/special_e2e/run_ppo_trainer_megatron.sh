@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
+# Megatron-LM is baked into the CI image but the vemlp runner / Ray workers do not inherit
+# the image's PYTHONPATH, so set it at runtime (main_ppo forwards it into the Ray runtime env).
+export PYTHONPATH="/workspace/Megatron-LM${PYTHONPATH:+:${PYTHONPATH}}"
+echo "PYTHONPATH=${PYTHONPATH}"
+
 export CUDA_DEVICE_MAX_CONNECTIONS=1 # For megatron communication/computation overlapping
 export VERL_LOGGING_LEVEL=INFO
 export VERL_PPO_LOGGING_LEVEL=INFO
@@ -105,7 +110,7 @@ CRITIC_GRAD_OFFLOAD=${CRITIC_GRAD_OFFLOAD:-$COMMON_GRAD_OFFLOAD}
 CRITIC_OPTIMIZER_OFFLOAD=${CRITIC_OPTIMIZER_OFFLOAD:-$COMMON_OPTIMIZER_OFFLOAD}
 RM_PARAM_OFFLOAD=${RM_PARAM_OFFLOAD:-$COMMON_PARAM_OFFLOAD}
 USE_MBRIDGE=${USE_MBRIDGE:-True}
-VANILLA_MBRIDGE=${VANILLA_MBRIDGE:-True}
+VANILLA_MBRIDGE=${VANILLA_MBRIDGE:-False}
 VALUE_VANILLA_MBRIDGE=${VALUE_VANILLA_MBRIDGE:-$VANILLA_MBRIDGE}
 USE_MEGATRON_FSDP=${USE_MEGATRON_FSDP:-False}
 USE_FUSED_KERNELS=${USE_FUSED_KERNELS:-False}
@@ -305,7 +310,6 @@ elif [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
         "${common_params[@]}" \
         +actor_rollout_ref.actor.megatron.override_transformer_config.context_parallel_size=${ACTOR_CP} \
         +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True \
-        ++actor_rollout_ref.ref.megatron.override_transformer_config.use_flash_attn=True \
         global_profiler.tool=npu \
         actor_rollout_ref.actor.profiler.tool_config.npu.contents=[npu,cpu,memory,shapes,module] \
         actor_rollout_ref.actor.profiler.tool_config.npu.level='level1' \

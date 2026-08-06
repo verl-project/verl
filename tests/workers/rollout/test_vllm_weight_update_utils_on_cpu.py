@@ -75,10 +75,10 @@ def _load_vllm_rollout_utils():
     fake_vllm_patch = types.ModuleType("verl.utils.vllm.patch")
     fake_vllm_patch.patch_vllm_moe_model_weight_loader = lambda model: None
 
-    fake_vllm_fp8 = types.ModuleType("verl.utils.vllm.vllm_fp8_utils")
-    fake_vllm_fp8.apply_vllm_fp8_patches = lambda: None
-    fake_vllm_fp8.is_fp8_model = lambda config: False
-    fake_vllm_fp8.load_quanted_weights = lambda weights, runner, is_drafter=False: weights
+    fake_vllm_quant = types.ModuleType("verl.utils.vllm.vllm_quant_utils")
+    fake_vllm_quant.apply_vllm_quant_patches = lambda: None
+    fake_vllm_quant.is_fp8_model = lambda config: False
+    fake_vllm_quant.load_quanted_weights = lambda weights, runner, is_drafter=False: weights
 
     fake_platform = types.ModuleType("verl.plugin.platform")
     fake_platform.get_platform = lambda: None
@@ -89,7 +89,7 @@ def _load_vllm_rollout_utils():
         "verl.third_party.vllm": fake_vllm_third_party,
         "verl.utils.vllm": fake_vllm_utils,
         "verl.utils.vllm.patch": fake_vllm_patch,
-        "verl.utils.vllm.vllm_fp8_utils": fake_vllm_fp8,
+        "verl.utils.vllm.vllm_quant_utils": fake_vllm_quant,
         "verl.plugin.platform": fake_platform,
         "verl.workers.rollout.vllm_rollout.weight_update_utils": _weight_update_utils,
     }

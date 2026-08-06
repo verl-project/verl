@@ -253,11 +253,19 @@ def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_lis
 
         fp8 = tf_config.fp8
         use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+        min_local_rows = (
+            tf_config.csa_window_size
+            if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid"
+            else None
+        )
 
         if input_ids.is_nested:
             batch_size = input_ids.shape[0]
             _, packed_seq_params, _ = preprocess_thd_engine(
-                input_ids, pre_process=True, use_fp8_padding=use_fp8_padding
+                input_ids,
+                pre_process=True,
+                use_fp8_padding=use_fp8_padding,
+                min_local_rows=min_local_rows,
             )
             layers_topk_idx = postprocess_thd_engine(
                 layers_topk_idx, packed_seq_params, input_ids, batch_size, post_process=True
@@ -273,7 +281,32 @@ def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_lis
         mini_layer_topk_idx_list.append(layers_topk_idx.cpu())
 
 
-def set_router_replay_data(layers_topk_idx, attention_mask, tf_config, vp_rank=None):
+def build_r3_replay_mask(input_ids: torch.Tensor, response_mask: torch.Tensor) -> torch.Tensor:
+    """Build a full-sequence replay mask for rollout-captured routes.
+
+    Response logprobs are read from shifted model rows, but those rows attend to
+    earlier hidden states whose MoE routing also affects the result. Replay every
+    causal row that can influence response logprobs and skip only the final
+    response row, whose logits are not used by ``no_padding_2_padding``.
+    """
+    total_lens = input_ids.offsets().diff()
+    response_lens = response_mask.sum(dim=-1).to(device=total_lens.device, dtype=total_lens.dtype)
+    bs = total_lens.size(0)
+    values = torch.tensor([True, False], dtype=torch.bool, device=total_lens.device).repeat(bs)
+    replay_lens = torch.where(response_lens > 0, total_lens - 1, torch.zeros_like(total_lens))
+    suffix_lens = total_lens - replay_lens
+    counts = torch.stack([replay_lens, suffix_lens], dim=1).flatten()
+    mask_values = torch.repeat_interleave(values, counts)
+    return torch.nested.nested_tensor_from_jagged(mask_values, offsets=input_ids.offsets())
+
+
+def set_router_replay_data(
+    layers_topk_idx,
+    attention_mask,
+    tf_config,
+    vp_rank=None,
+    replay_mask=None,
+):
     """
     Scatter the packed router top-k indices back to sequence-parallel ranks and update each local
     RouterReplay instance with target indices for replay mode.
@@ -288,6 +321,8 @@ def set_router_replay_data(layers_topk_idx, attention_mask, tf_config, vp_rank=N
         tf_config: Megatron/Transformer engine configuration object.
         vp_rank (Optional[int]): Virtual pipeline stage rank override. If None, the current VP rank from
             Megatron parallel state will be used.
+        replay_mask (Optional[torch.Tensor]): Optional per-token mask. Masked tokens use replayed routes;
+            unmasked tokens keep native Megatron routes.
 
     Returns:
         None: The function updates internal RouterReplay instances in-place.
@@ -295,11 +330,27 @@ def set_router_replay_data(layers_topk_idx, attention_mask, tf_config, vp_rank=N
     with torch.no_grad():
         fp8 = tf_config.fp8
         use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+        min_local_rows = (
+            tf_config.csa_window_size
+            if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid"
+            else None
+        )
 
+        replay_mask_rmpad = None
         if layers_topk_idx.is_nested:
             layers_topk_idx_rmpad, _, _ = preprocess_thd_engine(
-                layers_topk_idx, pre_process=True, use_fp8_padding=use_fp8_padding
+                layers_topk_idx,
+                pre_process=True,
+                use_fp8_padding=use_fp8_padding,
+                min_local_rows=min_local_rows,
             )
+            if replay_mask is not None:
+                replay_mask_rmpad, _, _ = preprocess_thd_engine(
+                    replay_mask,
+                    pre_process=True,
+                    use_fp8_padding=use_fp8_padding,
+                    min_local_rows=min_local_rows,
+                )
         else:
             layers_topk_idx_rmpad, _ = preprocess_packed_seqs(
                 layers_topk_idx, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding
@@ -310,6 +361,11 @@ def set_router_replay_data(layers_topk_idx, attention_mask, tf_config, vp_rank=N
         layers_topk_idx_rmpad_split = scatter_to_sequence_parallel_region(
             layers_topk_idx_rmpad.to(device_name).squeeze(dim=0)
         ).unsqueeze(dim=0)
+        replay_mask_rmpad_split = None
+        if replay_mask_rmpad is not None:
+            replay_mask_rmpad_split = scatter_to_sequence_parallel_region(
+                replay_mask_rmpad.to(device_name).squeeze(dim=0)
+            )
 
         # dynamic_bs_split, layer_num, topk -> layer_num, dynamic_bs_split, topk
         layers_topk_idx_reshape = layers_topk_idx_rmpad_split.permute(0, 2, 1, 3).squeeze(
@@ -333,7 +389,10 @@ def set_router_replay_data(layers_topk_idx, attention_mask, tf_config, vp_rank=N
                 continue
             router = router_instances_list[router_offset]
             idx = layer_idx if index_by_layer else moe_idx
-            router.set_target_indices(layers_topk_idx_reshape[idx].to(torch.int64))
+            router.set_target_indices(
+                layers_topk_idx_reshape[idx].to(torch.int64),
+                replay_mask=replay_mask_rmpad_split,
+            )
             router_offset += 1
             moe_idx += 1
 
