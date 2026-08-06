@@ -26,12 +26,25 @@ NDEVICES_PER_NODE=${NDEVICES_PER_NODE:-}
 TAU_POS=${TAU_POS:-1.0}
 TAU_NEG=${TAU_NEG:-1.05}
 
-# Megatron parallelism.
+# Megatron parallelism. EP is not bounded by DP; the constraint is
+# EP * ETP == world_size (with PP=CP=1). Larger EP spreads the 128 experts over
+# more ranks, which is the main lever on expert memory.
 TP=${TP:-4}
 PP=${PP:-1}
 CP=${CP:-1}
 EP=${EP:-4}
 ETP=${ETP:-4}
+
+# Activation recomputation: "full" recomputes every layer (max memory saving,
+# slowest backward), "selective" recomputes only the cheap ops, "none" disables
+# it. Megatron *rejects* recompute_method/recompute_num_layers when granularity
+# is selective, so each mode emits its own flag set rather than sharing one.
+RECOMPUTE=${RECOMPUTE:-full}
+
+# Fraction of optimizer state held on the host. 1 offloads all of it, which a
+# 30B MoE needs on 8 devices; lower it to trade device memory back for speed
+# once you know how much headroom you have.
+OPTIMIZER_OFFLOAD_FRACTION=${OPTIMIZER_OFFLOAD_FRACTION:-1}
 
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-32}
 PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-32}
@@ -130,12 +143,9 @@ ACTOR=(
     # on the accelerator during the first step() and a 30B MoE runs out of
     # memory there.
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=True
-    +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=1
+    +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=${OPTIMIZER_OFFLOAD_FRACTION}
     +actor_rollout_ref.actor.optim.override_optimizer_config.overlap_cpu_optimizer_d2h_h2d=True
     +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
-    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
-    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
-    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
     +actor_rollout_ref.actor.megatron.override_transformer_config.gradient_accumulation_fusion=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=True
     # 128 experts without fp32 routing is numerically fragile (Megatron warns).
@@ -181,6 +191,30 @@ TRAINER=(
 EXTRA=(
     model_engine=megatron
 )
+
+# Activation recomputation. Megatron validates these against each other:
+# selective granularity requires recompute_num_layers/method to be unset, so
+# the modes cannot share one flag set.
+case "${RECOMPUTE}" in
+    full)
+        EXTRA+=(
+            +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
+            +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
+            +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
+        )
+        ;;
+    selective)
+        EXTRA+=(
+            +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=selective
+        )
+        ;;
+    none)
+        ;;
+    *)
+        echo "Unsupported RECOMPUTE=${RECOMPUTE}. Expected 'full', 'selective' or 'none'." >&2
+        exit 1
+        ;;
+esac
 
 # Load from a pre-converted Megatron dist checkpoint when one is supplied.
 if [ -n "${MCORE_MODEL_PATH}" ]; then
