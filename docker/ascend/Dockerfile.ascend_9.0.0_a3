@@ -70,7 +70,7 @@ RUN MBRIDGE_PATH=$(pip show mbridge | grep Location | awk '{print $2}') && \
 
 # Prepare and install verl (update frequently)
 RUN git clone --recursive https://github.com/verl-project/verl.git && \
-    cd verl && pip install -r requirements-npu.txt && pip install -v -e . && cd .. && \
+    cd verl && pip install -r requirements-npu.txt && pip install -v -e . --no-deps && cd .. && \
     # Clear extra files
     rm -rf /tmp/* /var/tmp/* && \
     pip cache purge
