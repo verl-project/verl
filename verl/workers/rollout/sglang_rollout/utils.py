@@ -42,6 +42,38 @@ def lora_served_as_adapter(model_config) -> bool:
     return lora_enabled and not model_config.lora.get("merge", False)
 
 
+def sglang_lora_target_modules(target_modules: Any) -> list[str]:
+    """Render verl's ``model.target_modules`` as SGLang's ``lora_target_modules``.
+
+    Following PEFT, verl overloads this field by type: a list names modules matched
+    exactly or by suffix, while a bare string is either the ``"all-linear"`` shorthand
+    or a *regex* matched against the whole parameter key -- see
+    :func:`verl.utils.model.check_target_modules`, which dispatches on exactly that.
+
+    SGLang supports neither form. It normalizes the field with ``set(...)``, so a bare
+    string is torn into its characters and the LoRA memory pool later dies on one of
+    them::
+
+        NotImplementedError: get_hidden_dim not implemented for i
+
+    ``"all-linear"`` translates to SGLang's own ``"all"`` sentinel, which it expands
+    itself. A regex has no SGLang equivalent, and reading it as a literal module name
+    would silently adapt a different set of modules than training did, so it is
+    rejected with an actionable message instead.
+    """
+    if target_modules == "all-linear":
+        return ["all"]
+    if isinstance(target_modules, str):
+        raise ValueError(
+            f"SGLang cannot serve a regex `target_modules` ({target_modules!r}). PEFT matches a "
+            f"string against the full parameter key, which SGLang's LoRA pool has no equivalent "
+            f"of, and reading it as a literal module name would adapt different modules than "
+            f"training did. Use `all-linear`, or list the module names explicitly, e.g. "
+            f"[q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]."
+        )
+    return list(target_modules)
+
+
 def broadcast_pyobj(
     data: list[Any],
     rank: int,
