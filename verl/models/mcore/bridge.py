@@ -13,13 +13,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import torch
+from megatron.core import tensor_parallel
+
 try:
     from megatron.bridge import AutoBridge
-    from megatron.bridge.training.utils.train_utils import LinearForLastLayer, freeze_moe_router, make_value_model
+    from megatron.bridge.training.utils.train_utils import (
+        LinearForLastLayer as _BridgeLinearForLastLayer,
+        freeze_moe_router,
+        make_value_model,
+    )
 except ImportError:
     # `pip install verl[mcore]` or
     print("Megatron-Bridge package not found. Please install Megatron-Bridge with `pip install megatron-bridge`")
     raise
+
+
+class LinearForLastLayer(_BridgeLinearForLastLayer):
+    def forward(self, input_):
+        logits = torch.nn.Linear.forward(self, input_)
+        logits = logits.float()
+        if self.sequence_parallel:
+            logits = tensor_parallel.gather_from_sequence_parallel_region(
+                logits,
+                tensor_parallel_output_grad=torch.is_grad_enabled(),
+            )
+        return logits, None
+
 
 __all__ = [
     "AutoBridge",
