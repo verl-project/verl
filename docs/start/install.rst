@@ -22,7 +22,7 @@ We recommend using the **FSDP / FSDP2** backend to investigate, research and pro
 
 2. Inference:
 
-For inference, vllm 0.8.3 and later versions have been tested for stability. We recommend turning on env var `VLLM_USE_V1=1` for optimal performance.
+For inference, vllm 0.18.0 and later versions are supported; older releases are no longer usable with verl.
 
 For SGLang, refer to the :doc:`SGLang Backend<../workers/sglang_worker>` for detailed installation and usage instructions. SGLang rollout is under extensive development and offers many advanced features and optimizations. We encourage users to report any issues or provide feedback via the `SGLang Issue Tracker <https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/issues/106>`_.
 

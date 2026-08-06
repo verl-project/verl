@@ -21,6 +21,7 @@ from verl.utils.tokenizer.continuous_token import (
     DeepSeekContinuousTokenBuilder,
     DeepSeekVL2ContinuousTokenBuilder,
     Gemma4ContinuousTokenBuilder,
+    Gemma4VLContinuousTokenBuilder,
     GLM46VContinuousTokenBuilder,
     GLMContinuousTokenBuilder,
     GptOssContinuousTokenBuilder,
@@ -29,6 +30,7 @@ from verl.utils.tokenizer.continuous_token import (
     MiMoContinuousTokenBuilder,
     MiMoVLContinuousTokenBuilder,
     MiniMaxContinuousTokenBuilder,
+    MiniMaxVLContinuousTokenBuilder,
     QwenContinuousTokenBuilder,
     QwenVLContinuousTokenBuilder,
 )
@@ -41,6 +43,7 @@ from verl.utils.tokenizer.continuous_token_wiring import (
     list_continuous_token_builder_families,
     resolve_continuous_token_model_family,
 )
+from verl.utils.tokenizer.deepseek import DeepSeekV4ContinuousTokenBuilder
 
 
 class _DummyTokenizer:
@@ -281,6 +284,7 @@ def test_builtin_family_surface():
         "gemma4",
         "gptoss",
         "deepseek",
+        "deepseekv4",
         "vldefault",
         "qwenvl",
         "qwen25vl",
@@ -313,10 +317,13 @@ def test_builtin_family_surface():
         (ContinuousTokenModelFamily.GEMMA4, Gemma4ContinuousTokenBuilder),
         (ContinuousTokenModelFamily.GPTOSS, GptOssContinuousTokenBuilder),
         (ContinuousTokenModelFamily.DEEPSEEK, DeepSeekContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.DEEPSEEKV4, DeepSeekV4ContinuousTokenBuilder),
         (ContinuousTokenModelFamily.QWEN_VL, QwenVLContinuousTokenBuilder),
         (ContinuousTokenModelFamily.QWEN25_VL, QwenVLContinuousTokenBuilder),
         (ContinuousTokenModelFamily.QWEN3_VL, QwenVLContinuousTokenBuilder),
         (ContinuousTokenModelFamily.MIMO_VL, MiMoVLContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.MINIMAX_VL, MiniMaxVLContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.GEMMA4_VL, Gemma4VLContinuousTokenBuilder),
         (ContinuousTokenModelFamily.KIMI_VL, KimiVLContinuousTokenBuilder),
         (ContinuousTokenModelFamily.GLM4V, GLM46VContinuousTokenBuilder),
         (ContinuousTokenModelFamily.DEEPSEEK_VL2, DeepSeekVL2ContinuousTokenBuilder),
@@ -344,6 +351,8 @@ def test_builtin_family_class_mapping(family, builder_cls):
         ("XiaomiMiMo/MiMo-7B-SFT", ContinuousTokenModelFamily.MIMO),
         ("deepseek-ai/DeepSeek-R1", ContinuousTokenModelFamily.DEEPSEEK),
         ("deepseek-ai/DeepSeek-V3", ContinuousTokenModelFamily.DEEPSEEK),
+        ("deepseek-ai/DeepSeek-V4-Pro", ContinuousTokenModelFamily.DEEPSEEKV4),
+        ("deepseek-ai/DeepSeek-V4-Flash", ContinuousTokenModelFamily.DEEPSEEKV4),
         # VL families
         ("Qwen/Qwen2.5-VL-7B-Instruct", ContinuousTokenModelFamily.QWEN25_VL),
         ("Qwen/Qwen3-VL-4B", ContinuousTokenModelFamily.QWEN3_VL),
@@ -930,6 +939,9 @@ def test_model_specific_builders_validate_required_special_tokens():
 
     with pytest.raises(ValueError, match="required token '<\\|tool_response>'"):
         Gemma4ContinuousTokenBuilder(_MissingSpecialTokenTokenizer())
+
+    with pytest.raises(ValueError, match="required token '<｜end▁of▁sentence｜>'"):
+        DeepSeekV4ContinuousTokenBuilder(_MissingSpecialTokenTokenizer())
 
 
 def test_model_specific_builders_validate_special_token_id_shape():

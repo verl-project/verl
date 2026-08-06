@@ -146,6 +146,7 @@ def fused_forward_model_engine(vision_model: bool = False):
         temperature: float,
         calculate_entropy: bool,
         pad_token_id: int,
+        cp_layout: str = "zigzag",
     ):
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
@@ -162,6 +163,7 @@ def fused_forward_model_engine(vision_model: bool = False):
             pre_process=pre_process,
             use_fp8_padding=use_fp8_padding,
             min_local_rows=min_local_rows,
+            cp_layout=cp_layout,
         )
         input_ids_rmpad = input_ids_rmpad.contiguous()
 
@@ -190,6 +192,7 @@ def fused_forward_model_engine(vision_model: bool = False):
             need_roll=True,
             use_fp8_padding=use_fp8_padding,
             min_local_rows=min_local_rows,
+            cp_layout=cp_layout,
         )
         labels_rmpad = labels_rmpad.contiguous()
         output_orig: CausalLMOutputForPPO = model(
@@ -209,7 +212,12 @@ def fused_forward_model_engine(vision_model: bool = False):
         if log_probs.dim() == 1:
             log_probs = log_probs.unsqueeze(0)
         log_probs = postprocess_thd_engine(
-            log_probs, packed_seq_params, input_ids, input_ids.shape[0], post_process=post_process
+            log_probs,
+            packed_seq_params,
+            input_ids,
+            input_ids.shape[0],
+            post_process=post_process,
+            cp_layout=cp_layout,
         )
 
         output = {"log_probs": log_probs}
@@ -219,7 +227,12 @@ def fused_forward_model_engine(vision_model: bool = False):
             if entropy.dim() == 1:
                 entropy = entropy.unsqueeze(0)
             entropy = postprocess_thd_engine(
-                entropy, packed_seq_params, input_ids, input_ids.shape[0], post_process=post_process
+                entropy,
+                packed_seq_params,
+                input_ids,
+                input_ids.shape[0],
+                post_process=post_process,
+                cp_layout=cp_layout,
             )
             output["entropy"] = entropy
 

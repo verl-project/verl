@@ -198,7 +198,7 @@ def hf_delta_export(gen, snaps: dict, entry_fn):
     pass."""
     from verl.checkpoint_engine.delta_sync.sparse_gather import shard_delta_indices
 
-    from .spec import derive_placement
+    from .spec import derive_dtensor_placement
 
     for name, local, spec in gen:
         local = local.detach().contiguous().view(-1)
@@ -206,7 +206,12 @@ def hf_delta_export(gen, snaps: dict, entry_fn):
         assert snap is not None and snap.numel() == local.numel(), (
             f"{name}: no seed snapshot for this shard; run the seed export first"
         )
-        place, contributes, pg = derive_placement(spec)
+        if spec.place is not None:
+            # explicit exporter override: the backend declared the whole triple
+            # (hybrid geometries are not derivable from DTensor facts alone).
+            place, contributes, pg = spec.place, spec.contributes, spec.gather_group
+        else:
+            place, contributes, pg = derive_dtensor_placement(spec)
         if contributes:
             base = snap.to(local.device, non_blocking=True)
             lidx, lval = shard_delta_indices(local, base, 0)
@@ -218,18 +223,20 @@ def hf_delta_export(gen, snaps: dict, entry_fn):
         yield (*entry_fn(name, spec, place, lidx, lval), pg)
 
 
-def prime_delta_snapshots(gen, snaps: dict) -> None:
-    """Pin each rank's current shards to CPU as the steady diff base. Run right
-    after the seed's full-weight sync: weights do not move during the sync, so
-    the snapshots equal exactly what the rollout side received."""
-    from verl.utils.device import is_cuda_available
+def prime_delta_snapshots(gen, snaps: dict, pin: bool) -> None:
+    """Snapshot each rank's current shards to CPU as the steady diff base. Run
+    right after the seed's full-weight sync: weights do not move during the
+    sync, so the snapshots equal exactly what the rollout side received.
 
+    ``pin`` selects pinned vs pageable host memory and is the ENGINE's call
+    (``BaseEngine.delta_pin_snapshots``): pinning a whole shard set
+    (cudaHostAlloc) competes with everything else that pins on the node and its
+    failure surfaces as a CUDA out-of-memory; pageable costs a slower H2D on
+    the diff read-back but cannot OOM the device."""
     for name, local, _spec in gen:
         local = local.detach().contiguous().view(-1)
         snap = snaps.get(name)
         if snap is None or snap.numel() != local.numel():
-            # pinned host memory needs an accelerator context; degrade gracefully
-            # on CPU-only environments (unit tests) where pinning is meaningless.
-            snap = torch.empty_like(local, device="cpu", pin_memory=is_cuda_available)
+            snap = torch.empty_like(local, device="cpu", pin_memory=pin)
             snaps[name] = snap
         snap.copy_(local, non_blocking=True)

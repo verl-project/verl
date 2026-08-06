@@ -274,6 +274,7 @@ def gptmodel_forward_model_engine(
     mtp_enable_train: bool = False,
     local_cp_size: Optional[int] = None,
     forced_max_seqlen: Optional[int] = None,
+    cp_layout: str = "zigzag",
 ):
     """Default forward pass for GPT models with optional sequence packing."""
 
@@ -301,6 +302,7 @@ def gptmodel_forward_model_engine(
             pre_process=pre_process or (post_process and mtp_enable_train),
             use_fp8_padding=use_fp8_padding,
             local_cp_size=local_cp_size,
+            cp_layout=cp_layout,
         )
         input_ids_rmpad = input_ids_rmpad.contiguous()
 
@@ -324,6 +326,7 @@ def gptmodel_forward_model_engine(
                     need_roll=True,
                     use_fp8_padding=use_fp8_padding,
                     local_cp_size=local_cp_size,
+                    cp_layout=cp_layout,
                 )[0]
 
             model_kwargs["labels"] = args["label"].contiguous()
@@ -355,13 +358,20 @@ def gptmodel_forward_model_engine(
                     need_roll=(k == "label"),
                     use_fp8_padding=use_fp8_padding,
                     local_cp_size=local_cp_size,
+                    cp_layout=cp_layout,
                 )[0]
                 for k, v in logits_processor_args.items()
             }
             output_dict = logits_processor(output_orig, **args)
             output = {
                 k: postprocess_thd_engine(
-                    v, packed_seq_params, input_ids, batch_size, post_process=post_process, local_cp_size=local_cp_size
+                    v,
+                    packed_seq_params,
+                    input_ids,
+                    batch_size,
+                    post_process=post_process,
+                    local_cp_size=local_cp_size,
+                    cp_layout=cp_layout,
                 )
                 for k, v in output_dict.items()
             }
@@ -373,6 +383,7 @@ def gptmodel_forward_model_engine(
                 batch_size,
                 post_process=post_process,
                 local_cp_size=local_cp_size,
+                cp_layout=cp_layout,
             )
     else:
         """

@@ -1,4 +1,4 @@
-Last updated: 07/09/2026.
+Last updated: 08/03/2026.
 
 关键版本支持与依赖
 ^^^^^^^^^^^^^^^^^
@@ -11,9 +11,9 @@ torch         ``2.10.0``                                        PyTorch 深度�
 torch_npu     待Q2 torch_npu版本正式商发后更新链接               NPU PyTorch 适配插件                                       
 triton        ``3.5.0``                                         Triton，用于编写自定义算子                                 
 triton-ascend ``3.2.2``                                         NPU Triton 适配                                            
-transformers  ``4.57.3``                                        Hugging Face 大模型库，提供模型架构与预训练权重            
-vLLM          ``0.20.2``                                        高性能 LLM 推理与服务引擎                                  
-vLLM-Ascend   ``fac8784c2572b14b1134f04d9818926b4a297f3a``      NPU vLLM 后端适配                                          
+transformers  ``4.57.6``                                        Hugging Face 大模型库，提供模型架构与预训练权重            
+vLLM          ``0.23.0``                                        高性能 LLM 推理与服务引擎                                  
+vLLM-Ascend   ``0.23.0``                                        NPU vLLM 后端适配                                          
 Megatron-LM   ``core_r0.12.0``                                  大规模分布式训练框架                                       
 MindSpeed     ``0c6c0ceaa523a96032dee1539a52032155e6404e``      Megatron-LM 在昇腾 NPU 上的适配和优化组件                  
 ============= ================================================= ===================
@@ -28,7 +28,7 @@ vLLM推理后端支持
     #安装vllm
     git clone https://github.com/vllm-project/vllm.git
     cd vllm
-    git checkout v0.20.2
+    git checkout v0.23.0
     VLLM_TARGET_DEVICE=empty pip install -v -e .
     cd ..
 
@@ -36,8 +36,7 @@ vLLM推理后端支持
     #安装之前要先source cann环境： source /usr/local/Ascend/cann/set_env.sh
     git clone https://github.com/vllm-project/vllm-ascend.git
     cd vllm-ascend
-    git checkout fac8784c2572b14b1134f04d9818926b4a297f3a
-    git cherry-pick c8b402071ecfc9c36c4eba195dfa6bffea1988f2
+    git checkout releases/v0.23.0
     pip install -v -e . --no-build-isolation --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
     cd ..
 

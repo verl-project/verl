@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
-from enum import StrEnum
+from enum import Enum
 from typing import Any
 
 from .continuous_token import (
@@ -38,11 +38,17 @@ from .continuous_token import (
     QwenVLContinuousTokenBuilder,
     VLContinuousTokenBuilder,
 )
+from .deepseek import DeepSeekV4ContinuousTokenBuilder
 
 logger = logging.getLogger(__name__)
 
 
-class ContinuousTokenModelFamily(StrEnum):
+class ContinuousTokenModelFamily(str, Enum):
+    # ``enum.StrEnum`` needs Python 3.11, but verl supports 3.10, so mix in ``str`` and keep its
+    # ``__str__``/``__format__`` to render a member as its value.
+    __str__ = str.__str__
+    __format__ = str.__format__
+
     AUTO = "auto"
     DEFAULT = "default"
     QWEN = "qwen"
@@ -59,6 +65,7 @@ class ContinuousTokenModelFamily(StrEnum):
     GEMMA4 = "gemma4"
     GPTOSS = "gptoss"
     DEEPSEEK = "deepseek"
+    DEEPSEEKV4 = "deepseekv4"
     # Multimodal (VL) families
     VL_DEFAULT = "vldefault"
     QWEN_VL = "qwenvl"
@@ -88,6 +95,7 @@ _CONTINUOUS_TOKEN_BUILDER_REGISTRY: dict[ContinuousTokenModelFamily, type[Any]] 
     ContinuousTokenModelFamily.GEMMA4: Gemma4ContinuousTokenBuilder,
     ContinuousTokenModelFamily.GPTOSS: GptOssContinuousTokenBuilder,
     ContinuousTokenModelFamily.DEEPSEEK: DeepSeekContinuousTokenBuilder,
+    ContinuousTokenModelFamily.DEEPSEEKV4: DeepSeekV4ContinuousTokenBuilder,
     # Multimodal (VL) families
     ContinuousTokenModelFamily.VL_DEFAULT: VLContinuousTokenBuilder,
     ContinuousTokenModelFamily.QWEN_VL: QwenVLContinuousTokenBuilder,
@@ -224,6 +232,9 @@ def infer_continuous_token_model_family(
     # DeepSeek-VL2
     if "deepseek" in compact and "vl" in compact:
         return ContinuousTokenModelFamily.DEEPSEEK_VL2
+    # Only the V4 series uses the DSML turn format.
+    if any(marker in compact for marker in ("deepseekv4", "dsv4")):
+        return ContinuousTokenModelFamily.DEEPSEEKV4
     # DeepSeek text models (V2/V3/R1) — match if not VL2
     if "deepseek" in compact and "vl" not in compact:
         return ContinuousTokenModelFamily.DEEPSEEK

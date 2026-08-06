@@ -847,6 +847,25 @@ distillation:
         response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
         temperature: ${oc.select:actor_rollout_ref.rollout.temperature}
   teacher_key: data_source
+transfer_queue:
+  enable: false
+  metrics:
+    enabled: false
+    port: 0
+  backend:
+    storage_backend: SimpleStorage
+    SimpleStorage:
+      total_storage_size: 100000
+      num_data_storage_units: 8
+    MooncakeStore:
+      auto_init: false
+      metadata_server: localhost:50123
+      master_server_address: localhost:50124
+      local_hostname: localhost
+      protocol: tcp
+      global_segment_size: 4294967296
+      local_buffer_size: 1073741824
+      device_name: ''
 trainer:
   balance_batch: true
   total_epochs: 30
@@ -926,25 +945,6 @@ global_profiler:
       steps: null
       stages: null
       strict: false
-transfer_queue:
-  enable: false
-  metrics:
-    enabled: false
-    port: 0
-  backend:
-    storage_backend: SimpleStorage
-    SimpleStorage:
-      total_storage_size: 100000
-      num_data_storage_units: 8
-    MooncakeStore:
-      auto_init: false
-      metadata_server: localhost:50123
-      master_server_address: localhost:50124
-      local_hostname: localhost
-      protocol: tcp
-      global_segment_size: 4294967296
-      local_buffer_size: 1073741824
-      device_name: ''
 skip:
   _target_: verl.utils.skip.SkipManagerConfig
   rollout:

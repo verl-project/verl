@@ -50,7 +50,7 @@ from verl.utils.megatron.tensor_parallel import (
     vocab_parallel_log_probs_from_logits,
     vocab_parallel_sum_pi_squared,
 )
-from verl.utils.megatron_peft_utils import build_peft_config_for_vllm
+from verl.utils.megatron_peft_utils import add_base_layer_suffix, build_peft_config_for_vllm
 from verl.utils.megatron_utils import (
     check_mtp_config,
     get_megatron_module_device,
@@ -76,6 +76,19 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 class MegatronEngine(BaseEngine):
+    # mcore keeps model-parallel-local params resident and moves large host
+    # buffers every step; pinning the whole delta snapshot set on top of that
+    # starves the node's cudaHostAlloc pool and surfaces as CUDA OOM in
+    # unrelated allocations (observed at 30B/235B) -- pageable is the safe
+    # default here.
+    delta_pin_snapshots = False
+
+    @staticmethod
+    def _get_context_parallel_layout(unwrapped_model) -> str:
+        if getattr(unwrapped_model.config, "experimental_attention_variant", None) == "dsv4_hybrid":
+            return "contiguous"
+        return "zigzag"
+
     def __init__(
         self,
         model_config: HFModelConfig,
@@ -295,7 +308,11 @@ class MegatronEngine(BaseEngine):
         dtype, so inject ``grad_reduce_in_fp32=False`` unless the user set it
         explicitly via ``override_ddp_config``. Default (opt-out) leaves the fp32
         grad bucket untouched, preserving prior behavior.
+
+        For Muon + LayerWise, also enable ``use_layer_wise_param_layout`` on the
+        DDP config so master weights live in the param buffer (not fp32 clones).
         """
+        from verl.utils.megatron.optimizer import is_muon_layer_wise_config
         from verl.utils.torch_dtypes import PrecisionType
 
         override_ddp_config = dict(self.engine_config.override_ddp_config or {})
@@ -307,9 +324,12 @@ class MegatronEngine(BaseEngine):
             and "grad_reduce_in_fp32" not in override_ddp_config
         ):
             override_ddp_config["grad_reduce_in_fp32"] = False
+        if opt_cfg is not None and is_muon_layer_wise_config(opt_cfg):
+            override_ddp_config.setdefault("use_layer_wise_param_layout", True)
         return override_ddp_config
 
     def _build_megatron_module(self):
+        from verl.utils.megatron.optimizer import is_muon_layer_wise_config
         from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
         from verl.utils.model import print_model_size
 
@@ -318,10 +338,12 @@ class MegatronEngine(BaseEngine):
         else:
             wrap_with_ddp = True
 
+        layer_wise_muon = is_muon_layer_wise_config(self.optimizer_config)
         wrap_config = McoreModuleWrapperConfig(
             is_value_model=self.is_value_model,
             wrap_with_ddp=wrap_with_ddp,
             use_distributed_optimizer=self.engine_config.use_distributed_optimizer,
+            use_layer_wise_distributed_optimizer=layer_wise_muon,
             use_megatron_fsdp=self.engine_config.use_megatron_fsdp,
         )
         override_ddp_config = self._resolve_override_ddp_config()
@@ -825,6 +847,10 @@ class MegatronEngine(BaseEngine):
                 if non_merge_lora_sync
                 else self.bridge.export_hf_weights(self.module)
             )
+            if non_merge_lora_sync:
+                per_tensor_param = add_base_layer_suffix(
+                    per_tensor_param, model_type=self.model_config.hf_config.model_type
+                )
 
         # QAT: process weights through QATWeightExporter for quantized weight sync to vLLM
         if self._qat_enabled:
@@ -833,6 +859,68 @@ class MegatronEngine(BaseEngine):
             per_tensor_param = export_qat_weights(per_tensor_param, self.module, self._qat_config.mode, self.bridge)
 
         return per_tensor_param, peft_config
+
+    def _mcore_export_index(self):
+        """Build (once) the per-parameter delta export index: geometry specs and
+        form-B probes derived from the bridge's conversion tasks. See
+        :mod:`verl.workers.engine.megatron.delta_export`."""
+        index = getattr(self, "_delta_export_index", None)
+        if index is None:
+            from .delta_export import build_export_index
+
+            assert not self.vanilla_bridge, (
+                "megatron delta_sharded is built on Megatron-Bridge param mappings; "
+                "the deprecated vanilla mbridge flavor is not supported"
+            )
+            assert self.peft_cls is None, "megatron delta_sharded does not support LoRA"
+            self._delta_slot_cache: dict = {}
+            index = build_export_index(self.bridge, self.module, self._delta_slot_cache)
+            self._delta_export_index = index
+            self._delta_export_by_name = {rec.megatron_name: rec for rec in index}
+        return index
+
+    def get_per_tensor_param_shard(self, **kwargs):
+        """Yield each rank's *local* mcore shard ``(name, local_flat_bf16,
+        ShardSpec)`` -- the spec carries only the wire merge group (the
+        comm-stubbed probe owns all shard geometry). Pure export, no side
+        effects. Params owned by another pipeline stage yield an empty shard
+        (zero-count lockstep rows; see the index builder)."""
+        load_megatron_model_to_gpu(self.module, load_grad=False)
+        index = self._mcore_export_index()
+
+        def _gen():
+            empty = torch.empty(0, dtype=torch.bfloat16, device=get_device_id())
+            for rec in index:
+                if rec.param is None:
+                    yield rec.megatron_name, empty, rec.spec
+                    continue
+                local = rec.param.data
+                if local.is_floating_point() and local.dtype != torch.bfloat16:
+                    local = local.to(torch.bfloat16)
+                yield rec.megatron_name, local.reshape(-1), rec.spec
+
+        return _gen(), None
+
+    def _hf_delta_entry(self, name, spec, place, lidx, lval):
+        """mcore's per-param entry builder: probe the bridge's own converter
+        (comm-stubbed copy -- real group sizes, gathers synthesized locally)
+        with NaN sentinels -- see
+        :func:`verl.workers.engine.megatron.delta_export.mcore_hf_delta_entry`."""
+        from .delta_export import mcore_hf_delta_entry
+
+        rec = self._delta_export_by_name[name]
+        return mcore_hf_delta_entry(rec, place, lidx, lval, self._delta_slot_cache)
+
+    def get_per_tensor_param_delta_shard(self, **kwargs):
+        """Yield the delta engine's steady payloads -- FINAL HF-coordinate entries
+        per mcore parameter (see the FSDP engine's method of the same name for the
+        contract; MegatronEngine extends BaseEngine directly, so the thin wrapper
+        is repeated here). Requires a prior :meth:`prime_delta_snapshots` call."""
+        from ..utils import hf_delta_export
+
+        self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
+        gen, _ = self.get_per_tensor_param_shard()
+        return hf_delta_export(gen, self._delta_shard_snap, self._hf_delta_entry), None
 
     def disable_adapter(self) -> ContextManager:
         return self.peft_cls.disable_adapter(self.module)
@@ -988,6 +1076,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
         loss_mask = model_inputs["loss_mask"]
 
         unwrapped_model = unwrap_model(model)
+        cp_layout = self._get_context_parallel_layout(unwrapped_model)
         if hasattr(unwrapped_model, "vp_stage"):
             vp_rank = unwrapped_model.vp_stage
         else:
@@ -1045,6 +1134,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 temperature=temperature_value,
                 calculate_entropy=calculate_entropy,
                 pad_token_id=self.model_config.tokenizer.pad_token_id,
+                cp_layout=cp_layout,
             )
         else:
             if not isinstance(temperature, torch.Tensor):
@@ -1091,6 +1181,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
                 local_cp_size=local_cp_size,
                 forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
+                cp_layout=cp_layout,
             )
 
         # Router replay: record routing decisions for R2 mode
@@ -1203,6 +1294,7 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
         model_inputs = self.prepare_model_inputs(batch)
         input_ids = model_inputs["input_ids"]
         multi_modal_inputs = model_inputs["multi_modal_inputs"]
+        cp_layout = self._get_context_parallel_layout(unwrap_model(model))
 
         from verl.models.mcore import get_mcore_engine_forward_fn
 
@@ -1217,6 +1309,7 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
             pad_token_id=self.model_config.tokenizer.pad_token_id,
             data_format="thd" if self.engine_config.use_remove_padding else "bshd",
             forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
+            cp_layout=cp_layout,
         )
 
         return output, partial(postprocess_micro_batch_func, data=batch)
