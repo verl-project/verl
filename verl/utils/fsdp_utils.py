@@ -1188,3 +1188,41 @@ def fsdp2_sharded_load_from_cpu(
 
     # Process synchronization: ensure all processes complete loading before proceeding
     dist.barrier()
+
+
+@torch.no_grad()
+def fsdp1_sharded_save_to_cpu(
+    model: torch.nn.Module,
+) -> dict[str, torch.Tensor]:
+    """Save FSDP1 model parameters to CPU memory.
+
+    Each process saves its local shard (the flat_param data visible to it)
+    to CPU. Unlike the FSDP2 variant, FSDP1 parameters are regular tensors
+    managed by FlatParamHandle, not DTensors.
+
+    Args:
+        model: FSDP1-wrapped model.
+
+    Returns:
+        cpu_state: dict mapping parameter names to CPU tensor copies.
+    """
+    cpu_state: dict[str, torch.Tensor] = {}
+    for name, param in model.named_parameters():
+        cpu_state[name] = param.data.detach().clone().cpu()
+    return cpu_state
+
+
+@torch.no_grad()
+def fsdp1_sharded_load_from_cpu(
+    model: torch.nn.Module,
+    cpu_state: dict[str, torch.Tensor],
+) -> None:
+    """Restore FSDP1 model parameters from CPU memory.
+
+    Args:
+        model: FSDP1 model to restore (must have the same structure as when saved).
+        cpu_state: dict produced by fsdp1_sharded_save_to_cpu.
+    """
+    for name, param in model.named_parameters():
+        if name in cpu_state:
+            param.data.copy_(cpu_state[name].to(param.data.device))
