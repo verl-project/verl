@@ -1029,7 +1029,15 @@ class FSDPEngine(BaseEngine):
                 target_device=torch.device("cpu"),
             )
 
-        peft_config_dict = peft_config.to_dict() if peft_config is not None else None
+        if peft_config is not None:
+            peft_config_dict = peft_config.to_dict()
+            # Stringify enum values so all engines return the same shape.
+            for key in ('task_type', 'peft_type'):
+                val = peft_config_dict.get(key)
+                if hasattr(val, 'value'):
+                    peft_config_dict[key] = val.value
+        else:
+            peft_config_dict = None
         return per_tensor_param, peft_config_dict
 
     def _merged_lora_per_tensor_param(self):

@@ -145,7 +145,8 @@ def build_peft_config_for_vllm(lora_config: dict) -> dict:
     hf_exclude_modules = convert_megatron_to_hf_target_modules(exclude_modules)
 
     return {
-        "task_type": TaskType.CAUSAL_LM,
+        "task_type": TaskType.CAUSAL_LM.value,
+        "peft_type": "LORA",
         "r": lora_config.get("rank", 0),
         "lora_alpha": lora_config.get("alpha", 32),
         "target_modules": hf_target_modules,
