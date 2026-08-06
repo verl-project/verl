@@ -178,7 +178,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             if self.should_load_model:
                 remote_model_path = os.path.join(local_path, f"model_world_size_{self.world_size}_rank_{self.rank}.pt")
                 local_model_path = copy_to_local(remote_model_path)
-                model_state_dict = torch.load(local_model_path, weights_only=False)
+                model_state_dict = torch.load(local_model_path, weights_only=False, map_location="cpu")
                 if self.is_lora_only_state_dict(model_state_dict):
                     result = self.model.load_state_dict(model_state_dict, strict=False)
                     if result is not None and result.unexpected_keys:
@@ -198,7 +198,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             if self.should_load_optimizer:
                 remote_optim_path = os.path.join(local_path, f"optim_world_size_{self.world_size}_rank_{self.rank}.pt")
                 local_optim_path = copy_to_local(remote_optim_path)
-                optimizer_state_dict = torch.load(local_optim_path, weights_only=False)
+                optimizer_state_dict = torch.load(local_optim_path, weights_only=False, map_location="cpu")
                 self.optimizer.load_state_dict(optimizer_state_dict)
                 log_with_rank(f"Loaded optimizer from {remote_optim_path}", rank=self.rank, logger=logger)
 
@@ -207,7 +207,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 local_path, f"extra_state_world_size_{self.world_size}_rank_{self.rank}.pt"
             )
             local_extra_state_path = copy_to_local(remote_extra_state_path)
-            extra_state_dict = torch.load(local_extra_state_path, weights_only=False)
+            extra_state_dict = torch.load(local_extra_state_path, weights_only=False, map_location="cpu")
             # recover random state
             if "rng" in extra_state_dict:
                 # 'rng' may not exist for backward compatibility
