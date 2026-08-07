@@ -72,6 +72,13 @@ SAVE_FREQ=${SAVE_FREQ:-50}
 # Dropping 'optimizer' keeps checkpoints at weight size; the cost is that a
 # resumed run restarts the optimizer from scratch.
 SAVE_CONTENTS=${SAVE_CONTENTS:-'["model","extra"]'}
+
+# Prompt filtering runs to completion before any device work starts, and the
+# shipped data config pins it to a single process (see
+# trainer/config/data/legacy_data.yaml), so filtering 1.79M samples costs ~28
+# minutes with every accelerator idle. The code default is cpu_count()//4;
+# restore that here so the wait scales with the machine.
+FILTER_WORKERS=${FILTER_WORKERS:-$(python3 -c 'import os; print(max(1, os.cpu_count() // 4))' 2>/dev/null || echo 8)}
 TEST_FREQ=${TEST_FREQ:--1}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-10}
 ########################### end user-adjustable ###########################
@@ -115,6 +122,7 @@ DATA=(
     data.max_prompt_length=${MAX_PROMPT_LENGTH}
     data.max_response_length=${MAX_RESPONSE_LENGTH}
     data.filter_overlong_prompts=True
+    data.filter_overlong_prompts_workers=${FILTER_WORKERS}
     data.truncation='error'
 )
 
