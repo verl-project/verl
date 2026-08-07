@@ -482,6 +482,12 @@ class QwenContinuousTokenBuilder(ContinuousTokenBuilder):
     Qwen2, Qwen2.5, Qwen3, and Qwen3.5 templates render ``<|im_end|>\n`` after a turn,
     while generation may stop at ``<|im_end|>``. When the runtime prefix ends
     there, insert the missing newline before appending context tokens.
+
+    Note: when a Qwen3/Qwen3.5 context assistant message has no thinking, grouped
+    CT encoding renders that assistant in a synthetic context and may produce an
+    empty ``<think></think>`` block. Rendering that assistant together with the
+    following context messages through the full chat template does not produce
+    the empty thinking block.
     """
 
     def __init__(self, tokenizer: Any, **kwargs: Any):
@@ -739,6 +745,12 @@ class Gemma4ContinuousTokenBuilder(ContinuousTokenBuilder):
         # model-turn header. Compute the exact tail edit from the real rolled-back
         # message prefix instead. This is still a tail-only edit and is reported in
         # MergeResult so response metadata is trimmed and masked consistently.
+        # TODO: this full-template tail edit currently follows Gemma4's historical
+        # assistant behavior and drops thinking from appended context assistant
+        # messages when later context turns exist. Find an encoding strategy that
+        # both preserves assistant thinking and keeps the assistant/tool/user
+        # boundary identical to applying the Gemma4 chat template to the full
+        # context.
         if any(message.get("role") == "assistant" for message in appended_messages):
             self._assert_append_only(previous_messages, updated_messages)
             previous_rendered_ids = self._render_tokens(
