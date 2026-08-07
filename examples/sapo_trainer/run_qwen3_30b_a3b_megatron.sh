@@ -64,6 +64,14 @@ VAL_FILE=${VAL_FILE:-$HOME/data/aime-2024/test.parquet}
 PROJECT_NAME=${PROJECT_NAME:-verl_sapo_qwen3_moe}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_30b_a3b_megatron}
 SAVE_FREQ=${SAVE_FREQ:-50}
+
+# What goes into each checkpoint. The default ['model','optimizer','extra']
+# writes ~374 GB for this model on 16 ranks -- roughly 57 GB of weights plus
+# ~317 GB of Adam state. On a networked filesystem that write outlasts the
+# 30-minute gloo collective timeout and the run dies inside save_checkpoint.
+# Dropping 'optimizer' keeps checkpoints at weight size; the cost is that a
+# resumed run restarts the optimizer from scratch.
+SAVE_CONTENTS=${SAVE_CONTENTS:-'["model","extra"]'}
 TEST_FREQ=${TEST_FREQ:--1}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-10}
 ########################### end user-adjustable ###########################
@@ -183,6 +191,7 @@ TRAINER=(
     trainer.device=${DEVICE}
     trainer.val_before_train=False
     trainer.save_freq=${SAVE_FREQ}
+    actor_rollout_ref.actor.checkpoint.save_contents=${SAVE_CONTENTS}
     trainer.test_freq=${TEST_FREQ}
     trainer.total_epochs=${TOTAL_EPOCHS}
 )
