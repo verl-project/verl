@@ -67,6 +67,7 @@ from verl.trainer.ppo.utils import (
     Role,
     create_rl_dataset,
     create_rl_sampler,
+    get_trainer_worker_env,
     need_critic,
     need_reference_policy,
     need_teacher_policy,
@@ -285,6 +286,7 @@ class PPOTrainer(ABC):
                     OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
                 )
         wg_kwargs["device_name"] = self.config.trainer.device
+        wg_kwargs["worker_env"] = get_trainer_worker_env(self.config)
         logger.info(f"worker group kwargs: {wg_kwargs}")
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
