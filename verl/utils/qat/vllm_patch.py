@@ -18,8 +18,8 @@ vLLM NVFP4 Patches for Dynamic Weight Updates.
 Enables dynamic weight reloading for NVFP4 quantized models in vLLM.
 
 Supported schemes:
-- Dense: W4A16-FP4, W4A4-FP4
-- MoE: NVFP4-MoE
+- Dense: W4A16-FP4, W4A4-FP4, experimental W4A8 simulation
+- MoE: NVFP4-MoE, experimental W4A8 simulation on the Marlin path
 """
 
 import logging
@@ -34,6 +34,65 @@ from verl.utils.device import get_device_name
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+W4A8_SIMULATION_ENV = "VERL_W4A8_SIMULATION"
+_W4A8_SUPPORTED_VLLM_PREFIX = "0.15."
+_VLLM_FORCE_MARLIN_ENV = "VLLM_TEST_FORCE_FP8_MARLIN"
+_VLLM_USE_FLASHINFER_MOE_ENV = "VLLM_USE_FLASHINFER_MOE_FP4"
+_W4A8_MOE_EXPERTS_CLASS_CACHE: dict[type, type] = {}
+_W4A8_PREVIOUS_VLLM_ENV: Optional[dict[str, Optional[str]]] = None
+
+
+def set_w4a8_simulation(enabled: bool) -> None:
+    """Propagate the configured W4A8 simulation mode to vLLM subprocesses."""
+    global _W4A8_PREVIOUS_VLLM_ENV
+
+    os.environ[W4A8_SIMULATION_ENV] = "1" if enabled else "0"
+    if enabled:
+        # vLLM 0.15 exposes Marlin selection for this oracle through these
+        # environment switches. Set them here so qat.mode remains the only
+        # user-facing control and worker subprocesses inherit a valid backend.
+        if _W4A8_PREVIOUS_VLLM_ENV is None:
+            _W4A8_PREVIOUS_VLLM_ENV = {
+                _VLLM_USE_FLASHINFER_MOE_ENV: os.environ.get(_VLLM_USE_FLASHINFER_MOE_ENV),
+                _VLLM_FORCE_MARLIN_ENV: os.environ.get(_VLLM_FORCE_MARLIN_ENV),
+            }
+        os.environ[_VLLM_USE_FLASHINFER_MOE_ENV] = "0"
+        os.environ[_VLLM_FORCE_MARLIN_ENV] = "1"
+    elif _W4A8_PREVIOUS_VLLM_ENV is not None:
+        for name, value in _W4A8_PREVIOUS_VLLM_ENV.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        _W4A8_PREVIOUS_VLLM_ENV = None
+
+
+def is_w4a8_simulation_enabled() -> bool:
+    """Return whether the current process is running the W4A8 simulation."""
+    return os.environ.get(W4A8_SIMULATION_ENV, "0") == "1"
+
+
+def configure_w4a8_simulation(qat_mode: str, quant_method: Optional[str]) -> None:
+    """Enable W4A8 only for the supported compressed-tensors rollout path."""
+    set_w4a8_simulation(False)
+    if qat_mode.lower() != "w4a8":
+        return
+    if quant_method != "compressed-tensors":
+        raise ValueError(f"W4A8 simulation requires the compressed-tensors quantization method; got {quant_method!r}.")
+    set_w4a8_simulation(True)
+
+
+def _validate_w4a8_vllm_version() -> None:
+    """Fail clearly when vLLM does not provide the validated internal APIs."""
+    import vllm
+
+    version = getattr(vllm, "__version__", "unknown")
+    if not version.startswith(_W4A8_SUPPORTED_VLLM_PREFIX):
+        raise RuntimeError(
+            "W4A8 simulation currently requires vLLM 0.15.x because it patches version-specific "
+            f"Marlin APIs; found vLLM {version}."
+        )
 
 
 class ParamMetaDict(dict):
@@ -492,8 +551,47 @@ def _marlin_process_scales_experts(scale_hf, param_dtype, size_k, size_n, group_
     return torch.stack(result)
 
 
-def _process_nvfp4_moe_marlin(self, layer: torch.nn.Module, is_first_call: bool) -> None:
-    """Process MoE layer with MARLIN backend (W4A16)."""
+def _make_w4a8_moe_experts_cls(experts_cls: type) -> type:
+    """Wrap standard Marlin experts with FP8 Q/DQ at both expert GEMM inputs."""
+    from vllm.model_executor.layers.fused_moe.fused_marlin_moe import MarlinExperts
+
+    if getattr(experts_cls, "_verl_w4a8_simulation", False):
+        return experts_cls
+    if not isinstance(experts_cls, type) or not issubclass(experts_cls, MarlinExperts):
+        raise NotImplementedError(
+            "W4A8 fused-MoE simulation requires the standard vLLM MarlinExperts path; "
+            "other vLLM NVFP4 backends and batched expert classes are not supported."
+        )
+
+    cached_cls = _W4A8_MOE_EXPERTS_CLASS_CACHE.get(experts_cls)
+    if cached_cls is not None:
+        return cached_cls
+
+    class W4A8MarlinExperts(experts_cls):
+        _verl_w4a8_simulation = True
+
+        def apply(self, output, hidden_states, *args, **kwargs):
+            from verl.utils.qat.linear import fp8_e4m3_fake_quant
+
+            hidden_states = fp8_e4m3_fake_quant(hidden_states)
+            return super().apply(output, hidden_states, *args, **kwargs)
+
+        def activation(self, activation, output, input):
+            from verl.utils.qat.linear import fp8_e4m3_fake_quant
+
+            super().activation(activation, output, input)
+            output.copy_(fp8_e4m3_fake_quant(output))
+
+    W4A8MarlinExperts.__name__ = f"W4A8{experts_cls.__name__}"
+    W4A8MarlinExperts.__qualname__ = W4A8MarlinExperts.__name__
+    _W4A8_MOE_EXPERTS_CLASS_CACHE[experts_cls] = W4A8MarlinExperts
+    return W4A8MarlinExperts
+
+
+def _process_nvfp4_moe_marlin(
+    self, layer: torch.nn.Module, is_first_call: bool, experts_cls: Optional[type] = None
+) -> None:
+    """Process MoE layer with the Marlin W4A16 or W4A8-simulation path."""
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import make_nvfp4_moe_kernel
     from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
         marlin_make_workspace_new,
@@ -579,7 +677,7 @@ def _process_nvfp4_moe_marlin(self, layer: torch.nn.Module, is_first_call: bool)
         self.kernel = make_nvfp4_moe_kernel(
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
-            experts_cls=self.experts_cls,
+            experts_cls=self.experts_cls if experts_cls is None else experts_cls,
         )
 
 
@@ -682,6 +780,22 @@ def patched_nvfp4_moe_process_weights_after_loading(self, layer: torch.nn.Module
     """Patched process_weights_after_loading for NVFP4 MoE layer."""
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
 
+    is_marlin = self.nvfp4_backend == NvFp4MoeBackend.MARLIN
+    if is_w4a8_simulation_enabled():
+        if not is_marlin:
+            raise NotImplementedError(
+                "W4A8 fused-MoE simulation requires the vLLM NVFP4 Marlin backend; "
+                f"selected backend: {self.nvfp4_backend}."
+            )
+        # vLLM may defer kernel construction to select_gemm_impl() for
+        # non-naive all-to-all paths, where it reads self.experts_cls again.
+        # Persist the wrapper so both eager and deferred construction apply
+        # activation Q/DQ at the two expert GEMM inputs.
+        self.experts_cls = _make_w4a8_moe_experts_cls(self.experts_cls)
+        experts_cls = self.experts_cls
+    else:
+        experts_cls = self.experts_cls
+
     is_first_call = _check_first_call(layer)
 
     # Save metadata (first call only)
@@ -697,9 +811,8 @@ def patched_nvfp4_moe_process_weights_after_loading(self, layer: torch.nn.Module
             if param is not None and hasattr(param, "weight_loader"):
                 layer._weight_loaders[pname] = param.weight_loader
 
-    is_marlin = self.nvfp4_backend == NvFp4MoeBackend.MARLIN
     if is_marlin:
-        _process_nvfp4_moe_marlin(self, layer, is_first_call)
+        _process_nvfp4_moe_marlin(self, layer, is_first_call, experts_cls=experts_cls)
     else:
         _process_nvfp4_moe_flashinfer_cutlass(self, layer, is_first_call)
 
@@ -732,24 +845,56 @@ _PATCH_TARGETS = [
 ]
 
 _applied_patches = []
+_w4a8_apply_patch = None
+_original_w4a16_apply_weights = None
+
+
+def patched_w4a16_apply_weights_with_w4a8_simulation(self, layer, x, bias=None):
+    """Inject FP8 activation Q/DQ before the existing dense W4A16 kernel."""
+    if is_w4a8_simulation_enabled():
+        from verl.utils.qat.linear import fp8_e4m3_fake_quant
+
+        x = fp8_e4m3_fake_quant(x)
+
+    if _original_w4a16_apply_weights is None:
+        raise RuntimeError("Original vLLM W4A16 apply_weights method was not initialized")
+    return _original_w4a16_apply_weights(self, layer, x, bias)
 
 
 def apply_qat_patches():
     """Apply NVFP4 patches to support dynamic weight updates. Call before model loading."""
-    global _applied_patches
+    global _applied_patches, _original_w4a16_apply_weights, _w4a8_apply_patch
 
-    if _applied_patches:
-        logger.warning("QAT patches already applied, skipping")
-        return _applied_patches
+    if is_w4a8_simulation_enabled():
+        _validate_w4a8_vllm_version()
 
-    logger.info("Applying NVFP4 patches for dynamic weight loading...")
+    if not _applied_patches:
+        logger.info("Applying NVFP4 patches for dynamic weight loading...")
 
-    for target, replacement in _PATCH_TARGETS:
-        p = patch(target, replacement)
-        _applied_patches.append(p)
-        p.start()
+        for target, replacement in _PATCH_TARGETS:
+            p = patch(target, replacement)
+            _applied_patches.append(p)
+            p.start()
 
-    logger.info(f"Applied {len(_applied_patches)} NVFP4 patches for dynamic weight loading")
+        logger.info(f"Applied {len(_applied_patches)} NVFP4 patches for dynamic weight loading")
+
+    if is_w4a8_simulation_enabled() and _w4a8_apply_patch is None:
+        from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w4a16_nvfp4 import (
+            CompressedTensorsW4A16Fp4,
+        )
+
+        _original_w4a16_apply_weights = CompressedTensorsW4A16Fp4.apply_weights
+        target = (
+            "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
+            "compressed_tensors_w4a16_nvfp4.CompressedTensorsW4A16Fp4.apply_weights"
+        )
+        _w4a8_apply_patch = patch(target, patched_w4a16_apply_weights_with_w4a8_simulation)
+        _w4a8_apply_patch.start()
+        logger.warning(
+            "Enabled experimental W4A8 simulation: dense and supported fused-MoE inputs are FP8 "
+            "fake-quantized before W4A16 Marlin kernels"
+        )
+
     return _applied_patches
 
 
@@ -823,6 +968,7 @@ def manual_process_weights_after_loading(model):
 
 __all__ = [
     "apply_qat_patches",
+    "configure_w4a8_simulation",
     "prepare_qat_for_load_weights",
     "manual_process_weights_after_loading",
 ]
