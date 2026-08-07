@@ -19,7 +19,6 @@ Utilities for handling router replay functionality in Megatron models.
 
 import inspect
 import warnings
-from typing import Optional
 
 import torch
 
@@ -47,10 +46,14 @@ from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAc
 device_name = get_device_name()
 
 
+def _context_parallel_layout(tf_config) -> str:
+    if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid":
+        return "contiguous"
+    return "zigzag"
+
+
 # from megatron.core.transformer.transformer_block import get_num_layers_to_build
-def get_num_layers_to_build(
-    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None
-) -> int:
+def get_num_layers_to_build(config: TransformerConfig, vp_stage: int | None = None, pp_rank: int | None = None) -> int:
     """
     Determine the number of transformer layers to build for the current pipeline stage.
     Args:
@@ -185,7 +188,7 @@ def is_moe_layer(tf_config, layer_idx):
 
 
 def get_moe_num_layers_to_build(
-    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None
+    config: TransformerConfig, vp_stage: int | None = None, pp_rank: int | None = None
 ) -> int:
     """Count the number of MoE layers assigned to the current rank.
     When ``moe_layer_freq`` is 1 or unset, every transformer layer is an MoE
@@ -255,6 +258,7 @@ def merge_router_topk_indices(
 
         fp8 = tf_config.fp8
         use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+        cp_layout = _context_parallel_layout(tf_config)
         min_local_rows = (
             tf_config.csa_window_size
             if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid"
@@ -269,6 +273,7 @@ def merge_router_topk_indices(
                 use_fp8_padding=use_fp8_padding,
                 min_local_rows=min_local_rows,
                 local_cp_size=local_cp_size,
+                cp_layout=cp_layout,
             )
             layers_topk_idx = postprocess_thd_engine(
                 layers_topk_idx,
@@ -277,6 +282,7 @@ def merge_router_topk_indices(
                 batch_size,
                 post_process=True,
                 local_cp_size=local_cp_size,
+                cp_layout=cp_layout,
             )
         else:
             batch_size, seq_len = attention_mask.shape[:2]
@@ -374,6 +380,7 @@ def set_router_replay_data(
     with torch.no_grad():
         fp8 = tf_config.fp8
         use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+        cp_layout = _context_parallel_layout(tf_config)
         min_local_rows = (
             tf_config.csa_window_size
             if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid"
@@ -388,6 +395,7 @@ def set_router_replay_data(
                 use_fp8_padding=use_fp8_padding,
                 min_local_rows=min_local_rows,
                 local_cp_size=local_cp_size,
+                cp_layout=cp_layout,
             )
             if replay_mask is not None:
                 replay_mask_rmpad, _, _ = preprocess_thd_engine(
@@ -396,6 +404,7 @@ def set_router_replay_data(
                     use_fp8_padding=use_fp8_padding,
                     min_local_rows=min_local_rows,
                     local_cp_size=local_cp_size,
+                    cp_layout=cp_layout,
                 )
         else:
             layers_topk_idx_rmpad, _ = preprocess_packed_seqs(

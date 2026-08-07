@@ -16,7 +16,7 @@ import inspect
 import logging
 import os
 from functools import partial
-from typing import Any, Callable, ContextManager, Iterator, Optional
+from typing import Any, Callable, ContextManager, Iterator
 
 import torch
 import torch.distributed
@@ -304,6 +304,15 @@ class MegatronEngine(BaseEngine):
                     # verl invokes the MCore scheduler before the pipeline schedule.
                     "dynamic_context_parallel": False,
                     "max_seqlen_per_dp_cp_rank": self.engine_config.max_seqlen_per_dp_cp_rank,
+                }
+            )
+        if getattr(self.model_config.hf_config, "model_type", None) == "deepseek_v4" and (
+            self.engine_config.context_parallel_size > 1 or self.engine_config.dynamic_context_parallel
+        ):
+            override_transformer_config.update(
+                {
+                    "cp_partition_mode": "contiguous",
+                    "sequence_packing_scheduler": "default_dynamic_cp",
                 }
             )
         self.provider = None
@@ -740,9 +749,9 @@ class MegatronEngine(BaseEngine):
     def save_checkpoint(
         self,
         local_path: str,
-        hdfs_path: Optional[str] = None,
+        hdfs_path: str | None = None,
         global_step: int = 0,
-        max_ckpt_to_keep: Optional[int] = None,
+        max_ckpt_to_keep: int | None = None,
         **kwargs,
     ) -> None:
         """
@@ -765,7 +774,7 @@ class MegatronEngine(BaseEngine):
             offload_megatron_model_to_cpu(self.module)
 
     def load_checkpoint(
-        self, local_path: str, hdfs_path: Optional[str] = None, del_local_after_load: bool = True, **kwargs
+        self, local_path: str, hdfs_path: str | None = None, del_local_after_load: bool = True, **kwargs
     ) -> None:
         """
         Load model, optimizer, and scheduler states from a checkpoint.
@@ -845,6 +854,16 @@ class MegatronEngine(BaseEngine):
         dcp_group = None
         if self.engine_config.dynamic_context_parallel:
             dcp_group = mpu.get_data_parallel_group(with_context_parallel=True)
+            cp_layout = (
+                "contiguous"
+                if getattr(self.tf_config, "experimental_attention_variant", None) == "dsv4_hybrid"
+                else "zigzag"
+            )
+            min_local_rows = (
+                self.tf_config.csa_window_size
+                if cp_layout == "contiguous" and self.engine_config.use_fused_kernels
+                else None
+            )
             scheduler = DynamicCPScheduler(
                 max_seqlen_per_dp_cp_rank=self.engine_config.max_seqlen_per_dp_cp_rank,
                 dp_size=mpu.get_data_parallel_world_size(),
@@ -854,6 +873,8 @@ class MegatronEngine(BaseEngine):
                 data,
                 dcp_group,
                 tp_size=mpu.get_tensor_model_parallel_world_size(),
+                cp_layout=cp_layout,
+                min_local_rows=min_local_rows,
             )
             indices = None
         else:

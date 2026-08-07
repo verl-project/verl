@@ -150,6 +150,8 @@ def test_preprocess_thd_engine_pads_to_minimum_rows(monkeypatch):
     torch.testing.assert_close(local_ids[0, 100:], torch.zeros(28, dtype=torch.long))
     torch.testing.assert_close(local_positions[0, :100], torch.arange(100, dtype=torch.long))
     torch.testing.assert_close(local_positions[0, 100:], torch.zeros(28, dtype=torch.long))
+
+
 @pytest.mark.parametrize("cp_rank", [0, 1])
 def test_preprocess_thd_engine_pads_multidimensional_router_data(monkeypatch, cp_rank):
     mcore_util = _load_mcore_util_with_stubbed_megatron(
