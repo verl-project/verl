@@ -98,10 +98,10 @@ jobs:
           platforms: ${{ matrix.arch }}
           file: ./docker/ascend/Dockerfile.ascend_9.0.0_a2
           push: true
-          outputs: type=image,name=${{ env.QUAY_REPO }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.QUAY_REPO }}:temp-main-a2-${{ matrix.tag }},push-by-digest=true,name-canonical=true,push=true
           provenance: false
-          cache-from: type=gha,scope=ascend-${{ matrix.tag }}
-          cache-to: type=gha,mode=max,scope=ascend-${{ matrix.tag }}
+          cache-from: type=gha,scope=ascend-a2-${{ matrix.tag }}
+          cache-to: type=gha,mode=max,scope=ascend-a2-${{ matrix.tag }}
           build-args: |
             BUILDKIT_INLINE_CACHE=1
 
@@ -182,10 +182,10 @@ jobs:
           platforms: ${{ matrix.arch }}
           file: ./docker/ascend/Dockerfile.ascend_9.0.0_a2_v0.8.0
           push: true
-          outputs: type=image,name=${{ env.QUAY_REPO }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.QUAY_REPO }}:temp-v080-a2-${{ matrix.tag }},push-by-digest=true,name-canonical=true,push=true
           provenance: false
-          cache-from: type=gha,scope=ascend-${{ matrix.tag }}
-          cache-to: type=gha,mode=max,scope=ascend-${{ matrix.tag }}
+          cache-from: type=gha,scope=ascend-a2-v080-${{ matrix.tag }}
+          cache-to: type=gha,mode=max,scope=ascend-a2-v080-${{ matrix.tag }}
           build-args: |
             BUILDKIT_INLINE_CACHE=1
 
