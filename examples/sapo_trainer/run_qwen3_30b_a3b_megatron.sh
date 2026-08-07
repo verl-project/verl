@@ -70,17 +70,30 @@ SAVE_FREQ=${SAVE_FREQ:-50}
 # ~317 GB of Adam state. Dropping 'optimizer' keeps checkpoints at weight size;
 # the cost is that a resumed run restarts the optimizer from scratch.
 #
-# Weight-only is necessary but not sufficient on a networked filesystem. A
-# 16-rank run measured ~25 MiB/s aggregate to JuiceFS and did not speed up with
-# more concurrent writers, so even 57 GB takes ~37 minutes. One rank then ran
-# ~4x slower than its peers: the other 15 finished, entered the collective, and
-# died on the 30-minute gloo barrier timeout with 59 of 61 GB on disk and no
-# .metadata -- an unloadable checkpoint and a lost run. If your shared
-# filesystem is anywhere near that slow, point trainer.default_local_dir at
-# node-local disk and copy the finished checkpoint out afterwards.
+# Weight-only is necessary but not sufficient. A 16-rank run wrote 59 of 61 GB
+# and then died on the 30-minute gloo barrier inside save_checkpoint, leaving no
+# .metadata -- an unloadable checkpoint and a lost run. Fifteen ranks took 37
+# minutes over their shards; the sixteenth was still going at ~4x slower when
+# the barrier expired.
+#
+# That is not the filesystem. Sixteen plain writer processes on the same nodes,
+# same mount, same 3.8 GB per writer sustain ~60 MiB/s each (~1 GiB/s aggregate)
+# with a 1.05x spread slowest-to-fastest -- roughly 38x what the same ranks
+# achieved from inside the training process. The gap is in the writer's
+# interaction with the training process, not in the storage, and is still under
+# investigation.
+#
+# Until it is understood: keep save_freq low enough that a slow save is rare,
+# and if your shared filesystem is a network mount, consider pointing
+# trainer.default_local_dir at node-local disk and copying the finished
+# checkpoint out. Check the pod's ephemeral-storage quota first if you do --
+# `df` reports the host filesystem, not the limit that evicts you.
 SAVE_CONTENTS=${SAVE_CONTENTS:-'["model","extra"]'}
 
 # Node-local disk is far smaller than a shared filesystem, so bound retention.
+# Note this alone does not bound peak usage: ensure_checkpoint_capacity is a
+# documented no-op at 1, and verl holds the previous checkpoint until the new
+# one completes, so every save after the first peaks at two on disk.
 MAX_ACTOR_CKPT_TO_KEEP=${MAX_ACTOR_CKPT_TO_KEEP:-2}
 
 # Profiling is opt-in and costs nothing when off. Discrete mode splits the
