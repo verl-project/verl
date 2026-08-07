@@ -67,11 +67,36 @@ SAVE_FREQ=${SAVE_FREQ:-50}
 
 # What goes into each checkpoint. The default ['model','optimizer','extra']
 # writes ~374 GB for this model on 16 ranks -- roughly 57 GB of weights plus
-# ~317 GB of Adam state. On a networked filesystem that write outlasts the
-# 30-minute gloo collective timeout and the run dies inside save_checkpoint.
-# Dropping 'optimizer' keeps checkpoints at weight size; the cost is that a
-# resumed run restarts the optimizer from scratch.
+# ~317 GB of Adam state. Dropping 'optimizer' keeps checkpoints at weight size;
+# the cost is that a resumed run restarts the optimizer from scratch.
+#
+# Weight-only is necessary but not sufficient on a networked filesystem. A
+# 16-rank run measured ~25 MiB/s aggregate to JuiceFS and did not speed up with
+# more concurrent writers, so even 57 GB takes ~37 minutes. One rank then ran
+# ~4x slower than its peers: the other 15 finished, entered the collective, and
+# died on the 30-minute gloo barrier timeout with 59 of 61 GB on disk and no
+# .metadata -- an unloadable checkpoint and a lost run. If your shared
+# filesystem is anywhere near that slow, point trainer.default_local_dir at
+# node-local disk and copy the finished checkpoint out afterwards.
 SAVE_CONTENTS=${SAVE_CONTENTS:-'["model","extra"]'}
+
+# Node-local disk is far smaller than a shared filesystem, so bound retention.
+MAX_ACTOR_CKPT_TO_KEEP=${MAX_ACTOR_CKPT_TO_KEEP:-2}
+
+# Profiling is opt-in and costs nothing when off. Discrete mode splits the
+# trace per role (rollout / actor_compute_log_prob / actor_update /
+# ref_compute_log_prob), which is what turns "the step is slow" into "this
+# stage is slow". Step 1 pays one-off compilation and cache warmup, so the
+# default window starts at step 2.
+PROFILE=${PROFILE:-0}
+PROFILE_STEPS=${PROFILE_STEPS:-"[2,3]"}
+PROFILE_RANKS=${PROFILE_RANKS:-"[0]"}
+PROFILE_ALL_RANKS=${PROFILE_ALL_RANKS:-False}
+PROFILE_DISCRETE=${PROFILE_DISCRETE:-True}
+# NPU-only knobs; ignored when DEVICE=gpu selects the torch profiler.
+PROFILE_LEVEL=${PROFILE_LEVEL:-level1}
+PROFILE_ANALYSIS=${PROFILE_ANALYSIS:-True}
+PROFILE_SAVE_PATH=${PROFILE_SAVE_PATH:-./profile_data}
 
 # Prompt filtering runs to completion before any device work starts, and the
 # shipped data config pins it to a single process (see
@@ -91,6 +116,8 @@ case "${DEVICE}" in
         gen_tp=${GEN_TP:-4}
         rollout_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.8}
         ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-20480}
+        profile_tool=torch
+        profile_contents=${PROFILE_CONTENTS:-"['cuda','cpu']"}
         ;;
     npu)
         export CUDA_DEVICE_MAX_CONNECTIONS=1
@@ -104,6 +131,8 @@ case "${DEVICE}" in
         # offload traffic Megatron generates on Ascend.
         rollout_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.5}
         ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-10240}
+        profile_tool=npu
+        profile_contents=${PROFILE_CONTENTS:-"['npu','cpu']"}
         ;;
     *)
         echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
@@ -199,6 +228,7 @@ TRAINER=(
     trainer.device=${DEVICE}
     trainer.val_before_train=False
     trainer.save_freq=${SAVE_FREQ}
+    trainer.max_actor_ckpt_to_keep=${MAX_ACTOR_CKPT_TO_KEEP}
     actor_rollout_ref.actor.checkpoint.save_contents=${SAVE_CONTENTS}
     trainer.test_freq=${TEST_FREQ}
     trainer.total_epochs=${TOTAL_EPOCHS}
@@ -232,6 +262,53 @@ case "${RECOMPUTE}" in
         exit 1
         ;;
 esac
+
+# Profiling. All three roles are traced so the per-stage split is complete;
+# tracing only the actor tells you update_actor is slow but not what it is
+# competing with. The tool_config keys are tool-specific, so each profiler
+# gets its own literal block rather than an interpolated key path -- these
+# must stay greppable and checkable against the config schema.
+if [ "${PROFILE}" != 0 ]; then
+    EXTRA+=(
+        global_profiler.tool=${profile_tool}
+        global_profiler.steps=${PROFILE_STEPS}
+        global_profiler.save_path="${PROFILE_SAVE_PATH}"
+        actor_rollout_ref.actor.profiler.enable=True
+        actor_rollout_ref.actor.profiler.ranks=${PROFILE_RANKS}
+        actor_rollout_ref.actor.profiler.all_ranks=${PROFILE_ALL_RANKS}
+        actor_rollout_ref.rollout.profiler.enable=True
+        actor_rollout_ref.rollout.profiler.ranks=${PROFILE_RANKS}
+        actor_rollout_ref.rollout.profiler.all_ranks=${PROFILE_ALL_RANKS}
+        actor_rollout_ref.ref.profiler.enable=True
+        actor_rollout_ref.ref.profiler.ranks=${PROFILE_RANKS}
+        actor_rollout_ref.ref.profiler.all_ranks=${PROFILE_ALL_RANKS}
+    )
+    if [ "${profile_tool}" = npu ]; then
+        EXTRA+=(
+            actor_rollout_ref.actor.profiler.tool_config.npu.discrete=${PROFILE_DISCRETE}
+            actor_rollout_ref.actor.profiler.tool_config.npu.contents=${profile_contents}
+            actor_rollout_ref.actor.profiler.tool_config.npu.level=${PROFILE_LEVEL}
+            actor_rollout_ref.actor.profiler.tool_config.npu.analysis=${PROFILE_ANALYSIS}
+            actor_rollout_ref.rollout.profiler.tool_config.npu.discrete=${PROFILE_DISCRETE}
+            actor_rollout_ref.rollout.profiler.tool_config.npu.contents=${profile_contents}
+            actor_rollout_ref.rollout.profiler.tool_config.npu.level=${PROFILE_LEVEL}
+            actor_rollout_ref.rollout.profiler.tool_config.npu.analysis=${PROFILE_ANALYSIS}
+            actor_rollout_ref.ref.profiler.tool_config.npu.discrete=${PROFILE_DISCRETE}
+            actor_rollout_ref.ref.profiler.tool_config.npu.contents=${profile_contents}
+            actor_rollout_ref.ref.profiler.tool_config.npu.level=${PROFILE_LEVEL}
+            actor_rollout_ref.ref.profiler.tool_config.npu.analysis=${PROFILE_ANALYSIS}
+        )
+    else
+        EXTRA+=(
+            actor_rollout_ref.actor.profiler.tool_config.torch.discrete=${PROFILE_DISCRETE}
+            actor_rollout_ref.actor.profiler.tool_config.torch.contents=${profile_contents}
+            actor_rollout_ref.rollout.profiler.tool_config.torch.discrete=${PROFILE_DISCRETE}
+            actor_rollout_ref.rollout.profiler.tool_config.torch.contents=${profile_contents}
+            actor_rollout_ref.ref.profiler.tool_config.torch.discrete=${PROFILE_DISCRETE}
+            actor_rollout_ref.ref.profiler.tool_config.torch.contents=${profile_contents}
+        )
+    fi
+fi
 
 # Load from a pre-converted Megatron dist checkpoint when one is supplied.
 if [ -n "${MCORE_MODEL_PATH}" ]; then
