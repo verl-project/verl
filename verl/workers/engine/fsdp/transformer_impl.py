@@ -919,32 +919,10 @@ class FSDPEngine(BaseEngine):
 
         return _gen(), None
 
-    def _hf_delta_entry(self, name, spec, place, lidx, lval):
-        """Per-param HF delta entry builder: this engine handles DTensor identity
-        params only (weight name == HF name, coordinates translate). EP/converter
-        specs are the veomni engine's business -- it overrides this hook."""
-        from ..utils import _hf_entry_identity
-
-        if spec.to_hf_chunk is not None:
-            raise NotImplementedError(
-                f"{name}: the FSDP engine only handles DTensor identity params; "
-                "converter specs belong to the engine that declared them"
-            )
-        return _hf_entry_identity(name, spec, place, lidx, lval)
-
-    def get_per_tensor_param_delta_shard(self, **kwargs):
-        """Yield the delta engine's steady payloads -- FINAL HF-coordinate entries
-        ``(slots, dtype_str, counts, hf_idx, hf_val, gather_group)`` per parameter.
-        Weight->HF naming, to-HF conversion, diff and snapshot are all backend
-        business: the DTensor-generic pipeline lives in
-        :mod:`verl.workers.engine.utils`, the per-param entry builder is the
-        :meth:`_hf_delta_entry` hook. Requires a prior
-        :meth:`prime_delta_snapshots` call."""
-        from ..utils import hf_delta_export
-
-        self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
-        gen, _ = self.get_per_tensor_param_shard()
-        return hf_delta_export(gen, self._delta_shard_snap, self._hf_delta_entry), None
+    # _hf_delta_entry and get_per_tensor_param_delta_shard come from BaseEngine:
+    # this engine's params are DTensor identity params, which is exactly what the
+    # base implementations cover. The veomni engine subclasses this one and
+    # overrides _hf_delta_entry for its fused expert stacks.
 
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)

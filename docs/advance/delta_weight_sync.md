@@ -73,8 +73,9 @@ checkpoint engine (including the V1 ``separate_async`` trainer).
   ``get_per_tensor_param_delta_shard()`` — per-parameter entries ``(slots, dtype_str, counts,
   hf_idx, hf_val, gather_group)`` whose coordinates are already final HF coordinates. The engine
   only batches, gathers, buckets and ships.
-- **Diff (backend-owned)**: the default strategy (shared by the FSDP and veomni backends via
-  ``verl.workers.engine.utils.hf_delta_export``) byte-diffs each rank's **own shard** against its
+- **Diff (backend-owned)**: the default strategy (``BaseEngine.get_per_tensor_param_delta_shard`` via
+  ``verl.workers.engine.utils.hf_delta_export``, so any backend that implements the shard export gets
+  it for free) byte-diffs each rank's **own shard** against its
   pinned-CPU snapshot, refreshed on every export (no rank holds a full-model snapshot). The
   comparison is bit-exact (integer view inequality), so the reconstruction is lossless by
   construction — no thresholds, no drift. A backend that already keeps the previous step's weights
@@ -118,7 +119,7 @@ checksum, and the rollout-side receiver are all unchanged. Each rank computes it
 position in the full flattened parameter purely locally (from the DTensor spec, no extra collective).
 
 **Supported training engines**: the shard export requires ``Shard(0)`` DTensor parameters, which both
-FSDP versions provide:
+FSDP versions and TorchTitan provide:
 
 - **FSDP2** (``fully_shard``, ``actor.strategy=fsdp2``): native DTensor params; the export never stages
   the whole shard on the GPU (``state_dict()`` is reference-only, shards move lazily per parameter).
@@ -127,6 +128,13 @@ FSDP versions provide:
   machinery, so the whole-shard GPU staging round trip is kept for it (it is skipped for FSDP2).
   Single-GPU FSDP1 uses ``FULL_STATE_DICT`` (plain tensors) and degrades to the replicated/rank-0 path —
   still correct, just not shard-parallel.
+- **TorchTitan** (``model_engine=torchtitan``): FSDP2 underneath, so the same ``Shard(0)`` params, with
+  the HF names coming from TorchTitan's own state dict adapter — for a dense model that adapter is a
+  pure rename, so the DTensors reach the export with their placements intact. HSDP replicate and
+  context parallelism need no special handling (TorchTitan folds CP into the ``fsdp`` mesh dim).
+  Tensor, expert and pipeline parallelism are rejected at the export boundary for now: TP shards the
+  same tensor dim FSDP2 already cut and so produces a ``_StridedShard`` placement, EP needs the
+  per-expert converter path, and PP gives each stage a disjoint slice of the model.
 
 Other shard dimensions than ``Shard(0)`` are not supported and raise.
 
@@ -169,7 +177,8 @@ Correctness evidence (details in the PR):
 A runnable example is ``verl/experimental/one_step_off_policy/shell/grpo_0.6b_gsm8k_fsdp2_sglang_delta_sharded_2_6.sh`` —
 the SGLang 2+6 disaggregated GRPO recipe with ``backend=delta_sharded``.
 
-Current scope: disaggregated (``hybrid_engine=False``) + SGLang rollout in BF16, FSDP1/FSDP2 training engines.
+Current scope: disaggregated (``hybrid_engine=False``) + SGLang rollout in BF16, FSDP1/FSDP2/TorchTitan
+training engines.
 Selecting a delta backend with any other rollout engine raises ``NotImplementedError`` at worker startup;
 a per-backend apply interface (vllm/trt-llm plugins) is planned.
 
