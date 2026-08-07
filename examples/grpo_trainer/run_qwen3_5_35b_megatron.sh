@@ -18,21 +18,16 @@
 #
 # Requirements on Ascend:
 #   - 8 NPUs (2*64GB each, e.g. 1x8 A3)
-#   - Additional packages on base image(verl-8.5.2-a3-ubuntu22.04-py3.11-qwen3-5):
-#       pip install viztracer flash-linear-attention nvidia-modelopt nvidia-ml-py nvidia-resiliency-ext megatron-energon
-#   - Megatron-LM==0.16.0
-#   - MindSpeed==0.16.0
-#   - Megatron-Bridge==de93536e
-#
-# Qwen3.5 architecture notes:
-#   Qwen3.5 uses Gated Delta Net (GDN) linear attention which currently does
-#   NOT support packed sequences (THD format) in Megatron-LM. Therefore:
-#     - model.use_remove_padding=False           (deprecated option, will be removed in the future forces bshd compute format)
-#     - actor.megatron.use_remove_padding=False  (forces bshd compute format)
-#     - actor.use_dynamic_bsz=False              (required for bshd mode)
-#
-#   Once Megatron-LM adds THD support for Qwen3.5 GDN, use_remove_padding
-#   can be set to True for better performance.
+#   - Additional packages on base image(verl-9.0.0-a3-ubuntu22.04-py3.11-v0.8.0): 
+#       pip install torch_npu-2.9.0
+#       pip install decorator pybind11 diffusers
+#   - Megatron-LM==9c9dd848
+#   - MindSpeed==0bda3e13
+#   - Megatron-Bridge==9c9dd848
+#   - Mindspeed-Bridge==6c0f032e
+#   - Mindspeed-Ops==d8a49661
+#   - flash-linear-attention-npu==v26.1.0
+#        Installation reference: https://github.com/flashserve/flash-linear-attention-npu/blob/main/README.md
 #
 # Tested parallelism config (8 GPUs / 1 node):
 #   TP=2 PP=1 CP=1 EP=8 ETP=1 GEN_TP=8
@@ -41,7 +36,6 @@
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export VLLM_USE_V1=1
 export VLLM_ALLREDUCE_USE_SYMM_MEM=0
-
 set -xeuo pipefail
 
 ########################### Quick Config ###########################
@@ -193,14 +187,27 @@ case "${DEVICE}" in
     npu)
         export CPU_AFFINITY_CONF=1
         ACTOR+=(
+            actor_rollout_ref.actor.use_dynamic_bsz=True
             actor_rollout_ref.actor.megatron.vanilla_mbridge=False
             actor_rollout_ref.actor.checkpoint.strict=False
+            actor_rollout_ref.actor.megatron.use_remove_padding=True
             +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
             +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=alltoall
             +actor_rollout_ref.actor.megatron.override_transformer_config.use_naive_l2norm=True
+
+            +actor_rollout_ref.actor.megatron.override_transformer_config.use_triton_gdn=False
+            +actor_rollout_ref.actor.megatron.override_transformer_config.use_ascend_gdn=True
         )
         ROLLOUT+=(
+            actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.65
             +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
+        )
+        MODEL+=(
+            actor_rollout_ref.model.use_remove_padding=True
+        )
+        REF+=(
+            actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True
         )
         ;;
     *)
