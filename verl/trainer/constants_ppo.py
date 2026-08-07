@@ -12,11 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import os
 
 import torch
-from ray._private.runtime_env.constants import RAY_JOB_CONFIG_JSON_ENV_VAR
 
 from verl.utils.device import get_device_capability
 
@@ -90,6 +88,37 @@ PPO_RAY_RUNTIME_ENV = {
 }
 
 
+def _apply_uv_run_runtime_env(runtime_env):
+    """Start Ray workers in the driver's uv environment without shipping the CWD.
+
+    When an ancestor process is `uv run`, ray.init() applies Ray's uv hook. The hook
+    sets py_executable so workers run under the same `uv run` invocation as the driver
+    (wanted), and it also defaults working_dir to os.getcwd() (not wanted: that uploads
+    the whole repo and relocates every worker into a copy of it, where `uv run` would
+    build a second venv instead of reusing .venv).
+
+    verl used to opt out of the working_dir default by passing working_dir=None, but
+    Ray >= 2.55 validates the value and raises "TypeError: path_or_uri must be a string"
+    on None. Ray documents the alternative used here: flag off
+    RAY_ENABLE_UV_RUN_RUNTIME_ENV and call the hook manually.
+    """
+    try:
+        from ray._private import ray_constants
+        from ray._private.runtime_env.uv_runtime_env_hook import _get_uv_run_cmdline, hook
+    except ImportError:
+        return runtime_env
+
+    if not getattr(ray_constants, "RAY_ENABLE_UV_RUN_RUNTIME_ENV", False) or not _get_uv_run_cmdline():
+        return runtime_env
+
+    # A URI rather than a path, so the hook neither injects os.getcwd() nor checks that
+    # pyproject.toml lives under a working_dir that is dropped right after.
+    runtime_env = hook({**runtime_env, "working_dir": "verl://unset"})
+    runtime_env.pop("working_dir", None)
+    ray_constants.RAY_ENABLE_UV_RUN_RUNTIME_ENV = False
+    return runtime_env
+
+
 def get_ppo_ray_runtime_env(config=None):
     """
     A filter function to return the PPO Ray runtime environment.
@@ -99,14 +128,7 @@ def get_ppo_ray_runtime_env(config=None):
         config: Optional training config. When the engine strategy is Megatron
             and the GPU is Hopper/Ampere, CUDA_DEVICE_MAX_CONNECTIONS=1 is set.
     """
-    working_dir = (
-        json.loads(os.environ.get(RAY_JOB_CONFIG_JSON_ENV_VAR, "{}")).get("runtime_env", {}).get("working_dir", None)
-    )
-
-    runtime_env = {
-        "env_vars": PPO_RAY_RUNTIME_ENV["env_vars"].copy(),
-        **({"working_dir": None} if working_dir is None else {}),
-    }
+    runtime_env = {"env_vars": PPO_RAY_RUNTIME_ENV["env_vars"].copy()}
     # Only Megatron on Hopper/Ampere needs CUDA_DEVICE_MAX_CONNECTIONS=1.
     if _is_hopper_or_ampere and _uses_megatron(config):
         runtime_env["env_vars"]["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
@@ -125,4 +147,4 @@ def get_ppo_ray_runtime_env(config=None):
     pythonpath = os.environ.get("PYTHONPATH")
     if pythonpath:
         runtime_env["env_vars"]["PYTHONPATH"] = pythonpath
-    return runtime_env
+    return _apply_uv_run_runtime_env(runtime_env)

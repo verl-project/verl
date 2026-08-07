@@ -74,7 +74,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:sgl0512.dev4"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -98,38 +98,39 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 35 # Increase this timeout value as needed
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: 1
       SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK: "True"
       NCCL_SHM_DISABLE: "1"
       NCCL_P2P_DISABLE: "1"
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock (offline, from the image's baked cache).
+      # Keep these extras identical across the job so uv never re-syncs torch.
+      UV_RUN: "uv run --frozen --all-packages --extra sglang --extra megatron --extra ci"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - name: Install the current repository
+      # Diagnostic: show whether this runner can reach the outside world at all
+      # before uv needs it. Never fails the job.
+      - name: Keep the uv cache on the runner's persistent ${HOME}
         run: |
-          pip3 install cupy-cuda13x==13.6.0 pytest-asyncio
-          pip3 install hf_transfer pytest-asyncio
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
-          pip3 install --no-deps transformers==5.3.0
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
       - name: Check final pip list
         run: |
-          pip3 list
+          $UV_RUN uv pip list
       - name: Prepare gsm8k dataset
         run: |
-          ray stop --force
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+          $UV_RUN ray stop --force
+          $UV_RUN python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
       - name: Test the latest SGLang Rollout async with agent loop
         run: |
-          ROLLOUT_NAME=sglang pytest -svvv tests/experimental/agent_loop
+          ROLLOUT_NAME=sglang $UV_RUN pytest -svvv tests/experimental/agent_loop
       - name: Test SGLang agent loop with Continuous Token
         run: |
-          ray stop --force
-          ENABLE_CONTINUOUS_TOKEN=1 ROLLOUT_NAME=sglang pytest -svvv \
+          $UV_RUN ray stop --force
+          ENABLE_CONTINUOUS_TOKEN=1 ROLLOUT_NAME=sglang $UV_RUN pytest -svvv \
             tests/experimental/agent_loop/test_basic_agent_loop.py::test_single_turn \
             tests/experimental/agent_loop/test_basic_agent_loop.py::test_tool_agent
 
@@ -138,31 +139,31 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 35 # Increase this timeout value as needed
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: 1
       SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK: "True"
       NCCL_SHM_DISABLE: "1"
       NCCL_P2P_DISABLE: "1"
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock (offline, from the image's baked cache).
+      # Keep these extras identical across the job so uv never re-syncs torch.
+      UV_RUN: "uv run --frozen --all-packages --extra sglang --extra megatron --extra ci"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - name: Install the current repository
+      # Diagnostic: show whether this runner can reach the outside world at all
+      # before uv needs it. Never fails the job.
+      - name: Keep the uv cache on the runner's persistent ${HOME}
         run: |
-          pip3 install cupy-cuda13x==13.6.0 pytest-asyncio
-          pip3 install hf_transfer pytest-asyncio
-          pip3 install -r requirements-test.txt
-          pip3 install -r requirements.txt
-          pip3 install --no-deps -e .
-          pip3 install --no-deps transformers==5.3.0
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
       - name: Check final pip list
         run: |
-          pip3 list
+          $UV_RUN uv pip list
       - name: Test SGLang ServerAdapter with Checkpoint Engine (NCCL)
         run: |
-          ROLLOUT_NAME=sglang pytest -svvv tests/checkpoint_engine/test_special_server_adapter.py
+          ROLLOUT_NAME=sglang $UV_RUN pytest -svvv tests/checkpoint_engine/test_special_server_adapter.py
 
   cleanup:
     runs-on: ubuntu-latest

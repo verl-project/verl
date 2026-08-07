@@ -34,6 +34,20 @@ export NCCL_CUMEM_HOST_ENABLE=0
 ROLLOUT_NAME="vllm"
 export VLLM_USE_V1=1
 
+########################### launch ###########################
+# uv (set VERL_USE_UV=0 for system python, as the non-uv images do): on GPU this
+# runs every python entrypoint here — including the Ray workers, via
+# runtime_env.py_executable — through `uv run` on the matching extras of the
+# committed uv.lock, so the job needs no install step. This script is vllm x
+# megatron throughout. NPU falls back to ambient python.
+LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ]; then
+    UV_EXTRAS=(--extra "${ROLLOUT_NAME}" --extra megatron)
+    LAUNCH=(uv run --frozen --all-packages "${UV_EXTRAS[@]}" python3)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages ${UV_EXTRAS[*]}")
+fi
+
 STUDENT_MODEL_ID=${STUDENT_MODEL_ID:-Qwen/Qwen3-VL-2B-Instruct}
 GSM8K_TEACHER_MODEL_ID=${GSM8K_TEACHER_MODEL_ID:-Qwen/Qwen3-4B-Instruct-2507}
 GEO3K_TEACHER_MODEL_ID=${GEO3K_TEACHER_MODEL_ID:-Qwen/Qwen3-VL-4B-Instruct}
@@ -74,13 +88,13 @@ GEO3K_DIR="${HOME}/data/geo3k"
 # Prepare GSM8K (idempotent)
 if [ ! -f "${GSM8K_DIR}/train.parquet" ]; then
     echo "Preparing GSM8K dataset..."
-    python3 "${VERL_ROOT}/examples/data_preprocess/gsm8k.py" --local_save_dir "$GSM8K_DIR"
+    "${LAUNCH[@]}" "${VERL_ROOT}/examples/data_preprocess/gsm8k.py" --local_save_dir "$GSM8K_DIR"
 fi
 
 # Prepare Geo3K (idempotent)
 if [ ! -f "${GEO3K_DIR}/train.parquet" ]; then
     echo "Preparing Geo3K dataset..."
-    python3 "${VERL_ROOT}/examples/data_preprocess/geo3k.py" --local_save_dir "$GEO3K_DIR"
+    "${LAUNCH[@]}" "${VERL_ROOT}/examples/data_preprocess/geo3k.py" --local_save_dir "$GEO3K_DIR"
 fi
 
 GSM8K_TRAIN="${GSM8K_DIR}/train.parquet"
@@ -93,7 +107,7 @@ TEST_FILES="['${GSM8K_TEST}','${GEO3K_TEST}']"
 
 ############################ Detect Device ############################
 
-device_name=$(python3 - <<'EOF'
+device_name=$("${LAUNCH[@]}" - <<'EOF'
 from verl.utils.device import get_device_name
 print(get_device_name())
 EOF
@@ -265,7 +279,7 @@ echo "Teacher GSM8K: ${GSM8K_TEACHER_MODEL}"
 echo "Teacher Geo3K: ${GEO3K_TEACHER_MODEL}"
 echo "GPUs: ${N_GPUS_ROLLOUT} rollout + ${N_GPUS_TRAINING} training + ${N_GPUS_TEACHER_TOTAL} teachers"
 
-python3 -m verl.experimental.fully_async_policy.fully_async_main \
+"${LAUNCH[@]}" -m verl.experimental.fully_async_policy.fully_async_main \
     --config-path=config \
     --config-name='fully_async_ppo_megatron_trainer.yaml' \
     actor_rollout_ref.hybrid_engine=False \
@@ -279,6 +293,7 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main \
     "${REWARD[@]}" \
     "${TRAINER[@]}" \
     "${ASYNC_TRAINING[@]}" \
+    "${RAY[@]}" \
     "$@"
 
 echo "Fully async policy + Multi-Teacher OPD E2E test completed successfully"

@@ -57,7 +57,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm024.dev2"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -81,33 +81,36 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 20 # Increase this timeout value as needed
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       TORCH_COMPILE_DISABLE: 1
       TORCHINDUCTOR_DISABLE: 1
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock (offline, from the image's baked cache).
+      # Keep these extras identical across the job so uv never re-syncs torch.
+      UV_RUN: "uv run --frozen --all-packages --extra cpu"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - name: Install the current repository
+      # Diagnostic: show whether this runner can reach the outside world at all
+      # before uv needs it. Never fails the job.
+      - name: Keep the uv cache on the runner's persistent ${HOME}
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
-          pip3 install --no-deps TransferQueue==0.1.8
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
       - name: Check final pip list
         run: |
-          pip3 list
+          $UV_RUN uv pip list
       - name: Download datasets
         run: |
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
-          python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k
+          $UV_RUN python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+          $UV_RUN python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k
       - name: Running CPU unit tests
         run: |
           echo '[pytest]' > pytest.ini
           echo 'python_files = *_on_cpu.py' >> pytest.ini
-          pytest -s -x --asyncio-mode=auto tests/
+          $UV_RUN pytest -s -x --asyncio-mode=auto tests/
   cleanup:
     runs-on: ubuntu-latest
     needs: [setup, cpu_unit_tests]

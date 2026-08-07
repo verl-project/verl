@@ -86,11 +86,8 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:sgl0512.dev4"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
-  # The image bakes Megatron-LM at /workspace/Megatron-LM onto PYTHONPATH, but the vemlp
-  # dynamic runner does not inherit the image ENV, so re-declare it for the job steps.
-  PYTHONPATH: "/workspace/Megatron-LM"
 
 jobs:
   setup:
@@ -113,29 +110,32 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 40 # Increase this timeout value as needed
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock. These extras must match what the e2e script
+      # picks for this backend combo, or each step would re-sync torch.
+      UV_RUN: "uv run --frozen --all-packages --extra sglang --extra fsdp"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - name: Install the current repository
+      # Diagnostic: show whether this runner can reach the outside world at all
+      # before uv needs it. Never fails the job.
+      - name: Keep the uv cache on the runner's persistent ${HOME}
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
-          pip install --no-deps transformers==5.3.0
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
       - name: Check final pip list
         run: |
-          pip3 list
+          $UV_RUN uv pip list
       - name: Prepare gsm8k dataset
         run: |
-          ray stop --force
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+          $UV_RUN ray stop --force
+          $UV_RUN python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with rmpad using function rm and save ckpt
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           ENGINE=sglang bash tests/special_e2e/ppo_trainer/run_function_reward.sh
 
   e2e_ppo_trainer_fsdp-qwen2_5vl-3b:
@@ -143,31 +143,33 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 60 # Increase this timeout value as needed
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock. These extras must match what the e2e script
+      # picks for this backend combo, or each step would re-sync torch.
+      UV_RUN: "uv run --frozen --all-packages --extra sglang --extra fsdp"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - name: Install the current repository
+      # Diagnostic: show whether this runner can reach the outside world at all
+      # before uv needs it. Never fails the job.
+      - name: Keep the uv cache on the runner's persistent ${HOME}
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install -r requirements.txt
-          pip3 install --no-deps -e .
-          pip3 install transformers==5.3.0
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
       - name: Check final pip list
         run: |
-          pip3 list
+          $UV_RUN uv pip list
       # Geo3k
       - name: Prepare GEO3K dataset
         run: |
-          ray stop --force
-          python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k/
+          $UV_RUN ray stop --force
+          $UV_RUN python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k/
       - name: Running GEO3K VLM E2E training tests on 8 L20 GPUs with rmpad using function rm
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
             MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
@@ -177,7 +179,7 @@ jobs:
             bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Running GEO3K VLM E2E with rmpad using torch fused kernel (Qwen2.5-VL)
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           FUSED_KERNELS=True TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
             MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
@@ -187,7 +189,7 @@ jobs:
             bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Running GEO3K VLM E2E with rmpad using triton fused kernel (Qwen2.5-VL)
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           FUSED_KERNELS=True FUSED_KERNEL_BACKEND=triton \
             TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \

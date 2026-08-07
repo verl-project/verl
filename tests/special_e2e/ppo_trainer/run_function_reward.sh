@@ -55,6 +55,25 @@ SAVE_HF_MODEL=${SAVE_HF_MODEL:-False}
 FSDP_SIZE=${FSDP_SIZE:--1}
 SP_SIZE=${SP_SIZE:-1}
 
+########################### launch ###########################
+# uv (set VERL_USE_UV=0 for system python, as the ascend / rocm / trtllm images do):
+# GPU vllm/sglang x fsdp|megatron run every python entrypoint here — including the Ray
+# workers, via runtime_env.py_executable — through `uv run` on the matching extras of
+# the committed uv.lock, so the job needs no install step. Other backends / NPU fall
+# back to ambient python. Run from the verl repo root.
+LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ] && { [ "${ENGINE}" = vllm ] || [ "${ENGINE}" = sglang ]; }; then
+    # fsdp2 rides the same uv extra as fsdp; only the trainer strategy differs.
+    case "${STRATEGY}" in
+        megatron) TRAIN_EXTRA=megatron ;;
+        *)        TRAIN_EXTRA=fsdp ;;
+    esac
+    UV_EXTRAS=(--extra "${ENGINE}" --extra "${TRAIN_EXTRA}")
+    LAUNCH=(uv run --frozen --all-packages "${UV_EXTRAS[@]}" python3)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages ${UV_EXTRAS[*]}")
+fi
+
 if [ "${SAVE_HF_MODEL}" = "True" ]; then
     CHECKPOINT_CONTENTS="['model','hf_model','optimizer','extra']"
 else
@@ -87,7 +106,7 @@ fi
 
 exp_name="${VERL_EXP_NAME:-$(basename "${MODEL_ID,,}")-function-reward-minimal}"
 
-python3 -m verl.trainer.main_ppo \
+"${LAUNCH[@]}" -m verl.trainer.main_ppo \
     algorithm.adv_estimator="${ADV_ESTIMATOR}" \
     data.train_files="${TRAIN_FILES}" \
     data.val_files="${VAL_FILES}" \
@@ -151,11 +170,11 @@ python3 -m verl.trainer.main_ppo \
     trainer.resume_mode="${RESUME_MODE}" \
     trainer.total_epochs=2 \
     trainer.device=cuda \
-    trainer.total_training_steps="${TOTAL_TRAIN_STEPS}" $@ \
+    trainer.total_training_steps="${TOTAL_TRAIN_STEPS}" "${RAY[@]}" $@ \
     | tee "${output_file}"
 
 if [ "${CUSTOM_REWARD_FN}" = "True" ]; then
-    python3 tests/special_e2e/check_custom_rwd_fn.py --output_file="${output_file}"
+    "${LAUNCH[@]}" tests/special_e2e/check_custom_rwd_fn.py --output_file="${output_file}"
     check_exit_code=$?
     rm -rf "${reward_fn_file_path}"
     rm -rf "${output_file}"
