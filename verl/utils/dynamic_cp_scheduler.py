@@ -46,10 +46,41 @@ def _local_padding_mask(
     cp_size: int,
     cp_rank: int,
     tp_size: int,
+    cp_layout: str = "zigzag",
+    min_local_rows: int | None = None,
 ) -> torch.Tensor:
     """Build the MCore router padding mask for one local THD shard."""
-    align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
+    if cp_layout not in ("zigzag", "contiguous"):
+        raise ValueError(f"Unsupported context parallel layout: {cp_layout}")
+
+    cp_layout_factor = 2 if cp_layout == "zigzag" and cp_size > 1 else 1
+    align_size = tp_size * cp_size * cp_layout_factor
     padded_lens = [math.ceil(seq_len / align_size) * align_size for seq_len in seq_lens]
+
+    if min_local_rows is not None:
+        if min_local_rows <= 0:
+            raise ValueError(f"min_local_rows must be positive, got {min_local_rows}")
+        min_total_rows = cp_size * min_local_rows
+        padded_total_rows = sum(padded_lens)
+        if padded_total_rows < min_total_rows:
+            padded_lens[-1] += min_total_rows - padded_total_rows
+
+    if cp_layout == "contiguous":
+        local_padded_len = sum(padded_lens) // cp_size
+        local_global_start = local_padded_len * cp_rank
+        local_global_end = local_global_start + local_padded_len
+        mask = torch.ones(local_padded_len, dtype=torch.bool)
+        seq_global_start = 0
+        for seq_len, padded_len in zip(seq_lens, padded_lens, strict=True):
+            seq_valid_end = seq_global_start + seq_len
+            copy_global_start = max(local_global_start, seq_global_start)
+            copy_global_end = min(local_global_end, seq_valid_end)
+            if copy_global_start < copy_global_end:
+                destination_start = copy_global_start - local_global_start
+                destination_end = copy_global_end - local_global_start
+                mask[destination_start:destination_end] = False
+            seq_global_start += padded_len
+        return mask
 
     masks = []
     for seq_len, padded_len in zip(seq_lens, padded_lens, strict=True):
@@ -101,6 +132,8 @@ class DynamicCPScheduler:
         dcp_group,
         *,
         tp_size: int,
+        cp_layout: str = "zigzag",
+        min_local_rows: int | None = None,
     ) -> list[TensorDict]:
         """Return this rank's scheduled micro-batches without rerouting batch data."""
         input_ids = batch.get("input_ids", None)
@@ -159,6 +192,8 @@ class DynamicCPScheduler:
                 cp_size=local_cp_size,
                 cp_rank=cp_rank,
                 tp_size=tp_size,
+                cp_layout=cp_layout,
+                min_local_rows=min_local_rows,
             )
             tu.assign_non_tensor_data(micro_batch, "local_cp_size", local_cp_size)
             tu.assign_non_tensor_data(micro_batch, DCP_SAMPLE_IDS, list(sample_ids))
