@@ -64,8 +64,8 @@ MindSpeed与Megatron及相关依赖的源码安装指令：
     cd ..
 
     # 配置环境变量
-    export PYTHONPATH=$PYTHONPATH:your path/Megatron-LM
-    export PYTHONPATH=$PYTHONPATH:your path/MindSpeed
+    export PYTHONPATH=$PYTHONPATH:your_path/Megatron-LM
+    export PYTHONPATH=$PYTHONPATH:your_path/MindSpeed
 
     # 安装 mbridge
     pip install mbridge
