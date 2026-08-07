@@ -98,7 +98,7 @@ jobs:
           platforms: ${{ matrix.arch }}
           file: ./docker/ascend/Dockerfile.ascend_9.0.0_a2
           push: true
-          outputs: type=image,name=${{ env.QUAY_REPO }}:temp-main-a2-${{ matrix.tag }},push-by-digest=true,name-canonical=true,push=true
+          tags: ${{ env.QUAY_REPO }}:tmp-a2-${{ matrix.tag }}
           provenance: false
           cache-from: type=gha,scope=ascend-a2-${{ matrix.tag }}
           cache-to: type=gha,mode=max,scope=ascend-a2-${{ matrix.tag }}
@@ -182,7 +182,7 @@ jobs:
           platforms: ${{ matrix.arch }}
           file: ./docker/ascend/Dockerfile.ascend_9.0.0_a2_v0.8.0
           push: true
-          outputs: type=image,name=${{ env.QUAY_REPO }}:temp-v080-a2-${{ matrix.tag }},push-by-digest=true,name-canonical=true,push=true
+          tags: ${{ env.QUAY_REPO }}:tmp-a2-v080-${{ matrix.tag }}
           provenance: false
           cache-from: type=gha,scope=ascend-a2-v080-${{ matrix.tag }}
           cache-to: type=gha,mode=max,scope=ascend-a2-v080-${{ matrix.tag }}
