@@ -22,11 +22,7 @@ from typing import Callable
 import torch
 from megatron.core import parallel_state, tensor_parallel
 from megatron.core.models.gpt.gpt_model import GPTModel
-from megatron.core.transformer.multi_token_prediction import (
-    MTPLossAutoScaler,
-    MTPLossLoggingHelper,
-    roll_tensor,
-)
+from megatron.core.transformer.multi_token_prediction import MTPLossAutoScaler, MTPLossLoggingHelper, roll_tensor
 
 try:
     from megatron.core.transformer.multi_token_prediction import process_mtp_loss as _process_mtp_loss
@@ -93,6 +89,7 @@ def _megatron_gptmodel_postprocess(
     output_processor=None,
     output_processor_context=None,
     is_spec_decode=None,
+    mhc_multistream=None,
 ):
     """Postprocesses decoder hidden states to generate logits or compute loss.
 
@@ -111,6 +108,8 @@ def _megatron_gptmodel_postprocess(
             self.mtp._forward_has_padding_mask = "padding_mask" in signature(self.mtp.forward).parameters
         if self.mtp._forward_has_padding_mask:
             mtp_kwargs["padding_mask"] = padding_mask
+        if mhc_multistream is not None:
+            mtp_kwargs["mhc_multistream"] = mhc_multistream
         hidden_states = self.mtp(
             input_ids=input_ids,
             position_ids=position_ids,
