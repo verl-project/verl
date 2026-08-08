@@ -17,7 +17,6 @@ import logging
 import os
 
 import aiohttp
-import numpy as np
 import ray
 from omegaconf import DictConfig, open_dict
 from ray.actor import ActorHandle
@@ -29,6 +28,7 @@ from verl.trainer.ppo.reward import load_reward_manager, resolve_reward_manager_
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
 from verl.utils.ray_utils import get_event_loop
+from verl.utils.reward_score.reward_extra_info import assemble_reward_extra_info
 
 from .reward_model import RewardModelManager
 
@@ -343,10 +343,8 @@ class RewardLoopManager:
         batch = TensorDict({"rm_scores": rm_scores}, batch_size=len(data))
 
         reward_extra_infos = [output.get("reward_extra_info", {}) for output in outputs_flat]
-        reward_extra_keys = list(reward_extra_infos[0].keys())
-        non_tensor_batch = {}
-        for key in reward_extra_keys:
-            non_tensor_batch[key] = np.array([info[key] for info in reward_extra_infos])
+        non_tensor_batch = assemble_reward_extra_info(reward_extra_infos)
+        reward_extra_keys = list(non_tensor_batch.keys())
 
         if self.reward_model_manager is not None:
             self.reward_model_manager.sleep()

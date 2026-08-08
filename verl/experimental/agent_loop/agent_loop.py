@@ -54,6 +54,7 @@ from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.profiler import simple_timer
 from verl.utils.ray_utils import auto_await, get_event_loop
+from verl.utils.reward_score.reward_extra_info import assemble_reward_extra_info
 from verl.utils.rollout_trace import (
     RolloutTraceConfig,
     rollout_trace_attr,
@@ -76,6 +77,47 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 DEFAULT_ROUTING_CACHE_SIZE = 10000
+
+
+def _assemble_agent_loop_reward_extra_info(output: DataProto, reserved_keys: set[str] | None = None) -> list[str]:
+    """Assemble reward metadata after all agent-loop worker chunks are concatenated."""
+    raw_infos = output.non_tensor_batch.pop("reward_extra_info", None)
+    if raw_infos is None:
+        return []
+
+    reward_extra_infos = []
+    for info in raw_infos:
+        if info is None:
+            reward_extra_infos.append({})
+        elif isinstance(info, dict):
+            reward_extra_infos.append(info)
+        else:
+            raise TypeError(f"reward_extra_info must be a dict or None, got {type(info).__name__}")
+
+    assembled = assemble_reward_extra_info(reward_extra_infos)
+    occupied_keys = set(output.non_tensor_batch)
+    if output.batch is not None:
+        occupied_keys.update(output.batch.keys())
+    if reserved_keys:
+        occupied_keys.update(reserved_keys)
+    collisions = set(assembled).intersection(occupied_keys)
+    if collisions:
+        names = ", ".join(sorted(collisions))
+        raise ValueError(f"reward_extra_info keys collide with existing batch fields: {names}")
+
+    output.non_tensor_batch.update(assembled)
+    return list(assembled)
+
+
+def _finalize_agent_loop_reward_extra_info(output: DataProto, prompts: DataProto) -> DataProto:
+    """Finalize reward metadata for both regular and fully-async agent-loop managers."""
+    source_keys = set(prompts.non_tensor_batch)
+    if prompts.batch is not None:
+        source_keys.update(prompts.batch.keys())
+    reward_extra_keys = _assemble_agent_loop_reward_extra_info(output, reserved_keys=source_keys)
+    if output.batch is not None and "rm_scores" in output.batch.keys():
+        output.meta_info["reward_extra_keys"] = reward_extra_keys
+    return output
 
 
 class AgentLoopMetrics(BaseModel):
@@ -1097,12 +1139,6 @@ class AgentLoopWorker:
         if self.reward_loop_worker_handles is None and input_non_tensor_batch:
             non_tensor_batch.update(input_non_tensor_batch)
 
-        # add reward_extra_info to non_tensor_batch
-        reward_extra_infos = [input.extra_fields.get("reward_extra_info", {}) for input in inputs]
-        reward_extra_keys = list(reward_extra_infos[0].keys())
-        for key in reward_extra_keys:
-            non_tensor_batch[key] = np.array([info[key] for info in reward_extra_infos])
-
         # Add multi_modal_inputs to non_tensor_batch if any samples have them
         multi_modal_inputs_list = [input.multi_modal_inputs for input in inputs]
         if any(mmi is not None for mmi in multi_modal_inputs_list):
@@ -1118,6 +1154,10 @@ class AgentLoopWorker:
             "min_global_steps",
             "max_global_steps",
             "extras",
+            # Keep the raw per-sample dicts schema-stable across workers. The manager
+            # assembles them only after concatenating every worker chunk, so keys that
+            # appear in one chunk cannot disappear or make DataProto.concat fail.
+            "reward_extra_info",
         }
         all_keys = set(key for input_item in inputs for key in input_item.extra_fields) | default_extra_keys
         for key in all_keys:
@@ -1127,17 +1167,10 @@ class AgentLoopWorker:
 
         non_tensor_batch.update(extra_fields)
 
-        # Only include reward_extra_keys in meta_info if rm_scores is in batch
-        # This avoids conflicts when reward_tensor is merged later in ray_trainer.py
-        if "rm_scores" in batch.keys():
-            meta_info = {"metrics": metrics, "reward_extra_keys": reward_extra_keys}
-        else:
-            meta_info = {"metrics": metrics}
-
         return DataProto(
             batch=batch,
             non_tensor_batch=non_tensor_batch,
-            meta_info=meta_info,
+            meta_info={"metrics": metrics},
         )
 
 
@@ -1251,7 +1284,7 @@ class AgentLoopManager:
         timing = self._performance_metrics(metrics, output)
 
         output.meta_info = {"timing": timing, **outputs[0].meta_info}
-        return output
+        return _finalize_agent_loop_reward_extra_info(output, prompts)
 
     def _performance_metrics(self, metrics: list[list[dict[str, str]]], output: DataProto) -> dict[str, float]:
         timing = {}
