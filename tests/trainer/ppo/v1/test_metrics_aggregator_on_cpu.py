@@ -24,7 +24,9 @@ import math
 
 import pytest
 import torch
+from tensordict import NonTensorStack
 
+from verl.trainer.ppo.metric_utils import compute_agent_loop_timing_metrics
 from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY
 from verl.trainer.ppo.v1.utils import MetricsAggregator
 
@@ -66,6 +68,21 @@ def test_timing_and_sum_metrics_accumulate():
     out = agg.get_aggregated_metrics()
     assert out["timing_s/update_actor"] == pytest.approx(4.0)
     assert out["some/total_tokens"] == pytest.approx(30.0)
+
+
+def test_compute_score_timing_metrics_unwrap_transfer_queue_data_and_skip_missing_values():
+    metrics = NonTensorStack(
+        {"compute_score": 0.25},
+        {"generate_sequences": 1.0},
+        {"compute_score": 1.5},
+    )
+
+    out = compute_agent_loop_timing_metrics(metrics.tolist())
+
+    assert out["timing_s/agent_loop/compute_score/min"] == pytest.approx(0.25)
+    assert out["timing_s/agent_loop/compute_score/mean"] == pytest.approx(0.875)
+    assert out["timing_s/agent_loop/compute_score/max"] == pytest.approx(1.5)
+    assert compute_agent_loop_timing_metrics([{}, {"generate_sequences": 1.0}]) == {}
 
 
 def test_evicted_samples_are_summed_across_iterations():
