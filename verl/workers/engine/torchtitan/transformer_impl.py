@@ -506,6 +506,95 @@ class TorchTitanEngine(BaseEngine):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.optimizer)
 
+    def _to_hf_named_params(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Re-key a torchtitan state dict to HuggingFace names, values untouched.
+
+        Shared by the full export and the sharded one so that both agree on exactly
+        which HF tensors exist. That is a correctness requirement, not tidiness: the
+        delta path pairs the two by name -- the seed ships full tensors, every later
+        step ships a diff against them -- so a name in one set but not the other
+        either leaves a weight frozen at its seed value on the rollout side or trips
+        the missing-snapshot assert, and neither says why.
+        """
+        # Convert TorchTitan key names to HuggingFace key names (expected by vLLM)
+        sd_adapter = self.checkpointer.sd_adapter
+        if sd_adapter is not None:
+            params = sd_adapter.to_hf(params)
+
+        # When weight tying is enabled, the sd_adapter skips lm_head.weight during
+        # to_hf() conversion (since it's the same tensor as embed_tokens.weight in
+        # the torchtitan model). But vLLM needs lm_head.weight explicitly, so we
+        # add it back as a reference to embed_tokens.weight.
+        if "model.embed_tokens.weight" in params and "lm_head.weight" not in params:
+            params["lm_head.weight"] = params["model.embed_tokens.weight"]
+        return params
+
+    def _assert_shard_export_supported(self) -> None:
+        """Reject the parallelism layouts whose local shard is not one block.
+
+        The sharded export hands the DTensor placements straight to
+        :func:`~verl.workers.engine.spec.derive_dtensor_placement`, which can only
+        describe a local shard that is one hyper-rectangular block of the full
+        tensor. FSDP2 alone -- with or without HSDP replicate, and with CP folded
+        into the ``fsdp`` mesh dim -- always is. The layouts below are not, and each
+        needs work beyond placement math, so they are named here rather than
+        surfacing as a placement error midway through the export.
+        """
+        pd = self.parallel_dims
+        if pd.pp_enabled:
+            raise NotImplementedError(
+                "the torchtitan sharded delta export does not support pipeline parallelism: "
+                "each stage holds a disjoint slice of the model, so the export order is not "
+                "identical across ranks the way the delta engine's lockstep gather requires "
+                f"(pipeline_parallel_size={pd.pp})"
+            )
+        if pd.ep_enabled:
+            raise NotImplementedError(
+                "the torchtitan sharded delta export does not support expert parallelism: "
+                "sd_adapter.to_hf() splits the grouped expert stack into per-expert HF "
+                "tensors and yields only the locally owned ones, which needs the spec's "
+                f"to_hf_chunk/hf_slots converter path (expert_parallel_size={pd.ep})"
+            )
+        if pd.tp_enabled:
+            raise NotImplementedError(
+                "the torchtitan sharded delta export does not support tensor parallelism yet: "
+                "FSDP2 shards the same tensor dim TP already cut, which it expresses as a "
+                "_StridedShard placement that derive_dtensor_placement still rejects "
+                f"(tensor_parallel_size={pd.tp})"
+            )
+
+    def get_per_tensor_param_shard(self, **kwargs):
+        """Like :meth:`get_per_tensor_param`, but yields this rank's *local* FSDP2
+        shard ``(hf_name, local_flat_bf16, ShardSpec)`` instead of all-gathering the
+        full tensor, so the delta engine can diff and gather only what changed.
+
+        No collectives and no full-tensor staging: torchtitan is always FSDP2, whose
+        ``state_dict()`` only collects DTensor references, and each shard is moved
+        (and cast) lazily as the generator is consumed -- which is what keeps a CPU
+        offload policy from having to page the whole model in.
+        """
+        self._assert_shard_export_supported()
+        params = {}
+        for module in self.module:
+            params.update(module.state_dict())
+        params = self._to_hf_named_params(params)
+        device = get_device_id()  # local shards live on CPU under an offload policy
+
+        from ..spec import ShardSpec
+
+        def _gen():
+            for name, param in params.items():
+                spec = ShardSpec.from_param(param)
+                p = param.to(device, non_blocking=True)
+                # The wire (and the rollout side) speak bf16; mixed precision keeps
+                # fp32 master weights, so cast before the diff sees them.
+                if p.is_floating_point():
+                    p = p.to(torch.bfloat16, non_blocking=True)
+                local = p.to_local() if isinstance(p, DTensor) else p
+                yield name, local.reshape(-1), spec
+
+        return _gen(), None
+
     def get_per_tensor_param(self, **kwargs):
         for module in self.module:
             load_fsdp_model_to_gpu(module)
@@ -519,17 +608,7 @@ class TorchTitanEngine(BaseEngine):
             for module in self.module:
                 offload_fsdp_model_to_cpu(module)
 
-        # Convert TorchTitan key names to HuggingFace key names (expected by vLLM)
-        sd_adapter = self.checkpointer.sd_adapter
-        if sd_adapter is not None:
-            params = sd_adapter.to_hf(params)
-
-        # When weight tying is enabled, the sd_adapter skips lm_head.weight during
-        # to_hf() conversion (since it's the same tensor as embed_tokens.weight in
-        # the torchtitan model). But vLLM needs lm_head.weight explicitly, so we
-        # add it back as a reference to embed_tokens.weight.
-        if "model.embed_tokens.weight" in params and "lm_head.weight" not in params:
-            params["lm_head.weight"] = params["model.embed_tokens.weight"]
+        params = self._to_hf_named_params(params)
 
         device = get_device_id()  # used when fsdp2 set cpu_offload_policy
 

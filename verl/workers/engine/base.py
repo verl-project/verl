@@ -202,6 +202,24 @@ class BaseEngine:
         gen, _ = self.get_per_tensor_param_shard()
         prime_delta_snapshots(gen, self._delta_shard_snap, pin=is_cuda_available and self.delta_pin_snapshots)
 
+    def _hf_delta_entry(self, name, spec, place, lidx, lval):
+        """Build one parameter's final HF-coordinate delta entry.
+
+        The default covers identity params -- the weight name IS the HF name and
+        shard-local coordinates translate straight into it. An engine whose specs
+        carry a ``to_hf_chunk`` converter (a fused expert stack, say) must override
+        this: the converter is that engine's own declaration, so only it knows how
+        to apply it.
+        """
+        from .utils import _hf_entry_identity
+
+        if spec.to_hf_chunk is not None:
+            raise NotImplementedError(
+                f"{name}: {type(self).__name__} only handles DTensor identity params; "
+                "converter specs belong to the engine that declared them"
+            )
+        return _hf_entry_identity(name, spec, place, lidx, lval)
+
     def get_per_tensor_param_delta_shard(self, **kwargs) -> tuple[Generator, Optional[dict]]:
         """
         Yield the delta engine's per-parameter payloads in FINAL HF coordinates:
@@ -220,11 +238,21 @@ class BaseEngine:
         :meth:`prime_delta_snapshots`). The consuming delta engine only batches,
         gathers and ships.
 
+        Concrete here for the same reason as :meth:`prime_delta_snapshots`: it needs
+        nothing but :meth:`get_per_tensor_param_shard` plus the :meth:`_hf_delta_entry`
+        hook, so an engine that implements the shard export gets the steady path for
+        free. Backends that diff against something other than a pinned snapshot
+        (Megatron) override it.
+
         Returns:
             Generator: A generator that yields per-parameter HF-coordinate delta entries.
             Optional[dict]: Optional peft config.
         """
-        raise NotImplementedError
+        from verl.workers.engine.utils import hf_delta_export
+
+        self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
+        gen, _ = self.get_per_tensor_param_shard()
+        return hf_delta_export(gen, self._delta_shard_snap, self._hf_delta_entry), None
 
     def get_data_parallel_size(self):
         raise NotImplementedError
