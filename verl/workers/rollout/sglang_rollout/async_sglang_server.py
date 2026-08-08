@@ -51,7 +51,11 @@ from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_config
-from verl.workers.rollout.sglang_rollout.utils import SGLANG_LORA_NAME, lora_served_as_adapter
+from verl.workers.rollout.sglang_rollout.utils import (
+    SGLANG_LORA_NAME,
+    lora_served_as_adapter,
+    sglang_lora_target_modules,
+)
 from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
 
 logger = logging.getLogger(__file__)
@@ -327,7 +331,7 @@ class SGLangHttpServer:
                 {
                     "enable_lora": True,
                     "max_lora_rank": self.model_config.lora_rank,
-                    "lora_target_modules": self.model_config.target_modules,
+                    "lora_target_modules": sglang_lora_target_modules(self.model_config.target_modules),
                 }
             )
         # Only set dist_init_addr for multi-node; for single-node, let SGLang
