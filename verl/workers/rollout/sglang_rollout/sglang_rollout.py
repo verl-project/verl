@@ -433,12 +433,19 @@ class ServerAdapter(BaseRollout):
         )
         await self._engine.update_weights_from_tensor(req)
 
-    def wrap_lora_params(self, peft_config: LoraConfig, weights: Generator[tuple[str, torch.Tensor]]):
-        # peft config
-        peft_config_json = asdict(peft_config)
-        peft_config_json["task_type"] = peft_config_json["task_type"].value
-        peft_config_json["peft_type"] = peft_config_json["peft_type"].value
-        peft_config_json["target_modules"] = list(peft_config_json["target_modules"])
+    def wrap_lora_params(self, peft_config, weights: Generator[tuple[str, torch.Tensor]]):
+        # peft config — accept both LoraConfig objects and plain dicts
+        if isinstance(peft_config, dict):
+            peft_config_json = dict(peft_config)
+        else:
+            peft_config_json = asdict(peft_config)
+        # Stringify any remaining enum values
+        for key in ("task_type", "peft_type"):
+            val = peft_config_json.get(key)
+            if hasattr(val, "value"):
+                peft_config_json[key] = val.value
+        if "target_modules" in peft_config_json:
+            peft_config_json["target_modules"] = list(peft_config_json["target_modules"])
 
         # lora weights
         processed_weights: dict[str, torch.Tensor] = {
