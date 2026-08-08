@@ -27,6 +27,7 @@ import ray.util.collective as collective
 import torch
 import zmq
 
+from verl.checkpoint_engine._group_init import run_group_init_with_timeout
 from verl.checkpoint_engine.base import (
     CheckpointEngine,
     CheckpointEngineRegistry,
@@ -211,19 +212,28 @@ class NCCLCheckpointEngine(CheckpointEngine):
             self.world_size = world_size
             return
 
-        if self.rebuild_group or not collective.is_group_initialized(self.group_name):
-            collective.init_collective_group(world_size, rank, "nccl", self.group_name)
-            self.rank = rank
-            self.world_size = world_size
-        else:
-            assert self.rank == rank, f"rank {rank} is not equal to self.rank {self.rank}"
-            assert self.world_size == world_size, (
-                f"world_size {world_size} is not equal to self.world_size {self.world_size}"
-            )
+        def _do_init() -> None:
+            if self.rebuild_group or not collective.is_group_initialized(self.group_name):
+                collective.init_collective_group(world_size, rank, "nccl", self.group_name)
+                self.rank = rank
+                self.world_size = world_size
+            else:
+                assert self.rank == rank, f"rank {rank} is not equal to self.rank {self.rank}"
+                assert self.world_size == world_size, (
+                    f"world_size {world_size} is not equal to self.world_size {self.world_size}"
+                )
+            collective.barrier(self.group_name)
 
-        if self.rank > 0:
+        # Bound the NCCL group init + first barrier (the calls that can hang) so a
+        # stalled sync fails fast with a clear error instead of hanging forever
+        # (verl issue #6967).
+        run_group_init_with_timeout(_do_init, group_name=self.group_name)
+
+        # Connect the ZeroMQ SUB socket on the caller thread, NOT inside the
+        # timeout worker: pyzmq sockets are not thread-safe and this socket is
+        # used later from other threads.
+        if rank > 0:
             self._connect_zmq_client(master_metadata)
-        collective.barrier(self.group_name)
 
         logger.info(f"init_process_group rank: {self.rank}, world_size: {self.world_size}")
 

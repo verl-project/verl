@@ -19,6 +19,7 @@ from typing import Any, AsyncGenerator, Generator
 import ray
 import torch
 
+from verl.checkpoint_engine._group_init import wait_for_group_init
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
@@ -422,8 +423,10 @@ class CheckpointEngineManager:
         actor_wg_kwargs["method"] = ["init_process_group"] * actor_wg.world_size
         rollout_kwargs["method"] = ["init_process_group"] * rollout.world_size
 
-        # 3. init process group between all workers
-        ray.get(
+        # 3. init process group between all workers, bounded by a timeout so a
+        # hung first NCCL rendezvous fails fast with a clear error instead of
+        # hanging forever (verl issue #6967).
+        wait_for_group_init(
             actor_wg.execute_checkpoint_engine(**actor_wg_kwargs) + rollout.execute_checkpoint_engine(**rollout_kwargs)
         )
 
