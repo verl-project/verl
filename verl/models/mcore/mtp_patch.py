@@ -269,6 +269,51 @@ def patch_mtp_layer_get_embeddings(model: torch.nn.Module):
         return False
 
 
+def _patch_padding_mask_kwarg(layer, params: list) -> bool:
+    """Make MTP + ``recompute_granularity='full'`` usable on megatron-core 0.18.x.
+
+    megatron-core 0.18.x is internally inconsistent: ``MultiTokenPredictionLayer.forward``
+    calls ``self._checkpointed_forward(..., padding_mask=padding_mask)`` while
+    ``_checkpointed_forward`` itself does not declare ``padding_mask``, so **any** MTP run with
+    ``recompute_granularity == 'full'`` raises::
+
+        TypeError: MultiTokenPredictionLayer._checkpointed_forward() got an unexpected
+                   keyword argument 'padding_mask'
+
+    Introduced by two landings that do not compose (NVIDIA/Megatron-LM#2645 added the call-site
+    kwarg, #4593 refactored the method without it) and tracked upstream as
+    NVIDIA/Megatron-LM#4933. Fixed on megatron-core ``main``, but ``core_v0.18.2`` -- tagged
+    two months after that issue was filed and still the newest release -- ships the bug, so
+    every released megatron-core is affected. A backport is proposed as
+    NVIDIA/Megatron-LM#6367; once a release carries it, this shim becomes dead code and the
+    signature check below will skip it automatically.
+
+    ``padding_mask`` is dropped rather than forwarded: the method has no parameter to forward it
+    to on these versions, and verl never constructs one, so it is always ``None`` in practice.
+    A non-``None`` value would mean padded positions must be excluded, and silently ignoring it
+    would treat padding as real tokens -- so raise instead of guessing.
+
+    Returns True if a shim was installed on this layer.
+    """
+    if "padding_mask" in params:
+        return False  # megatron-core main and later: nothing to do
+
+    orig = layer._checkpointed_forward
+
+    def _checkpointed_forward_accepting_padding_mask(*args, padding_mask=None, **kwargs):
+        if padding_mask is not None:
+            raise NotImplementedError(
+                "megatron-core's MultiTokenPredictionLayer._checkpointed_forward does not accept "
+                "padding_mask on this version (see NVIDIA/Megatron-LM#4933), and dropping a "
+                "non-None mask would treat padded positions as real tokens. Upgrade "
+                "megatron-core, or disable full activation recomputation for MTP."
+            )
+        return orig(*args, **kwargs)
+
+    layer._checkpointed_forward = _checkpointed_forward_accepting_padding_mask
+    return True
+
+
 def patch_mtp_layer_checkpointed_forward(model: torch.nn.Module):
     """Patch the _checkpointed_forward method of MultiTokenPredictionLayer"""
     from megatron.core.models.gpt.gpt_model import GPTModel
@@ -293,6 +338,8 @@ def patch_mtp_layer_checkpointed_forward(model: torch.nn.Module):
 
     if target_layers:
         patched_count = 0
+        skipped_signature = 0
+        needs_padding_mask_shim = 0
         for layer in target_layers:
             if hasattr(layer, "_checkpointed_forward_backup"):
                 continue
@@ -301,12 +348,34 @@ def patch_mtp_layer_checkpointed_forward(model: torch.nn.Module):
             except (TypeError, ValueError):
                 params = ["forward_func"]
             if not params or params[0] != "forward_func":
+                # megatron-core >= 0.18 changed the signature from
+                # ``_checkpointed_forward(forward_func, *args, **kwargs)`` to
+                # ``_checkpointed_forward(hidden_states, decoder_input, ...)`` and moved the
+                # "keep non-tensor args out of the checkpoint" handling into its own
+                # ``custom_forward`` closure, so the patch below is neither applicable nor
+                # needed there. Skipping is correct -- but do it visibly: silently doing
+                # nothing here makes it impossible to tell whether the patch took effect.
+                skipped_signature += 1
+                if _patch_padding_mask_kwarg(layer, params):
+                    needs_padding_mask_shim += 1
                 continue
             layer._checkpointed_forward_backup = layer._checkpointed_forward
             layer._checkpointed_forward = _patched_checkpointed_forward.__get__(layer, layer.__class__)
             patched_count += 1
         if patched_count:
             print(f"Found and patched checkpointed forward for {patched_count} MTP layer(s)")
+        if skipped_signature:
+            print(
+                f"Skipped checkpointed-forward patch for {skipped_signature} MTP layer(s): "
+                "megatron-core >= 0.18 handles non-tensor checkpoint args natively "
+                "(MultiTokenPredictionLayer._checkpointed_forward no longer takes forward_func)."
+            )
+        if needs_padding_mask_shim:
+            print(
+                f"Applied padding_mask compatibility shim to {needs_padding_mask_shim} MTP layer(s) "
+                "(megatron-core 0.18.x passes padding_mask into _checkpointed_forward but the "
+                "method does not accept it; see NVIDIA/Megatron-LM#4933)."
+            )
         return patched_count > 0
     else:
         print("No MTP layers found to patch checkpointed forward")
