@@ -136,11 +136,14 @@ class RewardLoopWorker:
         )
 
     async def compute_score_batch(self, data: DataProto) -> list[dict]:
-        tasks = []
-        for i in range(len(data)):
-            tasks.append(asyncio.create_task(self.compute_score(data[i : i + 1])))
-        outputs = await asyncio.gather(*tasks)
-        return outputs
+        if self.config.reward.custom_reward_function.path is not None:
+            # custom reward function takes precedence over disrm
+            return await self.reward_manager.run_batch(data)
+        if self.config.reward.reward_model.enable:
+            # disrm: keep per-sample HTTP fan-out, do not batch
+            tasks = [asyncio.create_task(self.compute_score_disrm(data[i : i + 1])) for i in range(len(data))]
+            return list(await asyncio.gather(*tasks))
+        return await self.reward_manager.run_batch(data)
 
     async def compute_score(self, data: DataProto) -> dict:
         if self.config.reward.custom_reward_function.path is not None:

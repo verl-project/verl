@@ -137,8 +137,9 @@ The ``RewardManager`` maintains a reward function and defines its computation lo
 - **dapo**: DAPO implementation with an overlong reward penalty.
 - **limit**: Restricts the concurrency of the reward function, useful when external API calls are rate-limited.
 - **remote**: Runs in a separate process, effective for CPU-intensive tasks such as ``Math-Verify``.
+- **batch**: Forwards the whole chunk to a single ``compute_score`` call with plural kwargs (``data_sources`` / ``solution_strs`` / ``ground_truths`` / ``extra_infos``). Useful when the user reward function can amortize per-sample work (e.g. batched tokenization, one-shot remote inference).
 
-Users can also customize their own ``RewardManager``, inheriting from ``RewardManagerBase``, and implementing the ``run_single`` function.
+Users can also customize their own ``RewardManager``, inheriting from ``RewardManagerBase``, and implementing the ``run_single`` function. Custom managers may additionally override ``run_batch`` to receive the whole chunk in one call; the base class provides a default ``run_batch`` that fans out to ``run_single`` per sample, so existing managers keep their behavior with no changes.
 
 .. code:: python
 
