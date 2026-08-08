@@ -13,9 +13,10 @@
 # limitations under the License.
 
 import pytest
-import ray
 
 from verl.utils.ray_utils import parallel_put
+
+import ray  # noqa: E402 isort: skip
 
 
 # Initialize Ray for testing if not already done globally

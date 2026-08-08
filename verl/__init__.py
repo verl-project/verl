@@ -18,6 +18,8 @@ import os
 
 from packaging.version import parse as parse_version
 
+import verl.utils.distributed_backend  # noqa: F401
+
 from .protocol import DataProto
 from .utils.device import is_npu_available
 from .utils.import_utils import import_external_libs
