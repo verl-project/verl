@@ -510,6 +510,11 @@ def preprocess_thd_engine(
 
     packed_seq_params = PackedSeqParams(
         qkv_format="thd",
+        # Tell the attention kernels how the rows above were sharded across CP ranks. The rows
+        # are already split according to `cp_layout`, but PackedSeqParams defaults to "zigzag",
+        # so without this an attention variant that requires a contiguous split (DeepSeek-V4)
+        # raises "DSv4 THD CP requires a contiguous CP partition." on every forward.
+        cp_partition_mode=cp_layout,
         cu_seqlens_q=cu_seqlens_padded,
         max_seqlen_q=max_seqlen_in_batch,
         cu_seqlens_kv=cu_seqlens_padded,

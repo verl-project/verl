@@ -216,6 +216,19 @@ def get_moe_num_layers_to_build(
     return num_moe_layers
 
 
+def _context_parallel_layout(tf_config) -> str:
+    """Return the CP row layout used for THD packing, matching MegatronEngine.
+
+    Router-replay tensors must be sharded exactly like the model's own token rows; otherwise the
+    replayed routes are attached to the wrong tokens (or the shapes disagree outright, since the
+    zigzag layout doubles the alignment). Keep this in sync with
+    ``MegatronEngine._get_context_parallel_layout``.
+    """
+    if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid":
+        return "contiguous"
+    return "zigzag"
+
+
 def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_list, tf_config, vp_rank=None):
     """
     Merge recorded router top-k indices across sequence-parallel ranks for all router instances,
@@ -259,6 +272,8 @@ def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_lis
             else None
         )
 
+        cp_layout = _context_parallel_layout(tf_config)
+
         if input_ids.is_nested:
             batch_size = input_ids.shape[0]
             _, packed_seq_params, _ = preprocess_thd_engine(
@@ -266,9 +281,15 @@ def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_lis
                 pre_process=True,
                 use_fp8_padding=use_fp8_padding,
                 min_local_rows=min_local_rows,
+                cp_layout=cp_layout,
             )
             layers_topk_idx = postprocess_thd_engine(
-                layers_topk_idx, packed_seq_params, input_ids, batch_size, post_process=True
+                layers_topk_idx,
+                packed_seq_params,
+                input_ids,
+                batch_size,
+                post_process=True,
+                cp_layout=cp_layout,
             )
         else:
             batch_size, seq_len = attention_mask.shape[:2]
@@ -336,6 +357,8 @@ def set_router_replay_data(
             else None
         )
 
+        cp_layout = _context_parallel_layout(tf_config)
+
         replay_mask_rmpad = None
         if layers_topk_idx.is_nested:
             layers_topk_idx_rmpad, _, _ = preprocess_thd_engine(
@@ -343,6 +366,7 @@ def set_router_replay_data(
                 pre_process=True,
                 use_fp8_padding=use_fp8_padding,
                 min_local_rows=min_local_rows,
+                cp_layout=cp_layout,
             )
             if replay_mask is not None:
                 replay_mask_rmpad, _, _ = preprocess_thd_engine(
@@ -350,6 +374,7 @@ def set_router_replay_data(
                     pre_process=True,
                     use_fp8_padding=use_fp8_padding,
                     min_local_rows=min_local_rows,
+                    cp_layout=cp_layout,
                 )
         else:
             layers_topk_idx_rmpad, _ = preprocess_packed_seqs(
