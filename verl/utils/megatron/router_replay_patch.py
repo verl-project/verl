@@ -86,6 +86,7 @@ class RouterReplay:
         self.target_topk_idx = None  # For replay
         self.target_replay_mask = None
         self.recorded_topk_idx = None  # For recording
+        self.record_padding_mask = None  # THD alignment-only tokens in the current micro-batch
         self.router_replay_action = None  # Router replay action for this layer
         self.replay_backward_list = []  # List of tensors for backward pass replay
         self.replay_backward_mask_list = []
@@ -111,6 +112,10 @@ class RouterReplay:
         action = self.router_replay_action
         if action == RouterReplayAction.RECORD:
             probs, indices = default_compute_topk(scores, topk, num_groups=num_groups, group_topk=group_topk)
+            indices = self.canonicalize_record_topk_indices(indices)
+            # Keep routing probabilities aligned with the canonicalized routes
+            # that are exported for the following replay pass.
+            probs = scores.gather(1, indices)
             self.record_indices(indices)
             return probs, indices
 
@@ -134,8 +139,33 @@ class RouterReplay:
         self.recorded_topk_idx = None
         self.target_topk_idx = None
         self.target_replay_mask = None
+        self.record_padding_mask = None
         self.replay_backward_list = []
         self.replay_backward_mask_list = []
+
+    @staticmethod
+    def set_global_record_padding_mask(padding_mask: torch.Tensor | None):
+        """Set the current THD alignment padding mask for every local MoE router."""
+        for router in RouterReplay.router_instances:
+            router.record_padding_mask = padding_mask
+
+    @staticmethod
+    def clear_global_record_padding_mask():
+        """Clear the per-microbatch THD alignment padding mask."""
+        RouterReplay.set_global_record_padding_mask(None)
+
+    def canonicalize_record_topk_indices(self, topk_indices: torch.Tensor) -> torch.Tensor:
+        """Map non-semantic THD alignment tokens to expert zero before dispatch."""
+        padding_mask = self.record_padding_mask
+        if padding_mask is None:
+            return topk_indices
+        padding_mask = padding_mask.to(device=topk_indices.device, dtype=torch.bool)
+        if padding_mask.ndim != 1 or padding_mask.numel() != topk_indices.shape[0]:
+            raise RuntimeError(
+                "router replay THD padding mask does not match router token count: "
+                f"mask_shape={tuple(padding_mask.shape)}, topk_shape={tuple(topk_indices.shape)}"
+            )
+        return topk_indices.masked_fill(padding_mask.unsqueeze(1), 0)
 
     def set_router_replay_action(self, router_replay_action: RouterReplayAction):
         """Sets the router replay action for this layer."""
