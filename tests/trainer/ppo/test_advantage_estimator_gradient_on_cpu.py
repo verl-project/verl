@@ -41,11 +41,10 @@ Three behaviours get pinned, and they are deliberately different assertions:
     ``norm_adv_by_std_in_grpo=False`` (Dr. GRPO). A group mean that includes the
     sample shrinks the step but does not turn it. Asserted against the closed
     form for G = 2..6.
-  * not a pure rescaling -- GRPO with std normalisation on, which is the default.
-    The per-coordinate ratio to the true gradient is not constant, so the update
-    direction differs from the plain policy gradient. This is the documented
-    Dr. GRPO trade-off; the test pins that it is real and measurable rather than
-    asserting it is wrong.
+  * a pinned non-rescaling -- GRPO with std normalisation on, which is the
+    default. The full expected gradient vector is asserted, and its
+    per-coordinate ratio to the true gradient is confirmed to be non-constant.
+    This records the documented Dr. GRPO trade-off without judging it as wrong.
 
 ``grpo_passk`` is deliberately not covered: it optimises pass@k rather than
 E[R], so comparing it against the E[R] gradient would measure the objective
@@ -78,6 +77,7 @@ GROUP_SIZE = 4
 
 EXACTLY_UNBIASED_TOL = 1e-12
 CLOSED_FORM_TOL = 1e-9
+EXPECTED_GRPO_STD_NORMALISED_GRADIENT = np.array([0.28770953939275357, 0.13498216697212817, -0.13699747277377736])
 
 
 def _sigmoid(z):
@@ -235,12 +235,14 @@ def test_self_inclusive_group_mean_rescales_but_does_not_turn(policy, group_size
         np.testing.assert_allclose(g_est, expected_ratio * g_true, atol=CLOSED_FORM_TOL, err_msg=estimator.__name__)
 
 
-def test_grpo_std_normalisation_is_not_a_pure_rescaling(policy):
-    """With std normalisation on -- the default -- the ratio to the true gradient
-    is not constant across coordinates, so the update direction differs from the
-    plain policy gradient. Turning it off recovers a pure rescaling.
+def test_grpo_std_normalisation_has_pinned_direction_and_scale(policy):
+    """With std normalisation on -- the default -- pin the complete expected
+    gradient, including both its direction and scale. Its ratio to the true
+    gradient is non-constant; turning normalisation off recovers a pure scaling.
 
-    This pins the Dr. GRPO trade-off as a measured fact rather than a claim.
+    The golden vector comes from the exact enumeration performed by this module,
+    not from a sampled run. Pinning it ensures that a sign or scale regression
+    cannot pass merely because the result remains a non-pure rescaling.
     """
     g_true = policy.true_gradient()
 
@@ -249,9 +251,15 @@ def test_grpo_std_normalisation_is_not_a_pure_rescaling(policy):
     )
     assert np.ptp(ratio_off) < CLOSED_FORM_TOL, ratio_off
 
-    ratio_on = (
-        expected_estimator_gradient(policy, compute_grpo_outcome_advantage, norm_adv_by_std_in_grpo=True) / g_true
+    g_est_on = expected_estimator_gradient(policy, compute_grpo_outcome_advantage, norm_adv_by_std_in_grpo=True)
+    np.testing.assert_allclose(
+        g_est_on,
+        EXPECTED_GRPO_STD_NORMALISED_GRADIENT,
+        rtol=0.0,
+        atol=CLOSED_FORM_TOL,
     )
+
+    ratio_on = g_est_on / g_true
     assert np.ptp(ratio_on) > 1e-3, (
         f"std normalisation looks like a pure rescaling (ratios {ratio_on}); "
         "if this became true the Dr. GRPO distinction would have disappeared"
