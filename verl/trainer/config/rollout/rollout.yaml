@@ -274,7 +274,7 @@ checkpoint_engine:
   # Target class for checkpoint engine config
   _target_: verl.workers.config.CheckpointEngineConfig
 
-  # Backend for checkpoint engine: naive, nccl, nixl, hccl
+  # Backend for checkpoint engine: naive, nccl, nccl_parallel, nixl, hccl
   backend: naive
 
   # Specifies the tensor bucket size (in megabytes) for batch weight updates during rollout operations.
@@ -289,9 +289,14 @@ checkpoint_engine:
   # 1. Enable `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES`
   # 2. Manually set `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`
   # when using Tensor Parallelism (TP) >= 8.
+  # NOTE: the `nccl_parallel` backend reads this as the TOTAL in-flight transfer
+  # budget divided across its senders (32MB per-group floor), not a per-bucket size.
   update_weights_bucket_megabytes: 2048
 
-  # Additional keyword arguments to pass to the checkpoint engine constructor
+  # Additional keyword arguments to pass to the checkpoint engine constructor,
+  # keyed by backend name, e.g. engine_kwargs: {nccl_parallel: {phase: 2}}
+  # (nccl_parallel's `phase` caps how many striped broadcasts run concurrently
+  # per bulk-synchronous phase; see NCCLParallelCheckpointEngine docstring).
   engine_kwargs: {}
 
   # If set, this Python module is imported on every worker process before the
