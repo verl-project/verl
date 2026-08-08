@@ -20,6 +20,9 @@ total_training_steps: -1
 # Weight decay
 weight_decay: 0.01
 
+# Weight decay policy. "standard" excludes bias and normalization parameters; "all" preserves legacy behavior
+weight_decay_policy: standard
+
 # LR warmup steps
 lr_warmup_steps: -1
 

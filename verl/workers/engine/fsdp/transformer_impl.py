@@ -477,7 +477,18 @@ class FSDPEngine(BaseEngine):
     def _build_optimizer(self, module):
         from verl.workers.config.optimizer import build_optimizer
 
-        optimizer = build_optimizer(module.parameters(), self.optimizer_config)
+        if (
+            self.engine_config.strategy == "fsdp"
+            and self.optimizer_config.weight_decay_policy == "standard"
+            and not self.engine_config.use_orig_params
+        ):
+            raise ValueError(
+                "FSDP1 requires use_orig_params=True for weight_decay_policy='standard' because flattened "
+                "parameters cannot use per-original-parameter weight decay. Set use_orig_params=True, or use "
+                "weight_decay_policy='all' to preserve the legacy behavior."
+            )
+
+        optimizer = build_optimizer(module, self.optimizer_config)
 
         return optimizer
 

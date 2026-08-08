@@ -32,8 +32,8 @@ forward_prefetch: False
 # model dtype of fsdp
 model_dtype: fp32
 
-# Whether to use original parameters in fsdp. Only avaiable in fsdp1
-use_orig_params: false
+# Whether to use original parameters in fsdp. Required for selective weight decay in fsdp1
+use_orig_params: true
 
 # Random seed for reproducibility.
 seed: 42
