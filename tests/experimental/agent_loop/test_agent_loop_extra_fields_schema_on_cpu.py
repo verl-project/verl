@@ -14,7 +14,12 @@
 
 from __future__ import annotations
 
+import importlib.util
+import inspect
+import sys
+import types
 import warnings
+from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
@@ -308,6 +313,30 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
     torch.testing.assert_close(internal.routed_experts[:, 2:6], expected)
     assert torch.count_nonzero(internal.routed_experts[:, :2]) == 0
     assert torch.count_nonzero(internal.routed_experts[:, 6:]) == 0
+
+
+def _assert_output_field_is_preserved(postprocess):
+    agent_output = object()
+    bound = inspect.signature(postprocess).bind(object(), agent_output, False, output="dataset-output")
+
+    assert bound.arguments["output"] is agent_output
+    assert bound.arguments["kwargs"]["output"] == "dataset-output"
+
+
+def test_agent_loop_postprocess_preserves_output_field_on_cpu():
+    _assert_output_field_is_preserved(AgentLoopWorker._agent_loop_postprocess)
+
+
+def test_transfer_queue_agent_loop_postprocess_preserves_output_field_on_cpu(monkeypatch):
+    monkeypatch.setitem(sys.modules, "transfer_queue", types.ModuleType("transfer_queue"))
+    module_path = Path(__file__).parents[3] / "verl" / "trainer" / "ppo" / "v1" / "agent_loop_tq.py"
+    spec = importlib.util.spec_from_file_location("_agent_loop_tq_signature_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    worker_class = module.AgentLoopWorkerTQ.__ray_metadata__.modified_class
+
+    _assert_output_field_is_preserved(worker_class._agent_loop_postprocess)
 
 
 class _FakeTokenizerCustomPad:
