@@ -747,10 +747,10 @@ def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool
                         for name, param in lora_params.items()
                     }
                 else:
-                    model = peft_model.base_model.model
-                    orig_dev = "cpu" if "cpu" in str(next(model.parameters()).device) else get_device_name()
-                    model = model.to("cpu")
-                    for name, param in model.state_dict().items():
+                    for name, param in itertools.chain(
+                        peft_model.base_model.model.named_parameters(),
+                        peft_model.base_model.model.named_buffers(),
+                    ):
                         if any(x in name for x in ["_flat_param", "lora_"]):
                             continue
                         name = name.replace("_fsdp_wrapped_module.", "").replace(".base_layer", "")
@@ -759,21 +759,19 @@ def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool
                             if hasattr(param, "full_tensor")
                             else param.detach().cpu()
                         )
-                    model = model.to(orig_dev)
             get_torch_device().empty_cache()
     else:
         if base_sync_done:
             lora_params = get_peft_model_state_dict(peft_model)
         else:
-            model = peft_model.base_model.model
-            orig_dev = "cpu" if "cpu" in str(next(model.parameters()).device) else get_device_name()
-            model = model.to("cpu")
-            for name, param in model.state_dict().items():
+            for name, param in itertools.chain(
+                peft_model.base_model.model.named_parameters(),
+                peft_model.base_model.model.named_buffers(),
+            ):
                 if any(x in name for x in ["_flat_param", "lora_"]):
                     continue
                 name = name.replace("_fsdp_wrapped_module.", "").replace(".base_layer", "")
                 lora_params[name] = param.detach().cpu()
-            model = model.to(orig_dev)
     return lora_params
 
 
