@@ -178,12 +178,13 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
         {
             "actor_rollout_ref": {
                 "rollout": {"prompt_length": 16, "response_length": 16, "multi_turn": {"tool_config_path": None}},
-                "model": {},
+                # AgentLoopBase unconditionally builds the Continuous Token builder from the
+                # model path; an unrecognized name falls back to the default builder.
+                "model": {"path": "dummy-model", "tokenizer_path": "dummy-model"},
             },
             "data": {
                 "tool_config_path": None,
                 "apply_chat_template_kwargs": {},
-                "continuous_token": {"enable": False, "model_family": "auto"},
             },
         }
     )
