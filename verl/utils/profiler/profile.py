@@ -186,13 +186,13 @@ class DistProfiler:
         """Advance the profiler schedule by one step, intended to be called per mini-batch.
 
         Delegates to the backend `step` when the tool supports scheduling (currently the
-        torch profiler with a configured `wait/warmup/active/repeat` schedule); for all
-        other backends this is a no-op.
+        torch / npu profilers with a configured `wait/warmup/active/repeat` schedule); for
+        all other backends this is a no-op.
 
         Gated on enable/rank only (not `this_step`): the training loop may run inside a
         nested worker whose profiler was never explicitly started, while the underlying
-        torch profiler is process-global. The backend keeps `step` safe (no-op) whenever
-        no profiler is actively running.
+        torch / npu profiler is process-global. The backend keeps `step` safe (no-op)
+        whenever no profiler is actively running.
         """
         if self.check_enable() and self.check_this_rank():
             return getattr(self._impl, "step", lambda: None)()
