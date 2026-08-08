@@ -2,7 +2,9 @@
 """Unit tests for the platform abstraction layer."""
 
 import os
+import sys
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -143,6 +145,80 @@ class TestPlatformCreation:
     def test_invalid_platform_raises(self):
         with pytest.raises(ValueError):
             _create_platform("invalid_platform")
+
+
+class TestCpuOnlyRayWorkerLogging:
+    """Test warning levels for accelerator-less Ray workers."""
+
+    @staticmethod
+    def _mock_ray(assigned_resources):
+        context = mock.Mock()
+        context.get_task_id.return_value = "task-id"
+        context.get_assigned_resources.return_value = assigned_resources
+        return SimpleNamespace(
+            is_initialized=mock.Mock(return_value=True),
+            get_runtime_context=mock.Mock(return_value=context),
+        )
+
+    @staticmethod
+    def _exercise_fallback():
+        with (
+            mock.patch.object(PlatformRegistry, "registered_names", return_value=("nvidia",)),
+            mock.patch("verl.plugin.platform.platform_manager.PlatformCUDA.is_platform_available", return_value=False),
+            mock.patch("verl.plugin.platform.platform_manager.PlatformCUDA.is_available", return_value=False),
+        ):
+            assert _detect_platform_name() == "nvidia"
+            assert _create_platform("nvidia") is not None
+
+    def test_cpu_only_ray_worker_does_not_warn(self):
+        with (
+            mock.patch.dict(sys.modules, {"ray": self._mock_ray({"CPU": 1.0})}),
+            mock.patch("verl.plugin.platform.platform_manager.logger") as mock_logger,
+        ):
+            self._exercise_fallback()
+
+        mock_logger.warning.assert_not_called()
+        mock_logger.debug.assert_any_call(
+            "No supported accelerator detected. Registered: %s. Falling back to 'nvidia'.",
+            ("nvidia",),
+        )
+        mock_logger.debug.assert_any_call(
+            "Platform '%s' (%s) is registered but not available. "
+            "This may be due to this ray actor being a CPU-only actor.",
+            "nvidia",
+            "PlatformCUDA",
+        )
+
+    def test_gpu_assigned_ray_worker_still_warns(self):
+        with (
+            mock.patch.dict(sys.modules, {"ray": self._mock_ray({"CPU": 1.0, "GPU": 1.0})}),
+            mock.patch("verl.plugin.platform.platform_manager.logger") as mock_logger,
+        ):
+            self._exercise_fallback()
+
+        assert mock_logger.warning.call_count == 2
+
+    def test_ray_unavailable_still_warns(self):
+        with (
+            mock.patch.dict(sys.modules, {"ray": None}),
+            mock.patch("verl.plugin.platform.platform_manager.logger") as mock_logger,
+        ):
+            self._exercise_fallback()
+
+        assert mock_logger.warning.call_count == 2
+
+    def test_ray_runtime_context_failure_still_warns(self):
+        ray = SimpleNamespace(
+            is_initialized=mock.Mock(return_value=True),
+            get_runtime_context=mock.Mock(side_effect=RuntimeError("context unavailable")),
+        )
+        with (
+            mock.patch.dict(sys.modules, {"ray": ray}),
+            mock.patch("verl.plugin.platform.platform_manager.logger") as mock_logger,
+        ):
+            self._exercise_fallback()
+
+        assert mock_logger.warning.call_count == 2
 
 
 class TestPlatformSingleton:
