@@ -39,8 +39,9 @@ data:
   apply_chat_template_kwargs: {}
   num_workers: 8
 
-  # MultiTurnSFTDataset apply_chat_template to each turn separately and concat `input_ids`
-  # as a whole sequence, which may not equal to apply_chat_template to whole messages at once. 
+  # MultiTurnSFTDataset applies chat templates to independently renderable
+  # message groups and concatenates `input_ids`
+  # as a whole sequence, which may not equal to apply_chat_template to whole messages at once.
   # For example, Qwen Thinking series models add <think></think> tags to last turn, please check
   # your tokenizer chat template settings.
   # Set to True to ignore input_ids mismatch and use the concatenated input_ids as the final input_ids.
