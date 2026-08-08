@@ -38,9 +38,11 @@ import argparse
 import json
 import os
 import sys
+import zipfile
 from typing import Optional
 
 import datasets
+from huggingface_hub import hf_hub_download
 
 from verl.utils.hdfs_io import copy, makedirs
 
@@ -132,7 +134,18 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if not args.data_dir:
-        parser.error("--data_dir is required")
+        args.data_dir = os.path.expanduser("~/data/tinyllava-video-r1")
+        os.makedirs(args.data_dir, exist_ok=True)
+        if not os.path.exists(os.path.join(args.data_dir, "nextqa_0-30s.jsonl")):
+            hf_hub_download(
+                repo_id=DATA_SOURCE, filename="nextqa_0-30s.jsonl", repo_type="dataset", local_dir=args.data_dir
+            )
+        if not os.path.isdir(os.path.join(args.data_dir, "NextQA")):
+            zip_path = hf_hub_download(
+                repo_id=DATA_SOURCE, filename="NextQA.zip", repo_type="dataset", local_dir=args.data_dir
+            )
+            with zipfile.ZipFile(zip_path) as zf:
+                zf.extractall(args.data_dir)
 
     # ---- Load ----
     jsonl_path = os.path.join(args.data_dir, "nextqa_0-30s.jsonl")
