@@ -242,3 +242,28 @@ def test_vllm_update_weights_syncs_buffers_to_mtp_drafter():
     expected = torch.tensor([5, 6, 7, 8], dtype=torch.float32)
     torch.testing.assert_close(main_model.model.layers[0].e_score_correction_bias, expected)
     torch.testing.assert_close(drafter_model.model.layers[0].e_score_correction_bias, expected)
+
+
+def test_vllm_update_weights_strips_base_layer_suffix():
+    """Test that .base_layer suffix is stripped from param names in non-PEFT path."""
+    model = _ToyModel()
+    loaded_param_names = []
+
+    def _fake_load_weights(weights):
+        loaded_param_names.extend(name for name, _ in weights)
+
+    model.load_weights = _fake_load_weights
+
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    worker.model_runner = _FakeModelRunner(model)
+
+    weights = [
+        ("model.layers.0.linear.base_layer.weight", torch.ones(4, 4, dtype=torch.float32)),
+        ("model.layers.0.e_score_correction_bias", torch.arange(4, dtype=torch.float32) + 1),
+    ]
+
+    worker._update_weights(weights, peft_config=None, base_sync_done=False)
+
+    assert loaded_param_names == ["model.layers.0.linear.weight"], (
+        f"Expected stripped name without .base_layer, got {loaded_param_names}"
+    )
