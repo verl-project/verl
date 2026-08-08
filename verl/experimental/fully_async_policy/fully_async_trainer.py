@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import Any
 
 import ray
+import torch
 from omegaconf import OmegaConf, open_dict
 from tqdm import tqdm
 
@@ -33,13 +34,16 @@ from verl.experimental.fully_async_policy.dynamic_schedule import DynamicSchedul
 from verl.experimental.fully_async_policy.message_queue import MessageQueueClient
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
+from verl.trainer.distillation.teacher_selection import align_teacher_log_prob_rows, select_teacher_log_prob_rows
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
+from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.utils.tracking import Tracking
+from verl.workers.utils.padding import left_right_2_no_padding
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +92,9 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             self.distillation_config = omega_conf_to_dataclass(self.config.distillation)
         else:
             self.distillation_config = None
+        self.fused_teacher_enabled = bool(
+            self.distillation_config is not None and self.distillation_config.teacher_execution == "trainer"
+        )
 
         self.use_critic = need_critic(self.config)
         self.ray_worker_group_cls = ray_worker_group_cls
@@ -157,6 +164,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         # required_samples use ppo_mini_batch_size*require_batches as the minimum number of samples.
         self.require_batches = config.async_training.require_batches
         self.required_samples = config.actor_rollout_ref.actor.ppo_mini_batch_size * self.require_batches
+        self._fused_teacher_queue_finished = False
         self._step_wait_times: list[float] = []  # per-collection wait times within the current step (seconds)
         # Per-collection count of samples that actually had to be waited on (not
         # already sitting in the queue at collection start). Parallel to
@@ -380,6 +388,9 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         Returns:
             tuple: (epoch, batch_dict, gen_batch_output)
         """
+        if self.fused_teacher_enabled:
+            return await self._get_fused_teacher_samples_from_queue()
+
         print(
             f"[FullyAsyncTrainer] Requesting {self.required_samples} samples from queue",
             flush=True,
@@ -449,6 +460,151 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         # from queue backlog (no real waiting for generation happened); the policy
         # layer special-cases that when estimating the generation rate.
         self._step_wait_samples.append(pending_wait_samples)
+        return 0, batch
+
+    async def _get_fused_teacher_samples_from_queue(self) -> tuple[None, None] | tuple[int, Any]:
+        if not self.distillation_config.nonrouter:
+            raise NotImplementedError(
+                "Fully-async trainer-colocated multi-teacher OPD currently requires nonrouter=True."
+            )
+        if not self.config.actor_rollout_ref.actor.megatron.param_offload:
+            raise RuntimeError(
+                "Fully-async fused teacher scoring requires actor_rollout_ref.actor.megatron.param_offload=True."
+            )
+        return await self._get_fused_teacher_samples_nonrouter()
+
+    def _score_fused_teacher_batch_multi(self, teacher_key: str, batch_td) -> list:
+        """nonrouter fused: score ONE teacher on the shared no-padding batch and
+        return the per-token log_probs rows (full-sequence, aligned to the input
+        lengths). Called once per teacher; selection merges them later.
+
+        batch_td is converted once by the caller and shared across teachers:
+        dispatch chunks it without mutating it, so only teacher_key is
+        re-assigned here."""
+        tu.assign_non_tensor(batch_td, teacher_key=teacher_key)
+
+        output = self.actor_wg.compute_teacher_log_prob(batch_td)
+        # Keep the full-sequence nested representation, matching the V1 path and
+        # the no_padding_2_padding() boundary in the distillation loss.
+        teacher_log_probs = tu.get(output, "log_probs")
+        input_sequence_lengths = batch_td["input_ids"].offsets().diff().tolist()
+        aligned_teacher_log_prob_rows = align_teacher_log_prob_rows(
+            teacher_log_probs.unbind(), input_sequence_lengths, teacher_key=teacher_key
+        )
+
+        teacher_metrics = tu.get(output, "metrics")
+        if teacher_metrics and "mfu" in teacher_metrics:
+            self.metrics[f"perf/mfu/teacher_infer/{teacher_key}"] = teacher_metrics["mfu"]
+        metric_key = f"distillation/teacher_route/{teacher_key}/trajectories"
+        self.metrics[metric_key] = self.metrics.get(metric_key, 0) + len(aligned_teacher_log_prob_rows)
+        return aligned_teacher_log_prob_rows
+
+    async def _get_fused_teacher_samples_nonrouter(self) -> tuple[None, None] | tuple[int, Any]:
+        """nonrouter fused: assemble the collected samples first, then EVERY teacher
+        forwards the whole batch once (no routing at forward time), one CPU<->GPU
+        swap pair per teacher. The data_source-matched teacher result is selected
+        per row after scoring. gen excludes teacher_scoring."""
+        teacher_keys = list(self.distillation_config.teacher_models)
+        print(
+            f"[FullyAsyncTrainer] [nonrouter] Requesting {self.required_samples} samples; teachers={teacher_keys}",
+            flush=True,
+        )
+
+        consumer_start = time.time()
+        queue_len = 0
+        collected: list = []
+        while len(collected) < self.required_samples and not self._fused_teacher_queue_finished:
+            sample, queue_len = await self.message_queue_client.get_sample()
+            if sample is None:
+                self._fused_teacher_queue_finished = True
+                print(
+                    "[FullyAsyncTrainer] [nonrouter] Detected termination signal while collecting; "
+                    f"collected={len(collected)}."
+                )
+                break
+            collected.append(ray.cloudpickle.loads(sample))
+
+        total_wait_time = time.time() - consumer_start
+        if len(collected) < self.required_samples:
+            print(
+                f"[FullyAsyncTrainer] [nonrouter] Not enough samples: "
+                f"available={len(collected)}, required={self.required_samples}."
+            )
+            return None, None
+
+        # Assemble dense rollout fields first; the selected jagged teacher output
+        # is attached after scoring (jagged NestedTensor does not support dim-0 cat).
+        batch = assemble_batch_from_rollout_samples(collected, self.tokenizer, self.config, None)
+        if self.config.trainer.balance_batch:
+            self._balance_batch(batch, metrics={})
+
+        routing_field = self.distillation_config.teacher_key
+        route_values = None
+        if len(teacher_keys) > 1:
+            route_values = batch.non_tensor_batch.get(routing_field)
+            if route_values is None:
+                raise ValueError(
+                    f"Fused multi-teacher selection requires non_tensor_batch[{routing_field!r}], "
+                    "but the assembled batch does not contain it."
+                )
+            if len(route_values) != len(batch):
+                raise RuntimeError(
+                    f"Routing field {routing_field!r} has {len(route_values)} values for {len(batch)} trajectories."
+                )
+
+        # Convert to the no-padding engine format once; every teacher reuses the
+        # same batch_td and only overrides teacher_key inside the scoring call.
+        batch_td = batch.to_tensordict()
+        batch_td = left_right_2_no_padding(batch_td)
+        tu.assign_non_tensor(
+            batch_td,
+            calculate_entropy=False,
+            compute_loss=False,
+            temperature=self.config.actor_rollout_ref.rollout.temperature,
+        )
+
+        # Offload student params to CPU so the teacher engines (separate
+        # TrainingWorkers colocated on the same GPUs) can use the full GPU
+        # memory budget during teacher forward. The next actor eval/train
+        # context restores the parameters on demand.
+        self._offload_student_params()
+        scoring_start = time.time()
+        # Run EVERY teacher on the assembled batch; each teacher is a standalone
+        # engine (self.teacher[teacher_key]) that eval_mode swaps GPU<->CPU per
+        # call, so no explicit activation is needed.
+        teacher_results = [self._score_fused_teacher_batch_multi(teacher_key, batch_td) for teacher_key in teacher_keys]
+
+        teacher_scoring_time = time.time() - scoring_start
+
+        # Match V1 semantics: a single teacher serves every row; multiple
+        # teachers are selected per row using teacher_config.key.
+        route_to_teacher_idx = {
+            teacher_config.key: idx
+            for idx, teacher_config in enumerate(self.distillation_config.teacher_models.values())
+        }
+        selected_teacher_log_prob_rows = select_teacher_log_prob_rows(
+            teacher_results,
+            route_to_teacher_idx,
+            route_values,
+            batch_size=len(batch),
+            routing_field=routing_field,
+        )
+
+        # The dense batch was balanced before scoring, so these rows already
+        # match the final input order.
+        batch.batch["teacher_logprobs"] = torch.nested.as_nested_tensor(
+            selected_teacher_log_prob_rows, layout=torch.jagged
+        )
+
+        batch.meta_info["fully_async/total_wait_time"] = total_wait_time
+        batch.meta_info["fully_async/teacher_scoring_time"] = teacher_scoring_time
+        # Record teacher scoring time separately so gen can subtract it.
+        self.timing_raw["teacher_scoring"] = teacher_scoring_time
+        print(
+            f"[FullyAsyncTrainer] [nonrouter] Batch ready: "
+            f"teacher_scoring_time={teacher_scoring_time:.2f}s, collected={len(collected)}.",
+            flush=True,
+        )
         return 0, batch
 
     def _create_actor_rollout_classes(self):
@@ -603,6 +759,12 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             self._fit_log_aggregated_training_metrics(rollout_reset_timing_raw)
         self._fit_postprocess_step()
 
+    def _offload_student_params(self):
+        """Offload actor parameters while colocated teachers score samples."""
+        start = time.time()
+        self.actor_rollout_wg.to(device="cpu", model=True, optimizer=False, grad=False)
+        self.timing_raw["student_gpu_to_cpu"] = time.time() - start
+
     # Timing-raw keys that represent actual training-GPU compute, from
     # _fit_compute_reward() through _fit_update_actor(). Some keys may be
     # absent for a given step (e.g. "values"/"update_critic" when
@@ -648,6 +810,9 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             if batch is None:
                 raise TrainingStopException("Training terminated: queue returned None")
             self._collect_metrics_from_samples(batch, metrics)
+        # Fused teacher scoring runs inside _get_samples_from_queue(), so remove
+        # its separately tracked duration from the generation timing.
+        timing_raw["gen"] = max(0.0, timing_raw["gen"] - timing_raw.get("teacher_scoring", 0.0))
         batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
         return batch
 

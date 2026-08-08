@@ -2,7 +2,9 @@
 
 **Author:** [Jacob Helwig](https://jacobhelwig.github.io/)
 
-Last updated: 05/26/2026.
+**Author:** [meituan-search](https://github.com/meituan-search)
+
+Last updated: 08/04/2026.
 
 ## Background
 
@@ -131,7 +133,13 @@ The stop-gradient is required because the reward is used inside a policy-gradien
 
 Multi-teacher OPD (MOPD) extends OPD to multiple domain-specialized teachers [4,5,6,7]. This is useful when distilling knowledge to a student across multiple domains. In each domain, such as math, coding, or instruction following, different teachers specialized to the domain can be used.
 
-A base model can be trained or adapted independently on each domain, producing one expert teacher per domain. The student is then trained on a mixture of domains. For each example, the routing key selects the corresponding teacher, and the student matches that teacher's log-probabilities on student-induced states.
+A base model can be trained or adapted independently on each domain, producing
+one expert teacher per domain. The student is then trained on a mixture of
+domains. For each example, the teacher key identifies which teacher's
+log-probabilities supervise the student on student-induced states.
+Rollout-served execution routes the example before scoring, while
+trainer-colocated execution scores it with every teacher before selecting one
+result.
 
 MOPD consolidates multiple specialized policies into a single student model while preserving the on-policy state alignment of OPD.
 
@@ -155,49 +163,161 @@ MOPD consolidates multiple specialized policies into a single student model whil
 
 ## Configuration Parameters
 
-OPD parameters live under three namespaces:
+Choose `distillation.teacher_execution` first. A rollout-served setup uses the
+common settings plus the rollout-served teacher settings, while a
+trainer-colocated setup uses the common settings plus the trainer-colocated
+teacher settings. The reference below is organized into four groups:
 
-- `distillation.*` — top-level switches and the teacher resource pool ([`DistillationConfig`](../../verl/workers/config/distillation.py))
-- `distillation.teacher_models.<name>.*` — one entry per teacher ([`DistillationTeacherModelConfig`](../../verl/workers/config/distillation.py))
-- `distillation.distillation_loss.*` — loss-mode and aggregation settings ([`DistillationLossConfig`](../../verl/workers/config/distillation.py))
+| Category | **Super params** |
+| --- | --- |
+| Common OPD and student settings | `distillation.enabled`<br>`distillation.teacher_execution`<br>`distillation.distillation_loss.loss_mode`<br>`distillation.distillation_loss.topk`<br>`distillation.distillation_loss.use_task_rewards`<br>`distillation.distillation_loss.distillation_loss_coef`<br>`distillation.distillation_loss.loss_max_clamp`<br>`distillation.distillation_loss.log_prob_min_clamp`<br>`distillation.distillation_loss.use_policy_gradient`<br>`distillation.distillation_loss.policy_loss_mode`<br>`distillation.distillation_loss.clip_ratio`<br>`distillation.distillation_loss.clip_ratio_low`<br>`distillation.distillation_loss.clip_ratio_high`<br>`distillation.distillation_loss.global_batch_info` / `distillation.distillation_loss.loss_settings`<br>`actor_rollout_ref.actor.use_kl_loss` / `algorithm.use_kl_in_reward` |
+| Common teacher model settings | `distillation.teacher_key`<br>`distillation.teacher_models`<br>`distillation.teacher_models.<name>.key`<br>`distillation.teacher_models.<name>.model_path` |
+| Rollout-served teacher settings | `distillation.n_gpus_per_node`<br>`distillation.nnodes`<br>`distillation.teacher_models.<name>.num_replicas`<br>`distillation.teacher_models.<name>.inference.*` |
+| Trainer-colocated teacher settings | `distillation.nonrouter`<br>`actor_rollout_ref.teacher.*`<br>`actor_rollout_ref.actor.megatron.param_offload` |
 
-Defaults below are the YAML defaults from
+Defaults for `distillation.*` fields are taken from
 [`verl/trainer/config/distillation/distillation.yaml`](../../verl/trainer/config/distillation/distillation.yaml).
+Actor and algorithm settings retain the defaults from their own config trees.
 
----
+### Common OPD and student settings
 
-### `distillation.enabled` (bool)
+These settings enable OPD, choose the teacher execution mode, and control how
+the student is optimized. They apply to both teacher execution modes unless a
+parameter says otherwise.
+
+#### `distillation.enabled` (bool)
 
 Whether on-policy distillation is enabled. Default: `false`.
 
-When `true`, `main_ppo` allocates a separate teacher resource pool and spins up
-one or more teacher inference servers; the actor loss switches from `ppo_loss`
-to `distillation_ppo_loss`.
+When `true`, the actor loss switches from `ppo_loss` to
+`distillation_ppo_loss`. Teacher placement is controlled by
+`distillation.teacher_execution`: rollout-served teachers use a separate
+resource pool, while trainer-colocated teachers reuse the actor's training
+workers and GPUs.
 
-### `distillation.n_gpus_per_node` (int)
+#### `distillation.teacher_execution` (str)
 
-Number of GPUs per node in the teacher resource pool. Default: `8`.
+Where teacher log-probabilities are computed. Default: `"rollout"`.
 
-### `distillation.nnodes` (int)
+- `"rollout"`: launch vLLM/SGLang teacher servers in a dedicated teacher
+  resource pool.
+- `"trainer"`: construct one frozen Megatron engine per teacher in the actor
+  worker and swap actor/teacher parameters between CPU and GPU for scoring.
 
-Number of nodes in the teacher resource pool. Default: `0` (effectively
-disables the pool — must be set to `≥ 1` when `enabled=True`).
+#### `distillation.distillation_loss.loss_mode` (str)
 
-**Constraint:** the total teacher pool size (`n_gpus_per_node × nnodes`) must
-exactly equal the sum of `(num_replicas × per_replica_world_size)` across all
-configured teachers, or `DistillationConfig.__post_init__` raises.
+Distillation divergence to use. Default: `"k3"`.
 
-### `distillation.teacher_key` (str)
+Two registered families:
 
-Field on each sample's data proto used to route the sample to the right
-teacher in multi-teacher setups. Default: `"data_source"`.
+- **Top-k** (`forward_kl_topk`): forward KL using the teacher's top-k logits.
+- **Single-sample KL estimators** (`kl`, `k1`, `abs`, `mse`, `k2`,
+  `low_var_kl`, `k3`): per-token Monte Carlo estimators of reverse KL
+  computed from the student's `log_probs` and the teacher's single
+  `log_prob` at the sampled token.
 
-- **Single-teacher**: ignored (everything goes to the sole teacher).
+#### `distillation.distillation_loss.topk` (int, optional)
+
+`k` for top-k distillation losses. Default: `32`.
+
+Only used when `loss_mode` requires top-$k$ (e.g. `forward_kl_topk`). Drives both
+the teacher's `prompt_logprobs` request size and (for vLLM) the engine's
+`max_logprobs` cap.
+
+#### `distillation.distillation_loss.use_task_rewards` (bool)
+
+Whether to add the standard PPO/GRPO task-reward loss on top of the
+distillation loss. Default: `true`.
+
+- `true`: final loss is `policy_loss + distillation_loss_coef × distill_loss`.
+- `false`: the PPO term is zeroed and only the distillation loss contributes.
+
+Orthogonal to `use_policy_gradient` (which controls how the *distillation
+signal itself* is applied).
+
+#### `distillation.distillation_loss.distillation_loss_coef` (float)
+
+Coefficient on the distillation loss when combined with task rewards.
+Default: `1.0`. Only takes effect when `use_task_rewards=true`.
+
+#### `distillation.distillation_loss.loss_max_clamp` (float, optional)
+
+Per-token clamp on the distillation loss to `[-clamp, +clamp]`. Default:
+`null` (no clamp).
+
+#### `distillation.distillation_loss.log_prob_min_clamp` (float, optional)
+
+Lower clamp on log probabilities used inside divergence computations, to
+prevent `log q − log p` from blowing up when `p` or `q` are near zero.
+Default: `null`.
+
+#### `distillation.distillation_loss.use_policy_gradient` (bool)
+
+How the distillation signal is applied. `true` corresponds to PG OPD, `false`
+to GKD OPD. Default: `false`.
+
+**Validation:**
+
+- `use_policy_gradient=False` + `loss_mode="k1"` $\to$ `ValueError`. The k1 loss
+  has no gradient through the teacher logprob, so backpropagating it directly
+  is meaningless.
+- `use_policy_gradient=True` + `loss_mode="forward_kl_topk"` $\to$ warning. The
+  PG update only moves $\nabla_\theta\log\pi_\theta(y_t|s_t)$ for the sampled
+  token $y_t$, so the top-$k$ distributional signal is largely unused.
+
+#### `distillation.distillation_loss.policy_loss_mode` (str)
+
+Name of the policy loss to use when `use_policy_gradient=True`. Default:
+`"vanilla"`. **Currently only `"vanilla"` is supported**; anything else raises
+`NotImplementedError`.
+
+#### `distillation.distillation_loss.clip_ratio` (float)
+
+PPO clip ratio used by the policy-gradient update when
+`use_policy_gradient=True`. Default: `0.2`.
+
+#### `distillation.distillation_loss.clip_ratio_low` (float)
+
+Lower bound of the PPO clip range. Default: `0.2`.
+
+#### `distillation.distillation_loss.clip_ratio_high` (float)
+
+Upper bound of the PPO clip range. Default: `0.2`.
+
+#### `distillation.distillation_loss.global_batch_info` / `loss_settings`
+
+Internal fields populated at runtime — **do not set from the user side.**
+`loss_settings` is auto-populated from `loss_mode` via
+`get_distillation_loss_settings`; `global_batch_info` is filled by the actor
+worker before the loss runs.
+
+#### `actor_rollout_ref.actor.use_kl_loss` / `algorithm.use_kl_in_reward`
+
+The ordinary PPO/GRPO reference-policy KL settings remain actor/algorithm
+settings rather than `distillation.*` fields. In most OPD runs, set
+`actor_rollout_ref.actor.use_kl_loss=false` and
+`algorithm.use_kl_in_reward=false` so the student is not simultaneously
+regularized toward the reference policy and distilled from the teacher.
+
+### Common teacher model settings
+
+These settings identify the teachers and associate each sample with a teacher.
+They apply to both execution modes. Rollout-served teachers use the association
+to route a sample before scoring; trainer-colocated teachers score every sample
+with every teacher and use it to select one result afterwards.
+
+#### `distillation.teacher_key` (str)
+
+Field on each sample's data proto used to associate the sample with a teacher
+in multi-teacher setups. Default: `"data_source"`.
+
+- **Single-teacher**: ignored; the sole teacher serves every row.
 - **Multi-teacher**: the value of `sample[teacher_key]` must match the `key`
-  of one of the configured teachers, or
-  `AsyncTeacherLLMServerManager._resolve_teacher_key` raises.
+  of one configured teacher. Rollout-served execution uses it before scoring;
+  trainer-colocated execution uses it only after all teachers have scored the
+  row. An unknown value raises in either mode.
 
-### `distillation.teacher_models` (dict)
+#### `distillation.teacher_models` (dict)
 
 Map of teacher entries. Each value is a `DistillationTeacherModelConfig`.
 
@@ -221,25 +341,45 @@ distillation.teacher_models.teacher_model.model_path=Qwen/Qwen3-4B
 +distillation.teacher_models.teacher_model2.model_path=Qwen/Qwen3-VL-4B-Instruct
 ```
 
----
+#### `distillation.teacher_models.<name>.key` (str)
 
-### `distillation.teacher_models.<name>.key` (str)
+Identifier associated with this teacher in multi-teacher mode. Must match the
+value of `sample[distillation.teacher_key]`. Default: `null`
+(required for multi-teacher; auto-set to `"default"` for single-teacher only
+when no explicit key is provided).
 
-Identifier used to route samples to this teacher in multi-teacher mode. Must
-match the value of `sample[distillation.teacher_key]`. Default: `null`
-(required for multi-teacher; auto-set to `"default"` for single-teacher).
-
-### `distillation.teacher_models.<name>.model_path` (str)
+#### `distillation.teacher_models.<name>.model_path` (str)
 
 Local path or Hugging Face model id for the teacher. **Required.**
 
-The teacher must share the student's tokenizer/vocab — typically satisfied by
-picking a teacher in the same model family (e.g. `Qwen3-32B` teacher for a
-`Qwen3-8B` student).
+The teacher must share the student's tokenizer/vocab. This is typically
+satisfied by picking a teacher in the same model family (for example, a
+`Qwen3-32B` teacher for a `Qwen3-8B` student).
 
-### `distillation.teacher_models.<name>.num_replicas` (int)
+### Rollout-served teacher settings
 
-Number of inference replicas of this teacher to launch. Default: `0`.
+These settings apply only when `distillation.teacher_execution="rollout"`.
+They allocate the dedicated teacher resource pool and configure the inference
+servers that score student trajectories.
+
+#### `distillation.n_gpus_per_node` (int)
+
+Number of GPUs per node in the dedicated teacher resource pool. Default: `8`.
+
+#### `distillation.nnodes` (int)
+
+Number of nodes in the dedicated teacher resource pool. Default: `0`. It must
+be `≥ 1` for rollout-served teachers.
+
+**Constraint:** the total teacher pool size (`n_gpus_per_node × nnodes`) must
+exactly equal the sum of `(num_replicas × per_replica_world_size)` across all
+configured teachers, or `DistillationConfig.__post_init__` raises.
+
+#### `distillation.teacher_models.<name>.num_replicas` (int)
+
+Number of inference replicas of this teacher to launch. Default: `0`. This is
+used only for rollout-served teachers; trainer-colocated teachers force it to
+`0` because they reuse the actor workers.
 
 Each replica occupies
 `per_replica_world_size = inference.tensor_model_parallel_size * inference.data_parallel_size * inference.pipeline_model_parallel_size`
@@ -248,10 +388,13 @@ GPUs, so the teacher's total footprint is `num_replicas × per_replica_world_siz
 For a **single teacher**, you may leave this at `0`: `_resolve_teacher_models`
 auto-fills it as `pool_size // per_replica_world_size`.
 
-### `distillation.teacher_models.<name>.inference.*`
+#### `distillation.teacher_models.<name>.inference.*`
 
-Inference-engine config for this teacher; see [`RolloutConfig`](../../verl/workers/config/rollout.py). Same shape as
-`actor_rollout_ref.rollout.*`. Notable defaults inherited from the YAML:
+Inference-engine config for rollout-served teachers; see
+[`RolloutConfig`](../../verl/workers/config/rollout.py). Same shape as
+`actor_rollout_ref.rollout.*`. Trainer-colocated teachers do not use this
+subtree; their shared runtime comes from `actor_rollout_ref.teacher.*`.
+Notable defaults inherited from the YAML:
 
 - `inference.name` — e.g. `vllm` or `sglang`.
 - `inference.tensor_model_parallel_size` — default `2`.
@@ -268,94 +411,54 @@ Inference-engine config for this teacher; see [`RolloutConfig`](../../verl/worke
 `inference.response_length := 1`, since the teacher only scores the
 (prompt + response) prefix and emits one dummy token.
 
----
+### Trainer-colocated teacher settings
 
-### `distillation.distillation_loss.loss_mode` (str)
+These settings apply only when `distillation.teacher_execution="trainer"`.
+The trainer-colocated path requires a Megatron actor and
+`distillation.nonrouter=true`. Every configured teacher scores every trajectory
+sequentially on the training GPUs, then `distillation.teacher_key` selects the
+retained result for each row.
 
-Distillation divergence to use. Default: `"k3"`.
+Trainer-colocated teachers currently support sampled-token policy-gradient OPD,
+such as `loss_mode="k1"` with `use_policy_gradient=true`. Top-k distillation
+with `forward_kl_topk`, including its recommended supervised configuration with
+`use_policy_gradient=false`, is not yet supported. Set
+`distillation.n_gpus_per_node=0` and `distillation.nnodes=0`, and do not
+configure per-teacher `num_replicas` or `inference` settings.
 
-Two registered families:
+#### `actor_rollout_ref.teacher.*`
 
-- **Top-k** (`forward_kl_topk`): forward KL using the teacher's top-k logits.
-- **Single-sample KL estimators** (`kl`, `k1`, `abs`, `mse`, `k2`,
-  `low_var_kl`, `k3`): per-token Monte Carlo estimators of reverse KL
-  computed from the student's `log_probs` and the teacher's single
-  `log_prob` at the sampled token.
+Shared runtime for all trainer-colocated teachers. It uses the reference-policy
+config shape, but the worker maps its `log_prob_*` fields to the teacher's
+forward-only `TrainingWorker` configuration.
 
-### `distillation.distillation_loss.topk` (int, optional)
+Required settings include:
 
-`k` for top-k distillation losses. Default: `32`.
+- `strategy=megatron`.
+- `log_prob_use_dynamic_bsz` plus
+  `log_prob_max_token_len_per_gpu`, or a fixed
+  `log_prob_micro_batch_size_per_gpu`.
+- `megatron.param_offload=true`, so only the teacher currently running a
+  forward pass is resident on GPU.
 
-Only used when `loss_mode` requires top-$k$ (e.g. `forward_kl_topk`). Drives both
-the teacher's `prompt_logprobs` request size and (for vLLM) the engine's
-`max_logprobs` cap.
+Teacher identities, selection keys, and model paths remain under
+`distillation.teacher_models`; they are not configured in this runtime
+subtree.
 
-### `distillation.distillation_loss.use_task_rewards` (bool)
+#### `actor_rollout_ref.actor.megatron.param_offload` (bool)
 
-Whether to add the standard PPO/GRPO task-reward loss on top of the
-distillation loss. Default: `true`.
+Must be `true` for trainer-colocated teachers. Before teacher scoring the
+student parameters are moved to CPU, and the actor's next eval/train context
+restores them on demand.
 
-- `true`: final loss is `policy_loss + distillation_loss_coef × distill_loss`.
-- `false`: the PPO term is zeroed and only the distillation loss contributes.
-
-Orthogonal to `use_policy_gradient` (which controls how the *distillation
-signal itself* is applied).
-
-### `distillation.distillation_loss.distillation_loss_coef` (float)
-
-Coefficient on the distillation loss when combined with task rewards.
-Default: `1.0`. Only takes effect when `use_task_rewards=true`.
-
-### `distillation.distillation_loss.loss_max_clamp` (float, optional)
-
-Per-token clamp on the distillation loss to `[-clamp, +clamp]`. Default:
-`null` (no clamp).
-
-### `distillation.distillation_loss.log_prob_min_clamp` (float, optional)
-
-Lower clamp on log probabilities used inside divergence computations, to
-prevent `log q − log p` from blowing up when `p` or `q` are near zero.
-Default: `null`.
-
-### `distillation.distillation_loss.use_policy_gradient` (bool)
-
-How the distillation signal is applied. `true` corresponds to PG OPD, `false` to GKD OPD. Default: `false`.
-
-
-**Validation:**
-
-- `use_policy_gradient=False` + `loss_mode="k1"` $\to$ `ValueError`. The k1 loss
-  has no gradient through the teacher logprob, so backpropagating it directly
-  is meaningless.
-- `use_policy_gradient=True` + `loss_mode="forward_kl_topk"` $\to$ warning. The
-  PG update only moves $\nabla_\theta\log\pi_\theta(y_t|s_t)$ for the sampled token $y_t$, so the top-$k$
-  distributional signal is largely unused.
-
-### `distillation.distillation_loss.policy_loss_mode` (str)
-
-Name of the policy loss to use when `use_policy_gradient=True`. Default:
-`"vanilla"`. **Currently only `"vanilla"` is supported**; anything else raises
-`NotImplementedError`.
-
-### `distillation.distillation_loss.clip_ratio` (float)
-
-PPO clip ratio used by the policy-gradient update when
-`use_policy_gradient=True`. Default: `0.2`.
-
-### `distillation.distillation_loss.clip_ratio_low` (float)
-
-Lower bound of the PPO clip range. Default: `0.2`.
-
-### `distillation.distillation_loss.clip_ratio_high` (float)
-
-Upper bound of the PPO clip range. Default: `0.2`.
-
-### `distillation.distillation_loss.global_batch_info` / `loss_settings`
-
-Internal fields populated at runtime — **do not set from the user side.**
-`loss_settings` is auto-populated from `loss_mode` via
-`get_distillation_loss_settings`; `global_batch_info` is filled by the actor
-worker before the loss runs.
+`actor_rollout_ref.actor.megatron.optimizer_offload` and
+`actor_rollout_ref.actor.megatron.grad_offload` both default to `false`, so
+explicit `=False` overrides may be omitted. The fused path keeps optimizer
+state resident; the disposable gradient buffer is released at the completed
+optimizer-step boundary and recreated before the next backward pass. In
+particular, `grad_offload=false` does not ask the manual fused swap to preserve
+that completed-step Megatron gradient buffer; it only disables the regular
+gradient-offload policy.
 
 ## Usage
 
@@ -363,11 +466,14 @@ Example scripts are available in `examples/on_policy_distillation_trainer`. This
 
 ### Quick start
 
-For single-teacher OPD, first enable distillation, allocate a teacher resource pool, and specify the teacher model and inference server settings:
+For rollout-served single-teacher OPD, first enable distillation, allocate a
+teacher resource pool, and specify the teacher model and inference server
+settings:
 
 ```yaml
 distillation:
    enabled: true
+   teacher_execution: rollout
 
    n_gpus_per_node: 2
    nnodes: 1
@@ -391,6 +497,84 @@ actor_rollout_ref:
 algorithm:
    use_kl_in_reward: false
 ```
+
+### Trainer-colocated teachers
+
+Trainer-colocated OPD currently supports only non-router execution: every
+configured teacher scores every trajectory on the actor's training workers
+instead of using dedicated teacher nodes. The student parameters are moved to
+CPU, teachers are loaded and scored sequentially on the training GPUs, and
+each teacher is returned to CPU before the next teacher is loaded. After all
+forwards complete, `teacher_key` selects one teacher result per row. With a
+single teacher, per-row selection is skipped and the sole result serves every
+row.
+
+Both the v1 and fully-async trainers support this mode. A representative
+multi-teacher configuration is:
+
+```yaml
+actor_rollout_ref:
+  actor:
+    strategy: megatron
+    megatron:
+      param_offload: true
+      tensor_model_parallel_size: 8
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 8
+      expert_tensor_parallel_size: 1
+      context_parallel_size: 1
+
+  # Shared runtime for every trainer-colocated teacher.
+  teacher:
+    strategy: megatron
+    log_prob_micro_batch_size_per_gpu: 1
+    log_prob_use_dynamic_bsz: true
+    log_prob_max_token_len_per_gpu: 16384
+    megatron:
+      param_offload: true
+      tensor_model_parallel_size: 8
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 8
+      expert_tensor_parallel_size: 1
+      context_parallel_size: 1
+
+distillation:
+  enabled: true
+  teacher_execution: trainer
+  nonrouter: true
+  n_gpus_per_node: 0
+  nnodes: 0
+  teacher_key: data_source
+
+  teacher_models:
+    math:
+      key: math
+      model_path: /path/to/math-teacher
+    code:
+      key: code
+      model_path: /path/to/code-teacher
+
+  distillation_loss:
+    loss_mode: k1
+    use_policy_gradient: true
+```
+
+Do not configure `teacher_models.<name>.inference` or `num_replicas` for this
+mode. The shared `actor_rollout_ref.teacher` runtime replaces the inference
+server config, and teacher nodes are not allocated. The student and teachers
+must use the same tokenizer and vocabulary.
+
+The explicit actor overrides
+`megatron.optimizer_offload=false` and `megatron.grad_offload=false` are not
+needed because both defaults are already `false`. Keeping them in a launch
+script is harmless, but omitting them produces the same configuration. Keep
+`megatron.param_offload=true`; unlike the other two settings, it is required by
+the fused trainer path.
+
+Reference launch scripts:
+
+- [`tests/special_e2e/run_v1_separate_async_opd_policy_fusenode.sh`](../../tests/special_e2e/run_v1_separate_async_opd_policy_fusenode.sh)
+- [`tests/special_e2e/run_fully_async_opd_policy_fusenode.sh`](../../tests/special_e2e/run_fully_async_opd_policy_fusenode.sh)
 
 ### GKD OPD
 
@@ -475,12 +659,16 @@ distillation:
 
 When `use_task_rewards=false`, the PPO/GRPO task-reward loss is zeroed and the update optimizes only the distillation loss.
 
-### Multi-teacher OPD
+### Rollout-served multi-teacher OPD
 
-Multiple teachers can be configured by adding one entry under `distillation.teacher_models` per teacher. Each teacher has a routing `key`, model path, replica count, and inference configuration.
+The following routed example applies to `teacher_execution="rollout"`.
+Configure one entry under `distillation.teacher_models` per teacher. Each
+teacher has a routing `key`, model path, replica count, and inference
+configuration.
 
 ```yaml
 distillation:
+   teacher_execution: rollout
    n_gpus_per_node: 8
    nnodes: 2
    teacher_key: data_source
@@ -550,7 +738,7 @@ node 1:                                     ...,8,9,10] [b_1: 11,12,13,14,15]
 
 Replica `b_0` spans bundles `[6, 11)` — straddling node 0 (bundles 6, 7) and node 1 (bundles 8, 9, 10). A 5-GPU replica with `n_gpus_per_node=8` is expected to fit on a single node (`ceil(5 / 8) = 1`), so `_validate_replica_node_alignment` raises. To fix it, adjust `num_replicas` and the per-teacher inference parallelism.
 
-#### Teacher routing
+#### Rollout teacher routing
 
 The `teacher_key` controls routing. It must name a top-level field on each sample's `non_tensor_batch`. `data_source` is one such field, set by the dataset loader. In the example above, `teacher_key=data_source`, so samples with `data_source="openai/gsm8k"` are routed to the `gsm8k` teacher, and samples with `data_source="hiyouga/geometry3k"` are routed to the `geo3k` teacher.
 
@@ -558,7 +746,9 @@ When routing by data source, enable data shuffling. Without shuffling, a dataset
 
 ## Metrics
 
-OPD logs metrics under `actor/distillation/*`.
+Core loss metrics are logged under `actor/distillation/*`. Trainer-colocated
+teachers additionally emit timing, routing, and engine metrics under the
+namespaces documented below.
 
 ### Core metrics
 
@@ -570,6 +760,46 @@ OPD logs metrics under `actor/distillation/*`.
 
 - `actor/distillation/loss_min` / `actor/distillation/loss_max`  
   Minimum and maximum per-token distillation loss in the batch. 
+
+### Trainer-colocated teacher metrics
+
+These metrics are emitted when `distillation.teacher_execution="trainer"`:
+
+- `timing_s/teacher_scoring`
+  Wall-clock time spent in the trainer-colocated teacher-scoring phase. It is
+  logged separately from generation in both v1 and fully-async trainers.
+
+- `distillation/teacher_route/<teacher_key>/trajectories`
+  Number of trajectories forwarded through a teacher in the step. In
+  `nonrouter` mode every teacher scores the full batch, so this is a forward
+  count, not the number of rows whose final result was selected from that
+  teacher.
+
+- `timing_s/student_gpu_to_cpu`
+  Fully-async-only timing for moving student parameters off the training GPUs
+  before teacher scoring. The parameters remain on CPU until the next actor
+  eval/train context restores them on demand.
+
+- `perf/mfu/teacher_infer/<teacher_key>`
+  Fully-async per-teacher inference MFU, when the teacher engine returns an MFU
+  measurement.
+
+- `fully_async/teacher_scoring_time`
+  Fully-async batch metadata metric for the same teacher-scoring interval. It
+  is copied into the trainer metrics by `_collect_metrics_from_samples`.
+
+- `fully_async/total_wait_time`
+  Time spent waiting for enough rollout samples to assemble the fully-async
+  training batch.
+
+For fully-async fused teachers, `timing_s/gen` excludes
+`timing_s/teacher_scoring`; the teacher duration is subtracted after the nested
+generation timer closes. This keeps `timing_s/gen` comparable to generation
+and queue-wait time in non-fused runs while preserving teacher cost as its own
+metric. The student GPU-to-CPU offload remains part of `timing_s/gen`; parameter
+restoration is charged to the next actor eval/train phase that needs the model.
+v1 requires no subtraction because its teacher-scoring timer is already outside
+the `gen` timer.
 
 ### Top-$k$ metrics
 
@@ -616,11 +846,13 @@ A useful technique for debugging modifications and additions to the distillation
 
 OPD has two components:
 
-1. **Teacher logprob computation** — runs on a dedicated teacher resource pool as part of the agent loop.
+1. **Teacher logprob computation** — either runs on a dedicated rollout
+   resource pool as part of the agent loop, or on trainer-colocated Megatron
+   engines after a training batch is assembled.
 2. **Student optimization** — runs on the train workers, the same actor workers
    that handle PPO/GRPO updates.
 
-### Teacher logprob computation
+### Rollout-served teacher logprob computation
 
 Teacher logprob computation is interleaved with rollouts inside the **Agent
 Loop**. Each sample's teacher call fires as soon as its rollout finishes (no batch-wide barrier) so teacher work overlaps with the still-running
@@ -693,6 +925,42 @@ rollouts on other samples.
     stashed on the rollout output and later concatenated into the per-batch
     `DataProto` for the student training step.
 
+### Trainer-colocated teacher logprob computation
+
+With `teacher_execution="trainer"`, teacher scoring moves out of the Agent Loop
+and into the trainer after a batch of student trajectories has been collected.
+
+1. **Worker construction.** `FusedTeacherActorRolloutRefWorker` builds one
+   frozen, forward-only `TrainingWorker` per entry in
+   `distillation.teacher_models`. All teachers share the runtime in
+   `actor_rollout_ref.teacher`.
+
+2. **Batch assembly.** Fully-async training assembles rollout samples into a
+   dense `DataProto` and balances it before teacher scoring. v1 samples a
+   `KVBatchMeta` from the replay buffer and retrieves tensors from TransferQueue
+   by the batch keys.
+
+3. **Student offload.** The actor parameters are moved to CPU while optimizer
+   placement remains unchanged. This frees the parameter and completed-step
+   gradient storage needed by the teacher forward. The parameters remain on CPU
+   until the next actor eval/train context restores them on demand.
+
+4. **All-teacher forwards.** In the current required `nonrouter` mode, every
+   teacher scores every trajectory. Each teacher's `eval_mode` loads that
+   teacher's parameters onto GPU for one batched forward and returns them to CPU
+   on exit, so only one teacher model is resident at a time.
+
+5. **Row selection.** For multiple teachers, the value in `teacher_key`
+   selects one result per row after all forwards complete. For a single teacher,
+   routing data is not required and the sole teacher result is used for every
+   row.
+
+6. **Storage and alignment.** Fully-async training attaches the selected rows
+   as a jagged `teacher_logprobs` NestedTensor only after dense batch balancing,
+   avoiding unsupported jagged advanced indexing. v1 writes
+   `teacher_logprobs` to TransferQueue under the trajectory keys; subsequent
+   `KVBatchMeta` reordering changes key order rather than indexing the jagged
+   tensor directly.
 
 ### Student training
 
@@ -748,16 +1016,35 @@ The returned scalar loss is what `engine.train_batch` backpropagates.
 - `verl/experimental/agent_loop/agent_loop.py` — `AgentLoopWorker._compute_teacher_logprobs`; per-sample teacher dispatch from `_agent_loop_postprocess`, packs `teacher_logprobs` into the rollout output
 - `verl/trainer/distillation/fsdp/losses.py` — FSDP backend `compute_forward_kl_topk`
 - `verl/trainer/distillation/megatron/losses.py` — Megatron backend `compute_forward_kl_topk`
-- `verl/workers/engine_workers.py` — `ActorRolloutRefWorker.init_model`; binds `distillation_ppo_loss` as the actor's `loss_fn` when distillation is enabled
+- `verl/workers/engine_workers.py` — binds `distillation_ppo_loss` as the actor
+  loss and defines `FusedTeacherActorRolloutRefWorker`, which constructs and
+  dispatches trainer-colocated teacher engines
+- `verl/trainer/distillation/teacher_selection.py` — shared single-/multi-teacher
+  row selection used by v1 and fully-async fused scoring
+- `verl/trainer/ppo/v1/trainer_base.py` — v1 trainer-colocated teacher scoring,
+  TransferQueue storage, timing, and post-forward row selection
+- `verl/experimental/fully_async_policy/fully_async_trainer.py` — fully-async
+  fused batch assembly, student parameter swapping, all-teacher forwards,
+  jagged output attachment, and fused timing metrics
 - `verl/workers/engine/{fsdp,megatron}/transformer_impl.py` — training-engine forward steps; invoke `distillation_ppo_loss` first as a logits processor (top-$k$ modes) and again as the final loss
-- `verl/trainer/main_ppo.py` — `is_distillation_enabled` gate; allocates the dedicated `teacher_pool` resource pool
-- `verl/trainer/ppo/ray_trainer.py` — constructs `MultiTeacherModelManager` and hands its `get_client()` dict to `AgentLoopWorker(... teacher_client=...)`
+- `verl/trainer/main_ppo.py` — `is_distillation_enabled` gate; allocates the
+  dedicated `teacher_pool` only for rollout-served teachers
+- `verl/trainer/ppo/ray_trainer.py` — rollout-served path that constructs
+  `MultiTeacherModelManager` and hands its `get_client()` dict to
+  `AgentLoopWorker(... teacher_client=...)`
 - `verl/workers/rollout/llm_server.py` — `LLMServerClient` and `GlobalRequestLoadBalancer` used for both student rollout and teacher logprob computation
 
 ### **Configuration Files**
 
 - `verl/trainer/config/distillation/distillation.yaml` — YAML defaults for the `distillation.*` config tree
 - `verl/workers/config/distillation.py` — dataclass schema (`DistillationConfig`, `DistillationLossConfig`, `DistillationTeacherModelConfig`)
+- `verl/trainer/config/ref/megatron_ref.yaml` — ref-style runtime schema reused
+  by `actor_rollout_ref.teacher`
+- `tests/special_e2e/run_v1_separate_async_opd_policy_fusenode.sh` — v1
+  fused/standalone OPD
+  launch example
+- `tests/special_e2e/run_fully_async_opd_policy_fusenode.sh` — fully-async
+  fused/standalone OPD launch example
 
 ### **Documentation**
 
