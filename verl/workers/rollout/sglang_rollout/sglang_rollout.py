@@ -18,13 +18,11 @@ from __future__ import annotations
 import logging
 import multiprocessing as mp
 import os
-from dataclasses import asdict
 from typing import Generator
 
 import ray
 import sglang.srt.entrypoints.engine
 import torch
-from peft import LoraConfig
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import (
     MultiprocessingSerializer,
@@ -44,6 +42,7 @@ from verl.workers.rollout.sglang_rollout.http_server_engine import AsyncHttpServ
 from verl.workers.rollout.sglang_rollout.utils import (
     SGLANG_LORA_NAME,
     get_named_tensor_buckets,
+    normalize_peft_config_for_sglang,
 )
 
 logger = logging.getLogger(__file__)
@@ -433,22 +432,17 @@ class ServerAdapter(BaseRollout):
         )
         await self._engine.update_weights_from_tensor(req)
 
-    def wrap_lora_params(self, peft_config: LoraConfig, weights: Generator[tuple[str, torch.Tensor]]):
+    def wrap_lora_params(self, peft_config: dict, weights: Generator[tuple[str, torch.Tensor]]):
         # peft config
-        peft_config_json = asdict(peft_config)
-        peft_config_json["task_type"] = peft_config_json["task_type"].value
-        peft_config_json["peft_type"] = peft_config_json["peft_type"].value
-        peft_config_json["target_modules"] = list(peft_config_json["target_modules"])
+        peft_config_json = normalize_peft_config_for_sglang(peft_config)
 
         # lora weights
         processed_weights: dict[str, torch.Tensor] = {
             name: _preprocess_tensor_for_update_weights(tensor.detach()) for name, tensor in weights
         }
 
-        infer_tp_size = self.device_mesh["infer_tp"].mesh.size()[0]
-        serialized_named_tensors = []
-        for i in range(infer_tp_size):
-            serialized_tensors = MultiprocessingSerializer.serialize(processed_weights, output_str=True)
-            serialized_named_tensors.append(serialized_tensors)
+        # `LoadLoRAAdapterFromTensorsReqInput.serialized_tensors` is a single `str`: SGLang's
+        # LoRA path shards the adapter across TP ranks internally, so one payload serves all.
+        serialized_named_tensors = MultiprocessingSerializer.serialize(processed_weights, output_str=True)
 
         return peft_config_json, serialized_named_tensors
