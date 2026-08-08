@@ -510,6 +510,44 @@ def index_select_tensor_dict(batch: TensorDict, indices: torch.Tensor | list[int
     return selected_batch
 
 
+def partition_tensor_dict(batch: TensorDict, partitions: list[torch.Tensor | list[int]]) -> list[TensorDict]:
+    """Select multiple row partitions from a TensorDict.
+
+    Unlike repeated :func:`index_select_tensor_dict` calls, this unbinds each
+    nested tensor only once and reuses the resulting views across partitions.
+
+    Args:
+        batch: The TensorDict to partition.
+        partitions: 1D tensors or lists of row indices, one per output batch.
+
+    Returns:
+        TensorDicts containing the selected rows in partition order.
+    """
+    normalized_partitions = [
+        torch.tensor(partition) if isinstance(partition, list) else partition for partition in partitions
+    ]
+    assert all(partition.dim() == 1 for partition in normalized_partitions), "partitions must contain 1D indices"
+    assert all(partition.numel() > 0 for partition in normalized_partitions), "partitions must be non-empty"
+    nested_tensors = {
+        key: tensor for key, tensor in batch.items() if isinstance(tensor, torch.Tensor) and tensor.is_nested
+    }
+    if len(normalized_partitions) <= 1 or not nested_tensors:
+        return [index_select_tensor_dict(batch, partition) for partition in normalized_partitions]
+
+    partition_rows = [partition if isinstance(partition, list) else partition.tolist() for partition in partitions]
+    non_nested_batch = batch.exclude(*nested_tensors)
+    selected_batches = [index_select_tensor_dict(non_nested_batch, partition) for partition in normalized_partitions]
+    for key, tensor in nested_tensors.items():
+        tensor_rows = tensor.unbind()
+        ragged_idx = getattr(tensor, "_ragged_idx", tensor.dim() - 1)
+        for selected_batch, rows in zip(selected_batches, partition_rows, strict=True):
+            selected_batch[key] = nested_tensor_from_tensor_list(
+                [tensor_rows[idx] for idx in rows], ragged_idx=ragged_idx
+            )
+    keys = list(batch.keys())
+    return [selected_batch.select(*keys) for selected_batch in selected_batches]
+
+
 def union_tensor_dict(tensor_dict1: TensorDict, tensor_dict2: TensorDict) -> TensorDict:
     """Merge two TensorDicts, adding keys from the second to the first.
 

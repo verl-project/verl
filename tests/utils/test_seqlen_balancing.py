@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest.mock import patch
+
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from verl import DataProto
+from verl.utils import tensordict_utils as tu
 from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 from verl.utils.model import create_random_mask
 from verl.utils.seqlen_balancing import (
@@ -45,6 +48,49 @@ def test_seqlen_balancing():
     reverse_idx_map = torch.tensor(reverse_idx_map)
     new_batch = batch[reverse_idx_map]
     torch.testing.assert_close(new_batch, dataproto.batch)
+
+
+def test_rearrange_micro_batches_unbinds_each_nested_field_once():
+    lengths = [8, 7, 6, 5, 4, 3]
+    input_ids = tu.nested_tensor_from_tensor_list([torch.arange(length) for length in lengths])
+    position_ids = tu.nested_tensor_from_tensor_list(
+        [torch.arange(length).expand(2, length) for length in lengths], ragged_idx=2
+    )
+    batch = tu.get_tensordict(
+        {
+            "input_ids": input_ids,
+            "position_ids": position_ids,
+            "attention_mask": torch.ones(len(lengths), max(lengths)),
+        }
+    )
+
+    original_unbind = torch.Tensor.unbind
+
+    def run_and_count_unbinds(fn):
+        unbind_calls = []
+
+        def record_unbind(tensor, *args, **kwargs):
+            unbind_calls.append(tensor)
+            return original_unbind(tensor, *args, **kwargs)
+
+        with patch.object(torch.Tensor, "unbind", new=record_unbind):
+            output = fn()
+        return output, unbind_calls
+
+    (micro_batches, partitions), optimized_unbinds = run_and_count_unbinds(
+        lambda: rearrange_micro_batches(batch, max_token_len=12)
+    )
+    _, baseline_unbinds = run_and_count_unbinds(
+        lambda: [tu.index_select_tensor_dict(batch, partition) for partition in partitions]
+    )
+
+    assert len(micro_batches) == len(partitions)
+    assert len(micro_batches) > 1
+    for tensor in (input_ids, position_ids):
+        optimized_count = sum(unbound is tensor for unbound in optimized_unbinds)
+        baseline_count = sum(unbound is tensor for unbound in baseline_unbinds)
+        assert optimized_count > 0
+        assert baseline_count == optimized_count * len(partitions)
 
 
 def test_dynamic_batch():
