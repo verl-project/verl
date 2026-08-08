@@ -19,51 +19,135 @@ from tensordict import TensorDict
 from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
+from verl.utils.device import get_device_name
 from verl.utils.metric import AggregationType, Metric
 from verl.utils.torch_functional import masked_mean, masked_sum
 from verl.workers.config import ActorConfig, CriticConfig
 from verl.workers.utils.padding import no_padding_2_padding
+from verl.workers.utils.tpu_static_packing import (
+    flatten_tpu_loss_mask,
+    select_and_pad_tpu_data,
+    unpack_tpu_packed_data,
+)
+
+
+class DummyConfig:
+    """Fallback configuration object when config is passed as None during SFT loss evaluation."""
+
+    def __init__(self):
+        self.global_batch_info = {}
+        self.loss_scale_factor = None
+        self.loss_agg_mode = "token-mean"
 
 
 def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
+    """Compute Supervised Fine-Tuning (SFT) loss for actor model.
+
+    Supports both padded (RIGHT) and packed/nested sequence representations,
+    including static sequence packing for Google TPU v6e.
+
+    Args:
+        config (ActorConfig): Configuration object for actor training.
+        model_output (dict): Model forward outputs containing 'log_probs'.
+        data (TensorDict): Data batch containing token IDs, masks, and metadata.
+        dp_group: Data parallel process group (optional).
+
+    Returns:
+        tuple[torch.Tensor, dict]: Computed SFT loss and empty metrics dict.
+    """
+    is_tpu = get_device_name() == "tpu"
+    if is_tpu:
+        # TPU: Unpack sequence data if TPU static sequence packing is enabled
+        data = unpack_tpu_packed_data(data)
+
     pad_mode = tu.get_non_tensor_data(data=data, key="pad_mode", default=DatasetPadMode.NO_PADDING)
-    dp_size = data["dp_size"]
-    batch_num_tokens = data["batch_num_tokens"]
+
+    dp_size = tu.get_non_tensor_data(data=data, key="dp_size", default=1)
+    batch_num_tokens = tu.get_non_tensor_data(data=data, key="batch_num_tokens", default=None)
 
     log_prob = model_output["log_probs"]
 
-    if pad_mode == DatasetPadMode.NO_PADDING:
+    if pad_mode in (DatasetPadMode.NO_PADDING, DatasetPadMode.TPU_BINNED_PACK, "tpu_binned_pack"):
         # log_prob and loss mask are nested tensors of shape [bsz, j1]
         # for each sample, loss mask shape is [1, prompt_length + response_length]
         loss_mask = data["loss_mask"]
 
-        log_prob_flatten = log_prob.values()
-        loss_mask_flatten = loss_mask.values()
+        if is_tpu and pad_mode in (DatasetPadMode.TPU_BINNED_PACK, "tpu_binned_pack"):
+            # TPU: flatten loss mask to align with TPU binned static packed log_probs
+            log_prob_flatten = log_prob.values()
+            loss_mask = flatten_tpu_loss_mask(loss_mask, data, log_prob_flatten)
 
-        # left-shift the loss mask by one token to align with log_prob
-        loss_mask_flatten = torch.roll(loss_mask_flatten, shifts=-1, dims=0)
+        log_prob = no_padding_2_padding(log_prob, data)
 
-        # NOTE: loss is averaged over all tokens in the batch across all data parallel groups,
-        # For FSDP backend, the loss is directly used for backward; while for Megatron backend,
-        # the loss should be scaled by `num_microbatches` for pp schedule.
-        loss = -masked_sum(log_prob_flatten, loss_mask_flatten) / batch_num_tokens * dp_size
+        # construct global batch info
+        if config is None:
+            config = DummyConfig()
+
+        config.global_batch_info["dp_size"] = dp_size
+        config.global_batch_info["batch_num_tokens"] = batch_num_tokens
+        config.global_batch_info["global_batch_size"] = data["global_batch_size"]
+        config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
+
+        mask_key = "response_mask" if "response_mask" in data.keys() else "loss_mask"
+        if is_tpu:
+            # TPU: select and pad tensors with fixed target shape to avoid dynamic shape recompilation
+            padded_dict = select_and_pad_tpu_data(data, mask_key, target_tensor=log_prob)
+            response_mask = padded_dict[mask_key].to(bool)
+        else:
+            response_mask = data[mask_key].to(bool)
+
+        # Bypass zero-sequence length empty tensor backward pass issues
+        if log_prob.shape[1] == 0:
+            log_prob = torch.zeros(
+                (log_prob.shape[0], 1), device=log_prob.device, dtype=log_prob.dtype, requires_grad=True
+            )
+            response_mask = torch.zeros((response_mask.shape[0], 1), device=response_mask.device, dtype=torch.bool)
+
+        loss = agg_loss(
+            loss_mat=-log_prob, loss_mask=response_mask, loss_agg_mode=config.loss_agg_mode, **config.global_batch_info
+        )
+    elif pad_mode == DatasetPadMode.RIGHT:
+        if "response_mask" in data.keys():
+            mask = data["response_mask"].to(bool)
+            mask[:, -1] = False
+        else:
+            mask = data["loss_mask"].to(bool)
+            mask = torch.cat([mask[:, 1:], torch.zeros_like(mask[:, :1])], dim=1)
+        loss = -masked_sum(log_prob, mask) / batch_num_tokens * dp_size
     else:
-        response_mask = data["response_mask"].to(bool)
-        loss = -masked_sum(log_prob, response_mask) / batch_num_tokens * dp_size
+        raise ValueError(f"Unsupported pad_mode: {pad_mode}")
 
     return loss, {}
 
 
 def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
-    """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data."""
+    """Compute PPO policy gradient loss, entropy bonus, and KL divergence penalty.
+
+    Args:
+        config (ActorConfig): Configuration object for actor training.
+        model_output (dict): Model forward outputs containing 'log_probs' and optional 'entropy'.
+        data (TensorDict): Data batch containing old log probs, advantages, masks, and metadata.
+        dp_group: Data parallel process group (optional).
+
+    Returns:
+        tuple[torch.Tensor, dict]: Total policy loss and metric dictionary containing policy metrics,
+            entropy loss, and KL loss tracking.
+    """
+    is_tpu = get_device_name() == "tpu"
+    if is_tpu:
+        # TPU: Unpack sequence data if TPU static sequence packing is enabled
+        data = unpack_tpu_packed_data(data)
+
     log_prob = no_padding_2_padding(model_output["log_probs"], data)
     entropy = model_output.get("entropy", None)
     if entropy is not None:
         entropy = no_padding_2_padding(entropy, data)
 
     # global batch info for loss aggregation
-    config.global_batch_info["dp_size"] = data["dp_size"]
-    config.global_batch_info["batch_num_tokens"] = data["batch_num_tokens"]
+    dp_size = tu.get_non_tensor_data(data=data, key="dp_size", default=1)
+    batch_num_tokens = tu.get_non_tensor_data(data=data, key="batch_num_tokens", default=None)
+    config.global_batch_info["dp_size"] = dp_size
+    config.global_batch_info["batch_num_tokens"] = batch_num_tokens
     config.global_batch_info["global_batch_size"] = data["global_batch_size"]
     config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
 
@@ -71,8 +155,8 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     # normalize using dp_size/global_bsz/global_token; in this case, metric aggregation should be SUM
     # to reflect the mean loss over the global batch
     if (
-        data["dp_size"] > 1
-        or data["batch_num_tokens"] is not None
+        dp_size > 1
+        or batch_num_tokens is not None
         or data["global_batch_size"] is not None
         or config.loss_scale_factor is not None
     ):
@@ -88,7 +172,12 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         fields.append("rollout_is_weights")
     if "ref_log_prob" in data:
         fields.append("ref_log_prob")
-    data = data.select(*fields).to_padded_tensor()
+
+    if is_tpu:
+        # TPU: select and pad tensors with fixed target shape to avoid dynamic shape recompilation
+        data = select_and_pad_tpu_data(data, *fields, target_tensor=log_prob)
+    else:
+        data = data.select(*fields).to_padded_tensor()
 
     response_mask = data["response_mask"].to(bool)
     # compute policy loss
@@ -139,24 +228,30 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
         policy_loss += kl_loss * config.kl_loss_coef
         metrics["kl_loss"] = Metric(value=kl_loss, aggregation=metric_aggregation)
-        metrics["kl_coef"] = config.kl_loss_coef
+        metrics["kl_coef"] = Metric(value=config.kl_loss_coef, aggregation=metric_aggregation)
 
     return policy_loss, metrics
 
 
 def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=None):
-    """value loss
+    """Compute critic value function loss with optional value clipping.
 
     Args:
-        config: CriticConfig
-        model_output: model output from the model
-        data: the input to the model
-        dp_group: data paralle group
+        config (CriticConfig): Configuration object for critic training.
+        model_output (dict): Model forward outputs containing predicted 'values'.
+        data (TensorDict): Data batch containing target returns, old values, and masks.
+        dp_group: Data parallel process group (optional).
 
     Returns:
-        value loss
+        tuple[torch.Tensor, dict]: Value function loss and metric dictionary containing vf_loss,
+            vf_clipfrac, and mean predicted values.
     """
-    vpreds = no_padding_2_padding(model_output["values"], data)  # (bsz, response_length)
+    is_tpu = get_device_name() == "tpu"
+    if is_tpu:
+        # TPU: Unpack sequence data if TPU static sequence packing is enabled
+        data = unpack_tpu_packed_data(data)
+
+    vpreds = no_padding_2_padding(model_output["values"], data)
 
     # Normalize the value loss over the global mini-batch (dp_size / batch_num_tokens /
     # global_batch_size) instead of the local micro-batch, so the accumulated critic gradient is
@@ -177,8 +272,13 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
     else:
         metric_aggregation = AggregationType.MEAN
 
-    # select fields and convert to padded tensor
-    data = data.select("values", "returns", "response_mask").to_padded_tensor()
+    if is_tpu:
+        # TPU: select and pad tensors with fixed target shape to avoid dynamic shape recompilation
+        data = select_and_pad_tpu_data(data, "values", "returns", "response_mask")
+    else:
+        # select fields and convert to padded tensor
+        data = data.select("values", "returns", "response_mask").to_padded_tensor()
+
     values = data["values"]
     returns = data["returns"]
     response_mask = data["response_mask"].to(bool)

@@ -27,6 +27,7 @@ class DatasetPadMode(str, Enum):
     RIGHT = "right"
     LEFT_RIGHT = "left_right"
     NO_PADDING = "no_padding"
+    TPU_BINNED_PACK = "tpu_binned_pack"
 
 
 class SFTTensorCollator:
@@ -40,7 +41,7 @@ class SFTTensorCollator:
         self.pad_mode = pad_mode
 
     def __call__(self, batch: list[dict[str, any]]) -> dict[str, any]:
-        if self.pad_mode == DatasetPadMode.NO_PADDING:
+        if self.pad_mode in [DatasetPadMode.NO_PADDING, DatasetPadMode.TPU_BINNED_PACK]:
             return self.collate_variable_batch(batch)
         elif self.pad_mode in [DatasetPadMode.RIGHT, DatasetPadMode.LEFT_RIGHT]:
             from torch.utils.data import default_collate
