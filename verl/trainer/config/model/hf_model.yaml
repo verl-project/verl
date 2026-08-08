@@ -66,6 +66,11 @@ fused_kernel_options:
   # the implementation backend for fused kernels.
   impl_backend: torch
 
+# whether to enable cross-step prompt KV caching for the ref model via HF native
+# past_key_values. On a cache hit the prompt's transformer layers are skipped.
+# Compatible with all attention backends. See ref_prefix_cache.py.
+use_ref_prefix_cache: False
+
 # TiledMLP configuration for memory-efficient MLP computation.
 # Reduces peak memory by processing MLP forward/backward in tiles.
 tiled_mlp:
