@@ -116,8 +116,18 @@ def get_ppo_ray_runtime_env(config=None):
         if os.environ.get(key) is not None:
             runtime_env["env_vars"].pop(key, None)
     # Always forward these at call-time, not import-time.
-    for key in ("PYTHONHASHSEED", "VERL_FULL_DETERMINISM", "VLLM_BATCH_INVARIANT", "VERL_RL_INSIGHT_ENABLE"):
-        runtime_env["env_vars"][key] = os.environ.get(key, "0")
+    for key in (
+        "PYTHONHASHSEED",
+        "VERL_FULL_DETERMINISM",
+        "VLLM_BATCH_INVARIANT",
+        "VERL_RL_INSIGHT_ENABLE",
+        # Determinism env vars that must exist before torch/NCCL init in actors.
+        "CUBLAS_WORKSPACE_CONFIG",
+        "FLASH_ATTENTION_DETERMINISTIC",
+        "NCCL_DETERMINISTIC",
+        "NCCL_ALGO",
+    ):
+        runtime_env["env_vars"][key] = os.environ.get(key, "")
     # Forward PYTHONPATH to Ray workers so packages exposed only via PYTHONPATH (e.g. the
     # Megatron-LM baked into the CI image at /workspace/Megatron-LM, which is not installed
     # into site-packages) stay importable. Workers do not inherit the driver's PYTHONPATH when

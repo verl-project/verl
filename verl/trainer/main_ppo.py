@@ -48,6 +48,26 @@ def run_ppo(config, task_runner_class) -> None:
         os.environ["VERL_FULL_DETERMINISM"] = "1"
         os.environ["VLLM_BATCH_INVARIANT"] = "1"
         os.environ["PYTHONHASHSEED"] = str(rollout_cfg.seed)
+        # These must be set BEFORE the process imports torch / inits NCCL, so we
+        # export them here and forward via runtime env. Setting them later inside
+        # enable_full_determinism() (after the actor is up) is too late for NCCL/cuBLAS.
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+        os.environ["FLASH_ATTENTION_DETERMINISTIC"] = "1"
+        os.environ["NCCL_DETERMINISTIC"] = "1"
+        os.environ["NCCL_ALGO"] = "Ring"
+
+        # V0 backend required: V1's TransferQueue collects outputs in completion order,
+        # which varies across runs and is not fixable by seeding.
+        if config.trainer.use_v1:
+            logger.warning(
+                "[full_determinism] V1 trainer (trainer.use_v1=true) is not bitwise-reproducible "
+                "(completion-order collection). Forcing trainer.use_v1=false. Set it explicitly "
+                "to silence this warning."
+            )
+            from omegaconf import OmegaConf
+
+            with OmegaConf.open_dict(config.trainer):
+                config.trainer.use_v1 = False
 
     trainer_logger = config.trainer.get("logger", [])
     if "rl_insight" in ([trainer_logger] if isinstance(trainer_logger, str) else trainer_logger or []):
