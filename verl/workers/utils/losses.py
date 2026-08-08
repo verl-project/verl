@@ -198,8 +198,8 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
 
     metrics = {
         "critic/vf_loss": Metric(value=vf_loss, aggregation=metric_aggregation),
-        "critic/vf_clipfrac": vf_clipfrac.detach().item(),
-        "critic/vpred_mean": masked_mean(vpreds, response_mask).detach().item(),
+        "critic/vf_clipfrac": vf_clipfrac.detach(),
+        "critic/vpred_mean": masked_mean(vpreds, response_mask).detach(),
     }
 
     return vf_loss, metrics

@@ -22,6 +22,7 @@ from verl.trainer.ppo.rollout_corr_helper import (
     compute_offpolicy_metrics,
     compute_rollout_correction_and_rejection_mask,
 )
+from verl.utils.metric import AggregationType, Metric, materialize_metric_tensors
 from verl.workers.config.actor import ActorConfig
 
 
@@ -92,6 +93,25 @@ class TestRolloutISIntegration:
         assert pg_loss.ndim == 0  # Scalar
         assert not torch.isnan(pg_loss)
         assert not torch.isinf(pg_loss)
+
+    def test_policy_loss_metrics_defer_host_materialization(self, sample_data, config_with_rollout_is):
+        """Policy metrics stay detached on device until the worker boundary."""
+        _, pg_metrics = compute_policy_loss_vanilla(
+            old_log_prob=sample_data["old_log_prob"],
+            log_prob=sample_data["log_prob"],
+            advantages=sample_data["advantages"],
+            response_mask=sample_data["response_mask"],
+            loss_agg_mode="token-mean",
+            config=config_with_rollout_is,
+        )
+
+        assert set(pg_metrics) == {"actor/pg_clipfrac", "actor/ppo_kl", "actor/pg_clipfrac_lower"}
+        assert all(torch.is_tensor(value) and value.ndim == 0 for value in pg_metrics.values())
+        assert all(value.grad_fn is None and torch.isfinite(value) for value in pg_metrics.values())
+
+        wrapped = Metric.from_dict(pg_metrics, aggregation=AggregationType.MEAN)
+        materialize_metric_tensors(wrapped)
+        assert all(isinstance(metric.values[0], float) for metric in wrapped.values())
 
     def test_rollout_is_weights_computation(self, sample_data):
         """Test rollout correction weights and metrics computation."""

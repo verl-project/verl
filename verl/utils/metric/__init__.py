@@ -12,6 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .utils import AggregationType, Metric, reduce_metrics
+from .utils import AggregationType, Metric, materialize_metric_tensors, reduce_metrics
 
-__all__ = ["reduce_metrics", "AggregationType", "Metric"]
+__all__ = ["reduce_metrics", "materialize_metric_tensors", "AggregationType", "Metric"]
