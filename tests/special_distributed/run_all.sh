@@ -20,3 +20,6 @@ torchrun --nproc-per-node=4 --standalone tests/special_distributed/test_torch_fu
 # Regression for verl#5995 (FSDP2 + CPUOffloadPolicy state_dict crash). Only
 # needs 2 ranks to exercise CPUOffloadPolicy sharding.
 torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp2_cpu_offload_state_dict.py
+# Regression for verl#7092 (FSDP2 must honour HF _keep_in_fp32_modules*). Two
+# ranks are enough to exercise sharded fp32 units and the full-state-dict load.
+torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp2_keep_in_fp32.py

@@ -45,6 +45,7 @@ from verl.utils.fsdp_utils import (
     FSDPModule,
     MixedPrecisionPolicy,
     apply_fsdp2,
+    cast_module_to_dtype_keeping_fp32_modules,
     collect_lora_params,
     fsdp2_clip_grad_norm_,
     fsdp2_load_full_state_dict,
@@ -311,7 +312,16 @@ class FSDPEngine(BaseEngine):
             )
 
             # some parameters may not in torch_dtype
-            module.to(torch_dtype)
+            if self.engine_config.strategy == "fsdp2":
+                # Modules that HF declares via `_keep_in_fp32_modules` /
+                # `_keep_in_fp32_modules_strict` stay in fp32: `from_pretrained`
+                # just materialised them in fp32 and a blanket cast would round
+                # them through the low-precision dtype irrecoverably (verl#7092).
+                # FSDP1 is left alone on purpose -- its flat parameters require a
+                # uniform dtype per group, so it cannot represent the result.
+                cast_module_to_dtype_keeping_fp32_modules(module, torch_dtype)
+            else:
+                module.to(torch_dtype)
 
             if self.model_config.enable_gradient_checkpointing:
                 module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
