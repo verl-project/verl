@@ -908,11 +908,19 @@ def contiguous(data: TensorDict) -> TensorDict:
 
 
 def maybe_fix_3d_position_ids(data: TensorDict):
-    # note for tensordict with pickle/unpickle. nested tensor in tensordict after consolidate and pickle/unpickle
-    # will incur indexing error for ragged tensor. This only happens when using 3D position ids in VLMs.
-    # This is likely a bug in tensordict. As a workaround, we manually set _ragged_index.
-    if "position_ids" in data.keys() and data["position_ids"].dim() == 3 and data["position_ids"].is_nested:
-        data["position_ids"]._ragged_idx = 2
+    # TensorDict pickle/unpickle can rebuild VLM position IDs with the image/MRoPE
+    # axis as jagged: [batch, j4, sequence]. Merely overwriting _ragged_idx leaves
+    # the internal values/offsets inconsistent and later makes unbind split the
+    # sequence dimension with image-axis lengths. Rebuild the NestedTensor so the
+    # variable sequence dimension is genuinely jagged: [batch, 4, jsequence].
+    if "position_ids" not in data.keys():
+        return
+
+    position_ids = data["position_ids"]
+    if position_ids.dim() != 3 or not position_ids.is_nested or getattr(position_ids, "_ragged_idx", None) == 2:
+        return
+
+    data["position_ids"] = nested_tensor_from_tensor_list(list(position_ids.unbind()), ragged_idx=2)
 
 
 def list_of_dict_to_tensordict(list_of_dicts: list[dict[str, Any]]) -> TensorDict:
