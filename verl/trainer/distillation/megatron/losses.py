@@ -284,13 +284,31 @@ def compute_forward_kl_topk(
     assert teacher_topk_log_probs.is_nested and teacher_topk_ids.is_nested
 
     # 1. split across cp groups (bsz, seqlen, topk) => (bsz, seqlen/cp_size, topk)
+    # When CP > 1, teacher and student nested tensors may have different per-sample
+    # lengths (due to padding differences), causing preprocess_bshd_engine to compute
+    # different aligned max_seqlen values. Force teacher to use the same total seqlen
+    # as student so that after CP zigzag split, local dimensions match.
+    from megatron.core import parallel_state as mpu
+
+    cp_size = mpu.get_context_parallel_world_size()
+    forced_max_seqlen = student_logits.shape[1] * cp_size
+
     if data_format == "thd":
         teacher_topk_log_probs_cp_split, *_ = preprocess_thd_engine(teacher_topk_log_probs, pre_process=True)
         teacher_topk_ids_cp_split, *_ = preprocess_thd_engine(teacher_topk_ids, pre_process=True)
     else:
-        teacher_topk_log_probs_cp_split, *_ = preprocess_bshd_engine(teacher_topk_log_probs, pre_process=True)
-        teacher_topk_ids_cp_split, *_ = preprocess_bshd_engine(teacher_topk_ids, pre_process=True)
-    assert teacher_topk_log_probs_cp_split.shape[:2] == teacher_topk_ids_cp_split.shape[:2] == student_logits.shape[:2]
+        teacher_topk_log_probs_cp_split, *_ = preprocess_bshd_engine(
+            teacher_topk_log_probs, pre_process=True, forced_max_seqlen=forced_max_seqlen
+        )
+        teacher_topk_ids_cp_split, *_ = preprocess_bshd_engine(
+            teacher_topk_ids, pre_process=True, forced_max_seqlen=forced_max_seqlen
+        )
+    assert (
+        teacher_topk_log_probs_cp_split.shape[:2] == teacher_topk_ids_cp_split.shape[:2] == student_logits.shape[:2]
+    ), (
+        f"Shape mismatch after CP split: teacher_logprobs={teacher_topk_log_probs_cp_split.shape[:2]}, "
+        f"teacher_ids={teacher_topk_ids_cp_split.shape[:2]}, student_logits={student_logits.shape[:2]}"
+    )
 
     # 2. compute token-wise KL divergence across tp groups
     distillation_loss_config: DistillationLossConfig = config.distillation_loss
