@@ -207,7 +207,7 @@ class vLLMHttpServer:
     def lora_as_adapter(self) -> bool:
         return (
             self.model_config.lora_rank > 0 or self.model_config.lora.get("rank", 0) > 0
-        ) and not self.model_config.lora.get("merge", False)
+        ) and not self.model_config.should_merge_lora
 
     async def collective_rpc(
         self,
@@ -374,7 +374,7 @@ class vLLMHttpServer:
                 self.model_config.lora_rank
             )  # FIXME: fallback to lora_rank for now, we should unify lora settings.
 
-        if self.model_config.lora.get("merge", False):
+        if self.model_config.should_merge_lora:
             lora_rank = 0
 
         if lora_rank > 0:

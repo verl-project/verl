@@ -127,6 +127,7 @@ class HFModelConfig(BaseConfig):
     target_parameters: Optional[list[str]] = None  # for lora adapter on nn.Parameter
 
     exclude_modules: Optional[str] = None
+    modules_to_save: Optional[list[str]] = None
 
     # megatron lora config
     lora: dict[str, Any] = field(default_factory=dict)
@@ -144,6 +145,11 @@ class HFModelConfig(BaseConfig):
     architectures: Optional[list[str]] = None
 
     mtp: MtpConfig = field(default_factory=MtpConfig)
+
+    @property
+    def should_merge_lora(self) -> bool:
+        """Whether rollout synchronization needs full merged model weights."""
+        return self.lora.get("merge", False) or bool(self.modules_to_save)
 
     def __post_init__(self):
         import_external_libs(self.external_lib)

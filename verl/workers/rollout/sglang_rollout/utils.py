@@ -33,13 +33,13 @@ def lora_served_as_adapter(model_config) -> bool:
     runs set ``model.lora.rank`` (dict) while fsdp runs set the flat ``model.lora_rank``,
     so both must be checked to detect that LoRA is enabled at all.
 
-    With ``model.lora.merge=True`` the trainer merges the adapter into the base weights
-    and pushes a full HF-keyed weight update (``peft_config=None``), so no adapter is ever
-    loaded into SGLang: the engine must not be launched with ``enable_lora`` and requests
-    must not carry a ``lora_path``.
+    When ``model.should_merge_lora`` is true, the trainer pushes a full HF-keyed weight
+    update (``peft_config=None``). This covers explicit ``model.lora.merge=True`` as well
+    as PEFT ``modules_to_save``, whose full-rank updates cannot be represented by LoRA
+    deltas. In either case, SGLang must not launch or generate with an adapter.
     """
     lora_enabled = model_config.lora_rank > 0 or model_config.lora.get("rank", 0) > 0
-    return lora_enabled and not model_config.lora.get("merge", False)
+    return lora_enabled and not model_config.should_merge_lora
 
 
 def broadcast_pyobj(

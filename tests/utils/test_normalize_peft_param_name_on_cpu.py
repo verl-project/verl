@@ -12,12 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import nullcontext
+from types import SimpleNamespace
+
 import pytest
 import torch
 from peft import LoraConfig, get_peft_model
-from transformers import AutoModelForCausalLM, Qwen3Config
+from peft.utils.save_and_load import get_peft_model_state_dict
+from transformers import (
+    AutoModelForCausalLM,
+    Qwen2_5_VLConfig,
+    Qwen2_5_VLForConditionalGeneration,
+    Qwen2_5_VLVisionConfig,
+    Qwen3Config,
+)
 
+import verl.workers.engine.fsdp.transformer_impl as fsdp_transformer_impl
 from verl.utils.fsdp_utils import normalize_peft_param_name
+from verl.workers.engine.fsdp.transformer_impl import FSDPEngine
 
 
 def create_base_model():
@@ -145,6 +157,121 @@ def test_normalize_peft_param_name_tensor_shapes_match(base_model, peft_model):
         base_shape = base_state_dict[key].shape
         peft_shape = normalized_peft_state_dict[key].shape
         assert base_shape == peft_shape, f"Shape mismatch for {key}: base={base_shape}, peft={peft_shape}"
+
+
+def test_normalize_peft_param_name_uses_active_modules_to_save():
+    """Test that full-weight sync uses the trainable modules_to_save copy."""
+    base_model = create_base_model()
+    lora_config = LoraConfig(
+        r=8,
+        lora_alpha=16,
+        target_modules="all-linear",
+        modules_to_save=["lm_head"],
+        lora_dropout=0.0,
+        bias="none",
+        task_type="CAUSAL_LM",
+    )
+    peft_model = get_peft_model(base_model, lora_config)
+    lm_head = peft_model.base_model.model.lm_head
+
+    with torch.no_grad():
+        lm_head.original_module.weight.zero_()
+        lm_head.modules_to_save["default"].weight.fill_(1.0)
+
+    normalized = normalize_peft_param_name(peft_model.state_dict())
+
+    assert set(normalized) == set(create_base_model().state_dict())
+    assert torch.all(normalized["lm_head.weight"] == 1.0)
+    assert not any("modules_to_save" in key or "original_module" in key for key in normalized)
+
+
+def test_fsdp_exporter_streams_active_modules_to_save(monkeypatch):
+    """Test that the merged FSDP export returns full weights without PEFT metadata."""
+    peft_model = get_peft_model(
+        create_base_model(),
+        LoraConfig(
+            r=8,
+            lora_alpha=16,
+            target_modules="all-linear",
+            modules_to_save=["lm_head"],
+            lora_dropout=0.0,
+            bias="none",
+            task_type="CAUSAL_LM",
+        ),
+    )
+    lm_head = peft_model.base_model.model.lm_head
+    with torch.no_grad():
+        lm_head.original_module.weight.zero_()
+        lm_head.modules_to_save["default"].weight.fill_(1.0)
+
+    engine = object.__new__(FSDPEngine)
+    engine.module = peft_model
+    engine.model_config = SimpleNamespace(should_merge_lora=True)
+    engine._uses_fsdp2_cpu_offload_policy = True
+    engine._is_offload_param = False
+
+    monkeypatch.setattr(fsdp_transformer_impl, "merged_lora_context", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(fsdp_transformer_impl, "get_device_id", lambda: 0)
+    monkeypatch.setattr(fsdp_transformer_impl, "log_gpu_memory_usage", lambda *_args, **_kwargs: None)
+
+    per_tensor_param, peft_config = engine.get_per_tensor_param()
+    exported = dict(per_tensor_param)
+
+    assert peft_config is None
+    assert torch.all(exported["lm_head.weight"] == 1.0)
+    assert not any("modules_to_save" in key or "original_module" in key for key in exported)
+
+
+def test_vlm_projector_modules_to_save_semantics():
+    """Test that a VLM projector is fully trainable, saved, and excluded from LoRA."""
+    vision_config = Qwen2_5_VLVisionConfig(
+        depth=1,
+        hidden_size=16,
+        intermediate_size=32,
+        num_heads=2,
+        out_hidden_size=16,
+        patch_size=14,
+        spatial_merge_size=2,
+        temporal_patch_size=2,
+    )
+    config = Qwen2_5_VLConfig(
+        vision_config=vision_config,
+        text_config={
+            "model_type": "qwen2",
+            "hidden_size": 16,
+            "intermediate_size": 32,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+            "vocab_size": 128,
+        },
+        bos_token_id=1,
+        eos_token_id=2,
+        image_token_id=3,
+        video_token_id=4,
+        vision_start_token_id=5,
+        vision_end_token_id=6,
+    )
+    base_model = Qwen2_5_VLForConditionalGeneration(config)
+    peft_model = get_peft_model(
+        base_model,
+        LoraConfig(
+            r=2,
+            target_modules="all-linear",
+            exclude_modules=".*visual.*",
+            modules_to_save=["visual.merger"],
+            task_type="CAUSAL_LM",
+        ),
+    )
+
+    trainable_names = [name for name, param in peft_model.named_parameters() if param.requires_grad]
+    trainable_projector = [name for name in trainable_names if "visual.merger" in name]
+    adapter_state = get_peft_model_state_dict(peft_model, save_embedding_layers=False)
+
+    assert trainable_projector
+    assert all("modules_to_save.default" in name for name in trainable_projector)
+    assert not any("visual" in name and "lora_" in name for name in trainable_names)
+    assert any("visual.merger" in key for key in adapter_state)
 
 
 def test_normalize_peft_param_name_empty_dict():

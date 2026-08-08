@@ -666,7 +666,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # used for LoRA (base_sync_done is unused in merge-only mode but kept for Phase 2 adapter path)
             self.base_sync_done: bool = "dummy" not in self.config.rollout.load_format
             self.layered_summon = self.config.rollout.get("layered_summon", False)
-            self.peft_merge: bool = model_config.lora.get("merge", False)
+            self.peft_merge: bool = model_config.should_merge_lora
 
         # 4. build checkpoint engine
         if "actor" in self.role:
@@ -725,9 +725,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
            - after update_weights: rollout should be in wake_up mode.
         2. For async training with disaggregated trainer and rollout, send_weights only by checkpoint engine.
 
-        LoRA handling: when model.lora.merge=True (peft_merge), LoRA is merged into
-        base weights before sync. The engine returns full HF-keyed params with
-        peft_config=None, so the rollout receives a standard weight update.
+        LoRA handling: when model.should_merge_lora is true (explicit merge or
+        modules_to_save), LoRA is merged into base weights before sync. The engine
+        returns full HF-keyed params with peft_config=None, so the rollout receives
+        a standard weight update.
 
         Args:
             global_steps: Current global training step count, passed to rollout for logging/tracking.
