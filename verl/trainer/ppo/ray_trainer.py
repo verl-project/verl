@@ -135,6 +135,21 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
+def extract_spec_decode_stats(extra_fields):
+    """Extract per-request speculative-decoding counters from a non-tensor column.
+
+    TransferQueue may return non-tensor fields as a tensordict ``LinkedList``
+    (a list subclass without ``.tolist()``), while other backends may return a
+    numpy array. Normalize both representations before reading the counters.
+    """
+    fields = extra_fields.tolist() if hasattr(extra_fields, "tolist") else list(extra_fields)
+    return (
+        [field["spec_num_draft_tokens"] for field in fields],
+        [field["spec_num_accepted_tokens"] for field in fields],
+        [field["spec_num_verify_steps"] for field in fields],
+    )
+
+
 def compute_spec_decode_metrics(
     spec_drafts,
     spec_accepts,
