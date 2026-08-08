@@ -163,7 +163,7 @@ class McoreEngineConfig(EngineConfig):
         virtual_pipeline_model_parallel_size (Optional[int]): Virtual pipeline model parallel size
             for interleaved scheduling.
         context_parallel_size (int): Context parallel size for long sequences.
-        dynamic_context_parallel (bool): Whether to enable hybrid context parallelism.
+        dynamic_context_parallel (bool): Whether to enable dynamic context parallel scheduling.
         max_seqlen_per_dp_cp_rank (Optional[int]): Maximum sequence length per DPxCP rank.
         sequence_parallel (bool): Whether to enable sequence parallelism.
         use_distributed_optimizer (bool): Whether to use distributed optimizer.
@@ -221,6 +221,14 @@ class McoreEngineConfig(EngineConfig):
                 "in a future release. Use Megatron-Bridge by setting `vanilla_mbridge=False` or removing the option.",
                 FutureWarning,
                 stacklevel=2,
+            )
+        if self.dynamic_context_parallel and (
+            not isinstance(self.max_seqlen_per_dp_cp_rank, int)
+            or isinstance(self.max_seqlen_per_dp_cp_rank, bool)
+            or self.max_seqlen_per_dp_cp_rank <= 0
+        ):
+            raise ValueError(
+                "max_seqlen_per_dp_cp_rank must be a positive integer when dynamic_context_parallel is enabled"
             )
         if self.tensor_model_parallel_size == 1:
             warnings.warn("set sequence parallel to false as TP size is 1", stacklevel=2)
