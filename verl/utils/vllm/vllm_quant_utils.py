@@ -30,6 +30,7 @@ dispatch below stays unconditional.
 
 import importlib.metadata
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -37,10 +38,14 @@ import torch
 from packaging import version
 
 try:
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
     from vllm.model_executor.layers.linear import LinearBase
 except ImportError as e:
     raise ImportError("FP8 quantization not available") from e
+
+try:
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+except ImportError:
+    FusedMoE = None
 
 from verl.utils.kernel.fp8_kernel import scaled_fp8_blockwise
 from verl.utils.vllm.vllm_fp4_utils import (
@@ -91,10 +96,12 @@ def is_fp8_model(vllm_config):
 # ``nn.Module`` class. ``FusedMoE`` is now a factory *function* that builds a
 # ``MoERunner``, and the fused expert weight tensors (``w13_weight`` /
 # ``w2_weight``) moved onto a ``RoutedExperts`` submodule owned by the runner
-# (i.e. ``experts`` -> ``experts.routed_experts``). Resolve the concrete module
-# classes once so ``isinstance`` checks keep working across vLLM versions --
-# calling ``isinstance(x, FusedMoE)`` when ``FusedMoE`` is a function raises
-# ``TypeError: isinstance() arg 2 must be a type``.
+# (i.e. ``experts`` -> ``experts.routed_experts``). vLLM 0.26.1 removed the
+# ``FusedMoE`` name entirely. Resolve the concrete module classes once so
+# ``isinstance`` checks keep working across vLLM versions -- calling
+# ``isinstance(x, FusedMoE)`` when ``FusedMoE`` is a function raises
+# ``TypeError: isinstance() arg 2 must be a type``, and ``FusedMoE`` may be
+# ``None`` when the name no longer exists.
 if isinstance(FusedMoE, type):
     # vLLM < 0.24: ``FusedMoE`` is itself the expert-weight-holding module.
     _MOE_STOP_CLASSES = (FusedMoE,)
@@ -380,9 +387,17 @@ def load_quanted_weights(weights, model_runner, is_drafter=False):
         if hasattr(param, "subclass_type"):
             param.orig_type = param.__class__
             param.__class__ = param.subclass_type
-    # Finally load the weights into vllm
+    # Finally load the weights into vllm.
+    # MTP completeness check assumes a single full-checkpoint load; in RL refit
+    # weights arrive bucketed, so disable it (like vLLM's own NCCL/IPC engines).
+    # ``nullcontext`` covers older vLLM without the guard.
     try:
-        loaded_params = model.load_weights(weights_quantized)
+        from vllm.model_executor.model_loader.mtp_validation import disable_mtp_completeness_check
+    except ImportError:
+        disable_mtp_completeness_check = nullcontext
+    try:
+        with disable_mtp_completeness_check():
+            loaded_params = model.load_weights(weights_quantized)
     finally:
         # Undo the type change above to the original type
         for name, param in model.named_parameters():
