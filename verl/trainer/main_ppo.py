@@ -19,6 +19,7 @@ import hydra
 import ray
 from omegaconf import DictConfig, OmegaConf
 
+from verl.experimental.reward_loop import migrate_legacy_reward_impl
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
@@ -173,6 +174,12 @@ def main(config):
     """
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)
+
+    # Map the deprecated top-level reward keys (custom_reward_function, reward_model,
+    # sandbox_fusion) that ppo_trainer.yaml still ships via `legacy_reward_impl` onto
+    # `config.reward.*`, which is the only location the reward loop reads. Without this
+    # a legacy config is silently ignored.
+    config = migrate_legacy_reward_impl(config)
 
     # validate config
     validate_config(
