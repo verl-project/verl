@@ -57,6 +57,24 @@ def _load_vllm_rollout_utils():
     fake_vllm = types.ModuleType("vllm")
     fake_vllm.outputs = fake_outputs
 
+    # Simulate a newer vLLM where ``BaseLayerWithLoRA`` defines ``load_weights``
+    # (delegating to ``AutoWeightsLoader(self.base_layer)`` and thus expecting
+    # inner names without ``.base_layer.``). The resolver probes this at import
+    # time via ``"load_weights" in BaseLayerWithLoRA.__dict__``, so the stub
+    # chain must be importable as ``vllm.lora.layers.base``.
+    fake_lora_base = types.ModuleType("vllm.lora.layers.base")
+
+    class _FakeBaseLayerWithLoRA:
+        def load_weights(self, weights):
+            return iter(())
+
+    fake_lora_base.BaseLayerWithLoRA = _FakeBaseLayerWithLoRA
+    fake_lora_layers = types.ModuleType("vllm.lora.layers")
+    fake_lora_layers.base = fake_lora_base
+    fake_lora = types.ModuleType("vllm.lora")
+    fake_lora.layers = fake_lora_layers
+    fake_vllm.lora = fake_lora
+
     fake_vllm_third_party = types.ModuleType("verl.third_party.vllm")
     fake_vllm_third_party.VLLM_SLEEP_LEVEL = 1
     fake_vllm_third_party.get_version = lambda pkg: "0.8.0"
@@ -93,6 +111,9 @@ def _load_vllm_rollout_utils():
     fakes = {
         "vllm": fake_vllm,
         "vllm.outputs": fake_outputs,
+        "vllm.lora": fake_lora,
+        "vllm.lora.layers": fake_lora_layers,
+        "vllm.lora.layers.base": fake_lora_base,
         "verl.third_party.vllm": fake_vllm_third_party,
         "verl.utils.vllm": fake_vllm_utils,
         "verl.utils.vllm.patch": fake_vllm_patch,
@@ -218,8 +239,10 @@ def test_vision_merger_base_layer_is_stripped():
 # ---------------------------------------------------------------------------
 
 
-def test_lora_wrapped_base_layer_is_preserved():
-    """A language proj that exists with .base_layer is returned unchanged."""
+def test_lora_wrapped_base_layer_gets_stripped():
+    """A LoRA-wrapped leaf with .base_layer is stripped: vLLM's
+    BaseLayerWithLoRA.load_weights delegates to AutoWeightsLoader(base_layer)
+    which expects the inner name (no base_layer. prefix)."""
     model = _FakeModel(
         {
             "language_model.model.layers.0.self_attn.q_proj.base_layer.weight": torch.empty(0),
@@ -228,11 +251,13 @@ def test_lora_wrapped_base_layer_is_preserved():
     worker = _make_worker(model)
 
     name = "language_model.model.layers.0.self_attn.q_proj.base_layer.weight"
-    assert _resolve(worker, model, name) == name
+    assert _resolve(worker, model, name) == ("language_model.model.layers.0.self_attn.q_proj.weight")
 
 
-def test_missing_base_layer_is_added_for_leaf():
-    """If the incoming name lacks .base_layer but the wrapped form exists, add it."""
+def test_missing_base_layer_not_added_on_newer_vllm():
+    """On newer vLLM, incoming without .base_layer is NOT suffixed --
+    BaseLayerWithLoRA.load_weights delegates to AutoWeightsLoader(base_layer)
+    expecting inner names."""
     model = _FakeModel(
         {
             "language_model.model.layers.0.self_attn.q_proj.base_layer.weight": torch.empty(0),
@@ -240,10 +265,8 @@ def test_missing_base_layer_is_added_for_leaf():
     )
     worker = _make_worker(model)
 
-    assert (
-        _resolve(worker, model, "language_model.model.layers.0.self_attn.q_proj.weight")
-        == "language_model.model.layers.0.self_attn.q_proj.base_layer.weight"
-    )
+    name = "language_model.model.layers.0.self_attn.q_proj.weight"
+    assert _resolve(worker, model, name) == name
 
 
 # ---------------------------------------------------------------------------
@@ -318,10 +341,8 @@ def test_unpacked_proj_exists_via_packed_owner():
 
 
 def test_stacked_gdn_in_proj_not_double_mapped():
-    """GDN ``in_proj_qkv`` toggles ``.base_layer`` but is NOT mapped to
-    ``in_proj_qkvz`` here — the mapper is consulted only to *decide* the toggle,
-    and the returned name stays unmapped so vLLM maps it cleanly (returning the
-    mapped name would double-map ``in_proj_qkvz`` -> ``in_proj_qkvzz``)."""
+    """GDN ``in_proj_qkv`` is NOT suffixed with ``.base_layer`` on newer vLLM --
+    the name stays unmapped so vLLM's mapper stacks it cleanly."""
     mapper = _FakeMapper({".in_proj_qkv.": ".in_proj_qkvz."})
     model = _FakeModel(
         {"language_model.model.layers.0.linear_attn.in_proj_qkvz.base_layer.weight": torch.empty(0)},
@@ -331,22 +352,18 @@ def test_stacked_gdn_in_proj_not_double_mapped():
 
     incoming = "language_model.model.layers.0.linear_attn.in_proj_qkv.weight"
     resolved = _resolve(worker, model, incoming)
-    # Toggle on the unmapped name; no qkvz stacking here.
-    assert resolved == "language_model.model.layers.0.linear_attn.in_proj_qkv.base_layer.weight"
+    # No .base_layer added on newer vLLM.
+    assert resolved == incoming
     # vLLM's mapper then maps it cleanly (single z):
     assert _mapped(_make_worker(model), model, resolved) == (
-        "language_model.model.layers.0.linear_attn.in_proj_qkvz.base_layer.weight"
+        "language_model.model.layers.0.linear_attn.in_proj_qkvz.weight"
     )
 
 
-def test_shared_expert_packed_owner_toggles_base_layer():
-    """Qwen3.5 shared expert: Bridge exports separate ``gate_proj.weight`` /
-    ``up_proj.weight``; the live LoRA-wrapped model has the packed
-    ``gate_up_proj.base_layer.weight``. The resolver toggles ``.base_layer`` on
-    the UNMAPPED ``gate_proj`` name (decided via packed_modules_mapping +
-    mapper); vLLM's mapper then stacks ``gate_proj.base_layer`` ->
-    ``gate_up_proj.base_layer``. This is the regression that crashed with
-    ``There is no module ... named 'shared_expert.gate_up_proj.weight'``."""
+def test_shared_expert_packed_owner_no_base_layer_on_newer_vllm():
+    """On newer vLLM, shared expert gate_proj.weight is NOT suffixed with
+    .base_layer -- vLLM's mapper stacks gate_proj -> gate_up_proj and
+    BaseLayerWithLoRA.load_weights handles the inner name."""
     mapper = _FakeMapper({".shared_expert.gate_proj.": ".shared_expert.gate_up_proj."})
     model = _FakeModel(
         {"language_model.model.layers.0.mlp.shared_expert.gate_up_proj.base_layer.weight": torch.empty(0)},
@@ -357,10 +374,9 @@ def test_shared_expert_packed_owner_toggles_base_layer():
 
     incoming = "language_model.model.layers.0.mlp.shared_expert.gate_proj.weight"
     resolved = _resolve(worker, model, incoming)
-    # Toggle on the unmapped name; vLLM stacks it to gate_up_proj.base_layer.
-    assert resolved == "language_model.model.layers.0.mlp.shared_expert.gate_proj.base_layer.weight"
+    assert resolved == incoming
     assert _mapped(_make_worker(model), model, resolved) == (
-        "language_model.model.layers.0.mlp.shared_expert.gate_up_proj.base_layer.weight"
+        "language_model.model.layers.0.mlp.shared_expert.gate_up_proj.weight"
     )
 
 
@@ -396,13 +412,12 @@ def test_already_matching_name_is_noop():
     )
 
 
-def test_truly_unknown_name_falls_back_unchanged():
-    """When nothing matches (on a LoRA-wrapped model), return the original so
-    vLLM raises a clear error."""
+def test_truly_unknown_name_strips_base_layer():
+    """Even unknown names have ``.base_layer.`` stripped on newer vLLM."""
     model = _FakeModel({"a.base_layer.weight": torch.empty(0)})
     worker = _make_worker(model)
 
-    assert _resolve(worker, model, "does.not.exist.base_layer.weight") == "does.not.exist.base_layer.weight"
+    assert _resolve(worker, model, "does.not.exist.base_layer.weight") == "does.not.exist.weight"
 
 
 def test_drafter_drops_base_layer_wholesale():
@@ -439,7 +454,7 @@ def test_update_weights_resolves_names_before_load():
 
     assert model.loaded == [
         "merger.linear_fc1.weight",
-        "language_model.model.layers.0.self_attn.q_proj.base_layer.weight",
+        "language_model.model.layers.0.self_attn.q_proj.weight",
     ]
 
 

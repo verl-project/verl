@@ -41,6 +41,15 @@ VLLM_LORA_PATH = "simon_lora_path"
 
 VLLM_ASCEND_REQUIRED_ENV_VARS = {"VLLM_ALL2ALL_BACKEND": "flashinfer_all2allv", "VLLM_ASCEND_ENABLE_NZ": "0"}
 
+_HAS_LORA_LOAD_WEIGHTS = False
+
+try:
+    from vllm.lora.layers.base import BaseLayerWithLoRA
+
+    _HAS_LORA_LOAD_WEIGHTS = "load_weights" in BaseLayerWithLoRA.__dict__
+except ImportError:
+    pass
+
 
 def _resolve_vllm_weight_sync_local_rank(worker_local_rank: int, parallel_config: Any) -> int:
     worker_local_rank = int(worker_local_rank)
@@ -211,10 +220,9 @@ class vLLMColocateWorkerExtension:
         the stacking -- returning a mapped name would double-map, e.g.
         ``in_proj_qkvz`` -> ``in_proj_qkvzz``, corrupting shard_id).
         """
-        # Auxiliary models (e.g. the MTP drafter) are never LoRA-wrapped, so they
-        # have no ``.base_layer`` params at all; drop the suffix wholesale (their
-        # name prefix differs from the main model, so per-name probing won't hit).
-        if ".base_layer." in name and not any(".base_layer." in n for n in model_weight_names):
+        # Strip ``.base_layer.``: vLLM's BaseLayerWithLoRA.load_weights delegates
+        # to AutoWeightsLoader(base_layer) expecting inner names (no base_layer.).
+        if ".base_layer." in name:
             return name.replace(".base_layer.", ".")
 
         mapper = getattr(model, "hf_to_vllm_mapper", None)
@@ -268,15 +276,15 @@ class vLLMColocateWorkerExtension:
             if _exists(stripped):
                 return stripped
 
-        # Leaf weight/bias: toggle one ``.base_layer`` segment.
+        # Leaf weight/bias: on vLLM versions without BaseLayerWithLoRA.load_weights),
+        # add ``.base_layer.`` so AutoWeightsLoader recurses into the base_layer
+        # child; on newer vLLM, the strip above already handled it.
         if is_leaf:
-            if ".base_layer." in name:
-                alt = name.replace(".base_layer.", ".", 1)
-            else:
+            if not _HAS_LORA_LOAD_WEIGHTS and ".base_layer." not in name:
                 prefix, lf = name.rsplit(".", 1)
                 alt = f"{prefix}.base_layer.{lf}"
-            if alt != name and _exists(alt):
-                return alt
+                if alt != name and _exists(alt):
+                    return alt
 
         return name
 
