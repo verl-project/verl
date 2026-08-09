@@ -173,7 +173,7 @@ RUN CUDA_TARGET=$(uname -m | sed 's/aarch64/sbsa-linux/;s/x86_64/x86_64-linux/')
 
 RUN git clone https://github.com/Dao-AILab/fast-hadamard-transform.git fast-hadamard-transform && \
     cd fast-hadamard-transform && \
-    pip install -v -no-build-isolation .
+    pip install -v --no-build-isolation .
 
 RUN pip install git+https://github.com/verl-project/verl.git@${VERL_VERSION} && pip uninstall -y verl
 
