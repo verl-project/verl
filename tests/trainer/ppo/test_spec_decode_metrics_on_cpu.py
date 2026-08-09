@@ -17,7 +17,31 @@ import pytest
 
 pytest.importorskip("ray")
 
-from verl.trainer.ppo.ray_trainer import compute_spec_decode_metrics
+from verl.trainer.ppo.ray_trainer import compute_spec_decode_metrics, extract_spec_decode_stats
+
+
+class _FakeLinkedList(list):
+    """Stand-in for the tensordict LinkedList returned by TransferQueue."""
+
+
+def test_extract_spec_decode_stats_accepts_linked_list():
+    extra_fields = _FakeLinkedList(
+        [
+            {
+                "spec_num_draft_tokens": 16,
+                "spec_num_accepted_tokens": 7,
+                "spec_num_verify_steps": 2,
+            },
+            {
+                "spec_num_draft_tokens": 32,
+                "spec_num_accepted_tokens": 13,
+                "spec_num_verify_steps": 4,
+            },
+        ]
+    )
+
+    assert not hasattr(extra_fields, "tolist")
+    assert extract_spec_decode_stats(extra_fields) == ([16, 32], [7, 13], [2, 4])
 
 
 def test_spec_decode_metrics_detect_drafts_with_zero_acceptance():
