@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import dataclasses
+import inspect
 import logging
 import math
 import os
@@ -32,9 +32,11 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 ContextParallelLayout = Literal["zigzag", "contiguous"]
 
 # Older Megatron-core releases have no ``cp_partition_mode`` field on PackedSeqParams; they
-# support only the zigzag CP layout.
-_PACKED_SEQ_PARAMS_HAS_CP_PARTITION_MODE = any(
-    f.name == "cp_partition_mode" for f in dataclasses.fields(PackedSeqParams)
+# support only the zigzag CP layout. Inspect ``__init__`` rather than dataclass fields so that
+# duck-typed replacements (e.g. test stubs taking ``**kwargs``) also count as supporting it.
+_PACKED_SEQ_PARAMS_INIT_PARAMS = inspect.signature(PackedSeqParams.__init__).parameters
+_PACKED_SEQ_PARAMS_HAS_CP_PARTITION_MODE = "cp_partition_mode" in _PACKED_SEQ_PARAMS_INIT_PARAMS or any(
+    p.kind is inspect.Parameter.VAR_KEYWORD for p in _PACKED_SEQ_PARAMS_INIT_PARAMS.values()
 )
 
 
