@@ -20,7 +20,7 @@ export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:Tr
 
 ############################### configs ################################
 
-MODEL_PATH=$HDFS_ROOT/model/DeepSeek-V4-Flash
+MODEL_PATH=${MODEL_PATH:-$HDFS_ROOT/model/DeepSeek-V4-Flash}
 NNODES=${NNODES:-8}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 
@@ -70,8 +70,8 @@ PROJECT_NAME=${PROJECT_NAME:-wuxibin_dapo}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-deepseek_v4_flash_grpo_vllm_megatron}
 CKPTS_DIR=${CKPTS_DIR:-"${HOME}/verl/ckpts/${PROJECT_NAME}/${EXPERIMENT_NAME}"}
 
-TRAIN_FILE=$DATA_ROOT/dataset/BytedTsinghua-SIA/DAPO-Math-17k/data/dapo-math-17k.parquet
-TEST_FILE=$DATA_ROOT/dataset/aime25_test.parquet
+TRAIN_FILE=${TRAIN_FILE:-$DATA_ROOT/dataset/BytedTsinghua-SIA/DAPO-Math-17k/data/dapo-math-17k.parquet}
+TEST_FILE=${TEST_FILE:-$DATA_ROOT/dataset/aime25_test.parquet}
 OVERLONG_BUFFER_LEN=${OVERLONG_BUFFER_LEN:-${MAX_RESPONSE_LENGTH}}
 OVERLONG_BUFFER_ENABLE=${OVERLONG_BUFFER_ENABLE:-False}
 OVERLONG_PENALTY_FACTOR=${OVERLONG_PENALTY_FACTOR:-1.0}

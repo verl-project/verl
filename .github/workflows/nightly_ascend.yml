@@ -259,6 +259,11 @@ jobs:
           cd ..
           export HCCL_OP_EXPANSION_MODE="AIV"
           bash tests/special_npu/nightly_ci_ascend/run_dapo_moonlight-16b_megatron_npu.sh
+      - name: Running nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend checking script
+        run: |
+          cd /root/.cache/nightly_log/
+          python check_npu.py --log run_dapo_moonlight-16b_megatron_npu/run_dapo_moonlight-16b_megatron_npu.log --base run_dapo_moonlight-16b_megatron_npu/baseline_dapo_moonlight-16b_megatron_npu.txt
+
 
   # Test gspo qwen3-30b megatron vllm
   nightlyCI_gspo-qwen3-30b-megatron-vllm_ascend:
@@ -356,6 +361,10 @@ jobs:
         run: |
           ray stop --force
           bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_30b_megatron_sglang_npu.sh
+      - name: Running nightlyCI_gspo-qwen3-30b-megatron-vllm_ascend checking script
+        run: |
+          cd /root/.cache/nightly_log/
+          python check_npu.py --log run_grpo_qwen3_30b_megatron_sglang_npu/run_grpo_qwen3_30b_megatron_sglang_npu.log --base run_grpo_qwen3_30b_megatron_sglang_npu/baseline_grpo_qwen3_30b_megatron_sglang_npu.txt
   
     # Test grpo qwen3_5_2b fsdp2 vllm
   nightlyCI_grpo_qwen3_5_2b_fsdp2_vllm_ascend:
@@ -646,6 +655,10 @@ jobs:
         run: |
           ray stop --force
           bash tests/special_npu/nightly_ci_ascend/run_gspo_qwen3_8b_fsdp2_npu.sh
+      - name: Running nightlyCI_grpo-qwen3-8b-fsdp2-vllm_ascend checking script
+        run: |
+          cd /root/.cache/nightly_log/
+          python check_npu.py --log run_gspo_qwen3_8b_fsdp2_npu/run_gspo_qwen3_8b_fsdp2_npu.log --base run_gspo_qwen3_8b_fsdp2_npu/baseline_gspo_qwen3_8b_fsdp2_npu.txt
 
   # Test grpo qwen33.5-35b megatron vllm
   # nightlyCI_grpo-qwen3_5-35b-megatron-vllm_ascend:

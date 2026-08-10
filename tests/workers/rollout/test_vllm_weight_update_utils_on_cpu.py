@@ -71,6 +71,7 @@ def _load_vllm_rollout_utils():
 
     fake_vllm_utils.TensorLoRARequest = _FakeTensorLoRARequest
     fake_vllm_utils.VLLMHijack = _FakeVLLMHijack
+    fake_vllm_utils.resolve_weight_name = lambda model, name, names: name
 
     fake_vllm_patch = types.ModuleType("verl.utils.vllm.patch")
     fake_vllm_patch.patch_vllm_moe_model_weight_loader = lambda model: None
