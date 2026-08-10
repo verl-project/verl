@@ -178,6 +178,49 @@ def test_preprocess_thd_engine_pads_to_minimum_rows(monkeypatch):
     torch.testing.assert_close(local_positions[0, 100:], torch.zeros(28, dtype=torch.long))
 
 
+@pytest.mark.parametrize("cp_rank", [0, 1])
+def test_preprocess_thd_engine_pads_multidimensional_router_data(monkeypatch, cp_rank):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(
+        monkeypatch,
+        tp_size=1,
+        cp_size=2,
+        cp_rank=cp_rank,
+    )
+    route = torch.arange(48 * 8, dtype=torch.long).reshape(1, 48, 8)
+    routed_experts = _nested_tensor([route])
+
+    local_routes, packed_seq_params, _ = mcore_util.preprocess_thd_engine(routed_experts)
+
+    expected = torch.zeros((2, 48, 8), dtype=torch.long)
+    if cp_rank == 0:
+        expected[0] = route[0]
+    assert local_routes.shape == (1, 2, 48, 8)
+    assert packed_seq_params.cu_seqlens_q_padded.tolist() == [0, 4]
+    torch.testing.assert_close(local_routes[0], expected)
+
+
+@pytest.mark.parametrize(
+    ("cp_rank", "expected"),
+    [
+        (0, [2, 3, 1, 1]),
+        (1, [4, 5, 6, 7]),
+    ],
+)
+def test_preprocess_thd_engine_preserves_1d_zigzag_roll_alignment(monkeypatch, cp_rank, expected):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(
+        monkeypatch,
+        tp_size=1,
+        cp_size=2,
+        cp_rank=cp_rank,
+    )
+    labels = _nested_tensor([torch.arange(1, 8, dtype=torch.long)])
+
+    local_labels, packed_seq_params, _ = mcore_util.preprocess_thd_engine(labels, need_roll=True)
+
+    assert packed_seq_params.cu_seqlens_q_padded.tolist() == [0, 8]
+    torch.testing.assert_close(local_labels[0], torch.tensor(expected, dtype=torch.long))
+
+
 @pytest.mark.parametrize(
     ("cp_rank", "expected_ids", "expected_positions"),
     [
@@ -319,6 +362,8 @@ def test_preprocess_thd_engine_builds_global_sequence_indices_with_context_paral
 
     assert local_ids.shape == (1, 6)
     assert packed_seq_params.cu_seqlens_q_padded.tolist() == [0, 4, 12]
+    assert packed_seq_params.total_tokens == 12
+    assert packed_seq_params.cp_partition_mode == "zigzag"
     torch.testing.assert_close(
         local_ids,
         torch.tensor([[11, 14, 21, 22, 27, 28]], dtype=torch.long),

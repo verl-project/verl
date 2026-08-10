@@ -54,9 +54,14 @@ actor_rollout_ref:
       causal_conv1d_implementation: eager
       chunk_gated_delta_rule_implementation: eager
       load_balancing_loss_implementation: eager
+      dsa_indexer_implementation: eager
+      dsa_attention_implementation: eager
+      mhc_implementation: eager
       force_use_huggingface: false
       activation_gpu_limit: 0.0
       basic_modules: []
+      pad_to_length: ${oc.select:actor_rollout_ref.actor.pad_to_length,False}
+      pad_to_length_bucket: 1024
       router_replay:
         _target_: verl.workers.config.EngineRouterReplayConfig
         mode: disabled
@@ -82,6 +87,7 @@ actor_rollout_ref:
       clip_cov_ub: 5.0
       kl_cov_ratio: 0.0002
       ppo_kl_coef: 0.1
+      dro_beta: null
     clip_ratio_c: 3.0
     loss_agg_mode: token-mean
     loss_scale_factor: null
@@ -160,6 +166,7 @@ actor_rollout_ref:
       activation_observer: static_minmax
       quantization_config_path: null
     use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
+    pad_to_length: false
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: veomni
@@ -243,13 +250,19 @@ actor_rollout_ref:
       causal_conv1d_implementation: eager
       chunk_gated_delta_rule_implementation: eager
       load_balancing_loss_implementation: ${oc.select:actor_rollout_ref.actor.veomni.load_balancing_loss_implementation,eager}
+      dsa_indexer_implementation: eager
+      dsa_attention_implementation: eager
+      mhc_implementation: eager
       force_use_huggingface: false
       activation_gpu_limit: 0.0
       basic_modules: []
+      pad_to_length: ${oc.select:actor_rollout_ref.ref.pad_to_length,False}
+      pad_to_length_bucket: ${oc.select:actor_rollout_ref.actor.veomni.pad_to_length_bucket,1024}
       router_replay:
         _target_: verl.workers.config.EngineRouterReplayConfig
         mode: disabled
     _target_: verl.workers.config.VeOmniActorConfig
+    pad_to_length: ${oc.select:actor_rollout_ref.actor.pad_to_length,False}
   rollout:
     _target_: verl.workers.config.RolloutConfig
     name: ???
@@ -275,7 +288,7 @@ actor_rollout_ref:
     pipeline_model_parallel_size: 1
     max_num_batched_tokens: 8192
     max_model_len: null
-    max_num_seqs: 1024
+    max_num_seqs: 256
     enable_chunked_prefill: true
     enable_prefix_caching: true
     logprobs_mode: processed_logprobs
@@ -541,9 +554,14 @@ critic:
     causal_conv1d_implementation: eager
     chunk_gated_delta_rule_implementation: eager
     load_balancing_loss_implementation: eager
+    dsa_indexer_implementation: eager
+    dsa_attention_implementation: eager
+    mhc_implementation: eager
     force_use_huggingface: false
     activation_gpu_limit: 0.0
     basic_modules: []
+    pad_to_length: false
+    pad_to_length_bucket: 1024
     router_replay:
       _target_: verl.workers.config.EngineRouterReplayConfig
       mode: disabled

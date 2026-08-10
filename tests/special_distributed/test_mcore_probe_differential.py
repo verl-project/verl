@@ -42,13 +42,15 @@ sys.path.insert(0, os.environ.get("VERL_PATH", "/home/changyi/verl_ab_pre"))
 
 MODEL_KIND = os.environ.get("MODEL_KIND", "qwen2")
 TP = int(os.environ.get("TP_SIZE", "2"))
+PP = int(os.environ.get("PP_SIZE", "1"))
+EP = int(os.environ.get("EP_SIZE", "1"))
 
 
 def _build_tiny_hf_dir(rank: int) -> str:
     from transformers import AutoConfig
 
-    cfg_dir = f"/tmp/tiny_{MODEL_KIND}_probe_diff_v2"
-    if MODEL_KIND == "qwen2":
+    cfg_dir = f"/tmp/tiny_{MODEL_KIND}_probe_diff_v4"
+    if MODEL_KIND in ("qwen2", "qwen2_tied"):
         hf_config = AutoConfig.for_model(
             "qwen2",
             hidden_size=64,
@@ -58,7 +60,7 @@ def _build_tiny_hf_dir(rank: int) -> str:
             num_key_value_heads=2,
             vocab_size=512,
             max_position_embeddings=256,
-            tie_word_embeddings=False,
+            tie_word_embeddings=(MODEL_KIND == "qwen2_tied"),
         )
         hf_config.architectures = ["Qwen2ForCausalLM"]
     elif MODEL_KIND == "qwen3_moe":
@@ -152,8 +154,137 @@ def _build_tiny_hf_dir(rank: int) -> str:
         m = AutoModelForCausalLM.from_config(hf_config).to(torch.bfloat16)
         m.save_pretrained(cfg_dir, safe_serialization=True)
         del m
+        if MODEL_KIND in ("nemotron_h", "falcon_h1"):
+            # newer transformers' serialization rename table emits
+            # "backbone.embedding.weight" (singular) while the bridge mappings
+            # (and the RELEASED checkpoints) use "backbone.embeddings.weight".
+            # Normalize the stray key so the tiny checkpoint matches the
+            # released format the bridge expects.
+            from safetensors.torch import load_file, save_file
+
+            f = str(pathlib.Path(cfg_dir, "model.safetensors"))
+            sd = load_file(f)
+            fixed = {k.replace("backbone.embedding.", "backbone.embeddings."): v for k, v in sd.items()}
+            if fixed.keys() != sd.keys():
+                save_file(fixed, f, metadata={"format": "pt"})
     dist.barrier()
     return cfg_dir
+
+
+def _pp_differential(bridge, model, rank: int, world: int) -> None:
+    """PP>1 differential: run the PRODUCTION export path (global directory +
+    slot pre-seed + probe entries, a full-delta sync where every local element
+    is 'changed') and compare the merged wire-view against
+    ``bridge.export_hf_weights`` -- the bridge's own PP-broadcast full export,
+    an independent chain. Bitwise, per HF tensor, with directory-lockstep and
+    placeholder-row checks on the way."""
+    from verl.workers.engine.megatron.delta_export import build_export_index, mcore_hf_delta_entry
+
+    slot_cache: dict = {}
+    index = build_export_index(bridge, model, slot_cache)
+
+    # 1. directory lockstep: same ROW COUNT everywhere (mcore expert param
+    # NAMES legitimately differ per ep rank -- the row is the unit).
+    names = [r.megatron_name for r in index]
+    all_names: list = [None] * world
+    dist.all_gather_object(all_names, names)
+    failures = []
+    if rank == 0 and any(len(n) != len(names) for n in all_names):
+        failures.append(f"directory row counts diverge: {[len(n) for n in all_names]}")
+
+    # 1b. per-row slot-table identity: the batched gather merges BY SLOT
+    # POSITION within a row and rank 0 names merged pieces from its own list,
+    # so the row's table must be identical on every rank (the ep_size>1
+    # collision this oracle now guards).
+    row_tables = [r.slots for r in index]
+    all_tables: list = [None] * world
+    dist.all_gather_object(all_tables, row_tables)
+    if rank == 0:
+        for r_i, tbls in enumerate(all_tables):
+            bad = [k for k in range(len(row_tables)) if tbls[k] != row_tables[k]][:3]
+            if bad:
+                failures.append(f"row slot tables diverge on rank {r_i} (rows {bad})")
+                break
+
+    # 2. entries: owned params ship a full delta (every local element), rows
+    # owned by other stages must come back as zero-count lockstep entries.
+    mine: dict = {}  # slot name -> (shape, positions int64 cpu, values bf16 cpu)
+    for rec in index:
+        if rec.param is None:
+            e_idx = torch.empty(0, dtype=torch.int64, device="cuda")
+            e_val = torch.empty(0, dtype=torch.bfloat16, device="cuda")
+            slots, _dt, counts, hf_idx, _hf_val = mcore_hf_delta_entry(rec, 0, e_idx, e_val, slot_cache)
+            if int(counts.sum()) != 0 or hf_idx.numel() != 0:
+                failures.append(f"{rec.megatron_name}: placeholder row shipped a non-empty delta")
+            continue
+        if not rec.param.is_floating_point():
+            continue
+        local = rec.param.data.to(torch.bfloat16).reshape(-1)
+        lidx = torch.arange(local.numel(), dtype=torch.int64, device=local.device)
+        slots, _dt, counts, hf_idx, hf_val = mcore_hf_delta_entry(rec, 0, lidx, local, slot_cache)
+        off = 0
+        for (sname, sshape), c in zip(slots, counts.tolist(), strict=True):
+            if c:
+                pos = hf_idx[off : off + c].to(torch.int64).cpu()
+                val = hf_val[off : off + c].cpu()
+                off += c
+                prev = mine.get(sname)
+                if prev is None:
+                    mine[sname] = (tuple(sshape), pos, val)
+                else:
+                    mine[sname] = (tuple(sshape), torch.cat([prev[1], pos]), torch.cat([prev[2], val]))
+
+    # 3. independent reference: the bridge's own full export (PP broadcasts
+    # inside; full tensors on every rank).
+    exported = bridge.export_hf_weights(model, cpu=True, show_progress=False)
+    ref = {name: t.detach().to(torch.bfloat16).cpu() for name, t in exported}
+
+    all_pieces: list = [None] * world
+    dist.all_gather_object(all_pieces, mine)
+    n_checked = n_pass = 0
+    if rank == 0:
+        slot_names = {k for d in all_pieces for k in d}
+        missing_ref = sorted(set(ref) - slot_names)
+        if missing_ref:
+            more = max(0, len(missing_ref) - 5)
+            failures.append(f"HF tensors never covered by any entry: {missing_ref[:5]} (+{more})")
+        for sname in sorted(slot_names):
+            if sname not in ref:
+                failures.append(f"entry slot {sname} absent from bridge export")
+                continue
+            full = ref[sname]
+            merged = torch.full_like(full, float("nan"))
+            covered = torch.zeros(full.numel(), dtype=torch.int32)
+            mflat = merged.view(-1)
+            for d in all_pieces:
+                got = d.get(sname)
+                if got is None:
+                    continue
+                sshape, pos, val = got
+                if tuple(sshape) != tuple(full.shape):
+                    failures.append(f"{sname}: slot shape {sshape} != export shape {tuple(full.shape)}")
+                    continue
+                both = covered[pos] > 0
+                if both.any() and not torch.equal(mflat[pos[both]].view(torch.int16), val[both].view(torch.int16)):
+                    failures.append(f"{sname}: conflicting rank contributions")
+                mflat[pos] = val
+                covered[pos] += 1
+            n_checked += 1
+            if torch.isnan(mflat).any():
+                failures.append(f"{sname}: uncovered positions remain NaN")
+            elif not torch.equal(mflat.view(torch.int16), full.view(-1).view(torch.int16)):
+                failures.append(f"{sname}: bitwise mismatch")
+            else:
+                n_pass += 1
+        print("=" * 60)
+        for f in failures[:20]:
+            print("FAIL:", f)
+        print(f"PROBE DIFFERENTIAL [{MODEL_KIND} tp={TP} pp={PP}]: {n_pass}/{n_checked} bitwise-equal")
+        print("PROBE DIFFERENTIAL PASSED" if (n_checked > 0 and not failures) else "PROBE DIFFERENTIAL FAILED")
+    dist.barrier()
+    dist.destroy_process_group()
+    if rank == 0 and (failures or n_checked == 0):
+        sys.exit(1)
 
 
 def main():
@@ -164,7 +295,12 @@ def main():
 
     from megatron.core import parallel_state as mpu
 
-    mpu.initialize_model_parallel(tensor_model_parallel_size=TP, pipeline_model_parallel_size=1)
+    mpu.initialize_model_parallel(
+        tensor_model_parallel_size=TP,
+        pipeline_model_parallel_size=PP,
+        expert_model_parallel_size=EP,
+        expert_tensor_parallel_size=1 if EP > 1 else None,
+    )
     from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 
     model_parallel_cuda_manual_seed(1234)
@@ -176,7 +312,10 @@ def main():
     bridge = AutoBridge.from_hf_pretrained(cfg_dir, trust_remote_code=True)
     provider = bridge.to_megatron_provider(load_weights=False)
     provider.tensor_model_parallel_size = TP
-    provider.pipeline_model_parallel_size = 1
+    provider.pipeline_model_parallel_size = PP
+    if EP > 1:
+        provider.expert_model_parallel_size = EP
+        provider.expert_tensor_parallel_size = 1
     provider.bf16 = True
     provider.params_dtype = torch.bfloat16
     provider.finalize()
@@ -186,6 +325,10 @@ def main():
     # (layernorms, routers) must be bit-identical across TP ranks or the
     # differential would flag test artifacts instead of probe bugs.
     bridge.load_hf_weights(model)
+
+    if PP > 1 or EP > 1 or os.environ.get("ENGINE_DIFF"):
+        _pp_differential(bridge, model, rank, world)
+        return
 
     from verl.workers.engine.megatron.delta_export import make_probe
 

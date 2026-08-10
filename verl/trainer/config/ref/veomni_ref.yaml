@@ -12,6 +12,9 @@ _target_: verl.workers.config.VeOmniActorConfig
 
 strategy: veomni
 
+# pad every packed micro-batch to a fixed token count, following the actor unless overridden
+pad_to_length: ${oc.select:actor_rollout_ref.actor.pad_to_length,False}
+
 veomni:
   seed: ${oc.select:actor_rollout_ref.actor.veomni.seed,42}
   fsdp_size: ${oc.select:actor_rollout_ref.actor.veomni.fsdp_size,-1}
@@ -25,5 +28,7 @@ veomni:
   swiglu_mlp_implementation: ${oc.select:actor_rollout_ref.actor.veomni.swiglu_mlp_implementation,eager}
   rotary_pos_emb_implementation: ${oc.select:actor_rollout_ref.actor.veomni.rotary_pos_emb_implementation,eager}
   load_balancing_loss_implementation: ${oc.select:actor_rollout_ref.actor.veomni.load_balancing_loss_implementation,eager}
+  pad_to_length: ${oc.select:actor_rollout_ref.ref.pad_to_length,False}
+  pad_to_length_bucket: ${oc.select:actor_rollout_ref.actor.veomni.pad_to_length_bucket,1024}
   forward_only: True
 

@@ -43,6 +43,8 @@ actor_rollout_ref:
       entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_chunk_size,2048}
       use_torch_compile: true
       entropy_checkpointing: ${oc.select:actor_rollout_ref.actor.entropy_checkpointing,False}
+      pad_to_length: ${oc.select:actor_rollout_ref.actor.pad_to_length,False}
+      pad_to_length_bucket: 1024
       forward_only: false
       strategy: fsdp
       dtype: bfloat16
@@ -79,6 +81,7 @@ actor_rollout_ref:
       clip_cov_ub: 5.0
       kl_cov_ratio: 0.0002
       ppo_kl_coef: 0.1
+      dro_beta: null
     clip_ratio_c: 3.0
     loss_agg_mode: token-mean
     loss_scale_factor: null
@@ -161,6 +164,7 @@ actor_rollout_ref:
     entropy_from_logits_with_chunking: false
     entropy_from_logits_chunk_size: 2048
     entropy_checkpointing: false
+    pad_to_length: false
     use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
@@ -232,6 +236,8 @@ actor_rollout_ref:
       entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.ref.entropy_from_logits_chunk_size,2048}
       use_torch_compile: true
       entropy_checkpointing: ${oc.select:actor_rollout_ref.ref.entropy_checkpointing,False}
+      pad_to_length: ${oc.select:actor_rollout_ref.ref.pad_to_length,False}
+      pad_to_length_bucket: ${oc.select:actor_rollout_ref.actor.fsdp_config.pad_to_length_bucket,1024}
       forward_only: true
       strategy: fsdp
       dtype: bfloat16
@@ -251,6 +257,7 @@ actor_rollout_ref:
     entropy_from_logits_with_chunking: false
     entropy_from_logits_chunk_size: 2048
     entropy_checkpointing: false
+    pad_to_length: ${oc.select:actor_rollout_ref.actor.pad_to_length,False}
   rollout:
     _target_: verl.workers.config.RolloutConfig
     name: ???
@@ -276,7 +283,7 @@ actor_rollout_ref:
     pipeline_model_parallel_size: 1
     max_num_batched_tokens: 8192
     max_model_len: null
-    max_num_seqs: 1024
+    max_num_seqs: 256
     enable_chunked_prefill: true
     enable_prefix_caching: true
     logprobs_mode: processed_logprobs
@@ -531,6 +538,8 @@ critic:
     entropy_from_logits_chunk_size: 2048
     use_torch_compile: true
     entropy_checkpointing: false
+    pad_to_length: false
+    pad_to_length_bucket: 1024
     forward_only: false
     strategy: fsdp
     dtype: bfloat16

@@ -50,7 +50,7 @@ from verl.utils.megatron.tensor_parallel import (
     vocab_parallel_log_probs_from_logits,
     vocab_parallel_sum_pi_squared,
 )
-from verl.utils.megatron_peft_utils import add_base_layer_suffix, build_peft_config_for_vllm
+from verl.utils.megatron_peft_utils import build_peft_config_for_vllm
 from verl.utils.megatron_utils import (
     check_mtp_config,
     get_megatron_module_device,
@@ -855,10 +855,6 @@ class MegatronEngine(BaseEngine):
                 if non_merge_lora_sync
                 else self.bridge.export_hf_weights(self.module)
             )
-            if non_merge_lora_sync:
-                per_tensor_param = add_base_layer_suffix(
-                    per_tensor_param, model_type=self.model_config.hf_config.model_type
-                )
 
         # QAT: process weights through QATWeightExporter for quantized weight sync to vLLM
         if self._qat_enabled:
@@ -881,22 +877,27 @@ class MegatronEngine(BaseEngine):
                 "the deprecated vanilla mbridge flavor is not supported"
             )
             assert self.peft_cls is None, "megatron delta_sharded does not support LoRA"
-            index = build_export_index(self.bridge, self.module)
+            self._delta_slot_cache: dict = {}
+            index = build_export_index(self.bridge, self.module, self._delta_slot_cache)
             self._delta_export_index = index
             self._delta_export_by_name = {rec.megatron_name: rec for rec in index}
-            self._delta_slot_cache: dict = {}
         return index
 
     def get_per_tensor_param_shard(self, **kwargs):
         """Yield each rank's *local* mcore shard ``(name, local_flat_bf16,
         ShardSpec)`` -- the spec carries only the wire merge group (the
         comm-stubbed probe owns all shard geometry). Pure export, no side
-        effects. TP+EP only (PP=1 asserted in the index builder)."""
+        effects. Params owned by another pipeline stage yield an empty shard
+        (zero-count lockstep rows; see the index builder)."""
         load_megatron_model_to_gpu(self.module, load_grad=False)
         index = self._mcore_export_index()
 
         def _gen():
+            empty = torch.empty(0, dtype=torch.bfloat16, device=get_device_id())
             for rec in index:
+                if rec.param is None:
+                    yield rec.megatron_name, empty, rec.spec
+                    continue
                 local = rec.param.data
                 if local.is_floating_point() and local.dtype != torch.bfloat16:
                     local = local.to(torch.bfloat16)

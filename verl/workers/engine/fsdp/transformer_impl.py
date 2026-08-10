@@ -62,6 +62,7 @@ from verl.utils.fsdp_utils import (
 )
 from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
 from verl.utils.py_functional import convert_to_regular_types
+from verl.utils.seqlen_balancing import ceildiv
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import (
     gather_outputs_and_unpad,
@@ -74,7 +75,7 @@ from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig, HFModelCo
 from verl.workers.utils.padding import build_attention_mask_from_nested
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
-from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
+from ..utils import enable_full_determinism, pad_packed_inputs, postprocess_batch_func, prepare_micro_batches
 from .utils import create_device_mesh, get_sharding_strategy, unfuse_moe_params
 
 logger = logging.getLogger(__file__)
@@ -165,6 +166,9 @@ class FSDPEngine(BaseEngine):
             if self.engine_config.use_torch_compile  #  use torch compile by default
             else entropy_from_logits
         )
+
+        self.pad_to_length: bool = self.engine_config.pad_to_length
+        self.pad_to_length_bucket: int = self.engine_config.pad_to_length_bucket
 
     @property
     def is_param_offload_enabled(self) -> bool:
@@ -640,6 +644,31 @@ class FSDPEngine(BaseEngine):
     def get_context_parallel_group(self):
         raise NotImplementedError
 
+    def _get_packed_pad_size(self, packed_length: int) -> int:
+        """Right-padding that rounds a packed micro-batch up to the next bucket boundary.
+
+        ``rearrange_micro_batches`` derives the *number* of micro-batches from the token budget but
+        chooses their *contents* to balance attention workload (Σ seqlen²), so a micro-batch's token
+        count is neither constant nor bounded by that budget. Bucketing therefore beats padding to
+        the budget itself, which would leave every over-budget micro-batch fully dynamic while
+        making every under-budget one pay a full-budget forward.
+        """
+        if not self.pad_to_length:
+            return 0
+        bucket = self.pad_to_length_bucket
+        return ceildiv(packed_length, bucket) * bucket - packed_length
+
+    def _gather_and_unpad_packed(self, tensor: torch.Tensor, pad_size: int) -> torch.Tensor:
+        """Strip what ``prepare_model_inputs`` appended to the packed sequence.
+
+        Under Ulysses SP the per-rank shards are all-gathered back into the global packed
+        sequence first. ``pad_size`` covers both the SP-alignment pad and the static pad from
+        :meth:`_get_packed_pad_size`; both sit at the tail of the global sequence.
+        """
+        if self.use_ulysses_sp:
+            return gather_outputs_and_unpad(tensor, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+        return tensor[:-pad_size] if pad_size else tensor
+
     @contextmanager
     def _gradient_sync_context(self, *, is_last_micro_batch: bool):
         """Skip FSDP gradient communication on non-final accumulation steps.
@@ -1086,6 +1115,16 @@ class EngineTrainModeCtx(BaseEngineCtx):
 @EngineRegistry.register(model_type="language_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
 class FSDPEngineWithLMHead(FSDPEngine):
     def prepare_model_inputs(self, micro_batch: TensorDict):
+        if self.pad_to_length and tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False):
+            # Every top-K path re-derives the teacher tensors' layout from the *unpadded* packed
+            # length and slices them with the Ulysses rule only, which does not know about the
+            # static pad, so teacher and student token streams would silently misalign.
+            raise RuntimeError(
+                "pad_to_length is not supported with top-K distillation: the teacher tensors are "
+                "sliced with the Ulysses pad rule, which does not know about the static pad. "
+                "Disable pad_to_length for distillation runs."
+            )
+
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
@@ -1132,6 +1171,18 @@ class FSDPEngineWithLMHead(FSDPEngine):
             # for compute the log_prob
             input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=1)  # (1, total_nnz)
 
+            # Optional bucket-aligned packed length. This has to happen after the roll (which must
+            # see the true global sequence) and before the SP split, so the pad stays a suffix of
+            # the *global* packed sequence -- that is what prepare_model_outputs strips back off
+            # after the all-gather.
+            static_pad_size = self._get_packed_pad_size(input_ids_rmpad.size(-1))
+            if static_pad_size:
+                input_ids_rmpad, position_ids_rmpad = pad_packed_inputs(
+                    input_ids_rmpad, position_ids_rmpad, static_pad_size
+                )
+                input_ids_rmpad_rolled, _ = pad_packed_inputs(input_ids_rmpad_rolled, None, static_pad_size)
+                temperature_rmpad, _ = pad_packed_inputs(temperature_rmpad, None, static_pad_size, pad_value=1)
+
             # pad and slice the inputs if sp > 1
             sp_pad_size = 0
             is_vlm_model = False
@@ -1161,8 +1212,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     temperature_rmpad, position_ids_rmpad=None, sp_size=self.ulysses_sequence_parallel_size, pad_value=1
                 )
 
-                output_args["pad_size"] = pad_size
                 sp_pad_size = pad_size
+
+            # Total right-padding on the global packed sequence.
+            output_args["pad_size"] = static_pad_size + sp_pad_size
 
             input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)  # ((total_nnz / sp) + pad)
             temperature_rmpad = temperature_rmpad.squeeze(0)
@@ -1178,8 +1231,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
             }
             if packed_cu_seqlens is not None and pass_packed_cu_seqlens:
                 model_cu_seqlens = packed_cu_seqlens
-                if self.use_ulysses_sp and sp_pad_size:
-                    padded_total = int(model_cu_seqlens[-1].item()) + int(sp_pad_size)
+                if output_args["pad_size"]:
+                    padded_total = int(model_cu_seqlens[-1].item()) + int(output_args["pad_size"])
                     model_cu_seqlens = torch.cat(
                         [
                             model_cu_seqlens,
@@ -1289,9 +1342,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         cu_seqlens = input_ids.offsets()
                         for field_name in ("distillation_losses", "student_mass", "teacher_mass"):
                             v = getattr(aux_outputs, field_name).squeeze(0)
-                            if self.use_ulysses_sp:
-                                pad_size = output_args["pad_size"]
-                                v = gather_outputs_and_unpad(v, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+                            v = self._gather_and_unpad_packed(v, output_args["pad_size"])
                             model_output[field_name] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
             else:
                 logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
@@ -1328,9 +1379,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         assert v.shape == (logits_rmpad.shape[0],), (
                             f"logits_rmpad len: {logits_rmpad.shape[0]}, {k} shape: {v.shape}"
                         )
-                        if self.use_ulysses_sp:
-                            pad_size = output_args["pad_size"]
-                            v = gather_outputs_and_unpad(v, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+                        v = self._gather_and_unpad_packed(v, output_args["pad_size"])
                         model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
 
                 if not distillation_only:
@@ -1344,32 +1393,14 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         inplace_backward=inplace_backward,
                     )
 
-            # gather log_prob if sp > 1
-            if self.use_ulysses_sp:
-                pad_size = output_args["pad_size"]
-
-                # gather and unpad for the ulysses sp
-                if not distillation_only:
-                    log_probs = gather_outputs_and_unpad(
-                        log_probs,
-                        gather_dim=0,
-                        unpad_dim=0,
-                        padding_size=pad_size,
-                    )
-                if calculate_entropy:
-                    entropy_rmpad = gather_outputs_and_unpad(
-                        entropy_rmpad,
-                        gather_dim=0,
-                        unpad_dim=0,
-                        padding_size=pad_size,
-                    )
-                if calculate_sum_pi_squared:
-                    sum_pi_squared_rmpad = gather_outputs_and_unpad(
-                        sum_pi_squared_rmpad,
-                        gather_dim=0,
-                        unpad_dim=0,
-                        padding_size=pad_size,
-                    )
+            # gather across the ulysses sp group and drop the packed-sequence padding
+            pad_size = output_args["pad_size"]
+            if not distillation_only:
+                log_probs = self._gather_and_unpad_packed(log_probs, pad_size)
+            if calculate_entropy:
+                entropy_rmpad = self._gather_and_unpad_packed(entropy_rmpad, pad_size)
+            if calculate_sum_pi_squared:
+                sum_pi_squared_rmpad = self._gather_and_unpad_packed(sum_pi_squared_rmpad, pad_size)
 
             if pad_mode == DatasetPadMode.NO_PADDING:
                 cu_seqlens = input_ids.offsets()
@@ -1550,10 +1581,8 @@ class FSDPEngineWithValueHead(FSDPEngineWithLMHead):
                 # so we squeeze the last dimension here to get the value for each token
                 values_rmpad = values_rmpad.squeeze(-1)
 
-            # gather output if sp > 1
-            if self.use_ulysses_sp:
-                pad_size = output_args["pad_size"]
-                values_rmpad = gather_outputs_and_unpad(values_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+            # gather across the ulysses sp group and drop the packed-sequence padding
+            values_rmpad = self._gather_and_unpad_packed(values_rmpad, output_args["pad_size"])
 
             if pad_mode == DatasetPadMode.NO_PADDING:
                 cu_seqlens = input_ids.offsets()

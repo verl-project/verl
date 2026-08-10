@@ -938,6 +938,11 @@ class AgentLoopWorker:
                 mm_token_type_ids[0][input_ids[0] == video_token_id] = 2
             multi_modal_kwargs["mm_token_type_ids"] = mm_token_type_ids
 
+        # Allow model-specific processors to contribute additional RoPE inputs.
+        get_rope_index_kwargs = getattr(self.processor, "get_rope_index_kwargs", None)
+        if get_rope_index_kwargs is not None:
+            multi_modal_kwargs.update(get_rope_index_kwargs(multi_modal_inputs))
+
         # Model's get_rope_index has been dynamically bind to the processor.
         vision_position_ids, _ = self.processor.get_rope_index(
             input_ids=input_ids,

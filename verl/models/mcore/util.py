@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import logging
 import math
 import os
@@ -29,6 +30,14 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 ContextParallelLayout = Literal["zigzag", "contiguous"]
+
+# Older Megatron-core releases have no ``cp_partition_mode`` field on PackedSeqParams; they
+# support only the zigzag CP layout. Inspect ``__init__`` rather than dataclass fields so that
+# duck-typed replacements (e.g. test stubs taking ``**kwargs``) also count as supporting it.
+_PACKED_SEQ_PARAMS_INIT_PARAMS = inspect.signature(PackedSeqParams.__init__).parameters
+_PACKED_SEQ_PARAMS_HAS_CP_PARTITION_MODE = "cp_partition_mode" in _PACKED_SEQ_PARAMS_INIT_PARAMS or any(
+    p.kind is inspect.Parameter.VAR_KEYWORD for p in _PACKED_SEQ_PARAMS_INIT_PARAMS.values()
+)
 
 
 def _compute_fp8_thd_align_size(align_size: int) -> tuple[int, int]:
@@ -455,12 +464,12 @@ def preprocess_thd_engine(
             # alignment size, pad the tensor with zeros so that its total
             # length matches `align_size`. This ensures size alignment for
             # downstream operations (e.g., communication or memory alignment).
-            if d.numel() < align_size:
-                original_size = d.numel()
-                pad = torch.zeros(align_size - d.numel(), dtype=d.dtype, device=d.device)
+            if d.shape[0] < align_size:
+                pad_shape = (align_size - d.shape[0], *d.shape[1:])
+                pad = torch.zeros(pad_shape, dtype=d.dtype, device=d.device)
                 d = torch.cat([d, pad], dim=0)
                 logger.warning_once(
-                    f"Padding tensor for context parallel alignment, original_size={original_size}, "
+                    f"Padding tensor for context parallel alignment, original_size={d.shape[0]}, "
                     f"align_size={align_size}"
                 )
 
@@ -515,6 +524,18 @@ def preprocess_thd_engine(
 
     if include_total_tokens:
         extra_packed_args["total_tokens"] = total_tokens
+
+    if _PACKED_SEQ_PARAMS_HAS_CP_PARTITION_MODE:
+        # Tell the attention kernels how the rows above were sharded across CP ranks. The rows
+        # are already split according to `cp_layout`, but PackedSeqParams defaults to "zigzag",
+        # so without this an attention variant that requires a contiguous split (DeepSeek-V4)
+        # raises "DSv4 THD CP requires a contiguous CP partition." on every forward.
+        extra_packed_args["cp_partition_mode"] = cp_layout
+    elif cp_layout != "zigzag" and cp_size > 1:
+        raise ValueError(
+            f"cp_layout='{cp_layout}' requires PackedSeqParams.cp_partition_mode, which this "
+            "Megatron-core version does not provide. Upgrade Megatron-core or use the zigzag layout."
+        )
 
     packed_seq_params = PackedSeqParams(
         qkv_format="thd",

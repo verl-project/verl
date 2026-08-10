@@ -1,5 +1,5 @@
 # Pull base image
-FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.0.0-910b-ubuntu22.04-py3.11
+FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.1.0-910b-ubuntu22.04-py3.12
 
 ARG SOC_VERSION="ascend910b1"
 
@@ -19,8 +19,8 @@ RUN ARCH=$(uname -m) && \
         pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"; \
     fi && \
     # Clone libs
-    git clone --depth 1 --branch v0.18.0 https://github.com/vllm-project/vllm.git && \
-    git clone -b releases/v0.18.0 https://github.com/vllm-project/vllm-ascend.git && \
+    git clone --depth 1 --branch v0.23.0 https://github.com/vllm-project/vllm.git && \
+    git clone -b releases/v0.23.0 https://github.com/vllm-project/vllm-ascend.git && \
     git clone https://gitcode.com/Ascend/MindSpeed.git && \
     cd MindSpeed && git checkout core_r0.16.0 && cd .. && \
     git clone --depth 1 --branch core_r0.16.0 https://github.com/NVIDIA/Megatron-LM.git && \
@@ -34,18 +34,18 @@ RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && 
     ARCH=$(uname -m) && \
     # Export and source env
     if [ "$ARCH" = "aarch64" ]; then \
-        export LD_LIBRARY_PATH=/usr/local/Ascend/cann-9.0.0/aarch64-linux/devlib/linux/aarch64:$LD_LIBRARY_PATH; \
+        export LD_LIBRARY_PATH=/usr/local/Ascend/cann-9.1.0/aarch64-linux/devlib/linux/aarch64:$LD_LIBRARY_PATH; \
     elif [ "$ARCH" = "x86_64" ]; then \
-        export LD_LIBRARY_PATH=/usr/local/Ascend/cann-9.0.0/x86_64-linux/devlib/linux/x86_64/:$LD_LIBRARY_PATH; \
+        export LD_LIBRARY_PATH=/usr/local/Ascend/cann-9.1.0/x86_64-linux/devlib/linux/x86_64/:$LD_LIBRARY_PATH; \
     fi && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     # Install vllm
-    cd vllm && pip install -r requirements/build.txt && \
+    cd vllm && \
     VLLM_TARGET_DEVICE=empty pip install -v -e. && cd .. && \
     if [ "$ARCH" = "x86_64" ]; then \
-        pip install torch==2.9.0+cpu --index-url https://download.pytorch.org/whl/cpu/; \
-        pip install torchvision==0.24.0+cpu --index-url https://download.pytorch.org/whl/cpu/; \
+        pip install torch==2.10.0+cpu --index-url https://download.pytorch.org/whl/cpu/; \
+        pip install torchvision==0.25.0+cpu --index-url https://download.pytorch.org/whl/cpu/; \
     fi && \
     # Install vllm-ascend
     cd vllm-ascend && pip install -r requirements.txt && \
@@ -71,7 +71,7 @@ RUN MBRIDGE_PATH=$(pip show mbridge | grep Location | awk '{print $2}') && \
 
 # Prepare and install verl (update frequently)
 RUN git clone --recursive https://github.com/verl-project/verl.git && \
-    cd verl && pip install -r requirements-npu.txt && pip install -v -e . && cd .. && \
+    cd verl && pip install -r requirements-npu.txt && pip install -v -e . --no-deps && cd .. && \
     # Clear extra files
     rm -rf /tmp/* /var/tmp/* && \
     pip cache purge
