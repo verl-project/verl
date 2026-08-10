@@ -463,3 +463,94 @@ class TestEdgeCases:
 
         engine.get_per_tensor_param.assert_called_once_with(layered_summon=False, base_sync_done=True)
         assert rollout.update_weights.call_args.kwargs["base_sync_done"] is True
+
+
+# ---------------------------------------------------------------------------
+# Regression test for issue #7289: multi-iteration LoRA adapter cycle
+# ---------------------------------------------------------------------------
+
+
+class TestLoraAdapterMultiIterationCycle:
+    """Regression test for https://github.com/verl-project/verl/issues/7289.
+
+    The bug: on the second weight sync, resume(tags=["weights"]) is called
+    but release() only freed kv_cache (because sleep_level=1 was set during
+    the first sync). This causes a KeyError in SGLang because weights were
+    never released.
+
+    The fix: skip weight resume when sleep_level=1.
+    """
+
+    def test_second_iteration_does_not_resume_weights(self):
+        """Simulate two full sync cycles in adapter mode.
+
+        First cycle: sleep_level not set yet, so weights are resumed (OK).
+        Second cycle: sleep_level=1 from first cycle, weights NOT released
+        by release(), so resume must skip weights.
+        """
+        peft_cfg = MagicMock()
+        rollout, engine = _make_mocks(
+            peft_config=peft_cfg,
+            params_by_base_sync_done={False: "base_params", True: "adapter_params"},
+        )
+
+        # --- First iteration (base_sync_done=False) ---
+        asyncio.run(
+            _update_weights(
+                rollout=rollout,
+                actor_engine=engine,
+                peft_merge=False,
+                base_sync_done=False,
+                free_cache_engine=True,
+            )
+        )
+        # After first iteration, sleep_level must be 1
+        assert rollout.sleep_level == 1
+        # First iteration should resume weights (they were released at level 2)
+        first_resume_calls = rollout.resume.call_args_list
+        assert call(tags=["weights"]) in first_resume_calls
+
+        # --- Reset mock call history ---
+        rollout.reset_mock()
+
+        # --- Second iteration (base_sync_done=True, sleep_level already 1) ---
+        asyncio.run(
+            _update_weights(
+                rollout=rollout,
+                actor_engine=engine,
+                peft_merge=False,
+                base_sync_done=True,
+                free_cache_engine=True,
+            )
+        )
+        # Second iteration must NOT resume weights (they were never released)
+        second_resume_calls = rollout.resume.call_args_list
+        assert call(tags=["weights"]) not in second_resume_calls
+        # But kv_cache resume should still happen
+        assert call(tags=["kv_cache"]) in second_resume_calls
+
+    def test_three_iterations_stay_consistent(self):
+        """Three consecutive iterations: only the first one resumes weights."""
+        peft_cfg = MagicMock()
+        rollout, engine = _make_mocks(
+            peft_config=peft_cfg,
+            params_by_base_sync_done={False: "base_params", True: "adapter_params"},
+        )
+
+        for i in range(3):
+            rollout.reset_mock()
+            asyncio.run(
+                _update_weights(
+                    rollout=rollout,
+                    actor_engine=engine,
+                    peft_merge=False,
+                    base_sync_done=(i > 0),
+                    free_cache_engine=True,
+                )
+            )
+            resume_calls = rollout.resume.call_args_list
+            if i == 0:
+                assert call(tags=["weights"]) in resume_calls, f"Iteration {i}: should resume weights"
+            else:
+                assert call(tags=["weights"]) not in resume_calls, f"Iteration {i}: should NOT resume weights"
+            assert call(tags=["kv_cache"]) in resume_calls, f"Iteration {i}: should always resume kv_cache"

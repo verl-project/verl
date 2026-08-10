@@ -762,8 +762,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         log_gpu_memory_usage("Before resume weights", logger=logger)
 
         # 1. resume rollout memory (weights were released during sleep)
+        # When sleep_level=1 (LoRA adapter mode), release() only frees
+        # kv_cache and keeps base weights on GPU, so we must not try to
+        # resume weights that were never released.
         if self.config.rollout.free_cache_engine:
-            await self.rollout.resume(tags=["weights"])
+            if getattr(self.rollout, "sleep_level", 2) != 1:
+                await self.rollout.resume(tags=["weights"])
         log_gpu_memory_usage("After resume weights", logger=logger)
 
         # 2. determine if we need a base weight sync (adapter path only)
