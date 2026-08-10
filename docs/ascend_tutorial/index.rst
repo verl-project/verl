@@ -32,6 +32,7 @@ Last updated: 06/05/2026.
    model_support/examples/gspo_optimization_practice
    model_support/examples/multi-machine_task_startup_practice
    model_support/examples/qwen3_5_megatron_npu
+   model_support/examples/sapo_megatron_npu
 
 .. toctree::
    :maxdepth: 1
