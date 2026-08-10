@@ -26,9 +26,11 @@ NDEVICES_PER_NODE=${NDEVICES_PER_NODE:-}
 TAU_POS=${TAU_POS:-1.0}
 TAU_NEG=${TAU_NEG:-1.05}
 
-# Megatron parallelism. EP is not bounded by DP; the constraint is
-# EP * ETP == world_size (with PP=CP=1). Larger EP spreads the 128 experts over
-# more ranks, which is the main lever on expert memory.
+# Megatron parallelism. world must be divisible by EP*ETP*PP; the data-parallel
+# and expert-data-parallel sizes are *derived* by megatron's mpu from world_size
+# (dp = world/(TP*PP*CP), edp = world/(EP*ETP*PP)) and are never set here.
+# edp diverges from dp only when PP==1. Larger EP spreads the 128 experts over
+# more ranks, the main lever on expert memory.
 TP=${TP:-4}
 PP=${PP:-1}
 CP=${CP:-1}
