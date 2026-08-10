@@ -129,11 +129,51 @@ class SFTTrainer:
         if task_type is None:
             task_type = "CAUSAL_LM"
 
-        return {
+        raw_use_rslora = self.config.model.get("use_rslora", None)
+        use_rslora = (
+            bool(raw_use_rslora) if raw_use_rslora is not None else (False if lora_adapter_path is None else None)
+        )
+        target_parameters = self.config.model.get("target_parameters", None)
+        alpha_pattern = self.config.model.get("alpha_pattern", None)
+        rank_pattern = self.config.model.get("rank_pattern", None)
+        if lora_adapter_path is not None:
+            import json
+
+            from verl.utils.fs import copy_to_local
+
+            try:
+                local_adapter_path = copy_to_local(
+                    lora_adapter_path, use_shm=bool(self.config.model.get("use_shm", False))
+                )
+                adapter_cfg_path = os.path.join(local_adapter_path, "adapter_config.json")
+                if os.path.isfile(adapter_cfg_path):
+                    with open(adapter_cfg_path, encoding="utf-8") as f:
+                        adapter_cfg = json.load(f)
+                    if "use_rslora" in adapter_cfg:
+                        use_rslora = bool(adapter_cfg["use_rslora"])
+                    if not target_parameters and adapter_cfg.get("target_parameters"):
+                        target_parameters = list(adapter_cfg["target_parameters"])
+                    if not alpha_pattern and adapter_cfg.get("alpha_pattern"):
+                        alpha_pattern = dict(adapter_cfg["alpha_pattern"])
+                    if not rank_pattern and adapter_cfg.get("rank_pattern"):
+                        rank_pattern = dict(adapter_cfg["rank_pattern"])
+            except Exception:
+                pass
+
+        meta = {
             "r": lora_rank,
             "lora_alpha": int(lora_alpha or 0),
             "task_type": str(task_type),
         }
+        if use_rslora is not None:
+            meta["use_rslora"] = use_rslora
+        if target_parameters:
+            meta["target_parameters"] = [str(p) for p in target_parameters]
+        if alpha_pattern:
+            meta["alpha_pattern"] = {str(k): v for k, v in dict(alpha_pattern).items()}
+        if rank_pattern:
+            meta["rank_pattern"] = {str(k): int(v) for k, v in dict(rank_pattern).items()}
+        return meta
 
     def _build_config(self):
         from verl.utils.config import omega_conf_to_dataclass

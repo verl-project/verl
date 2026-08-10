@@ -209,7 +209,22 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         if hasattr(task_type, "value"):
             task_type = task_type.value
 
-        return {"r": lora_rank, "lora_alpha": lora_alpha, "task_type": str(task_type)}
+        meta = {
+            "r": lora_rank,
+            "lora_alpha": lora_alpha,
+            "task_type": str(task_type),
+            "use_rslora": bool(getattr(peft_config, "use_rslora", False)),
+        }
+        target_parameters = getattr(peft_config, "target_parameters", None)
+        if target_parameters:
+            meta["target_parameters"] = [str(p) for p in target_parameters]
+        alpha_pattern = getattr(peft_config, "alpha_pattern", None)
+        if alpha_pattern:
+            meta["alpha_pattern"] = {str(k): v for k, v in dict(alpha_pattern).items()}
+        rank_pattern = getattr(peft_config, "rank_pattern", None)
+        if rank_pattern:
+            meta["rank_pattern"] = {str(k): int(v) for k, v in dict(rank_pattern).items()}
+        return meta
 
     def _save_lora_train_meta(self, local_path: str, unwrap_model):
         lora_train_meta = self._get_lora_train_meta(unwrap_model)
