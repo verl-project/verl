@@ -220,11 +220,6 @@ class vLLMColocateWorkerExtension:
         the stacking -- returning a mapped name would double-map, e.g.
         ``in_proj_qkvz`` -> ``in_proj_qkvzz``, corrupting shard_id).
         """
-        # Strip ``.base_layer.``: vLLM's BaseLayerWithLoRA.load_weights delegates
-        # to AutoWeightsLoader(base_layer) expecting inner names (no base_layer.).
-        if ".base_layer." in name:
-            return name.replace(".base_layer.", ".")
-
         mapper = getattr(model, "hf_to_vllm_mapper", None)
         packed = getattr(model, "packed_modules_mapping", None) or {}
         leaf = name.rsplit(".", 1)[-1]
@@ -238,20 +233,34 @@ class vLLMColocateWorkerExtension:
                 mapped = mapped[0] if mapped else candidate
                 if mapped != candidate and mapped in model_weight_names:
                     return True
-                # Packed-owner lookup (q/k/v -> qkv) via packed_modules_mapping.
-                if packed and "." in candidate:
-                    parts = candidate.split(".")
-                    mi = -3 if len(parts) >= 3 and parts[-2] == "base_layer" else -2
-                    if -mi <= len(parts):
-                        rev = {u: p for p, us in packed.items() for u in us}
-                        for pn in rev.get(parts[mi], ()):
-                            pp = parts.copy()
-                            pp[mi] = pn
-                            mp = mapper.apply_list([".".join(pp)])
-                            mp = mp[0] if mp else ".".join(pp)
+            # Packed-owner lookup (q/k/v -> qkv) via packed_modules_mapping.
+            # Hoisted out of the mapper guard so models with
+            # packed_modules_mapping but no hf_to_vllm_mapper (e.g. Llama) also
+            # reach it.
+            if packed and "." in candidate:
+                parts = candidate.split(".")
+                mi = -3 if len(parts) >= 3 and parts[-2] == "base_layer" else -2
+                if -mi <= len(parts):
+                    # packed is {owner: [unpacked,...]}; invert to {unpacked: owner}.
+                    rev = {u: p for p, us in packed.items() for u in us}
+                    owner = rev.get(parts[mi])
+                    for pn in (owner,) if owner else ():
+                        pp = parts.copy()
+                        pp[mi] = pn
+                        joined = ".".join(pp)
+                        if joined in model_weight_names:
+                            return True
+                        if mapper is not None:
+                            mp = mapper.apply_list([joined])
+                            mp = mp[0] if mp else joined
                             if mp != candidate and mp in model_weight_names:
                                 return True
             return False
+
+        if ".base_layer." in name:
+            model_has_base_layer = any(".base_layer." in n for n in model_weight_names)
+            if not model_has_base_layer or _HAS_LORA_LOAD_WEIGHTS:
+                return name.replace(".base_layer.", ".", 1)
 
         if _exists(name):
             return name

@@ -57,16 +57,15 @@ def _load_vllm_rollout_utils():
     fake_vllm = types.ModuleType("vllm")
     fake_vllm.outputs = fake_outputs
 
-    # Simulate a newer vLLM where ``BaseLayerWithLoRA`` defines ``load_weights``
-    # (delegating to ``AutoWeightsLoader(self.base_layer)`` and thus expecting
-    # inner names without ``.base_layer.``). The resolver probes this at import
-    # time via ``"load_weights" in BaseLayerWithLoRA.__dict__``, so the stub
-    # chain must be importable as ``vllm.lora.layers.base``.
+    # Stub ``vllm.lora.layers.base.BaseLayerWithLoRA`` WITHOUT ``load_weights`` --
+    # the module-level probe (``"load_weights" in BaseLayerWithLoRA.__dict__``)
+    # then falls to False, matching released vLLM. Tests that exercise the
+    # newer-vLLM path monkeypatch ``_HAS_LORA_LOAD_WEIGHTS`` so both branches
+    # are covered.
     fake_lora_base = types.ModuleType("vllm.lora.layers.base")
 
     class _FakeBaseLayerWithLoRA:
-        def load_weights(self, weights):
-            return iter(())
+        pass
 
     fake_lora_base.BaseLayerWithLoRA = _FakeBaseLayerWithLoRA
     fake_lora_layers = types.ModuleType("vllm.lora.layers")
@@ -239,10 +238,11 @@ def test_vision_merger_base_layer_is_stripped():
 # ---------------------------------------------------------------------------
 
 
-def test_lora_wrapped_base_layer_gets_stripped():
+def test_lora_wrapped_base_layer_gets_stripped(monkeypatch):
     """A LoRA-wrapped leaf with .base_layer is stripped: vLLM's
     BaseLayerWithLoRA.load_weights delegates to AutoWeightsLoader(base_layer)
     which expects the inner name (no base_layer. prefix)."""
+    monkeypatch.setattr(_vllm_rollout_utils, "_HAS_LORA_LOAD_WEIGHTS", True)
     model = _FakeModel(
         {
             "language_model.model.layers.0.self_attn.q_proj.base_layer.weight": torch.empty(0),
@@ -254,10 +254,11 @@ def test_lora_wrapped_base_layer_gets_stripped():
     assert _resolve(worker, model, name) == ("language_model.model.layers.0.self_attn.q_proj.weight")
 
 
-def test_missing_base_layer_not_added_on_newer_vllm():
+def test_missing_base_layer_not_added_on_newer_vllm(monkeypatch):
     """On newer vLLM, incoming without .base_layer is NOT suffixed --
     BaseLayerWithLoRA.load_weights delegates to AutoWeightsLoader(base_layer)
     expecting inner names."""
+    monkeypatch.setattr(_vllm_rollout_utils, "_HAS_LORA_LOAD_WEIGHTS", True)
     model = _FakeModel(
         {
             "language_model.model.layers.0.self_attn.q_proj.base_layer.weight": torch.empty(0),
@@ -266,6 +267,36 @@ def test_missing_base_layer_not_added_on_newer_vllm():
     worker = _make_worker(model)
 
     name = "language_model.model.layers.0.self_attn.q_proj.weight"
+    assert _resolve(worker, model, name) == name
+
+
+def test_missing_base_layer_is_added_on_released_vllm():
+    """On released vLLM (no BaseLayerWithLoRA.load_weights), an incoming leaf
+    without ``.base_layer`` is suffixed so the model's load_weights recurses
+    into the ``base_layer`` child and matches the real param."""
+    model = _FakeModel(
+        {
+            "language_model.model.layers.0.self_attn.q_proj.base_layer.weight": torch.empty(0),
+        }
+    )
+    worker = _make_worker(model)
+
+    name = "language_model.model.layers.0.self_attn.q_proj.weight"
+    assert _resolve(worker, model, name) == ("language_model.model.layers.0.self_attn.q_proj.base_layer.weight")
+
+
+def test_suffixed_leaf_is_kept_on_released_vllm():
+    """On released vLLM, an incoming ``.base_layer.`` leaf is kept as-is
+    (the loader recurses and matches the suffixed param -- the strip is gated
+    off when the model has ``.base_layer`` params and the version is old)."""
+    model = _FakeModel(
+        {
+            "language_model.model.layers.0.self_attn.q_proj.base_layer.weight": torch.empty(0),
+        }
+    )
+    worker = _make_worker(model)
+
+    name = "language_model.model.layers.0.self_attn.q_proj.base_layer.weight"
     assert _resolve(worker, model, name) == name
 
 
@@ -340,9 +371,10 @@ def test_unpacked_proj_exists_via_packed_owner():
     assert _resolve(worker, model, incoming) == incoming
 
 
-def test_stacked_gdn_in_proj_not_double_mapped():
+def test_stacked_gdn_in_proj_not_double_mapped(monkeypatch):
     """GDN ``in_proj_qkv`` is NOT suffixed with ``.base_layer`` on newer vLLM --
     the name stays unmapped so vLLM's mapper stacks it cleanly."""
+    monkeypatch.setattr(_vllm_rollout_utils, "_HAS_LORA_LOAD_WEIGHTS", True)
     mapper = _FakeMapper({".in_proj_qkv.": ".in_proj_qkvz."})
     model = _FakeModel(
         {"language_model.model.layers.0.linear_attn.in_proj_qkvz.base_layer.weight": torch.empty(0)},
@@ -360,10 +392,11 @@ def test_stacked_gdn_in_proj_not_double_mapped():
     )
 
 
-def test_shared_expert_packed_owner_no_base_layer_on_newer_vllm():
+def test_shared_expert_packed_owner_no_base_layer_on_newer_vllm(monkeypatch):
     """On newer vLLM, shared expert gate_proj.weight is NOT suffixed with
     .base_layer -- vLLM's mapper stacks gate_proj -> gate_up_proj and
     BaseLayerWithLoRA.load_weights handles the inner name."""
+    monkeypatch.setattr(_vllm_rollout_utils, "_HAS_LORA_LOAD_WEIGHTS", True)
     mapper = _FakeMapper({".shared_expert.gate_proj.": ".shared_expert.gate_up_proj."})
     model = _FakeModel(
         {"language_model.model.layers.0.mlp.shared_expert.gate_up_proj.base_layer.weight": torch.empty(0)},
@@ -412,8 +445,9 @@ def test_already_matching_name_is_noop():
     )
 
 
-def test_truly_unknown_name_strips_base_layer():
+def test_truly_unknown_name_strips_base_layer(monkeypatch):
     """Even unknown names have ``.base_layer.`` stripped on newer vLLM."""
+    monkeypatch.setattr(_vllm_rollout_utils, "_HAS_LORA_LOAD_WEIGHTS", True)
     model = _FakeModel({"a.base_layer.weight": torch.empty(0)})
     worker = _make_worker(model)
 
@@ -436,7 +470,12 @@ def test_drafter_drops_base_layer_wholesale():
 # ---------------------------------------------------------------------------
 
 
-def test_update_weights_resolves_names_before_load():
+def test_update_weights_resolves_names_before_load(monkeypatch):
+    # LoRA base-sync phase (peft_config set, base_sync_done=False): the vLLM model
+    # is LoRA-wrapped (has ``.base_layer``), so the resolver reconciles incoming
+    # names against it. (``peft_config=None`` is the non-LoRA / merge path where the
+    # model is never wrapped and the resolver is skipped -- it can't reach here.)
+    monkeypatch.setattr(_vllm_rollout_utils, "_HAS_LORA_LOAD_WEIGHTS", True)
     model = _FakeModel(
         {
             "merger.linear_fc1.weight": torch.empty(0),
