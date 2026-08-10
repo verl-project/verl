@@ -26,7 +26,7 @@ import torch
 from vllm.outputs import RequestOutput
 
 from verl.utils.device import get_device_name, is_npu_available
-from verl.utils.vllm import TensorLoRARequest, VLLMHijack
+from verl.utils.vllm import TensorLoRARequest, VLLMHijack, resolve_weight_name
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.utils.vllm.vllm_quant_utils import apply_vllm_quant_patches, is_fp8_model, load_quanted_weights
 from verl.workers.rollout.vllm_rollout.weight_update_utils import apply_buffer_updates, split_buffer_updates
@@ -40,15 +40,6 @@ VLLM_LORA_NAME = "123"
 VLLM_LORA_PATH = "simon_lora_path"
 
 VLLM_ASCEND_REQUIRED_ENV_VARS = {"VLLM_ALL2ALL_BACKEND": "flashinfer_all2allv", "VLLM_ASCEND_ENABLE_NZ": "0"}
-
-_HAS_LORA_LOAD_WEIGHTS = False
-
-try:
-    from vllm.lora.layers.base import BaseLayerWithLoRA
-
-    _HAS_LORA_LOAD_WEIGHTS = "load_weights" in BaseLayerWithLoRA.__dict__
-except ImportError:
-    pass
 
 
 def _resolve_vllm_weight_sync_local_rank(worker_local_rank: int, parallel_config: Any) -> int:
@@ -197,105 +188,6 @@ class vLLMColocateWorkerExtension:
         instance._is_qat_model = _is_qat_model
         instance._is_modelopt_qat = _is_modelopt_qat
         return instance
-
-    # ------------------------------------------------------------------
-    # Receiver-side ``.base_layer`` reconciliation. With LoRA enabled, vLLM
-    # wraps *every* linear layer (not just the user's target_modules), exposing
-    # base weights under ``.base_layer``; Megatron only LoRA-wraps the user's
-    # target_modules, so Bridge exports plain names for the rest.
-    # The receiver reconciles each name against the live vLLM namespace --
-    # toggling one ``.base_layer`` segment (probe the model, not a hard-coded list).
-    # ------------------------------------------------------------------
-
-    def _resolve_weight_name(self, model, name: str, model_weight_names: set[str]) -> str:
-        """Reconcile an incoming sync name with the live vLLM namespace:
-
-        - toggle one ``.base_layer`` segment (add it for vLLM-wrapped leaves the
-          Megatron side didn't suffix, drop it for unwrapped ones);
-        - route packed routed-expert aliases (``experts.gate_up_proj``) under the
-          LoRA ``base_layer`` so AutoWeightsLoader reaches MoERunner.load_weights.
-
-        The mapper/``packed_modules_mapping`` are consulted only to *decide* the
-        toggle; the return is always the unmapped name (vLLM's load_weights does
-        the stacking -- returning a mapped name would double-map, e.g.
-        ``in_proj_qkvz`` -> ``in_proj_qkvzz``, corrupting shard_id).
-        """
-        mapper = getattr(model, "hf_to_vllm_mapper", None)
-        packed = getattr(model, "packed_modules_mapping", None) or {}
-        leaf = name.rsplit(".", 1)[-1]
-        is_leaf = leaf in {"weight", "bias"} or leaf.endswith(("_weight", "_bias"))
-
-        def _exists(candidate: str) -> bool:
-            if candidate in model_weight_names:
-                return True
-            if mapper is not None:
-                mapped = mapper.apply_list([candidate])
-                mapped = mapped[0] if mapped else candidate
-                if mapped != candidate and mapped in model_weight_names:
-                    return True
-            # Packed-owner lookup (q/k/v -> qkv) via packed_modules_mapping.
-            # Hoisted out of the mapper guard so models with
-            # packed_modules_mapping but no hf_to_vllm_mapper (e.g. Llama) also
-            # reach it.
-            if packed and "." in candidate:
-                parts = candidate.split(".")
-                mi = -3 if len(parts) >= 3 and parts[-2] == "base_layer" else -2
-                if -mi <= len(parts):
-                    # packed is {owner: [unpacked,...]}; invert to {unpacked: owner}.
-                    rev = {u: p for p, us in packed.items() for u in us}
-                    owner = rev.get(parts[mi])
-                    for pn in (owner,) if owner else ():
-                        pp = parts.copy()
-                        pp[mi] = pn
-                        joined = ".".join(pp)
-                        if joined in model_weight_names:
-                            return True
-                        if mapper is not None:
-                            mp = mapper.apply_list([joined])
-                            mp = mp[0] if mp else joined
-                            if mp != candidate and mp in model_weight_names:
-                                return True
-            return False
-
-        if ".base_layer." in name:
-            model_has_base_layer = any(".base_layer." in n for n in model_weight_names)
-            if not model_has_base_layer or _HAS_LORA_LOAD_WEIGHTS:
-                return name.replace(".base_layer.", ".", 1)
-
-        if _exists(name):
-            return name
-
-        # Packed routed-expert alias: route under the LoRA base_layer so
-        # AutoWeightsLoader reaches MoERunner.load_weights (FusedMoE3DWithLoRA
-        # has no load_weights itself). Only for non-leaf, non-routed names.
-        marker = ".mlp.experts."
-        idx = name.find(marker)
-        if idx != -1:
-            tail = name[idx + len(marker) :]
-            if (
-                tail
-                and ".base_layer." not in tail
-                and not is_leaf
-                and any("mlp.experts.base_layer." in n for n, _ in model.named_parameters(remove_duplicate=False))
-            ):
-                return name.replace(marker, marker + "base_layer.", 1)
-
-        if ".mlp.experts.base_layer." in name and not is_leaf:
-            stripped = name.replace(".base_layer.", ".", 1)
-            if _exists(stripped):
-                return stripped
-
-        # Leaf weight/bias: on vLLM versions without BaseLayerWithLoRA.load_weights),
-        # add ``.base_layer.`` so AutoWeightsLoader recurses into the base_layer
-        # child; on newer vLLM, the strip above already handled it.
-        if is_leaf:
-            if not _HAS_LORA_LOAD_WEIGHTS and ".base_layer." not in name:
-                prefix, lf = name.rsplit(".", 1)
-                alt = f"{prefix}.base_layer.{lf}"
-                if alt != name and _exists(alt):
-                    return alt
-
-        return name
 
     def _get_drafter_model(self):
         """Return the drafter's model object, or None if unavailable."""
@@ -498,9 +390,7 @@ class vLLMColocateWorkerExtension:
                         else:
                             names = {n for n, _ in model.named_parameters(remove_duplicate=False)}
                             names.update(n for n, _ in model.named_buffers())
-                            model.load_weights(
-                                (self._resolve_weight_name(model, n, names), t) for n, t in param_updates
-                            )
+                            model.load_weights((resolve_weight_name(model, n, names), t) for n, t in param_updates)
                 loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
                 logger.info(
                     f"Loading standard weights (non-FP8, async), "

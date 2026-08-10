@@ -107,12 +107,31 @@ def _load_vllm_rollout_utils():
     fake_platform = types.ModuleType("verl.plugin.platform")
     fake_platform.get_platform = lambda: None
 
+    # Minimal stubs for the heavyweight vllm.lora.* imports pulled in by
+    # ``verl/utils/vllm/utils.py`` (which also defines ``resolve_weight_name``).
+    # Only the symbols touched at import time need to exist.
+    fake_lora_request = types.ModuleType("vllm.lora.request")
+    fake_lora_request.LoRARequest = type("LoRARequest", (), {})
+    fake_lora_utils = types.ModuleType("vllm.lora.utils")
+    fake_lora_utils.get_adapter_absolute_path = lambda p: p
+    fake_lora_worker_manager = types.ModuleType("vllm.lora.worker_manager")
+    fake_lora_worker_manager.LRUCacheWorkerLoRAManager = type("LRUCacheWorkerLoRAManager", (), {})
+    fake_lora_model = types.ModuleType("vllm.lora.lora_model")
+    fake_lora_model.LoRAModel = type("LoRAModel", (), {})
+    fake_lora_models = types.ModuleType("vllm.lora.models")
+    fake_lora_models.LoRAModel = type("LoRAModel", (), {})
+
     fakes = {
         "vllm": fake_vllm,
         "vllm.outputs": fake_outputs,
         "vllm.lora": fake_lora,
         "vllm.lora.layers": fake_lora_layers,
         "vllm.lora.layers.base": fake_lora_base,
+        "vllm.lora.request": fake_lora_request,
+        "vllm.lora.utils": fake_lora_utils,
+        "vllm.lora.worker_manager": fake_lora_worker_manager,
+        "vllm.lora.lora_model": fake_lora_model,
+        "vllm.lora.models": fake_lora_models,
         "verl.third_party.vllm": fake_vllm_third_party,
         "verl.utils.vllm": fake_vllm_utils,
         "verl.utils.vllm.patch": fake_vllm_patch,
@@ -124,10 +143,23 @@ def _load_vllm_rollout_utils():
     saved = {name: sys.modules.get(name) for name in fakes}
     try:
         sys.modules.update(fakes)
+        # Load the real ``verl/utils/vllm/utils.py`` under the stubbed deps so
+        # ``vllm_rollout/utils.py``'s ``from verl.utils.vllm import resolve_weight_name``
+        # resolves to the genuine function (with its module-level ``_HAS_LORA_LOAD_WEIGHTS``
+        # probe falling to False since the stub ``BaseLayerWithLoRA`` has no load_weights).
+        utils_path = _REPO_ROOT / "verl/utils/vllm/utils.py"
+        utils_spec = importlib.util.spec_from_file_location("verl.utils.vllm.utils_real", utils_path)
+        utils_module = importlib.util.module_from_spec(utils_spec)
+        assert utils_spec is not None and utils_spec.loader is not None
+        utils_spec.loader.exec_module(utils_module)
+        fake_vllm_utils.resolve_weight_name = utils_module.resolve_weight_name
+        fake_vllm_utils._HAS_LORA_LOAD_WEIGHTS = utils_module._HAS_LORA_LOAD_WEIGHTS
+
         spec = importlib.util.spec_from_file_location(module_name, module_path)
         module = importlib.util.module_from_spec(spec)
         assert spec is not None and spec.loader is not None
         spec.loader.exec_module(module)
+        module._vllm_utils_real = utils_module
     finally:
         for name, prev in saved.items():
             if prev is None:
@@ -140,6 +172,11 @@ def _load_vllm_rollout_utils():
 _weight_update_utils = _load_weight_update_utils()
 _vllm_rollout_utils = _load_vllm_rollout_utils()
 vLLMColocateWorkerExtension = _vllm_rollout_utils.vLLMColocateWorkerExtension
+# The real ``verl/utils/vllm/utils.py`` module hosting ``resolve_weight_name``
+# (loaded under stubbed deps); monkeypatch its ``_HAS_LORA_LOAD_WEIGHTS`` to flip
+# the vLLM-version branch under test.
+_vllm_utils_real = _vllm_rollout_utils._vllm_utils_real
+resolve_weight_name = _vllm_utils_real.resolve_weight_name
 
 
 class _FakeMapper:
@@ -200,9 +237,10 @@ def _make_worker(model):
 
 
 def _resolve(worker, model, name):
+    del worker  # resolve_weight_name is a pure function (no worker state)
     names = {n for n, _ in model.named_parameters(remove_duplicate=False)}
     names.update(n for n, _ in model.named_buffers())
-    return worker._resolve_weight_name(model, name, names)
+    return resolve_weight_name(model, name, names)
 
 
 def _mapped(worker, model, name):
@@ -242,7 +280,7 @@ def test_lora_wrapped_base_layer_gets_stripped(monkeypatch):
     """A LoRA-wrapped leaf with .base_layer is stripped: vLLM's
     BaseLayerWithLoRA.load_weights delegates to AutoWeightsLoader(base_layer)
     which expects the inner name (no base_layer. prefix)."""
-    monkeypatch.setattr(_vllm_rollout_utils, "_HAS_LORA_LOAD_WEIGHTS", True)
+    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
     model = _FakeModel(
         {
             "language_model.model.layers.0.self_attn.q_proj.base_layer.weight": torch.empty(0),
@@ -258,7 +296,7 @@ def test_missing_base_layer_not_added_on_newer_vllm(monkeypatch):
     """On newer vLLM, incoming without .base_layer is NOT suffixed --
     BaseLayerWithLoRA.load_weights delegates to AutoWeightsLoader(base_layer)
     expecting inner names."""
-    monkeypatch.setattr(_vllm_rollout_utils, "_HAS_LORA_LOAD_WEIGHTS", True)
+    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
     model = _FakeModel(
         {
             "language_model.model.layers.0.self_attn.q_proj.base_layer.weight": torch.empty(0),
@@ -374,7 +412,7 @@ def test_unpacked_proj_exists_via_packed_owner():
 def test_stacked_gdn_in_proj_not_double_mapped(monkeypatch):
     """GDN ``in_proj_qkv`` is NOT suffixed with ``.base_layer`` on newer vLLM --
     the name stays unmapped so vLLM's mapper stacks it cleanly."""
-    monkeypatch.setattr(_vllm_rollout_utils, "_HAS_LORA_LOAD_WEIGHTS", True)
+    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
     mapper = _FakeMapper({".in_proj_qkv.": ".in_proj_qkvz."})
     model = _FakeModel(
         {"language_model.model.layers.0.linear_attn.in_proj_qkvz.base_layer.weight": torch.empty(0)},
@@ -396,7 +434,7 @@ def test_shared_expert_packed_owner_no_base_layer_on_newer_vllm(monkeypatch):
     """On newer vLLM, shared expert gate_proj.weight is NOT suffixed with
     .base_layer -- vLLM's mapper stacks gate_proj -> gate_up_proj and
     BaseLayerWithLoRA.load_weights handles the inner name."""
-    monkeypatch.setattr(_vllm_rollout_utils, "_HAS_LORA_LOAD_WEIGHTS", True)
+    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
     mapper = _FakeMapper({".shared_expert.gate_proj.": ".shared_expert.gate_up_proj."})
     model = _FakeModel(
         {"language_model.model.layers.0.mlp.shared_expert.gate_up_proj.base_layer.weight": torch.empty(0)},
@@ -447,7 +485,7 @@ def test_already_matching_name_is_noop():
 
 def test_truly_unknown_name_strips_base_layer(monkeypatch):
     """Even unknown names have ``.base_layer.`` stripped on newer vLLM."""
-    monkeypatch.setattr(_vllm_rollout_utils, "_HAS_LORA_LOAD_WEIGHTS", True)
+    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
     model = _FakeModel({"a.base_layer.weight": torch.empty(0)})
     worker = _make_worker(model)
 
@@ -475,7 +513,7 @@ def test_update_weights_resolves_names_before_load(monkeypatch):
     # is LoRA-wrapped (has ``.base_layer``), so the resolver reconciles incoming
     # names against it. (``peft_config=None`` is the non-LoRA / merge path where the
     # model is never wrapped and the resolver is skipped -- it can't reach here.)
-    monkeypatch.setattr(_vllm_rollout_utils, "_HAS_LORA_LOAD_WEIGHTS", True)
+    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
     model = _FakeModel(
         {
             "merger.linear_fc1.weight": torch.empty(0),
