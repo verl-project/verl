@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
 import logging
 import math
 import os
@@ -29,6 +30,12 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 ContextParallelLayout = Literal["zigzag", "contiguous"]
+
+# Older Megatron-core releases have no ``cp_partition_mode`` field on PackedSeqParams; they
+# support only the zigzag CP layout.
+_PACKED_SEQ_PARAMS_HAS_CP_PARTITION_MODE = any(
+    f.name == "cp_partition_mode" for f in dataclasses.fields(PackedSeqParams)
+)
 
 
 def _compute_fp8_thd_align_size(align_size: int) -> tuple[int, int]:
@@ -508,13 +515,20 @@ def preprocess_thd_engine(
                 for k, v in saved_position_roll_dict.items():
                     position_ids_rmpad[k] = v
 
-    packed_seq_params = PackedSeqParams(
-        qkv_format="thd",
+    if _PACKED_SEQ_PARAMS_HAS_CP_PARTITION_MODE:
         # Tell the attention kernels how the rows above were sharded across CP ranks. The rows
         # are already split according to `cp_layout`, but PackedSeqParams defaults to "zigzag",
         # so without this an attention variant that requires a contiguous split (DeepSeek-V4)
         # raises "DSv4 THD CP requires a contiguous CP partition." on every forward.
-        cp_partition_mode=cp_layout,
+        extra_packed_args["cp_partition_mode"] = cp_layout
+    elif cp_layout != "zigzag" and cp_size > 1:
+        raise ValueError(
+            f"cp_layout='{cp_layout}' requires PackedSeqParams.cp_partition_mode, which this "
+            "Megatron-core version does not provide. Upgrade Megatron-core or use the zigzag layout."
+        )
+
+    packed_seq_params = PackedSeqParams(
+        qkv_format="thd",
         cu_seqlens_q=cu_seqlens_padded,
         max_seqlen_q=max_seqlen_in_batch,
         cu_seqlens_kv=cu_seqlens_padded,
