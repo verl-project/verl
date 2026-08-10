@@ -118,6 +118,7 @@ class MegatronEngine(BaseEngine):
             "gate_proj_layer_name": "linear_fc1.",
         }
         self.weight_converter = None
+        self._hf_export_tasks = None
 
         # QAT configuration
         self._qat_config = getattr(self.engine_config, "qat", None)
@@ -438,6 +439,7 @@ class MegatronEngine(BaseEngine):
         )
 
     def initialize(self):
+        self._hf_export_tasks = None
         self._build_tf_config()
 
         self.module = self._build_megatron_module()
@@ -829,6 +831,14 @@ class MegatronEngine(BaseEngine):
             RouterReplay.clear_global_router_replay_action()
         return output
 
+    def _mbridge_export_tasks(self):
+        """Cache static export tasks while preserving Bridge's specialized FP8 task planning."""
+        if getattr(self.bridge, "export_weight_dtype", None) == "fp8":
+            return None
+        if self._hf_export_tasks is None:
+            self._hf_export_tasks = self.bridge.get_conversion_tasks(self.module)
+        return self._hf_export_tasks
+
     def get_per_tensor_param(self, base_sync_done=False, **kwargs):
         peft_config = None
         non_merge_lora_sync = self.peft_cls is not None and not self.model_config.lora.get("merge", False)
@@ -842,10 +852,15 @@ class MegatronEngine(BaseEngine):
         elif adapter_only:
             per_tensor_param = self.bridge.export_adapter_weights(self.module)
         else:
+            conversion_tasks = self._mbridge_export_tasks()
             per_tensor_param = (
-                self.bridge.export_hf_weights(self.module, merge_adapter_weights=False)
+                self.bridge.export_hf_weights(
+                    self.module,
+                    conversion_tasks=conversion_tasks,
+                    merge_adapter_weights=False,
+                )
                 if non_merge_lora_sync
-                else self.bridge.export_hf_weights(self.module)
+                else self.bridge.export_hf_weights(self.module, conversion_tasks=conversion_tasks)
             )
 
         # QAT: process weights through QATWeightExporter for quantized weight sync to vLLM
