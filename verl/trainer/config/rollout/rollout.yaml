@@ -60,6 +60,34 @@ cudagraph_capture_sizes: null
 # Whether to free engine KVCache after generation.
 free_cache_engine: True
 
+abort_kv_reuse:
+  enabled: false
+  timeout_s: 30.0
+  require_global_visibility: true
+  fallback: recompute
+
+# External KV backend used by abort_kv_reuse.
+kv_backend: null
+
+# Optional Ray-managed FlexKV services. When enabled, VERL starts two Redis
+# metadata services and one external FlexKV server per rollout node.
+flexkv_service:
+  auto_start: false
+  redis_server_path: redis-server
+  expected_gpus_per_node: null
+  cpu_cache_gb: 16
+  flexkv_redis_port: 6393
+  mooncake_redis_port: 6395
+  local_zmq_port_base: 56800
+  rpc_port_base: 12841
+  transfer_engine_port_base: 56900
+  tokens_per_block: 16
+  protocol: tcp
+  device_name: ""
+  node_ttl_seconds: 3600
+  startup_timeout_s: 120.0
+  log_dir: /tmp/verl_flexkv
+
 # TP size for rollout. Not effective for hf
 tensor_model_parallel_size: 2
 

@@ -645,6 +645,10 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         """Stop rollout profiling on all replicas before the next weight sync."""
         await self.llm_server_manager.stop_profile()
 
+    async def shutdown_services(self):
+        if hasattr(self, "llm_server_manager"):
+            await self.llm_server_manager.shutdown()
+
     def do_validate(self):
         """Run validation and return metrics"""
         timing_raw = {}
@@ -1195,6 +1199,12 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
     def get_hybrid_worker_group(self):
         """Return the worker group for hybrid replicas."""
         return self._hybrid_worker_group
+
+    async def begin_abort_kv_reuse_cycle(self, cycle_id: int) -> None:
+        await self.llm_server_manager.global_load_balancer.begin_abort_kv_reuse_cycle.remote(cycle_id)
+
+    async def mark_abort_kv_reuse_ready(self, cycle_id: int) -> None:
+        await self.llm_server_manager.global_load_balancer.mark_abort_kv_reuse_ready.remote(cycle_id)
 
     async def add_replicas(self, resource_ids: list[str]) -> int:
         n = await self.llm_server_manager.add_replicas(resource_ids)

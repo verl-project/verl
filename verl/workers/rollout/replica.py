@@ -128,6 +128,13 @@ class RolloutReplica(ABC):
         self._server_address: str = None
         self._server_handle: ActorHandle = None
 
+    async def _get_flexkv_service_env(self, node_id: str, gpu_ids: list[str]) -> dict[str, str]:
+        """Register a rollout node with the shared FlexKV service, when enabled."""
+        manager = getattr(self, "flexkv_service_manager", None)
+        if manager is None:
+            return {}
+        return await manager.register_node(node_id, gpu_ids)
+
     async def init_hybrid(self, worker_group: RayWorkerGroup):
         """Init hybrid rollout server, rollout engine and training engine(fsdp/megatron) fused in same process.
 
@@ -266,13 +273,23 @@ class RolloutReplica(ABC):
         """Wake up each rollout server."""
         await asyncio.gather(*[server.wake_up.remote() for server in self.servers])
 
-    async def sleep(self):
+    async def sleep(self, reset_connector: bool = True):
         """Sleep each rollout server."""
-        await asyncio.gather(*[server.sleep.remote() for server in self.servers])
+        if reset_connector:
+            await asyncio.gather(*[server.sleep.remote() for server in self.servers])
+        else:
+            await asyncio.gather(
+                *[server.sleep.remote(reset_connector=False) for server in self.servers]
+            )
 
-    async def abort_all_requests(self):
-        """Partial rollout: abort and save all unfinished requests in each rollout server."""
-        await asyncio.gather(*[server.abort_all_requests.remote() for server in self.servers])
+    async def abort_all_requests(self, checkpoint_kv: bool = False, timeout_s: float = 30.0):
+        """Abort requests and optionally wait for external KV checkpointing."""
+        await asyncio.gather(
+            *[
+                server.abort_all_requests.remote(checkpoint_kv=checkpoint_kv, timeout_s=timeout_s)
+                for server in self.servers
+            ]
+        )
 
     async def resume_generation(self):
         """Resume generation on all servers after abort_all_requests."""

@@ -17,6 +17,7 @@ import inspect
 import json
 import logging
 import os
+import time
 import uuid
 from pprint import pprint
 from typing import Any, Callable, Optional
@@ -124,6 +125,9 @@ class vLLMHttpServer:
 
         os.environ[get_visible_devices_keyword()] = cuda_visible_devices
         os.environ["VERL_REPLICA_RANK"] = str(replica_rank)
+        flexkv_instance_num = int(os.getenv("FLEXKV_INSTANCE_NUM", "1"))
+        if flexkv_instance_num > 1:
+            os.environ["FLEXKV_INSTANCE_ID"] = str(replica_rank % flexkv_instance_num)
         # Forward the Ray job id into the vLLM worker subprocess so the
         # colocated weight-transfer IPC socket path is unique per Ray job.
         # Without this, two concurrent verl jobs on the same node both bind
@@ -249,6 +253,42 @@ class vLLMHttpServer:
         # 1. setup vllm serve cli args
         engine_kwargs = self.config.get("engine_kwargs", {}).get(self._get_engine_kwargs_key(), {}) or {}
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
+        abort_kv_config = self.config.get("abort_kv_reuse", {}) or {}
+        if bool(abort_kv_config.get("enabled", False)):
+            kv_backend = self.config.get("kv_backend")
+            kv_transfer_config = engine_kwargs.get("kv_transfer_config") or {}
+            kv_connector = (
+                kv_transfer_config.get("kv_connector")
+                if isinstance(kv_transfer_config, dict)
+                else getattr(kv_transfer_config, "kv_connector", None)
+            )
+            kv_role = (
+                kv_transfer_config.get("kv_role")
+                if isinstance(kv_transfer_config, dict)
+                else getattr(kv_transfer_config, "kv_role", None)
+            )
+            expected_connectors = {
+                "mooncake_store": "MooncakeStoreConnector",
+                "flexkv": "FlexKVConnectorV1",
+            }
+            if kv_backend not in expected_connectors:
+                raise ValueError(
+                    "abort_kv_reuse requires a supported external KV backend; "
+                    f"supported={sorted(expected_connectors)}, "
+                    f"got {kv_backend!r}"
+                )
+            expected_connector = expected_connectors[kv_backend]
+            if kv_connector != expected_connector or kv_role != "kv_both":
+                raise ValueError(
+                    "abort_kv_reuse configuration mismatch: "
+                    f"backend={kv_backend!r}, connector={kv_connector!r}, kv_role={kv_role!r}"
+                )
+            logger.info(
+                "abort KV reuse backend validated: backend=%s connector=%s role=%s",
+                kv_backend,
+                kv_connector,
+                kv_role,
+            )
         if self.config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": self.config.get("limit_images")}
 
@@ -788,14 +828,14 @@ class vLLMHttpServer:
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip wake_up in standalone mode")
 
-    async def sleep(self):
+    async def sleep(self, reset_connector: bool = True):
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
 
         if self.rollout_mode == RolloutMode.HYBRID:
-            await self._sleep_hybrid()
+            await self._sleep_hybrid(reset_connector=reset_connector)
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            await self.engine.sleep(level=1)
+            await self.engine.sleep(level=1, reset_connector=reset_connector)
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
@@ -849,7 +889,12 @@ class vLLMHttpServer:
     async def wait_for_requests_to_drain(self):
         await self.engine.wait_for_requests_to_drain()
 
-    async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
+    async def abort_all_requests(
+        self,
+        reset_prefix_cache: bool = True,
+        checkpoint_kv: bool = False,
+        timeout_s: float = 30.0,
+    ) -> dict[str, Any]:
         """Abort all ongoing generation requests.
 
         On vLLM >= 0.12.0, uses AsyncLLM.pause_generation() to abort in-flight
@@ -868,26 +913,51 @@ class vLLMHttpServer:
             # Snapshot request IDs before pausing for reporting
             request_ids = list(self.engine.output_processor.request_states.keys())
 
-            # pause_generation with wait_for_inflight_requests=False will:
-            # 1. Set engine to paused state (blocks new generate calls)
-            # 2. Abort all in-flight requests
-            # 3. Wait for requests to drain
-            # 4. Clear prefix and mm caches if clear_cache=True.
-            #    EngineCore._reset_caches defaults reset_connector=True
-            #    on this path, so any attached external KV store (e.g.
-            #    MooncakeStoreConnector) is invalidated along with the
-            #    local prefix cache — RL-correct hard-reset at every
-            #    weight update boundary, no extra kwargs needed.
+            if checkpoint_kv:
+                print(
+                    "VERL_ABORT_KV_EVENT "
+                    + json.dumps(
+                        {
+                            "phase": "BARRIER_WAIT_START",
+                            "replica_id": self.replica_rank,
+                            "node_rank": self.node_rank,
+                            "request_count": len(request_ids),
+                            "timeout_s": timeout_s,
+                            "wall_ns": time.time_ns(),
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+            # pause_generation() waits for delayed-free connector work to finish.
             await self.engine.pause_generation(
+                mode="abort",
                 wait_for_inflight_requests=False,
-                clear_cache=reset_prefix_cache,
+                clear_cache=(reset_prefix_cache and not checkpoint_kv),
             )
+            if checkpoint_kv:
+                print(
+                    "VERL_ABORT_KV_EVENT "
+                    + json.dumps(
+                        {
+                            "phase": "BARRIER_VISIBLE",
+                            "replica_id": self.replica_rank,
+                            "node_rank": self.node_rank,
+                            "request_count": len(request_ids),
+                            "wall_ns": time.time_ns(),
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
 
             logger.info(f"Aborted {len(request_ids)} requests: {request_ids}")
             return {"aborted_count": len(request_ids), "request_ids": request_ids}
 
         except Exception as e:
             logger.error(f"Error aborting requests: {e}")
+            if checkpoint_kv:
+                raise
             return {"aborted_count": 0, "request_ids": [], "error": str(e)}
 
     async def resume_generation(self):
@@ -1072,7 +1142,7 @@ class vLLMHttpServer:
         """Return the tags passed to engine.wake_up(). Default includes kv_cache."""
         return ["kv_cache", "weights"]
 
-    async def _sleep_hybrid(self):
+    async def _sleep_hybrid(self, reset_connector: bool = True):
         """HYBRID sleep: adapters and MTP need level=1; full weights need level=2.
 
         Uses engine.sleep() instead of engine.collective_rpc("sleep") to ensure
@@ -1095,7 +1165,7 @@ class vLLMHttpServer:
             sleep_level = 1
         else:
             sleep_level = 2
-        await self.engine.sleep(level=sleep_level)
+        await self.engine.sleep(level=sleep_level, reset_connector=reset_connector)
         await self.engine.reset_encoder_cache()
 
 
@@ -1144,6 +1214,10 @@ class vLLMReplica(RolloutReplica):
                 worker_cuda_visible_devices[node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node]
             )
             node_id = worker_node_ids[node_rank * gpus_per_replica_node]
+            node_gpu_ids = worker_cuda_visible_devices[
+                node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node
+            ]
+            service_env = await self._get_flexkv_service_env(node_id, node_gpu_ids)
             prefix = self._get_server_name_prefix()
             if self.is_reward_model:
                 name = f"{prefix}server_reward_{self.replica_rank}_{node_rank}{self.name_suffix}"
@@ -1154,6 +1228,7 @@ class vLLMReplica(RolloutReplica):
             env_vars = {
                 **{var: "1" for var in get_platform().ray_noset_envvars()},
                 **get_platform().rollout_env_vars(),
+                **service_env,
             }
 
             server = self.server_class.options(
@@ -1197,19 +1272,30 @@ class vLLMReplica(RolloutReplica):
             else f"{server_address}:{server_port}"
         )
 
-    async def sleep(self):
+    async def sleep(self, reset_connector: bool = True):
         """Sleep each rollout server."""
         # Drain DP engines for safe sleep.
         await self.servers[0].wait_for_requests_to_drain.remote()
-        await asyncio.gather(*[server.sleep.remote() for server in self.servers])
+        await asyncio.gather(
+            *[server.sleep.remote(reset_connector=reset_connector) for server in self.servers]
+        )
 
-    async def abort_all_requests(self) -> dict[str, Any]:
+    async def abort_all_requests(
+        self, checkpoint_kv: bool = False, timeout_s: float = 30.0
+    ) -> dict[str, Any]:
         """Abort all ongoing generation requests across all servers.
 
         Returns:
             dict[str, Any]: Combined abort results from all servers.
         """
-        results = await asyncio.gather(*[server.abort_all_requests.remote() for server in self.servers])
+        results = await asyncio.gather(
+            *[
+                server.abort_all_requests.remote(
+                    checkpoint_kv=checkpoint_kv, timeout_s=timeout_s
+                )
+                for server in self.servers
+            ]
+        )
 
         total_aborted = sum(r.get("aborted_count", 0) for r in results)
         all_request_ids = []
