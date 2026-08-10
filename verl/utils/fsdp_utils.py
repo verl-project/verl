@@ -194,7 +194,12 @@ def offload_fsdp_model_to_cpu(model: FSDP, empty_cache: bool = True):
 
 @torch.no_grad()
 def offload_fsdp2_model_to_cpu(model, empty_cache: bool = True):
-    model.cpu()
+    # PyTorch currently allocates pinned host storage for CUDA-to-CPU
+    # Tensor.to() copies when non_blocking=True. This behavior is not strictly
+    # documented, so keep it covered by the FSDP2 model-transfer regression
+    # test. The pinned parameters also make the subsequent CPU-to-GPU copy
+    # asynchronous.
+    model.to("cpu", non_blocking=True)
     if empty_cache:
         get_torch_device().empty_cache()
 
@@ -222,7 +227,7 @@ def load_fsdp_model_to_gpu(model: FSDP):
 @torch.no_grad()
 def load_fsdp2_model_to_gpu(model):
     device = get_device_id()
-    model.to(device)
+    model.to(device, non_blocking=True)
 
 
 @torch.no_grad()
