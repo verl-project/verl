@@ -4,6 +4,9 @@ _target_: verl.workers.config.McoreEngineConfig
 # Whether to offload model parameters to CPU
 param_offload: False
 
+# Keep one host copy per dense/expert replica group and restore replicas via broadcast. Requires param_offload=True.
+deduplicate_param_offload: False
+
 # Whether to offload gradients to CPU
 grad_offload: False
 

@@ -64,6 +64,7 @@ from verl.utils.megatron.tensor_parallel import (
 )
 from verl.utils.megatron_peft_utils import build_peft_config_for_vllm
 from verl.utils.megatron_utils import (
+    build_megatron_param_offload_groups,
     check_mtp_config,
     get_megatron_module_device,
     get_megatron_mtp_loss,
@@ -197,6 +198,7 @@ class MegatronEngine(BaseEngine):
         self._is_offload_param = self.engine_config.param_offload
         self._is_offload_grad = self.engine_config.grad_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
+        self._param_offload_groups = build_megatron_param_offload_groups(self.engine_config.deduplicate_param_offload)
 
         self.mode = None
 
@@ -710,6 +712,17 @@ class MegatronEngine(BaseEngine):
         self.lr_scheduler.step(1)
         return get_megatron_last_lr(self.optimizer)
 
+    def _load_model(self, *, load_grad: bool = True, load_frozen_params: bool = True) -> None:
+        load_megatron_model_to_gpu(
+            self.module,
+            load_grad=load_grad,
+            load_frozen_params=load_frozen_params,
+            param_offload_groups=self._param_offload_groups,
+        )
+
+    def _offload_model(self) -> None:
+        offload_megatron_model_to_cpu(self.module, param_offload_groups=self._param_offload_groups)
+
     def to(self, device: str, model: bool = True, optimizer: bool = True, grad: bool = True):
         """
         Move model parameters, optimizer states, or both to the specified device.
@@ -727,12 +740,12 @@ class MegatronEngine(BaseEngine):
         assert device in (device_name, "cpu")
         if device == device_name:
             if model:
-                load_megatron_model_to_gpu(self.module, load_grad=grad)
+                self._load_model(load_grad=grad)
             if optimizer and self.optimizer is not None:
                 load_megatron_optimizer(self.optimizer)
         elif device == "cpu":
             if model:
-                offload_megatron_model_to_cpu(self.module)
+                self._offload_model()
             if optimizer and self.optimizer is not None:
                 offload_megatron_optimizer(self.optimizer)
         else:
@@ -781,13 +794,13 @@ class MegatronEngine(BaseEngine):
         """
         origin_module_device = get_megatron_module_device(self.module)
         if self._is_offload_param or origin_module_device == "cpu":
-            load_megatron_model_to_gpu(self.module, load_grad=True)
+            self._load_model()
         self.checkpoint_mananager.save_checkpoint(
             local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
         )
         torch.distributed.barrier()
         if self._is_offload_param:
-            offload_megatron_model_to_cpu(self.module)
+            self._offload_model()
 
     def load_checkpoint(
         self, local_path: str, hdfs_path: str | None = None, del_local_after_load: bool = True, **kwargs
@@ -801,12 +814,12 @@ class MegatronEngine(BaseEngine):
             del_local_after_load: Whether to delete local copy after loading.
         """
         if self._is_offload_param:
-            load_megatron_model_to_gpu(self.module)
+            self._load_model()
         self.checkpoint_mananager.load_checkpoint(
             local_path=local_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load
         )
         if self._is_offload_param:
-            offload_megatron_model_to_cpu(self.module)
+            self._offload_model()
         if self._is_offload_optimizer:
             offload_megatron_optimizer(self.optimizer)
 
@@ -1019,7 +1032,7 @@ class MegatronEngine(BaseEngine):
         if non_merge_lora_sync:
             peft_config = build_peft_config_for_vllm(self.model_config.lora)
         # when lora adapter only, we only load adapter weights when base sync is done, otherwise load all weights
-        load_megatron_model_to_gpu(self.module, load_grad=False, load_frozen_params=not adapter_only)
+        self._load_model(load_grad=False, load_frozen_params=not adapter_only)
         if self.vanilla_bridge:
             per_tensor_param = self.bridge.export_weights(self.module)
         elif adapter_only:
@@ -1069,7 +1082,7 @@ class MegatronEngine(BaseEngine):
         comm-stubbed probe owns all shard geometry). Pure export, no side
         effects. Params owned by another pipeline stage yield an empty shard
         (zero-count lockstep rows; see the index builder)."""
-        load_megatron_model_to_gpu(self.module, load_grad=False)
+        self._load_model(load_grad=False)
         index = self._mcore_export_index()
 
         def _gen():
