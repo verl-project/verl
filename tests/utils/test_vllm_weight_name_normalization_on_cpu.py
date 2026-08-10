@@ -450,7 +450,7 @@ def test_update_weights_resolves_names_before_load():
         ("language_model.model.layers.0.self_attn.q_proj.base_layer.weight", torch.empty(0)),
     ]
 
-    worker._update_weights(weights, peft_config=None, base_sync_done=False)
+    worker._update_weights(weights, peft_config={"r": 1}, base_sync_done=False)
 
     assert model.loaded == [
         "merger.linear_fc1.weight",

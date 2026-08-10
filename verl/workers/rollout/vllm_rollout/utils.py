@@ -484,9 +484,14 @@ class vLLMColocateWorkerExtension:
             else:
                 if param_updates:
                     for model in self._iter_all_models():
-                        names = {n for n, _ in model.named_parameters(remove_duplicate=False)}
-                        names.update(n for n, _ in model.named_buffers())
-                        model.load_weights((self._resolve_weight_name(model, n, names), t) for n, t in param_updates)
+                        if peft_config is None:
+                            model.load_weights(param_updates)
+                        else:
+                            names = {n for n, _ in model.named_parameters(remove_duplicate=False)}
+                            names.update(n for n, _ in model.named_buffers())
+                            model.load_weights(
+                                (self._resolve_weight_name(model, n, names), t) for n, t in param_updates
+                            )
                 loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
                 logger.info(
                     f"Loading standard weights (non-FP8, async), "
