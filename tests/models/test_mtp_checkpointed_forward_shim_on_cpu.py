@@ -65,9 +65,12 @@ def _bound_params(layer):
 
 def test_shim_not_installed_when_padding_mask_already_supported():
     layer = _LayerMain()
-    before = layer._checkpointed_forward
     assert _patch_padding_mask_kwarg(layer, _bound_params(layer)) is False
-    assert layer._checkpointed_forward is before, "must not rebind when megatron already accepts it"
+    # The shim rebinds by assigning an *instance* attribute, so "was not rebound" means no such
+    # attribute exists. Comparing the accessed method with `is` would not work here: attribute
+    # access on an un-rebound method builds a fresh bound-method object every time, so the
+    # identity check fails even when nothing was patched.
+    assert "_checkpointed_forward" not in vars(layer), "must not rebind when megatron already accepts it"
     # and the real kwarg still reaches the method
     assert layer._checkpointed_forward(1, 2, padding_mask="pm")[4] == "pm"
 
