@@ -205,3 +205,25 @@ class PPOTrainerSeparateAsync(PPOTrainer):
     def should_switch_to_rollout(self):
         # TODO: Implement switch strategy by checking replay buffer and switch overhead
         return False
+
+    def _start_profiling(self):
+        # Overridden to make sure standalone_server_manager is used and not
+        # llm_server_manager.
+        if self._should_start_profiling():
+            self.standalone_server_manager.start_profile()
+            self.actor_rollout_wg.start_profile(role="e2e", profile_step=self.global_steps)
+            if self.use_reference_policy:
+                self.ref_policy_wg.start_profile(profile_step=self.global_steps)
+            if self.use_critic:
+                self.critic_wg.start_profile(profile_step=self.global_steps)
+
+    def _stop_profiling(self):
+        # Overridden to make sure standalone_server_manager is used and not
+        # llm_server_manager.
+        if self._should_stop_profiling():
+            self.standalone_server_manager.stop_profile()
+            self.actor_rollout_wg.stop_profile()
+            if self.use_reference_policy:
+                self.ref_policy_wg.stop_profile()
+            if self.use_critic:
+                self.critic_wg.stop_profile()
