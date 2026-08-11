@@ -286,7 +286,10 @@ teacher TP=2、global batch 24、response 1024 完成 100 个全参数 optimizer
 下游结果仅作为文字标注，避免将 GSM8K accuracy 和 Geo3K trainer-inline composite
 误画成同一种训练指标。
 
-![项目2 OPD 四卡百步复现曲线](opd_megatron_vllm_ascend_reproduction.png)
+
+<div align="center">
+ <img src="https://github.com/chengminhua/verl_data/blob/main/opd_megatron_vllm_ascend_reproduction.png" alt="项目2 OPD 四卡百步复现曲线">
+</div>
 
 这些数字是复现参考，不是可迁移硬件标杆。报告结果时应记录模型和数据 revision、
 batch、token 上限、被排除 step 以及 checkpoint 评测设置。只在 100% 训练进度和
@@ -686,6 +689,9 @@ annotations so GSM8K accuracy and the Geo3K trainer-inline composite are not
 misrepresented as the same training metric.
 
 ![Project 2 four-NPU 100-step OPD reproduction curves](opd_megatron_vllm_ascend_reproduction.png)
+<div align="center">
+ <img src="https://github.com/chengminhua/verl_data/blob/main/opd_megatron_vllm_ascend_reproduction.png" alt="Project 2 four-NPU 100-step OPD reproduction curves">
+</div>
 
 Treat these numbers as a reproducibility reference rather than a portable
 hardware benchmark. Report the exact model and data revisions, batch and token
