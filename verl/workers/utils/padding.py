@@ -64,7 +64,7 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
         else:  # (4, seq_len)
             valid_ids = curr_pos_ids[:, curr_mask]
         position_ids_list.append(valid_ids)
-    position_ids_nested = torch.nested.as_nested_tensor(position_ids_list, layout=torch.jagged)
+    position_ids_nested = tu.nested_tensor_from_tensor_list(position_ids_list)
 
     data["input_ids"] = input_ids_nested
     data["position_ids"] = position_ids_nested

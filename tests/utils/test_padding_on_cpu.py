@@ -13,6 +13,7 @@
 # limitations under the License.
 import random
 
+import pytest
 import torch
 from tensordict import TensorDict
 
@@ -133,6 +134,32 @@ def test_padding_conversion_without_log_probs():
     assert data_converted["position_ids"].is_nested
     assert "old_log_probs" not in data_converted
     assert "ref_log_prob" not in data_converted
+
+
+@pytest.mark.parametrize("batch_size", [1, 2])
+def test_padding_conversion_preserves_mrope_token_axis_for_equal_lengths(batch_size):
+    """Pack singleton and equal-length mRoPE batches along the token dimension."""
+    num_rope_dimensions = 4
+    seq_len = 6
+
+    position_ids = torch.arange(batch_size * num_rope_dimensions * seq_len).reshape(
+        batch_size, num_rope_dimensions, seq_len
+    )
+    data = TensorDict(
+        {
+            "input_ids": torch.arange(batch_size * seq_len).reshape(batch_size, seq_len),
+            "attention_mask": torch.ones(batch_size, seq_len),
+            "response_mask": torch.ones(batch_size, 2),
+            "position_ids": position_ids,
+        }
+    )
+
+    packed_position_ids = left_right_2_no_padding(data)["position_ids"]
+
+    assert packed_position_ids._ragged_idx == 2
+    assert packed_position_ids.values().shape == (num_rope_dimensions, batch_size * seq_len)
+    torch.testing.assert_close(packed_position_ids.offsets(), torch.arange(batch_size + 1) * seq_len)
+    torch.testing.assert_close(packed_position_ids.values(), torch.cat(position_ids.unbind(0), dim=-1))
 
 
 def test_padding_roundtrip():
