@@ -137,6 +137,7 @@ def test_engine_hook_context_and_current_thd_arguments(monkeypatch):
             "use_fp8_padding": True,
             "min_local_rows": 64,
             "cp_layout": "dualpipev",
+            "local_cp_size": None,
         },
     ]
 
