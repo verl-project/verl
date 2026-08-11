@@ -177,6 +177,8 @@ class McoreEngineConfig(EngineConfig):
         use_mbridge (bool): Whether to use MBridge for communication.
         vanilla_mbridge (bool): Whether to use the deprecated legacy mbridge backend instead of Megatron-Bridge.
         use_megatron_fsdp (bool): Whether to use Megatron-FSDP (Zero-3 sharding).
+        pad_to_length (bool): Whether to round every packed micro-batch up to a bucket-aligned length.
+        pad_to_length_bucket (int): Padding granularity on the global packed sequence.
         dtype (str): Mixed precision training param dtype, default "bfloat16"
     """
 
@@ -196,6 +198,8 @@ class McoreEngineConfig(EngineConfig):
     sequence_parallel: bool = True
     use_distributed_optimizer: bool = True
     pad_bshd_to_minibatch_max: bool = True
+    pad_to_length: bool = False
+    pad_to_length_bucket: int = 512
     use_dist_checkpointing: bool = False
     dist_checkpointing_path: Optional[str] = None
     dist_checkpointing_prefix: str = ""

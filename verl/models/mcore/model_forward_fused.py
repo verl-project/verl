@@ -268,6 +268,7 @@ def fused_forward_model_engine(vision_model: bool = False):
         cp_layout: str = "zigzag",
         local_cp_size: int | None = None,
         router_padding_mask: Tensor | None = None,
+        pad_to_length_bucket: int | None = None,
     ):
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
@@ -284,6 +285,7 @@ def fused_forward_model_engine(vision_model: bool = False):
             pre_process=pre_process,
             use_fp8_padding=use_fp8_padding,
             min_local_rows=min_local_rows,
+            pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
             local_cp_size=local_cp_size,
         )
@@ -316,6 +318,7 @@ def fused_forward_model_engine(vision_model: bool = False):
             need_roll=True,
             use_fp8_padding=use_fp8_padding,
             min_local_rows=min_local_rows,
+            pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
             local_cp_size=local_cp_size,
         )
