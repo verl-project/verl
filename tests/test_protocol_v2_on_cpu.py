@@ -149,6 +149,31 @@ def test_index_select_tensor_dict_preserves_3d_nested_tensor_layout_with_equal_s
     tu.assert_tensordict_eq(selected, tu.get_tensordict({"position_ids": expected}))
 
 
+def test_index_select_tensor_dict_repairs_broken_3d_position_ids_ragged_idx():
+    position_ids = tu.nested_tensor_from_tensor_list(
+        [
+            torch.arange(2).expand(4, 2),
+            torch.arange(5).expand(4, 5),
+            (torch.arange(5) + 10).expand(4, 5),
+            torch.arange(3).expand(4, 3),
+        ]
+    )
+    position_ids._ragged_idx = 1
+    data = tu.get_tensordict({"position_ids": position_ids})
+
+    selected = tu.index_select_tensor_dict(data, torch.tensor([1, 2]))
+    expected = tu.nested_tensor_from_tensor_list(
+        [
+            torch.arange(5).expand(4, 5),
+            (torch.arange(5) + 10).expand(4, 5),
+        ],
+        ragged_idx=2,
+    )
+
+    assert selected["position_ids"]._ragged_idx == 2
+    tu.assert_tensordict_eq(selected, tu.get_tensordict({"position_ids": expected}))
+
+
 def test_tensordict_with_images():
     # each sample contains a sequence with multiple images of different sizes
     vocab_size = 128

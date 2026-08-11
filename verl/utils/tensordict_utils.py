@@ -492,7 +492,30 @@ def index_select_tensor_dict(batch: TensorDict, indices: torch.Tensor | list[int
             if isinstance(tensor, torch.Tensor) and not tensor.is_nested:
                 data_dict[key] = tensor[indices]
             elif isinstance(tensor, torch.Tensor) and tensor.is_nested:
-                tensor_lst = tensor.unbind()  # for performance
+                is_3d_position_ids = key == "position_ids" and tensor.dim() == 3
+                if is_3d_position_ids:
+                    tensor._ragged_idx = 2
+
+                try:
+                    tensor_lst = tensor.unbind()  # for performance
+                except RuntimeError as unbind_error:
+                    if not is_3d_position_ids:
+                        raise
+
+                    try:
+                        padded = tensor.to_padded_tensor(0)
+                        lengths = tensor.offsets().diff().tolist()
+                        selected_tensors = [
+                            padded[idx, :, : lengths[idx]]
+                            for idx in indices.tolist()
+                        ]
+                        data_dict[key] = nested_tensor_from_tensor_list(
+                            selected_tensors, ragged_idx=2
+                        )
+                    except Exception as fallback_error:
+                        raise unbind_error from fallback_error
+                    continue
+
                 selected_tensors = [tensor_lst[idx] for idx in indices]
                 data_dict[key] = nested_tensor_from_tensor_list(
                     selected_tensors, ragged_idx=getattr(tensor, "_ragged_idx", tensor.dim() - 1)
