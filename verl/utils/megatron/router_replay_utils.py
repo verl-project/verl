@@ -219,6 +219,19 @@ def get_moe_num_layers_to_build(
     return num_moe_layers
 
 
+def _context_parallel_layout(tf_config) -> str:
+    """Return the CP row layout used for THD packing, matching MegatronEngine.
+
+    Router-replay tensors must be sharded exactly like the model's own token rows; otherwise the
+    replayed routes are attached to the wrong tokens (or the shapes disagree outright, since the
+    zigzag layout doubles the alignment). Keep this in sync with
+    ``MegatronEngine._get_context_parallel_layout``.
+    """
+    if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid":
+        return "contiguous"
+    return "zigzag"
+
+
 def merge_router_topk_indices(
     attention_mask, input_ids, mini_layer_topk_idx_list, tf_config, vp_rank=None, local_cp_size=None
 ):
@@ -264,6 +277,8 @@ def merge_router_topk_indices(
             if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid"
             else None
         )
+
+        cp_layout = _context_parallel_layout(tf_config)
 
         if input_ids.is_nested:
             batch_size = input_ids.shape[0]
@@ -386,6 +401,8 @@ def set_router_replay_data(
             if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid"
             else None
         )
+
+        cp_layout = _context_parallel_layout(tf_config)
 
         replay_mask_rmpad = None
         if layers_topk_idx.is_nested:

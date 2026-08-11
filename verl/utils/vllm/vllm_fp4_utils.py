@@ -93,6 +93,7 @@ def _refittable_mxfp4_backends():
         Mxfp4MoeBackend.DEEPGEMM_MXFP4,
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
+        Mxfp4MoeBackend.AITER_MXFP4_BF16,
     )
 
 

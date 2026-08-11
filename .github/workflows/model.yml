@@ -183,6 +183,7 @@ jobs:
         run: |
           ray stop --force
           pytest -s -x tests/models/test_engine.py
+          pytest -s -x tests/models/test_model_forward_fused.py
 
   cleanup:
     runs-on: ubuntu-latest

@@ -642,14 +642,29 @@ def apply_patch_megatron_recomputation_backward():
             for inp in detached_inputs
         )
         cur_stream = torch.cuda.current_stream()
-        # Release original input and grad tensors
-        for t in detached_inputs:
-            if isinstance(t, torch.Tensor) and t.requires_grad:
-                t.record_stream(cur_stream)
-                t.untyped_storage().resize_(0)
-                if t.grad is not None:
-                    t.grad.record_stream(cur_stream)
-                    t.grad.untyped_storage().resize_(0)
+        # Release saved input/grad tensors (MoE residual-memory leak fix, commit 04df110c).
+        # Skip MTP layer checkpoints: their saved ``hidden_states`` aliases the decoder
+        # output (a ``torch.chunk`` view), and MTP backward runs before the decoder
+        # backward, so ``resize_(0)`` would truncate storage the decoder still needs
+        # -> async CUDA illegal-memory-access.
+        is_mtp_checkpoint = False
+        run_fn = getattr(ctx, "run_function", None)
+        for cell in getattr(run_fn, "__closure__", None) or ():
+            try:
+                obj = cell.cell_contents
+            except ValueError:
+                continue
+            if obj.__class__.__name__ == "MultiTokenPredictionLayer":
+                is_mtp_checkpoint = True
+                break
+        if not is_mtp_checkpoint:
+            for t in detached_inputs:
+                if isinstance(t, torch.Tensor) and t.requires_grad:
+                    t.record_stream(cur_stream)
+                    t.untyped_storage().resize_(0)
+                    if t.grad is not None:
+                        t.grad.record_stream(cur_stream)
+                        t.grad.untyped_storage().resize_(0)
         # ctx.saved_tensors = None
         return (None, None) + grads
 
