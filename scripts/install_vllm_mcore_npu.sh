@@ -9,13 +9,20 @@ pip install torchvision==0.25.0
 pip install torchaudio==2.10.0
 pip install triton-ascend==3.2.1 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
 pip install "transformers==5.10.4" 
-pip install setuptools-scm
+# vLLM v0.23.0's [build-system].requires pins torch==2.11.0. Default PEP 517
+# build isolation would provision a build overlay by downloading torch 2.11
+# and nvidia_* CUDA wheels, leaving pip check warnings and a dangling
+# torch_npu 2.10.0 dependent. VLLM_TARGET_DEVICE=empty does not influence
+# build isolation. Below we install the build backend deps up front and pass
+# --no-build-isolation to the vLLM install, matching the pattern already
+# used for the vLLM-Ascend install a few lines below.
+pip install setuptools-scm setuptools-rust wheel
 
 
 echo "2. install vllm & vllm-ascend"
 git clone --depth 1 --branch v0.23.0 https://github.com/vllm-project/vllm.git
 cd vllm
-VLLM_TARGET_DEVICE=empty pip install -v -e .
+VLLM_TARGET_DEVICE=empty pip install -v --no-build-isolation -e .
 cd ..
 git clone -b releases/v0.23.0 https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
