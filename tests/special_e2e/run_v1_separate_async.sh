@@ -10,6 +10,8 @@ NUM_GPUS=${NUM_GPUS:-8}
 N_GPUS_TRAINING=${N_GPUS_TRAINING:-$((NUM_GPUS / 2))}
 N_GPUS_ROLLOUT=${N_GPUS_ROLLOUT:-$((NUM_GPUS - N_GPUS_TRAINING))}
 ACTOR_STRATEGY=${ACTOR_STRATEGY:-fsdp2}
+ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.6}
+VANILLA_MBRIDGE=${VANILLA_MBRIDGE:-False}
 
 if ((N_GPUS_TRAINING <= 0 || N_GPUS_ROLLOUT <= 0 || N_GPUS_TRAINING + N_GPUS_ROLLOUT != NUM_GPUS)); then
     echo "Invalid GPU split: total=${NUM_GPUS}, training=${N_GPUS_TRAINING}, rollout=${N_GPUS_ROLLOUT}"
@@ -76,7 +78,7 @@ common_params=(
     actor_rollout_ref.rollout.nnodes=1
     actor_rollout_ref.rollout.n_gpus_per_node=${N_GPUS_ROLLOUT}
     actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP}
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.6
+    actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEMORY_UTILIZATION}
     actor_rollout_ref.rollout.n=${N_RESP_PER_PROMPT}
     actor_rollout_ref.rollout.calculate_log_probs=True
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
@@ -120,7 +122,7 @@ elif [[ "${ACTOR_STRATEGY}" == "megatron" ]]; then
         model_engine=megatron \
         "${common_params[@]}" \
         actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
-        actor_rollout_ref.actor.megatron.vanilla_mbridge=False \
+        actor_rollout_ref.actor.megatron.vanilla_mbridge=${VANILLA_MBRIDGE} \
         actor_rollout_ref.actor.megatron.param_offload=False \
         actor_rollout_ref.actor.megatron.optimizer_offload=False \
         actor_rollout_ref.actor.megatron.grad_offload=False \
