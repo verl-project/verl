@@ -204,6 +204,7 @@ class MegatronEngine(BaseEngine):
             "gate_proj_layer_name": "linear_fc1.",
         }
         self.weight_converter = None
+        self._hf_export_tasks = None
 
         # QAT configuration
         self._qat_config = getattr(self.engine_config, "qat", None)
@@ -381,10 +382,21 @@ class MegatronEngine(BaseEngine):
 
                 provider.transformer_layer_spec = modelopt_transformer_layer_spec
 
-            provider.apply_overrides_and_finalize(
-                dtype=self.param_dtype,
-                overrides=provider_overrides,
-            )
+            # Megatron-Bridge >= v0.5.0 provides apply_overrides_and_finalize.
+            # Megatron-Bridge <  v0.5.0 does not, so we fall back to manual setattr + finalize.
+            if hasattr(provider, "apply_overrides_and_finalize"):
+                provider.apply_overrides_and_finalize(
+                    dtype=self.param_dtype,
+                    overrides=provider_overrides,
+                )
+            else:
+                provider.params_dtype = self.param_dtype
+                provider.fp16 = self.param_dtype == torch.float16
+                provider.bf16 = self.param_dtype == torch.bfloat16
+                for name, value in provider_overrides.items():
+                    setattr(provider, name, value)
+                if hasattr(provider, "finalize"):
+                    provider.finalize()
             self.provider = provider
             tf_config = None  # Will be set after model creation
         self.bridge = bridge
@@ -552,6 +564,7 @@ class MegatronEngine(BaseEngine):
         )
 
     def initialize(self):
+        self._hf_export_tasks = None
         self._build_tf_config()
         _check_dcp_unsupported_features(self.engine_config, self.model_config, tf_config=self.tf_config)
 
@@ -990,6 +1003,14 @@ class MegatronEngine(BaseEngine):
             RouterReplay.clear_global_router_replay_action()
         return output
 
+    def _mbridge_export_tasks(self):
+        """Cache static export tasks while preserving Bridge's specialized FP8 task planning."""
+        if getattr(self.bridge, "export_weight_dtype", None) == "fp8":
+            return None
+        if self._hf_export_tasks is None:
+            self._hf_export_tasks = self.bridge.get_conversion_tasks(self.module)
+        return self._hf_export_tasks
+
     def get_per_tensor_param(self, base_sync_done=False, **kwargs):
         peft_config = None
         non_merge_lora_sync = self.peft_cls is not None and not self.model_config.lora.get("merge", False)
@@ -1003,10 +1024,15 @@ class MegatronEngine(BaseEngine):
         elif adapter_only:
             per_tensor_param = self.bridge.export_adapter_weights(self.module)
         else:
+            conversion_tasks = self._mbridge_export_tasks()
             per_tensor_param = (
-                self.bridge.export_hf_weights(self.module, merge_adapter_weights=False)
+                self.bridge.export_hf_weights(
+                    self.module,
+                    conversion_tasks=conversion_tasks,
+                    merge_adapter_weights=False,
+                )
                 if non_merge_lora_sync
-                else self.bridge.export_hf_weights(self.module)
+                else self.bridge.export_hf_weights(self.module, conversion_tasks=conversion_tasks)
             )
 
         # QAT: process weights through QATWeightExporter for quantized weight sync to vLLM
