@@ -630,6 +630,18 @@ class MegatronEngine(BaseEngine):
     def get_context_parallel_group(self):
         return mpu.get_context_parallel_group()
 
+    def finalize_async_checkpointing(self, blocking: bool = False) -> None:
+        """Finalize queued Megatron distributed checkpoint writes.
+
+        ``AsyncCallsQueue`` performs distributed collectives while finalizing,
+        so callers must invoke this method from an identical control-flow point
+        on every rank.
+        """
+        if not self.checkpoint_config.async_save:
+            return
+
+        self.checkpoint_mananager.finalize_async_checkpointing(blocking=blocking)
+
     def save_checkpoint(
         self,
         local_path: str,

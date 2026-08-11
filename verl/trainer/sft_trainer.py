@@ -95,6 +95,7 @@ class SFTTrainer:
             resume_mode=resume_mode,
             resume_from_path=resume_from_path,
             lora_train_meta=lora_train_meta,
+            async_save=self.checkpoint_config.async_save,
         )
 
     def _get_lora_train_meta(self):
@@ -383,6 +384,12 @@ class SFTTrainer:
                     self.training_client.start_profile()
                 # train for on batch
                 output = self.training_client.train_batch(data=data)
+                # Advance pending distributed checkpoint writes at the same
+                # point on every training rank. Megatron's async queue performs
+                # collectives while finalizing, so it cannot run in a background
+                # thread or only on rank 0.
+                self.ckpt_handler.finalize_async_checkpointing(blocking=False)
+
                 # Advance the profiler schedule once per step. No-op unless a torch
                 # profiler schedule (wait/warmup/active/repeat) is active.
                 self.training_client.step_profile()
@@ -442,6 +449,13 @@ class SFTTrainer:
                     self.ckpt_handler.save_checkpoint(step=global_step)
 
                 if is_last_step:
+                    # Ensure the last async checkpoint completes before the
+                    # process group is torn down. This makes its dist_ckpt
+                    # metadata, manifest, and resume tracker durable.
+                    self.ckpt_handler.finalize_async_checkpointing(blocking=True)
+                    if self.checkpoint_config.async_save:
+                        torch.distributed.barrier()
+
                     if is_logging:
                         print(f"Total time for train steps: {train_time:.2f}s")
                         print(f"Final validation metrics: {last_valid_metric}")

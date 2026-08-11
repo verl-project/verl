@@ -65,6 +65,7 @@ class CheckpointHandler:
         resume_from_path=None,
         mode=OrchestrationMode.SPMD,
         lora_train_meta=None,
+        async_save=False,
     ):
         self.default_local_dir = default_local_dir
         self.max_ckpt_to_keep = max_ckpt_to_keep
@@ -75,6 +76,7 @@ class CheckpointHandler:
         self.train_dataloader = train_dataloader
         self.mode = mode
         self.lora_train_meta = lora_train_meta
+        self.async_save = async_save
 
         if self.mode == OrchestrationMode.SPMD:
             self.rank = torch.distributed.get_rank()
@@ -86,6 +88,11 @@ class CheckpointHandler:
             self.dp_rank = 0
         else:
             raise ValueError(f"Unknown {self.mode=}")
+
+    def finalize_async_checkpointing(self, blocking: bool = False) -> None:
+        """Advance outstanding engine checkpoint writes in a rank-aligned call."""
+        if self.async_save:
+            self.engine.finalize_async_checkpointing(blocking=blocking)
 
     def save_checkpoint(self, step):
         """Save checkpoint using FSDPCheckpointManager with improved tracking"""
@@ -99,9 +106,17 @@ class CheckpointHandler:
         # Get max checkpoints to keep
         max_ckpt_to_keep = self.max_ckpt_to_keep
 
+        # Complete the previous asynchronous save before starting a new one.
+        # Megatron's finalize path contains collectives, so every SPMD rank
+        # reaches this point through the same CheckpointHandler call.
+        self.finalize_async_checkpointing(blocking=False)
+
         # Use checkpoint manager to save
         self.engine.save_checkpoint(
-            local_path=local_global_step_folder, global_step=step, max_ckpt_to_keep=max_ckpt_to_keep
+            local_path=local_global_step_folder,
+            hdfs_path=self.default_hdfs_dir,
+            global_step=step,
+            max_ckpt_to_keep=max_ckpt_to_keep,
         )
 
         # Save dataloader state. Note that we only save the iterator in the train_dataloader.
@@ -123,8 +138,10 @@ class CheckpointHandler:
             torch.save(dataloader_state_dict, dataloader_local_path)
             print(f"Saved dataloader state to: {dataloader_local_path}")
 
-        if self.rank == 0:
-            # Update latest checkpoint tracker (atomic write)
+        if self.rank == 0 and not self.async_save:
+            # Synchronous engines publish the checkpoint once all local files
+            # are written. Megatron async saves publish from their finalize
+            # callback instead, after dist_checkpointing has written metadata.
             tracker_file = get_checkpoint_tracker_filename(self.default_local_dir)
             temp_tracker_file = tracker_file + ".tmp"
             with open(temp_tracker_file, "w") as f:
@@ -132,8 +149,10 @@ class CheckpointHandler:
             os.rename(temp_tracker_file, tracker_file)
             print(f"Updated checkpoint tracker: {tracker_file}")
 
-        # Copy to HDFS if configured
-        if self.rank == 0 and self.default_hdfs_dir:
+        # Synchronous engines have completed their local writes, so copy now.
+        # Async Megatron saves copy from their finalize callback instead, after
+        # dist checkpoint metadata is durable.
+        if self.rank == 0 and self.default_hdfs_dir and not self.async_save:
             hdfs_io.makedirs(self.default_hdfs_dir, exist_ok=True)
             hdfs_io.copy(src=local_global_step_folder, dst=self.default_hdfs_dir, dirs_exist_ok=True)
 

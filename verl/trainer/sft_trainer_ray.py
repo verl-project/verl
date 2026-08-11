@@ -82,6 +82,7 @@ class SFTTrainer:
             resume_mode=resume_mode,
             resume_from_path=resume_from_path,
             mode=OrchestrationMode.RAY,
+            async_save=self.checkpoint_config.async_save,
         )
 
     def _build_config(self):
@@ -333,6 +334,7 @@ class SFTTrainer:
                 # train for on batch
                 output = self.training_client.train_batch(data)
                 output = output.get()
+                self.ckpt_handler.finalize_async_checkpointing(blocking=False)
 
                 if global_step == self.end_profile_step:
                     self.training_client.stop_profile()
@@ -374,6 +376,7 @@ class SFTTrainer:
                     self.ckpt_handler.save_checkpoint(step=global_step)
 
                 if is_last_step:
+                    self.ckpt_handler.finalize_async_checkpointing(blocking=True)
                     print(f"Total time for train steps: {train_time:.2f}s")
                     print(f"Final validation metrics: {last_valid_metric}")
                     return
