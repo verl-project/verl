@@ -136,6 +136,7 @@ def test_engine_dcp_contracts():
     engine_config = SimpleNamespace(
         dynamic_context_parallel=True,
         use_remove_padding=True,
+        pad_to_length=False,
         virtual_pipeline_model_parallel_size=None,
         router_replay=SimpleNamespace(mode="R2"),
     )

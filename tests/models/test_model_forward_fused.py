@@ -124,13 +124,22 @@ def test_engine_hook_context_and_current_thd_arguments(monkeypatch):
     assert hook_kwargs["output_processor"] is mff.fused_output_processor
     assert hook_kwargs["output_processor_context"].temperature == pytest.approx(0.7)
     assert preprocess_calls == [
-        {"pre_process": True, "use_fp8_padding": True, "min_local_rows": 64, "cp_layout": "dualpipev"},
+        {
+            "pre_process": True,
+            "use_fp8_padding": True,
+            "min_local_rows": 64,
+            "pad_to_length_bucket": None,
+            "cp_layout": "dualpipev",
+            "local_cp_size": None,
+        },
         {
             "pre_process": True,
             "need_roll": True,
             "use_fp8_padding": True,
             "min_local_rows": 64,
+            "pad_to_length_bucket": None,
             "cp_layout": "dualpipev",
+            "local_cp_size": None,
         },
     ]
 
