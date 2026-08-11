@@ -55,8 +55,8 @@ RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && 
     pip install -e Megatron-LM && \
     # Install transformers
     cd transformers && pip install -e . && cd .. && \
-    # Install mbridge with Qwen3-VL support
-    pip install --no-deps git+https://github.com/ISEEKYAN/mbridge.git@a61943d7fcb34a190471cfeb0a0eb8bbda621ddf && \
+    # Install mbridge
+    pip install mbridge && \
     # Install others
     pip install "nvidia-modelopt[torch]>=0.37.0" flash-linear-attention==0.5.0 qwen_vl_utils viztracer mathruler && \
     # Clear extra files

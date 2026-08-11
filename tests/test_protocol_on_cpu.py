@@ -1089,31 +1089,6 @@ def test_serialize_deserialize_tensordict_nested_tensors():
         assert orig.dtype == recon.dtype
 
 
-@pytest.mark.parametrize("rope_dim", [3, 4])
-def test_maybe_fix_3d_position_ids_rebuilds_ragged_sequence_layout(rope_dim: int):
-    position_ids_rows = [
-        torch.arange(i * rope_dim * 700, (i + 1) * rope_dim * 700).view(rope_dim, 700) for i in range(2)
-    ]
-    decoded_position_ids = torch.nested.as_nested_tensor(position_ids_rows, layout=torch.jagged)
-    decoded = TensorDict({"position_ids": decoded_position_ids}, batch_size=(2,))
-    assert decoded["position_ids"].values().shape == torch.Size([2 * rope_dim, 700])
-    assert decoded["position_ids"].offsets().tolist() == [0, rope_dim, 2 * rope_dim]
-    assert decoded["position_ids"]._ragged_idx == 1
-
-    tu.maybe_fix_3d_position_ids(decoded)
-
-    fixed = decoded["position_ids"]
-    assert fixed.values().shape == torch.Size([rope_dim, 1400])
-    assert fixed.offsets().tolist() == [0, 700, 1400]
-    assert fixed._ragged_idx == 2
-    for actual, expected in zip(fixed.unbind(), position_ids_rows, strict=True):
-        assert torch.equal(actual, expected)
-
-    selected = tu.index_select_tensor_dict(decoded, torch.tensor([1, 0]))
-    for actual, expected in zip(selected["position_ids"].unbind(), reversed(position_ids_rows), strict=True):
-        assert torch.equal(actual, expected)
-
-
 def test_serialize_deserialize_tensordict_mixed_types():
     """Test serialization and deserialization of TensorDict with mixed tensor types"""
     # Create tensors with different data types

@@ -1,6 +1,6 @@
 # 昇腾 NPU 上基于 Megatron 和 vLLM Ascend 的在线蒸馏 / On-policy distillation with Megatron and vLLM Ascend
 
-更新日期 / Last updated: 2026-08-08.
+更新日期 / Last updated: 2026-08-11.
 
 ## 中文版
 
@@ -15,7 +15,9 @@
   Qwen3-VL-4B-Instruct teacher 蒸馏 Qwen3-VL-2B-Instruct student。
   这是项目 2 当前的校准与验收链路。
 
-脚本关闭流水线并行和专家并行，并允许配置张量并行。每个资源池中未用于张量并行
+三个脚本都通过 `torch_npu` 自动识别 `DEVICE=gpu|npu`，并在脚本内部选择对应的
+资源、显存、offload 与运行时配置；只有特殊环境才需要手工覆盖 `DEVICE`。脚本关闭
+流水线并行和专家并行，并允许配置张量并行。每个资源池中未用于张量并行
 的 worker 组成数据并行副本。四卡环境既支持 student/teacher 各 TP=2，也支持
 物理 2+2、两侧 TP=1/DP=2。小模型不一定能从更大的 TP 获益，应以实测门禁选择。
 
@@ -81,7 +83,8 @@ Ascend Dockerfile 使用 `core_r0.16.0` 分支的 MindSpeed 和 Megatron Core，
 应保持在同一 Megatron Core 版本线。本环境使用 legacy mbridge，因为 NVIDIA
 Megatron-Bridge 会导入仅支持 CUDA 的 Transformer Engine 组件。
 
-Qwen3-VL 需要包含 `qwen3_vl` bridge 的 mbridge revision。本项目固定为：
+Dockerfile 保持安装发布版 `mbridge`，不固定源码 commit。Qwen3-VL 需要包含
+`qwen3_vl` bridge 的 mbridge revision；在构建或启动 NPU 镜像后安装已验证版本：
 
 ```bash
 pip install --no-deps \
@@ -141,7 +144,7 @@ prompt 256、response 1024。四卡验收拓扑使用两侧 TP=2：
 
 ```bash
 NGPUS_PER_NODE=2 \
-TEACHER_NGPUS_PER_NODE=2 \
+TEACHER_WORLD_SIZE=2 \
 ACTOR_TP=2 \
 ROLLOUT_TP=2 \
 TEACHER_TP=2 \
@@ -168,7 +171,8 @@ teacher log-prob 会在 estimator 前对称 clamp，避免 `-inf - -inf` 进入�
 稳定时，应检查有限的 `actor/distillation/loss`、`actor/loss` 和
 `actor/grad_norm`，并单独披露原始诊断。
 
-`OPTIMIZER_CPU_OFFLOAD=true` 默认启用 Megatron CPU optimizer。它仍会更新所有模型
+NPU 分支默认设置 `OPTIMIZER_CPU_OFFLOAD=true`，启用 Megatron CPU optimizer。
+GPU 分支默认关闭该设置。CPU offload 仍会更新所有模型
 参数；offload 只改变 optimizer state 的存放位置，不改变训练范围或可训练参数。
 
 已验证 Geo3K 数据经 processor 展开后，训练 prompt 最大 771 token，测试最大 613
@@ -318,8 +322,9 @@ Megatron `forward_kl_topk` 是 vocabulary-parallel 实现。接受环境前，�
 ## English Version
 
 
-This guide covers full-parameter on-policy distillation (OPD) on Ascend NPUs
-with Megatron training and vLLM Ascend inference. The canonical recipes are:
+This guide covers full-parameter on-policy distillation (OPD) with Megatron
+training and vLLM inference, including the vLLM Ascend path. The canonical
+recipes are:
 
 - `run_qwen2_5_0_5b_megatron.sh`: Qwen2.5-0.5B student and
   Qwen2.5-3B-Instruct teacher on GSM8K.
@@ -329,7 +334,10 @@ with Megatron training and vLLM Ascend inference. The canonical recipes are:
   Qwen3-VL-2B-Instruct student and Qwen3-VL-4B-Instruct teacher pair on
   Geo3K. This is the current project-2 calibration target.
 
-The recipes keep pipeline and expert parallelism disabled. Tensor parallelism
+All three scripts auto-detect `DEVICE=gpu|npu` by probing `torch_npu` and select
+device-specific resource, memory, offload, and runtime settings internally.
+Override `DEVICE` only for unusual environments. The recipes keep pipeline and
+expert parallelism disabled. Tensor parallelism
 is configurable; any remaining workers in a pool form data-parallel replicas.
 Their basic single-node placement is one NPU for the colocated student/rollout
 pool and one NPU for the teacher pool. On four NPUs, both a TP=2+2 placement
@@ -413,7 +421,8 @@ on the same Megatron Core line. The legacy mbridge backend is selected because
 the NVIDIA Megatron-Bridge package imports CUDA-only Transformer Engine
 components in this environment.
 
-Qwen3-VL support requires an mbridge revision containing the `qwen3_vl`
+The Dockerfiles retain the released `mbridge` package and do not pin a source
+commit. Qwen3-VL support requires an mbridge revision containing the `qwen3_vl`
 bridge. The recipes were validated with mbridge commit
 `a61943d7fcb34a190471cfeb0a0eb8bbda621ddf`. The PyPI package named `0.15.1`
 may not contain that bridge even though it has the same package version. Until
@@ -484,7 +493,7 @@ To run the supplementary four-NPU topology, assign TP=2 to both pools:
 
 ```bash
 NGPUS_PER_NODE=2 \
-TEACHER_NGPUS_PER_NODE=2 \
+TEACHER_WORLD_SIZE=2 \
 ACTOR_TP=2 \
 ROLLOUT_TP=2 \
 TEACHER_TP=2 \
@@ -516,9 +525,10 @@ preventing `-inf - -inf` from entering the optimized loss. Raw
 `actor/distillation/loss`, `actor/loss`, and `actor/grad_norm` fields to decide
 whether the optimization path is numerically valid.
 
-`OPTIMIZER_CPU_OFFLOAD=true` selects Megatron's CPU-resident optimizer and is
-the recipe default. It still updates every model parameter; offload changes
-optimizer-state placement, not the training scope or trainable parameters.
+The NPU branch defaults `OPTIMIZER_CPU_OFFLOAD=true`, selecting Megatron's
+CPU-resident optimizer; the GPU branch defaults it to false. CPU offload still
+updates every model parameter and changes optimizer-state placement rather
+than the training scope or trainable parameters.
 
 The processor-expanded Geo3K prompts in the validated dataset reached 771
 tokens in train and 613 in test, so the 1024 prompt limit preserves every
