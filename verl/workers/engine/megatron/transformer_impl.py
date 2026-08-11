@@ -771,6 +771,11 @@ class MegatronEngine(BaseEngine):
             peft_config = build_peft_config_for_vllm(self.model_config.lora)
         # when lora adapter only, we only load adapter weights when base sync is done, otherwise load all weights
         load_megatron_model_to_gpu(self.module, load_grad=False, load_frozen_params=not adapter_only)
+        # Barrier: ensure all model-parallel ranks have finished loading before any rank starts the
+        # weight conversion generator. Without this, a slow loader causes others to deadlock inside
+        # gather_from_ep_ranks / broadcast_from_pp_rank (EP×PP collective mismatch under disaggregated
+        # weight sync with param_offload=True).
+        torch.distributed.barrier(group=mpu.get_model_parallel_group())
         if self.vanilla_bridge:
             per_tensor_param = self.bridge.export_weights(self.module)
         elif adapter_only:
