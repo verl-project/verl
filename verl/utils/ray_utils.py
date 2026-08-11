@@ -24,6 +24,61 @@ from typing import Any, Optional
 
 import ray
 
+# Optional Ray custom resource that constrains where lightweight loop workers
+# (agent-loop / reward-loop actors) may be scheduled. In a shared or
+# heterogeneous Ray cluster, ``ray.nodes()`` also returns nodes that belong to
+# other jobs or worker groups. Round-robin over all of them with a soft
+# NodeAffinity can place a loop worker on a foreign node that does not run this
+# job's runtime image, which then crashes on import (e.g. ModuleNotFoundError).
+# Set this env var to a Ray custom resource that only this job's nodes advertise
+# to keep loop workers on them. Unset -> historical behavior (all alive nodes).
+LOOP_WORKER_NODE_RESOURCE_ENV = "VERL_LOOP_WORKER_NODE_RESOURCE"
+
+# Fractional amount requested from the node resource so it only acts as a
+# scheduling gate, never a real capacity constraint. Mirrors the tiny reservation
+# verl already uses for accelerator_type bundles in single_controller/ray/base.py.
+_LOOP_WORKER_NODE_RESOURCE_AMOUNT = 1e-4
+
+
+def get_loop_worker_node_resource() -> Optional[str]:
+    """Return the configured loop-worker node resource, or None if unset."""
+    value = os.environ.get(LOOP_WORKER_NODE_RESOURCE_ENV, "").strip()
+    return value or None
+
+
+def schedulable_loop_worker_node_ids(node_resource: Optional[str] = None) -> list[str]:
+    """Return NodeIDs eligible to host agent-loop / reward-loop workers.
+
+    Without ``node_resource`` this preserves the historical behavior of
+    scheduling across every alive node that has CPU. When ``node_resource`` is
+    given, only nodes that advertise that Ray custom resource are returned, so a
+    shared/heterogeneous cluster never round-robins a loop worker onto a foreign
+    node that lacks this job's runtime.
+    """
+    nodes = [node for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
+    if node_resource:
+        nodes = [node for node in nodes if node["Resources"].get(node_resource, 0) > 0]
+        if not nodes:
+            raise RuntimeError(
+                f"No alive Ray node advertises the resource {node_resource!r} requested via "
+                f"{LOOP_WORKER_NODE_RESOURCE_ENV}; cannot place agent-loop/reward-loop workers. "
+                "Ensure this job's node group exports that custom resource."
+            )
+    return [node["NodeID"] for node in nodes]
+
+
+def loop_worker_node_affinity_resources(node_resource: Optional[str] = None) -> Optional[dict]:
+    """Actor ``resources`` requirement that pins a loop worker to a node group.
+
+    A soft NodeAffinity alone can still fall back to a foreign node when the
+    targeted node is momentarily full. Requiring a tiny amount of the node
+    resource makes Ray refuse to schedule the actor anywhere that does not
+    advertise it, closing that leak. Returns None when no resource is configured.
+    """
+    if not node_resource:
+        return None
+    return {node_resource: _LOOP_WORKER_NODE_RESOURCE_AMOUNT}
+
 
 def ray_noset_visible_devices(env_vars=os.environ):
     # Refer to
