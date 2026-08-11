@@ -125,7 +125,7 @@ def test_engine_hook_context_and_current_thd_arguments(monkeypatch):
     assert hook_kwargs["output_processor_context"].temperature == pytest.approx(0.7)
     assert preprocess_calls == [
         {
-            "pre_process": True, 
+            "pre_process": True,
             "use_fp8_padding": True,
             "min_local_rows": 64,
             "cp_layout": "dualpipev",
