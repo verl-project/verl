@@ -45,7 +45,7 @@ class TensorMetadata(TypedDict):
 def rebuild_ipc(handle: tuple[Callable, tuple], device_id: int | None = None) -> torch.Tensor:
     func, args = handle
     list_args = list(args)
-    if device_id is not None:
+    if device_id is not None and len(list_args) > 6:
         # the key is to change device id to the current device id
         # in case two processes have different CUDA_VISIBLE_DEVICES
         list_args[6] = device_id
