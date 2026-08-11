@@ -24,6 +24,8 @@ Covers the three pieces that make a packed micro-batch shape-stable:
   inherits it.
 * ``FSDPEngine._gather_and_unpad_packed`` — the no-SP branch that trims
   the pad back off before the outputs are re-jagged.
+* Masked fused-head labels — response masks align to causal predictor rows,
+  while static padding uses the standard ``-100`` ignore index.
 
 The ``veomni.*`` imports that ``transformer_impl`` performs at module
 load are stubbed with ``MagicMock`` the same way
@@ -32,6 +34,7 @@ plain CPU unit-test image.
 """
 
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -56,6 +59,7 @@ for _mod in (
     sys.modules.setdefault(_mod, MagicMock())
 
 
+from verl.utils.dataset.dataset_utils import DatasetPadMode  # noqa: E402
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead  # noqa: E402
 from verl.workers.engine.utils import pad_packed_inputs  # noqa: E402
 from verl.workers.engine.veomni.transformer_impl import VeOmniEngineWithLMHead  # noqa: E402
@@ -184,3 +188,42 @@ class TestGatherAndUnpadPacked:
         tensor = torch.arange(10)
 
         assert engine._gather_and_unpad_packed(tensor, 0) is tensor
+
+
+@pytest.mark.parametrize(
+    "use_fused_kernels,model_type,masked",
+    [
+        (True, "language_model", True),
+        (False, "language_model", False),
+        (True, "value_model", False),
+    ],
+    ids=["masked-actor", "eager", "value-model"],
+)
+def test_fused_head_masks_only_policy_targets(use_fused_kernels, model_type, masked):
+    def nested(rows):
+        return torch.nested.as_nested_tensor([torch.tensor(row) for row in rows], layout=torch.jagged)
+
+    engine = _make_engine(FSDPEngineWithLMHead, pad_to_length=True, bucket=12)
+    engine.use_ulysses_sp = False
+    engine.pass_packed_cu_seqlens = False
+    engine.model_config = SimpleNamespace(model_type=model_type, fused_kernel_options={"impl_backend": "torch"})
+    micro_batch = TensorDict(
+        {
+            "input_ids": nested([[11, 12, 13, 14, 15], [21, 22, 23, 24]]),
+            "position_ids": nested([[0, 1, 2, 3, 4], [0, 1, 2, 3]]),
+            "response_mask": nested([[1, 0, 1], [0, 1]]),
+        },
+        batch_size=[2],
+    )
+    micro_batch.set_non_tensor("temperature", 1.0)
+    micro_batch.set_non_tensor("use_remove_padding", True)
+    micro_batch.set_non_tensor("use_fused_kernels", use_fused_kernels)
+    micro_batch.set_non_tensor("pad_mode", DatasetPadMode.NO_PADDING)
+
+    model_inputs, output_args = engine.prepare_model_inputs(micro_batch)
+    labels = model_inputs.get("shift_labels", output_args["input_ids_rmpad_rolled"].unsqueeze(0))
+    dense = [12, 13, 14, 15, 21, 22, 23, 24, 11]
+    sparse = [-100, 13, -100, 15, -100, -100, -100, 24, -100]
+    expected = (sparse if masked else dense) + [(-100 if masked else 0)] * 3
+
+    assert labels.squeeze(0).tolist() == expected

@@ -25,6 +25,7 @@ from typing import Callable, ContextManager, Optional
 
 import torch
 import torch.distributed
+import torch.nn.functional as F
 from peft import LoraConfig, TaskType, get_peft_model
 from tensordict import TensorDict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -1171,6 +1172,29 @@ class FSDPEngineWithLMHead(FSDPEngine):
             # for compute the log_prob
             input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=1)  # (1, total_nnz)
 
+            label_pad_value = 0
+            if (
+                use_fused_kernels
+                and self.model_config.model_type == "language_model"
+                and "response_mask" in micro_batch
+                and self.model_config.fused_kernel_options.get("impl_backend") == "torch"
+            ):
+                # response_mask marks targets; shift it left to select their predictor rows.
+                active_rows_mask = (
+                    torch.cat(
+                        [
+                            F.pad(mask, (sequence.numel() - mask.numel() - 1, 1))
+                            for sequence, mask in zip(
+                                input_ids.unbind(), micro_batch["response_mask"].unbind(), strict=True
+                            )
+                        ]
+                    )
+                    .bool()
+                    .unsqueeze(0)
+                )
+                label_pad_value = -100
+                input_ids_rmpad_rolled = input_ids_rmpad_rolled.masked_fill(~active_rows_mask, label_pad_value)
+
             # Optional bucket-aligned packed length. This has to happen after the roll (which must
             # see the true global sequence) and before the SP split, so the pad stays a suffix of
             # the *global* packed sequence -- that is what prepare_model_outputs strips back off
@@ -1180,7 +1204,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 input_ids_rmpad, position_ids_rmpad = pad_packed_inputs(
                     input_ids_rmpad, position_ids_rmpad, static_pad_size
                 )
-                input_ids_rmpad_rolled, _ = pad_packed_inputs(input_ids_rmpad_rolled, None, static_pad_size)
+                input_ids_rmpad_rolled, _ = pad_packed_inputs(
+                    input_ids_rmpad_rolled, None, static_pad_size, pad_value=label_pad_value
+                )
                 temperature_rmpad, _ = pad_packed_inputs(temperature_rmpad, None, static_pad_size, pad_value=1)
 
             # pad and slice the inputs if sp > 1
@@ -1206,12 +1232,12 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     input_ids_rmpad_rolled,
                     position_ids_rmpad=None,
                     sp_size=self.ulysses_sequence_parallel_size,
+                    pad_value=label_pad_value,
                 )
 
                 temperature_rmpad, _, _ = ulysses_pad_and_slice_inputs(
                     temperature_rmpad, position_ids_rmpad=None, sp_size=self.ulysses_sequence_parallel_size, pad_value=1
                 )
-
                 sp_pad_size = pad_size
 
             # Total right-padding on the global packed sequence.
