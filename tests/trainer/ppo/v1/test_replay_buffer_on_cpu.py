@@ -222,6 +222,37 @@ class SampleConsumer(threading.Thread):
         return self.result
 
 
+class WaitConsumer(threading.Thread):
+    """Runs the blocking ``wait_for_sampleable`` so the test can assert it stays blocked."""
+
+    def __init__(self, rb: ReplayBufferAsync, partition_id: str, target_count: int, global_steps: int = 0):
+        super().__init__(daemon=True)
+        self.rb = rb
+        self.partition_id = partition_id
+        self.target_count = target_count
+        self.global_steps = global_steps
+        self.metrics: dict | None = None
+        self.error: Exception | None = None
+
+    def run(self) -> None:
+        try:
+            _, self.metrics = self.rb.wait_for_sampleable(
+                global_steps=self.global_steps,
+                partition_id=self.partition_id,
+                target_count=self.target_count,
+            )
+        except Exception as e:
+            self.error = e
+
+    def metrics_or_raise(self, timeout: float = 10.0) -> dict:
+        self.join(timeout)
+        assert not self.is_alive(), "WaitConsumer thread did not finish in time"
+        if self.error is not None:
+            raise self.error
+        assert self.metrics is not None
+        return self.metrics
+
+
 def _produce(partition_id: str, specs: list[PromptSpec]) -> RolloutProducer:
     producer = RolloutProducer(partition_id, specs)
     producer.start()
@@ -1136,5 +1167,88 @@ def test_overlapping_async_eviction_reasons_refill_once(tq_init, partition_id):
         assert refiller.calls == [1]
         assert metrics["validation/off_policy/evicted_samples"] == 1
         assert metrics["validation/filter_groups/evicted_samples"] == 1
+    finally:
+        _clear_partition(partition_id)
+
+
+# --------------------------------------------------------------------------- #
+# wait_for_sampleable: buffer depth without consuming (separate_async switching).
+# --------------------------------------------------------------------------- #
+
+
+def test_get_sampleable_count_excludes_stale_groups_without_consuming(tq_init, partition_id):
+    fresh = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=5)
+    stale = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=0)
+    _produce(partition_id, [fresh, stale]).join_and_check()
+
+    rb = _make_rb(
+        trainer_mode="colocate_async",
+        max_off_policy_strategy="drop",
+        max_off_policy_threshold=1,
+    )
+    try:
+        assert rb.get_sampleable_count(global_steps=5, partition_id=partition_id) == 1
+        assert {fresh.uid, stale.uid}.issubset(tq.kv_list(partition_id=partition_id)[partition_id])
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_wait_for_sampleable_leaves_the_groups_for_sample(tq_init, partition_id):
+    specs = [PromptSpec(uid=_uid(), status="finished", sessions=1) for _ in range(2)]
+    _produce(partition_id, specs).join_and_check()
+
+    rb = _make_rb(trainer_mode="colocate_async")
+    try:
+        _, metrics = rb.wait_for_sampleable(global_steps=0, partition_id=partition_id, target_count=2)
+
+        assert metrics == {}
+        # Waiting only observes depth, so the whole batch is still there to sample.
+        batch = _sample(rb, partition_id, batch_size=2)
+        assert _uids_of(batch.keys) == {spec.uid for spec in specs}
+    finally:
+        _clear_partition(partition_id)
+
+
+def test_wait_for_sampleable_blocks_below_the_target(tq_init, partition_id):
+    ready = PromptSpec(uid=_uid(), status="finished", sessions=1)
+    pending = PromptSpec(uid=_uid(), status="running", sessions=1)
+    _produce(partition_id, [ready, pending]).join_and_check()
+
+    rb = _make_rb(trainer_mode="colocate_async")
+    waiter = WaitConsumer(rb, partition_id, target_count=2)
+    try:
+        waiter.start()
+
+        time.sleep(POLL_INTERVAL * 5)
+        assert waiter.is_alive(), "wait must block until the target depth is reached"
+
+        _set_prompt_status(partition_id, pending.uid, "finished", global_steps=0)
+
+        assert waiter.metrics_or_raise() == {}
+    finally:
+        waiter.join(timeout=10.0)
+        _clear_partition(partition_id)
+
+
+def test_wait_for_sampleable_replaces_groups_sample_would_have_evicted(tq_init, partition_id):
+    # Without eviction and refill the wait would sit forever on a group that can never be trained on.
+    stale = PromptSpec(uid=_uid(), status="finished", sessions=1, global_steps=0)
+    _produce(partition_id, [stale]).join_and_check()
+
+    refiller = FakeRefiller(partition_id, global_steps=5)
+    rb = _make_rb(
+        trainer_mode="colocate_async",
+        max_off_policy_strategy="drop",
+        max_off_policy_threshold=1,
+        refill_fn=refiller,
+    )
+    try:
+        _, metrics = rb.wait_for_sampleable(global_steps=5, partition_id=partition_id, target_count=1)
+
+        assert refiller.calls == [1]
+        assert metrics["validation/off_policy/evicted_samples"] == 1
+        # The replacement, not the evicted group, is what the following sample() sees.
+        batch = _sample(rb, partition_id, batch_size=1, global_steps=5)
+        assert _uids_of(batch.keys) == {refiller.produced_uids[0]}
     finally:
         _clear_partition(partition_id)

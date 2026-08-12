@@ -239,6 +239,25 @@ trainer:
     # Asynchronous PPO trainer with separate trainer and rollout
     separate_async:
 
+      # Allow the trainer to switch to rollout mode to reduce idle.
+      enable_switch: false
+
+      # Fraction of train_batch_size that must be sampleable before the rollout replicas are
+      # reclaimed.
+      switch_threshold_ratio: 0.4
+
+      # Optional threshold adaptation. Starvation raises the ratio immediately; calm steps lower it
+      # only after the configured release interval. 
+      adaptive_switch_threshold: true
+      switch_threshold_step_up: 0.05
+      switch_threshold_step_down: 0.03
+
+      # Consecutive idle/calm steps required before ratio adjusts in that direction.
+      switch_threshold_release_steps: 2
+
+      # Window size for calculating average switch cost.
+      switch_cost_window_size: 3
+
       # Number of warmup batches to add before training loop starts
       num_warmup_batches: 1
 

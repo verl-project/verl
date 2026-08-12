@@ -811,16 +811,23 @@ class vLLMHttpServer:
             await self.engine.reset_encoder_cache()
 
     async def release_kv_cache(self):
-        """Release only kv_cache GPU memory, keeping model weights intact.
-        # TODO: support true release of kv_cache
-        """
+        """Free the kv_cache pool for the duration of a weight sync."""
+        # TODO: use the real release_kv_cache() method after vllm supports it (vllm#44890/46438)
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
+        if self.rollout_mode == RolloutMode.COLOCATED:
+            return
+        await self.engine.sleep(level=self._resolve_sleep_level())
+        await self.engine.wake_up(tags=["weights"])
 
     async def resume_kv_cache(self):
         """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
-        if self.node_rank != 0:
+        if self.node_rank != 0 or not self.config.free_cache_engine:
             return
+        if self.rollout_mode == RolloutMode.COLOCATED:
+            return
+        await self.engine.wake_up(tags=["kv_cache"])
+        await self.engine.reset_prefix_cache(reset_connector=True)
 
     async def start_profile(self, **kwargs):
         if self.node_rank != 0:
@@ -1072,6 +1079,24 @@ class vLLMHttpServer:
         """Return the tags passed to engine.wake_up(). Default includes kv_cache."""
         return ["kv_cache", "weights"]
 
+    def _resolve_sleep_level(self) -> int:
+        """Deepest sleep level whose discarded state a subsequent weight sync can restore.
+
+        MTP drafter-only weights are initialized by vLLM and are not guaranteed
+        to be restored by actor weight sync after level 2 sleep discards them.
+        lora only update adapter weights, so set sleep level to 1.
+        vllm_ascend not support sleep_level now. Enabling EP during training may lead to accuracy issues.
+        """
+        mtp_config = getattr(self.config, "mtp", None)
+        mtp_rollout_enabled = (
+            mtp_config is not None
+            and getattr(mtp_config, "enable", False)
+            and getattr(mtp_config, "enable_rollout", False)
+        )
+        if mtp_rollout_enabled or self.lora_as_adapter or is_torch_npu_available(check_device=False):
+            return 1
+        return 2
+
     async def _sleep_hybrid(self):
         """HYBRID sleep: adapters and MTP need level=1; full weights need level=2.
 
@@ -1081,21 +1106,7 @@ class vLLMHttpServer:
         leaving other DP shards' weights unreleased, which causes OOM during
         FSDP training backward when DP > 1.
         """
-        mtp_config = getattr(self.config, "mtp", None)
-        mtp_rollout_enabled = (
-            mtp_config is not None
-            and getattr(mtp_config, "enable", False)
-            and getattr(mtp_config, "enable_rollout", False)
-        )
-        # MTP drafter-only weights are initialized by vLLM and are not guaranteed
-        # to be restored by actor weight sync after level 2 sleep discards them.
-        # lora only update adapter weights, so set sleep level to 1
-        # vllm_ascend not support sleep_level now. Enabling EP during training may lead to accuracy issues.
-        if mtp_rollout_enabled or self.lora_as_adapter or is_torch_npu_available(check_device=False):
-            sleep_level = 1
-        else:
-            sleep_level = 2
-        await self.engine.sleep(level=sleep_level)
+        await self.engine.sleep(level=self._resolve_sleep_level())
         await self.engine.reset_encoder_cache()
 
 

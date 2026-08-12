@@ -515,8 +515,11 @@ class PPOTrainer(ABC):
         sample_batch_size = train_batch_size // self.parameter_sync_step
 
         self._add_batch_to_generate()
+        prepare_metrics = self.on_step_prompts_submitted()
 
         metrics_aggregator = MetricsAggregator()
+        if prepare_metrics:
+            metrics_aggregator.add_step_metrics(prepare_metrics)
         combined_keys: list = []
         combined_tags: list = []
         combined_partition_id = "train"
@@ -610,6 +613,15 @@ class PPOTrainer(ABC):
     def on_step_begin(self):
         """Called at the beginning of each training step."""
         return
+
+    def on_step_prompts_submitted(self) -> dict:
+        """Called once this step's prompts are dispatched, before any mini-batch is sampled.
+
+        The only hook that sees the step as a whole rather than one local update, so it is where a
+        trainer acts on decisions whose cost should not be paid per mini-batch. Returns metrics to
+        fold into the step's log.
+        """
+        return {}
 
     @abstractmethod
     def on_step_end(self):
