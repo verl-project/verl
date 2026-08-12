@@ -162,9 +162,7 @@ class ContinuousTokenBuilder:
         *,
         tools: list[dict[str, Any]] | None = None,
     ) -> MergeResult:
-        appended_ids = self.tokenize_context_incremental_messages(
-            previous_messages, updated_messages, tools=tools
-        )
+        appended_ids = self.tokenize_context_incremental_messages(previous_messages, updated_messages, tools=tools)
         return self._merge_context_token_ids(runtime_token_ids, appended_ids)
 
     def merge_assistant_tokens(self, runtime_token_ids: list[int], assistant_token_ids: list[int]) -> MergeResult:
@@ -176,9 +174,7 @@ class ContinuousTokenBuilder:
             kind="assistant",
         )
 
-    def _merge_context_token_ids(
-        self, runtime_token_ids: list[int], appended_token_ids: list[int]
-    ) -> MergeResult:
+    def _merge_context_token_ids(self, runtime_token_ids: list[int], appended_token_ids: list[int]) -> MergeResult:
         """Merge runtime prefix tokens and appended context tokens.
 
         Model-specific builders usually override this hook for boundary handling,
@@ -498,9 +494,7 @@ class QwenContinuousTokenBuilder(ContinuousTokenBuilder):
         self._newline_id = int(newline_ids[0])
         self._im_end_id = require_token_id(tokenizer, "<|im_end|>")
 
-    def _merge_context_token_ids(
-        self, runtime_token_ids: list[int], appended_token_ids: list[int]
-    ) -> MergeResult:
+    def _merge_context_token_ids(self, runtime_token_ids: list[int], appended_token_ids: list[int]) -> MergeResult:
         prefix = list(runtime_token_ids)
         inserted_token_ids: list[int] = []
         if prefix and prefix[-1] == self._im_end_id:
@@ -530,9 +524,7 @@ class MiniMaxContinuousTokenBuilder(ContinuousTokenBuilder):
         self._newline_id = int(newline_ids[0])
         self._eos_id = require_token_id(tokenizer, "[e~[")
 
-    def _merge_context_token_ids(
-        self, runtime_token_ids: list[int], appended_token_ids: list[int]
-    ) -> MergeResult:
+    def _merge_context_token_ids(self, runtime_token_ids: list[int], appended_token_ids: list[int]) -> MergeResult:
         prefix = list(runtime_token_ids)
         inserted_token_ids: list[int] = []
         if prefix and prefix[-1] == self._eos_id:
@@ -560,9 +552,7 @@ class GLMContinuousTokenBuilder(ContinuousTokenBuilder):
         self._user_id = require_token_id(tokenizer, "<|user|>")
         self._ambiguous_boundary_ids = {self._observation_id, self._user_id}
 
-    def _merge_context_token_ids(
-        self, runtime_token_ids: list[int], appended_token_ids: list[int]
-    ) -> MergeResult:
+    def _merge_context_token_ids(self, runtime_token_ids: list[int], appended_token_ids: list[int]) -> MergeResult:
         prefix = list(runtime_token_ids)
         removed_prefix_token_count = 0
         if prefix and prefix[-1] in self._ambiguous_boundary_ids:
@@ -950,9 +940,7 @@ class DeepSeekContinuousTokenBuilder(ContinuousTokenBuilder):
             tokenizer.encode(self._TOOL_OUTPUTS_END_TOKEN, add_special_tokens=False)
         )
         if not self._tool_outputs_end_ids:
-            raise ValueError(
-                f"Expected DeepSeek {self._TOOL_OUTPUTS_END_TOKEN!r} to tokenize to at least one token"
-            )
+            raise ValueError(f"Expected DeepSeek {self._TOOL_OUTPUTS_END_TOKEN!r} to tokenize to at least one token")
 
     @staticmethod
     def _optional_token_id(tokenizer: Any, token: str) -> int | None:
@@ -1046,9 +1034,7 @@ class DeepSeekContinuousTokenBuilder(ContinuousTokenBuilder):
             removed_prefix_token_count=removed_prefix_token_count,
         )
 
-    def _merge_context_token_ids(
-        self, runtime_token_ids: list[int], appended_token_ids: list[int]
-    ) -> MergeResult:
+    def _merge_context_token_ids(self, runtime_token_ids: list[int], appended_token_ids: list[int]) -> MergeResult:
         # Direct concatenation — DeepSeek template has no inter-turn separator.
         merged_token_ids = list(runtime_token_ids) + list(appended_token_ids)
         return MergeResult(
