@@ -12,6 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
+
+import pytest
+
+from verl.workers.config import CheckpointEngineConfig
 from verl.workers.config.rollout import RolloutConfig
 
 
@@ -34,3 +39,13 @@ def test_prompt_length_must_be_positive():
     # default and a sane value remain valid
     assert RolloutConfig().prompt_length == 512
     assert RolloutConfig(prompt_length=1).prompt_length == 1
+
+
+def test_checkpoint_engine_ack_timeout_default():
+    assert CheckpointEngineConfig().update_weights_ack_timeout_seconds == 30.0
+
+
+@pytest.mark.parametrize("timeout", [0, -1, math.inf, -math.inf, math.nan])
+def test_checkpoint_engine_rejects_invalid_ack_timeout(timeout):
+    with pytest.raises(ValueError, match="positive finite"):
+        CheckpointEngineConfig(update_weights_ack_timeout_seconds=timeout)
