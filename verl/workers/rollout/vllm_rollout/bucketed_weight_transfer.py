@@ -341,12 +341,6 @@ class BucketedWeightReceiver:
                         if self.use_shm:
                             tensor = tensor.to(self.device)
                         weights.append((name, tensor))
-                        continue
-                    size = dtype.itemsize * shape.numel()
-                    tensor = self.buffer[offset : offset + size].view(dtype=dtype).view(shape)
-                    if self.use_shm:
-                        tensor = tensor.to(self.device)
-                    weights.append((name, tensor))
                     is_last = metadata["is_last"]
                     on_bucket_received(weights, is_last)
                     get_torch_device().synchronize()
