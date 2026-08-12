@@ -19,7 +19,6 @@ Utilities for handling router replay functionality in Megatron models.
 
 import inspect
 import warnings
-from typing import Optional
 
 import torch
 
@@ -47,10 +46,14 @@ from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAc
 device_name = get_device_name()
 
 
+def _context_parallel_layout(tf_config) -> str:
+    if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid":
+        return "contiguous"
+    return "zigzag"
+
+
 # from megatron.core.transformer.transformer_block import get_num_layers_to_build
-def get_num_layers_to_build(
-    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None
-) -> int:
+def get_num_layers_to_build(config: TransformerConfig, vp_stage: int | None = None, pp_rank: int | None = None) -> int:
     """
     Determine the number of transformer layers to build for the current pipeline stage.
     Args:
@@ -185,7 +188,7 @@ def is_moe_layer(tf_config, layer_idx):
 
 
 def get_moe_num_layers_to_build(
-    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None
+    config: TransformerConfig, vp_stage: int | None = None, pp_rank: int | None = None
 ) -> int:
     """Count the number of MoE layers assigned to the current rank.
     When ``moe_layer_freq`` is 1 or unset, every transformer layer is an MoE
@@ -216,7 +219,22 @@ def get_moe_num_layers_to_build(
     return num_moe_layers
 
 
-def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_list, tf_config, vp_rank=None):
+def _context_parallel_layout(tf_config) -> str:
+    """Return the CP row layout used for THD packing, matching MegatronEngine.
+
+    Router-replay tensors must be sharded exactly like the model's own token rows; otherwise the
+    replayed routes are attached to the wrong tokens (or the shapes disagree outright, since the
+    zigzag layout doubles the alignment). Keep this in sync with
+    ``MegatronEngine._get_context_parallel_layout``.
+    """
+    if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid":
+        return "contiguous"
+    return "zigzag"
+
+
+def merge_router_topk_indices(
+    attention_mask, input_ids, mini_layer_topk_idx_list, tf_config, vp_rank=None, local_cp_size=None
+):
     """
     Merge recorded router top-k indices across sequence-parallel ranks for all router instances,
     then pack/unpack them to align with the original (batch, seq_len) layout and append the result.
@@ -253,11 +271,14 @@ def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_lis
 
         fp8 = tf_config.fp8
         use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+        cp_layout = _context_parallel_layout(tf_config)
         min_local_rows = (
             tf_config.csa_window_size
             if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid"
             else None
         )
+
+        cp_layout = _context_parallel_layout(tf_config)
 
         if input_ids.is_nested:
             batch_size = input_ids.shape[0]
@@ -266,9 +287,17 @@ def merge_router_topk_indices(attention_mask, input_ids, mini_layer_topk_idx_lis
                 pre_process=True,
                 use_fp8_padding=use_fp8_padding,
                 min_local_rows=min_local_rows,
+                local_cp_size=local_cp_size,
+                cp_layout=cp_layout,
             )
             layers_topk_idx = postprocess_thd_engine(
-                layers_topk_idx, packed_seq_params, input_ids, batch_size, post_process=True
+                layers_topk_idx,
+                packed_seq_params,
+                input_ids,
+                batch_size,
+                post_process=True,
+                local_cp_size=local_cp_size,
+                cp_layout=cp_layout,
             )
         else:
             batch_size, seq_len = attention_mask.shape[:2]
@@ -300,12 +329,48 @@ def build_r3_replay_mask(input_ids: torch.Tensor, response_mask: torch.Tensor) -
     return torch.nested.nested_tensor_from_jagged(mask_values, offsets=input_ids.offsets())
 
 
+def align_r3_router_replay_data(layers_topk_idx: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
+    """Align rollout routes with full training inputs one sequence at a time.
+
+    Autoregressive rollout records the routes used to predict each generated
+    token, so it has no route for the final generated token. The R3 replay mask
+    leaves that final model row native; append one ignored placeholder per
+    affected sequence so route and model tensors still have identical shapes.
+    """
+    if not layers_topk_idx.is_nested or not input_ids.is_nested:
+        raise TypeError("R3 router replay requires jagged route targets and input_ids")
+
+    route_parts = list(layers_topk_idx.unbind())
+    input_lens = [int(length) for length in input_ids.offsets().diff().tolist()]
+    if len(route_parts) != len(input_lens):
+        raise RuntimeError(
+            f"R3 router replay has {len(route_parts)} route sequences for {len(input_lens)} input sequences"
+        )
+
+    aligned_parts = []
+    for sample_id, (routes, input_len) in enumerate(zip(route_parts, input_lens, strict=True)):
+        route_len = routes.shape[0]
+        if route_len == input_len:
+            aligned_parts.append(routes)
+        elif route_len == input_len - 1:
+            placeholder = torch.zeros((1, *routes.shape[1:]), dtype=routes.dtype, device=routes.device)
+            aligned_parts.append(torch.cat((routes, placeholder), dim=0))
+        else:
+            raise RuntimeError(
+                f"R3 router replay sample {sample_id} has {route_len} route rows for {input_len} input tokens; "
+                "expected equal lengths or exactly one missing final route"
+            )
+
+    return torch.nested.as_nested_tensor(aligned_parts, layout=torch.jagged)
+
+
 def set_router_replay_data(
     layers_topk_idx,
     attention_mask,
     tf_config,
     vp_rank=None,
     replay_mask=None,
+    local_cp_size=None,
 ):
     """
     Scatter the packed router top-k indices back to sequence-parallel ranks and update each local
@@ -330,11 +395,14 @@ def set_router_replay_data(
     with torch.no_grad():
         fp8 = tf_config.fp8
         use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+        cp_layout = _context_parallel_layout(tf_config)
         min_local_rows = (
             tf_config.csa_window_size
             if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid"
             else None
         )
+
+        cp_layout = _context_parallel_layout(tf_config)
 
         replay_mask_rmpad = None
         if layers_topk_idx.is_nested:
@@ -343,6 +411,8 @@ def set_router_replay_data(
                 pre_process=True,
                 use_fp8_padding=use_fp8_padding,
                 min_local_rows=min_local_rows,
+                local_cp_size=local_cp_size,
+                cp_layout=cp_layout,
             )
             if replay_mask is not None:
                 replay_mask_rmpad, _, _ = preprocess_thd_engine(
@@ -350,6 +420,8 @@ def set_router_replay_data(
                     pre_process=True,
                     use_fp8_padding=use_fp8_padding,
                     min_local_rows=min_local_rows,
+                    local_cp_size=local_cp_size,
+                    cp_layout=cp_layout,
                 )
         else:
             layers_topk_idx_rmpad, _ = preprocess_packed_seqs(
@@ -437,8 +509,7 @@ def reorder_and_merge_vpp_layers(
 
     if micro_batch_tensor_list[0].is_nested:
         for chunk_id in range(vpp_size):
-            tensors = [tensor for nt in tensor_by_chunk[chunk_id] for tensor in nt.unbind()]
-            mini_tensor_list.append(torch.nested.as_nested_tensor(tensors, layout=torch.jagged))
+            mini_tensor_list.append(merge_nested_router_maps(tensor_by_chunk[chunk_id]))
     else:
         for chunk_id in range(vpp_size):
             mini_tensor_list.append(torch.cat(tensor_by_chunk[chunk_id], dim=0))
@@ -446,6 +517,12 @@ def reorder_and_merge_vpp_layers(
     out = torch.cat(mini_tensor_list, dim=2)
 
     return out
+
+
+def merge_nested_router_maps(router_maps) -> torch.Tensor:
+    """Flatten recorded micro-batch routes into one uint8 jagged tensor."""
+    tensors = [tensor.to(torch.uint8) for router_map in router_maps for tensor in router_map.unbind()]
+    return torch.nested.as_nested_tensor(tensors, layout=torch.jagged)
 
 
 def get_current_rank_layer_info(tf_config, vp_rank=None):
@@ -497,11 +574,14 @@ def pp_gather(local_layers_router_map, tf_config):
 
     pp_group = mpu.get_pipeline_model_parallel_group()
     world_size = torch.distributed.get_world_size(pp_group)
-    local_layers_router_map = local_layers_router_map.to(device_name)
     if local_layers_router_map.is_nested:
+        # all_gather_object preserves each sender's CUDA device, so normalize
+        # jagged route maps before concatenating routes from local PP ranks.
+        local_layers_router_map = local_layers_router_map.to("cpu")
         layers_topk_idx_global_list = [None] * world_size
         torch.distributed.all_gather_object(layers_topk_idx_global_list, local_layers_router_map, pp_group)
     else:
+        local_layers_router_map = local_layers_router_map.to(device_name)
         layers_topk_idx_global_list = [
             torch.empty(
                 size=local_layers_router_map.shape,

@@ -153,9 +153,11 @@ class TeacherModelManager:
                 )
 
     def _initialize_load_balancer_handle(self):
+        import ray
+
         from verl.workers.rollout.llm_server import GlobalRequestLoadBalancer
 
-        self.load_balancer_handle = GlobalRequestLoadBalancer.remote(
+        self.load_balancer_handle = ray.remote(GlobalRequestLoadBalancer).remote(
             servers=dict(zip(self.server_addresses, self.server_handles, strict=True))
         )
 

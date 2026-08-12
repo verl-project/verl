@@ -27,7 +27,7 @@ def test_dsv4_value_head_forwards_contiguous_cp_layout():
         hf_config=SimpleNamespace(),
         tokenizer=SimpleNamespace(pad_token_id=0),
     )
-    engine.engine_config = SimpleNamespace(use_remove_padding=True)
+    engine.engine_config = SimpleNamespace(use_remove_padding=True, pad_to_length=False)
     engine.prepare_model_inputs = lambda batch: {
         "input_ids": batch["input_ids"],
         "multi_modal_inputs": None,

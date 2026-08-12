@@ -58,9 +58,12 @@ on:
       # Entrypoints
       - ".github/workflows/vllm.yml"
       - "tests/special_e2e/generation"
+      - "tests/experimental/reward_loop/run_determinism_e2e_with_rm.py"
       - "tests/workers/rollout"
       - "verl/trainer/main_generation.py"
       - "verl/trainer/config/generation.yaml"
+      - "verl/trainer/main_ppo.py"
+      - "verl/trainer/config/ppo_trainer.yaml"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -123,7 +126,7 @@ jobs:
       - name: Prepare gsm8k dataset
         run: |
           ray stop --force
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k --local_dir ${HOME}/data/gsm8k
       - name: Test the latest vLLM Rollout async with agent loop
         run: |
           ROLLOUT_NAME=vllm pytest -svvv tests/experimental/agent_loop
