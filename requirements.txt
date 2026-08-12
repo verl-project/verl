@@ -19,7 +19,7 @@ torchdata
 # models like Qwen2/Llama); fixed in 5.6.1. See huggingface/transformers#45588.
 transformers>=5.5.3,!=5.6.0,<5.11
 wandb
-packaging>=20.0
+packaging>=26.3
 uvicorn
 fastapi
 latex2sympy2_extended
