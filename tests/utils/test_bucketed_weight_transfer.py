@@ -61,9 +61,14 @@ def _generate_weights(weight_specs, seed):
 class _FakeSocket:
     def __init__(self):
         self.messages = []
+        self.poll_calls = []
 
     def send_pyobj(self, message):
         self.messages.append(message)
+
+    def poll(self, timeout, flags):
+        self.poll_calls.append((timeout, flags))
+        return flags
 
     def recv(self):
         return b""
@@ -117,6 +122,37 @@ def test_sender_accepts_strided_tensor(monkeypatch):
     assert buffer.dtype == torch.uint8
     assert buffer.numel() == weight.nbytes
     assert torch.equal(recovered, weight)
+    assert socket.poll_calls == [(sender.ack_timeout_ms, bucketed_weight_transfer.zmq.POLLIN)]
+
+
+def test_sender_ack_supports_recv_only_socket():
+    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
+
+    class _RecvOnlySocket:
+        def recv(self):
+            return b""
+
+    sender = bucketed_weight_transfer.BucketedWeightSender("ipc:///tmp/test-bwt-unused.sock")
+    sender.socket = _RecvOnlySocket()
+
+    sender._receive_ack("test")
+
+
+def test_sender_ack_timeout_raises():
+    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
+
+    class _TimeoutSocket:
+        def poll(self, _timeout, _flags):
+            return 0
+
+        def recv(self):
+            raise AssertionError("recv must not be called after a timeout")
+
+    sender = bucketed_weight_transfer.BucketedWeightSender("ipc:///tmp/test-bwt-unused.sock", ack_timeout_ms=1)
+    sender.socket = _TimeoutSocket()
+
+    with pytest.raises(RuntimeError, match="timed out waiting 1ms"):
+        sender._receive_ack("test")
 
 
 # ---------------------------------------------------------------------------

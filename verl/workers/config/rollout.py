@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import math
 import warnings
 from dataclasses import dataclass, field
 from typing import Optional
@@ -133,12 +134,18 @@ class CheckpointEngineConfig(BaseConfig):
     backend: Optional[str] = "naive"
     # Bucket size in MB to transfer multiple weights at one time
     update_weights_bucket_megabytes: int = 2048
+    # Maximum time to wait for each bucketed weight-transfer acknowledgement.
+    update_weights_ack_timeout_seconds: float = 30.0
     # Additional keyword arguments for checkpoint engine
     engine_kwargs: dict = field(default_factory=dict)
     # If set, this Python module is imported on every worker process before the
     # backend is instantiated, allowing custom backends to register themselves
     # in CheckpointEngineRegistry.
     custom_backend_module: Optional[str] = None
+
+    def __post_init__(self):
+        if not math.isfinite(self.update_weights_ack_timeout_seconds) or self.update_weights_ack_timeout_seconds <= 0:
+            raise ValueError("update_weights_ack_timeout_seconds must be a positive finite number.")
 
 
 @dataclass
