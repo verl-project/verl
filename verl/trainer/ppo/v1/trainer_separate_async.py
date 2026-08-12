@@ -308,24 +308,15 @@ class PPOTrainerSeparateAsync(PPOTrainer):
                 and (benefit is None or effective_switch_cost is None or benefit > effective_switch_cost)
             )
             decision_metrics = {
-                "separate_async/switch/threshold": float(self._step_threshold),
                 "separate_async/switch/threshold_ratio": ratio_used,
-                "separate_async/switch/sample_wait_seconds": self._step_sample_wait_seconds,
                 "separate_async/switch/wait_samples": float(self._step_wait_samples),
                 "separate_async/switch/idle": float(had_idle),
                 "separate_async/decision/sampleable_count": float(sampleable_count),
-                "separate_async/decision/threshold": float(decision_threshold),
-                "separate_async/decision/threshold_ratio": self._switch_threshold_ratio,
                 "separate_async/decision/remaining": float(remaining),
-                "separate_async/decision/scaling_factor": self._scaling_factor,
-                "separate_async/decision/evaluable": float(
-                    per_sample_time is not None and effective_switch_cost is not None
-                ),
                 "separate_async/decision/switch_to_rollout": float(should_switch),
             }
             if per_sample_time is not None:
                 decision_metrics["separate_async/decision/per_sample_time_seconds"] = per_sample_time
-                decision_metrics["separate_async/decision/benefit_seconds"] = benefit
             if effective_switch_cost is not None:
                 decision_metrics["separate_async/decision/effective_switch_cost_seconds"] = effective_switch_cost
 

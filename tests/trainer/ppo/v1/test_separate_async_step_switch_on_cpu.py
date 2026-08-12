@@ -166,7 +166,10 @@ def test_step_lends_the_engine_out_and_reclaims_it_exactly_once():
     assert trainer.checkpoint_manager.resume_calls == 1
     assert trainer.balancer_calls == ["add", "clear"]
     assert trainer.events[:5] == ["add", "clear", "standalone_update", "hybrid_update", "hybrid_resume"]
-    assert trainer._pending_sync_metrics["separate_async/decision/evaluable"] == 0.0
+    # No wait history yet, so both halves of the benefit model are unavailable and their
+    # metrics stay absent; the decision falls back to "lend whenever anything is missing".
+    assert "separate_async/decision/per_sample_time_seconds" not in trainer._pending_sync_metrics
+    assert "separate_async/decision/effective_switch_cost_seconds" not in trainer._pending_sync_metrics
 
     trainer.on_step_begin()
     trainer.on_step_prompts_submitted()
@@ -265,11 +268,11 @@ def test_cost_gate_skips_lending_when_the_remaining_work_is_cheaper_to_fill_on_s
     trainer.on_step_end()
 
     assert trainer.checkpoint_manager.update_calls == []
+    assert trainer._scaling_factor == 2.0
     assert trainer._pending_sync_metrics["separate_async/decision/remaining"] == 1.0
-    assert trainer._pending_sync_metrics["separate_async/decision/scaling_factor"] == 2.0
-    assert trainer._pending_sync_metrics["separate_async/decision/benefit_seconds"] == 1.0
+    assert trainer._pending_sync_metrics["separate_async/decision/per_sample_time_seconds"] == 2.0
     assert trainer._pending_sync_metrics["separate_async/decision/effective_switch_cost_seconds"] == 7.0
-    assert trainer._pending_sync_metrics["separate_async/decision/evaluable"] == 1.0
+    # benefit = remaining * per_sample_time * (1 - 1/scaling_factor) = 1 * 2.0 * 0.5 = 1.0 < 7.0
     assert trainer._pending_sync_metrics["separate_async/decision/switch_to_rollout"] == 0.0
 
 
@@ -420,6 +423,6 @@ def test_trainer_idle_is_reported():
     _run_step(trainer, sample_wait_seconds=2.0)
 
     assert trainer._pending_sync_metrics["separate_async/switch/idle"] == 1.0
-    assert trainer._pending_sync_metrics["separate_async/switch/threshold"] == 32.0
-    assert trainer._pending_sync_metrics["separate_async/switch/sample_wait_seconds"] == pytest.approx(2.0)
+    assert trainer._step_threshold == 32
+    assert trainer._step_sample_wait_seconds == pytest.approx(2.0)
     assert trainer._switch_threshold_ratio == pytest.approx(0.5)
