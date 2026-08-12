@@ -25,12 +25,12 @@ path in verl splits by accumulated bytes with no idea which tensors belong
 together, and each split point can break this independently:
 
 * ``sglang_rollout.get_named_tensor_buckets`` -- the plain full-sync path, used
-  by the NCCL checkpoint engine and by ``separate_async``'s hybrid replicas;
-* ``delta_checkpoint_engine`` -- the seed stream and the steady delta stream;
-* ``delta_loader`` -- re-cuts each received flush by ``CHUNK_BYTES``.
+  by the NCCL checkpoint engine and by ``separate_async``'s hybrid replicas.
 
-This module is the single source of truth for the membership table so those
-sites cannot drift apart. It deliberately imports nothing.
+Today that is the only such site, but any future splitter (a sparse/delta wire,
+a receiver-side re-chunker) has the same constraint, so the membership table
+lives here as a single source of truth rather than inline in the bucketer. It
+deliberately imports nothing.
 
 Note this is a property of the *loader*, not of DSv4: 121 of SGLang's 190 model
 files write fused params per-slice via ``stacked_params_mapping`` (a shard_id
@@ -53,7 +53,18 @@ _ATTN_SPELLINGS = (".self_attn.", ".attn.")
 # are distinct entries and each needs its own pair.
 _FAMILIES = (
     ("wqkv_a", ("wq_a.weight", "wkv.weight")),
-    ("wqkv_a_scale", ("wq_a.weight_scale_inv", "wkv.weight_scale_inv")),
+    # Two spellings of the fp8 scale, and BOTH are needed:
+    #   .scale            -- what the natively-fp8 DSv4 checkpoint stores and
+    #                        what the Megatron export actually streams. Measured,
+    #                        not guessed: the run named them
+    #                        ``layers.0.attn.wq_a.scale`` / ``...wkv.scale``.
+    #   .weight_scale_inv -- what SGLang's own param is called, and what a
+    #                        verl-side requantizer of a bf16 master emits
+    #                        (``name + "_scale_inv"``).
+    # Getting this wrong is invisible: the weight group still pairs up and only
+    # the scale group silently stays unpaired, which reads as a partial fix.
+    ("wqkv_a_scale", ("wq_a.scale", "wkv.scale")),
+    ("wqkv_a_scale_inv", ("wq_a.weight_scale_inv", "wkv.weight_scale_inv")),
     ("compressor_wkv_gate", ("compressor.wkv.weight", "compressor.wgate.weight")),
     (
         "indexer_compressor_wkv_gate",
