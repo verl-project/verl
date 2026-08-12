@@ -125,6 +125,15 @@ def test_preprocess_bshd_engine_preserves_1d_input_shape_on_cpu(monkeypatch):
     torch.testing.assert_close(position_ids, torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]], dtype=torch.long))
 
 
+def test_preprocess_thd_engine_rounds_packed_length_to_bucket_without_cp(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1, cp_size=1)
+    input_ids = _nested_tensor([torch.arange(513)])
+
+    packed, _, _ = mcore_util.preprocess_thd_engine(input_ids, pad_to_length_bucket=512)
+
+    assert packed.shape == (1, 1024)
+
+
 def test_preprocess_bshd_engine_preserves_topk_dense_dim_on_cpu(monkeypatch):
     _check_topk_preprocess(monkeypatch, torch.device("cpu"))
 

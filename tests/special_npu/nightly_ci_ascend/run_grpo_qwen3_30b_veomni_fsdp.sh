@@ -25,7 +25,7 @@ case "${DEVICE}" in
         export TASK_QUEUE_ENABLE=1
         export HCCL_OP_EXPANSION_MODE="AIV"
         export VLLM_USE_V1=1
-        export VLLM_VERSION=0.18.0
+        export VLLM_VERSION=0.23.0
         export VLLM_ASCEND_ENABLE_NZ=0
         export HCCL_BUFFSIZE=610
         export CKPT_DIR="./c0kpt30b"

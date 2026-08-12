@@ -133,6 +133,12 @@ jobs:
       - name: Check final pip list
         run: |
           uv pip list
+      - name: Configure related dependencies
+        run: |
+          rm -rf /Megatron-LM
+          git clone --depth 1 --branch core_r0.18.0 https://github.com/NVIDIA/Megatron-LM.git /Megatron-LM
+          rm -rf /MindSpeed
+          git clone --depth 1 --branch core_r0.18.0 https://gitcode.com/ascend/MindSpeed.git /MindSpeed
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
@@ -212,6 +218,12 @@ jobs:
       - name: Check final pip list
         run: |
           uv pip list
+      - name: Configure related dependencies
+        run: |
+          rm -rf /Megatron-LM
+          git clone --depth 1 --branch core_r0.18.0 https://github.com/NVIDIA/Megatron-LM.git /Megatron-LM
+          rm -rf /MindSpeed
+          git clone --depth 1 --branch core_r0.18.0 https://gitcode.com/ascend/MindSpeed.git /MindSpeed
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models

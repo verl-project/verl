@@ -339,6 +339,7 @@ def preprocess_thd_engine(
     use_fp8_padding: bool = False,
     local_cp_size: int | None = None,
     min_local_rows: int | None = None,
+    pad_to_length_bucket: int | None = None,
     cp_layout: ContextParallelLayout = "zigzag",
 ) -> tuple[torch.Tensor, PackedSeqParams, torch.Tensor | None]:
     """Pack nested THD sequences and shard their rows across CP ranks.
@@ -398,6 +399,16 @@ def preprocess_thd_engine(
             pad_size_last = min_total_rows - cu_seqlens_padded[-1]
             cu_seqlens_padded[-1] += pad_size_last
             seqlens_in_batch_padded[-1] += pad_size_last
+
+    if pad_to_length_bucket is not None:
+        if pad_to_length_bucket <= 0:
+            raise ValueError("pad_to_length_bucket must be a positive integer")
+        total_alignment = math.lcm(pad_to_length_bucket, cp_size)
+        if use_fp8_padding:
+            total_alignment = math.lcm(total_alignment, total_align)
+        pad_size_last = (-cu_seqlens_padded[-1]) % total_alignment
+        cu_seqlens_padded[-1] += pad_size_last
+        seqlens_in_batch_padded[-1] += pad_size_last
 
     # ----------------------------------------------------------------------------
     # Move the index information needed in the subsequent loop to the CPU at once,

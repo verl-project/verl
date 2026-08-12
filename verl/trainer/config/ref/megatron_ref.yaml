@@ -24,6 +24,8 @@ megatron:
   use_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.use_mbridge,False}
   vanilla_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.vanilla_mbridge,False}
   use_remove_padding: ${oc.select:actor_rollout_ref.actor.megatron.use_remove_padding,True}
+  pad_to_length: ${oc.select:actor_rollout_ref.actor.megatron.pad_to_length,False}
+  pad_to_length_bucket: ${oc.select:actor_rollout_ref.actor.megatron.pad_to_length_bucket,512}
   tensor_model_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.tensor_model_parallel_size,1}
   pipeline_model_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.pipeline_model_parallel_size,1}
   virtual_pipeline_model_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size,null}

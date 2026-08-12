@@ -274,6 +274,7 @@ def gptmodel_forward_model_engine(
     mtp_enable_train: bool = False,
     local_cp_size: Optional[int] = None,
     forced_max_seqlen: Optional[int] = None,
+    pad_to_length_bucket: Optional[int] = None,
     cp_layout: str = "zigzag",
     router_padding_mask: torch.Tensor | None = None,
     mtp_loss_normalization_factor: float | None = None,
@@ -304,6 +305,7 @@ def gptmodel_forward_model_engine(
             pre_process=pre_process or (post_process and mtp_enable_train),
             use_fp8_padding=use_fp8_padding,
             local_cp_size=local_cp_size,
+            pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
         )
         if mtp_loss_normalization_factor is not None:
@@ -330,6 +332,7 @@ def gptmodel_forward_model_engine(
                     need_roll=True,
                     use_fp8_padding=use_fp8_padding,
                     local_cp_size=local_cp_size,
+                    pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
                 )[0]
 
@@ -365,6 +368,7 @@ def gptmodel_forward_model_engine(
                     need_roll=(k == "label"),
                     use_fp8_padding=use_fp8_padding,
                     local_cp_size=local_cp_size,
+                    pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
                 )[0]
                 for k, v in logits_processor_args.items()

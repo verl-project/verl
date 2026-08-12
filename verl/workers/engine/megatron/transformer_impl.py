@@ -113,6 +113,8 @@ def _check_dcp_unsupported_features(engine_config, model_config, tf_config=None,
         return
     if not engine_config.use_remove_padding:
         raise ValueError("dynamic_context_parallel requires use_remove_padding=True")
+    if engine_config.pad_to_length:
+        raise NotImplementedError("dynamic_context_parallel does not support pad_to_length")
     if model_config.model_type == "value_model":
         raise NotImplementedError("Dynamic CP currently supports language models only")
     if hasattr(model_config.hf_config, "vision_config"):
@@ -1237,6 +1239,16 @@ class MegatronEngineWithLMHead(MegatronEngine):
         calculate_sum_pi_squared = tu.get_non_tensor_data(batch, key="calculate_sum_pi_squared", default=False)
         distillation_use_topk = tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
         distillation_only = tu.get_non_tensor_data(batch, key="distillation_only", default=False)
+        pad_to_length_bucket = (
+            self.engine_config.pad_to_length_bucket
+            if self.engine_config.pad_to_length and self.engine_config.use_remove_padding
+            else None
+        )
+
+        if pad_to_length_bucket is not None and distillation_use_topk:
+            raise RuntimeError("pad_to_length is not supported with top-K distillation")
+        if pad_to_length_bucket is not None and self.enable_routing_replay:
+            raise RuntimeError("pad_to_length is not supported with router replay")
 
         if calculate_sum_pi_squared and use_fused_kernels:
             raise NotImplementedError(
@@ -1310,6 +1322,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 cp_layout=cp_layout,
                 local_cp_size=local_cp_size,
                 router_padding_mask=router_padding_mask,
+                pad_to_length_bucket=pad_to_length_bucket,
             )
         else:
             if not isinstance(temperature, torch.Tensor):
@@ -1369,6 +1382,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 router_padding_mask=router_padding_mask,
                 mtp_loss_normalization_factor=mtp_loss_normalization_factor,
                 forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
+                pad_to_length_bucket=pad_to_length_bucket,
                 cp_layout=cp_layout,
             )
 
@@ -1490,6 +1504,11 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
             pad_token_id=self.model_config.tokenizer.pad_token_id,
             data_format="thd" if self.engine_config.use_remove_padding else "bshd",
             forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
+            pad_to_length_bucket=(
+                self.engine_config.pad_to_length_bucket
+                if self.engine_config.pad_to_length and self.engine_config.use_remove_padding
+                else None
+            ),
             cp_layout=cp_layout,
         )
 
