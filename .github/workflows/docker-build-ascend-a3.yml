@@ -243,8 +243,8 @@ jobs:
           chmod +x crane
           ./crane auth login quay.io -u "${{ secrets.QUAY_USERNAME }}" -p "${{ secrets.QUAY_PASSWORD }}"
           echo "Deleting temporary main tags..."
-          ./crane tag delete ${{ env.QUAY_REPO }}:tmp-a3-amd64 || true
-          ./crane tag delete ${{ env.QUAY_REPO }}:tmp-a3-arm64 || true
+          ./crane delete ${{ env.QUAY_REPO }}:tmp-a3-amd64 || true
+          ./crane delete ${{ env.QUAY_REPO }}:tmp-a3-arm64 || true
 
   # ============================================================
   # 第二阶段（v0.8.0）：合并多架构 manifest
@@ -286,5 +286,5 @@ jobs:
           chmod +x crane
           ./crane auth login quay.io -u "${{ secrets.QUAY_USERNAME }}" -p "${{ secrets.QUAY_PASSWORD }}"
           echo "Deleting temporary v0.8.0 tags..."
-          ./crane tag delete ${{ env.QUAY_REPO }}:tmp-a3-v080-amd64 || true
-          ./crane tag delete ${{ env.QUAY_REPO }}:tmp-a3-v080-arm64 || true
+          ./crane delete ${{ env.QUAY_REPO }}:tmp-a3-v080-amd64 || true
+          ./crane delete ${{ env.QUAY_REPO }}:tmp-a3-v080-arm64 || true
