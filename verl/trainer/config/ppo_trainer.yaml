@@ -246,10 +246,13 @@ trainer:
       # reclaimed.
       switch_threshold_ratio: 0.4
 
-      # Optional threshold adaptation. Starvation raises the ratio immediately; calm steps lower it
-      # only after the configured release interval. 
+      # Automatically adapt the threshold to reduce trainer starvation when enable_switch is True.
       adaptive_switch_threshold: true
+
+      # Fraction added to switch_threshold_ratio after sustained trainer idle.
       switch_threshold_step_up: 0.05
+
+      # Fraction subtracted from switch_threshold_ratio after a sustained calm period.
       switch_threshold_step_down: 0.03
 
       # Consecutive idle/calm steps required before ratio adjusts in that direction.
