@@ -118,6 +118,7 @@ class RayResourcePool(ResourcePool):
         max_colocate_count: int = 10,
         detached=False,
         accelerator_type: Optional[str] = None,
+        pinned_node_ids: Optional[list] = None,  # RACK-AWARE: per-node target node_id list (PG-pinned)
     ) -> None:
         super().__init__(process_on_nodes, max_colocate_count)
         self.use_gpu = use_gpu
@@ -126,6 +127,7 @@ class RayResourcePool(ResourcePool):
         self.pgs = None
         self.detached = detached
         self.accelerator_type = accelerator_type
+        self.pinned_node_ids = pinned_node_ids  # RACK-AWARE: None=原生 PG; list=用 node:<ip> 钉 PG
 
     def get_placement_groups(self, strategy="STRICT_PACK", name=None, device_name="cuda"):
         if self.pgs is not None:
@@ -145,6 +147,38 @@ class RayResourcePool(ResourcePool):
             bundle[device_name] = 1
             if self.accelerator_type is not None:
                 bundle[self.accelerator_type] = 1e-4
+
+        # ===== RACK-AWARE (PG-pinned): pinned_node_ids 设置时, 用 node:<ip> resource 把每个 PG 钉到指定节点 =====
+        _pinned = getattr(self, "pinned_node_ids", None)
+        if _pinned is not None:
+            import logging as _ralg
+            _nid_ip = {n["NodeID"]: n["NodeManagerAddress"] for n in ray.nodes() if n.get("Alive", False)}
+            if len(_pinned) != len(self._store):
+                raise RuntimeError("[RACK-AWARE] pinned_node_ids len %d != store len %d (pool=%s)"
+                                   % (len(_pinned), len(self._store), self.name_prefix))
+            _ra_scheme = []
+            for _idx, _pc in enumerate(self._store):
+                _ip = _nid_ip.get(_pinned[_idx])
+                if _ip is None:
+                    raise RuntimeError("[RACK-AWARE] pinned node_id %s not found in ray.nodes()" % _pinned[_idx])
+                _bundles = []
+                for _j in range(_pc):
+                    _b = bundle.copy()
+                    if _j == 0:
+                        _b["node:%s" % _ip] = 1  # 钉住整个 PG (STRICT_PACK) 到这个节点
+                    _bundles.append(_b)
+                _ra_scheme.append(_bundles)
+            _lifetime = "detached" if self.detached else None
+            pgs = [placement_group(bundles=_bs, strategy=strategy, name=pg_name_prefix + str(_i), lifetime=_lifetime)
+                   for _i, _bs in enumerate(_ra_scheme)]
+            ray.get([pg.ready() for pg in pgs])
+            _ralg.getLogger(__name__).warning(
+                "[RACK-AWARE] created %d node-pinned PGs for pool=%s (PG0 -> node %s)"
+                % (len(pgs), self.name_prefix, _pinned[0]))
+            self.pgs = pgs  # pinned 列表已按 rackid 排序, 不再 sort
+            return pgs
+        # ===== end RACK-AWARE =====
+
         pg_scheme = [[bundle.copy() for _ in range(process_count)] for process_count in self._store]
 
         lifetime = "detached" if self.detached else None

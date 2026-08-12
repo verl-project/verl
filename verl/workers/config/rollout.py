@@ -157,6 +157,20 @@ class CheckpointEngineConfig(BaseConfig):
     custom_backend_module: Optional[str] = None
 
 
+def get_engine_pcp_size(vllm_engine_kwargs: dict) -> int:
+    """Prefill context parallel (PCP) size from vllm engine_kwargs.
+
+    PCP is a vllm/vllm-ascend engine feature; the standard engine argument is
+    ``prefill_context_parallel_size`` (vllm-ascend >= 0.18). Some forks name it
+    ``cp_size`` with ``cp_mode=pcp`` — accepted as an alias so replica GPU
+    accounting stays correct on those forks. Returns 1 when PCP is not configured.
+    """
+    pcp = (vllm_engine_kwargs or {}).get("prefill_context_parallel_size", None)
+    if pcp is None and (vllm_engine_kwargs or {}).get("cp_mode", None) in (None, "pcp"):
+        pcp = (vllm_engine_kwargs or {}).get("cp_size", None)
+    return int(pcp) if pcp else 1
+
+
 @dataclass
 class RolloutConfig(BaseConfig):
     _mutable_fields = {
@@ -281,6 +295,15 @@ class RolloutConfig(BaseConfig):
 
     disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
 
+    @property
+    def prefill_context_parallel_size(self) -> int:
+        """Prefill context parallel (PCP) size of the inference engine.
+
+        PCP ranks are extra engine worker processes, so this size multiplies the
+        replica world size. See ``get_engine_pcp_size`` for the accepted engine_kwargs.
+        """
+        return get_engine_pcp_size((self.engine_kwargs or {}).get("vllm", {}) or {})
+
     def __post_init__(self):
         """Validate the rollout config"""
         # Deprecation warning for mode field - only async mode is supported
@@ -298,8 +321,18 @@ class RolloutConfig(BaseConfig):
             )
 
         if self.name != "trtllm" and self.expert_parallel_size > 1:
-            assert self.expert_parallel_size == (self.tensor_model_parallel_size * self.data_parallel_size), (
+            # vllm-ascend builds its MoE all-to-all (mc2) group over dp * pcp * tp
+            # ranks (PCP ranks are full engine workers holding expert shards), so the
+            # EP group size must include prefill_context_parallel_size; it is 1 when
+            # PCP is not configured, preserving the original tp * dp constraint.
+            expected_ep_size = (
+                self.tensor_model_parallel_size * self.data_parallel_size * self.prefill_context_parallel_size
+            )
+            assert self.expert_parallel_size == expected_ep_size, (
                 "expert_parallel_size must be equal to tensor_model_parallel_size * data_parallel_size"
+                f" * prefill_context_parallel_size (got expert_parallel_size={self.expert_parallel_size}, "
+                f"expected {expected_ep_size} = tp{self.tensor_model_parallel_size} * dp{self.data_parallel_size}"
+                f" * pcp{self.prefill_context_parallel_size})"
             )
 
         if self.moe_tensor_parallel_size is not None and self.moe_tensor_parallel_size > 1:
