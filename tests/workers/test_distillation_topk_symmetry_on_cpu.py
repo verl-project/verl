@@ -109,6 +109,8 @@ def test_distillation_outputs_emitted_in_both_padding_modes(use_remove_padding, 
         output_args = {
             "input_ids_rmpad_rolled": input_ids_rmpad_rolled,
             "temperature_rmpad": torch.ones(total_nnz),
+            # No SP and no static pad_to_length here, so nothing to trim off the packed tail.
+            "pad_size": 0,
         }
     else:
         # False branch: output.logits shape (bsz, max_seqlen, V).

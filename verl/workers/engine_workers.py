@@ -758,6 +758,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             return metrics or {}
 
         set_expandable_segments(False)
+        aggressive_empty_cache(force_sync=True)
         log_gpu_memory_usage("Before resume weights", logger=logger)
 
         # 1. resume rollout memory (weights were released during sleep)
@@ -777,11 +778,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 3. sync weights: For SGLang, we need base first (when needed), then adapter/merged
         if do_lora_base_sync:
-            per_tensor_param_base, peft_config = self.actor.engine.get_per_tensor_param(
+            per_tensor_param_base, _base_peft_config = self.actor.engine.get_per_tensor_param(
                 layered_summon=self.layered_summon, base_sync_done=False
             )
             await self.rollout.update_weights(
-                per_tensor_param_base, peft_config=peft_config, base_sync_done=False, global_steps=global_steps
+                per_tensor_param_base, peft_config=_base_peft_config, base_sync_done=False, global_steps=global_steps
             )
 
         await self.rollout.update_weights(

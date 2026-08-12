@@ -5,7 +5,7 @@ on:
   push:
     branches: ["main"]
     paths:
-      - "docker/ascend/Dockerfile.ascend_9.0.0_a3"
+      - "docker/ascend/Dockerfile.ascend_9.1.0_a3"
       - "docker/ascend/Dockerfile.ascend_9.0.0_a3_v0.8.0"
       - ".github/workflows/docker-build-ascend-a3.yml"
 
@@ -58,7 +58,7 @@ jobs:
       - name: Get base image name and tag
         id: base_image
         run: |
-          BASE_IMAGE_FULL=$(grep '^FROM' ./docker/ascend/Dockerfile.ascend_9.0.0_a3 | head -1 | cut -d' ' -f2)
+          BASE_IMAGE_FULL=$(grep '^FROM' ./docker/ascend/Dockerfile.ascend_9.1.0_a3 | head -1 | cut -d' ' -f2)
           echo "Base image full: $BASE_IMAGE_FULL" 
           BASE_IMAGE_TAG=$(echo "$BASE_IMAGE_FULL" | cut -d':' -f2)
           echo "Base image tag: $BASE_IMAGE_TAG"
@@ -70,7 +70,7 @@ jobs:
       - name: Get image tag
         id: version
         run: |
-          echo "tag=latest-cann9.0.0-torch_npu2.9.0post2-a3-ubuntu22.04-py3.11-vllm" >> "$GITHUB_OUTPUT"
+          echo "tag=latest-vllm-a3-ubuntu" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -96,12 +96,12 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.arch }}
-          file: ./docker/ascend/Dockerfile.ascend_9.0.0_a3
+          file: ./docker/ascend/Dockerfile.ascend_9.1.0_a3
           push: true
-          outputs: type=image,name=${{ env.QUAY_REPO }},push-by-digest=true,name-canonical=true,push=true
+          tags: ${{ env.QUAY_REPO }}:tmp-a3-${{ matrix.tag }}
           provenance: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=ascend-a3-${{ matrix.tag }}
+          cache-to: type=gha,mode=max,scope=ascend-a3-${{ matrix.tag }}
           build-args: |
             BUILDKIT_INLINE_CACHE=1
 
@@ -182,10 +182,10 @@ jobs:
           platforms: ${{ matrix.arch }}
           file: ./docker/ascend/Dockerfile.ascend_9.0.0_a3_v0.8.0
           push: true
-          outputs: type=image,name=${{ env.QUAY_REPO }},push-by-digest=true,name-canonical=true,push=true
+          tags: ${{ env.QUAY_REPO }}:tmp-a3-v080-${{ matrix.tag }}
           provenance: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=ascend-a3-v080-${{ matrix.tag }}
+          cache-to: type=gha,mode=max,scope=ascend-a3-v080-${{ matrix.tag }}
           build-args: |
             BUILDKIT_INLINE_CACHE=1
 
@@ -237,6 +237,14 @@ jobs:
           docker buildx imagetools create \
             -t "$IMAGE:${{ needs.build-push-digest.outputs.tag }}" \
             $DIGESTS
+      - name: Delete temporary tags (main)
+        run: |
+          curl -sL https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_x86_64.tar.gz | tar -xz crane
+          chmod +x crane
+          ./crane auth login quay.io -u "${{ secrets.QUAY_USERNAME }}" -p "${{ secrets.QUAY_PASSWORD }}"
+          echo "Deleting temporary main tags..."
+          ./crane tag delete ${{ env.QUAY_REPO }}:tmp-a3-amd64 || true
+          ./crane tag delete ${{ env.QUAY_REPO }}:tmp-a3-arm64 || true
 
   # ============================================================
   # 第二阶段（v0.8.0）：合并多架构 manifest
@@ -270,5 +278,13 @@ jobs:
           DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests-v080 | sed 's/^v080-//'))
           echo "v0.8.0 image digests: $DIGESTS"
           docker buildx imagetools create \
-            -t "$IMAGE:v0.8.0-cann9.0.0-torch_npu2.9.0post2-a3-ubuntu22.04-py3.11-vllm" \
+            -t "$IMAGE:v0.8.0-cann9.0.0-torch_npu2.9.0.post2-a3-ubuntu22.04-py3.11-vllm" \
             $DIGESTS
+      - name: Delete temporary tags (v0.8.0)
+        run: |
+          curl -sL https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_x86_64.tar.gz | tar -xz crane
+          chmod +x crane
+          ./crane auth login quay.io -u "${{ secrets.QUAY_USERNAME }}" -p "${{ secrets.QUAY_PASSWORD }}"
+          echo "Deleting temporary v0.8.0 tags..."
+          ./crane tag delete ${{ env.QUAY_REPO }}:tmp-a3-v080-amd64 || true
+          ./crane tag delete ${{ env.QUAY_REPO }}:tmp-a3-v080-arm64 || true

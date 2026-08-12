@@ -163,7 +163,7 @@ class McoreEngineConfig(EngineConfig):
         virtual_pipeline_model_parallel_size (Optional[int]): Virtual pipeline model parallel size
             for interleaved scheduling.
         context_parallel_size (int): Context parallel size for long sequences.
-        dynamic_context_parallel (bool): Whether to enable hybrid context parallelism.
+        dynamic_context_parallel (bool): Whether to enable dynamic context parallel scheduling.
         max_seqlen_per_dp_cp_rank (Optional[int]): Maximum sequence length per DPxCP rank.
         sequence_parallel (bool): Whether to enable sequence parallelism.
         use_distributed_optimizer (bool): Whether to use distributed optimizer.
@@ -177,6 +177,8 @@ class McoreEngineConfig(EngineConfig):
         use_mbridge (bool): Whether to use MBridge for communication.
         vanilla_mbridge (bool): Whether to use the deprecated legacy mbridge backend instead of Megatron-Bridge.
         use_megatron_fsdp (bool): Whether to use Megatron-FSDP (Zero-3 sharding).
+        pad_to_length (bool): Whether to round every packed micro-batch up to a bucket-aligned length.
+        pad_to_length_bucket (int): Padding granularity on the global packed sequence.
         dtype (str): Mixed precision training param dtype, default "bfloat16"
     """
 
@@ -196,6 +198,8 @@ class McoreEngineConfig(EngineConfig):
     sequence_parallel: bool = True
     use_distributed_optimizer: bool = True
     pad_bshd_to_minibatch_max: bool = True
+    pad_to_length: bool = False
+    pad_to_length_bucket: int = 512
     use_dist_checkpointing: bool = False
     dist_checkpointing_path: Optional[str] = None
     dist_checkpointing_prefix: str = ""
@@ -221,6 +225,14 @@ class McoreEngineConfig(EngineConfig):
                 "in a future release. Use Megatron-Bridge by setting `vanilla_mbridge=False` or removing the option.",
                 FutureWarning,
                 stacklevel=2,
+            )
+        if self.dynamic_context_parallel and (
+            not isinstance(self.max_seqlen_per_dp_cp_rank, int)
+            or isinstance(self.max_seqlen_per_dp_cp_rank, bool)
+            or self.max_seqlen_per_dp_cp_rank <= 0
+        ):
+            raise ValueError(
+                "max_seqlen_per_dp_cp_rank must be a positive integer when dynamic_context_parallel is enabled"
             )
         if self.tensor_model_parallel_size == 1:
             warnings.warn("set sequence parallel to false as TP size is 1", stacklevel=2)
@@ -249,6 +261,19 @@ class FSDPEngineConfig(EngineConfig):
             debugging.
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
         dtype (str): Mixed precision training param dtype, default "bfloat16"
+        pad_to_length (bool): Round every packed micro-batch up to a multiple of
+            ``pad_to_length_bucket`` tokens, so the packed shape only takes a handful of distinct
+            values instead of a new one per micro-batch, which avoids repeated kernel
+            recompilation / autotuning. Requires ``use_remove_padding=True``. Pad tokens carry
+            their own ``position_ids`` segment and are stripped before the outputs reach the loss,
+            but they still cost a full forward pass. default False
+        pad_to_length_bucket (int): Padding granularity in tokens, on the *global* packed sequence
+            (before the sequence-parallel split). Rounded up internally to a multiple of
+            ``ulysses_sequence_parallel_size``. Smaller values waste fewer tokens per micro-batch
+            but admit more distinct shapes; setting it to the dynamic-batching token budget
+            (``max_token_len_per_gpu * ulysses_sequence_parallel_size``) collapses every
+            within-budget micro-batch onto a single shape. Only read when ``pad_to_length=True``.
+            default 1024
         qat (QATEngineConfig): QAT configuration, default disabled
     """
 
@@ -270,6 +295,8 @@ class FSDPEngineConfig(EngineConfig):
     use_torch_compile: bool = True
     entropy_checkpointing: bool = False
     strategy: str = "fsdp"
+    pad_to_length: bool = False
+    pad_to_length_bucket: int = 1024
     qat: QATEngineConfig = field(default_factory=QATEngineConfig)
 
     def __post_init__(self):
@@ -338,6 +365,21 @@ class VeOmniEngineConfig(EngineConfig):
             in distributed training. Important: this will negatively impact performance, so only use it for
             debugging.
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
+        pad_to_length (bool): Round every packed micro-batch up to a multiple of
+            ``pad_to_length_bucket`` tokens, so the packed shape only takes a handful of distinct
+            values instead of a new one per micro-batch, which avoids repeated kernel
+            recompilation / autotuning (the verl counterpart of VeOmni's ``train.pad_to_length``,
+            which pads to a single length because its dyn-bsz collator caps the packed length --
+            verl's workload-balanced ``rearrange_micro_batches`` does not, hence the buckets).
+            Requires ``use_remove_padding=True``. Pad tokens carry their own ``position_ids``
+            segment and are stripped before the outputs reach the loss, but they still cost a full
+            forward pass. default False
+        pad_to_length_bucket (int): Padding granularity in tokens, on the *global* packed sequence
+            (before the sequence-parallel split). Rounded up internally to a multiple of
+            ``ulysses_parallel_size``. Smaller values waste fewer tokens per micro-batch but admit
+            more distinct shapes; setting it to the dynamic-batching token budget
+            (``max_token_len_per_gpu * ulysses_parallel_size``) collapses every within-budget
+            micro-batch onto a single shape. Only read when ``pad_to_length=True``. default 1024
         rms_norm_gated_implementation (str): Gated RMSNorm implementation (Qwen3.5 GatedDeltaNet
             ``self.norm``). ``"fla"`` uses fla.modules.FusedRMSNormGated (requires flash-linear-attention,
             GPU). ``"eager"`` (default) uses the HuggingFace Qwen3_5RMSNormGated. Qwen3.5 has no NPU
@@ -391,9 +433,14 @@ class VeOmniEngineConfig(EngineConfig):
     rms_norm_gated_implementation: str = "eager"
     causal_conv1d_implementation: str = "eager"
     chunk_gated_delta_rule_implementation: str = "eager"
+    dsa_indexer_implementation: str = "eager"
+    dsa_attention_implementation: str = "eager"
+    mhc_implementation: str = "eager"
     force_use_huggingface: bool = False
     activation_gpu_limit: float = 0.0
     basic_modules: Optional[list[str]] = field(default_factory=list)
+    pad_to_length: bool = False
+    pad_to_length_bucket: int = 1024
 
     def __post_init__(self):
         super().__post_init__()

@@ -48,9 +48,11 @@ would be loaded into parameters that an earlier post-processing pass already
 transformed. The bucketed transfer path must prepare the model before the first
 bucket and finalize it only after the last bucket.
 
-The DeepSeek V4 parameter restoration, loaders, and scale handling are in
-``verl/utils/vllm/vllm_dsv4_fp8_utils.py``. The generic FP8 dispatch is in
-``verl/utils/vllm/vllm_fp8_utils.py``, and the bucket-level orchestration is in
+``verl/utils/vllm/vllm_quant_utils.py`` is the entry point: it quantizes the
+outgoing weight stream and dispatches the prepare/finalize pair to the scheme
+that owns each layer. ``verl/utils/vllm/vllm_fp8_utils.py`` handles the block
+FP8 linear and MoE methods, ``verl/utils/vllm/vllm_fp4_utils.py`` handles the
+MXFP4 routed experts, and the bucket-level orchestration is in
 ``verl/workers/rollout/vllm_rollout/utils.py``.
 
 Incorrect synchronization can fail immediately with an expert shape mismatch

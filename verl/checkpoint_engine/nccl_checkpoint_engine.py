@@ -85,6 +85,7 @@ class BroadcastOperation:
         else:
             self.socket.recv_string()
             self.metadata = self.socket.recv_pyobj()
+            self.bucket = self.bucket[: self.metadata["length"]]
 
         # broadcast tensor via NCCL
         collective.broadcast(self.bucket, src_rank=0, group_name=self.group_name)
@@ -264,8 +265,8 @@ class NCCLCheckpointEngine(CheckpointEngine):
                 broadcast_op = BroadcastOperation(
                     rank=self.rank,
                     group_name=self.group_name,
-                    bucket=send_buf,
-                    metadata={"bucket_meta": bucket_meta, "is_last": False},
+                    bucket=send_buf[:offset],
+                    metadata={"bucket_meta": bucket_meta, "is_last": False, "length": offset},
                     socket=self.socket,
                     topic=self.topic,
                 )
@@ -291,8 +292,8 @@ class NCCLCheckpointEngine(CheckpointEngine):
         broadcast_op = BroadcastOperation(
             rank=self.rank,
             group_name=self.group_name,
-            bucket=send_buf,
-            metadata={"bucket_meta": bucket_meta, "is_last": True},
+            bucket=send_buf[:offset],
+            metadata={"bucket_meta": bucket_meta, "is_last": True, "length": offset},
             socket=self.socket,
             topic=self.topic,
         )
@@ -339,7 +340,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
             topic=self.topic,
         )
         metadata = await broadcast_op.wait_for_complete()
-        total_bytes += self.bucket_size
+        total_bytes += metadata["length"]
         total_params += len(metadata["bucket_meta"])
 
         # wait for the NCCL broadcast kernel to finish before we yield the tensors
@@ -367,7 +368,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
 
             # 3. wait for next bucket broadcast finish
             metadata = await broadcast_op.wait_for_complete()
-            total_bytes += self.bucket_size
+            total_bytes += metadata["length"]
             total_params += len(metadata["bucket_meta"])
 
             # 4. swap send_buf and recv_buf

@@ -41,6 +41,7 @@ from verl.utils.tokenizer.continuous_token_wiring import (
     list_continuous_token_builder_families,
     resolve_continuous_token_model_family,
 )
+from verl.utils.tokenizer.deepseek import DeepSeekV4ContinuousTokenBuilder
 
 
 class _DummyTokenizer:
@@ -291,6 +292,7 @@ def test_builtin_family_surface():
         "kimivl",
         "glm4v",
         "deepseekvl2",
+        "deepseekv4",
     )
     assert list_continuous_token_builder_families() == CONTINUOUS_TOKEN_BUILDER_FAMILIES
 
@@ -320,6 +322,7 @@ def test_builtin_family_surface():
         (ContinuousTokenModelFamily.KIMI_VL, KimiVLContinuousTokenBuilder),
         (ContinuousTokenModelFamily.GLM4V, GLM46VContinuousTokenBuilder),
         (ContinuousTokenModelFamily.DEEPSEEK_VL2, DeepSeekVL2ContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.DEEPSEEKV4, DeepSeekV4ContinuousTokenBuilder),
     ],
 )
 def test_builtin_family_class_mapping(family, builder_cls):
@@ -352,6 +355,9 @@ def test_builtin_family_class_mapping(family, builder_cls):
         ("moonshotai/Kimi-VL-A3B-Instruct", ContinuousTokenModelFamily.KIMI_VL),
         ("zai-org/GLM-4.5V", ContinuousTokenModelFamily.GLM4V),
         ("deepseek-ai/deepseek-vl2-tiny", ContinuousTokenModelFamily.DEEPSEEK_VL2),
+        ("deepseek-ai/DeepSeek-V4-Pro", ContinuousTokenModelFamily.DEEPSEEKV4),
+        ("deepseek-ai/DeepSeek-V4-Flash", ContinuousTokenModelFamily.DEEPSEEKV4),
+        ("deepseek-ai/DeepSeek-R1", ContinuousTokenModelFamily.DEFAULT),
     ],
 )
 def test_auto_family_inference(model_path, expected):
@@ -930,6 +936,9 @@ def test_model_specific_builders_validate_required_special_tokens():
 
     with pytest.raises(ValueError, match="required token '<\\|tool_response>'"):
         Gemma4ContinuousTokenBuilder(_MissingSpecialTokenTokenizer())
+
+    with pytest.raises(ValueError, match="required token '<｜end▁of▁sentence｜>'"):
+        DeepSeekV4ContinuousTokenBuilder(_MissingSpecialTokenTokenizer())
 
 
 def test_model_specific_builders_validate_special_token_id_shape():

@@ -25,7 +25,7 @@ from verl.checkpoint_engine.delta_sync.sparse_gather import (
     gather_slot_entries_to_rank0,
     shard_delta_indices,
 )
-from verl.workers.engine.spec import ShardSpec, derive_placement, translate_flat_indices
+from verl.workers.engine.spec import ShardSpec, derive_dtensor_placement, translate_flat_indices
 
 
 def _run_case(shape, placements, mesh, dev, rank, si):
@@ -43,10 +43,10 @@ def _run_case(shape, placements, mesh, dev, rank, si):
     dt_new = distribute_tensor(full_new, mesh, placements)
 
     # --- sharded path (real module) ---
-    place, contributes, _pg = derive_placement(ShardSpec.from_param(dt_new))
+    place, contributes, _pg = derive_dtensor_placement(ShardSpec.from_param(dt_new))
     loc_new = dt_new.to_local().reshape(-1)
     loc_old = dt_old.to_local().reshape(-1)
-    place2, _, _ = derive_placement(ShardSpec.from_param(dt_old))
+    place2, _, _ = derive_dtensor_placement(ShardSpec.from_param(dt_old))
     assert place == place2
     if contributes:
         # engine convention: diff in shard-local coordinates, then translate

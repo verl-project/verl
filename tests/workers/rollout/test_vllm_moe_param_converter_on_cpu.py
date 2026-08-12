@@ -12,18 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import asyncio
 
 import torch
 
-from verl.workers.rollout.vllm_rollout.vllm_rollout import _iter_vllm_compatible_moe_params
+from verl.workers.engine.fsdp.utils import unfuse_moe_params
 
 
 def _collect(weights, model_type):
-    async def collect():
-        return [item async for item in _iter_vllm_compatible_moe_params(weights, model_type)]
-
-    return asyncio.run(collect())
+    return [item for item in unfuse_moe_params(weights, model_type)]
 
 
 def test_qwen_moe_packed_weights_are_expanded_per_expert():

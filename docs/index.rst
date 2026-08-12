@@ -84,6 +84,7 @@ verl is fast with:
    algo/otb.md
    algo/dppo.md
    algo/opd.md
+   algo/dro.md
 
 .. toctree::
    :maxdepth: 1
@@ -102,6 +103,7 @@ verl is fast with:
    :caption: Performance Tuning Guide
 
    perf/dpsk.md
+   advance/dynamic_context_parallel
    perf/best_practices
    perf/perf_tuning
    perf/rollout_kv_offload.md
