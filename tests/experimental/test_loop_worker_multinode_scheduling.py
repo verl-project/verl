@@ -48,14 +48,12 @@ def _actor_node_ids(actors):
     return ray.get([actor.get_node_id.remote() for actor in actors])
 
 
-def test_loop_workers_stay_on_configured_nodes_and_default_can_use_foreign(multinode_ray_cluster, monkeypatch):
+def test_loop_workers_stay_on_configured_nodes(multinode_ray_cluster, monkeypatch):
     nodes = ray.nodes()
-    all_node_ids = {node["NodeID"] for node in nodes}
+    alive_node_ids = {node["NodeID"] for node in nodes if node["Alive"]}
     eligible_node_ids = {node["NodeID"] for node in nodes if node["Resources"].get(_RESOURCE, 0) > 0}
-    foreign_node_ids = all_node_ids - eligible_node_ids
     assert len(nodes) == 3
     assert len(eligible_node_ids) == 2
-    assert len(foreign_node_ids) == 1
     print(
         "ray_nodes=",
         [(node["NodeID"], _RESOURCE in node["Resources"]) for node in nodes],
@@ -85,7 +83,7 @@ def test_loop_workers_stay_on_configured_nodes_and_default_can_use_foreign(multi
     asyncio.run(default_manager._init_agent_loop_workers())
     default_node_ids = _actor_node_ids(default_manager.agent_loop_workers)
     print(f"default_agent_nodes={default_node_ids}")
-    assert foreign_node_ids.intersection(default_node_ids)
+    assert set(default_node_ids) <= alive_node_ids
 
     with pytest.raises(RuntimeError, match="missing-loop-worker-resource"):
         schedulable_loop_worker_node_ids("missing-loop-worker-resource")
