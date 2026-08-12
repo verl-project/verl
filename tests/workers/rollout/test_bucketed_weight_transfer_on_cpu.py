@@ -181,6 +181,34 @@ class _ReceiveFailureSocket:
         self.message = message
 
 
+class _RecvOnlySocket:
+    def recv(self):
+        return b""
+
+
+class _TimeoutSocket:
+    def poll(self, _timeout, _flags):
+        return 0
+
+    def recv(self):
+        raise AssertionError("recv must not be called after a timeout")
+
+
+def test_cpu_sender_ack_supports_recv_only_socket():
+    sender = _transfer_module().BucketedWeightSender("ipc:///tmp/test-bwt-unused.sock")
+    sender.socket = _RecvOnlySocket()
+
+    sender._receive_ack("test")
+
+
+def test_cpu_sender_ack_timeout_raises():
+    sender = _transfer_module().BucketedWeightSender("ipc:///tmp/test-bwt-unused.sock", ack_timeout_ms=1)
+    sender.socket = _TimeoutSocket()
+
+    with pytest.raises(RuntimeError, match="timed out waiting 1ms"):
+        sender._receive_ack("test")
+
+
 def test_cpu_receiver_preserves_decode_failure(monkeypatch):
     receiver = _transfer_module().BucketedWeightReceiver("ipc:///tmp/unused.sock", torch.device("cpu"), use_shm=True)
     socket = _ReceiveFailureSocket()
