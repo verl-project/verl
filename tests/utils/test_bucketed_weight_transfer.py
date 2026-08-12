@@ -19,10 +19,13 @@ and because CUDA IPC requires distinct processes.
 
 import asyncio
 import multiprocessing as mp
+import os
+import threading
 import uuid
 
 import pytest
 import torch
+import zmq
 
 from verl.utils.device import get_device_name, get_torch_device, is_support_ipc
 
@@ -59,18 +62,32 @@ def _generate_weights(weight_specs, seed):
 
 
 class _FakeSocket:
-    def __init__(self):
+    def __init__(self, response=b"", poll_result=zmq.POLLIN):
         self.messages = []
+        self.response = response
+        self.poll_result = poll_result
 
     def send_pyobj(self, message):
         self.messages.append(message)
 
+    def send(self, message):
+        self.messages.append(message)
+
     def recv(self):
-        return b""
+        return self.response
+
+    def poll(self, _timeout, _flags):
+        return self.poll_result
 
 
 class _FakeTorchDevice:
     def synchronize(self):
+        pass
+
+    def empty_cache(self):
+        pass
+
+    def ipc_collect(self):
         pass
 
 
@@ -117,6 +134,264 @@ def test_sender_accepts_strided_tensor(monkeypatch):
     assert buffer.dtype == torch.uint8
     assert buffer.numel() == weight.nbytes
     assert torch.equal(recovered, weight)
+
+
+def test_receiver_callback_failure_reaches_sender(monkeypatch):
+    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
+
+    response = bucketed_weight_transfer._encode_receiver_error(KeyError("embed_tokens.weight"))
+    socket = _FakeSocket(response=response)
+    sender = bucketed_weight_transfer.BucketedWeightSender(
+        zmq_handle="ipc:///tmp/test-bwt-unused.sock",
+        bucket_size_mb=1,
+        use_shm=True,
+    )
+
+    monkeypatch.setattr(sender, "_init_socket", lambda: setattr(sender, "socket", socket))
+    monkeypatch.setattr(sender, "_init_buffer", lambda: setattr(sender, "buffer", torch.empty(0)))
+    monkeypatch.setattr(sender, "_cleanup", lambda: None)
+    monkeypatch.setattr(bucketed_weight_transfer, "get_torch_device", lambda: _FakeTorchDevice())
+
+    with pytest.raises(RuntimeError, match=r"KeyError: 'embed_tokens\.weight'"):
+        asyncio.run(sender.async_send_weights(iter(())))
+
+
+def test_sender_times_out_without_receiver_ack(monkeypatch):
+    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
+
+    socket = _FakeSocket(poll_result=0)
+    sender = bucketed_weight_transfer.BucketedWeightSender(
+        zmq_handle="ipc:///tmp/test-bwt-unused.sock",
+        bucket_size_mb=1,
+        use_shm=True,
+        ack_timeout_ms=1,
+    )
+    monkeypatch.setattr(sender, "_init_socket", lambda: setattr(sender, "socket", socket))
+    monkeypatch.setattr(sender, "_init_buffer", lambda: setattr(sender, "buffer", torch.empty(0)))
+    monkeypatch.setattr(sender, "_cleanup", lambda: None)
+    monkeypatch.setattr(bucketed_weight_transfer, "get_torch_device", lambda: _FakeTorchDevice())
+
+    with pytest.raises(RuntimeError, match="timed out waiting 1ms"):
+        asyncio.run(sender.async_send_weights(iter(())))
+
+
+@pytest.mark.parametrize("phase", ["intermediate", "oversized"])
+def test_sender_propagates_receiver_error_for_every_bucket_send(monkeypatch, phase):
+    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
+
+    socket = _FakeSocket(response=bucketed_weight_transfer._encode_receiver_error(ValueError(phase)))
+    sender = bucketed_weight_transfer.BucketedWeightSender(
+        zmq_handle="ipc:///tmp/test-bwt-unused.sock",
+        bucket_size_mb=1,
+        use_shm=False,
+    )
+    monkeypatch.setattr(sender, "_init_socket", lambda: setattr(sender, "socket", socket))
+    monkeypatch.setattr(sender, "_init_buffer", lambda: setattr(sender, "buffer", torch.empty(1 << 20, dtype=torch.uint8)))
+    monkeypatch.setattr(sender, "_cleanup", lambda: None)
+    monkeypatch.setattr(bucketed_weight_transfer, "get_torch_device", lambda: _FakeTorchDevice())
+
+    if phase == "intermediate":
+        weights = [("a", torch.empty(200_000, dtype=torch.uint8)), ("b", torch.empty(200_000, dtype=torch.uint8))]
+    else:
+        weights = [("large", torch.empty(300_000))]
+
+    with pytest.raises(RuntimeError, match=f"ValueError: {phase}"):
+        asyncio.run(sender.async_send_weights(iter(weights)))
+
+
+def _receiver_with_socket(monkeypatch, metadata, *, use_shm=False):
+    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
+
+    class ReceiverSocket(_FakeSocket):
+        def recv_pyobj(self):
+            return metadata
+
+    socket = ReceiverSocket()
+    receiver = bucketed_weight_transfer.BucketedWeightReceiver(
+        zmq_handle="ipc:///tmp/test-bwt-unused.sock",
+        device=torch.device("cpu"),
+        use_shm=use_shm,
+    )
+    monkeypatch.setattr(receiver, "_init_socket", lambda: setattr(receiver, "socket", socket))
+    monkeypatch.setattr(receiver, "_init_buffer", lambda: None)
+    monkeypatch.setattr(receiver, "_cleanup", lambda: None)
+    return receiver, socket
+
+
+def test_receiver_reports_metadata_decode_failure(monkeypatch):
+    receiver, socket = _receiver_with_socket(monkeypatch, {"is_last": True})
+
+    with pytest.raises(KeyError, match="bucket_meta"):
+        receiver.receive_weights(lambda *_: None)
+
+    assert socket.messages == [b"error:KeyError: 'bucket_meta'"]
+
+
+def test_receiver_reports_ipc_rebuild_failure(monkeypatch):
+    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
+
+    receiver, socket = _receiver_with_socket(
+        monkeypatch,
+        {
+            "bucket_meta": {
+                "weight": {"shape": torch.Size([1]), "dtype": torch.float32, "offset": 0, "handle": ("bad", ())}
+            },
+            "is_last": True,
+        },
+    )
+    monkeypatch.setattr(bucketed_weight_transfer, "rebuild_ipc", lambda *_: (_ for _ in ()).throw(ValueError("bad IPC")))
+
+    with pytest.raises(ValueError, match="bad IPC"):
+        receiver.receive_weights(lambda *_: None)
+
+    assert socket.messages == [b"error:ValueError: bad IPC"]
+
+
+def test_receiver_reports_tensor_conversion_failure(monkeypatch):
+    class FailingTensor:
+        def view(self, *_args, **_kwargs):
+            return self
+
+        def to(self, _device):
+            raise RuntimeError("tensor conversion failed")
+
+    class FailingBuffer:
+        def __getitem__(self, _index):
+            return FailingTensor()
+
+    receiver, socket = _receiver_with_socket(
+        monkeypatch,
+        {
+            "bucket_meta": {
+                "weight": {"shape": torch.Size([1]), "dtype": torch.float32, "offset": 0, "handle": None}
+            },
+            "is_last": True,
+        },
+        use_shm=True,
+    )
+    receiver.buffer = FailingBuffer()
+
+    with pytest.raises(RuntimeError, match="tensor conversion failed"):
+        receiver.receive_weights(lambda *_: None)
+
+    assert socket.messages == [b"error:RuntimeError: tensor conversion failed"]
+
+
+def test_receiver_reports_synchronize_failure(monkeypatch):
+    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
+
+    receiver, socket = _receiver_with_socket(monkeypatch, {"bucket_meta": {}, "is_last": True})
+    monkeypatch.setattr(
+        bucketed_weight_transfer,
+        "get_torch_device",
+        lambda: type("FailingDevice", (), {"synchronize": lambda self: (_ for _ in ()).throw(RuntimeError("sync failed"))})(),
+    )
+
+    with pytest.raises(RuntimeError, match="sync failed"):
+        receiver.receive_weights(lambda *_: None)
+
+    assert socket.messages == [b"error:RuntimeError: sync failed"]
+
+
+def _receiver_hard_exit_after_buffer_ack(zmq_handle):
+    socket = zmq.Context().socket(zmq.REP)
+    socket.connect(zmq_handle)
+    socket.recv_pyobj()
+    socket.send(b"")
+    socket.recv_pyobj()
+    os._exit(0)
+
+
+def test_sender_times_out_after_receiver_hard_exit(monkeypatch):
+    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
+
+    zmq_handle = _unique_zmq_handle()
+    sender = bucketed_weight_transfer.BucketedWeightSender(
+        zmq_handle=zmq_handle,
+        bucket_size_mb=1,
+        use_shm=True,
+        ack_timeout_ms=1_000,
+    )
+    monkeypatch.setattr(bucketed_weight_transfer, "get_torch_device", lambda: _FakeTorchDevice())
+    sender_error = []
+
+    def send():
+        try:
+            asyncio.run(sender.async_send_weights(iter(())))
+        except Exception as exc:
+            sender_error.append(exc)
+
+    sender_thread = threading.Thread(target=send)
+    receiver_process = mp.get_context("spawn").Process(target=_receiver_hard_exit_after_buffer_ack, args=(zmq_handle,))
+    sender_thread.start()
+    receiver_process.start()
+    receiver_process.join(timeout=5)
+    sender_thread.join(timeout=5)
+
+    assert receiver_process.exitcode == 0
+    assert not sender_thread.is_alive()
+    assert len(sender_error) == 1
+    assert "timed out waiting 1000ms" in str(sender_error[0])
+
+
+def test_receiver_reports_callback_failure_before_reraising(monkeypatch):
+    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
+
+    class _ReceiverSocket(_FakeSocket):
+        def recv_pyobj(self):
+            return {"bucket_meta": {}, "is_last": True}
+
+    def fail_weight_load(_weights, _is_last):
+        raise KeyError("embed_tokens.weight")
+
+    socket = _ReceiverSocket()
+    receiver = bucketed_weight_transfer.BucketedWeightReceiver(
+        zmq_handle="ipc:///tmp/test-bwt-unused.sock",
+        device=torch.device("cpu"),
+        use_shm=True,
+    )
+    monkeypatch.setattr(receiver, "_init_socket", lambda: setattr(receiver, "socket", socket))
+    monkeypatch.setattr(receiver, "_init_buffer", lambda: None)
+    monkeypatch.setattr(receiver, "_cleanup", lambda: None)
+
+    with pytest.raises(KeyError, match="embed_tokens.weight"):
+        receiver.receive_weights(fail_weight_load)
+
+    assert socket.messages == [bucketed_weight_transfer._encode_receiver_error(KeyError("embed_tokens.weight"))]
+
+
+def test_receiver_failure_reaches_sender_over_zmq(monkeypatch):
+    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
+
+    monkeypatch.setattr(bucketed_weight_transfer, "get_torch_device", lambda: _FakeTorchDevice())
+    zmq_handle = _unique_zmq_handle()
+    sender = bucketed_weight_transfer.BucketedWeightSender(zmq_handle=zmq_handle, bucket_size_mb=1, use_shm=True)
+    receiver = bucketed_weight_transfer.BucketedWeightReceiver(
+        zmq_handle=zmq_handle,
+        device=torch.device("cpu"),
+        use_shm=True,
+    )
+    sender_error = []
+
+    def fail_weight_load(_weights, _is_last):
+        raise KeyError("embed_tokens.weight")
+
+    def send():
+        try:
+            asyncio.run(sender.async_send_weights(iter(())))
+        except Exception as exc:
+            sender_error.append(exc)
+
+    sender_thread = threading.Thread(target=send)
+    sender_thread.start()
+    with pytest.raises(KeyError, match="embed_tokens.weight"):
+        receiver.receive_weights(fail_weight_load)
+    sender_thread.join(timeout=5)
+
+    assert not sender_thread.is_alive()
+    assert len(sender_error) == 1
+    assert isinstance(sender_error[0], RuntimeError)
+    assert "KeyError: 'embed_tokens.weight'" in str(sender_error[0])
 
 
 # ---------------------------------------------------------------------------

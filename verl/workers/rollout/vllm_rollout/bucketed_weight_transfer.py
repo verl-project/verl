@@ -32,6 +32,19 @@ from verl.utils.device import get_device_id, get_device_name, get_torch_device, 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
+_RECEIVER_ERROR_PREFIX = b"error:"
+_DEFAULT_ACK_TIMEOUT_MS = 30_000
+
+
+def _encode_receiver_error(exc: Exception) -> bytes:
+    return _RECEIVER_ERROR_PREFIX + f"{type(exc).__name__}: {exc}".encode("utf-8", errors="replace")
+
+
+def _raise_on_receiver_error(response: bytes) -> None:
+    if response.startswith(_RECEIVER_ERROR_PREFIX):
+        detail = response.removeprefix(_RECEIVER_ERROR_PREFIX).decode("utf-8", errors="replace")
+        raise RuntimeError(f"weight receiver failed while loading a bucket: {detail}")
+
 
 class TensorMetadata(TypedDict):
     name: str
@@ -89,11 +102,15 @@ class BucketedWeightSender:
         zmq_handle: str,
         bucket_size_mb: int = 512,
         use_shm: bool = False,
+        ack_timeout_ms: int = _DEFAULT_ACK_TIMEOUT_MS,
     ):
+        if ack_timeout_ms <= 0:
+            raise ValueError("ack_timeout_ms must be positive")
         self.zmq_handle = zmq_handle
         self.bucket_size_mb = bucket_size_mb
         self.bucket_size = int(bucket_size_mb) << 20
         self.use_shm = use_shm
+        self.ack_timeout_ms = ack_timeout_ms
 
         self.zmq_context = zmq.Context.instance()
         self.socket = None
@@ -129,7 +146,7 @@ class BucketedWeightSender:
                 if offset + weight.nbytes > self.bucket_size and len(bucket_meta) > 0:
                     get_torch_device().synchronize()
                     self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
-                    self.socket.recv()
+                    self._receive_ack("intermediate bucket")
                     bucket_meta = {}
                     offset = 0
 
@@ -156,9 +173,14 @@ class BucketedWeightSender:
             # send the last bucket
             get_torch_device().synchronize()
             self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": True})
-            self.socket.recv()
+            self._receive_ack("final bucket")
         finally:
             self._cleanup()
+
+    def _receive_ack(self, phase: str) -> None:
+        if not self.socket.poll(self.ack_timeout_ms, zmq.POLLIN):
+            raise RuntimeError(f"timed out waiting {self.ack_timeout_ms}ms for weight receiver acknowledgement ({phase})")
+        _raise_on_receiver_error(self.socket.recv())
 
     def _init_socket(self):
         """Initialize ZMQ REQ socket and bind."""
@@ -189,7 +211,7 @@ class BucketedWeightSender:
             comm_metadata = {"name": shm_name, "size": self.bucket_size}
             self.socket.send_pyobj(comm_metadata)
 
-        self.socket.recv()
+        self._receive_ack("buffer initialization")
         self.buffer = buffer
         self.shm = shm
 
@@ -230,7 +252,7 @@ class BucketedWeightSender:
             "handle": handle,
         }
         self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
-        self.socket.recv()
+        self._receive_ack(f"oversized tensor {name}")
 
 
 class BucketedWeightReceiver:
@@ -274,27 +296,36 @@ class BucketedWeightReceiver:
         """
         try:
             self._init_socket()
-            self._init_buffer()
+            try:
+                self._init_buffer()
+            except Exception as exc:
+                self._send_error(exc)
+                raise
 
             # receive bucket and update weights
             while True:
-                metadata = self.socket.recv_pyobj()
-                weights, tensor = [], None
-                for name, meta in metadata["bucket_meta"].items():
-                    shape, dtype, offset, handle = meta["shape"], meta["dtype"], meta["offset"], meta["handle"]
-                    if handle is not None:
-                        tensor = rebuild_ipc(handle, self.device.index)
+                try:
+                    metadata = self.socket.recv_pyobj()
+                    weights, tensor = [], None
+                    for name, meta in metadata["bucket_meta"].items():
+                        shape, dtype, offset, handle = meta["shape"], meta["dtype"], meta["offset"], meta["handle"]
+                        if handle is not None:
+                            tensor = rebuild_ipc(handle, self.device.index)
+                            weights.append((name, tensor))
+                            continue
+                        size = dtype.itemsize * shape.numel()
+                        tensor = self.buffer[offset : offset + size].view(dtype=dtype).view(shape)
+                        if self.use_shm:
+                            tensor = tensor.to(self.device)
                         weights.append((name, tensor))
-                        continue
-                    size = dtype.itemsize * shape.numel()
-                    tensor = self.buffer[offset : offset + size].view(dtype=dtype).view(shape)
-                    if self.use_shm:
-                        tensor = tensor.to(self.device)
-                    weights.append((name, tensor))
-                is_last = metadata["is_last"]
-                on_bucket_received(weights, is_last)
-                get_torch_device().synchronize()
-                self.socket.send(b"")
+                    is_last = metadata["is_last"]
+                    on_bucket_received(weights, is_last)
+                    get_torch_device().synchronize()
+                except Exception as exc:
+                    self._send_error(exc)
+                    raise
+                else:
+                    self.socket.send(b"")
                 del weights, tensor
                 if is_last:
                     break
@@ -321,6 +352,12 @@ class BucketedWeightReceiver:
         self.socket.send(b"")
         self.buffer = buffer
         self.shm = shm
+
+    def _send_error(self, exc: Exception) -> None:
+        try:
+            self.socket.send(_encode_receiver_error(exc))
+        except zmq.ZMQError:
+            logger.warning("failed to send weight receiver error acknowledgement", exc_info=True)
 
     def _cleanup(self):
         """clean up"""
