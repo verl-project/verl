@@ -482,7 +482,11 @@ class FSDPEngine(BaseEngine):
         return optimizer
 
     def _build_lr_scheduler(self, optimizer):
-        from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
+        from verl.utils.torch_functional import (
+            get_constant_schedule_with_warmup,
+            get_cosine_schedule_with_warmup,
+            get_wsd_schedule_with_warmup,
+        )
 
         optim_config = self.optimizer_config
 
@@ -492,9 +496,15 @@ class FSDPEngine(BaseEngine):
         min_lr_ratio = optim_config.min_lr_ratio
         num_cycles = optim_config.num_cycles
         zero_indexed_step = optim_config.zero_indexed_step
+        if lr_scheduler_type == "wsd" and total_steps <= 0:
+            raise ValueError(f"`total_training_steps` must be positive, got {total_steps}")
         if num_warmup_steps <= 0:
             num_warmup_steps_ratio = optim_config.lr_warmup_steps_ratio
+            if lr_scheduler_type == "wsd" and not 0.0 <= num_warmup_steps_ratio <= 1.0:
+                raise ValueError(f"`lr_warmup_steps_ratio` must be within [0, 1], got {num_warmup_steps_ratio}")
             num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
+        if lr_scheduler_type == "wsd" and not 0 <= num_warmup_steps <= total_steps:
+            raise ValueError(f"`lr_warmup_steps` must be within [0, total_training_steps], got {num_warmup_steps}")
 
         if self.rank == 0:
             print(f"Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}")
@@ -508,6 +518,16 @@ class FSDPEngine(BaseEngine):
                 num_training_steps=total_steps,
                 min_lr_ratio=min_lr_ratio,
                 num_cycles=num_cycles,
+                zero_indexed_step=zero_indexed_step,
+            )
+        elif lr_scheduler_type == "wsd":
+            lr_scheduler = get_wsd_schedule_with_warmup(
+                optimizer=optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=total_steps,
+                min_lr_ratio=0.0 if min_lr_ratio is None else min_lr_ratio,
+                num_cycles=num_cycles,
+                stable_ratio=optim_config.lr_wsd_stable_steps_ratio,
                 zero_indexed_step=zero_indexed_step,
             )
         else:

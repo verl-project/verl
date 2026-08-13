@@ -861,6 +861,7 @@ def get_wsd_schedule_with_warmup(
     num_cycles: float = 0.5,
     last_epoch: int = -1,
     stable_ratio: float = 0.9,
+    zero_indexed_step: bool = True,
 ):
     """
     Create a Warmup-Stable-Decay learning rate scheduler.
@@ -868,7 +869,9 @@ def get_wsd_schedule_with_warmup(
     The schedule follows three phases:
     1. Warmup: Learning rate increases linearly from 0 to the initial LR
     2. Stable: Learning rate remains constant at the initial LR
-    3. Decay: Learning rate decreases following a cosine curve to min_lr_ratio * initial LR
+    3. Decay: Learning rate follows the same cosine curve as
+       :func:`get_cosine_schedule_with_warmup`. With the default ``num_cycles=0.5``,
+       the curve reaches ``min_lr_ratio * initial_lr`` at the configured endpoint.
 
     Args:
         optimizer (:class:`~torch.optim.Optimizer`):
@@ -883,26 +886,42 @@ def get_wsd_schedule_with_warmup(
             The number of waves in the cosine schedule during decay phase.
         last_epoch (:obj:`int`, `optional`, defaults to -1):
             The index of the last epoch when resuming training.
-        stable_ratio (:obj:`float`, `optional`, defaults to 0.0):
+        stable_ratio (:obj:`float`, `optional`, defaults to 0.9):
             The ratio of non-warmup steps that should maintain a constant learning rate.
-            Set to 0.0 to behave exactly like cosine schedule.
+            Set to 0.0 to behave exactly like the cosine schedule over the configured
+            training interval.
+        zero_indexed_step (:obj:`bool`, `optional`, defaults to True):
+            Whether the LR schedule uses 0-indexed steps. If False, evaluate each step as one-indexed.
 
     Return:
         :obj:`torch.optim.lr_scheduler.LambdaLR` with the appropriate schedule.
     """
-    remaining_steps = max(0, num_training_steps - num_warmup_steps)
+    if num_training_steps <= 0:
+        raise ValueError(f"`num_training_steps` must be positive, got {num_training_steps}")
+    if not 0 <= num_warmup_steps <= num_training_steps:
+        raise ValueError(f"`num_warmup_steps` must be within [0, num_training_steps], got {num_warmup_steps}")
+    min_lr_ratio = 0.0 if min_lr_ratio is None else min_lr_ratio
+    if not 0.0 <= stable_ratio <= 1.0:
+        raise ValueError(f"`stable_ratio` must be within [0, 1], got {stable_ratio}")
+    if not 0.0 <= min_lr_ratio <= 1.0:
+        raise ValueError(f"`min_lr_ratio` must be within [0, 1], got {min_lr_ratio}")
+
+    remaining_steps = num_training_steps - num_warmup_steps
     num_stable_steps = int(remaining_steps * stable_ratio)
     num_decay_steps = remaining_steps - num_stable_steps
+    coef = (1.0 - min_lr_ratio) * 0.5
+    intercept = (1.0 + min_lr_ratio) * 0.5
 
     def lr_lambda(current_step):
-        if current_step < num_warmup_steps:
-            return float(current_step) / float(max(1, num_warmup_steps))
-        if current_step < num_warmup_steps + num_stable_steps:
+        logical_step = current_step if zero_indexed_step else current_step + 1
+        if logical_step < num_warmup_steps:
+            return float(logical_step) / float(max(1, num_warmup_steps))
+        if logical_step < num_warmup_steps + num_stable_steps:
             return 1.0
-        if current_step < num_training_steps:
-            progress = float(current_step - num_warmup_steps - num_stable_steps) / float(max(1, num_decay_steps))
-            value = max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress)))
-            return (1.0 - min_lr_ratio) * value + min_lr_ratio
+        if logical_step <= num_training_steps:
+            progress = float(logical_step - num_warmup_steps - num_stable_steps) / float(max(1, num_decay_steps))
+            x = math.cos(math.pi * float(num_cycles) * 2.0 * progress)
+            return max(min_lr_ratio, x * coef + intercept)
         return min_lr_ratio
 
     return LambdaLR(optimizer, lr_lambda, last_epoch)

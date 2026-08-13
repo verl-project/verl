@@ -3,7 +3,7 @@
 Config Explanation
 ===================
 
-Last updated: 06/18/2025.
+Last updated: 08/13/2026.
 
 ppo_trainer.yaml for RL FSDP Backend
 -------------------------------------
@@ -145,9 +145,10 @@ Actor/Rollout/Reference Policy
         lr: 1e-6
         lr_warmup_steps: -1 # Prioritized. Negative values mean delegating to lr_warmup_steps_ratio.
         lr_warmup_steps_ratio: 0.  # the total steps will be injected during runtime
-        min_lr_ratio: 0.0   # only used with cosine lr scheduler, default to 0.0
-        num_cycles: 0.5     # only used with cosine lr scheduler, default to 0.5
-        lr_scheduler_type: constant  # select from constant/cosine
+        min_lr_ratio: 0.0   # used with cosine/wsd lr schedulers, default to 0.0
+        num_cycles: 0.5     # used with cosine/wsd lr schedulers, default to 0.5
+        lr_scheduler_type: constant  # select from constant/cosine/wsd
+        lr_wsd_stable_steps_ratio: 0.9  # fraction of non-warmup steps kept stable before WSD decay
         total_training_steps: -1  # must be override by program
       fsdp_config:
         wrap_policy:
@@ -692,7 +693,10 @@ Optim
      weight_decay: 0.01
      lr_warmup_steps_ratio: 0.1
      clip_grad: 1.0
-     lr_scheduler: cosine
+     min_lr_ratio: 0.0
+     num_cycles: 0.5
+     lr_scheduler_type: constant
+     lr_wsd_stable_steps_ratio: 0.9
      override_optimizer_config: null
 
 - ``optimizer``: Optimizer class name (e.g., ``"AdamW"``, ``"AdamW8bit"``, ``"_AdamW"``). The class name as it appears in the module.
@@ -701,10 +705,15 @@ Optim
 - ``optim.weight_decay``: Weight decay for the optimizer.
 - ``optim.lr_warmup_steps_ratio``: Ratio of warmup steps to total training steps.
 - ``optim.clip_grad``: Gradient clipping value.
-- ``optim.lr_scheduler``: Learning rate scheduler type. Options:
+- ``optim.min_lr_ratio``: Minimum learning-rate ratio used by the ``cosine`` and ``wsd`` schedulers.
+- ``optim.num_cycles``: Number of cosine cycles used during cosine decay. With the default ``0.5``, decay reaches ``min_lr_ratio`` at the configured endpoint.
+- ``optim.lr_scheduler_type``: Learning rate scheduler type. Options:
 
-  - ``cosine``: Cosine learning rate scheduler with warmup (default).
-  - ``wsd``: Warmup-Stable-Decay scheduler that provides a stable learning rate phase between warmup and decay phases.
+  - ``constant``: Constant learning rate after warmup (default).
+  - ``cosine``: Cosine learning rate scheduler with warmup.
+  - ``wsd``: Warmup-Stable-Decay scheduler that provides a stable learning-rate phase between warmup and cosine decay. Setting ``lr_wsd_stable_steps_ratio`` to ``0.0`` matches the cosine schedule over the configured training interval.
+
+- ``optim.lr_wsd_stable_steps_ratio``: Fraction of non-warmup steps assigned to WSD's stable phase. The remainder is assigned to cosine decay.
 
 - ``override_optimizer_config``: Dictionary of additional optimizer-specific keyword arguments. For example, to use ``torchao.optim``'s ``_AdamW`` with BF16 stochastic rounding: ``{"bf16_stochastic_round": true}``
 

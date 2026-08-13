@@ -29,14 +29,17 @@ betas: [0.9, 0.999]
 # Clip gradient
 clip_grad: 1.0
 
-# Minimum LR ratio for cosine schedule
+# Minimum LR ratio for cosine and WSD schedules
 min_lr_ratio: 0.0
 
-# Number of cosine cycles in LR schedule
+# Number of cosine cycles in cosine and WSD schedules
 num_cycles: 0.5
 
-# LR scheduler type: "constant" or "cosine"
+# LR scheduler type: "constant", "cosine", or "wsd"
 lr_scheduler_type: constant
+
+# Fraction of post-warmup steps assigned to WSD's stable phase; the remainder is decay
+lr_wsd_stable_steps_ratio: 0.9
 
 # Whether the LR schedule uses 0-indexed steps
 zero_indexed_step: true
