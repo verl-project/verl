@@ -152,6 +152,20 @@ def passthrough_moe_param_handler(name, tensor, expert_id_base):
     yield name, tensor
 
 
+def streamed_gpt_oss_moe_param_handler(name, tensor, expert_id_base):
+    """Export GPT-OSS fused projections one global expert at a time.
+
+    The vLLM GPT-OSS loader consumes the original checkpoint orientation and
+    interleaved gate/up layout, so this handler only inserts the global expert
+    id into the key and selects the corresponding row. In particular, these
+    fused checkpoint keys do not have a trailing ``.weight`` component.
+    """
+    for local_expert_id in range(tensor.size(0)):
+        expert_id = expert_id_base + local_expert_id
+        expert_name = name.replace("mlp.experts.", f"mlp.experts.{expert_id}.", 1)
+        yield expert_name, tensor[local_expert_id].to(get_device_id(), non_blocking=True)
+
+
 # Overrides the default MoE parameter mapping per model_type. Handlers follow the
 # ``default_moe_param_handler`` contract: (name, stacked_tensor, expert_id_base).
 MOE_PARAM_HANDERS = {"gpt_oss": passthrough_moe_param_handler}
@@ -159,12 +173,8 @@ MOE_PARAM_HANDERS = {"gpt_oss": passthrough_moe_param_handler}
 
 def get_moe_param_handler(model_type, ep_enabled):
     """Resolve the checkpoint export handler for the current MoE layout."""
-    # GPT-OSS stores all experts in fused tensors with gate/up values interleaved
-    # along the last dimension. When EP is disabled, the tensor is already global
-    # and vLLM expects this packed checkpoint layout unchanged. EP requires a
-    # shard-aware vLLM loader and must not pass local shards under the same name.
     if model_type == "gpt_oss" and ep_enabled:
-        raise NotImplementedError("VeOmni GPT-OSS does not support EP weight updates")
+        return streamed_gpt_oss_moe_param_handler
 
     return MOE_PARAM_HANDERS.get(model_type, default_moe_param_handler)
 
@@ -316,12 +326,16 @@ def veomni_shard_export(module):
     params = module.state_dict()
     params = convert_weight_keys(params, getattr(module, "_fsdp_wrapped_module", module))
 
-    model_type = getattr(module.config, "model_type", "default")
-    if model_type == "gpt_oss":
-        raise NotImplementedError("VeOmni GPT-OSS does not support delta_sharded weight updates")
-
     ps = parallel_state.get_parallel_state()
-    process_func = MOE_PARAM_HANDERS.get(model_type, default_moe_param_handler)
+    model_type = getattr(module.config, "model_type", "default")
+    # Delta export must be separable by expert row even when EP is disabled.
+    # The packed GPT-OSS handler produces one global tensor and therefore cannot
+    # describe sparse row updates; use vLLM's streamed expert format here.
+    process_func = (
+        streamed_gpt_oss_moe_param_handler
+        if model_type == "gpt_oss"
+        else get_moe_param_handler(model_type, ps.ep_enabled)
+    )
 
     from torch.distributed.tensor import DTensor
     from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
