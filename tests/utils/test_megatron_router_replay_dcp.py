@@ -30,25 +30,35 @@ def _nested(parts):
 
 def test_router_record_and_replay_use_dynamic_cp_size(monkeypatch):
     calls = []
+    gathered_dtypes = []
     router = SimpleNamespace(recorded_topk_idx=torch.tensor([[1], [2]]))
     monkeypatch.setattr(router_utils.RouterReplayHelper, "get_micro_batch_router_list", lambda *_args: [router])
-    monkeypatch.setattr(router_utils, "gather_from_sequence_parallel_region", lambda tensor, **_kwargs: tensor)
+    monkeypatch.setattr(
+        router_utils,
+        "gather_from_sequence_parallel_region",
+        lambda tensor, **_kwargs: gathered_dtypes.append(tensor.dtype) or tensor,
+    )
     monkeypatch.setattr(router_utils, "scatter_to_sequence_parallel_region", lambda tensor: tensor)
     monkeypatch.setattr(router_utils, "get_current_rank_layer_info", lambda *_args: {"start": 0, "end": 1})
     monkeypatch.setattr(router_utils, "device_name", "cpu")
 
+    # The route tensor reaches preprocess_thd_engine only on the replay side, and by
+    # then it is back to int16; input_ids arrive as int64.
     def fake_preprocess(value, **kwargs):
         calls.append(kwargs["local_cp_size"])
-        if value.dtype == torch.uint8:
-            value = torch.tensor([[[[1]], [[2]]]], dtype=torch.uint8)
+        if value.dtype == torch.int16:
+            value = torch.tensor([[[[1]], [[2]]]], dtype=torch.int16)
         return value, object(), None
 
+    # postprocess_thd_engine is dtype- and trailing-shape-preserving, so it hands
+    # back the uint8 payload merge_router_topk_indices fed into the collectives.
+    payload = torch.tensor([[[1]], [[2]]], dtype=torch.int16).view(torch.uint8)
     monkeypatch.setattr(router_utils, "preprocess_thd_engine", fake_preprocess)
     monkeypatch.setattr(
         router_utils,
         "postprocess_thd_engine",
         lambda output, _packed, _input_ids, _batch_size, **kwargs: (
-            calls.append(kwargs["local_cp_size"]) or _nested([torch.tensor([[[1]], [[2]]], dtype=torch.uint8)])
+            calls.append(kwargs["local_cp_size"]) or _nested([payload])
         ),
     )
 
@@ -56,6 +66,11 @@ def test_router_record_and_replay_use_dynamic_cp_size(monkeypatch):
     recorded = []
     config = SimpleNamespace(fp8=None, num_layers=1, moe_layer_freq=1)
     router_utils.merge_router_topk_indices(None, input_ids, recorded, config, local_cp_size=2)
+
+    # int16 has no NCCL datatype, so the collective must see the uint8 view while the
+    # recorded routes land back as int16.
+    assert gathered_dtypes == [torch.uint8]
+    assert recorded[0].dtype == torch.int16
 
     target = {}
     router.set_target_indices = lambda indices, replay_mask=None: target.update(indices=indices, mask=replay_mask)
@@ -69,8 +84,8 @@ def test_r3_alignment_mask_and_dcp_collection():
     input_ids = _nested([torch.arange(4), torch.arange(3)])
     routes = _nested(
         [
-            torch.full((3, 1, 1), 1, dtype=torch.uint8),
-            torch.full((3, 1, 1), 2, dtype=torch.uint8),
+            torch.full((3, 1, 1), 1, dtype=torch.int16),
+            torch.full((3, 1, 1), 2, dtype=torch.int16),
         ]
     )
     aligned = router_utils.align_r3_router_replay_data(routes, input_ids)
@@ -92,8 +107,10 @@ def test_r3_alignment_mask_and_dcp_collection():
 
 
 def test_pp_gather_normalizes_nested_routes_to_cpu(monkeypatch):
-    local = _nested([torch.tensor([[[1]], [[2]]], dtype=torch.uint8)])
-    remote = _nested([torch.tensor([[[3]], [[4]]], dtype=torch.uint8)])
+    # The nested branch rides all_gather_object, which pickles the tensor, so int16
+    # needs no uint8 reinterpretation here.
+    local = _nested([torch.tensor([[[1]], [[2]]], dtype=torch.int16)])
+    remote = _nested([torch.tensor([[[3]], [[4]]], dtype=torch.int16)])
     monkeypatch.setattr(router_utils.mpu, "get_pipeline_model_parallel_group", lambda: object())
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda _group: 2)
 
@@ -106,4 +123,5 @@ def test_pp_gather_normalizes_nested_routes_to_cpu(monkeypatch):
     routes = router_utils.pp_gather(local, config)
 
     assert routes.device.type == "cpu"
+    assert routes.dtype == torch.int16
     assert [part.tolist() for part in routes.unbind()] == [[[[1], [3]], [[2], [4]]]]

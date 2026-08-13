@@ -979,7 +979,7 @@ class MegatronEngine(BaseEngine):
                 topk_idx_td = merge_nested_router_maps(self.mini_layer_topk_idx_list)
             self.mini_layer_topk_idx_list = []
 
-            layers_topk_idx = pp_gather(topk_idx_td.to(torch.uint8), self.tf_config)
+            layers_topk_idx = pp_gather(topk_idx_td, self.tf_config)
             use_dynamic_bsz = tu.get_non_tensor_data(data=data, key="use_dynamic_bsz", default=True)
             if use_dynamic_bsz and indices is not None:
                 layers_topk_idx = restore_dynamic_batch(layers_topk_idx, indices)

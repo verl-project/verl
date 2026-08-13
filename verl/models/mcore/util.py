@@ -628,7 +628,7 @@ def postprocess_thd_engine(
         half_seqlen = s_len_padded_chunk // 2
         s_len = seq_lens_cpu[i]
         s_len_padded = s_len_padded_chunk * cp_size
-        tmp = torch.empty(s_len_padded, *output.shape[2:], device=output.device)
+        tmp = torch.empty(s_len_padded, *output.shape[2:], device=output.device, dtype=output.dtype)
         for j in range(cp_size):
             o = output_list[j][0]
             # split to 2 chunks

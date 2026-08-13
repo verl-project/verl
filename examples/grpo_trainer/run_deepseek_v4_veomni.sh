@@ -78,6 +78,7 @@ ENGINE_CONFIG=(
     actor_rollout_ref.actor.veomni.dsa_indexer_implementation=tilelang
     actor_rollout_ref.actor.veomni.dsa_attention_implementation=tilelang
     actor_rollout_ref.actor.veomni.mhc_implementation=tilelang
+    actor_rollout_ref.actor.veomni.router_replay.mode=R3
 )
 
 # Actor model config

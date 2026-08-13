@@ -259,10 +259,11 @@ def merge_router_topk_indices(
         router_instances_list = RouterReplayHelper.get_micro_batch_router_list(tf_config, vp_rank)
         layers_topk_idx = []
         for router in router_instances_list:
-            layers_topk_idx.append(router.recorded_topk_idx.to(torch.uint8))  # dynamic_bs, topk
+            layers_topk_idx.append(router.recorded_topk_idx.to(torch.int16))  # dynamic_bs, topk
 
         # layer_num, dynamic_bs, topk  -> dynamic_bs, layer_num, topk
         layers_topk_idx = torch.stack(layers_topk_idx).permute(1, 0, 2).to(device_name)
+        layers_topk_idx = layers_topk_idx.contiguous().view(torch.uint8)
         # dynamic_bs, layer_num, topk -> 1, dynamic_bs_all, layer_num, topk
         layers_topk_idx = (
             gather_from_sequence_parallel_region(layers_topk_idx, tensor_parallel_output_grad=False)
@@ -300,6 +301,11 @@ def merge_router_topk_indices(
                 local_cp_size=local_cp_size,
                 cp_layout=cp_layout,
             )
+            # Undo the uint8 view. Nested tensors have no view(dtype), so reinterpret
+            # the packed values buffer and re-wrap it on the same offsets.
+            layers_topk_idx = torch.nested.nested_tensor_from_jagged(
+                layers_topk_idx.values().contiguous().view(torch.int16), offsets=layers_topk_idx.offsets()
+            )
         else:
             batch_size, seq_len = attention_mask.shape[:2]
             _, packed_seq_params = preprocess_packed_seqs(
@@ -308,6 +314,7 @@ def merge_router_topk_indices(
             layers_topk_idx = postprocess_packed_seqs(
                 layers_topk_idx, packed_seq_params, attention_mask, batch_size, seq_len, post_process=True
             )
+            layers_topk_idx = layers_topk_idx.view(torch.int16)
         mini_layer_topk_idx_list.append(layers_topk_idx.cpu())
 
 
@@ -565,8 +572,8 @@ def reorder_and_merge_vpp_layers(
 
 
 def merge_nested_router_maps(router_maps) -> torch.Tensor:
-    """Flatten recorded micro-batch routes into one uint8 jagged tensor."""
-    tensors = [tensor.to(torch.uint8) for router_map in router_maps for tensor in router_map.unbind()]
+    """Flatten recorded micro-batch routes into one int16 jagged tensor."""
+    tensors = [tensor.to(torch.int16) for router_map in router_maps for tensor in router_map.unbind()]
     return torch.nested.as_nested_tensor(tensors, layout=torch.jagged)
 
 
@@ -626,21 +633,18 @@ def pp_gather(local_layers_router_map, tf_config):
         layers_topk_idx_global_list = [None] * world_size
         torch.distributed.all_gather_object(layers_topk_idx_global_list, local_layers_router_map, pp_group)
     else:
-        local_layers_router_map = local_layers_router_map.to(device_name)
-        layers_topk_idx_global_list = [
-            torch.empty(
-                size=local_layers_router_map.shape,
-                dtype=local_layers_router_map.dtype,
-                device=local_layers_router_map.device,
-            )
-            for _ in range(world_size)
-        ]
+        # NCCL has no int16 datatype, so gather a bit-identical uint8 view and undo it
+        # before the layer-dimension concat below. The nested branch above needs none
+        # of this: all_gather_object pickles the tensor.
+        payload = local_layers_router_map.to(device_name).contiguous().view(torch.uint8)
+        layers_topk_idx_global_list = [torch.empty_like(payload) for _ in range(world_size)]
         torch.distributed.all_gather(
-            tensor=local_layers_router_map,
+            tensor=payload,
             tensor_list=layers_topk_idx_global_list,
             group=pp_group,
             async_op=False,
         )
+        layers_topk_idx_global_list = [t.view(torch.int16) for t in layers_topk_idx_global_list]
     vp_size = tf_config.virtual_pipeline_model_parallel_size
     if vp_size is not None:
         vpp_router_map_offset = [[] for _ in range(pp_size)]

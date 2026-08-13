@@ -350,8 +350,11 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
             raw_prompt=[{"role": "user", "content": "hi"}],
         )
 
-    expected = torch.tensor(routed_experts.copy()).unsqueeze(0)
+    # Rollout is where routed_experts gets its int16 storage dtype, whatever dtype
+    # the backend handed over.
+    expected = torch.tensor(routed_experts.copy()).to(torch.int16).unsqueeze(0)
     assert internal.routed_experts is not None
+    assert internal.routed_experts.dtype == torch.int16
     assert internal.routed_experts.shape == (1, 8, 2, 1)
     torch.testing.assert_close(internal.routed_experts[:, 2:6], expected)
     assert torch.count_nonzero(internal.routed_experts[:, :2]) == 0
