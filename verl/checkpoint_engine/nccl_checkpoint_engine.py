@@ -31,7 +31,6 @@ from verl.checkpoint_engine.base import (
     CheckpointEngine,
     CheckpointEngineRegistry,
     TensorMeta,
-    get_weight_chunks_size,
     merge_weight_chunks,
     split_weight_chunks,
 )
@@ -140,7 +139,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
         rebuild_group: bool = False,
         is_master: bool = False,
         rollout_dtype: torch.dtype = torch.bfloat16,
-        multi_sender: bool = False,
+        multi_sender: bool = True,
     ) -> None:
         self.bucket_size = bucket_size
         self.group_name = group_name
@@ -419,12 +418,12 @@ class NCCLCheckpointEngine(CheckpointEngine):
         offset = 0
 
         # a single buffer suffices: nothing reads the bucket, so successive broadcasts can share it
-        async for chunk_size in get_weight_chunks_size(weights, self.bucket_size):
-            if offset + chunk_size > self.bucket_size:
+        async for tensor_meta, _ in split_weight_chunks(weights, self.bucket_size, meta_only=True):
+            if offset + tensor_meta.chunk_size > self.bucket_size:
                 collective.broadcast(self.recv_buf[:offset], src_rank=0, group_name=self.group_name)
                 offset = 0
 
-            offset += chunk_size
+            offset += tensor_meta.chunk_size
 
         # relay last bucket
         collective.broadcast(self.recv_buf[:offset], src_rank=0, group_name=self.group_name)

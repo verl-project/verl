@@ -539,8 +539,8 @@ class CheckpointEngineManager:
 
 
 async def split_weight_chunks(
-    weights: Generator[tuple[str, torch.Tensor], None, None], bucket_size: int
-) -> AsyncGenerator[tuple[TensorMeta, torch.Tensor], None]:
+    weights: Generator[tuple[str, torch.Tensor], None, None], bucket_size: int, meta_only: bool = False
+) -> AsyncGenerator[tuple[TensorMeta, torch.Tensor | None], None]:
     """Split the weight into chunks.
 
     Args:
@@ -563,30 +563,7 @@ async def split_weight_chunks(
                 chunk_size=chunk_size,
                 offset=None,
             )
-            yield (tensor_meta, buffer[chunk_offset : chunk_offset + chunk_size])
-            chunk_offset += chunk_size
-
-
-async def get_weight_chunks_size(
-    weights: Generator[tuple[str, torch.Tensor], None, None], bucket_size: int
-) -> AsyncGenerator[int, None]:
-    """Yield the size of each weight chunk, without slicing the chunk itself.
-
-    Splits on exactly the same boundaries as `split_weight_chunks`, so a caller that only needs to
-    keep in step with a peer walking that generator can use this instead and skip the buffers.
-
-    Args:
-        weights: The weights generator.
-        bucket_size: Max bucket size in bytes.
-
-    Yields:
-        The size of the weight chunks.
-    """
-    async for _name, weight in ensure_async_iterator(weights):
-        chunk_offset = 0
-        while chunk_offset < weight.nbytes:
-            chunk_size = min(bucket_size, weight.nbytes - chunk_offset)
-            yield chunk_size
+            yield (tensor_meta, None if meta_only else buffer[chunk_offset : chunk_offset + chunk_size])
             chunk_offset += chunk_size
 
 
