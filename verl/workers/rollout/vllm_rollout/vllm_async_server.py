@@ -905,6 +905,12 @@ class vLLMHttpServer:
                 - aborted_count: Number of requests aborted
                 - request_ids: List of aborted request IDs
         """
+        # Only node rank 0 owns AsyncLLM/self.engine. The remaining actors in a
+        # multi-node replica run vLLM's headless entry point, so there is no
+        # engine object to abort through on those actors.
+        if self.node_rank != 0:
+            return {"aborted_count": 0, "request_ids": []}
+
         try:
             # Snapshot request IDs before pausing for reporting
             request_ids = list(self.engine.output_processor.request_states.keys())
@@ -946,6 +952,9 @@ class vLLMHttpServer:
         Returns:
             dict[str, Any]: Dictionary containing abort result.
         """
+        if self.node_rank != 0:
+            return {"aborted": False, "request_id": request_id}
+
         try:
             request_states = self.engine.output_processor.request_states
             req_state = request_states.get(request_id)
@@ -1256,6 +1265,10 @@ class vLLMReplica(RolloutReplica):
         """
         results = await asyncio.gather(*[server.abort_all_requests.remote() for server in self.servers])
 
+        errors = [f"server {index}: {result['error']}" for index, result in enumerate(results) if "error" in result]
+        if errors:
+            raise RuntimeError(f"Failed to abort requests on vLLM replica {self.replica_rank}: {'; '.join(errors)}")
+
         total_aborted = sum(r.get("aborted_count", 0) for r in results)
         all_request_ids = []
         for r in results:
@@ -1290,9 +1303,11 @@ class vLLMReplica(RolloutReplica):
         return {"aborted": False, "request_id": request_id, "error": "Request not found on any server"}
 
     async def release_kv_cache(self):
-        # Drain all in-flight requests so that vLLM worker threads go idle
-        # before we touch engine.release_kv_cache()
-        await self.servers[0].wait_for_requests_to_drain.remote()
+        # abort_all_requests() has already awaited pause_generation() with
+        # wait_for_inflight_requests=False, which waits for the engine-side
+        # pause and abort operation to be acknowledged. Do not re-check
+        # wait_for_requests_to_drain() here: that bookkeeping can remain
+        # stale after a DP pause.
         await asyncio.gather(*[server.release_kv_cache.remote() for server in self.servers])
 
     # -----------------------------------------------------------------------
