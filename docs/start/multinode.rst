@@ -293,6 +293,22 @@ manager available on your cluster or use other container runtimes (e.g. through 
 
 3. Modify `examples/tutorial/slurm/ray_on_slurm.slurm <https://github.com/verl-project/verl/blob/main/examples/tutorial/slurm/ray_on_slurm.slurm>`_ with your cluster's own information.
 
+   On a cluster with multiple network interfaces, hostname resolution may select a management network instead of the
+   high-speed interconnect. Set ``RAY_NETWORK_INTERFACE`` to make the example resolve the IPv4 address of that interface
+   on every node and explicitly bind both the Ray head and workers to it:
+
+   .. code:: bash
+
+       RAY_NETWORK_INTERFACE=ib0 sbatch examples/tutorial/slurm/ray_on_slurm.slurm
+
+   The interface name must exist on every allocated node. This setting controls Ray's network interface only. Distributed
+   communication backends may need their own interface settings, for example:
+
+   .. code:: bash
+
+       export GLOO_SOCKET_IFNAME=ib0
+       export NCCL_SOCKET_IFNAME=ib0
+
 4. Submit the job script to the Slurm cluster with `sbatch`.
 
 Please note that Slurm cluster setup may vary. If you encounter any issues, please refer to Ray's
