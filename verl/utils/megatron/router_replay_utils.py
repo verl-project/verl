@@ -53,42 +53,6 @@ def _context_parallel_layout(tf_config) -> str:
     return "zigzag"
 
 
-def get_thd_tensor_parallel_padding_mask(input_ids: torch.Tensor) -> torch.Tensor | None:
-    """Return this TP rank's THD alignment-only positions for router replay.
-
-    With CP=1 and TP/SP enabled, the no-padding THD path strips alignment rows
-    from exported ``routed_experts`` and recreates them as expert-zero rows when
-    replay data is packed. Padding token IDs with zero does not force the RECORD
-    router logits to select expert zero, so canonicalize those rows before
-    dispatch to keep the R2 forward/backward topology identical. CP layouts have
-    their own packing contract and are intentionally not handled here.
-    """
-    if not input_ids.is_nested or mpu.get_context_parallel_world_size() != 1:
-        return None
-
-    tp_size = mpu.get_tensor_model_parallel_world_size()
-    if tp_size <= 1:
-        return None
-
-    seq_lens = input_ids.offsets().diff().tolist()
-    padded_lens = [length + (-length % tp_size) for length in seq_lens]
-    total_padded = sum(padded_lens)
-    if total_padded == sum(seq_lens):
-        return None
-    if total_padded % tp_size:
-        raise RuntimeError(f"THD padded token count must divide TP size: total={total_padded}, tp={tp_size}")
-
-    global_padding_mask = torch.zeros(total_padded, dtype=torch.bool, device=input_ids.device)
-    offset = 0
-    for seq_len, padded_len in zip(seq_lens, padded_lens, strict=True):
-        global_padding_mask[offset + seq_len : offset + padded_len] = True
-        offset += padded_len
-
-    local_tokens = total_padded // tp_size
-    tp_rank = mpu.get_tensor_model_parallel_rank()
-    return global_padding_mask.view(tp_size, local_tokens)[tp_rank].contiguous()
-
-
 # from megatron.core.transformer.transformer_block import get_num_layers_to_build
 def get_num_layers_to_build(config: TransformerConfig, vp_stage: int | None = None, pp_rank: int | None = None) -> int:
     """
