@@ -54,7 +54,9 @@ from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.profiler import simple_timer
 from verl.utils.ray_utils import (
+    assign_loop_worker_nodes,
     auto_await,
+    available_cpu_per_node,
     get_event_loop,
     get_loop_worker_node_resource,
     loop_worker_node_affinity_resources,
@@ -1214,11 +1216,18 @@ class AgentLoopManager:
         node_resource = get_loop_worker_node_resource()
         node_ids = schedulable_loop_worker_node_ids(node_resource)
         worker_resources = loop_worker_node_affinity_resources(node_resource)
+        num_cpus_per_worker = self.rollout_config.agent.num_cpus_per_worker
+        # Spread workers toward the nodes with the most available CPU so they do
+        # not all pile onto node_ids[0]; falls back to round-robin when Ray does
+        # not report per-node availability.
+        node_assignments = assign_loop_worker_nodes(
+            node_ids, num_workers, available_cpu_per_node(), num_cpus_per_worker
+        )
         for i in range(num_workers):
-            # Round-robin scheduling over the candidate nodes
-            node_id = node_ids[i % len(node_ids)]
+            node_id = node_assignments[i]
             options = {
                 "name": f"agent_loop_worker_{i}" + f"_{uuid4().hex[:8]}",
+                "num_cpus": num_cpus_per_worker,
                 "scheduling_strategy": ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id, soft=True
                 ),

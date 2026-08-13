@@ -38,7 +38,9 @@ def multinode_ray_cluster():
 def _agent_config(num_workers):
     return SimpleNamespace(
         actor_rollout_ref=SimpleNamespace(
-            rollout=SimpleNamespace(agent=SimpleNamespace(num_workers=num_workers)),
+            rollout=SimpleNamespace(
+                agent=SimpleNamespace(num_workers=num_workers, num_cpus_per_worker=0.25),
+            ),
             model=None,
         )
     )
@@ -65,7 +67,9 @@ def test_loop_workers_stay_on_configured_nodes(multinode_ray_cluster, monkeypatc
     asyncio.run(agent_manager._init_agent_loop_workers())
 
     reward_manager = object.__new__(RewardLoopManager)
-    reward_manager.config = SimpleNamespace(reward=SimpleNamespace(num_workers=3))
+    reward_manager.config = SimpleNamespace(
+        reward=SimpleNamespace(num_workers=3, num_cpus_per_worker=0.25)
+    )
     reward_manager.reward_loop_workers_class = _NodeProbe
     reward_manager.reward_router_address = None
     reward_manager._init_reward_loop_workers()

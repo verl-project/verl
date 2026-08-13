@@ -13,15 +13,20 @@
 # limitations under the License.
 """CPU unit tests for agent-loop / reward-loop worker node selection."""
 
+import dataclasses
+
 import pytest
 
 from verl.utils import ray_utils
 from verl.utils.ray_utils import (
     LOOP_WORKER_NODE_RESOURCE_ENV,
+    assign_loop_worker_nodes,
     get_loop_worker_node_resource,
     loop_worker_node_affinity_resources,
     schedulable_loop_worker_node_ids,
 )
+from verl.workers.config.reward import RewardConfig
+from verl.workers.config.rollout import AgentLoopConfig
 
 # A shared/heterogeneous cluster: two managed nodes advertising a group resource,
 # one foreign node (other worker group, no group resource), and a dead node.
@@ -79,3 +84,65 @@ def test_single_node_group_does_not_degrade():
 def test_affinity_resources():
     assert loop_worker_node_affinity_resources(None) is None
     assert loop_worker_node_affinity_resources(_GROUP) == {_GROUP: pytest.approx(1e-4)}
+
+
+def test_assign_falls_back_to_round_robin_without_cpu_data():
+    node_ids = ["a", "b", "c"]
+    # No available-CPU info -> historical round-robin over the candidate nodes.
+    assert assign_loop_worker_nodes(node_ids, 5, available_cpu=None, cpus_per_worker=0.25) == [
+        "a",
+        "b",
+        "c",
+        "a",
+        "b",
+    ]
+    assert assign_loop_worker_nodes(node_ids, 5, available_cpu={}, cpus_per_worker=0.25) == [
+        "a",
+        "b",
+        "c",
+        "a",
+        "b",
+    ]
+
+
+def test_assign_prefers_most_available_and_spreads_as_cpu_drains():
+    node_ids = ["a", "b"]
+    # "b" starts with more free CPU; each placement debits cpus_per_worker so the
+    # two nodes alternate as their available CPU converges.
+    placed = assign_loop_worker_nodes(node_ids, 4, available_cpu={"a": 5.0, "b": 6.0}, cpus_per_worker=2.0)
+    assert placed == ["b", "a", "b", "a"]
+
+
+def test_assign_zero_cost_pins_to_single_emptiest():
+    node_ids = ["a", "b", "c"]
+    # With no per-worker cost nothing drains, so the single emptiest node wins all.
+    placed = assign_loop_worker_nodes(node_ids, 3, available_cpu={"a": 1.0, "b": 3.0, "c": 2.0}, cpus_per_worker=0.0)
+    assert placed == ["b", "b", "b"]
+
+
+def test_assign_missing_node_treated_as_zero_cpu():
+    node_ids = ["a", "b"]
+    # "b" absent from the map -> 0 available, so "a" is always preferred.
+    placed = assign_loop_worker_nodes(node_ids, 2, available_cpu={"a": 4.0}, cpus_per_worker=0.0)
+    assert placed == ["a", "a"]
+
+
+def test_assign_empty_nodes_raises():
+    with pytest.raises(ValueError):
+        assign_loop_worker_nodes([], 3, available_cpu={"a": 1.0})
+
+
+def test_available_cpu_per_node_returns_empty_when_unreachable():
+    # Outside a live Ray driver the internal state view is unavailable; callers
+    # must then fall back to round-robin.
+    assert ray_utils.available_cpu_per_node() == {}
+
+
+def _declared_default(config_cls, field_name):
+    return next(f for f in dataclasses.fields(config_cls) if f.name == field_name).default
+
+
+def test_loop_worker_cpu_knob_defaults_are_fractional():
+    assert AgentLoopConfig().num_cpus_per_worker == 0.25
+    assert _declared_default(AgentLoopConfig, "num_cpus_per_worker") == 0.25
+    assert _declared_default(RewardConfig, "num_cpus_per_worker") == 0.25
