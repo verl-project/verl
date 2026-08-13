@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import logging
-from types import SimpleNamespace
 
 import pytest
 
@@ -349,23 +348,16 @@ def test_builtin_family_class_mapping(family, builder_cls):
     ],
 )
 def test_auto_family_inference_uses_exact_root_model_type(model_type, expected):
-    assert infer_continuous_token_model_family(hf_config=SimpleNamespace(model_type=model_type)) == expected
+    assert infer_continuous_token_model_family(hf_model_type=model_type) == expected
 
 
-def test_auto_family_inference_accepts_config_dict():
-    assert infer_continuous_token_model_family(hf_config={"model_type": "deepseek_v4"}) == (
-        ContinuousTokenModelFamily.DEEPSEEKV4
-    )
+def test_auto_family_inference_normalizes_hf_model_type():
+    assert infer_continuous_token_model_family(hf_model_type=" DeepSeek_V4 ") == (ContinuousTokenModelFamily.DEEPSEEKV4)
 
 
-def test_auto_family_inference_does_not_use_architectures_or_nested_model_type(caplog):
-    config = SimpleNamespace(
-        model_type="unregistered_wrapper",
-        architectures=["Qwen3ForCausalLM"],
-        text_config=SimpleNamespace(model_type="qwen3"),
-    )
+def test_auto_family_inference_does_not_guess_unregistered_model_type(caplog):
     with caplog.at_level(logging.WARNING, logger="verl.utils.tokenizer.continuous_token_wiring"):
-        family = infer_continuous_token_model_family(hf_config=config)
+        family = infer_continuous_token_model_family(hf_model_type="unregistered_wrapper")
     assert family == ContinuousTokenModelFamily.DEFAULT
     assert "unregistered_wrapper" in caplog.text
 
@@ -374,20 +366,20 @@ def test_explicit_family_is_not_rewritten():
     assert (
         resolve_continuous_token_model_family(
             ContinuousTokenModelFamily.DEFAULT,
-            hf_config=SimpleNamespace(model_type="qwen3"),
+            hf_model_type="qwen3",
         )
         == ContinuousTokenModelFamily.DEFAULT
     )
     assert resolve_continuous_token_model_family(
         "qwen_3.5",
-        hf_config=SimpleNamespace(model_type="deepseek_v3"),
+        hf_model_type="deepseek_v3",
     ) == (ContinuousTokenModelFamily.QWEN35)
 
 
 def test_unknown_model_type_with_multimodal_processor_resolves_to_vl_default():
     assert (
         infer_continuous_token_model_family(
-            hf_config=SimpleNamespace(model_type="unknown_model"),
+            hf_model_type="unknown_model",
             has_multimodal_processor=True,
         )
         == ContinuousTokenModelFamily.VL_DEFAULT
@@ -397,14 +389,14 @@ def test_unknown_model_type_with_multimodal_processor_resolves_to_vl_default():
 def test_auto_family_is_resolved_at_factory_time():
     builder = create_continuous_token_builder(
         _QwenBoundaryTokenizer(),
-        hf_config=SimpleNamespace(model_type="qwen3"),
+        hf_model_type="qwen3",
     )
     assert isinstance(builder, QwenContinuousTokenBuilder)
 
 
 def test_qwen2_auto_uses_qwen_builder_and_newline_boundary_logic():
     tokenizer = _QwenBoundaryTokenizer()
-    builder = create_continuous_token_builder(tokenizer, hf_config=SimpleNamespace(model_type="qwen2"))
+    builder = create_continuous_token_builder(tokenizer, hf_model_type="qwen2")
     result = builder._merge_non_assistant_token_ids([1, tokenizer.im_end_id], [2])
 
     assert isinstance(builder, QwenContinuousTokenBuilder)
@@ -419,7 +411,7 @@ def test_unknown_model_with_non_multimodal_processor_uses_default_text_builder(c
     with caplog.at_level(logging.WARNING, logger="verl.utils.tokenizer.continuous_token_wiring"):
         builder = create_continuous_token_builder(
             _TemplateTokenizer(),
-            hf_config=SimpleNamespace(model_type="unknown_text_model"),
+            hf_model_type="unknown_text_model",
             processor=TextProcessor(),
         )
 
@@ -1239,7 +1231,7 @@ class TestWiringVLFactory:
 
         builder = create_continuous_token_builder(
             MockTokenizer(),
-            hf_config=SimpleNamespace(model_type="qwen2_5_vl"),
+            hf_model_type="qwen2_5_vl",
             processor=MockProcessor(),
         )
         assert isinstance(builder, QwenVLContinuousTokenBuilder)
@@ -1258,7 +1250,7 @@ class TestWiringVLFactory:
         with caplog.at_level(logging.WARNING, logger="verl.utils.tokenizer.continuous_token_wiring"):
             builder = create_continuous_token_builder(
                 MockTokenizer(),
-                hf_config=SimpleNamespace(model_type="acme_model"),
+                hf_model_type="acme_model",
                 processor=MockProcessor(),
             )
         assert isinstance(builder, VLContinuousTokenBuilder)
@@ -1282,7 +1274,7 @@ class TestWiringVLFactory:
 
         builder = create_continuous_token_builder(
             MockTokenizer(),
-            hf_config=SimpleNamespace(model_type="gemma4"),
+            hf_model_type="gemma4",
             processor=MockProcessor(),
         )
         assert isinstance(builder, Gemma4VLContinuousTokenBuilder)
@@ -1301,7 +1293,7 @@ class TestWiringVLFactory:
         with pytest.raises(ValueError, match="multimodal processor was provided"):
             create_continuous_token_builder(
                 MockTokenizer(),
-                hf_config=SimpleNamespace(model_type="qwen3"),
+                hf_model_type="qwen3",
                 processor=MockProcessor(),
             )
 

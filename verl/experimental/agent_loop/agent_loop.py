@@ -212,7 +212,7 @@ class AgentLoopBase(ABC):
         processor (AutoProcessor): Processor for process messages.
         dataset_cls (type[Dataset]): Dataset class for creating dataset, Defaults to RLHFDataset.
         data_config (DictConfigWrap): Dataset config.
-        hf_config: Root Hugging Face model config used for Continuous Token builder selection.
+        hf_model_type: Root Hugging Face ``model_type`` used for Continuous Token builder selection.
     """
 
     def __init__(
@@ -223,7 +223,7 @@ class AgentLoopBase(ABC):
         processor: AutoProcessor,
         dataset_cls: type[RLHFDataset],
         data_config: DictConfigWrap,
-        hf_config: Any | None = None,
+        hf_model_type: str | None = None,
         **kwargs,
     ):
         self.config = trainer_config.config
@@ -241,7 +241,7 @@ class AgentLoopBase(ABC):
         # default builder (or default VL builder with a multimodal processor).
         self.continuous_token_builder = create_continuous_token_builder(
             self.tokenizer,
-            hf_config=hf_config,
+            hf_model_type=hf_model_type,
             chat_template_kwargs=self.apply_chat_template_kwargs,
             mm_processor_kwargs=self.mm_processor_kwargs,
             processor=self.processor,
@@ -474,6 +474,8 @@ class AgentLoopWorker:
         self.dataset_cls = get_dataset_class(config.data)
         self.tokenizer = self.model_config.tokenizer
         self.processor = self.model_config.processor
+        hf_model_type = getattr(self.model_config.hf_config, "model_type", None)
+        self.hf_model_type: str | None = hf_model_type if isinstance(hf_model_type, str) else None
         self.mm_processor_kwargs = config.data.get("mm_processor_kwargs", {})
 
         # Online policy distillation
@@ -651,7 +653,7 @@ class AgentLoopWorker:
                 server_manager=self.llm_client,
                 tokenizer=self.tokenizer,
                 processor=self.processor,
-                hf_config=self.model_config.hf_config,
+                hf_model_type=self.hf_model_type,
                 dataset_cls=self.dataset_cls,
                 data_config=DictConfigWrap(self.config.data),
                 tools=ToolListWrap(self.tools),

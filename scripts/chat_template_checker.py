@@ -529,7 +529,7 @@ def _create_builder_or_error(
     tokenizer,
     *,
     trajectory_name: str,
-    hf_config: Any,
+    hf_model_type: str | None,
     model_family: str,
     custom_builder_module: str | None,
     chat_template_kwargs: dict[str, Any],
@@ -542,7 +542,7 @@ def _create_builder_or_error(
         builder = create_continuous_token_builder(
             tokenizer,
             model_family=model_family,
-            hf_config=hf_config,
+            hf_model_type=hf_model_type,
             chat_template_kwargs=chat_template_kwargs,
             processor=processor,
         )
@@ -662,7 +662,7 @@ def run_continuous_token_checks(
     tokenizer,
     trajectory: MockTrajectory,
     *,
-    hf_config: Any,
+    hf_model_type: str | None,
     model_family: str,
     custom_builder_module: str | None,
     chat_template_kwargs: dict[str, Any],
@@ -679,7 +679,7 @@ def run_continuous_token_checks(
     builder, error = _create_builder_or_error(
         tokenizer,
         trajectory_name=trajectory.name,
-        hf_config=hf_config,
+        hf_model_type=hf_model_type,
         model_family=model_family,
         custom_builder_module=custom_builder_module,
         chat_template_kwargs=chat_template_kwargs,
@@ -879,7 +879,7 @@ def run_continuous_token_checks_vl(
     tokenizer,
     trajectory: VLMockTrajectory,
     *,
-    hf_config: Any,
+    hf_model_type: str | None,
     model_family: str,
     custom_builder_module: str | None,
     tool_parser: str,
@@ -896,7 +896,7 @@ def run_continuous_token_checks_vl(
     builder, error = _create_builder_or_error(
         tokenizer,
         trajectory_name=trajectory.name,
-        hf_config=hf_config,
+        hf_model_type=hf_model_type,
         model_family=model_family,
         custom_builder_module=custom_builder_module,
         chat_template_kwargs=chat_template_kwargs,
@@ -1000,14 +1000,15 @@ def main() -> int:
     processor = None
     try:
         tokenizer = _load_tokenizer(args.model, local_files_only=not args.allow_download, template_path=args.template)
-        hf_config, _ = PretrainedConfig.get_config_dict(
+        hf_config_dict, _ = PretrainedConfig.get_config_dict(
             args.model,
             trust_remote_code=True,
             local_files_only=not args.allow_download,
         )
+        hf_model_type = hf_config_dict.get("model_type")
         resolved_family = resolve_continuous_token_model_family(
             args.model_family,
-            hf_config=hf_config,
+            hf_model_type=hf_model_type,
             has_multimodal_processor=args.enable_multimodal,
         )
 
@@ -1025,7 +1026,7 @@ def main() -> int:
             print(f"Processor loaded:      {type(processor).__name__}")
             resolved_family = resolve_continuous_token_model_family(
                 args.model_family,
-                hf_config=hf_config,
+                hf_model_type=hf_model_type,
                 has_multimodal_processor=getattr(processor, "image_processor", None) is not None,
             )
         elif needs_processor and not args.enable_multimodal:
@@ -1064,7 +1065,7 @@ def main() -> int:
             run_continuous_token_checks(
                 tokenizer,
                 trajectory,
-                hf_config=hf_config,
+                hf_model_type=hf_model_type,
                 model_family=args.model_family,
                 custom_builder_module=args.custom_builder_module,
                 chat_template_kwargs=chat_template_kwargs,
@@ -1101,7 +1102,7 @@ def main() -> int:
                         processor,
                         tokenizer,
                         trajectory,
-                        hf_config=hf_config,
+                        hf_model_type=hf_model_type,
                         model_family=args.model_family,
                         custom_builder_module=args.custom_builder_module,
                         tool_parser=tool_parser,

@@ -167,7 +167,7 @@ def list_continuous_token_builder_families() -> tuple[str, ...]:
 def resolve_continuous_token_model_family(
     model_family: str | ContinuousTokenModelFamily,
     *,
-    hf_config: Any | None = None,
+    hf_model_type: str | None = None,
     has_multimodal_processor: bool = False,
 ) -> ContinuousTokenModelFamily:
     """Resolve ``auto`` to a concrete family, or canonicalize an explicit family."""
@@ -177,12 +177,12 @@ def resolve_continuous_token_model_family(
         return family
 
     resolved = infer_continuous_token_model_family(
-        hf_config=hf_config,
+        hf_model_type=hf_model_type,
         has_multimodal_processor=has_multimodal_processor,
     )
     logger.info(
         "Resolved Continuous Token builder family from config.json model_type=%r: %s",
-        _root_model_type(hf_config),
+        _normalize_hf_model_type(hf_model_type),
         resolved,
     )
     return resolved
@@ -190,7 +190,7 @@ def resolve_continuous_token_model_family(
 
 def infer_continuous_token_model_family(
     *,
-    hf_config: Any | None = None,
+    hf_model_type: str | None = None,
     has_multimodal_processor: bool = False,
 ) -> ContinuousTokenModelFamily:
     """Infer a builder from the root ``config.json`` ``model_type`` field.
@@ -199,7 +199,7 @@ def infer_continuous_token_model_family(
     ``architectures`` are intentionally ignored. Unknown model types use the
     generic builder selected by whether a multimodal processor is present.
     """
-    model_type = _root_model_type(hf_config)
+    model_type = _normalize_hf_model_type(hf_model_type)
     if model_type is not None:
         family = _MODEL_TYPE_TO_FAMILY.get(model_type)
         if family is not None:
@@ -218,13 +218,13 @@ def create_continuous_token_builder(
     tokenizer: Any,
     *,
     model_family: str | ContinuousTokenModelFamily = "auto",
-    hf_config: Any | None = None,
+    hf_model_type: str | None = None,
     chat_template_kwargs: dict[str, Any] | None = None,
     mm_processor_kwargs: dict[str, Any] | None = None,
     processor: Any | None = None,
     **builder_kwargs: Any,
 ) -> Any:
-    """Instantiate the Continuous Token builder inferred from ``hf_config.model_type``.
+    """Instantiate the Continuous Token builder inferred from the root Hugging Face ``model_type``.
 
     Inference uses an exact registry lookup on the root Hugging Face config's
     ``model_type``. Repository/tokenizer names and ``architectures`` are not used.
@@ -245,7 +245,7 @@ def create_continuous_token_builder(
     has_mm_processor = _is_multimodal_processor(processor)
     resolved_family = resolve_continuous_token_model_family(
         model_family,
-        hf_config=hf_config,
+        hf_model_type=hf_model_type,
         has_multimodal_processor=has_mm_processor,
     )
     builder_cls = get_continuous_token_builder_class(resolved_family)
@@ -294,7 +294,7 @@ def create_continuous_token_builder(
 
         raise ValueError(
             f"Model resolved to the text Continuous Token family {resolved_family!r}, but a multimodal "
-            f"processor was provided. Register config.json model_type={_root_model_type(hf_config)!r} "
+            f"processor was provided. Register config.json model_type={_normalize_hf_model_type(hf_model_type)!r} "
             f"as a VL or unified family, or do not load a multimodal processor."
         )
 
@@ -314,17 +314,11 @@ def _is_multimodal_processor(processor: Any | None) -> bool:
     return processor is not None and getattr(processor, "image_processor", None) is not None
 
 
-def _root_model_type(hf_config: Any | None) -> str | None:
-    """Return only the root config's normalized ``model_type`` value."""
-    if hf_config is None:
+def _normalize_hf_model_type(hf_model_type: str | None) -> str | None:
+    """Normalize a root Hugging Face ``model_type`` value."""
+    if not isinstance(hf_model_type, str):
         return None
-    if isinstance(hf_config, dict):
-        model_type = hf_config.get("model_type")
-    else:
-        model_type = getattr(hf_config, "model_type", None)
-    if not isinstance(model_type, str):
-        return None
-    normalized = model_type.strip().lower()
+    normalized = hf_model_type.strip().lower()
     return normalized or None
 
 
