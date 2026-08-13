@@ -153,6 +153,14 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
    # 如果您仅需要使用FSDP后端
    # USE_MEGATRON=0 bash verl/scripts/install_vllm_mcore_npu.sh
 
+日志过滤
+^^^^^^^^^^^^^^^^^^^^^^^^
+transformers版本升级后，可能出现大量别名废弃告警，可添加环境变量过滤冗余日志
+
+.. code:: bash
+
+   export TRANSFORMERS_VERBOSITY=error
+
 3. 自定义安装-SGLang + FSDP/Megatron
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
