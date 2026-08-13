@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
 import torch
 
 from verl.utils.megatron.router_replay_patch import (
@@ -56,3 +57,15 @@ def test_record_padding_mask_shape_mismatch_hard_fails():
         assert "padding mask does not match" in str(exc)
     else:
         raise AssertionError("expected router padding-mask shape mismatch to fail")
+
+
+def test_record_padding_mask_scope_clears_state_and_propagates_forward_error():
+    router_replay = RouterReplay()
+    padding_mask = torch.tensor([False, True])
+
+    with pytest.raises(RuntimeError, match="forward failed"):
+        with RouterReplay.scoped_record_padding_mask(padding_mask):
+            assert router_replay.record_padding_mask is padding_mask
+            raise RuntimeError("forward failed")
+
+    assert router_replay.record_padding_mask is None
