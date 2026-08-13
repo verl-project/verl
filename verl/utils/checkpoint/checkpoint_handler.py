@@ -40,6 +40,8 @@ def extract_step(path):
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "WARN"))
 
+_DATALOADER_METADATA_VERSION = 1
+
 
 class OrchestrationMode(Enum):
     SPMD = 0
@@ -121,7 +123,24 @@ class CheckpointHandler:
             # Use StatefulDataLoader's built-in state dict functionality
             dataloader_state_dict = self.train_dataloader.state_dict()
             torch.save(dataloader_state_dict, dataloader_local_path)
+            steps_per_epoch = len(self.train_dataloader)
+            dataloader_metadata = {
+                "version": _DATALOADER_METADATA_VERSION,
+                "global_step": step,
+                "steps_per_epoch": steps_per_epoch,
+                "step_in_epoch": step % steps_per_epoch if steps_per_epoch > 0 else None,
+            }
+            metadata_path = f"{dataloader_local_path}.meta.json"
+            temp_metadata_path = f"{metadata_path}.tmp"
+            with open(temp_metadata_path, "w", encoding="utf-8") as f:
+                json.dump(dataloader_metadata, f)
+            os.replace(temp_metadata_path, metadata_path)
             print(f"Saved dataloader state to: {dataloader_local_path}")
+
+        # All data-parallel ranks must finish their dataloader files before
+        # rank 0 publishes the checkpoint tracker or copies the directory.
+        if self.mode == OrchestrationMode.SPMD:
+            torch.distributed.barrier()
 
         if self.rank == 0:
             # Update latest checkpoint tracker (atomic write)
@@ -129,7 +148,7 @@ class CheckpointHandler:
             temp_tracker_file = tracker_file + ".tmp"
             with open(temp_tracker_file, "w") as f:
                 f.write(str(step))
-            os.rename(temp_tracker_file, tracker_file)
+            os.replace(temp_tracker_file, tracker_file)
             print(f"Updated checkpoint tracker: {tracker_file}")
 
         # Copy to HDFS if configured
@@ -162,17 +181,77 @@ class CheckpointHandler:
 
         # Use checkpoint manager to load model state
         self.engine.load_checkpoint(checkpoint_path)
-        # Always load dataloader state for StatefulDataLoader
-        self._load_dataloader_state(checkpoint_path)
+        # Restore mid-epoch progress while leaving an exhausted epoch-boundary
+        # dataloader fresh for the next epoch.
+        self._load_dataloader_state(checkpoint_path, resume_step)
 
         return resume_step
 
-    def _load_dataloader_state(self, checkpoint_path: str):
+    def _load_dataloader_state(self, checkpoint_path: str, resume_step: int):
         """Load dataloader state from checkpoint"""
         dp_rank = self.dp_rank
         dataloader_path = os.path.join(checkpoint_path, f"data_{dp_rank}.pt")
 
         if os.path.exists(dataloader_path):
+            steps_per_epoch = len(self.train_dataloader)
+            metadata_path = f"{dataloader_path}.meta.json"
+            if os.path.exists(metadata_path):
+                try:
+                    with open(metadata_path, encoding="utf-8") as f:
+                        metadata = json.load(f)
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise ValueError(f"Cannot read SFT dataloader metadata from {metadata_path}") from exc
+                if not isinstance(metadata, dict):
+                    raise ValueError(f"Invalid SFT dataloader metadata in {metadata_path}: expected an object")
+                saved_step = metadata.get("global_step")
+                saved_steps_per_epoch = metadata.get("steps_per_epoch")
+                saved_step_in_epoch = metadata.get("step_in_epoch")
+                if type(metadata.get("version")) is not int or metadata["version"] != _DATALOADER_METADATA_VERSION:
+                    raise ValueError(f"Invalid SFT dataloader metadata version in {metadata_path}")
+                if type(saved_step) is not int:
+                    raise ValueError(f"Invalid SFT dataloader metadata in {metadata_path}")
+                if type(saved_steps_per_epoch) is not int or saved_steps_per_epoch < 0:
+                    raise ValueError(f"Invalid steps_per_epoch in {metadata_path}: {saved_steps_per_epoch!r}")
+                expected_step_in_epoch = saved_step % saved_steps_per_epoch if saved_steps_per_epoch > 0 else None
+                step_in_epoch_is_valid = (
+                    saved_step_in_epoch is None
+                    if expected_step_in_epoch is None
+                    else type(saved_step_in_epoch) is int and saved_step_in_epoch == expected_step_in_epoch
+                )
+                if saved_step != resume_step or not step_in_epoch_is_valid:
+                    raise ValueError(
+                        f"SFT dataloader metadata in {metadata_path} does not match resume step {resume_step}"
+                    )
+                if saved_steps_per_epoch != steps_per_epoch:
+                    raise ValueError(
+                        "Cannot safely resume SFT with a different number of batches per epoch: "
+                        f"checkpoint={saved_steps_per_epoch}, current={steps_per_epoch}. "
+                        "Use the same SFT dataloader geometry as the saved checkpoint."
+                    )
+                at_epoch_boundary = saved_steps_per_epoch > 0 and saved_step_in_epoch == 0
+            else:
+                # Checkpoints created before dataloader metadata was added can
+                # only infer the boundary from the current loader geometry.
+                at_epoch_boundary = steps_per_epoch > 0 and resume_step % steps_per_epoch == 0
+                log_with_rank(
+                    f"No SFT dataloader metadata found at {metadata_path}; inferring the epoch position from the "
+                    "current number of batches per epoch. Keep the SFT dataloader geometry unchanged when resuming "
+                    "this legacy checkpoint.",
+                    logger=logger,
+                    rank=self.rank,
+                    level=logging.WARNING,
+                    log_only_rank_0=True,
+                )
+            if at_epoch_boundary:
+                log_with_rank(
+                    f"Skipping dataloader state restore because resume_step={resume_step} is at an epoch boundary "
+                    f"(steps_per_epoch={steps_per_epoch}); the saved dataloader is exhausted",
+                    logger=logger,
+                    rank=self.rank,
+                    log_only_rank_0=True,
+                )
+                return
+
             # Use StatefulDataLoader's built-in state dict functionality
             dataloader_state_dict = torch.load(dataloader_path, map_location="cpu", weights_only=False)
             self.train_dataloader.load_state_dict(dataloader_state_dict)
