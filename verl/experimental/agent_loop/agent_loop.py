@@ -212,6 +212,7 @@ class AgentLoopBase(ABC):
         processor (AutoProcessor): Processor for process messages.
         dataset_cls (type[Dataset]): Dataset class for creating dataset, Defaults to RLHFDataset.
         data_config (DictConfigWrap): Dataset config.
+        hf_config: Root Hugging Face model config used for Continuous Token builder selection.
     """
 
     def __init__(
@@ -222,6 +223,7 @@ class AgentLoopBase(ABC):
         processor: AutoProcessor,
         dataset_cls: type[RLHFDataset],
         data_config: DictConfigWrap,
+        hf_config: Any | None = None,
         **kwargs,
     ):
         self.config = trainer_config.config
@@ -234,14 +236,12 @@ class AgentLoopBase(ABC):
         self.apply_chat_template_kwargs = self.data_config.get("apply_chat_template_kwargs", {})
         self.mm_processor_kwargs = self.data_config.get("mm_processor_kwargs", {})
         # Continuous Token is the only rollout tokenization path for agent loops.
-        # The model family (boundary handling) is always inferred from the model /
-        # tokenizer path; unrecognized models fall back to the default builder
-        # (or the default VL builder when a multimodal processor is present).
-        model_config = self.config.actor_rollout_ref.model
+        # The model family (boundary handling) is inferred by exact lookup of the
+        # root Hugging Face config's model_type. Unrecognized models use the
+        # default builder (or default VL builder with a multimodal processor).
         self.continuous_token_builder = create_continuous_token_builder(
             self.tokenizer,
-            model_path=model_config.path,
-            tokenizer_name_or_path=model_config.tokenizer_path,
+            hf_config=hf_config,
             chat_template_kwargs=self.apply_chat_template_kwargs,
             mm_processor_kwargs=self.mm_processor_kwargs,
             processor=self.processor,
@@ -651,6 +651,7 @@ class AgentLoopWorker:
                 server_manager=self.llm_client,
                 tokenizer=self.tokenizer,
                 processor=self.processor,
+                hf_config=self.model_config.hf_config,
                 dataset_cls=self.dataset_cls,
                 data_config=DictConfigWrap(self.config.data),
                 tools=ToolListWrap(self.tools),

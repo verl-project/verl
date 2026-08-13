@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 
@@ -26,8 +27,6 @@ from verl.utils.tokenizer.continuous_token import (
     GptOssContinuousTokenBuilder,
     KimiVLContinuousTokenBuilder,
     MergeResult,
-    MiMoContinuousTokenBuilder,
-    MiMoVLContinuousTokenBuilder,
     MiniMaxContinuousTokenBuilder,
     QwenContinuousTokenBuilder,
     QwenVLContinuousTokenBuilder,
@@ -46,10 +45,6 @@ from verl.utils.tokenizer.deepseek import DeepSeekV4ContinuousTokenBuilder
 
 class _DummyTokenizer:
     name_or_path = "Qwen/Qwen3-8B"
-
-
-class _InitKwargsTokenizer:
-    init_kwargs = {"name_or_path": "MiniMaxAI/MiniMax-M2.7"}
 
 
 class _TemplateTokenizer:
@@ -272,7 +267,6 @@ def test_builtin_family_surface():
         "qwen25",
         "qwen3",
         "qwen35",
-        "mimo",
         "minimax",
         "minimaxm2",
         "minimaxm25",
@@ -286,7 +280,6 @@ def test_builtin_family_surface():
         "qwenvl",
         "qwen25vl",
         "qwen3vl",
-        "mimovl",
         "minimaxvl",
         "gemma4vl",
         "kimivl",
@@ -305,7 +298,6 @@ def test_builtin_family_surface():
         (ContinuousTokenModelFamily.QWEN25, QwenContinuousTokenBuilder),
         (ContinuousTokenModelFamily.QWEN3, QwenContinuousTokenBuilder),
         (ContinuousTokenModelFamily.QWEN35, QwenContinuousTokenBuilder),
-        (ContinuousTokenModelFamily.MIMO, MiMoContinuousTokenBuilder),
         (ContinuousTokenModelFamily.MINIMAX, MiniMaxContinuousTokenBuilder),
         (ContinuousTokenModelFamily.MINIMAX_M2, MiniMaxContinuousTokenBuilder),
         (ContinuousTokenModelFamily.MINIMAX_M25, MiniMaxContinuousTokenBuilder),
@@ -318,7 +310,6 @@ def test_builtin_family_surface():
         (ContinuousTokenModelFamily.QWEN_VL, QwenVLContinuousTokenBuilder),
         (ContinuousTokenModelFamily.QWEN25_VL, QwenVLContinuousTokenBuilder),
         (ContinuousTokenModelFamily.QWEN3_VL, QwenVLContinuousTokenBuilder),
-        (ContinuousTokenModelFamily.MIMO_VL, MiMoVLContinuousTokenBuilder),
         (ContinuousTokenModelFamily.KIMI_VL, KimiVLContinuousTokenBuilder),
         (ContinuousTokenModelFamily.GLM4V, GLM46VContinuousTokenBuilder),
         (ContinuousTokenModelFamily.DEEPSEEK_VL2, DeepSeekVL2ContinuousTokenBuilder),
@@ -330,70 +321,111 @@ def test_builtin_family_class_mapping(family, builder_cls):
 
 
 @pytest.mark.parametrize(
-    ("model_path", "expected"),
+    ("model_type", "expected"),
     [
-        ("zai-org/GLM-4.7-Flash", ContinuousTokenModelFamily.GLM47),
-        ("THUDM/GLM-5-9B-Chat", ContinuousTokenModelFamily.GLM5),
-        ("google/gemma-4-27b-it", ContinuousTokenModelFamily.GEMMA4),
-        ("openai/gpt-oss-20b", ContinuousTokenModelFamily.GPTOSS),
-        ("MiniMaxAI/MiniMax-M2", ContinuousTokenModelFamily.MINIMAX_M2),
-        ("MiniMaxAI/MiniMax-M2.5", ContinuousTokenModelFamily.MINIMAX_M25),
-        ("MiniMaxAI/MiniMax-M2.7", ContinuousTokenModelFamily.MINIMAX_M27),
-        ("MiniMaxAI/MiniMax-Text-01", ContinuousTokenModelFamily.MINIMAX),
-        ("Qwen/Qwen3.5-35B-A3B", ContinuousTokenModelFamily.QWEN35),
-        ("Qwen/Qwen2.5-7B-Instruct", ContinuousTokenModelFamily.QWEN25),
-        ("Qwen/Qwen3-8B", ContinuousTokenModelFamily.QWEN3),
-        ("XiaomiMiMo/MiMo-7B-RL", ContinuousTokenModelFamily.MIMO),
-        ("XiaomiMiMo/MiMo-7B-SFT", ContinuousTokenModelFamily.MIMO),
-        ("deepseek-ai/DeepSeek-R1", ContinuousTokenModelFamily.DEEPSEEK),
-        ("deepseek-ai/DeepSeek-V3", ContinuousTokenModelFamily.DEEPSEEK),
-        # VL families
-        ("Qwen/Qwen2.5-VL-7B-Instruct", ContinuousTokenModelFamily.QWEN25_VL),
-        ("Qwen/Qwen3-VL-4B", ContinuousTokenModelFamily.QWEN3_VL),
-        ("Qwen/Qwen2-VL-72B-Instruct", ContinuousTokenModelFamily.QWEN_VL),
-        ("XiaomiMiMo/MiMo-VL-7B", ContinuousTokenModelFamily.MIMO_VL),
-        ("moonshotai/Kimi-VL-A3B-Instruct", ContinuousTokenModelFamily.KIMI_VL),
-        ("zai-org/GLM-4.5V", ContinuousTokenModelFamily.GLM4V),
-        ("deepseek-ai/deepseek-vl2-tiny", ContinuousTokenModelFamily.DEEPSEEK_VL2),
-        ("deepseek-ai/DeepSeek-V4-Pro", ContinuousTokenModelFamily.DEEPSEEKV4),
-        ("deepseek-ai/DeepSeek-V4-Flash", ContinuousTokenModelFamily.DEEPSEEKV4),
-        ("deepseek-ai/DeepSeek-R1", ContinuousTokenModelFamily.DEFAULT),
+        ("glm4_moe", ContinuousTokenModelFamily.GLM47),
+        ("glm_moe_dsa", ContinuousTokenModelFamily.GLM5),
+        ("gemma4", ContinuousTokenModelFamily.GEMMA4),
+        ("gpt_oss", ContinuousTokenModelFamily.GPTOSS),
+        ("minimax_m2", ContinuousTokenModelFamily.MINIMAX_M2),
+        ("minimax_text_01", ContinuousTokenModelFamily.MINIMAX),
+        ("qwen3_5", ContinuousTokenModelFamily.QWEN35),
+        ("qwen3_5_moe", ContinuousTokenModelFamily.QWEN35),
+        ("qwen3", ContinuousTokenModelFamily.QWEN3),
+        ("qwen3_moe", ContinuousTokenModelFamily.QWEN3),
+        ("qwen2", ContinuousTokenModelFamily.QWEN),
+        ("deepseek_v2", ContinuousTokenModelFamily.DEEPSEEK),
+        ("deepseek_v3", ContinuousTokenModelFamily.DEEPSEEK),
+        ("deepseek_v4", ContinuousTokenModelFamily.DEEPSEEKV4),
+        # VL families.
+        ("qwen2_5_vl", ContinuousTokenModelFamily.QWEN25_VL),
+        ("qwen3_vl", ContinuousTokenModelFamily.QWEN3_VL),
+        ("qwen3_vl_moe", ContinuousTokenModelFamily.QWEN3_VL),
+        ("qwen2_vl", ContinuousTokenModelFamily.QWEN_VL),
+        ("minimax_vl_01", ContinuousTokenModelFamily.MINIMAX_VL),
+        ("kimi_vl", ContinuousTokenModelFamily.KIMI_VL),
+        ("glm4v_moe", ContinuousTokenModelFamily.GLM4V),
+        ("deepseek_vl_v2", ContinuousTokenModelFamily.DEEPSEEK_VL2),
     ],
 )
-def test_auto_family_inference(model_path, expected):
-    assert infer_continuous_token_model_family(model_path=model_path) == expected
+def test_auto_family_inference_uses_exact_root_model_type(model_type, expected):
+    assert infer_continuous_token_model_family(hf_config=SimpleNamespace(model_type=model_type)) == expected
 
 
-def test_auto_family_inference_uses_tokenizer_name():
-    assert infer_continuous_token_model_family(tokenizer=_DummyTokenizer()) == ContinuousTokenModelFamily.QWEN3
-
-
-def test_auto_family_inference_uses_tokenizer_init_kwargs_name():
-    assert infer_continuous_token_model_family(tokenizer=_InitKwargsTokenizer()) == (
-        ContinuousTokenModelFamily.MINIMAX_M27
+def test_auto_family_inference_accepts_config_dict():
+    assert infer_continuous_token_model_family(hf_config={"model_type": "deepseek_v4"}) == (
+        ContinuousTokenModelFamily.DEEPSEEKV4
     )
+
+
+def test_auto_family_inference_does_not_use_architectures_or_nested_model_type(caplog):
+    config = SimpleNamespace(
+        model_type="unregistered_wrapper",
+        architectures=["Qwen3ForCausalLM"],
+        text_config=SimpleNamespace(model_type="qwen3"),
+    )
+    with caplog.at_level(logging.WARNING, logger="verl.utils.tokenizer.continuous_token_wiring"):
+        family = infer_continuous_token_model_family(hf_config=config)
+    assert family == ContinuousTokenModelFamily.DEFAULT
+    assert "unregistered_wrapper" in caplog.text
 
 
 def test_explicit_family_is_not_rewritten():
     assert (
-        resolve_continuous_token_model_family(ContinuousTokenModelFamily.DEFAULT, model_path="Qwen/Qwen3-8B")
+        resolve_continuous_token_model_family(
+            ContinuousTokenModelFamily.DEFAULT,
+            hf_config=SimpleNamespace(model_type="qwen3"),
+        )
         == ContinuousTokenModelFamily.DEFAULT
     )
-    assert resolve_continuous_token_model_family("qwen_3.5", model_path="deepseek-ai/DeepSeek-R1") == (
-        ContinuousTokenModelFamily.QWEN35
-    )
+    assert resolve_continuous_token_model_family(
+        "qwen_3.5",
+        hf_config=SimpleNamespace(model_type="deepseek_v3"),
+    ) == (ContinuousTokenModelFamily.QWEN35)
 
 
-def test_auto_family_resolution_uses_tokenizer_name_or_path():
+def test_unknown_model_type_with_multimodal_processor_resolves_to_vl_default():
     assert (
-        resolve_continuous_token_model_family("auto", tokenizer_name_or_path="openai/gpt-oss-120b")
-        == ContinuousTokenModelFamily.GPTOSS
+        infer_continuous_token_model_family(
+            hf_config=SimpleNamespace(model_type="unknown_model"),
+            has_multimodal_processor=True,
+        )
+        == ContinuousTokenModelFamily.VL_DEFAULT
     )
 
 
 def test_auto_family_is_resolved_at_factory_time():
-    builder = create_continuous_token_builder(_QwenBoundaryTokenizer(), model_family="auto")
+    builder = create_continuous_token_builder(
+        _QwenBoundaryTokenizer(),
+        hf_config=SimpleNamespace(model_type="qwen3"),
+    )
     assert isinstance(builder, QwenContinuousTokenBuilder)
+
+
+def test_qwen2_auto_uses_qwen_builder_and_newline_boundary_logic():
+    tokenizer = _QwenBoundaryTokenizer()
+    builder = create_continuous_token_builder(tokenizer, hf_config=SimpleNamespace(model_type="qwen2"))
+    result = builder._merge_non_assistant_token_ids([1, tokenizer.im_end_id], [2])
+
+    assert isinstance(builder, QwenContinuousTokenBuilder)
+    assert result.token_ids == [1, tokenizer.im_end_id, tokenizer.newline_id, 2]
+    assert result.inserted_token_ids == [tokenizer.newline_id]
+
+
+def test_unknown_model_with_non_multimodal_processor_uses_default_text_builder(caplog):
+    class TextProcessor:
+        pass
+
+    with caplog.at_level(logging.WARNING, logger="verl.utils.tokenizer.continuous_token_wiring"):
+        builder = create_continuous_token_builder(
+            _TemplateTokenizer(),
+            hf_config=SimpleNamespace(model_type="unknown_text_model"),
+            processor=TextProcessor(),
+        )
+
+    assert isinstance(builder, ContinuousTokenBuilder)
+    assert "unknown_text_model" in caplog.text
+    assert "default" in caplog.text
 
 
 def test_default_builder_creation_forwards_kwargs():
@@ -1117,47 +1149,6 @@ class TestQwenVLContinuousTokenBuilder:
         assert result.inserted_token_ids == [198]
 
 
-class TestMiMoVLContinuousTokenBuilder:
-    """Test MiMo-VL vision token handling."""
-
-    def setup_method(self):
-        from verl.utils.tokenizer.continuous_token import MiMoVLContinuousTokenBuilder
-
-        class MockMiMoVLTokenizer:
-            def encode(self, text, add_special_tokens=False):
-                if text == "\n":
-                    return [198]
-                return [1, 2, 3]
-
-            def convert_tokens_to_ids(self, token):
-                mapping = {
-                    "<|im_end|>": 151645,
-                    "<|vision_start|>": 151652,
-                    "<|vision_end|>": 151653,
-                    "<|image_pad|>": 151655,
-                }
-                return mapping.get(token, 0)
-
-        class MockImageProcessor:
-            merge_size = 2
-
-        class MockProcessor:
-            image_processor = MockImageProcessor()
-
-        self.tokenizer = MockMiMoVLTokenizer()
-        self.processor = MockProcessor()
-        self.builder = MiMoVLContinuousTokenBuilder(self.tokenizer, self.processor)
-
-    def test_supports_multimodal(self):
-        assert self.builder.supports_multimodal() is True
-
-    def test_merge_inherits_mimo_newline_patch(self):
-        """MiMo-VL should still insert newline after im_end (from MiMoBuilder)."""
-        result = self.builder._merge_non_assistant_token_ids([100, 151645], [10, 20])
-        assert result.token_ids == [100, 151645, 198, 10, 20]
-        assert result.inserted_token_ids == [198]
-
-
 # =============================================================================
 # Tests for wiring factory with VL families
 # =============================================================================
@@ -1229,8 +1220,8 @@ class TestWiringVLFactory:
         assert isinstance(builder, QwenVLContinuousTokenBuilder)
         assert builder.supports_multimodal() is True
 
-    def test_vl_family_inferred_from_path_with_processor(self):
-        """model_family=auto: a VL model path resolves to its VL builder."""
+    def test_vl_family_inferred_from_model_type_with_processor(self):
+        """A registered VL model_type resolves to its processor-backed builder."""
         from verl.utils.tokenizer.continuous_token import QwenVLContinuousTokenBuilder
         from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
 
@@ -1248,7 +1239,7 @@ class TestWiringVLFactory:
 
         builder = create_continuous_token_builder(
             MockTokenizer(),
-            model_path="Qwen/Qwen2.5-VL-7B-Instruct",
+            hf_config=SimpleNamespace(model_type="qwen2_5_vl"),
             processor=MockProcessor(),
         )
         assert isinstance(builder, QwenVLContinuousTokenBuilder)
@@ -1267,12 +1258,13 @@ class TestWiringVLFactory:
         with caplog.at_level(logging.WARNING, logger="verl.utils.tokenizer.continuous_token_wiring"):
             builder = create_continuous_token_builder(
                 MockTokenizer(),
-                model_path="acme/foobar-7b-instruct",
+                hf_config=SimpleNamespace(model_type="acme_model"),
                 processor=MockProcessor(),
             )
         assert isinstance(builder, VLContinuousTokenBuilder)
         assert builder.supports_multimodal() is True
-        assert "default VL builder" in caplog.text
+        assert "acme_model" in caplog.text
+        assert "vldefault" in caplog.text
 
     def test_gemma4_unified_with_processor_upgrades_to_vl(self):
         """Gemma4 (unified checkpoint, no vl marker) + processor -> Gemma4 VL builder."""
@@ -1290,7 +1282,7 @@ class TestWiringVLFactory:
 
         builder = create_continuous_token_builder(
             MockTokenizer(),
-            model_path="google/gemma-4-27b-it",
+            hf_config=SimpleNamespace(model_type="gemma4"),
             processor=MockProcessor(),
         )
         assert isinstance(builder, Gemma4VLContinuousTokenBuilder)
@@ -1309,7 +1301,7 @@ class TestWiringVLFactory:
         with pytest.raises(ValueError, match="multimodal processor was provided"):
             create_continuous_token_builder(
                 MockTokenizer(),
-                model_path="Qwen/Qwen3-8B",
+                hf_config=SimpleNamespace(model_type="qwen3"),
                 processor=MockProcessor(),
             )
 
@@ -1544,7 +1536,6 @@ class TestQwenVLMergeNonAssistantTokens:
 @pytest.mark.parametrize(
     "builder_name",
     [
-        "MiMoVLContinuousTokenBuilder",
         "GLM46VContinuousTokenBuilder",
         "KimiVLContinuousTokenBuilder",
     ],

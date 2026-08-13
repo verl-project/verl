@@ -67,7 +67,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PretrainedConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -529,7 +529,7 @@ def _create_builder_or_error(
     tokenizer,
     *,
     trajectory_name: str,
-    model: str,
+    hf_config: Any,
     model_family: str,
     custom_builder_module: str | None,
     chat_template_kwargs: dict[str, Any],
@@ -542,8 +542,7 @@ def _create_builder_or_error(
         builder = create_continuous_token_builder(
             tokenizer,
             model_family=model_family,
-            model_path=model,
-            tokenizer_name_or_path=model,
+            hf_config=hf_config,
             chat_template_kwargs=chat_template_kwargs,
             processor=processor,
         )
@@ -663,7 +662,7 @@ def run_continuous_token_checks(
     tokenizer,
     trajectory: MockTrajectory,
     *,
-    model: str,
+    hf_config: Any,
     model_family: str,
     custom_builder_module: str | None,
     chat_template_kwargs: dict[str, Any],
@@ -680,7 +679,7 @@ def run_continuous_token_checks(
     builder, error = _create_builder_or_error(
         tokenizer,
         trajectory_name=trajectory.name,
-        model=model,
+        hf_config=hf_config,
         model_family=model_family,
         custom_builder_module=custom_builder_module,
         chat_template_kwargs=chat_template_kwargs,
@@ -786,7 +785,7 @@ def _infer_tool_parser(model: str) -> str:
         return "kimi"
     if "glm" in compact:
         return "glm"
-    # Qwen VL / MiMo VL and other VL families use the Hermes tool format.
+    # Qwen VL and other VL families use the Hermes tool format.
     return "hermes"
 
 
@@ -880,7 +879,7 @@ def run_continuous_token_checks_vl(
     tokenizer,
     trajectory: VLMockTrajectory,
     *,
-    model: str,
+    hf_config: Any,
     model_family: str,
     custom_builder_module: str | None,
     tool_parser: str,
@@ -897,7 +896,7 @@ def run_continuous_token_checks_vl(
     builder, error = _create_builder_or_error(
         tokenizer,
         trajectory_name=trajectory.name,
-        model=model,
+        hf_config=hf_config,
         model_family=model_family,
         custom_builder_module=custom_builder_module,
         chat_template_kwargs=chat_template_kwargs,
@@ -1001,11 +1000,15 @@ def main() -> int:
     processor = None
     try:
         tokenizer = _load_tokenizer(args.model, local_files_only=not args.allow_download, template_path=args.template)
+        hf_config, _ = PretrainedConfig.get_config_dict(
+            args.model,
+            trust_remote_code=True,
+            local_files_only=not args.allow_download,
+        )
         resolved_family = resolve_continuous_token_model_family(
             args.model_family,
-            model_path=args.model,
-            tokenizer=tokenizer,
-            tokenizer_name_or_path=args.model,
+            hf_config=hf_config,
+            has_multimodal_processor=args.enable_multimodal,
         )
 
         # Load processor for VL families
@@ -1020,6 +1023,11 @@ def main() -> int:
                 local_files_only=not args.allow_download,
             )
             print(f"Processor loaded:      {type(processor).__name__}")
+            resolved_family = resolve_continuous_token_model_family(
+                args.model_family,
+                hf_config=hf_config,
+                has_multimodal_processor=getattr(processor, "image_processor", None) is not None,
+            )
         elif needs_processor and not args.enable_multimodal:
             print(
                 f"WARNING: Model family {resolved_family!r} requires a processor for multimodal. "
@@ -1056,7 +1064,7 @@ def main() -> int:
             run_continuous_token_checks(
                 tokenizer,
                 trajectory,
-                model=args.model,
+                hf_config=hf_config,
                 model_family=args.model_family,
                 custom_builder_module=args.custom_builder_module,
                 chat_template_kwargs=chat_template_kwargs,
@@ -1093,7 +1101,7 @@ def main() -> int:
                         processor,
                         tokenizer,
                         trajectory,
-                        model=args.model,
+                        hf_config=hf_config,
                         model_family=args.model_family,
                         custom_builder_module=args.custom_builder_module,
                         tool_parser=tool_parser,
