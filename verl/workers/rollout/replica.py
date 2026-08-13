@@ -14,6 +14,7 @@
 import asyncio
 import logging
 import os
+import time
 from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -22,6 +23,7 @@ import ray
 from omegaconf import DictConfig
 from pydantic import BaseModel
 from ray.actor import ActorHandle
+from ray.util.state import get_actor
 
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ResourcePoolManager
 from verl.utils.config import omega_conf_to_dataclass
@@ -34,6 +36,54 @@ logger = logging.getLogger(__file__)
 # Max number of concurrent calls to the methods of Rollout,
 # excluding calls to generate method.
 CONTROL_METHOD_CONCURRENCY = 16
+
+
+# Deadline for a rollout server actor to leave PENDING_CREATION. A colocated server actor
+# is hard-pinned (NodeAffinity, soft=False) to its training worker's node; if that node has
+# no free slot the actor never schedules and the subsequent .remote() call would block
+# forever. Bounding the wait turns a silent hang into an actionable error.
+ROLLOUT_SERVER_SCHEDULE_TIMEOUT_S = 300.0
+
+_UNSCHEDULED_ACTOR_STATES = ("PENDING_CREATION", "DEPENDENCIES_UNREADY")
+
+
+async def wait_rollout_servers_scheduled(
+    servers: list[ActorHandle],
+    *,
+    timeout_s: float = ROLLOUT_SERVER_SCHEDULE_TIMEOUT_S,
+    poll_interval_s: float = 2.0,
+) -> None:
+    """Fail fast if any rollout server actor stays unschedulable past ``timeout_s``.
+
+    Returns as soon as every actor has left the PENDING_CREATION / DEPENDENCIES_UNREADY
+    states. Slow engine init is unaffected: an already-scheduled (ALIVE) actor passes
+    immediately, so only a genuine placement failure trips the deadline.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        pending = []
+        for server in servers:
+            info = get_actor(server._actor_id.hex())
+            state = info.get("state") if info else _UNSCHEDULED_ACTOR_STATES[0]
+            if state in _UNSCHEDULED_ACTOR_STATES:
+                pending.append(info or {"actor_id": server._actor_id.hex(), "state": state})
+        if not pending:
+            return
+        if time.monotonic() >= deadline:
+            detail = "; ".join(
+                f"{p.get('name') or p.get('actor_id')} state={p.get('state')} "
+                f"node={p.get('node_id')} required_resources={p.get('required_resources')}"
+                for p in pending
+            )
+            raise RuntimeError(
+                f"Rollout server actor(s) still unschedulable after {timeout_s:.0f}s: {detail}. "
+                "A colocated rollout server is hard-pinned to its training worker's node "
+                "(NodeAffinity, soft=False); that node has no free slot for it. Check "
+                "`ray list actors` for PENDING_CREATION servers and either reduce per-node "
+                "resource requests or use a layout with >=2 usable GPUs per node for "
+                "cross-node hybrid rollout."
+            )
+        await asyncio.sleep(poll_interval_s)
 
 
 class TokenOutput(BaseModel):
