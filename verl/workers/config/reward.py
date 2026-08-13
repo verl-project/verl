@@ -98,6 +98,9 @@ class RewardConfig(BaseConfig):
     num_workers: int = 8
     preset: Optional[str] = None
     custom_reward_function: dict[str, object] = field(default_factory=lambda: {"path": None, "name": "compute_score"})
+    # CPU reserved per reward-loop worker actor. Lightweight actors, so a
+    # fractional default avoids over-reserving CPU and stalling placement.
+    num_cpus_per_worker: float = 0.25
     reward_manager: RewardManagerConfig = field(default_factory=RewardManagerConfig)
 
     # reward model args

@@ -80,6 +80,55 @@ def loop_worker_node_affinity_resources(node_resource: Optional[str] = None) -> 
     return {node_resource: _LOOP_WORKER_NODE_RESOURCE_AMOUNT}
 
 
+def available_cpu_per_node() -> dict[str, float]:
+    """Best-effort map of NodeID -> currently available CPU.
+
+    Ray does not expose per-node *available* resources through the public
+    ``ray.nodes()`` payload, so this reads the driver-side resource view when it
+    is reachable and returns an empty mapping otherwise. Callers must treat an
+    empty result as "unknown" and fall back to round-robin placement.
+    """
+    try:
+        from ray._private.state import state as ray_state
+
+        per_node = ray_state._available_resources_per_node()
+    except Exception:
+        return {}
+    return {node_id: float(resources.get("CPU", 0.0)) for node_id, resources in (per_node or {}).items()}
+
+
+def assign_loop_worker_nodes(
+    node_ids: list[str],
+    num_workers: int,
+    available_cpu: Optional[dict[str, float]] = None,
+    cpus_per_worker: float = 0.0,
+) -> list[str]:
+    """Assign each loop worker to a candidate node, spreading by available CPU.
+
+    Prefers the node with the most currently-available CPU so workers fan out
+    across a heterogeneous group instead of stacking on ``node_ids[0]``. Each
+    placement provisionally debits ``cpus_per_worker`` from the chosen node so
+    later workers favor the next-emptiest node. Falls back to the historical
+    round-robin order when ``available_cpu`` is empty (Ray reported no per-node
+    availability). ``node_ids`` order breaks ties deterministically.
+    """
+    if num_workers <= 0:
+        return []
+    if not node_ids:
+        raise ValueError("assign_loop_worker_nodes requires at least one candidate node")
+    if not available_cpu:
+        return [node_ids[i % len(node_ids)] for i in range(num_workers)]
+
+    remaining = {node_id: float(available_cpu.get(node_id, 0.0)) for node_id in node_ids}
+    rank = {node_id: i for i, node_id in enumerate(node_ids)}
+    assignments = []
+    for _ in range(num_workers):
+        node_id = min(node_ids, key=lambda nid: (-remaining[nid], rank[nid]))
+        assignments.append(node_id)
+        remaining[node_id] -= cpus_per_worker
+    return assignments
+
+
 def ray_noset_visible_devices(env_vars=os.environ):
     # Refer to
     # https://github.com/ray-project/ray/blob/161849364a784442cc659fb9780f1a6adee85fce/python/ray/_private/accelerators/nvidia_gpu.py#L95-L96

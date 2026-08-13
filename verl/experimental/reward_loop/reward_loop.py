@@ -29,6 +29,8 @@ from verl.trainer.ppo.reward import load_reward_manager, resolve_reward_manager_
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
 from verl.utils.ray_utils import (
+    assign_loop_worker_nodes,
+    available_cpu_per_node,
     get_event_loop,
     get_loop_worker_node_resource,
     loop_worker_node_affinity_resources,
@@ -335,13 +337,20 @@ class RewardLoopManager:
         node_resource = get_loop_worker_node_resource()
         node_ids = schedulable_loop_worker_node_ids(node_resource)
         worker_resources = loop_worker_node_affinity_resources(node_resource)
+        num_cpus_per_worker = self.config.reward.num_cpus_per_worker
+        # Spread workers toward the nodes with the most available CPU so they do
+        # not all pile onto node_ids[0]; falls back to round-robin when Ray does
+        # not report per-node availability.
+        node_assignments = assign_loop_worker_nodes(
+            node_ids, num_workers, available_cpu_per_node(), num_cpus_per_worker
+        )
 
         for i in range(num_workers):
-            # Round-robin scheduling over the candidate nodes
-            node_id = node_ids[i % len(node_ids)]
+            node_id = node_assignments[i]
 
             options = {
                 "name": f"reward_loop_worker_{i}",
+                "num_cpus": num_cpus_per_worker,
                 "scheduling_strategy": ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_id,
                     soft=True,
