@@ -137,3 +137,89 @@ class TestCheckpointCleanupLogic:
         manager.register_checkpoint(ckpt_300, 1)
         assert not os.path.exists(ckpt_200)
         assert manager.previous_saved_paths == [ckpt_300]
+
+    def test_loaded_checkpoint_restores_retention_after_restart(self, manager):
+        ckpt_100 = self._create_checkpoint_dir(100)
+
+        manager.record_loaded_checkpoint(ckpt_100)
+        ckpt_200 = self._create_checkpoint_dir(200)
+        manager.register_checkpoint(ckpt_200, max_ckpt_to_keep=1)
+        manager.finalize_loaded_checkpoint_retention(ckpt_200, max_ckpt_to_keep=1)
+
+        assert not os.path.exists(ckpt_100)
+        assert os.path.exists(ckpt_200)
+        assert manager.previous_saved_paths == [ckpt_200]
+
+    def test_loaded_checkpoint_accepts_relative_registered_path(self, manager, monkeypatch):
+        ckpt_100 = self._create_checkpoint_dir(100)
+        ckpt_200 = self._create_checkpoint_dir(200)
+        monkeypatch.chdir(self.test_dir)
+
+        manager.record_loaded_checkpoint(ckpt_100)
+        manager.register_checkpoint("global_step_200", max_ckpt_to_keep=1)
+        manager.finalize_loaded_checkpoint_retention(ckpt_200, max_ckpt_to_keep=1)
+
+        assert not os.path.exists(ckpt_100)
+        assert os.path.exists(ckpt_200)
+
+    def test_loaded_checkpoint_retention_does_not_scan_siblings(self, manager):
+        ckpt_100 = self._create_checkpoint_dir(100)
+        ckpt_200 = self._create_checkpoint_dir(200)
+        ckpt_300 = os.path.join(self.test_dir, "global_step_300")
+
+        manager.record_loaded_checkpoint(ckpt_200)
+        os.makedirs(ckpt_300)
+        manager.register_checkpoint(ckpt_300, max_ckpt_to_keep=1)
+        manager.finalize_loaded_checkpoint_retention(ckpt_300, max_ckpt_to_keep=1)
+
+        assert manager.previous_saved_paths == [ckpt_300]
+        assert not os.path.exists(ckpt_200)
+        assert os.path.exists(ckpt_100)
+
+    @pytest.mark.parametrize("max_ckpt_to_keep", [None, 0, 2])
+    def test_loaded_checkpoint_retention_is_limited_to_max_one(self, manager, max_ckpt_to_keep):
+        ckpt_100 = self._create_checkpoint_dir(100)
+        manager.record_loaded_checkpoint(ckpt_100)
+        ckpt_200 = os.path.join(self.test_dir, "global_step_200")
+        os.makedirs(ckpt_200)
+        manager.register_checkpoint(ckpt_200, max_ckpt_to_keep=max_ckpt_to_keep)
+
+        manager.finalize_loaded_checkpoint_retention(ckpt_200, max_ckpt_to_keep=max_ckpt_to_keep)
+
+        assert os.path.exists(ckpt_100)
+
+    def test_loaded_checkpoint_retention_ignores_different_series(self, manager):
+        external_root = tempfile.mkdtemp()
+        try:
+            loaded_path = os.path.join(external_root, "global_step_100")
+            os.makedirs(loaded_path)
+            manager.record_loaded_checkpoint(loaded_path)
+            ckpt_200 = self._create_checkpoint_dir(200)
+            manager.register_checkpoint(ckpt_200, max_ckpt_to_keep=1)
+
+            manager.finalize_loaded_checkpoint_retention(ckpt_200, max_ckpt_to_keep=1)
+
+            assert os.path.exists(loaded_path)
+        finally:
+            shutil.rmtree(external_root, ignore_errors=True)
+
+    @pytest.mark.parametrize("new_step", [100, 50])
+    def test_loaded_checkpoint_retention_ignores_same_or_newer_loaded_step(self, manager, new_step):
+        loaded_path = self._create_checkpoint_dir(100)
+        manager.record_loaded_checkpoint(loaded_path)
+        new_path = os.path.join(self.test_dir, f"global_step_{new_step}")
+        os.makedirs(new_path, exist_ok=True)
+        manager.register_checkpoint(new_path, max_ckpt_to_keep=1)
+
+        manager.finalize_loaded_checkpoint_retention(new_path, max_ckpt_to_keep=1)
+
+        assert os.path.exists(loaded_path)
+
+    def test_loaded_checkpoint_retention_requires_registered_replacement(self, manager):
+        loaded_path = self._create_checkpoint_dir(100)
+        new_path = self._create_checkpoint_dir(200)
+        manager.record_loaded_checkpoint(loaded_path)
+
+        manager.finalize_loaded_checkpoint_retention(new_path, max_ckpt_to_keep=1)
+
+        assert os.path.exists(loaded_path)
