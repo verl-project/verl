@@ -49,7 +49,6 @@ from verl.utils.megatron.router_replay_utils import (
     RouterReplayHelper,
     align_r3_router_replay_data,
     build_r3_replay_mask,
-    get_thd_tensor_parallel_padding_mask,
     merge_nested_router_maps,
     merge_router_topk_indices,
     pp_gather,
@@ -1391,27 +1390,23 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 if batch_num_tokens > 0:
                     mtp_loss_normalization_factor = routed_num_tokens / batch_num_tokens
 
-            record_padding_mask = None
-            if RouterReplayHelper.is_r2_record_action(self.tf_config, vp_rank):
-                record_padding_mask = get_thd_tensor_parallel_padding_mask(input_ids)
-            with RouterReplay.scoped_record_padding_mask(record_padding_mask):
-                output = forward_fn(
-                    model,
-                    input_ids,
-                    multi_modal_inputs,
-                    logits_processor=logits_processor,
-                    logits_processor_args=logits_processor_args,
-                    vision_model=hasattr(self.model_config.hf_config, "vision_config"),
-                    pad_token_id=self.model_config.tokenizer.pad_token_id,
-                    data_format=data_format,
-                    mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
-                    local_cp_size=local_cp_size,
-                    router_padding_mask=router_padding_mask,
-                    mtp_loss_normalization_factor=mtp_loss_normalization_factor,
-                    forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
-                    pad_to_length_bucket=pad_to_length_bucket,
-                    cp_layout=cp_layout,
-                )
+            output = forward_fn(
+                model,
+                input_ids,
+                multi_modal_inputs,
+                logits_processor=logits_processor,
+                logits_processor_args=logits_processor_args,
+                vision_model=hasattr(self.model_config.hf_config, "vision_config"),
+                pad_token_id=self.model_config.tokenizer.pad_token_id,
+                data_format=data_format,
+                mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
+                local_cp_size=local_cp_size,
+                router_padding_mask=router_padding_mask,
+                mtp_loss_normalization_factor=mtp_loss_normalization_factor,
+                forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
+                pad_to_length_bucket=pad_to_length_bucket,
+                cp_layout=cp_layout,
+            )
 
         # Router replay: record routing decisions for R2 mode
         if RouterReplayHelper.is_r2_record_action(self.tf_config, vp_rank):
