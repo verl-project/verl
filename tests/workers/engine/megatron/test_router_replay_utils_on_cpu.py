@@ -120,22 +120,29 @@ def test_merge_router_topk_indices_prefers_actual_recorded_routers(monkeypatch):
     assert torch.equal(merged[0][0, :, 1, :], recorded_b.to(torch.uint8))
 
 
-def test_thd_sequence_parallel_padding_mask_marks_only_alignment_tail(monkeypatch):
+def test_thd_tensor_parallel_padding_mask_marks_only_alignment_tail(monkeypatch):
     input_ids = torch.nested.as_nested_tensor([torch.arange(235)], layout=torch.jagged)
 
     monkeypatch.setattr(rr_utils.mpu, "get_context_parallel_world_size", lambda: 1)
     monkeypatch.setattr(rr_utils.mpu, "get_tensor_model_parallel_world_size", lambda: 2)
 
     monkeypatch.setattr(rr_utils.mpu, "get_tensor_model_parallel_rank", lambda: 0)
-    rank_zero_mask = rr_utils.get_thd_sequence_parallel_padding_mask(input_ids)
+    rank_zero_mask = rr_utils.get_thd_tensor_parallel_padding_mask(input_ids)
     assert rank_zero_mask.shape == (118,)
     assert not rank_zero_mask.any()
 
     monkeypatch.setattr(rr_utils.mpu, "get_tensor_model_parallel_rank", lambda: 1)
-    rank_one_mask = rr_utils.get_thd_sequence_parallel_padding_mask(input_ids)
+    rank_one_mask = rr_utils.get_thd_tensor_parallel_padding_mask(input_ids)
     assert rank_one_mask.shape == (118,)
     assert rank_one_mask.sum().item() == 1
     assert rank_one_mask[-1].item()
+
+
+def test_thd_tensor_parallel_padding_mask_does_not_override_cp_packing(monkeypatch):
+    input_ids = torch.nested.as_nested_tensor([torch.arange(235)], layout=torch.jagged)
+    monkeypatch.setattr(rr_utils.mpu, "get_context_parallel_world_size", lambda: 2)
+
+    assert rr_utils.get_thd_tensor_parallel_padding_mask(input_ids) is None
 
 
 def test_merge_router_topk_indices_hard_fails_when_record_count_mismatches(monkeypatch):

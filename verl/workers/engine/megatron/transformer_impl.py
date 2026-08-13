@@ -49,7 +49,7 @@ from verl.utils.megatron.router_replay_utils import (
     RouterReplayHelper,
     align_r3_router_replay_data,
     build_r3_replay_mask,
-    get_thd_sequence_parallel_padding_mask,
+    get_thd_tensor_parallel_padding_mask,
     merge_nested_router_maps,
     merge_router_topk_indices,
     pp_gather,
@@ -1393,9 +1393,8 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
             record_padding_mask = None
             if RouterReplayHelper.is_r2_record_action(self.tf_config, vp_rank):
-                record_padding_mask = get_thd_sequence_parallel_padding_mask(input_ids)
-            RouterReplay.set_global_record_padding_mask(record_padding_mask)
-            try:
+                record_padding_mask = get_thd_tensor_parallel_padding_mask(input_ids)
+            with RouterReplay.scoped_record_padding_mask(record_padding_mask):
                 output = forward_fn(
                     model,
                     input_ids,
@@ -1413,8 +1412,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
                     pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
                 )
-            finally:
-                RouterReplay.clear_global_record_padding_mask()
 
         # Router replay: record routing decisions for R2 mode
         if RouterReplayHelper.is_r2_record_action(self.tf_config, vp_rank):

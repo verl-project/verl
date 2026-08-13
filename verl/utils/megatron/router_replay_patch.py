@@ -14,6 +14,7 @@
 import inspect
 import types
 import warnings
+from contextlib import contextmanager
 from enum import Enum
 from functools import wraps
 
@@ -159,6 +160,16 @@ class RouterReplay:
     def clear_global_record_padding_mask():
         """Clear the per-microbatch THD alignment padding mask."""
         RouterReplay.set_global_record_padding_mask(None)
+
+    @staticmethod
+    @contextmanager
+    def scoped_record_padding_mask(padding_mask: torch.Tensor | None):
+        """Apply a RECORD-only padding mask for one forward without suppressing failures."""
+        RouterReplay.set_global_record_padding_mask(padding_mask)
+        try:
+            yield
+        finally:
+            RouterReplay.clear_global_record_padding_mask()
 
     def canonicalize_record_topk_indices(self, topk_indices: torch.Tensor) -> torch.Tensor:
         """Map non-semantic THD alignment tokens to expert zero before dispatch."""

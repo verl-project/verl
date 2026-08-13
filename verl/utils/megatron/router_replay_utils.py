@@ -53,14 +53,15 @@ def _context_parallel_layout(tf_config) -> str:
     return "zigzag"
 
 
-def get_thd_sequence_parallel_padding_mask(input_ids: torch.Tensor) -> torch.Tensor | None:
+def get_thd_tensor_parallel_padding_mask(input_ids: torch.Tensor) -> torch.Tensor | None:
     """Return this TP rank's THD alignment-only positions for router replay.
 
-    The no-padding THD path strips these positions from exported
-    ``routed_experts`` but recreates them as zeros during replay. Canonicalizing
-    them before RECORD keeps the dispatcher topology identical across R2 passes.
-    Context-parallel layouts use zig-zag packing and are intentionally left
-    untouched until they receive their own audited mapping.
+    With CP=1 and TP/SP enabled, the no-padding THD path strips alignment rows
+    from exported ``routed_experts`` and recreates them as expert-zero rows when
+    replay data is packed. Padding token IDs with zero does not force the RECORD
+    router logits to select expert zero, so canonicalize those rows before
+    dispatch to keep the R2 forward/backward topology identical. CP layouts have
+    their own packing contract and are intentionally not handled here.
     """
     if not input_ids.is_nested or mpu.get_context_parallel_world_size() != 1:
         return None
