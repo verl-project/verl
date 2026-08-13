@@ -5,10 +5,10 @@ set -xeuo pipefail
 # reward model (disRM). This exercises PPOTrainer._compute_reward_colocate, which is the
 # colocated-RM path shared by all V1 trainers (sync / colocate_async / separate_async).
 #
-# Unlike run_fully_async_policy_genrm.sh (which uses a STANDALONE GenRM on its own GPUs),
-# here the reward model is colocated with the actor/rollout on the same GPUs
-# (reward.reward_model.enable_resource_pool=False). The rollout replicas are slept after
-# sampling so the reward model can reuse their GPU memory for scoring.
+# The reward model is colocated with the actor/rollout on the same GPUs
+# (reward.reward_model.enable_resource_pool=False), as opposed to a standalone RM holding
+# its own GPUs. The rollout replicas are slept after sampling so the reward model can
+# reuse their GPU memory for scoring.
 #
 # GPU allocation: all GPUs are shared between training, rollout and the reward model
 # (colocate); a single node with >=2 GPUs is sufficient for the smoke test.

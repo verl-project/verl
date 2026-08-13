@@ -31,6 +31,7 @@ except ImportError:
 from megatron.core import parallel_state as mpu
 from megatron.core.pipeline_parallel.schedules import get_schedule_table
 from megatron.core.tensor_parallel import gather_from_sequence_parallel_region, scatter_to_sequence_parallel_region
+from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 
@@ -371,6 +372,7 @@ def set_router_replay_data(
     vp_rank=None,
     replay_mask=None,
     local_cp_size=None,
+    model=None,
 ):
     """
     Scatter the packed router top-k indices back to sequence-parallel ranks and update each local
@@ -388,6 +390,8 @@ def set_router_replay_data(
             Megatron parallel state will be used.
         replay_mask (Optional[torch.Tensor]): Optional per-token mask. Masked tokens use replayed routes;
             unmasked tokens keep native Megatron routes.
+        model: The forwarded model (or list of VPP chunks). When given, targets are written to its own
+            routers instead of a positional slice of the global RouterReplay.router_instances list.
 
     Returns:
         None: The function updates internal RouterReplay instances in-place.
@@ -443,14 +447,25 @@ def set_router_replay_data(
         layers_topk_idx_reshape = layers_topk_idx_rmpad_split.permute(0, 2, 1, 3).squeeze(
             dim=0
         )  # layer_num, dynamic_bs_all, topk
-        local_rank_info = get_current_rank_layer_info(tf_config, vp_rank)
-        offset, end = local_rank_info["start"], local_rank_info["end"]
-        router_instances_list = RouterReplayHelper.get_micro_batch_router_list(tf_config, vp_rank)
-
         # When dim-0 covers all layers (e.g. R3, or R2 with all-MoE models),
         # index by absolute layer_idx; otherwise (R2 with mixed dense/MoE),
         # dim-0 only contains MoE layers, index by MoE-layer ordinal.
         index_by_layer = len(layers_topk_idx_reshape) == tf_config.num_layers
+
+        if model is not None:
+            for layer_number, router in iter_model_routers(model):
+                layer_idx = layer_number - 1
+                idx = layer_idx if index_by_layer else sum(1 for i in range(layer_idx) if is_moe_layer(tf_config, i))
+                if 0 <= idx < layers_topk_idx_reshape.shape[0]:
+                    router.set_target_indices(
+                        layers_topk_idx_reshape[idx].to(torch.int64),
+                        replay_mask=replay_mask_rmpad_split,
+                    )
+            return
+
+        local_rank_info = get_current_rank_layer_info(tf_config, vp_rank)
+        offset, end = local_rank_info["start"], local_rank_info["end"]
+        router_instances_list = RouterReplayHelper.get_micro_batch_router_list(tf_config, vp_rank)
 
         # For R2: count MoE layers before `offset` as the starting position.
         moe_idx = sum(1 for i in range(offset) if is_moe_layer(tf_config, i))
@@ -467,6 +482,36 @@ def set_router_replay_data(
             )
             router_offset += 1
             moe_idx += 1
+
+
+def iter_model_routers(model):
+    """Yield ``(layer_number, RouterReplay)`` for every replay-enabled router owned by ``model``.
+
+    ``model`` is a single module or the list of virtual-pipeline chunks. The process-global
+    ``RouterReplay.router_instances`` list can hold more routers than this model has local layers —
+    a model that rebuilds its decoder registers a set it then discards — so a positional slice of it
+    can address the wrong objects. Walking the forwarded model reaches each layer's own router.
+    """
+    for chunk in model if isinstance(model, list | tuple) else [model]:
+        # Scope to the decoder: MTP layers restart layer numbering at 1, so they alias decoder
+        # layers, and the replay tensor carries no MTP rows. ``mtp`` is a sibling of ``decoder``
+        # on both GPTModel and HybridModel, the only two classes that build one.
+        for module in getattr(chunk, "decoder", chunk).modules():
+            router = getattr(module, "router_replay", None)
+            if isinstance(module, TopKRouter) and router is not None and module.layer_number is not None:
+                yield module.layer_number, router
+
+
+def set_model_router_replay_action(model, router_replay_action):
+    """Set the router replay action on the forwarded model's own routers.
+
+    Mirrors the module walk in ``set_router_replay_data``. Toggling through the positional slice can
+    miss the real routers, leaving them stuck in REPLAY_FORWARD so the backward recompute reads a
+    stale cross-micro-batch ``target_topk_idx`` instead of popping its own entry from
+    ``replay_backward_list``.
+    """
+    for _, router in iter_model_routers(model):
+        router.set_router_replay_action(router_replay_action)
 
 
 def reorder_and_merge_vpp_layers(

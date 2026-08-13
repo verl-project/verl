@@ -48,7 +48,6 @@ on:
       - "examples/grpo_trainer/**"
       - "examples/ppo_trainer/**"
       - "examples/sft/**"
-      - "verl/experimental/one_step_off_policy/**"
       - "tests/special_npu/**"
       - "tests/special_sanity/check_device_api_usage.py"
       - "verl/**"
