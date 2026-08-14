@@ -69,9 +69,9 @@ class MockCausalLM(nn.Module):
 class TestFSDP2PeftWrapping(unittest.TestCase):
     """Test module selection in apply_fsdp2 for vanilla and peft-wrapped models."""
 
-    def _get_wrapped_names(self, model, cls_names):
+    def _get_wrapped_names(self, model, cls_names, *, use_fused_kernels=False):
         """Return names of modules selected for wrapping."""
-        selected = _select_fsdp2_wrap_targets(model, cls_names)
+        selected = _select_fsdp2_wrap_targets(model, cls_names, use_fused_kernels=use_fused_kernels)
         # _select_fsdp2_wrap_targets returns module objects; map back to names
         module_to_name = {id(m): n for n, m in model.named_modules()}
         return [module_to_name[id(m)] for m in selected]
@@ -96,6 +96,14 @@ class TestFSDP2PeftWrapping(unittest.TestCase):
 
         self.assertIn("model.embed_tokens", names)
         self.assertIn("lm_head", names)
+        self.assertTrue(any("layers.0" in n for n in names))
+
+    def test_fused_model_keeps_untied_lm_head_in_root(self):
+        model = MockCausalLM(tie_word_embeddings=False)
+        names = self._get_wrapped_names(model, ["MockDecoderLayer"], use_fused_kernels=True)
+
+        self.assertIn("model.embed_tokens", names)
+        self.assertNotIn("lm_head", names)
         self.assertTrue(any("layers.0" in n for n in names))
 
     def test_tied_embeddings_skips_name_based_wrapping(self):
