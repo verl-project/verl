@@ -19,6 +19,7 @@ import torch
 from omegaconf import OmegaConf
 
 from verl.protocol import DataProto
+from verl.utils import rollout_data_backend
 from verl.utils.skip.base_skip import BaseSkip, SkipAction, register_skip
 
 
@@ -164,17 +165,17 @@ class RolloutSkip(BaseSkip):
 
 @register_skip("rollout_tq")
 class RolloutTqSkip(RolloutSkip):
-    """Rollout skip for V1 TransferQueue-based trainer (``skip.rollout_tq``).
+    """Rollout skip for the V1 rollout data backend (``skip.rollout_tq``).
 
-    Unlike V0's decorator pattern, V1's split architecture (submit prompts to TQ,
-    then sample trajectories) requires direct method calls from the trainer:
+    Unlike V0's decorator pattern, V1's split architecture (submit prompts to
+    the rollout backend, then sample trajectories) requires direct method calls:
     - Phase one (no cache): trainer calls ``prepare_data`` after ``replay_buffer.sample``
     - Phase two (cache exists): trainer calls ``load_dump_data`` in ``_add_batch_to_generate``
 
     When ``parameter_sync_step > 1`` (separate async), one global step performs multiple
     ``sample`` calls.  Each mini-batch is saved to a separate inner sub-directory
     ``{step}/{inner_idx}/`` so the full step is captured; on load all inner dirs are
-    merged.  For ``parameter_sync_step == 1`` (sync / colocate async) the directory
+    merged. For ``parameter_sync_step == 1`` (sync / colocate async) the directory
     structure is (``{step}/{0}/tq_batch.pt``).
     """
 
@@ -297,7 +298,7 @@ class RolloutTqSkip(RolloutSkip):
         return True
 
     def prepare_data(self, step: int, batch, global_steps: int) -> None:
-        """Phase one: read batch from TransferQueue and save to disk.
+        """Phase one: read a rollout batch from the selected backend and save it.
 
         When ``parameter_sync_step > 1``, each ``sample`` call saves its mini-batch
         to ``{step}/{inner_idx}/``.  The first missing inner index is used so that
@@ -305,11 +306,9 @@ class RolloutTqSkip(RolloutSkip):
 
         Args:
             step: Current training step (used as dump directory name).
-            batch: :class:`transfer_queue.KVBatchMeta` from ``ReplayBuffer.sample()``.
+            batch: :class:`verl.protocol.RolloutDataRef` from ``ReplayBuffer.sample()``.
             global_steps: Current ``global_steps`` for metadata.
         """
-        import transfer_queue as tq
-
         # Determine which inner index to save to (-1 means all present, shouldn't happen)
         inner_idx = self._find_first_missing_inner(step)
         if inner_idx == -1:
@@ -317,16 +316,16 @@ class RolloutTqSkip(RolloutSkip):
         save_dir = self._get_v1_inner_dir(step, inner_idx)
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        # Read all trajectory fields from TQ
-        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id)
-
-        save_payload = {
-            "tensordict": data,
-            "tags": batch.tags,
-            "keys": list(batch.keys),
-            "global_steps": global_steps,
-        }
-        torch.save(save_payload, save_dir / self.tq_batch_name)
+        with rollout_data_backend.materialized_batch(
+            keys=batch.keys, partition_id=batch.partition_id
+        ) as data:
+            save_payload = {
+                "tensordict": data,
+                "tags": batch.tags,
+                "keys": list(batch.keys),
+                "global_steps": global_steps,
+            }
+            torch.save(save_payload, save_dir / self.tq_batch_name)
 
         meta_path = save_dir / self.meta_name
         meta_path.write_text(json.dumps({"global_steps": global_steps, "num_trajectories": len(batch.keys)}))
@@ -344,7 +343,7 @@ class RolloutTqSkip(RolloutSkip):
         global_steps: int,
         partition_id: str = "train",
     ) -> None:
-        """Phase two: load cached data from disk and inject into TransferQueue.
+        """Phase two: load cached data and inject it into the selected backend.
 
         Maps saved trajectories to new prompt uids in order, preserving the
         original key structure (``{uid}_{session_id}_{index}``) and GRPO group
@@ -355,10 +354,8 @@ class RolloutTqSkip(RolloutSkip):
             new_prompt_uids: Freshly generated uids for the current batch.
             n: Number of trajectories per prompt (``rollout.n``).
             global_steps: Current ``global_steps``, used to override staleness tags.
-            partition_id: TQ partition (``"train"`` or ``"val"``).
+            partition_id: Backend partition (``"train"`` or ``"val"``).
         """
-        import transfer_queue as tq
-
         load_step = self._resolve_load_step_v1(step)
         if load_step == -1:
             raise FileNotFoundError(
@@ -439,8 +436,7 @@ class RolloutTqSkip(RolloutSkip):
 
         new_fields = index_select_tensor_dict(data, traj_indices)
 
-        # Write trajectory data to TQ
-        tq.kv_batch_put(
+        rollout_data_backend.batch_put(
             keys=new_keys,
             fields=new_fields,
             tags=new_tags,
@@ -449,7 +445,7 @@ class RolloutTqSkip(RolloutSkip):
 
         # Mark prompt-level keys as finished so ReplayBuffer can pick them up immediately
         prompt_tags = [{"is_prompt": True, "status": "finished", "global_steps": global_steps}] * len(new_prompt_uids)
-        tq.kv_batch_put(
+        rollout_data_backend.batch_put(
             keys=new_prompt_uids,
             partition_id=partition_id,
             tags=prompt_tags,
@@ -458,7 +454,7 @@ class RolloutTqSkip(RolloutSkip):
         print(
             f"{self.print_mark}\033[33mInjected {len(new_keys)} cached trajectories "
             f"from step {load_step} ({len(new_prompt_uids)} prompts x {n}) "
-            f"into TQ partition '{partition_id}' at current step {step}\033[0m",
+            f"into backend partition '{partition_id}' at current step {step}\033[0m",
             flush=True,
         )
 

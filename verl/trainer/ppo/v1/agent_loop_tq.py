@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # TODO: move this file to verl.experimental.agent_loop after V1 is stable
-"""TransferQueue adapter for AgentLoopManager and AgentLoopWorker"""
+"""External rollout-data adapter for AgentLoopManager and AgentLoopWorker."""
 
 import asyncio
 import logging
@@ -22,7 +22,6 @@ from typing import Any
 
 import ray
 import torch
-import transfer_queue as tq
 from tensordict import NonTensorData, NonTensorStack, TensorDict
 
 from verl.experimental.agent_loop import (
@@ -31,8 +30,8 @@ from verl.experimental.agent_loop import (
     AgentLoopWorker,
     get_trajectory_info,
 )
+from verl.utils import rollout_data_backend
 from verl.utils.ray_utils import auto_await
-from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -53,8 +52,28 @@ async def _settle_session_tasks(tasks: list[asyncio.Task[Any]]) -> list[BaseExce
 class AgentLoopWorkerTQ(AgentLoopWorker):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        tq.init()
+        rollout_data_backend.init(
+            transfer_queue_config=self.config.transfer_queue,
+        )
         self.background_tasks = set()
+
+    async def _settle_background_tasks(self) -> list[BaseException]:
+        tasks = list(self.background_tasks)
+        errors = await _settle_session_tasks(tasks)
+        self.background_tasks.difference_update(tasks)
+        return errors
+
+    def _discard_successful_background_task(self, task: asyncio.Task[Any]) -> None:
+        if task.cancelled() or task.exception() is None:
+            self.background_tasks.discard(task)
+
+    async def quiesce(self) -> None:
+        errors = await self._settle_background_tasks()
+        if errors:
+            raise RuntimeError("agent-loop tasks failed during shutdown") from errors[0]
+
+    async def close_client(self) -> None:
+        rollout_data_backend.close()
 
     async def generate_sequences(self, batch: TensorDict) -> None:
         """Spawn agent loop for each sample in the batch without waiting for the results."""
@@ -102,12 +121,16 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 self._run_prompt(prompt, sampling_params, trajectory=trajectory_info[i], trace=trace_this_sample)
             )
             self.background_tasks.add(task)
-            task.add_done_callback(self.background_tasks.discard)
+            task.add_done_callback(self._discard_successful_background_task)
 
     async def _run_prompt(self, prompt: dict, sampling_params: dict, trajectory: dict, trace: bool = False) -> None:
         """Spawn multiple agent loops in parallel according to rollout.n or rollout.val_kwargs.n."""
         uid, partition_id = prompt["uid"], "train" if not trajectory["validate"] else "val"
-        await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
+        await rollout_data_backend.async_batch_put(
+            keys=[uid],
+            partition_id=partition_id,
+            tags=[{"status": "running"}],
+        )
         tasks = []
         try:
             # NOTE: user can dynamically adjust n for each sample here, e.g according to task difficulty.
@@ -119,7 +142,6 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             if not trajectory["validate"] and not do_sample:
                 apply_greedy_sampling_params(run_sampling_params)
 
-            tasks = []
             for i in range(n):
                 task = asyncio.create_task(
                     self._run_agent_loop(
@@ -140,17 +162,21 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 status = "failure"
             else:
                 status = "finished"
-            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": status})
+            await rollout_data_backend.async_batch_put(
+                keys=[uid], partition_id=partition_id, tags=[{"status": status}]
+            )
         except Exception as e:
             logger.exception(f"Error in _run_prompt: {e}")
             if tasks:
                 await _settle_session_tasks(tasks)
-            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
+            await rollout_data_backend.async_batch_put(
+                keys=[uid], partition_id=partition_id, tags=[{"status": "failure"}]
+            )
 
     async def _agent_loop_postprocess(
         self, output: AgentLoopOutput | list[AgentLoopOutput], validate, **kwargs
     ) -> None:
-        """Put agent loop outputs into TransferQueue."""
+        """Put agent loop outputs into the configured rollout data backend."""
         uid, session_id = kwargs["uid"], kwargs["session_id"]
         outputs = output if isinstance(output, list) else [output]
         if not outputs:
@@ -174,7 +200,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 output.reward_score = final_output.reward_score
                 output.extra_fields["reward_extra_info"] = final_output.extra_fields["reward_extra_info"]
 
-        # NOTE: agent loop may has multiple outputs, put each output into TransferQueue.
+        # NOTE: an agent loop may have multiple outputs; store each one independently.
         # key format: {uid}_{session_id}_{index}
         # - uid: raw prompt uid from dataset
         # - session_id: session id for rollout.n sampling
@@ -219,9 +245,9 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
                 }
             )
 
-        await tq.async_kv_batch_put(
+        await rollout_data_backend.async_batch_put(
             keys=keys,
-            fields=list_of_dict_to_tensordict(fields),
+            fields=rollout_data_backend.rows_to_fields(fields),
             tags=tags,
             partition_id="train" if not validate else "val",
         )
@@ -243,7 +269,7 @@ class AgentLoopManagerTQ(AgentLoopManager):
     def generate_sequences(self, prompts: TensorDict) -> None:
         """
         Dispatch input batch to agent loop workers without blocking. Workers should put agent loop outputs
-        into TransferQueue once an agent loop finished.
+        into the configured data backend once an agent loop finishes.
 
         Args:
             prompts (TensorDict): Input batch from train or validation dataset.
@@ -255,3 +281,9 @@ class AgentLoopManagerTQ(AgentLoopManager):
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=False)
             ]
         )
+
+    def quiesce(self) -> None:
+        ray.get([worker.quiesce.remote() for worker in self.agent_loop_workers])
+
+    def close_clients(self) -> None:
+        ray.get([worker.close_client.remote() for worker in self.agent_loop_workers])

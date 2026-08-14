@@ -21,8 +21,10 @@ from verl.workers.utils.padding import (
     embeds_padding_2_no_padding,
     left_right_2_no_padding,
     no_padding_2_padding,
+    padded_tensor,
     response_from_nested,
     response_to_nested,
+    sequence_lengths,
 )
 
 
@@ -323,6 +325,19 @@ def test_response_from_nested():
         torch.testing.assert_close(tensor, expected)
 
 
+def test_response_from_nested_accepts_equal_length_dense_mask():
+    log_probs = [torch.arange(10, dtype=torch.float32), torch.arange(20, dtype=torch.float32)]
+    log_probs_nt = torch.nested.as_nested_tensor(log_probs, layout=torch.jagged)
+    response_mask = torch.ones((2, 4), dtype=torch.int64)
+
+    response_log_probs = response_from_nested(log_probs_nt, response_mask)
+
+    assert response_log_probs.is_nested
+    assert response_log_probs.offsets().diff().tolist() == [4, 4]
+    torch.testing.assert_close(response_log_probs[0], log_probs[0][-5:-1])
+    torch.testing.assert_close(response_log_probs[1], log_probs[1][-5:-1])
+
+
 def test_response_to_nested():
     batch_size = 10
     log_probs = torch.rand(batch_size, 100)
@@ -336,6 +351,48 @@ def test_response_to_nested():
         response_len = response_mask[i].shape[0]
         expected = log_probs[i, :response_len]
         torch.testing.assert_close(tensor, expected)
+
+
+def test_response_to_nested_accepts_equal_length_dense_mask():
+    values = torch.arange(12, dtype=torch.float32).reshape(2, 6)
+    response_mask = torch.ones((2, 4), dtype=torch.int64)
+
+    nested = response_to_nested(values, response_mask)
+
+    assert nested.is_nested
+    assert nested.offsets().diff().tolist() == [4, 4]
+    torch.testing.assert_close(nested[0], values[0, :4])
+    torch.testing.assert_close(nested[1], values[1, :4])
+
+
+def test_no_padding_2_padding_accepts_equal_length_dense_responses():
+    prompts = torch.nested.as_nested_tensor(
+        [torch.tensor([1, 2]), torch.tensor([3, 4, 5])], layout=torch.jagged
+    )
+    responses = torch.ones((2, 4), dtype=torch.int64)
+    data = TensorDict(
+        {"prompts": prompts, "responses": responses}, batch_size=[2]
+    )
+
+    padded = no_padding_2_padding(torch.arange(13, dtype=torch.float32), data)
+
+    torch.testing.assert_close(
+        padded, torch.tensor([[1, 2, 3, 4], [8, 9, 10, 11]], dtype=torch.float32)
+    )
+
+
+def test_sequence_helpers_accept_jagged_and_equal_length_dense_tensors():
+    jagged = torch.nested.as_nested_tensor(
+        [torch.tensor([1, 2]), torch.tensor([3, 4, 5])], layout=torch.jagged
+    )
+    dense = torch.tensor([[1, 2, 3], [4, 5, 6]])
+
+    assert sequence_lengths(jagged, 2, "values").tolist() == [2, 3]
+    assert sequence_lengths(dense, 2, "values").tolist() == [3, 3]
+    torch.testing.assert_close(
+        padded_tensor(jagged, 0), torch.tensor([[1, 2, 0], [3, 4, 5]])
+    )
+    assert padded_tensor(dense, 0) is dense
 
 
 if __name__ == "__main__":

@@ -28,14 +28,9 @@ from typing import Any
 
 import torch
 
-try:
-    import transfer_queue as tq
-    from transfer_queue import KVBatchMeta
-except ImportError:
-    from verl.utils.transferqueue_utils import KVBatchMeta, tq
-
+from verl.protocol import RolloutDataRef
+from verl.utils import rollout_data_backend
 from verl.utils.model import compute_position_id_with_mask
-from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
 logger = logging.getLogger(__name__)
 
@@ -125,10 +120,10 @@ def construct_minimal_padding_template(
 
 
 def upsample_batch_to_divisible_size(
-    batch: KVBatchMeta,
+    batch: RolloutDataRef,
     batch_multiple: int,
     eos_token_id: int,
-) -> KVBatchMeta:
+) -> RolloutDataRef:
     """Append synthetic no-op samples so the batch size becomes divisible by *batch_multiple*.
 
     The synthetic samples reuse the first real sample as a metadata template,
@@ -138,12 +133,12 @@ def upsample_batch_to_divisible_size(
     downstream metrics filtering.
 
     Args:
-        batch: The current KVBatchMeta from TransferQueue.
+        batch: The current RolloutDataRef from TransferQueue.
         batch_multiple: The required divisor (e.g. lcm of dp_size and mini-batch sizes).
         eos_token_id: The EOS token id from the tokenizer.
 
     Returns:
-        The (possibly enlarged) KVBatchMeta.
+        The (possibly enlarged) RolloutDataRef.
     """
     remainder = len(batch) % batch_multiple
     if remainder == 0:
@@ -152,10 +147,12 @@ def upsample_batch_to_divisible_size(
     # Take the first trajectory as the metadata template for padding data.
     source_idx = 0
     source_key = batch.keys[source_idx]
-    source_td = tq.kv_batch_get(keys=[source_key], partition_id=batch.partition_id)[0]
-
-    # Construct the minimal padding template of one prompt token and one response token
-    template_sample, template_tag = construct_minimal_padding_template(source_td, batch.tags[source_idx], eos_token_id)
+    with rollout_data_backend.materialized_batch(
+        keys=[source_key], partition_id=batch.partition_id
+    ) as source_batch:
+        template_sample, template_tag = construct_minimal_padding_template(
+            source_batch[0], batch.tags[source_idx], eos_token_id
+        )
 
     # All padding data use the same uid (also the same trajectory_id 0 but with ascending session_ids)
     # This uid is not identical to any of the actual data, so it won't affect the grpo advantage value.
@@ -176,10 +173,10 @@ def upsample_batch_to_divisible_size(
         pad_fields.append(sample)
         pad_tags.append(copy.deepcopy(template_tag))
 
-    tq.kv_batch_put(
+    rollout_data_backend.batch_put(
         keys=pad_keys,
         partition_id=batch.partition_id,
-        fields=list_of_dict_to_tensordict(pad_fields),
+        fields=rollout_data_backend.rows_to_fields(pad_fields),
         tags=pad_tags,
     )
     logger.info(
@@ -189,7 +186,7 @@ def upsample_batch_to_divisible_size(
         pad_size,
         batch_multiple,
     )
-    return KVBatchMeta(
+    return RolloutDataRef(
         keys=batch.keys + pad_keys,
         tags=batch.tags + pad_tags,
         partition_id=batch.partition_id,

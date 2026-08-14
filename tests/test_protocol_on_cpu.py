@@ -778,6 +778,9 @@ def test_from_tensordict():
     assert torch.all(torch.eq(data.batch["obs"], tensor_dict["obs"])).item()
     assert data.meta_info["name"] == "abdce"
 
+    non_tensor_only = DataProto.from_tensordict(tu.get_tensordict({"labels": tensor_dict["labels"]}, {}))
+    assert len(non_tensor_only) == len(tensor_dict["labels"])
+
 
 @pytest.mark.skipif(
     parse_version(tensordict.__version__) < parse_version("0.10"), reason="requires at least tensordict 0.10"
@@ -902,6 +905,10 @@ def test_to_tensordict_and_back_with_nested_data():
 
     # Verify non-tensor data is preserved
     assert reconstructed_data.non_tensor_batch["labels"].tolist() == labels
+    assert all(
+        reconstructed_data.non_tensor_batch[key].shape == (len(labels),)
+        for key in ("turn_scores", "reward_extra_info", "raw_prompt")
+    )
 
     # Verify nested structures are preserved
     assert len(reconstructed_data.non_tensor_batch["turn_scores"]) == len(turn_scores)

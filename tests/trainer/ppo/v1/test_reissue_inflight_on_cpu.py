@@ -30,7 +30,7 @@ to build a full trainer.
 A second group of tests covers the ``tq.save_checkpoint``/``tq.load_checkpoint``
 round-trip that backs checkpoint consistency (matching ``_save_checkpoint``/
 ``_load_checkpoint``). These call the real checkpoint APIs, so they skip on
-builds that lack them (the same ``_tq_supports_checkpoint`` gate the trainer uses
+builds that lack them (the same backend capability gate the trainer uses
 to decide whether to save/load); one test additionally asserts the trainer
 short-circuits re-issue when the gate reports the feature unsupported.
 """
@@ -43,13 +43,15 @@ import transfer_queue as tq
 from omegaconf import OmegaConf
 from tensordict import TensorDict
 
-from verl.trainer.ppo.v1 import trainer_base
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer
+from verl.utils import rollout_data_backend
 from verl.utils import tensordict_utils as tu
 
 # Capture the real compatibility guard before the autouse fixture patches it. The save/load round-trip
 # tests call the real APIs, so they must skip on builds that do not provide them.
-_REAL_TQ_SUPPORTS_CHECKPOINT = trainer_base._tq_supports_checkpoint
+_REAL_TQ_SUPPORTS_CHECKPOINT = (
+    rollout_data_backend.TransferQueueBackend().supports_checkpoint
+)
 requires_tq_checkpoint = pytest.mark.skipif(
     not _REAL_TQ_SUPPORTS_CHECKPOINT(),
     reason="TransferQueue >= 0.1.9 with save_checkpoint/load_checkpoint is required",
@@ -58,9 +60,10 @@ requires_tq_checkpoint = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def tq_init():
-    tq.init()
+    rollout_data_backend.configure_runtime({"name": "transfer_queue"})
+    rollout_data_backend.init()
     yield
-    tq.close()
+    rollout_data_backend.close()
 
 
 @pytest.fixture(autouse=True)
@@ -70,7 +73,7 @@ def _force_tq_checkpoint_supported(monkeypatch):
     The locally installed TransferQueue may not support checkpointing, which short-circuits re-issue.
     The save/load round-trip tests instead use ``requires_tq_checkpoint`` and call the actual APIs.
     """
-    monkeypatch.setattr(trainer_base, "_tq_supports_checkpoint", lambda: True)
+    monkeypatch.setattr(rollout_data_backend, "supports_checkpoint", lambda: True)
 
 
 @pytest.fixture
@@ -180,7 +183,9 @@ def test_async_submission_persists_reissuable_prompt_fields(monkeypatch):
     )
     tu.assign_non_tensor_data(batch, "global_steps", stub.global_steps)
     puts = []
-    monkeypatch.setattr(trainer_base.tq, "kv_batch_put", lambda **kwargs: puts.append(kwargs))
+    monkeypatch.setattr(
+        rollout_data_backend, "batch_put", lambda **kwargs: puts.append(kwargs)
+    )
 
     assert stub._submit_batch_to_rollout(batch) == 2
     assert len(puts) == 1
@@ -348,7 +353,7 @@ def test_reissue_noop_for_sync_mode(tq_init, partition_id):
 # tq.save_checkpoint / tq.load_checkpoint round-trip
 #
 # These call the real TransferQueue checkpoint APIs (matching _save_checkpoint/_load_checkpoint),
-# so they skip on builds that lack them. The defensive gate (_tq_supports_checkpoint) is what the
+# so they skip on builds that lack them. The backend capability gate is what the
 # trainer uses to decide whether to save/load at all; here we skip on the same condition and
 # additionally assert the trainer short-circuits when the gate reports unsupported.
 # --------------------------------------------------------------------------- #
@@ -424,7 +429,7 @@ def test_reissue_short_circuits_when_checkpoint_unsupported(tq_init, partition_i
     This overrides the autouse fixture (which forces the gate open) to assert the real guard, so
     an old TransferQueue never tries to read back / re-submit prompts that were never persisted.
     """
-    monkeypatch.setattr(trainer_base, "_tq_supports_checkpoint", lambda: False)
+    monkeypatch.setattr(rollout_data_backend, "supports_checkpoint", lambda: False)
     _submit_prompt(partition_id, _uid(), "running", global_steps=1)
 
     stub = _make_trainer_stub()

@@ -905,6 +905,9 @@ trainer:
     separate_async:
       num_warmup_batches: 1
       parameter_sync_step: 4
+    rollout_data_backend:
+      name: transfer_queue
+      config: {}
     sampler:
       max_off_policy_threshold: 8
       max_off_policy_strategy: drop

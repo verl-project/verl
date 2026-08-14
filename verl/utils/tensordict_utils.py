@@ -915,9 +915,13 @@ def maybe_fix_3d_position_ids(data: TensorDict):
         data["position_ids"]._ragged_idx = 2
 
 
-def list_of_dict_to_tensordict(list_of_dicts: list[dict[str, Any]]) -> TensorDict:
+def list_of_dict_to_tensordict(
+    list_of_dicts: list[dict[str, Any]], *, jagged_1d: bool = False
+) -> TensorDict:
     """
     Create a TensorDict from a list of dict of tensors and non_tensors.
+    ``jagged_1d`` keeps per-sample 1D rollout sequences jagged even when all
+    rows happen to have the same length.
     Note that this requires tensordict version at least 0.10
     """
     assert parse_version(tensordict.__version__) >= parse_version("0.10"), (
@@ -936,6 +940,7 @@ def list_of_dict_to_tensordict(list_of_dicts: list[dict[str, Any]]) -> TensorDic
             if val_list
             and all(isinstance(item, torch.Tensor) for item in val_list)
             and all(item.shape == val_list[0].shape for item in val_list)
+            and (not jagged_1d or val_list[0].ndim != 1)
             else (
                 torch.nested.as_nested_tensor(val_list, layout=torch.jagged)
                 if val_list and all(isinstance(item, torch.Tensor) for item in val_list)
