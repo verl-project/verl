@@ -281,6 +281,9 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
         messages: list[dict[str, Any]],
         *,
         tools: list[dict[str, Any]] | None = None,
+        images: list[Any] | None = None,
+        videos: list[Any] | None = None,
+        audios: list[Any] | None = None,
     ) -> list[int]:
         return self._encode(messages, tools=tools, add_bos_token=True)
 
