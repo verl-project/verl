@@ -21,10 +21,11 @@ from verl.base_config import BaseConfig
 from verl.trainer.config import BaseModelConfig, CheckpointConfig
 from verl.utils.profiler import ProfilerConfig
 
-from .checkpoint import McoreCheckpointConfig
+from .checkpoint import McoreCheckpointConfig, MindSpeedCheckpointConfig
 from .engine import (
     FSDPEngineConfig,
     McoreEngineConfig,
+    MindSpeedEngineConfig,
     TorchtitanEngineConfig,
     VeOmniEngineConfig,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "McoreCriticConfig",
     "TorchTitanCriticConfig",
     "FSDPCriticModelCfg",
+    "MindSpeedCriticConfig",
     "VeOmniCriticConfig",
 ]
 
@@ -278,6 +280,29 @@ class FSDPCriticModelCfg(BaseModelConfig):
     target_modules: str | list[str] = "all-linear"
     # TiledMLP configuration for memory-efficient MLP computation
     tiled_mlp: dict = field(default_factory=lambda: {"enabled": False, "num_shards": 4})
+
+
+@dataclass
+class MindSpeedCriticConfig(CriticConfig):
+    """Configuration for mindspeed-based critic model training.
+
+    The inheritance from CriticConfig provides all base critic configuration plus mindspeed-specific settings.
+
+    Args:
+        nccl_timeout (int): NCCL timeout in seconds for distributed operations.
+        mindspeed (Dict[str, Any]): mindspeed-specific parallelism settings.
+        checkpoint (MindSpeedCheckpointConfig): MindSpeed-specific checkpoint config
+            (inherits ``mbridge_config`` from :class:`McoreCheckpointConfig`).
+    """
+
+    strategy: str = "mindspeed"
+    nccl_timeout: int = 600
+    mindspeed: MindSpeedEngineConfig = field(default_factory=MindSpeedEngineConfig)
+    checkpoint: MindSpeedCheckpointConfig = field(default_factory=MindSpeedCheckpointConfig)
+
+    def validate(self, n_gpus: int, train_batch_size: int):
+        """Validate mindspeed critic configuration with runtime parameters."""
+        super().validate(n_gpus, train_batch_size)
 
 
 @dataclass

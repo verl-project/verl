@@ -138,6 +138,74 @@ jobs:
           cd /root/.cache/nightly_log/
           python check_npu.py --log run_qwen3_vl_8b_Instruct_fsdp2_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.log --base run_qwen3_vl_8b_Instruct_fsdp2_npu/baseline_qwen3_vl_8b_Instruct_fsdp2_npu.txt
   
+  # Test grpo qwen3-8b mindspeedllm sglang
+  nightlyCI_grpo-qwen3-8b-mindspeedllm-sglang:
+    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
+    runs-on: linux-aarch64-a3-16
+    timeout-minutes: 180 # Increase this timeout value as needed
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+      UV_HTTP_TIMEOUT: 120
+      UV_NO_CACHE: "1"
+      UV_SYSTEM_PYTHON: "1"
+      UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - name: Install uv
+        run: pip install uv
+      - name: Check initial pip list from image
+        run: |
+          uv pip list
+      - name: Checkout verl-project/verl repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Install the current repository
+        run: |
+          uv pip install --no-deps --no-build-isolation -e .
+          uv pip install --no-deps TransferQueue==0.1.8
+      - name: Check final pip list
+        run: |
+          uv pip list
+      - name: Configure related dependencies
+        run: |
+          git clone --depth 1 --branch core_v0.12.1 https://github.com/NVIDIA/Megatron-LM.git /Megatron-LM
+          rm -rf /MindSpeed
+          git clone https://gitcode.com/ascend/MindSpeed.git /MindSpeed
+          git clone https://gitcode.com/ascend/MindSpeed-LLM.git /MindSpeed-LLM
+      - name: Prepare weights
+        run: |
+          ln -s /root/.cache/models ~/models
+      - name: Prepare GSM8K dataset
+        run: |
+          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+      - name: Running nightlyCI_grpo-qwen3-8b-mindspeedllm-sglang
+        run: |
+          ray stop --force
+          export PYTHONPATH=$PYTHONPATH:/Megatron-LM
+          export PYTHONPATH=$PYTHONPATH:/MindSpeed
+          export PYTHONPATH=$PYTHONPATH:/MindSpeed-LLM
+          rm -rf /root/.cache/torch_extensions/py311_cpu/npu_rotary_position_embedding
+          bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_8b_mindspeedllm_npu.sh
+      - name: Running nightlyCI_grpo-qwen3-8b-mindspeedllm-sglang checking script
+        run: |
+          cd /root/.cache/nightly_log/
+          python check_npu.py --log run_grpo_qwen3_8b_mindspeedllm_npu/run_grpo_qwen3_8b_mindspeedllm_npu.log --base run_grpo_qwen3_8b_mindspeedllm_npu/baseline_grpo_qwen3_8b_mindspeedllm_npu.txt
+
   # Test dapo moonlight-16b megatron vllm
   nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend:
     if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}

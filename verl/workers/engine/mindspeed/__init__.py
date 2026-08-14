@@ -12,6 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .transformer_impl import MindspeedEngineWithLMHead, MindspeedEngineWithValueHead
+from .transformer_impl import MindspeedEngineWithLMHead, MindspeedEngineWithValueHead, MindSpeedMegatronEngineWithLMHead
 
-__all__ = ["MindspeedEngineWithLMHead", "MindspeedEngineWithValueHead"]
+__all__ = ["MindspeedEngineWithLMHead", "MindspeedEngineWithValueHead", "MindSpeedMegatronEngineWithLMHead"]
