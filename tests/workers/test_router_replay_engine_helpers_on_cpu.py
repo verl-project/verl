@@ -324,6 +324,45 @@ class TestPrepareModelOutputs:
         )
         assert "routed_experts" not in model_output
 
+    def _replay_forward(self, controller, num_routers: int, seq_lens: list[int], L: int = _L):
+        """Arm REPLAY with ``L`` layer slots, then fire ``num_routers`` routers."""
+        controller.begin_replay()
+        nnz = sum(seq_lens)
+        controller.begin_microbatch(targets=[torch.randint(0, 8, (nnz, _TOPK)) for _ in range(L)])
+        # Positions are keyed on ``id(module)``, so the routers must be kept
+        # alive for the whole forward -- CPython recycles the address of a
+        # temporary, which would collapse them onto one position.
+        routers = [torch.nn.Linear(1, 1) for _ in range(num_routers)]
+        for r in routers:
+            controller.on_router_forward(
+                r,
+                torch.randn(nnz, 8),
+                torch.randint(0, 8, (nnz, _TOPK), dtype=torch.int64),
+            )
+        engine = _make_engine(controller)
+        return engine.prepare_model_outputs(
+            output=None,
+            output_args={"pad_size": 0},
+            micro_batch=TensorDict({"input_ids": _make_jagged_input_ids(seq_lens)}, batch_size=[len(seq_lens)]),
+            logits_processor_func=None,
+        )
+
+    def test_replay_rejects_fewer_routers_than_layer_slots(self, controller):
+        """The DeepSeek-V4 failure mode: a family whose layers use more than one
+        router class, with only some classes hooked. Targets are matched by fire
+        order while the rollout indexes by absolute layer, so the unhooked layers'
+        slots are still consumed and every later layer replays the wrong experts.
+        ``on_router_forward`` cannot see this (it only trips when a router finds
+        no slot at all), and nothing downstream fails — the run just trains on
+        mis-routed experts. So it has to be caught once the forward is over."""
+        with pytest.raises(RuntimeError, match=r"2 routers fired but routed_experts carries 3"):
+            self._replay_forward(controller, num_routers=_L - 1, seq_lens=[4, 6])
+
+    def test_replay_accepts_one_router_per_layer_slot(self, controller):
+        """The contract holding is the common case and must stay silent."""
+        model_output = self._replay_forward(controller, num_routers=_L, seq_lens=[4, 6])
+        assert "routed_experts" not in model_output
+
     def test_no_controller_output_is_untouched(self):
         engine = _make_engine(controller=None)
         td = TensorDict({"input_ids": _make_jagged_input_ids([3, 4])}, batch_size=[2])

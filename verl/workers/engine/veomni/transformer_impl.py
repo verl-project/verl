@@ -918,6 +918,17 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
             model_output["routed_experts"] = torch.nested.nested_tensor_from_jagged(
                 recorded.view(torch.int16), micro_batch["input_ids"].offsets()
             )
+        elif rr is not None and rr.action is RouterReplayAction.REPLAY:
+            if rr.num_fired != rr.num_targets:
+                raise RuntimeError(
+                    f"router_replay REPLAY: {rr.num_fired} routers fired but routed_experts "
+                    f"carries {rr.num_targets} layer slots. Targets are matched to routers by "
+                    "fire order, so unequal counts mean every layer replayed the wrong slot. "
+                    "Rollout backends index this tensor by absolute decoder-layer index, so "
+                    "each decoder layer must contribute exactly one router that calls "
+                    "`maybe_replay_indices` -- check that no MoE variant in this model family "
+                    "(e.g. a hash-routed or dense layer) is left unhooked."
+                )
 
         return model_output
 

@@ -60,6 +60,18 @@ position. It also makes recompute detection free: a module that is
 already in the table is by definition not firing for the first time, so
 RECORD simply skips it.
 
+Fire order is only meaningful because of the contract it implies: slot
+``i`` of a ``routed_experts`` tensor must belong to the ``i``-th router to
+fire. Rollout backends fill that tensor by **absolute decoder-layer
+index** over all ``num_hidden_layers`` (vLLM sizes its capture buffer that
+way and writes at ``extract_layer_index(layer_name)``), so R3 replay is
+only correct when every decoder layer contributes exactly one hooked
+router. A model that hooks a subset -- e.g. DeepSeek-V4, whose first three
+layers are hash-routed -- silently shifts every layer's target unless its
+skipped layers are hooked too. :meth:`num_fired` vs :meth:`num_targets`
+lets the engine assert the contract after each forward instead of
+mis-routing quietly.
+
 Positions without recorded routing
 ----------------------------------
 Some positions the routers are asked to route have no recorded routing:
@@ -114,6 +126,16 @@ class VeOmniRouterReplay:
     @property
     def action(self) -> RouterReplayAction:
         return self._action
+
+    @property
+    def num_fired(self) -> int:
+        """How many distinct routers have fired since ``begin_microbatch``."""
+        return len(self._id_to_pos)
+
+    @property
+    def num_targets(self) -> int:
+        """How many layer targets REPLAY was armed with for this micro-batch."""
+        return len(self._targets)
 
     def install(self, model: nn.Module) -> None:
         """Register this controller with VeOmni's global ``set_active_replay`` slot.
