@@ -719,6 +719,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 torch.distributed.barrier()
                 per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
                 await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
+                # Exit barrier: hold the lock until all actors finish send_weights.
+                # Without this, faster actors release the lock early, begin a new
+                # update_actor, and submit training NCCL ops to the EP/PP groups while
+                # slower actors are still in the weight-sync ALLGATHER — causing a
+                # NCCL seq-number mismatch and a 30-minute watchdog timeout.
+                torch.distributed.barrier()
             finally:
                 self._distributed_group_lock.release()
             return
