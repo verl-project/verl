@@ -7,7 +7,7 @@ pip uninstall -y triton triton-ascend
 # 安装与 vLLM-Ascend 0.23.0 对应的软件包
 pip install torchvision==0.25.0
 pip install torchaudio==2.10.0
-pip install triton-ascend==3.2.1 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+pip install triton-ascend==3.2.2 --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
 pip install "transformers==5.10.4" 
 pip install setuptools-scm
 
@@ -41,8 +41,8 @@ fi
 
 echo "4. install verl"
 cd verl
-pip install -r requirements-npu.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
 pip install -v -e .
+pip install -r requirements-npu.txt --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
 # （可选）提示：为了更佳的使用体验，最好将 recipe 子模块更新至最新 commit
 cd recipe
 git checkout main

@@ -32,10 +32,12 @@ _ngpus = torch.cuda.device_count()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rebuild_group", [False, True])
+@pytest.mark.parametrize("multi_sender", [False, True])
 @pytest.mark.parametrize("num_trainer, num_rollout", [(2, _ngpus - 2)])
 @auto_await
 async def test_nccl_checkpoint_engine(
     rebuild_group,
+    multi_sender,
     num_trainer,
     num_rollout,
     num_nodes=1,
@@ -60,7 +62,7 @@ async def test_nccl_checkpoint_engine(
     checkpoint_engine_config = CheckpointEngineConfig(
         backend="nccl",
         update_weights_bucket_megabytes=bucket_size_mb,
-        engine_kwargs={"nccl": {"rebuild_group": rebuild_group}},
+        engine_kwargs={"nccl": {"rebuild_group": rebuild_group, "multi_sender": multi_sender}},
     )
     model_config = HFModelConfig(path=model_path, use_remove_padding=True)
     rollout_config = RolloutConfig(name="vllm", checkpoint_engine=checkpoint_engine_config)
@@ -191,6 +193,7 @@ async def test_kimi_checkpoint_engine(
 if __name__ == "__main__":
     test_nccl_checkpoint_engine(
         rebuild_group=False,
+        multi_sender=False,
         num_trainer=2,
         num_rollout=30,
         num_nodes=4,

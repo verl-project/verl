@@ -51,7 +51,12 @@ from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_config
-from verl.workers.rollout.sglang_rollout.utils import SGLANG_LORA_NAME, lora_served_as_adapter
+from verl.workers.rollout.sglang_rollout.utils import (
+    SGLANG_LORA_NAME,
+    lora_rank_of,
+    lora_served_as_adapter,
+    sglang_lora_target_modules,
+)
 from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
 
 logger = logging.getLogger(__file__)
@@ -326,8 +331,8 @@ class SGLangHttpServer:
             args.update(
                 {
                     "enable_lora": True,
-                    "max_lora_rank": self.model_config.lora_rank,
-                    "lora_target_modules": self.model_config.target_modules,
+                    "max_lora_rank": lora_rank_of(self.model_config),
+                    "lora_target_modules": sglang_lora_target_modules(self.model_config.target_modules),
                 }
             )
         # Only set dist_init_addr for multi-node; for single-node, let SGLang
@@ -466,8 +471,9 @@ class SGLangHttpServer:
             # In hybrid mode, rollout is wake up in `update_weights`
             raise ValueError(f"wake_up not support rollout_mode {self.rollout_mode}")
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            # Directly call engine to wake up without sync weights.
-            obj = ResumeMemoryOccupationReqInput(tags=["kv_cache", "weights"])
+            # Resume exactly what sleep() released; adapter mode keeps the base weights resident.
+            tags = ["kv_cache"] if self.lora_as_adapter else ["kv_cache", "weights"]
+            obj = ResumeMemoryOccupationReqInput(tags=tags)
             await self.tokenizer_manager.resume_memory_occupation(obj, None)
             await self.tokenizer_manager.flush_cache()
         elif self.rollout_mode == RolloutMode.STANDALONE:

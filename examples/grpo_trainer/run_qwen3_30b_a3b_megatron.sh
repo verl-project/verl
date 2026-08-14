@@ -6,7 +6,7 @@
 #   INFER_BACKEND          rollout backend: vllm | sglang | trtllm   (default: vllm)
 #   ROLLOUT_QUANTIZATION   fp8 to enable TRT-LLM FP8 rollout         (default: unset)
 #
-# Ascend NPU users: see run_qwen3_30b_a3b_mindspeed.sh.
+# Ascend NPU users: see examples/ascend_extras/grpo_trainer/run_qwen3_30b_a3b_megatron.sh.
 
 set -xeuo pipefail
 export CUDA_DEVICE_MAX_CONNECTIONS=1

@@ -266,6 +266,9 @@ def fused_forward_model_engine(vision_model: bool = False):
         calculate_entropy: bool,
         pad_token_id: int,
         cp_layout: str = "zigzag",
+        local_cp_size: int | None = None,
+        router_padding_mask: Tensor | None = None,
+        pad_to_length_bucket: int | None = None,
     ):
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
@@ -282,11 +285,15 @@ def fused_forward_model_engine(vision_model: bool = False):
             pre_process=pre_process,
             use_fp8_padding=use_fp8_padding,
             min_local_rows=min_local_rows,
+            pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
+            local_cp_size=local_cp_size,
         )
         input_ids_rmpad = input_ids_rmpad.contiguous()
 
         model_kwargs = {}
+        if router_padding_mask is not None:
+            model_kwargs["padding_mask"] = router_padding_mask
         if "pixel_values" in multi_modal_inputs:
             model_kwargs["pixel_values"] = multi_modal_inputs["pixel_values"].to(input_ids.device)
         if "image_grid_thw" in multi_modal_inputs:
@@ -311,7 +318,9 @@ def fused_forward_model_engine(vision_model: bool = False):
             need_roll=True,
             use_fp8_padding=use_fp8_padding,
             min_local_rows=min_local_rows,
+            pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
+            local_cp_size=local_cp_size,
         )
         labels_rmpad = labels_rmpad.contiguous()
         forward_kwargs = dict(
@@ -344,6 +353,7 @@ def fused_forward_model_engine(vision_model: bool = False):
             input_ids.shape[0],
             post_process=post_process,
             cp_layout=cp_layout,
+            local_cp_size=local_cp_size,
         )
 
         output = {"log_probs": log_probs}
@@ -359,6 +369,7 @@ def fused_forward_model_engine(vision_model: bool = False):
                 input_ids.shape[0],
                 post_process=post_process,
                 cp_layout=cp_layout,
+                local_cp_size=local_cp_size,
             )
             output["entropy"] = entropy
 
@@ -382,6 +393,7 @@ def _fused_GPTModel_forward(
     inference_params: Optional[BaseInferenceContext] = None,
     loss_mask: Optional[Tensor] = None,
     temperature: float = 1.0,
+    padding_mask: Tensor | None = None,
     **kwargs,
 ) -> CausalLMOutputForPPO:
     """
@@ -394,17 +406,26 @@ def _fused_GPTModel_forward(
 
     inference_context = deprecate_inference_params(inference_context, inference_params)
 
+    preprocess_kwargs = {}
+    if padding_mask is not None:
+        # Only forward the kwarg when set: older Megatron-Core _preprocess
+        # signatures (without MoE router padding support) stay compatible.
+        preprocess_kwargs["padding_mask"] = padding_mask
     preproc_output = model._preprocess(
         input_ids=input_ids,
         position_ids=position_ids,
         decoder_input=decoder_input,
         inference_context=inference_context,
         packed_seq_params=packed_seq_params,
+        **preprocess_kwargs,
     )
 
     (decoder_input, rotary_pos_emb, rotary_pos_cos, rotary_pos_sin, sequence_len_offset) = preproc_output[:5]
 
     decoder_extra_block_kwargs = extra_block_kwargs or {}
+    if padding_mask is not None:
+        # _preprocess scatters the mask across sequence-parallel ranks.
+        decoder_extra_block_kwargs["padding_mask"] = preproc_output[5]
     if getattr(model.config, "moe_n_hash_layers", 0) > 0 and input_ids is not None:
         decoder_extra_block_kwargs["input_ids"] = input_ids
 

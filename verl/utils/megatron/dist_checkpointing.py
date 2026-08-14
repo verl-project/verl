@@ -34,7 +34,7 @@ def save_dist_checkpointing(
 ):
     validate_sharding_integrity = True
     # Get checkpointing strategies
-    save_strategy = TorchDistSaveShardedStrategy()
+    save_strategy = TorchDistSaveShardedStrategy(backend="torch_dist", version=1)
     save_strategy = FullyParallelSaveStrategyWrapper(
         save_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
     )

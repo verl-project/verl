@@ -63,7 +63,7 @@ from .base import CheckpointEngineRegistry
 from .delta_sync.encode import DeltaFlush, DeltaParam
 from .delta_sync.encode import checksum as _checksum
 from .delta_sync.sparse_gather import gather_slot_entries_to_rank0
-from .nccl_checkpoint_engine import MasterMetadata, NCCLCheckpointEngine
+from .nccl_checkpoint_engine import MasterMetadata, NCCLCheckpointEngine, WorkerMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -246,11 +246,17 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
 
     wire_format = "delta_flush"
 
-    def prepare(self) -> MasterMetadata | None:
+    def prepare(self) -> WorkerMetadata:
         # Delta broadcasts small per-flush buffers directly, so skip the parent's
         # 2 * bucket_size fixed buffers. Still hand back the master zmq endpoint
         # that build_topology() distributes to the rollout workers.
-        return MasterMetadata(zmq_ip=self.ip, zmq_port=self.listen_port) if self.is_master else None
+        #
+        # Only rank 0 broadcasts here (see the assert in send_weights) and this engine has no relay
+        # path, so it always takes the parent's single-sender topology.
+        master = (
+            MasterMetadata(zmq_ip=self.ip, zmq_port=self.listen_port, multi_sender=False) if self.is_master else None
+        )
+        return WorkerMetadata(node_id=self.get_node_id(), master=master)
 
     # ---- trainer side ----
     # ---- shared STREAMING wire ----

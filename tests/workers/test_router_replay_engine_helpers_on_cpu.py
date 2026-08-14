@@ -16,13 +16,15 @@
 
 Complements ``tests/utils/veomni/test_router_replay_on_cpu.py`` (which
 covers the controller state machine in isolation). This file tests the
-engine-side glue helpers in ``verl/workers/engine/veomni/transformer_impl.py``:
+two engine hooks in ``verl/workers/engine/veomni/transformer_impl.py``
+that own everything shape-related:
 
-* ``VeOmniEngineWithLMHead._maybe_push_router_replay_state`` — the
-  per-micro-batch snapshot side-channel (pad_size + cu_seqlens) pushed
-  back from ``prepare_model_inputs`` to ``forward_backward_batch``,
-  plus the jagged-NestedTensor input assertion and the strict
-  missing-routed_experts error path in REPLAY mode.
+* ``VeOmniEngineWithLMHead._prepare_router_replay_inputs`` — arms the
+  controller, and in REPLAY mode reshapes ``routed_experts`` with the
+  same pad rule ``super().prepare_model_inputs`` applied to
+  ``input_ids``.
+* ``VeOmniEngineWithLMHead.prepare_model_outputs`` — unpads the recorded
+  indices and re-wraps them per sample, like ``log_probs``.
 
 The real production helpers are imported here (not mirrored) — the
 ``veomni.*`` package surfaces that ``transformer_impl`` needs at module
@@ -32,7 +34,7 @@ same pattern the rest of the verl test suite uses for optional deps
 
 Out of scope (covered by manual GPU smoke + the e2e shell scripts):
 real ``VeOmniEngineWithLMHead`` instantiation, FSDP wrapping,
-multi-rank SP all-gather, end-to-end forward through the patched
+multi-rank SP slice/all-gather, end-to-end forward through the patched
 ``SparseMoeBlock``.
 """
 
@@ -72,10 +74,13 @@ for _mod in (
     sys.modules.setdefault(_mod, MagicMock())
 
 
-from verl.utils.veomni.router_replay import RouterReplayAction, VeOmniRouterReplay  # noqa: E402
+from verl.utils.veomni.router_replay import VeOmniRouterReplay  # noqa: E402
+from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead  # noqa: E402
 from verl.workers.engine.veomni.transformer_impl import VeOmniEngineWithLMHead  # noqa: E402
 
 # ----------------------------------------------------------------- helpers
+
+_L, _TOPK = 3, 2
 
 
 def _make_jagged_input_ids(seq_lens: list[int]) -> torch.Tensor:
@@ -85,25 +90,22 @@ def _make_jagged_input_ids(seq_lens: list[int]) -> torch.Tensor:
     return torch.nested.as_nested_tensor(pieces, layout=torch.jagged)
 
 
-def _make_jagged_routed_experts(seq_lens: list[int], L: int, topk: int) -> torch.Tensor:
+def _make_jagged_routed_experts(seq_lens: list[int], L: int = _L, topk: int = _TOPK) -> torch.Tensor:
     """Build a jagged NestedTensor mimicking the trainer-side
     ``routed_experts`` shape: ``[bs, jagged_seq, L, topk]``."""
     pieces = [torch.randint(0, 8, (s, L, topk), dtype=torch.int64) for s in seq_lens]
     return torch.nested.as_nested_tensor(pieces, layout=torch.jagged)
 
 
-def _make_engine_with_controller(
-    controller: VeOmniRouterReplay,
-    mode: str = "R2",
-) -> VeOmniEngineWithLMHead:
+def _make_engine(controller: VeOmniRouterReplay | None, mode: str = "R2") -> VeOmniEngineWithLMHead:
     """Build a bare ``VeOmniEngineWithLMHead`` instance without invoking
     its ``__init__`` (which requires a torch.distributed process group,
-    parallel_state init, etc.). Only the controller and the mode string
-    (used to gate R3-specific replay-mask construction) are needed for
-    the helper methods exercised here."""
+    parallel_state init, etc.). Only the attributes the two helpers read
+    are populated."""
     engine = VeOmniEngineWithLMHead.__new__(VeOmniEngineWithLMHead)
     engine._router_replay = controller
     engine._router_replay_mode = mode
+    engine.use_ulysses_sp = False
     return engine
 
 
@@ -113,324 +115,258 @@ def controller():
 
 
 # ===========================================================
-# _maybe_push_router_replay_state
+# _prepare_router_replay_inputs
 # ===========================================================
 
 
-class TestMaybePushRouterReplayState:
-    """The per-mb side-channel + REPLAY input prep glue. Exercised on a
-    bare-instance ``VeOmniEngineWithLMHead`` (no real init needed —
-    the method only reads ``self._router_replay``)."""
-
-    def test_pad_and_cu_seqlens_snapshot_population(self, controller):
-        """The two snapshot sinks should receive one entry per call,
-        in the order ``prepare_model_inputs`` ran."""
+class TestPrepareRouterReplayInputs:
+    def test_record_only_arms_the_controller(self, controller):
+        """RECORD doesn't read ``routed_experts`` (it's the *output*, not an
+        input). Even when the micro_batch carries one, it must be ignored —
+        and the previous micro-batch's buffer must be dropped."""
         controller.begin_record()
-        engine = _make_engine_with_controller(controller)
+        controller._recorded = [torch.zeros(4, _TOPK, dtype=torch.int64)]  # stale mb
+        engine = _make_engine(controller)
 
-        pad_sink: list[int] = []
-        cu_sink: list[torch.Tensor] = []
-
-        for mb in range(3):
-            mb_lens = [3 + mb, 5 + mb]
-            input_ids = _make_jagged_input_ids(mb_lens)
-            td = TensorDict({"input_ids": input_ids}, batch_size=[len(mb_lens)])
-            td.set_non_tensor("_router_replay_pad_size_out", pad_sink)
-            td.set_non_tensor("_router_replay_cu_seqlens_out", cu_sink)
-            output_args = {"pad_size": mb}  # pretend ulysses pad varies
-            engine._maybe_push_router_replay_state(td, output_args)
-
-        assert pad_sink == [0, 1, 2]
-        assert len(cu_sink) == 3
-        # Each cu_seqlens entry should reflect input_ids offsets at the
-        # time of capture (cloned, not aliased to the now-freed mb).
-        assert cu_sink[0].tolist() == [0, 3, 8]
-        assert cu_sink[1].tolist() == [0, 4, 10]
-        assert cu_sink[2].tolist() == [0, 5, 12]
-
-    def test_side_channel_list_can_be_stashed_on_micro_batch(self):
-        """Regression: ``forward_backward_batch`` stashes the snapshot
-        list via ``tu.assign_non_tensor_data(...)`` onto a micro_batch
-        that has a non-empty batch_size. The original code used
-        ``tu.assign_non_tensor`` (auto-dispatch), which detects the
-        value as a list and routes to ``assign_non_tensor_stack``,
-        producing a ``NonTensorStack`` with ``batch_size=[len(list)]``.
-        For an empty list (``[]``), the stack has ``batch_size=[0]``,
-        which mismatches the micro_batch's ``batch_size=[1]`` and
-        triggers ``RuntimeError: ... Modifying the batch size of a
-        lazy representation of a tensordict is not permitted`` because
-        ``NonTensorStack`` is itself a lazy TD.
-
-        The fix: use ``assign_non_tensor_data`` (singular), which wraps
-        the entire list as one ``NonTensorData(val)`` regardless of type
-        — the list IS the value, not a per-sample sequence to stack.
-        """
-        from verl.utils import tensordict_utils as tu
-
-        # Plain TensorDict with batch_size=[1] — same shape that
-        # prepare_micro_batches yields for a 1-sample micro-batch.
-        td = TensorDict({}, batch_size=[1])
-
-        # Sanity: the OLD (broken) auto-dispatch path raises on empty list.
-        with pytest.raises(RuntimeError, match="lazy representation"):
-            tu.assign_non_tensor(td, _broken_sink=[])
-
-        # The fixed singular API tolerates any value, including an empty
-        # list, by wrapping it as a single NonTensorData.
-        sink: list[int] = []
-        tu.assign_non_tensor_data(td, "_sink", sink)
-
-        # Mutate via reference and read back — the side-channel contract
-        # the engine driver relies on.
-        sink.append(7)
-        sink.append(11)
-        recovered = tu.get_non_tensor_data(td, "_sink", default=None)
-        assert recovered == [7, 11], f"side-channel list lost mutations: {recovered}"
-
-    def test_non_jagged_input_ids_raises(self, controller):
-        """The engine init guard rejects use_remove_padding=False, but
-        the per-mb assertion catches future bypass paths — a dense
-        tensor would otherwise fail mid-step on .offsets() with an
-        opaque AttributeError."""
-        controller.begin_record()
-        engine = _make_engine_with_controller(controller)
+        seq_lens = [3, 4]
         td = TensorDict(
-            {"input_ids": torch.randint(0, 100, (2, 8), dtype=torch.int64)},
+            {
+                "input_ids": _make_jagged_input_ids(seq_lens),
+                "routed_experts": _make_jagged_routed_experts(seq_lens),
+            },
             batch_size=[2],
         )
-        with pytest.raises(RuntimeError, match="must be a jagged NestedTensor"):
-            engine._maybe_push_router_replay_state(td, {"pad_size": 0})
+        engine._prepare_router_replay_inputs(td, {"pad_size": 0})
+
+        assert controller._recorded == []
+        assert controller._targets == []
 
     def test_replay_missing_routed_experts_raises(self, controller):
-        """Strict mode: REPLAY without routed_experts on the micro_batch
-        is a plumbing bug (compute_log_prob → update_actor lost the
-        field), not a soft fallback."""
+        """Strict mode: REPLAY without routed_experts is a plumbing bug
+        (compute_log_prob → update_actor lost the field), not a soft
+        fallback."""
         controller.begin_replay()
-        engine = _make_engine_with_controller(controller)
+        engine = _make_engine(controller)
         td = TensorDict({"input_ids": _make_jagged_input_ids([3, 5])}, batch_size=[2])
         with pytest.raises(RuntimeError, match="missing 'routed_experts'"):
-            engine._maybe_push_router_replay_state(td, {"pad_size": 0})
+            engine._prepare_router_replay_inputs(td, {"pad_size": 0})
 
-    def test_replay_with_routed_experts_feeds_targets(self, controller):
-        """Successful R2 REPLAY path: routed_experts.values() is sliced
-        per-layer and forwarded to set_microbatch_targets. The
-        controller's ``_targets`` should then contain L per-layer
-        tensors. R2 must NOT build a replay_mask — RECORD captured
-        full-sequence routing, so REPLAY substitutes uniformly."""
-        L, topk = 3, 2
+    def test_replay_unbinds_targets_per_layer(self, controller):
+        """``routed_experts`` covers prompt + response for every token, so with
+        no padding the targets go through verbatim: one ``[total_nnz, topk]``
+        tensor per layer."""
         controller.begin_replay()
-        engine = _make_engine_with_controller(controller, mode="R2")
+        engine = _make_engine(controller)
 
         seq_lens = [4, 6]
-        routed = _make_jagged_routed_experts(seq_lens, L, topk)
+        routed = _make_jagged_routed_experts(seq_lens)
         td = TensorDict(
             {
                 "input_ids": _make_jagged_input_ids(seq_lens),
                 "routed_experts": routed,
-                # R2 must ignore response_mask even when present —
-                # gating prompt tokens out would re-introduce routing
-                # divergence on prompt tokens that propagates through
-                # attention KV into response logits/grad.
-                "response_mask": torch.tensor([[1, 1, 0, 0], [1, 1, 1, 0]], dtype=torch.int64),
             },
             batch_size=[2],
         )
-        engine._maybe_push_router_replay_state(td, {"pad_size": 0})
-        assert len(controller._targets) == L
-        for t in controller._targets:
-            assert t.shape == (sum(seq_lens), topk)
-        assert controller._replay_mask is None, "R2 must NOT build a replay_mask"
+        engine._prepare_router_replay_inputs(td, {"pad_size": 0})
 
-    def test_r3_with_response_mask_builds_per_token_mask(self, controller):
-        """Regression: R3 must build a per-rmpad-token mask from
-        ``response_mask`` (strided ``(bs, max_response_len)``) via
-        per-sample length arithmetic — calling ``response_mask.values()``
-        directly raises ``RuntimeError: values expected sparse tensor
-        layout but got Strided``.
+        assert len(controller._targets) == _L
+        flat = routed.values()
+        for pos, t in enumerate(controller._targets):
+            assert t.shape == (sum(seq_lens), _TOPK)
+            assert torch.equal(t, flat[:, pos, :])
 
-        Layout the test mimics: 2 samples with total lens [5, 7], where
-        the last 2 / 3 tokens of each are response. The expected flat
-        mask is ``[0,0,0,1,1, 0,0,0,0,1,1,1]``.
-        """
-        L, topk = 2, 1
+    def test_replay_pad_extends_targets_with_zero_rows(self, controller):
+        """With ``pad_to_length`` (or the Ulysses alignment) the packed sequence
+        the routers see is longer than the recorded routing, so the targets have
+        to grow by ``pad_size``. The tail is zero-filled, which the controller's
+        duplicate-top-k check reads as "route this natively"."""
         controller.begin_replay()
-        engine = _make_engine_with_controller(controller, mode="R3")
-
-        # Sample 0: 5 tokens (3 prompt + 2 response).
-        # Sample 1: 7 tokens (4 prompt + 3 response).
-        seq_lens = [5, 7]
-        max_response_len = 4  # padded; sample 0 has 2 response tokens, sample 1 has 3
-        response_mask = torch.zeros(2, max_response_len, dtype=torch.int64)
-        response_mask[0, :2] = 1  # sample 0: 2 response tokens
-        response_mask[1, :3] = 1  # sample 1: 3 response tokens
-
-        routed = _make_jagged_routed_experts(seq_lens, L, topk)
-        td = TensorDict(
-            {
-                "input_ids": _make_jagged_input_ids(seq_lens),
-                "routed_experts": routed,
-                "response_mask": response_mask,
-            },
-            batch_size=[2],
-        )
-        engine._maybe_push_router_replay_state(td, {"pad_size": 0})
-
-        assert controller._replay_mask is not None, "R3 must build a replay_mask"
-        expected = torch.tensor(
-            [
-                False,
-                False,
-                False,
-                True,
-                True,  # sample 0: 3 prompt + 2 response
-                False,
-                False,
-                False,
-                False,
-                True,
-                True,
-                True,  # sample 1: 4 prompt + 3 response
-            ],
-            dtype=torch.bool,
-        )
-        assert torch.equal(controller._replay_mask, expected), (
-            f"replay_mask mismatch: got {controller._replay_mask.tolist()}, expected {expected.tolist()}"
-        )
-
-    def test_r2_pad_to_length_extends_targets_and_gates_the_pad_tail(self, controller):
-        """With ``pad_to_length`` the packed sequence the routers see is longer than the
-        recorded routing, so the targets have to grow by ``pad_size``. The pad tail gets a
-        False mask: those positions have no recorded routing and their outputs never reach
-        the loss, so they route natively."""
-        L, topk = 3, 2
-        controller.begin_replay()
-        engine = _make_engine_with_controller(controller, mode="R2")
+        engine = _make_engine(controller)
 
         seq_lens = [4, 6]
         pad_size = 5
         td = TensorDict(
             {
                 "input_ids": _make_jagged_input_ids(seq_lens),
-                "routed_experts": _make_jagged_routed_experts(seq_lens, L, topk),
+                "routed_experts": _make_jagged_routed_experts(seq_lens),
             },
             batch_size=[2],
         )
-        engine._maybe_push_router_replay_state(td, {"pad_size": pad_size})
+        engine._prepare_router_replay_inputs(td, {"pad_size": pad_size})
 
-        padded_nnz = sum(seq_lens) + pad_size
-        assert len(controller._targets) == L
+        real_nnz = sum(seq_lens)
+        assert len(controller._targets) == _L
         for t in controller._targets:
-            assert t.shape == (padded_nnz, topk)
-        expected = torch.zeros(padded_nnz, dtype=torch.bool)
-        expected[: sum(seq_lens)] = True
-        assert torch.equal(controller._replay_mask, expected)
+            assert t.shape == (real_nnz + pad_size, _TOPK)
+            assert (t[real_nnz:] == 0).all(), "pad tail must be zero so the duplicate fallback fires"
 
-    def test_r3_pad_to_length_gates_both_prompt_and_pad(self, controller):
-        """The R3 response-only gate and the pad gate compose: prompt tokens carry rollout
-        placeholders, pad tokens carry nothing, and both fall through to native routing."""
-        L, topk = 2, 1
-        controller.begin_replay()
-        engine = _make_engine_with_controller(controller, mode="R3")
-
+    def test_replay_is_uniform_across_r2_and_r3(self, controller):
+        """R3 records at the rollout backend, which reports routing for every
+        token it forwarded — prompt included. So R3 needs no response-only
+        gate: it takes the same path as R2."""
         seq_lens = [5, 7]
-        pad_size = 4
-        response_mask = torch.zeros(2, 4, dtype=torch.int64)
-        response_mask[0, :2] = 1
-        response_mask[1, :3] = 1
-        td = TensorDict(
-            {
-                "input_ids": _make_jagged_input_ids(seq_lens),
-                "routed_experts": _make_jagged_routed_experts(seq_lens, L, topk),
-                "response_mask": response_mask,
-            },
-            batch_size=[2],
-        )
-        engine._maybe_push_router_replay_state(td, {"pad_size": pad_size})
+        td_fields = {
+            "input_ids": _make_jagged_input_ids(seq_lens),
+            "routed_experts": _make_jagged_routed_experts(seq_lens),
+            # Present but irrelevant: gating prompt tokens out would let them
+            # fall back to native routing and diverge from the rollout.
+            "response_mask": torch.tensor([[1, 1, 0, 0], [1, 1, 1, 0]], dtype=torch.int64),
+        }
 
-        expected = torch.tensor(
-            # sample 0: 3 prompt + 2 response | sample 1: 4 prompt + 3 response | 4 pad
-            [0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0],
-            dtype=torch.bool,
-        )
-        assert torch.equal(controller._replay_mask, expected)
-        for t in controller._targets:
-            assert t.shape == (sum(seq_lens) + pad_size, topk)
-
-    def test_r3_missing_response_mask_raises(self, controller):
-        """R3 needs response_mask to know which tokens to substitute.
-        Missing it is a plumbing bug, not a soft-fallback case."""
-        L, topk = 2, 1
-        controller.begin_replay()
-        engine = _make_engine_with_controller(controller, mode="R3")
-        seq_lens = [3, 4]
-        td = TensorDict(
-            {
-                "input_ids": _make_jagged_input_ids(seq_lens),
-                "routed_experts": _make_jagged_routed_experts(seq_lens, L, topk),
-            },
-            batch_size=[2],
-        )
-        with pytest.raises(RuntimeError, match="R3.*missing 'response_mask'"):
-            engine._maybe_push_router_replay_state(td, {"pad_size": 0})
-
-    def test_r3_response_longer_than_total_raises(self, controller):
-        """Defensive: if response_mask describes more tokens than the
-        actor's input, prompt_lens goes negative — fail-fast with a
-        typed error instead of letting repeat_interleave produce a
-        malformed mask that surfaces later as the EP all-to-all crash."""
-        L, topk = 2, 1
-        controller.begin_replay()
-        engine = _make_engine_with_controller(controller, mode="R3")
-        # Sample 0: 3 tokens but response_mask claims 5 → prompt_lens = -2.
-        seq_lens = [3, 4]
-        response_mask = torch.zeros(2, 6, dtype=torch.int64)
-        response_mask[0, :5] = 1  # impossible: 5 response > 3 total
-        response_mask[1, :2] = 1
-        td = TensorDict(
-            {
-                "input_ids": _make_jagged_input_ids(seq_lens),
-                "routed_experts": _make_jagged_routed_experts(seq_lens, L, topk),
-                "response_mask": response_mask,
-            },
-            batch_size=[2],
-        )
-        with pytest.raises(RuntimeError, match="response_mask sum exceeds total token"):
-            engine._maybe_push_router_replay_state(td, {"pad_size": 0})
-
-    def test_record_does_not_consume_routed_experts(self, controller):
-        """RECORD path doesn't read routed_experts (it's the *output*,
-        not an input). Even if the micro_batch happens to carry one,
-        it must not be touched."""
-        L, topk = 2, 1
-        controller.begin_record()
-        engine = _make_engine_with_controller(controller)
-        seq_lens = [3, 4]
-        td = TensorDict(
-            {
-                "input_ids": _make_jagged_input_ids(seq_lens),
-                "routed_experts": _make_jagged_routed_experts(seq_lens, L, topk),
-            },
-            batch_size=[2],
-        )
-        engine._maybe_push_router_replay_state(td, {"pad_size": 0})
-        # No targets set — RECORD ignores the field entirely.
-        assert controller._targets == []
+        targets_per_mode = {}
+        for mode in ("R2", "R3"):
+            ctrl = VeOmniRouterReplay()
+            ctrl.begin_replay()
+            engine = _make_engine(ctrl, mode=mode)
+            engine._prepare_router_replay_inputs(TensorDict(dict(td_fields), batch_size=[2]), {"pad_size": 0})
+            targets_per_mode[mode] = ctrl._targets
+        for r2, r3 in zip(targets_per_mode["R2"], targets_per_mode["R3"], strict=True):
+            assert torch.equal(r2, r3)
 
     def test_no_controller_is_a_noop(self):
         """If router_replay is disabled on the engine, the helper is a
         pure no-op even when the micro_batch is malformed."""
-        engine = _make_engine_with_controller(controller=None)
-        # Deliberately broken micro_batch — would raise if the helper
-        # progressed past the early ``return``.
+        engine = _make_engine(controller=None)
         td = TensorDict(
             {"input_ids": torch.randint(0, 100, (2, 8), dtype=torch.int64)},
             batch_size=[2],
         )
-        engine._maybe_push_router_replay_state(td, {"pad_size": 0})
-        # No raise = pass.
+        engine._prepare_router_replay_inputs(td, {"pad_size": 0})
+
+    def test_disabled_controller_is_a_noop(self, controller):
+        """Same for a controller that exists but is between steps."""
+        engine = _make_engine(controller)
+        td = TensorDict(
+            {"input_ids": torch.randint(0, 100, (2, 8), dtype=torch.int64)},
+            batch_size=[2],
+        )
+        engine._prepare_router_replay_inputs(td, {"pad_size": 0})
+        assert controller._targets == []
 
 
-def _silence_unused_action_import():
-    """``RouterReplayAction`` is imported for symmetry with the engine
-    code that consumes it; silence the lint warning in tests."""
-    _ = RouterReplayAction
+# ===========================================================
+# prepare_model_outputs
+# ===========================================================
+
+
+class TestPrepareModelOutputs:
+    """``super().prepare_model_outputs`` needs a real HF model output, so it is
+    stubbed out here — these tests only cover the routed-experts addendum."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_super(self, monkeypatch):
+        monkeypatch.setattr(
+            FSDPEngineWithLMHead,
+            "prepare_model_outputs",
+            lambda self, output, output_args, micro_batch, logits_processor_func: {"log_probs": None},
+        )
+
+    def test_record_output_is_unpadded_and_wrapped_per_sample(self, controller):
+        """The recorded indices arrive as ``[nnz + pad, L, topk]``; the pad
+        suffix is dropped and the rest is re-wrapped on ``input_ids`` offsets
+        so ``postprocess_batch_func`` can restore batch order."""
+        seq_lens = [4, 6]
+        pad_size = 3
+        controller.begin_record()
+        controller.begin_microbatch()
+
+        routers = [torch.nn.Linear(1, 1) for _ in range(_L)]
+        fired = []
+        for r in routers:
+            idx = torch.randint(0, 8, (sum(seq_lens) + pad_size, _TOPK), dtype=torch.int64)
+            controller.on_router_forward(r, torch.randn(idx.size(0), 8), idx)
+            fired.append(idx)
+
+        engine = _make_engine(controller)
+        input_ids = _make_jagged_input_ids(seq_lens)
+        td = TensorDict({"input_ids": input_ids}, batch_size=[2])
+        model_output = engine.prepare_model_outputs(
+            output=None,
+            output_args={"pad_size": pad_size},
+            micro_batch=td,
+            logits_processor_func=None,
+        )
+
+        routed = model_output["routed_experts"]
+        assert routed.is_nested
+        per_sample = routed.unbind()
+        assert [t.shape for t in per_sample] == [(s, _L, _TOPK) for s in seq_lens]
+        # Values line up with what the routers reported, pad suffix removed. The trip
+        # through the uint8 view is a reinterpretation, so it must not perturb a
+        # single id, and the result must come back as int16.
+        assert routed.dtype == torch.int16
+        expected = torch.stack(fired, dim=1)[: sum(seq_lens)]
+        assert torch.equal(routed.values(), expected)
+
+    def test_record_output_preserves_ids_above_uint8_range(self, controller):
+        """The whole point of int16 storage: expert ids past 255 must survive the
+        record -> gather -> unpad path. uint8 would wrap them silently."""
+        seq_lens = [3]
+        controller.begin_record()
+        controller.begin_microbatch()
+        idx = torch.tensor([[0, 255], [256, 511], [1023, 300]], dtype=torch.int64)
+        controller.on_router_forward(torch.nn.Linear(1, 1), torch.randn(3, 1024), idx)
+
+        engine = _make_engine(controller)
+        td = TensorDict({"input_ids": _make_jagged_input_ids(seq_lens)}, batch_size=[1])
+        model_output = engine.prepare_model_outputs(
+            output=None, output_args={"pad_size": 0}, micro_batch=td, logits_processor_func=None
+        )
+        assert torch.equal(model_output["routed_experts"].values(), idx.unsqueeze(1))
+
+    def test_replay_output_carries_no_routed_experts(self, controller):
+        """REPLAY consumes routing, it doesn't produce it."""
+        controller.begin_replay()
+        engine = _make_engine(controller)
+        td = TensorDict({"input_ids": _make_jagged_input_ids([3, 4])}, batch_size=[2])
+        model_output = engine.prepare_model_outputs(
+            output=None, output_args={"pad_size": 0}, micro_batch=td, logits_processor_func=None
+        )
+        assert "routed_experts" not in model_output
+
+    def _replay_forward(self, controller, num_routers: int, seq_lens: list[int], L: int = _L):
+        """Arm REPLAY with ``L`` layer slots, then fire ``num_routers`` routers."""
+        controller.begin_replay()
+        nnz = sum(seq_lens)
+        controller.begin_microbatch(targets=[torch.randint(0, 8, (nnz, _TOPK)) for _ in range(L)])
+        # Positions are keyed on ``id(module)``, so the routers must be kept
+        # alive for the whole forward -- CPython recycles the address of a
+        # temporary, which would collapse them onto one position.
+        routers = [torch.nn.Linear(1, 1) for _ in range(num_routers)]
+        for r in routers:
+            controller.on_router_forward(
+                r,
+                torch.randn(nnz, 8),
+                torch.randint(0, 8, (nnz, _TOPK), dtype=torch.int64),
+            )
+        engine = _make_engine(controller)
+        return engine.prepare_model_outputs(
+            output=None,
+            output_args={"pad_size": 0},
+            micro_batch=TensorDict({"input_ids": _make_jagged_input_ids(seq_lens)}, batch_size=[len(seq_lens)]),
+            logits_processor_func=None,
+        )
+
+    def test_replay_rejects_fewer_routers_than_layer_slots(self, controller):
+        """The DeepSeek-V4 failure mode: a family whose layers use more than one
+        router class, with only some classes hooked. Targets are matched by fire
+        order while the rollout indexes by absolute layer, so the unhooked layers'
+        slots are still consumed and every later layer replays the wrong experts.
+        ``on_router_forward`` cannot see this (it only trips when a router finds
+        no slot at all), and nothing downstream fails — the run just trains on
+        mis-routed experts. So it has to be caught once the forward is over."""
+        with pytest.raises(RuntimeError, match=r"2 routers fired but routed_experts carries 3"):
+            self._replay_forward(controller, num_routers=_L - 1, seq_lens=[4, 6])
+
+    def test_replay_accepts_one_router_per_layer_slot(self, controller):
+        """The contract holding is the common case and must stay silent."""
+        model_output = self._replay_forward(controller, num_routers=_L, seq_lens=[4, 6])
+        assert "routed_experts" not in model_output
+
+    def test_no_controller_output_is_untouched(self):
+        engine = _make_engine(controller=None)
+        td = TensorDict({"input_ids": _make_jagged_input_ids([3, 4])}, batch_size=[2])
+        model_output = engine.prepare_model_outputs(
+            output=None, output_args={"pad_size": 0}, micro_batch=td, logits_processor_func=None
+        )
+        assert "routed_experts" not in model_output

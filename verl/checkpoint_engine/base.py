@@ -539,8 +539,8 @@ class CheckpointEngineManager:
 
 
 async def split_weight_chunks(
-    weights: Generator[tuple[str, torch.Tensor], None, None], bucket_size: int
-) -> AsyncGenerator[tuple[TensorMeta, torch.Tensor], None]:
+    weights: Generator[tuple[str, torch.Tensor], None, None], bucket_size: int, meta_only: bool = False
+) -> AsyncGenerator[tuple[TensorMeta, torch.Tensor | None], None]:
     """Split the weight into chunks.
 
     Args:
@@ -563,7 +563,7 @@ async def split_weight_chunks(
                 chunk_size=chunk_size,
                 offset=None,
             )
-            yield (tensor_meta, buffer[chunk_offset : chunk_offset + chunk_size])
+            yield (tensor_meta, None if meta_only else buffer[chunk_offset : chunk_offset + chunk_size])
             chunk_offset += chunk_size
 
 
