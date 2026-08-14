@@ -112,6 +112,7 @@ ROLLOUT_CONFIG=(
     actor_rollout_ref.rollout.val_kwargs.n=$n_resp_per_prompt_val
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=$use_dynamic_bsz
+    actor_rollout_ref.rollout.enable_rollout_routing_replay=True
     +actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype=fp8
 )
 
