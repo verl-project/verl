@@ -93,9 +93,14 @@ bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
 | MiniCPM-o-2.6         | ✓      |          |          | FSDP            | nvidia    |
 | Moonlight-16B-A3B     | ✓      |          |          | Megatron        | nvidia    |
 | Nemotron-Nano-v3-30B-A3B | ✓   |          |          | Megatron        | nvidia    |
+| Nemotron-3.5-Lightning-30B-A3B | ✓ |      |          | Megatron        | nvidia    |
 | Seed-OSS-36B          | ✓      |          |          | FSDP2           | nvidia    |
 | GPT-OSS-20B           | ✓      | ✓        |          | FSDP, VeOmni    | nvidia    |
 | Mistral-Nemo-12B (RM demo) | ✓ |          |          | FSDP            | nvidia    |
+
+The Nemotron 3.5 Lightning launcher is an experimental configuration example;
+checkpoint loading, actor-to-vLLM weight synchronization, and a complete GRPO
+step still require H100 validation.
 
 LoRA variants live in `examples/tuning/lora/`, profiling variants in `examples/profile/`.
 Scale / hardware-specific demos (e.g. `run_qwen3_8b_fsdp_gb200.sh`, FP8 variants, VeOmni) keep a trailing suffix to stay discoverable.
