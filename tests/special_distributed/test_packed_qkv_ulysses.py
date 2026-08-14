@@ -27,6 +27,7 @@ import torch.distributed as dist
 
 from verl.utils import ulysses
 from verl.utils.ulysses import (
+    gather_packed_qkv_seq_scatter_heads,
     gather_qkv_seq_scatter_heads,
     gather_seq_scatter_heads,
     set_ulysses_sequence_parallel_group,
@@ -104,3 +105,21 @@ def test_packed_qkv_matches_three_all_to_all_in_forward_and_backward(dtype: torc
 
     for packed, legacy in zip(packed_inputs, legacy_inputs, strict=True):
         torch.testing.assert_close(packed.grad, legacy.grad, atol=0, rtol=0)
+
+
+def test_prepacked_qkv_api_matches_three_all_to_all():
+    q, k, v = _make_qkv(torch.float32, head_dim=1)
+    packed = torch.cat((q, k, v), dim=0)
+
+    with patch.object(ulysses, "all_to_all_tensor", wraps=ulysses.all_to_all_tensor) as all_to_all:
+        outputs = gather_packed_qkv_seq_scatter_heads(
+            packed,
+            (q.size(0), k.size(0), v.size(0)),
+            seq_dim=2,
+            head_dim=1,
+        )
+        assert all_to_all.call_count == 1
+
+    legacy_outputs = tuple(gather_seq_scatter_heads(x, seq_dim=2, head_dim=1) for x in (q, k, v))
+    for actual, expected in zip(outputs, legacy_outputs, strict=True):
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)

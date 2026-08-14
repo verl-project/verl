@@ -139,12 +139,16 @@ def main():
 
             if dist.get_rank() == 0:
                 speedup = legacy_ms / packed_total_ms
+                prepacked_total_ms = packed_a2a_ms + unpack_ms
                 print(
                     f"| {world_size} | {dtype_name} | {local_seq_len} | {args.heads} | {args.head_dim} | "
                     f"{legacy_ms:.3f} | {pack_ms:.3f} | {packed_a2a_ms:.3f} | {unpack_ms:.3f} | "
                     f"{packed_total_ms:.3f} | {speedup:.3f}x |"
                 )
                 print(f"  peak HBM: three-A2A={legacy_peak / 2**20:.1f} MiB, packed={packed_peak / 2**20:.1f} MiB")
+                print(
+                    f"  pre-packed API: {prepacked_total_ms:.3f} ms, {legacy_ms / prepacked_total_ms:.3f}x vs three-A2A"
+                )
 
     set_ulysses_sequence_parallel_group(None)
     dist.destroy_process_group()
