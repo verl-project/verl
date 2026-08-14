@@ -763,6 +763,22 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 torch.distributed.barrier()
                 per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
                 metrics = await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
+                # Drain EP and PP NCCL streams before the world exit barrier.
+                # The world barrier uses a different communicator (different CUDA
+                # stream) from EXPERT_MODEL_PARALLEL_GROUP and
+                # PIPELINE_MODEL_PARALLEL_GROUP, so it can complete while
+                # gather_from_ep_ranks / broadcast_from_pp_rank ALLGATHERs are
+                # still in-flight on those streams. Explicit group barriers flush
+                # each stream first.
+                try:
+                    from megatron.core import parallel_state as mpu
+
+                    if mpu.get_expert_model_parallel_world_size() > 1:
+                        torch.distributed.barrier(group=mpu.get_expert_model_parallel_group())
+                    if mpu.get_pipeline_model_parallel_world_size() > 1:
+                        torch.distributed.barrier(group=mpu.get_pipeline_model_parallel_group())
+                except ImportError:
+                    pass
                 torch.distributed.barrier()
             finally:
                 self._distributed_group_lock.release()
