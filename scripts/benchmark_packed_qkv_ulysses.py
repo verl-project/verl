@@ -25,7 +25,11 @@ from collections.abc import Callable
 import torch
 import torch.distributed as dist
 
-from verl.utils.ulysses import gather_seq_scatter_heads, set_ulysses_sequence_parallel_group
+from verl.utils.ulysses import (
+    gather_qkv_seq_scatter_heads,
+    gather_seq_scatter_heads,
+    set_ulysses_sequence_parallel_group,
+)
 
 _DTYPES = {
     "fp32": torch.float32,
@@ -83,6 +87,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--heads", type=int, default=16)
     parser.add_argument("--head-dim", type=int, default=128)
+    parser.add_argument("--gqa-kv-heads", type=int, default=4)
     parser.add_argument("--local-seq-lens", type=int, nargs="+", default=[256, 1024, 4096])
     parser.add_argument("--dtypes", nargs="+", choices=_DTYPES, default=_DEFAULT_DTYPES)
     parser.add_argument("--warmup", type=int, default=20)
@@ -101,6 +106,8 @@ def main():
     world_size = dist.get_world_size()
     if args.heads % world_size:
         raise ValueError(f"--heads ({args.heads}) must be divisible by world size ({world_size})")
+    if args.gqa_kv_heads >= args.heads or args.gqa_kv_heads % world_size:
+        raise ValueError("--gqa-kv-heads must be smaller than --heads and divisible by world size")
     set_ulysses_sequence_parallel_group(dist.group.WORLD)
 
     if dist.get_rank() == 0:
@@ -148,6 +155,24 @@ def main():
                 print(f"  peak HBM: three-A2A={legacy_peak / 2**20:.1f} MiB, packed={packed_peak / 2**20:.1f} MiB")
                 print(
                     f"  pre-packed API: {prepacked_total_ms:.3f} ms, {legacy_ms / prepacked_total_ms:.3f}x vs three-A2A"
+                )
+
+            gqa_shape = (args.batch_size, args.gqa_kv_heads, local_seq_len, args.head_dim)
+            gqa_k = _random_tensor(gqa_shape, dtype, device)
+            gqa_v = _random_tensor(gqa_shape, dtype, device)
+
+            def three_gqa_all_to_all(q=q, k=gqa_k, v=gqa_v):
+                return tuple(gather_seq_scatter_heads(x, seq_dim=2, head_dim=1) for x in (q, k, v))
+
+            def variable_gqa_all_to_all(q=q, k=gqa_k, v=gqa_v):
+                return gather_qkv_seq_scatter_heads(q, k, v, seq_dim=2, head_dim=1)
+
+            legacy_gqa_ms = _time_ms(three_gqa_all_to_all, args.warmup, args.iterations)
+            packed_gqa_ms = _time_ms(variable_gqa_all_to_all, args.warmup, args.iterations)
+            if dist.get_rank() == 0:
+                print(
+                    f"  GQA Hq/Hkv={args.heads}/{args.gqa_kv_heads}: three-A2A={legacy_gqa_ms:.3f} ms, "
+                    f"variable-packed={packed_gqa_ms:.3f} ms, speedup={legacy_gqa_ms / packed_gqa_ms:.3f}x"
                 )
 
     set_ulysses_sequence_parallel_group(None)

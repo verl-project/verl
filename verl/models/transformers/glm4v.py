@@ -311,8 +311,10 @@ def glm4v_attn_forward(
         )
         mrope_section = self.rope_parameter.get("mrope_section", None)
     query_states, key_states = apply_multimodal_rotary_pos_emb(query_states, key_states, cos, sin, mrope_section)
-    key_states = repeat_kv(key_states, self.num_key_value_groups)
-    value_states = repeat_kv(value_states, self.num_key_value_groups)
+    sp_size = get_ulysses_sequence_parallel_world_size()
+    if sp_size == 1 or key_states.size(1) % sp_size:
+        key_states = repeat_kv(key_states, self.num_key_value_groups)
+        value_states = repeat_kv(value_states, self.num_key_value_groups)
     dropout_rate = 0.0 if not self.training else self.attention_dropout
 
     # This is before the transpose

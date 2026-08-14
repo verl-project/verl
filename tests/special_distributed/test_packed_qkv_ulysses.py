@@ -62,22 +62,27 @@ def _init_dist():
             dist.destroy_process_group()
 
 
-def _make_qkv(dtype: torch.dtype, head_dim: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _make_qkv(
+    dtype: torch.dtype, head_dim: int, kv_heads: int | None = None
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     torch.manual_seed(1234 + rank)
     device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
     heads = max(8, 2 * world_size)
     heads = ((heads + world_size - 1) // world_size) * world_size
+    kv_heads = heads if kv_heads is None else kv_heads
     shape = [2, 8, 8, 16]
     shape[head_dim] = heads
+    kv_shape = shape.copy()
+    kv_shape[head_dim] = kv_heads
 
     def random(shape: list[int]) -> torch.Tensor:
         # torch.randn does not support FP8 directly. Creating FP32 samples then
         # casting mirrors how FP8 activation buffers are normally produced.
         return torch.randn(shape, device=device, dtype=torch.float32).to(dtype)
 
-    return random(shape), random(shape), random(shape)
+    return random(shape), random(kv_shape), random(kv_shape)
 
 
 @pytest.mark.parametrize("dtype", _TEST_DTYPES, ids=_TEST_DTYPE_IDS)
@@ -119,6 +124,42 @@ def test_prepacked_qkv_api_matches_three_all_to_all():
             head_dim=1,
         )
         assert all_to_all.call_count == 1
+
+    legacy_outputs = tuple(gather_seq_scatter_heads(x, seq_dim=2, head_dim=1) for x in (q, k, v))
+    for actual, expected in zip(outputs, legacy_outputs, strict=True):
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("dtype", _TEST_DTYPES, ids=_TEST_DTYPE_IDS)
+def test_gqa_uses_one_variable_payload_all_to_all_in_forward_and_backward(dtype: torch.dtype):
+    world_size = dist.get_world_size()
+    q, k, v = _make_qkv(dtype, head_dim=1, kv_heads=world_size)
+    assert q.shape != k.shape == v.shape
+    packed_inputs = [x.detach().clone().requires_grad_(True) for x in (q, k, v)]
+    legacy_inputs = [x.detach().clone().requires_grad_(True) for x in (q, k, v)]
+
+    with patch.object(dist, "all_to_all_single", wraps=dist.all_to_all_single) as all_to_all:
+        outputs = gather_qkv_seq_scatter_heads(*packed_inputs, seq_dim=2, head_dim=1)
+        assert all_to_all.call_count == 1
+
+    legacy_outputs = tuple(gather_seq_scatter_heads(x, seq_dim=2, head_dim=1) for x in legacy_inputs)
+    for actual, expected in zip(outputs, legacy_outputs, strict=True):
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+    sum(output.float().square().mean() for output in outputs).backward()
+    sum(output.float().square().mean() for output in legacy_outputs).backward()
+    for actual, expected in zip(packed_inputs, legacy_inputs, strict=True):
+        torch.testing.assert_close(actual.grad, expected.grad, atol=0, rtol=0)
+
+
+def test_incompatible_qkv_falls_back_to_three_all_to_all():
+    q, k, v = _make_qkv(torch.float32, head_dim=1)
+    k = k[:, :, :-1, :].contiguous()
+    v = v[:, :, :-1, :].contiguous()
+
+    with patch.object(ulysses, "all_to_all_tensor", wraps=ulysses.all_to_all_tensor) as all_to_all:
+        outputs = gather_qkv_seq_scatter_heads(q, k, v, seq_dim=2, head_dim=1)
+        assert all_to_all.call_count == 3
 
     legacy_outputs = tuple(gather_seq_scatter_heads(x, seq_dim=2, head_dim=1) for x in (q, k, v))
     for actual, expected in zip(outputs, legacy_outputs, strict=True):
