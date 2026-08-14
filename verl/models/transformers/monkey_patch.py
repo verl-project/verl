@@ -27,7 +27,7 @@ from verl.utils.import_utils import is_trl_available
 from verl.utils.transformers_compat import is_transformers_version_in_range
 from verl.utils.ulysses import (
     gather_heads_scatter_seq,
-    gather_seq_scatter_heads,
+    gather_qkv_seq_scatter_heads,
     get_ulysses_sequence_parallel_group,
     get_ulysses_sequence_parallel_world_size,
     slice_input_tensor,
@@ -128,9 +128,9 @@ def _ulysses_flash_attention_forward(
         value_states = repeat_kv(value_states, repeats)
 
         # (bsz, seq_len/n, n_head, head_dim) -> (bsz, seq_len, n_head/n, head_dim)
-        query_states = gather_seq_scatter_heads(query_states, seq_dim=1, head_dim=2)
-        key_states = gather_seq_scatter_heads(key_states, seq_dim=1, head_dim=2)
-        value_states = gather_seq_scatter_heads(value_states, seq_dim=1, head_dim=2)
+        query_states, key_states, value_states = gather_qkv_seq_scatter_heads(
+            query_states, key_states, value_states, seq_dim=1, head_dim=2
+        )
 
         # TODO: all_gather position_ids because `prepare_fa2_from_position_ids` needs it, we can eliminate
         # this all_gather by passing cu_seq_lens_q, cu_seq_lens_k, max_length_k, max_length_q explicitly.
