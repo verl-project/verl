@@ -441,6 +441,10 @@ actor_rollout_ref:
       dropout_position: pre
       lora_A_init_method: xavier
       lora_B_init_method: zero
+      normalize_moe_lora: false
+      share_expert_adapters: true
+      experts_shared_outer_loras: false
+      lora_plus_ratio: 1.0
       a2a_experimental: false
       dtype: null
       adapter_path: null
@@ -654,6 +658,10 @@ critic:
       dropout_position: pre
       lora_A_init_method: xavier
       lora_B_init_method: zero
+      normalize_moe_lora: false
+      share_expert_adapters: true
+      experts_shared_outer_loras: false
+      lora_plus_ratio: 1.0
       a2a_experimental: false
       dtype: null
       adapter_path: null

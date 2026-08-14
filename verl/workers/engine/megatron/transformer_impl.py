@@ -545,7 +545,14 @@ class MegatronEngine(BaseEngine):
             fp16=self.param_dtype == torch.float16,
             bf16=self.param_dtype == torch.bfloat16,
         )
-        optimizer = get_megatron_optimizer(model=self.module, config=optim_config_megatron)
+        # LoRA+: lr_B = lora_plus_ratio * lr_A (read from the lora config dict).
+        lora_cfg = getattr(self.model_config, "lora", {})
+        lora_plus_ratio = float(lora_cfg.get("lora_plus_ratio", 1.0))
+        optimizer = get_megatron_optimizer(
+            model=self.module,
+            config=optim_config_megatron,
+            lora_plus_ratio=lora_plus_ratio,
+        )
         register_megatron_training_hooks(self.module, optimizer)
         return optimizer
 
