@@ -1,7 +1,7 @@
 Ascend Install Guidance
 =================
 
-Last updated: 2026/08/03.
+Last updated: 2026/08/13.
 
 关键更新
 --------
@@ -92,14 +92,14 @@ MindSpeed-LLM：MindSpeed-LLM是基于昇腾生态的大语言模型分布式训
 依赖          版本                                     说明
 ============= ======================================= ===================
 HDK           ``26.0.rc1``                            NPU硬件驱动与固件
-CANN          ``9.0.0``                               CANN软件，帮助开发者实现在昇腾软硬件平台上开发和运行AI业务
-Python        ``>=3.10, <3.12``\ ，推荐 ``3.11``      
+CANN          ``9.1.0``                               CANN软件，帮助开发者实现在昇腾软硬件平台上开发和运行AI业务
+Python        ``>=3.10, <3.13``\ ，推荐 ``3.12``      
 torch         ``2.10.0``                              PyTorch 深度学习框架基础包
-torch_npu     ``2.10.0.post2``                        NPU PyTorch 适配插件        
+torch_npu     ``2.10.0.post4``                        NPU PyTorch 适配插件        
 torchvision   ``0.25.0``                              PyTorch 图像处理库
 torchaudio    ``2.10.0``                              PyTorch 音频处理库
 triton        ``3.5.0``                               Triton，用于编写自定义算子
-triton-ascend ``3.2.1``                               NPU Triton 适配，安装命令需参考脚本 `安装脚本 <../../../scripts/install_vllm_mcore_npu.sh>`_
+triton-ascend ``3.2.2``                               NPU Triton 适配，安装命令需参考脚本 `安装脚本 <../../../scripts/install_vllm_mcore_npu.sh>`_
 transformers  ``5.10.4``                              Hugging Face 大模型库，提供模型架构与预训练权重
 vLLM          ``0.23.0``                              高性能 LLM 推理与服务引擎
 vLLM-Ascend   ``0.23.0``                              NPU vLLM 后端适配  
@@ -126,8 +126,8 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
    # 安装NPU驱动
    sudo yum install -y Atlas-A3-hdk-npu-driver-26.0.rc1
    # 安装Toolkit，可指定--install-path 自定义路径
-   sudo yum install -y Ascend-cann-toolkit-9.0.0
-   sudo yum install -y Ascend-cann-A3-ops-9.0.0
+   sudo yum install -y Ascend-cann-toolkit-9.1.0
+   sudo yum install -y Ascend-cann-A3-ops-9.1.0
    # 安装后验证
    source /usr/local/Ascend/ascend-toolkit/set_env.sh
    python3 -c "import acl;print(acl.get_soc_name())"
@@ -144,7 +144,7 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
    # 使能CANN环境， 如果您自定义了CANN的路径，请根据自定义路径修改以下使能命令
    source /usr/local/Ascend/ascend-toolkit/set_env.sh
    source /usr/local/Ascend/nnal/atb/set_env.sh
-   conda create -n verl-vllm-npu python=3.11 -y
+   conda create -n verl-vllm-npu python=3.12 -y
    conda activate verl-vllm-npu
    git clone --recursive https://github.com/verl-project/verl.git
    bash verl/scripts/install_vllm_mcore_npu.sh
