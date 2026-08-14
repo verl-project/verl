@@ -27,7 +27,7 @@ from typing import Any
 
 from verl.trainer.config import CheckpointConfig
 
-__all__ = ["McoreCheckpointConfig", "MindSpeedCheckpointConfig"]
+__all__ = ["McoreCheckpointConfig"]
 
 
 @dataclass
@@ -47,14 +47,3 @@ class McoreCheckpointConfig(CheckpointConfig):
     """
 
     mbridge_config: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class MindSpeedCheckpointConfig(McoreCheckpointConfig):
-    """Checkpoint config for the MindSpeed backend.
-
-    MindSpeed reuses the Megatron checkpoint manager and therefore inherits the
-    mbridge knob from :class:`McoreCheckpointConfig`. A dedicated class is kept
-    so MindSpeed-only fields (should any appear in the future) have a natural
-    home and so the ``_target_`` in MindSpeed yamls mirrors the backend name.
-    """

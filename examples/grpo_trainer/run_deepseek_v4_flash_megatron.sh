@@ -96,8 +96,6 @@ DATA=(
     data.truncation=left
     data.dataloader_num_workers=${DATALOADER_NUM_WORKERS}
     +data.apply_chat_template_kwargs.enable_thinking=${ENABLE_THINKING}
-    data.continuous_token.enable=True
-    data.continuous_token.model_family=deepseekv4
 )
 
 MODEL=(

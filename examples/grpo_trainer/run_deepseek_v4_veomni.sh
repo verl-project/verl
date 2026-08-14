@@ -130,8 +130,6 @@ DATA=(
     data.filter_overlong_prompts_workers=64
     data.truncation='error'
     +data.apply_chat_template_kwargs.enable_thinking=${enable_thinking}
-    data.continuous_token.enable=True
-    data.continuous_token.model_family=deepseekv4
 )
 
 TRAINER=(

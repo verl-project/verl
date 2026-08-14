@@ -33,7 +33,6 @@ Last updated: 2026/08/13.
    - `Docker镜像获取、构建和使用 <#1-docker镜像获取构建和使用>`_
    - `自定义安装-vLLM + FSDP/Megatron <#2-自定义安装-vllm--fsdpmegatron>`_
    - `自定义安装-SGLang + FSDP/Megatron <#3-自定义安装-sglang--fsdpmegatron>`_
-   - `训练后端拓展-MindSpeed-LLM后端部署 <#4-训练后端拓展>`_
 - `附录 <#附录>`_
 
 硬件支持
@@ -62,14 +61,6 @@ Atlas 800T A3
      - FSDP/FSDP2/Megatron
    * - SGLang
      - FSDP/FSDP2/Megatron
-
-训练后端拓展
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-verl将训推后端抽象解耦，支持灵活接入自定义各类训推后端，当前拓展训练后端如下：
-
-MindSpeed-LLM：MindSpeed-LLM是基于昇腾生态的大语言模型分布式训练套件，当前已接入verl，安装部署方法参照章节 `训练后端拓展-MindSpeed-LLM后端部署 <#mindspeed-llm-训练后端支持>`_
-
 
 部署指南
 --------
@@ -246,44 +237,6 @@ SGLang 使用注意事项
 
    # 使能推理 EP 时需要
    export SGLANG_DEEPEP_BF16_DISPATCH=1
-
-4. 训练后端拓展
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-MindSpeed-LLM 训练后端支持
-^^^^^^^^^^^^^^^
-
-如需使用基于 Megatron/MindSpeed 体系的 MindSpeed-LLM 训练后端，需要额外下载
-MindSpeed-LLM。需要注意的是，MindSpeed-LLM 训练后端依赖 MindSpeed-LLM
-master 分支、MindSpeed master 分支以及 Megatron-LM ``core_r0.16.0``
-分支。
-
-MindSpeed-LLM 及相关依赖的源码安装指令：
-
-.. code:: bash
-
-   # 下载 MindSpeed-LLM、MindSpeed 和 Megatron-LM
-   git clone https://gitcode.com/Ascend/MindSpeed-LLM.git
-   git clone https://gitcode.com/Ascend/MindSpeed.git
-   git clone --depth 1 --branch core_r0.16.0 https://github.com/NVIDIA/Megatron-LM.git
-
-   # 配置环境变量
-   export PYTHONPATH=$PYTHONPATH:/your/path/Megatron-LM
-   export PYTHONPATH=$PYTHONPATH:/your/path/MindSpeed
-   export PYTHONPATH=$PYTHONPATH:/your/path/MindSpeed-LLM
-
-   # 安装 mbridge
-   pip install mbridge
-
-MindSpeed-LLM 作为基于 Megatron/MindSpeed 体系的昇腾 LLM 训练后端使用时，使用方式如下：
-
-1. 使能 verl worker 模型 ``strategy`` 配置为 ``mindspeed``\ ，例如
-   ``actor_rollout_ref.actor.strategy=mindspeed``\ 。
-2. MindSpeed-LLM 自定义入参可通过 ``llm_kwargs`` 参数传入，例如对 MOE
-   模型开启 GMM 特性可使用
-   ``+actor_rollout_ref.actor.mindspeed.llm_kwargs.moe_grouped_gemm=True``\ 。
-3. 更多特性信息可参考 `MindSpeed-LLM
-   内的特性文档 <https://gitcode.com/Ascend/MindSpeed-LLM/tree/master/docs/zh/pytorch/features/mcore>`__\ 。
 
 附录
 ----------------

@@ -33,7 +33,7 @@ VeRL 推理引擎采用分层架构设计，通过抽象接口与工厂模式，
 
 ### 2.2 训练引擎选择与适配
 
-VeRL 主线代码将训练引擎抽象为 `Engine`类，通过标准化接口层实现调度逻辑与底层训练实现的解耦。该架构设计支持 FSDP、Megatron、MindSpeed-LLM 等多种训练后端灵活接入、即插即用，无需修改 VeRL 核心算法与调度逻辑，大幅降低迁移适配成本。
+VeRL 主线代码将训练引擎抽象为 `Engine`类，通过标准化接口层实现调度逻辑与底层训练实现的解耦。该架构设计支持 FSDP、Megatron 等多种训练后端灵活接入、即插即用，无需修改 VeRL 核心算法与调度逻辑，大幅降低迁移适配成本。
 
 当前 NPU 已通过 `is_npu_available` 接口完成设备自动检测，并自动应用对应的 NPU 设备适配补丁。目前只需通过配置 model_engine=fsdp/megatron，即可一键切换训练后端至 FSDP、Megatron，系统会自动加载对应后端的 NPU 适配逻辑，无需额外修改代码。VeRL中昇腾对Megatron做了适配与优化，具体特性配置参考[verl-MindSpeed特性文档](https://gitcode.com/Ascend/MindSpeed/blob/master/docs/zh/user-guide/verl.md)设置。
 
