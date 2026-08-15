@@ -1334,6 +1334,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         model_output = {}
 
+        # Some internal callers construct output_args directly instead of going
+        # through prepare_model_inputs. Without the optimization metadata, fall
+        # back to the original out-of-place scaling path.
+        temperature_is_one = output_args.get("temperature_is_one", False)
+
         input_ids = micro_batch["input_ids"]
 
         if use_remove_padding:
@@ -1367,7 +1372,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 logits_rmpad = _scale_logits_by_temperature(
                     logits_rmpad,
                     temperature_rmpad.unsqueeze(-1),
-                    is_unit_temperature=output_args["temperature_is_one"],
+                    is_unit_temperature=temperature_is_one,
                 )
 
                 log_probs = None
@@ -1464,7 +1469,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 logits = _scale_logits_by_temperature(
                     logits,
                     temperature,
-                    is_unit_temperature=output_args["temperature_is_one"],
+                    is_unit_temperature=temperature_is_one,
                 )
 
                 if calculate_entropy:
