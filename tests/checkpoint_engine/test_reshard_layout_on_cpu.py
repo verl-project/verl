@@ -50,7 +50,7 @@ def test_local_shape_rejects_tensor_ranks_unsupported_by_m2n(shape):
         local_shape(shape, shard_dim=None, shard_size=1)
 
 
-def test_shard_api_maps_raw_fsdp_to_rollout_tp():
+def test_shard_api_maps_sharded_source_to_sharded_destination():
     exported = (
         "model.layers.0.mlp.down_proj.weight",
         torch.empty(16, device="meta"),
@@ -59,7 +59,11 @@ def test_shard_api_maps_raw_fsdp_to_rollout_tp():
 
     weight = local_weight_desc_from_shard_api(exported, destination_shard_dim=1)
     source, destination = build_reshard_layouts(
-        weight, source_dp=2, source_shard_size=16, destination_dp=8, destination_tp_size=4
+        weight,
+        source_replica_size=2,
+        source_shard_size=16,
+        destination_replica_size=8,
+        destination_shard_size=4,
     )
 
     assert weight.tensor.shape == (2, 8)
@@ -79,7 +83,11 @@ def test_shard_api_preserves_replicated_layouts():
 
     weight = local_weight_desc_from_shard_api(exported, destination_shard_dim=None)
     source, destination = build_reshard_layouts(
-        weight, source_dp=2, source_shard_size=16, destination_dp=8, destination_tp_size=4
+        weight,
+        source_replica_size=2,
+        source_shard_size=16,
+        destination_replica_size=8,
+        destination_shard_size=4,
     )
 
     assert weight.source_shard_dim is None
@@ -98,7 +106,11 @@ def test_shard_api_accepts_one_dimensional_source_mesh():
 
     weight = local_weight_desc_from_shard_api(exported, destination_shard_dim=1)
     source, _ = build_reshard_layouts(
-        weight, source_dp=1, source_shard_size=16, destination_dp=8, destination_tp_size=4
+        weight,
+        source_replica_size=1,
+        source_shard_size=16,
+        destination_replica_size=8,
+        destination_shard_size=4,
     )
 
     assert weight.source_mesh_dims == (1, 16)
@@ -177,10 +189,10 @@ def test_layout_builder_rejects_source_shard_size_mismatch():
     with pytest.raises(ValueError, match="source mesh shard size 16 does not match configured 8"):
         build_reshard_layouts(
             weight,
-            source_dp=2,
+            source_replica_size=2,
             source_shard_size=8,
-            destination_dp=8,
-            destination_tp_size=4,
+            destination_replica_size=8,
+            destination_shard_size=4,
         )
 
 
@@ -192,11 +204,11 @@ def test_layout_builder_rejects_source_replica_size_mismatch():
     )
     weight = local_weight_desc_from_shard_api(exported, destination_shard_dim=1)
 
-    with pytest.raises(ValueError, match="source replica size 2 does not match configured source_dp 4"):
+    with pytest.raises(ValueError, match="source replica size 2 does not match configured source replica size 4"):
         build_reshard_layouts(
             weight,
-            source_dp=4,
+            source_replica_size=4,
             source_shard_size=16,
-            destination_dp=8,
-            destination_tp_size=4,
+            destination_replica_size=8,
+            destination_shard_size=4,
         )

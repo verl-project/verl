@@ -191,18 +191,17 @@ def local_weight_desc_from_shard_api(
 def build_reshard_layouts(
     weight: LocalWeightDesc,
     *,
-    source_dp: int,
+    source_replica_size: int,
     source_shard_size: int,
-    destination_dp: int,
-    destination_tp_size: int,
+    destination_replica_size: int,
+    destination_shard_size: int,
 ) -> tuple[ReshardLayout, ReshardLayout]:
     """Build source and destination layouts in one combined communicator.
 
-    A sharded source is modeled as (source_dp, source_shard_size), and a
-    sharded destination as (destination_dp, destination_tp_size). For a
-    replicated weight, all ranks are flattened onto the first mesh dimension
-    and the second dimension is one. This lets every weight use the same
-    two-placement representation.
+    A sharded side is modeled as (replica_size, shard_size). For a replicated
+    weight, all ranks are flattened onto the first mesh dimension and the
+    second dimension is one. This lets every weight use the same two-placement
+    representation without assigning parallelism roles to the mesh dimensions.
 
     Source ranks occupy the first contiguous communicator range. Destination
     ranks immediately follow them, so the destination "start_rank" equals the
@@ -210,13 +209,14 @@ def build_reshard_layouts(
     filtering, is the caller's responsibility and happens before this function.
     """
 
-    if min(source_dp, source_shard_size, destination_dp, destination_tp_size) <= 0:
+    if min(source_replica_size, source_shard_size, destination_replica_size, destination_shard_size) <= 0:
         raise ValueError("Reshard topology sizes must be positive")
     if weight.source_mesh_dims is not None:
-        source_replica_size, exported_shard_size = weight.source_mesh_dims
-        if source_replica_size != source_dp:
+        exported_replica_size, exported_shard_size = weight.source_mesh_dims
+        if exported_replica_size != source_replica_size:
             raise ValueError(
-                f"source replica size {source_replica_size} does not match configured source_dp {source_dp}"
+                f"source replica size {exported_replica_size} does not match configured source replica size "
+                f"{source_replica_size}"
             )
         if exported_shard_size != source_shard_size:
             raise ValueError(
@@ -227,12 +227,14 @@ def build_reshard_layouts(
 
     # With no tensor shard dimension, placements=(None, None) replicates the
     # full tensor across the flattened rank dimension and a singleton dimension.
-    source_world_size = source_dp * source_shard_size
-    source_dims = (source_dp, source_shard_size) if weight.source_shard_dim is not None else (source_world_size, 1)
+    source_world_size = source_replica_size * source_shard_size
+    source_dims = (
+        (source_replica_size, source_shard_size) if weight.source_shard_dim is not None else (source_world_size, 1)
+    )
     destination_dims = (
-        (destination_dp, destination_tp_size)
+        (destination_replica_size, destination_shard_size)
         if weight.destination_shard_dim is not None
-        else (destination_dp * destination_tp_size, 1)
+        else (destination_replica_size * destination_shard_size, 1)
     )
     return (
         ReshardLayout(
@@ -245,6 +247,6 @@ def build_reshard_layouts(
             mesh_dims=destination_dims,
             start_rank=source_world_size,
             placements=(None, weight.destination_shard_dim),
-            local_shape=local_shape(weight.global_shape, weight.destination_shard_dim, destination_tp_size),
+            local_shape=local_shape(weight.global_shape, weight.destination_shard_dim, destination_shard_size),
         ),
     )
