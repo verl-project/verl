@@ -34,8 +34,6 @@ CONFIG_DIR = Path(__file__).resolve().parents[2] / "verl" / "trainer" / "config"
 KNOWN_UNMAPPED = {
     # Mandatory (???) in the YAML, so OmegaConf reports it as absent.
     "name",
-    # Nested ServerConfig block; read by the trtllm rollout only.
-    "server",
     # No reader in the tree.
     "custom",
     "layer_name_map",
