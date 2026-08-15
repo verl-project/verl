@@ -170,6 +170,11 @@ class RolloutConfig(BaseConfig):
     # Whether to enable full determinism for reproducibility.
     full_determinism: bool = False
 
+    # Extra in-flight requests the replica holding a multi-turn session may have over the
+    # least-loaded one before that session is re-routed. null never re-routes (unchanged
+    # behavior), 0 always moves to the least-loaded replica. Ignored under full_determinism.
+    affinity_break_margin: Optional[int] = None
+
     # Random seed for rollout. Used as the seed for vLLM sampling and
     # enable_full_determinism() when full_determinism is True.
     seed: int = 42
