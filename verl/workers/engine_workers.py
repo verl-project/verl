@@ -762,9 +762,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         log_gpu_memory_usage("Before resume weights", logger=logger)
 
         # 1. resume rollout memory (weights were released during sleep)
-        # sleep_level=1 (adapter mode) never released weights, so do not resume them.
-        # Backends other than sglang carry no sleep_level, hence the default.
-        if self.config.rollout.free_cache_engine and getattr(self.rollout, "sleep_level", 2) != 1:
+        # sleep_level=1 (adapter mode) in SGLang never released weights, so do not resume them.
+        # vLLM is different: its level-1 sleep goes through CuMemAllocator.sleep(offload_tags=("weights",))
+        is_sglang = self.config.rollout.get("name", "") == "sglang"
+        if is_sglang:
+            resume_weights = self.config.rollout.free_cache_engine and getattr(self.rollout, "sleep_level", 2) != 1
+        else:
+            # vLLM: level-1 sleep still unmaps weights → must resume.
+            resume_weights = self.config.rollout.free_cache_engine
+        if resume_weights:
             await self.rollout.resume(tags=["weights"])
         log_gpu_memory_usage("After resume weights", logger=logger)
 
