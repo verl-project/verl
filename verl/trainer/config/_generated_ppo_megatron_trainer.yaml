@@ -310,20 +310,24 @@ actor_rollout_ref:
     temperature: 1.0
     top_k: -1
     top_p: 1
+    repetition_penalty: 1.0
     full_determinism: false
     seed: 42
     prompt_length: ${oc.select:data.max_prompt_length,512}
     response_length: ${oc.select:data.max_response_length,512}
     dtype: bfloat16
     gpu_memory_utilization: 0.5
+    standalone_gpu_memory_utilization: null
     ignore_eos: false
     enforce_eager: false
     cudagraph_capture_sizes: null
     free_cache_engine: true
+    enable_sleep_mode: true
     tensor_model_parallel_size: 2
     data_parallel_size: 1
     expert_parallel_size: 1
     pipeline_model_parallel_size: 1
+    moe_tensor_parallel_size: 1
     max_num_batched_tokens: 8192
     max_model_len: null
     max_num_seqs: 256
@@ -342,6 +346,7 @@ actor_rollout_ref:
     'n': 1
     over_sample_rate: 0
     multi_stage_wake_up: false
+    limit_images: null
     engine_kwargs:
       vllm: {}
       sglang: {}
@@ -377,6 +382,7 @@ actor_rollout_ref:
         _target_: verl.workers.config.CustomAsyncServerConfig
         path: null
         name: null
+    checkpoint_manager_class: null
     checkpoint_engine:
       _target_: verl.workers.config.CheckpointEngineConfig
       backend: naive
