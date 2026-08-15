@@ -473,6 +473,27 @@ profiler:
       # Whether to fail on unknown stage or missing msprobe
       strict: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.precision_debugger.strict,${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}}
 
+# HTTP client settings used to reach a rollout server, read by the trtllm rollout
+server:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.ServerConfig
+
+  # Per-request timeout in seconds
+  timeout: 60.0
+
+  # Number of attempts per request before giving up
+  max_attempts: 3
+
+  # Seconds to wait between attempts
+  retry_delay: 2.0
+
+  # Maximum number of concurrent connections to the server
+  max_connections: 1000
+
+  # Seconds to wait for the server to come up before failing
+  max_start_wait_time: 300.0
+
 # prometheus configuration for vllm/sglang server mode
 prometheus:
 
