@@ -395,6 +395,63 @@ def test_lce_non_divisible_vocab_padding():
         torch.testing.assert_close(ref_ent, ker_ent, atol=1e-3, rtol=1e-3, msg=f"entropy mismatch: {desc}")
 
 
+def test_lce_all_negative_logits_are_shift_invariant():
+    """Regression test for max reductions incorrectly anchored at zero."""
+    if not torch.cuda.is_available() or is_torch_npu_available(check_device=False):
+        return
+
+    num_tokens = 32
+    hidden_size = 128
+    vocab_size = 1153
+    temperature = 1.0
+
+    hidden_data = torch.zeros((1, num_tokens, hidden_size), dtype=torch.bfloat16, device="cuda")
+    hidden_data[..., 0] = 1
+    hidden_data[..., 1] = 1
+    weight_data = torch.zeros((vocab_size, hidden_size), dtype=torch.bfloat16, device="cuda")
+    weight_data[:, 0] = -334
+    weight_data[:, 1] = torch.linspace(-1, 1, vocab_size, dtype=torch.bfloat16, device="cuda")
+    labels = (torch.arange(num_tokens, device="cuda") * 37 % vocab_size).unsqueeze(0).contiguous()
+
+    reference_hidden = hidden_data.clone().requires_grad_()
+    reference_weight = weight_data.clone().requires_grad_()
+    reference_logprobs, reference_entropy = run_torch_entropy(reference_hidden, reference_weight, labels, temperature)
+
+    kernel_hidden = hidden_data.clone().requires_grad_()
+    kernel_weight = weight_data.clone().requires_grad_()
+    kernel_logprobs, kernel_entropy = linear_cross_entropy(kernel_hidden, kernel_weight, labels, temperature)
+
+    assert torch.isfinite(kernel_logprobs).all()
+    assert torch.isfinite(kernel_entropy).all()
+    torch.testing.assert_close(kernel_logprobs, reference_logprobs, atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(kernel_entropy, reference_entropy, atol=1e-3, rtol=1e-3)
+
+    shifted_weight = weight_data.clone()
+    shifted_weight[:, 0] += 336
+    shifted_logprobs, shifted_entropy = linear_cross_entropy(
+        hidden_data, shifted_weight.contiguous(), labels, temperature
+    )
+    torch.testing.assert_close(kernel_logprobs, shifted_logprobs, atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(kernel_entropy, shifted_entropy, atol=1e-3, rtol=1e-3)
+
+    grad_logprobs = torch.linspace(-0.5, 0.5, num_tokens, device="cuda")
+    grad_entropy = torch.linspace(0.5, -0.5, num_tokens, device="cuda")
+    reference_grads = torch.autograd.grad(
+        (reference_logprobs, reference_entropy),
+        (reference_hidden, reference_weight),
+        (grad_logprobs, grad_entropy),
+    )
+    kernel_grads = torch.autograd.grad(
+        (kernel_logprobs, kernel_entropy),
+        (kernel_hidden, kernel_weight),
+        (grad_logprobs, grad_entropy),
+    )
+
+    assert all(torch.isfinite(grad).all() for grad in kernel_grads)
+    for kernel_grad, reference_grad in zip(kernel_grads, reference_grads, strict=True):
+        torch.testing.assert_close(kernel_grad, reference_grad, atol=2e-2, rtol=4e-2)
+
+
 if __name__ == "__main__":
     # torch.cuda.memory._record_memory_history()
 
@@ -406,5 +463,6 @@ if __name__ == "__main__":
         test.check_storage_all()
 
     test_lce_non_divisible_vocab_padding()
+    test_lce_all_negative_logits_are_shift_invariant()
 
     # torch.cuda.memory._dump_snapshot("test_linear_cross_entropy.pkl")
