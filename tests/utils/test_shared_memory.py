@@ -13,12 +13,39 @@
 # limitations under the License.
 
 import multiprocessing
+import os
 import unittest
 from multiprocessing import shared_memory
 
 import torch
 
 from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import create_shared_memory, rebuild_shared_memory
+
+
+def test_file_backed_shared_memory(tmp_path, monkeypatch):
+    monkeypatch.setenv("VERL_WEIGHT_TRANSFER_DIR", str(tmp_path))
+    name = "file_backed_weights"
+    size = 256
+
+    creator = create_shared_memory(size, name)
+    creator.buf[:size] = bytes(range(256))
+    tensor, attached = rebuild_shared_memory(creator.name, size)
+
+    assert os.path.dirname(creator.name) == str(tmp_path)
+    assert tensor.tolist() == list(range(256))
+
+    del tensor
+    attached.close()
+    creator.close()
+    creator.unlink()
+    assert not os.path.exists(creator.name)
+
+
+def test_file_backed_shared_memory_rejects_path_names(tmp_path, monkeypatch):
+    monkeypatch.setenv("VERL_WEIGHT_TRANSFER_DIR", str(tmp_path))
+
+    with unittest.TestCase().assertRaisesRegex(ValueError, "path separators"):
+        create_shared_memory(16, "../outside")
 
 
 class TestSharedMemory(unittest.TestCase):

@@ -19,6 +19,7 @@ Not recommended depending on vllm for this file.
 
 import gc
 import logging
+import mmap
 import os
 from multiprocessing import shared_memory
 from typing import Callable, TypedDict
@@ -53,8 +54,58 @@ def rebuild_ipc(handle: tuple[Callable, tuple], device_id: int | None = None) ->
     return buffer
 
 
+class _FileBackedSharedMemory:
+    """File-backed mmap exposing the SharedMemory interface used below."""
+
+    def __init__(self, name: str, create: bool = False, size: int = 0):
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        if create:
+            flags |= os.O_CREAT | os.O_EXCL
+        fd = os.open(name, flags, 0o600)
+        try:
+            if create:
+                os.ftruncate(fd, size)
+            self.size = os.fstat(fd).st_size
+            self._mapping = mmap.mmap(fd, self.size, access=mmap.ACCESS_WRITE)
+        finally:
+            os.close(fd)
+        self.name = name
+        self.buf = memoryview(self._mapping)
+
+    def close(self):
+        self.buf.release()
+        self._mapping.close()
+
+    def unlink(self):
+        try:
+            os.unlink(self.name)
+        except FileNotFoundError:
+            pass
+
+
 def create_shared_memory(size: int, name: str):
-    """Create shared memory for weight transfer. If already exists, attach to it."""
+    """Create shared memory, optionally backed by a regular file.
+
+    Setting VERL_WEIGHT_TRANSFER_DIR avoids the /dev/shm capacity limit in
+    containers where POSIX shared memory is smaller than a transfer bucket.
+    The default remains POSIX shared memory.
+    """
+    fallback_dir = os.getenv("VERL_WEIGHT_TRANSFER_DIR")
+    if fallback_dir:
+        if os.path.basename(name) != name:
+            raise ValueError(f"Shared memory name must not contain path separators: {name!r}")
+        fallback_dir = os.path.abspath(fallback_dir)
+        os.makedirs(fallback_dir, mode=0o700, exist_ok=True)
+        path = os.path.join(fallback_dir, name)
+        try:
+            shm = _FileBackedSharedMemory(name=path, create=True, size=size)
+        except FileExistsError:
+            shm = _FileBackedSharedMemory(name=path)
+        if shm.size < size:
+            actual_size = shm.size
+            shm.close()
+            raise AssertionError(f"Stale shared buffer '{path}': expected {size} bytes, got {actual_size}")
+        return shm
     try:
         shm = shared_memory.SharedMemory(name=name, create=True, size=size)
     except FileExistsError:
@@ -65,7 +116,14 @@ def create_shared_memory(size: int, name: str):
 
 def rebuild_shared_memory(name: str, size: int, dtype=torch.uint8):
     """Rebuild tensor from shared memory."""
-    shm = shared_memory.SharedMemory(name=name)
+    if os.path.isabs(name):
+        shm = _FileBackedSharedMemory(name=name)
+    else:
+        shm = shared_memory.SharedMemory(name=name)
+    if shm.size < size:
+        actual_size = shm.size
+        shm.close()
+        raise AssertionError(f"Shared buffer '{name}' is smaller than expected: {actual_size} < {size}")
     tensor = torch.frombuffer(shm.buf[:size], dtype=dtype)
 
     return tensor, shm
@@ -149,7 +207,7 @@ class BucketedWeightSender:
                     "handle": None,
                 }
                 self.buffer[offset : offset + weight.nbytes].view(dtype=weight.dtype).view(weight.shape).copy_(
-                    weight, non_blocking=True
+                    weight, non_blocking=not self.use_shm
                 )
                 offset += weight.nbytes
 
@@ -186,7 +244,7 @@ class BucketedWeightSender:
             shm = create_shared_memory(self.bucket_size, shm_name)
             buffer = torch.frombuffer(shm.buf, dtype=torch.uint8)
 
-            comm_metadata = {"name": shm_name, "size": self.bucket_size}
+            comm_metadata = {"name": shm.name, "size": self.bucket_size}
             self.socket.send_pyobj(comm_metadata)
 
         self.socket.recv()

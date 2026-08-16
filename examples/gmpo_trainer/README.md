@@ -38,6 +38,19 @@ bash examples/gmpo_trainer/run_qwen3_8b_fsdp.sh
 # override any of MODEL_PATH, CLIP_RATIO, ROLLOUT_N, etc. via env vars
 ```
 
+For Qwen2.5-7B GMPO with Megatron actor/reference training and vLLM-Ascend rollout on Ascend NPUs:
+
+```bash
+MODEL_PATH=/path/to/Qwen2.5-7B \
+DATA_ROOT=/path/to/data \
+NPUS_PER_NODE=4 \
+bash examples/gmpo_trainer/run_qwen2_5_7b_megatron.sh
+```
+
+The example uses `VERL_WEIGHT_TRANSFER_DIR` for file-backed bucketed weight transfer when container
+`/dev/shm` capacity is limited. See [verl-ascend-recipe issue #19](https://github.com/verl-project/verl-ascend-recipe/issues/19#issuecomment-5307736682)
+for the validated environment, training logs, and 100-step results.
+
 ## 4. Contacts
 If you have any question about our work or this repository, please don't hesitate to contact us by emails or open an issue under this project.
 - [zhaoyuzhong20@mails.ucas.ac.cn](zhaoyuzhong20@mails.ucas.ac.cn)

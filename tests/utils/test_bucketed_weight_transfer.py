@@ -212,6 +212,13 @@ def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm):
 class TestBucketedWeightTransferSHM:
     """Test BucketedWeightSender/Receiver via shared memory path."""
 
+    def test_file_backed_single_small_weight(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VERL_WEIGHT_TRANSFER_DIR", str(tmp_path))
+        specs = [("layer.weight", (32, 16), torch.float32)]
+
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=True)
+        assert not list(tmp_path.iterdir())
+
     def test_single_small_weight(self):
         specs = [("layer.weight", (32, 16), torch.float32)]
         _transfer_and_validate(specs, bucket_size_mb=1, use_shm=True)
