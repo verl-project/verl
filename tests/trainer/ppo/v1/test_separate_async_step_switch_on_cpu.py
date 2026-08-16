@@ -20,11 +20,13 @@ the engine is lent to generation at the weight sync and reclaimed once the repla
 enough, with the remaining mini-batches served by the standalone pool alone.
 """
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
 from omegaconf import OmegaConf
 
+import verl.trainer.ppo.v1.trainer_separate_async as trainer_module
 from verl.trainer.ppo.v1.trainer_separate_async import HybridEngineMode, PPOTrainerSeparateAsync
 
 
@@ -166,6 +168,8 @@ def test_step_lends_the_engine_out_and_reclaims_it_exactly_once():
     assert trainer.checkpoint_manager.resume_calls == 1
     assert trainer.balancer_calls == ["add", "clear"]
     assert trainer.events[:5] == ["add", "clear", "standalone_update", "hybrid_update", "hybrid_resume"]
+    assert trainer.timing_raw["switch_to_rollout"] >= 0.0
+    assert len(trainer._to_rollout_costs) == 1
     # No wait history yet, so both halves of the benefit model are unavailable and their
     # metrics stay absent; the decision falls back to "lend whenever anything is missing".
     assert "separate_async/decision/per_sample_time_seconds" not in trainer._pending_sync_metrics
@@ -178,6 +182,8 @@ def test_step_lends_the_engine_out_and_reclaims_it_exactly_once():
     assert trainer.checkpoint_manager.abort_calls == 1
     assert trainer.checkpoint_manager.sleep_calls == 1
     assert trainer.balancer_calls == ["add", "clear", "remove"]
+    assert trainer.timing_raw["switch_to_trainer"] >= 0.0
+    assert len(trainer._to_trainer_costs) == 1
 
     # Later mini-batches run through the sample hooks, which must not switch again.
     for _ in range(3):
@@ -185,6 +191,22 @@ def test_step_lends_the_engine_out_and_reclaims_it_exactly_once():
         trainer.on_sample_end()
     assert trainer.checkpoint_manager.sleep_calls == 1
     assert trainer.balancer_calls == ["add", "clear", "remove"]
+
+
+def test_switch_to_rollout_timing_accumulates_prepare_and_wake(monkeypatch):
+    @contextmanager
+    def recording_timer(name, timing_raw, **_kwargs):
+        yield
+        timing_raw[name] = timing_raw.get(name, 0.0) + 1.0
+
+    monkeypatch.setattr(trainer_module, "marked_timer", recording_timer)
+    trainer = _trainer()
+    trainer.current_mode = HybridEngineMode.TRAINER
+
+    trainer.on_step_end()
+
+    assert trainer.timing_raw["switch_to_rollout"] == 2.0
+    assert trainer.timing_raw["update_weights"] == 1.0
 
 
 def test_step_begin_reclaims_hybrid_before_submission_when_inventory_is_ready():
@@ -198,6 +220,7 @@ def test_step_begin_reclaims_hybrid_before_submission_when_inventory_is_ready():
     assert trainer.checkpoint_manager.abort_calls == 1
     assert trainer.checkpoint_manager.sleep_calls == 1
     assert trainer.timing_raw["switch_wait"] == 0.0
+    assert trainer.timing_raw["switch_to_trainer"] >= 0.0
     assert trainer.on_step_prompts_submitted() == {}
 
 
@@ -254,7 +277,7 @@ def test_inventory_gate_skips_lending_when_the_target_is_already_buffered():
     assert trainer.balancer_calls == []
     assert trainer.timing_raw["switch_wait"] == 0.0
     assert trainer._pending_sync_metrics["separate_async/decision/remaining"] == 0.0
-    assert trainer._pending_sync_metrics["separate_async/decision/switch_to_rollout"] == 0.0
+    assert trainer._pending_sync_metrics["separate_async/decision/should_switch_to_rollout"] == 0.0
 
 
 def test_cost_gate_skips_lending_when_the_remaining_work_is_cheaper_to_fill_on_standalone():
@@ -273,7 +296,7 @@ def test_cost_gate_skips_lending_when_the_remaining_work_is_cheaper_to_fill_on_s
     assert trainer._pending_sync_metrics["separate_async/decision/per_sample_time_seconds"] == 2.0
     assert trainer._pending_sync_metrics["separate_async/decision/effective_switch_cost_seconds"] == 7.0
     # benefit = remaining * per_sample_time * (1 - 1/scaling_factor) = 1 * 2.0 * 0.5 = 1.0 < 7.0
-    assert trainer._pending_sync_metrics["separate_async/decision/switch_to_rollout"] == 0.0
+    assert trainer._pending_sync_metrics["separate_async/decision/should_switch_to_rollout"] == 0.0
 
 
 def test_cost_gate_lends_when_the_remaining_work_is_more_expensive_than_the_switch():
@@ -287,7 +310,7 @@ def test_cost_gate_lends_when_the_remaining_work_is_more_expensive_than_the_swit
     trainer.on_step_end()
 
     assert trainer.checkpoint_manager.update_calls == [1]
-    assert trainer._pending_sync_metrics["separate_async/decision/switch_to_rollout"] == 1.0
+    assert trainer._pending_sync_metrics["separate_async/decision/should_switch_to_rollout"] == 1.0
 
 
 def test_switch_cost_window_forgets_cold_start():

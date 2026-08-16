@@ -90,45 +90,7 @@ https://github.com/Begunner/verl-link/blob/main/sepa_switch.svg?raw=true)
 
 The upper timeline shows `separate_async` without switching; the lower timeline shows hybrid GPUs joining rollout during idle windows when switching is enabled.
 
-### Lifecycle
-
-```text
-                              next step begins
-                                      │
-                                      ▼
-                         Is enough data already sampleable?
-                           │ yes                  │ no
-                           ▼                      ▼
-                    reclaim hybrid         keep hybrid in rollout
-                           │                      │
-                           │              submit this step's prompts
-                           │                      │
-                           │              wait until threshold
-                           │                      │
-                           └──────────────┬───────┘
-                                          ▼
-                             remove hybrid from balancer
-                             abort unfinished requests
-                             sleep hybrid replicas
-                                          │
-                                          ▼
-                           parameter_sync_step PPO updates
-                                          │
-                                          ▼
-                            sync standalone rollout weights
-                                          │
-                                          ▼
-                      benefit > measured switching cost?
-                           │ yes                  │ no
-                           ▼                      ▼
-                   lend hybrid again       remain in trainer mode
-```
-
-The reclaim order is important: hybrid replicas are removed from routing before their requests are aborted and their memory is returned to training. Aborted requests are then retried through the remaining standalone replicas.
-
-The last training step never lends hybrid replicas back to generation.
-
-### Reclaim threshold
+### Switch to trainer threshold
 
 The trainer converts `switch_threshold_ratio` into a number of sampleable groups:
 
@@ -137,38 +99,20 @@ target = round(switch_threshold_ratio × train_batch_size)
 threshold = clamp(target, one_mini_batch, train_batch_size)
 ```
 
-The one-mini-batch floor ensures the trainer has useful work immediately after paying the reclaim cost. If the buffer is already at the threshold when a step begins, the trainer reclaims its hybrid replicas immediately. Otherwise, it keeps them in rollout mode until the threshold is reached.
+`switch_threshold_ratio` defines the target number of prompt groups ready for sampling before switching to trainer. At the end of a step, if the next step's buffer already meets the target or is expected to reach it soon without hybrid assistance (that is, the estimated benefit of lending does not exceed the measured switch cost), the hybrid replicas remain in trainer mode. If the buffer is below the target and switch is enabled, the hybrid replicas enter rollout mode and switch back to trainer mode once the target is reached. The one-mini-batch floor guarantees that at least one mini-batch is ready to train immediately.
 
 ### Adaptive threshold
 
 With `adaptive_switch_threshold=True`, the threshold ratio reacts to observed sample wait:
 
 - After `switch_threshold_release_steps` consecutive idle steps, increase the ratio by `switch_threshold_step_up`.
-- After the same number of consecutive calm steps, decrease the ratio by `switch_threshold_step_down`.
-- Clamp the ratio to `[1 / parameter_sync_step, 1]`.
+- After `switch_threshold_release_steps` consecutive non-idle steps, decrease the ratio by `switch_threshold_step_down`.
 
-The release interval applies in both directions and prevents one noisy step from changing the threshold.
-
-### Benefit-versus-cost decision
-
-At the end of a step, the trainer estimates whether lending hybrid replicas is worthwhile:
-
-```text
-remaining = threshold - sampleable_groups_for_next_step
-scaling_factor = (hybrid_gpus + standalone_gpus) / standalone_gpus
-
-benefit =
-  remaining × observed_wait_per_sample × (1 - 1 / scaling_factor)
-
-switch_cost =
-  moving_average(switch_to_rollout) + moving_average(switch_to_trainer)
-```
-
-The trainer lends the hybrid replicas when `benefit > switch_cost`. During cold start, when either estimate is unavailable, it lends whenever the next-step buffer is below the threshold. The benefit model assumes near-linear generation scaling and can be optimistic when newly activated replicas have cold caches or the lending window is short.
+The release interval applies in both directions and prevents noisy steps from changing the threshold.
 
 ### Switch configuration
 
-All switch settings are inert unless `enable_switch=True`.
+All switch-related settings are ignored unless `enable_switch=True`.
 
 
 | Parameter                        | Default | Description                                                                          |
@@ -182,7 +126,7 @@ All switch settings are inert unless `enable_switch=True`.
 | `switch_cost_window_size`        | `3`     | Number of recent transition costs used by the decision                               |
 
 
-Step switching cannot be combined with rollout PD disaggregation. It also requires a replay buffer that implements `get_sampleable_count()` and `wait_for_sampleable()`, which the built-in `ReplayBufferAsync` provides.
+Temporarily, step switching cannot be combined with rollout PD disaggregation.
 
 ## Configuration
 
@@ -200,14 +144,14 @@ The warmup batch starts generation before the first training step, reducing the 
 
 ### Separate async
 
-The following example uses two trainer nodes and one standalone rollout node:
+The following example uses two trainer nodes and two standalone rollout nodes:
 
 ```bash
 trainer.use_v1=True \
 trainer.v1.trainer_mode=separate_async \
 trainer.nnodes=2 \
 trainer.n_gpus_per_node=8 \
-actor_rollout_ref.rollout.nnodes=1 \
+actor_rollout_ref.rollout.nnodes=2 \
 actor_rollout_ref.rollout.n_gpus_per_node=8 \
 actor_rollout_ref.rollout.checkpoint_engine.backend=nccl \
 data.train_batch_size=64 \
@@ -222,20 +166,19 @@ To enable step switching, add:
 
 ```bash
 trainer.v1.separate_async.enable_switch=True \
-trainer.v1.separate_async.adaptive_switch_threshold=True \
-actor_rollout_ref.rollout.disaggregation.enabled=False
+trainer.v1.separate_async.adaptive_switch_threshold=True
 ```
 
 ## Observability and Tuning
 
 Start with the following timing metrics:
 
-- `timing_s/gen`: trainer time spent waiting for the next trainable mini-batch.
+- `timing_s/gen`: trainer time spent waiting for the next trainable train-batch. (Also means idle time for separate_async's hybrid gpus)
 - `timing_s/update_actor`: actor update time.
 - `timing_s/update_weights`: standalone weight synchronization time in `separate_async`.
-- `timing_s/switch_wait`: time during which lent hybrid replicas help fill the reclaim threshold.
-- `timing_s/switch_to_rollout`: measured trainer-to-rollout transition time.
-- `perf/throughput`: token throughput normalized by all trainer and standalone rollout GPUs in `separate_async`.
+- `timing_s/switch_wait`: time during which lent hybrid replicas help fill the switch-to-trainer threshold. (It is not idle.)
+- `timing_s/switch_to_rollout`: trainer-to-rollout transition time, including load-balancer registration, sticky-cache clearing, hybrid weight update, and generation resume.
+- `timing_s/switch_to_trainer`: rollout-to-trainer transition time, including load-balancer removal, request abort, and hybrid replica sleep.
 
 When switching is enabled, inspect:
 
@@ -246,7 +189,7 @@ When switching is enabled, inspect:
 - `separate_async/decision/remaining`
 - `separate_async/decision/benefit_seconds`
 - `separate_async/decision/effective_switch_cost_seconds`
-- `separate_async/decision/switch_to_rollout`
+- `separate_async/decision/should_switch_to_rollout`
 
 Practical tuning order:
 
@@ -254,15 +197,14 @@ Practical tuning order:
 2. Set `parameter_sync_step` from the required batch-size invariant.
 3. Choose `max_off_policy_threshold` and `drop` or `wait` from the workload's policy-lag tolerance.
 4. Enable switching when `timing_s/gen` shows sustained trainer idle time.
-5. Keep adaptive thresholds enabled initially; use the decision metrics to determine whether the estimated benefit has a clear margin over switching cost.
-
-The [RL-Insight guide](rl_insight.md) provides V1 rollout, TransferQueue, and resource-state dashboards. For large models where weight synchronization dominates, see [Delta Weight Sync](delta_weight_sync.md).
 
 ## Checkpoint and Validation Behavior
 
-When the installed TransferQueue supports checkpointing, V1 async checkpoints persist its state alongside model and dataloader state. Finished trajectories are restored directly. Pending and running prompts are cleared and reissued after resume so prompts already fetched from the dataloader are not lost.
+When the installed TransferQueue supports checkpointing, V1 async checkpoints persist its state alongside model and dataloader state. Finished samples are restored directly. Pending and running prompts are cleared and reissued after resume so prompts already fetched from the dataloader are not lost.
 
-In `separate_async`, validation makes hybrid replicas available for rollout if they are currently in trainer mode. The next training step reclaims them before PPO updates when necessary.
+In `separate_async`, validation makes hybrid replicas available for rollout if they are currently in trainer mode.
+
+Validation shares the same AgentLoop and rollout server pool with unfinished training trajectories. Those partial trajectories continue running alongside validation requests, so `timing_s/testing` includes the contention and rollout capacity they consume rather than measuring validation generation in isolation.
 
 ## Benchmark
 

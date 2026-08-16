@@ -210,14 +210,20 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         if self.current_mode != HybridEngineMode.ROLLOUT:
             return
         if not self._enable_switch:
-            self.switch_to_trainer()
+            self._timed_switch_to_trainer()
             return
 
         self._step_threshold = self._switch_threshold()
         sampleable_count = self.replay_buffer.get_sampleable_count(self.global_steps, "train")
         if sampleable_count >= self._step_threshold:
-            switch_start = time.perf_counter()
+            self._timed_switch_to_trainer()
+
+    def _timed_switch_to_trainer(self) -> None:
+        """Switch Hybrid back to training and record the full remove/abort/sleep cost."""
+        switch_start = time.perf_counter()
+        with marked_timer("switch_to_trainer", self.timing_raw, color="cyan"):
             self.switch_to_trainer()
+        if self._enable_switch:
             self._to_trainer_costs.append(time.perf_counter() - switch_start)
 
     def on_sample_begin(self):
@@ -239,9 +245,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
             _, eviction_metrics = self.replay_buffer.wait_for_sampleable(
                 self.global_steps, "train", self._step_threshold
             )
-        switch_start = time.perf_counter()
-        self.switch_to_trainer()
-        self._to_trainer_costs.append(time.perf_counter() - switch_start)
+        self._timed_switch_to_trainer()
         return eviction_metrics
 
     def _switch_threshold(self) -> int:
@@ -313,7 +317,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
                 "separate_async/switch/idle": float(had_idle),
                 "separate_async/decision/sampleable_count": float(sampleable_count),
                 "separate_async/decision/remaining": float(remaining),
-                "separate_async/decision/switch_to_rollout": float(should_switch),
+                "separate_async/decision/should_switch_to_rollout": float(should_switch),
             }
             if per_sample_time is not None:
                 decision_metrics["separate_async/decision/per_sample_time_seconds"] = per_sample_time
@@ -322,8 +326,10 @@ class PPOTrainerSeparateAsync(PPOTrainer):
 
         if should_switch:
             prepare_start = time.perf_counter()
-            self.add_replicas_to_balancer()
-            self.clear_sticky_cache()
+            # Accumulate preparation and wake-up under one user-facing transition metric.
+            with marked_timer("switch_to_rollout", self.timing_raw, color="cyan"):
+                self.add_replicas_to_balancer()
+                self.clear_sticky_cache()
             prepare_seconds = time.perf_counter() - prepare_start
 
         with marked_timer("update_weights", self.timing_raw, color="red"):
