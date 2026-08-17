@@ -418,8 +418,6 @@ def vlm_data_file():
     ],
 )
 def test_multiturn_sft_vlm_dataset_on_cpu(model_path, vlm_data_file):
-    pytest.importorskip("qwen_vl_utils")
-
     df = pd.read_parquet(vlm_data_file)
     tokenizer = hf_tokenizer(model_path)
     processor = hf_processor(model_path)
@@ -481,8 +479,6 @@ def test_multiturn_sft_vlm_dataset_on_cpu(model_path, vlm_data_file):
     ],
 )
 def test_multiturn_sft_vlm_dataloader_on_cpu(model_path, vlm_data_file):
-    pytest.importorskip("qwen_vl_utils")
-
     df = pd.read_parquet(vlm_data_file)
     tokenizer = hf_tokenizer(model_path)
     processor = hf_processor(model_path)

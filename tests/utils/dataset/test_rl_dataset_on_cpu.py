@@ -188,8 +188,6 @@ def test_maybe_filter_out_long_prompts_accepts_image_path(monkeypatch):
 
 
 def test_image_rl_data():
-    pytest.importorskip("qwen_vl_utils")
-
     tokenizer = hf_tokenizer(os.path.expanduser("~/models/Qwen/Qwen2-VL-2B-Instruct"))
     processor = hf_processor(os.path.expanduser("~/models/Qwen/Qwen2-VL-2B-Instruct"))
     config = OmegaConf.create(
