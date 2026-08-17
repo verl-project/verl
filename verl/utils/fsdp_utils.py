@@ -199,6 +199,13 @@ def offload_fsdp2_model_to_cpu(model, empty_cache: bool = True):
     # documented, so keep it covered by the FSDP2 model-transfer regression
     # test. The pinned parameters also make the subsequent CPU-to-GPU copy
     # asynchronous.
+    #
+    # The CPU tensors are not safe for host access until the D2H copy finishes.
+    # Current callers reload them on the same CUDA stream, whose ordering keeps
+    # the D2H-to-H2D round trip correct. A caller that reads the tensors on the
+    # host must synchronize first, and a caller that reloads them on another
+    # stream must establish an explicit stream dependency. empty_cache() below
+    # is not a synchronization point.
     model.to("cpu", non_blocking=True)
     if empty_cache:
         get_torch_device().empty_cache()
