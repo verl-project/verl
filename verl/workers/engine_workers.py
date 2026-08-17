@@ -755,6 +755,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 return metrics or {}
             per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
             metrics = await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
+            if self.actor.engine.is_param_offload_enabled:
+                self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
+            aggressive_empty_cache(force_sync=True)
             return metrics or {}
 
         set_expandable_segments(False)

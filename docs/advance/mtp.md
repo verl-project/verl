@@ -16,11 +16,11 @@ Currently, RL training can be performed on mimo-7B-RL, Qwen-next, and Deepseek s
 
     - mbridge: Apply the patches and review suggestions from PR: [#62](https://github.com/ISEEKYAN/mbridge/pull/62) (Already merged into the main branch);
 
-    - Megatron-Bridge: Apply the patches and review suggestions from PR if you want to try out mimo-7B-RL: [#2387](https://github.com/NVIDIA-NeMo/Megatron-Bridge/pull/2387) (will be merged into the main branch in the future);
+    - Megatron-Bridge: Use a version containing MiMo-7B-RL support from merged PR [#2387](https://github.com/NVIDIA-NeMo/Megatron-Bridge/pull/2387);
 
     - megatron: Use the latest dev version (commit: [23e092f41ec8bc659020e401ddac9576c1cfed7e](https://github.com/NVIDIA/Megatron-LM/tree/23e092f41ec8bc659020e401ddac9576c1cfed7e)), which supports MTP + CP training methods. If you additionally enable `recompute_granularity=full`, use a dev commit that includes [#3457](https://github.com/NVIDIA/Megatron-LM/pull/3457) (`ffd66a3e6`, 2026-06-03) — the commit pinned above predates it by about six months. #3457 threads `padding_mask` through `MultiTokenPredictionLayer._checkpointed_forward`; without it, `MultiTokenPredictionLayer.forward` passes a keyword the method does not declare and training raises a `TypeError` on the first step. Released `megatron-core` 0.18.0 and 0.18.2 do not carry the fix either (tracked as [#4933](https://github.com/NVIDIA/Megatron-LM/issues/4933)).
     
-    - sglang: Use the specified branch: [https://github.com/ArronHZG/sglang/tree/fix_mtp_update_weights_from_tensor](https://github.com/ArronHZG/sglang/tree/fix_mtp_update_weights_from_tensor), [PR](https://github.com/sgl-project/sglang/pull/17870) , which fix the MTP update weights from tensor OOM issue.
+    - sglang: The training-only example uses `update_weights_from_distributed`. If `actor_rollout_ref.model.mtp.enable_rollout=True` is enabled and weights are updated through the tensor/IPC path, use a version containing the fix from [PR #17870](https://github.com/sgl-project/sglang/pull/17870) to avoid the MTP `update_weights_from_tensor` memory leak.
 
 ## 2. MTP Training Configuration (Core Parameters)
 

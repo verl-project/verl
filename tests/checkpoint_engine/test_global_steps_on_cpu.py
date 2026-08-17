@@ -20,11 +20,16 @@ from verl.workers.engine_workers import ActorRolloutRefWorker
 
 
 class _FakeTrainerEngine:
-    def __init__(self):
+    def __init__(self, param_offload=False):
         self.weights = [("w", object())]
+        self.is_param_offload_enabled = param_offload
+        self.to_calls = []
 
     def get_per_tensor_param(self):
         return iter(self.weights), None
+
+    def to(self, device, *, model, optimizer, grad):
+        self.to_calls.append((device, model, optimizer, grad))
 
 
 class _FakeCheckpointEngine:
@@ -77,6 +82,35 @@ def test_actor_worker_passes_global_steps_to_checkpoint_engine_send():
 
     assert checkpoint_engine.sent_global_steps == 17
     assert checkpoint_engine.sent_weights == worker.actor.engine.weights
+
+
+def test_actor_worker_reoffloads_params_after_checkpoint_engine_send(monkeypatch):
+    checkpoint_engine = _FakeCheckpointEngine()
+    trainer_engine = _FakeTrainerEngine(param_offload=True)
+    worker = ActorRolloutRefWorker.__new__(ActorRolloutRefWorker)
+    worker.config = SimpleNamespace(
+        rollout=SimpleNamespace(
+            checkpoint_engine=SimpleNamespace(backend="sglang_hccl"),
+        ),
+    )
+    worker.actor = SimpleNamespace(engine=trainer_engine)
+    worker.checkpoint_engine = checkpoint_engine
+    empty_cache_calls = []
+    monkeypatch.setattr(
+        "verl.workers.engine_workers.aggressive_empty_cache",
+        lambda force_sync: empty_cache_calls.append(force_sync),
+    )
+
+    asyncio.run(
+        ActorRolloutRefWorker.update_weights.__wrapped__(
+            worker,
+            global_steps=23,
+            mode="auto",
+        )
+    )
+
+    assert trainer_engine.to_calls == [("cpu", True, False, False)]
+    assert empty_cache_calls == [True]
 
 
 def test_checkpoint_worker_passes_global_steps_to_receive_and_rollout_update():

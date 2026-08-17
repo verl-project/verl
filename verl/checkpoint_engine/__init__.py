@@ -52,6 +52,14 @@ except ImportError as e:
     HCCLCheckpointEngine = None
 
 try:
+    from .sglang_hccl_checkpoint_engine import SGLangHCCLCheckpointEngine, SGLangHCCLCheckpointEngineManager
+
+    __all__ += ["SGLangHCCLCheckpointEngine", "SGLangHCCLCheckpointEngineManager"]
+except ImportError:
+    SGLangHCCLCheckpointEngine = None
+    SGLangHCCLCheckpointEngineManager = None
+
+try:
     from .nixl_checkpoint_engine import NIXLCheckpointEngine
 
     __all__ += ["NIXLCheckpointEngine"]
