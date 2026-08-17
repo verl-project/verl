@@ -1310,6 +1310,7 @@ class TestWiringVLFactory:
         )
         assert isinstance(builder, QwenVLContinuousTokenBuilder)
         assert builder.supports_multimodal() is True
+        
     def test_text_specific_family_with_processor_raises(self):
         """A recognized text-only family paired with a multimodal processor is a misconfiguration."""
         from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
