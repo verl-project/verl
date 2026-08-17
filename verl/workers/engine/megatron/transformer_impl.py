@@ -363,6 +363,14 @@ class MegatronEngine(BaseEngine):
             }
             for key, value in override_transformer_config.items():
                 provider_overrides[key] = value
+
+            from verl.models.mcore.mtp_support import configure_native_hybrid_mtp
+
+            configure_native_hybrid_mtp(
+                provider,
+                self.model_config.mtp,
+                provider_overrides,
+            )
             if (
                 self.model_config.hf_config.model_type == "deepseek_v4"
                 and not self.model_config.mtp.enable
