@@ -28,6 +28,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 import torch.distributed as dist
+
+pytest.importorskip("megatron.core")
+
 from megatron.core import parallel_state as mpu
 
 from verl.trainer.config import CheckpointConfig

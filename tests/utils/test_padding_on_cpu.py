@@ -13,9 +13,11 @@
 # limitations under the License.
 import random
 
+import pytest
 import torch
 from tensordict import TensorDict
 
+from verl.utils.device import is_torch_npu_available
 from verl.workers.utils.padding import (
     build_attention_mask_from_nested,
     embeds_padding_2_no_padding,
@@ -26,6 +28,11 @@ from verl.workers.utils.padding import (
 )
 
 
+def _require_padding_backend():
+    if not is_torch_npu_available(check_device=False):
+        pytest.importorskip("flash_attn.bert_padding")
+
+
 def test_padding_conversion_with_log_probs():
     """Test that log probability tensors remain in padded format after conversion
 
@@ -34,6 +41,8 @@ def test_padding_conversion_with_log_probs():
     in the loss computation to match log_prob from model output, rather than being
     converted to nested format.
     """
+    _require_padding_backend()
+
     batch_size = 4
     max_seq_len = 128
     max_response_len = 64
@@ -106,6 +115,8 @@ def test_padding_conversion_with_log_probs():
 
 def test_padding_conversion_without_log_probs():
     """Test that padding conversion works correctly when log prob tensors are not present"""
+    _require_padding_backend()
+
     batch_size = 4
     max_seq_len = 128
     max_response_len = 64
@@ -137,6 +148,8 @@ def test_padding_conversion_without_log_probs():
 
 def test_padding_roundtrip():
     """Test that converting from padding to nested and back preserves values in the response region"""
+    _require_padding_backend()
+
     batch_size = 2
     max_seq_len = 64
     max_response_len = 32
@@ -185,6 +198,8 @@ def test_padding_roundtrip():
 
 def test_no_padding_2_padding_varying_lengths():
     """Test no_padding_2_padding with varied prompt/response lengths."""
+    _require_padding_backend()
+
     batch_size = 4
     max_seq_len = 100
     max_response_len = 50
