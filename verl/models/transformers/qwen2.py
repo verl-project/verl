@@ -24,7 +24,7 @@ from transformers.utils import logging
 from verl.utils.transformers_compat import flash_attn_supports_top_left_mask
 from verl.utils.ulysses import (
     gather_heads_scatter_seq,
-    gather_seq_scatter_heads,
+    gather_qkv_seq_scatter_heads,
     get_ulysses_sequence_parallel_world_size,
     validate_ulysses_config,
 )
@@ -65,9 +65,9 @@ def qwen2_flash_attn_forward(
         validate_ulysses_config(self.num_heads, ulysses_sp_size)
 
         # (bsz, n_head, seq_len/n, head_dim) -> (bsz, n_head/n, seq_len, head_dim)
-        query_states = gather_seq_scatter_heads(query_states, seq_dim=2, head_dim=1)
-        key_states = gather_seq_scatter_heads(key_states, seq_dim=2, head_dim=1)
-        value_states = gather_seq_scatter_heads(value_states, seq_dim=2, head_dim=1)
+        query_states, key_states, value_states = gather_qkv_seq_scatter_heads(
+            query_states, key_states, value_states, seq_dim=2, head_dim=1
+        )
 
     full_q_len = query_states.size(2)  # full seq length
 
@@ -186,9 +186,9 @@ def qwen2_attn_forward(
         validate_ulysses_config(self.config.num_attention_heads, ulysses_sp_size)
 
         # (bsz, n_head, seq_len/n, head_dim) -> (bsz, n_head/n, seq_len, head_dim)
-        query_states = gather_seq_scatter_heads(query_states, seq_dim=2, head_dim=1)
-        key_states = gather_seq_scatter_heads(key_states, seq_dim=2, head_dim=1)
-        value_states = gather_seq_scatter_heads(value_states, seq_dim=2, head_dim=1)
+        query_states, key_states, value_states = gather_qkv_seq_scatter_heads(
+            query_states, key_states, value_states, seq_dim=2, head_dim=1
+        )
 
     full_q_len = query_states.size(2)
 
