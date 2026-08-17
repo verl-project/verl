@@ -133,16 +133,6 @@ class TRTLLMHttpServer:
 
         self.profiler_controller = self._init_profiler_controller()
 
-        # Non-HYBRID with load_format=dummy normally needs to load from disk (auto).
-        # Exception: FP8 has no on-disk ckpt; weights are filled during first sync (keep dummy).
-        if (
-            self.rollout_mode != RolloutMode.HYBRID
-            and self.config.load_format == "dummy"
-            and self.config.quantization != "fp8"
-        ):
-            logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
-            self.config.load_format = "auto"
-
         self.is_vlm_model = (
             self.model_config.hf_config is not None and hasattr(self.model_config.hf_config, "vision_config")
         ) or hasattr(self.model_config, "vision_config")
