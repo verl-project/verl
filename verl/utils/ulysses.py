@@ -87,6 +87,199 @@ def gather_seq_scatter_heads(
     return x
 
 
+def gather_packed_qkv_seq_scatter_heads(
+    packed_qkv: Tensor,
+    qkv_batch_sizes: tuple[int, int, int],
+    seq_dim: int,
+    head_dim: int,
+    unpadded_dim_size: int = 0,
+    group: ProcessGroup = None,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Redistribute a pre-packed equal-layout QKV buffer with one all-to-all.
+
+    ``packed_qkv`` stores Q, K, and V consecutively along dimension zero.
+    ``qkv_batch_sizes`` records their dimension-zero extents so the communicated
+    buffer can be returned as views without another copy.
+    """
+    if len(qkv_batch_sizes) != 3 or any(size < 0 for size in qkv_batch_sizes):
+        raise ValueError(f"qkv_batch_sizes must contain three non-negative sizes, got {qkv_batch_sizes}")
+    if sum(qkv_batch_sizes) != packed_qkv.size(0):
+        raise ValueError(
+            f"qkv_batch_sizes sum to {sum(qkv_batch_sizes)}, but packed_qkv.size(0) is {packed_qkv.size(0)}"
+        )
+
+    ndim = packed_qkv.ndim
+    seq_dim %= ndim
+    head_dim %= ndim
+    if seq_dim == 0 or head_dim == 0:
+        raise ValueError("dimension zero is reserved for pre-packed Q/K/V batches")
+
+    packed_qkv = gather_seq_scatter_heads(
+        packed_qkv,
+        seq_dim=seq_dim,
+        head_dim=head_dim,
+        unpadded_dim_size=unpadded_dim_size,
+        group=group,
+    )
+    return packed_qkv.split(qkv_batch_sizes, dim=0)
+
+
+def gather_qkv_seq_scatter_heads(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    seq_dim: int,
+    head_dim: int,
+    unpadded_dim_size: int = 0,
+    group: ProcessGroup = None,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Gather sequence and scatter heads for Q/K/V with one all-to-all when possible.
+
+    Equal-layout Q/K/V tensors are concatenated along batch dimension, which is
+    not partitioned by the Ulysses collective. Differently sized GQA tensors use
+    one flattened variable-payload all-to-all when every head count is divisible
+    by the sequence-parallel world size. Other incompatible layouts retain the
+    existing three-call behavior.
+    """
+    group = get_ulysses_sequence_parallel_group() if group is None else group
+    if group is None:
+        return query, key, value
+
+    ndim = query.ndim
+    seq_dim %= ndim
+    head_dim %= ndim
+    equal_layout = (
+        query.shape == key.shape == value.shape
+        and query.dtype == key.dtype == value.dtype
+        and query.device == key.device == value.device
+        and seq_dim != 0
+        and head_dim != 0
+    )
+    if equal_layout:
+        batch_sizes = (query.size(0), key.size(0), value.size(0))
+        packed_qkv = torch.cat((query, key, value), dim=0)
+        return gather_packed_qkv_seq_scatter_heads(
+            packed_qkv,
+            batch_sizes,
+            seq_dim,
+            head_dim,
+            unpadded_dim_size,
+            group,
+        )
+
+    if _can_use_variable_qkv_all_to_all(query, key, value, seq_dim, head_dim, group):
+        query, key, value = QKVSeqAllToAll.apply(group, query, key, value, head_dim, seq_dim)
+        if unpadded_dim_size and unpadded_dim_size % dist.get_world_size(group) != 0:
+            padding_size = query.size(seq_dim) - unpadded_dim_size
+            query = _unpad_tensor(query, seq_dim, padding_size)
+            key = _unpad_tensor(key, seq_dim, padding_size)
+            value = _unpad_tensor(value, seq_dim, padding_size)
+        return query, key, value
+
+    return (
+        gather_seq_scatter_heads(query, seq_dim, head_dim, unpadded_dim_size, group),
+        gather_seq_scatter_heads(key, seq_dim, head_dim, unpadded_dim_size, group),
+        gather_seq_scatter_heads(value, seq_dim, head_dim, unpadded_dim_size, group),
+    )
+
+
+def _can_use_variable_qkv_all_to_all(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    seq_dim: int,
+    head_dim: int,
+    group: ProcessGroup,
+) -> bool:
+    if query.ndim != key.ndim or query.ndim != value.ndim:
+        return False
+    seq_dim %= query.ndim
+    head_dim %= query.ndim
+    if seq_dim == head_dim:
+        return False
+    if query.dtype != key.dtype or query.dtype != value.dtype:
+        return False
+    if query.device != key.device or query.device != value.device:
+        return False
+    for dim in range(query.ndim):
+        if dim != head_dim and not (query.size(dim) == key.size(dim) == value.size(dim)):
+            return False
+    world_size = dist.get_world_size(group)
+    return all(tensor.size(head_dim) % world_size == 0 for tensor in (query, key, value))
+
+
+def _all_to_all_variable_qkv(
+    group: ProcessGroup,
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    scatter_dim: int,
+    gather_dim: int,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Run one all-to-all over flattened per-destination Q/K/V payloads."""
+    world_size = dist.get_world_size(group)
+    scatter_dim %= query.ndim
+    gather_dim %= query.ndim
+    tensors = (query, key, value)
+    tensor_chunks = [tensor.chunk(world_size, dim=scatter_dim) for tensor in tensors]
+    chunk_shapes = [chunks[0].shape for chunks in tensor_chunks]
+    chunk_numels = [chunks[0].numel() for chunks in tensor_chunks]
+
+    send_chunks = [
+        torch.cat(tuple(chunks[rank].contiguous().view(-1) for chunks in tensor_chunks)) for rank in range(world_size)
+    ]
+    send_buffer = torch.cat(send_chunks)
+    recv_buffer = torch.empty_like(send_buffer)
+    dist.all_to_all_single(recv_buffer, send_buffer, group=group)
+
+    output_chunks: list[list[Tensor]] = [[], [], []]
+    recv_chunks = recv_buffer.chunk(world_size)
+    for recv_chunk in recv_chunks:
+        offset = 0
+        for output, shape, numel in zip(output_chunks, chunk_shapes, chunk_numels, strict=True):
+            output.append(recv_chunk.narrow(0, offset, numel).view(shape))
+            offset += numel
+    return tuple(torch.cat(chunks, dim=gather_dim).contiguous() for chunks in output_chunks)
+
+
+class QKVSeqAllToAll(torch.autograd.Function):
+    """Autograd-capable variable-payload QKV all-to-all."""
+
+    @staticmethod
+    def forward(
+        ctx: Any,
+        group: ProcessGroup,
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+        scatter_dim: int,
+        gather_dim: int,
+    ):
+        ctx.group = group
+        ctx.scatter_dim = scatter_dim
+        ctx.gather_dim = gather_dim
+        return _all_to_all_variable_qkv(group, query, key, value, scatter_dim, gather_dim)
+
+    @staticmethod
+    def backward(ctx: Any, grad_query: Tensor, grad_key: Tensor, grad_value: Tensor):
+        grad_query, grad_key, grad_value = _all_to_all_variable_qkv(
+            ctx.group,
+            grad_query,
+            grad_key,
+            grad_value,
+            ctx.gather_dim,
+            ctx.scatter_dim,
+        )
+        return (
+            None,
+            grad_query,
+            grad_key,
+            grad_value,
+            None,
+            None,
+        )
+
+
 def gather_heads_scatter_seq(x: Tensor, head_dim: int, seq_dim: int, group: ProcessGroup = None) -> Tensor:
     """
     A func to sync attention result with alltoall in sequence parallel

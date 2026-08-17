@@ -30,7 +30,7 @@ from transformers.utils import logging
 # Import compatibility wrapper for flash_attn_supports_top_left_mask
 from verl.utils.ulysses import (
     gather_heads_scatter_seq,
-    gather_seq_scatter_heads,
+    gather_qkv_seq_scatter_heads,
     get_ulysses_sequence_parallel_world_size,
     validate_ulysses_config,
 )
@@ -73,9 +73,9 @@ def apertus_attn_forward(
     if ulysses_sp_size > 1:
         validate_ulysses_config(self.config.num_attention_heads, ulysses_sp_size)
 
-        query_states = gather_seq_scatter_heads(query_states, seq_dim=2, head_dim=1)
-        key_states = gather_seq_scatter_heads(key_states, seq_dim=2, head_dim=1)
-        value_states = gather_seq_scatter_heads(value_states, seq_dim=2, head_dim=1)
+        query_states, key_states, value_states = gather_qkv_seq_scatter_heads(
+            query_states, key_states, value_states, seq_dim=2, head_dim=1
+        )
 
     full_q_len = query_states.size(2)
 

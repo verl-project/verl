@@ -32,7 +32,7 @@ from transformers.utils import is_flash_attn_2_available, is_flash_attn_greater_
 from verl.utils.device import is_npu_available
 from verl.utils.ulysses import (
     gather_heads_scatter_seq,
-    gather_seq_scatter_heads,
+    gather_qkv_seq_scatter_heads,
     get_ulysses_sequence_parallel_group,
     get_ulysses_sequence_parallel_world_size,
     validate_ulysses_config,
@@ -234,9 +234,9 @@ def _custom_flash_attention_forward(
     if sp_size > 1:
         # qkv: (batch_size, seq_length / sp_size, num_head, head_size)
         validate_ulysses_config(query_states.size(2), sp_size)
-        query_states = gather_seq_scatter_heads(query_states, seq_dim=1, head_dim=2)
-        key_states = gather_seq_scatter_heads(key_states, seq_dim=1, head_dim=2)
-        value_states = gather_seq_scatter_heads(value_states, seq_dim=1, head_dim=2)
+        query_states, key_states, value_states = gather_qkv_seq_scatter_heads(
+            query_states, key_states, value_states, seq_dim=1, head_dim=2
+        )
         position_ids_lst = [torch.empty_like(position_ids) for _ in range(sp_size)]
         position_ids = dist.all_gather(position_ids_lst, position_ids, group=get_ulysses_sequence_parallel_group())
         position_ids = torch.cat(position_ids_lst, dim=-1)  # (batch_size, seq_length)
@@ -311,8 +311,10 @@ def glm4v_attn_forward(
         )
         mrope_section = self.rope_parameter.get("mrope_section", None)
     query_states, key_states = apply_multimodal_rotary_pos_emb(query_states, key_states, cos, sin, mrope_section)
-    key_states = repeat_kv(key_states, self.num_key_value_groups)
-    value_states = repeat_kv(value_states, self.num_key_value_groups)
+    sp_size = get_ulysses_sequence_parallel_world_size()
+    if sp_size == 1 or key_states.size(1) % sp_size:
+        key_states = repeat_kv(key_states, self.num_key_value_groups)
+        value_states = repeat_kv(value_states, self.num_key_value_groups)
     dropout_rate = 0.0 if not self.training else self.attention_dropout
 
     # This is before the transpose
