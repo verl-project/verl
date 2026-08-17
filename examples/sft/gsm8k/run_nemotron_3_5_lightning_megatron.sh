@@ -10,14 +10,15 @@
 #     bash examples/sft/gsm8k/run_nemotron_3_5_lightning_megatron.sh
 #
 # Pinned pre-release software snapshot:
-#   Base container: nvcr.io/nvidia/nemo:26.08
+#   Public rebuild base: nvcr.io/nvidia/pytorch:26.06-py3
+#   Transformer Engine 2.18.0: e7c550c5f80636cf841a8204b1d6f85a5f3f28b7
 #   Megatron-Bridge r0.6.0: c93251151adeeadbae3ff2a2bf5ee7a1c34cff01
 #   Megatron-Core 0.19.0 (Bridge submodule): cd4afffa648426a959dc7cb1e24b5ce7d0c3ff54
 #   Transformers: >=5.8.1,<5.11 (5.10.4 is compatible with verl and Bridge)
 #
 # Keep Megatron-Core at the commit vendored by Megatron-Bridge. The public
-# Lightning checkpoint revision verified by NVIDIA is:
-#   b3caaabed0263651a17dc1f2d4ce97e794f76c44
+# Lightning checkpoint revision used for hardware validation is:
+#   d468880b6ad3c6e0d21377ce7242adaea4cc884d
 
 set -xeuo pipefail
 
@@ -63,9 +64,12 @@ LR_WARMUP_STEPS=${LR_WARMUP_STEPS:-10}
 DTYPE=${DTYPE:-bfloat16}
 
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
+TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-null}
 SAVE_FREQ=${SAVE_FREQ:-100}
 TEST_FREQ=${TEST_FREQ:-after_each_epoch}
 RESUME_MODE=${RESUME_MODE:-auto}
+MAX_CKPT_TO_KEEP=${MAX_CKPT_TO_KEEP:-2}
+LOGGER=${LOGGER:-'["console","wandb"]'}
 
 BACKEND=${BACKEND:-megatron}
 PROJECT_NAME=${PROJECT_NAME:-verl_sft_gsm8k}
@@ -168,12 +172,13 @@ MEGATRON_ENGINE_CONFIG=(
     "${MEGATRON_ENGINE_CONFIG[@]}" \
     "trainer.test_freq=${TEST_FREQ}" \
     "trainer.save_freq=${SAVE_FREQ}" \
-    'trainer.logger=["console","wandb"]' \
+    "trainer.logger=${LOGGER}" \
     "trainer.project_name=${PROJECT_NAME}" \
     "trainer.experiment_name=${EXPERIMENT_NAME}" \
     "trainer.total_epochs=${TOTAL_EPOCHS}" \
+    "trainer.total_training_steps=${TOTAL_TRAINING_STEPS}" \
     "trainer.default_local_dir=${CHECKPOINT_DIR}" \
     "trainer.resume_mode=${RESUME_MODE}" \
-    "trainer.max_ckpt_to_keep=10" \
+    "trainer.max_ckpt_to_keep=${MAX_CKPT_TO_KEEP}" \
     "checkpoint.save_contents=[model,optimizer,extra]" \
     "$@"

@@ -2,8 +2,9 @@
 # GRPO | NVIDIA Nemotron 3.5 Lightning 30B-A3B | Megatron actor | vLLM rollout
 # DAPO-style recipe on DAPO-Math-17k / AIME-2024.
 #
-# EXPERIMENTAL: this configuration has static validation only; run a one-step
-# checkpoint-load, weight-sync, and GRPO smoke test before production use.
+# EXPERIMENTAL: ordinary BF16 rollout passed a two-hour, 37-step hardware soak.
+# Convergence, checkpoint restore, quantized synchronization, alternate
+# topologies, and optional MTP speculative rollout remain unvalidated.
 #
 # This is a verl adaptation; NVIDIA has not published a Lightning-specific
 # GRPO recipe. The 2x8 H100 actor topology starts from NVIDIA's verified SFT
@@ -13,12 +14,14 @@
 #   Megatron-Bridge r0.6.0: c93251151adeeadbae3ff2a2bf5ee7a1c34cff01
 #   Megatron-Core 0.19.0 (Bridge submodule): cd4afffa648426a959dc7cb1e24b5ce7d0c3ff54
 #   Transformers: >=5.8.1,<5.11 (5.10.4 is compatible with verl and Bridge)
-#   vLLM: 0.27.1 recommended for optional Nemotron-H MTP speculation
+#   vLLM: 6e448d0ea9bf3d88d898b65449ca6dc2aec170ac (hardware-tested)
 #
 # Use the BF16 customization checkpoint. Quantized Lightning checkpoints and
 # quantized actor-to-rollout weight updates are intentionally not enabled here.
-# Set MTP_ROLLOUT_SPEC=1 to use one-token MTP speculation. vLLM 0.27.1 is the
-# recommended current release with Nemotron-H MTP support.
+# Set MTP_ROLLOUT_SPEC=1 to use one-token MTP speculation. That optional path
+# was not enabled in the hardware soak.
+# Checkpoint revision used for hardware validation:
+#   d468880b6ad3c6e0d21377ce7242adaea4cc884d
 
 set -xeuo pipefail
 
@@ -73,8 +76,11 @@ MTP_LOSS_SCALING_FACTOR=${MTP_LOSS_SCALING_FACTOR:-0.3}
 MTP_DETACH_ENCODER=${MTP_DETACH_ENCODER:-True}
 
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-10}
+TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-null}
 SAVE_FREQ=${SAVE_FREQ:-50}
 TEST_FREQ=${TEST_FREQ:-10}
+MAX_ACTOR_CKPT_TO_KEEP=${MAX_ACTOR_CKPT_TO_KEEP:-2}
+LOGGER=${LOGGER:-'["console","wandb"]'}
 PROJECT_NAME=${PROJECT_NAME:-verl_grpo_dapo_math}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-nemotron-3-5-lightning-30b-a3b-megatron}
 CHECKPOINT_DIR=${CHECKPOINT_DIR:-${HOME}/verl/checkpoints/${PROJECT_NAME}/${EXPERIMENT_NAME}}
@@ -237,7 +243,7 @@ ROLLOUT=(
 TRAINER=(
     trainer.balance_batch=True
     trainer.critic_warmup=0
-    'trainer.logger=["console","wandb"]'
+    "trainer.logger=${LOGGER}"
     trainer.project_name=${PROJECT_NAME}
     trainer.experiment_name=${EXPERIMENT_NAME}
     trainer.n_gpus_per_node=${NGPUS_PER_NODE}
@@ -245,8 +251,10 @@ TRAINER=(
     trainer.save_freq=${SAVE_FREQ}
     trainer.test_freq=${TEST_FREQ}
     trainer.total_epochs=${TOTAL_EPOCHS}
+    trainer.total_training_steps=${TOTAL_TRAINING_STEPS}
     trainer.default_local_dir="${CHECKPOINT_DIR}"
     trainer.resume_mode=auto
+    trainer.max_actor_ckpt_to_keep=${MAX_ACTOR_CKPT_TO_KEEP}
     trainer.val_before_train=False
     trainer.log_val_generations=10
 )
