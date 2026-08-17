@@ -346,3 +346,10 @@ class Worker(WorkerHelper):
         """
         result = func(*args, **kwargs)
         return result
+
+    @register(dispatch_mode=Dispatch.ALL_TO_ALL, execute_mode=Execute.ALL)
+    def close_rollout_data_backend(self):
+        """Close a rollout-data client initialized in this worker process."""
+        from verl.utils import rollout_data_backend
+
+        rollout_data_backend.close()

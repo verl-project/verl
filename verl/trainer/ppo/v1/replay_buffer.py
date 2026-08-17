@@ -17,10 +17,10 @@ import time
 from collections import Counter, defaultdict
 
 import numpy as np
-import transfer_queue as tq
 from omegaconf import DictConfig
-from transfer_queue import KVBatchMeta
 
+from verl.protocol import RolloutDataRef
+from verl.utils import rollout_data_backend
 from verl.utils.skip import SkipManager
 
 logger = logging.getLogger(__name__)
@@ -194,7 +194,7 @@ class ReplayBuffer:
         self.failure_keys.clear()
         self.prompt_global_steps.clear()
 
-        data = tq.kv_list()
+        data = rollout_data_backend.list_entries()
         if data is None:
             return
 
@@ -231,7 +231,7 @@ class ReplayBuffer:
             return
 
         trajectory_keys = {key for key in self.partitions[partition_id] if key.split("_")[0] in uids}
-        tq.kv_clear(
+        rollout_data_backend.clear(
             partition_id=partition_id,
             keys=[*uids, *trajectory_keys],
         )
@@ -266,23 +266,27 @@ class ReplayBuffer:
         missing_metric_uids = new_finished_uids - {key.split("_")[0] for key in trajectory_keys}
 
         if trajectory_keys:
-            data = tq.kv_batch_get(
+            with rollout_data_backend.materialized_batch(
                 keys=trajectory_keys,
                 partition_id=partition_id,
                 select_fields=["extra_fields"],
-            )
-            extra_fields_list = list(data["extra_fields"])
-        else:
-            extra_fields_list = []
-
-        for key, extra_fields in zip(trajectory_keys, extra_fields_list, strict=True):
-            uid = key.split("_")[0]
-            extra_fields = getattr(extra_fields, "data", extra_fields)
-            reward_extra_info = extra_fields.get("reward_extra_info", {}) if isinstance(extra_fields, dict) else {}
-            if self.filter_groups_metric not in reward_extra_info:
-                missing_metric_uids.add(uid)
-            else:
-                metrics_by_uid[uid].append(float(reward_extra_info[self.filter_groups_metric]))
+            ) as data:
+                for key, extra_fields in zip(
+                    trajectory_keys, data["extra_fields"], strict=True
+                ):
+                    uid = key.split("_")[0]
+                    extra_fields = getattr(extra_fields, "data", extra_fields)
+                    reward_extra_info = (
+                        extra_fields.get("reward_extra_info", {})
+                        if isinstance(extra_fields, dict)
+                        else {}
+                    )
+                    if self.filter_groups_metric not in reward_extra_info:
+                        missing_metric_uids.add(uid)
+                    else:
+                        metrics_by_uid[uid].append(
+                            float(reward_extra_info[self.filter_groups_metric])
+                        )
 
         if missing_metric_uids:
             raise RuntimeError(
@@ -376,8 +380,8 @@ class ReplayBuffer:
 
     def _materialize_batch(
         self, partition_id: str, selected_prompt_uids: list[str], partition_snapshot: dict[str, dict]
-    ) -> KVBatchMeta:
-        tq.kv_clear(partition_id=partition_id, keys=selected_prompt_uids)
+    ) -> RolloutDataRef:
+        rollout_data_backend.clear(partition_id=partition_id, keys=selected_prompt_uids)
 
         keys, tags = [], []
         selected = set(selected_prompt_uids)
@@ -386,7 +390,7 @@ class ReplayBuffer:
             if uid in selected:
                 keys.append(key)
                 tags.append(tag)
-        return KVBatchMeta(partition_id=partition_id, keys=keys, tags=tags)
+        return RolloutDataRef(partition_id=partition_id, keys=keys, tags=tags)
 
     def _wait_for_next_poll(self, partition_id: str, last_debug_time: float) -> float:
         time.sleep(self.poll_interval)
@@ -402,7 +406,7 @@ class ReplayBuffer:
         return last_debug_time
 
     @SkipManager.annotate_tq(role="rollout_tq", phase="sample")
-    def sample(self, global_steps: int, partition_id: str, batch_size: int) -> tuple[KVBatchMeta, dict]:
+    def sample(self, global_steps: int, partition_id: str, batch_size: int) -> tuple[RolloutDataRef, dict]:
         """Sample a batch using synchronous rollout semantics.
 
         NOTE: user can customize sampling strategy by setting:
@@ -417,7 +421,7 @@ class ReplayBuffer:
             batch_size (int, optional): Batch size.
 
         Returns:
-            KVBatchMeta: A batch of data.
+            RolloutDataRef: A batch of data.
             dict: Auxiliary metrics.
         """
         last_debug_time = time.time()
@@ -539,7 +543,7 @@ class ReplayBufferAsync(ReplayBuffer):
         return len(sampleable_keys) >= batch_size
 
     @SkipManager.annotate_tq(role="rollout_tq", phase="sample")
-    def sample(self, global_steps: int, partition_id: str, batch_size: int) -> tuple[KVBatchMeta, dict]:
+    def sample(self, global_steps: int, partition_id: str, batch_size: int) -> tuple[RolloutDataRef, dict]:
         """Sample a batch while evicting and replacing stale, DAPO-filtered, or failed groups."""
         last_debug_time = time.time()
         eviction_metrics: dict = {}

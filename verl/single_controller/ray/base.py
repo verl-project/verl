@@ -638,8 +638,15 @@ class RayWorkerGroup(WorkerGroup):
             "MASTER_ADDR": self._master_addr,
             "MASTER_PORT": self._master_port,
         }
+        rollout_backend = os.getenv("VERL_ROLLOUT_DATA_BACKEND")
+        if rollout_backend is not None:
+            env_vars["VERL_ROLLOUT_DATA_BACKEND"] = rollout_backend
         if worker_env is not None:
-            logging.debug(f"Appending ray class env, origin: {env_vars}, customized env: {worker_env}")
+            logging.debug(
+                "Appending ray class env keys, origin: %s, customized: %s",
+                sorted(env_vars),
+                sorted(worker_env),
+            )
             conflict_env_vars = set(env_vars.keys()) & set(worker_env.keys())
             if len(conflict_env_vars) > 0:
                 logging.error(

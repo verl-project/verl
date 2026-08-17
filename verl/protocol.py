@@ -40,7 +40,7 @@ from verl.utils.py_functional import list_of_dict_to_dict_of_list, union_two_dic
 from verl.utils.torch_functional import allgather_dict_tensors
 from verl.utils.transferqueue_utils import BatchMeta, KVBatchMeta
 
-__all__ = ["DataProto", "union_tensor_dict"]
+__all__ = ["DataProto", "RolloutDataRef", "union_tensor_dict"]
 
 with contextlib.suppress(Exception):
     tensordict.set_lazy_legacy(False).set()
@@ -566,14 +566,14 @@ class DataProto:
             meta_info = {}
         batch = {}
         non_tensor_batch = {}
-        batch_size = None
+        batch_size = tensor_dict.batch_size[:num_batch_dims]
         for key, val in tensor_dict.items():
             if isinstance(val, torch.Tensor):
                 batch[key] = val
-                if batch_size is None:
-                    batch_size = val.shape[:num_batch_dims]
             elif isinstance(val, NonTensorStack):
-                non_tensor_batch[key] = np.array([elem.data for elem in val], dtype=object)
+                rows = np.empty((len(val),), dtype=object)
+                rows[:] = [elem.data for elem in val]
+                non_tensor_batch[key] = rows
             elif isinstance(val, NonTensorData):
                 meta_info[key] = val.data
 
@@ -1108,7 +1108,7 @@ class DataProto:
         assert parse_version(tensordict.__version__) >= parse_version("0.10"), (
             "Convert DataProto to TensorDict at least requires tensordict version 0.10"
         )
-        tensor_batch = self.batch.to_dict()
+        tensor_batch = {} if self.batch is None else self.batch.to_dict()
         non_tensor_batch = self.non_tensor_batch
 
         from tensordict.tensorclass import NonTensorData, NonTensorStack
@@ -1228,6 +1228,85 @@ class DataProtoFuture:
         return output
 
 
+@dataclass
+class RolloutDataRef:
+    """Backend-neutral reference to rollout rows stored outside the controller."""
+
+    keys: list[str] = field(default_factory=list)
+    tags: list[dict[str, Any]] = field(default_factory=list)
+    partition_id: str | None = None
+    fields: list[str] | None = None
+    extra_info: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if len(self.keys) != len(self.tags):
+            raise ValueError("keys and tags must have the same length")
+        if len(self.keys) != len(set(self.keys)):
+            raise ValueError("rollout data keys must be unique")
+        if self.keys and (not isinstance(self.partition_id, str) or not self.partition_id):
+            raise ValueError("non-empty rollout data requires a partition_id")
+        if self.fields is not None and len(self.fields) != len(set(self.fields)):
+            raise ValueError("rollout data fields must be unique")
+        self.tags = list(self.tags)
+        self.extra_info = dict(self.extra_info)
+
+    @property
+    def size(self) -> int:
+        return len(self.keys)
+
+    def __len__(self) -> int:
+        return self.size
+
+    def reorder(self, indexes: list[int]) -> None:
+        if len(indexes) != self.size or set(indexes) != set(range(self.size)):
+            raise ValueError("reorder indexes must be a permutation of the batch")
+        self.keys = [self.keys[index] for index in indexes]
+        self.tags = [self.tags[index] for index in indexes]
+
+    def chunk(self, chunks: int) -> list["RolloutDataRef"]:
+        if chunks <= 0:
+            raise ValueError("chunks must be positive")
+        base_size, remainder = divmod(self.size, chunks)
+        result = []
+        start = 0
+        for index in range(chunks):
+            end = start + base_size + (index < remainder)
+            result.append(
+                RolloutDataRef(
+                    keys=self.keys[start:end],
+                    tags=self.tags[start:end],
+                    partition_id=self.partition_id,
+                    fields=self.fields,
+                    extra_info=self.extra_info,
+                )
+            )
+            start = end
+        return result
+
+    @classmethod
+    def concat(cls, refs: list["RolloutDataRef"]) -> "RolloutDataRef":
+        extra_info = {}
+        for ref in refs:
+            for key, value in ref.extra_info.items():
+                extra_info.setdefault(key, []).append(value)
+        refs = [ref for ref in refs if ref.size]
+        if not refs:
+            return cls(extra_info=extra_info)
+        partition_id = refs[0].partition_id
+        fields = refs[0].fields
+        if any(ref.partition_id != partition_id for ref in refs):
+            raise ValueError("cannot concatenate rollout data from different partitions")
+        if any(ref.fields != fields for ref in refs):
+            raise ValueError("cannot concatenate rollout data with different fields")
+        return cls(
+            keys=[key for ref in refs for key in ref.keys],
+            tags=[tag for ref in refs for tag in ref.tags],
+            partition_id=partition_id,
+            fields=fields,
+            extra_info=extra_info,
+        )
+
+
 class BatchData:
     """Uniform dispatch wrapper for batch data operations.
 
@@ -1246,9 +1325,6 @@ class BatchData:
         assert BatchData(arg).is_chunkable()
         assert BatchData(output_list).is_concatable()
     """
-
-    _CHUNKABLE_TYPES = (TensorDict, KVBatchMeta, BatchMeta)  # lazily extended with DataProto etc.
-    _CONCATABLE_TYPES = (TensorDict, KVBatchMeta, BatchMeta)
 
     def __init__(self, data):
         self._data = data
@@ -1279,6 +1355,10 @@ class BatchData:
 
             raw_chunks = chunk_tensordict(data, chunks)
             return tuple(contiguous(val).consolidate() for val in raw_chunks)
+        if isinstance(data, RolloutDataRef):
+            from verl.utils.rollout_data_backend import prepare_for_dispatch
+
+            data = prepare_for_dispatch(data)
         if isinstance(data, KVBatchMeta):
             # early translate KVBatchMeta -> BatchMeta to prevent frequent
             # controller communication during PUT/GET in each rank
@@ -1324,11 +1404,11 @@ class BatchData:
 
     @classmethod
     def _chunkable_types(cls):
-        return (DataProto, DataProtoFuture, TensorDict, KVBatchMeta, BatchMeta)
+        return (DataProto, DataProtoFuture, TensorDict, RolloutDataRef, KVBatchMeta, BatchMeta)
 
     @classmethod
     def _concatable_types(cls):
-        return (DataProto, ray.ObjectRef, TensorDict, KVBatchMeta, BatchMeta)
+        return (DataProto, ray.ObjectRef, TensorDict, RolloutDataRef, KVBatchMeta, BatchMeta)
 
 
 def all_gather_data_proto(data: DataProto, process_group):

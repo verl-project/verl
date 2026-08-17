@@ -74,6 +74,13 @@ _ASYNC_BRIDGE_THREAD: threading.Thread | None = None
 _ASYNC_BRIDGE_LOCK = threading.Lock()
 
 
+def _ensure_tq_initialized() -> None:
+    global TQ_INITIALIZED
+    if not TQ_INITIALIZED:
+        tq.init()
+        TQ_INITIALIZED = True
+
+
 def _run_event_loop_forever(loop: asyncio.AbstractEventLoop, ready: threading.Event) -> None:
     asyncio.set_event_loop(loop)
     ready.set()
@@ -147,28 +154,23 @@ def _run_async_in_temp_loop(async_func: Callable[..., Any], *args, **kwargs) -> 
     return future.result()
 
 
+def _is_meta(value: Any) -> bool:
+    from verl.protocol import RolloutDataRef
+
+    return isinstance(value, BatchMeta | KVBatchMeta | RolloutDataRef)
+
+
 def _find_meta(*args, **kwargs):
     for arg in args:
-        if isinstance(arg, BatchMeta | KVBatchMeta):
+        if _is_meta(arg):
             return arg
     for v in kwargs.values():
-        if isinstance(v, BatchMeta | KVBatchMeta):
+        if _is_meta(v):
             return v
     return None
 
 
-async def _async_meta_to_realdata(meta: BatchMeta | KVBatchMeta) -> TensorDict:
-    if isinstance(meta, KVBatchMeta):
-        meta = await async_kv_batch_meta2batch_meta(meta)
-    meta_info = copy.deepcopy(meta.extra_info)
-    if meta.size == 0:
-        empty_td = TensorDict({}, batch_size=(0,))
-        tu.assign_non_tensor(empty_td, **meta_info)
-        return empty_td
-
-    tq_client = tq.get_client()
-    tensordict = await tq_client.async_get_data(meta)
-
+def _with_extra_info(tensordict: TensorDict, meta_info: dict[str, Any]) -> TensorDict:
     for key, val in meta_info.items():
         if isinstance(val, (NonTensorData | NonTensorStack)):
             tensordict[key] = val
@@ -177,11 +179,79 @@ async def _async_meta_to_realdata(meta: BatchMeta | KVBatchMeta) -> TensorDict:
     return tensordict
 
 
-def _meta_to_realdata(meta: BatchMeta) -> TensorDict:
+def _rollout_ref_to_realdata(meta) -> TensorDict:
+    from verl.utils import rollout_data_backend
+
+    meta_info = copy.deepcopy(meta.extra_info)
+    if meta.size == 0:
+        return _with_extra_info(TensorDict({}, batch_size=(0,)), meta_info)
+    data = rollout_data_backend.batch_get(
+        keys=meta.keys,
+        partition_id=meta.partition_id,
+        select_fields=meta.fields,
+    )
+    try:
+        return _with_extra_info(data, meta_info)
+    except BaseException:
+        rollout_data_backend.release_result(data)
+        raise
+
+
+async def _async_meta_to_realdata(meta) -> TensorDict:
+    from verl.protocol import RolloutDataRef
+
+    if isinstance(meta, RolloutDataRef):
+        return await asyncio.to_thread(_rollout_ref_to_realdata, meta)
+    if isinstance(meta, KVBatchMeta):
+        meta = await async_kv_batch_meta2batch_meta(meta)
+
+    meta_info = copy.deepcopy(meta.extra_info)
+    if meta.size == 0:
+        return _with_extra_info(TensorDict({}, batch_size=(0,)), meta_info)
+    return _with_extra_info(await tq.get_client().async_get_data(meta), meta_info)
+
+
+def _meta_to_realdata(meta) -> TensorDict:
+    from verl.protocol import RolloutDataRef
+
+    if isinstance(meta, RolloutDataRef):
+        return _rollout_ref_to_realdata(meta)
     return _run_async_in_temp_loop(_async_meta_to_realdata, meta)
 
 
-async def _async_update_meta_with_output(output: TensorDict, meta: BatchMeta, func_name=None) -> BatchMeta:
+def _materialize_meta(value: Any, materialized: list[TensorDict]) -> Any:
+    if not _is_meta(value):
+        return value
+    from verl.protocol import RolloutDataRef
+
+    result = _meta_to_realdata(value)
+    if isinstance(value, RolloutDataRef):
+        materialized.append(result)
+    return result
+
+
+async def _async_materialize_meta(value: Any, materialized: list[TensorDict]) -> Any:
+    if not _is_meta(value):
+        return value
+    from verl.protocol import RolloutDataRef
+
+    result = await _async_meta_to_realdata(value)
+    if isinstance(value, RolloutDataRef):
+        materialized.append(result)
+    return result
+
+
+def _release_materialized(values: list[TensorDict]) -> None:
+    from verl.utils import rollout_data_backend
+
+    for value in values:
+        try:
+            rollout_data_backend.release_result(value)
+        except Exception:
+            logger.exception("Failed to release materialized rollout data")
+
+
+def _split_output(output: TensorDict) -> tuple[list[str], dict[str, Any]]:
     fields, meta_data = [], {}
     for k, v in output.items():
         if isinstance(v, torch.Tensor | NonTensorStack):
@@ -190,7 +260,30 @@ async def _async_update_meta_with_output(output: TensorDict, meta: BatchMeta, fu
             meta_data[k] = v.data
         else:
             raise ValueError(f"Unsupported type {type(v)} for key {k} in output TensorDict.")
+    return fields, meta_data
 
+
+def _update_rollout_ref(output: TensorDict, meta):
+    from verl.utils import rollout_data_backend
+
+    fields, meta_data = _split_output(output)
+    if fields:
+        meta = rollout_data_backend.batch_put(
+            keys=meta.keys,
+            partition_id=meta.partition_id,
+            fields=output.select(*fields),
+        )
+    meta.extra_info = meta_data
+    return meta
+
+
+async def _async_update_meta_with_output(output: TensorDict, meta, func_name=None):
+    from verl.protocol import RolloutDataRef
+
+    if isinstance(meta, RolloutDataRef):
+        return await asyncio.to_thread(_update_rollout_ref, output, meta)
+
+    fields, meta_data = _split_output(output)
     if fields:
         t1 = time.time()
         tq_client = tq.get_client()
@@ -202,9 +295,12 @@ async def _async_update_meta_with_output(output: TensorDict, meta: BatchMeta, fu
     return meta
 
 
-def _update_meta_with_output(output: TensorDict, meta: BatchMeta, func_name=None) -> BatchMeta:
-    updated_meta = _run_async_in_temp_loop(_async_update_meta_with_output, output, meta, func_name)
-    return updated_meta
+def _update_meta_with_output(output: TensorDict, meta, func_name=None):
+    from verl.protocol import RolloutDataRef
+
+    if isinstance(meta, RolloutDataRef):
+        return _update_rollout_ref(output, meta)
+    return _run_async_in_temp_loop(_async_update_meta_with_output, output, meta, func_name)
 
 
 def _compute_need_collect(dispatch_mode: "dict | Dispatch", args: list) -> bool:
@@ -259,7 +355,7 @@ def _compute_need_collect(dispatch_mode: "dict | Dispatch", args: list) -> bool:
         return True
 
 
-def _postprocess_common(output, put_data, need_collect):
+def _postprocess_common(output, put_data, need_collect, meta=None):
     """Common post-processing logic for function outputs in TransferQueue bridge.
 
     This function handles the final return value based on whether data should be
@@ -287,10 +383,10 @@ def _postprocess_common(output, put_data, need_collect):
         across different execution paths and avoid redundant data operations in
         distributed scenarios.
     """
-    from verl.protocol import DataProto
+    from verl.protocol import DataProto, RolloutDataRef
 
     if put_data and not need_collect:
-        return BatchMeta()
+        return RolloutDataRef() if isinstance(meta, RolloutDataRef) else BatchMeta()
     elif not put_data and not need_collect and isinstance(output, DataProto):
         return DataProto()
     elif not put_data and not need_collect and isinstance(output, TensorDict):
@@ -299,11 +395,46 @@ def _postprocess_common(output, put_data, need_collect):
         return output
 
 
+def _bridge_meta_kind(meta: Any) -> tuple[bool, Any]:
+    from verl.protocol import RolloutDataRef
+
+    if not isinstance(meta, RolloutDataRef):
+        _ensure_tq_initialized()
+    is_kv_meta = isinstance(meta, KVBatchMeta)
+    return is_kv_meta, meta.tags if is_kv_meta else None
+
+
+def _bridge_output_state(
+    output: Any,
+    meta: Any,
+    dispatch_mode: "dict | Dispatch",
+    args: list[Any],
+) -> tuple[bool, bool]:
+    put_data = isinstance(output, TensorDict) and bool(output.batch_size)
+    if put_data:
+        assert output.batch_size[0] == meta.size, (
+            f"output batch size {output.batch_size} != meta size {meta.size}"
+        )
+    need_collect = (
+        _compute_need_collect(dispatch_mode, args)
+        if dispatch_mode is not None
+        else True
+    )
+    return put_data, need_collect
+
+
+def _release_if_detached(result: Any, materialized: list[TensorDict]) -> None:
+    if (
+        result is None
+        or _is_meta(result)
+        or isinstance(result, TensorDict)
+        and not result.batch_size
+    ):
+        _release_materialized(materialized)
+
+
 async def async_kv_batch_meta2batch_meta(meta: KVBatchMeta) -> BatchMeta:
-    global TQ_INITIALIZED
-    if not TQ_INITIALIZED:
-        tq.init()
-        TQ_INITIALIZED = True
+    _ensure_tq_initialized()
     tq_client = tq.get_client()
     batch_meta = await tq_client.async_kv_retrieve_meta(keys=meta.keys, partition_id=meta.partition_id, create=False)
     fields = meta.fields
@@ -321,10 +452,7 @@ def kv_batch_meta2batch_meta(meta: KVBatchMeta):
 
 
 async def async_batch_meta2kv_batch_meta(meta: BatchMeta) -> KVBatchMeta:
-    global TQ_INITIALIZED
-    if not TQ_INITIALIZED:
-        tq.init()
-        TQ_INITIALIZED = True
+    _ensure_tq_initialized()
     tq_client = tq.get_client()
     partition_id = meta.partition_ids[0]
     assert all([partition_id == pid for pid in meta.partition_ids])
@@ -345,13 +473,12 @@ def batch_meta2kv_batch_meta(meta: BatchMeta):
 
 
 def tqbridge(dispatch_mode: "dict | Dispatch" = None):
-    """Creates a decorator for bridging KVBatchMeta and TensorDict.
+    """Bridge external rollout references and worker-local TensorDict values.
 
-    This decorator automatically handles conversions between `KVBatchMeta`
-    and `TensorDict` in function parameters, and decides whether to sync function
-    output back to `KVBatchMeta` based on configuration(`put_data`). It supports
-    both synchronous and asynchronous functions (async def). When TQ is not enabled, it
-    simply calls the original function as-is.
+    The decorator materializes external rollout references before a worker call
+    and writes TensorDict results back through the selected rollout backend. It
+    preserves the existing TransferQueue metadata behavior and also manages
+    Mooncake read-buffer ownership.
 
     Args:
         dispatch_mode: Controls data collection behavior for the current worker. Passed to
@@ -377,46 +504,35 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None):
             if batch_meta is None:
                 return func(*args, **kwargs)
             else:
-                global TQ_INITIALIZED
-                if not TQ_INITIALIZED:
-                    tq.init()
-                    TQ_INITIALIZED = True
-
-                is_kv_batch_meta = isinstance(batch_meta, KVBatchMeta)
+                is_kv_batch_meta, tags = _bridge_meta_kind(batch_meta)
                 if is_kv_batch_meta:
-                    tags = batch_meta.tags
                     batch_meta = kv_batch_meta2batch_meta(batch_meta)
-                t1 = time.time()
-                args = [_meta_to_realdata(arg) if isinstance(arg, BatchMeta | KVBatchMeta) else arg for arg in args]
-                kwargs = {
-                    k: _meta_to_realdata(v) if isinstance(v, BatchMeta | KVBatchMeta) else v for k, v in kwargs.items()
-                }
-                t2 = time.time()
-                logger.info(
-                    f"Task {func.__name__} (pid={pid}) is getting len_samples={batch_meta.size}, cost time: {t2 - t1}"
-                )
+                materialized = []
+                try:
+                    t1 = time.time()
+                    args = [_materialize_meta(arg, materialized) for arg in args]
+                    kwargs = {key: _materialize_meta(value, materialized) for key, value in kwargs.items()}
+                    t2 = time.time()
+                    logger.info(
+                        f"Task {func.__name__} (pid={pid}) is getting "
+                        f"len_samples={batch_meta.size}, cost time: {t2 - t1}"
+                    )
 
-                output = func(*args, **kwargs)
+                    output = func(*args, **kwargs)
 
-                put_data = False
-                if isinstance(output, TensorDict):
-                    if output.batch_size:
-                        assert output.batch_size[0] == batch_meta.size, (
-                            f"output batch size {output.batch_size} != meta size {batch_meta.size}"
-                        )
-                        put_data = True
-
-                if dispatch_mode is not None:
-                    need_collect = _compute_need_collect(dispatch_mode, args)
-                else:
-                    need_collect = True
-                if put_data and need_collect:
-                    updated_meta = _update_meta_with_output(output, batch_meta, func.__name__)
-                    if is_kv_batch_meta:
-                        updated_meta = batch_meta2kv_batch_meta(updated_meta)
-                        updated_meta.tags = tags
-                    return updated_meta
-                return _postprocess_common(output, put_data, need_collect)
+                    put_data, need_collect = _bridge_output_state(output, batch_meta, dispatch_mode, args)
+                    if put_data and need_collect:
+                        result = _update_meta_with_output(output, batch_meta, func.__name__)
+                        if is_kv_batch_meta:
+                            result = batch_meta2kv_batch_meta(result)
+                            result.tags = tags
+                    else:
+                        result = _postprocess_common(output, put_data, need_collect, batch_meta)
+                except BaseException:
+                    _release_materialized(materialized)
+                    raise
+                _release_if_detached(result, materialized)
+                return result
 
         @wraps(func)
         async def async_inner(*args, **kwargs):
@@ -424,56 +540,37 @@ def tqbridge(dispatch_mode: "dict | Dispatch" = None):
             if batch_meta is None:
                 return await func(*args, **kwargs)
             else:
-                global TQ_INITIALIZED
-                if not TQ_INITIALIZED:
-                    tq.init()
-                    TQ_INITIALIZED = True
-
-                is_kv_batch_meta = isinstance(batch_meta, KVBatchMeta)
+                is_kv_batch_meta, tags = _bridge_meta_kind(batch_meta)
                 if is_kv_batch_meta:
-                    tags = batch_meta.tags
                     batch_meta = await async_kv_batch_meta2batch_meta(batch_meta)
 
-                t1 = time.time()
-                args = [
-                    await _async_meta_to_realdata(arg) if isinstance(arg, BatchMeta | KVBatchMeta) else arg
-                    for arg in args
-                ]
-                kwargs = {
-                    k: await _async_meta_to_realdata(v) if isinstance(v, BatchMeta | KVBatchMeta) else v
-                    for k, v in kwargs.items()
-                }
-                t2 = time.time()
-                logger.info(
-                    f"Task {func.__name__} (pid={pid}) is getting len_samples={batch_meta.size}, cost time: {t2 - t1}"
-                )
+                materialized = []
+                try:
+                    t1 = time.time()
+                    args = [await _async_materialize_meta(arg, materialized) for arg in args]
+                    kwargs = {key: await _async_materialize_meta(value, materialized) for key, value in kwargs.items()}
+                    t2 = time.time()
+                    logger.info(
+                        f"Task {func.__name__} (pid={pid}) is getting "
+                        f"len_samples={batch_meta.size}, cost time: {t2 - t1}"
+                    )
 
-                output = await func(*args, **kwargs)
+                    output = await func(*args, **kwargs)
 
-                put_data = False
-                if isinstance(output, TensorDict):
-                    if output.batch_size:
-                        assert output.batch_size[0] == batch_meta.size, (
-                            f"output batch size {output.batch_size} != meta size {batch_meta.size}"
-                        )
-                        put_data = True
+                    put_data, need_collect = _bridge_output_state(output, batch_meta, dispatch_mode, args)
+                    if put_data and need_collect:
+                        result = await _async_update_meta_with_output(output, batch_meta, func.__name__)
+                        if is_kv_batch_meta:
+                            result = await async_batch_meta2kv_batch_meta(result)
+                            result.tags = tags
+                    else:
+                        result = _postprocess_common(output, put_data, need_collect, batch_meta)
+                except BaseException:
+                    _release_materialized(materialized)
+                    raise
+                _release_if_detached(result, materialized)
+                return result
 
-                if dispatch_mode is not None:
-                    need_collect = _compute_need_collect(dispatch_mode, args)
-                else:
-                    need_collect = True
-                if put_data and need_collect:
-                    updated_meta = await _async_update_meta_with_output(output, batch_meta, func.__name__)
-                    if is_kv_batch_meta:
-                        updated_meta = await async_batch_meta2kv_batch_meta(updated_meta)
-                        updated_meta.tags = tags
-                    return updated_meta
-                return _postprocess_common(output, put_data, need_collect)
-
-        wrapper_inner = inner
-        wrapper_async_inner = async_inner
-
-        wrapper = wrapper_async_inner if inspect.iscoroutinefunction(func) else wrapper_inner
-        return wrapper
+        return async_inner if inspect.iscoroutinefunction(func) else inner
 
     return decorator

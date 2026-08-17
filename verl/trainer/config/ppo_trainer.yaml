@@ -245,6 +245,15 @@ trainer:
       # Frequency of parameter synchronization between trainer and rollout
       parameter_sync_step: 4
 
+    # Rollout data plane backend. TransferQueue remains the default.
+    rollout_data_backend:
+
+      # Rollout data backend: transfer_queue or mooncake
+      name: transfer_queue
+
+      # Backend-specific options passed to the implementation
+      config: {}
+
     # Replay buffer sampling strategy
     sampler:
 

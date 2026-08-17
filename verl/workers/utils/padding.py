@@ -114,7 +114,9 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
 
     if prompt_ids.is_nested:
         prompt_lens = prompt_ids.offsets().diff()
-        response_lens = response_ids.offsets().diff()
+        response_lens = sequence_lengths(
+            response_ids, len(prompt_ids), "responses"
+        )
         if max_response_len < 0:
             max_response_len = response_lens.max().item()
     else:
@@ -191,18 +193,40 @@ def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
     return data
 
 
+def sequence_lengths(value: torch.Tensor, batch_size: int, name: str) -> torch.Tensor:
+    """Return per-row lengths for a jagged tensor or an equal-length dense tensor."""
+    if value.is_nested:
+        return value.offsets().diff()
+    if value.ndim != 2 or value.shape[0] != batch_size:
+        raise ValueError(f"dense {name} must have shape (batch_size, sequence_length)")
+    return torch.full(
+        (batch_size,),
+        value.shape[1],
+        dtype=torch.int64,
+        device=value.device,
+    )
+
+
+def padded_tensor(value: torch.Tensor, padding: int) -> torch.Tensor:
+    """Pad a jagged tensor while leaving an already-dense tensor unchanged."""
+    return value.to_padded_tensor(padding=padding) if value.is_nested else value
+
+
 def response_from_nested(tensor: torch.Tensor, response_mask: torch.Tensor) -> torch.Tensor:
     """Extract response from nested model output.
 
     Args:
         tensor: a nested tensor with shape (bsz, prompt_len + response_len)
-        response_mask: a nested tensor with shape (bsz, response_len)
+        response_mask: a nested tensor, or an equal-length dense tensor, with
+            shape (bsz, response_len)
 
     Returns:
         tensor: a nested tensor with shape (bsz, response_len)
     """
     values, offsets = tensor.values(), tensor.offsets()
-    response_lens = response_mask.offsets().diff()
+    response_lens = sequence_lengths(
+        response_mask, len(tensor), "response_mask"
+    )
     response_list = []
     for resp_len, seq_offset in zip(response_lens, offsets[1:], strict=True):
         # left-shift model output by one token for log_probs/values
@@ -215,13 +239,15 @@ def response_to_nested(tensor: torch.Tensor, response_mask: torch.Tensor) -> tor
 
     Args:
         tensor: a tensor with shape (bsz, response_len)
-        response_mask: a nested tensor with shape (bsz, response_len)
+        response_mask: a nested tensor, or an equal-length dense tensor, with
+            shape (bsz, response_len)
 
     Returns:
         tensor: a nested tensor with shape (bsz, response_len)
     """
-    assert response_mask.is_nested
-    response_lens = response_mask.offsets().diff()
+    response_lens = sequence_lengths(
+        response_mask, tensor.shape[0], "response_mask"
+    )
     response_list = []
     for i in range(tensor.shape[0]):
         response_list.append(tensor[i, : response_lens[i]])

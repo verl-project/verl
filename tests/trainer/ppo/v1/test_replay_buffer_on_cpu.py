@@ -27,9 +27,10 @@ from dataclasses import dataclass, field
 import pytest
 import torch
 import transfer_queue as tq
-from transfer_queue import KVBatchMeta
 
+from verl.protocol import RolloutDataRef
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
+from verl.utils import rollout_data_backend
 
 # Small poll interval so the blocking consumer reacts to producer writes quickly.
 POLL_INTERVAL = 0.05
@@ -37,9 +38,10 @@ POLL_INTERVAL = 0.05
 
 @pytest.fixture(scope="module")
 def tq_init():
-    tq.init()
+    rollout_data_backend.configure_runtime({"name": "transfer_queue"})
+    rollout_data_backend.init()
     yield
-    tq.close()
+    rollout_data_backend.close()
 
 
 @pytest.fixture
@@ -109,7 +111,7 @@ class FakeRefiller:
         return num_prompts
 
 
-def _sample(rb: ReplayBuffer, partition_id: str, batch_size: int, global_steps: int = 0) -> KVBatchMeta:
+def _sample(rb: ReplayBuffer, partition_id: str, batch_size: int, global_steps: int = 0) -> RolloutDataRef:
     """Call ``sample`` and return just the batch (dropping the metrics dict)."""
     batch, _metrics = rb.sample(global_steps=global_steps, partition_id=partition_id, batch_size=batch_size)
     return batch
@@ -199,7 +201,7 @@ class SampleConsumer(threading.Thread):
         self.partition_id = partition_id
         self.batch_size = batch_size
         self.global_steps = global_steps
-        self.result: KVBatchMeta | None = None
+        self.result: RolloutDataRef | None = None
         self.metrics: dict | None = None
         self.error: Exception | None = None
 
@@ -213,7 +215,7 @@ class SampleConsumer(threading.Thread):
         except Exception as e:
             self.error = e
 
-    def result_or_raise(self, timeout: float = 10.0) -> KVBatchMeta:
+    def result_or_raise(self, timeout: float = 10.0) -> RolloutDataRef:
         self.join(timeout)
         assert not self.is_alive(), "SampleConsumer thread did not finish in time"
         if self.error is not None:

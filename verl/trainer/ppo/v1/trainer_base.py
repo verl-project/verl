@@ -27,20 +27,17 @@ from typing import Any, Optional
 import numpy as np
 import ray
 import torch
-import transfer_queue as tq
 from omegaconf import DictConfig, OmegaConf, open_dict
-from packaging.version import InvalidVersion, Version
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
-from transfer_queue import KVBatchMeta
 
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop import AgentLoopManager
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.experimental.teacher_loop import MultiTeacherModelManager
-from verl.protocol import DataProto, DataProtoFuture
+from verl.protocol import DataProto, DataProtoFuture, RolloutDataRef
 from verl.single_controller.ray import (
     RayClassWithInitArgs,
     RayWorkerGroup,
@@ -73,6 +70,7 @@ from verl.trainer.ppo.utils import (
 )
 from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY, ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.utils import MetricsAggregator, compute_advantage_for_multi_trajectories
+from verl.utils import rollout_data_backend
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.config import omega_conf_to_dataclass
@@ -89,7 +87,12 @@ from verl.workers.config import CriticConfig, DistillationConfig, HFModelConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
 from verl.workers.rollout.llm_server import LLMServerClient, LLMServerManager
 from verl.workers.utils.losses import value_loss
-from verl.workers.utils.padding import response_from_nested, response_to_nested
+from verl.workers.utils.padding import (
+    padded_tensor,
+    response_from_nested,
+    response_to_nested,
+    sequence_lengths,
+)
 
 
 def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
@@ -100,19 +103,6 @@ def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
-
-
-def _tq_supports_checkpoint() -> bool:
-    """Whether the installed TransferQueue can snapshot/restore its state for checkpoint consistency."""
-    try:
-        version_supported = Version(getattr(tq, "__version__", "")) >= Version("0.1.9")
-    except InvalidVersion:
-        return False
-    return (
-        version_supported
-        and callable(getattr(tq, "save_checkpoint", None))
-        and callable(getattr(tq, "load_checkpoint", None))
-    )
 
 
 class PPOTrainer(ABC):
@@ -384,6 +374,23 @@ class PPOTrainer(ABC):
         """Get the handles of reward loop workers."""
         return self.reward_loop_manager.reward_loop_worker_handles
 
+    def close_rollout_data_clients(self) -> None:
+        """Close rollout-data clients created lazily in model workers."""
+        closed = set()
+        first_error = None
+        for name in ("actor_rollout_wg", "critic_wg", "ref_policy_wg"):
+            worker_group = getattr(self, name, None)
+            if worker_group is None or id(worker_group) in closed:
+                continue
+            closed.add(id(worker_group))
+            try:
+                worker_group.close_rollout_data_backend()
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
+
     def fit(self, agent_loop_manager: AgentLoopManager):
         """Fit the trainer with the agent loop manager.
 
@@ -484,7 +491,7 @@ class PPOTrainer(ABC):
                 self._log_rollout_data(batch, self.timing_raw, rollout_data_dir)
 
             # 7. cleanup transfer queue
-            tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
+            rollout_data_backend.clear(keys=batch.keys, partition_id=batch.partition_id)
 
             dapo_filtered_reward_counts = metrics.pop(DAPO_FILTERED_REWARD_COUNTS_KEY, None)
             self.logger.log(data=metrics, step=self.global_steps)
@@ -506,7 +513,7 @@ class PPOTrainer(ABC):
         # Ensure dump executor is shut down when training loop ends without reaching is_last_step
         self._shutdown_dump_executor()
 
-    def step(self, metrics: dict, timing_raw: dict) -> KVBatchMeta:
+    def step(self, metrics: dict, timing_raw: dict) -> RolloutDataRef:
         train_batch_size = self.config.data.train_batch_size
         assert train_batch_size % self.parameter_sync_step == 0, (
             f"train_batch_size ({train_batch_size}) must be divisible by "
@@ -531,9 +538,9 @@ class PPOTrainer(ABC):
             combined_partition_id = batch.partition_id
 
         metrics.update(metrics_aggregator.get_aggregated_metrics())
-        return KVBatchMeta(partition_id=combined_partition_id, keys=combined_keys, tags=combined_tags)
+        return RolloutDataRef(partition_id=combined_partition_id, keys=combined_keys, tags=combined_tags)
 
-    def _step_once(self, metrics: dict, timing_raw: dict, sample_batch_size: int) -> KVBatchMeta:
+    def _step_once(self, metrics: dict, timing_raw: dict, sample_batch_size: int) -> RolloutDataRef:
         """Run a single local update: sample one mini-batch and perform the full PPO pipeline once."""
         # 1. sample batch from replay buffer
         with marked_timer("gen", timing_raw, color="red"):
@@ -838,17 +845,17 @@ class PPOTrainer(ABC):
 
         # 5. restore TransferQueue state (async modes). Re-issuing the restored in-flight prompts is
         # deferred to fit() to use the agent_loop_manager.
-        if self.trainer_mode != "sync" and _tq_supports_checkpoint():
+        if self.trainer_mode != "sync" and rollout_data_backend.supports_checkpoint():
             tq_ckpt_path = os.path.join(global_step_folder, "transfer_queue")
             if os.path.exists(tq_ckpt_path):
                 logger.info(f"Loading TransferQueue state from {tq_ckpt_path}")
-                tq.load_checkpoint(tq_ckpt_path)
+                rollout_data_backend.load_checkpoint(tq_ckpt_path)
 
     def _reissue_inflight_prompts(self, partition_id: str = "train") -> int:
         """Restart checkpointed pending/running prompt groups from their persisted prompt data."""
-        if self.trainer_mode == "sync" or not _tq_supports_checkpoint():
+        if self.trainer_mode == "sync" or not rollout_data_backend.supports_checkpoint():
             return 0
-        data = tq.kv_list(partition_id)
+        data = rollout_data_backend.list_entries(partition_id)
         if not data:
             return 0
         items = data.get(partition_id, {})
@@ -860,21 +867,24 @@ class PPOTrainer(ABC):
         if not inflight_uids:
             return 0
 
-        batch = tq.kv_batch_get(keys=inflight_uids, partition_id=partition_id)
-        inflight_uid_set = set(inflight_uids)
-        old_trajectory_keys = [
-            key
-            for key, tag in items.items()
-            if not tag.get("is_prompt", False) and key.split("_", 1)[0] in inflight_uid_set
-        ]
-        if old_trajectory_keys:
-            tq.kv_clear(keys=old_trajectory_keys, partition_id=partition_id)
+        with rollout_data_backend.materialized_batch(keys=inflight_uids, partition_id=partition_id) as batch:
+            inflight_uid_set = set(inflight_uids)
+            old_trajectory_keys = [
+                key
+                for key, tag in items.items()
+                if not tag.get("is_prompt", False) and key.split("_", 1)[0] in inflight_uid_set
+            ]
+            if old_trajectory_keys:
+                rollout_data_backend.clear(keys=old_trajectory_keys, partition_id=partition_id)
 
-        # Treat this as a new dispatch attempt for the resumed training step.
-        tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
-        tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps} for _ in inflight_uids]
-        tq.kv_batch_put(keys=inflight_uids, partition_id=partition_id, tags=tags)
-        self.agent_loop_manager.generate_sequences(batch)
+            # Treat this as a new dispatch attempt for the resumed training step.
+            tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
+            tags = [
+                {"is_prompt": True, "status": "pending", "global_steps": self.global_steps}
+                for _ in inflight_uids
+            ]
+            rollout_data_backend.batch_put(keys=inflight_uids, partition_id=partition_id, tags=tags)
+            self.agent_loop_manager.generate_sequences(batch)
 
         logger.info(
             f"Re-issued {len(inflight_uids)} in-flight prompts for step {self.global_steps}; "
@@ -938,9 +948,9 @@ class PPOTrainer(ABC):
         # save TransferQueue state for async modes so in-flight prompts (already fetched from the
         # dataloader but not yet trained into this checkpoint's weights) survive a restart:
         # finished trajectories are restored as-is, pending/running prompts are re-issued on resume.
-        # Requires a TransferQueue release with checkpoint support (see _tq_supports_checkpoint).
-        if self.trainer_mode != "sync" and _tq_supports_checkpoint():
-            tq.save_checkpoint(
+        # Persist data-plane state when the selected backend supports it.
+        if self.trainer_mode != "sync" and rollout_data_backend.supports_checkpoint():
+            rollout_data_backend.save_checkpoint(
                 os.path.join(local_global_step_folder, "transfer_queue"),
                 metadata={"global_steps": self.global_steps},
             )
@@ -984,7 +994,7 @@ class PPOTrainer(ABC):
             tags = [
                 {"is_prompt": True, "status": "pending", "global_steps": self.global_steps} for _ in range(len(batch))
             ]
-            tq.kv_batch_put(keys=list(batch["uid"]), partition_id="val", tags=tags)
+            rollout_data_backend.batch_put(keys=list(batch["uid"]), partition_id="val", tags=tags)
             self.agent_loop_manager.generate_sequences(batch)
 
             # 2. sample batch from replay buffer: one prompt (GRPO group) per submitted row.
@@ -1019,59 +1029,64 @@ class PPOTrainer(ABC):
                 {session_key: base_offset + j for j, (session_key, _) in enumerate(sorted_sessions)}
             )
 
-            text_data = tq.kv_batch_get(
-                keys=batch.keys, partition_id=batch.partition_id, select_fields=["prompts", "responses"]
-            )
-            text_data["prompts"] = text_data["prompts"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
-            text_data["responses"] = text_data["responses"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
-            all_inputs = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in text_data["prompts"]]
-            all_outputs = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in text_data["responses"]]
+            with rollout_data_backend.materialized_batch(
+                keys=batch.keys,
+                partition_id=batch.partition_id,
+                select_fields=["prompts", "responses"],
+            ) as text_data:
+                text_data["prompts"] = padded_tensor(text_data["prompts"], self.tokenizer.pad_token_id)
+                text_data["responses"] = padded_tensor(text_data["responses"], self.tokenizer.pad_token_id)
+                all_inputs = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in text_data["prompts"]]
+                all_outputs = [
+                    self.tokenizer.decode(ids, skip_special_tokens=True) for ids in text_data["responses"]
+                ]
 
             fields = ["uid", "rm_scores", "num_turns", "reward_model", "data_source", "extra_fields"]
-            data = tq.kv_batch_get(keys=final_keys, partition_id=batch.partition_id, select_fields=fields)
+            with rollout_data_backend.materialized_batch(
+                keys=final_keys, partition_id=batch.partition_id, select_fields=fields
+            ) as data:
+                sample_uids.extend(data.pop("uid").tolist())
+                sample_outputs.extend(all_outputs[i] for i in final_indices)
+                sample_inputs.extend(all_inputs[i] for i in final_indices)
+                scores = data["rm_scores"].sum(dim=1).tolist()
+                sample_scores.extend(scores)
+                sample_turns.extend(data.pop("num_turns").tolist())
+                reward_extra_infos_dict["reward"].extend(scores)
 
-            sample_uids.extend(data.pop("uid").tolist())
-            sample_outputs.extend(all_outputs[i] for i in final_indices)
-            sample_inputs.extend(all_inputs[i] for i in final_indices)
-            scores = data["rm_scores"].sum(dim=1).tolist()
-            sample_scores.extend(scores)
-            sample_turns.extend(data.pop("num_turns").tolist())
-            reward_extra_infos_dict["reward"].extend(scores)
+                extra_fields_list = data.pop("extra_fields", None)
+                if extra_fields_list is not None:
+                    n_prior = len(reward_extra_infos_dict["reward"]) - len(extra_fields_list.tolist())
+                    for extra_field in extra_fields_list.tolist():
+                        reward_extra_info = (
+                            extra_field.get("reward_extra_info", {}) if isinstance(extra_field, dict) else {}
+                        )
+                        for key in reward_extra_infos_dict:
+                            if key != "reward" and key not in reward_extra_info:
+                                reward_extra_infos_dict[key].append(None)
+                        for key, value in reward_extra_info.items():
+                            if key not in reward_extra_infos_dict:
+                                reward_extra_infos_dict[key] = [None] * n_prior
+                            reward_extra_infos_dict[key].append(value)
+                        n_prior += 1
 
-            extra_fields_list = data.pop("extra_fields", None)
-            if extra_fields_list is not None:
-                n_prior = len(reward_extra_infos_dict["reward"]) - len(extra_fields_list.tolist())
-                for extra_field in extra_fields_list.tolist():
-                    reward_extra_info = (
-                        extra_field.get("reward_extra_info", {}) if isinstance(extra_field, dict) else {}
-                    )
-                    for key in reward_extra_infos_dict:
-                        if key != "reward" and key not in reward_extra_info:
-                            reward_extra_infos_dict[key].append(None)
-                    for key, value in reward_extra_info.items():
-                        if key not in reward_extra_infos_dict:
-                            reward_extra_infos_dict[key] = [None] * n_prior
-                        reward_extra_infos_dict[key].append(value)
-                    n_prior += 1
+                reward_model = data.pop("reward_model", None)
+                if reward_model is not None:
+                    sample_gts.extend([item.get("ground_truth", None) for item in reward_model.tolist()])
+                else:
+                    sample_gts.extend([None] * len(final_indices))
 
-            reward_model = data.pop("reward_model", None)
-            if reward_model is not None:
-                sample_gts.extend([item.get("ground_truth", None) for item in reward_model.tolist()])
-            else:
-                sample_gts.extend([None] * len(final_indices))
-
-            data_source = data.pop("data_source", None)
-            if data_source is not None:
-                data_sources.extend(data_source.tolist())
-            else:
-                data_sources.extend(["unknown"] * len(final_indices))
+                data_source = data.pop("data_source", None)
+                if data_source is not None:
+                    data_sources.extend(data_source.tolist())
+                else:
+                    data_sources.extend(["unknown"] * len(final_indices))
 
             dump_all_inputs.extend(all_inputs)
             dump_all_outputs.extend(all_outputs)
             dump_all_keys.extend(batch.keys)
 
             # 5. cleanup transfer queue
-            tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
+            rollout_data_backend.clear(keys=batch.keys, partition_id=batch.partition_id)
 
         # logger to wandb
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
@@ -1203,24 +1218,26 @@ class PPOTrainer(ABC):
         self._dump_futures.clear()
         self._dump_executor.shutdown(wait=True)
 
-    def _log_rollout_data(self, batch: KVBatchMeta, timing_raw: dict, rollout_data_dir: str):
+    def _log_rollout_data(self, batch: RolloutDataRef, timing_raw: dict, rollout_data_dir: str):
         """Fetch rollout data from TransferQueue and dump sorted by uid."""
         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
             fields = ["uid", "prompts", "responses", "rm_scores", "reward_model"]
-            data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
-            data["prompts"] = data["prompts"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
-            data["responses"] = data["responses"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
+            with rollout_data_backend.materialized_batch(
+                keys=batch.keys, partition_id=batch.partition_id, select_fields=fields
+            ) as data:
+                data["prompts"] = padded_tensor(data["prompts"], self.tokenizer.pad_token_id)
+                data["responses"] = padded_tensor(data["responses"], self.tokenizer.pad_token_id)
 
-            uids = data.pop("uid").tolist()
-            inputs = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in data["prompts"]]
-            outputs = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in data["responses"]]
-            scores = data["rm_scores"].sum(dim=1).tolist()
+                uids = data.pop("uid").tolist()
+                inputs = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in data["prompts"]]
+                outputs = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in data["responses"]]
+                scores = data["rm_scores"].sum(dim=1).tolist()
 
-            reward_model = data.pop("reward_model", None)
-            if reward_model is not None:
-                gts = [item.get("ground_truth", None) for item in reward_model.tolist()]
-            else:
-                gts = [None] * len(uids)
+                reward_model = data.pop("reward_model", None)
+                if reward_model is not None:
+                    gts = [item.get("ground_truth", None) for item in reward_model.tolist()]
+                else:
+                    gts = [None] * len(uids)
 
             # Sort by uid key ({sample}_{rollout}_{output})
             sort_keys = []
@@ -1346,7 +1363,7 @@ class PPOTrainer(ABC):
         """Register prompts in TransferQueue and dispatch them for generation."""
         tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps} for _ in range(len(batch))]
         if self.trainer_mode != "sync":
-            tq.kv_batch_put(
+            rollout_data_backend.batch_put(
                 keys=list(batch["uid"]),
                 partition_id="train",
                 tags=tags,
@@ -1355,7 +1372,7 @@ class PPOTrainer(ABC):
                 fields=batch.select(*[key for key in batch.keys() if not isinstance(batch.get(key), NonTensorData)]),
             )
         else:
-            tq.kv_batch_put(keys=list(batch["uid"]), partition_id="train", tags=tags)
+            rollout_data_backend.batch_put(keys=list(batch["uid"]), partition_id="train", tags=tags)
 
         self.agent_loop_manager.generate_sequences(batch)
         return len(batch)
@@ -1371,58 +1388,55 @@ class PPOTrainer(ABC):
         batch = self._next_train_batch()
         self._submit_batch_to_rollout(batch)
 
-    def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict | None = None) -> KVBatchMeta:
+    def _compute_reward_colocate(self, batch: RolloutDataRef, metrics: dict | None = None) -> RolloutDataRef:
         """Compute the reward score with a colocated reward model."""
         assert self.reward_loop_manager is not None, "RewardLoopManager is None"
 
         # 1. read the fields required by the reward model from TransferQueue.
         fields = ["prompts", "responses", "raw_prompt"]
-        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
+        with rollout_data_backend.materialized_batch(
+            keys=batch.keys, partition_id=batch.partition_id, select_fields=fields
+        ) as data:
+            prompt_lengths = sequence_lengths(data["prompts"], len(batch), "prompts")
+            response_lengths = sequence_lengths(data["responses"], len(batch), "responses")
+            prompts = padded_tensor(data["prompts"], self.tokenizer.pad_token_id)
+            responses = padded_tensor(data["responses"], self.tokenizer.pad_token_id)
 
-        prompt_lengths = data["prompts"].offsets().diff()
-        response_lengths = data["responses"].offsets().diff()
-        prompts = data["prompts"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
-        responses = data["responses"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
+            # 2. rebuild the attention mask aligned with the [prompts | responses] layout.
+            prompt_mask = self._lengths_to_mask(prompt_lengths, prompts.size(1))
+            response_mask = self._lengths_to_mask(response_lengths, responses.size(1))
+            attention_mask = torch.cat([prompt_mask, response_mask], dim=1)
 
-        # 2. rebuild the attention mask aligned with the [prompts | responses] layout.
-        prompt_mask = self._lengths_to_mask(prompt_lengths, prompts.size(1))
-        response_mask = self._lengths_to_mask(response_lengths, responses.size(1))
-        attention_mask = torch.cat([prompt_mask, response_mask], dim=1)
+            # Normalize the backend-specific non-tensor container to plain rows.
+            raw_prompts = list(data["raw_prompt"])
+            raw_prompt_arr = np.empty(len(raw_prompts), dtype=object)
+            raw_prompt_arr[:] = raw_prompts
 
-        # `raw_prompt` is a non-tensor field; depending on the TransferQueue backend it
-        # comes back as a tensordict LinkedList (a `list` subclass), a NonTensorStack or a
-        # numpy array. `list(...)` normalizes all of them to a plain list where each element
-        # is one sample's chat-message list (whereas `.tolist()` only exists on numpy/tensors).
-        raw_prompts = list(data["raw_prompt"])
-        raw_prompt_arr = np.empty(len(raw_prompts), dtype=object)
-        raw_prompt_arr[:] = raw_prompts
+            rm_input = DataProto(
+                batch=TensorDict(
+                    {"prompts": prompts, "responses": responses, "attention_mask": attention_mask},
+                    batch_size=len(batch),
+                ),
+                non_tensor_batch={"raw_prompt": raw_prompt_arr},
+            )
 
-        rm_input = DataProto(
-            batch=TensorDict(
-                {"prompts": prompts, "responses": responses, "attention_mask": attention_mask},
-                batch_size=len(batch),
-            ),
-            non_tensor_batch={"raw_prompt": raw_prompt_arr},
-        )
+            # 3. run the reward model (wakes/sleeps the reward model internally).
+            rm_output = self.reward_loop_manager.compute_rm_score(rm_input)
 
-        # 3. run the reward model (wakes/sleeps the reward model internally).
-        rm_output = self.reward_loop_manager.compute_rm_score(rm_input)
-
-        # 4. write rm_scores (and reward extra info) back to TransferQueue.
-        padded_rm_scores = rm_output.batch["rm_scores"]
-        rm_scores = torch.nested.as_nested_tensor(
-            [padded_rm_scores[i, : response_lengths[i]] for i in range(len(batch))],
-            layout=torch.jagged,
-        )
-        write_back = {"rm_scores": rm_scores}
-        for key in rm_output.meta_info.get("reward_extra_keys", []):
-            write_back[key] = rm_output.non_tensor_batch[key]
-        tq.kv_batch_put(
-            keys=batch.keys,
-            partition_id=batch.partition_id,
-            fields=tu.get_tensordict(write_back),
-        )
-
+            # 4. write rm_scores (and reward extra info) back to TransferQueue.
+            padded_rm_scores = rm_output.batch["rm_scores"]
+            rm_scores = torch.nested.as_nested_tensor(
+                [padded_rm_scores[i, : response_lengths[i]] for i in range(len(batch))],
+                layout=torch.jagged,
+            )
+            write_back = {"rm_scores": rm_scores}
+            for key in rm_output.meta_info.get("reward_extra_keys", []):
+                write_back[key] = rm_output.non_tensor_batch[key]
+            rollout_data_backend.batch_put(
+                keys=batch.keys,
+                partition_id=batch.partition_id,
+                fields=tu.get_tensordict(write_back),
+            )
         return batch
 
     @staticmethod
@@ -1450,7 +1464,7 @@ class PPOTrainer(ABC):
         # Notice lcm(a, b, c) == lcm(lcm(a, b), c), so it is optimal.
         return required_multiple
 
-    def _balance_batch(self, batch: KVBatchMeta, metrics, logging_prefix="global_seqlen", keep_minibatch=False):
+    def _balance_batch(self, batch: RolloutDataRef, metrics, logging_prefix="global_seqlen", keep_minibatch=False):
         """Reorder the data on single controller such that each dp rank gets similar total tokens."""
         # get actor dp size
         role, worker_group = "actor", self.actor_rollout_wg
@@ -1476,7 +1490,7 @@ class PPOTrainer(ABC):
         metrics.update(global_balance_stats)
         return batch
 
-    def _compute_old_log_prob(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
+    def _compute_old_log_prob(self, batch: RolloutDataRef, metrics: dict) -> RolloutDataRef:
         """Compute the old log prob of the batch."""
         # Operating Mode Selection:
         # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
@@ -1485,11 +1499,11 @@ class PPOTrainer(ABC):
         rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
         bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
         if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
-            data = tq.kv_batch_get(
+            with rollout_data_backend.materialized_batch(
                 keys=batch.keys, partition_id=batch.partition_id, select_fields=["rollout_log_probs"]
-            )
-            data["old_log_probs"] = data.pop("rollout_log_probs")
-            tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data)
+            ) as data:
+                data["old_log_probs"] = data.pop("rollout_log_probs")
+                rollout_data_backend.batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data)
             return batch
 
         # 1. compute log probs
@@ -1500,44 +1514,51 @@ class PPOTrainer(ABC):
                 "temperature": self.config.actor_rollout_ref.rollout.temperature,
             }
         )
-        output: KVBatchMeta = self.actor_rollout_wg.compute_log_prob(batch)
+        output: RolloutDataRef = self.actor_rollout_wg.compute_log_prob(batch)
         assert len(output) == len(batch)
 
         fields = ["entropy", "log_probs", "response_mask"]
         if self.config.actor_rollout_ref.rollout.calculate_log_probs:
             fields.extend(["responses", "rollout_log_probs"])
-        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
+        with rollout_data_backend.materialized_batch(
+            keys=batch.keys, partition_id=batch.partition_id, select_fields=fields
+        ) as materialized:
+            # 2. write old_log_probs and entropy back to TransferQueue
+            materialized["old_log_probs"] = response_from_nested(
+                materialized.pop("log_probs"), materialized["response_mask"]
+            )
+            materialized["entropy"] = response_from_nested(
+                materialized.pop("entropy"), materialized["response_mask"]
+            )
+            batch = rollout_data_backend.batch_put(
+                keys=batch.keys,
+                partition_id=batch.partition_id,
+                fields=materialized.select("old_log_probs", "entropy"),
+            )
 
-        # 2. write old_log_probs and entropy back to TransferQueue
-        data["old_log_probs"] = response_from_nested(data.pop("log_probs"), data["response_mask"])
-        data["entropy"] = response_from_nested(data.pop("entropy"), data["response_mask"])
-        batch = tq.kv_batch_put(
-            keys=batch.keys, partition_id=batch.partition_id, fields=data.select("old_log_probs", "entropy")
-        )
+            data = DataProto(batch=materialized.to_padded_tensor())
 
-        data = DataProto(batch=data.to_padded_tensor())
+            # 3. calculate actor entroy metrics
+            actor_config = self.config.actor_rollout_ref.actor
+            entropy_agg = agg_loss(
+                loss_mat=data.batch["entropy"],
+                loss_mask=data.batch["response_mask"],
+                loss_agg_mode=actor_config.loss_agg_mode,
+                loss_scale_factor=actor_config.loss_scale_factor,
+            )
+            old_log_prob_metrics = {
+                "actor/entropy": entropy_agg.detach().item(),
+                # "perf/mfu/actor_infer": old_log_prob_mfu,
+            }
+            metrics.update(old_log_prob_metrics)
 
-        # 3. calculate actor entroy metrics
-        actor_config = self.config.actor_rollout_ref.actor
-        entropy_agg = agg_loss(
-            loss_mat=data.batch["entropy"],
-            loss_mask=data.batch["response_mask"],
-            loss_agg_mode=actor_config.loss_agg_mode,
-            loss_scale_factor=actor_config.loss_scale_factor,
-        )
-        old_log_prob_metrics = {
-            "actor/entropy": entropy_agg.detach().item(),
-            # "perf/mfu/actor_infer": old_log_prob_mfu,
-        }
-        metrics.update(old_log_prob_metrics)
-
-        # 4. calculate rollout vs actor logprobs diff
-        if self.config.actor_rollout_ref.rollout.calculate_log_probs:
-            metrics.update(calculate_debug_metrics(data))
+            # 4. calculate rollout vs actor logprobs diff
+            if self.config.actor_rollout_ref.rollout.calculate_log_probs:
+                metrics.update(calculate_debug_metrics(data))
 
         return batch
 
-    def _compute_ref_log_prob(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
+    def _compute_ref_log_prob(self, batch: RolloutDataRef, metrics: dict) -> RolloutDataRef:
         """Compute the reference log prob of the batch."""
         # 1. compute log probs
         metadata = {
@@ -1555,15 +1576,17 @@ class PPOTrainer(ABC):
         assert len(output) == len(batch)
 
         # 2. write ref_log_prob and entropy back to TransferQueue
-        data = tq.kv_batch_get(
+        with rollout_data_backend.materialized_batch(
             keys=batch.keys, partition_id=batch.partition_id, select_fields=["log_probs", "response_mask"]
-        )
-        data["ref_log_prob"] = response_from_nested(data.pop("log_probs"), data["response_mask"])
-        tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data.select("ref_log_prob"))
+        ) as data:
+            data["ref_log_prob"] = response_from_nested(data.pop("log_probs"), data["response_mask"])
+            rollout_data_backend.batch_put(
+                keys=batch.keys, partition_id=batch.partition_id, fields=data.select("ref_log_prob")
+            )
 
         return batch
 
-    def _compute_values(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
+    def _compute_values(self, batch: RolloutDataRef, metrics: dict) -> RolloutDataRef:
         """Compute the values of the batch."""
         # 1. compute value
         batch.extra_info.update(
@@ -1573,80 +1596,87 @@ class PPOTrainer(ABC):
             }
         )
         output = self.critic_wg.infer_batch(batch)
-        # TODO: DataProtoFuture support KVBatchMeta
+        # TODO: DataProtoFuture support RolloutDataRef
         ray.get(output.futures)
 
         # 2. write value back to TransferQueue
-        data = tq.kv_batch_get(
+        with rollout_data_backend.materialized_batch(
             keys=batch.keys, partition_id=batch.partition_id, select_fields=["values", "response_mask"]
-        )
-        data["values"] = response_from_nested(data.pop("values"), data["response_mask"])
-        tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data.select("values"))
+        ) as data:
+            data["values"] = response_from_nested(data.pop("values"), data["response_mask"])
+            rollout_data_backend.batch_put(
+                keys=batch.keys, partition_id=batch.partition_id, fields=data.select("values")
+            )
 
         return batch
 
-    def _compute_advantage(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
+    def _compute_advantage(self, batch: RolloutDataRef, metrics: dict) -> RolloutDataRef:
         """Compute the advantage of the batch."""
-        fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob", "values"]
-        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
-
-        response_mask = data["response_mask"]
-        data = DataProto(batch=data.to_padded_tensor())
-        data.batch["token_level_scores"] = data.batch["rm_scores"]
-        data.non_tensor_batch["uid"] = np.array(data.batch.pop("uid").tolist(), dtype=object)
+        fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs"]
+        if self.use_reference_policy:
+            fields.append("ref_log_prob")
+        if self.use_critic:
+            fields.append("values")
+        with rollout_data_backend.materialized_batch(
+            keys=batch.keys, partition_id=batch.partition_id, select_fields=fields
+        ) as materialized:
+            response_mask = materialized["response_mask"]
+            data = DataProto(batch=materialized.to_padded_tensor())
+            data.batch["token_level_scores"] = data.batch["rm_scores"]
+            data.non_tensor_batch["uid"] = np.array(data.batch.pop("uid").tolist(), dtype=object)
 
         # 1. apply kl penalty to rewards
-        if self.config.algorithm.use_kl_in_reward:
-            data, kl_metrics = apply_kl_penalty(
-                data, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
-            )
-            metrics.update(kl_metrics)
-        else:
-            data.batch["token_level_rewards"] = data.batch["token_level_scores"]
+            if self.config.algorithm.use_kl_in_reward:
+                data, kl_metrics = apply_kl_penalty(
+                    data, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
+                )
+                metrics.update(kl_metrics)
+            else:
+                data.batch["token_level_rewards"] = data.batch["token_level_scores"]
 
         # 2. Compute rollout correction: IS weights, rejection sampling, and metrics
         # Only runs in decoupled mode (computes once per batch using stable π_old)
         # In bypass mode, this is skipped - actor computes metrics from evolving π_θ vs π_rollout
-        rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
-        bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
-        rollout_correction = (
-            rollout_corr_config is not None and "rollout_log_probs" in data.batch and not bypass_recomputing_logprobs
-        )
-        if rollout_correction:
-            data, is_metrics = compute_rollout_correction_and_add_to_batch(data, rollout_corr_config)
-            metrics.update(is_metrics)
+            rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
+            bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
+            rollout_correction = (
+                rollout_corr_config is not None
+                and "rollout_log_probs" in data.batch
+                and not bypass_recomputing_logprobs
+            )
+            if rollout_correction:
+                data, is_metrics = compute_rollout_correction_and_add_to_batch(data, rollout_corr_config)
+                metrics.update(is_metrics)
 
         # 3. compute advantages
-        data = compute_advantage_for_multi_trajectories(
-            data,
-            batch_keys=batch.keys,
-            adv_estimator=self.config.algorithm.adv_estimator,
-            gamma=self.config.algorithm.gamma,
-            lam=self.config.algorithm.lam,
-            num_repeat=self.config.actor_rollout_ref.rollout.n,
-            norm_adv_by_std_in_grpo=self.config.algorithm.get("norm_adv_by_std_in_grpo", True),
-            config=self.config.algorithm,
-        )
+            data = compute_advantage_for_multi_trajectories(
+                data,
+                batch_keys=batch.keys,
+                adv_estimator=self.config.algorithm.adv_estimator,
+                gamma=self.config.algorithm.gamma,
+                lam=self.config.algorithm.lam,
+                num_repeat=self.config.actor_rollout_ref.rollout.n,
+                norm_adv_by_std_in_grpo=self.config.algorithm.get("norm_adv_by_std_in_grpo", True),
+                config=self.config.algorithm,
+            )
 
-        # 4. write nested advantages and returns back to TransferQueue
-        fields = ["advantages", "returns"]
-        if self.config.algorithm.use_kl_in_reward:
-            fields.append("token_level_rewards")
-        if rollout_correction:
-            fields.append("response_mask")
-            if "rollout_is_weights" in data.batch:
-                fields.append("rollout_is_weights")
+        # 4. write nested advantages, returns and rewards back to TransferQueue
+            fields = ["advantages", "returns", "token_level_rewards"]
+            if rollout_correction:
+                fields.append("response_mask")
+                if "rollout_is_weights" in data.batch:
+                    fields.append("rollout_is_weights")
 
-        output = {}
-        for field in fields:
-            output[field] = response_to_nested(data.batch[field], response_mask)
-        output = TensorDict(output, batch_size=len(batch))
+            output = {}
+            for field in fields:
+                output[field] = response_to_nested(data.batch[field], response_mask)
+            output = TensorDict(output, batch_size=len(batch))
 
-        batch = tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=output)
+            batch = rollout_data_backend.batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=output)
 
         return batch
 
-    def _update_critic(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
+    def _update_critic(self, batch: RolloutDataRef, metrics: dict) -> RolloutDataRef:
         """Update the critic network."""
         ppo_mini_batch_size = self.config.critic.ppo_mini_batch_size
         ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
@@ -1669,7 +1699,7 @@ class PPOTrainer(ABC):
 
         return batch
 
-    def _update_actor(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
+    def _update_actor(self, batch: RolloutDataRef, metrics: dict) -> RolloutDataRef:
         """Update the actor network."""
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
@@ -1710,126 +1740,128 @@ class PPOTrainer(ABC):
 
         return batch
 
-    def _compute_metrics(self, batch: KVBatchMeta, metrics, timing_raw, global_steps, epoch):
+    def _compute_metrics(self, batch: RolloutDataRef, metrics, timing_raw, global_steps, epoch):
         # 1. collect necessary fields from TransferQueue for computing metrics
         non_padding_mask = np.array([not tag.get("is_padding", False) for tag in batch.tags], dtype=bool)
         fields = [
             "prompts",
             "responses",
             "response_mask",
-            "values",
             "advantages",
             "returns",
             "rm_scores",
             "token_level_rewards",
             "num_turns",
         ]
+        if self.use_critic:
+            fields.append("values")
         moe_lb_metrics_interval = self.config.actor_rollout_ref.rollout.get("moe_load_balance_metrics_interval", 0)
-        data = get_metric_data_with_optional_routed_experts(
+        materialized = get_metric_data_with_optional_routed_experts(
             keys=batch.keys,
             partition_id=batch.partition_id,
             fields=fields,
             moe_lb_metrics_interval=moe_lb_metrics_interval,
             global_steps=global_steps,
             accumulator=self._rollout_moe_lb_metrics_accumulator,
-            kv_batch_get=tq.kv_batch_get,
+            kv_batch_get=rollout_data_backend.batch_get,
         )
+        try:
+            num_turns = np.array(materialized.pop("num_turns").tolist())
+            prompt_length = sequence_lengths(materialized["prompts"], len(batch), "prompts")
+            response_length = sequence_lengths(materialized["responses"], len(batch), "responses")
+            global_token_num = (prompt_length + response_length).tolist()
+            min_global_steps = np.array([tag["min_global_steps"] for tag in batch.tags], dtype=int)[non_padding_mask]
+            max_global_steps = np.array([tag["max_global_steps"] for tag in batch.tags], dtype=int)[non_padding_mask]
 
-        num_turns = np.array(data.pop("num_turns").tolist())
-        prompt_length = data["prompts"].offsets().diff()
-        response_length = data["responses"].offsets().diff()
-        global_token_num = (prompt_length + response_length).tolist()
-        min_global_steps = np.array([tag["min_global_steps"] for tag in batch.tags], dtype=int)[non_padding_mask]
-        max_global_steps = np.array([tag["max_global_steps"] for tag in batch.tags], dtype=int)[non_padding_mask]
+            # Only fetch speculative decoding stats when rollout writes them.
+            spec_drafts = spec_accepts = spec_verifies = None
+            mtp_config = getattr(self.config.actor_rollout_ref.model, "mtp", None)
+            if mtp_config is not None and mtp_config.enable and mtp_config.enable_rollout:
+                with rollout_data_backend.materialized_batch(
+                    keys=batch.keys,
+                    partition_id=batch.partition_id,
+                    select_fields=["extra_fields"],
+                ) as spec_data:
+                    extra_fields = list(spec_data["extra_fields"])
+                    if extra_fields and all(
+                        isinstance(extra_field, dict) and "spec_num_draft_tokens" in extra_field
+                        for extra_field in extra_fields
+                    ):
+                        spec_drafts = [extra_field["spec_num_draft_tokens"] for extra_field in extra_fields]
+                        spec_accepts = [extra_field["spec_num_accepted_tokens"] for extra_field in extra_fields]
+                        spec_verifies = [extra_field["spec_num_verify_steps"] for extra_field in extra_fields]
 
-        # Only fetch speculative decoding stats when rollout writes them.
-        spec_drafts = spec_accepts = spec_verifies = None
-        mtp_config = getattr(self.config.actor_rollout_ref.model, "mtp", None)
-        if mtp_config is not None and mtp_config.enable and mtp_config.enable_rollout:
-            spec_data = tq.kv_batch_get(
-                keys=batch.keys,
-                partition_id=batch.partition_id,
-                select_fields=["extra_fields"],
+            data = materialized.to_padded_tensor()
+            data["token_level_scores"] = data["rm_scores"]
+            if "token_level_rewards" not in data:
+                data["token_level_rewards"] = data["rm_scores"]
+            data["prompt_length"] = prompt_length.float()
+            data["response_length"] = response_length.float()
+            batch = DataProto(batch=data, meta_info={"global_token_num": global_token_num})
+            metrics_batch = batch.select_idxs(non_padding_mask) if non_padding_mask.any() else batch
+
+            # 2. compute metrics
+            metrics.update({"training/global_step": global_steps, "training/epoch": epoch})
+            metrics.update(
+                compute_moe_lb_metrics(
+                    metrics_batch=metrics_batch,
+                    moe_lb_metrics_interval=moe_lb_metrics_interval,
+                    global_steps=global_steps,
+                    accumulator=self._rollout_moe_lb_metrics_accumulator,
+                )
             )
-            extra_fields = spec_data.pop("extra_fields").tolist()
-            # The rollout omits the spec_* stats when the backend does not report
-            # per-request spec-decode stats; leave all three as None in that case.
-            if extra_fields and all(
-                isinstance(extra_field, dict) and "spec_num_draft_tokens" in extra_field for extra_field in extra_fields
-            ):
-                spec_drafts = [extra_field["spec_num_draft_tokens"] for extra_field in extra_fields]
-                spec_accepts = [extra_field["spec_num_accepted_tokens"] for extra_field in extra_fields]
-                spec_verifies = [extra_field["spec_num_verify_steps"] for extra_field in extra_fields]
+            metrics.update(compute_data_metrics(batch=metrics_batch, use_critic=self.use_critic))
+            metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
+            n_gpus = self._get_n_gpus_for_throughput()
+            metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
+            gradient_norm = metrics.get("actor/grad_norm", None)
+            metrics.update(compute_variance_proxy_metrics(batch=metrics_batch, gradient_norm=gradient_norm))
 
-        data = data.to_padded_tensor()
-        data["token_level_scores"] = data["rm_scores"]
-        if "token_level_rewards" not in data:
-            data["token_level_rewards"] = data["rm_scores"]
-        data["prompt_length"] = prompt_length.float()
-        data["response_length"] = response_length.float()
-        batch = DataProto(batch=data, meta_info={"global_token_num": global_token_num})
-        metrics_batch = batch.select_idxs(non_padding_mask) if non_padding_mask.any() else batch
-
-        # 2. compute metrics
-        metrics.update({"training/global_step": global_steps, "training/epoch": epoch})
-        metrics.update(
-            compute_moe_lb_metrics(
-                metrics_batch=metrics_batch,
-                moe_lb_metrics_interval=moe_lb_metrics_interval,
-                global_steps=global_steps,
-                accumulator=self._rollout_moe_lb_metrics_accumulator,
+            # 3. other auxiliary metrics
+            if non_padding_mask.any():
+                num_turns = num_turns[non_padding_mask]
+            metrics.update(
+                {
+                    "training/num_turns/mean": num_turns.mean(),
+                    "training/num_turns/max": num_turns.max(),
+                    "training/num_turns/min": num_turns.min(),
+                }
             )
-        )
-        metrics.update(compute_data_metrics(batch=metrics_batch, use_critic=self.use_critic))
-        metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
-        n_gpus = self._get_n_gpus_for_throughput()
-        metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
-        gradient_norm = metrics.get("actor/grad_norm", None)
-        metrics.update(compute_variance_proxy_metrics(batch=metrics_batch, gradient_norm=gradient_norm))
 
-        # 3. other auxiliary metrics
-        if non_padding_mask.any():
-            num_turns = num_turns[non_padding_mask]
-        metrics.update(
-            {
-                "training/num_turns/mean": num_turns.mean(),
-                "training/num_turns/max": num_turns.max(),
-                "training/num_turns/min": num_turns.min(),
-            }
-        )
+            # 4. per-request speculative-decoding aggregation (same metrics async PPO logs;
+            # see compute_spec_decode_metrics in verl/trainer/ppo/ray_trainer.py).
+            metrics.update(compute_spec_decode_metrics(spec_drafts, spec_accepts, spec_verifies, non_padding_mask))
 
-        # 4. per-request speculative-decoding aggregation (same metrics async PPO logs;
-        # see compute_spec_decode_metrics in verl/trainer/ppo/ray_trainer.py).
-        metrics.update(compute_spec_decode_metrics(spec_drafts, spec_accepts, spec_verifies, non_padding_mask))
-
-        # 5. off-policy staleness metrics
-        #   global_steps is the model weight version (one update_weights per global_step), and
-        #   min/max_global_steps are the versions a trajectory was generated across, so all quantities
-        #   below are already in model-version units.
-        #   - trajectory_spans: how many distinct model versions a single trajectory was
-        #     generated across (1 == fully generated on a single version). This captures the
-        #     within-trajectory policy inconsistency caused by partial rollout / continuation.
-        #   - trajectory_staleness: how many model versions the trajectory lags behind the
-        #     *current* policy. A trajectory spans versions [min_global_steps, max_global_steps],
-        #     so the lag is a range: the freshest weights used give the lower bound
-        #     (global_steps - max_global_steps) and the oldest weights the worst case
-        #     (global_steps - min_global_steps). We log the lower bound as the primary metric.
-        trajectory_spans = max_global_steps - min_global_steps + 1
-        trajectory_staleness = (global_steps - 1) - max_global_steps
-        trajectory_staleness_worst = (global_steps - 1) - min_global_steps
-        metrics.update(
-            {
-                "training/off_policy/trajectory_spans/mean": trajectory_spans.mean(),
-                "training/off_policy/trajectory_spans/max": trajectory_spans.max(),
-                "training/off_policy/trajectory_spans/min": trajectory_spans.min(),
-                "training/off_policy/trajectory_staleness/mean": trajectory_staleness.mean(),
-                "training/off_policy/trajectory_staleness/max": trajectory_staleness.max(),
-                "training/off_policy/trajectory_staleness/min": trajectory_staleness.min(),
-                "training/off_policy/trajectory_staleness_worst/mean": trajectory_staleness_worst.mean(),
-                "training/off_policy/trajectory_staleness_worst/max": trajectory_staleness_worst.max(),
-                "training/off_policy/trajectory_staleness_worst/min": trajectory_staleness_worst.min(),
-            }
-        )
+            # 5. off-policy staleness metrics
+            #   global_steps is the model weight version (one update_weights per global_step), and
+            #   min/max_global_steps are the versions a trajectory was generated across, so all quantities
+            #   below are already in model-version units.
+            #   - trajectory_spans: how many distinct model versions a single trajectory was
+            #     generated across (1 == fully generated on a single version). This captures the
+            #     within-trajectory policy inconsistency caused by partial rollout / continuation.
+            #   - trajectory_staleness: how many model versions the trajectory lags behind the
+            #     *current* policy. A trajectory spans versions [min_global_steps, max_global_steps],
+            #     so the lag is a range: the freshest weights used give the lower bound
+            #     (global_steps - max_global_steps) and the oldest weights the worst case
+            #     (global_steps - min_global_steps). We log the lower bound as the primary metric.
+            trajectory_spans = max_global_steps - min_global_steps + 1
+            trajectory_staleness = (global_steps - 1) - max_global_steps
+            trajectory_staleness_worst = (global_steps - 1) - min_global_steps
+            metrics.update(
+                {
+                    "training/off_policy/trajectory_spans/mean": trajectory_spans.mean(),
+                    "training/off_policy/trajectory_spans/max": trajectory_spans.max(),
+                    "training/off_policy/trajectory_spans/min": trajectory_spans.min(),
+                    "training/off_policy/trajectory_staleness/mean": trajectory_staleness.mean(),
+                    "training/off_policy/trajectory_staleness/max": trajectory_staleness.max(),
+                    "training/off_policy/trajectory_staleness/min": trajectory_staleness.min(),
+                    "training/off_policy/trajectory_staleness_worst/mean": trajectory_staleness_worst.mean(),
+                    "training/off_policy/trajectory_staleness_worst/max": trajectory_staleness_worst.max(),
+                    "training/off_policy/trajectory_staleness_worst/min": trajectory_staleness_worst.min(),
+                }
+            )
+        finally:
+            rollout_data_backend.release_result(materialized)
 
 
 TRAINER_REGISTRY: dict[str, type[PPOTrainer]] = {}
