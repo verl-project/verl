@@ -38,6 +38,8 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.name = os.environ["ROLLOUT_NAME"]
     config.actor_rollout_ref.rollout.mode = "async"
     config.actor_rollout_ref.rollout.skip_tokenizer_init = False
+    # No trainer to sync weights from, so the server must load them from disk.
+    config.actor_rollout_ref.rollout.load_format = "auto"
 
     return config
 
