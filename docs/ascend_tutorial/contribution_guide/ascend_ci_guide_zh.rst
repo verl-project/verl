@@ -1,9 +1,9 @@
 NPU-CI 添加指导
 ===========
 
-Last updated：02/02/2026.
+Last updated: 02/02/2026.
 
-我们在 verl 上增加基于华为昇腾设备的CI用例添加指导。
+我们在 verl 上提供基于华为昇腾设备的CI用例添加指导。
 
 verl 仓库使用 GitHub Actions 作为 CI 平台，通过分层测试架构保障代码质量与系统稳定性。
 NPU 相关的工作流主要包括：
@@ -68,7 +68,7 @@ NPU 相关的工作流主要包括：
 
    ${HOME}是root
 
-   gpu用例中权重在~/models/路径下，如需适配可以用软链接，``ln -s /root/.cache/models ~/models``
+   GPU用例中权重在~/models/路径下，如需适配可以用软链接，``ln -s /root/.cache/models ~/models``
 
    以下为原始数据集，请按需进行数据处理，示例如下。
    
@@ -120,7 +120,7 @@ NPU 相关的工作流主要包括：
        timeout-minutes: 60          # 任务超时阈值（分钟）
        container:
          #运行镜像 该示例为vllm的镜像
-         image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:verl-9.0.0-910b-ubuntu22.04-py3.11-latest
+         image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
          options: >-
            --shm-size 16g  # 共享内存配置
        env:

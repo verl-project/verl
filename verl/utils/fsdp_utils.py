@@ -740,8 +740,7 @@ def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool
                     FSDP.summon_full_params(module, writeback=False, offload_to_cpu=True) if is_fsdp1 else nullcontext()
                 )
                 with summon_ctx:
-                    state_dict = {n: p for n, p in peft_model.named_parameters()}
-                    lora_params = get_peft_model_state_dict(peft_model, state_dict=state_dict)
+                    lora_params = get_peft_model_state_dict(peft_model)
                     lora_params = {
                         name: param.full_tensor().detach().cpu()
                         if hasattr(param, "full_tensor")
@@ -1101,6 +1100,47 @@ def merged_lora_context(actor, backup_adapters=False):
         else:
             # Fall back to unmerge if no backup was made
             fsdp_merge_unmerge(actor, do_merge=False)
+
+
+def fsdp1_sharded_save_to_cpu(model: torch.nn.Module) -> dict[str, torch.Tensor]:
+    """
+    Sharded Save for FSDP1: each rank copies its own local parameter shards to CPU memory.
+
+    FSDP1 exposes flat, already-sharded ``torch.nn.Parameter`` tensors (or views into them when
+    ``use_orig_params=True``) instead of DTensors, so the sharding layout is implicit in the local
+    shapes and does not need to be recorded.
+
+    Args:
+        model: FSDP1-wrapped model.
+
+    Returns:
+        Dictionary mapping parameter name to its local shard on CPU.
+    """
+    cpu_sharded_state = {}
+    for param_name, param in model.named_parameters():
+        cpu_sharded_state[param_name] = param.data.detach().to("cpu", copy=True)
+    return cpu_sharded_state
+
+
+def fsdp1_sharded_load_from_cpu(model: torch.nn.Module, cpu_sharded_state: dict[str, torch.Tensor]) -> None:
+    """
+    Sharded Load for FSDP1: each rank copies its own CPU shards back into the live parameters.
+
+    The model must be in the same sharding state as when :func:`fsdp1_sharded_save_to_cpu` was
+    called, so that local shapes still match.
+
+    Args:
+        model: FSDP1-wrapped model to be restored.
+        cpu_sharded_state: Shards saved by :func:`fsdp1_sharded_save_to_cpu` on this rank.
+    """
+    with torch.no_grad():
+        for param_name, param in model.named_parameters():
+            # Skip parameters not in the saved state (e.g., newly added parameters)
+            if param_name not in cpu_sharded_state:
+                continue
+            param.data.copy_(cpu_sharded_state[param_name].to(param.device))
+
+    dist.barrier()
 
 
 def fsdp2_sharded_save_to_cpu(

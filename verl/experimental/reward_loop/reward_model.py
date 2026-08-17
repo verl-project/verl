@@ -41,6 +41,7 @@ class RewardModelManager:
         """
         self.config = config
         self.resource_pool = resource_pool
+
         self._initialize_llm_servers()
         self._initialize_router()
         assert self.config.rollout.skip_tokenizer_init is False, "Reward model should not skip tokenizer init."

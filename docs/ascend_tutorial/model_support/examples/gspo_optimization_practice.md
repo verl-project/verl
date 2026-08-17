@@ -1,8 +1,10 @@
 # NPU Qwen3-32B GSPO Optimization Practice
 
-Last updated: 02/26/2026.
+Last updated: 07/03/2026.
 
-为保障使用体验，请切换verl commit id 至 252d76908
+为保障使用体验，请切换 verl 至 main 分支，commit id 为 9d05508f5e3bd8ecb70cf94ab10dc087b57a716d。注意：main 分支可能会因迭代重构导致 patch 出问题，如需稳定版本可切换至 `release/v0.8.0`。
+
+本实践对应的训练脚本：[run_qwen3_32b_fsdp.sh](../../../../examples/ascend_extras/gspo_trainer/run_qwen3_32b_fsdp.sh)（`examples/ascend_extras/gspo_trainer/run_qwen3_32b_fsdp.sh`）。
 
 ## 算法适配
 
@@ -10,7 +12,7 @@ GSPO通过将优化颗粒度从**token级**提升到**sequence级**，规避了G
 
 想要成功在verl仓库中调用到GSPO算法，需要进行如下的必要配置
 
-```python
+```bash
 # 核心算法配置  
 algorithm.adv_estimator=grpo \                    # 使用GRPO优势估计器  
 algorithm.use_kl_in_reward=False \                # 不在奖励中添加KL惩罚  
@@ -28,7 +30,7 @@ actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \ # 序列级平均，
 actor_rollout_ref.rollout.n=16 \                  # 每个prompt生成16个响应（组采样）
 ```
 
-一般选择入口函数为 `verl.trainer.main_ppo`
+一般选择入口函数为 `verl.trainer.main_ppo`。完整可运行示例见 [run_qwen3_32b_fsdp.sh](../../../../examples/ascend_extras/gspo_trainer/run_qwen3_32b_fsdp.sh)。
 
 ## 基础环境
 
@@ -36,22 +38,22 @@ actor_rollout_ref.rollout.n=16 \                  # 每个prompt生成16个响�
 
 ### 安装基础环境
 
-| software     | version                                                    |
-| ------------ | ---------------------------------------------------------- |
-| Python       | >=3.10, <3.12                                              |
-| CANN         | ==8.3.RC1                                                  |
-| torch        | ==2.7.1                                                    |
-| torch_npu    | ==2.7.1                                                    |
-| verl         | main分支 commitId=252d76908b903ad8fb6969eb3a5e5f873c95ea2b |
-| vllm         | v0.11.0                                                    |
-| vllm-ascend  | v0.11.0-dev                                                |
-| transformers | 4.57.3                                                     |
+| software      | version                                                    |
+| ------------- | ---------------------------------------------------------- |
+| Python        | 3.11                                                       |
+| CANN          | ==9.0.0.B160 (CANN900B160)                                 |
+| torch         | ==2.9.0                                                    |
+| torch_npu     | ==2.9.0                                                    |
+| triton_ascend | ==3.2.1                                                    |
+| verl          | main                                                       |
+| vllm          | v0.18.0                                                    |
+| vllm-ascend   | v0.18.0                                                    |
+| transformers  | 5.3.0                                                      |
 
-在本实践中, 我们通过指定 verl 的commit id 以避免引入其他问题
 
 ```bash
 cd verl
-git checkout 252d76908b903ad8fb6969eb3a5e5f873c95ea2b
+git checkout main
 # 指定相应的recipe版本
 git submodule update --init --recursive recipe
 ```
@@ -99,7 +101,7 @@ export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
 yum install jemalloc
 ```
 
-如果上述方法无法正常安装，可以通过源码编译安装 前往jemalloc官网下载最新稳定版本，官网地址:https://github.com/jemalloc/jemalloc/releases/
+如果上述方法无法正常安装，可以通过源码编译安装。前往jemalloc官网下载最新稳定版本，官网地址:https://github.com/jemalloc/jemalloc/releases/
 
 ```shell
 tar -xvf jemalloc-{version}.tar.bz2
@@ -198,7 +200,7 @@ fi
 sleep 600
 ```
 
-DEFAULT_SH:修改为训练所用配置 sh 文件路径。在此案例中修改为 [Qwen3-8B](https://github.com/verl-project/verl/blob/main/examples/gspo_trainer/run_qwen3_8b_fsdp.sh) 路径。
+DEFAULT_SH:修改为训练所用配置 sh 文件路径。在此案例中修改为 [run_qwen3_32b_fsdp.sh](../../../../examples/ascend_extras/gspo_trainer/run_qwen3_32b_fsdp.sh)（即 `examples/ascend_extras/gspo_trainer/run_qwen3_32b_fsdp.sh`）。
 
 NNODES 和 NPUS_PER_NODE:修改为使用节点数量和每个节点 NPU 数量。在此案例中分别为4和16。
 
@@ -206,7 +208,7 @@ MASTER_ADDR:修改为对应主节点 IP。即所有节点的 MASTER_ADDR 应该�
 
 SOCKET_IFNAME, HCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME: 修改为对应通信网卡，通信网卡可以通过以下命令获取：
 
-```
+```bash
 ifconfig |grep "$(hostname -I |awk '{print $1}'|awk -F '.' '{print $0}')" -B 1|awk -F ':' '{print$1}' | head -1 | tail -1
 ```
 
@@ -223,7 +225,7 @@ actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) / sp_size))
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) / sp_size))
 ```
 
-**这个优化点主要调整上面这两个参数，不过需要注意这两个参数调整的太大会导致OOM**
+**这个优化点主要调整上面这两个参数，不过需要注意这两个参数调整得太大会导致OOM**
 
 **主要调整** `actor_ppo_max_token_len`,调大了会降低训练的耗时，调整 `infer_ppo_max_token_len`没有明显的收益，可以不动
 
@@ -245,7 +247,7 @@ infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) / sp_size))
 ```bash
 # 开启ACLgraph+FULL_DECODE_ONLY（注意：当设置此参数为False时，TASK_QUEUE_ENABLE必须设置为1，不然会报错）
 actor_rollout_ref.rollout.enforce_eager=False \
-actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes='[8,16,32,64,128]' \ 
+actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes='[8,16,32,64,128]' \
 actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode='FULL_DECODE_ONLY'
 ```
 
@@ -294,10 +296,10 @@ HCCL_OP_EXPANSION_MODE环境变量用于配置通信算法的编排展开位置�
 
 <img src="https://github.com/wucong25/verl-data/blob/main/ascend_task_queue1.png" alt="image-20260113194257095" style="zoom:50%;" />
 
-- 软件栈工作在hostcpu，通信算法展开一个个task
+- 软件栈工作在host CPU，通信算法展开一个个task
 - 每个task调用runtime接口，下发到device的rtsqueue
-- STARS从rstqueue上顺序拿取task
-- 根据task类型分别调用掉SDMA和RDMA引擎。
+- STARS从rtsqueue上顺序拿取task
+- 根据task类型分别调用SDMA和RDMA引擎。
   **单算子瓶颈**：hostbound 每个task提交是2~5us，一个通信算子有几百个task，单算子场景不会在device上缓存，下发一个执行一个
 
 ##### AICPU机制展开
@@ -306,7 +308,7 @@ HCCL_OP_EXPANSION_MODE环境变量用于配置通信算法的编排展开位置�
 
 - host侧不下发一个个task，把通信算子作为一个个kernel，放在通信算子kernel的队列上去。
 - STARS调度kernel队列流上的kernel，把kernel放到AiCPU上去执行。
-- AICPU调用函数（kernel），用一个线程执行kernel 函数，在函数内把通信task展开，把task放到rstqueue上，STARS调用。
+- AICPU调用函数（kernel），用一个线程执行kernel 函数，在函数内把通信task展开，把task放到rtsqueue上，STARS调用。
 - 降低host和aicpu交互，由几百次降低为一次。
 - task的提交在AICPU上提交，做了提交的部分合并。
 
@@ -379,7 +381,7 @@ actor_rollout_ref.model.enable_gradient_checkpointing=True \
 
 # 参数卸载 (Parameter Offload)
 # 作用: 将模型参数卸载到CPU内存,训练时再加载回GPU。
-actor_rollout_ref.actor.fsdp_config.param_offload=True  \ 
+actor_rollout_ref.actor.fsdp_config.param_offload=True \
 actor_rollout_ref.ref.fsdp_config.param_offload=True \
 
 # 优化器状态卸载 (Optimizer Offload)
@@ -395,7 +397,7 @@ actor_rollout_ref.rollout.free_cache_engine=True \
 # entropy_from_logits_with_chunking: 分块处理logits张量(如2048 tokens一组),避免一次性加载整个[bsz*seq_len, vocab]张量
 actor_rollout_ref.actor.entropy_checkpointing=True \
 actor_rollout_ref.ref.entropy_checkpointing=True \
-actor_rollout_ref.actor.entropy_from_logits_with_chunking=True \  
+actor_rollout_ref.actor.entropy_from_logits_with_chunking=True \
 actor_rollout_ref.ref.entropy_from_logits_with_chunking=True \
 
 # 推理引擎显存配置

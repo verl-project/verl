@@ -36,7 +36,7 @@ from types import SimpleNamespace
 import torch
 from tensordict import TensorDict
 
-from verl.workers.engine.fsdp import transformer_impl as fsdp_transformer_impl
+from verl.workers.engine.fsdp import transformer_impl
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
 
 VOCAB, HIDDEN, SEQ = 16, 8, 6
@@ -67,7 +67,7 @@ def _make_engine_stub():
     """Bypass __init__; provide only what forward_step touches."""
     eng = object.__new__(FSDPEngineWithLMHead)
     eng._autocast_dtype = torch.float32  # skip autocast
-    eng.module = _TinyCheckpointedLM().to("cpu")
+    eng.module = _TinyCheckpointedLM()
     eng.prepare_model_inputs = lambda micro_batch: ({"input_ids": micro_batch["input_ids"]}, {})
     eng.prepare_model_outputs = lambda output, output_args, micro_batch, logits_processor_func: {
         "log_probs": output.hidden.sum(-1)
@@ -81,8 +81,7 @@ def _loss_fn(model_output, data, dp_group=None):
 
 
 def test_forward_step_output_carries_no_grad_fn_and_releases_graph(monkeypatch):
-    monkeypatch.setattr(fsdp_transformer_impl, "get_device_id", lambda: torch.device("cpu"))
-    monkeypatch.setattr(fsdp_transformer_impl, "get_device_name", lambda: "cpu")
+    monkeypatch.setattr(transformer_impl, "get_device_id", lambda: "cpu")
 
     eng = _make_engine_stub()
     micro_batch = TensorDict(

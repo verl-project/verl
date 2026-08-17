@@ -88,13 +88,14 @@ jobs:
     runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:verl-9.0.0-910b-ubuntu22.04-py3.11-latest
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
       options: >-
         --shm-size 16g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       device_name: "npu"
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -112,7 +113,7 @@ jobs:
         run: |
           pip install --no-deps -e .
           pip install veomni==0.1.11 --ignore-requires-python --no-deps --index-url https://pypi.org/simple/
-          pip install transformers==5.3.0
+          pip install transformers==5.5.3
       - name: Check final pip list
         run: |
           pip list

@@ -18,6 +18,8 @@ Trace Parameter Configuration
 - ``actor_rollout_ref.rollout.trace.token2text=True`` # To show decoded text in trace view
 - ``actor_rollout_ref.rollout.trace.max_samples_per_step_per_worker=N`` # Limit traces per worker (optional)
 
+When ``token2text`` is enabled, ``prompt_text`` and ``response_text`` are added to the traced output for both the complete agent loop and each per-turn LLM generation call. The token ids remain available in the trace.
+
 Limiting Trace Volume
 ~~~~~~~~~~~~~~~~~~~~~~
 
@@ -95,7 +97,7 @@ After executing the training, on the project page, you can see the WEAVE sidebar
 
 Each Trace project corresponds to a trajectory. You can filter and select the trajectories you need to view by step, sample_index, rollout_n, and experiment_name.
 
-After enabling token2text, prompt_text and response_text will be automatically added to the output of ToolAgentLoop.run, making it convenient to view the input and output content.
+After enabling token2text, ``prompt_text`` and ``response_text`` are automatically added to the outputs of ``ToolAgentLoop.run`` and each ``LLMServerClient.generate`` call, making it convenient to inspect complete trajectories and individual turns.
 
 .. image:: https://github.com/eric-haibin-lin/verl-community/blob/main/docs/weave_trace_list.png?raw=true
 
@@ -136,7 +138,7 @@ For example, searching for ``"tags.step = '1'"`` can display all trajectories of
 
 Opening one of the trajectories allows you to view each function call process within it.
 
-After enabling token2text, prompt_text and response_text will be automatically added to the output of ToolAgentLoop.run, making it convenient to view the content.
+After enabling token2text, ``prompt_text`` and ``response_text`` are automatically added to the outputs of ``ToolAgentLoop.run`` and each ``LLMServerClient.generate`` call, making it convenient to inspect complete trajectories and individual turns.
 
 .. image:: https://github.com/eric-haibin-lin/verl-community/blob/main/docs/mlflow_trace_view.png?raw=true
 

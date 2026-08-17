@@ -1,35 +1,32 @@
-# Models
-Common modelzoo such as huggingface/transformers stuggles when using Pytorch native model parallelism. Following the design principle of vLLM, we keep a simple, parallelizable, highly-optimized with packed inputs in verl. 
-## Adding a New Huggingface Model
-### Step 1: Copy the model file from HF to verl
-- Add a new file under verl/models/hf
-- Copy ONLY the model file from huggingface/transformers/models to verl/models/hf
+# Model integrations
 
-### Step 2: Modify the model file to use packed inputs
-- Remove all the code related to inference (kv cache)
-- Modify the inputs to include only
-    - input_ids (total_nnz,)
-    - cu_seqlens (total_nnz + 1,)
-    - max_seqlen_in_batch: int
-- Note that this requires using flash attention with causal mask.
+The FSDP and FSDP2 engines load Hugging Face model implementations directly.
+Do not copy complete files from `transformers` into this directory to add a
+checkpoint. Start with the
+[FSDP model extension guide](../../docs/advance/fsdp_extension.rst), which
+describes the training, rollout, and weight-synchronization compatibility
+boundaries.
 
-### Step 2.5: Add tests
-- Add a test to compare this version and the huggingface version
-- Following the infrastructure and add tests to tests/models/hf
+## Directory ownership
 
-### Step 3: Add a function to apply tensor parallelism
-- Please follow
-    - https://pytorch.org/docs/stable/distributed.tensor.parallel.html
-    - https://pytorch.org/tutorials/intermediate/TP_tutorial.html
-- General comments
-    - Tensor Parallelism in native Pytorch is NOT auto-parallelism. The way it works is to specify how model parameters and input/output reshards using configs. These configs are then registered as hooks to perform input/output resharding before/after model forward.
+- `transformers/` contains narrow verl-specific patches and optimized
+  implementations for features such as remove-padding execution, Ulysses
+  sequence parallelism, multimodal inputs, and fused kernels.
+- `mcore/` contains Megatron model integration and Hugging Face/Megatron
+  checkpoint conversion. See the
+  [model engine guide](../../docs/workers/model_engine.rst) for backend-level
+  architecture.
+- `registry.py` and `weight_loader_registry.py` serve Megatron-specific model
+  and checkpoint paths; they are not FSDP model registries.
 
-### Step 4: Add a function to apply data parallelism
-- Please use FSDP2 APIs
-- See demo here https://github.com/pytorch/torchtitan/blob/main/torchtitan/parallelisms/parallelize_llama.py#L413
+For model code outside the installed `transformers` package, use the
+`trust_remote_code` or `external_lib` model settings described in the FSDP
+guide. Add in-tree code only when verl needs behavior that cannot be provided by
+the upstream or external implementation.
 
-### Step 5: Add a function to apply pipeline parallelism
-- Comes in Pytorch 2.4
-- Currently only in alpha in nightly version
-- Check torchtitan for more details
+## Tests
 
+Place model construction, patched-forward, and numerical comparison tests
+under `tests/models/`. Exercise FSDP and FSDP2 integration through
+`tests/special_e2e/sft/run_sft_engine.sh`, and validate actor-to-rollout weight
+synchronization with the intended rollout backend.

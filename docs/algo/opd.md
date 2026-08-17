@@ -668,6 +668,15 @@ rollouts on other samples.
    when the loss mode requires top-$k$ (e.g. `forward_kl_topk`); otherwise `0`
    (single-sample logprob only).
 
+   **Temperature is always forced to `1.0`** regardless of the configured value.
+   `prompt_logprobs` is computed via a forward pass over the existing (prompt + response)
+   tokens — no sampling occurs — so temperature has no effect on the result.
+   The default distillation config copies the student rollout temperature via Hydra
+   interpolation (`temperature: ${oc.select:actor_rollout_ref.rollout.temperature}`),
+   which would silently set a non-1.0 value when rollout temperature differs from 1.0
+   (e.g. 0.7). The manager ignores the configured value and always uses `temperature=1.0`,
+   logging a warning if the configured value is not 1.0.
+
 8. **Server-side load balancing.** The manager calls `client.generate(...)`,
    which acquires a backing server through the shared `GlobalRequestLoadBalancer`
    actor.
@@ -766,4 +775,4 @@ The returned scalar loss is what `engine.train_batch` backpropagates.
 
 - `tests/workers/test_distillation_topk_symmetry_on_cpu.py` — top-k loss symmetry and overlap metric checks
 - `tests/utils/test_special_megatron_kl_loss_tp.py` — Megatron KL loss and overlap metrics under tensor parallelism
-- `tests/special_e2e/run_fully_async_policy_opd.sh` — end-to-end OPD with the fully-async rollouter
+- `tests/special_e2e/run_v1_separate_async_opd.sh` — end-to-end multi-teacher OPD on the V1 separate_async trainer

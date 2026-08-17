@@ -40,10 +40,11 @@ use_dist_checkpointing: False
 # distributed checkpointing path
 dist_checkpointing_path: null
 
-# Whether to use hybrid context parallelism
+# Whether to use dynamic context parallel scheduling
 dynamic_context_parallel: False
 
-# Maximum sequence length per DPxCP rank
+# Maximum packed sequence length per DPxCP rank. A positive integer is required
+# when dynamic_context_parallel=True.
 max_seqlen_per_dp_cp_rank: null
 
 # distributed checkpointing prefix, e.g. Nemo2 will append prefix 'module.' to the state dict keys
@@ -96,11 +97,21 @@ override_mcore_model_config: {}
 # oc.select: default val for ref.megatron.use_mbridge
 use_mbridge: True
 
+# Whether to use the deprecated legacy mbridge backend instead of Megatron-Bridge
 # oc.select: default val for ref.megatron.vanilla_mbridge
-vanilla_mbridge: True
+vanilla_mbridge: False
 
 # whether to use thd format (sequence packing), if not, use bshd format, padding the input_ids to the longest sequence length
 use_remove_padding: True
+
+# BSHD path only. Pad every micro-batch of a mini-batch to the mini-batch's global max sequence length instead of
+# each micro-batch's own max. Unifies padding across micro-batches to avoid repeated cuDNN compilation. Only takes
+# effect when use_remove_padding=False (BSHD); no-op on the THD path.
+pad_bshd_to_minibatch_max: True
+
+# Match the FSDP packed-padding controls. Set the bucket to 512 to reduce THD shape variability.
+pad_to_length: false
+pad_to_length_bucket: 512
 
 # Whether to use Megatron-FSDP (Zero-3 sharding)
 use_megatron_fsdp: False

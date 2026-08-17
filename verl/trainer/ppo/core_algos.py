@@ -718,10 +718,12 @@ def compute_reinforce_plus_plus_outcome_advantage(
         running_return = 0
 
         for t in reversed(range(token_level_rewards.shape[1])):
-            running_return = token_level_rewards[:, t] + gamma * running_return
-            returns[:, t] = running_return
-            # Reset after EOS
-            running_return = running_return * response_mask[:, t]
+            new_running_return = token_level_rewards[:, t] + gamma * running_return
+            # For valid tokens (mask=1): update returns and running_return.
+            # For observation tokens (mask=0): skip — carry running_return
+            # through unchanged so rewards propagate past observation spans.
+            returns[:, t] = new_running_return * response_mask[:, t]
+            running_return = new_running_return * response_mask[:, t] + running_return * (1 - response_mask[:, t])
 
         advantages = verl_F.masked_whiten(returns, response_mask)
         advantages = advantages * response_mask
@@ -1171,6 +1173,11 @@ def agg_loss(
                 raise ValueError("(global) batch_num_tokens is required when dp_size > 1")
             batch_num_tokens = loss_mask.sum()
         loss = verl_F.masked_sum(loss_mat, loss_mask) / batch_num_tokens * dp_size
+    elif loss_agg_mode == "token-sum":
+        # DDP/FSDP average gradients across data-parallel ranks. Scaling each
+        # rank's local token sum by dp_size makes the reduced gradient equal to
+        # the sum over all valid tokens in the global batch.
+        loss = verl_F.masked_sum(loss_mat, loss_mask) * dp_size
     elif loss_agg_mode in ["seq-mean-token-sum", "seq-mean-token-sum-norm"]:
         seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)  # token-sum
         seq_mask = (torch.sum(loss_mask, dim=-1) > 0).float()  # exclude fully masked sequences
@@ -1766,7 +1773,7 @@ def compute_policy_loss_clip_cov(
             Upper clip range for dual-clip PPO. Defaults to same as `cliprange`.
         loss_agg_mode (str, optional):
             Aggregation mode for `agg_loss`. Defaults to "token-mean".
-        clip_cvo_ratio (float, optional):
+        clip_cov_ratio (float, optional):
             Ratio for clipping the covariance. Defaults to 0.0002.
         clip_cov_lb (float, optional):
             Lower bound for clipping covariance. Defaults to 1.0.
@@ -2003,6 +2010,39 @@ def compute_policy_loss_geo_mean(
     return pg_loss, pg_metrics
 
 
+@register_policy_loss("dro")
+def compute_policy_loss_dro(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[ActorConfig] = None,
+    rollout_is_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Compute Direct Reward Optimization with a quadratic log-ratio penalty."""
+    assert config is not None
+    assert config.policy_loss is not None
+
+    beta = config.policy_loss.dro_beta
+    if beta is None or beta <= 0:
+        raise ValueError("policy_loss.dro_beta must be a positive value when using DRO")
+
+    log_ratio = log_prob - old_log_prob
+    pg_losses = -(log_prob * advantages - 0.5 * beta * log_ratio.square())
+
+    if rollout_is_weights is not None:
+        pg_losses = pg_losses * rollout_is_weights
+
+    pg_loss = agg_loss(
+        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
+    )
+    pg_metrics = {
+        "actor/ppo_kl": verl_F.masked_mean(-log_ratio, response_mask).detach().item(),
+    }
+    return pg_loss, pg_metrics
+
+
 @register_policy_loss("cispo")
 def compute_policy_loss_cispo(
     old_log_prob: torch.Tensor,
@@ -2088,6 +2128,10 @@ def compute_value_loss(
     response_mask: torch.Tensor,
     cliprange_value: float,
     loss_agg_mode: str = "token-mean",
+    dp_size: int = 1,
+    batch_num_tokens: Optional[int] = None,
+    global_batch_size: Optional[int] = None,
+    loss_scale_factor: Optional[int] = None,
 ):
     """
     Compute the clipped value-function loss for PPO.
@@ -2107,6 +2151,15 @@ def compute_value_loss(
             Clip range for value prediction updates.
         loss_agg_mode (str, optional):
             Aggregation mode for `agg_loss`. Defaults to "token-mean".
+        dp_size (int, optional):
+            Data parallel size, forwarded to `agg_loss` for global-batch normalization. Defaults to 1.
+        batch_num_tokens (Optional[int], optional):
+            Number of valid tokens in the global batch, forwarded to `agg_loss`. Defaults to None
+            (normalize by the local micro-batch token count).
+        global_batch_size (Optional[int], optional):
+            Global batch size, forwarded to `agg_loss` for the seq-mean modes. Defaults to None.
+        loss_scale_factor (Optional[int], optional):
+            Scale factor for the "seq-mean-token-sum-norm" mode, forwarded to `agg_loss`. Defaults to None.
 
     Returns:
         vf_loss (torch.FloatTensor):
@@ -2118,7 +2171,15 @@ def compute_value_loss(
     vf_losses1 = (vpreds - returns) ** 2
     vf_losses2 = (vpredclipped - returns) ** 2
     clipped_vf_losses = torch.max(vf_losses1, vf_losses2)
-    vf_loss = 0.5 * agg_loss(loss_mat=clipped_vf_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+    vf_loss = 0.5 * agg_loss(
+        loss_mat=clipped_vf_losses,
+        loss_mask=response_mask,
+        loss_agg_mode=loss_agg_mode,
+        dp_size=dp_size,
+        batch_num_tokens=batch_num_tokens,
+        global_batch_size=global_batch_size,
+        loss_scale_factor=loss_scale_factor,
+    )
     vf_clipfrac = verl_F.masked_mean(torch.gt(vf_losses2, vf_losses1).float(), response_mask)
     return vf_loss, vf_clipfrac
 

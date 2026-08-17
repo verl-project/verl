@@ -27,18 +27,7 @@ from verl.trainer.ppo.utils import create_rl_dataset, create_rl_sampler, need_cr
 from verl.utils.config import validate_config
 
 
-@ray.remote
-class TaskRunner:
-    """Ray remote class for executing distributed PPO training tasks.
-
-    This class encapsulates the main training logic and runs as a Ray remote actor
-    to enable distributed execution across multiple nodes and GPUs.
-
-    Attributes:
-        role_worker_mapping: Dictionary mapping Role enums to Ray remote worker classes
-        mapping: Dictionary mapping Role enums to resource pool IDs for GPU allocation
-    """
-
+class BaseTaskRunner:
     def __init__(self):
         self.role_worker_mapping = {}
         self.mapping = {}
@@ -141,6 +130,25 @@ class TaskRunner:
         return
 
     def run(self, config):
+        pass
+
+
+@ray.remote
+class TaskRunner(BaseTaskRunner):
+    """Ray remote class for executing distributed PPO training tasks.
+
+    This class encapsulates the main training logic and runs as a Ray remote actor
+    to enable distributed execution across multiple nodes and GPUs.
+
+    Attributes:
+        role_worker_mapping: Dictionary mapping Role enums to Ray remote worker classes
+        mapping: Dictionary mapping Role enums to resource pool IDs for GPU allocation
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def run(self, config):
         """Execute the main PPO training workflow.
 
         This method sets up the distributed training environment, initializes
@@ -152,8 +160,6 @@ class TaskRunner:
         """
         # Print the initial configuration. `resolve=True` will evaluate symbolic values.
         from pprint import pprint
-
-        from verl.utils.fs import copy_to_local
 
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
         pprint(OmegaConf.to_container(config, resolve=True))
@@ -176,19 +182,14 @@ class TaskRunner:
             use_critic=need_critic(config),
         )
 
-        # Download the checkpoint from HDFS to the local machine.
-        # `use_shm` determines whether to use shared memory, which could lead to faster model loading if turned on
-        local_path = copy_to_local(
-            config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False)
-        )
+        # Instantiate the tokenizer and processor from the model config.
+        from verl.utils.config import omega_conf_to_dataclass
+        from verl.workers.config import HFModelConfig
 
-        # Instantiate the tokenizer and processor.
-        from verl.utils import hf_processor, hf_tokenizer
-
-        trust_remote_code = config.data.get("trust_remote_code", False)
-        tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        model_config: HFModelConfig = omega_conf_to_dataclass(config.actor_rollout_ref.model)
+        tokenizer = model_config.tokenizer
         # Used for multimodal LLM, could be None
-        processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+        processor = model_config.processor
 
         resource_pool_manager = self.init_resource_pool_mgr(config)
 

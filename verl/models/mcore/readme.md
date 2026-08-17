@@ -1,14 +1,14 @@
-updated 20251222
+updated 20260706
 
 # The ways verl integrates megatron-core
 There has been 3 ways that verl integrates megatron-core as it training backend:
 1. the codes inside this directory, which defines the conversion for new models one by one. (deprecated now)
-2. through [mbridge](https://github.com/ISEEKYAN/mbridge) (will be deprecated at about v0.8)
-3. through [megatron-bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) (the official way for further development)
+2. through [mbridge](https://github.com/ISEEKYAN/mbridge) (deprecated)
+3. through [Megatron-Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) (the default and official way for further development)
 
 There is a configure option of `megatron.use_mbridge` to choose way#1 (false) or way#2 (true), and after the megatron-bridge is integrated we have a new option `megatron.vanilla_mbridge` to choose way#2 (true) or way#3 (false)
 
-Now since we deprecated the way#1, the option `use_mbridge` will be asserted to be true and will be removed after v0.7. The default `vanilla_mbridge` is true for now and will be false one the megatron-bridge backend turns default.
+Now since we deprecated the way#1, the option `use_mbridge` will be asserted to be true and will be removed after v0.9. Megatron-Bridge is selected by default with `vanilla_mbridge=false`. Setting `vanilla_mbridge=true` selects the deprecated mbridge backend for compatibility.
 
 With the bridge way(#2 or #3), we can directly load and save the megatron model weight through HuggingFace format, and we can use any megatron version >= 0.13 to adopt new megatron optimization feature as handy as possible by directly add overrided megatron configs such as `+actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform`.
 

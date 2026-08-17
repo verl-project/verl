@@ -11,9 +11,9 @@
 #
 # Requirements on Ascend:
 #   - 4 nodes, 16 trainer devices per node
-#   - Additional packages on base image(quay.io/ascend/verl:verl-8.5.2-a3-ubuntu22.04-py3.11-qwen3-5):
+#   - Additional packages on base image(quay.io/ascend/verl:v0.8.0-cann9.0.0-torch2.9.0post2-a3-ubuntu22.04-py3.11-vllm):
 #       pip install viztracer flash-linear-attention nvidia-modelopt nvidia-ml-py nvidia-resiliency-ext megatron-energon
-#   - Megatron-LM==0.16.1
+#   - Megatron-LM==0.16.0
 #   - MindSpeed==0.16.0
 #   - Megatron-Bridge==de93536e
 #
@@ -98,7 +98,7 @@ case "${DEVICE}" in
         PP=${PP:-2}
         EP=${EP:-8}
         GEN_TP=${GEN_TP:-8}
-        n_devices_per_node=${n_devices_per_node:-8}
+        n_devices_per_node=${NDEVICES_PER_NODE:-8}
         rollout_gpu_memory_utilization=${rollout_gpu_memory_utilization:-0.66}
         rollout_log_prob_micro_batch_size_per_gpu=${rollout_log_prob_micro_batch_size_per_gpu:-1}
         ref_log_prob_micro_batch_size_per_gpu=${ref_log_prob_micro_batch_size_per_gpu:-1}
@@ -108,7 +108,7 @@ case "${DEVICE}" in
         PP=${PP:-4}
         EP=${EP:-16}
         GEN_TP=${GEN_TP:-16}
-        n_devices_per_node=${n_devices_per_node:-16}
+        n_devices_per_node=${NDEVICES_PER_NODE:-16}
         rollout_gpu_memory_utilization=${rollout_gpu_memory_utilization:-0.6}
         rollout_log_prob_micro_batch_size_per_gpu=${rollout_log_prob_micro_batch_size_per_gpu:-4}
         ref_log_prob_micro_batch_size_per_gpu=${ref_log_prob_micro_batch_size_per_gpu:-4}
@@ -245,12 +245,24 @@ case "${DEVICE}" in
             +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=alltoall
             +actor_rollout_ref.actor.megatron.override_transformer_config.use_naive_l2norm=True
         )
+        ROLLOUT+=(
+            +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
+        )
         ;;
 esac
 
 ########################### Launch ###########################
 export HYDRA_FULL_ERROR=1
-PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
+# uv (set VERL_USE_UV=0 for system python): GPU vllm/sglang × megatron run the driver and every Ray worker
+# (runtime_env.py_executable) through `uv run` on the matching extras of the committed uv.lock;
+# other backends / NPU fall back to ambient python. Run from the verl repo root.
+LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ] && { [ "${rollout_backend}" = vllm ] || [ "${rollout_backend}" = sglang ]; }; then
+    LAUNCH=(uv run --frozen --all-packages --extra "${rollout_backend}" --extra megatron python3)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages --extra ${rollout_backend} --extra megatron")
+fi
+PYTHONUNBUFFERED=1 "${LAUNCH[@]}" -m verl.trainer.main_ppo \
     "${ALGORITHM[@]}" \
     "${DATA[@]}" \
     "${MODEL[@]}" \
@@ -260,4 +272,5 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     "${ACTOR[@]}" \
     "${REF[@]}" \
     "${EXTRA[@]}" \
+    "${RAY[@]}" \
     "$@"

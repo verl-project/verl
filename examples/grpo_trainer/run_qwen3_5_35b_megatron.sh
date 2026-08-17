@@ -18,9 +18,9 @@
 #
 # Requirements on Ascend:
 #   - 8 NPUs (2*64GB each, e.g. 1x8 A3)
-#   - Additional packages on base image(verl-8.5.2-a3-ubuntu22.04-py3.11-qwen3-5):
+#   - Additional packages on base image(v0.8.0-cann9.0.0-torch2.9.0post2-a3-ubuntu22.04-py3.11-vllm):
 #       pip install viztracer flash-linear-attention nvidia-modelopt nvidia-ml-py nvidia-resiliency-ext megatron-energon
-#   - Megatron-LM==0.16.1
+#   - Megatron-LM==0.16.0
 #   - MindSpeed==0.16.0
 #   - Megatron-Bridge==de93536e
 #
@@ -41,7 +41,6 @@
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export VLLM_USE_V1=1
 export VLLM_ALLREDUCE_USE_SYMM_MEM=0
-
 set -xeuo pipefail
 
 ########################### Quick Config ###########################
@@ -193,11 +192,27 @@ case "${DEVICE}" in
     npu)
         export CPU_AFFINITY_CONF=1
         ACTOR+=(
+            actor_rollout_ref.actor.use_dynamic_bsz=True
             actor_rollout_ref.actor.megatron.vanilla_mbridge=False
             actor_rollout_ref.actor.checkpoint.strict=False
+            actor_rollout_ref.actor.megatron.use_remove_padding=True
             +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
             +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=alltoall
             +actor_rollout_ref.actor.megatron.override_transformer_config.use_naive_l2norm=True
+
+            +actor_rollout_ref.actor.megatron.override_transformer_config.use_triton_gdn=False
+            +actor_rollout_ref.actor.megatron.override_transformer_config.use_ascend_gdn=True
+        )
+        ROLLOUT+=(
+            actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
+            actor_rollout_ref.rollout.gpu_memory_utilization=0.65
+            +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
+        )
+        MODEL+=(
+            actor_rollout_ref.model.use_remove_padding=True
+        )
+        REF+=(
+            actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True
         )
         ;;
     *)
@@ -208,7 +223,16 @@ esac
 
 ########################### Launch ###########################
 
-python3 -m verl.trainer.main_ppo \
+# uv (set VERL_USE_UV=0 for system python): GPU vllm/sglang × megatron run the driver and every Ray worker
+# (runtime_env.py_executable) through `uv run` on the matching extras of the committed uv.lock;
+# other backends / NPU fall back to ambient python. Run from the verl repo root.
+LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ] && { [ "${rollout_name}" = vllm ] || [ "${rollout_name}" = sglang ]; }; then
+    LAUNCH=(uv run --frozen --all-packages --extra "${rollout_name}" --extra megatron python3)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages --extra ${rollout_name} --extra megatron")
+fi
+"${LAUNCH[@]}" -m verl.trainer.main_ppo \
     "${DATA[@]}" \
     "${ALGORITHM[@]}" \
     "${MODEL[@]}" \
@@ -217,4 +241,5 @@ python3 -m verl.trainer.main_ppo \
     "${REF[@]}" \
     "${TRAINER[@]}" \
     "${EXTRA[@]}" \
+    "${RAY[@]}" \
     "$@"

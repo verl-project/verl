@@ -19,12 +19,14 @@ import dataclasses
 import json
 import logging
 import os
+from contextlib import contextmanager
 from enum import Enum
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 import orjson
+from packaging.version import Version
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,7 @@ class Tracking:
         "clearml",
         "trackio",
         "file",
+        "rl_insight",
     ]
 
     def __init__(self, project_name, experiment_name, default_backend: str | list[str] = "console", config=None):
@@ -67,6 +70,7 @@ class Tracking:
                 assert backend in self.supported_backend, f"{backend} is not supported"
 
         self.logger = {}
+        self._finished = False
 
         if "tracking" in default_backend or "wandb" in default_backend:
             import os
@@ -180,26 +184,170 @@ class Tracking:
         if "file" in default_backend:
             self.logger["file"] = FileLogger(project_name, experiment_name)
 
+        if "rl_insight" in default_backend:
+            self.logger["rl_insight"] = RLInsightLogger(project_name, experiment_name, config)
+
     def log(self, data, step, backend=None):
         for default_backend, logger_instance in self.logger.items():
             if backend is None or default_backend in backend:
                 logger_instance.log(data=data, step=step)
 
+    def finish(self, exit_code: int = 0):
+        """Flush and finalize every configured backend exactly once."""
+        if getattr(self, "_finished", False):
+            return
+        self._finished = True
+        loggers = getattr(self, "logger", {})
+
+        if "wandb" in loggers:
+            loggers["wandb"].finish(exit_code=exit_code)
+        if "swanlab" in loggers:
+            loggers["swanlab"].finish()
+        if "vemlp_wandb" in loggers:
+            loggers["vemlp_wandb"].finish(exit_code=exit_code)
+        if "tensorboard" in loggers:
+            loggers["tensorboard"].finish()
+        if "clearml" in loggers:
+            loggers["clearml"].finish()
+        if "trackio" in loggers:
+            loggers["trackio"].finish()
+        if "file" in loggers:
+            loggers["file"].finish()
+        if "rl_insight" in loggers:
+            loggers["rl_insight"].finish()
+
     def __del__(self):
-        if "wandb" in self.logger:
-            self.logger["wandb"].finish(exit_code=0)
-        if "swanlab" in self.logger:
-            self.logger["swanlab"].finish()
-        if "vemlp_wandb" in self.logger:
-            self.logger["vemlp_wandb"].finish(exit_code=0)
-        if "tensorboard" in self.logger:
-            self.logger["tensorboard"].finish()
-        if "clearml" in self.logger:
-            self.logger["clearml"].finish()
-        if "trackio" in self.logger:
-            self.logger["trackio"].finish()
-        if "file" in self.logger:
-            self.logger["file"].finish()
+        self.finish()
+
+
+class RLInsightLogger:
+    """Logger backend that exports scalar metrics and rl-insight runtime signals."""
+
+    ENABLE_ENV = "VERL_RL_INSIGHT_ENABLE"
+    _init_done = False
+    _rl_insight_module = None
+    _registered_metrics: set[tuple[str | None, tuple[str, ...], str | None]] = set()
+
+    def __init__(self, project_name, experiment_name, config=None):
+        self.init(project_name=project_name, experiment_name=experiment_name, config=config)
+
+    @classmethod
+    def _get_rl_insight(cls):
+        if cls._rl_insight_module is None:
+            import rl_insight
+
+            cls._rl_insight_module = rl_insight
+        return cls._rl_insight_module
+
+    @classmethod
+    def enabled(cls) -> bool:
+        """Return whether rl-insight is globally enabled in this process."""
+        return os.getenv(cls.ENABLE_ENV) == "1"
+
+    @classmethod
+    def init(cls, project_name=None, experiment_name=None, config=None):
+        if not cls.enabled() or cls._init_done:
+            return
+
+        rl_insight_config = {}
+        if config is not None:
+            try:
+                rl_insight_config = config.get("trainer", {}).get("rl_insight", {}) or {}
+            except (AttributeError, KeyError, TypeError):
+                pass
+        cls._get_rl_insight().init(project=project_name, experiment_name=experiment_name, config=rl_insight_config)
+        cls._init_done = True
+        if config is not None:
+            cls.register_transfer_queue_metrics(config)
+
+    @classmethod
+    def log(cls, data, step):
+        if not cls.enabled():
+            return
+        if not cls._init_done:
+            cls._get_rl_insight().init()
+            cls._init_done = True
+        metric_gauge = cls._get_rl_insight().metric_gauge
+
+        for key, value in data.items():
+            try:
+                scalar = float(value)
+            except (TypeError, ValueError):
+                continue
+            metric_gauge(str(key).replace("/", "_"), scalar)
+
+    @classmethod
+    def finish(cls):
+        if not cls._init_done:
+            return
+
+        cls._get_rl_insight().finish()
+        cls._init_done = False
+        cls._registered_metrics.clear()
+
+    @classmethod
+    @contextmanager
+    def trace_state(
+        cls,
+        state_name: str,
+        *,
+        state_lane_id: str | int | None = None,
+        **labels: Any,
+    ):
+        if not cls.enabled():
+            yield
+            return
+
+        if not cls._init_done:
+            cls._get_rl_insight().init()
+            cls._init_done = True
+        with cls._get_rl_insight().trace_state(state_name, state_lane_id=state_lane_id, **labels):
+            yield
+
+    @classmethod
+    def register_rollout_metrics(
+        cls,
+        server_addresses: list[str],
+        rollout_name: str | None,
+        labels: list[dict[str, Any] | None] | None = None,
+    ) -> None:
+        cls.register_metrics(server_addresses, rollout_name, labels)
+
+    @classmethod
+    def register_transfer_queue_metrics(cls, config) -> None:
+        if not (config or {}).get("transfer_queue", {}).get("metrics", {}).get("enabled", False):
+            return
+
+        try:
+            import transfer_queue as tq
+
+            endpoint = tq.get_metrics_endpoint()
+        except Exception:
+            logger.exception("[rl-insight] Failed to get transfer_queue metrics endpoint")
+            return
+
+        if endpoint:
+            cls.register_metrics([endpoint], "transfer_queue", None)
+
+    @classmethod
+    def register_metrics(
+        cls,
+        server_addresses: list[str],
+        job_name: str | None = None,
+        labels: list[dict[str, Any] | None] | None = None,
+    ) -> None:
+        if not cls.enabled():
+            return
+
+        metric_key = (job_name, tuple(server_addresses), repr(labels))
+        if metric_key in cls._registered_metrics:
+            return
+
+        try:
+            cls._get_rl_insight().update_prometheus_config(server_addresses, job_name, labels)
+            cls._registered_metrics.add(metric_key)
+        except Exception:
+            logger.exception("[rl-insight] Failed to register metrics endpoint")
 
 
 class ClearMLLogger:
@@ -589,3 +737,53 @@ class ValidationGenerationsLogger:
         self.writer.add_text("val/generations", text_content, step)
         # Flush to ensure data is written
         self.writer.flush()
+
+
+@dataclasses.dataclass
+class DapoFilteredRewardTableLogger:
+    """Wandb table of DAPO-filtered (no-signal) group counts per reward value.
+
+    Each training step adds one row containing compact ``reward:count`` pairs. Wandb 0.20+
+    uploads rows incrementally; older versions rebuild the full table for compatibility.
+
+    Intentionally wandb-only: this "value distribution over time" view is a table, which other
+    tracking backends do not render usefully. Non-wandb backends are silently skipped.
+    """
+
+    project_name: str = None
+    experiment_name: str = None
+
+    def log(self, loggers, reward_counts: dict, step: int):
+        """reward_counts maps metric value -> count for this step (already merged across mini-batches)."""
+        if "wandb" in loggers:
+            self._log_to_wandb(reward_counts, step)
+
+    def _log_to_wandb(self, reward_counts: dict, step: int):
+        import wandb
+
+        if wandb.run is None:
+            return
+
+        row = {float(value): int(count) for value, count in reward_counts.items()}
+        counts_text = ", ".join(f"{value:g}:{row[value]}" for value in sorted(row))
+        columns = ["step", "reward_counts"]
+
+        if not hasattr(self, "_use_incremental_table"):
+            self._use_incremental_table = Version(wandb.__version__) >= Version("0.20.0")
+            if self._use_incremental_table:
+                self._table = wandb.Table(columns=columns, log_mode="INCREMENTAL")
+            else:
+                self._rows = []
+                logger.warning(
+                    "wandb<0.20.0 does not support incremental tables; "
+                    "the DAPO filtered-reward table will re-upload its full history each step."
+                )
+
+        if self._use_incremental_table:
+            self._table.add_data(step, counts_text)
+            table = self._table
+        else:
+            self._rows.append([step, counts_text])
+            table = wandb.Table(columns=columns, data=list(self._rows))
+
+        wandb.log({"training/filter_groups/filtered_reward_counts": table}, step=step)

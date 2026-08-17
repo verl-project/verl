@@ -158,6 +158,25 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
     """
     vpreds = no_padding_2_padding(model_output["values"], data)  # (bsz, response_length)
 
+    # Normalize the value loss over the global mini-batch (dp_size / batch_num_tokens /
+    # global_batch_size) instead of the local micro-batch, so the accumulated critic gradient is
+    # invariant to how the mini-batch is split into micro-batches (as the actor's ppo_loss does).
+    dp_size = data["dp_size"]
+    batch_num_tokens = data["batch_num_tokens"]
+    global_batch_size = data["global_batch_size"]
+
+    # When the loss is normalized over the global batch, each micro-batch contributes a partial sum,
+    # so the loss metric must be aggregated with SUM to reflect the global-batch mean.
+    if (
+        dp_size > 1
+        or batch_num_tokens is not None
+        or global_batch_size is not None
+        or config.loss_scale_factor is not None
+    ):
+        metric_aggregation = AggregationType.SUM
+    else:
+        metric_aggregation = AggregationType.MEAN
+
     # select fields and convert to padded tensor
     data = data.select("values", "returns", "response_mask").to_padded_tensor()
     values = data["values"]
@@ -171,16 +190,16 @@ def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=No
         response_mask=response_mask,
         cliprange_value=config.cliprange_value,
         loss_agg_mode=config.loss_agg_mode,
+        dp_size=dp_size,
+        batch_num_tokens=batch_num_tokens,
+        global_batch_size=global_batch_size,
+        loss_scale_factor=config.loss_scale_factor,
     )
 
-    metrics = {}
-
-    metrics.update(
-        {
-            "critic/vf_loss": vf_loss.detach().item(),
-            "critic/vf_clipfrac": vf_clipfrac.detach().item(),
-            "critic/vpred_mean": masked_mean(vpreds, response_mask).detach().item(),
-        }
-    )
+    metrics = {
+        "critic/vf_loss": Metric(value=vf_loss, aggregation=metric_aggregation),
+        "critic/vf_clipfrac": vf_clipfrac.detach().item(),
+        "critic/vpred_mean": masked_mean(vpreds, response_mask).detach().item(),
+    }
 
     return vf_loss, metrics

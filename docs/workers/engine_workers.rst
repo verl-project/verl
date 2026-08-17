@@ -114,7 +114,10 @@ Key RPCs
      directly. LoRA adapters are merged into base weights up-front when
      ``model.lora.merge=True``.
    - For **disaggregated async training**: send the weights through
-     ``self.checkpoint_engine.send_weights`` instead.
+     ``self.checkpoint_engine.send_weights`` instead. The transport is chosen by
+     ``checkpoint_engine.backend`` (e.g. ``nccl`` for a full-weight broadcast, or
+     ``delta`` to broadcast only the parameters that changed since the previous
+     sync — see :doc:`../advance/one_step_off`).
 
 5. ``save_checkpoint`` / ``load_checkpoint``
 
@@ -183,19 +186,18 @@ The ``EngineRegistry`` dispatches on ``(model_type, backend, device)`` –
 for example ``(language_model, fsdp2, cuda)`` or
 ``(language_model, megatron, npu)``:
 
-=====================  ======================  =====================  =====================================================================
-model_type             backend                 device                 Engine class
-=====================  ======================  =====================  =====================================================================
-``language_model``     ``fsdp`` / ``fsdp2``    ``cuda`` / ``npu``     ``verl.workers.engine.fsdp.FSDPEngineWithLMHead``
-``language_model``     ``megatron``            ``cuda``               ``verl.workers.engine.megatron.MegatronEngineWithLMHead``
-``language_model``     ``megatron``            ``npu``                ``verl.workers.engine.mindspeed.MindspeedEngineWithLMHead``
-``language_model``     ``mindspeed_megatron``  ``npu``                ``verl.workers.engine.mindspeed.MindSpeedMegatronEngineWithLMHead``
-``language_model``     ``automodel``           ``cuda``               ``verl.workers.engine.automodel.AutomodelEngineWithLMHead``
-``language_model``     ``veomni``              ``cuda`` / ``npu``     ``verl.workers.engine.veomni.VeOmniEngineWithLMHead``
-``language_model``     ``torchtitan``          ``cuda`` / ``npu``     ``verl.workers.engine.torchtitan.TorchTitanEngineWithLMHead``
-``value_model``        ``fsdp`` / ``fsdp2``    ``cuda`` / ``npu``     ``verl.workers.engine.fsdp.FSDPEngineWithValueHead``
-``value_model``        ``megatron``            ``cuda``               ``verl.workers.engine.megatron.MegatronEngineWithValueHead``
-=====================  ======================  =====================  =====================================================================
+=====================  =====================  =====================  ============================================================
+model_type             backend                device                 Engine class
+=====================  =====================  =====================  ============================================================
+``language_model``     ``fsdp`` / ``fsdp2``   ``cuda`` / ``npu``     ``verl.workers.engine.fsdp.FSDPEngineWithLMHead``
+``language_model``     ``megatron``           ``cuda``               ``verl.workers.engine.megatron.MegatronEngineWithLMHead``
+``language_model``     ``megatron``           ``npu``                ``verl.workers.engine.mindspeed.MindspeedEngineWithLMHead``
+``language_model``     ``automodel``          ``cuda``               ``verl.workers.engine.automodel.AutomodelEngineWithLMHead``
+``language_model``     ``veomni``             ``cuda`` / ``npu``     ``verl.workers.engine.veomni.VeOmniEngineWithLMHead``
+``language_model``     ``torchtitan``         ``cuda`` / ``npu``     ``verl.workers.engine.torchtitan.TorchTitanEngineWithLMHead``
+``value_model``        ``fsdp`` / ``fsdp2``   ``cuda`` / ``npu``     ``verl.workers.engine.fsdp.FSDPEngineWithValueHead``
+``value_model``        ``megatron``           ``cuda``               ``verl.workers.engine.megatron.MegatronEngineWithValueHead``
+=====================  =====================  =====================  ============================================================
 
 Migrating from Legacy Workers
 -----------------------------

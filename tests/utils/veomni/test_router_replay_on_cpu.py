@@ -16,22 +16,25 @@
 
 Pure-CPU coverage for the controller state machine. The patched
 ``SparseMoeBlock`` integration (the actual end-to-end forward through a
-real router) lives in VeOmni's invariant test suite; the engine-driver
-glue (snapshot side-channel + nested rebuild) lives in
+real router) lives in VeOmni's invariant test suite; the engine-side
+pad / Ulysses / nested-rebuild glue lives in
 ``tests/workers/test_router_replay_engine_helpers_on_cpu.py``.
 
 What's covered
 --------------
-* RECORD lifecycle (single mb, multi-mb).
-* Recompute under whole-model AND per-layer activation checkpointing.
-  Per-layer checkpointing fires backward recompute for each layer
-  *independently in reverse order* — the failure mode that breaks any
-  monotonic-cursor design.
-* REPLAY first step (R3 case): set_microbatch_targets must work
-  before any RECORD has populated the id table.
-* REPLAY strict missing-target error path.
+* RECORD lifecycle for a single micro-batch, and the reset between
+  micro-batches.
+* Recompute under per-layer activation checkpointing, which fires each
+  layer *independently in reverse order* — the failure mode that breaks
+  any monotonic-cursor design.
+* ``take_recorded`` stacking order and shape.
+* REPLAY first step (R3 case): targets must work before any RECORD has
+  populated the id table.
+* REPLAY strict missing-target and shape-mismatch error paths, and the
+  duplicate-top-k fallback that guards positions with no recorded
+  routing.
+* ``begin_microbatch`` mode validation.
 * Snapshot clone semantics.
-* id-mapping stability across micro-batches.
 * ``install`` / ``uninstall`` against a stubbed VeOmni hook surface.
 """
 
@@ -105,19 +108,44 @@ def _fire_all(ctrl, routers):
 # ===========================================================
 
 
-def test_record_multiple_microbatches(ctrl, routers):
-    """advance_record_microbatch bumps the slot fill count without
-    touching the id mapping. The id table must persist across mbs in
-    the same step (recompute detection in on_router_forward depends on
-    ``len(slot) == _mb_index + 1``, which only holds with stable ids)."""
+def test_take_recorded_is_layer_major(ctrl, routers):
+    """``take_recorded`` stacks layers on dim=1, so the result matches the
+    trainer-side ``routed_experts`` layout ``[nnz, L, topk]``."""
     ctrl.begin_record()
-    n_mb = 3
-    for mb in range(n_mb):
-        if mb > 0:
-            ctrl.advance_record_microbatch()
+    ctrl.begin_microbatch()
+    fired = _fire_all(ctrl, routers)
+
+    recorded = ctrl.take_recorded()
+    assert recorded.shape == (_NNZ, len(routers), _TOPK)
+    for pos, native in enumerate(fired):
+        assert torch.equal(recorded[:, pos, :], native), f"layer {pos} landed on the wrong slice"
+
+
+def test_record_begin_microbatch_drops_previous_microbatch(ctrl, routers):
+    """The controller holds exactly one micro-batch. Re-arming must clear
+    the previous one, otherwise ``take_recorded`` would stack stale layers
+    and the engine's per-mb gather would see the wrong nnz."""
+    ctrl.begin_record()
+    for _ in range(3):
+        ctrl.begin_microbatch()
         _fire_all(ctrl, routers)
-    assert all(len(slot) == n_mb for slot in ctrl._recorded)
+        assert len(ctrl._recorded) == len(routers)
     assert ctrl.action is RouterReplayAction.RECORD
+
+
+def test_take_recorded_before_any_router_fired_raises(ctrl):
+    """An empty buffer means the model's SparseMoeBlock never called the
+    hook — fail with a message that points at the wiring."""
+    ctrl.begin_record()
+    ctrl.begin_microbatch()
+    with pytest.raises(RuntimeError, match="no router fired"):
+        ctrl.take_recorded()
+
+
+def test_take_recorded_outside_record_mode_raises(ctrl):
+    ctrl.begin_replay()
+    with pytest.raises(RuntimeError, match="requires RECORD"):
+        ctrl.take_recorded()
 
 
 # ===========================================================
@@ -131,12 +159,15 @@ def test_record_recompute_per_layer_reverse(ctrl, routers):
     that breaks any monotonic-cursor design. Subsumes whole-model
     recompute (which is just sequential forward order)."""
     ctrl.begin_record()
-    _fire_all(ctrl, routers)  # forward layer 0..L-1
+    ctrl.begin_microbatch()
+    fired = _fire_all(ctrl, routers)  # forward layer 0..L-1
     for r in reversed(routers):  # backward recompute, reverse order
         ctrl.on_router_forward(r, _scores(), _idx())
-    assert all(len(slot) == 1 for slot in ctrl._recorded), (
-        f"per-layer reverse recompute leaked: {[len(s) for s in ctrl._recorded]}"
-    )
+
+    assert len(ctrl._recorded) == len(routers), f"per-layer reverse recompute leaked extra slots: {len(ctrl._recorded)}"
+    # The recompute fired with *different* indices; the original snapshot wins.
+    for pos, native in enumerate(fired):
+        assert torch.equal(ctrl._recorded[pos], native), f"layer {pos} was overwritten by recompute"
 
 
 # ===========================================================
@@ -146,11 +177,11 @@ def test_record_recompute_per_layer_reverse(ctrl, routers):
 
 def test_replay_first_step_without_prior_discovery(ctrl, routers):
     """R3 first step: REPLAY runs before any RECORD has populated the id
-    table. set_microbatch_targets just stashes the list; lookup happens
+    table. begin_microbatch just stashes the list; lookup happens
     lazily during forward."""
     ctrl.begin_replay()
     targets = [_idx() for _ in routers]
-    ctrl.set_microbatch_targets(targets)
+    ctrl.begin_microbatch(targets=targets)
     returned = _fire_all(ctrl, routers)
     for i, ret in enumerate(returned):
         assert torch.equal(ret, targets[i]), f"REPLAY layer {i} returned wrong target"
@@ -161,7 +192,7 @@ def test_replay_per_layer_reverse_recompute(ctrl, routers):
     same target, regardless of fire order."""
     ctrl.begin_replay()
     targets = [_idx() for _ in routers]
-    ctrl.set_microbatch_targets(targets)
+    ctrl.begin_microbatch(targets=targets)
     _fire_all(ctrl, routers)  # forward populates id mapping
     # backward recompute in reverse — each layer must hit its OWN target
     for r, want_pos in zip(reversed(routers), reversed(range(len(routers))), strict=True):
@@ -169,77 +200,31 @@ def test_replay_per_layer_reverse_recompute(ctrl, routers):
         assert torch.equal(ret, targets[want_pos]), f"REPLAY recompute layer {want_pos} returned wrong target"
 
 
-def test_replay_strict_missing_target_raises(ctrl, routers):
+def test_replay_strict_missing_target_pos_raises(ctrl, routers):
     """Layer position with no target must raise — no silent fallback."""
     ctrl.begin_replay()
-    ctrl.set_microbatch_targets([_idx()])  # only 1 target for 3 layers
+    ctrl.begin_microbatch(targets=[_idx()])  # only 1 target for 3 layers
     ctrl.on_router_forward(routers[0], _scores(), _idx())  # pos 0 OK
     with pytest.raises(RuntimeError, match="pos=1.*no target"):
         ctrl.on_router_forward(routers[1], _scores(), _idx())
 
 
-def test_replay_with_mask_substitutes_only_masked_tokens(ctrl, routers):
-    """R3 prompt-token regression: when ``replay_mask`` is provided,
-    only tokens with mask=True get the recorded target; mask=False
-    tokens fall through to native indices.
-
-    This is what prevents R3 from sending all prompt tokens to expert 0
-    (the rollout backend writes zeros for prompt tokens because it
-    never captured prefill-time routing). Without the mask, those
-    zeros would be substituted, corrupting the EP all-to-all and
-    surfacing as ``RuntimeError: Split sizes doesn't match total dim
-    0 size`` mid-forward.
-    """
-    ctrl.begin_replay()
-    # 16 tokens; first 10 are "prompt" (mask=False), last 6 are "response" (mask=True).
-    mask = torch.tensor([False] * 10 + [True] * 6)
-    targets = [torch.zeros(_NNZ, _TOPK, dtype=torch.int64) for _ in routers]
-    # Fill response-portion of each target with DISTINCT-per-slot nonzero
-    # values so they (a) differ from the native sentinel, (b) don't
-    # contain duplicate top-k slots that would trigger the duplicate
-    # fallback.
-    for layer_pos, t in enumerate(targets):
-        for k in range(_TOPK):
-            t[10:, k] = layer_pos * 10 + k + 1  # e.g., layer 0 row: [1, 2], layer 1 row: [11, 12]
-    ctrl.set_microbatch_targets(targets, replay_mask=mask)
-
-    for layer_pos, r in enumerate(routers):
-        # Native values must also be distinct per slot so they don't
-        # themselves trigger the duplicate fallback.
-        native = torch.stack(
-            [torch.full((_NNZ,), 90 + k, dtype=torch.int64) for k in range(_TOPK)],
-            dim=-1,
-        )  # row pattern: [90, 91]
-        out = ctrl.on_router_forward(r, _scores(), native)
-
-        # First 10 rows (prompt, mask=False): native values preserved.
-        assert torch.equal(out[:10], native[:10]), (
-            f"layer {layer_pos}: prompt rows must keep native indices, got {out[:10]}"
-        )
-        # Last 6 rows (response, mask=True): substituted with the target.
-        assert torch.equal(out[10:], targets[layer_pos][10:]), (
-            f"layer {layer_pos}: response rows must use replay target"
-        )
-
-
 def test_replay_duplicate_topk_falls_back_to_native(ctrl, routers):
-    """R3 robustness regression: rows where the substituted top-k
-    contains duplicates (e.g. a placeholder ``[0, 0, 0, ...]`` that
-    slipped through the mask, or any rollout-side corruption) must
-    fall through to native routing.
+    """Rows whose target top-k contains a duplicate must fall through to
+    native routing. This is the only guard for positions that have no
+    recorded routing: the pad suffix the engine appends, and the trailing
+    rows the rollout backend leaves at zero in R3 (final generated token,
+    tool-response tokens). All of them arrive as all-zero rows.
 
-    Without this fallback, VeOmni's MoE expert dispatch silently
-    dedupes the duplicate top-k slots inside ``permute()``, while
-    ``input_splits`` keeps counting all of them — the EP all-to-all
-    then crashes with ``Split sizes doesn't match total dim 0 size``
-    several layers deep.
+    Without the fallback, VeOmni's MoE expert dispatch silently dedupes the
+    duplicate top-k slots inside ``permute()``, while ``input_splits`` keeps
+    counting all of them — the EP all-to-all then crashes with ``Split sizes
+    doesn't match total dim 0 size`` several layers deep.
     """
     ctrl.begin_replay()
-    # All-True mask — exercise the fallback purely on duplicate detection.
-    mask = torch.ones(_NNZ, dtype=torch.bool)
 
     # Build a target with two corruption patterns:
-    #   row 0: all-zeros (extreme duplicate — every slot is expert 0)
+    #   row 0: all-zeros (what a pad token or an unrecorded R3 row looks like)
     #   row 1: partial duplicate (slots 0 and 1 both expert 5)
     # The other rows are clean (distinct top-k).
     targets = []
@@ -252,7 +237,7 @@ def test_replay_duplicate_topk_falls_back_to_native(ctrl, routers):
         t[1, 0] = 5
         t[1, 1] = 5  # duplicate row
         targets.append(t)
-    ctrl.set_microbatch_targets(targets, replay_mask=mask)
+    ctrl.begin_microbatch(targets=targets)
 
     for r, t in zip(routers, targets, strict=True):
         # Native: distinct per row, distinct per slot.
@@ -270,23 +255,36 @@ def test_replay_duplicate_topk_falls_back_to_native(ctrl, routers):
             assert torch.equal(out[i], t[i]), f"clean row {i} must use replay target"
 
 
-def test_replay_mask_shape_mismatch_raises(ctrl, routers):
-    """Defensive: a mask sliced with a different SP rule than the
-    targets would silently corrupt routing. The controller refuses
-    rather than broadcast."""
+def test_replay_target_row_count_mismatch_raises(ctrl, routers):
+    """Defensive: a target sliced with a different SP rule than input_ids
+    would silently misalign routing. The controller refuses rather than
+    letting the downstream ``torch.where`` broadcast."""
     ctrl.begin_replay()
-    targets = [_idx() for _ in routers]
-    bad_mask = torch.ones(_NNZ + 4, dtype=torch.bool)  # too long
-    ctrl.set_microbatch_targets(targets, replay_mask=bad_mask)
-    with pytest.raises(RuntimeError, match="replay_mask has .* rows but top_indices"):
+    ctrl.begin_microbatch(targets=[torch.zeros(_NNZ + 4, _TOPK, dtype=torch.int64) for _ in routers])
+    with pytest.raises(RuntimeError, match="target has shape"):
         ctrl.on_router_forward(routers[0], _scores(), _idx())
 
 
-def test_replay_set_targets_outside_replay_mode_raises(ctrl):
-    """set_microbatch_targets is REPLAY-only."""
+# ===========================================================
+# begin_microbatch mode validation
+# ===========================================================
+
+
+def test_begin_microbatch_replay_without_targets_raises(ctrl):
+    ctrl.begin_replay()
+    with pytest.raises(RuntimeError, match="REPLAY requires per-layer targets"):
+        ctrl.begin_microbatch()
+
+
+def test_begin_microbatch_record_with_targets_raises(ctrl):
     ctrl.begin_record()
-    with pytest.raises(RuntimeError, match="requires REPLAY"):
-        ctrl.set_microbatch_targets([_idx()])
+    with pytest.raises(RuntimeError, match="RECORD does not take targets"):
+        ctrl.begin_microbatch(targets=[_idx()])
+
+
+def test_begin_microbatch_while_disabled_raises(ctrl):
+    with pytest.raises(RuntimeError, match="requires RECORD or REPLAY"):
+        ctrl.begin_microbatch()
 
 
 # ===========================================================
@@ -294,16 +292,10 @@ def test_replay_set_targets_outside_replay_mode_raises(ctrl):
 # ===========================================================
 
 
-def test_advance_record_microbatch_outside_record_raises(ctrl):
-    """advance_record_microbatch is RECORD-only."""
-    ctrl.begin_replay()
-    with pytest.raises(RuntimeError, match="requires RECORD"):
-        ctrl.advance_record_microbatch()
-
-
 def test_clear_resets_state(ctrl, routers):
     """clear() is the always-safe reset; state must be empty after."""
     ctrl.begin_record()
+    ctrl.begin_microbatch()
     _fire_all(ctrl, routers)
     assert ctrl.action is RouterReplayAction.RECORD
     assert ctrl._recorded
@@ -323,10 +315,11 @@ def test_record_snapshot_independent_of_source_tensor(ctrl, routers):
     """The captured tensor must NOT alias the source — otherwise
     autograd-graph mutations would corrupt recorded indices."""
     ctrl.begin_record()
+    ctrl.begin_microbatch()
     src = _idx()
     ctrl.on_router_forward(routers[0], _scores(), src)
     src.fill_(99)
-    captured = ctrl._recorded[0][0]
+    captured = ctrl._recorded[0]
     assert (captured != 99).all(), "snapshot must be independent of the source tensor (.detach().clone())"
 
 
@@ -337,12 +330,13 @@ def test_record_snapshot_independent_of_source_tensor(ctrl, routers):
 
 def test_disabled_passes_through_indices(ctrl, routers):
     """When no begin_*() has been called (DISABLED), on_router_forward
-    is a no-op pass-through."""
+    is a no-op pass-through and does not even assign layer positions."""
     src = _idx()
     out = ctrl.on_router_forward(routers[0], _scores(), src)
     assert torch.equal(out, src)
     assert ctrl._recorded == []
     assert ctrl._targets == []
+    assert ctrl._id_to_pos == {}
 
 
 # ===========================================================

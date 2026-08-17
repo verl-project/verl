@@ -47,10 +47,16 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_visible_devices_keyword
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 from verl.utils.profiler import DistProfiler, build_sglang_profiler_args
+from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_config
-from verl.workers.rollout.sglang_rollout.utils import SGLANG_LORA_NAME
+from verl.workers.rollout.sglang_rollout.utils import (
+    SGLANG_LORA_NAME,
+    lora_rank_of,
+    lora_served_as_adapter,
+    sglang_lora_target_modules,
+)
 from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
 
 logger = logging.getLogger(__file__)
@@ -175,10 +181,6 @@ class SGLangHttpServer:
         self._pd_decode_peers: list[ActorHandle] = []
         self._pd_bootstrap_host: Optional[str] = None
 
-        if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
-            logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
-            self.config.load_format = "auto"
-
         # used for http server
         self._server_address = ray.util.get_node_ip_address().strip("[]")
         self._server_port = None
@@ -256,6 +258,16 @@ class SGLangHttpServer:
         engine_kwargs = self.config.get("engine_kwargs", {}).get("sglang", {}) or {}
         attention_backend = engine_kwargs.pop("attention_backend", None)
         mm_attention_backend = engine_kwargs.pop("mm_attention_backend", None)
+        # Delta checkpoint engines apply sparse weight updates in place through SGLang's
+        # custom-weight-loader hook; register the verl loader so the update requests'
+        # load_format resolves inside the TP workers.
+        custom_weight_loader = list(engine_kwargs.pop("custom_weight_loader", None) or [])
+        ce_backend = str((self.config.get("checkpoint_engine", None) or {}).get("backend", ""))
+        if ce_backend == "delta_sharded":
+            from verl.workers.rollout.sglang_rollout.delta_loader import LOADER_FQN
+
+            if LOADER_FQN not in custom_weight_loader:
+                custom_weight_loader.append(LOADER_FQN)
         if attention_backend is None:
             if torch.version.hip is not None:
                 attention_backend = "aiter"
@@ -272,16 +284,12 @@ class SGLangHttpServer:
         quantization = self.config.get("quantization", None)
         if quantization is not None:
             if quantization == "fp8":
+                from verl.utils.sglang.sglang_fp8_utils import build_sglang_fp8_quant_config
+
                 assert version.parse(sglang.__version__) >= version.parse("0.5.5"), (
                     "sglang>=0.5.5 is required for FP8 quantization"
                 )
-                FP8_BLOCK_QUANT_KWARGS = {
-                    "activation_scheme": "dynamic",
-                    "fmt": "e4m3",
-                    "quant_method": "fp8",
-                    "weight_block_size": [128, 128],
-                }
-                fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
+                fp8_block_quant_kwargs = build_sglang_fp8_quant_config(self.model_config.hf_config)
             else:
                 raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
         infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
@@ -310,16 +318,17 @@ class SGLangHttpServer:
             "json_model_override_args": json.dumps({"quantization_config": fp8_block_quant_kwargs})
             if quantization == "fp8"
             else json.dumps({}),
+            "custom_weight_loader": custom_weight_loader or None,
             **engine_kwargs,
         }
 
         # update lora-related args
-        if self.model_config.lora_rank > 0:
+        if self.lora_as_adapter:
             args.update(
                 {
                     "enable_lora": True,
-                    "max_lora_rank": self.model_config.lora_rank,
-                    "lora_target_modules": self.model_config.target_modules,
+                    "max_lora_rank": lora_rank_of(self.model_config),
+                    "lora_target_modules": sglang_lora_target_modules(self.model_config.target_modules),
                 }
             )
         # Only set dist_init_addr for multi-node; for single-node, let SGLang
@@ -332,7 +341,7 @@ class SGLangHttpServer:
             )
             args["dist_init_addr"] = dist_init_addr
 
-        if self.config.prometheus.enable:
+        if self.config.prometheus.enable or RLInsightLogger.enabled():
             if self.config.prometheus.served_model_name:
                 # Extract model name from path if it's a full path
                 served_model_name = self.config.prometheus.served_model_name
@@ -346,8 +355,16 @@ class SGLangHttpServer:
 
         # enable_weights_cpu_backup is supported in sglang>=0.5.3
         if "enable_weights_cpu_backup" in [f.name for f in dataclasses.fields(ServerArgs)]:
+            # HYBRID mode also needs CPU weight backup so that:
+            #   1. sleep() can release GPU weights to free memory for the training engine.
+            #   2. naive update_weights() can call resume(tags=["weights"]) to reload weights
+            #      from CPU before applying the latest trainer weights via IPC.
+            # Without this, sleep() releases GPU memory but update_weights() cannot restore
+            # the weight buffers, causing OOM when training tries to use the freed memory.
             enable_weights_cpu_backup = (
-                True if self.rollout_mode == RolloutMode.COLOCATED or self.model_config.lora_rank > 0 else False
+                True
+                if self.rollout_mode in (RolloutMode.COLOCATED, RolloutMode.HYBRID) or self.model_config.lora_rank > 0
+                else False
             )
             args["enable_weights_cpu_backup"] = enable_weights_cpu_backup
 
@@ -450,8 +467,9 @@ class SGLangHttpServer:
             # In hybrid mode, rollout is wake up in `update_weights`
             raise ValueError(f"wake_up not support rollout_mode {self.rollout_mode}")
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            # Directly call engine to wake up without sync weights.
-            obj = ResumeMemoryOccupationReqInput(tags=["kv_cache", "weights"])
+            # Resume exactly what sleep() released; adapter mode keeps the base weights resident.
+            tags = ["kv_cache"] if self.lora_as_adapter else ["kv_cache", "weights"]
+            obj = ResumeMemoryOccupationReqInput(tags=tags)
             await self.tokenizer_manager.resume_memory_occupation(obj, None)
             await self.tokenizer_manager.flush_cache()
         elif self.rollout_mode == RolloutMode.STANDALONE:
@@ -462,9 +480,8 @@ class SGLangHttpServer:
 
     @property
     def lora_as_adapter(self) -> bool:
-        return (
-            self.model_config.lora_rank > 0 or self.model_config.lora.get("rank", 0) > 0
-        ) and not self.model_config.lora.get("merge", False)
+        """See :func:`verl.workers.rollout.sglang_rollout.utils.lora_served_as_adapter`."""
+        return lora_served_as_adapter(self.model_config)
 
     async def sleep(self):
         if self.node_rank != 0 or not self.config.free_cache_engine:
@@ -613,10 +630,11 @@ class SGLangHttpServer:
         generate_request = GenerateReqInput(**request)
 
         # Add lora request
-        if self.model_config.lora_rank > 0:
+        if self.lora_as_adapter:
             generate_request.lora_path = SGLANG_LORA_NAME
 
-        output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
+        with RLInsightLogger.trace_state("sglang_generate", state_lane_id=f"replica_{self.replica_rank}"):
+            output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
         meta_info = output.get("meta_info", {})
         finish_reason = meta_info.get("finish_reason")
         finish_reason = finish_reason["type"] if finish_reason else None
@@ -643,7 +661,9 @@ class SGLangHttpServer:
         routed_experts = None
         if self.config.enable_rollout_routing_replay:
             if self.config.skip_tokenizer_init:
-                routed_experts = output.get("meta_info", {}).get("routed_experts", None)
+                # convert to numpy
+                captured = output.get("meta_info", {}).get("routed_experts", None)
+                routed_experts = captured.numpy() if captured is not None else None
             else:
                 from sglang.srt.layers.moe.routed_experts_capturer import extract_routed_experts_from_meta_info
 
@@ -669,9 +689,11 @@ class SGLangHttpServer:
 
         # Re-key backend spec-decoding stats to the rollout-common names.
         if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
-            extra_fields["spec_num_draft_tokens"] = int(meta_info["spec_draft_token_num"])
-            extra_fields["spec_num_accepted_tokens"] = int(meta_info["spec_accept_token_num"])
-            extra_fields["spec_num_verify_steps"] = int(meta_info["spec_verify_ct"])
+            extra_fields["spec_num_draft_tokens"] = int(
+                meta_info.get("spec_draft_token_num", self.config.mtp.speculative_num_draft_tokens)
+            )
+            extra_fields["spec_num_accepted_tokens"] = int(meta_info.get("spec_accept_token_num", 0))
+            extra_fields["spec_num_verify_steps"] = int(meta_info.get("spec_verify_ct", 0))
 
         return TokenOutput(
             token_ids=token_ids,

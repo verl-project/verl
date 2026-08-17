@@ -15,7 +15,7 @@ Last updated: 05/14/2026
 
 ### 1.2 模型权重
 
-BF16 为 VeRL 框架中 FSDP 与 Megatron 等训练后端**默认混合精度训练数据类型**。昇腾 NPU 环境统一采用 **BF16** 作为基准精度格式，权重需对齐反量化为 BF16。目前 A2、A3 机型**暂不支持 FP8 精度训练**，仅支持 BF16 精度；A5 机型后续版本将开放 FP8 低精度训练能力。
+BF16 为 VeRL 框架中 FSDP 与 Megatron 等训练后端**默认混合精度训练数据类型**。昇腾 NPU 环境统一采用 **BF16** 作为基准精度格式，权重需对齐反量化为 BF16。目前 A2、A3 机型**暂不支持 FP8 精度训练**，仅支持 BF16 精度；Ascend 950 系列产品 后续版本将开放 FP8 低精度训练能力。
 
 ### 1.3 数据准备
 
@@ -33,7 +33,7 @@ VeRL 推理引擎采用分层架构设计，通过抽象接口与工厂模式，
 
 ### 2.2 训练引擎选择与适配
 
-VeRL 主线代码将训练引擎抽象为 `Engine`类，通过标准化接口层实现调度逻辑与底层训练实现的解耦。该架构设计支持 FSDP、Megatron、MindSpeed-LLM 等多种训练后端灵活接入、即插即用，无需修改 VeRL 核心算法与调度逻辑，大幅降低迁移适配成本。
+VeRL 主线代码将训练引擎抽象为 `Engine`类，通过标准化接口层实现调度逻辑与底层训练实现的解耦。该架构设计支持 FSDP、Megatron 等多种训练后端灵活接入、即插即用，无需修改 VeRL 核心算法与调度逻辑，大幅降低迁移适配成本。
 
 当前 NPU 已通过 `is_npu_available` 接口完成设备自动检测，并自动应用对应的 NPU 设备适配补丁。目前只需通过配置 model_engine=fsdp/megatron，即可一键切换训练后端至 FSDP、Megatron，系统会自动加载对应后端的 NPU 适配逻辑，无需额外修改代码。VeRL中昇腾对Megatron做了适配与优化，具体特性配置参考[verl-MindSpeed特性文档](https://gitcode.com/Ascend/MindSpeed/blob/master/docs/zh/user-guide/verl.md)设置。
 
@@ -43,7 +43,7 @@ Megatron-Bridge 主要用于在 VeRL 框架下，完成推理引擎依赖的 Hug
 
 ```
 actor_rollout_ref.actor.megatron.use_mbridge=True
-actor_rollout_ref.actor.megatron.vanilla_mbridge=False \
+actor_rollout_ref.actor.megatron.vanilla_mbridge=False
 ```
 
 Megatron-Bridge已在社区原生适配大量主流模型结构，支持列表可参考：[supported model](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/docs/models/README.md)，在昇腾 NPU 环境开展模型迁移适配时，可基于社区现有能力完成基础配置，但仍有部分模型特殊结构与场景需要补充定制化适配。
@@ -105,12 +105,12 @@ Megatron-Bridge已在社区原生适配大量主流模型结构，支持列表�
 
 推理侧已正常使用 NPU 优化的 `npu_swiglu` 融合算子，但训练侧仍执行原生 GLU 小算子实现。
 
-* **根因**：尽管已在 Verl 参数中添加了 `swiglu` 使能配置，但 Megatron-Bridge 在 NPU 适配 PR 中，未显式配置 `provider.bias_activation_fusion=True`，导致代码未进入 NPU 融合算子分支。
+* **根因**：尽管已在 VeRL 参数中添加了 `swiglu` 使能配置，但 Megatron-Bridge 在 NPU 适配 PR 中，未显式配置 `provider.bias_activation_fusion=True`，导致代码未进入 NPU 融合算子分支。
+* **修复方案**：在 Megatron-Bridge 中添加配置项使训练侧正确调用融合算子：
   ```
   +actor_rollout_ref.actor.megatron.override_transformer_config.swiglu=True \
   +actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_swiglu=True \
   ```
-* **修复方案**：在 Megatron-Bridge 中添加配置项使训练侧正确调用融合算子：
 
 #### 3.3.3 案例二：indexer_k_norm 的精度与超参数不一致
 
@@ -118,7 +118,7 @@ Megatron-Bridge已在社区原生适配大量主流模型结构，支持列表�
 
 * **精度差异**：推理侧在 LayerNorm 中存在升精度到 fp32 操作 `F.layer_norm( x.float(), (self.dim,), self.weight, self.bias, self.eps).type_as(x)`，而训练侧 Megatron 实现为 BF16。微小差异经多层累积不可忽视。
 * **修复方案**：统一训练侧代码增加升精降精操作。
-* **超参差异**：GLM5 推理侧vllm继承 DeepSeekV32 逻辑，`k_norm` 的 EPS 值被硬编码为 `1e-6`；而训练引擎及官方技术报告统一采用 `1e-5`。
+* **超参差异**：GLM5 推理侧vllm继承 DeepSeek-V3.2 逻辑，`k_norm` 的 EPS 值被硬编码为 `1e-6`；而训练引擎及官方技术报告统一采用 `1e-5`。
 * **修复方案**：将推理侧 EPS 修改为 `1e-5` 与训练侧对齐。
 
 ```
@@ -175,10 +175,10 @@ actor_rollout_ref.rollout.enable_rollout_routing_replay=True \
 
 ## 四、性能优化
 
-在昇腾 NPU 上进行大模型 RL（强化学习）训练性能优化时，基础配置调优可优先参考官方文档：[perf_tuning.rst](https://github.com/verl-project/verl/blob/04833f01/docs/perf/perf_tuning.rst)。为实现更高效的优化，建议遵循**数据采集​​→​瓶颈定位​→配置调优→迭代验证**的标准化流程，该流程可显著提升 Rollout、Reward、Update 等核心阶段的吞吐量，同时有效降低资源空泡与负载不均问题。性能分析与调优的具体操作，可严格参照以下官方指引：
+在昇腾 NPU 上进行大模型 RL（强化学习）训练性能优化时，基础配置调优可优先参考官方文档：[perf_tuning.rst](https://github.com/verl-project/verl/blob/04833f01/docs/perf/perf_tuning.rst)。为实现更高效的优化，建议遵循**数据采集​​→​瓶颈定位​→配置调优→迭代验证**的标准化流程，该流程可显著提升 Rollout、Reward、Update 等核心阶段的吞吐量，同时有效降低资源空转与负载不均问题。性能分析与调优的具体操作，可严格参照以下官方指引：
 
 1. [Ascend Performance Analysis Guide](../performance/ascend_performance_analysis_guide.md)
-2. [Profiling 数据采集与使能配置](../performance//ascend_profiling_zh.rst)
+2. [Profiling 数据采集与使能配置](../performance/ascend_profiling_zh.rst)
 
 ### 4.1 推理性能优化
 
@@ -187,13 +187,14 @@ Rollout 阶段作为大模型 RL 训练的核心推理环节，其推理耗时�
 1. **启用图模式功能**：图模式将整个计算图提前编译优化，可以实现算子融合、内存复用、常量折叠等深度优化，显著提升执行效率。
 2. **CPU 绑核加速算子下发**：通过 CPU 绑核可提升算子下发效率；自 vllm-ascend v0.18.0rc1 版本起，ARM 架构昇腾服务器已默认开启该能力。
 3. **HCCL 通信算法配置为 AIV 模式**：将环境变量 `HCCL_OP_EXPANSION_MODE` 设置为 `AIV` 模式，指定通信算法的编排与展开逻辑运行在 Device 侧 Vector Core 计算单元。
-4. **启用异步调度**：能够消除 Worker 连续两次 execute_model 执行间隙，让 Worker 可直接获取已调度完成的 SchedulerOutput 进行模型推理，无需阻塞等待调。
+4. **启用异步调度**：能够消除 Worker 连续两次 execute_model 执行间隙，让 Worker 可直接获取已调度完成的 SchedulerOutput 进行模型推理，无需阻塞等待调度。
 
 对应配置参数如下：
 
 ```
 # 图模式启用
-actor_rollout_ref.rollout.enforce_eager=False +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY" 
+actor_rollout_ref.rollout.enforce_eager=False
++actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY"
 +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes="[2, 4, 8, 16, 24, 32]"
 # CPU绑核
 ++actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.enable_cpu_binding=True
@@ -201,7 +202,7 @@ actor_rollout_ref.rollout.enforce_eager=False +actor_rollout_ref.rollout.engine_
 ++actor_rollout_ref.rollout.engine_kwargs.vllm.async_scheduling=True
 ```
 
-### 4.2训练性能优化：
+### 4.2 训练性能优化
 
 大模型 RL 训练的 Update 阶段具有序列长度差异大、显存消耗高等特点。除了基础的算子融合，还需结合序列并行与显存-计算权衡策略来打破瓶颈。常见训练性能优化特性可参考 [MindSpeed-verl 文档](https://gitcode.com/Ascend/MindSpeed/blob/master/docs/zh/user-guide/verl.md) 完成启用，核心优化手段包括：
 
@@ -290,6 +291,6 @@ ais_bench --models vllm_api_stream_chat --datasets aime2025_gen_0_shot_chat_prom
 
 本文完整覆盖了大模型从 GPU 迁移至昇腾 NPU 或在 NPU 上独立适配的全流程实践，主要分为环境搭建、组件联调、精度对齐、性能优化、评测验证五大关键环节，为开发者提供可落地、可复用的操作指南与问题解决方案。
 
-前期准备阶段需重把控环境依赖版本、模型权重精度与数据集格式，为后续适配奠定基础；组件联调环节需遵循先单组件验证后整网打通的原则，优先确保推理、训练引擎及权重转换工具的稳定适配，针对特殊模型结构需完成定制化改造；精度对齐是迁移适配的核心，需重点监控训推一致性指标，通过逐模块排查解决框架实现、精度类型等常见差异，MoE 模型需启用 Routing Replay 机制保障训练稳定；性能优化需遵循标准化流程，聚焦推理与训练核心阶段，通过图模式、算子融合等手段提升效率、降低资源消耗；最终通过标准化评测验证，确保模型迁移后业务效果达标、无知识退化。
+前期准备阶段需重点把控环境依赖版本、模型权重精度与数据集格式，为后续适配奠定基础；组件联调环节需遵循先单组件验证后整网打通的原则，优先确保推理、训练引擎及权重转换工具的稳定适配，针对特殊模型结构需完成定制化改造；精度对齐是迁移适配的核心，需重点监控训推一致性指标，通过逐模块排查解决框架实现、精度类型等常见差异，MoE 模型需启用 Routing Replay 机制保障训练稳定；性能优化需遵循标准化流程，聚焦推理与训练核心阶段，通过图模式、算子融合等手段提升效率、降低资源消耗；最终通过标准化评测验证，确保模型迁移后业务效果达标、无知识退化。
 
 整体而言，遵循本文流程可有效降低 NPU 迁移适配成本，规避常见坑点，实现大模型在昇腾 NPU 上的稳定、高效运行。

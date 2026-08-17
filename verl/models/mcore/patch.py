@@ -17,7 +17,90 @@
 # 1. `get_query_key_value_tensors` in `multi_latent_attention.py` works wrong when packed_seq_params is not None
 
 
+def pure_torch_hadamard_transform(x, scale=1.0):
+    """Fast Walsh-Hadamard transform along the last dim (size must be 2**k).
+
+    Vectorized butterfly accumulated in fp32, numerically equivalent to
+    ``F.linear(x, scipy.linalg.hadamard(dim)) * scale`` and bit-for-bit identical to
+    the Dao-AILab CUDA kernel it stands in for.
+    """
+    import torch
+
+    n = x.shape[-1]
+    if n < 1 or n & (n - 1) != 0:
+        raise ValueError(f"hadamard_transform requires last dim to be a power of 2, got {n}")
+    orig_dtype = x.dtype
+    orig_shape = x.shape
+    # Accumulate in fp32 for numerical stability, cast back at the end.
+    y = x.to(torch.float32).reshape(-1, n)
+    h = 1
+    while h < n:
+        y = y.view(-1, n // (2 * h), 2, h)
+        a = y[:, :, 0, :]
+        b = y[:, :, 1, :]
+        y = torch.stack((a + b, a - b), dim=2).reshape(-1, n)
+        h *= 2
+    y = y * scale
+    return y.reshape(orig_shape).to(orig_dtype)
+
+
+def apply_fast_hadamard_transform_shim():
+    """Provide a pure-torch ``fast_hadamard_transform`` when the CUDA package is absent.
+
+    DeepSeek-V4 / V3.2 sparse-attention (DSA) in Megatron-LM does
+    ``from fast_hadamard_transform import hadamard_transform`` at import time and
+    asserts it is not None inside the indexer's ``rotate_activation``. The upstream
+    Dao-AILab package only ships nvcc kernels and cannot be built on ROCm, so that
+    import yields ``None`` there and every DSA forward crashes.
+
+    Register ``pure_torch_hadamard_transform`` under the real import name so any
+    importer picks it up, and back-fill modules that already captured ``None``
+    (e.g. Megatron's ``dsa`` module at import time). This is a no-op once the name
+    imports, be it the real package or the stub an earlier call installed.
+    """
+    import importlib
+    import logging
+    import sys
+    import types
+
+    # Catch every exception, not just ImportError: a CUDA extension built against
+    # another toolkit fails to load with OSError. An import that goes through means
+    # every importer of the name resolves to that same module, so none of them can
+    # be left holding a None binding.
+    try:
+        importlib.import_module("fast_hadamard_transform")
+        return
+    except Exception:
+        pass
+
+    module = types.ModuleType("fast_hadamard_transform")
+    module.hadamard_transform = pure_torch_hadamard_transform
+    sys.modules["fast_hadamard_transform"] = module
+
+    # Back-fill modules that already ran `from fast_hadamard_transform import
+    # hadamard_transform` and captured None (e.g. Megatron's dsa.py at import).
+    # Read `__dict__` directly: `getattr` would trigger PEP-562 module-level
+    # `__getattr__` hooks, which can raise or force lazy imports.
+    for mod in list(sys.modules.values()):
+        mod_dict = getattr(mod, "__dict__", None)
+        if mod_dict is not None and mod_dict.get("hadamard_transform", "keep") is None:
+            mod_dict["hadamard_transform"] = pure_torch_hadamard_transform
+
+    logging.getLogger(__name__).warning(
+        "fast_hadamard_transform is unavailable; falling back to a pure-torch Fast "
+        "Walsh-Hadamard transform. Results match the CUDA kernel but DSA forward will be slower."
+    )
+
+
 def apply_patch():
+    # DeepSeek sparse-attention (DSA) needs ``fast_hadamard_transform``, which
+    # cannot be built on ROCm (its setup requires nvcc). Install a pure-torch
+    # fallback from the central mcore patch entry so every DSA importer picks it
+    # up without engine-specific wiring. Callers run this both before model
+    # creation (hf_to_mcore_config_dpskv3) and after it (the mbridge path in
+    # megatron_utils.get_model), which is why the shim also back-fills importers.
+    apply_fast_hadamard_transform_shim()
+
     import megatron.core
     import torch
     import torch.nn.functional as F
@@ -559,14 +642,29 @@ def apply_patch_megatron_recomputation_backward():
             for inp in detached_inputs
         )
         cur_stream = torch.cuda.current_stream()
-        # Release original input and grad tensors
-        for t in detached_inputs:
-            if isinstance(t, torch.Tensor) and t.requires_grad:
-                t.record_stream(cur_stream)
-                t.untyped_storage().resize_(0)
-                if t.grad is not None:
-                    t.grad.record_stream(cur_stream)
-                    t.grad.untyped_storage().resize_(0)
+        # Release saved input/grad tensors (MoE residual-memory leak fix, commit 04df110c).
+        # Skip MTP layer checkpoints: their saved ``hidden_states`` aliases the decoder
+        # output (a ``torch.chunk`` view), and MTP backward runs before the decoder
+        # backward, so ``resize_(0)`` would truncate storage the decoder still needs
+        # -> async CUDA illegal-memory-access.
+        is_mtp_checkpoint = False
+        run_fn = getattr(ctx, "run_function", None)
+        for cell in getattr(run_fn, "__closure__", None) or ():
+            try:
+                obj = cell.cell_contents
+            except ValueError:
+                continue
+            if obj.__class__.__name__ == "MultiTokenPredictionLayer":
+                is_mtp_checkpoint = True
+                break
+        if not is_mtp_checkpoint:
+            for t in detached_inputs:
+                if isinstance(t, torch.Tensor) and t.requires_grad:
+                    t.record_stream(cur_stream)
+                    t.untyped_storage().resize_(0)
+                    if t.grad is not None:
+                        t.grad.record_stream(cur_stream)
+                        t.grad.untyped_storage().resize_(0)
         # ctx.saved_tensors = None
         return (None, None) + grads
 
