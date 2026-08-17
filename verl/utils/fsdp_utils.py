@@ -12,15 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import functools
+import importlib.util
 import itertools
 import json
 import logging
 import math
 import os
+import re
 from abc import ABC
 from collections import OrderedDict
 from contextlib import contextmanager, nullcontext
+from dataclasses import replace
 from typing import Optional, cast
 
 import torch
@@ -496,9 +500,38 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
     else:
         model = model.to_empty(device=get_device_id())
 
+    # Align the source dtypes with the destination states before anything is
+    # broadcast, distributed or assigned. The broadcast carries rank 0's dtype,
+    # and the meta/assign path in `_distribute_tensors` adopts it verbatim, so a
+    # source that disagrees with the target (e.g. a bf16 checkpoint feeding an
+    # fp32-keep module) would silently redefine the parameter's dtype.
+    # FSDP2 preserves FQNs, so these names still address the same states.
+    # Parameters and persistent buffers are treated alike because both appear in
+    # `state_dict()` and both are loaded by `set_model_state_dict`.
+    # `remove_duplicate=False` is required: `state_dict()` lists a tied tensor
+    # under *every* alias, so a de-duplicated map would leave the second alias
+    # unaligned and let it define the parameter's dtype instead.
+    # The alignment goes into a shallow copy: this function is documented to
+    # modify the model, not the caller's state dict, and callers reuse it.
+    # `copy.copy` (not `dict(...)`) keeps the mapping subclass and carries over
+    # `_metadata`, which `load_state_dict` reads and a plain dict would drop.
+    target_dtypes = {
+        name: state.dtype
+        for name, state in itertools.chain(
+            model.named_parameters(remove_duplicate=False),
+            model.named_buffers(remove_duplicate=False),
+        )
+        if state.dtype.is_floating_point
+    }
+    aligned_state = copy.copy(full_state)
+    for name, tensor in full_state.items():
+        target = target_dtypes.get(name)
+        if target is not None and torch.is_tensor(tensor) and tensor.dtype != target:
+            aligned_state[name] = tensor.to(target)
+
     cpu_offload = cpu_offload is not None
     options = StateDictOptions(full_state_dict=True, cpu_offload=cpu_offload, broadcast_from_rank0=True)
-    set_model_state_dict(model, full_state, options=options)
+    set_model_state_dict(model, aligned_state, options=options)
 
     # rotary_emb is not in state_dict, so we need to broadcast it manually
     # Sort by name to ensure deterministic order across ranks. FSDP2 can return
@@ -532,6 +565,258 @@ def maybe_patch_fsdp_module(model):
         yield
     finally:
         fully_shard_module.FSDPModule = orig_fsdp_module
+
+
+def _hf_keep_in_fp32_root(model: nn.Module) -> Optional[nn.Module]:
+    """The module ``from_pretrained`` reads the fp32-keep declarations from.
+
+    Transformers attaches both attributes to every ``PreTrainedModel``, and the
+    loader consults only the top-most one. verl may hand us a wrapper (a PEFT
+    model, for instance), so the outermost declaring module is resolved instead
+    of assuming the root is the model itself. ``modules()`` is a pre-order walk,
+    so the first hit is the outermost.
+    """
+    for submodule in model.modules():
+        if hasattr(submodule, "_keep_in_fp32_modules") or hasattr(submodule, "_keep_in_fp32_modules_strict"):
+            return submodule
+    return None
+
+
+def get_keep_in_fp32_module_names(model: nn.Module, target_dtype: Optional[torch.dtype]) -> list[str]:
+    """Resolve the HF fp32-keep module names that apply for ``target_dtype``.
+
+    Transformers declares two independent lists, with *different* activation
+    rules. The gate below is verified identical in 4.56.1
+    (``modeling_utils.from_pretrained``) and 5.10.0
+    (``modeling_utils._get_dtype_plan``), which span verl's supported range:
+
+    * ``_keep_in_fp32_modules`` guards against bf16 -> fp16 rounding only, so HF
+      honours it for ``float16`` (and, in 4.x, for quantizers that opt in) --
+      **not** for ``bfloat16``.
+    * ``_keep_in_fp32_modules_strict`` forbids any low-precision cast, so HF
+      honours it for both ``float16`` and ``bfloat16``.
+
+    Mirroring that gate is what keeps verl consistent with ``from_pretrained``;
+    a broader rule would silently promote modules HF deliberately leaves in
+    bf16. Quantizer opt-in (``use_keep_in_fp32_modules``) is out of scope: verl
+    does not build the FSDP2 path through ``hf_quantizer``.
+
+    Only the top-most declaration is read, which is what both versions do:
+    4.56.1 consults the top-level model alone, and 5.10.0's ``post_init``
+    already folds every child's declaration into it. Collecting from nested
+    models directly would widen 4.56.1's behaviour.
+
+    Transformers 5.x stores these as ``set``, whose iteration order is not
+    stable, so the result is sorted.
+    """
+    if target_dtype not in (torch.float16, torch.bfloat16):
+        return []
+
+    root = _hf_keep_in_fp32_root(model)
+    if root is None:
+        return []
+
+    names = set()
+    if target_dtype == torch.float16:
+        names.update(getattr(root, "_keep_in_fp32_modules", None) or [])
+    names.update(getattr(root, "_keep_in_fp32_modules_strict", None) or [])
+    return sorted(names)
+
+
+def _keep_in_fp32_uses_glob_matching() -> bool:
+    """Whether the installed transformers matches keep names as unanchored globs.
+
+    5.x resolves them through ``core_model_loading.build_glob_alternation``;
+    4.x compiles the pattern inline in ``from_pretrained``. That module does not
+    exist before 5.0, which makes it a reliable capability probe -- and it is
+    only probed, never imported, since it is private and unstable.
+    """
+    return importlib.util.find_spec("transformers.core_model_loading") is not None
+
+
+def _keep_in_fp32_regex(module_names: list[str]):
+    """Compile the installed transformers' fp32-keep matcher.
+
+    Both branches reproduce the upstream pattern construction verbatim, so a
+    declaration that is legal for the installed version resolves the same way it
+    would inside ``from_pretrained``:
+
+    * 4.x (``modeling_utils.py:5127``) anchors on whole dot-separated path
+      segments: ``((^|\\.)name($|\\.))``. A name that is merely a substring of a
+      segment does not match.
+    * 5.x (``core_model_loading.build_glob_alternation``) searches unanchored
+      and expands ``*`` to ``.*``, so substrings *do* match and glob
+      declarations are honoured.
+
+    Neither branch escapes the name, matching upstream: these come from model
+    class attributes, and escaping would silently reinterpret a 5.x glob.
+    """
+    if not module_names:
+        return None
+    if _keep_in_fp32_uses_glob_matching():
+        return re.compile("|".join(name.replace("*", r".*") for name in module_names))
+    return re.compile("|".join(rf"((^|\.){name}($|\.))" for name in module_names))
+
+
+def _defines_forward(module: nn.Module) -> bool:
+    """Whether ``module`` can serve as an FSDP2 unit boundary.
+
+    FSDP2 unshards a unit's parameters from a hook on that unit's own forward,
+    so a module that is never called cannot be one. A container that does not
+    override ``nn.Module.forward`` is exactly that case: models reach past it to
+    its children (``holder.child(x)``), leaving the hook unreachable and the
+    parameters sharded during compute. ``fully_shard`` rejects the two
+    best-known examples outright -- ``nn.ModuleList`` and ``nn.ModuleDict`` --
+    but a plain ``nn.Module`` used for namespacing is accepted and then silently
+    misbehaves, so the check is on the behaviour rather than on a class list.
+    ``nn.ParameterList`` / ``nn.ParameterDict`` are covered too: they hold
+    parameters directly and define no forward, so their states end up with no
+    owner and are rejected by the ownership check below.
+    """
+    return type(module).forward is not nn.Module.forward
+
+
+def _named_floating_states(model: nn.Module, params_only: bool = False):
+    """Every floating parameter/buffer under *every* name it is reachable by.
+
+    ``remove_duplicate=False`` is essential: tied weights are a single tensor
+    exposed under several FQNs, and a keep rule may name any one of them.
+    """
+    states = model.named_parameters(remove_duplicate=False)
+    if not params_only:
+        states = itertools.chain(states, model.named_buffers(remove_duplicate=False))
+    return ((name, state) for name, state in states if state.dtype.is_floating_point)
+
+
+def _resolve_keep_in_fp32_states(model: nn.Module, regex, params_only: bool = False) -> dict[int, list[str]]:
+    """Map each fp32-keep tensor to *all* of the names it is reachable by.
+
+    A tied tensor is kept in fp32 as soon as **any** of its aliases matches: the
+    aliases are one tensor, so a per-name decision would be order dependent and
+    would silently downcast a weight that a keep rule named.
+    """
+    aliases: dict[int, list[str]] = {}
+    matched: set[int] = set()
+    for name, state in _named_floating_states(model, params_only):
+        aliases.setdefault(id(state), []).append(name)
+        if regex.search(name):
+            matched.add(id(state))
+    return {state_id: names for state_id, names in aliases.items() if state_id in matched}
+
+
+def cast_module_to_dtype_keeping_fp32_modules(model: nn.Module, dtype: torch.dtype) -> list[str]:
+    """``model.to(dtype)`` that honours HF's ``_keep_in_fp32_modules*`` declarations.
+
+    A blanket ``model.to(bf16)`` after ``from_pretrained`` destroys the fp32
+    copies HF just materialised, and the rounding is not recoverable. This casts
+    every other floating state instead and leaves the declared modules alone.
+
+    Returns:
+        The FQNs kept in fp32, including every alias of a tied weight (empty when
+        the model declares nothing, in which case behaviour is identical to
+        ``model.to(dtype)``).
+    """
+    regex = _keep_in_fp32_regex(get_keep_in_fp32_module_names(model, dtype))
+    if regex is None:
+        model.to(dtype)
+        return []
+
+    keep = _resolve_keep_in_fp32_states(model, regex)
+    cast_ids = set()
+    for name, state in _named_floating_states(model):
+        if id(state) in cast_ids:
+            continue  # tied alias: the tensor was already handled
+        cast_ids.add(id(state))
+        state.data = state.data.to(torch.float32 if id(state) in keep else dtype)
+
+    kept = sorted(itertools.chain.from_iterable(keep.values()))
+    if kept:
+        logger.info(f"kept {len(kept)} states in fp32 per HF _keep_in_fp32_modules: {kept}")
+    return kept
+
+
+def _select_keep_in_fp32_wrap_targets(model: nn.Module, param_dtype: Optional[torch.dtype]) -> list[nn.Module]:
+    """Modules that must become their own FSDP2 unit to stay out of ``param_dtype``.
+
+    ``fully_shard`` all-gathers every parameter of a unit in
+    ``mp_policy.param_dtype`` and rejects a unit whose parameters do not share
+    one original dtype, so an fp32-keep module can only stay in fp32 by being a
+    separate unit.
+
+    A module qualifies when *all* of its floating parameters are kept, which
+    collapses parent/child overlap and duplicate entries onto the topmost
+    matching module -- each is therefore wrapped exactly once.
+
+    Raises:
+        ValueError: if a kept parameter is tied across a unit boundary, or if a
+            matched module mixes fp32 keep parameters with lower-precision ones
+            (an adapter injected into it, for instance). FSDP2 gives each
+            parameter to exactly one unit and all-gathers a unit at a single
+            dtype, so neither shape can be expressed. Both checks run before
+            anything is wrapped, so the model is never left partially wrapped.
+    """
+    regex = _keep_in_fp32_regex(get_keep_in_fp32_module_names(model, param_dtype))
+    if regex is None:
+        return []
+
+    keep = _resolve_keep_in_fp32_states(model, regex, params_only=True)
+    targets: list[nn.Module] = []
+    selected_prefixes: list[str] = []
+    # named_modules() is a pre-order walk, so a parent is always visited first.
+    for name, submodule in model.named_modules():
+        if not name or any(name.startswith(prefix) for prefix in selected_prefixes):
+            continue  # root, or already covered by a selected ancestor
+        if not _defines_forward(submodule):
+            # No forward of its own, so no hook that could unshard it. Descend
+            # instead: its children are matched too, and each of them can carry
+            # the fp32 policy.
+            continue
+        params = [(f"{name}.{n}", p) for n, p in submodule.named_parameters() if p.dtype.is_floating_point]
+        if not params or not all(id(p) in keep for _, p in params):
+            continue
+        fp32 = sorted(fqn for fqn, p in params if p.dtype == torch.float32)
+        others = sorted(f"{fqn} ({p.dtype})" for fqn, p in params if p.dtype != torch.float32)
+        if others and fp32:
+            raise ValueError(
+                f"cannot keep '{name}' in fp32 under FSDP2: it mixes fp32 keep parameters {fp32} with "
+                f"lower-precision parameters {others}. An FSDP2 unit all-gathers all of its parameters at one "
+                "dtype, so it cannot satisfy the keep-in-fp32 contract and the mixed parameter dtypes at the "
+                "same time. Adjust the wrapping or adapter configuration so the fp32-keep module does not share "
+                "a unit with lower-precision parameters."
+            )
+        if others:
+            raise ValueError(
+                f"cannot keep '{name}' in fp32 under FSDP2: every parameter it declares as fp32-keep is already "
+                f"in a lower precision {others}. The declaration is a precision contract, so the build-time "
+                "preservation must have been bypassed -- casting the model with plain `.to(dtype)` instead of "
+                "`cast_module_to_dtype_keeping_fp32_modules` does exactly that. Refusing rather than silently "
+                "sharding the module at the low precision it was already degraded to."
+            )
+        targets.append(submodule)
+        selected_prefixes.append(f"{name}.")
+
+    # Fail closed: every kept parameter must resolve to exactly one unit under
+    # all of its names. Anything else would leave it all-gathered twice, or in
+    # the surrounding low-precision unit.
+    for names in keep.values():
+        owners = {next((prefix for prefix in selected_prefixes if name.startswith(prefix)), None) for name in names}
+        if owners == {None}:
+            raise ValueError(
+                f"cannot keep {sorted(names)} in fp32 under FSDP2: no fp32-keep unit owns it, so it would stay "
+                f"in the surrounding unit and be all-gathered in {param_dtype}. This happens when the parameter "
+                "hangs directly off the root module, or off a module that also holds parameters which are not "
+                "kept. Move it into a dedicated submodule so it can become its own FSDP2 unit, or drop the "
+                "module from the keep list."
+            )
+        if len(owners) > 1 or None in owners:
+            raise ValueError(
+                f"cannot keep {sorted(names)} in fp32 under FSDP2: the parameter is tied across FSDP2 unit "
+                f"boundaries (resolved units: {sorted(o for o in owners if o)}). HF declares it via "
+                "_keep_in_fp32_modules / _keep_in_fp32_modules_strict, but FSDP2 assigns each parameter to "
+                "exactly one unit. Untie the weight (e.g. set tie_word_embeddings=False) or drop the module "
+                "from the keep list."
+            )
+    return targets
 
 
 def _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap):
@@ -575,6 +860,28 @@ def apply_fsdp2(model, fsdp_kwargs, config):
     assert len(fsdp_transformer_layer_cls_to_wrap) > 0 and fsdp_transformer_layer_cls_to_wrap[0] is not None
 
     modules = _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap)
+
+    # Modules HF declares as fp32-keep must be their own units, wrapped *before*
+    # any parent so that the parent no longer manages their parameters (FSDP2
+    # skips nested units when collecting managed modules). Leaving `param_dtype`
+    # unset preserves each parameter's original fp32 all-gather dtype without
+    # changing the module's input dtype. All other policy fields are retained.
+    mp_policy = fsdp_kwargs.get("mp_policy")
+    keep_fp32_modules = _select_keep_in_fp32_wrap_targets(model, getattr(mp_policy, "param_dtype", None))
+    if keep_fp32_modules:
+        keep_fp32_kwargs = {**fsdp_kwargs, "mp_policy": replace(mp_policy, param_dtype=None)}
+        for module in keep_fp32_modules:
+            with maybe_patch_fsdp_module(module):
+                fully_shard(module, **keep_fp32_kwargs)
+        # A keep unit already covers itself and everything beneath it. Wrapping
+        # any of those again would double-wrap the module, and for a descendant
+        # it would also invert FSDP2's children-before-parents ordering, since
+        # the ancestor is wrapped by the time we get here. Ancestors of a keep
+        # unit are deliberately kept: wrapping them after the keep child is the
+        # correct order. Membership is by module identity, since FQN prefixes
+        # can collide across differently named subtrees.
+        covered = {id(covered_module) for unit in keep_fp32_modules for covered_module in unit.modules()}
+        modules = [module for module in modules if id(module) not in covered]
 
     for idx, module in enumerate(modules):
         # if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
