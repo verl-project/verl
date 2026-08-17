@@ -58,11 +58,6 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-def _should_resume_rollout_weights(rollout_name: str, sleep_level: int) -> bool:
-    """Return whether weight memory must be resumed before a rollout update."""
-    return rollout_name != "sglang" or sleep_level != 1
-
-
 def _with_routing_replay_flag(enabled: bool):
     """Decorator to set 'enable_routing_replay' flag on the data TensorDict."""
 

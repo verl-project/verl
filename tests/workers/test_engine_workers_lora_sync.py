@@ -28,8 +28,6 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, call
 
-from verl.workers.engine_workers import _should_resume_rollout_weights
-
 # ---------------------------------------------------------------------------
 # Helper: simulate engine_workers.update_weights() logic
 # ---------------------------------------------------------------------------
@@ -45,7 +43,6 @@ async def _update_weights(
     layered_summon: bool = False,
     global_steps: int = None,
     checkpoint_backend: str = "naive",
-    rollout_name: str = "sglang",
 ):
     """Reproduce the update_weights() logic from engine_workers.py.
 
@@ -57,10 +54,10 @@ async def _update_weights(
         per_tensor_param, _ = actor_engine.get_per_tensor_param()
         return
 
-    # 1. resume weights unless SGLang adapter mode kept them resident
-    should_resume_weights = _should_resume_rollout_weights(rollout_name, getattr(rollout, "sleep_level", 2))
-    if free_cache_engine and should_resume_weights:
-        await rollout.resume(tags=["weights"])
+    # 1. resume weights (conditional on sleep_level)
+    if free_cache_engine:
+        if getattr(rollout, "sleep_level", 2) != 1:
+            await rollout.resume(tags=["weights"])
 
     # 2. probe adapter-mode params first so we can discover peft_config
     per_tensor_param, peft_config = actor_engine.get_per_tensor_param(
@@ -238,7 +235,7 @@ class TestAdapterModeSubsequentIterations:
         assert rollout.update_weights.call_args.kwargs["base_sync_done"] is True
 
     def test_skips_weight_resume(self):
-        """SGLang adapter mode keeps weights resident and skips weight resume."""
+        """With sleep_level=1, weight resume is skipped."""
         peft_cfg = MagicMock()
         rollout, engine = _make_mocks(peft_config=peft_cfg)
         rollout.sleep_level = 1
@@ -262,15 +259,6 @@ class TestAdapterModeSubsequentIterations:
 # ---------------------------------------------------------------------------
 # Merge mode tests (peft_merge=True)
 # ---------------------------------------------------------------------------
-
-
-class TestWeightResumePolicy:
-    def test_sglang_skips_weight_resume_at_sleep_level_1(self):
-        assert not _should_resume_rollout_weights("sglang", 1)
-
-    def test_vllm_resumes_weights_at_sleep_level_1(self):
-        """vLLM level-1 sleep unmaps weights, so adapter sync must resume them."""
-        assert _should_resume_rollout_weights("vllm", 1)
 
 
 class TestMergeMode:
