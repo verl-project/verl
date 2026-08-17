@@ -13,12 +13,12 @@
 # limitations under the License.
 
 
-import ray
-
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.base.worker import Worker
 from verl.single_controller.ray.base import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.utils.device import get_device_name
+
+import ray  # noqa: E402 isort: skip
 
 
 class TestActor(Worker):
