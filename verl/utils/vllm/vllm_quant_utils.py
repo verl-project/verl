@@ -194,11 +194,20 @@ def get_module_from_param_name(model, name: str):
     return _resolve_expert_weight_module(current_module)
 
 
+# Fast-path allowlist: leaf names that can possibly be fp8 weights.
+# Dense linear and per-expert-layout weights end in "weight".
+# Fused-MoE expert params (all experts in one tensor, no per-expert index)
+# use projection names without a ".weight" suffix, e.g. "gate_up_proj" /
+# "down_proj". Any other leaf (bias, embedding, norm, ...) is skipped before
+# the more expensive module resolution.
+_FP8_CANDIDATE_LEAVES: frozenset = frozenset({"weight", "gate_up_proj", "down_proj"})
+
+
 def is_fp8_weight(name, model):
     if name not in fp8_state.seen_params:
         fp8_state.seen_params.add(name)
-        # Filter out bias params
-        if name.endswith("weight"):
+        leaf = name.rsplit(".", 1)[-1]
+        if leaf in _FP8_CANDIDATE_LEAVES:
             module = get_module_from_param_name(model, name)
             # We currently only quantize linear and fused-MoE expert layers.
             is_fp8_linear = isinstance(module, LinearBase) and module.weight.dtype == torch.float8_e4m3fn
