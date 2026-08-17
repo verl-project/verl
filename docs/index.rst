@@ -160,6 +160,7 @@ verl is fast with:
    advance/grafana_prometheus.md
    advance/mtp.md
    advance/determinism.md
+   advance/fsdp_turbo_backend
 
 .. toctree::
    :maxdepth: 1

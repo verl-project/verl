@@ -14,13 +14,14 @@
 import warnings
 
 from .base import BaseEngine, EngineRegistry
-from .fsdp import FSDPEngine, FSDPEngineWithLMHead
+from .fsdp import FSDPEngine, FSDPEngineWithLMHead, FSDPTurboEngineWithLMHead
 
 __all__ = [
     "BaseEngine",
     "EngineRegistry",
     "FSDPEngine",
     "FSDPEngineWithLMHead",
+    "FSDPTurboEngineWithLMHead",
 ]
 
 try:

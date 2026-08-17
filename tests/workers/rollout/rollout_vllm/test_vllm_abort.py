@@ -80,6 +80,8 @@ def test_vllm_abort():
         config.actor_rollout_ref.rollout.tensor_model_parallel_size = TP_SIZE
         config.actor_rollout_ref.rollout.prompt_length = 512
         config.actor_rollout_ref.rollout.response_length = 512  # Longer for abort test
+        # No trainer to sync weights from, so the server must load them from disk.
+        config.actor_rollout_ref.rollout.load_format = "auto"
 
         # ==================== Create Rollout Server ====================
         print("\n[3] Creating rollout server (this may take a while)...")

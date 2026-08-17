@@ -85,6 +85,11 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # This image is not the uv.cu130 one: it ships its own torch-npu stack, so the
+  # shared e2e scripts must launch with ambient python instead of `uv run`.
+  VERL_USE_UV: 0
+
 jobs:
   e2e_ppo_trainer_megatron-deepseek_ascend:
     if: github.repository_owner == 'verl-project'
@@ -130,6 +135,8 @@ jobs:
       - name: Install the current repository 
         run: |
           uv pip install pytest pytest-asyncio
+          uv pip install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@0a21da4 --no-deps --no-build-isolation
+          uv pip install git+https://github.com/ISEEKYAN/mbridge.git@main --no-deps --no-build-isolation
           uv pip install --no-deps --no-build-isolation -e .
       - name: Check final pip list
         run: |

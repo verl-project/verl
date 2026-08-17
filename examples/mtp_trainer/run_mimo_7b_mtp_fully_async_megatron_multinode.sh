@@ -59,7 +59,16 @@ TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/aime-2024.parquet"}
 actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 3))
 
-python -m verl.experimental.fully_async_policy.fully_async_main \
+# uv (set VERL_USE_UV=0 for system python): on GPU, the driver and every Ray worker
+# (runtime_env.py_executable) run through `uv run` on the sglang × megatron extras of the committed uv.lock;
+# NPU falls back to ambient python. Run from the verl repo root.
+LAUNCH=(python)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ]; then
+    LAUNCH=(uv run --frozen --all-packages --extra sglang --extra megatron python)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages --extra sglang --extra megatron")
+fi
+"${LAUNCH[@]}" -m verl.experimental.fully_async_policy.fully_async_main \
     --config-path=config \
     --config-name='fully_async_ppo_megatron_trainer.yaml' \
     data.train_files="${TRAIN_FILE}" \
@@ -149,4 +158,5 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     trainer.total_epochs=${total_epochs} \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
+    "${RAY[@]}" \
     trainer.log_val_generations=10 "$@"

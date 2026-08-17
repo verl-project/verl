@@ -59,6 +59,20 @@ actor_rollout_ref:
         - re:.*mlp.gate$
         activation_observer: static_minmax
         quantization_config_path: null
+      turbo_config:
+        distributed:
+          fully_shard_parallel_size: 16
+          tensor_parallel_size: 1
+          expert_parallel_size: 1
+          expert_fully_shard_parallel_size: 1
+          ulysses_parallel_size: 1
+          fsdp_plan:
+            param_dtype: bf16
+            reduce_dtype: fp32
+            output_dtype: bf16
+            fsdp_implementation: native
+            num_to_forward_prefetch: 1
+            num_to_backward_prefetch: 1
     _target_: verl.workers.config.FSDPActorConfig
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: fsdp
@@ -252,6 +266,20 @@ actor_rollout_ref:
         - re:.*mlp.gate$
         activation_observer: static_minmax
         quantization_config_path: null
+      turbo_config:
+        distributed:
+          fully_shard_parallel_size: 16
+          tensor_parallel_size: 1
+          expert_parallel_size: 1
+          expert_fully_shard_parallel_size: 1
+          ulysses_parallel_size: 1
+          fsdp_plan:
+            param_dtype: bf16
+            reduce_dtype: fp32
+            output_dtype: bf16
+            fsdp_implementation: native
+            num_to_forward_prefetch: 1
+            num_to_backward_prefetch: 1
     _target_: verl.workers.config.FSDPActorConfig
     ulysses_sequence_parallel_size: ${oc.select:actor_rollout_ref.actor.ulysses_sequence_parallel_size,1}
     entropy_from_logits_with_chunking: false
@@ -551,6 +579,20 @@ critic:
       - re:.*mlp.gate$
       activation_observer: static_minmax
       quantization_config_path: null
+    turbo_config:
+      distributed:
+        fully_shard_parallel_size: 16
+        tensor_parallel_size: 1
+        expert_parallel_size: 1
+        expert_fully_shard_parallel_size: 1
+        ulysses_parallel_size: 1
+        fsdp_plan:
+          param_dtype: bf16
+          reduce_dtype: fp32
+          output_dtype: bf16
+          fsdp_implementation: native
+          num_to_forward_prefetch: 1
+          num_to_backward_prefetch: 1
   _target_: verl.workers.config.FSDPCriticConfig
   rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
   strategy: fsdp
@@ -990,4 +1032,6 @@ skip:
 ray_kwargs:
   ray_init:
     num_cpus: null
+    runtime_env:
+      py_executable: null
   timeline_json_file: null

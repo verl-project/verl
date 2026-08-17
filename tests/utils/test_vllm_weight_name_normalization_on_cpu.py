@@ -29,6 +29,7 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
 import torch
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -104,8 +105,12 @@ def _load_vllm_rollout_utils():
     fake_vllm_quant.is_fp8_model = lambda config: False
     fake_vllm_quant.load_quanted_weights = lambda *a, **k: []
 
-    fake_platform = types.ModuleType("verl.plugin.platform")
-    fake_platform.get_platform = lambda: None
+    # NOTE: deliberately do NOT stub verl.plugin.platform. It is lightweight and
+    # imports fine on CPU. verl.utils.device binds `get_platform` at import time, so
+    # a `lambda: None` stub gets baked into verl.utils.device during this window;
+    # because only the keys in `fakes` below are restored, that fake would leak
+    # process-wide and later tests would crash in get_device_name() with
+    # "'NoneType' object has no attribute 'device_name'".
 
     # Minimal stubs for the heavyweight vllm.lora.* imports pulled in by
     # ``verl/utils/vllm/utils.py`` (which also defines ``resolve_weight_name``).
@@ -136,7 +141,6 @@ def _load_vllm_rollout_utils():
         "verl.utils.vllm": fake_vllm_utils,
         "verl.utils.vllm.patch": fake_vllm_patch,
         "verl.utils.vllm.vllm_quant_utils": fake_vllm_quant,
-        "verl.plugin.platform": fake_platform,
         "verl.workers.rollout.vllm_rollout.weight_update_utils": _weight_update_utils,
     }
 
@@ -645,6 +649,11 @@ class _FakeBucketReceiver:
 
 def test_update_weights_from_ipc_accumulates_lora_across_buckets(monkeypatch):
     """A LoRA adapter split across two buckets yields one add_lora with all tensors."""
+    # Unlike the resolver tests above (which fully stub sys.modules), this drives the
+    # real update_weights_from_ipc path and imports the actual bucketed_weight_transfer
+    # module, whose package __init__ hard-requires vllm. vllm isn't in the `cpu` extra,
+    # so this is skipped under cpu_unit_tests and run in vllm.yml (the vllm venv).
+    pytest.importorskip("vllm")
     import verl.workers.rollout.vllm_rollout.bucketed_weight_transfer as bwt
 
     monkeypatch.setattr(
@@ -686,6 +695,9 @@ def test_update_weights_from_ipc_accumulates_lora_across_buckets(monkeypatch):
 
 def test_update_weights_from_ipc_standard_loads_per_bucket(monkeypatch):
     """Standard (non-LoRA) base sync loads every bucket immediately (no accumulation)."""
+    # See the note above: needs the real bucketed_weight_transfer (vllm-backed), which
+    # the `cpu` extra can't provide, so it is skipped here and run in vllm.yml.
+    pytest.importorskip("vllm")
     import verl.workers.rollout.vllm_rollout.bucketed_weight_transfer as bwt
 
     monkeypatch.setattr(

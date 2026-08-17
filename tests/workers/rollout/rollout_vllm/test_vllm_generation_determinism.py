@@ -98,6 +98,9 @@ def _make_rollout_config(model_path, seed):
     config.actor_rollout_ref.rollout.full_determinism = True
     config.actor_rollout_ref.rollout.seed = seed
     config.actor_rollout_ref.rollout.scheduling_policy = "priority"
+    # Standalone servers have no trainer to sync weights from; without real weights
+    # this test would compare logprobs of a randomly initialized model.
+    config.actor_rollout_ref.rollout.load_format = "auto"
     return config
 
 

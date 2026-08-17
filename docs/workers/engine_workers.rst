@@ -142,7 +142,7 @@ Construction takes a single
 ``model_config``, ``engine_config``, ``optimizer_config``,
 ``checkpoint_config`` and ``profiler_config``. The backend is chosen
 from ``engine_config.strategy`` (``fsdp``, ``fsdp2``, ``megatron``,
-``automodel``, ``veomni``, ``torchtitan``).
+``automodel``, ``veomni``, ``torchtitan``, ``fsdp_turbo``).
 
 Key RPCs
 ^^^^^^^^
@@ -176,7 +176,7 @@ Set the ``strategy`` field on ``actor.engine`` / ``critic.engine`` /
 
    actor_rollout_ref:
      actor:
-       strategy: fsdp2        # or: fsdp, megatron, automodel, veomni, torchtitan
+       strategy: fsdp2        # or: fsdp, megatron, automodel, veomni, torchtitan, fsdp_turbo
        engine:
          strategy: fsdp2
          param_offload: False
@@ -186,18 +186,19 @@ The ``EngineRegistry`` dispatches on ``(model_type, backend, device)`` –
 for example ``(language_model, fsdp2, cuda)`` or
 ``(language_model, megatron, npu)``:
 
-=====================  =====================  =====================  ============================================================
-model_type             backend                device                 Engine class
-=====================  =====================  =====================  ============================================================
-``language_model``     ``fsdp`` / ``fsdp2``   ``cuda`` / ``npu``     ``verl.workers.engine.fsdp.FSDPEngineWithLMHead``
-``language_model``     ``megatron``           ``cuda``               ``verl.workers.engine.megatron.MegatronEngineWithLMHead``
-``language_model``     ``megatron``           ``npu``                ``verl.workers.engine.mindspeed.MindspeedEngineWithLMHead``
-``language_model``     ``automodel``          ``cuda``               ``verl.workers.engine.automodel.AutomodelEngineWithLMHead``
-``language_model``     ``veomni``             ``cuda`` / ``npu``     ``verl.workers.engine.veomni.VeOmniEngineWithLMHead``
-``language_model``     ``torchtitan``         ``cuda`` / ``npu``     ``verl.workers.engine.torchtitan.TorchTitanEngineWithLMHead``
-``value_model``        ``fsdp`` / ``fsdp2``   ``cuda`` / ``npu``     ``verl.workers.engine.fsdp.FSDPEngineWithValueHead``
-``value_model``        ``megatron``           ``cuda``               ``verl.workers.engine.megatron.MegatronEngineWithValueHead``
-=====================  =====================  =====================  ============================================================
+=====================  ======================  =====================  =====================================================================
+model_type             backend                 device                 Engine class
+=====================  ======================  =====================  =====================================================================
+``language_model``     ``fsdp`` / ``fsdp2``    ``cuda`` / ``npu``     ``verl.workers.engine.fsdp.FSDPEngineWithLMHead``
+``language_model``     ``megatron``            ``cuda``               ``verl.workers.engine.megatron.MegatronEngineWithLMHead``
+``language_model``     ``megatron``            ``npu``                ``verl.workers.engine.mindspeed.MindspeedEngineWithLMHead``
+``language_model``     ``automodel``           ``cuda``               ``verl.workers.engine.automodel.AutomodelEngineWithLMHead``
+``language_model``     ``veomni``              ``cuda`` / ``npu``     ``verl.workers.engine.veomni.VeOmniEngineWithLMHead``
+``language_model``     ``torchtitan``          ``cuda`` / ``npu``     ``verl.workers.engine.torchtitan.TorchTitanEngineWithLMHead``
+``language_model``     ``fsdp_turbo``          ``cuda`` / ``npu``     ``verl.workers.engine.fsdp.FSDPTurboEngineWithLMHead``
+``value_model``        ``fsdp`` / ``fsdp2``    ``cuda`` / ``npu``     ``verl.workers.engine.fsdp.FSDPEngineWithValueHead``
+``value_model``        ``megatron``            ``cuda``               ``verl.workers.engine.megatron.MegatronEngineWithValueHead``
+=====================  ======================  =====================  =====================================================================
 
 Migrating from Legacy Workers
 -----------------------------
