@@ -58,6 +58,11 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def _should_resume_rollout_weights(rollout_name: str, sleep_level: int) -> bool:
+    """Return whether weight memory must be resumed before a rollout update."""
+    return rollout_name != "sglang" or sleep_level != 1
+
+
 def _with_routing_replay_flag(enabled: bool):
     """Decorator to set 'enable_routing_replay' flag on the data TensorDict."""
 
@@ -762,9 +767,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         log_gpu_memory_usage("Before resume weights", logger=logger)
 
         # 1. resume rollout memory (weights were released during sleep)
-        # sleep_level=1 (adapter mode) never released weights, so do not resume them.
-        # Backends other than sglang carry no sleep_level, hence the default.
-        if self.config.rollout.free_cache_engine and getattr(self.rollout, "sleep_level", 2) != 1:
+        # SGLang adapter mode releases only the KV cache at sleep level 1.
+        # vLLM level-1 sleep still unmaps its weight-tagged CuMem allocations,
+        # so it must resume them before an in-memory LoRA adapter is activated.
+        should_resume_weights = _should_resume_rollout_weights(
+            self.config.rollout.name, getattr(self.rollout, "sleep_level", 2)
+        )
+        if self.config.rollout.free_cache_engine and should_resume_weights:
             await self.rollout.resume(tags=["weights"])
         log_gpu_memory_usage("After resume weights", logger=logger)
 
