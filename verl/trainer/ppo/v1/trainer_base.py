@@ -430,13 +430,6 @@ class PPOTrainer(ABC):
         # SkipManager skips warmup batches in async trainers, so it doesn't conflict with reissue.
         SkipManager.set_step(self.global_steps)
         self._reissue_inflight_prompts()
-        self.prev_step_profile = False
-        self.curr_step_profile = (
-            self.global_steps in self.config.global_profiler.steps
-            if self.config.global_profiler.steps is not None
-            else False
-        )
-        self.next_step_profile = False
 
         self.on_train_begin()
         last_val_metrics = None
@@ -1275,15 +1268,34 @@ class PPOTrainer(ABC):
 
         return metric_dict
 
+    def _should_start_profiling(self) -> bool:
+        if self.config.global_profiler.steps is None:
+            return False
+
+        curr_step_profiled = self.global_steps in self.config.global_profiler.steps
+
+        if self.config.global_profiler.profile_continuous_steps:
+            prev_step_profiled = (self.global_steps - 1) in self.config.global_profiler.steps
+            return curr_step_profiled and (not prev_step_profiled)
+
+        return curr_step_profiled
+
+    def _should_stop_profiling(self) -> bool:
+        if self.config.global_profiler.steps is None:
+            return False
+
+        curr_step_profiled = self.global_steps in self.config.global_profiler.steps
+
+        if self.config.global_profiler.profile_continuous_steps:
+            next_step_profiled = (self.global_steps + 1) in self.config.global_profiler.steps
+            return curr_step_profiled and (not next_step_profiled)
+
+        return curr_step_profiled
+
     def _start_profiling(self) -> None:
         """Start profiling for all worker groups if profiling is enabled."""
-        do_profile = (
-            not self.prev_step_profile and self.curr_step_profile
-            if self.config.global_profiler.profile_continuous_steps
-            else self.curr_step_profile
-        )
-
-        if do_profile:
+        if self._should_start_profiling():
+            self.llm_server_manager.start_profile()
             self.actor_rollout_wg.start_profile(role="e2e", profile_step=self.global_steps)
             if self.use_reference_policy:
                 self.ref_policy_wg.start_profile(profile_step=self.global_steps)
@@ -1292,20 +1304,8 @@ class PPOTrainer(ABC):
 
     def _stop_profiling(self) -> None:
         """Stop profiling for all worker groups if profiling is enabled."""
-        self.next_step_profile = (
-            self.global_steps + 1 in self.config.global_profiler.steps
-            if self.config.global_profiler.steps is not None
-            else False
-        )
-        do_profile = (
-            self.curr_step_profile and not self.next_step_profile
-            if self.config.global_profiler.profile_continuous_steps
-            else self.curr_step_profile
-        )
-        self.prev_step_profile = self.curr_step_profile
-        self.curr_step_profile = self.next_step_profile
-
-        if do_profile:
+        if self._should_stop_profiling():
+            self.llm_server_manager.stop_profile()
             self.actor_rollout_wg.stop_profile()
             if self.use_reference_policy:
                 self.ref_policy_wg.stop_profile()
