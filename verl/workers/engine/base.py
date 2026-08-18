@@ -270,6 +270,17 @@ class BaseEngine:
         """
         raise NotImplementedError
 
+    def finalize_async_checkpointing(self, blocking: bool = False) -> None:
+        """Finalize asynchronous checkpoint writes.
+
+        Engines that support asynchronous checkpointing must override this
+        method. It is called only when ``checkpoint.async_save`` is enabled.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support asynchronous checkpointing. "
+            "Set checkpoint.async_save=false or use the Megatron engine."
+        )
+
     def load_checkpoint(
         self, local_path: str, hdfs_path: Optional[str] = None, del_local_after_load: bool = True, **kwargs
     ) -> None:

@@ -439,6 +439,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
         return self.engine.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def finalize_async_checkpointing(self, blocking=False):
+        """Finalize queued checkpoint writes on every training rank."""
+        return self.engine.finalize_async_checkpointing(blocking=blocking)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
         return self.engine.load_checkpoint(local_path, hdfs_path, del_local_after_load)
 
