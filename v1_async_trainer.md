@@ -63,9 +63,9 @@ This avoids dropping long-running trajectories during rollout/trainer transition
 The V1 sampler controls staleness in model-version units:
 
 
-| Parameter                                     | Default | Meaning                                                                                                             |
-| --------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------- |
-| `trainer.v1.sampler.max_off_policy_threshold` | `8`     | Maximum model versions from first generation to being trained before staleness handling is triggered                                         |
+| Parameter                                     | Default | Meaning                                                                                                                                                                      |
+| --------------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `trainer.v1.sampler.max_off_policy_threshold` | `8`     | Maximum model versions from first generation to being trained before staleness handling is triggered                                                                         |
 | `trainer.v1.sampler.max_off_policy_strategy`  | `drop`  | `drop` evicts stale prompt groups (for GRPO, one stale trajectory, the whole sample dropped); `wait` blocks for threshold-reaching in-flight groups instead of dropping them |
 
 
@@ -75,7 +75,7 @@ Monitor both forms of off-policy behavior:
 - `training/off_policy/trajectory_staleness/*`: gap between the newest version used by a trajectory and the current training version.
 - `training/off_policy/trajectory_staleness_worst/*`: gap between the oldest version used by a trajectory and the current training version.
 
-## Separate Async Step Switching
+## Separate Async Step Switching (experimental)
 
 Enable step switching with:
 
@@ -85,8 +85,7 @@ trainer.v1.separate_async.enable_switch=True
 
 The switch addresses a specific idle window: after a PPO step finishes, the trainer may have to wait for standalone rollout to produce enough sampleable groups for the next step. During that window, the trainer's hybrid replicas can join the standalone load balancer and help generate samples.
 
-![separate_async_switch_timeline](
-https://github.com/Begunner/verl-link/blob/main/sepa_switch.svg?raw=true)
+separate_async_switch_timeline
 
 The upper timeline shows `separate_async` without switching; the lower timeline shows hybrid GPUs joining rollout during idle windows when switching is enabled.
 
@@ -130,7 +129,7 @@ Temporarily, step switching cannot be combined with rollout PD disaggregation.
 
 ## Configuration
 
-### Colocated async
+### Colocate async
 
 Add the following overrides to an existing V1 PPO launch:
 
@@ -202,30 +201,55 @@ Practical tuning order:
 
 When the installed TransferQueue supports checkpointing, V1 async checkpoints persist its state alongside model and dataloader state. Finished samples are restored directly. Pending and running prompts are cleared and reissued after resume so prompts already fetched from the dataloader are not lost.
 
-In `separate_async`, validation makes hybrid replicas available for rollout if they are currently in trainer mode.
-
 Validation shares the same AgentLoop and rollout server pool with unfinished training trajectories. Those partial trajectories continue running alongside validation requests, so `timing_s/testing` includes the contention and rollout capacity they consume rather than measuring validation generation in isolation.
+
+In `separate_async`, validation makes hybrid replicas available for rollout if they are currently in trainer mode.
 
 ## Benchmark
 
-### Four-node mode comparison
+### V1 Trainer all modes
 
-> TODO: Add the four-node `sync` / `colocate_async` / `separate_async` comparison after the original run configuration and metrics are exported.
+The three modes were compared over their first 150 steps with the same four-node budget. `sync` and `colocate_async` used all four nodes as hybrid resources, while `separate_async` used two hybrid trainer nodes and two standalone rollout nodes.
 
-### Three-node step-switch comparison
+- Qwen3.5-35B-A3B with Megatron training (TP2 PP2 CP2 EP4) and vLLM rollout (TP4).
+- `train_batch_size=64`, `ppo_mini_batch_size=16`, and `parameter_sync_step=4`.
+- DAPO-Math-17k, max_prompt_length=2048, max_response_length=32768
+
+
+| Mode             | Resource split          | 150-step wall clock | Aggregate tokens/s | Mean response length |
+| ---------------- | ----------------------- | ------------------- | ------------------ | -------------------- |
+| `sync`           | 4 hybrid                | 22.79 h             | 12,053             | 12,720               |
+| `colocate_async` | 4 hybrid                | 13.31 h             | 17,813             | 10,956               |
+| `separate_async` | 2 hybrid + 2 standalone | 12.75 h             | 22,125             | 13,066               |
+
+
+Compared with `sync`, `colocate_async` reduced wall clock by **41.6%** and increased aggregate token throughput by **47.8%**; `separate_async` reduced wall clock by **44.1%** and increased throughput by **83.6%**. The mean trainer wait for samples (`timing_s/gen`) fell from **380.8 s** in `sync` to **156.7 s** in `colocate_async` and **43.2 s** in `separate_async`.
+
+`sync` and `colocate_async` recomputed old log probabilities in a similar **31.8 s** and **31.2 s** per step, while `separate_async` reused rollout log probabilities and spent only **0.3 s**. As a diagnostic scheduling comparison, subtracting `timing_s/old_log_prob` gives adjusted 150-step times of **21.47 h**, **12.01 h**, and **12.74 h**, respectively; these adjusted values are not measured end-to-end runtimes.
+
+`separate_async` completed 150 steps 4.2% faster than `colocate_async` while processing 24.2% more tokens per second, but its mean response length was 19.3% higher. Report both time-to-step and aggregate token throughput rather than attributing the throughput difference entirely to scheduling. Each mode was measured with one run and no seed sweep.
+
+### Separate_async switching
 
 The step switch was evaluated for the first 150 steps of two otherwise identical runs:
 
 - 3 × 8 H100 GPUs: two trainer/hybrid nodes and one standalone rollout node.
-- Qwen3.5-35B-A3B with Megatron training and vLLM rollout.
+- Qwen3.5-35B-A3B with Megatron training (TP2 PP2 CP2 EP8) and vLLM rollout (TP4).
 - `train_batch_size=64`, `ppo_mini_batch_size=16`, and `parameter_sync_step=4`.
-- One run per setting; no seed sweep.
+- DAPO-Math-17k, max_prompt_length=2048, max_response_length=32768
 
-Enabling the switch reduced cumulative wall clock from **18.80 h to 16.43 h** (**12.6%**) and increased aggregate token throughput from **15,150 to 16,687 tokens/s** (**10.1%**). The runs differed by about 4% in mean response length, so aggregate tokens per wall-clock second is the more representative comparison.
 
-Cumulative wall-clock comparison for separate_async with and without step switching
+| Mode        | Resource split          | 150-step wall clock | Aggregate tokens/s | Mean response length |
+| ----------- | ----------------------- | ------------------- | ------------------ | -------------------- |
+| `no-switch` | 2 hybrid + 1 standalone | 18.80 h             | 15,150             | 12,720               |
+| `switch`    | 2 hybrid + 1 standalone | 16.43 h             | 16,687             | 10,956               |
 
-The result is specific to a rollout-constrained 2:1 hybrid-to-standalone resource ratio. Gains should shrink as standalone rollout capacity increases or as switch cost becomes a larger fraction of the available idle window.
+
+Cumulative training-step-time comparison for `separate_async` with and without step switching
+
+The no-switch baseline spent a mean **167.1 s** per step in `timing_s/gen`, or **37.0%** of its mean **451.2 s** step time. During this interval, the hybrid trainer GPUs were idle while waiting for the standalone rollout pool to fill the training buffer, showing that the tested 2:1 hybrid-to-standalone allocation was rollout-constrained rather than perfectly balanced.
+
+A perfect static resource split is generally difficult to maintain because response lengths and rollout latency change throughout RL training. Step switching can therefore be enabled when no single allocation is expected to remain balanced: hybrid GPUs are lent only when the buffer is short and the estimated benefit exceeds the measured round-trip switch cost; otherwise, they remain in trainer mode. Gains should shrink as standalone rollout capacity increases or as switch cost becomes a larger fraction of the available idle window.
 
 ## Relationship to Other Async Implementations
 
@@ -239,6 +263,3 @@ The result is specific to a rollout-constrained 2:1 hybrid-to-standalone resourc
 | Staleness control       | Model-version threshold with `drop` or `wait`   | Stale-sample production ratio                           |
 | Partial rollout         | Built into the V1 async rollout client          | `async_training.partial_rollout`                        |
 | Dynamic hybrid lending  | `trainer.v1.separate_async.enable_switch`       | `DynamicResourceController` policies                    |
-
-
-The two hybrid-lending implementations solve a similar utilization problem but have different state machines and decision inputs. See [Dynamic Resource Scheduling for Fully-Async Training](dynamic_schedule.md) for the experimental implementation.
