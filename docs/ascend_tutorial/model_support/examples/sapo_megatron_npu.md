@@ -275,7 +275,7 @@ if not self.checkpoint_config.async_save:
 #### D. 不确定性声明
 
 - 上述 A/B/C 均为 v0.8.0 静态审查结论，**未在集群实跑验证**。
-- 本地仓库含已提交 patch（`5bf69a73` vllm 版本门控、`e34f731c` tau 路径），但**未改动 checkpoint 相关代码**，故 async_save 坏掉应是上游 v0.8.0 既存问题，非本地引入——但用户要求修复前先在干净 v0.8.0 复现确认。
+- 本分支的 vllm patch 门控改动已在 rebase 到 main 时被上游 #7190/#7147 的无条件 patch 结构取代并删除；分支内现存改动（tau 路径、recipe、docs）均**未触碰 checkpoint 相关代码**，故 async_save 坏掉应是上游 v0.8.0 既存问题，非本地引入——但用户要求修复前先在干净 v0.8.0 复现确认。
 - 修复（方案 1）属仓库侧代码改动，需 TDD 配套测试；项目 CLAUDE.md 禁止 agent 提 PR，须人类提交者逐行审阅 + 跑测试 + defend；提交前 `gh pr list --search "async_calls_finalize_fn_exec"` 查重。
 
 ---
