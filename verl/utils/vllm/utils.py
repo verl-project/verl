@@ -59,7 +59,7 @@ class VLLMHijack:
 
             model = self._adapter_manager.model
             hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
-            if hf_to_vllm_mapper is not None:
+            if hf_to_vllm_mapper is not None and is_version_ge(minver="0.25.0"):
                 hf_to_vllm_mapper = hf_to_vllm_mapper.get_unstacked_mapper()
 
             lora = self._lora_model_cls.from_lora_tensors(
