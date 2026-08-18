@@ -119,7 +119,6 @@ Megatron 的融合算子集成在 MindSpeed 中，需要添加特定参数开启
    ::
 
        +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
-       ++actor_rollout_ref.ref.megatron.override_transformer_config.use_flash_attn=True
 
 2. **RotaryMul**
    ::
