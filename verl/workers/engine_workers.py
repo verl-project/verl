@@ -310,7 +310,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 actor_output = self.train_batch(mini_batch_td)
                 output_lst.append(actor_output)
                 # Advance the profiler schedule once per mini-batch. No-op unless a
-                # torch profiler schedule (wait/warmup/active/repeat) is active.
+                # torch/npu profiler schedule (wait/warmup/active/repeat) is active.
                 self.profiler.step()
 
             if self.engine.is_mp_src_rank_with_outputs():

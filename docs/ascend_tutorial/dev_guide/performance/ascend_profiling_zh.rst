@@ -61,6 +61,15 @@ Last updated: 07/13/2026.
 
 -  analysis: 是否启用自动数据解析。
 -  discrete: 是否使用离散模式。
+-  schedule: 用于 Actor/Critic 的 update 阶段按 mini-batch 抽样采集。verl 每个
+   mini-batch 调用一次 ``profiler.step()`` 推进 schedule，仅在 ``active > 0`` 时生效：
+
+   -  skip_first: 在第一个周期开始前忽略的初始 mini-batch 数。
+   -  wait: 每个周期开始时空闲（不采集）的 mini-batch 数。
+   -  warmup: 每个周期中先追踪但丢弃的 mini-batch 数，用于让 profiler 稳定。
+   -  active: 每个周期实际记录的 mini-batch 数。设为 ``<= 0``（默认）则关闭调度。
+   -  repeat: 记录的周期数。``0``（默认）表示持续重复直到 profiling 结束。
+
 -  profile_token_start：仅在 rollout role 下生效，用于指定 rollout 解码阶段的采集起始 response token；参数合法时生效（从 0 开始，满足 ``profile_token_end > profile_token_start``，且区间在 response 长度内）。
 -  profile_token_end：仅在 rollout role 下生效，用于指定 rollout 解码阶段的采集结束 response token（右边界不包含）；参数合法时生效（从 0 开始，满足 ``profile_token_end > profile_token_start``，且区间在 response 长度内）。
 
@@ -111,6 +120,13 @@ Last updated: 07/13/2026.
                   npu:
                      discrete: True
                      contents: [npu, cpu]
+                     # 可选：按 mini-batch schedule 抽样；不设置时采集 actor 的全部 mini-batch
+                     schedule:
+                        skip_first: 0
+                        wait: 0
+                        warmup: 1  # 预热一个 mini-batch
+                        active: 1  # 采集第二个 mini-batch
+                        repeat: 1  # 采集一个周期后停止
          rollout:
             profiler:
                enable: True  # 设置为 True 以采集推理阶段
@@ -167,6 +183,12 @@ Last updated: 07/13/2026.
       actor_rollout_ref.actor.profiler.tool_config.npu.contents="['npu','cpu']" # 控制采集列表，默认cpu、npu，可配置memory、shapes、module等
       actor_rollout_ref.actor.profiler.tool_config.npu.level=level1
       actor_rollout_ref.actor.profiler.tool_config.npu.analysis=False # 禁用自动数据解析
+      # 可选：按 mini-batch schedule 抽样；不设置时采集 actor 的全部 mini-batch
+      actor_rollout_ref.actor.profiler.tool_config.npu.schedule.skip_first=0
+      actor_rollout_ref.actor.profiler.tool_config.npu.schedule.wait=0
+      actor_rollout_ref.actor.profiler.tool_config.npu.schedule.warmup=1  # 预热一个mini-batch
+      actor_rollout_ref.actor.profiler.tool_config.npu.schedule.active=1  # 采集第二个mini-batch
+      actor_rollout_ref.actor.profiler.tool_config.npu.schedule.repeat=1  # 采集一个周期后停止
 
       actor_rollout_ref.rollout.profiler.enable=True
       actor_rollout_ref.rollout.profiler.all_ranks=False
