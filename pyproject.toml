@@ -140,7 +140,7 @@ fsdp = [
     "torch==2.11.0",
     "torchvision==0.26.0",
     "torchaudio==2.11.0",
-    "liger-kernel",
+    "liger-kernel>=0.8.2",
     "trl==0.27.0",
     # transformers NOT pinned here: trainers inherit the synced engine's version
     # (vllm 5.5.3 / sglang 5.3.0). See override-dependencies below.
@@ -162,7 +162,7 @@ megatron = [
     "onnxscript",
     "trl==0.27.0",
     "matplotlib",
-    "liger-kernel",
+    "liger-kernel>=0.8.2",
     # Two Megatron<->HF connectors: mbridge (legacy) and megatron-bridge (NVIDIA,
     # imported as megatron.bridge; the migration target, installed deps-free — see
     # [[tool.uv.dependency-metadata]] below). 0.5.2 is the wheelhouse build of the
