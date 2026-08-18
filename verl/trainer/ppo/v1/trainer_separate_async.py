@@ -28,6 +28,7 @@ from verl.trainer.ppo.v1.trainer_base import PPOTrainer, register_trainer
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient, LLMServerManager
+from verl.workers.rollout.utils import update_prometheus_config
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -140,6 +141,12 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         self.standalone_server_manager: LLMServerManager = LLMServerManager.create(
             config=self.config, start_rank=hybrid_num_replicas
         )
+        rollout_config = self.config.actor_rollout_ref.rollout
+        if rollout_config.prometheus.enable:
+            server_addresses = (
+                self.llm_server_manager.server_addresses + self.standalone_server_manager.server_addresses
+            )
+            update_prometheus_config(rollout_config.prometheus, server_addresses, rollout_config.name)
 
         # create checkpoint engine manager for trainer and standalone rollout
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
