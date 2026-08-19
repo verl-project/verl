@@ -48,6 +48,12 @@ ppo_max_token_len_per_gpu: 32768
 # Max token length per GPU in forward pass
 forward_max_token_len_per_gpu: ${.ppo_max_token_len_per_gpu}
 
+# Infer-time max tokens per GPU. Defaults to the documented forward budget.
+ppo_infer_max_token_len_per_gpu: ${.forward_max_token_len_per_gpu}
+
+# Infer-time local per-GPU micro batch size. Defaults to the training micro-batch.
+ppo_infer_micro_batch_size_per_gpu: ${.ppo_micro_batch_size_per_gpu}
+
 # Number of PPO epochs per batch
 ppo_epochs: ${oc.select:actor_rollout_ref.actor.ppo_epochs,1}
 
