@@ -75,6 +75,19 @@ Monitor both forms of off-policy behavior:
 - `training/off_policy/trajectory_staleness/*`: gap between the newest version used by a trajectory and the current training version.
 - `training/off_policy/trajectory_staleness_worst/*`: gap between the oldest version used by a trajectory and the current training version.
 
+### Separate Async Decoupled PPO
+
+When `separate_async` recomputes old log probabilities, actor weights may change between controller-level mini-batches. To keep the same `pi_old` for the entire `parameter_sync_step` cycle, the first mini-batch copies `pi_old` to CPU and computes with the weights already on GPU. Before each later mini-batch, the trainer:
+
+1. Copies the current updated weights to CPU.
+2. Restores `pi_old` to GPU and computes old log probabilities.
+3. Restores the current weights to GPU and clears their temporary CPU copy.
+
+For `N` mini-batches, this results in `N` `save_model_to_cpu` calls and `2 * (N - 1)` `restore_model_from_cpu` calls. The old-policy weights themselves are saved once and restored `N - 1` times; the remaining calls preserve the current weights around old-log-probability computation. For example, four mini-batches make four save calls and six restore calls, of which one save and three restores transfer `pi_old`.
+
+These transfers and old log prob computings are skipped when `algorithm.rollout_correction.bypass_mode=True`.
+
+
 ## Separate Async Step Switching (experimental)
 
 Enable step switching with:
@@ -214,20 +227,28 @@ The three modes were compared over their first 150 steps with the same four-node
 - Qwen3.5-35B-A3B with Megatron training (TP2 PP2 CP2 EP4) and vLLM rollout (TP4).
 - `train_batch_size=64`, `ppo_mini_batch_size=16`, and `parameter_sync_step=4`.
 - DAPO-Math-17k, max_prompt_length=2048, max_response_length=32768
+- Decoupled PPO enabled
 
 
-| Mode             | Resource split          | 150-step wall clock | Aggregate tokens/s | Mean response length |
-| ---------------- | ----------------------- | ------------------- | ------------------ | -------------------- |
-| `sync`           | 4 hybrid                | 22.79 h             | 12,053             | 12,720               |
-| `colocate_async` | 4 hybrid                | 13.31 h             | 17,813             | 10,956               |
-| `separate_async` | 2 hybrid + 2 standalone | 12.75 h             | 22,125             | 13,066               |
+| Mode             | Resource split          | 150-step training time | Aggregate tokens/s | Mean response length |
+| ---------------- | ----------------------- | ---------------------- | ------------------ | -------------------- |
+| `sync`           | 4 hybrid                | 22.79 h                | 12,053             | 12,720               |
+| `colocate_async` | 4 hybrid                | 14.72 h (-35.4%)       | 18,852 (+56.4%)    | 12,854               |
+| `separate_async` | 2 hybrid + 2 standalone | 14.10 h (-38.1%)       | 18,829 (+56.2%)    | 12,288               |
 
 
-Compared with `sync`, `colocate_async` reduced wall clock by **41.6%** and increased aggregate token throughput by **47.8%**; `separate_async` reduced wall clock by **44.1%** and increased throughput by **83.6%**. The mean trainer wait for samples (`timing_s/gen`) fell from **380.8 s** in `sync` to **156.7 s** in `colocate_async` and **43.2 s** in `separate_async`.
+![v1_modes_quality_step](
+https://github.com/Begunner/verl-link/blob/main/v1_trainer/v1_modes_quality_step.png?raw=true)
 
-`sync` and `colocate_async` recomputed old log probabilities in a similar **31.8 s** and **31.2 s** per step, while `separate_async` reused rollout log probabilities and spent only **0.3 s**. As a diagnostic scheduling comparison, subtracting `timing_s/old_log_prob` gives adjusted 150-step times of **21.47 h**, **12.01 h**, and **12.74 h**, respectively; these adjusted values are not measured end-to-end runtimes.
+![v1_modes_timing_components](
+https://github.com/Begunner/verl-link/blob/main/v1_trainer/v1_modes_timing_components.png?raw=true)
 
-`separate_async` completed 150 steps 4.2% faster than `colocate_async` while processing 24.2% more tokens per second, but its mean response length was 19.3% higher. Report both time-to-step and aggregate token throughput rather than attributing the throughput difference entirely to scheduling. Each mode was measured with one run and no seed sweep.
+![v1_modes_offpolicy](
+https://github.com/Begunner/verl-link/blob/main/v1_trainer/v1_modes_offpolicy.png?raw=true)
+
+![v1_modes_policy_alignment](
+https://github.com/Begunner/verl-link/blob/main/v1_trainer/v1_modes_policy_alignment.png?raw=true)
+
 
 ### Separate_async switching
 
@@ -237,6 +258,7 @@ The step switch was evaluated for the first 150 steps of two otherwise identical
 - Qwen3.5-35B-A3B with Megatron training (TP2 PP2 CP2 EP8) and vLLM rollout (TP4).
 - `train_batch_size=64`, `ppo_mini_batch_size=16`, and `parameter_sync_step=4`.
 - DAPO-Math-17k, max_prompt_length=2048, max_response_length=32768
+- Decoupled PPO disabled
 
 
 | Mode        | Resource split          | 150-step wall clock | Aggregate tokens/s | Mean response length |
