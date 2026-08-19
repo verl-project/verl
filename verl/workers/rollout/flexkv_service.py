@@ -375,7 +375,7 @@ def _run_node_server() -> None:
         num_layers=text.num_hidden_layers,
         num_kv_heads=text.num_key_value_heads,
         head_size=head_dim,
-        packed_kv=args.packed_kv,
+        kv_dim=1 if args.packed_kv else 2,
         dtype=torch.bfloat16,
         tp_size=args.tp_size,
         pp_size=1,
