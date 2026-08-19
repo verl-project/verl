@@ -199,22 +199,23 @@ class Tracking:
         self._finished = True
         loggers = getattr(self, "logger", {})
 
-        if "wandb" in loggers:
-            loggers["wandb"].finish(exit_code=exit_code)
-        if "swanlab" in loggers:
-            loggers["swanlab"].finish()
-        if "vemlp_wandb" in loggers:
-            loggers["vemlp_wandb"].finish(exit_code=exit_code)
-        if "tensorboard" in loggers:
-            loggers["tensorboard"].finish()
-        if "clearml" in loggers:
-            loggers["clearml"].finish()
-        if "trackio" in loggers:
-            loggers["trackio"].finish()
-        if "file" in loggers:
-            loggers["file"].finish()
-        if "rl_insight" in loggers:
-            loggers["rl_insight"].finish()
+        finish_calls = {
+            "wandb": lambda logger_instance: logger_instance.finish(exit_code=exit_code),
+            "swanlab": lambda logger_instance: logger_instance.finish(),
+            "vemlp_wandb": lambda logger_instance: logger_instance.finish(exit_code=exit_code),
+            "tensorboard": lambda logger_instance: logger_instance.finish(),
+            "clearml": lambda logger_instance: logger_instance.finish(),
+            "trackio": lambda logger_instance: logger_instance.finish(),
+            "file": lambda logger_instance: logger_instance.finish(),
+            "rl_insight": lambda logger_instance: logger_instance.finish(),
+        }
+        for backend, finish_call in finish_calls.items():
+            if backend not in loggers:
+                continue
+            try:
+                finish_call(loggers[backend])
+            except Exception:
+                logger.warning("Failed to finish %s logger cleanly.", backend, exc_info=True)
 
     def __del__(self):
         self.finish()
