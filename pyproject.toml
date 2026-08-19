@@ -50,7 +50,7 @@ verl-core = [
     "transformers",
     "ray[default]>=2.41.0",
     "torchdata",
-    "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
+    "tensordict>=0.8.0,!=0.9.0,<=0.14.0",
     "wandb",
     "packaging>=20.0",
     "tensorboard",
