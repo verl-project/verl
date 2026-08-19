@@ -440,11 +440,10 @@ class MegatronEngine(BaseEngine):
     def _resolve_override_ddp_config(self):
         """Keep the DDP grad-bucket dtype consistent with the optimizer's grad buffer.
 
-        When the precision-aware optimizer is opted into with a sub-fp32
-        ``main_grads_dtype``, the DDP grad bucket must reduce grads in the same
-        dtype, so inject ``grad_reduce_in_fp32=False`` unless the user set it
-        explicitly via ``override_ddp_config``. Default (opt-out) leaves the fp32
-        grad bucket untouched, preserving prior behavior.
+        Default to FP32 gradient reduction for the conventional optimizer. When
+        the precision-aware optimizer is opted into with a sub-FP32
+        ``main_grads_dtype``, reduce gradients in that lower precision instead.
+        An explicit ``override_ddp_config`` value always wins.
 
         For Muon + LayerWise, also enable ``use_layer_wise_param_layout`` on the
         DDP config so master weights live in the param buffer (not fp32 clones).
@@ -454,13 +453,12 @@ class MegatronEngine(BaseEngine):
 
         override_ddp_config = dict(self.engine_config.override_ddp_config or {})
         opt_cfg = self.optimizer_config
-        if (
-            opt_cfg is not None
-            and getattr(opt_cfg, "use_precision_aware_optimizer", False)
-            and PrecisionType.to_dtype(getattr(opt_cfg, "main_grads_dtype", "fp32")) != torch.float32
-            and "grad_reduce_in_fp32" not in override_ddp_config
-        ):
-            override_ddp_config["grad_reduce_in_fp32"] = False
+        if opt_cfg is not None and "grad_reduce_in_fp32" not in override_ddp_config:
+            use_low_precision_main_grads = (
+                getattr(opt_cfg, "use_precision_aware_optimizer", False)
+                and PrecisionType.to_dtype(getattr(opt_cfg, "main_grads_dtype", "fp32")) != torch.float32
+            )
+            override_ddp_config["grad_reduce_in_fp32"] = not use_low_precision_main_grads
         if opt_cfg is not None and is_muon_layer_wise_config(opt_cfg):
             override_ddp_config.setdefault("use_layer_wise_param_layout", True)
         return override_ddp_config
