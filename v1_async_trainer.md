@@ -24,7 +24,8 @@ Set the mode with `trainer.v1.trainer_mode`.
 
 `colocate_async` and `separate_async` both enable partial-rollout through `FullyAsyncLLMServerClient`. If generation is aborted during a mode transition, completed tokens are retained and the remaining generation is retried. A resumed trajectory can therefore span multiple model versions.
 
-v1_trainer_timeline
+![v1_trainer_timeline](
+https://github.com/Begunner/verl-link/blob/main/v1_trainer.svg?raw=true)
 
 ## The V1 Training Loop
 
@@ -75,7 +76,9 @@ Monitor both forms of off-policy behavior:
 - `training/off_policy/trajectory_staleness/*`: gap between the newest version used by a trajectory and the current training version.
 - `training/off_policy/trajectory_staleness_worst/*`: gap between the oldest version used by a trajectory and the current training version.
 
-### Separate Async Decoupled PPO
+### Separate Async training Granularity and Decoupled PPO
+
+`separate_async` uses a mini-batch training granularity, trying to overlap rollout and training in the same step. When a mini-batch is samplable, it is trained at once. This advances the timing of `update_weights` and reduces staleness.
 
 When `separate_async` recomputes old log probabilities, actor weights may change between controller-level mini-batches. To keep the same `pi_old` for the entire `parameter_sync_step` cycle, the first mini-batch copies `pi_old` to CPU and computes with the weights already on GPU. Before each later mini-batch, the trainer:
 
@@ -98,7 +101,8 @@ trainer.v1.separate_async.enable_switch=True
 
 The switch addresses a specific idle window: after a PPO step finishes, the trainer may have to wait for standalone rollout to produce enough sampleable groups for the next step. During that window, the trainer's hybrid replicas can join the standalone load balancer and help generate samples.
 
-separate_async_switch_timeline
+![separate_async_switch_timeline](
+https://github.com/Begunner/verl-link/blob/main/sepa_switch.svg?raw=true)
 
 The upper timeline shows `separate_async` without switching; the lower timeline shows hybrid GPUs joining rollout during idle windows when switching is enabled.
 
@@ -220,7 +224,7 @@ In `separate_async`, validation makes hybrid replicas available for rollout if t
 
 ## Benchmark
 
-### V1 Trainer all modes
+### V1 trainer all modes
 
 The three modes were compared over their first 150 steps with the same four-node budget. `sync` and `colocate_async` used all four nodes as hybrid resources, while `separate_async` used two hybrid trainer nodes and two standalone rollout nodes.
 
@@ -272,16 +276,3 @@ Cumulative training-step-time comparison for `separate_async` with and without s
 The no-switch baseline spent a mean **167.1 s** per step in `timing_s/gen`, or **37.0%** of its mean **451.2 s** step time. During this interval, the hybrid trainer GPUs were idle while waiting for the standalone rollout pool to fill the training buffer, showing that the tested 2:1 hybrid-to-standalone allocation was rollout-constrained rather than perfectly balanced.
 
 A perfect static resource split is generally difficult to maintain because response lengths and rollout latency change throughout RL training. Step switching can therefore be enabled when no single allocation is expected to remain balanced: hybrid GPUs are lent only when the buffer is short and the estimated benefit exceeds the measured round-trip switch cost; otherwise, they remain in trainer mode. Gains should shrink as standalone rollout capacity increases or as switch cost becomes a larger fraction of the available idle window.
-
-## Relationship to Other Async Implementations
-
-
-| Concept                 | V1 async trainer                                | Experimental `fully_async_policy`                       |
-| ----------------------- | ----------------------------------------------- | ------------------------------------------------------- |
-| Entry point             | `verl.trainer.main_ppo`                         | `verl.experimental.fully_async_policy.fully_async_main` |
-| Data exchange           | TransferQueue                                   | MessageQueue                                            |
-| Async sampler           | `ReplayBufferAsync`                             | MessageQueue consumer and staleness controller          |
-| Parameter sync interval | `trainer.v1.separate_async.parameter_sync_step` | `async_training.trigger_parameter_sync_step`            |
-| Staleness control       | Model-version threshold with `drop` or `wait`   | Stale-sample production ratio                           |
-| Partial rollout         | Built into the V1 async rollout client          | `async_training.partial_rollout`                        |
-| Dynamic hybrid lending  | `trainer.v1.separate_async.enable_switch`       | `DynamicResourceController` policies                    |
