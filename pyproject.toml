@@ -141,7 +141,7 @@ fsdp = [
     "torchvision==0.26.0",
     "torchaudio==2.11.0",
     "liger-kernel",
-    "trl==0.27.0",
+    "trl==1.10.0",
     # transformers NOT pinned here: trainers inherit the synced engine's version
     # (vllm 5.5.3 / sglang 5.3.0). See override-dependencies below.
 ]
@@ -160,7 +160,7 @@ megatron = [
     "apex",
     "transformer-engine",
     "onnxscript",
-    "trl==0.27.0",
+    "trl==1.10.0",
     "matplotlib",
     "liger-kernel",
     # Two Megatron<->HF connectors: mbridge (legacy) and megatron-bridge (NVIDIA,
