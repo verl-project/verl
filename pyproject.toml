@@ -172,7 +172,7 @@ megatron = [
     "megatron-core",
     # megatron-bridge hard-imports modelopt but is installed deps-free (below), so
     # megatron needs it explicitly. 0.44.0: PyPI stable of bridge r0.5.0's 0.44.x.
-    "nvidia-modelopt==0.44.0",
+    "nvidia-modelopt==0.45.0",
     # transformers NOT pinned here (see fsdp note): inherited via override-deps below.
 ]
 
