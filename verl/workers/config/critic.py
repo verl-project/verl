@@ -128,6 +128,26 @@ class CriticConfig(BaseConfig):
                     f"critic.ppo_mini_batch_size ({self.ppo_mini_batch_size})"
                 )
 
+    def apply_engine_batching(self, engine_config):
+        """Copy critic-level batching knobs onto the engine TrainingWorker reads.
+
+        Actor/ref already assign these fields in ``engine_workers.py``. The critic
+        worker is a bare ``TrainingWorker``, so trainers must do the same here.
+        """
+        engine_config.use_dynamic_bsz = self.use_dynamic_bsz
+        engine_config.micro_batch_size_per_gpu = self.ppo_micro_batch_size_per_gpu
+        infer_mbs = self.ppo_infer_micro_batch_size_per_gpu
+        if infer_mbs is None:
+            infer_mbs = getattr(self, "forward_micro_batch_size_per_gpu", None)
+        if infer_mbs is None:
+            infer_mbs = self.ppo_micro_batch_size_per_gpu
+        engine_config.infer_micro_batch_size_per_gpu = infer_mbs
+        engine_config.max_token_len_per_gpu = self.ppo_max_token_len_per_gpu
+        infer_tokens = self.ppo_infer_max_token_len_per_gpu
+        forward_tokens = getattr(self, "forward_max_token_len_per_gpu", None)
+        engine_config.infer_max_token_len_per_gpu = infer_tokens if infer_tokens is not None else forward_tokens
+        return engine_config
+
     @staticmethod
     def _check_mutually_exclusive(mbs, mbs_per_gpu, name: str):
         """Validate mutually exclusive micro batch size configuration options.
