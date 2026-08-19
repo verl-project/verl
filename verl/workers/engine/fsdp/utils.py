@@ -80,8 +80,17 @@ def get_sharding_strategy(device_mesh, zero3_enable=True):
         sharding_strategy = ShardingStrategy.FULL_SHARD
         sharding_strategy = fsdp_strategy
     elif device_mesh.ndim == 2:
-        sharding_strategy = ShardingStrategy.HYBRID_SHARD
-        sharding_strategy = hsdp_strategy
+        if device_mesh.size(1) == 1:
+            # fsdp_size=1 degenerates the shard dim to size 1. FSDP1 clamps
+            # HYBRID_SHARD to NO_SHARD but keeps reducing gradients over the
+            # size-1 shard group, so ranks on the replicate dim never
+            # synchronize -- silently (pytorch/pytorch#154888, closed as
+            # not_planned). Selecting NO_SHARD explicitly makes FSDP's
+            # non-hybrid path reduce over mesh_dim=0, the replicate dim.
+            sharding_strategy = ShardingStrategy.NO_SHARD
+        else:
+            sharding_strategy = ShardingStrategy.HYBRID_SHARD
+            sharding_strategy = hsdp_strategy
     else:
         raise NotImplementedError(f"Get device mesh ndim={device_mesh.ndim}, but only support 1 or 2")
     return sharding_strategy

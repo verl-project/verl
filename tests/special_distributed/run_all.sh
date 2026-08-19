@@ -25,3 +25,7 @@ torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp2_cp
 # Regression for colocated FSDP2 full-parameter model transfers. It locks in
 # PyTorch's implicit pinned allocation for non-blocking D2H Module.to().
 torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp2_pinned_model_transfer.py
+# Regression: fsdp_size=1 builds a degenerate (world_size, 1) mesh; selecting a
+# hybrid strategy for it silently stops cross-rank gradient synchronization.
+# Two ranks are enough to observe it.
+torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp_degenerate_mesh_grad_sync.py
