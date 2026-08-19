@@ -32,6 +32,7 @@ from torch.utils.data import DistributedSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
+from verl.trainer.sft_val_utils import resolve_sft_val_batch_size
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint import CheckpointHandler, OrchestrationMode
 from verl.utils.dataset.dataset_utils import SFTTensorCollator
@@ -201,17 +202,20 @@ class SFTTrainer:
         )
 
         if self.val_dataset:
+            val_batch_size = resolve_sft_val_batch_size(
+                config.data, self.train_batch_size_per_dp, len(self.val_dataset)
+            )
             self.val_sampler = DistributedSampler(
-                self.val_dataset, shuffle=False, num_replicas=dp_size, rank=dp_rank, drop_last=True
+                self.val_dataset, shuffle=False, num_replicas=dp_size, rank=dp_rank, drop_last=False
             )
             self.val_dataloader = StatefulDataLoader(
                 dataset=self.val_dataset,
-                batch_size=self.train_batch_size_per_dp,
+                batch_size=val_batch_size,
                 sampler=self.val_sampler,
                 collate_fn=self.collate_fn,
                 num_workers=8,
                 pin_memory=False,
-                drop_last=True,
+                drop_last=False,
                 pin_memory_device=device_name,
             )
         else:
@@ -364,11 +368,19 @@ class SFTTrainer:
                         metrics = tu.get(output, "metrics")
                         val_losses.append(metrics["loss"])
 
-                    val_loss = torch.mean(torch.tensor(val_losses, device=self.device_name))
-
-                    metric = {"val/loss": val_loss.detach().item()}
-                    tracking.log(data=metric, step=global_step)
-                    last_valid_metric = metric
+                    if not val_losses:
+                        log_with_rank(
+                            "Validation produced no batches; skip val/loss rather than logging NaN.",
+                            logger=logger,
+                            rank=0,
+                            level=logging.WARNING,
+                            log_only_rank_0=True,
+                        )
+                    else:
+                        val_loss = torch.mean(torch.tensor(val_losses, device=self.device_name))
+                        metric = {"val/loss": val_loss.detach().item()}
+                        tracking.log(data=metric, step=global_step)
+                        last_valid_metric = metric
 
                 if is_last_step or (self.save_freq > 0 and is_save_step):
                     self.ckpt_handler.save_checkpoint(step=global_step)
