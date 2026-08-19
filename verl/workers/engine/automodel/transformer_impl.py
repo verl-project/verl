@@ -47,6 +47,15 @@ from verl.utils.device import get_device_id, get_device_name
 from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.workers.config import AutomodelEngineConfig, AutomodelOptimizerConfig, HFModelConfig
+from verl.workers.engine.automodel.utils import (
+    _PackedExpertSpec,
+    collect_automodel_lora_param_maps,
+    merged_dense_lora_weight,
+    merged_packed_expert_base,
+    split_moe_lora_adapter,
+    split_packed_expert,
+    to_vllm_peft_dict,
+)
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
@@ -97,9 +106,12 @@ class AutomodelEngine(BaseEngine):
         apply_te_patches()
 
         world_size = torch.distributed.get_world_size()
-        self.distributed_config, self.device_mesh, self.moe_mesh = build_distributed_config_from_engine_config(
-            self.engine_config, world_size
-        )
+        (
+            self.distributed_setup,
+            self.distributed_config,
+            self.device_mesh,
+            self.moe_mesh,
+        ) = build_distributed_config_from_engine_config(self.engine_config, world_size)
 
         if self.engine_config.full_determinism:
             enable_full_determinism(seed=self.engine_config.seed)
@@ -128,8 +140,13 @@ class AutomodelEngine(BaseEngine):
 
     def initialize(self):
         """Build the model, optimizer, LR scheduler, and checkpointer using Automodel infrastructure."""
-        self.module = build_automodel_model(
-            self.model_config, self.engine_config, self.distributed_config, self.device_mesh, self.moe_mesh
+        self.module, self.peft_config = build_automodel_model(
+            self.model_config,
+            self.engine_config,
+            self.distributed_setup,
+            self.distributed_config,
+            self.device_mesh,
+            self.moe_mesh,
         )
         log_gpu_memory_usage("After Automodel model build", logger=logger)
 
@@ -155,13 +172,12 @@ class AutomodelEngine(BaseEngine):
 
     def _build_optimizer(self, module):
         """Build optimizer via Automodel's build_optimizer."""
-        from nemo_automodel.components.config.loader import ConfigNode
-        from nemo_automodel.recipes.llm.train_ft import build_optimizer as automodel_build_optimizer
+        from nemo_automodel.components.optim.optimizer import build_optimizer as automodel_build_optimizer
 
         config = self.optimizer_config
 
-        opt_dict = {
-            "_target_": f"{config.optimizer_impl}.{config.optimizer}",
+        optimizer_name = f"{config.optimizer_impl}.{config.optimizer}"
+        opt_kwargs = {
             "lr": config.lr,
             "weight_decay": config.weight_decay,
             "eps": config.eps,
@@ -169,21 +185,20 @@ class AutomodelEngine(BaseEngine):
         }
 
         if config.master_weights:
-            opt_dict["master_weights"] = config.master_weights
+            opt_kwargs["master_weights"] = config.master_weights
         if config.store_param_remainders:
-            opt_dict["store_param_remainders"] = config.store_param_remainders
+            opt_kwargs["store_param_remainders"] = config.store_param_remainders
 
         _short_to_torch = {"bf16": "torch.bfloat16", "fp32": "torch.float32", "fp16": "torch.float16"}
         for attr in ("exp_avg_dtype", "exp_avg_sq_dtype", "master_weight_dtype"):
             val = getattr(config, attr, None)
             if val is not None:
-                opt_dict[attr] = _short_to_torch.get(val, val)
+                opt_kwargs[attr] = _short_to_torch.get(val, val)
 
         if config.override_optimizer_config:
-            opt_dict.update(config.override_optimizer_config)
+            opt_kwargs.update(config.override_optimizer_config)
 
-        cfg_opt = ConfigNode(opt_dict)
-        optimizers = automodel_build_optimizer(module, cfg_opt, self.distributed_config, self.device_mesh)
+        optimizers = automodel_build_optimizer(module, (optimizer_name, opt_kwargs), device_mesh=self.device_mesh)
         assert len(optimizers) == 1, f"Expected 1 optimizer, got {len(optimizers)}"
         return optimizers[0]
 
@@ -355,6 +370,7 @@ class AutomodelEngine(BaseEngine):
             raise ValueError(f"Invalid device type: {device}")
 
     def _build_checkpointer(self):
+        is_peft = self.peft_config is not None
         ckpt_config = CheckpointingConfig(
             enabled=True,
             checkpoint_dir="checkpoints/",
@@ -362,7 +378,7 @@ class AutomodelEngine(BaseEngine):
             model_cache_dir=HF_HUB_CACHE,
             model_repo_id=self.model_config.path,
             save_consolidated=True,
-            is_peft=False,
+            is_peft=is_peft,
         )
         self.checkpointer = Checkpointer(
             config=ckpt_config,
@@ -386,7 +402,7 @@ class AutomodelEngine(BaseEngine):
             load_automodel_model_to_gpu(self.module)
 
         # Save model weights
-        self.checkpointer.save_model(self.module, local_path)
+        self.checkpointer.save_model(self.module, local_path, peft_config=self.peft_config)
 
         # Save optimizer and LR scheduler state
         if self.optimizer is not None:
@@ -404,14 +420,23 @@ class AutomodelEngine(BaseEngine):
         if self._is_offload_param:
             load_automodel_model_to_gpu(self.module)
 
-        model_path = os.path.join(local_path, "model")
-        if not os.path.isdir(model_path):
-            model_path = local_path
-        self.checkpointer.load_model(self.module, model_path)
+        # Resume a pre-trained LoRA adapter from a standalone path (base weights
+        # were already loaded at initialize(); is_peft=True reads adapter_model.safetensors).
+        adapter_path = getattr(self.model_config, "lora_adapter_path", None)
+        if adapter_path is not None and self.peft_config is not None:
+            from verl.utils.fs import copy_to_local
 
-        if self.optimizer is not None:
-            scheduler_list = [self.lr_scheduler] if self.lr_scheduler is not None else None
-            self.checkpointer.load_optimizer(self.optimizer, self.module, local_path, scheduler=scheduler_list)
+            local_adapter_path = copy_to_local(adapter_path, use_shm=self.model_config.use_shm)
+            self.checkpointer.load_model(self.module, local_adapter_path)
+        else:
+            model_path = os.path.join(local_path, "model")
+            if not os.path.isdir(model_path):
+                model_path = local_path
+            self.checkpointer.load_model(self.module, model_path)
+
+            if self.optimizer is not None:
+                scheduler_list = [self.lr_scheduler] if self.lr_scheduler is not None else None
+                self.checkpointer.load_optimizer(self.optimizer, self.module, local_path, scheduler=scheduler_list)
 
         torch.distributed.barrier()
         if self._is_offload_param:
@@ -420,21 +445,145 @@ class AutomodelEngine(BaseEngine):
         if self._is_offload_optimizer and self.optimizer is not None:
             offload_automodel_optimizer(self.optimizer)
 
-    def get_per_tensor_param(self, **kwargs):
+    def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         load_automodel_model_to_gpu(self.module)
 
         params = self.module.state_dict()
         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
 
+        # Drop parametrization metadata (e.g. Moonlight MLA ``*_extra_state``) — no
+        # matching vLLM param, would KeyError during weight sync.
+        params = {k: v for k, v in params.items() if "_extra_state" not in k}
+
+        merge_lora = self.peft_config is not None and self.model_config.lora.get("merge", False)
+
+        if self.peft_config is not None and not merge_lora:
+            # Two-phase adapter sync: base_sync_done=False streams the whole base
+            # model (load_format=dummy), base_sync_done=True yields adapter-only
+            # params + peft_config for vLLM add_lora.
+            if base_sync_done:
+                params = {k: v for k, v in params.items() if "lora_" in k}
+            else:
+                params = {k: v for k, v in params.items() if "lora_" not in k}
+
         if self._is_offload_param:
             offload_automodel_model_to_cpu(self.module)
 
+        # One tree walk -> packed base expert specs (phase-1 split), MoE LoRA specs
+        # (phase-2 split), patched-linear prefixes (phase-1 _remap), and module
+        # refs for the merge path.
+        (
+            packed_expert_prefixes,
+            moe_lora_prefixes,
+            lora_linear_prefixes,
+            moe_lora_modules,
+            dense_lora_modules,
+        ) = collect_automodel_lora_param_maps(self.module)
+
+        if merge_lora:
+            return self._merged_lora_param_generator(
+                params, moe_lora_modules, dense_lora_modules, packed_expert_prefixes
+            ), None
+
         def param_generator():
+            lora_base_sync = self.peft_config is not None and not base_sync_done
+
+            # vLLM wraps every linear leaf as ``.base_layer.`` under enable_lora;
+            # phase-1 base keys must carry the suffix to match. Detect linear
+            # leaves (weight/bias with ndim>=2) at runtime; lora_* submodules and
+            # per-expert split leaves (added from the split specs) are handled.
+            _linear_leaf_basenames = set()
+            if lora_base_sync:
+                for _mname, _mod in self.module.named_modules():
+                    for _pname, _p in _mod.named_parameters(recurse=False):
+                        if _pname in ("weight", "bias") and _p.ndim >= 2:
+                            _leaf = _mname.rpartition(".")[-1]
+                            if not _leaf.startswith("lora_"):
+                                _linear_leaf_basenames.add(_leaf)
+                            break
+                for _spec in packed_expert_prefixes.values():
+                    for _sub_names in _spec.splits:
+                        _linear_leaf_basenames.update(_sub_names)
+
+            def _remap(key):
+                if not lora_base_sync:
+                    return key
+                # lm_head/embed are not LinearBase (ParallelLMHead/VocabParallelEmbedding).
+                if key.endswith("lm_head.weight") or key.endswith("embed_tokens.weight"):
+                    return key
+                module_k, _, _param_leaf = key.rpartition(".")
+                _, _, mod_leaf = module_k.rpartition(".")
+                if mod_leaf not in _linear_leaf_basenames:
+                    return key
+                for prefix in lora_linear_prefixes:
+                    if key.startswith(prefix + "."):
+                        return f"{prefix}.base_layer.{key[len(prefix) + 1 :]}"
+                return f"{module_k}.base_layer.{key[len(module_k) + 1 :]}"
+
             for name, param in params.items():
                 unsharded_tensor = param.full_tensor() if isinstance(param, DTensor) else param
-                yield name, unsharded_tensor
+                # Phase 2: split MoE adapter params into per-expert lora_A/lora_B.
+                moe_lora_spec = moe_lora_prefixes.get(name)
+                if moe_lora_spec is not None and unsharded_tensor.dim() == 3:
+                    yield from split_moe_lora_adapter(moe_lora_spec, name.rsplit(".", 1)[-1], unsharded_tensor)
+                    continue
+                # Phase 1: split packed MoE base tensors into per-expert keys.
+                spec = packed_expert_prefixes.get(name)
+                if spec is not None and unsharded_tensor.dim() == 3:
+                    for expert_id in range(unsharded_tensor.size(0)):
+                        for sub_name, sub_tensor in split_packed_expert(spec, unsharded_tensor, expert_id):
+                            yield _remap(f"{spec.prefix}.{expert_id}.{sub_name}"), sub_tensor
+                    continue
+                yield _remap(name), unsharded_tensor
 
-        return param_generator(), None
+        # Both phases return non-null peft_config so the rollout routes phase-1
+        # base keys and phase-2 adapter tensors through resolve_weight_name
+        # (same path FSDP/Megatron use). The resolver keeps .base_layer. for
+        # strict loaders and strips it for flat loaders, so _remap's suffixed
+        # keys reconcile across architectures. Phase 2 short-circuits to add_lora.
+        peft_config_dict = to_vllm_peft_dict(self.peft_config) if self.peft_config is not None else None
+        return param_generator(), peft_config_dict
+
+    def _merged_lora_param_generator(self, params, moe_lora_modules, dense_lora_modules, packed_expert_prefixes):
+        """Stream full HF-keyed base params with LoRA adapters folded in
+        (``model.lora.merge=true``). Returns ``peft_config=None`` — the rollout
+        has ``enable_lora`` disabled and expects a standard weight update."""
+        # Split rules for GroupedExpertsLoRA packed base attrs. LoRA experts are
+        # in moe_lora_modules (not packed_expert_prefixes), so build specs inline.
+        _MERGE_SPLITS = {
+            "gate_and_up_projs": (("gate_proj", "up_proj"),),
+            "down_projs": (("down_proj",),),
+        }
+
+        for name, param in params.items():
+            if "lora_" in name:
+                continue  # adapters folded into the base below; skip standalone.
+            # Dense LinearLoRA base weight: fold base + scale*(B@A).
+            base_leaf = name.rsplit(".", 1)[-1]
+            prefix = name[: -len(base_leaf) - 1] if "." in name else ""
+            if base_leaf == "weight" and prefix in dense_lora_modules:
+                yield name, merged_dense_lora_weight(dense_lora_modules[prefix])
+                continue
+            # Packed MoE expert base (LoRA experts detected via moe_lora_modules).
+            if base_leaf in _MERGE_SPLITS and prefix in moe_lora_modules:
+                module = moe_lora_modules[prefix]
+                merged = merged_packed_expert_base(module, base_leaf)
+                spec = _PackedExpertSpec(prefix=prefix, packed_attr=base_leaf, splits=_MERGE_SPLITS[base_leaf])
+                for expert_id in range(merged.size(0)):
+                    for sub_name, sub_tensor in split_packed_expert(spec, merged, expert_id):
+                        yield f"{prefix}.{expert_id}.{sub_name}", sub_tensor
+                continue
+            # Non-LoRA base param (embeddings, lm_head, router, shared experts,
+            # norms); plain non-LoRA GroupedExperts still go through packed_expert_prefixes.
+            spec = packed_expert_prefixes.get(name)
+            if spec is not None:
+                unsharded = param.full_tensor() if isinstance(param, DTensor) else param
+                for expert_id in range(unsharded.size(0)):
+                    for sub_name, sub_tensor in split_packed_expert(spec, unsharded, expert_id):
+                        yield f"{spec.prefix}.{expert_id}.{sub_name}", sub_tensor
+                continue
+            unsharded = param.full_tensor() if isinstance(param, DTensor) else param
+            yield name, unsharded
 
 
 class AutomodelEvalModeCtx(BaseEngineCtx):
@@ -692,29 +841,26 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
         micro_batch = micro_batch.to(get_device_id())
         model_inputs, output_args = self.prepare_model_inputs(micro_batch=micro_batch)
 
-        with torch.autocast(device_type=device_name, dtype=torch.bfloat16):
-            raw_output = self.module(
-                **model_inputs,
-                use_cache=False,
+        raw_output = self.module(
+            **model_inputs,
+            use_cache=False,
+        )
+
+        model_output = self.prepare_model_outputs(output=raw_output, output_args=output_args, micro_batch=micro_batch)
+
+        if loss_function is not None:
+            loss, metrics = loss_function(
+                model_output=model_output, data=micro_batch, dp_group=self.get_data_parallel_group()
             )
+        else:
+            assert forward_only, "forward_only must be True when loss_function is None"
+            loss = torch.tensor(1.0, device=device_name)
+            metrics = {}
 
-            model_output = self.prepare_model_outputs(
-                output=raw_output, output_args=output_args, micro_batch=micro_batch
-            )
+        output = {
+            "model_output": model_output,
+            "loss": loss.detach().item(),
+            "metrics": metrics,
+        }
 
-            if loss_function is not None:
-                loss, metrics = loss_function(
-                    model_output=model_output, data=micro_batch, dp_group=self.get_data_parallel_group()
-                )
-            else:
-                assert forward_only, "forward_only must be True when loss_function is None"
-                loss = torch.tensor(1.0, device=device_name)
-                metrics = {}
-
-            output = {
-                "model_output": model_output,
-                "loss": loss.detach().item(),
-                "metrics": metrics,
-            }
-
-            return loss, output
+        return loss, output

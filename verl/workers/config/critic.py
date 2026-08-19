@@ -23,6 +23,7 @@ from verl.utils.profiler import ProfilerConfig
 
 from .checkpoint import McoreCheckpointConfig
 from .engine import (
+    AutomodelEngineConfig,
     FSDPEngineConfig,
     McoreEngineConfig,
     TorchtitanEngineConfig,
@@ -38,6 +39,7 @@ __all__ = [
     "TorchTitanCriticConfig",
     "FSDPCriticModelCfg",
     "VeOmniCriticConfig",
+    "AutomodelCriticConfig",
 ]
 
 
@@ -313,3 +315,28 @@ class VeOmniCriticConfig(CriticConfig):
                         f"critic.ppo_micro_batch_size ({self.ppo_micro_batch_size}) * "
                         f"veomni.ulysses_parallel_size ({sp_size}) must be >= n_gpus ({n_gpus})"
                     )
+
+
+@dataclass
+class AutomodelCriticConfig(CriticConfig):
+    """Configuration for Automodel (nemo_automodel) critic model training.
+
+    Uses the nemo_automodel backend for the value model, mirroring
+    ``AutomodelActorConfig`` but for the critic role. For GRPO
+    (``critic.enable=False``) this is never instantiated, but Hydra still
+    composes the ``${model_engine}_critic`` group at config-load time, so the
+    yaml + dataclass must exist.
+
+    Args:
+        strategy (str): Training strategy set to 'automodel'.
+        automodel_config (AutomodelEngineConfig): Automodel engine configuration.
+    """
+
+    strategy: str = "automodel"
+    automodel_config: AutomodelEngineConfig = field(default_factory=AutomodelEngineConfig)
+    grad_clip: float = 1.0
+
+    def __post_init__(self):
+        """Set engine to Automodel config."""
+        super().__post_init__()
+        self.engine = self.automodel_config
