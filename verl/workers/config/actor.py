@@ -24,6 +24,7 @@ from verl.utils.qat import QATConfig
 
 from .checkpoint import McoreCheckpointConfig
 from .engine import (
+    AutomodelEngineConfig,
     FSDPEngineConfig,
     McoreEngineConfig,
     TorchtitanEngineConfig,
@@ -41,6 +42,7 @@ __all__ = [
     "VeOmniActorConfig",
     "QATConfig",
     "TorchTitanActorConfig",
+    "AutomodelActorConfig",
 ]
 
 
@@ -373,6 +375,33 @@ class VeOmniActorConfig(ActorConfig):
                 "configuration for MoE routing replay. Set "
                 "actor.use_remove_padding=True or router_replay.mode='disabled'."
             )
+
+
+@dataclass
+class AutomodelActorConfig(ActorConfig):
+    """Configuration for Automodel (nemo_automodel) actor models.
+
+    The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
+
+    Args:
+        strategy (str): Training strategy set to 'automodel' for the nemo_automodel backend.
+        automodel_config (AutomodelEngineConfig): Configuration for Automodel engine settings.
+        use_remove_padding (bool): Whether to remove padding tokens in inputs during training.
+        use_rollout_log_probs (bool): Whether to use log probabilities from rollout engine.
+        grad_clip (float): Gradient clipping for actor updates.
+    """
+
+    strategy: str = "automodel"
+    automodel_config: AutomodelEngineConfig = field(default_factory=AutomodelEngineConfig)
+    use_remove_padding: bool = False
+    use_rollout_log_probs: bool = False
+    grad_clip: float = 1.0
+
+    def __post_init__(self):
+        """Validate Automodel actor configuration parameters."""
+        super().__post_init__()
+        self.engine = self.automodel_config
+        object.__setattr__(self.engine, "strategy", self.strategy)
 
 
 @dataclass
