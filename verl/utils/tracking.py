@@ -305,6 +305,29 @@ class RLInsightLogger:
             yield
 
     @classmethod
+    def trace_span(
+        cls,
+        name: str,
+        *,
+        start_time_ns: int,
+        end_time_ns: int,
+        attributes: dict[str, Any] | None = None,
+    ) -> None:
+        """Report one completed span through rl-insight's direct trace API."""
+        if not cls.enabled():
+            return
+
+        if not cls._init_done:
+            cls._get_rl_insight().init()
+            cls._init_done = True
+        cls._get_rl_insight().trace_span(
+            name=name,
+            start_time_ns=start_time_ns,
+            end_time_ns=end_time_ns,
+            attributes=dict(attributes or {}),
+        )
+
+    @classmethod
     def register_rollout_metrics(
         cls,
         server_addresses: list[str],
