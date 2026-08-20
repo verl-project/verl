@@ -13,7 +13,7 @@ n_gpus_per_node=8
 trainer_nnodes=8
 
 project_name='wuxibin_dapo'
-exp_name='deepseek_v4_flash_ep8_sp4_0804b'
+exp_name='deepseek_v4_flash_base_ep8_sp2_qat_0824a'
 
 # ===================================== Algorithm =====================================
 adv_estimator=grpo
@@ -25,8 +25,8 @@ kl_coef=0.001
 use_kl_loss=False
 kl_loss_coef=0.001
 
-clip_ratio_low=3e-4
-clip_ratio_high=4e-4
+clip_ratio_low=5e-4
+clip_ratio_high=5.3e-4
 
 actor_lr=1e-6
 critic_lr=2e-6
@@ -35,7 +35,7 @@ gae_lam=0.95
 critic_warmup=0
 
 # ===================================== Data/Model =====================================
-model_path=$HDFS_ROOT/model/deepseek-ai/DeepSeek-V4-Flash
+model_path=$HDFS_ROOT/model/deepseek-ai/DeepSeek-V4-Flash-Base
 train_files=$DATA_ROOT/dataset/BytedTsinghua-SIA/DAPO-Math-17k/data/dapo-math-17k.parquet
 test_files=$DATA_ROOT/dataset/aime25_test.parquet
 checkpoint_dir=$DATA_ROOT/checkpoint/$project_name/$exp_name
@@ -52,7 +52,7 @@ expert_size=${expert_size:-8}
 use_remove_padding=True
 use_dynamic_bsz=True
 max_prompt_length=$((1024 * 2))
-max_response_length=$((1024 * 8))
+max_response_length=$((1024 * 30))
 actor_max_token_len_per_gpu=$(((max_prompt_length + max_response_length) / usp_size))
 
 # Inference config
@@ -78,6 +78,7 @@ ENGINE_CONFIG=(
     actor_rollout_ref.actor.veomni.dsa_indexer_implementation=tilelang
     actor_rollout_ref.actor.veomni.dsa_attention_implementation=tilelang
     actor_rollout_ref.actor.veomni.mhc_implementation=tilelang
+    actor_rollout_ref.actor.veomni.qat_implementation=fp8_blockwise
     actor_rollout_ref.actor.veomni.router_replay.mode=R3
 )
 
@@ -105,6 +106,7 @@ ROLLOUT_CONFIG=(
     actor_rollout_ref.rollout.data_parallel_size=$infer_dp
     actor_rollout_ref.rollout.expert_parallel_size=$infer_ep
     actor_rollout_ref.rollout.calculate_log_probs=True
+    actor_rollout_ref.rollout.max_model_len=$((max_prompt_length + max_response_length))
     actor_rollout_ref.rollout.gpu_memory_utilization=$gpu_memory_utilization
     actor_rollout_ref.rollout.n=$n_resp_per_prompt
     actor_rollout_ref.rollout.val_kwargs.top_p=0.7

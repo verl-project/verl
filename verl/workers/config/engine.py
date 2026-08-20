@@ -436,6 +436,7 @@ class VeOmniEngineConfig(EngineConfig):
     dsa_indexer_implementation: str = "eager"
     dsa_attention_implementation: str = "eager"
     mhc_implementation: str = "eager"
+    qat_implementation: str = "none"
     force_use_huggingface: bool = False
     activation_gpu_limit: float = 0.0
     basic_modules: Optional[list[str]] = field(default_factory=list)

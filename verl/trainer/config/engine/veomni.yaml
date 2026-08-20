@@ -76,6 +76,7 @@ load_balancing_loss_implementation: eager
 dsa_indexer_implementation: eager
 dsa_attention_implementation: eager
 mhc_implementation: eager
+qat_implementation: none
 
 force_use_huggingface: false
 
