@@ -351,6 +351,7 @@ class RLInsightLogger:
         from rl_insight.agent_loop import agent_loop_session
 
         return agent_loop_session(
+            project=project_name,
             experiment_name=experiment_name,
             sample=sample,
             session=session,
