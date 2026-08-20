@@ -144,9 +144,12 @@ class AgentLoopOutput(BaseModel):
             rm_scores[-1] = reward_score
             output["rm_scores"] = rm_scores
 
+        # Mutating a default dict does not add the field to Pydantic's fields-set,
+        # so model_dump(exclude_unset=True) can omit populated extra fields.
+        extra_fields = output.setdefault("extra_fields", self.extra_fields.copy())
         teacher_ids, teacher_logprobs = (
-            output["extra_fields"].pop("teacher_ids", None),
-            output["extra_fields"].pop("teacher_logprobs", None),
+            extra_fields.pop("teacher_ids", None),
+            extra_fields.pop("teacher_logprobs", None),
         )
         if teacher_ids is not None:
             output["teacher_ids"] = teacher_ids
