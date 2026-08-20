@@ -17,7 +17,7 @@ from typing import Any
 
 import torch
 
-from verl import DataProto
+from verl.protocol import DataProto
 from verl.workers.reward_manager import register
 from verl.workers.reward_manager.abstract import AbstractRewardManager, RawRewardFn
 

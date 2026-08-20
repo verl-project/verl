@@ -17,10 +17,10 @@
 import numpy as np
 import pytest
 import torch
-from omegaconf import OmegaConf
 from tensordict import TensorDict
 
-from verl import DataProto as ClassicDataProto
+from verl import DataProto as PublicDataProto
+from verl import LegacyDataProto
 from verl.experimental.neoproto import (
     DataProto,
     DefaultStorageEngine,
@@ -29,7 +29,6 @@ from verl.experimental.neoproto import (
 )
 from verl.experimental.neoproto.worker_bridge import finalize_engine_output, prepare_engine_input
 from verl.single_controller.base.decorator import _split_args_kwargs_data_proto
-from verl.trainer.ppo.data_plane import ClassicPPODataPlane, build_data_plane
 from verl.workers.utils.batch_adapter import EngineBatchSpec, run_engine_batch, set_batch_control_fields
 
 _BASE_KEYS = ("input_ids", "attention_mask", "position_ids", "response_mask", "prompts", "responses")
@@ -97,71 +96,38 @@ def _bridge_batch(storage, *, extra_tensors=None):
 
 def test_neoproto_implements_common_data_proto_contract(storage):
     data = DataProto.from_dict(tensors={"input_ids": torch.arange(8).view(4, 2)}, storage=storage)
-    assert isinstance(data, ClassicDataProto)
+    assert PublicDataProto is DataProto
+    assert isinstance(data, LegacyDataProto)
     assert callable(data.prepare_dispatch)
     assert data.new_like(batch=TensorDict({}, batch_size=[0])).__class__ is DataProto
 
 
-@pytest.mark.parametrize(
-    ("name", "expected_class"),
-    [("classic", ClassicDataProto), ("neoproto", DataProto)],
-)
-def test_data_plane_factory_selects_once(name, expected_class):
-    config = OmegaConf.create({"trainer": {"data_plane": name, "neoproto_strict_mode": False}})
-
-    strategy = build_data_plane(config)
-
-    assert strategy.name == name
-    assert strategy.data_proto_cls is expected_class
-    set_default_storage_engine(None)
-
-
-def test_data_plane_factory_accepts_legacy_neoproto_flag():
-    config = OmegaConf.create({"trainer": {"use_neoproto": True, "neoproto_strict_mode": False}})
-
-    strategy = build_data_plane(config)
-
-    assert strategy.name == "neoproto"
-    set_default_storage_engine(None)
-
-
 def test_neoproto_request_controls_do_not_mutate_source(storage):
-    from verl.experimental.neoproto.data_plane import NeoPPODataPlane
-
     data = _bridge_batch(storage)
-    strategy = NeoPPODataPlane()
-
-    prepared = strategy.prepare_inference(data, {"no_lora_adapter": True})
+    request = data.prepare_worker_request(no_lora_adapter=True)
 
     assert "no_lora_adapter" not in data.meta_info
-    assert prepared.payload.meta_info["no_lora_adapter"] is True
+    assert request.meta_info["no_lora_adapter"] is True
 
 
-def test_classic_strategy_prepares_and_collects_without_trainer_branches(monkeypatch):
-    monkeypatch.setattr("verl.trainer.ppo.data_plane.left_right_2_no_padding", lambda data: data)
-    monkeypatch.setattr("verl.trainer.ppo.data_plane.no_padding_2_padding", lambda value, data: value)
-    data = ClassicDataProto.from_dict(
-        tensors={
-            "input_ids": torch.ones(2, 2, dtype=torch.long),
-            "attention_mask": torch.ones(2, 2, dtype=torch.long),
-        }
-    )
-    strategy = ClassicPPODataPlane()
-
-    prepared = strategy.prepare_inference(data, {"compute_loss": False})
-    output = TensorDict({"log_probs": torch.zeros(2, 1, dtype=torch.bfloat16)}, batch_size=[2])
-    collected = strategy.collect_inference(
-        output,
-        prepared,
-        {"log_probs": "old_log_probs"},
-        restore_keys=("log_probs",),
-        fp32_keys=("log_probs",),
+def test_neoproto_collects_worker_output_by_ref(storage):
+    output = DataProto.from_dict(
+        tensors={"log_probs": torch.zeros(2, 1), "entropy": torch.ones(2, 1)},
+        meta_info={"metrics": {"mfu": 0.5}},
+        storage=storage,
     )
 
-    compute_loss = prepared.payload["compute_loss"]
-    assert compute_loss is False or getattr(compute_loss, "data", None) is False
-    assert isinstance(collected, ClassicDataProto)
-    assert collected.batch["old_log_probs"].dtype == torch.float32
+    collected = DataProto.collect_worker_output(output, {"log_probs": "old_log_probs"})
+
+    assert set(collected.batch.keys()) == {"old_log_probs"}
+    assert collected.ref_table["old_log_probs"] is output.ref_table["log_probs"]
+
+
+def test_neoproto_rejects_non_neo_worker_output():
+    output = TensorDict({"log_probs": torch.zeros(2, 1)}, batch_size=[2])
+
+    with pytest.raises(RuntimeError, match="non-Neo worker payload"):
+        DataProto.collect_worker_output(output, {"log_probs": "old_log_probs"})
 
 
 def test_split_args_attaches_obj_ref_local_ref(storage):
@@ -179,14 +145,6 @@ def test_split_args_attaches_obj_ref_local_ref(storage):
     for c in chunks:
         assert isinstance(c, DataProto)
         assert len(c) == 2
-
-
-def test_classic_dispatch_hook_is_noop():
-    data = ClassicDataProto.from_dict(tensors={"input_ids": torch.arange(16).view(8, 2)})
-    chunks = _split_args_kwargs_data_proto(4, data)[0][0]
-
-    assert len(chunks) == 4
-    assert all(not hasattr(chunk, "OBJ_REF") for chunk in chunks)
 
 
 def test_attach_preserialized_ref_tables_with_ray_object_store():

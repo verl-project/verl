@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 import torch
 
-from verl import DataProto as ClassicDataProto
+from verl import LegacyDataProto as ClassicDataProto
 from verl.experimental.neoproto import DataProto, InMemoryStorageEngine, set_default_storage_engine
 from verl.protocol import BatchData, pad_dataproto_to_divisor
 from verl.single_controller.base.decorator import _split_args_kwargs_data_proto_with_auto_padding
@@ -65,14 +65,14 @@ def _make_data(storage, offset=0, *, auto_padding=False):
     )
 
 
-@pytest.mark.parametrize("data_plane", ["classic", "neoproto"])
-def test_common_data_proto_surface_matches(data_plane, storage):
+@pytest.mark.parametrize("implementation", ["classic", "neoproto"])
+def test_common_data_proto_surface_matches(implementation, storage):
     tensors = {
         "input_ids": torch.arange(12).reshape(4, 3),
         "attention_mask": torch.ones(4, 3, dtype=torch.int64),
     }
     non_tensors = {"uid": np.asarray([f"id-{index}" for index in range(4)], dtype=object)}
-    if data_plane == "classic":
+    if implementation == "classic":
         data = ClassicDataProto.from_dict(tensors=tensors, non_tensors=non_tensors)
     else:
         data = DataProto.from_dict(tensors=tensors, non_tensors=non_tensors, storage=storage)
@@ -86,14 +86,14 @@ def test_common_data_proto_surface_matches(data_plane, storage):
     output = merged.new_like(
         batch=merged.batch,
         non_tensor_batch=merged.non_tensor_batch,
-        meta_info={"source": data_plane},
+        meta_info={"source": implementation},
     )
 
     assert type(output) is type(data)
     assert output.batch["input_ids"][:, 0].tolist() == [3, 9, 3, 9]
     assert output.batch["values"].squeeze(-1).tolist() == [10.0, 30.0, 10.0, 30.0]
     assert output.non_tensor_batch["uid"].tolist() == ["id-1", "id-3", "id-1", "id-3"]
-    assert output.meta_info["source"] == data_plane
+    assert output.meta_info["source"] == implementation
 
 
 def test_driver_operations_are_metadata_only(storage):

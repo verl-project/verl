@@ -5,7 +5,7 @@
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
-"""Experimental NeoProto data plane for the v0 trainer."""
+"""NeoProto ref/index batch implementation for the v0 trainer."""
 
 from .neo import IndexView, NeoProto
 from .storage import (

@@ -18,7 +18,8 @@ import os
 
 from packaging.version import parse as parse_version
 
-from .protocol import DataProto
+from .experimental.neoproto.views import DataProto
+from .protocol import DataProto as LegacyDataProto
 from .utils.device import is_npu_available
 from .utils.import_utils import import_external_libs
 from .utils.logging_utils import set_basic_config
@@ -32,7 +33,7 @@ with open(os.path.join(version_folder, "version/version")) as f:
 set_basic_config(level=logging.WARNING)
 
 
-__all__ = ["DataProto", "__version__"]
+__all__ = ["DataProto", "LegacyDataProto", "__version__"]
 
 
 modules = os.getenv("VERL_USE_EXTERNAL_MODULES", "")

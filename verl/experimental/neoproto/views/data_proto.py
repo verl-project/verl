@@ -305,8 +305,8 @@ class DataProto(NeoProto, RLDataProto):
             spec = self.schema.get(
                 k,
                 FieldSpec(
-                    dtype="float32",
-                    shape=tuple(v.shape[1:]) if v.dim() > 1 else (),
+                    dtype=normalize_dtype(v),
+                    shape=tuple(v.shape),
                     token_axis=1 if v.dim() > 1 else None,
                 ),
             )
@@ -317,7 +317,9 @@ class DataProto(NeoProto, RLDataProto):
                 spec=spec,
                 backend=_batch_tensor_backend(v),
             )
-        if bs > 0:
+        if bs < 0 and hasattr(value, "batch_size") and len(value.batch_size) > 0:
+            bs = int(value.batch_size[0])
+        if bs >= 0:
             self.ref_table.batch_size = bs
         if self.dim0_index.sample_indices is None:
             self.dim0_index = self.dim0_index.identity(self.ref_table.batch_size)
@@ -348,6 +350,8 @@ class DataProto(NeoProto, RLDataProto):
             engine = self._engine()
             bs = -1
             for k, v in value.items():
+                if not isinstance(v, np.ndarray):
+                    v = np.asarray(v, dtype=object)
                 granularity = "sample"
                 v_bs = self._cal_bs_size(v)
                 if bs == -1:
@@ -387,6 +391,7 @@ class DataProto(NeoProto, RLDataProto):
         dim0_index: Optional[IndexView] = None,
         storage: Optional[StorageEngine] = None,
     ) -> DataProto:
+        assert num_batch_dims == 1, "NeoProto-backed DataProto supports exactly one batch dimension"
         tensors = tensors or {}
         non_tensors = non_tensors or {}
         meta_info = dict(meta_info or {})
@@ -405,6 +410,10 @@ class DataProto(NeoProto, RLDataProto):
                 # TODO: only materialize for token-based tensors
                 if batch_size is None and hasattr(v, "shape") and len(v.shape) >= num_batch_dims:
                     batch_size = int(v.shape[0])
+                elif hasattr(v, "shape") and len(v.shape) >= num_batch_dims:
+                    assert batch_size == int(v.shape[0]), (
+                        f"Not all tensors have the same batch size: {batch_size} != {int(v.shape[0])} for {k}"
+                    )
                 spec = FieldSpec(
                     dtype=normalize_dtype(v),
                     shape=tuple(v.shape) if hasattr(v, "shape") else (),
@@ -425,9 +434,15 @@ class DataProto(NeoProto, RLDataProto):
             if isinstance(v, Ref):
                 inst.add_ref(k, v, granularity=granularity)
             else:
+                if not isinstance(v, np.ndarray):
+                    v = np.asarray(v, dtype=object)
                 # TODO: only materialize for token-based np array
                 if batch_size is None and hasattr(v, "shape") and len(v.shape) >= 1:
                     batch_size = int(v.shape[0])
+                elif hasattr(v, "shape") and len(v.shape) >= 1:
+                    assert batch_size == int(v.shape[0]), (
+                        f"Tensor and non-tensor batch sizes differ: {batch_size} != {int(v.shape[0])} for {k}"
+                    )
                 spec = FieldSpec(
                     dtype="object",
                     shape=tuple(getattr(v, "shape", ())),
@@ -640,6 +655,28 @@ class DataProto(NeoProto, RLDataProto):
 
         return prepare_neo_engine_batch(self, spec)
 
+    def prepare_worker_request(self, **control_fields: Any) -> DataProto:
+        """Create an RPC-local ref view without mutating the long-lived batch."""
+        request = self.select()
+        request.set_control_fields(**control_fields)
+        return request
+
+    @staticmethod
+    def collect_worker_output(output: Any, key_map: dict[str, str]) -> DataProto:
+        """Select and rename ref-backed worker fields without driver materialization."""
+        ref_table = getattr(output, "ref_table", None)
+        source_keys = [key for key in key_map if ref_table is not None and key in ref_table]
+        if not source_keys:
+            raise RuntimeError(
+                "NeoProto received an empty or non-Neo worker payload; "
+                f"expected one of {sorted(key_map)}, got {type(output)!r}"
+            )
+
+        selected = output.select(batch_keys=source_keys, non_tensor_batch_keys=[], meta_info_keys=[])
+        old_keys = [key for key in source_keys if key_map[key] != key]
+        new_keys = [key_map[key] for key in old_keys]
+        return selected.rename(old_keys=old_keys, new_keys=new_keys) if old_keys else selected
+
     def cpu(self) -> DataProto:
         """NeoProto payload refs already resolve to CPU tensors on workers."""
         return self
@@ -695,24 +732,56 @@ class DataProto(NeoProto, RLDataProto):
             materialized.update(fresh)
         return materialized
 
+    def make_iterator(self, mini_batch_size, epochs, seed=None, dataloader_kwargs=None):
+        """Preserve the legacy iterator API while yielding Neo-backed batches."""
+        legacy_iterator = super().make_iterator(
+            mini_batch_size=mini_batch_size,
+            epochs=epochs,
+            seed=seed,
+            dataloader_kwargs=dataloader_kwargs,
+        )
+        return (type(self).from_verl(batch) for batch in legacy_iterator)
+
     @staticmethod
     def concat(items: list[NeoProto], new_index: bool = False) -> DataProto:
         from verl.protocol import list_of_dict_to_dict_of_list
 
         output = NeoProto.concat(items, new_index=new_index)
         all_metrics = []
+        merged_meta: dict[str, Any] = {}
         for item in items:
             meta = getattr(item, "meta_info", None) or {}
-            metrics = meta.get("metrics")
-            if metrics is None:
-                continue
-            if isinstance(metrics, list):
-                all_metrics.extend(metrics)
-            else:
-                all_metrics.append(metrics)
+            for key, value in meta.items():
+                if key == "metrics":
+                    if value is None:
+                        continue
+                    if isinstance(value, list):
+                        all_metrics.extend(value)
+                    else:
+                        all_metrics.append(value)
+                elif key in merged_meta:
+                    assert merged_meta[key] == value, f"Conflicting values for meta_info key '{key}'"
+                else:
+                    merged_meta[key] = value
+        output.meta_info.update(merged_meta)
         if all_metrics:
             output.meta_info["metrics"] = list_of_dict_to_dict_of_list(all_metrics)
         return output
+
+    def save_to_disk(self, filepath) -> None:
+        """Persist using the historical DataProto pickle API."""
+        import pickle
+
+        with open(filepath, "wb") as file:
+            pickle.dump(self, file)
+
+    @staticmethod
+    def load_from_disk(filepath) -> DataProto:
+        """Load a batch written by :meth:`save_to_disk`."""
+        import pickle
+
+        with open(filepath, "rb") as file:
+            return pickle.load(file)
 
     def dynamic_chunk(self, chunk_size: int) -> DataProto:
         return NeoProto.chunk(self, chunk_size)
@@ -842,7 +911,7 @@ class DataProto(NeoProto, RLDataProto):
                 meta_info=dict(self.meta_info) if self.meta_info is not None else {},
             )
 
-        single = NeoProto.__getitem__(self, key)
+        single = NeoProto.__getitem__(self, key) if isinstance(key, slice) else self.select_idxs(key)
         self._inherit_caches(single, key)
         return single
 
@@ -1030,6 +1099,23 @@ class _BatchProxy:
 
     def __contains__(self, key: str) -> bool:
         return key in self._visible_keys()
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, dict):
+            return False
+        if set(self.keys()) != set(other.keys()):
+            return False
+        for key, expected in other.items():
+            actual = self[key]
+            if _HAVE_TORCH and isinstance(actual, torch.Tensor):
+                if not (isinstance(expected, torch.Tensor) and torch.equal(actual, expected)):
+                    return False
+            elif isinstance(actual, np.ndarray):
+                if not np.array_equal(actual, expected):
+                    return False
+            elif actual != expected:
+                return False
+        return True
 
     def get_cache_key(self, key: str) -> str:
         if len(self._owner.dim0_index.sample_indices) == self._owner.ref_table.batch_size:
