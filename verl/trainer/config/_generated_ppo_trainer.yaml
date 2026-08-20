@@ -849,7 +849,6 @@ trainer:
   - wandb
   log_val_generations: 0
   rollout_data_dir: null
-  correctness_dump_dir: null
   validation_data_dir: null
   nnodes: 1
   n_gpus_per_node: 8
@@ -869,8 +868,6 @@ trainer:
   ray_wait_register_center_timeout: 300
   device: cuda
   use_v1: false
-  data_plane: classic
-  neoproto_strict_mode: false
   v1:
     trainer_mode: sync
     sync: {}

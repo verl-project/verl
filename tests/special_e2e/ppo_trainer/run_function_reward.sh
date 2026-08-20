@@ -2,7 +2,6 @@
 set -xeuo pipefail
 
 NUM_GPUS=${NUM_GPUS:-8}
-DATA_PLANE=${DATA_PLANE:-classic}
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
@@ -61,8 +60,6 @@ RESUME_MODE=${RESUME_MODE:-disable}
 SAVE_FREQ=${SAVE_FREQ:--1}
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-1}
 ROLLOUT_DATA_DIR=${ROLLOUT_DATA_DIR:-null}
-CORRECTNESS_DUMP_DIR=${CORRECTNESS_DUMP_DIR:-null}
-NEOPROTO_STRICT_MODE=${NEOPROTO_STRICT_MODE:-False}
 OUTPUT_FILE=${OUTPUT_FILE:-$(pwd)/output.txt}
 KEEP_OUTPUT_FILE=${KEEP_OUTPUT_FILE:-False}
 
@@ -181,9 +178,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq="${SAVE_FREQ}" \
     trainer.resume_mode="${RESUME_MODE}" \
     trainer.rollout_data_dir="${ROLLOUT_DATA_DIR}" \
-    trainer.correctness_dump_dir="${CORRECTNESS_DUMP_DIR}" \
-    trainer.data_plane="${DATA_PLANE}" \
-    trainer.neoproto_strict_mode="${NEOPROTO_STRICT_MODE}" \
     trainer.total_epochs=2 \
     trainer.device=cuda \
     trainer.total_training_steps="${TOTAL_TRAIN_STEPS}" $@ \

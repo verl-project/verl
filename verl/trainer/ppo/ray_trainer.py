@@ -34,6 +34,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
 from verl import DataProto
+from verl.experimental.neoproto.storage import DefaultStorageEngine, set_default_storage_engine
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
@@ -41,7 +42,6 @@ from verl.trainer.config import AlgoConfig
 from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
-from verl.trainer.ppo.data_plane import build_data_plane
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
@@ -330,10 +330,11 @@ class RayPPOTrainer:
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
-        # dataplane switch
-        self.data_plane = build_data_plane(config)
-        self.data_proto_cls = self.data_plane.data_proto_cls
-        print(f"RayPPOTrainer data_proto_cls={self.data_proto_cls.__module__}.{self.data_proto_cls.__name__}")
+        # NeoProto is the single trainer data path. ``DataProto`` is its
+        # backward-compatible public API, not a runtime-selectable alternative.
+        set_default_storage_engine(DefaultStorageEngine())
+        if os.environ.get("NEO_BRIDGE_FULL_MATERIALIZE", "0") != "0":
+            raise RuntimeError("The NeoProto-only trainer forbids NEO_BRIDGE_FULL_MATERIALIZE")
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
@@ -611,7 +612,7 @@ class RayPPOTrainer:
         sample_uids = []
 
         for test_data in self.val_dataloader:
-            test_batch = self.data_proto_cls.from_single_dict(test_data)
+            test_batch = DataProto.from_single_dict(test_data)
 
             if "uid" not in test_batch.non_tensor_batch:
                 test_batch.non_tensor_batch["uid"] = np.array(
@@ -1217,112 +1218,41 @@ class RayPPOTrainer:
         )
         metrics.update(global_balance_stats)
 
-    def _dump_correctness_tensors(self, batch: DataProto, dump_dir: str) -> None:
-        """Persist a test-only semantic snapshot immediately before PPO updates."""
-        tensor_keys = (
-            "prompts",
-            "responses",
-            "input_ids",
-            "attention_mask",
-            "position_ids",
-            "response_mask",
-            "rollout_log_probs",
-            "old_log_probs",
-            "ref_log_prob",
-            "values",
-            "token_level_scores",
-            "token_level_rewards",
-            "advantages",
-            "returns",
-        )
-        tensors = {}
-        present_keys = set(batch.batch.keys())
-        for key in tensor_keys:
-            if key in present_keys:
-                value = batch.batch[key]
-                tensors[key] = value.detach().cpu().contiguous().clone()
-
-        non_tensors = {}
-        for key in ("index", "data_source", "reward_model"):
-            if key in batch.non_tensor_batch:
-                non_tensors[key] = np.asarray(batch.non_tensor_batch[key]).copy()
-
-        if "uid" in batch.non_tensor_batch:
-            uid_to_group = {}
-            canonical_groups = []
-            for uid in batch.non_tensor_batch["uid"]:
-                uid_to_group.setdefault(uid, len(uid_to_group))
-                canonical_groups.append(uid_to_group[uid])
-            non_tensors["uid_group"] = np.asarray(canonical_groups, dtype=np.int64)
-
-        os.makedirs(dump_dir, exist_ok=True)
-        output_path = os.path.join(dump_dir, f"{self.global_steps}.pt")
-        torch.save(
-            {
-                "global_step": self.global_steps,
-                "tensors": tensors,
-                "non_tensors": non_tensors,
-            },
-            output_path,
-        )
-        print(f"NEOPROTO_CORRECTNESS_DUMP={output_path} tensor_keys={sorted(tensors)}")
-
     def _compute_values(self, batch: DataProto) -> DataProto:
-        prepared = self.data_plane.prepare_inference(batch, {"compute_loss": False})
-        output = self.critic_wg.infer_batch(prepared.payload)
+        request = batch.prepare_worker_request(compute_loss=False)
+        output = self.critic_wg.infer_batch(request)
         output = output.get()
-        return self.data_plane.collect_inference(
-            output,
-            prepared,
-            {"values": "values"},
-            restore_keys=("values",),
-            fp32_keys=("values",),
-        )
+        return DataProto.collect_worker_output(output, {"values": "values"})
 
     def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
         metadata = {"calculate_entropy": False, "compute_loss": False}
         if self.ref_in_actor:
             metadata["no_lora_adapter"] = True
 
-        prepared = self.data_plane.prepare_inference(batch, metadata)
+        request = batch.prepare_worker_request(**metadata)
         if self.ref_in_actor:
-            output = self.actor_rollout_wg.compute_log_prob(prepared.payload)
+            output = self.actor_rollout_wg.compute_log_prob(request)
         else:
-            output = self.ref_policy_wg.compute_ref_log_prob(prepared.payload)
-        return self.data_plane.collect_inference(
-            output,
-            prepared,
-            {"log_probs": "ref_log_prob"},
-            restore_keys=("log_probs",),
-            fp32_keys=("log_probs",),
-        )
+            output = self.ref_policy_wg.compute_ref_log_prob(request)
+        return DataProto.collect_worker_output(output, {"log_probs": "ref_log_prob"})
 
     def _compute_old_log_prob(self, batch: DataProto):
         calculate_sum_pi_squared = self.config.actor_rollout_ref.actor.get("calculate_sum_pi_squared", False)
 
-        prepared = self.data_plane.prepare_inference(
-            batch,
-            {
-                "calculate_entropy": True,
-                "calculate_sum_pi_squared": calculate_sum_pi_squared,
-                "compute_loss": False,
-            },
+        request = batch.prepare_worker_request(
+            calculate_entropy=True,
+            calculate_sum_pi_squared=calculate_sum_pi_squared,
+            compute_loss=False,
         )
-        output = self.actor_rollout_wg.compute_log_prob(prepared.payload)
+        output = self.actor_rollout_wg.compute_log_prob(request)
         output_keys = set(output.keys())
         key_map = {"log_probs": "old_log_probs", "entropy": "entropys"}
         if "routed_experts" in output_keys:
             key_map["routed_experts"] = "routed_experts"
         if calculate_sum_pi_squared and "sum_pi_squared" in output_keys:
             key_map["sum_pi_squared"] = "sum_pi_squared"
-        old_log_prob = self.data_plane.collect_inference(
-            output,
-            prepared,
-            key_map,
-            restore_keys=("log_probs", "entropy", "sum_pi_squared"),
-            fp32_keys=("log_probs", "entropy", "sum_pi_squared"),
-        )
-        old_log_prob_mfu = self.data_plane.collect_metrics(output)["mfu"]
+        old_log_prob = DataProto.collect_worker_output(output, key_map)
+        old_log_prob_mfu = output.meta_info["metrics"]["mfu"]
         return old_log_prob, old_log_prob_mfu
 
     def _update_actor(self, batch: DataProto) -> DataProto:
@@ -1363,9 +1293,9 @@ class RayPPOTrainer:
             compute_loss=True,
         )
 
-        prepared = self.data_plane.prepare_training(batch, actor_meta)
-        actor_output = self.actor_rollout_wg.update_actor(prepared.payload)
-        actor_output = self.data_plane.collect_metrics(actor_output)
+        request = batch.prepare_worker_request(**actor_meta)
+        actor_output = self.actor_rollout_wg.update_actor(request)
+        actor_output = actor_output.meta_info["metrics"]
 
         actor_output = rename_dict(actor_output, "actor/")
         # modify key name
@@ -1388,10 +1318,10 @@ class RayPPOTrainer:
             dataloader_kwargs={"shuffle": shuffle},
         )
 
-        prepared = self.data_plane.prepare_training(batch, critic_meta)
-        output = self.critic_wg.train_mini_batch(prepared.payload)
+        request = batch.prepare_worker_request(**critic_meta)
+        output = self.critic_wg.train_mini_batch(request)
         output = output.get()
-        output = self.data_plane.collect_metrics(output)
+        output = output.meta_info["metrics"]
 
         output = rename_dict(output, "critic/")
         # modify key name
@@ -1472,10 +1402,10 @@ class RayPPOTrainer:
                         if self.config.global_profiler.profile_continuous_steps
                         else curr_step_profile
                     )
-                self.data_plane.reset_materialize_stats()
+                DataProto.reset_materialize_stats()
 
                 with marked_timer("dataplane/from_single_dict", timing_raw):
-                    batch: DataProto = self.data_proto_cls.from_single_dict(batch_dict)
+                    batch = DataProto.from_single_dict(batch_dict)
                 batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
 
                 # add uid to batch
@@ -1555,8 +1485,7 @@ class RayPPOTrainer:
                         self._balance_batch(batch, metrics=metrics)
 
                     with marked_timer("dataplane/prefetch_gen", timing_raw):
-                        self.data_plane.prefetch(
-                            batch,
+                        batch.prefetch(
                             ["responses", "attention_mask", "input_ids", "response_mask"],
                         )
 
@@ -1595,8 +1524,8 @@ class RayPPOTrainer:
                     else:  # Recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
                             old_log_prob, old_log_prob_mfu = self._compute_old_log_prob(batch)
-                            self.data_plane.prefetch(old_log_prob, ["entropys"])
-                            self.data_plane.prefetch(batch, ["response_mask"])
+                            old_log_prob.prefetch(["entropys"])
+                            batch.prefetch(["response_mask"])
                             entropys = old_log_prob.batch["entropys"]
                             response_masks = batch.batch["response_mask"]
                             actor_config = self.config.actor_rollout_ref.actor
@@ -1654,8 +1583,7 @@ class RayPPOTrainer:
                         # keeps the classic global-batch semantics.
                         adv_estimator = self.config.algorithm.adv_estimator
                         with marked_timer("dataplane/prefetch_adv", timing_raw):
-                            self.data_plane.prefetch(
-                                batch,
+                            batch.prefetch(
                                 [
                                     "token_level_scores",
                                     "token_level_rewards",
@@ -1712,11 +1640,6 @@ class RayPPOTrainer:
                             config=self.config.algorithm,
                         )
                         batch.clear_cache()
-
-                    correctness_dump_dir = self.config.trainer.get("correctness_dump_dir", None)
-                    if correctness_dump_dir:
-                        with marked_timer("dump_correctness_tensors", timing_raw):
-                            self._dump_correctness_tensors(batch, correctness_dump_dir)
 
                     # update critic
                     if self.use_critic:
@@ -1794,7 +1717,7 @@ class RayPPOTrainer:
                 steps_duration = timing_raw["step"]
                 self.max_steps_duration = max(self.max_steps_duration, steps_duration)
 
-                timing_raw.update(self.data_plane.pop_materialize_stats())
+                timing_raw.update(DataProto.pop_materialize_stats())
 
                 # training metrics
                 metrics.update(
@@ -1807,8 +1730,7 @@ class RayPPOTrainer:
                 # per-rank masked means / explained variance is not equivalent
                 # when ranks contain different numbers of valid response tokens.
                 with marked_timer("dataplane/prefetch_metrics", timing_raw):
-                    self.data_plane.prefetch(
-                        batch,
+                    batch.prefetch(
                         [
                             "token_level_scores",
                             "token_level_rewards",

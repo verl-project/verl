@@ -23,7 +23,8 @@ from omegaconf import DictConfig, open_dict
 from ray.actor import ActorHandle
 from tensordict import TensorDict
 
-from verl.protocol import DataProto, pad_dataproto_to_divisor
+from verl import DataProto
+from verl.protocol import pad_dataproto_to_divisor
 from verl.single_controller.ray.base import RayResourcePool
 from verl.trainer.ppo.reward import load_reward_manager, resolve_reward_manager_cls
 from verl.utils import hf_tokenizer

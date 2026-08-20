@@ -1,132 +1,65 @@
 # NeoProto integration
 
-Last updated: 08/06/2026.
+Last updated: 08/19/2026.
 
-NeoProto is an experimental ref/index data plane for the V0 `RayPPOTrainer`: batch
-payloads stay in a storage engine while the controller manipulates schemas, references,
-and index views. This page describes how it is wired into the trainer.
+NeoProto is the default and only data path for the V0 `RayPPOTrainer`. Batch
+payloads stay in a storage engine while the driver manipulates schemas,
+references, and index views. There is no runtime classic/NeoProto selector.
 
-The integration rests on a single idea: the data plane is selected once at trainer
-startup, so PPO control flow, dispatch, and workers never branch on which batch
-implementation is in use.
+## Public compatibility API
 
-## Configuration
-
-```yaml
-trainer:
-  data_plane: classic  # classic | neoproto
-```
-
-```bash
-python -m verl.trainer.main_ppo trainer.data_plane=neoproto
-```
-
-`use_neoproto` is the compatibility field that older launch scripts still pass. It only
-upgrades the default `classic` to `neoproto`, and has no effect once `data_plane` names
-something else. The full truth table is in the `_resolve_data_plane_name` docstring.
-
-## Selected once
-
-`verl/trainer/ppo/data_plane.py` holds a name-to-strategy registry, and
-`_resolve_data_plane_name` is the only place in the repository that reads this
-configuration. `RayPPOTrainer` resolves it once during construction:
+Existing code can continue to import and construct `verl.DataProto`:
 
 ```python
-self.data_plane = build_data_plane(config)
-self.data_proto_cls = self.data_plane.data_proto_cls
+from verl import DataProto
+
+batch = DataProto.from_dict(tensors=tensors, non_tensors=non_tensors)
 ```
 
-`data_proto_cls` decides which container to create; `data_plane` decides how that
-container crosses the worker boundary.
+This public `DataProto` is a NeoProto-backed compatibility view. It preserves
+the established `batch`, `non_tensor_batch`, `meta_info`, selection, concat,
+repeat, padding, and construction APIs, but it does not use the former eager
+TensorDict transport path.
 
-The agent loop worker is a separate Ray actor that must produce batches of the same
-type, so it calls `resolve_data_proto_cls(config)` in `__init__` and reads the same
-registry. That function resolves the class only and does not call `setup()`, which keeps
-the rollout process from taking over the trainer's data-plane initialization.
+The old concrete implementation remains available as
+`verl.LegacyDataProto` (and historically as `verl.protocol.DataProto`) for
+explicit compatibility checks. The trainer never selects it.
 
-## The strategy owns the RPC boundary
+## Controller boundary
 
-`PPODataPlane` defines `prepare_inference`, `collect_inference`, `prepare_training`,
-`collect_metrics`, `prefetch`, and the materialization counters. The trainer only calls
-`self.data_plane.*`:
-
-```python
-prepared = self.data_plane.prepare_inference(batch, {"compute_loss": False})
-output = self.critic_wg.infer_batch(prepared.payload).get()
-return self.data_plane.collect_inference(output, prepared, {"values": "values"}, ...)
-```
-
-`ClassicPPODataPlane` converts the DataProto into a de-padded TensorDict on the driver,
-then restores padding and rewraps the result on the way back.
-
-`NeoPPODataPlane` sends a ref view instead, and collects results by selecting and
-renaming on the ref table without materializing on the driver. It builds a separate
-request view per RPC so that transient control fields such as `no_lora_adapter` do not
-persist on the long-lived batch or leak into later calls.
-
-## One expression for both containers
-
-Classic `DataProto` provides a set of default hooks that NeoProto overrides only where
-behavior genuinely differs:
-
-
-| hook                       | classic                                     | NeoProto                                 |
-| -------------------------- | ------------------------------------------- | ---------------------------------------- |
-| `new_like(...)`            | build output with the current concrete type | same                                     |
-| `prefetch(...)`            | no-op                                       | populate the lazy cache                  |
-| `clear_cache()`            | no-op                                       | drop materialization caches              |
-| `prepare_dispatch(chunks)` | no-op                                       | attach rank-local ref tables             |
-| `set_control_fields(...)`  | write to `meta_info`                        | write ref-side control fields            |
-| `cpu()`                    | `to("cpu")`                                 | return self; refs already resolve to CPU |
-
-
-Shared code therefore reads identically for both, with no `type(data)(...)` and no type
-checks:
-
-```python
-output = input_batch.new_like(batch=..., non_tensor_batch=..., meta_info=...)
-```
-
-
-
-## Dispatch
-
-After chunking, the single controller calls the same hook unconditionally:
+`single_controller` remains the scheduling and RPC layer. It does not know
+about a trainer data-plane strategy. After chunking, it invokes the batch hook
+unconditionally:
 
 ```python
 batch_data.prepare_dispatch(chunked_arg)
 ```
 
-Classic DataProto needs no preparation. NeoProto attaches the matching `OBJ_REF` and
-`LOCAL_REF` for each rank before Ray serializes the chunks. The ref-table construction
-lives in `verl/experimental/neoproto/dispatch.py`.
+The NeoProto-backed view attaches rank-local object-store ref tables before Ray
+serialization. Generic `chunk` and `concat` behavior stays in `BatchData`.
 
-## Worker adapter
+## Worker boundary
 
-Worker entry points go through `run_engine_batch(data, impl, spec)`. A TensorDict input
-is passed straight to the engine. A NeoProto input is delegated to the worker bridge,
-which materializes only the required and present optional fields declared by the
-`EngineBatchSpec`, converts them into the no-padding TensorDict the engine already
-expects, calls the unmodified engine, restores padding, and rewraps the output as a
-ref-backed DataProto.
+Transient RPC controls are attached to a short-lived ref view through
+`prepare_worker_request`; the long-lived trainer batch is not mutated. Worker
+results are selected and renamed through `collect_worker_output`, without
+materializing them on the driver.
 
-The field lists live next to the engine entry points in
-`verl/workers/engine_workers.py` rather than inside the bridge, which keeps the
-producer-consumer relationship visible. All of these names are existing public verl
-TensorDict fields or worker control fields.
+Engine entry points continue to use `run_engine_batch(data, impl, spec)`.
+NeoProto materializes only the fields declared by `EngineBatchSpec`, converts
+them into the no-padding TensorDict expected by existing compute engines,
+restores output padding, and returns a ref-backed result. PPO, reward,
+advantage, actor, critic, and rollout algorithms are unchanged.
 
-## Why the global DataProto is not replaced
+Unexpected non-Neo worker output and `NEO_BRIDGE_FULL_MATERIALIZE=1` are
+fail-closed errors. The removed `trainer.data_plane`, `trainer.use_neoproto`,
+and `trainer.neoproto_strict_mode` settings must not be passed by launch
+scripts.
 
-Swapping `verl.DataProto` process-wide is unsafe: modules that already ran
-`from verl import DataProto` keep the old reference, so the swap only affects later
-imports and leaves two inconsistent DataProto classes alive in the same process. The
-integration therefore selects at a single decision point instead of rewriting a global
-alias.
+## Current scope
 
-## Limitations
-
-- Classic is the default data plane.
-- Only the synchronous V0 PPO trainer is covered.
-- NeoProto currently uses the Ray object store backend only.
-- PPO, reward, advantage, and model engine algorithms are unchanged.
-
+- The synchronous V0 PPO trainer is the validated integration target.
+- NeoProto storage and worker-boundary correctness must be validated before
+  performance benchmarking.
+- Direct users of `verl.protocol.DataProto` are on the explicit legacy path and
+  should migrate to `from verl import DataProto`.
