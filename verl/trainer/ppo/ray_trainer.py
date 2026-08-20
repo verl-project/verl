@@ -261,6 +261,11 @@ def compute_advantage(
         if adv_estimator in (AdvantageEstimator.GDPO, "gdpo"):
             adv_kwargs["non_tensor_batch"] = data.non_tensor_batch
             adv_kwargs["batch"] = data.batch
+        if adv_estimator in (AdvantageEstimator.CODAPO, "codapo"):
+            adv_kwargs["non_tensor_batch"] = data.non_tensor_batch
+            adv_kwargs["batch"] = data.batch
+            adv_kwargs["old_log_probs"] = data.batch["old_log_probs"]
+            adv_kwargs["norm_adv_by_std_in_grpo"] = norm_adv_by_std_in_grpo
         # Add sum_pi_squared for Optimal Token Baseline
         if adv_estimator in (AdvantageEstimator.OPTIMAL_TOKEN_BASELINE, AdvantageEstimator.TIR_OPTIMAL_TOKEN_BASELINE):
             # Check if sum_pi_squared is available
@@ -329,6 +334,8 @@ class RayPPOTrainer:
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
+        if config.algorithm.adv_estimator in (AdvantageEstimator.CODAPO, "codapo"):
+            raise ValueError("CoDaPO requires trainer.use_v1=True")
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"

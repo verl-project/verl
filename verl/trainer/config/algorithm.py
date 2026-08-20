@@ -670,3 +670,7 @@ class AlgoConfig(BaseConfig):
     # gdpo_reward_weights: per-dimension weights for aggregation (default: equal weights).
     gdpo_reward_keys: Optional[list[str]] = None
     gdpo_reward_weights: Optional[list[float]] = None
+    # CoDaPO (Confidence and Difficulty-adaptive Policy Optimization) settings.
+    codapo_top_k: int = 4
+    codapo_weight_offset: float = 0.1
+    codapo_accuracy_key: str = "acc"

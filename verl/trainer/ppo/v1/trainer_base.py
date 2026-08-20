@@ -115,6 +115,20 @@ def _tq_supports_checkpoint() -> bool:
     )
 
 
+def _extract_reward_extra_info(extra_fields: Any) -> dict[str, np.ndarray]:
+    """Convert per-sample reward metadata to DataProto non-tensor fields."""
+    if extra_fields is None:
+        return {}
+    reward_extra_infos = [
+        extra_field.get("reward_extra_info", {}) if isinstance(extra_field, dict) else {}
+        for extra_field in extra_fields
+    ]
+    if not reward_extra_infos:
+        return {}
+    common_keys = set.intersection(*(set(info) for info in reward_extra_infos))
+    return {key: np.asarray([info[key] for info in reward_extra_infos]) for key in common_keys}
+
+
 class PPOTrainer(ABC):
     """Base class for PPO trainer.
 
@@ -138,6 +152,14 @@ class PPOTrainer(ABC):
         )
         # track mini-batch index within a parameter_sync_step cycle for Decoupled PPO
         self.local_trigger_step = 0
+        self._codapo_enabled = config.algorithm.adv_estimator in (core_algos.AdvantageEstimator.CODAPO, "codapo")
+        self._codapo_resampled_batch: TensorDict | None = None
+        if self._codapo_enabled:
+            if self.trainer_mode != "sync" or self.parameter_sync_step != 1:
+                raise ValueError("CoDaPO requires the V1 sync trainer with parameter_sync_step=1")
+            filter_groups = config.algorithm.get("filter_groups")
+            if filter_groups is not None and filter_groups.get("enable", False):
+                raise ValueError("CoDaPO cannot be combined with algorithm.filter_groups")
 
     def _build_replay_buffer(self) -> ReplayBuffer:
         """Instantiate the replay buffer (or a user-provided custom sampler).
@@ -514,7 +536,18 @@ class PPOTrainer(ABC):
         )
         sample_batch_size = train_batch_size // self.parameter_sync_step
 
-        self._add_batch_to_generate()
+        codapo_original_batch = None
+        if self._codapo_enabled:
+            if self._codapo_resampled_batch is None:
+                codapo_original_batch = self._next_train_batch()
+                prompt_batch = codapo_original_batch
+            else:
+                prompt_batch = self._codapo_resampled_batch
+                self._codapo_resampled_batch = None
+                tu.assign_non_tensor_data(prompt_batch, "global_steps", self.global_steps)
+            self._submit_batch_to_rollout(prompt_batch)
+        else:
+            self._add_batch_to_generate()
 
         metrics_aggregator = MetricsAggregator()
         combined_keys: list = []
@@ -531,7 +564,54 @@ class PPOTrainer(ABC):
             combined_partition_id = batch.partition_id
 
         metrics.update(metrics_aggregator.get_aggregated_metrics())
+        if self._codapo_enabled:
+            metrics["codapo/is_focused_step"] = float(codapo_original_batch is None)
+            if codapo_original_batch is not None:
+                self._codapo_resampled_batch = self._build_codapo_resampled_batch(
+                    codapo_original_batch,
+                    KVBatchMeta(partition_id=combined_partition_id, keys=combined_keys, tags=combined_tags),
+                    metrics,
+                )
         return KVBatchMeta(partition_id=combined_partition_id, keys=combined_keys, tags=combined_tags)
+
+    def _build_codapo_resampled_batch(
+        self,
+        prompt_batch: TensorDict,
+        rollout_batch: KVBatchMeta,
+        metrics: dict,
+    ) -> TensorDict:
+        """Build CoDaPO's focused prompt batch from the original rollout values."""
+        data = tq.kv_batch_get(
+            keys=rollout_batch.keys,
+            partition_id=rollout_batch.partition_id,
+            select_fields=["uid", "codapo_values"],
+        )
+        value_by_uid = {
+            tu.unwrap_non_tensor_data(uid): value
+            for uid, value in zip(data["uid"], data["codapo_values"].detach().cpu().tolist(), strict=True)
+        }
+        prompt_values = torch.tensor(
+            [value_by_uid[tu.unwrap_non_tensor_data(uid)] for uid in prompt_batch["uid"]], dtype=torch.float32
+        )
+        top_k = self.config.algorithm.get("codapo_top_k", 4)
+        if not 0 < top_k <= len(prompt_batch):
+            raise ValueError(f"algorithm.codapo_top_k must be in [1, {len(prompt_batch)}], got {top_k}")
+        selected_indices = torch.topk(prompt_values, top_k).indices.tolist()
+        resample_indices = [selected_indices[i % top_k] for i in range(len(prompt_batch))]
+        resampled_batch = tu.index_select_tensor_dict(prompt_batch, resample_indices)
+        tu.assign_non_tensor_stack(
+            resampled_batch,
+            "uid",
+            [str(uuid.uuid4()) for _ in range(len(resampled_batch))],
+        )
+
+        metrics.update(
+            {
+                "codapo/value/mean": prompt_values.mean().item(),
+                "codapo/selected_value/mean": prompt_values[selected_indices].mean().item(),
+            }
+        )
+        return resampled_batch
 
     def _step_once(self, metrics: dict, timing_raw: dict, sample_batch_size: int) -> KVBatchMeta:
         """Run a single local update: sample one mini-batch and perform the full PPO pipeline once."""
@@ -708,6 +788,8 @@ class PPOTrainer(ABC):
         )
 
         self.steps_per_epoch = len(self.train_dataset) // self.config.data.train_batch_size
+        if getattr(self, "_codapo_enabled", False):
+            self.steps_per_epoch *= 2
 
         # adjust total_training_steps
         total_training_steps = self.steps_per_epoch * self.config.trainer.total_epochs
@@ -1631,11 +1713,21 @@ class PPOTrainer(ABC):
 
     def _compute_advantage(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the advantage of the batch."""
-        fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob", "values"]
+        fields = [
+            "uid",
+            "response_mask",
+            "rm_scores",
+            "rollout_log_probs",
+            "old_log_probs",
+            "ref_log_prob",
+            "values",
+            "extra_fields",
+        ]
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
 
         response_mask = data["response_mask"]
-        data = DataProto(batch=data.to_padded_tensor())
+        reward_extra_info = _extract_reward_extra_info(tu.pop(data, "extra_fields"))
+        data = DataProto(batch=data.to_padded_tensor(), non_tensor_batch=reward_extra_info)
         data.batch["token_level_scores"] = data.batch["rm_scores"]
         data.non_tensor_batch["uid"] = np.array(data.batch.pop("uid").tolist(), dtype=object)
 
@@ -1661,6 +1753,7 @@ class PPOTrainer(ABC):
             metrics.update(is_metrics)
 
         # 3. compute advantages
+        advantage_input_fields = set(data.batch.keys())
         data = compute_advantage_for_multi_trajectories(
             data,
             batch_keys=batch.keys,
@@ -1671,6 +1764,7 @@ class PPOTrainer(ABC):
             norm_adv_by_std_in_grpo=self.config.algorithm.get("norm_adv_by_std_in_grpo", True),
             config=self.config.algorithm,
         )
+        advantage_output_fields = set(data.batch.keys()) - advantage_input_fields
 
         # 4. write nested advantages and returns back to TransferQueue
         fields = ["advantages", "returns"]
@@ -1684,6 +1778,13 @@ class PPOTrainer(ABC):
         output = {}
         for field in fields:
             output[field] = response_to_nested(data.batch[field], response_mask)
+        for field in sorted(advantage_output_fields - set(output)):
+            value = data.batch[field]
+            output[field] = (
+                response_to_nested(value, response_mask)
+                if value.ndim == response_mask.ndim and value.shape == response_mask.shape
+                else value
+            )
         output = TensorDict(output, batch_size=len(batch))
 
         batch = tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=output)
