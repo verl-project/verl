@@ -264,9 +264,7 @@ class RLInsightLogger:
     def log(cls, data, step):
         if not cls.enabled():
             return
-        if not cls._init_done:
-            cls._get_rl_insight().init()
-            cls._init_done = True
+        cls._ensure_rl_insight_init()
         metric_gauge = cls._get_rl_insight().metric_gauge
 
         for key, value in data.items():
@@ -298,9 +296,7 @@ class RLInsightLogger:
             yield
             return
 
-        if not cls._init_done:
-            cls._get_rl_insight().init()
-            cls._init_done = True
+        cls._ensure_rl_insight_init()
         with cls._get_rl_insight().trace_state(state_name, state_lane_id=state_lane_id, **labels):
             yield
 
@@ -317,14 +313,51 @@ class RLInsightLogger:
         if not cls.enabled():
             return
 
-        if not cls._init_done:
-            cls._get_rl_insight().init()
-            cls._init_done = True
+        cls._ensure_rl_insight_init()
         cls._get_rl_insight().trace_span(
             name=name,
             start_time_ns=start_time_ns,
             end_time_ns=end_time_ns,
             attributes=dict(attributes or {}),
+        )
+
+    @classmethod
+    def _ensure_rl_insight_init(cls) -> None:
+        if not cls._init_done:
+            cls._get_rl_insight().init()
+            cls._init_done = True
+
+    @classmethod
+    def agent_loop_session(
+        cls,
+        *,
+        experiment_name: Any | None = None,
+        sample: Any,
+        session: Any,
+        traj: Any = 0,
+        uid: Any = None,
+        global_steps: Any = None,
+        session_id: Any = None,
+    ):
+        """Return the shared agent-loop session trace state."""
+        from verl.utils.rollout_trace import RolloutTraceConfig
+
+        rollout_config = RolloutTraceConfig.get_instance()
+        project_name = rollout_config.project_name
+        if experiment_name is None:
+            experiment_name = rollout_config.experiment_name or "default"
+        if cls.enabled() and not cls._init_done:
+            cls.init(project_name=project_name, experiment_name=experiment_name)
+        from rl_insight.agent_loop import agent_loop_session
+
+        return agent_loop_session(
+            experiment_name=experiment_name,
+            sample=sample,
+            session=session,
+            traj=traj,
+            uid=uid,
+            global_steps=global_steps,
+            session_id=session_id,
         )
 
     @classmethod
