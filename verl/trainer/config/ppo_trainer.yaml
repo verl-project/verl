@@ -185,6 +185,12 @@ trainer:
   # Path to resume training from (only used when resume_mode is "resume_path")
   resume_from_path: null
 
+  # Fully qualified class name of a user-defined checkpoint callback,
+  # e.g. "my_pkg.callbacks.MyCheckpointCallback". Instantiated on the driver with the
+  # full trainer config; its on_save hook is called after each checkpoint save,
+  # similar to the on_save event of the transformers TrainerCallback. No callback is used if null.
+  checkpoint_callback_class: null
+
   # Whether to run validation before training begins
   val_before_train: True
 

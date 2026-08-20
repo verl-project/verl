@@ -3,7 +3,7 @@
 Config Explanation
 ===================
 
-Last updated: 06/18/2025.
+Last updated: 08/24/2026.
 
 ppo_trainer.yaml for RL FSDP Backend
 -------------------------------------
@@ -604,6 +604,7 @@ Trainer
      default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name} # local checkpoint path
      resume_mode: auto # or disable or resume_path if resume_from_path is set
      resume_from_path: null
+     checkpoint_callback_class: null
      remove_previous_ckpt_in_save: False
      del_local_ckpt_after_load: False
      ray_wait_register_center_timeout: 300
@@ -628,6 +629,11 @@ Trainer
   from the path specified in ``resume_from_path``.
 - ``trainer.resume_from_path``: The path to resume training from. Only
   effective when ``resume_mode`` is set to ``resume_path``.
+- ``trainer.checkpoint_callback_class``: Fully qualified class name of a
+  user-defined checkpoint callback (a ``CheckpointCallback`` subclass).
+  Instantiated on the driver; its ``on_save`` hook is called after each
+  checkpoint save. See :doc:`../advance/checkpoint` for the interface.
+  Default is null (no callback).
 - ``trainer.remove_previous_ckpt_in_save``: Whether to remove previous
   checkpoints in the save directory. Default is False.
 - ``trainer.del_local_ckpt_after_load``: Whether to delete local
