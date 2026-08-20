@@ -76,6 +76,24 @@ Monitor both forms of off-policy behavior:
 - `training/off_policy/trajectory_staleness/*`: gap between the newest version used by a trajectory and the current training version.
 - `training/off_policy/trajectory_staleness_worst/*`: gap between the oldest version used by a trajectory and the current training version.
 
+### Prompt refilling in replay buffer and checkpoint recovery
+
+Both async modes use `ReplayBufferAsync`, which samples prompt groups from the TransferQueue. The refill unit is one prompt group and evicting the group produces exactly one replacement prompt.
+
+During sampling, the replay buffer repeatedly synchronizes TransferQueue metadata and classifies terminal groups. A training group is evicted when any of the following applies:
+
+- Its prompt age exceeds `max_off_policy_threshold` while `max_off_policy_strategy=drop`.
+- It is removed by the configured DAPO group filter.
+- Its rollout finishes with `failure`.
+
+The reasons are unioned before eviction, so a group matching multiple conditions is removed and refilled only once. After evicting `k` groups, the buffer invokes `refill_fn(k)`, which fetches exactly `k` new prompts from the training dataloader, records them as `pending` in the TransferQueue, and dispatches them to the AgentLoop:
+
+Refill can repeat if replacement groups also fail or are filtered. This keeps the requested training batch size stable without training on groups rejected by the active sampling policy. Refill applies to the training partition; validation does not perform staleness, filtering, or failure refill.
+
+With `max_off_policy_strategy=wait`, stale groups are not evicted or refilled. Instead, sampling blocks when an in-flight prompt reaches the threshold, allowing it to finish and remain trainable. DAPO-filtered and failed groups are still evicted and replaced normally.
+
+When async trainer saves a checkpoint, pending and running groups have already consumed dataloader entries, so they are reissued from their saved prompts during `load_checkpoint` recovery. Finished groups and their completed trajectories are restored as-is and remain available for sampling; they are not regenerated.
+
 ### Separate Async training Granularity and Decoupled PPO
 
 `separate_async` uses a mini-batch training granularity, trying to overlap rollout and training in the same step. When a mini-batch is samplable, it is trained at once. This advances the timing of `update_weights` and reduces staleness.
