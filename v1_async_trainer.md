@@ -1,6 +1,6 @@
 # V1 Async Trainer
 
-Last updated: 08/14/2026.
+Last updated: 08/20/2026.
 
 The V1 trainer provides two asynchronous PPO training modes under the standard `verl.trainer.main_ppo` entry point:
 
@@ -118,6 +118,8 @@ threshold = clamp(target, one_mini_batch, train_batch_size)
 `switch_threshold_ratio` defines the target number of prompt groups ready for sampling before switching to trainer. At the end of a step, if the next step's buffer already meets the target or is expected to reach it soon without hybrid assistance (that is, the estimated benefit of lending does not exceed the measured switch cost), the hybrid replicas remain in trainer mode. If the buffer is below the target and switch is enabled, the hybrid replicas enter rollout mode and switch back to trainer mode once the target is reached. The one-mini-batch floor guarantees that at least one mini-batch is ready to train immediately.
 
 ### Adaptive threshold
+
+Since the sample-length distribution can evolve throughout RL training, the resource balance required by rollout and training can shift over time. The switch threshold therefore adapts to observed trainer idle time instead of assuming a fixed optimal resource split.
 
 With `adaptive_switch_threshold=True`, the threshold ratio reacts to observed sample wait:
 
@@ -256,7 +258,7 @@ https://github.com/Begunner/verl-link/blob/main/v1_trainer/v1_modes_policy_align
 
 ### Separate_async switching
 
-The step switch was evaluated for the first 150 steps of two otherwise identical runs:
+The step switch was evaluated for the first 100 steps of two otherwise identical runs:
 
 - 3 × 8 H100 GPUs: two trainer/hybrid nodes and one standalone rollout node.
 - Qwen3.5-35B-A3B with Megatron training (TP2 PP2 CP2 EP8) and vLLM rollout (TP4).
@@ -265,14 +267,16 @@ The step switch was evaluated for the first 150 steps of two otherwise identical
 - Decoupled PPO disabled
 
 
-| Mode        | Resource split          | 150-step wall clock | Aggregate tokens/s | Mean response length |
-| ----------- | ----------------------- | ------------------- | ------------------ | -------------------- |
-| `no-switch` | 2 hybrid + 1 standalone | 18.80 h             | 15,150             | 12,720               |
-| `switch`    | 2 hybrid + 1 standalone | 16.43 h             | 16,687             | 10,956               |
+| Mode        | Resource split          | 100-step training time | Aggregate tokens/s | Mean response length | Mean reward |
+| ----------- | ----------------------- | ---------------------- | ------------------ | -------------------- | ----------- |
+| `no-switch` | 2 hybrid + 1 standalone | 13.15 h                | 14,604             | 13,343               | 0.7755      |
+| `switch`    | 2 hybrid + 1 standalone | 11.79 h (-10.3%)       | 16,445 (+12.6%)    | 13,478               | 0.7762      |
 
+![switch_quality_step](
+https://github.com/Begunner/verl-link/blob/main/v1_trainer/switch_quality_step.png?raw=true)
 
-Cumulative training-step-time comparison for `separate_async` with and without step switching
+![switch_timing_components](
+https://github.com/Begunner/verl-link/blob/main/v1_trainer/switch_timing_components.png?raw=true)
 
-The no-switch baseline spent a mean **167.1 s** per step in `timing_s/gen`, or **37.0%** of its mean **451.2 s** step time. During this interval, the hybrid trainer GPUs were idle while waiting for the standalone rollout pool to fill the training buffer, showing that the tested 2:1 hybrid-to-standalone allocation was rollout-constrained rather than perfectly balanced.
-
-A perfect static resource split is generally difficult to maintain because response lengths and rollout latency change throughout RL training. Step switching can therefore be enabled when no single allocation is expected to remain balanced: hybrid GPUs are lent only when the buffer is short and the estimated benefit exceeds the measured round-trip switch cost; otherwise, they remain in trainer mode. Gains should shrink as standalone rollout capacity increases or as switch cost becomes a larger fraction of the available idle window.
+![switch_offpolicy](
+https://github.com/Begunner/verl-link/blob/main/v1_trainer/switch_offpolicy.png?raw=true)
