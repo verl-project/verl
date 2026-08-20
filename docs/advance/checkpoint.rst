@@ -3,7 +3,7 @@
 Using Checkpoints to Support Fault Tolerance Training
 =====================================================
 
-Last updated: 04/23/2026.
+Last updated: 08/20/2026.
 
 There could be training errors or machine failure during the whole RLHF training process, 
 so it is recommended to enable checkpoints to minimize your loss.
@@ -33,10 +33,50 @@ Megatron:
   path is used (no dist shards for weights), ``model`` and ``hf_model`` refer to the same HF tree
   and are deduplicated (saved once).
 
-.. note:: 
+.. note::
 
     For FSDP, ``checkpoint.save_contents`` other than ``hf_model`` are binded together to save and
     load. We recommend to include ``model``, ``optimizer`` and ``extra`` all.
+
+Checkpoint Callback
+-------------------
+
+Set ``trainer.checkpoint_callback_class`` to the fully qualified class name of a
+``verl.trainer.ppo.checkpoint_callback.CheckpointCallback`` subclass to run custom
+code after each trainer checkpoint save — for example uploading checkpoints
+to object storage, registering them in a model registry, or triggering evaluations.
+The interface mirrors the ``on_save`` event of the HuggingFace ``transformers``
+``TrainerCallback``:
+
+.. code:: yaml
+
+    trainer:
+      checkpoint_callback_class: my_pkg.callbacks.MyCheckpointCallback
+
+The class must be importable on the driver. It is instantiated once with the full
+trainer config (``cls(config=config)``), and its ``on_save`` hook is invoked with
+keyword arguments:
+
+.. code:: python
+
+    from verl.trainer.ppo.checkpoint_callback import CheckpointCallback
+
+    class MyCheckpointCallback(CheckpointCallback):
+        def on_save(self, trainer, global_step, checkpoint_dir, async_save=False, **kwargs):
+            upload_to_my_storage(checkpoint_dir, step=global_step)
+
+Hook semantics:
+
+- ``on_save`` is called after the save of a ``global_step_{N}`` directory and
+  only fires when the save path completed without raising. With
+  ``async_save=True`` (Megatron asynchronous checkpointing), worker-side writes
+  may still be in flight when ``on_save`` fires and
+  ``latest_checkpointed_iteration.txt`` has not been written, so do not assume
+  the checkpoint is durable yet.
+- The hook runs only on the driver process, after the worker-group RPCs.
+  Per-rank hooks inside the FSDP/Megatron checkpoint managers are not covered.
+- Exceptions raised by the hook propagate and abort training. Wrap the hook
+  body in ``try/except`` for best-effort semantics.
 
 Checkpoint Saving Directory Structure
 -------------------------------------
