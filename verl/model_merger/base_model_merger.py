@@ -31,6 +31,43 @@ from .output_validation import validate_hf_model_output
 AutoModelForVision2Seq = get_auto_model_for_vision2seq()
 
 
+def assert_no_aliased_state_dict_tensors(state_dict: dict[str, torch.Tensor]) -> None:
+    """Fail loudly if two *different* keys in ``state_dict`` share the same tensor storage.
+
+    Both the FSDP and Megatron mergers are expected to materialise one independent CPU
+    tensor per state_dict key; any legitimate weight tying (e.g. tied input/output
+    embeddings) is handled explicitly by dropping the alias key via
+    ``drop_tied_target_keys`` instead of relying on implicit storage sharing.
+
+    If two distinct keys still alias the same storage by the time we are about to call
+    ``save_pretrained``, ``transformers``/``safetensors`` will treat them as a tied pair
+    and silently omit all but one of them while writing the sharded safetensors files,
+    producing a checkpoint with missing/duplicated weights (see
+    https://github.com/verl-project/verl/issues/6259). Raise a clear error naming the
+    colliding keys instead of letting that happen silently.
+    """
+    storage_to_keys: dict[tuple, list[str]] = {}
+    for key, tensor in state_dict.items():
+        if not isinstance(tensor, torch.Tensor) or tensor.numel() == 0:
+            # Zero-element tensors can spuriously share a null storage pointer; skip them.
+            continue
+        storage_id = (tensor.device, tensor.storage().data_ptr())
+        storage_to_keys.setdefault(storage_id, []).append(key)
+
+    collisions = [keys for keys in storage_to_keys.values() if len(keys) > 1]
+    if collisions:
+        details = "; ".join(str(keys) for keys in collisions)
+        raise RuntimeError(
+            "Detected distinct state_dict keys that unexpectedly share the same underlying "
+            f"tensor storage, which would corrupt the merged checkpoint: {details}. "
+            "`save_pretrained` silently drops all but one tensor per shared storage group, "
+            "so this would produce safetensors shards with missing/duplicated weights (see "
+            "https://github.com/verl-project/verl/issues/6259). If these keys are genuinely "
+            "tied parameters, they must be handled explicitly (see `drop_tied_target_keys`) "
+            "instead of relying on implicit storage sharing."
+        )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="verl model merger")
     subparsers = parser.add_subparsers(dest="operation", required=True, help="Specify 'merge' or 'test' operation.")
@@ -421,6 +458,7 @@ class BaseModelMerger(ABC):
             print(f"Saving lora adapter to {lora_path}")
 
         drop_tied_target_keys(state_dict, model, self.model_config)
+        assert_no_aliased_state_dict_tensors(state_dict)
 
         print(f"Saving model to {self.config.target_dir}")
         model.save_pretrained(self.config.target_dir, state_dict=state_dict)

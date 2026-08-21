@@ -132,7 +132,22 @@ class FSDPModelMerger(BaseModelMerger):
     def _merge_by_placement(self, tensors: list[torch.Tensor], placement: Placement) -> torch.Tensor:
         """Merges a list of tensors based on their DTensor placement"""
         if placement.is_replicate():
-            return tensors[0]
+            # NOTE: tensors[0] is the raw ``_local_tensor`` loaded straight from the rank-0
+            # checkpoint file. For parameters that FSDP could not evenly shard further (e.g.
+            # a dimension too small relative to the shard/world size -- more likely to occur
+            # the larger the FSDP world size is), it is left "replicated" rather than sharded,
+            # and its local tensor can still be a *view* sharing storage with some other
+            # buffer from the source checkpoint (e.g. another parameter's tensor, if the
+            # checkpoint writer packed multiple tensors into one contiguous allocation).
+            # Returning it unmodified propagates that storage aliasing into the merged
+            # state_dict, where two *unrelated* keys can end up pointing at the same
+            # underlying storage. `save_pretrained` treats same-storage tensors as tied
+            # weights and silently drops all but one when writing sharded safetensors files,
+            # corrupting the merged checkpoint (see
+            # https://github.com/verl-project/verl/issues/6259). Clone to guarantee every key
+            # in the merged state_dict owns independent storage; legitimate weight tying is
+            # handled explicitly and separately via `drop_tied_target_keys`.
+            return tensors[0].clone()
         elif placement.is_partial():
             raise NotImplementedError("Partial placement is not supported yet")
         elif placement.is_shard():
