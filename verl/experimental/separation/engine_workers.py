@@ -23,14 +23,18 @@ from verl.single_controller.base.decorator import Dispatch, register
 from verl.utils.device import (
     get_device_name,
 )
-from verl.workers.engine_workers import ActorRolloutRefWorker, DistillationConfig
+from verl.workers.engine_workers import (
+    ActorRolloutRefWorker,
+    DistillationConfig,
+    FusedTeacherActorRolloutRefWorker,
+)
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 device_name = get_device_name()
 
-__all__ = ["DetachActorWorker"]
+__all__ = ["DetachActorWorker", "FusedTeacherDetachActorWorker"]
 
 
 class DetachActorWorker(ActorRolloutRefWorker):
@@ -167,3 +171,14 @@ class DetachActorWorker(ActorRolloutRefWorker):
         """
         if n in self.cpu_saved_models:
             del self.cpu_saved_models[n]
+
+
+class FusedTeacherDetachActorWorker(FusedTeacherActorRolloutRefWorker, DetachActorWorker):
+    """Detach-capable actor worker that also owns trainer-colocated teachers.
+
+    Inherits from FusedTeacherActorRolloutRefWorker (fused-teacher logic) and
+    DetachActorWorker (CPU save/restore logic). The MRO ensures:
+    - FusedTeacherActorRolloutRefWorker.__init__/init_model runs first (teacher setup)
+    - DetachActorWorker provides save_model_to_cpu / restore_model_from_cpu
+    - Both eventually delegate to ActorRolloutRefWorker via super()
+    """

@@ -23,7 +23,7 @@ from typing import Optional
 import psutil
 import torch
 from codetiming import Timer
-from omegaconf import DictConfig, open_dict
+from omegaconf import DictConfig, OmegaConf, open_dict
 from tensordict import NonTensorData, TensorDict
 from torch.distributed.device_mesh import init_device_mesh
 
@@ -830,3 +830,214 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         """
         return getattr(self.checkpoint_engine, method)(*args, **kwargs)
+
+
+def is_fused_teacher_enabled(distillation_config: Optional[DistillationConfig]) -> bool:
+    """Whether distillation uses teacher engines colocated with the trainer actor."""
+    return bool(
+        is_distillation_enabled(distillation_config)
+        and getattr(distillation_config, "teacher_execution", "rollout") == "trainer"
+    )
+
+
+class FusedTeacherActorRolloutRefWorker(ActorRolloutRefWorker):
+    """Actor/rollout/ref worker that also owns trainer-colocated teacher engines.
+
+    Inherits from ActorRolloutRefWorker and adds:
+    - self.teacher: dict of trainer-colocated teacher TrainingWorkers
+    - _init_fused_teachers: teacher engine construction (called after base init_model)
+    - compute_teacher_log_prob: teacher forward inference
+    """
+
+    def __init__(
+        self, config: DictConfig, role: str, distillation_config: Optional[DistillationConfig] = None, **kwargs
+    ):
+        super().__init__(config, role, distillation_config=distillation_config, **kwargs)
+        self.teacher: dict[str, TrainingWorker] = {}
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init_model(self):
+        super().init_model()
+        if self._is_actor and is_fused_teacher_enabled(self.distillation_config):
+            self._init_fused_teachers()
+
+    def _init_fused_teachers(self):
+        """Build trainer-colocated teacher models on the actor worker.
+
+        Each teacher is a frozen, param_offload=True TrainingWorker. The actor
+        and teachers share the same Ray worker and GPU ranks, and are swapped
+        in one at a time by their engine contexts.
+        """
+        if self.config.actor.strategy != "megatron":
+            raise NotImplementedError("Trainer-colocated teachers currently require actor.strategy=megatron.")
+        if not self.distillation_enabled or self.distillation_config is None:
+            raise RuntimeError("Fused-teacher worker requires distillation to be enabled.")
+        if self.config.get("teacher") is None:
+            raise RuntimeError(
+                "Fused-teacher worker requires actor_rollout_ref.teacher runtime config. "
+                "Configure it independently from distillation.teacher_models."
+            )
+
+        model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model)
+        actor_config: ActorConfig = omega_conf_to_dataclass(self.config.actor)
+        actor_config.model_config = model_config
+        teacher_distillation_config: DistillationConfig = omega_conf_to_dataclass(self.distillation_config)
+        teacher_runtime_omega = deepcopy(self.config.teacher)
+        # The teacher runtime follows the ref-style config schema (log_prob_*),
+        # while TrainingWorker consumes ActorConfig fields (ppo_*).
+        with open_dict(teacher_runtime_omega):
+            teacher_runtime_omega.ppo_mini_batch_size = self.config.actor.ppo_mini_batch_size
+            teacher_runtime_omega.ppo_micro_batch_size = teacher_runtime_omega.pop("log_prob_micro_batch_size", None)
+            teacher_runtime_omega.ppo_micro_batch_size_per_gpu = teacher_runtime_omega.pop(
+                "log_prob_micro_batch_size_per_gpu", None
+            )
+            teacher_runtime_omega.use_dynamic_bsz = teacher_runtime_omega.pop("log_prob_use_dynamic_bsz", False)
+            teacher_runtime_omega.ppo_max_token_len_per_gpu = teacher_runtime_omega.pop(
+                "log_prob_max_token_len_per_gpu", None
+            )
+        teacher_runtime_config: ActorConfig = omega_conf_to_dataclass(teacher_runtime_omega)
+        if teacher_runtime_config.strategy != "megatron":
+            raise NotImplementedError(
+                "Trainer-colocated teachers currently require actor_rollout_ref.teacher.strategy=megatron."
+            )
+        # Megatron parallel state is process-global. Until per-engine parallel
+        # contexts are available, actor and teachers in this single worker must
+        # use the same process-group layout.
+        parallel_fields = (
+            "tensor_model_parallel_size",
+            "pipeline_model_parallel_size",
+            "virtual_pipeline_model_parallel_size",
+            "expert_model_parallel_size",
+            "expert_tensor_parallel_size",
+            "context_parallel_size",
+            "sequence_parallel",
+        )
+        parallel_mismatches = {
+            field: (getattr(actor_config.engine, field, None), getattr(teacher_runtime_config.engine, field, None))
+            for field in parallel_fields
+            if getattr(actor_config.engine, field, None) != getattr(teacher_runtime_config.engine, field, None)
+        }
+        if parallel_mismatches:
+            raise NotImplementedError(
+                "Single-worker fused teachers currently require the same Megatron parallelism as the actor; "
+                f"mismatches: {parallel_mismatches}."
+            )
+        if not teacher_runtime_config.engine.param_offload:
+            raise RuntimeError(
+                "Trainer-colocated multi-teacher inference requires "
+                "actor_rollout_ref.teacher.megatron.param_offload=True so only one teacher "
+                "is resident on GPU at a time."
+            )
+        student_model_config: HFModelConfig = model_config
+        student_hf_config = getattr(student_model_config.hf_config, "text_config", student_model_config.hf_config)
+        structural_fields = (
+            "model_type",
+            "vocab_size",
+            "hidden_size",
+            "num_hidden_layers",
+            "num_attention_heads",
+            "num_key_value_heads",
+            "intermediate_size",
+            "num_experts",
+            "num_experts_per_tok",
+        )
+        for teacher_key, teacher_config in teacher_distillation_config.teacher_models.items():
+            teacher_model_dict = {
+                "_target_": "verl.workers.config.HFModelConfig",
+                "path": teacher_config.model_path,
+                "hf_config_path": teacher_config.model_path,
+                # Token-level OPD requires a shared token-id space; load the
+                # student's tokenizer while loading the teacher architecture.
+                "tokenizer_path": self.config.model.get("tokenizer_path") or self.config.model.path,
+                "load_tokenizer": True,
+                "use_shm": self.config.model.get("use_shm", False),
+                "trust_remote_code": self.config.model.get("trust_remote_code", False),
+                "external_lib": self.config.model.get("external_lib", None),
+                "enable_gradient_checkpointing": False,
+                "use_remove_padding": self.config.model.get("use_remove_padding", True),
+                "mtp": OmegaConf.to_container(
+                    OmegaConf.structured(MtpConfig(enable=False, enable_train=False, enable_rollout=False)),
+                    resolve=True,
+                ),
+            }
+            teacher_model_config: HFModelConfig = omega_conf_to_dataclass(
+                teacher_model_dict, dataclass_type=HFModelConfig
+            )
+            if student_model_config.architectures != teacher_model_config.architectures:
+                raise ValueError(
+                    "Fused teacher requires identical model architectures, "
+                    f"got student={student_model_config.architectures} and "
+                    f"teacher[{teacher_key}]={teacher_model_config.architectures}."
+                )
+            teacher_hf_config = getattr(teacher_model_config.hf_config, "text_config", teacher_model_config.hf_config)
+            mismatches = {
+                field: (
+                    getattr(student_hf_config, field, None),
+                    getattr(teacher_hf_config, field, None),
+                )
+                for field in structural_fields
+                if getattr(student_hf_config, field, None) != getattr(teacher_hf_config, field, None)
+            }
+            if mismatches:
+                raise ValueError(
+                    f"Fused teacher requires isomorphic teacher/student models; "
+                    f"teacher {teacher_key!r} mismatches: {mismatches}"
+                )
+            # Runtime (TP/PP/EP, param_offload, batching, etc.) comes from
+            # actor_rollout_ref.teacher. Only teacher identity/model_path/routing
+            # remains in distillation.teacher_models.
+            teacher_engine = deepcopy(teacher_runtime_config.engine)
+            teacher_engine.forward_only = True
+            teacher_engine.use_dynamic_bsz = teacher_runtime_config.use_dynamic_bsz
+            teacher_engine.infer_max_token_len_per_gpu = teacher_runtime_config.ppo_max_token_len_per_gpu
+            teacher_engine.infer_micro_batch_size_per_gpu = teacher_runtime_config.ppo_micro_batch_size_per_gpu
+            teacher_engine.use_remove_padding = model_config.get("use_remove_padding", False)
+            if teacher_engine.use_dynamic_bsz:
+                assert teacher_runtime_config.ppo_max_token_len_per_gpu is not None
+            else:
+                assert teacher_runtime_config.ppo_micro_batch_size_per_gpu is not None
+            teacher_training_config = TrainingWorkerConfig(
+                model_type=teacher_model_config.get("model_type", "language_model"),
+                model_config=teacher_model_config,
+                engine_config=teacher_engine,
+                optimizer_config=teacher_runtime_config.optim,
+                checkpoint_config=teacher_runtime_config.checkpoint,
+            )
+            tw = TrainingWorker(config=teacher_training_config)
+            tw.reset()
+            self.teacher[teacher_key] = tw
+        if self.teacher:
+            first_tw = next(iter(self.teacher.values()))
+            self.set_dispatch_collect(mesh_name="teacher", **first_tw.get_dispatch_collect())
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="teacher"))
+    @DistProfiler.annotate(color="purple", role="teacher_compute_log_prob")
+    @_with_routing_replay_flag(enabled=False)
+    def compute_teacher_log_prob(self, data: TensorDict) -> TensorDict:
+        """Fused (trainer-colocated) teacher forward. The selected teacher is a
+        standalone param_offload=True engine; eval_mode swaps it GPU<->CPU around
+        infer_batch, so no manual weight swap / activation is needed.
+
+        teacher_key selection: the preferred path is for the caller to embed
+        teacher_key in the data via tu.assign_non_tensor (required for
+        multi-teacher routing, and used by the fully-async trainer). As a
+        single-teacher convenience (e.g. a collocated OPD script with one
+        teacher), if teacher_key is absent and exactly one teacher engine is
+        built, that engine is used automatically. This keeps the method usable
+        on paths that do not pre-route by teacher_key."""
+        teacher_key = tu.get(data, key="teacher_key", default=None)
+        if teacher_key is None:
+            if len(self.teacher) == 1:
+                teacher_key = next(iter(self.teacher))
+            else:
+                raise RuntimeError(
+                    "compute_teacher_log_prob requires 'teacher_key' in the data when "
+                    f"multiple fused teachers are configured (keys={sorted(self.teacher)}); "
+                    "set it via tu.assign_non_tensor(data, teacher_key=...)."
+                )
+        if teacher_key not in self.teacher:
+            raise RuntimeError(
+                f"No fused teacher engine for teacher_key={teacher_key!r}; configured keys: {sorted(self.teacher)}."
+            )
+        output = self.teacher[teacher_key].infer_batch(data=data)
+        return output.cpu() if output is not None else None

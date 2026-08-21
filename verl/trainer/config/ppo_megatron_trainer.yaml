@@ -2,5 +2,6 @@
 # python3 -m verl.trainer.main_ppo model_engine=megatron ...
 defaults:
   - ppo_trainer
+  - ref@actor_rollout_ref.teacher: megatron_ref
   - override model_engine: megatron
   - _self_

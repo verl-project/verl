@@ -70,9 +70,9 @@ def create_role_worker_mapping(config):
         dict: Mapping from roles to worker classes
     """
     # Always use the unified model engine worker implementation.
-    from verl.experimental.separation.engine_workers import DetachActorWorker
+    from verl.experimental.separation.engine_workers import DetachActorWorker, FusedTeacherDetachActorWorker
     from verl.single_controller.ray import RayWorkerGroup
-    from verl.workers.engine_workers import TrainingWorker
+    from verl.workers.engine_workers import TrainingWorker, is_fused_teacher_enabled
 
     ray_worker_group_cls = RayWorkerGroup
 
@@ -83,8 +83,11 @@ def create_role_worker_mapping(config):
     ):
         train_role = Role.ActorRollout
 
+    actor_worker_cls = (
+        FusedTeacherDetachActorWorker if is_fused_teacher_enabled(config.get("distillation")) else DetachActorWorker
+    )
     role_worker_mapping = {
-        train_role: ray.remote(DetachActorWorker),
+        train_role: ray.remote(actor_worker_cls),
         Role.Critic: ray.remote(TrainingWorker),
     }
 

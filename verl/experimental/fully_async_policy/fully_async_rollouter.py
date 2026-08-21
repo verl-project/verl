@@ -418,6 +418,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         self._hybrid_worker_group = None
 
         # Config
+        self.distillation_config = config.get("distillation")
         self.staleness_threshold: float = config.async_training.get("staleness_threshold", 1)
         # required_samples use ppo_mini_batch_size*require_batches as the minimum number of samples.
         self.require_batches = config.async_training.require_batches
@@ -776,7 +777,8 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         from verl.trainer.ppo.utils import Role
 
         self.teacher_model_manager = None
-        if is_distillation_enabled(self.config.get("distillation")):
+        distillation_config = self.config.get("distillation")
+        if is_distillation_enabled(distillation_config) and distillation_config.teacher_execution == "rollout":
             from verl.experimental.teacher_loop import MultiTeacherModelManager
 
             resource_pool_spec = {}
@@ -991,7 +993,14 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
     async def _process_single_sample_streaming(self, rollout_sample: RolloutSample):
         """Process a single sample streamingly"""
         # Calling asynchronous generation methods
-        # Embed sample_id into prompts for skip management
+        # Embed sample_id into prompts for skip management. Preserve the teacher
+        # selection field because agent-loop returns a new DataProto without the
+        # input's non_tensor_batch; selection happens after every teacher scores.
+        routing_field = None
+        routing_values = None
+        if self.distillation_config is not None and self.distillation_config.teacher_execution == "trainer":
+            routing_field = self.distillation_config.teacher_key
+            routing_values = rollout_sample.full_batch.non_tensor_batch.get(routing_field)
         rollout_sample.full_batch.non_tensor_batch["uid"] = np.array(
             [f"uid_{rollout_sample.sample_id}"] * len(rollout_sample.full_batch), dtype=object
         )
@@ -1002,6 +1011,8 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         rollout_sample.full_batch.non_tensor_batch["uid"] = np.array(
             [f"uid_{rollout_sample.sample_id}"] * len(rollout_sample.full_batch), dtype=object
         )
+        if routing_field is not None and routing_values is not None:
+            rollout_sample.full_batch.non_tensor_batch[routing_field] = routing_values
         rollout_sample.rollout_status = await self.get_statistics()
 
         success = await self.message_queue_client.put_sample(

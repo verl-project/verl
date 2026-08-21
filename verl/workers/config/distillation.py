@@ -146,11 +146,13 @@ class DistillationTeacherModelConfig(BaseConfig):
 
     key: Optional[str] = None
     model_path: Optional[str] = None
-    inference: RolloutConfig = field(default_factory=RolloutConfig)
+    inference: Optional[RolloutConfig] = None
     num_replicas: Optional[int] = 0
 
     @property
     def per_replica_world_size(self) -> int:
+        if self.inference is None:
+            raise ValueError("inference must be configured for a rollout-served distillation teacher.")
         return (
             self.inference.tensor_model_parallel_size
             * self.inference.data_parallel_size
@@ -170,6 +172,8 @@ class DistillationTeacherModelConfig(BaseConfig):
             raise ValueError("num_replicas must be specified for distillation teacher model config.")
 
     def validate_and_prepare_for_distillation(self, use_topk: bool, topk: Optional[int]) -> None:
+        if self.inference is None:
+            raise ValueError("inference must be configured when distillation.teacher_execution='rollout'.")
         # Prompt + Response from student are fed into teacher as context
         max_model_len = self.inference.max_model_len
         student_prompt_length = self.inference.prompt_length
@@ -257,20 +261,52 @@ class DistillationConfig(BaseConfig):
     ```
     """
 
-    _mutable_fields = BaseConfig._mutable_fields | {"teacher_models", "n_gpus_per_node", "nnodes"}
+    _mutable_fields = BaseConfig._mutable_fields | {
+        "teacher_models",
+        "n_gpus_per_node",
+        "nnodes",
+        "teacher_execution",
+        "nonrouter",
+    }
 
     enabled: bool = False
+    # "rollout": score trajectories on dedicated vLLM/SGLang teacher resources.
+    # "trainer": score trajectories on the trainer's Megatron engine by swapping
+    # isomorphic teacher/student parameter snapshots between phases.
+    teacher_execution: str = "rollout"
     n_gpus_per_node: int = 0
     nnodes: int = 0
     teacher_models: dict[str, DistillationTeacherModelConfig] = field(default_factory=dict)
     teacher_key: str = "data_source"
+    # nonrouter: every sample is forwarded by ALL teachers (no routing at forward
+    # time); the trainer later selects which teacher log_prob to use by `teacher_key`.
+    nonrouter: bool = False
     distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
 
     def __post_init__(self):
         if not self.enabled:
             return
 
+        if self.teacher_execution not in {"rollout", "trainer"}:
+            raise ValueError(
+                f"distillation.teacher_execution must be either 'rollout' or 'trainer', got {self.teacher_execution!r}."
+            )
+
         self.teacher_models = self._resolve_teacher_models()
+        if self.teacher_execution == "trainer":
+            if not self.nonrouter:
+                raise NotImplementedError(
+                    "Trainer-colocated distillation currently requires distillation.nonrouter=True."
+                )
+            if self.distillation_loss.loss_settings.use_topk:
+                raise NotImplementedError(
+                    "Trainer-colocated distillation currently supports sampled-token losses "
+                    "(for example k1), but not forward_kl_topk."
+                )
+            for teacher_model in self.teacher_models.values():
+                teacher_model.num_replicas = 0
+            return
+
         teacher_world_size_sum = 0
         for teacher_model in self.teacher_models.values():
             teacher_model.validate_and_prepare_for_distillation(
@@ -289,22 +325,30 @@ class DistillationConfig(BaseConfig):
     def _resolve_teacher_models(self) -> dict[str, DistillationTeacherModelConfig]:
         assert "teacher_model" in self.teacher_models
         if len(self.teacher_models) == 1:
-            # Single teacher occupies the entire teacher resource pool.
             teacher_model = self.teacher_models["teacher_model"]
-            inference = teacher_model.inference
-            per_replica = (
-                inference.tensor_model_parallel_size
-                * inference.data_parallel_size
-                * inference.pipeline_model_parallel_size
-            )
-            pool_size = self.n_gpus_per_node * self.nnodes
-            if pool_size % per_replica != 0:
-                raise ValueError(
-                    f"Single teacher's per_replica_world_size ({per_replica}) must divide the distillation "
-                    f"resource pool size ({self.n_gpus_per_node=} * {self.nnodes=} = {pool_size})."
+            if self.teacher_execution == "rollout":
+                # Single teacher occupies the entire teacher resource pool.
+                inference = teacher_model.inference
+                if inference is None:
+                    raise ValueError("inference must be configured when distillation.teacher_execution='rollout'.")
+                per_replica = (
+                    inference.tensor_model_parallel_size
+                    * inference.data_parallel_size
+                    * inference.pipeline_model_parallel_size
                 )
-            teacher_model.num_replicas = pool_size // per_replica
-            teacher_model.key = "default"
+                pool_size = self.n_gpus_per_node * self.nnodes
+                if pool_size % per_replica != 0:
+                    raise ValueError(
+                        f"Single teacher's per_replica_world_size ({per_replica}) must divide the distillation "
+                        f"resource pool size ({self.n_gpus_per_node=} * {self.nnodes=} = {pool_size})."
+                    )
+                teacher_model.num_replicas = pool_size // per_replica
+            else:
+                teacher_model.num_replicas = 0
+            # Keep an explicit routing key. Older single-teacher configs omit it,
+            # so retain "default" only as the backwards-compatible fallback.
+            if teacher_model.key is None:
+                teacher_model.key = "default"
         else:
             # Multiple teachers: remove default single teacher config
             self.teacher_models.pop("teacher_model")

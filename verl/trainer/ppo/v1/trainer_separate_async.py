@@ -20,7 +20,7 @@ from omegaconf import DictConfig
 from transfer_queue import KVBatchMeta
 
 from verl.checkpoint_engine import CheckpointEngineManager
-from verl.experimental.separation.engine_workers import DetachActorWorker
+from verl.experimental.separation.engine_workers import DetachActorWorker, FusedTeacherDetachActorWorker
 from verl.trainer.ppo.utils import Role, need_reward_model
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, register_trainer
 from verl.utils.config import omega_conf_to_dataclass
@@ -70,13 +70,14 @@ class PPOTrainerSeparateAsync(PPOTrainer):
 
     def _init_resource_pool_mgr(self):
         super()._init_resource_pool_mgr()
-        # Replace ActorRolloutRefWorker with DetachActorWorker to get CPU save/restore
-        # capability needed for Decoupled PPO when parameter_sync_step > 1.
-        # The base class adds exactly one of ActorRolloutRef or ActorRollout to the mapping.
+
+        # Separate async requires CPU save/restore for Decoupled PPO. The fused
+        # variant adds trainer-colocated teacher swapping to the same worker.
+        worker_cls = FusedTeacherDetachActorWorker if self.fused_teacher_enabled else DetachActorWorker
         if Role.ActorRolloutRef in self.role_worker_mapping:
-            self.role_worker_mapping[Role.ActorRolloutRef] = ray.remote(DetachActorWorker)
+            self.role_worker_mapping[Role.ActorRolloutRef] = ray.remote(worker_cls)
         elif Role.ActorRollout in self.role_worker_mapping:
-            self.role_worker_mapping[Role.ActorRollout] = ray.remote(DetachActorWorker)
+            self.role_worker_mapping[Role.ActorRollout] = ray.remote(worker_cls)
 
     def _setup(self):
         super()._setup()
