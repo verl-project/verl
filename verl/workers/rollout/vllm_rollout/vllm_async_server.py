@@ -836,15 +836,36 @@ class vLLMHttpServer:
 
     async def release_kv_cache(self):
         """Release only kv_cache GPU memory, keeping model weights intact.
-        # TODO: support true release of kv_cache
         """
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
-
+        debug_prefix = (
+            f"[vLLMHttpServer][replica={self.replica_rank}][node={self.node_rank}]"
+            f"[mode={self.rollout_mode}]"
+        )
+        print(f"{debug_prefix} release_kv_cache: releasing KV-cache allocations only", flush=True)
+        await self.engine.collective_rpc("release_kv_cache")
+        print(f"{debug_prefix} release_kv_cache: completed; weights remain on device", flush=True)
+    
     async def resume_kv_cache(self):
         """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
-        if self.node_rank != 0:
+        if self.node_rank != 0 or not self.config.free_cache_engine:
             return
+        debug_prefix = (
+            f"[elease_kv_cache_replic={self.replica_rank}][node={self.node_rank}]"
+            f"[mode={self.rollout_mode}]"
+        )
+        print(f"{debug_prefix} resume_kv_cache: restoring KV-cache allocations only", flush=True)
+        await self.engine.collective_rpc("resume_kv_cache")
+        print(f"{debug_prefix} resume_kv_cache: KV cache restored; resetting prefix cache", flush=True)
+        await self.engine.reset_prefix_cache(**_RESET_PREFIX_CACHE_KWARGS)
+        if _VLLM_VERSION >= version.parse("0.9.0"):
+            print(f"{debug_prefix} resume_kv_cache: resetting multimodal cache", flush=True)
+            await self.engine.reset_mm_cache()
+        if _VLLM_VERSION >= version.parse("0.16.0"):
+            print(f"{debug_prefix} resume_kv_cache: resetting encoder cache", flush=True)
+            await self.engine.reset_encoder_cache()
+        print(f"{debug_prefix} resume_kv_cache: completed", flush=True)
 
     def _should_profile(self) -> bool:
         """Whether this replica drives the engine profiler."""

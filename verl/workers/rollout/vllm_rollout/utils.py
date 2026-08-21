@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import platform
+from datetime import datetime
 import signal
 import threading
 from collections.abc import Mapping
@@ -414,6 +415,87 @@ class vLLMColocateWorkerExtension:
         trainer_rank = int(trainer_rank_base) + local_rank if trainer_rank_base is not None else local_rank
         return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{trainer_rank}.sock"
 
+
+    def release_kv_cache(self) -> None:
+        """Unmap only vLLM-Ascend KV-cache allocations."""
+        from vllm.platforms import current_platform
+        if current_platform.device_type != "npu":
+            logger.warning("KV-cache-only release is currently implemented only for vLLM-Ascend")
+            return
+        from vllm_ascend.device_allocator.camem import CaMemAllocator, unmap_and_release
+        allocator = CaMemAllocator.get_instance()
+        released_ptrs = getattr(self, "_verl_released_kv_cache_ptrs", set())
+        if released_ptrs:
+            logger.warning("KV cache is already released; skipping duplicate release")
+            return
+        torch.npu.synchronize()
+        free_before, total = torch.npu.mem_get_info()
+        rank = getattr(self, "rank", getattr(self, "local_rank", "unknown"))
+        device = torch.npu.current_device()
+        gib = 1024**3
+        print(
+            f"[KVCacheMemory][time={datetime.now().astimezone().isoformat(timespec='milliseconds')}]"
+            f"[release][before][rank={rank}][device={device}] "
+            f"free={free_before / gib:.2f} GiB used={(total - free_before) / gib:.2f} GiB "
+            f"total={total / gib:.2f} GiB",
+            flush=True,
+        )
+        for ptr, data in allocator.pointer_to_data.items():
+            if data.tag == "kv_cache":
+                unmap_and_release(data.handle)
+                released_ptrs.add(ptr)
+        self._verl_released_kv_cache_ptrs = released_ptrs
+        torch.npu.empty_cache()
+        torch.npu.synchronize()
+        free_after, _ = torch.npu.mem_get_info()
+        print(
+            f"[KVCacheMemory][time={datetime.now().astimezone().isoformat(timespec='milliseconds')}]"
+            f"[release][after][rank={rank}][device={device}] "
+            f"free={free_after / gib:.2f} GiB used={(total - free_after) / gib:.2f} GiB "
+            f"total={total / gib:.2f} GiB freed={(free_after - free_before) / gib:.2f} GiB "
+            f"allocations={len(released_ptrs)}",
+            flush=True,
+        )
+        logger.info("Released %d KV-cache allocations without touching weights", len(released_ptrs))
+
+
+    def resume_kv_cache(self) -> None:
+        """Remap KV-cache allocations released by release_kv_cache()."""
+        from vllm.platforms import current_platform
+        if current_platform.device_type != "npu":
+            logger.warning("KV-cache-only resume is currently implemented only for vLLM-Ascend")
+            return
+        from vllm_ascend.device_allocator.camem import CaMemAllocator, create_and_map
+        allocator = CaMemAllocator.get_instance()
+        released_ptrs = getattr(self, "_verl_released_kv_cache_ptrs", set())
+        torch.npu.synchronize()
+        free_before, total = torch.npu.mem_get_info()
+        rank = getattr(self, "rank", getattr(self, "local_rank", "unknown"))
+        device = torch.npu.current_device()
+        gib = 1024**3
+        print(
+            f"[KVCacheMemory][time={datetime.now().astimezone().isoformat(timespec='milliseconds')}]"
+            f"[resume][before][rank={rank}][device={device}] "
+            f"free={free_before / gib:.2f} GiB used={(total - free_before) / gib:.2f} GiB "
+            f"total={total / gib:.2f} GiB allocations={len(released_ptrs)}",
+            flush=True,
+        )
+        for ptr in released_ptrs:
+            data = allocator.pointer_to_data.get(ptr)
+            if data is None:
+                raise RuntimeError(f"KV-cache allocation {ptr:#x} disappeared while released")
+            create_and_map(data.handle)
+        torch.npu.synchronize()
+        free_after, _ = torch.npu.mem_get_info()
+        print(
+            f"[KVCacheMemory][time={datetime.now().astimezone().isoformat(timespec='milliseconds')}]"
+            f"[resume][after][rank={rank}][device={device}] "
+            f"free={free_after / gib:.2f} GiB used={(total - free_after) / gib:.2f} GiB "
+            f"total={total / gib:.2f} GiB restored={(free_before - free_after) / gib:.2f} GiB",
+            flush=True,
+        )
+        logger.info("Restored %d KV-cache allocations without touching weights", len(released_ptrs))
+        released_ptrs.clear()
 
 class SuppressSignalInThread:
     def __enter__(self):
