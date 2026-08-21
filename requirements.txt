@@ -3,6 +3,7 @@ accelerate
 codetiming
 datasets
 dill
+fsspec
 hydra-core
 liger-kernel
 numpy>=2.0.0
