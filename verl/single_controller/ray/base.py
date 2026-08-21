@@ -191,6 +191,9 @@ class ResourcePoolManager:
     mapping: dict[int, str]
     max_colocate_count: int = 3
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
+    # When False, RayResourcePools reserve CPU-only bundles. Used by the
+    # remote-backend trainer path where the plugin owns GPU allocation.
+    use_gpu: bool = True
 
     def create_resource_pool(self):
         """Create Ray resource pools for distributed training.
@@ -207,7 +210,7 @@ class ResourcePoolManager:
             # that can utilize different WorkerGroup for differnt models
             resource_pool = RayResourcePool(
                 process_on_nodes=process_on_nodes,
-                use_gpu=True,
+                use_gpu=self.use_gpu,
                 max_colocate_count=self.max_colocate_count,
                 name_prefix=resource_pool_name,
             )
@@ -225,6 +228,12 @@ class ResourcePoolManager:
 
     def _check_resource_available(self):
         """Check if the resource pool can be satisfied in this ray cluster."""
+        # CPU-only pools (remote-backend forwarders) don't reserve GPUs; skip
+        # the headroom check so a plugin that already owns the visible GPUs
+        # doesn't trip a false negative.
+        if not self.use_gpu:
+            return
+
         node_available_resources = ray._private.state.available_resources_per_node()
         node_available_gpus = {
             node: node_info.get("GPU", 0) if "GPU" in node_info else node_info.get("NPU", 0)
