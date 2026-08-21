@@ -132,19 +132,18 @@ def _trainer(
     trainer.add_replicas_to_balancer = add_replicas
     trainer.remove_replicas_from_balancer = remove_replicas
     trainer.clear_sticky_cache = clear_sticky
-    trainer._enable_switch = enable_switch
+    trainer.hybrid_rollout_config = HybridRolloutSwitchConfig(
+        enable_switch=enable_switch,
+        switch_threshold_ratio=switch_threshold_ratio,
+        adaptive_switch_threshold=adaptive_switch_threshold,
+        switch_threshold_step_up=0.05,
+        switch_threshold_step_down=0.025,
+        switch_threshold_release_steps=2,
+        switch_cost_window_size=3,
+    )
     if enable_switch:
-        trainer._init_switch_config(
-            HybridRolloutSwitchConfig(
-                enable_switch=True,
-                switch_threshold_ratio=switch_threshold_ratio,
-                adaptive_switch_threshold=adaptive_switch_threshold,
-                switch_threshold_step_up=0.05,
-                switch_threshold_step_down=0.025,
-                switch_threshold_release_steps=2,
-                switch_cost_window_size=3,
-            )
-        )
+        trainer._init_hybrid_rollout_state()
+        trainer._validate_hybrid_rollout_runtime()
     return trainer
 
 
@@ -168,6 +167,12 @@ def test_hybrid_rollout_switch_config_target_instantiates_dataclass():
 
     assert isinstance(switch_config, HybridRolloutSwitchConfig)
     assert switch_config.switch_threshold_ratio == 0.25
+
+
+@pytest.mark.parametrize("window_size", [0, -1])
+def test_hybrid_rollout_switch_config_rejects_nonpositive_cost_window(window_size):
+    with pytest.raises(ValueError, match="switch_cost_window_size must be positive"):
+        HybridRolloutSwitchConfig(switch_cost_window_size=window_size)
 
 
 def test_step_lends_the_engine_out_and_reclaims_it_exactly_once():
@@ -369,44 +374,28 @@ def test_switching_rejects_a_replay_buffer_that_cannot_report_depth():
         }
     )
     trainer.replay_buffer = SimpleNamespace()
+    trainer.hybrid_rollout_config = HybridRolloutSwitchConfig()
 
     with pytest.raises(TypeError, match="wait_for_sampleable"):
-        trainer._init_switch_config(
-            HybridRolloutSwitchConfig(
-                switch_threshold_ratio=0.25,
-                adaptive_switch_threshold=False,
-                switch_threshold_step_up=0.05,
-                switch_threshold_step_down=0.025,
-                switch_threshold_release_steps=2,
-                switch_cost_window_size=3,
-            )
-        )
+        trainer._validate_hybrid_rollout_runtime()
 
 
 def test_switching_rejects_rollout_disaggregation():
     trainer = object.__new__(PPOTrainerSeparateAsync)
     trainer.config = OmegaConf.create({"actor_rollout_ref": {"rollout": {"disaggregation": {"enabled": True}}}})
     trainer.replay_buffer = _RecordingReplayBuffer()
+    trainer.hybrid_rollout_config = HybridRolloutSwitchConfig()
 
     with pytest.raises(ValueError, match="does not support rollout disaggregation"):
-        trainer._init_switch_config(
-            HybridRolloutSwitchConfig(
-                switch_threshold_ratio=0.25,
-                adaptive_switch_threshold=False,
-                switch_threshold_step_up=0.05,
-                switch_threshold_step_down=0.025,
-                switch_threshold_release_steps=2,
-                switch_cost_window_size=3,
-            )
-        )
+        trainer._validate_hybrid_rollout_runtime()
 
 
 def test_disabled_switching_skips_custom_replay_buffer_validation():
     trainer = object.__new__(PPOTrainerSeparateAsync)
     trainer.config = OmegaConf.create({})
     trainer.replay_buffer = SimpleNamespace()
-    trainer._enable_switch = False
-    assert trainer._enable_switch is False
+    trainer.hybrid_rollout_config = HybridRolloutSwitchConfig(enable_switch=False)
+    assert trainer.hybrid_rollout_config.enable_switch is False
 
 
 def test_adaptive_threshold_increases_after_trainer_idle():

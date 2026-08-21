@@ -82,6 +82,12 @@ class HybridRolloutSwitchConfig(BaseConfig):
     switch_threshold_release_steps: int = 2
     switch_cost_window_size: int = 3
 
+    def __post_init__(self):
+        if not 0.0 < self.switch_threshold_ratio <= 1.0:
+            raise ValueError(f"switch_threshold_ratio must be in (0, 1], got {self.switch_threshold_ratio}")
+        if self.switch_cost_window_size <= 0:
+            raise ValueError("switch_cost_window_size must be positive")
+
 
 @dataclass
 class BaseModelConfig(BaseConfig):
