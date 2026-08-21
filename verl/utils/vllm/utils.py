@@ -224,14 +224,16 @@ def resolve_weight_name(model, name: str, model_weight_names: set[str]) -> str:
             cleaf = csegs[-1]
             stem = csegs[:-1]
             # Drop an injected ``base_layer`` so a LoRA-suffixed shard still matches.
+            suffix = []
             if stem and stem[-1] == "base_layer":
+                suffix = ["base_layer"]
                 stem = stem[:-1]
             for owner, shards in packed.items():
                 osegs = owner.split(".")
                 for shard in shards:
                     ssegs = shard.split(".")
                     if len(stem) >= len(ssegs) and stem[-len(ssegs) :] == ssegs:
-                        fused = ".".join(stem[: -len(ssegs)] + osegs + [cleaf])
+                        fused = ".".join(stem[: -len(ssegs)] + osegs + suffix + [cleaf])
                         if fused in model_weight_names:
                             return True
                         if mapper is not None:
@@ -286,14 +288,6 @@ def resolve_weight_name(model, name: str, model_weight_names: set[str]) -> str:
         parent_has_base_layer = _exists(parent + ".base_layer.weight") or any(
             n.startswith(parent + ".base_layer.") for n in model_weight_names
         )
-        if packed and parent_has_base_layer:
-            # A packed shard (e.g. DSV4 ``compressor.wkv``) must be returned as
-            # the *shard*, suffix stripped: vLLM rewrites shard -> fused owner
-            # inside ``load_weights`` and indexes ``params_dict`` after that.
-            # ``_exists`` below can't do it -- its tail-sequence lookup drops the
-            # ``model.layers.N.`` prefix and misses multi-segment shards.
-            if any(shard in name for shards in packed.values() for shard in shards):
-                return stripped
         if parent_has_base_layer:
             if _HAS_LORA_LOAD_WEIGHTS and not _inner_load_weights_is_strict(model):
                 return stripped
