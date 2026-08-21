@@ -61,6 +61,30 @@ def test_dynamic_batch():
     torch.testing.assert_close(input_ids, dataproto.batch["input_ids"])
 
 
+def test_single_micro_batch_reuses_original_nested_batch():
+    """A one-micro-batch split must not repack large jagged fields."""
+    input_ids = torch.randint(low=0, high=10, size=(2, 8))
+    attention_mask = torch.ones_like(input_ids)
+    pixel_values = torch.nested.as_nested_tensor(
+        [torch.randn(2, 3), torch.randn(4, 3)],
+        layout=torch.jagged,
+    )
+    dataproto = DataProto.from_single_dict(
+        {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "pixel_values": pixel_values,
+        }
+    )
+
+    micro_batches, micro_bsz_idx_lst = rearrange_micro_batches(dataproto.batch, max_token_len=16)
+
+    assert len(micro_batches) == 1
+    assert micro_batches[0] is dataproto.batch
+    assert micro_batches[0]["pixel_values"] is pixel_values
+    assert micro_bsz_idx_lst == [[0, 1]]
+
+
 def _worker(rank, world_size, init_method, max_token_len, use_same_dp, min_mb):
     # 1) init process group & CUDA
     get_torch_device().set_device(rank)

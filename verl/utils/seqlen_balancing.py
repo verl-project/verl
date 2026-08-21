@@ -408,6 +408,11 @@ def rearrange_micro_batches(
 
     assert num_micro_batches <= num_groups
 
+    # Fast path: avoid redundant repacking when the full batch fits in one micro-batch.
+    if num_micro_batches == 1:
+        identity_indices = list(range(batch_size))
+        return [batch], [identity_indices]
+
     # upcast to int64 to avoid potential overflow im `calculate_workload` computation.
     seq_len_effective = seq_len_effective.long()
 
