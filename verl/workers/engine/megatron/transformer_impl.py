@@ -947,7 +947,12 @@ class MegatronEngine(BaseEngine):
         if enable_routing_replay:
             # Set to REPLAY mode: for R3 mode or actor update phase in R2 mode
             RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
-            if forward_only and self.engine_config.router_replay.mode == "R2":
+            # Agent-loop schemas can retain the optional key with a ``None``
+            # value. R2 must record routes in that case; treating key presence
+            # as replay data skips RECORD and leaves the subsequent update with
+            # no targets.
+            has_replay_routes = data.get("routed_experts", None) is not None
+            if forward_only and self.engine_config.router_replay.mode == "R2" and not has_replay_routes:
                 # In R2 mode, forward_only calls (e.g., compute_log_probs) need to record routing information
                 RouterReplay.set_global_router_replay_action(RouterReplayAction.RECORD)
 
@@ -1298,13 +1303,18 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
         if RouterReplayHelper.is_replay_forward_action(self.tf_config, vp_rank):
             layers_topk_idx = model_inputs["routed_experts"]
+            if layers_topk_idx is None:
+                raise RuntimeError(
+                    "router_replay REPLAY: micro_batch has no routed_experts. "
+                    "R2 compute_log_prob must record and preserve routes before actor update."
+                )
             replay_mask = None
             if self.engine_config.router_replay.mode == "R3":
                 layers_topk_idx = align_r3_router_replay_data(layers_topk_idx, input_ids)
                 replay_mask = build_r3_replay_mask(input_ids, batch["response_mask"])
             set_router_replay_data(
                 layers_topk_idx,
-                None,
+                attention_mask,
                 self.tf_config,
                 vp_rank,
                 replay_mask=replay_mask,
@@ -1402,7 +1412,12 @@ class MegatronEngineWithLMHead(MegatronEngine):
         # Router replay: record routing decisions for R2 mode
         if RouterReplayHelper.is_r2_record_action(self.tf_config, vp_rank):
             merge_router_topk_indices(
-                None, input_ids, self.mini_layer_topk_idx_list, self.tf_config, vp_rank, local_cp_size=local_cp_size
+                attention_mask,
+                input_ids,
+                self.mini_layer_topk_idx_list,
+                self.tf_config,
+                vp_rank,
+                local_cp_size=local_cp_size,
             )
 
         # Router replay: switch to backward replay mode for next backward pass
