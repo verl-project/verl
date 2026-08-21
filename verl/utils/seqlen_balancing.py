@@ -624,3 +624,75 @@ def get_group_balanced_partitions(
         sample_partitions.append(sorted(sample_indices))
 
     return sample_partitions
+
+
+def get_length_grouped_micro_batches(
+    batch,
+    max_token_len: int,
+    dp_group=None,
+    same_micro_num_in_dp: bool = True,
+):
+    """Split a batch into micro-batches that group sequences by length to minimize padding.
+
+    Greedy algorithm: sort sequences by length (descending) and pack into micro-batches
+    such that ``len(micro_batch) * max_seq_in_micro_batch <= max_token_len``.
+
+    Used when ``use_remove_padding`` (sequence packing) is unavailable, e.g. for
+    Mamba/SSM-based models.
+
+    Args:
+        batch: TensorDict containing nested ``input_ids`` with jagged layout.
+        max_token_len: Maximum number of tokens per micro-batch (after padding).
+        dp_group: torch.distributed group for data-parallel sync.
+        same_micro_num_in_dp: If True, ensure same micro-batch count across DP ranks.
+
+    Returns:
+        List[TensorDict]: the micro-batches.
+        List[List[int]]: index lists mapping each micro-batch back to original positions.
+    """
+    input_ids = batch["input_ids"]
+    assert input_ids.is_nested, "get_length_grouped_micro_batches requires nested input_ids"
+    sequence_lengths = input_ids.offsets().diff().cpu().tolist()
+
+    sorted_sequence_lengths_with_idx = sorted(
+        [(length, idx) for idx, length in enumerate(sequence_lengths)], key=lambda x: x[0], reverse=True
+    )
+
+    micro_batches_idx = []
+    current_micro_batch = []
+    current_max_len = 0
+
+    for length, idx in sorted_sequence_lengths_with_idx:
+        new_max_len = max(current_max_len, length)
+        new_batch_size = len(current_micro_batch) + 1
+        if current_micro_batch and new_batch_size * new_max_len > max_token_len:
+            micro_batches_idx.append(current_micro_batch)
+            current_micro_batch = [idx]
+            current_max_len = length
+        else:
+            current_micro_batch.append(idx)
+            current_max_len = new_max_len
+
+    if current_micro_batch:
+        micro_batches_idx.append(current_micro_batch)
+
+    # Ensure all DP ranks end up with the same number of micro-batches by splitting
+    # the largest batches on lagging ranks. Required because the optimizer step is
+    # synchronized across DP ranks.
+    if same_micro_num_in_dp and dist.is_initialized():
+        num_micro_batches_tensor = torch.tensor([len(micro_batches_idx)], device=get_device_name())
+        dist.all_reduce(num_micro_batches_tensor, op=dist.ReduceOp.MAX, group=dp_group)
+        max_num_micro_batches = num_micro_batches_tensor.cpu().item()
+        while len(micro_batches_idx) < max_num_micro_batches:
+            largest_batch_idx = max(range(len(micro_batches_idx)), key=lambda i: len(micro_batches_idx[i]))
+            largest_batch = micro_batches_idx[largest_batch_idx]
+            assert len(largest_batch) > 1, (
+                f"Cannot split micro-batches further to reach {max_num_micro_batches} on rank "
+                f"{dist.get_rank(dp_group)}: largest remaining batch has only one sequence."
+            )
+            mid = len(largest_batch) // 2
+            micro_batches_idx[largest_batch_idx] = largest_batch[:mid]
+            micro_batches_idx.append(largest_batch[mid:])
+
+    micro_batches = [tu.index_select_tensor_dict(batch, partition) for partition in micro_batches_idx]
+    return micro_batches, micro_batches_idx

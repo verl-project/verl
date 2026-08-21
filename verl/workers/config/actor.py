@@ -304,6 +304,11 @@ class FSDPActorConfig(ActorConfig):
             Forwarded to ``fsdp_config.pad_to_length``, which is what the engine reads.
         fsdp_config (dict[str, Any]): Configuration for FSDP settings.
         use_remove_padding (bool): Whether to remove padding tokens in inputs during training
+            via sequence packing (varlen attention). Incompatible with use_length_grouped_bsz.
+        use_length_grouped_bsz (bool): Whether to build micro-batches by greedily grouping
+            sequences of similar length, reducing padding waste when re-padding jagged
+            tensors for the model forward pass. Useful for models that cannot use
+            sequence packing (e.g. Mamba/SSM). Incompatible with use_remove_padding.
     """
 
     strategy: str = "fsdp"
@@ -315,6 +320,7 @@ class FSDPActorConfig(ActorConfig):
     pad_to_length: bool = False
     fsdp_config: FSDPEngineConfig = field(default_factory=FSDPEngineConfig)
     use_remove_padding: bool = False
+    use_length_grouped_bsz: bool = False
     use_rollout_log_probs: bool = False
 
     def __post_init__(self):
