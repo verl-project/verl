@@ -151,7 +151,7 @@ def _trainer(
 def _run_step(trainer: PPOTrainerSeparateAsync, *, sample_wait_seconds: float) -> None:
     """Drive one global step's hooks, with the mini-batches blocked for the given total."""
     trainer.on_step_begin()
-    trainer.on_step_prompts_submitted()
+    trainer._wait_for_sampleable_and_switch()
     trainer._step_sample_wait_seconds = sample_wait_seconds
     trainer.on_step_end()
 
@@ -176,7 +176,7 @@ def test_step_lends_the_engine_out_and_reclaims_it_exactly_once():
     assert "separate_async/decision/effective_switch_cost_seconds" not in trainer._pending_sync_metrics
 
     trainer.on_step_begin()
-    trainer.on_step_prompts_submitted()
+    trainer._wait_for_sampleable_and_switch()
     assert trainer.current_mode == HybridEngineMode.TRAINER
     assert trainer.replay_buffer.wait_calls == [16]
     assert trainer.checkpoint_manager.abort_calls == 1
@@ -221,14 +221,14 @@ def test_step_begin_reclaims_hybrid_before_submission_when_inventory_is_ready():
     assert trainer.checkpoint_manager.sleep_calls == 1
     assert trainer.timing_raw["switch_wait"] == 0.0
     assert trainer.timing_raw["switch_to_trainer"] >= 0.0
-    assert trainer.on_step_prompts_submitted() == {}
+    assert trainer._wait_for_sampleable_and_switch() == {}
 
 
-def test_prompts_submitted_is_a_noop_once_the_engine_is_training():
+def test_wait_for_sampleable_is_a_noop_once_the_engine_is_training():
     trainer = _trainer()
     trainer.current_mode = HybridEngineMode.TRAINER
 
-    assert trainer.on_step_prompts_submitted() == {}
+    assert trainer._wait_for_sampleable_and_switch() == {}
     assert trainer.replay_buffer.wait_calls == []
     assert trainer.balancer_calls == []
 
@@ -236,16 +236,17 @@ def test_prompts_submitted_is_a_noop_once_the_engine_is_training():
 def test_eviction_metrics_from_the_wait_reach_the_step():
     metrics = {"training/off_policy/evicted_samples": 3}
     trainer = _trainer(eviction_metrics=metrics)
+    trainer._add_batch_to_generate = lambda: None
 
     trainer.on_step_begin()
-    assert trainer.on_step_prompts_submitted() == metrics
+    assert trainer.prepare_step() == metrics
 
 
 def test_disabled_switching_reclaims_the_engine_without_waiting():
     trainer = _trainer(enable_switch=False)
 
     trainer.on_step_begin()
-    assert trainer.on_step_prompts_submitted() == {}
+    assert trainer._wait_for_sampleable_and_switch() == {}
     assert trainer.current_mode == HybridEngineMode.TRAINER
     assert trainer.replay_buffer.wait_calls == []
     assert trainer.checkpoint_manager.sleep_calls == 1

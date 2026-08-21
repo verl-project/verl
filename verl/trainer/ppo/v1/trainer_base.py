@@ -514,8 +514,7 @@ class PPOTrainer(ABC):
         )
         sample_batch_size = train_batch_size // self.parameter_sync_step
 
-        self._add_batch_to_generate()
-        prepare_metrics = self.on_step_prompts_submitted()
+        prepare_metrics = self.prepare_step()
 
         metrics_aggregator = MetricsAggregator()
         if prepare_metrics:
@@ -613,15 +612,6 @@ class PPOTrainer(ABC):
     def on_step_begin(self):
         """Called at the beginning of each training step."""
         return
-
-    def on_step_prompts_submitted(self) -> dict:
-        """Called once this step's prompts are dispatched, before any mini-batch is sampled.
-
-        The only hook that sees the step as a whole rather than one local update, so it is where a
-        trainer acts on decisions whose cost should not be paid per mini-batch. Returns metrics to
-        fold into the step's log.
-        """
-        return {}
 
     @abstractmethod
     def on_step_end(self):
@@ -1382,6 +1372,10 @@ class PPOTrainer(ABC):
         """Add one training batch to the AgentLoopManager."""
         batch = self._next_train_batch()
         self._submit_batch_to_rollout(batch)
+
+    def prepare_step(self) -> dict:
+        self._add_batch_to_generate()
+        return {}
 
     def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict | None = None) -> KVBatchMeta:
         """Compute the reward score with a colocated reward model."""

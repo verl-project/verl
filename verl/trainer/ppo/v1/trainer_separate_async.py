@@ -243,7 +243,12 @@ class PPOTrainerSeparateAsync(PPOTrainer):
     def on_sample_end(self):
         self._step_sample_wait_seconds += time.perf_counter() - self._sample_start
 
-    def on_step_prompts_submitted(self) -> dict:
+    def prepare_step(self) -> dict:
+        metrics = super().prepare_step()
+        metrics.update(self._wait_for_sampleable_and_switch())
+        return metrics
+
+    def _wait_for_sampleable_and_switch(self) -> dict:
         if self.current_mode != HybridEngineMode.ROLLOUT:
             return {}
 
