@@ -224,6 +224,7 @@ class RLInsightLogger:
     """Logger backend that exports scalar metrics and rl-insight runtime signals."""
 
     ENABLE_ENV = "VERL_RL_INSIGHT_ENABLE"
+    MINIMUM_RL_INSIGHT_VERSION = Version("0.3.0")
     _init_done = False
     _rl_insight_module = None
     _registered_metrics: set[tuple[str | None, tuple[str, ...], str | None]] = set()
@@ -243,6 +244,17 @@ class RLInsightLogger:
     def enabled(cls) -> bool:
         """Return whether rl-insight is globally enabled in this process."""
         return os.getenv(cls.ENABLE_ENV) == "1"
+
+    @classmethod
+    def _require_rl_insight_version(cls, feature: str) -> None:
+        """Raise immediately when an RL-Insight feature needs a newer release."""
+        module = cls._get_rl_insight()
+        installed = Version(getattr(module, "__version__", "0"))
+        if installed < cls.MINIMUM_RL_INSIGHT_VERSION:
+            raise RuntimeError(
+                f"RL-Insight >= {cls.MINIMUM_RL_INSIGHT_VERSION} is required for {feature}; "
+                f"installed version is {installed}."
+            )
 
     @classmethod
     def init(cls, project_name=None, experiment_name=None, config=None):
@@ -313,6 +325,7 @@ class RLInsightLogger:
         if not cls.enabled():
             return
 
+        cls._require_rl_insight_version("trace_span")
         cls._ensure_rl_insight_init()
         cls._get_rl_insight().trace_span(
             name=name,
@@ -340,6 +353,9 @@ class RLInsightLogger:
         session_id: Any = None,
     ):
         """Return the shared agent-loop session trace state."""
+        if cls.enabled():
+            cls._require_rl_insight_version("agent_loop_session")
+
         from verl.utils.rollout_trace import RolloutTraceConfig
 
         rollout_config = RolloutTraceConfig.get_instance()
