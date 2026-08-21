@@ -27,7 +27,9 @@ import pytest
 from omegaconf import OmegaConf
 
 import verl.trainer.ppo.v1.trainer_separate_async as trainer_module
+from verl.trainer.config import HybridRolloutSwitchConfig
 from verl.trainer.ppo.v1.trainer_separate_async import HybridEngineMode, PPOTrainerSeparateAsync
+from verl.utils.config import omega_conf_to_dataclass
 
 
 class _RecordingCheckpointManager:
@@ -133,16 +135,14 @@ def _trainer(
     trainer._enable_switch = enable_switch
     if enable_switch:
         trainer._init_switch_config(
-            OmegaConf.create(
-                {
-                    "enable_switch": True,
-                    "switch_threshold_ratio": switch_threshold_ratio,
-                    "adaptive_switch_threshold": adaptive_switch_threshold,
-                    "switch_threshold_step_up": 0.05,
-                    "switch_threshold_step_down": 0.025,
-                    "switch_threshold_release_steps": 2,
-                    "switch_cost_window_size": 3,
-                }
+            HybridRolloutSwitchConfig(
+                enable_switch=True,
+                switch_threshold_ratio=switch_threshold_ratio,
+                adaptive_switch_threshold=adaptive_switch_threshold,
+                switch_threshold_step_up=0.05,
+                switch_threshold_step_down=0.025,
+                switch_threshold_release_steps=2,
+                switch_cost_window_size=3,
             )
         )
     return trainer
@@ -154,6 +154,20 @@ def _run_step(trainer: PPOTrainerSeparateAsync, *, sample_wait_seconds: float) -
     trainer._wait_for_sampleable_and_switch()
     trainer._step_sample_wait_seconds = sample_wait_seconds
     trainer.on_step_end()
+
+
+def test_hybrid_rollout_switch_config_target_instantiates_dataclass():
+    config = OmegaConf.create(
+        {
+            "_target_": "verl.trainer.config.HybridRolloutSwitchConfig",
+            "switch_threshold_ratio": 0.25,
+        }
+    )
+
+    switch_config = omega_conf_to_dataclass(config)
+
+    assert isinstance(switch_config, HybridRolloutSwitchConfig)
+    assert switch_config.switch_threshold_ratio == 0.25
 
 
 def test_step_lends_the_engine_out_and_reclaims_it_exactly_once():
@@ -358,15 +372,13 @@ def test_switching_rejects_a_replay_buffer_that_cannot_report_depth():
 
     with pytest.raises(TypeError, match="wait_for_sampleable"):
         trainer._init_switch_config(
-            OmegaConf.create(
-                {
-                    "switch_threshold_ratio": 0.25,
-                    "adaptive_switch_threshold": False,
-                    "switch_threshold_step_up": 0.05,
-                    "switch_threshold_step_down": 0.025,
-                    "switch_threshold_release_steps": 2,
-                    "switch_cost_window_size": 3,
-                }
+            HybridRolloutSwitchConfig(
+                switch_threshold_ratio=0.25,
+                adaptive_switch_threshold=False,
+                switch_threshold_step_up=0.05,
+                switch_threshold_step_down=0.025,
+                switch_threshold_release_steps=2,
+                switch_cost_window_size=3,
             )
         )
 
@@ -378,15 +390,13 @@ def test_switching_rejects_rollout_disaggregation():
 
     with pytest.raises(ValueError, match="does not support rollout disaggregation"):
         trainer._init_switch_config(
-            OmegaConf.create(
-                {
-                    "switch_threshold_ratio": 0.25,
-                    "adaptive_switch_threshold": False,
-                    "switch_threshold_step_up": 0.05,
-                    "switch_threshold_step_down": 0.025,
-                    "switch_threshold_release_steps": 2,
-                    "switch_cost_window_size": 3,
-                }
+            HybridRolloutSwitchConfig(
+                switch_threshold_ratio=0.25,
+                adaptive_switch_threshold=False,
+                switch_threshold_step_up=0.05,
+                switch_threshold_step_down=0.025,
+                switch_threshold_release_steps=2,
+                switch_cost_window_size=3,
             )
         )
 

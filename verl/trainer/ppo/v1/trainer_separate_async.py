@@ -23,6 +23,7 @@ from transfer_queue import KVBatchMeta
 
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.separation.engine_workers import DetachActorWorker
+from verl.trainer.config import HybridRolloutSwitchConfig
 from verl.trainer.ppo.utils import Role, need_reward_model
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, register_trainer
 from verl.utils.config import omega_conf_to_dataclass
@@ -81,18 +82,20 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         elif Role.ActorRollout in self.role_worker_mapping:
             self.role_worker_mapping[Role.ActorRollout] = ray.remote(DetachActorWorker)
 
-        switch_config = self.config.trainer.v1.separate_async
+        switch_config: HybridRolloutSwitchConfig = omega_conf_to_dataclass(
+            self.config.trainer.v1.separate_async.hybrid_rollout
+        )
         self._enable_switch = bool(switch_config.enable_switch)
         if self._enable_switch:
             self._init_switch_config(switch_config)
 
-    def _init_switch_config(self, sa_cfg: DictConfig) -> None:
+    def _init_switch_config(self, switch_config: HybridRolloutSwitchConfig) -> None:
         """Validate the step-switch settings against the replay buffer that will serve them."""
-        self._switch_threshold_ratio = float(sa_cfg.switch_threshold_ratio)
-        self._adaptive_switch_threshold = bool(sa_cfg.adaptive_switch_threshold)
-        self._threshold_step_up = float(sa_cfg.switch_threshold_step_up)
-        self._threshold_step_down = float(sa_cfg.switch_threshold_step_down)
-        self._threshold_release_steps = int(sa_cfg.switch_threshold_release_steps)
+        self._switch_threshold_ratio = float(switch_config.switch_threshold_ratio)
+        self._adaptive_switch_threshold = bool(switch_config.adaptive_switch_threshold)
+        self._threshold_step_up = float(switch_config.switch_threshold_step_up)
+        self._threshold_step_down = float(switch_config.switch_threshold_step_down)
+        self._threshold_release_steps = int(switch_config.switch_threshold_release_steps)
         self._idle_steps = 0
         self._calm_steps = 0
         self._step_sample_wait_seconds = 0.0
@@ -101,16 +104,16 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         self._step_threshold = 0
         self._wait_seconds = 0.0
         self._wait_samples = 0
-        switch_cost_window_size = int(sa_cfg.switch_cost_window_size)
+        switch_cost_window_size = int(switch_config.switch_cost_window_size)
         if switch_cost_window_size <= 0:
-            raise ValueError("trainer.v1.separate_async.switch_cost_window_size must be positive")
+            raise ValueError("trainer.v1.separate_async.hybrid_rollout.switch_cost_window_size must be positive")
         self._to_rollout_costs: deque[float] = deque(maxlen=switch_cost_window_size)
         self._to_trainer_costs: deque[float] = deque(maxlen=switch_cost_window_size)
         rollout_cfg = self.config.get("actor_rollout_ref", {}).get("rollout", {})
         disaggregation_cfg = rollout_cfg.get("disaggregation", {})
         if bool(disaggregation_cfg.get("enabled", False)):
             raise ValueError(
-                "trainer.v1.separate_async.enable_switch does not support rollout disaggregation: "
+                "trainer.v1.separate_async.hybrid_rollout.enable_switch does not support rollout disaggregation: "
                 "step-boundary redistribution relies on paused replicas queueing new requests"
             )
         trainer_cfg = self.config.trainer
@@ -120,7 +123,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         self._scaling_factor = (hybrid_gpus + standalone_gpus) / standalone_gpus
         if not 0.0 < self._switch_threshold_ratio <= 1.0:
             raise ValueError(
-                "trainer.v1.separate_async.switch_threshold_ratio must be in (0, 1], got "
+                "trainer.v1.separate_async.hybrid_rollout.switch_threshold_ratio must be in (0, 1], got "
                 f"{self._switch_threshold_ratio}"
             )
         # Custom samplers own their polling. One that cannot wait on buffer depth would hand the
@@ -129,7 +132,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         if any(not hasattr(self.replay_buffer, method) for method in required_methods):
             raise TypeError(
                 f"{type(self.replay_buffer).__name__} must implement {required_methods} when "
-                "trainer.v1.separate_async.enable_switch=True"
+                "trainer.v1.separate_async.hybrid_rollout.enable_switch=True"
             )
 
     def _setup(self):

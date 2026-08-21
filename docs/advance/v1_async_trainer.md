@@ -114,7 +114,7 @@ These transfers and old log prob computings are skipped when `algorithm.rollout_
 Enable step switching with:
 
 ```bash
-trainer.v1.separate_async.enable_switch=True
+trainer.v1.separate_async.hybrid_rollout.enable_switch=True
 ```
 
 The switch addresses a specific idle window: after a PPO step finishes, the trainer may have to wait for standalone rollout to produce enough sampleable groups for the next step. During that window, the trainer's hybrid replicas can join the standalone load balancer and help generate samples.
@@ -148,13 +148,13 @@ The release interval applies in both directions and prevents noisy steps from ch
 
 ### Switch configuration
 
-All switch-related settings are ignored unless `enable_switch=True`.
+All settings under `trainer.v1.separate_async.hybrid_rollout` are ignored unless `enable_switch=True`.
 
 
 | Parameter                        | Default | Description                                                                          |
 | -------------------------------- | ------- | ------------------------------------------------------------------------------------ |
 | `enable_switch`                  | `false` | Allow hybrid trainer replicas to help rollout between steps                          |
-| `switch_threshold_ratio`         | `0.3`   | Target sampleable fraction before hybrid replicas are reclaimed; must be in `(0, 1]` |
+| `switch_threshold_ratio`         | `0.4`   | Target sampleable fraction before hybrid replicas are reclaimed; must be in `(0, 1]` |
 | `adaptive_switch_threshold`      | `true`  | Adapt the reclaim threshold from observed trainer idle time                          |
 | `switch_threshold_step_up`       | `0.05`  | Ratio increase after sustained idle                                                  |
 | `switch_threshold_step_down`     | `0.03`  | Ratio decrease after sustained calm                                                  |
@@ -201,8 +201,8 @@ trainer.v1.separate_async.num_warmup_batches=1
 To enable step switching, add:
 
 ```bash
-trainer.v1.separate_async.enable_switch=True \
-trainer.v1.separate_async.adaptive_switch_threshold=True
+trainer.v1.separate_async.hybrid_rollout.enable_switch=True \
+trainer.v1.separate_async.hybrid_rollout.adaptive_switch_threshold=True
 ```
 
 ## Observability and Tuning

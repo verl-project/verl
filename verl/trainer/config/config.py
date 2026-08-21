@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from verl.base_config import BaseConfig
 
-__all__ = ["CheckpointConfig", "ProfileConfig", "BaseModelConfig"]
+__all__ = ["CheckpointConfig", "ProfileConfig", "HybridRolloutSwitchConfig", "BaseModelConfig"]
 
 
 @dataclass
@@ -68,6 +68,19 @@ class ProfileConfig(BaseConfig):
     step_start: int = -1
     step_end: int = -1
     save_path: Optional[str] = None
+
+
+@dataclass
+class HybridRolloutSwitchConfig(BaseConfig):
+    """Configuration for lending idle trainer GPUs to rollout between training steps."""
+
+    enable_switch: bool = False
+    switch_threshold_ratio: float = 0.4
+    adaptive_switch_threshold: bool = True
+    switch_threshold_step_up: float = 0.05
+    switch_threshold_step_down: float = 0.03
+    switch_threshold_release_steps: int = 2
+    switch_cost_window_size: int = 3
 
 
 @dataclass

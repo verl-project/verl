@@ -937,15 +937,17 @@ trainer:
     colocate_async:
       num_warmup_batches: 1
     separate_async:
-      enable_switch: false
-      switch_threshold_ratio: 0.4
-      adaptive_switch_threshold: true
-      switch_threshold_step_up: 0.05
-      switch_threshold_step_down: 0.03
-      switch_threshold_release_steps: 2
-      switch_cost_window_size: 3
       num_warmup_batches: 1
       parameter_sync_step: 4
+      hybrid_rollout:
+        _target_: verl.trainer.config.HybridRolloutSwitchConfig
+        enable_switch: false
+        switch_threshold_ratio: 0.4
+        adaptive_switch_threshold: true
+        switch_threshold_step_up: 0.05
+        switch_threshold_step_down: 0.03
+        switch_threshold_release_steps: 2
+        switch_cost_window_size: 3
     sampler:
       max_off_policy_threshold: 8
       max_off_policy_strategy: drop

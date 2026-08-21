@@ -239,33 +239,38 @@ trainer:
     # Asynchronous PPO trainer with separate trainer and rollout
     separate_async:
 
-      # Allow the trainer to switch to rollout mode to reduce idle.
-      enable_switch: false
-
-      # Fraction of train_batch_size that must be sampleable before the rollout replicas are
-      # reclaimed.
-      switch_threshold_ratio: 0.4
-
-      # Automatically adapt the threshold to reduce trainer starvation when enable_switch is True.
-      adaptive_switch_threshold: true
-
-      # Fraction added to switch_threshold_ratio after sustained trainer idle.
-      switch_threshold_step_up: 0.05
-
-      # Fraction subtracted from switch_threshold_ratio after a sustained calm period.
-      switch_threshold_step_down: 0.03
-
-      # Consecutive idle/calm steps required before ratio adjusts in that direction.
-      switch_threshold_release_steps: 2
-
-      # Window size for calculating average switch cost.
-      switch_cost_window_size: 3
-
       # Number of warmup batches to add before training loop starts
       num_warmup_batches: 1
 
       # Frequency of parameter synchronization between trainer and rollout
       parameter_sync_step: 4
+
+      # Lend idle hybrid trainer GPUs to rollout
+      hybrid_rollout:
+
+        # Target dataclass for this configuration
+        _target_: verl.trainer.config.HybridRolloutSwitchConfig
+
+        # Global toggle to allow the trainer to switch to rollout mode to reduce idle.
+        enable_switch: false
+
+        # Fraction of train_batch_size that must be sampleable before the rollout replicas are reclaimed.
+        switch_threshold_ratio: 0.4
+
+        # Automatically adapt the threshold to reduce trainer starvation when enable_switch is True.
+        adaptive_switch_threshold: true
+
+        # Fraction added to switch_threshold_ratio after sustained trainer idle.
+        switch_threshold_step_up: 0.05
+
+        # Fraction subtracted from switch_threshold_ratio after a sustained calm period.
+        switch_threshold_step_down: 0.03
+
+        # Consecutive idle/calm steps required before ratio adjusts in that direction.
+        switch_threshold_release_steps: 2
+
+        # Window size for calculating average switch cost.
+        switch_cost_window_size: 3
 
     # Replay buffer sampling strategy
     sampler:
