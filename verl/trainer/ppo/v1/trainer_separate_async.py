@@ -85,17 +85,17 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         switch_config: HybridRolloutSwitchConfig = omega_conf_to_dataclass(
             self.config.trainer.v1.separate_async.hybrid_rollout
         )
-        self._enable_switch = bool(switch_config.enable_switch)
+        self._enable_switch = switch_config.enable_switch
         if self._enable_switch:
             self._init_switch_config(switch_config)
 
     def _init_switch_config(self, switch_config: HybridRolloutSwitchConfig) -> None:
         """Validate the step-switch settings against the replay buffer that will serve them."""
-        self._switch_threshold_ratio = float(switch_config.switch_threshold_ratio)
-        self._adaptive_switch_threshold = bool(switch_config.adaptive_switch_threshold)
-        self._threshold_step_up = float(switch_config.switch_threshold_step_up)
-        self._threshold_step_down = float(switch_config.switch_threshold_step_down)
-        self._threshold_release_steps = int(switch_config.switch_threshold_release_steps)
+        self._switch_threshold_ratio = switch_config.switch_threshold_ratio
+        self._adaptive_switch_threshold = switch_config.adaptive_switch_threshold
+        self._threshold_step_up = switch_config.switch_threshold_step_up
+        self._threshold_step_down = switch_config.switch_threshold_step_down
+        self._threshold_release_steps = switch_config.switch_threshold_release_steps
         self._idle_steps = 0
         self._calm_steps = 0
         self._step_sample_wait_seconds = 0.0
@@ -104,7 +104,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         self._step_threshold = 0
         self._wait_seconds = 0.0
         self._wait_samples = 0
-        switch_cost_window_size = int(switch_config.switch_cost_window_size)
+        switch_cost_window_size = switch_config.switch_cost_window_size
         if switch_cost_window_size <= 0:
             raise ValueError("trainer.v1.separate_async.hybrid_rollout.switch_cost_window_size must be positive")
         self._to_rollout_costs: deque[float] = deque(maxlen=switch_cost_window_size)
