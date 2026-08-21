@@ -1,0 +1,41 @@
+engine:
+  accelerator: gpu           # Whether to train on cpu or gpu
+  check_finite: true         # Check if 'early_stopping_metric' is finite during training. Aborts training if not. Only active when 'early_stopping' is not null.
+  data_dir: ./data           # Where you want to store the training data
+  deterministic: warn        # 'warn' tries to use deterministic algorithms if possible, also accepts true or false.
+  detect_anomaly: false      # Lightning trainer argument with same name.
+  devices: null              # This is set by each task by default, but can be overridden
+  early_stopping: null       # The number of epochs to wait before stopping if no improvement is found. Set to null to disable.
+  early_stopping_metric: null  # Metric to use for early stopping. If null, uses 'task.target_metric'.
+  gradient_clip_alg: norm    # {value, norm} to disable gradient clipping: set 'gradient_clip_val' to null
+  gradient_clip_val: null    # DEFAULT: don't clip gradients, expects value in [0, 1]
+  log_extra: false           # Activate logging of gradients and more. Can be bool or a dict with the options supported by callback `LogTrainingStats` in `pytorch_fob/engine/callbacks.py`.
+  logging_interval: 50       # Number of steps between each logging step.
+  optimize_memory: false     # Use nondeterministic, but memory-efficient algorithms for self-attention
+  output_dir: ./experiments  # Where you want to store the results
+  plot: true                 # Whether to plot the results.
+  precision: bf16-mixed      # Floating precision of training, see https://lightning.ai/docs/pytorch/stable/common/precision_basic.html
+  restrict_train_epochs: null  # Only train for a specific number of epochs. Set to null to disable. The epochs set here are counted from start of training, so this works with 'resume'.
+  resume: true               # You can either pass the path to your checkpoint here or set to true, which loads the last checkpoint.
+  run_scheduler: sequential  # How to schedule the runs of the experiment. Supported values:
+                               # 'sequential': runs are performed sequentially
+                               # 'single:N' where N is the number of the run starting from 1.
+                               # 'slurm_array': runs are scheduled using a SLURM array job.
+                               # 'slurm_jobs': runs are scheduled using independent SLURM jobs
+  save_sbatch_scripts: null  # Path to directory where sbatch scripts will be saved. If null, sbatch scripts will not be saved.
+  sbatch_time_factor: 1      # Time factor for SLURM. Multiplies all default times by this factor.
+  sbatch_args:               # Additional arguments to pass to sbatch. Only used if run_scheduler is 'slurm_array'.
+    # ntasks-per-node and gres are set to 'devices' by default
+    # cpus-per-task is set to 'workers' by default
+    nodes: 1
+    mem-per-cpu: 2gb
+    time: 00:30:00           # Each task has their own default time (assumes A100 or similar gpu). Format: HH:MM:SS or seconds.
+  sbatch_script_template: null  # Path to template for the sbatch script. Script can contain placeholder '__FOB_COMMAND__'. Otherwise it will be executed before the experiment. 'sbatch_args' will be added to the beginning of the script.
+  slurm_log_dir: null        # Default: 'output_dir/slurm_logs' for run_scheduler 'slurm_array' and 'run_dir/slurm_logs' for run_scheduler 'slurm_jobs'
+  seed: 42                   # The seed to use for the experiment
+  seed_mode: fixed           # Currently only supports 'fixed'
+  silent: false              # whether to hide progress bars. Recommended when writing outputs to a log file.
+  test: true                 # Whether to test the model.
+  train: true                # Whether to train the model.
+  validate: false            # Whether to validate the model after training (only useful if you are interested in the results, for example for HPO).
+  workers: 16                # The number of processes to use for dataloading

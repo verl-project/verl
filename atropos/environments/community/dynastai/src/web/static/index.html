@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DynastAI - Medieval Kingdom Management</title>
+    <link rel="stylesheet" href="css/main.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Lato:wght@300;400;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header>
+        <h1>DynastAI</h1>
+        <p>Rule wisely or suffer the consequences</p>
+    </header>
+
+    <main>
+        <div id="metrics-container">
+            <div class="metric">
+                <h3>Power</h3>
+                <div class="meter-container">
+                    <div class="meter power" id="power-meter"></div>
+                </div>
+                <span id="power-value">50</span>
+            </div>
+            <div class="metric">
+                <h3>Stability</h3>
+                <div class="meter-container">
+                    <div class="meter stability" id="stability-meter"></div>
+                </div>
+                <span id="stability-value">50</span>
+            </div>
+            <div class="metric">
+                <h3>Piety</h3>
+                <div class="meter-container">
+                    <div class="meter piety" id="piety-meter"></div>
+                </div>
+                <span id="piety-value">50</span>
+            </div>
+            <div class="metric">
+                <h3>Wealth</h3>
+                <div class="meter-container">
+                    <div class="meter wealth" id="wealth-meter"></div>
+                </div>
+                <span id="wealth-value">50</span>
+            </div>
+        </div>
+
+        <div id="card-container" class="hidden">
+            <div id="card">
+                <div id="category-indicator"></div>
+                <img id="character-image" src="" alt="Character Portrait" class="character-image" style="display: none;">
+                <div id="card-text">Welcome to your kingdom, Your Majesty. Make your choices wisely...</div>
+                <div id="card-options">
+                    <button id="yes-button" class="choice-btn">Yes</button>
+                    <button id="no-button" class="choice-btn">No</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="effects-display" class="hidden">
+            <div class="effect-item power-effect">Power: <span id="power-effect">0</span></div>
+            <div class="effect-item stability-effect">Stability: <span id="stability-effect">0</span></div>
+            <div class="effect-item piety-effect">Piety: <span id="piety-effect">0</span></div>
+            <div class="effect-item wealth-effect">Wealth: <span id="wealth-effect">0</span></div>
+        </div>
+
+        <div id="start-screen">
+            <h2>Begin Your Reign</h2>
+            <p>As the new monarch, you must balance the needs of the realm while keeping your metrics in check.</p>
+            <p>If any metric reaches 0 or 100, your reign will end.</p>
+            <div class="name-input">
+                <label for="ruler-name">Your Royal Name:</label>
+                <input type="text" id="ruler-name" placeholder="Enter your name">
+            </div>
+
+            <div class="play-mode">
+                <label for="play-mode">Choose Play Mode:</label>
+                <select id="play-mode" class="mode-select">
+                    <option value="manual">Play Manually</option>
+                    <option value="ai">Let AI Play</option>
+                </select>
+            </div>
+
+            <button id="start-game" class="primary-btn">Start New Game</button>
+        </div>
+
+        <div id="game-over" class="hidden">
+            <h2>Your Reign Has Ended</h2>
+            <p id="game-over-reason"></p>
+            <div id="final-metrics">
+                <div>Power: <span id="final-power"></span></div>
+                <div>Stability: <span id="final-stability"></span></div>
+                <div>Piety: <span id="final-piety"></span></div>
+                <div>Wealth: <span id="final-wealth"></span></div>
+            </div>
+            <p id="reign-summary"></p>
+            <p id="detailed-ending" class="detailed-ending"></p>
+            <p id="legacy-message" class="legacy-message"></p>
+            <div id="reign-options">
+                <button id="continue-game" class="secondary-btn">Continue Dynasty</button>
+                <button id="new-game" class="primary-btn">Start New Reign</button>
+            </div>
+        </div>
+    </main>
+
+    <footer>
+        <p>Year <span id="reign-year">1</span> of your reign</p>
+        <p class="api-status">API Status: <span id="api-status">Checking...</span></p>
+    </footer>
+
+    <script src="js/game.js"></script>
+</body>
+</html>
