@@ -410,6 +410,43 @@ def test_suffixed_leaf_is_kept_on_released_vllm():
     assert _resolve(worker, model, name) == name
 
 
+def test_packed_shard_leaf_suffixed_on_strict_released_vllm():
+    """Regression: vLLM 0.24.0 (strict ``params_dict[name]`` loader, no
+    ``BaseLayerWithLoRA.load_weights``) + Llama-arch + merge=False LoRA. The
+    Bridge exports the *shard* leaf (``gate_proj``/``q_proj``); vLLM's
+    ``stacked_params_mapping`` fuses it to the packed owner
+    (``gate_up_proj``/``qkv_proj``) and indexes ``params_dict`` *after* the
+    rewrite. The live param lives under ``.base_layer.`` (LoRA-wrapped), so the
+    shard leaf must be suffixed before vLLM fuses it -- otherwise the fused name
+    ``gate_up_proj.weight`` (no ``.base_layer``) KeyErrors. The packed-owner
+    lookup must probe the wrapped form (``gate_up_proj.base_layer.weight``),
+    not just the bare owner."""
+    # _HAS_LORA_LOAD_WEIGHTS is False by default (released vLLM); _strict_outer
+    # gives a strict inner loader (params_dict[name], no AutoWeightsLoader).
+    model = _strict_outer(
+        {
+            "layers.0.self_attn.qkv_proj.base_layer.weight": torch.empty(0),
+            "layers.0.mlp.gate_up_proj.base_layer.weight": torch.empty(0),
+        }
+    )
+    model.packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+    worker = _make_worker(model)
+
+    # Shard leaves (what the Bridge exports) -> suffixed so vLLM fuses to the
+    # wrapped owner key.
+    assert _resolve(worker, model, "layers.0.mlp.gate_proj.weight") == ("layers.0.mlp.gate_proj.base_layer.weight")
+    assert _resolve(worker, model, "layers.0.self_attn.q_proj.weight") == (
+        "layers.0.self_attn.q_proj.base_layer.weight"
+    )
+    # Owner leaves are suffixed directly.
+    assert _resolve(worker, model, "layers.0.mlp.gate_up_proj.weight") == (
+        "layers.0.mlp.gate_up_proj.base_layer.weight"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Non-leaf fused-MoE expert alias: strip Bridge-inserted .base_layer.
 # ---------------------------------------------------------------------------
@@ -1122,3 +1159,47 @@ def test_strict_loader_unprefixed_shard_against_model_prefixed_live(monkeypatch)
         _resolve(worker, model, "layers.0.attn.compressor.wgate.base_layer.weight")
         == "layers.0.attn.compressor.wgate.weight"
     )
+
+
+def test_packed_shard_keeps_suffix_when_fused_target_is_wrapped(monkeypatch):
+    """A packed shard whose fused owner is LoRA-wrapped must arrive SUFFIXED.
+
+    vLLM rewrites shard -> fused owner and then indexes ``params_dict``, which
+    holds ``gate_up_proj.base_layer.weight``; stripping is a KeyError. Loaders
+    that re-add the suffix themselves (DSV4) guard on ``not in params_dict``, so
+    the suffixed form is right for them too.
+    """
+    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", True)
+    live = "model.layers.0.mlp.gate_up_proj.base_layer.weight"
+    model = _strict_outer({live: torch.empty(0)})
+    model.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+    worker = _make_worker(model)
+    for shard in ("gate_proj", "up_proj"):
+        name = f"model.layers.0.mlp.{shard}.base_layer.weight"
+        assert _resolve(worker, model, name) == name
+
+
+def test_packed_shard_keeps_suffix_on_released_vllm(monkeypatch):
+    """vLLM 0.24 (no ``BaseLayerWithLoRA.load_weights``): a LoRA-wrapped packed
+    shard must keep the suffix so ``AutoWeightsLoader`` recurses into the
+    ``base_layer`` child after the shard -> fused rewrite.
+
+    Regression for CI ``e2e_ppo_trainer_megatron-deepseek`` (Llama-arch
+    deepseek-coder-1.3b, ``target_modules`` includes ``linear_fc1``), which
+    died with ``KeyError: 'layers.0.mlp.gate_up_proj.weight'``.
+    """
+    monkeypatch.setattr(_vllm_utils_real, "_HAS_LORA_LOAD_WEIGHTS", False)
+    live = {
+        "model.layers.0.mlp.gate_up_proj.base_layer.weight": torch.empty(0),
+        "model.layers.0.self_attn.qkv_proj.base_layer.weight": torch.empty(0),
+    }
+    for outer in (_strict_outer, _flat_outer):
+        model = outer(live)
+        model.packed_modules_mapping = {
+            "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+            "gate_up_proj": ["gate_proj", "up_proj"],
+        }
+        worker = _make_worker(model)
+        for shard in ("mlp.gate_proj", "mlp.up_proj", "self_attn.q_proj"):
+            name = f"model.layers.0.{shard}.base_layer.weight"
+            assert _resolve(worker, model, name) == name
