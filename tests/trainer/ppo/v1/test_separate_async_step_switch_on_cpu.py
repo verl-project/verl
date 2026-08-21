@@ -143,8 +143,45 @@ def _trainer(
     )
     if enable_switch:
         trainer._init_hybrid_rollout_state()
-        trainer._validate_hybrid_rollout_runtime()
     return trainer
+
+
+def _construct_trainer(monkeypatch, *, replay_buffer, enable_switch: bool = True, disaggregation: bool = False):
+    config = OmegaConf.create(
+        {
+            "data": {"train_batch_size": 64},
+            "actor_rollout_ref": {
+                "actor": {"ppo_mini_batch_size": 16},
+                "rollout": {
+                    "nnodes": 1,
+                    "n_gpus_per_node": 8,
+                    "checkpoint_engine": {"backend": "nccl"},
+                    "disaggregation": {"enabled": disaggregation},
+                },
+            },
+            "trainer": {
+                "nnodes": 1,
+                "n_gpus_per_node": 8,
+                "v1": {
+                    "separate_async": {
+                        "parameter_sync_step": 4,
+                        "hybrid_rollout": {
+                            "_target_": "verl.trainer.config.HybridRolloutSwitchConfig",
+                            "enable_switch": enable_switch,
+                        },
+                    }
+                },
+            },
+            "reward": {"reward_model": {"enable": False}},
+        }
+    )
+
+    def mock_base_init(trainer, trainer_config):
+        trainer.config = trainer_config
+        trainer.replay_buffer = replay_buffer
+
+    monkeypatch.setattr(trainer_module.PPOTrainer, "__init__", mock_base_init)
+    return PPOTrainerSeparateAsync(config)
 
 
 def _run_step(trainer: PPOTrainerSeparateAsync, *, sample_wait_seconds: float) -> None:
@@ -365,36 +402,19 @@ def test_switching_rejects_a_ratio_outside_the_unit_interval(ratio):
         _trainer(switch_threshold_ratio=ratio)
 
 
-def test_switching_rejects_a_replay_buffer_that_cannot_report_depth():
-    trainer = object.__new__(PPOTrainerSeparateAsync)
-    trainer.config = OmegaConf.create(
-        {
-            "trainer": {"nnodes": 1, "n_gpus_per_node": 8},
-            "actor_rollout_ref": {"rollout": {"nnodes": 1, "n_gpus_per_node": 8, "disaggregation": {"enabled": False}}},
-        }
-    )
-    trainer.replay_buffer = SimpleNamespace()
-    trainer.hybrid_rollout_config = HybridRolloutSwitchConfig()
-
+def test_switching_rejects_a_replay_buffer_that_cannot_report_depth(monkeypatch):
     with pytest.raises(TypeError, match="wait_for_sampleable"):
-        trainer._validate_hybrid_rollout_runtime()
+        _construct_trainer(monkeypatch, replay_buffer=SimpleNamespace())
 
 
-def test_switching_rejects_rollout_disaggregation():
-    trainer = object.__new__(PPOTrainerSeparateAsync)
-    trainer.config = OmegaConf.create({"actor_rollout_ref": {"rollout": {"disaggregation": {"enabled": True}}}})
-    trainer.replay_buffer = _RecordingReplayBuffer()
-    trainer.hybrid_rollout_config = HybridRolloutSwitchConfig()
-
+def test_switching_rejects_rollout_disaggregation(monkeypatch):
     with pytest.raises(ValueError, match="does not support rollout disaggregation"):
-        trainer._validate_hybrid_rollout_runtime()
+        _construct_trainer(monkeypatch, replay_buffer=_RecordingReplayBuffer(), disaggregation=True)
 
 
-def test_disabled_switching_skips_custom_replay_buffer_validation():
-    trainer = object.__new__(PPOTrainerSeparateAsync)
-    trainer.config = OmegaConf.create({})
-    trainer.replay_buffer = SimpleNamespace()
-    trainer.hybrid_rollout_config = HybridRolloutSwitchConfig(enable_switch=False)
+def test_disabled_switching_skips_custom_replay_buffer_validation(monkeypatch):
+    trainer = _construct_trainer(monkeypatch, replay_buffer=SimpleNamespace(), enable_switch=False)
+
     assert trainer.hybrid_rollout_config.enable_switch is False
 
 
