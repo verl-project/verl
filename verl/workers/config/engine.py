@@ -86,8 +86,8 @@ class EngineConfig(BaseConfig):
         "forward_only",
         "param_offload",
     }
-    # whether to offload param
-    param_offload: bool = False
+    # whether to offload param (None means use strategy-specific default)
+    param_offload: Optional[bool] = None
     # whether to offload optimizer
     optimizer_offload: bool = False
     # whether to offload grad
@@ -274,6 +274,14 @@ class FSDPEngineConfig(EngineConfig):
 
     def __post_init__(self):
         super().__post_init__()
+        # Default param_offload to True for forward_only (ref/reward) models to preserve
+        # existing behavior of unconditional CPU offloading. Users can explicitly disable
+        # offloading by setting param_offload=False for smaller models that fit in GPU.
+        if self.param_offload is None:
+            if self.forward_only:
+                self.param_offload = True  # Default: offload for ref/reward models (backward compat)
+            else:
+                self.param_offload = False  # Default: no offload for actor models
         assert self.strategy in ["fsdp", "fsdp2"], f"strategy {self.strategy} not supported"
 
 
