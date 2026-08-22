@@ -884,6 +884,7 @@ transfer_queue:
       local_buffer_size: 1073741824
       device_name: ''
 trainer:
+  worker_env: {}
   balance_batch: true
   total_epochs: 30
   total_training_steps: null
