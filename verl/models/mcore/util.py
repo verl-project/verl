@@ -13,10 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import logging
 import math
 import os
-from typing import Literal, Optional
+from dataclasses import fields, is_dataclass
+from typing import Literal
 
 import torch
 from megatron.core import parallel_state as mpu
@@ -29,6 +31,20 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 ContextParallelLayout = Literal["zigzag", "contiguous"]
+
+# Older Megatron-core releases have no ``cp_partition_mode`` field on PackedSeqParams; they
+# support only the zigzag CP layout. Inspect ``__init__`` rather than dataclass fields so that
+# duck-typed replacements (e.g. test stubs taking ``**kwargs``) also count as supporting it.
+_PACKED_SEQ_PARAMS_INIT_PARAMS = inspect.signature(PackedSeqParams.__init__).parameters
+_PACKED_SEQ_PARAMS_HAS_CP_PARTITION_MODE = "cp_partition_mode" in _PACKED_SEQ_PARAMS_INIT_PARAMS or any(
+    p.kind is inspect.Parameter.VAR_KEYWORD for p in _PACKED_SEQ_PARAMS_INIT_PARAMS.values()
+)
+
+
+def _packed_seq_params_supports(field_name: str) -> bool:
+    if is_dataclass(PackedSeqParams):
+        return field_name in {field.name for field in fields(PackedSeqParams)}
+    return field_name in getattr(PackedSeqParams, "__dataclass_fields__", {})
 
 
 def get_fp8_padding_options(config) -> tuple[bool, Optional[str]]:
@@ -346,10 +362,11 @@ def preprocess_thd_engine(
     need_roll: bool = False,
     use_fp8_padding: bool = False,
     fp8_recipe: Optional[str] = None,
-    local_cp_size: Optional[int] = None,
-    min_local_rows: Optional[int] = None,
+    local_cp_size: int | None = None,
+    min_local_rows: int | None = None,
+    pad_to_length_bucket: int | None = None,
     cp_layout: ContextParallelLayout = "zigzag",
-) -> tuple[torch.Tensor, PackedSeqParams, Optional[torch.Tensor]]:
+) -> tuple[torch.Tensor, PackedSeqParams, torch.Tensor | None]:
     """Pack nested THD sequences and shard their rows across CP ranks.
 
     ``zigzag`` is the default causal-attention layout: each rank receives a
@@ -375,6 +392,8 @@ def preprocess_thd_engine(
     else:
         cp_size = mpu.get_context_parallel_world_size()
         cp_rank = mpu.get_context_parallel_rank()
+    if _packed_seq_params_supports("cp_partition_mode"):
+        extra_packed_args["cp_partition_mode"] = cp_layout
     cp_layout_factor = 2 if cp_layout == "zigzag" and cp_size > 1 else 1
     align_size = tp_size * cp_size * cp_layout_factor
     seqlens_in_batch = input_ids.offsets().diff()
@@ -405,6 +424,16 @@ def preprocess_thd_engine(
             pad_size_last = min_total_rows - cu_seqlens_padded[-1]
             cu_seqlens_padded[-1] += pad_size_last
             seqlens_in_batch_padded[-1] += pad_size_last
+
+    if pad_to_length_bucket is not None:
+        if pad_to_length_bucket <= 0:
+            raise ValueError("pad_to_length_bucket must be a positive integer")
+        total_alignment = math.lcm(pad_to_length_bucket, cp_size)
+        if use_fp8_padding:
+            total_alignment = math.lcm(total_alignment, total_align)
+        pad_size_last = (-cu_seqlens_padded[-1]) % total_alignment
+        cu_seqlens_padded[-1] += pad_size_last
+        seqlens_in_batch_padded[-1] += pad_size_last
 
     # ----------------------------------------------------------------------------
     # Move the index information needed in the subsequent loop to the CPU at once,
@@ -471,16 +500,15 @@ def preprocess_thd_engine(
             start_idx = cu_seqlens_padded_cpu[i] // cp_size
             # split to 2 chunks
             d = input_ids[i]
-            # If the number of elements in `d` is smaller than the required
-            # alignment size, pad the tensor with zeros so that its total
-            # length matches `align_size`. This ensures size alignment for
-            # downstream operations (e.g., communication or memory alignment).
+            # Alignment applies to the sequence dimension. Extra trailing
+            # dimensions (for example top-k teacher logits) must not affect
+            # whether a short sequence is padded.
             if d.shape[0] < align_size:
-                pad_shape = (align_size - d.shape[0], *d.shape[1:])
-                pad = torch.zeros(pad_shape, dtype=d.dtype, device=d.device)
+                original_size = d.shape[0]
+                pad = torch.zeros((align_size - d.shape[0], *d.shape[1:]), dtype=d.dtype, device=d.device)
                 d = torch.cat([d, pad], dim=0)
                 logger.warning_once(
-                    f"Padding tensor for context parallel alignment, original_size={d.shape[0]}, "
+                    f"Padding tensor for context parallel alignment, original_size={original_size}, "
                     f"align_size={align_size}"
                 )
 
@@ -533,6 +561,18 @@ def preprocess_thd_engine(
                 for k, v in saved_position_roll_dict.items():
                     position_ids_rmpad[k] = v
 
+    if _PACKED_SEQ_PARAMS_HAS_CP_PARTITION_MODE:
+        # Tell the attention kernels how the rows above were sharded across CP ranks. The rows
+        # are already split according to `cp_layout`, but PackedSeqParams defaults to "zigzag",
+        # so without this an attention variant that requires a contiguous split (DeepSeek-V4)
+        # raises "DSv4 THD CP requires a contiguous CP partition." on every forward.
+        extra_packed_args["cp_partition_mode"] = cp_layout
+    elif cp_layout != "zigzag" and cp_size > 1:
+        raise ValueError(
+            f"cp_layout='{cp_layout}' requires PackedSeqParams.cp_partition_mode, which this "
+            "Megatron-core version does not provide. Upgrade Megatron-core or use the zigzag layout."
+        )
+
     packed_seq_params = PackedSeqParams(
         qkv_format="thd",
         cu_seqlens_q=cu_seqlens_padded,
@@ -555,7 +595,7 @@ def postprocess_thd_engine(
     input_ids: torch.Tensor,
     batch_size: int,
     post_process: bool = True,
-    local_cp_size: Optional[int] = None,
+    local_cp_size: int | None = None,
     cp_layout: ContextParallelLayout = "zigzag",
 ) -> torch.Tensor:
     """
@@ -613,7 +653,7 @@ def postprocess_thd_engine(
         half_seqlen = s_len_padded_chunk // 2
         s_len = seq_lens_cpu[i]
         s_len_padded = s_len_padded_chunk * cp_size
-        tmp = torch.empty(s_len_padded, *output.shape[2:], device=output.device)
+        tmp = torch.empty(s_len_padded, *output.shape[2:], device=output.device, dtype=output.dtype)
         for j in range(cp_size):
             o = output_list[j][0]
             # split to 2 chunks
@@ -645,7 +685,7 @@ def preprocess_bshd_engine(
     pre_process: bool = True,
     need_roll: bool = False,
     use_fp8_padding: bool = False,
-    forced_max_seqlen: Optional[int] = None,
+    forced_max_seqlen: int | None = None,
 ):
     """
     Preprocess bshd sequences
@@ -834,21 +874,17 @@ def postprocess_bshd_engine(
 
 
 def build_vlm_attn_mask_thd(input_ids: torch.Tensor, pad_token_id: int = None):
-    input_ids_rmpad = input_ids.to_padded_tensor(pad_token_id)
-
-    if is_npu_available:
-        return input_ids_rmpad, None
-
+    input_ids_with_pad = input_ids.to_padded_tensor(pad_token_id)
     seqlens_in_batch = input_ids.offsets().diff()
-    attention_mask = torch.zeros_like(input_ids_rmpad, dtype=torch.bool)
+    attention_mask = torch.zeros_like(input_ids_with_pad, dtype=torch.bool)
     for i, seqlen in enumerate(seqlens_in_batch):
         attention_mask[i, :seqlen] = True
 
-    return input_ids_rmpad, attention_mask
+    return input_ids_with_pad, attention_mask
 
 
 def build_vlm_attn_mask_bshd(
-    input_ids: torch.Tensor, batch_size: int, pad_token_id: int = None, forced_max_seqlen: Optional[int] = None
+    input_ids: torch.Tensor, batch_size: int, pad_token_id: int = None, forced_max_seqlen: int | None = None
 ):
     seqlens_in_batch = input_ids.offsets().diff()
     # When ``forced_max_seqlen`` is given, pad to the mini-batch global max (raw, unaligned)

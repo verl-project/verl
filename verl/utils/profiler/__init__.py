@@ -14,9 +14,16 @@
 
 from ..device import is_npu_available
 from ..import_utils import is_nvtx_available
-from .config import build_sglang_profiler_args, build_vllm_profiler_args
+from .config import (
+    build_sglang_profiler_args,
+    build_vllm_profiler_args,
+    relocate_rollout_traces,
+    rollout_profiler_global_ranks,
+    rollout_trace_dir,
+    rollout_trace_local_rank,
+)
 from .performance import GPUMemoryLogger, log_gpu_memory_usage, simple_timer
-from .profile import DistProfiler, DistProfilerExtension, ProfilerConfig
+from .profile import DistProfiler, DistProfilerExtension, ProfilerConfig, build_rollout_dist_profiler
 
 # Select marker implementations by availability, but keep DistProfiler as our dispatcher
 if is_nvtx_available():
@@ -36,8 +43,13 @@ __all__ = [
     "DistProfiler",
     "DistProfilerExtension",
     "ProfilerConfig",
+    "build_rollout_dist_profiler",
     "simple_timer",
     "marked_timer",
     "build_vllm_profiler_args",
     "build_sglang_profiler_args",
+    "rollout_trace_dir",
+    "relocate_rollout_traces",
+    "rollout_profiler_global_ranks",
+    "rollout_trace_local_rank",
 ]

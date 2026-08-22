@@ -18,13 +18,11 @@ from __future__ import annotations
 import logging
 import multiprocessing as mp
 import os
-from dataclasses import asdict
 from typing import Generator
 
 import ray
 import sglang.srt.entrypoints.engine
 import torch
-from peft import LoraConfig
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import (
     MultiprocessingSerializer,
@@ -37,6 +35,7 @@ from sglang.srt.weight_sync.utils import _preprocess_tensor_for_update_weights
 from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
+from verl.utils.device import get_device_id
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
@@ -44,10 +43,24 @@ from verl.workers.rollout.sglang_rollout.http_server_engine import AsyncHttpServ
 from verl.workers.rollout.sglang_rollout.utils import (
     SGLANG_LORA_NAME,
     get_named_tensor_buckets,
+    lora_served_as_adapter,
+    normalize_peft_config_for_sglang,
 )
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def _strip_lora_base_layer(name: str) -> str:
+    """Drop the ``.base_layer`` segment ``replace_lora_wrapper()`` inserts for vLLM; SGLang
+    has no such level and its loader raises KeyError on it."""
+    return name.replace(".base_layer.", ".") if ".base_layer." in name else name
+
+
+def _to_ipc_device(tensor: torch.Tensor) -> torch.Tensor:
+    """Move a CPU tensor to the device, one at a time: sglang's IPC patch indexes a reducer slot
+    that only device tensors have."""
+    return tensor.to(get_device_id(), non_blocking=True) if tensor.device.type == "cpu" else tensor
 
 
 # patch to avoid issue https://github.com/sgl-project/sglang/issues/6723
@@ -198,8 +211,8 @@ class ServerAdapter(BaseRollout):
         # sleep_level controls what gets released during sleep/release:
         #   2 (default) = release weights + kv_cache (full sleep, merge path)
         #   1 = release kv_cache only (keep base weights, adapter path)
-        # Set by engine_workers.update_weights() when lora.merge=False.
-        self.sleep_level = 2
+        # From config, not assigned after the first sync: sleep() branches on the same predicate.
+        self.sleep_level = 1 if lora_served_as_adapter(self.model_config) else 2
 
     async def _init_server_adapter(self):
         if self._engine is not None:
@@ -347,7 +360,7 @@ class ServerAdapter(BaseRollout):
                 req = LoadLoRAAdapterFromTensorsReqInput(
                     lora_name=SGLANG_LORA_NAME,
                     config_dict=serialize_peft_config,
-                    serialized_tensors=serialize_named_tensors,
+                    serialized_named_tensors=serialize_named_tensors,
                 )
                 # send http request
                 await self._engine.load_lora_adapter_from_tensor(req)
@@ -378,7 +391,7 @@ class ServerAdapter(BaseRollout):
             async for params_batch in get_named_tensor_buckets(weights, update_weights_bucket_bytes):
                 await sgl_update_weights(
                     engine=self._engine,
-                    params_batch=params_batch,
+                    params_batch=[(_strip_lora_base_layer(name), _to_ipc_device(t)) for name, t in params_batch],
                     device_mesh_key="infer_tp",
                     device_mesh=self.device_mesh,
                 )
@@ -421,9 +434,13 @@ class ServerAdapter(BaseRollout):
         """
         import torch.distributed as dist
         from sglang.srt.managers.io_struct import UpdateWeightsFromTensorReqInput
-        from sglang.srt.model_executor.model_runner import LocalSerializedTensor
         from sglang.srt.utils import MultiprocessingSerializer
         from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
+
+        try:
+            from sglang.srt.model_executor.model_runner import LocalSerializedTensor
+        except ImportError:  # moved out of model_runner in sglang 0.5.16
+            from sglang.srt.model_executor.model_runner_components.weight_updater import LocalSerializedTensor
 
         from verl.workers.rollout.sglang_rollout.delta_loader import LOADER_FQN
 
@@ -453,22 +470,17 @@ class ServerAdapter(BaseRollout):
         )
         await self._engine.update_weights_from_tensor(req)
 
-    def wrap_lora_params(self, peft_config: LoraConfig, weights: Generator[tuple[str, torch.Tensor]]):
+    def wrap_lora_params(self, peft_config: dict, weights: Generator[tuple[str, torch.Tensor]]):
         # peft config
-        peft_config_json = asdict(peft_config)
-        peft_config_json["task_type"] = peft_config_json["task_type"].value
-        peft_config_json["peft_type"] = peft_config_json["peft_type"].value
-        peft_config_json["target_modules"] = list(peft_config_json["target_modules"])
+        peft_config_json = normalize_peft_config_for_sglang(peft_config)
 
         # lora weights
         processed_weights: dict[str, torch.Tensor] = {
-            name: _preprocess_tensor_for_update_weights(tensor.detach()) for name, tensor in weights
+            name: _to_ipc_device(_preprocess_tensor_for_update_weights(tensor.detach())) for name, tensor in weights
         }
 
-        infer_tp_size = self.device_mesh["infer_tp"].mesh.size()[0]
-        serialized_named_tensors = []
-        for i in range(infer_tp_size):
-            serialized_tensors = MultiprocessingSerializer.serialize(processed_weights, output_str=True)
-            serialized_named_tensors.append(serialized_tensors)
+        # One serialized copy per TP rank, same field and shape as the weight sync above.
+        tp_size = self.device_mesh["infer_tp"].mesh.size()[0]
+        serialized_named_tensors = [MultiprocessingSerializer.serialize(processed_weights) for _ in range(tp_size)]
 
         return peft_config_json, serialized_named_tensors

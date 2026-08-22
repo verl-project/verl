@@ -1,0 +1,173 @@
+name: e2e_v1_separate_async_ascend
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - ".github/workflows/e2e_v1_separate_async_ascend.yml"
+      - "tests/special_e2e/run_v1_separate_async.sh"
+      - "tests/special_e2e/run_v1_separate_async_ascend.sh"
+      - "examples/data_preprocess/gsm8k.py"
+      - "verl/trainer/main_ppo.py"
+      - "verl/trainer/ppo/v1/**"
+      - "verl/trainer/config/**"
+      - "verl/checkpoint_engine/**"
+      - "verl/experimental/separation/**"
+      - "verl/models/**"
+      - "verl/single_controller/**"
+      - "verl/workers/**"
+      - "verl/utils/device.py"
+      - "verl/utils/distributed.py"
+      - "verl/utils/fsdp_utils.py"
+      - "verl/utils/megatron_utils.py"
+      - "verl/utils/transferqueue_utils.py"
+      - "requirements-npu.txt"
+      - "pyproject.toml"
+      - "setup.py"
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - ".github/workflows/e2e_v1_separate_async_ascend.yml"
+      - "tests/special_e2e/run_v1_separate_async.sh"
+      - "tests/special_e2e/run_v1_separate_async_ascend.sh"
+      - "examples/data_preprocess/gsm8k.py"
+      - "verl/trainer/main_ppo.py"
+      - "verl/trainer/ppo/v1/**"
+      - "verl/trainer/config/**"
+      - "verl/checkpoint_engine/**"
+      - "verl/experimental/separation/**"
+      - "verl/models/**"
+      - "verl/single_controller/**"
+      - "verl/workers/**"
+      - "verl/utils/device.py"
+      - "verl/utils/distributed.py"
+      - "verl/utils/fsdp_utils.py"
+      - "verl/utils/megatron_utils.py"
+      - "verl/utils/transferqueue_utils.py"
+      - "requirements-npu.txt"
+      - "pyproject.toml"
+      - "setup.py"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  # This image is not the uv.cu130 one: it ships its own torch-npu stack, so the
+  # shared e2e scripts must launch with ambient python instead of `uv run`.
+  VERL_USE_UV: 0
+
+jobs:
+  e2e_v1_separate_async_fsdp2_ascend:
+    if: github.repository_owner == 'verl-project'
+    runs-on: linux-aarch64-a3-8
+    timeout-minutes: 60
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      ACTOR_STRATEGY: "fsdp2"
+      device_name: "npu"
+      UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+      UV_HTTP_TIMEOUT: 120
+      UV_NO_CACHE: "1"
+      UV_SYSTEM_PYTHON: "1"
+      UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
+      TRANSFORMERS_VERBOSITY: 'error'
+    steps:
+      - name: Check NPU and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - name: Install uv
+        run: pip install uv
+      - name: Check initial pip list
+        run: uv pip list
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Install the current repository
+        run: |
+          uv pip install --no-deps -e .
+          uv pip install --no-deps TransferQueue==0.1.8
+      - name: Check final pip list
+        run: uv pip list
+      - name: Prepare weights
+        run: ln -s /root/.cache/models "${HOME}/models"
+      - name: Prepare GSM8K dataset
+        run: python examples/data_preprocess/gsm8k.py --local_dataset_path "${HOME}/.cache/datasets/openai/gsm8k"
+      - name: Run V1 separate_async with FSDP2
+        run: |
+          ray stop --force
+          bash tests/special_e2e/run_v1_separate_async_ascend.sh
+
+  e2e_v1_separate_async_megatron_ascend:
+    if: github.repository_owner == 'verl-project'
+    needs: e2e_v1_separate_async_fsdp2_ascend
+    runs-on: linux-aarch64-a3-8
+    timeout-minutes: 60
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      ACTOR_STRATEGY: "megatron"
+      VANILLA_MBRIDGE: "True"
+      device_name: "npu"
+      UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+      UV_HTTP_TIMEOUT: 120
+      UV_NO_CACHE: "1"
+      UV_SYSTEM_PYTHON: "1"
+      UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
+      TRANSFORMERS_VERBOSITY: 'error'
+    steps:
+      - name: Check NPU and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - name: Install uv
+        run: pip install uv
+      - name: Check initial pip list
+        run: uv pip list
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Install the current repository
+        run: |
+          uv pip install --no-deps -e .
+          uv pip install --no-deps TransferQueue==0.1.8
+      - name: Check final pip list
+        run: uv pip list
+      - name: Prepare weights
+        run: ln -s /root/.cache/models "${HOME}/models"
+      - name: Prepare GSM8K dataset
+        run: python examples/data_preprocess/gsm8k.py --local_dataset_path "${HOME}/.cache/datasets/openai/gsm8k"
+      - name: Run V1 separate_async with Megatron
+        run: |
+          ray stop --force
+          bash tests/special_e2e/run_v1_separate_async_ascend.sh

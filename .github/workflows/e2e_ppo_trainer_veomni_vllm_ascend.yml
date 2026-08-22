@@ -68,6 +68,7 @@ on:
       - ".github/workflows/e2e_ppo_trainer_veomni_vllm_ascend.yml"
       - "examples/data_preprocess/gsm8k.py"
       - "tests/special_e2e/run_ppo_trainer_veomni.sh"
+      - "tests/special_e2e/profiler_finish_hook_marker.sh"
       - "verl/trainer/main_ppo.py"
       - "verl/trainer/config/ppo_trainer.yaml"
       # Megatron
@@ -88,13 +89,14 @@ jobs:
     runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
       options: >-
         --shm-size 16g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       device_name: "npu"
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |

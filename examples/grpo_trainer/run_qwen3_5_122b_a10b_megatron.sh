@@ -17,6 +17,22 @@
 #   - MindSpeed==0.16.0
 #   - Megatron-Bridge==de93536e
 #
+# Requirements on Ascend (Mindspeed-Bridge):
+#   - 8 NPUs (2*64GB each, e.g. 1x8 A3)
+#   - Megatron-LM==core_v0.18.0
+#   - Megatron-Bridge==v0.5.0
+#   - MindSpeed==core_r0.18.0
+#   - MegatronAdaptor==core_r0.18.0
+#   - TransformerEngineNPU==main
+#   -   pip install decorator pybind11 diffusers
+#   - MindSpeed-Ops==master
+#   - Mindspeed-Bridge==master
+#   - flash-linear-attention-npu==v26.1.0
+#       Installation reference: https://github.com/flashserve/flash-linear-attention-npu/blob/v26.1.0/README.md
+#   - Set USE_MINDSPEED_BRIDGE=True to enable ascend GDN performance optimization:
+#       +actor_rollout_ref.actor.megatron.override_transformer_config.use_triton_gdn=False
+#       +actor_rollout_ref.actor.megatron.override_transformer_config.use_ascend_gdn=True
+#
 # Qwen3.5 architecture notes:
 #   Qwen3.5 uses Gated Delta Net (GDN) linear attention which currently does
 #   NOT support packed sequences (THD format) in Megatron-LM. Therefore:
@@ -118,6 +134,8 @@ esac
 
 ACTOR_VPP=${ACTOR_VPP:-null}
 ALL_OFFLOAD=${ALL_OFFLOAD:-True}
+# Set to True when using Mindspeed-Bridge to enable ascend GDN performance optimization
+USE_MINDSPEED_BRIDGE=${USE_MINDSPEED_BRIDGE:-False}
 # ---- end user-adjustable ----
 
 # ---- no user adjustment needed below ----
@@ -245,6 +263,12 @@ case "${DEVICE}" in
             +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=alltoall
             +actor_rollout_ref.actor.megatron.override_transformer_config.use_naive_l2norm=True
         )
+        if [ "${USE_MINDSPEED_BRIDGE}" = "True" ]; then
+          ACTOR+=(
+              +actor_rollout_ref.actor.megatron.override_transformer_config.use_triton_gdn=False
+              +actor_rollout_ref.actor.megatron.override_transformer_config.use_ascend_gdn=True
+          )
+        fi
         ROLLOUT+=(
             +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
         )
@@ -253,7 +277,16 @@ esac
 
 ########################### Launch ###########################
 export HYDRA_FULL_ERROR=1
-PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
+# uv (set VERL_USE_UV=0 for system python): GPU vllm/sglang × megatron run the driver and every Ray worker
+# (runtime_env.py_executable) through `uv run` on the matching extras of the committed uv.lock;
+# other backends / NPU fall back to ambient python. Run from the verl repo root.
+LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ] && { [ "${rollout_backend}" = vllm ] || [ "${rollout_backend}" = sglang ]; }; then
+    LAUNCH=(uv run --frozen --all-packages --extra "${rollout_backend}" --extra megatron python3)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages --extra ${rollout_backend} --extra megatron")
+fi
+PYTHONUNBUFFERED=1 "${LAUNCH[@]}" -m verl.trainer.main_ppo \
     "${ALGORITHM[@]}" \
     "${DATA[@]}" \
     "${MODEL[@]}" \
@@ -263,4 +296,5 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     "${ACTOR[@]}" \
     "${REF[@]}" \
     "${EXTRA[@]}" \
+    "${RAY[@]}" \
     "$@"

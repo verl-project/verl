@@ -27,7 +27,12 @@ from verl.plugin.platform import get_platform
 from verl.single_controller.ray import SubRayResourcePool
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.net_utils import is_valid_ipv6_address
-from verl.utils.profiler import DistProfiler
+from verl.utils.profiler import (
+    DistProfiler,
+    build_rollout_dist_profiler,
+    relocate_rollout_traces,
+    rollout_profiler_global_ranks,
+)
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.utils import get_max_position_embeddings, qwen2_5_vl_dedup_image_tokens, run_uvicorn
@@ -132,16 +137,6 @@ class TRTLLMHttpServer:
         self._generation_allowed.set()
 
         self.profiler_controller = self._init_profiler_controller()
-
-        # Non-HYBRID with load_format=dummy normally needs to load from disk (auto).
-        # Exception: FP8 has no on-disk ckpt; weights are filled during first sync (keep dummy).
-        if (
-            self.rollout_mode != RolloutMode.HYBRID
-            and self.config.load_format == "dummy"
-            and self.config.quantization != "fp8"
-        ):
-            logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
-            self.config.load_format = "auto"
 
         self.is_vlm_model = (
             self.model_config.hf_config is not None and hasattr(self.model_config.hf_config, "vision_config")
@@ -463,6 +458,16 @@ class TRTLLMHttpServer:
     async def stop_profile(self):
         if self.profiler_controller.check_enable() and self.profiler_controller.check_this_rank():
             await self.llm.collective_rpc("stop_profile")
+            # Relocate the engine's traces into save_path (when relocate_results is set) so the
+            # training worker's single end-of-run upload of the whole save_path picks them up. The
+            # rollout engine does not run the finish command itself: it shares save_path with the
+            # colocated training worker, so uploading here too would send the same directory twice.
+            relocate_rollout_traces(
+                self.profiler_controller.config,
+                self.replica_rank,
+                self.replica_world_size,
+                self.profiler_keep_global_ranks,
+            )
 
     def _init_profiler_controller(self) -> DistProfiler:
         profiler_config = self.config.profiler
@@ -479,7 +484,20 @@ class TRTLLMHttpServer:
             elif profiler_config.tool is not None:
                 logger.warning(f"trtllm rollout: unsupported profiler tool '{profiler_config.tool}', disabling")
                 profiler_config = None
-        return DistProfiler(self.replica_rank, config=profiler_config, tool_config=tool_config)
+        # `ranks` in the rollout profiler config are global GPU ranks (as in the training roles);
+        # map them to the replica that owns them so e.g. ranks=[0, 8] with tp=8 profiles the replicas
+        # holding global ranks 0 and 8 (replicas 0 and 1), not replica indices 0 and 8.
+        self.replica_world_size = (
+            self.config.tensor_model_parallel_size
+            * self.config.data_parallel_size
+            * self.config.pipeline_model_parallel_size
+        )
+        # A tp>1 engine profiles its whole replica, but the user asked for specific global GPU ranks;
+        # keep only those when relocating so ranks=[0, 8] yields exactly GPU 0 and 8, not their tp-mates.
+        self.profiler_keep_global_ranks = rollout_profiler_global_ranks(profiler_config)
+        return build_rollout_dist_profiler(
+            self.replica_rank, self.replica_world_size, config=profiler_config, tool_config=tool_config
+        )
 
 
 class TRTLLMReplica(RolloutReplica):

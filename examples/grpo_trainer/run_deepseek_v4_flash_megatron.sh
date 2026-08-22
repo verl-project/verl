@@ -96,8 +96,6 @@ DATA=(
     data.truncation=left
     data.dataloader_num_workers=${DATALOADER_NUM_WORKERS}
     +data.apply_chat_template_kwargs.enable_thinking=${ENABLE_THINKING}
-    data.continuous_token.enable=True
-    data.continuous_token.model_family=deepseekv4
 )
 
 MODEL=(
@@ -136,6 +134,29 @@ ACTOR=(
     ++actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_mhc=False
     "++actor_rollout_ref.actor.megatron.override_transformer_config.pipeline_model_parallel_layout='${PIPELINE_MODEL_PARALLEL_LAYOUT}'"
 )
+
+# Context parallelism needs three extra transformer-config settings for DeepSeek-V4 on top of
+# `context_parallel_size`. Each of them is enforced by Megatron-Core, so without them the run
+# aborts at model build or in the first attention forward. They are appended only when CP > 1.
+#
+#   cp_partition_mode=contiguous
+#     DSv4 attention requires every CP rank to own ONE consecutive interval of the packed THD
+#     buffer. Megatron-Core defaults to "zigzag" and raises
+#     "DSv4 Hybrid with CP requires cp_partition_mode='contiguous'."
+#   sequence_packing_scheduler=dp_balanced
+#     Megatron-Core asserts "DSv4 Hybrid with CP requires a sequence_packing_scheduler for THD
+#     inputs." Needs Transformer Engine >= 2.9.
+#   max_seqlen_per_dp_cp_rank
+#     Documented as max sequence length / cp_size; it drives how sub-samples are assigned to
+#     each DPxCP rank.
+CP_ARGS=()
+if [ "${ACTOR_CP}" -gt 1 ]; then
+    CP_ARGS=(
+        ++actor_rollout_ref.actor.megatron.override_transformer_config.cp_partition_mode=contiguous
+        ++actor_rollout_ref.actor.megatron.override_transformer_config.sequence_packing_scheduler=dp_balanced
+        ++actor_rollout_ref.actor.megatron.override_transformer_config.max_seqlen_per_dp_cp_rank=$(((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH) / ACTOR_CP))
+    )
+fi
 
 ROLLOUT=(
     actor_rollout_ref.rollout.name=vllm
@@ -193,6 +214,7 @@ python3 -m verl.trainer.main_ppo \
     "${DATA[@]}" \
     "${MODEL[@]}" \
     "${ACTOR[@]}" \
+    "${CP_ARGS[@]}" \
     "${ROLLOUT[@]}" \
     "${REWARD[@]}" \
     "${TRAINER[@]}" \
