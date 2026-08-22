@@ -161,18 +161,50 @@ async def get_named_tensor_buckets(
     if bucket_bytes <= 0:
         raise ValueError(f"bucket_bytes must be greater than 0, got {bucket_bytes}")
 
+    from verl.utils.fusion_groups import fusion_key, group_size
+
     current_bucket = []
     current_size = 0
+    # Members of a fused destination param (SGLang's DSv4 wqkv_a / wkv_gate) are
+    # held here until the group is whole, then placed in one bucket: that loader
+    # cats both halves inside a single load_weights call and asserts its cache
+    # empty on return, so a bucket boundary between them makes it fire. A full
+    # sync contains every member by construction, so this only ever delays a
+    # tensor by its sibling -- nothing is dropped.
+    staged: dict = {}
+
+    def _place(entries):
+        """Put an indivisible run of entries in a bucket, cutting before it if
+        it would not fit rather than partway through."""
+        nonlocal current_bucket, current_size
+        total = sum(sz for _, _, sz in entries)
+        if current_bucket and current_size + total > bucket_bytes:
+            out, current_bucket, current_size = current_bucket, [], 0
+            return out, entries
+        return None, entries
+
     async for name, tensor in ensure_async_iterator(iterable):
         tensor_size = tensor.element_size() * tensor.numel()
-        if current_size + tensor_size > bucket_bytes:
-            if current_bucket:
-                yield current_bucket
-            current_bucket = [(name, _compact_for_bucket(tensor))]
-            current_size = tensor_size
+        key = fusion_key(name)
+        if key is not None:
+            slot = staged.setdefault(key, [])
+            slot.append((name, _compact_for_bucket(tensor), tensor_size))
+            if len(slot) < group_size(key[1]):
+                continue
+            entries = staged.pop(key)
         else:
-            current_bucket.append((name, _compact_for_bucket(tensor)))
-            current_size += tensor_size
+            entries = [(name, _compact_for_bucket(tensor), tensor_size)]
 
+        flushed, entries = _place(entries)
+        if flushed:
+            yield flushed
+        for n, t, sz in entries:
+            current_bucket.append((n, t))
+            current_size += sz
+
+    assert not staged, (
+        f"fused param groups never completed in this sync: {sorted(staged)}. "
+        f"Every member must appear in the weight stream."
+    )
     if current_bucket:
         yield current_bucket

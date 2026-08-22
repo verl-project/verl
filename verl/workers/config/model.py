@@ -193,13 +193,25 @@ class HFModelConfig(BaseConfig):
             lookup_error = error.__cause__ or error.__context__
             if not isinstance(lookup_error, KeyError) or lookup_error.args != ("deepseek_v4",):
                 raise
-            from vllm.transformers_utils.config import get_config
+            try:
+                from vllm.transformers_utils.config import get_config
 
-            self.hf_config = get_config(
-                self.local_hf_config_path,
-                trust_remote_code=self.trust_remote_code,
-                attn_implementation=attn_implementation,
-            )
+                self.hf_config = get_config(
+                    self.local_hf_config_path,
+                    trust_remote_code=self.trust_remote_code,
+                    attn_implementation=attn_implementation,
+                )
+            except ImportError:
+                # sglang-only containers: register sglang's config class so
+                # AutoConfig (and every later Auto* lookup) resolves deepseek_v4.
+                from sglang.srt.configs.deepseek_v4 import DeepSeekV4Config
+
+                AutoConfig.register("deepseek_v4", DeepSeekV4Config, exist_ok=True)
+                self.hf_config = AutoConfig.from_pretrained(
+                    self.local_hf_config_path,
+                    trust_remote_code=self.trust_remote_code,
+                    attn_implementation=attn_implementation,
+                )
 
         override_config_kwargs = {}
 
