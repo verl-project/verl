@@ -23,13 +23,12 @@ from transformers import (
     Qwen2Config,
 )
 
+# verl's attention dispatcher already routes to flash_attn on CUDA and to the
+# device-agnostic pure-PyTorch impl on NPU/XPU, so import it unconditionally (matching
+# how verl's own source uses it). Upstream branched on cuda/npu only, leaving these
+# names unbound on XPU -> NameError.
+from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 from verl.utils.device import get_device_name
-
-if get_device_name() == "cuda":
-    from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
-elif get_device_name() == "npu":
-    from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
-
 from verl.utils.model import compute_position_id_with_mask, create_random_mask
 from verl.utils.torch_functional import log_probs_from_logits_all_rmpad, masked_mean
 
