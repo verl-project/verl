@@ -14,6 +14,7 @@
 import json
 import os
 from copy import deepcopy
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -106,6 +107,26 @@ def test_build_messages_accepts_image_path():
         {"type": "text", "text": "Describe "},
         {"type": "image", "image": image_path},
     ]
+
+
+def test_build_messages_drops_image_bytes_without_mutating_source():
+    dataset = _mock_rlhf_dataset()
+    buffer = BytesIO()
+    Image.new("RGB", (2, 2), color="red").save(buffer, format="PNG")
+    source_image = {"bytes": buffer.getvalue()}
+    example = {
+        "prompt": [{"role": "user", "content": "Describe <image>"}],
+        "images": [source_image],
+    }
+
+    messages = dataset._build_messages(example, key=dataset.prompt_key)
+    image_content = messages[0]["content"][1]
+
+    assert isinstance(image_content["image"], Image.Image)
+    assert image_content["image"].getpixel((0, 0)) == (255, 0, 0)
+    assert "bytes" not in image_content
+    assert "bytes" in source_image
+    assert "image" not in source_image
 
 
 @pytest.mark.parametrize(
