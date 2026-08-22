@@ -1,6 +1,6 @@
 # FP8 RL in verl
 
-Last updated: 03/05/2026
+Last updated: 08/22/2026
 
 verl supports two FP8 modes for accelerating RL training:
 
@@ -212,6 +212,46 @@ actor_rollout_ref.rollout:
 Results and observations:
 - FP8 E2E achieves comparable accuracy to the BF16 baseline, with the two curves closely aligned throughout training.
 - The training/inference precision mismatch (measured by KL divergence) follows the ordering: FP8 rollout-only > FP8 E2E > BF16 E2E. This is expected, as FP8 E2E maintains consistent precision across both training and inference, resulting in lower distribution mismatch than the FP8 rollout-only setting where training remains in BF16.
+
+---
+
+## MXFP8 Training (Blackwell)
+
+MXFP8 is the OCP microscaling FP8 format: E4M3 elements with one shared E8M0 scale per
+32-element block, natively accelerated by Blackwell tensor cores. Compared to the
+`blockwise` recipe above (1x128 activation / 128x128 weight scaling, designed for Hopper),
+MXFP8 uses hardware-decoded block scales and needs no `NVTE_FP8_BLOCK_SCALING_FP32_SCALES`
+workaround.
+
+### Requirements
+
+- **Blackwell GPUs** (SM100+). On Hopper, use `fp8_recipe: "blockwise"` as described in
+  the FP8 End-to-End section instead — Hopper tensor cores cannot consume MXFP8 block scales.
+- **Megatron-Core >= 0.13** and **Transformer Engine >= 2.1**
+
+### Key Configuration
+
+```yaml
+# MXFP8 training via Transformer Engine
+actor_rollout_ref.actor.megatron.override_transformer_config:
+  fp8: "e4m3"                # element format; "hybrid" (e4m3 fwd + e5m2 bwd) also supported
+  fp8_recipe: "mxfp8"        # 32-element block scaling
+  # Optional: keep the first/last layers in bf16 for stability
+  first_last_layers_bf16: true
+  num_layers_at_start_in_bf16: 1
+  num_layers_at_end_in_bf16: 1
+```
+
+Notes:
+
+- Requires the Megatron-Bridge model path (`actor_rollout_ref.actor.megatron.use_mbridge=True`,
+  the default). The legacy model-building path does not support FP8 recipes and fails loudly.
+- Model weights stay in bf16 (`fp8_param` is not supported); only GEMM inputs are cast to
+  MXFP8 on the fly, so checkpointing and rollout weight sync are unchanged.
+- verl pads packed sequences to the 32-token block boundaries MXFP8 quantization requires;
+  this is automatic once `fp8_recipe: "mxfp8"` is set.
+- MXFP8 rollout inference (SGLang) is tracked separately in
+  [verl#7186](https://github.com/verl-project/verl/pull/7186).
 
 ---
 

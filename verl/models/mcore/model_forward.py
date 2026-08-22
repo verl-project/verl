@@ -24,6 +24,7 @@ from verl.workers.config import MtpConfig
 from .util import (
     build_vlm_attn_mask_bshd,
     build_vlm_attn_mask_thd,
+    get_fp8_padding_options,
     postprocess_bshd,
     postprocess_bshd_engine,
     postprocess_packed_seqs,
@@ -55,8 +56,7 @@ def model_forward_gen(vision_model: bool = False):
         )  # vision model does not need pre_process, because we pack the input_ids to thd in the forward function
         post_process = unwrap_model(model).post_process
         sp = unwrap_model(model).config.sequence_parallel
-        fp8 = unwrap_model(model).config.fp8
-        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+        use_fp8_padding, fp8_recipe = get_fp8_padding_options(unwrap_model(model).config)
 
         model_kwargs = {}
         if "pixel_values" in multi_modal_inputs:
@@ -77,13 +77,16 @@ def model_forward_gen(vision_model: bool = False):
                 attention_mask,
                 pre_process=pre_process or (post_process and mtp_enable_train),
                 use_fp8_padding=use_fp8_padding,
+                fp8_recipe=fp8_recipe,
             )
             input_ids_rmpad = input_ids_rmpad.contiguous()
 
             # when pp > 1 and processor is not None, we need to pass the labels and loss_mask to the model
             if mtp_enable_train and post_process:
                 args = {
-                    k: preprocess_packed_seqs(v, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding)[0]
+                    k: preprocess_packed_seqs(
+                        v, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding, fp8_recipe=fp8_recipe
+                    )[0]
                     for k, v in logits_processor_args.items()
                 }
                 model_kwargs["labels"] = args["label"].contiguous()
@@ -109,7 +112,9 @@ def model_forward_gen(vision_model: bool = False):
 
             if post_process and logits_processor is not None:
                 args = {
-                    k: preprocess_packed_seqs(v, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding)[0]
+                    k: preprocess_packed_seqs(
+                        v, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding, fp8_recipe=fp8_recipe
+                    )[0]
                     for k, v in logits_processor_args.items()
                 }
                 output_dict = logits_processor(output_orig, **args)
@@ -131,7 +136,7 @@ def model_forward_gen(vision_model: bool = False):
             When using the bshd format, we have to add paddings to the input_ids to meet the longest sequence length, 
             so it is recommended to disable dynamic batch size and set batch size to 1
             """
-            assert fp8 is None, "fp8 is not supported for bshd format yet"
+            assert not use_fp8_padding, "fp8 is not supported for bshd format yet"
 
             batch_size, sequence_length = attention_mask.shape[:2]
             position_ids_for_preprocess = (
@@ -282,8 +287,7 @@ def gptmodel_forward_model_engine(
     pre_process = unwrap_model(model).pre_process
     post_process = unwrap_model(model).post_process
 
-    fp8 = unwrap_model(model).config.fp8
-    use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+    use_fp8_padding, fp8_recipe = get_fp8_padding_options(unwrap_model(model).config)
 
     model_kwargs = {}
     if "pixel_values" in multi_modal_inputs:
@@ -301,6 +305,7 @@ def gptmodel_forward_model_engine(
             input_ids,
             pre_process=pre_process or (post_process and mtp_enable_train),
             use_fp8_padding=use_fp8_padding,
+            fp8_recipe=fp8_recipe,
             local_cp_size=local_cp_size,
             cp_layout=cp_layout,
         )
@@ -325,6 +330,7 @@ def gptmodel_forward_model_engine(
                     pre_process=True,
                     need_roll=True,
                     use_fp8_padding=use_fp8_padding,
+                    fp8_recipe=fp8_recipe,
                     local_cp_size=local_cp_size,
                     cp_layout=cp_layout,
                 )[0]
@@ -357,6 +363,7 @@ def gptmodel_forward_model_engine(
                     pre_process=True,
                     need_roll=(k == "label"),
                     use_fp8_padding=use_fp8_padding,
+                    fp8_recipe=fp8_recipe,
                     local_cp_size=local_cp_size,
                     cp_layout=cp_layout,
                 )[0]
