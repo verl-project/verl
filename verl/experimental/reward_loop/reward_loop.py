@@ -267,7 +267,7 @@ class RewardLoopWorker:
         else:
             raise NotImplementedError(f"RewardLoopManager does not support {engine_name}")
 
-        return {"reward_score": rm_score}
+        return {"reward_score": rm_score, "reward_extra_info": {}}
 
 
 class RewardLoopManager:
