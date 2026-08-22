@@ -899,6 +899,12 @@ class AgentLoopWorker:
         if self.processor is None or not hasattr(self.processor, "get_rope_index"):
             return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
 
+        # VL processors still expose get_rope_index for text-only batches.
+        # Without image/video grids, leftover image_pad/video_pad tokens would
+        # call next(None) inside get_rope_index. Fall back to 1D positions.
+        if multi_modal_inputs.get("image_grid_thw") is None and multi_modal_inputs.get("video_grid_thw") is None:
+            return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
+
         multi_modal_kwargs = {
             "image_grid_thw": multi_modal_inputs.get("image_grid_thw"),
             "video_grid_thw": multi_modal_inputs.get("video_grid_thw"),
