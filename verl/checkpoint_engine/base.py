@@ -558,6 +558,21 @@ class CheckpointEngineManager:
         return sync_metrics
 
 
+def align_bucket_offset(offset: int, dtype: torch.dtype) -> int:
+    """Round ``offset`` up to the next multiple of ``dtype``'s itemsize.
+
+    Bucket packing places tensors back-to-back in a uint8 buffer and records
+    each start in ``TensorMeta.offset``. The receive path reinterprets each
+    single-chunk slice with ``Tensor.view(dtype)``, which requires the slice's
+    storage offset to be a multiple of the element size. Aligning each
+    tensor's start keeps mixed-dtype streams viewable. On a homogeneous
+    stream, every tensor's byte length is a multiple of its own element size,
+    so this is a no-op and the wire layout is unchanged.
+    """
+    itemsize = dtype.itemsize
+    return (offset + itemsize - 1) // itemsize * itemsize
+
+
 async def split_weight_chunks(
     weights: Generator[tuple[str, torch.Tensor], None, None], bucket_size: int, meta_only: bool = False
 ) -> AsyncGenerator[tuple[TensorMeta, torch.Tensor | None], None]:
