@@ -892,6 +892,14 @@ class FSDPEngine(BaseEngine):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.optimizer)
 
+    def prepare_checkpoint_retention(self, loaded_path: str) -> None:
+        if self.checkpoint_manager.rank == 0:
+            self.checkpoint_manager.record_loaded_checkpoint(loaded_path)
+
+    def finalize_checkpoint_retention(self, new_path: str, max_ckpt_to_keep: Optional[int] = None) -> None:
+        if self.checkpoint_manager.rank == 0:
+            self.checkpoint_manager.finalize_loaded_checkpoint_retention(new_path, max_ckpt_to_keep)
+
     def get_per_tensor_param_shard(self, **kwargs):
         """Like :meth:`get_per_tensor_param`, but yields each rank's *local* FSDP shard
         ``(name, local_flat_shard_bf16, ShardSpec)`` instead of all-gathering the full
