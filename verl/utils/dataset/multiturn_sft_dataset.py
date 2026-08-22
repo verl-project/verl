@@ -230,6 +230,9 @@ class MultiTurnSFTDataset(Dataset):
         if index != 0 and message["role"] != "system":
             input_ids = input_ids[len(self.system_prompt) :]
             attention_mask = attention_mask[len(self.system_prompt) :]
+            # mm_token_type_ids is one entry per token, remove the same leading tokens
+            if "mm_token_type_ids" in inputs:
+                inputs["mm_token_type_ids"] = inputs["mm_token_type_ids"][..., len(self.system_prompt) :]
 
         if message["role"] == "assistant":
             loss_mask = torch.ones_like(attention_mask)
@@ -324,12 +327,13 @@ class MultiTurnSFTDataset(Dataset):
         print_assembled_message(self.tokenizer, messages, input_ids, loss_mask, attention_mask, tools)
         self.sanity_check(input_ids, messages, tools, enable_thinking)
 
+        # mm_token_type_ids is (1, turn_len) per turn with one entry per token, so turns join on dim 1,
+        # not dim 0: exempt it from the filtering and stacking below, then pad and truncate it like input_ids
+        mm_token_type_ids = multi_modal_inputs.pop("mm_token_type_ids", None)
+
         # Since the tokenizer may return user-customized results, we need to filter out inconsistent tensor shapes
         keys_to_remove = []
         for k, v in multi_modal_inputs.items():
-            if k == "mm_token_type_ids":
-                keys_to_remove.append(k)
-                continue
             if len(v) > 0 and v[0] is not None and isinstance(v[0], torch.Tensor):
                 # Check if all tensors in the list have the same shape
                 first_shape = v[0].shape[1:]
@@ -341,6 +345,12 @@ class MultiTurnSFTDataset(Dataset):
 
         for k, v in multi_modal_inputs.items():
             multi_modal_inputs[k] = torch.concat(v, dim=0)
+
+        if mm_token_type_ids is not None:
+            mm_token_type_ids = torch.cat(mm_token_type_ids, dim=1)
+            assert mm_token_type_ids.shape[-1] == input_ids.shape[0], (
+                f"mm_token_type_ids has {mm_token_type_ids.shape[-1]} entries for {input_ids.shape[0]} tokens"
+            )
 
         # 2. handle position_ids for Qwen-VL series models
         if self.processor is not None and "Qwen2VLImageProcessor" in self.processor.image_processor.__class__.__name__:
@@ -376,17 +386,24 @@ class MultiTurnSFTDataset(Dataset):
                 attention_mask = torch.cat((attention_mask, padded_attention_mask))
                 loss_mask = torch.cat((loss_mask, padded_loss_mask))
                 position_ids = F.pad(position_ids, (0, self.max_length - sequence_length), value=0)
+                if mm_token_type_ids is not None:
+                    # pad with 0 ("text") so the padding adds no image attention
+                    mm_token_type_ids = F.pad(mm_token_type_ids, (0, self.max_length - sequence_length), value=0)
             elif sequence_length > self.max_length:
                 if self.truncation == "left":
                     input_ids = input_ids[-self.max_length :]
                     attention_mask = attention_mask[-self.max_length :]
                     loss_mask = loss_mask[-self.max_length :]
                     position_ids = position_ids[..., -self.max_length :]
+                    if mm_token_type_ids is not None:
+                        mm_token_type_ids = mm_token_type_ids[..., -self.max_length :]
                 elif self.truncation == "right":
                     input_ids = input_ids[: self.max_length]
                     attention_mask = attention_mask[: self.max_length]
                     loss_mask = loss_mask[: self.max_length]
                     position_ids = position_ids[..., : self.max_length]
+                    if mm_token_type_ids is not None:
+                        mm_token_type_ids = mm_token_type_ids[..., : self.max_length]
                 elif self.truncation == "error":
                     raise ValueError(f"{sequence_length=} is larger than {self.max_length=}")
                 else:
@@ -398,6 +415,8 @@ class MultiTurnSFTDataset(Dataset):
                 "position_ids": position_ids,
                 "loss_mask": loss_mask,
             }
+            if mm_token_type_ids is not None:
+                multi_modal_inputs["mm_token_type_ids"] = mm_token_type_ids
             if len(multi_modal_inputs) > 0:
                 res["multi_modal_inputs"] = multi_modal_inputs
             return res
@@ -409,6 +428,8 @@ class MultiTurnSFTDataset(Dataset):
                 input_ids = input_ids[: self.max_length]
                 loss_mask = loss_mask[: self.max_length]
                 position_ids = position_ids[..., : self.max_length]
+                if mm_token_type_ids is not None:
+                    mm_token_type_ids = mm_token_type_ids[..., : self.max_length]
 
             # return nested tensor with out padding
             res = {
@@ -416,6 +437,8 @@ class MultiTurnSFTDataset(Dataset):
                 "position_ids": position_ids,
                 "loss_mask": loss_mask,
             }
+            if mm_token_type_ids is not None:
+                multi_modal_inputs["mm_token_type_ids"] = mm_token_type_ids
             if len(multi_modal_inputs) > 0:
                 res["multi_modal_inputs"] = multi_modal_inputs
             return res

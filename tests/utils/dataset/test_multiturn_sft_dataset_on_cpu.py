@@ -532,3 +532,58 @@ def test_multiturn_sft_vlm_dataloader_on_cpu(model_path, vlm_data_file):
             f"pixel_values: {pixel_values.shape} should have shape "
             f"({num_patches}, 3 * {temporal_patch_size} * {patch_size} * {patch_size})"
         )
+
+        # 4. verify mm_token_type_ids: one row per sample, padded to the longest sequence
+        mm_token_type_ids = multi_modal_inputs["mm_token_type_ids"]
+        assert mm_token_type_ids.shape == (batch_size, max(len(ids) for ids in input_ids)), (
+            f"mm_token_type_ids: {mm_token_type_ids.shape} should have shape "
+            f"({batch_size}, {max(len(ids) for ids in input_ids)})"
+        )
+        # padding is tagged 0 ("text"), so tagging neither loses nor invents image tokens
+        assert (mm_token_type_ids == 1).sum() == (input_ids.values() == processor.image_token_id).sum(), (
+            "number of image-tagged positions should equal the number of image tokens in the batch"
+        )
+
+
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        f"{custom_model_prefix}/Qwen/Qwen3-VL-2B-Instruct",
+    ],
+)
+@pytest.mark.parametrize(
+    "pad_mode, truncation",
+    [
+        ("right", "left"),
+        ("right", "right"),
+        ("no_padding", "right"),
+    ],
+)
+def test_multiturn_sft_vlm_mm_token_type_ids_on_cpu(model_path, pad_mode, truncation, vlm_data_file):
+    """Test that mm_token_type_ids is kept and stays one entry per token of input_ids.
+
+    Multimodal models read it to tell image tokens from text ones, so it has to come out of every
+    branch that changes the sequence length still indexing input_ids position for position.
+    max_length is below the longest row, so both padding and truncation run.
+    """
+    tokenizer = hf_tokenizer(model_path)
+    processor = hf_processor(model_path)
+    config = {"max_length": 64, "pad_mode": pad_mode, "truncation": truncation, "messages_key": "messages"}
+    dataset = MultiTurnSFTDataset(parquet_files=vlm_data_file, tokenizer=tokenizer, processor=processor, config=config)
+
+    for i in range(len(dataset)):
+        item = dataset[i]
+        input_ids = item["input_ids"]
+        mm_token_type_ids = item.get("multi_modal_inputs", {}).get("mm_token_type_ids")
+
+        # 1. verify mm_token_type_ids is kept with one entry per token
+        assert mm_token_type_ids is not None, f"row {i}: mm_token_type_ids must not be dropped"
+        assert mm_token_type_ids.shape == (1, input_ids.shape[0]), (
+            f"row {i}: mm_token_type_ids {tuple(mm_token_type_ids.shape)} should be (1, {input_ids.shape[0]})"
+        )
+
+        # 2. verify image tokens are tagged 1 and everything else, padding included, 0
+        expected = (input_ids == processor.image_token_id).to(mm_token_type_ids.dtype)
+        assert torch.equal(mm_token_type_ids.reshape(-1), expected), (
+            f"row {i}: mm_token_type_ids should tag the image tokens of input_ids 1 and text or padding 0"
+        )
