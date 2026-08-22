@@ -3,7 +3,22 @@
 
 昇腾全面支持 verl 使用与开发，本文档全面介绍了如何在华为昇腾芯片 NPU 上使用 verl。
 
-Last updated: 05/14/2026.
+Last updated: 08/11/2026.
+
+## Qwen3-VL Megatron OPD dependency
+
+The Ascend Dockerfiles install the released `mbridge` package without pinning
+a source commit. Qwen3-VL Megatron OPD was validated with the revision that
+contains the `qwen3_vl` bridge; install it after building or starting the NPU
+image:
+
+```bash
+pip install --no-deps \
+  'git+https://github.com/ISEEKYAN/mbridge.git@a61943d7fcb34a190471cfeb0a0eb8bbda621ddf'
+```
+
+See the [Megatron + vLLM Ascend OPD guide](./model_support/examples/opd_megatron_vllm_ascend.md)
+for the complete validated dependency matrix and runtime checks.
 
 ## 目录结构
 
