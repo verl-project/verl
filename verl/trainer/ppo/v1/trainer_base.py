@@ -1260,7 +1260,7 @@ class PPOTrainer(ABC):
                 for metric_name, metric_val in metric2val.items():
                     if (
                         (var_name == core_var)
-                        and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"])
+                        and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best", "pass"])
                         and (f"@{n_max}" in metric_name)
                     ):
                         metric_sec = "val-core"

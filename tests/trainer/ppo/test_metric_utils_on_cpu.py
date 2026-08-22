@@ -27,6 +27,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
+    pass_at_k,
     process_validation_metrics,
 )
 from verl.utils.metric import (
@@ -492,6 +493,58 @@ class TestBootstrapMetric(unittest.TestCase):
             bootstrap_metric([], subset_size=1, reduce_fns=[np.mean])
 
 
+class TestPassAtK(unittest.TestCase):
+    """Tests for the pass_at_k unbiased estimator (Codex/HumanEval)."""
+
+    def test_humaneval_reference_values(self):
+        """Match the closed-form reference values from the HumanEval paper."""
+        # n=5, c=2: pass@1 = c/n = 0.4
+        self.assertAlmostEqual(pass_at_k(5, 2, 1), 0.4)
+        # n=5, c=2: pass@2 = 1 - C(3,2)/C(5,2) = 1 - 3/10 = 0.7
+        self.assertAlmostEqual(pass_at_k(5, 2, 2), 0.7)
+        # n=10, c=1: pass@1 = 0.1
+        self.assertAlmostEqual(pass_at_k(10, 1, 1), 0.1)
+
+    def test_reduces_to_any_correct_when_k_equals_n(self):
+        """pass@n is the exact 'any correct' indicator (this is true pass@N)."""
+        self.assertEqual(pass_at_k(4, 0, 4), 0.0)
+        self.assertEqual(pass_at_k(4, 1, 4), 1.0)
+        self.assertEqual(pass_at_k(4, 2, 4), 1.0)
+        self.assertEqual(pass_at_k(4, 4, 4), 1.0)
+
+    def test_partial_pass_intermediate_k(self):
+        """A prompt with 1 correct of 4: pass@1=0.25, pass@2=0.5, pass@4=1.0."""
+        self.assertAlmostEqual(pass_at_k(4, 1, 1), 0.25)
+        self.assertAlmostEqual(pass_at_k(4, 1, 2), 0.5)  # 1 - C(3,2)/C(4,2) = 1 - 3/6
+        self.assertAlmostEqual(pass_at_k(4, 1, 4), 1.0)
+
+    def test_all_correct_and_none_correct(self):
+        """Degenerate counts return 1.0 / 0.0 for every k."""
+        for k in (1, 2, 4):
+            self.assertEqual(pass_at_k(4, 4, k), 1.0)
+            self.assertEqual(pass_at_k(4, 0, k), 0.0)
+
+    def test_monotonic_non_decreasing_in_k(self):
+        """pass@k never decreases as k grows for fixed (n, c)."""
+        vals = [pass_at_k(8, 3, k) for k in range(1, 9)]
+        for lo, hi in zip(vals, vals[1:], strict=False):
+            self.assertLessEqual(lo, hi + 1e-12)
+
+    def test_k_greater_than_n_raises(self):
+        """k must not exceed n."""
+        with self.assertRaises(ValueError):
+            pass_at_k(4, 2, 5)
+
+    def test_bounded_unit_interval(self):
+        """Estimate always lies in [0, 1]."""
+        for n in range(1, 9):
+            for c in range(0, n + 1):
+                for k in range(1, n + 1):
+                    v = pass_at_k(n, c, k)
+                    self.assertGreaterEqual(v, 0.0)
+                    self.assertLessEqual(v, 1.0)
+
+
 class TestCalcMajVal(unittest.TestCase):
     """Tests for the calc_maj_val function."""
 
@@ -550,6 +603,41 @@ class TestProcessValidationMetrics(unittest.TestCase):
 
         # Check the value of mean@2 for source1/score
         self.assertAlmostEqual(result["source1"]["score"]["mean@2"], 0.85)
+
+        # pass@N is emitted alongside mean/std; both scores > 0 so pass@2 == 1.0
+        self.assertIn("pass@2", result["source1"]["score"])
+        self.assertAlmostEqual(result["source1"]["score"]["pass@2"], 1.0)
+
+    def test_process_validation_metrics_pass_at_k_values(self):
+        """pass@N reflects the exact fraction of prompts with >=1 correct sample.
+
+        One prompt with 1 correct of 4, contrasted against the biased bootstrap best@4:
+        pass@4 == 1.0 (the prompt did pass), pass@2 == 0.5, while mean@4 == 0.25.
+        """
+        data_sources = ["src"] * 4
+        sample_uids = ["p1"] * 4
+        infos_dict = {"score": [1.0, 0.0, 0.0, 0.0]}
+
+        result = process_validation_metrics(data_sources, sample_uids, infos_dict, seed=42)
+        score = result["src"]["score"]
+
+        self.assertAlmostEqual(score["mean@4"], 0.25)
+        self.assertAlmostEqual(score["pass@2"], 0.5)
+        self.assertAlmostEqual(score["pass@4"], 1.0)  # exact "any correct", unlike best@4
+        # sanity: the biased bootstrap under-reports the passing prompt
+        self.assertLess(score["best@4/mean"], 1.0)
+
+    def test_process_validation_metrics_pass_at_k_aggregates_across_prompts(self):
+        """pass@N averages per-prompt values: one all-correct + one all-wrong -> 0.5."""
+        data_sources = ["src"] * 8
+        sample_uids = ["good"] * 4 + ["bad"] * 4
+        infos_dict = {"score": [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]}
+
+        result = process_validation_metrics(data_sources, sample_uids, infos_dict, seed=42)
+        score = result["src"]["score"]
+
+        self.assertAlmostEqual(score["pass@4"], 0.5)
+        self.assertAlmostEqual(score["pass@2"], 0.5)
 
     def test_process_validation_metrics_with_pred(self):
         """Test process_validation_metrics with prediction data."""
