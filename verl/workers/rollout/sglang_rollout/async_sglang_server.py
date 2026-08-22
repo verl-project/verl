@@ -54,7 +54,7 @@ from verl.utils.profiler import (
 )
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import HFModelConfig, RolloutConfig
-from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
+from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput, wait_rollout_servers_scheduled
 from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_config
 from verl.workers.rollout.sglang_rollout.utils import (
     SGLANG_LORA_NAME,
@@ -864,6 +864,9 @@ class SGLangReplica(RolloutReplica):
                 base_gpu_id=base_gpu_id,
             )
             self.servers.append(server)
+
+        # Fail fast if a server actor cannot be placed, instead of blocking on the next .remote().
+        await wait_rollout_servers_scheduled(self.servers)
 
         # launch http server in each node
         master_address, master_port = None, None
