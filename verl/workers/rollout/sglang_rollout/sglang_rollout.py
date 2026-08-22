@@ -140,6 +140,10 @@ class ServerAdapter(BaseRollout):
             )
             fp8_block_quant_kwargs = build_sglang_fp8_quant_config(self.model_config.hf_config)
             self.model_config.hf_config.quantization_config = fp8_block_quant_kwargs
+        elif self.config.get("quantization", None) == "mxfp8":
+            from verl.utils.sglang.sglang_mxfp8_utils import get_mxfp8_quant_config
+
+            self.model_config.hf_config.quantization_config = get_mxfp8_quant_config()
         self._engine: AsyncHttpServerAdapter = None
 
         rank = int(os.environ["RANK"])
@@ -356,12 +360,22 @@ class ServerAdapter(BaseRollout):
                 await self._engine.load_lora_adapter_from_tensor(req)
         else:
             update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
+
             if self.config.get("quantization", None) == "fp8":
                 from verl.utils.sglang.sglang_fp8_utils import SGLangFP8QuantizerHelper
 
                 logger.info("Convert bf16 weights to fp8 format before loading")
                 fp8_quantizer_helper = SGLangFP8QuantizerHelper(self.model_config.hf_config.quantization_config)
                 weights = fp8_quantizer_helper.quant_weights_by_name(
+                    weights,
+                    dtype=self.model_config.hf_config.dtype,
+                )
+            elif self.config.get("quantization", None) == "mxfp8":
+                from verl.utils.sglang.sglang_mxfp8_utils import SGLangMXFP8QuantizerHelper
+
+                logger.info("Convert bf16 weights to mxfp8 format before loading")
+                mxfp8_quantizer_helper = SGLangMXFP8QuantizerHelper(self.model_config.hf_config.quantization_config)
+                weights = mxfp8_quantizer_helper.quant_weights_by_name(
                     weights,
                     dtype=self.model_config.hf_config.dtype,
                 )
@@ -377,6 +391,9 @@ class ServerAdapter(BaseRollout):
                 )
 
         if self._engine is not None and self._is_server_tp_leader():
+            if self.config.get("quantization", None) == "mxfp8":
+                logger.info("Post-process SGLang MXFP8 weights after loading")
+                await self._engine.post_process_weights(post_process_quantization=True)
             await self._engine.flush_cache()
             if global_steps is not None:
                 await self.server_actor.set_global_steps.remote(global_steps)
