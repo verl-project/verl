@@ -502,6 +502,27 @@ class PPOTrainer(ABC):
                 progress_bar.close()
                 return
 
+        # The dataloader can exhaust an epoch before total_training_steps is reached.
+        # In that case is_last_step never becomes true, so a non-aligned final step
+        # (for example step 237 with save_freq=50) would otherwise not be saved.
+        final_completed_step = self.global_steps - 1
+        if (
+            self.config.trainer.save_freq > 0
+            and final_completed_step > 0
+            and final_completed_step % self.config.trainer.save_freq != 0
+        ):
+            logger.info(
+                "Training ended because all configured epochs were exhausted; "
+                f"force-saving final checkpoint at step {final_completed_step}"
+            )
+            next_global_step = self.global_steps
+            self.global_steps = final_completed_step
+            try:
+                with marked_timer("save_final_checkpoint", self.timing_raw, color="green"):
+                    self._save_checkpoint()
+            finally:
+                self.global_steps = next_global_step
+
         self.on_train_end()
         # Ensure dump executor is shut down when training loop ends without reaching is_last_step
         self._shutdown_dump_executor()
