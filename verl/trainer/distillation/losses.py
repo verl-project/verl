@@ -22,7 +22,7 @@ from verl.base_config import BaseConfig
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.metric import AggregationType, Metric
 from verl.workers.config import ActorConfig, DistillationConfig, DistillationLossConfig
-from verl.workers.utils.losses import ppo_loss
+from verl.workers.utils.losses import ppo_loss, update_global_batch_info
 from verl.workers.utils.padding import no_padding_2_padding
 
 DistillationLossFn = Callable[
@@ -106,14 +106,45 @@ def get_distillation_loss_settings(loss_name: str) -> DistillationLossSettings:
     return DISTILLATION_SETTINGS_REGISTRY[loss_name]
 
 
+def align_response_mask(response_mask: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Convert a response mask to dense bool and align it to a padded loss tensor.
+
+    ``no_padding_2_padding`` pads log-probs to ``max_response_len``, while a nested
+    ``response_mask`` is padded by ``to_padded_tensor`` to its own max ragged length.
+    Those two baselines can disagree, so align the mask to ``target`` before masked
+    reductions. Padding cells are ``False`` and do not contribute.
+    """
+    if response_mask.is_nested:
+        response_mask = response_mask.bool().to_padded_tensor(False)
+    else:
+        response_mask = response_mask.bool()
+
+    if response_mask.ndim != target.ndim or response_mask.shape[:-1] != target.shape[:-1]:
+        raise ValueError(f"response mask shape {response_mask.shape} cannot align to target shape {target.shape}")
+
+    target_length = target.shape[-1]
+    current_length = response_mask.shape[-1]
+    if current_length < target_length:
+        padding = torch.zeros(
+            (*response_mask.shape[:-1], target_length - current_length),
+            dtype=torch.bool,
+            device=response_mask.device,
+        )
+        response_mask = torch.cat((response_mask, padding), dim=-1)
+    elif current_length > target_length:
+        truncated = response_mask[..., target_length:]
+        if truncated.any():
+            raise ValueError("response mask contains valid tokens beyond the target loss length")
+        response_mask = response_mask[..., :target_length]
+    return response_mask
+
+
 def compute_distillation_loss_range(
     distillation_losses: torch.Tensor, response_mask: torch.Tensor
 ) -> dict[str, Metric]:
     """Compute min and max distillation loss over valid response tokens."""
-    if response_mask.is_nested:
-        distillation_losses_response = distillation_losses[response_mask.bool().to_padded_tensor(False)]
-    else:
-        distillation_losses_response = distillation_losses[response_mask.bool()]
+    response_mask = align_response_mask(response_mask, distillation_losses)
+    distillation_losses_response = distillation_losses[response_mask]
     return {
         "distillation/loss_min": Metric(AggregationType.MIN, distillation_losses_response.min()),
         "distillation/loss_max": Metric(AggregationType.MAX, distillation_losses_response.max()),
@@ -242,6 +273,10 @@ def distillation_loss(
     """
     assert distillation_config is not None
     loss_config: DistillationLossConfig = distillation_config.distillation_loss
+    global_batch_info = update_global_batch_info(config, data)
+    loss_config.global_batch_info.clear()
+    loss_config.global_batch_info.update(global_batch_info)
+
     distillation_loss_fn = get_distillation_loss_fn(loss_config.loss_mode)
     distillation_losses, distillation_metrics = distillation_loss_fn(
         config=config,
@@ -249,7 +284,7 @@ def distillation_loss(
         model_output=model_output,
         data=data,
     )
-    response_mask = data["response_mask"]
+    response_mask = align_response_mask(data["response_mask"], distillation_losses)
     loss_agg_mode = config.loss_agg_mode
 
     distillation_metrics.update(
@@ -259,23 +294,13 @@ def distillation_loss(
         # clamping min is for k1 loss which can be negative
         distillation_losses = distillation_losses.clamp(min=-loss_config.loss_max_clamp, max=loss_config.loss_max_clamp)
 
-    # global batch info for loss aggregation
-    config.global_batch_info["dp_size"] = data["dp_size"]
-    config.global_batch_info["batch_num_tokens"] = data["batch_num_tokens"]
-    config.global_batch_info["global_batch_size"] = data["global_batch_size"]
-    config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
-
     if loss_config.use_policy_gradient:
         # Use negative distillation loss as reward, as done by https://thinkingmachines.ai/blog/on-policy-distillation/.
         policy_loss_fn = get_policy_loss_fn(loss_config.policy_loss_mode)
-        for k, v in config.global_batch_info.items():
-            loss_config.global_batch_info[k] = v
         log_prob = no_padding_2_padding(model_output["log_probs"], data)
         old_log_prob = data["old_log_probs"]
         if old_log_prob.is_nested:
             old_log_prob = data["old_log_probs"].to_padded_tensor(0.0)
-        if response_mask.is_nested:
-            response_mask = response_mask.to_padded_tensor(False)
         rollout_is_weights = data.get("rollout_is_weights", None)
         distillation_loss, pg_metrics = policy_loss_fn(
             old_log_prob=old_log_prob,
@@ -290,8 +315,6 @@ def distillation_loss(
         distillation_metrics.update(pg_metrics)
     else:
         # Directly backpropagate distillation loss as a supervised loss, as in https://arxiv.org/abs/2306.13649.
-        if response_mask.is_nested:
-            response_mask = response_mask.to_padded_tensor(False)
         distillation_loss = agg_loss(
             loss_mat=distillation_losses,
             loss_mask=response_mask,
@@ -324,10 +347,7 @@ def compute_forward_kl_topk(
     if overlap_count is not None and overlap_token_advantage is not None:
         overlap_count = no_padding_2_padding(overlap_count, data)
         overlap_token_advantage = no_padding_2_padding(overlap_token_advantage, data)
-    if data["response_mask"].is_nested:
-        response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
-    else:
-        response_mask_bool = data["response_mask"].bool()
+    response_mask_bool = align_response_mask(data["response_mask"], distillation_losses)
     assert distillation_losses.shape == student_mass.shape == teacher_mass.shape == response_mask_bool.shape
 
     overlap_metrics = {}
@@ -388,11 +408,11 @@ def compute_distillation_loss_reverse_kl_estimator(
     """
     student_log_probs = no_padding_2_padding(model_output["log_probs"], data)
     teacher_log_probs = no_padding_2_padding(data["teacher_logprobs"], data).squeeze(-1)
-    if data["response_mask"].is_nested:
-        response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
-    else:
-        response_mask_bool = data["response_mask"].bool()
-    assert teacher_log_probs.shape == student_log_probs.shape == response_mask_bool.shape
+    response_mask_bool = align_response_mask(data["response_mask"], student_log_probs)
+    assert teacher_log_probs.shape == student_log_probs.shape == response_mask_bool.shape, (
+        f"shape mismatch: teacher={teacher_log_probs.shape} student={student_log_probs.shape} "
+        f"mask={response_mask_bool.shape}"
+    )
 
     loss_config: DistillationLossConfig = distillation_config.distillation_loss
     distillation_losses = kl_penalty(

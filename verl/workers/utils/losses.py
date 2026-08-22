@@ -54,6 +54,19 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     return loss, {}
 
 
+def update_global_batch_info(config: ActorConfig, data: TensorDict) -> dict:
+    """Refresh loss-normalization metadata from the current micro-batch."""
+    global_batch_info = {
+        "dp_size": data["dp_size"],
+        "batch_num_tokens": data["batch_num_tokens"],
+        "global_batch_size": data["global_batch_size"],
+        "loss_scale_factor": config.loss_scale_factor,
+    }
+    config.global_batch_info.clear()
+    config.global_batch_info.update(global_batch_info)
+    return global_batch_info
+
+
 def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
     """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data."""
     log_prob = no_padding_2_padding(model_output["log_probs"], data)
@@ -61,11 +74,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     if entropy is not None:
         entropy = no_padding_2_padding(entropy, data)
 
-    # global batch info for loss aggregation
-    config.global_batch_info["dp_size"] = data["dp_size"]
-    config.global_batch_info["batch_num_tokens"] = data["batch_num_tokens"]
-    config.global_batch_info["global_batch_size"] = data["global_batch_size"]
-    config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
+    update_global_batch_info(config, data)
 
     # assumes that if any of the global batch info is set, the policy_loss_fn will
     # normalize using dp_size/global_bsz/global_token; in this case, metric aggregation should be SUM
