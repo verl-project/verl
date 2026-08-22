@@ -56,6 +56,9 @@ def _make_tool_schema(name: str, required: list[str] | None = None) -> OpenAIFun
 
 
 class TestToolCallIdOnCpu(unittest.IsolatedAsyncioTestCase):
+    def test_deterministic_request_id_uses_sample_priority(self) -> None:
+        assert ToolAgentLoop._make_request_id(priority=7, full_determinism=True) == "det-7"
+
     async def test_kimi_tool_parser_preserves_model_emitted_tool_call_id(self) -> None:
         raw_tool_call_id = "call-get_weather-0"
         response_text = (
