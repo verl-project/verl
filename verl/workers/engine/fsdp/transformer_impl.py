@@ -1513,7 +1513,6 @@ class FSDPEngineWithLMHead(FSDPEngine):
         device_name = get_device_name()
         # actually, we should avoid assigning like this...
         micro_batch = micro_batch.to(get_device_id())
-        model_inputs, output_args = self.prepare_model_inputs(micro_batch=micro_batch)
 
         # Honor mixed_precision.param_dtype resolved during FSDP setup. When dtype is fp32,
         # autocast is a no-op at best and a footgun at worst, so skip it entirely.
@@ -1525,6 +1524,28 @@ class FSDPEngineWithLMHead(FSDPEngine):
             if autocast_dtype == torch.float32
             else torch.autocast(device_type=device_name, dtype=autocast_dtype)
         )
+
+        # Cross-step prompt KV cache path for the ref model (HF native
+        # past_key_values). Skips the prompt forward entirely on a cache hit.
+        # Gated by the engine's own forward_only flag (dedicated ref engine only,
+        # NOT the per-call param) so the actor's compute_log_prob does not take
+        # this branch. NOTE: FSDP + use_cache interaction must be validated on
+        # GPU/NPU before real training use.
+        if getattr(self.model_config, "use_ref_prefix_cache", False) and getattr(
+            self.engine_config, "forward_only", False
+        ):
+            model_output = self._forward_ref_prefix_cache(micro_batch, autocast_ctx)
+            if model_output is not None:
+                assert loss_function is None, "ref prefix-cache path expects forward_only (no loss_function)"
+                model_output = {
+                    key: value.detach() if torch.is_tensor(value) and value.grad_fn is not None else value
+                    for key, value in model_output.items()
+                }
+                loss = torch.tensor(1.0, device=device_name)
+                return loss, {"model_output": model_output, "loss": loss.detach().item(), "metrics": {}}
+
+        model_inputs, output_args = self.prepare_model_inputs(micro_batch=micro_batch)
+
         with autocast_ctx:
             raw_output = self.module(
                 **model_inputs,
@@ -1562,6 +1583,54 @@ class FSDPEngineWithLMHead(FSDPEngine):
             }
 
             return loss, output
+
+    def _forward_ref_prefix_cache(self, micro_batch: TensorDict, autocast_ctx):
+        """Run the ref cross-step prefix-cache forward if the micro-batch supports it.
+
+        Uses HF native ``past_key_values``: prefill a prompt once (cache miss) or
+        reuse the cached prefill (hit, skips the prompt's transformer layers).
+        Returns ``{"log_probs": <jagged>}`` when applicable, else ``None`` to
+        fall back. See :mod:`verl.trainer.ppo.ref_prefix_cache`.
+        """
+        keys = micro_batch.keys()
+        if "prompts" not in keys or "responses" not in keys:
+            return None
+        uids = tu.get_non_tensor_data(data=micro_batch, key="uid", default=None)
+        if uids is None:
+            return None
+        response_mask = micro_batch.get("response_mask", None)
+        if response_mask is None:
+            return None
+
+        # Lazy-init the persistent cache on the engine (survives across steps).
+        cache = getattr(self, "_ref_prefix_kv_cache", None)
+        if cache is None:
+            from verl.trainer.ppo.ref_prefix_cache import RefPrefixKVCache
+
+            cache = RefPrefixKVCache()
+            self._ref_prefix_kv_cache = cache
+
+        temperature = micro_batch["temperature"]
+        if isinstance(temperature, torch.Tensor):
+            temperature = float(temperature.flatten()[0].item()) if temperature.numel() > 0 else 1.0
+        else:
+            temperature = float(temperature)
+        pad_token_id = getattr(self.model_config.hf_config, "pad_token_id", None) or 0
+
+        from verl.trainer.ppo.ref_prefix_cache import forward_ref_with_prefix_cache
+
+        with autocast_ctx:
+            log_probs = forward_ref_with_prefix_cache(
+                model=self.module,
+                prompts=micro_batch["prompts"],
+                responses=micro_batch["responses"],
+                response_mask=response_mask,
+                uids=uids,
+                pad_token_id=pad_token_id,
+                cache=cache,
+                temperature=temperature,
+            )
+        return {"log_probs": log_probs}
 
 
 @EngineRegistry.register(model_type="value_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
