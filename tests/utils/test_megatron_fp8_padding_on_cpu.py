@@ -40,12 +40,18 @@ def _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size: int = 1, cp_siz
 
     packed_seq_params.PackedSeqParams = PackedSeqParams
 
+    # Mirrors megatron.core.fp8_utils.get_fp8_align_size for CI hosts without megatron.
+    fp8_utils = types.ModuleType("megatron.core.fp8_utils")
+    fp8_utils.get_fp8_align_size = lambda fp8_recipe: 32 if fp8_recipe == "mxfp8" else 16
+
     core.parallel_state = parallel_state
+    core.fp8_utils = fp8_utils
     megatron.core = core
     monkeypatch.setitem(sys.modules, "megatron", megatron)
     monkeypatch.setitem(sys.modules, "megatron.core", core)
     monkeypatch.setitem(sys.modules, "megatron.core.parallel_state", parallel_state)
     monkeypatch.setitem(sys.modules, "megatron.core.packed_seq_params", packed_seq_params)
+    monkeypatch.setitem(sys.modules, "megatron.core.fp8_utils", fp8_utils)
     monkeypatch.setattr(device_module, "is_npu_available", False)
 
     util_path = Path(__file__).parents[2] / "verl" / "models" / "mcore" / "util.py"

@@ -55,7 +55,11 @@ def _compute_fp8_thd_align_size(align_size: int, fp8_recipe: Optional[str] = Non
 
     Returns (per_seq_align_size, total_align_size).
     """
-    per_seq_base = 32 if fp8_recipe == "mxfp8" else 16
+    # Same recipe->alignment mapping megatron applies to its MoE fp8 padding
+    # (experts.py / token_dispatcher.py), so new recipes stay in sync.
+    from megatron.core.fp8_utils import get_fp8_align_size
+
+    per_seq_base = get_fp8_align_size(fp8_recipe)
     return math.lcm(per_seq_base, align_size), align_size * 128
 
 
