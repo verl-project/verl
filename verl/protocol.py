@@ -308,10 +308,25 @@ def collate_fn(x: list["DataProtoItem"]):
 
 @dataclass
 class DataProtoItem:
-    # TODO(zhangchi.usc1992) add consistency check
     batch: TensorDict = None
     non_tensor_batch: dict = field(default_factory=dict)
     meta_info: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        self.check_consistency()
+
+    def check_consistency(self):
+        """Validate the unbatched item contract used by ``DataProto.__getitem__``."""
+
+        if self.batch is not None:
+            assert len(self.batch.batch_size) == 0, (
+                "DataProtoItem.batch must represent a single item with num_batch_dims=0, "
+                f"got batch_size={self.batch.batch_size}"
+            )
+        assert isinstance(self.non_tensor_batch, dict), (
+            f"DataProtoItem.non_tensor_batch must be a dict, got {type(self.non_tensor_batch)}"
+        )
+        assert isinstance(self.meta_info, dict), f"DataProtoItem.meta_info must be a dict, got {type(self.meta_info)}"
 
 
 @dataclass
