@@ -749,4 +749,4 @@ Most parameters for Model are similar to Reward Model.
   default to ``all-linear``. See `peft docs <https://huggingface.co/docs/peft/v0.15.0/en/package_reference/lora#peft.LoraConfig.target_modules>`_ for detail.
 
 - ``use_liger``: Whether to enable Liger kernel, default to False. If True,
-  we apply Liger kernel to the model (depends on `liger-kernel`).
+  we apply Liger kernel to the model (depends on ``liger-kernel>=0.8.2``).

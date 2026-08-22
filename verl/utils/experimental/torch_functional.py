@@ -17,6 +17,15 @@ from typing import Optional
 import torch
 
 try:
+    from liger_kernel.ops import (
+        LigerFusedLinearScaledCrossEntropyFunction as _LIGER_FUSED_LINEAR_SCALED_CROSS_ENTROPY,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "liger_kernel":
+        raise
+    _LIGER_FUSED_LINEAR_SCALED_CROSS_ENTROPY = None
+
+try:
     from flash_attn.ops.triton.cross_entropy import cross_entropy_loss
 
     _FLASH_ATTN_CROSS_ENTROPY_AVAILABLE = True
@@ -222,10 +231,36 @@ class FusedLinearForPPO(torch.nn.Module):
         temperature: float = 1.0,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
         input_ids = input_ids.to(torch.int64)
-        return FusedLinearForPPOFunction.apply(
+        if _LIGER_FUSED_LINEAR_SCALED_CROSS_ENTROPY is None:
+            return FusedLinearForPPOFunction.apply(
+                hidden_states,
+                vocab_weights,
+                input_ids,
+                temperature,
+                self.chunk_size,
+            )
+
+        if hidden_states.ndim not in (2, 3):
+            raise ValueError(f"hidden_states must be 2D or 3D, got shape {tuple(hidden_states.shape)}")
+        if input_ids.shape != hidden_states.shape[:-1]:
+            raise ValueError(
+                f"input_ids shape {tuple(input_ids.shape)} must match hidden_states shape "
+                f"{tuple(hidden_states.shape[:-1])}"
+            )
+
+        output_shape = input_ids.shape
+        hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
+        input_ids = input_ids.reshape(-1)
+
+        nll, entropy = _LIGER_FUSED_LINEAR_SCALED_CROSS_ENTROPY.apply(
             hidden_states,
             vocab_weights,
             input_ids,
             temperature,
-            self.chunk_size,
+            -100,
+            1,
+            True,
         )
+        log_probs = -nll
+
+        return log_probs.reshape(output_shape), entropy.reshape(output_shape)
