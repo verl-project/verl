@@ -25,6 +25,7 @@ from typing import Callable, ContextManager, Optional
 
 import torch
 import torch.distributed
+import torch.nn.functional as F
 from peft import LoraConfig, TaskType, get_peft_model
 from tensordict import TensorDict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -1133,6 +1134,12 @@ class FSDPEngineWithLMHead(FSDPEngine):
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
+        use_masked_fused_head = (
+            use_fused_kernels
+            and self.model_config.model_type == "language_model"
+            and "response_mask" in micro_batch
+            and self.model_config.fused_kernel_options.get("impl_backend") == "torch"
+        )
         temperature = micro_batch["temperature"]
         temperature_item = temperature
         if use_fused_kernels:
@@ -1174,7 +1181,17 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
 
             # for compute the log_prob
-            input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=1)  # (1, total_nnz)
+            shift_labels_rmpad = torch.roll(input_ids_rmpad, shifts=-1, dims=1)  # (1, total_nnz)
+            shift_labels_pad_value = -100 if use_masked_fused_head else 0
+
+            if use_masked_fused_head:
+                # response_mask marks targets; shift it left to select their predictor rows.
+                predictor_masks = [
+                    F.pad(mask, (sequence.numel() - mask.numel() - 1, 1))
+                    for sequence, mask in zip(input_ids.unbind(), micro_batch["response_mask"].unbind(), strict=True)
+                ]
+                predictor_mask = torch.cat(predictor_masks).bool().unsqueeze(0)
+                shift_labels_rmpad = shift_labels_rmpad.masked_fill(~predictor_mask, -100)
 
             # Optional bucket-aligned packed length. This has to happen after the roll (which must
             # see the true global sequence) and before the SP split, so the pad stays a suffix of
@@ -1185,7 +1202,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 input_ids_rmpad, position_ids_rmpad = pad_packed_inputs(
                     input_ids_rmpad, position_ids_rmpad, static_pad_size
                 )
-                input_ids_rmpad_rolled, _ = pad_packed_inputs(input_ids_rmpad_rolled, None, static_pad_size)
+                shift_labels_rmpad, _ = pad_packed_inputs(
+                    shift_labels_rmpad, None, static_pad_size, pad_value=shift_labels_pad_value
+                )
                 temperature_rmpad, _ = pad_packed_inputs(temperature_rmpad, None, static_pad_size, pad_value=1)
 
             # pad and slice the inputs if sp > 1
@@ -1207,24 +1226,24 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         sp_size=self.ulysses_sequence_parallel_size,
                         skip_position_ids_rmpad=getattr(self, "_veomni_handles_position_ids", False),
                     )
-                input_ids_rmpad_rolled, _, _ = ulysses_pad_and_slice_inputs(
-                    input_ids_rmpad_rolled,
+                shift_labels_rmpad, _, _ = ulysses_pad_and_slice_inputs(
+                    shift_labels_rmpad,
                     position_ids_rmpad=None,
                     sp_size=self.ulysses_sequence_parallel_size,
+                    pad_value=shift_labels_pad_value,
                 )
 
                 temperature_rmpad, _, _ = ulysses_pad_and_slice_inputs(
                     temperature_rmpad, position_ids_rmpad=None, sp_size=self.ulysses_sequence_parallel_size, pad_value=1
                 )
-
                 sp_pad_size = pad_size
 
             # Total right-padding on the global packed sequence.
             output_args["pad_size"] = static_pad_size + sp_pad_size
 
-            input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)  # ((total_nnz / sp) + pad)
+            shift_labels_rmpad = shift_labels_rmpad.squeeze(0)  # ((total_nnz / sp) + pad)
             temperature_rmpad = temperature_rmpad.squeeze(0)
-            output_args["input_ids_rmpad_rolled"] = input_ids_rmpad_rolled
+            output_args["input_ids_rmpad_rolled"] = shift_labels_rmpad
             output_args["temperature_rmpad"] = temperature_rmpad
 
             # only pass input_ids and position_ids to enable flash_attn_varlen
@@ -1292,7 +1311,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
             extra_args["temperature"] = temperature_item
             extra_args["return_dict"] = True
             if use_remove_padding:
-                # We have already computed `input_ids_rmpad_rolled` from the *full*
+                # We have already computed the shifted labels from the *full*
                 # global sequence and (when SP>1) SP-sliced it. Pass it into the model
                 # so the fused forward uses these labels verbatim instead of redoing
                 # `torch.roll` on the local SP shard, which would wrap around the
