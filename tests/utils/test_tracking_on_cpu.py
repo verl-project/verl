@@ -30,6 +30,34 @@ def test_tracking_finish_finalizes_wandb_once():
     tracking.logger["wandb"].finish.assert_called_once_with(exit_code=1)
 
 
+def test_tracking_finish_logs_backend_finish_errors(caplog):
+    tracking = Tracking.__new__(Tracking)
+    broken_wandb = MagicMock()
+    broken_wandb.finish.side_effect = ConnectionResetError("Connection lost")
+    tensorboard = MagicMock()
+    tracking.logger = {"wandb": broken_wandb, "tensorboard": tensorboard}
+    tracking._finished = False
+
+    tracking.finish(exit_code=0)
+
+    broken_wandb.finish.assert_called_once_with(exit_code=0)
+    tensorboard.finish.assert_called_once_with()
+    assert "Failed to finish wandb logger cleanly." in caplog.text
+
+
+def test_tracking_del_suppresses_backend_finish_errors(caplog):
+    tracking = Tracking.__new__(Tracking)
+    broken_wandb = MagicMock()
+    broken_wandb.finish.side_effect = ConnectionResetError("Connection lost")
+    tracking.logger = {"wandb": broken_wandb}
+    tracking._finished = False
+
+    tracking.__del__()
+
+    broken_wandb.finish.assert_called_once_with(exit_code=0)
+    assert "Failed to finish wandb logger cleanly." in caplog.text
+
+
 def test_dapo_filtered_reward_table_logs_incremental_rows():
     mock_wandb = MagicMock()
     mock_wandb.run = object()
