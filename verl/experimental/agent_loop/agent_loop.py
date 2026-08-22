@@ -899,11 +899,15 @@ class AgentLoopWorker:
         if self.processor is None or not hasattr(self.processor, "get_rope_index"):
             return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
 
-        # VL processors still expose get_rope_index for text-only batches.
-        # Without image/video grids, leftover image_pad/video_pad tokens would
-        # call next(None) inside get_rope_index. Fall back to 1D positions.
-        if multi_modal_inputs.get("image_grid_thw") is None and multi_modal_inputs.get("video_grid_thw") is None:
-            return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
+        get_rope_index_kwargs = getattr(self.processor, "get_rope_index_kwargs", None)
+
+        # M-RoPE processors still expose get_rope_index for strictly text-only batches.
+        # Calling it can make leftover image/video placeholder tokens walk past an empty
+        # grid iterator. Keep the processor's 4D layout so text-only and multimodal
+        # samples produced by this worker remain batchable.
+        if not multi_modal_inputs:
+            text_position_ids = compute_position_id_with_mask(attention_mask)
+            return text_position_ids.unsqueeze(1).expand(-1, 4, -1)  # (1, 4, seq_len)
 
         multi_modal_kwargs = {
             "image_grid_thw": multi_modal_inputs.get("image_grid_thw"),
@@ -921,7 +925,6 @@ class AgentLoopWorker:
             multi_modal_kwargs["mm_token_type_ids"] = mm_token_type_ids
 
         # Allow model-specific processors to contribute additional RoPE inputs.
-        get_rope_index_kwargs = getattr(self.processor, "get_rope_index_kwargs", None)
         if get_rope_index_kwargs is not None:
             multi_modal_kwargs.update(get_rope_index_kwargs(multi_modal_inputs))
 
