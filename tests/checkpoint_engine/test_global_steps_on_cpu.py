@@ -19,11 +19,18 @@ from verl.checkpoint_engine.base import CheckpointEngineWorker
 from verl.workers.engine_workers import ActorRolloutRefWorker
 
 
+class _FakeRolloutConfig(SimpleNamespace):
+    """RolloutConfig stand-in: the real one is a dataclass, so it also supports .get()."""
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)
+
+
 class _FakeTrainerEngine:
     def __init__(self):
         self.weights = [("w", object())]
 
-    def get_per_tensor_param(self):
+    def get_per_tensor_param(self, **kwargs):
         return iter(self.weights), None
 
 
@@ -60,8 +67,9 @@ def test_actor_worker_passes_global_steps_to_checkpoint_engine_send():
     checkpoint_engine = _FakeCheckpointEngine()
     worker = ActorRolloutRefWorker.__new__(ActorRolloutRefWorker)
     worker.config = SimpleNamespace(
-        rollout=SimpleNamespace(
+        rollout=_FakeRolloutConfig(
             checkpoint_engine=SimpleNamespace(backend="modelexpress"),
+            load_format="dummy",
         ),
     )
     worker.actor = SimpleNamespace(engine=_FakeTrainerEngine())
