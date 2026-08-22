@@ -24,6 +24,110 @@ from typing import Any, Optional
 
 import ray
 
+# Optional Ray custom resource that constrains where lightweight loop workers
+# (agent-loop / reward-loop actors) may be scheduled. In a shared or
+# heterogeneous Ray cluster, ``ray.nodes()`` also returns nodes that belong to
+# other jobs or worker groups. Round-robin over all of them with a soft
+# NodeAffinity can place a loop worker on a foreign node that does not run this
+# job's runtime image, which then crashes on import (e.g. ModuleNotFoundError).
+# Set this env var to a Ray custom resource that only this job's nodes advertise
+# to keep loop workers on them. Unset -> historical behavior (all alive nodes).
+LOOP_WORKER_NODE_RESOURCE_ENV = "VERL_LOOP_WORKER_NODE_RESOURCE"
+
+# Fractional amount requested from the node resource so it only acts as a
+# scheduling gate, never a real capacity constraint. Mirrors the tiny reservation
+# verl already uses for accelerator_type bundles in single_controller/ray/base.py.
+_LOOP_WORKER_NODE_RESOURCE_AMOUNT = 1e-4
+
+
+def get_loop_worker_node_resource() -> Optional[str]:
+    """Return the configured loop-worker node resource, or None if unset."""
+    value = os.environ.get(LOOP_WORKER_NODE_RESOURCE_ENV, "").strip()
+    return value or None
+
+
+def schedulable_loop_worker_node_ids(node_resource: Optional[str] = None) -> list[str]:
+    """Return NodeIDs eligible to host agent-loop / reward-loop workers.
+
+    Without ``node_resource`` this preserves the historical behavior of
+    scheduling across every alive node that has CPU. When ``node_resource`` is
+    given, only nodes that advertise that Ray custom resource are returned, so a
+    shared/heterogeneous cluster never round-robins a loop worker onto a foreign
+    node that lacks this job's runtime.
+    """
+    nodes = [node for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
+    if node_resource:
+        nodes = [node for node in nodes if node["Resources"].get(node_resource, 0) > 0]
+        if not nodes:
+            raise RuntimeError(
+                f"No alive Ray node advertises the resource {node_resource!r} requested via "
+                f"{LOOP_WORKER_NODE_RESOURCE_ENV}; cannot place agent-loop/reward-loop workers. "
+                "Ensure this job's node group exports that custom resource."
+            )
+    return [node["NodeID"] for node in nodes]
+
+
+def loop_worker_node_affinity_resources(node_resource: Optional[str] = None) -> Optional[dict]:
+    """Actor ``resources`` requirement that pins a loop worker to a node group.
+
+    A soft NodeAffinity alone can still fall back to a foreign node when the
+    targeted node is momentarily full. Requiring a tiny amount of the node
+    resource makes Ray refuse to schedule the actor anywhere that does not
+    advertise it, closing that leak. Returns None when no resource is configured.
+    """
+    if not node_resource:
+        return None
+    return {node_resource: _LOOP_WORKER_NODE_RESOURCE_AMOUNT}
+
+
+def available_cpu_per_node() -> dict[str, float]:
+    """Best-effort map of NodeID -> currently available CPU.
+
+    Ray does not expose per-node *available* resources through the public
+    ``ray.nodes()`` payload, so this reads the driver-side resource view when it
+    is reachable and returns an empty mapping otherwise. Callers must treat an
+    empty result as "unknown" and fall back to round-robin placement.
+    """
+    try:
+        from ray._private.state import state as ray_state
+
+        per_node = ray_state._available_resources_per_node()
+    except Exception:
+        return {}
+    return {node_id: float(resources.get("CPU", 0.0)) for node_id, resources in (per_node or {}).items()}
+
+
+def assign_loop_worker_nodes(
+    node_ids: list[str],
+    num_workers: int,
+    available_cpu: Optional[dict[str, float]] = None,
+    cpus_per_worker: float = 0.0,
+) -> list[str]:
+    """Assign each loop worker to a candidate node, spreading by available CPU.
+
+    Prefers the node with the most currently-available CPU so workers fan out
+    across a heterogeneous group instead of stacking on ``node_ids[0]``. Each
+    placement provisionally debits ``cpus_per_worker`` from the chosen node so
+    later workers favor the next-emptiest node. Falls back to the historical
+    round-robin order when ``available_cpu`` is empty (Ray reported no per-node
+    availability). ``node_ids`` order breaks ties deterministically.
+    """
+    if num_workers <= 0:
+        return []
+    if not node_ids:
+        raise ValueError("assign_loop_worker_nodes requires at least one candidate node")
+    if not available_cpu:
+        return [node_ids[i % len(node_ids)] for i in range(num_workers)]
+
+    remaining = {node_id: float(available_cpu.get(node_id, 0.0)) for node_id in node_ids}
+    rank = {node_id: i for i, node_id in enumerate(node_ids)}
+    assignments = []
+    for _ in range(num_workers):
+        node_id = min(node_ids, key=lambda nid: (-remaining[nid], rank[nid]))
+        assignments.append(node_id)
+        remaining[node_id] -= cpus_per_worker
+    return assignments
+
 
 def ray_noset_visible_devices(env_vars=os.environ):
     # Refer to
