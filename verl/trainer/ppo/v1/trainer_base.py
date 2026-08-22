@@ -776,6 +776,7 @@ class PPOTrainer(ABC):
             self.mapping[Role.RewardModel] = "global_pool"
 
         distillation_config = config.get("distillation")
+        max_colocate_count = 3
         if is_distillation_enabled(distillation_config):
             if distillation_config.n_gpus_per_node <= 0:
                 raise ValueError("config.distillation.n_gpus_per_node must be greater than 0")
@@ -786,7 +787,17 @@ class PPOTrainer(ABC):
             resource_pool_spec["teacher_pool"] = teacher_pool
             self.mapping[Role.TeacherModel] = "teacher_pool"
 
-        self.resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
+            if distillation_config.get("share_gpu_group", False):
+                # All teachers' worker actors share the same placement-group bundles.
+                # Each bundle reserves max_colocate_count CPUs and actors request 1 CPU
+                # each (plus 1/max_colocate_count GPU), so the per-bundle actor count
+                # (= number of teachers) must not exceed max_colocate_count.
+                num_teachers = len(omega_conf_to_dataclass(distillation_config).teacher_models)
+                max_colocate_count = max(3, num_teachers)
+
+        self.resource_pool_manager = ResourcePoolManager(
+            resource_pool_spec=resource_pool_spec, mapping=self.mapping, max_colocate_count=max_colocate_count
+        )
 
     def _load_checkpoint(self):
         self.global_steps = 0
