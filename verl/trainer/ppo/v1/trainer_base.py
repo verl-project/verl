@@ -440,6 +440,7 @@ class PPOTrainer(ABC):
 
         self.on_train_begin()
         last_val_metrics = None
+        completed_training_steps = 0
         while current_epoch < self.config.trainer.total_epochs and self.global_steps <= self.total_training_steps:
             is_last_step = self.global_steps >= self.total_training_steps
             metrics = {}
@@ -493,6 +494,7 @@ class PPOTrainer(ABC):
                     self.config.trainer.logger, dapo_filtered_reward_counts, self.global_steps
                 )
             progress_bar.update(1)
+            completed_training_steps += 1
             self.global_steps += 1
             SkipManager.set_step(self.global_steps)
             current_epoch = (self.global_steps - 1) // self.steps_per_epoch
@@ -505,24 +507,18 @@ class PPOTrainer(ABC):
         # The dataloader can exhaust an epoch before total_training_steps is reached.
         # In that case is_last_step never becomes true, so a non-aligned final step
         # (for example step 237 with save_freq=50) would otherwise not be saved.
-        final_completed_step = self.global_steps - 1
-        if (
-            self.config.trainer.save_freq > 0
-            and final_completed_step > 0
-            and final_completed_step % self.config.trainer.save_freq != 0
+        if self._should_force_save_epoch_exhaustion_checkpoint(
+            completed_training_steps=completed_training_steps,
+            current_epoch=current_epoch,
         ):
+            final_completed_step = self.global_steps - 1
             logger.info(
                 "Training ended because all configured epochs were exhausted; "
                 f"force-saving final checkpoint at step {final_completed_step}"
             )
-            next_global_step = self.global_steps
-            self.global_steps = final_completed_step
-            try:
-                with marked_timer("save_final_checkpoint", self.timing_raw, color="green"):
-                    self._save_checkpoint()
-            finally:
-                self.global_steps = next_global_step
+            self._force_save_epoch_exhaustion_checkpoint(final_completed_step)
 
+        progress_bar.close()
         self.on_train_end()
         # Ensure dump executor is shut down when training loop ends without reaching is_last_step
         self._shutdown_dump_executor()
@@ -621,6 +617,35 @@ class PPOTrainer(ABC):
     def on_train_end(self):
         """Called after the training loop ends."""
         return
+
+    def _should_force_save_epoch_exhaustion_checkpoint(
+        self, *, completed_training_steps: int, current_epoch: int
+    ) -> bool:
+        """Return True when epoch exhaustion should trigger a final off-boundary save."""
+        if completed_training_steps <= 0:
+            return False
+        if current_epoch < self.config.trainer.total_epochs:
+            return False
+
+        save_freq = self.config.trainer.save_freq
+        if save_freq <= 0:
+            return False
+
+        final_completed_step = self.global_steps - 1
+        if final_completed_step <= 0:
+            return False
+        return final_completed_step % save_freq != 0
+
+    def _force_save_epoch_exhaustion_checkpoint(self, final_completed_step: int) -> None:
+        """Save the last completed step without leaving global_steps advanced."""
+        next_global_step = self.global_steps
+        self.global_steps = final_completed_step
+        try:
+            timing_raw: dict[str, float] = {}
+            with marked_timer("save_final_checkpoint", timing_raw, color="green"):
+                self._save_checkpoint()
+        finally:
+            self.global_steps = next_global_step
 
     def on_validate_begin(self):
         """Called before the validation loop starts."""
