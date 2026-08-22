@@ -43,6 +43,10 @@ actor_rollout_ref:
       entropy_checkpointing: false
       forward_only: false
       enable_fsdp_offload: false
+      enable_async_activation_offload: false
+      activation_offload_modules:
+      - model.visual.blocks.{*}
+      - model.language_model.layers.{*}
       enable_reentrant: false
       attn_implementation: flash_attention_2
       moe_implementation: fused
@@ -247,6 +251,10 @@ actor_rollout_ref:
       entropy_checkpointing: false
       forward_only: true
       enable_fsdp_offload: false
+      enable_async_activation_offload: false
+      activation_offload_modules:
+      - model.visual.blocks.{*}
+      - model.language_model.layers.{*}
       enable_reentrant: false
       attn_implementation: ${oc.select:actor_rollout_ref.actor.veomni.attn_implementation,flash_attention_2}
       moe_implementation: ${oc.select:actor_rollout_ref.actor.veomni.moe_implementation,fused}
@@ -552,6 +560,10 @@ critic:
     entropy_checkpointing: false
     forward_only: false
     enable_fsdp_offload: false
+    enable_async_activation_offload: false
+    activation_offload_modules:
+    - model.visual.blocks.{*}
+    - model.language_model.layers.{*}
     enable_reentrant: false
     attn_implementation: flash_attention_2
     moe_implementation: fused
