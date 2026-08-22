@@ -281,6 +281,7 @@ class SGLangHttpServer:
         # Leave None to let sglang's VisionAttention auto-pick per device
         # (triton_attn on Ada, fa3 on Hopper, fa4 on Blackwell).
         quantization = self.config.get("quantization", None)
+        quant_config_kwargs = None
         if quantization is not None:
             if quantization == "fp8":
                 from verl.utils.sglang.sglang_fp8_utils import build_sglang_fp8_quant_config
@@ -288,9 +289,17 @@ class SGLangHttpServer:
                 assert version.parse(sglang.__version__) >= version.parse("0.5.5"), (
                     "sglang>=0.5.5 is required for FP8 quantization"
                 )
-                fp8_block_quant_kwargs = build_sglang_fp8_quant_config(self.model_config.hf_config)
+                quant_config_kwargs = build_sglang_fp8_quant_config(self.model_config.hf_config)
+            elif quantization == "mxfp8":
+                from verl.utils.sglang.sglang_mxfp8_utils import (
+                    build_sglang_mxfp8_quant_config,
+                    check_sglang_mxfp8_support,
+                )
+
+                check_sglang_mxfp8_support()
+                quant_config_kwargs = build_sglang_mxfp8_quant_config(self.model_config.hf_config)
             else:
-                raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
+                raise ValueError(f"Currently only support fp8/mxfp8 quantization, got: {quantization}")
         infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
         args = {
             "model_path": self.model_config.local_path,
@@ -314,8 +323,8 @@ class SGLangHttpServer:
             "skip_tokenizer_init": self.config.skip_tokenizer_init,
             "skip_server_warmup": True,
             "quantization": quantization,
-            "json_model_override_args": json.dumps({"quantization_config": fp8_block_quant_kwargs})
-            if quantization == "fp8"
+            "json_model_override_args": json.dumps({"quantization_config": quant_config_kwargs})
+            if quant_config_kwargs is not None
             else json.dumps({}),
             "custom_weight_loader": custom_weight_loader or None,
             **engine_kwargs,

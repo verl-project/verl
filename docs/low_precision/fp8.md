@@ -236,22 +236,49 @@ workaround.
 actor_rollout_ref.actor.megatron.override_transformer_config:
   fp8: "e4m3"                # element format; "hybrid" (e4m3 fwd + e5m2 bwd) also supported
   fp8_recipe: "mxfp8"        # 32-element block scaling
-  # Optional: keep the first/last layers in bf16 for stability
-  first_last_layers_bf16: true
-  num_layers_at_start_in_bf16: 1
-  num_layers_at_end_in_bf16: 1
+
+# MXFP8 rollout inference (SGLang)
+actor_rollout_ref.rollout:
+  name: sglang
+  quantization: mxfp8
 ```
 
 Notes:
 
-- Requires the Megatron-Bridge model path (`actor_rollout_ref.actor.megatron.use_mbridge=True`,
+- Training requires the Megatron-Bridge model path (`actor_rollout_ref.actor.megatron.use_mbridge=True`,
   the default). The legacy model-building path does not support FP8 recipes and fails loudly.
 - Model weights stay in bf16 (`fp8_param` is not supported); only GEMM inputs are cast to
-  MXFP8 on the fly, so checkpointing and rollout weight sync are unchanged.
+  MXFP8 on the fly, so checkpointing is unchanged.
 - verl pads packed sequences to the 32-token block boundaries MXFP8 quantization requires;
   this is automatic once `fp8_recipe: "mxfp8"` is set.
-- MXFP8 rollout inference (SGLang) is tracked separately in
-  [verl#7186](https://github.com/verl-project/verl/pull/7186).
+
+### MXFP8 Rollout and Train-Inference Consistency
+
+With `quantization: mxfp8`, SGLang is launched in MXFP8 mode against the bf16 checkpoint
+(via a `quantization_config` override, no offline conversion needed), and weight sync
+quantizes the bf16 actor weights to MXFP8 on the fly.
+
+The weight-sync quantization deliberately uses **TransformerEngine's `MXFP8Quantizer`** —
+the same quantizer the trainer's FP8 GEMMs apply to weights — so the rollout engine serves
+exactly the weight grid the training forward pass saw. An independent quantization kernel
+can round E8M0 scales differently at block boundaries and reintroduce train-inference
+mismatch. Residual mismatch (activation quantization kernels and GEMM implementations still
+differ between TE and SGLang) is small; pairing with token-level TIS is recommended,
+as with the blockwise FP8 E2E recipe.
+
+Layer skipping follows the same rules as FP8 rollout (`ignored_layers`,
+`modules_to_not_convert`, or the `SGLANG_FP8_IGNORED_LAYERS` env var). If you enable
+`first_last_layers_bf16` on the training side, keep the two sides consistent by excluding
+the same layers from rollout quantization, e.g. for a 36-layer model with the first and
+last layer in bf16:
+
+```json
+{
+  "quantization_config": {
+    "ignored_layers": ["re:model\\.layers\\.(0|35)\\..*"]
+  }
+}
+```
 
 ---
 

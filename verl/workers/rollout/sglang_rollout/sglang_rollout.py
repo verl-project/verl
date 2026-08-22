@@ -116,7 +116,8 @@ class ServerAdapter(BaseRollout):
         replica_rank: int = -1,
     ):
         super().__init__(config, model_config, device_mesh)
-        if self.config.get("quantization", None) == "fp8":
+        quantization = self.config.get("quantization", None)
+        if quantization == "fp8":
             import sglang
             from packaging import version
 
@@ -127,6 +128,15 @@ class ServerAdapter(BaseRollout):
             )
             fp8_block_quant_kwargs = build_sglang_fp8_quant_config(self.model_config.hf_config)
             self.model_config.hf_config.quantization_config = fp8_block_quant_kwargs
+        elif quantization == "mxfp8":
+            from verl.utils.sglang.sglang_mxfp8_utils import (
+                build_sglang_mxfp8_quant_config,
+                check_sglang_mxfp8_support,
+            )
+
+            check_sglang_mxfp8_support()
+            mxfp8_quant_kwargs = build_sglang_mxfp8_quant_config(self.model_config.hf_config)
+            self.model_config.hf_config.quantization_config = mxfp8_quant_kwargs
         self._engine: AsyncHttpServerAdapter = None
 
         rank = int(os.environ["RANK"])
@@ -343,12 +353,22 @@ class ServerAdapter(BaseRollout):
                 await self._engine.load_lora_adapter_from_tensor(req)
         else:
             update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
-            if self.config.get("quantization", None) == "fp8":
+            quantization = self.config.get("quantization", None)
+            if quantization == "fp8":
                 from verl.utils.sglang.sglang_fp8_utils import SGLangFP8QuantizerHelper
 
                 logger.info("Convert bf16 weights to fp8 format before loading")
                 fp8_quantizer_helper = SGLangFP8QuantizerHelper(self.model_config.hf_config.quantization_config)
                 weights = fp8_quantizer_helper.quant_weights_by_name(
+                    weights,
+                    dtype=self.model_config.hf_config.dtype,
+                )
+            elif quantization == "mxfp8":
+                from verl.utils.sglang.sglang_mxfp8_utils import SGLangMXFP8QuantizerHelper
+
+                logger.info("Convert bf16 weights to mxfp8 format before loading")
+                mxfp8_quantizer_helper = SGLangMXFP8QuantizerHelper(self.model_config.hf_config.quantization_config)
+                weights = mxfp8_quantizer_helper.quant_weights_by_name(
                     weights,
                     dtype=self.model_config.hf_config.dtype,
                 )
