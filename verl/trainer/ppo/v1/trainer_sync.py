@@ -35,7 +35,7 @@ class PPOTrainerSync(PPOTrainer):
     def on_step_end(self):
         with marked_timer("update_weights", self.timing_raw, color="red"):
             # wake up all replicas to update weights
-            self.checkpoint_manager.update_weights(self.global_steps)
+            self._pending_sync_metrics = self.checkpoint_manager.update_weights(self.global_steps)
 
     def on_sample_end(self):
         # sleep all replicas to discard weights and kv cache

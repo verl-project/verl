@@ -159,6 +159,7 @@ class TinkerTrainingWorker(TrainingWorker):
         ):
             output = self.engine.forward_backward_batch(data, loss_function=self.loss_fn, forward_only=False)
         delta_time = timer.last
+        disk_metrics = self.collect_disk_offload_metrics() if not disable_auto_offload else {}
 
         if self.engine.is_mp_src_rank_with_outputs():
             final_output = self._postprocess_output(
@@ -168,6 +169,7 @@ class TinkerTrainingWorker(TrainingWorker):
                 forward_only=False,
                 images_seqlens=images_seqlens,
             ).cpu()
+            tu.get(final_output, "metrics").update(disk_metrics)
         else:
             final_output = None
 
@@ -180,10 +182,10 @@ class TinkerTrainingWorker(TrainingWorker):
             _apply_optim_step_params(self.engine.optimizer, optim_step_params)
             grad_norm = self.engine.optimizer_step()
 
-        metrics = {}
+        metrics = self.collect_disk_offload_metrics()
         if grad_norm is not None and self.engine.is_mp_src_rank_with_outputs():
             metrics["grad_norm"] = grad_norm
-        return metrics
+        return metrics if self.engine.is_mp_src_rank_with_outputs() else {}
 
 
 class TinkerActorRolloutRefWorker(ActorRolloutRefWorker):

@@ -55,6 +55,17 @@ class BaseEngine:
         """Whether optimizer offloading is enabled."""
         raise NotImplementedError
 
+    @property
+    def is_grad_offload_enabled(self) -> bool:
+        """Whether gradient offloading is enabled.
+
+        Existing engines historically move gradient buffers together with
+        parameters.  They inherit this compatibility default; engines with an
+        independent gradient policy should override it.
+        """
+
+        return self.is_param_offload_enabled
+
     def train_mode(self, **kwargs):
         """
         Context manager entry for switching the engine and model into training mode.
@@ -250,6 +261,40 @@ class BaseEngine:
         if grad:
             assert model, "Gradient buffers must be moved to device along with model parameters"
 
+    def offload(
+        self,
+        *,
+        model: bool = True,
+        optimizer: bool = True,
+        grad: bool = True,
+        preserve_grad: bool = True,
+    ) -> None:
+        """Move selected state to its configured offload target.
+
+        The base implementation preserves the legacy CPU behavior.  Backends
+        supporting non-device targets such as disk override this method.
+        """
+
+        del preserve_grad
+        self.to(device="cpu", model=model, optimizer=optimizer, grad=grad)
+
+    def onload(self, *, model: bool = True, optimizer: bool = True, grad: bool = True) -> None:
+        """Restore selected offloaded state to the active accelerator."""
+
+        self.to(device=get_device_name(), model=model, optimizer=optimizer, grad=grad)
+
+    @property
+    def has_disk_offload_store(self) -> bool:
+        """Whether this engine owns a store that can report disk I/O statistics."""
+
+        return getattr(self, "_disk_store", None) is not None
+
+    def pop_disk_offload_stats(self):
+        """Return and clear rank-local disk I/O statistics."""
+
+        store = getattr(self, "_disk_store", None)
+        return store.pop_io_stats() if store is not None else {}
+
     def save_checkpoint(
         self,
         local_path: str,
@@ -311,28 +356,40 @@ class BaseEngineCtx:
         self.disable_auto_offload = kwargs.pop("disable_auto_offload", False)
         self.zero_grad_on_exit = kwargs.pop("zero_grad_on_exit", True)
 
-    def _context_switch(self, device):
+    def _context_switch(self, device, *, preserve_grad=None):
         if self.disable_auto_offload:
             return
-        if device != "cpu":
-            if not self.engine.is_param_offload_enabled and not self.engine.is_optimizer_offload_enabled:
-                return
+        if not (
+            self.engine.is_param_offload_enabled
+            or self.engine.is_grad_offload_enabled
+            or self.engine.is_optimizer_offload_enabled
+        ):
+            return
+        is_onload = device != "cpu"
         if self.mode == "eval":
-            self.engine.to(device=device, model=self.engine.is_param_offload_enabled, optimizer=False, grad=False)
+            if is_onload:
+                self.engine.onload(model=self.engine.is_param_offload_enabled, optimizer=False, grad=False)
+            else:
+                self.engine.offload(model=self.engine.is_param_offload_enabled, optimizer=False, grad=False)
         elif self.mode == "train":
-            self.engine.to(
-                device=device,
-                model=self.engine.is_param_offload_enabled,
-                optimizer=self.engine.is_optimizer_offload_enabled,
-                grad=self.engine.is_param_offload_enabled,
-            )
+            kwargs = {
+                "model": self.engine.is_param_offload_enabled,
+                "optimizer": self.engine.is_optimizer_offload_enabled,
+                "grad": self.engine.is_grad_offload_enabled,
+            }
+            if is_onload:
+                self.engine.onload(**kwargs)
+            else:
+                if preserve_grad is None:
+                    preserve_grad = not self.zero_grad_on_exit
+                self.engine.offload(**kwargs, preserve_grad=preserve_grad)
 
     def __enter__(self):
         self.engine.mode = self.mode
         self._context_switch(get_device_name())
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self._context_switch("cpu")
+        self._context_switch("cpu", preserve_grad=not self.zero_grad_on_exit and exc_type is None)
         self.engine.mode = None
 
 

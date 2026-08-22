@@ -26,6 +26,9 @@ from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
 __all__ = [
+    "ComponentOffloadConfig",
+    "DiskOffloadConfig",
+    "EngineOffloadConfig",
     "FSDPEngineConfig",
     "McoreEngineConfig",
     "TrainingWorkerConfig",
@@ -40,6 +43,56 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
+
+
+@dataclass
+class ComponentOffloadConfig(BaseConfig):
+    """Offload policy for one engine state type.
+
+    ``None`` keeps backward compatibility with the legacy boolean fields on
+    :class:`EngineConfig`: ``True`` resolves to ``"cpu"`` and ``False`` to
+    ``"none"``.  An explicit target takes precedence only when the matching
+    legacy field is left at its default value.
+    """
+
+    target: Optional[Literal["none", "cpu", "disk"]] = None
+
+    def __post_init__(self) -> None:
+        assert self.target in (None, "none", "cpu", "disk"), f"Unsupported offload target: {self.target!r}"
+
+
+@dataclass
+class DiskOffloadConfig(BaseConfig):
+    """Configuration shared by disk-target engine state.
+
+    The path must point to node-local storage. Runtime code creates an isolated
+    scratch directory for every engine store below this directory.
+    """
+
+    path: Optional[str] = None
+    chunk_size_mb: int = 64
+    cleanup_on_exit: bool = True
+
+    def __post_init__(self) -> None:
+        assert self.chunk_size_mb > 0, "disk offload chunk_size_mb must be positive"
+
+
+@dataclass
+class EngineOffloadConfig(BaseConfig):
+    """Per-state offload targets for an engine instance."""
+
+    param: ComponentOffloadConfig = field(default_factory=ComponentOffloadConfig)
+    grad: ComponentOffloadConfig = field(default_factory=ComponentOffloadConfig)
+    optimizer: ComponentOffloadConfig = field(default_factory=ComponentOffloadConfig)
+    disk: DiskOffloadConfig = field(default_factory=DiskOffloadConfig)
+
+    def __post_init__(self) -> None:
+        for name in ("param", "grad", "optimizer"):
+            component = getattr(self, name)
+            if not isinstance(component, ComponentOffloadConfig):
+                object.__setattr__(self, name, ComponentOffloadConfig(**dict(component)))
+        if not isinstance(self.disk, DiskOffloadConfig):
+            object.__setattr__(self, "disk", DiskOffloadConfig(**dict(self.disk)))
 
 
 # TODO: rename to RouterReplayConfig after removing the legacy implementation
@@ -84,6 +137,7 @@ class EngineConfig(BaseConfig):
         "use_remove_padding",
         "forward_only",
         "param_offload",
+        "offload",
     }
     # whether to offload param
     param_offload: bool = False
@@ -91,6 +145,8 @@ class EngineConfig(BaseConfig):
     optimizer_offload: bool = False
     # whether to offload grad
     grad_offload: bool = False
+    # per-state target policy; explicit values supersede legacy booleans
+    offload: EngineOffloadConfig = field(default_factory=EngineOffloadConfig)
     # whether the engine is forward only (e.g., ref policy)
     forward_only: bool = False
     # the strategy (backend)
@@ -115,13 +171,70 @@ class EngineConfig(BaseConfig):
     full_determinism: bool = False
     router_replay: EngineRouterReplayConfig = field(default_factory=EngineRouterReplayConfig)
 
+    def _normalize_legacy_offload(self, components: tuple[str, ...]) -> None:
+        """Normalize optional legacy booleans and warn when users set them."""
+
+        legacy_fields = []
+        for component in components:
+            field_name = f"{component}_offload"
+            value = getattr(self, field_name)
+            if value is None:
+                object.__setattr__(self, field_name, False)
+                continue
+            assert isinstance(value, bool), f"{field_name} must be a boolean or null, got {type(value).__name__}"
+            legacy_fields.append(field_name)
+
+        if legacy_fields:
+            warnings.warn(
+                f"The legacy {self.strategy} offload boolean field(s) "
+                f"{', '.join(legacy_fields)} are deprecated and will be removed in a future release. "
+                "Use offload.<component>.target='cpu' for true or 'none' for false.",
+                FutureWarning,
+                stacklevel=3,
+            )
+
     def __post_init__(self):
-        pass
+        if not isinstance(self.offload, EngineOffloadConfig):
+            object.__setattr__(self, "offload", EngineOffloadConfig(**dict(self.offload)))
+
+        for component in ("param", "grad", "optimizer"):
+            configured_target = getattr(self.offload, component).target
+            legacy_enabled = getattr(self, f"{component}_offload")
+            assert configured_target is None or not legacy_enabled, (
+                f"Configure either {component}_offload=true (legacy CPU target) or offload.{component}.target, not both"
+            )
+        disk_components = [
+            component
+            for component in ("param", "grad", "optimizer")
+            if getattr(self.offload, component).target == "disk"
+        ]
+        # TODO: Remove this guard after AutoModel, TorchTitan, and FSDP-Turbo add
+        # backend-specific disk serialization and restoration for all state types.
+        assert not disk_components or self.strategy in (None, "megatron", "fsdp", "fsdp2", "veomni"), (
+            "Disk offload targets are supported only by Megatron, FSDP1/FSDP2, and VeOmni; "
+            f"strategy={self.strategy!r}, components={', '.join(disk_components)}"
+        )
         # TODO: turn on this check after we reorg config
         # if self.use_dynamic_bsz:
         #     assert self.max_token_len_per_gpu is not None
         # else:
         #     assert self.micro_batch_size_per_gpu is not None
+
+    def get_offload_target(self, component: Literal["param", "grad", "optimizer"]) -> str:
+        """Resolve a component target while preserving legacy boolean behavior."""
+
+        assert component in ("param", "grad", "optimizer"), f"Unknown engine state type: {component!r}"
+        configured_target = getattr(self.offload, component).target
+        if configured_target is not None:
+            return configured_target
+        # Legacy engine contexts moved/released grad storage whenever
+        # param_offload was enabled, regardless of grad_offload. Preserve that
+        # behavior only when the parameter target comes from the legacy field.
+        # On backends that expose an independent gradient policy, an explicit
+        # new grad target (including "none") takes precedence.
+        if component == "grad" and self.param_offload and self.offload.param.target is None:
+            return "cpu"
+        return "cpu" if getattr(self, f"{component}_offload") else "none"
 
 
 @dataclass
@@ -152,9 +265,9 @@ class McoreEngineConfig(EngineConfig):
     The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
 
     Args:
-        param_offload (bool): Whether to offload parameters to CPU.
-        grad_offload (bool): Whether to offload gradients to CPU.
-        optimizer_offload (bool): Whether to offload optimizer states to CPU.
+        param_offload (Optional[bool]): Deprecated parameter CPU-offload switch.
+        grad_offload (Optional[bool]): Deprecated gradient CPU-offload switch.
+        optimizer_offload (Optional[bool]): Deprecated optimizer CPU-offload switch.
         tensor_model_parallel_size (int): Tensor model parallel size.
         expert_model_parallel_size (int): Expert model parallel size for MoE models.
         expert_tensor_parallel_size (Optional[int]): Expert tensor parallel size for MoE models.
@@ -183,6 +296,11 @@ class McoreEngineConfig(EngineConfig):
 
     # sequence_parallel is not listed as a frozen field for auto-correction purpose
     _mutable_fields = EngineConfig._mutable_fields | {"sequence_parallel"}
+    # ``None`` means the legacy field was not configured. Explicit True and
+    # False are both accepted for compatibility and emit a deprecation warning.
+    param_offload: Optional[bool] = None
+    grad_offload: Optional[bool] = None
+    optimizer_offload: Optional[bool] = None
     # mcore parallelism
     tensor_model_parallel_size: int = 1
     expert_model_parallel_size: int = 1
@@ -214,10 +332,23 @@ class McoreEngineConfig(EngineConfig):
     qat: QATEngineConfig = field(default_factory=QATEngineConfig)
 
     def __post_init__(self) -> None:
+        self._normalize_legacy_offload(("param", "grad", "optimizer"))
         super().__post_init__()
         """config validation logics go here"""
         assert self.strategy == "megatron"
         assert self.dtype in ["bfloat16", "float16"], f"dtype {self.dtype} not supported"
+        disk_components = [
+            component for component in ("param", "grad", "optimizer") if self.get_offload_target(component) == "disk"
+        ]
+        assert not disk_components or self.offload.disk.path, (
+            "offload.disk.path is required when Megatron state targets disk; "
+            f"configured components: {', '.join(disk_components)}"
+        )
+        # TODO: Remove this guard after Megatron-FSDP exposes stable parameter,
+        # gradient-buffer, and optimizer state for disk serialization and restoration.
+        assert not disk_components or not self.use_megatron_fsdp, (
+            "Megatron-FSDP does not yet support disk offload targets"
+        )
         if self.vanilla_mbridge:
             warnings.warn(
                 "The legacy mbridge backend selected by `vanilla_mbridge=True` is deprecated and will be removed "
@@ -246,8 +377,8 @@ class FSDPEngineConfig(EngineConfig):
 
     Args:
         wrap_policy (Dict[str, Any]): Configuration for FSDP wrap policy.
-        param_offload (bool): Whether to offload parameters to CPU, default False
-        optimizer_offload (bool): Whether to offload optimizer states to CPU, default False
+        param_offload (Optional[bool]): Deprecated parameter CPU-offload switch.
+        optimizer_offload (Optional[bool]): Deprecated optimizer CPU-offload switch.
         offload_policy (bool): Whether to offload policy model parameters, default False
         reshard_after_forward (bool): Whether to reshard parameters after forward pass, default True
         fsdp_size (int): FSDP group size. -1 means use all available GPUs.
@@ -279,6 +410,8 @@ class FSDPEngineConfig(EngineConfig):
     # ulysses_sequence_parallel_size is mutable for backward compatibility
     _mutable_fields = EngineConfig._mutable_fields | {"ulysses_sequence_parallel_size"}
 
+    param_offload: Optional[bool] = None
+    optimizer_offload: Optional[bool] = None
     # fsdp specific flags
     wrap_policy: dict[str, Any] = field(default_factory=dict)
     offload_policy: bool = False
@@ -300,7 +433,21 @@ class FSDPEngineConfig(EngineConfig):
     turbo_config: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
+        self._normalize_legacy_offload(("param", "optimizer"))
         super().__post_init__()
+        assert self.offload.grad.target is None, (
+            "FSDP does not expose an independent gradient offload target; gradients follow parameters"
+        )
+        disk_components = [
+            component for component in ("param", "optimizer") if self.get_offload_target(component) == "disk"
+        ]
+        assert not disk_components or self.offload.disk.path, (
+            "offload.disk.path is required when FSDP state targets disk; "
+            f"configured components: {', '.join(disk_components)}"
+        )
+        assert not disk_components or not self.offload_policy, (
+            "FSDP disk offload cannot be combined with FSDP2 offload_policy"
+        )
         assert self.strategy in ["fsdp", "fsdp2", "fsdp_turbo"], f"strategy {self.strategy} not supported"
 
 
@@ -311,8 +458,8 @@ class VeOmniEngineConfig(EngineConfig):
     The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
 
     Args:
-        param_offload (bool): Whether to offload parameters to CPU, default False
-        optimizer_offload (bool): Whether to offload optimizer states to CPU, default False
+        param_offload (Optional[bool]): Deprecated parameter CPU-offload switch.
+        optimizer_offload (Optional[bool]): Deprecated optimizer CPU-offload switch.
         fsdp_size (int): FSDP group size. -1 means use all available GPUs, default -1
         ulysses_parallel_size (int): Ulysses sequence parallel size, default 1
         expert_parallel_size (int): Expert parallel size, default 1
@@ -401,6 +548,8 @@ class VeOmniEngineConfig(EngineConfig):
 
     _mutable_fields = EngineConfig._mutable_fields | {"attn_implementation"}
 
+    param_offload: Optional[bool] = None
+    optimizer_offload: Optional[bool] = None
     forward_prefetch: bool = False
     entropy_from_logits_with_chunking: bool = False
     entropy_from_logits_chunk_size: int = 2048
@@ -443,7 +592,21 @@ class VeOmniEngineConfig(EngineConfig):
     pad_to_length_bucket: int = 1024
 
     def __post_init__(self):
+        self._normalize_legacy_offload(("param", "optimizer"))
         super().__post_init__()
+        assert self.offload.grad.target is None, (
+            "VeOmni does not expose an independent gradient offload target; gradients follow parameters"
+        )
+        disk_components = [
+            component for component in ("param", "optimizer") if self.get_offload_target(component) == "disk"
+        ]
+        assert not disk_components or self.offload.disk.path, (
+            "offload.disk.path is required when VeOmni state targets disk; "
+            f"configured components: {', '.join(disk_components)}"
+        )
+        assert not disk_components or not self.enable_fsdp_offload, (
+            "VeOmni disk offload cannot be combined with enable_fsdp_offload"
+        )
         assert self.strategy in ["veomni"], f"strategy {self.strategy} not supported"
 
         replacements = {
@@ -464,6 +627,8 @@ class TorchtitanEngineConfig(EngineConfig):
     The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
 
     Args:
+        param_offload (Optional[bool]): Deprecated parameter CPU-offload switch.
+        optimizer_offload (Optional[bool]): Deprecated optimizer CPU-offload switch.
         wrap_policy (Dict[str, Any]): Configuration for FSDP wrap policy.
         reshard_after_forward (Literal["default", "always", "never"]): The policy for applying
             `reshard_after_forward` within an FSDP setup, default "default"
@@ -496,6 +661,8 @@ class TorchtitanEngineConfig(EngineConfig):
 
     """
 
+    param_offload: Optional[bool] = None
+    optimizer_offload: Optional[bool] = None
     wrap_policy: dict[str, Any] = field(default_factory=dict)
     reshard_after_forward: Literal["default", "always", "never"] = "default"
     forward_prefetch: bool = False
@@ -523,7 +690,11 @@ class TorchtitanEngineConfig(EngineConfig):
     full_determinism: bool = False
 
     def __post_init__(self):
+        self._normalize_legacy_offload(("param", "optimizer"))
         super().__post_init__()
+        assert self.offload.grad.target is None, (
+            "TorchTitan does not expose an independent gradient offload target; gradients follow parameters"
+        )
         assert self.attn_type in ["flex", "flex_flash", "varlen"], (
             f"attn_type {self.attn_type} not supported (sdpa is not a valid language-model backend)"
         )
@@ -619,6 +790,8 @@ class AutomodelEngineConfig(EngineConfig):
         entropy_checkpointing (bool): Whether to use checkpointing for entropy computation.
     """
 
+    param_offload: Optional[bool] = None
+    optimizer_offload: Optional[bool] = None
     strategy: str = "automodel"
     distributed_strategy: str = "fsdp2"
     # Parallelism sizes
@@ -650,7 +823,11 @@ class AutomodelEngineConfig(EngineConfig):
     entropy_checkpointing: bool = False
 
     def __post_init__(self):
+        self._normalize_legacy_offload(("param", "optimizer"))
         super().__post_init__()
+        assert self.offload.grad.target is None, (
+            "AutoModel does not expose an independent gradient offload target; gradients follow parameters"
+        )
         assert self.strategy == "automodel", f"strategy must be 'automodel', got {self.strategy}"
         assert self.distributed_strategy in ["fsdp2", "megatron_fsdp", "ddp"], (
             f"distributed_strategy {self.distributed_strategy} not supported"

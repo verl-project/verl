@@ -36,6 +36,39 @@ logger = logging.getLogger(__name__)
 _NUM_LOCAL_EXPERTS_MODEL_TYPES = {"gpt_oss", "mixtral"}
 
 
+def extract_disk_offload_metrics(worker_metrics: Any, prefix: str) -> dict[str, Any]:
+    """Reduce disk I/O worker metrics and add a role or phase prefix."""
+
+    from verl.utils.metric import Metric, reduce_metrics
+
+    if isinstance(worker_metrics, list):
+        merged = defaultdict(list)
+        for current in worker_metrics:
+            if not isinstance(current, dict):
+                continue
+            for key, value in current.items():
+                if isinstance(value, list):
+                    merged[key].extend(value)
+                else:
+                    merged[key].append(value)
+        worker_metrics = merged
+    if not isinstance(worker_metrics, dict):
+        return {}
+
+    selected = {key: value for key, value in worker_metrics.items() if key.startswith("disk_")}
+    if not selected:
+        return {}
+
+    aggregated = {}
+    for key, value in selected.items():
+        if isinstance(value, Metric | list | tuple | np.ndarray):
+            aggregated[key] = reduce_metrics({key: value})[key]
+        else:
+            aggregated[key] = value
+    prefix = prefix.rstrip("/")
+    return {f"{prefix}/{key}": value for key, value in aggregated.items()}
+
+
 @deprecated("verl.utils.metric.reduce_metrics")
 def reduce_metrics(metrics: dict[str, list[Any]]) -> dict[str, Any]:
     """

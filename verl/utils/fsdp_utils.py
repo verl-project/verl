@@ -21,7 +21,7 @@ import os
 from abc import ABC
 from collections import OrderedDict
 from contextlib import contextmanager, nullcontext
-from typing import Optional, cast
+from typing import Iterator, Optional, cast
 
 import torch
 import torch.distributed as dist
@@ -36,6 +36,13 @@ from transformers.trainer_pt_utils import get_module_class_from_name
 
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.model import check_exclude_modules, check_target_modules
+from verl.utils.offload import (
+    DiskOffloadStore,
+    StorageOffloadRef,
+    read_storage_refs,
+    storage_offload_refs,
+    write_storage_refs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -259,6 +266,185 @@ def load_fsdp_optimizer(optimizer, device_id):
             for key, value in state.items():
                 if isinstance(value, torch.Tensor):
                     state[key] = value.to(device_id, non_blocking=True)
+
+
+def _prepare_fsdp_model_for_disk(model) -> None:
+    """Make persistent local shards authoritative before disk I/O."""
+
+    model_version = fsdp_version(model)
+    if model_version == 1:
+        _lazy_init(model, model)
+        if not model._is_root:
+            raise RuntimeError("Only the root FSDP1 module can be disk-offloaded")
+        for handle in model._all_handles:
+            flat_param = handle.flat_param
+            if (
+                flat_param.data.data_ptr() != flat_param._local_shard.data_ptr()
+                or flat_param.data.size() != flat_param._local_shard.size()
+            ):
+                handle.reshard(True)
+            if (
+                flat_param.data.data_ptr() != flat_param._local_shard.data_ptr()
+                or flat_param.data.size() != flat_param._local_shard.size()
+            ):
+                raise RuntimeError("FSDP1 flat parameter did not return to its persistent local shard")
+        return
+
+    # FSDP2 refuses reshard from transient forward/backward states.  VeOmni's
+    # CPU helper applies the same normalization before moving its DTensors.
+    try:
+        from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
+        from torch.distributed.fsdp._fully_shard._fsdp_state import _get_module_fsdp_state
+
+        for module in model.modules():
+            state = _get_module_fsdp_state(module)
+            if state is not None and state._fsdp_param_group is not None:
+                state._fsdp_param_group._training_state = TrainingState.IDLE
+    except ImportError:
+        pass
+    if hasattr(model, "reshard"):
+        model.reshard()
+
+
+def _iter_fsdp_model_disk_tensors(model, component: str) -> Iterator[tuple[str, torch.Tensor]]:
+    if component not in ("param", "grad"):
+        raise ValueError(f"Unsupported FSDP model component: {component!r}")
+
+    if fsdp_version(model) == 1:
+        for handle_index, handle in enumerate(model._all_handles):
+            flat_param = handle.flat_param
+            tensor = flat_param._local_shard if component == "param" else flat_param.grad
+            if tensor is not None:
+                yield f"model.flat_param.{handle_index}.{component}", tensor
+        if component == "param":
+            for name, buffer in model.named_buffers():
+                yield f"model.buffer.{name}", buffer
+        return
+
+    for name, param in model.named_parameters():
+        tensor = param if component == "param" else param.grad
+        if tensor is not None:
+            yield f"model.{component}.{name}", tensor
+    if component == "param":
+        for name, buffer in model.named_buffers():
+            yield f"model.buffer.{name}", buffer
+
+
+@torch.no_grad()
+def discard_fsdp_grad(model) -> None:
+    """Discard dead gradients without touching parameter storage."""
+
+    if fsdp_version(model) == 1:
+        _lazy_init(model, model)
+        for handle in model._all_handles:
+            handle.flat_param.grad = None
+    else:
+        for param in model.parameters():
+            param.grad = None
+    get_torch_device().empty_cache()
+
+
+@torch.no_grad()
+def offload_fsdp_model_to_disk(
+    model,
+    store: DiskOffloadStore,
+    *,
+    offload_param: bool,
+    offload_grad: bool,
+    preserve_grad: bool,
+) -> dict[str, list[StorageOffloadRef]]:
+    """Persist selected FSDP local shards and release their storages in place."""
+
+    _prepare_fsdp_model_for_disk(model)
+    refs: dict[str, list[StorageOffloadRef]] = {}
+    if offload_param:
+        refs["param"] = storage_offload_refs(_iter_fsdp_model_disk_tensors(model, "param"))
+        store.write_tensors("param", ((ref.key, ref.tensor) for ref in refs["param"]))
+    if offload_grad and preserve_grad:
+        refs["grad"] = storage_offload_refs(_iter_fsdp_model_disk_tensors(model, "grad"))
+        store.write_tensors("grad", ((ref.key, ref.tensor) for ref in refs["grad"]))
+    elif offload_grad:
+        store.invalidate("grad")
+        discard_fsdp_grad(model)
+        refs["grad"] = []
+
+    try:
+        for component_refs in refs.values():
+            for ref in component_refs:
+                ref.release()
+    except Exception:
+        for component, component_refs in refs.items():
+            if component_refs:
+                read_storage_refs(store, component, component_refs)
+        raise
+    get_torch_device().empty_cache()
+    return refs
+
+
+@torch.no_grad()
+def load_fsdp_model_from_disk(
+    store: DiskOffloadStore,
+    refs: dict[str, list[StorageOffloadRef]],
+    *,
+    load_param: bool,
+    load_grad: bool,
+) -> None:
+    """Restore FSDP local shards into their original storages."""
+
+    if load_param:
+        read_storage_refs(store, "param", refs.get("param", ()))
+    if load_grad:
+        read_storage_refs(store, "grad", refs.get("grad", ()))
+    get_torch_device().empty_cache()
+
+
+def _optimizer_instances(optimizer) -> list:
+    if getattr(optimizer, "_is_multi_optimizer", False):
+        return list(optimizer.optimizers_dict.values())
+    return [optimizer]
+
+
+def _iter_nested_tensors(value, prefix: str) -> Iterator[tuple[str, torch.Tensor]]:
+    if isinstance(value, torch.Tensor):
+        yield prefix, value
+    elif isinstance(value, dict):
+        for key in sorted(value, key=str):
+            yield from _iter_nested_tensors(value[key], f"{prefix}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            yield from _iter_nested_tensors(item, f"{prefix}.{index}")
+
+
+def _iter_fsdp_optimizer_disk_tensors(optimizer) -> Iterator[tuple[str, torch.Tensor]]:
+    seen: set[int] = set()
+    for optimizer_index, current_optimizer in enumerate(_optimizer_instances(optimizer)):
+        for group_index, group in enumerate(current_optimizer.param_groups):
+            for param_index, param in enumerate(group["params"]):
+                state = current_optimizer.state.get(param, {})
+                for key, tensor in _iter_nested_tensors(
+                    state,
+                    f"optimizer.{optimizer_index}.group.{group_index}.param.{param_index}",
+                ):
+                    if id(tensor) in seen:
+                        continue
+                    seen.add(id(tensor))
+                    yield key, tensor
+
+
+@torch.no_grad()
+def offload_fsdp_optimizer_to_disk(optimizer, store: DiskOffloadStore) -> list[StorageOffloadRef]:
+    refs = write_storage_refs(store, "optimizer", _iter_fsdp_optimizer_disk_tensors(optimizer))
+    get_torch_device().empty_cache()
+    return refs
+
+
+@torch.no_grad()
+def load_fsdp_optimizer_from_disk(
+    store: DiskOffloadStore,
+    refs: list[StorageOffloadRef],
+) -> None:
+    read_storage_refs(store, "optimizer", refs)
+    get_torch_device().empty_cache()
 
 
 @contextmanager

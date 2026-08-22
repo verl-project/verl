@@ -48,7 +48,7 @@ class PPOTrainerColocateAsync(PPOTrainer):
     def on_step_end(self):
         with marked_timer("update_weights", self.timing_raw, color="red"):
             # wake up all replicas to update weights
-            self.checkpoint_manager.update_weights(self.global_steps)
+            self._pending_sync_metrics = self.checkpoint_manager.update_weights(self.global_steps)
             # resume generation
             self.checkpoint_manager.resume_generation_replicas()
 

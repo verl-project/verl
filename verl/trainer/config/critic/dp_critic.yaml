@@ -25,6 +25,46 @@ _target_: verl.workers.config.FSDPCriticConfig
 # distribution strategy. Options: fsdp (deprecating), fsdp2
 strategy: fsdp
 
+# FSDP engine offload settings that follow the actor unless critic-specific
+# values are provided by the user.
+fsdp:
+
+  # Deprecated parameter CPU-offload switch
+  param_offload: ${oc.select:actor_rollout_ref.actor.fsdp_config.param_offload,null}
+
+  # Deprecated optimizer CPU-offload switch
+  optimizer_offload: ${oc.select:actor_rollout_ref.actor.fsdp_config.optimizer_offload,null}
+
+  # Per-state offload policy
+  offload:
+
+    # Parameter offload policy
+    param:
+
+      # Parameter offload target
+      target: ${oc.select:actor_rollout_ref.actor.fsdp_config.offload.param.target,null}
+
+    # Optimizer-state offload policy
+    optimizer:
+
+      # Optimizer-state offload target
+      target: ${oc.select:actor_rollout_ref.actor.fsdp_config.offload.optimizer.target,null}
+
+    # Disk backend settings
+    disk:
+
+      # Disk offload root path
+      path: ${oc.select:actor_rollout_ref.actor.fsdp_config.offload.disk.path,null}
+
+      # CPU staging-buffer size in MiB
+      chunk_size_mb: ${oc.select:actor_rollout_ref.actor.fsdp_config.offload.disk.chunk_size_mb,64}
+
+      # Whether to clean owned scratch files when the worker exits
+      cleanup_on_exit: ${oc.select:actor_rollout_ref.actor.fsdp_config.offload.disk.cleanup_on_exit,True}
+
+  # Existing FSDP2 CPU-offload policy
+  offload_policy: ${oc.select:actor_rollout_ref.actor.fsdp_config.offload_policy,False}
+
 # Forward-only batch size during inference (global)
 forward_micro_batch_size: ${oc.select:.ppo_micro_batch_size,null}
 

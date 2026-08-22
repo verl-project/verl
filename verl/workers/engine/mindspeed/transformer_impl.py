@@ -21,6 +21,7 @@ except ImportError:
     repatch = None
 
 from verl.trainer.config import CheckpointConfig
+from verl.utils.device import get_device_name
 from verl.workers.config import (
     HFModelConfig,
     McoreEngineConfig,
@@ -35,6 +36,29 @@ from .utils import (
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+# TODO: Remove this guard after adding NPU-aware staging and validating storage
+# release/restore for MindSpeed parameter, gradient-buffer, and optimizer state.
+def _reject_disk_offload(engine_config: McoreEngineConfig) -> None:
+    disk_components = [
+        component
+        for component in ("param", "grad", "optimizer")
+        if engine_config.get_offload_target(component) == "disk"
+    ]
+    assert not disk_components, (
+        f"MindSpeed/NPU does not support disk offload yet; configured components: {', '.join(disk_components)}"
+    )
+
+
+def _reset_mindspeed_offload_state(engine, device: str, *, model: bool, optimizer: bool, grad: bool) -> None:
+    """Preserve MindSpeed's transfer hook around the offload lifecycle API."""
+
+    model = model and engine.is_param_offload_enabled
+    optimizer = optimizer and engine.is_optimizer_offload_enabled
+    grad = grad and engine.is_grad_offload_enabled
+    if model or optimizer or grad:
+        reset_fp8_reuse_quantized_weight(engine, device, model, optimizer, grad)
 
 
 def _mindspeed_repatch(engine_config):
@@ -62,6 +86,7 @@ class MindspeedEngineWithLMHead(MegatronEngineWithLMHead):
         optimizer_config: McoreOptimizerConfig,
         checkpoint_config: CheckpointConfig,
     ):
+        _reject_disk_offload(engine_config)
         super().__init__(model_config, engine_config, optimizer_config, checkpoint_config)
 
     def _init_device_mesh(self):
@@ -86,6 +111,27 @@ class MindspeedEngineWithLMHead(MegatronEngineWithLMHead):
         reset_fp8_reuse_quantized_weight(self, device, model, optimizer, grad)
         super().to(device=device, model=model, optimizer=optimizer, grad=grad)
 
+    def offload(
+        self,
+        *,
+        model: bool = True,
+        optimizer: bool = True,
+        grad: bool = True,
+        preserve_grad: bool = True,
+    ) -> None:
+        _reset_mindspeed_offload_state(self, "cpu", model=model, optimizer=optimizer, grad=grad)
+        super().offload(model=model, optimizer=optimizer, grad=grad, preserve_grad=preserve_grad)
+
+    def onload(self, *, model: bool = True, optimizer: bool = True, grad: bool = True, **kwargs) -> None:
+        _reset_mindspeed_offload_state(
+            self,
+            get_device_name(),
+            model=model,
+            optimizer=optimizer,
+            grad=grad,
+        )
+        super().onload(model=model, optimizer=optimizer, grad=grad, **kwargs)
+
 
 @EngineRegistry.register(model_type="value_model", backend="megatron", device="npu")
 class MindspeedEngineWithValueHead(MegatronEngineWithValueHead):
@@ -96,6 +142,7 @@ class MindspeedEngineWithValueHead(MegatronEngineWithValueHead):
         optimizer_config: McoreOptimizerConfig,
         checkpoint_config: CheckpointConfig,
     ):
+        _reject_disk_offload(engine_config)
         super().__init__(model_config, engine_config, optimizer_config, checkpoint_config)
 
     def _init_device_mesh(self):

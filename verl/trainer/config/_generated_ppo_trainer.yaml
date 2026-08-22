@@ -28,8 +28,21 @@ actor_rollout_ref:
       _target_: verl.workers.config.FSDPEngineConfig
       wrap_policy:
         min_num_params: 0
-      param_offload: false
-      optimizer_offload: false
+      param_offload: null
+      optimizer_offload: null
+      offload:
+        _target_: verl.workers.config.EngineOffloadConfig
+        param:
+          _target_: verl.workers.config.ComponentOffloadConfig
+          target: null
+        optimizer:
+          _target_: verl.workers.config.ComponentOffloadConfig
+          target: null
+        disk:
+          _target_: verl.workers.config.DiskOffloadConfig
+          path: null
+          chunk_size_mb: 64
+          cleanup_on_exit: true
       offload_policy: false
       reshard_after_forward: true
       fsdp_size: -1
@@ -233,8 +246,21 @@ actor_rollout_ref:
       _target_: verl.workers.config.FSDPEngineConfig
       wrap_policy:
         min_num_params: 0
-      param_offload: false
-      optimizer_offload: false
+      param_offload: null
+      optimizer_offload: null
+      offload:
+        _target_: verl.workers.config.EngineOffloadConfig
+        param:
+          _target_: verl.workers.config.ComponentOffloadConfig
+          target: null
+        optimizer:
+          _target_: verl.workers.config.ComponentOffloadConfig
+          target: null
+        disk:
+          _target_: verl.workers.config.DiskOffloadConfig
+          path: null
+          chunk_size_mb: 64
+          cleanup_on_exit: true
       offload_policy: false
       reshard_after_forward: true
       fsdp_size: -1
@@ -550,9 +576,22 @@ critic:
     _target_: verl.workers.config.FSDPEngineConfig
     wrap_policy:
       min_num_params: 0
-    param_offload: false
-    optimizer_offload: false
-    offload_policy: false
+    param_offload: ${oc.select:actor_rollout_ref.actor.fsdp_config.param_offload,null}
+    optimizer_offload: ${oc.select:actor_rollout_ref.actor.fsdp_config.optimizer_offload,null}
+    offload:
+      _target_: verl.workers.config.EngineOffloadConfig
+      param:
+        _target_: verl.workers.config.ComponentOffloadConfig
+        target: ${oc.select:actor_rollout_ref.actor.fsdp_config.offload.param.target,null}
+      optimizer:
+        _target_: verl.workers.config.ComponentOffloadConfig
+        target: ${oc.select:actor_rollout_ref.actor.fsdp_config.offload.optimizer.target,null}
+      disk:
+        _target_: verl.workers.config.DiskOffloadConfig
+        path: ${oc.select:actor_rollout_ref.actor.fsdp_config.offload.disk.path,null}
+        chunk_size_mb: ${oc.select:actor_rollout_ref.actor.fsdp_config.offload.disk.chunk_size_mb,64}
+        cleanup_on_exit: ${oc.select:actor_rollout_ref.actor.fsdp_config.offload.disk.cleanup_on_exit,True}
+    offload_policy: ${oc.select:actor_rollout_ref.actor.fsdp_config.offload_policy,False}
     reshard_after_forward: true
     fsdp_size: -1
     forward_prefetch: false

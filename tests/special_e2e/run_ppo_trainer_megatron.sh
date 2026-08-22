@@ -112,19 +112,23 @@ CRITIC_TP=${CRITIC_TP:-$TRAIN_TP}
 CRITIC_EP=${CRITIC_EP:-$COMMON_EP}
 CRITIC_ETP=${CRITIC_ETP:-$COMMON_ETP}
 
-ALL_OFFLOAD=${ALL_OFFLOAD:-True}
-COMMON_PARAM_OFFLOAD=${COMMON_PARAM_OFFLOAD:-$ALL_OFFLOAD}
-COMMON_GRAD_OFFLOAD=${COMMON_GRAD_OFFLOAD:-$ALL_OFFLOAD}
-COMMON_OPTIMIZER_OFFLOAD=${COMMON_OPTIMIZER_OFFLOAD:-$ALL_OFFLOAD}
+# Select the storage tier for all state types and roles.
+OFFLOAD_TARGET=${OFFLOAD_TARGET:-cpu}
+DISK_OFFLOAD_PATH=${DISK_OFFLOAD_PATH:-null}
+DISK_OFFLOAD_CHUNK_SIZE_MB=${DISK_OFFLOAD_CHUNK_SIZE_MB:-64}
 
-ACTOR_PARAM_OFFLOAD=${ACTOR_PARAM_OFFLOAD:-$COMMON_PARAM_OFFLOAD}
-ACTOR_GRAD_OFFLOAD=${ACTOR_GRAD_OFFLOAD:-$COMMON_GRAD_OFFLOAD}
-ACTOR_OPTIMIZER_OFFLOAD=${ACTOR_OPTIMIZER_OFFLOAD:-$COMMON_OPTIMIZER_OFFLOAD}
-REF_PARAM_OFFLOAD=${REF_PARAM_OFFLOAD:-$COMMON_PARAM_OFFLOAD}
-CRITIC_PARAM_OFFLOAD=${CRITIC_PARAM_OFFLOAD:-$COMMON_PARAM_OFFLOAD}
-CRITIC_GRAD_OFFLOAD=${CRITIC_GRAD_OFFLOAD:-$COMMON_GRAD_OFFLOAD}
-CRITIC_OPTIMIZER_OFFLOAD=${CRITIC_OPTIMIZER_OFFLOAD:-$COMMON_OPTIMIZER_OFFLOAD}
-RM_PARAM_OFFLOAD=${RM_PARAM_OFFLOAD:-$COMMON_PARAM_OFFLOAD}
+case "${OFFLOAD_TARGET}" in
+    none | cpu | disk) ;;
+    *)
+        echo "[ERROR] OFFLOAD_TARGET must be one of none, cpu, or disk; got: ${OFFLOAD_TARGET}"
+        exit 1
+        ;;
+esac
+
+if [ "${OFFLOAD_TARGET}" = disk ] && [ "${DISK_OFFLOAD_PATH}" = null ]; then
+    echo "[ERROR] DISK_OFFLOAD_PATH must point to node-local scratch storage for disk offload"
+    exit 1
+fi
 USE_MBRIDGE=${USE_MBRIDGE:-True}
 VANILLA_MBRIDGE=${VANILLA_MBRIDGE:-False}
 VALUE_VANILLA_MBRIDGE=${VALUE_VANILLA_MBRIDGE:-$VANILLA_MBRIDGE}
@@ -214,9 +218,11 @@ common_params=(
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=$ACTOR_TP
     actor_rollout_ref.actor.megatron.expert_model_parallel_size=$ACTOR_EP
     actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=$ACTOR_ETP
-    actor_rollout_ref.actor.megatron.param_offload=${ACTOR_PARAM_OFFLOAD}
-    actor_rollout_ref.actor.megatron.optimizer_offload=${ACTOR_OPTIMIZER_OFFLOAD}
-    actor_rollout_ref.actor.megatron.grad_offload=${ACTOR_GRAD_OFFLOAD}
+    actor_rollout_ref.actor.megatron.offload.param.target=${OFFLOAD_TARGET}
+    actor_rollout_ref.actor.megatron.offload.grad.target=${OFFLOAD_TARGET}
+    actor_rollout_ref.actor.megatron.offload.optimizer.target=${OFFLOAD_TARGET}
+    actor_rollout_ref.actor.megatron.offload.disk.path="${DISK_OFFLOAD_PATH}"
+    actor_rollout_ref.actor.megatron.offload.disk.chunk_size_mb=${DISK_OFFLOAD_CHUNK_SIZE_MB}
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=${USE_DIST_CKPT}
     actor_rollout_ref.actor.megatron.dist_checkpointing_path=${DIST_CKPT_PATH}
     actor_rollout_ref.actor.use_kl_loss=True
@@ -244,7 +250,9 @@ common_params=(
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=$REF_TP
     actor_rollout_ref.ref.megatron.expert_model_parallel_size=$REF_EP
     actor_rollout_ref.ref.megatron.expert_tensor_parallel_size=$REF_ETP
-    actor_rollout_ref.ref.megatron.param_offload=${REF_PARAM_OFFLOAD}
+    actor_rollout_ref.ref.megatron.offload.param.target=${OFFLOAD_TARGET}
+    actor_rollout_ref.ref.megatron.offload.disk.path="${DISK_OFFLOAD_PATH}"
+    actor_rollout_ref.ref.megatron.offload.disk.chunk_size_mb=${DISK_OFFLOAD_CHUNK_SIZE_MB}
     actor_rollout_ref.ref.megatron.use_dist_checkpointing=${USE_DIST_CKPT}
     actor_rollout_ref.ref.megatron.dist_checkpointing_path=${DIST_CKPT_PATH}
     critic.optim.lr=2e-5
@@ -267,9 +275,11 @@ common_params=(
     critic.megatron.tensor_model_parallel_size=$CRITIC_TP
     critic.megatron.expert_model_parallel_size=$CRITIC_EP
     critic.megatron.expert_tensor_parallel_size=$CRITIC_ETP
-    critic.megatron.param_offload=${CRITIC_PARAM_OFFLOAD}
-    critic.megatron.optimizer_offload=${CRITIC_OPTIMIZER_OFFLOAD}
-    critic.megatron.grad_offload=${CRITIC_GRAD_OFFLOAD}
+    critic.megatron.offload.param.target=${OFFLOAD_TARGET}
+    critic.megatron.offload.grad.target=${OFFLOAD_TARGET}
+    critic.megatron.offload.optimizer.target=${OFFLOAD_TARGET}
+    critic.megatron.offload.disk.path="${DISK_OFFLOAD_PATH}"
+    critic.megatron.offload.disk.chunk_size_mb=${DISK_OFFLOAD_CHUNK_SIZE_MB}
     critic.megatron.use_dist_checkpointing=${USE_DIST_CKPT}
     critic.megatron.dist_checkpointing_path=${DIST_CKPT_PATH}
     critic.checkpoint.save_contents=$CHECKPOINT_CONTENTS

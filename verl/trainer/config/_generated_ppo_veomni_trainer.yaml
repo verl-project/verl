@@ -24,8 +24,21 @@ actor_rollout_ref:
       override_optimizer_config: {}
     veomni:
       _target_: verl.workers.config.VeOmniEngineConfig
-      param_offload: false
-      optimizer_offload: false
+      param_offload: null
+      optimizer_offload: null
+      offload:
+        _target_: verl.workers.config.EngineOffloadConfig
+        param:
+          _target_: verl.workers.config.ComponentOffloadConfig
+          target: null
+        optimizer:
+          _target_: verl.workers.config.ComponentOffloadConfig
+          target: null
+        disk:
+          _target_: verl.workers.config.DiskOffloadConfig
+          path: null
+          chunk_size_mb: 64
+          cleanup_on_exit: true
       fsdp_size: -1
       ulysses_parallel_size: 1
       expert_parallel_size: 1
@@ -218,8 +231,21 @@ actor_rollout_ref:
           strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
     veomni:
       _target_: verl.workers.config.VeOmniEngineConfig
-      param_offload: ${oc.select:actor_rollout_ref.actor.veomni.param_offload,False}
-      optimizer_offload: false
+      param_offload: ${oc.select:actor_rollout_ref.actor.veomni.param_offload,null}
+      optimizer_offload: null
+      offload:
+        _target_: verl.workers.config.EngineOffloadConfig
+        param:
+          _target_: verl.workers.config.ComponentOffloadConfig
+          target: ${oc.select:actor_rollout_ref.actor.veomni.offload.param.target,null}
+        optimizer:
+          _target_: verl.workers.config.ComponentOffloadConfig
+          target: null
+        disk:
+          _target_: verl.workers.config.DiskOffloadConfig
+          path: ${oc.select:actor_rollout_ref.actor.veomni.offload.disk.path,null}
+          chunk_size_mb: ${oc.select:actor_rollout_ref.actor.veomni.offload.disk.chunk_size_mb,64}
+          cleanup_on_exit: ${oc.select:actor_rollout_ref.actor.veomni.offload.disk.cleanup_on_exit,True}
       fsdp_size: ${oc.select:actor_rollout_ref.actor.veomni.fsdp_size,-1}
       ulysses_parallel_size: ${oc.select:actor_rollout_ref.actor.veomni.ulysses_parallel_size,1}
       expert_parallel_size: ${oc.select:actor_rollout_ref.actor.veomni.expert_parallel_size,1}
@@ -523,8 +549,21 @@ critic:
     override_optimizer_config: {}
   veomni:
     _target_: verl.workers.config.VeOmniEngineConfig
-    param_offload: false
-    optimizer_offload: false
+    param_offload: ${oc.select:actor_rollout_ref.actor.veomni.param_offload,null}
+    optimizer_offload: ${oc.select:actor_rollout_ref.actor.veomni.optimizer_offload,null}
+    offload:
+      _target_: verl.workers.config.EngineOffloadConfig
+      param:
+        _target_: verl.workers.config.ComponentOffloadConfig
+        target: ${oc.select:actor_rollout_ref.actor.veomni.offload.param.target,null}
+      optimizer:
+        _target_: verl.workers.config.ComponentOffloadConfig
+        target: ${oc.select:actor_rollout_ref.actor.veomni.offload.optimizer.target,null}
+      disk:
+        _target_: verl.workers.config.DiskOffloadConfig
+        path: ${oc.select:actor_rollout_ref.actor.veomni.offload.disk.path,null}
+        chunk_size_mb: ${oc.select:actor_rollout_ref.actor.veomni.offload.disk.chunk_size_mb,64}
+        cleanup_on_exit: ${oc.select:actor_rollout_ref.actor.veomni.offload.disk.cleanup_on_exit,True}
     fsdp_size: -1
     ulysses_parallel_size: 1
     expert_parallel_size: 1
@@ -541,7 +580,7 @@ critic:
     entropy_from_logits_with_chunking: false
     entropy_checkpointing: false
     forward_only: false
-    enable_fsdp_offload: false
+    enable_fsdp_offload: ${oc.select:actor_rollout_ref.actor.veomni.enable_fsdp_offload,False}
     enable_reentrant: false
     attn_implementation: flash_attention_2
     moe_implementation: fused

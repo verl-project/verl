@@ -138,7 +138,7 @@ jobs:
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron, use Megatron-Bridge e2e to pre-load and save (Deepseek)
         run: |
           $UV_RUN ray stop --force
-          ALL_OFFLOAD=True SAVE_FREQ=1 MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct COMMON_PP=4 COMMON_VPP=null COMMON_CP=1 USE_MBRIDGE=True USE_DIST_CKPT=False \
+          SAVE_FREQ=1 MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct COMMON_PP=4 COMMON_VPP=null COMMON_CP=1 USE_MBRIDGE=True USE_DIST_CKPT=False \
           bash tests/special_e2e/run_ppo_trainer_megatron.sh
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron, use Megatron-Bridge e2e to pre-load and save (Deepseek)
         run: |
@@ -152,7 +152,7 @@ jobs:
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron, use Megatron-Bridge LoRA e2e to pre-load and save (Deepseek)
         run: |
           $UV_RUN ray stop --force
-          ALL_OFFLOAD=True SAVE_FREQ=1 MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct COMMON_PP=4 LORA_RANK=8 COMMON_VPP=null COMMON_CP=1 USE_MBRIDGE=True VANILLA_MBRIDGE=False VALUE_VANILLA_MBRIDGE=False USE_DIST_CKPT=False \
+          SAVE_FREQ=1 MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct COMMON_PP=4 LORA_RANK=8 COMMON_VPP=null COMMON_CP=1 USE_MBRIDGE=True VANILLA_MBRIDGE=False VALUE_VANILLA_MBRIDGE=False USE_DIST_CKPT=False \
           bash tests/special_e2e/run_ppo_trainer_megatron.sh
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron, use Megatron-Bridge LoRA e2e to pre-load and save (Deepseek)
         run: |
@@ -194,7 +194,13 @@ jobs:
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron (Qwen3) testing learning rate scheduler
         run: |
           $UV_RUN ray stop --force
-          ALL_OFFLOAD=True VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 LR_WARMUP_STEPS=1 TOTAL_TRAIN_STEPS=2 MODEL_ID=Qwen/Qwen3-0.6B bash tests/special_e2e/run_ppo_trainer_megatron.sh
+          VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 LR_WARMUP_STEPS=1 TOTAL_TRAIN_STEPS=2 MODEL_ID=Qwen/Qwen3-0.6B bash tests/special_e2e/run_ppo_trainer_megatron.sh
+      - name: Running GSM8K E2E training tests with Megatron disk offload
+        run: |
+          $UV_RUN ray stop --force
+          OFFLOAD_TARGET=disk \
+          DISK_OFFLOAD_PATH="${RUNNER_TEMP}/verl-disk-offload" \
+          MODEL_ID=Qwen/Qwen3-0.6B bash tests/special_e2e/run_ppo_trainer_megatron.sh
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with FP8 rollout
         run: |
           $UV_RUN ray stop --force
@@ -203,7 +209,8 @@ jobs:
       - name: Running GSM8K E2E PPO training tests on 8 L20 GPUs with Megatron-FSDP (Qwen3)
         run: |
           $UV_RUN ray stop --force
-          ALL_OFFLOAD=False USE_MBRIDGE=True VANILLA_MBRIDGE=False USE_MEGATRON_FSDP=True \
+          OFFLOAD_TARGET=none \
+          USE_MBRIDGE=True VANILLA_MBRIDGE=False USE_MEGATRON_FSDP=True \
           TOTAL_TRAIN_STEPS=2 MODEL_ID=Qwen/Qwen3-0.6B \
           COMMON_PP=1 COMMON_VPP=null COMMON_CP=1 COMMON_TP=1 INFER_TP=1 \
           bash tests/special_e2e/run_ppo_trainer_megatron.sh \

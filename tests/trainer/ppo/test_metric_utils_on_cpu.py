@@ -27,6 +27,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
+    extract_disk_offload_metrics,
     process_validation_metrics,
 )
 from verl.utils.metric import (
@@ -69,6 +70,32 @@ class TestReduceMetrics(unittest.TestCase):
         result = reduce_metrics(metrics)
 
         self.assertEqual(result["single"], 5.0)
+
+
+class TestExtractDiskOffloadMetrics(unittest.TestCase):
+    def test_filters_reduces_and_prefixes_disk_metrics(self):
+        worker_metrics = [
+            {
+                "disk_offload_s/param": [2.0],
+                "disk_offload_gib/param": [4.0],
+                "disk_offload_gib_s/param": [2.0],
+                "loss": [1.0],
+            },
+            {
+                "disk_offload_s/param": [2.0],
+                "disk_offload_gib/param": [4.0],
+                "disk_offload_gib_s/param": [2.0],
+            },
+        ]
+
+        assert extract_disk_offload_metrics(worker_metrics, "actor_infer") == {
+            "actor_infer/disk_offload_s/param": 2.0,
+            "actor_infer/disk_offload_gib/param": 4.0,
+            "actor_infer/disk_offload_gib_s/param": 2.0,
+        }
+
+    def test_returns_empty_when_disk_io_did_not_run(self):
+        assert extract_disk_offload_metrics({"loss": [1.0]}, "actor") == {}
 
 
 class TestMetric(unittest.TestCase):

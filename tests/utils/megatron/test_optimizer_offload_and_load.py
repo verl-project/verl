@@ -25,7 +25,15 @@ from megatron.core.optimizer.optimizer import ChainedOptimizer
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.transformer_config import TransformerConfig
 
-from verl.utils.megatron_utils import load_megatron_optimizer, offload_megatron_optimizer
+from verl.utils.megatron_utils import (
+    load_megatron_model_from_disk,
+    load_megatron_optimizer,
+    load_megatron_optimizer_from_disk,
+    offload_megatron_model_to_disk,
+    offload_megatron_optimizer,
+    offload_megatron_optimizer_to_disk,
+)
+from verl.utils.offload import DiskOffloadStore
 
 # ==== Helper functions ==== #
 
@@ -101,6 +109,17 @@ def precision_aware_optimizer_is_on_device(optimizer, device):
     return True
 
 
+def snapshot_optimizer_state(optimizer):
+    opts = optimizer.chained_optimizers if isinstance(optimizer, ChainedOptimizer) else [optimizer]
+    return [
+        value.clone()
+        for opt in opts
+        for state in opt.optimizer.state.values()
+        for value in state.values()
+        if isinstance(value, torch.Tensor)
+    ]
+
+
 # ==== Tests ==== #
 
 
@@ -150,5 +169,104 @@ def test_precision_aware_optimizer_offload_and_load(tmp_path):
         )
     finally:
         # Tear down MPU state and torch.distributed.
+        mpu.destroy_model_parallel()
+        dist.destroy_process_group()
+
+
+def test_precision_aware_optimizer_disk_offload_and_load(tmp_path):
+    rendezvous_file = tmp_path / "rdzv_optimizer_disk"
+
+    torch.cuda.set_device(0)
+    dist.init_process_group(
+        backend="cpu:gloo,cuda:nccl",
+        init_method=f"file://{rendezvous_file}",
+        rank=0,
+        world_size=1,
+    )
+    mpu.initialize_model_parallel()
+    model_parallel_cuda_manual_seed(123)
+
+    try:
+        model_chunks = init_model()
+        optimizer = init_precision_aware_optimizer(model_chunks)
+        for model_chunk in model_chunks:
+            model_chunk.zero_grad_buffer()
+        optimizer.zero_grad(set_to_none=False)
+        update_successful, _, _ = optimizer.step()
+        assert update_successful
+        expected_state = snapshot_optimizer_state(optimizer)
+
+        store = DiskOffloadStore(
+            str(tmp_path / "offload"),
+            rank=0,
+            chunk_size_mb=1,
+            cleanup_on_exit=False,
+            job_id="optimizer-test",
+        )
+        offload_megatron_optimizer_to_disk(optimizer, store)
+        assert precision_aware_optimizer_is_on_device(optimizer, torch.device("cpu"))
+
+        load_megatron_optimizer_from_disk(optimizer, store)
+        assert precision_aware_optimizer_is_on_device(optimizer, torch.device("cuda:0"))
+        for actual, expected in zip(snapshot_optimizer_state(optimizer), expected_state, strict=True):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    finally:
+        mpu.destroy_model_parallel()
+        dist.destroy_process_group()
+
+
+def test_megatron_param_and_live_grad_disk_round_trip(tmp_path):
+    rendezvous_file = tmp_path / "rdzv_model_disk"
+
+    torch.cuda.set_device(0)
+    dist.init_process_group(
+        backend="cpu:gloo,cuda:nccl",
+        init_method=f"file://{rendezvous_file}",
+        rank=0,
+        world_size=1,
+    )
+    mpu.initialize_model_parallel()
+    model_parallel_cuda_manual_seed(123)
+
+    try:
+        model_chunks = init_model()
+        buffers = [
+            buffer
+            for model_chunk in model_chunks
+            for group in (model_chunk.buffers, model_chunk.expert_parallel_buffers)
+            for buffer in group
+        ]
+        for buffer in buffers:
+            buffer.grad_data.copy_(torch.randn_like(buffer.grad_data))
+        expected_params = [buffer.param_data.clone() for buffer in buffers]
+        expected_grads = [buffer.grad_data.clone() for buffer in buffers]
+
+        store = DiskOffloadStore(
+            str(tmp_path / "offload"),
+            rank=0,
+            chunk_size_mb=1,
+            cleanup_on_exit=False,
+            job_id="model-test",
+        )
+        offload_megatron_model_to_disk(
+            model_chunks,
+            store,
+            offload_param=True,
+            offload_grad=True,
+            preserve_grad=True,
+        )
+        assert all(buffer.param_data.storage().size() == 0 for buffer in buffers)
+        assert all(buffer.grad_data.storage().size() == 0 for buffer in buffers)
+
+        load_megatron_model_from_disk(
+            model_chunks,
+            store,
+            load_param=True,
+            load_grad=True,
+        )
+        for buffer, expected_param, expected_grad in zip(buffers, expected_params, expected_grads, strict=True):
+            torch.testing.assert_close(buffer.param_data, expected_param, rtol=0, atol=0)
+            torch.testing.assert_close(buffer.grad_data, expected_grad, rtol=0, atol=0)
+    finally:
         mpu.destroy_model_parallel()
         dist.destroy_process_group()

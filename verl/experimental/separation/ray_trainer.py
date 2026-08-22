@@ -519,6 +519,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         else:  # Recompute old_log_probs
             with marked_timer("old_log_prob", timing_raw, color="blue"):
                 old_log_prob, old_log_prob_mfu = self._compute_old_log_prob(batch)
+                metrics.update(old_log_prob.meta_info.pop("metrics", {}))
                 entropys = old_log_prob.batch["entropys"]
                 response_masks = batch.batch["response_mask"]
                 actor_config = self.config.actor_rollout_ref.actor
@@ -562,6 +563,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         if self.use_reference_policy:
             with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
                 ref_log_prob = self._compute_ref_log_prob(batch)
+                self.metrics.update(ref_log_prob.meta_info.pop("metrics", {}))
                 batch = batch.union(ref_log_prob)
         return batch
 
@@ -570,6 +572,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
         if self.use_critic:
             with marked_timer("values", timing_raw, color="cyan"):
                 values = self._compute_values(batch)
+                self.metrics.update(values.meta_info.pop("metrics", {}))
                 batch = batch.union(values)
         return batch
 

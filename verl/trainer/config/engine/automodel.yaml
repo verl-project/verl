@@ -16,11 +16,27 @@ dp_replicate_size: 1
 sequence_parallel: false
 defer_fsdp_grad_sync: true
 
-# Whether to offload model parameters to CPU
-param_offload: false
+# Deprecated CPU-offload booleans. Null means unspecified; explicitly setting
+# true or false remains compatible but emits a deprecation warning.
+param_offload: null
 
-# Whether to offload optimizer state to CPU
-optimizer_offload: false
+optimizer_offload: null
+
+# Per-state CPU offload targets. AutoModel does not support disk offload;
+# parameter offload continues to move gradient storage with the parameters.
+offload:
+  _target_: verl.workers.config.EngineOffloadConfig
+  param:
+    _target_: verl.workers.config.ComponentOffloadConfig
+    target: null
+  optimizer:
+    _target_: verl.workers.config.ComponentOffloadConfig
+    target: null
+  disk:
+    _target_: verl.workers.config.DiskOffloadConfig
+    path: null
+    chunk_size_mb: 64
+    cleanup_on_exit: true
 
 # Whether to enable activation checkpointing
 activation_checkpointing: false

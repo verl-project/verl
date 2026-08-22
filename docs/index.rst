@@ -162,6 +162,7 @@ verl is fast with:
    advance/mtp.md
    advance/determinism.md
    advance/fsdp_turbo_backend
+   advance/disk_offload
 
 .. toctree::
    :maxdepth: 1

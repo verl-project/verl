@@ -1,14 +1,42 @@
 # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
 _target_: verl.workers.config.McoreEngineConfig
 
-# Whether to offload model parameters to CPU
-param_offload: False
+# Deprecated CPU-offload booleans. Null means unspecified; explicitly setting
+# true or false remains compatible but emits a deprecation warning.
+param_offload: null
 
-# Whether to offload gradients to CPU
-grad_offload: False
+grad_offload: null
 
-# Whether to offload optimizer state to CPU
-optimizer_offload: False
+optimizer_offload: null
+
+# Per-state offload targets. Null keeps compatibility with the legacy booleans
+# above; set an explicit target to one of: none, cpu, disk.
+offload:
+
+  # Target dataclass for the offload policy
+  _target_: verl.workers.config.EngineOffloadConfig
+
+  # Parameter offload policy
+  param:
+    _target_: verl.workers.config.ComponentOffloadConfig
+    target: null
+
+  # Gradient offload policy
+  grad:
+    _target_: verl.workers.config.ComponentOffloadConfig
+    target: null
+
+  # Optimizer-state offload policy
+  optimizer:
+    _target_: verl.workers.config.ComponentOffloadConfig
+    target: null
+
+  # Disk backend settings shared by disk-target components
+  disk:
+    _target_: verl.workers.config.DiskOffloadConfig
+    path: null
+    chunk_size_mb: 64
+    cleanup_on_exit: true
 
 # tensor model parallel size
 tensor_model_parallel_size: 1

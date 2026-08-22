@@ -136,6 +136,12 @@ jobs:
         run: |
           ray stop --force
           FSDP_SIZE=4 SP_SIZE=2 bash tests/special_e2e/run_ppo_trainer_veomni.sh
+      - name: Running GSM8K E2E training tests with VeOmni disk offload
+        run: |
+          ray stop --force
+          OFFLOAD_TARGET=disk \
+          DISK_OFFLOAD_PATH="${RUNNER_TEMP}/verl-veomni-disk-offload" \
+          FSDP_SIZE=4 SP_SIZE=2 bash tests/special_e2e/run_ppo_trainer_veomni.sh
       - name: Running GEO3K E2E training tests on 8 L20 GPUs with veomni engine (FSDP_SIZE=8, USP=1)
         run: |
           ray stop --force

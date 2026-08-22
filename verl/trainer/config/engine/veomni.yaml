@@ -1,11 +1,27 @@
 # Target class for this configuration
 _target_: verl.workers.config.VeOmniEngineConfig
 
-# Whether to offload model parameters to CPU
-param_offload: False
+# Deprecated CPU-offload booleans. Null means unspecified; explicitly setting
+# true or false remains compatible but emits a deprecation warning.
+param_offload: null
 
-# Whether to offload optimizer state to CPU
-optimizer_offload: False
+optimizer_offload: null
+
+# Per-state offload targets. Parameter offload also moves gradient storage,
+# matching the existing VeOmni behavior. Optimizer state is independent.
+offload:
+  _target_: verl.workers.config.EngineOffloadConfig
+  param:
+    _target_: verl.workers.config.ComponentOffloadConfig
+    target: null
+  optimizer:
+    _target_: verl.workers.config.ComponentOffloadConfig
+    target: null
+  disk:
+    _target_: verl.workers.config.DiskOffloadConfig
+    path: null
+    chunk_size_mb: 64
+    cleanup_on_exit: true
 
 # FSDP group size. -1 means use all available GPUs.
 fsdp_size: -1

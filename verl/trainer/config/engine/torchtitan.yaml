@@ -1,11 +1,28 @@
 # Target class for this configuration
 _target_: verl.workers.config.TorchtitanEngineConfig
 
-# Whether to offload model parameters to CPU
-param_offload: False
+# Deprecated compatibility switches. null means unset; explicit true/false
+# still works but emits a FutureWarning. Use offload.*.target instead.
+param_offload: null
 
-# Whether to offload optimizer state to CPU
-optimizer_offload: False
+optimizer_offload: null
+
+# Per-state offload target. null preserves legacy-field fallback; TorchTitan
+# accepts explicit none/cpu for parameters and optimizer state and rejects disk.
+# Gradient storage continues to follow parameter placement.
+offload:
+  _target_: verl.workers.config.EngineOffloadConfig
+  param:
+    _target_: verl.workers.config.ComponentOffloadConfig
+    target: null
+  optimizer:
+    _target_: verl.workers.config.ComponentOffloadConfig
+    target: null
+  disk:
+    _target_: verl.workers.config.DiskOffloadConfig
+    path: null
+    chunk_size_mb: 64
+    cleanup_on_exit: true
 
 # policy for wrapping the model
 wrap_policy:

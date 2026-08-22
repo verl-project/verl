@@ -22,7 +22,7 @@ import logging
 import os
 import warnings
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator
 
 import torch
 import torch.nn.functional as F
@@ -42,6 +42,7 @@ import verl.utils.megatron.tensor_parallel as tp_utils
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.fs import local_mkdir_safe
 from verl.utils.model import normalize_model_name
+from verl.utils.offload import DiskOffloadStore
 from verl.utils.torch_dtypes import PrecisionType
 from verl.workers.config import HFModelConfig, McoreEngineConfig
 
@@ -660,7 +661,7 @@ def _clear_te_fp8_weight_workspaces(model_chunk):
 
 
 @torch.no_grad()
-def offload_megatron_model_to_cpu(models):
+def offload_megatron_model_to_cpu(models, *, offload_param=True, offload_grad=True, preserve_grad=False):
     """
     In megatron, the model and optimizer storage are:
     - bf16 parameter data chunked in model parallel group
@@ -674,7 +675,7 @@ def offload_megatron_model_to_cpu(models):
             for buffers in model_chunk_all_buffers:
                 for buffer in buffers:
                     # offload parameters
-                    if buffer.param_data.storage().size() > 0:
+                    if offload_param and buffer.param_data.storage().size() > 0:
                         # Reuse a single pinned cpu_data buffer per DDP buffer.
                         # The previous implementation reallocated cpu_data via
                         # `.cpu().pin_memory()` on every offload. Python evaluates
@@ -715,25 +716,41 @@ def offload_megatron_model_to_cpu(models):
                         buffer.param_data.cpu_data.copy_(buffer.param_data.data, non_blocking=False)
                         buffer.param_data.storage().resize_(0)
 
-                    assert buffer.param_data_size == buffer.param_data.cpu_data.storage().size()
+                    if offload_param:
+                        assert buffer.param_data_size == buffer.param_data.cpu_data.storage().size()
 
-                    if buffer.grad_data.storage().size() > 0:
+                    if offload_grad and buffer.grad_data.storage().size() > 0:
                         # if the grad_data size is already zero, we assume that it is already offloaded
                         buffer.grad_data_size = buffer.grad_data.storage().size()
+                        buffer.grad_data_preserved = preserve_grad
+                        if preserve_grad:
+                            existing = getattr(buffer.grad_data, "cpu_data", None)
+                            if existing is None:
+                                buffer.grad_data.cpu_data = torch.empty(
+                                    buffer.grad_data.size(),
+                                    dtype=buffer.grad_data.dtype,
+                                    device="cpu",
+                                    pin_memory=True,
+                                )
+                            else:
+                                assert existing.shape == buffer.grad_data.shape
+                                assert existing.dtype == buffer.grad_data.dtype
+                            buffer.grad_data.cpu_data.copy_(buffer.grad_data.data, non_blocking=False)
                         buffer.grad_data.storage().resize_(0)
             # Offload frozen parameters not in DDP buffers (e.g. base model in LoRA/PEFT)
             # DDP buffers only contain requires_grad=True params, so frozen params must be offloaded separately.
             for param in model_chunk.module.parameters():
-                if not param.requires_grad and param.device.type != "cpu":
+                if offload_param and not param.requires_grad and param.device.type != "cpu":
                     param.data = param.data.to("cpu", non_blocking=True)
         else:
             # we need this for ref module
             for _, param in model_chunk.named_parameters():
-                old_data = param.data
-                param.data = param.data.to("cpu")
-                if _can_safely_resize_storage(old_data):
-                    old_data.storage().resize_(0)
-                if param.grad is not None:
+                if offload_param:
+                    old_data = param.data
+                    param.data = param.data.to("cpu")
+                    if _can_safely_resize_storage(old_data):
+                        old_data.storage().resize_(0)
+                if offload_grad and param.grad is not None:
                     old_grad = param.grad
                     param.grad = param.grad.to("cpu")
                     if _can_safely_resize_storage(old_grad):
@@ -741,7 +758,7 @@ def offload_megatron_model_to_cpu(models):
 
         # Drop Transformer-Engine FP8 weight-workspace caches, which hold quantized
         # copies of the weights on GPU and are not covered by the parameter offload above.
-        cleared = _clear_te_fp8_weight_workspaces(model_chunk)
+        cleared = _clear_te_fp8_weight_workspaces(model_chunk) if offload_param else 0
         if cleared:
             logger.debug("Cleared %d TE FP8 weight workspaces on offload", cleared)
 
@@ -750,7 +767,7 @@ def offload_megatron_model_to_cpu(models):
 
 
 @torch.no_grad()
-def load_megatron_model_to_gpu(models, load_grad=True, load_frozen_params=True):
+def load_megatron_model_to_gpu(models, load_param=True, load_grad=True, load_frozen_params=True):
     """
     Load megatron model to GPU.
     Args:
@@ -768,20 +785,23 @@ def load_megatron_model_to_gpu(models, load_grad=True, load_frozen_params=True):
                         current_storage_size = buffer.grad_data.storage().size()
                         if current_storage_size == 0 or current_storage_size == buffer.grad_data_size:
                             buffer.grad_data.storage().resize_(buffer.grad_data_size)
-                            buffer.grad_data.zero_()
+                            if getattr(buffer, "grad_data_preserved", False):
+                                buffer.grad_data.copy_(buffer.grad_data.cpu_data, non_blocking=True)
+                            else:
+                                buffer.grad_data.zero_()
                         else:
                             # Non-standard layers (e.g. GatedDeltaNet) may have grad
                             # buffers with mismatched storage size; skip resize and
                             # zero in-place with current storage.
                             buffer.grad_data.zero_()
 
-                    if buffer.param_data.storage().size() == 0:
+                    if load_param and buffer.param_data.storage().size() == 0:
                         buffer.param_data.storage().resize_(buffer.param_data_size)
                         # copy data from cpu to cuda
                         buffer.param_data.copy_(buffer.param_data.cpu_data, non_blocking=True)
 
             # Load frozen parameters that were offloaded (e.g. base model in LoRA/PEFT)
-            if load_frozen_params:
+            if load_param and load_frozen_params:
                 device_id = get_device_id()
                 for param in model_chunk.module.parameters():
                     if not param.requires_grad and param.device.type == "cpu":
@@ -790,9 +810,233 @@ def load_megatron_model_to_gpu(models, load_grad=True, load_frozen_params=True):
             # we need this for ref module
             device_id = get_device_id()
             for _, param in model_chunk.named_parameters():
-                param.data = param.data.to(device_id, non_blocking=True)
-                if param.grad is not None:
+                if load_param:
+                    param.data = param.data.to(device_id, non_blocking=True)
+                if load_grad and param.grad is not None:
                     param.grad = param.grad.to(device_id, non_blocking=True)
+    gc.collect()
+    get_torch_device().empty_cache()
+
+
+def _empty_tensor_data(tensor: torch.Tensor) -> None:
+    tensor.data = torch.empty(0, dtype=tensor.dtype, device="cpu")
+
+
+def _model_disk_entries(models, component: str) -> Iterator[tuple[str, torch.Tensor, str]]:
+    """Yield stable keys, tensors, and release strategies for Megatron model state."""
+
+    for model_index, model_chunk in enumerate(models):
+        if isinstance(model_chunk, DDP):
+            buffer_groups = (
+                ("dense", model_chunk.buffers),
+                ("expert", model_chunk.expert_parallel_buffers),
+            )
+            for group_name, buffers in buffer_groups:
+                for buffer_index, buffer in enumerate(buffers):
+                    tensor = buffer.param_data if component == "param" else buffer.grad_data
+                    yield f"model.{model_index}.{group_name}.{buffer_index}.{component}", tensor, "storage"
+            if component == "param":
+                for name, param in model_chunk.module.named_parameters():
+                    if not param.requires_grad:
+                        yield f"model.{model_index}.frozen.{name}", param, "data"
+        else:
+            for name, param in model_chunk.named_parameters():
+                if component == "param":
+                    yield f"model.{model_index}.param.{name}", param, "data"
+                elif param.grad is not None:
+                    yield f"model.{model_index}.grad.{name}", param.grad, "data"
+
+
+@torch.no_grad()
+def _discard_megatron_grad(models) -> None:
+    """Apply verl's existing post-zero-grad storage reclamation."""
+
+    for model_chunk in models:
+        if isinstance(model_chunk, DDP):
+            for buffers in (model_chunk.buffers, model_chunk.expert_parallel_buffers):
+                for buffer in buffers:
+                    if buffer.grad_data.storage().size() > 0:
+                        buffer.grad_data_size = buffer.grad_data.storage().size()
+                        buffer.grad_data_preserved = False
+                        buffer.grad_data.storage().resize_(0)
+        else:
+            for param in model_chunk.parameters():
+                param.grad = None
+    gc.collect()
+    get_torch_device().empty_cache()
+
+
+@torch.no_grad()
+def offload_megatron_model_to_disk(
+    models,
+    store: DiskOffloadStore,
+    *,
+    offload_param: bool,
+    offload_grad: bool,
+    preserve_grad: bool,
+) -> None:
+    """Persist selected model state and then release accelerator storage."""
+
+    releases: list[tuple[torch.Tensor, str]] = []
+    if offload_param:
+        entries = list(_model_disk_entries(models, "param"))
+        store.write_tensors("param", ((key, tensor) for key, tensor, _ in entries))
+        releases.extend((tensor, strategy) for _, tensor, strategy in entries)
+
+    if offload_grad and preserve_grad:
+        entries = list(_model_disk_entries(models, "grad"))
+        store.write_tensors("grad", ((key, tensor) for key, tensor, _ in entries))
+        releases.extend((tensor, strategy) for _, tensor, strategy in entries)
+    elif offload_grad:
+        store.invalidate("grad")
+        _discard_megatron_grad(models)
+
+    # All requested writes have committed before the resident copies are released.
+    for tensor, strategy in releases:
+        if strategy == "storage":
+            tensor.storage().resize_(0)
+        else:
+            _empty_tensor_data(tensor)
+
+    if offload_param:
+        for model_chunk in models:
+            cleared = _clear_te_fp8_weight_workspaces(model_chunk)
+            if cleared:
+                logger.debug("Cleared %d TE FP8 weight workspaces on disk offload", cleared)
+
+    gc.collect()
+    get_torch_device().empty_cache()
+
+
+def _prepare_disk_restore_tensor(
+    store: DiskOffloadStore,
+    component: str,
+    key: str,
+    tensor: torch.Tensor,
+    strategy: str,
+) -> torch.Tensor:
+    metadata = store.metadata(component, key)
+    if strategy == "storage":
+        if tensor.storage().size() == 0:
+            tensor.storage().resize_(metadata.numel)
+        return tensor
+    if tensor.numel() == 0 or tensor.device.type == "cpu":
+        tensor.data = torch.empty(metadata.shape, dtype=tensor.dtype, device=get_device_id())
+    return tensor
+
+
+@torch.no_grad()
+def load_megatron_model_from_disk(
+    models,
+    store: DiskOffloadStore,
+    *,
+    load_param: bool,
+    load_grad: bool,
+    load_frozen_params: bool = True,
+) -> None:
+    """Restore selected Megatron model state from a committed disk generation."""
+
+    if load_param:
+        entries = [
+            entry for entry in _model_disk_entries(models, "param") if load_frozen_params or ".frozen." not in entry[0]
+        ]
+        targets = [
+            (key, _prepare_disk_restore_tensor(store, "param", key, tensor, strategy))
+            for key, tensor, strategy in entries
+        ]
+        store.read_tensors("param", targets)
+
+    if load_grad:
+        entries = list(_model_disk_entries(models, "grad"))
+        targets = [
+            (key, _prepare_disk_restore_tensor(store, "grad", key, tensor, strategy))
+            for key, tensor, strategy in entries
+        ]
+        store.read_tensors("grad", targets)
+
+    gc.collect()
+    get_torch_device().empty_cache()
+
+
+def _iter_megatron_optimizer_tensors(optimizers) -> Iterator[tuple[str, torch.Tensor]]:
+    opts = optimizers.chained_optimizers if isinstance(optimizers, ChainedOptimizer) else [optimizers]
+    seen: set[int] = set()
+
+    def emit(key: str, tensor: torch.Tensor):
+        if id(tensor) in seen:
+            return None
+        seen.add(id(tensor))
+        return key, tensor
+
+    for optimizer_index, optimizer in enumerate(opts):
+        for group_index, group in enumerate(getattr(optimizer, "shard_fp32_from_float16_groups", [])):
+            for param_index, param in enumerate(group):
+                key = f"optimizer.{optimizer_index}.master.{group_index}.{param_index}"
+                if param is not None and (item := emit(key, param)):
+                    yield item
+
+        inner_optimizer = getattr(optimizer, "optimizer", None)
+        if inner_optimizer is None:
+            continue
+        state_sources = [
+            (f"sub.{sub_index}", sub_optimizer.state)
+            for sub_index, sub_optimizer in enumerate(getattr(inner_optimizer, "sub_optimizers", [inner_optimizer]))
+        ]
+        if hasattr(inner_optimizer, "sub_optimizers"):
+            # HybridDeviceOptimizer mirrors some state through its own mapping.
+            # Include non-aliased tensors as well; ``seen`` removes true aliases.
+            state_sources.append(("hybrid", inner_optimizer.state))
+        for source_name, state_mapping in state_sources:
+            for state_index, state in enumerate(state_mapping.values()):
+                for state_name in sorted(state, key=str):
+                    tensor = state[state_name]
+                    if isinstance(tensor, torch.Tensor) and (
+                        item := emit(
+                            f"optimizer.{optimizer_index}.state.{source_name}.{state_index}.{state_name}", tensor
+                        )
+                    ):
+                        yield item
+
+
+@torch.no_grad()
+def offload_megatron_optimizer_to_disk(optimizers, store: DiskOffloadStore) -> None:
+    """Persist Megatron optimizer tensors and release their resident storage."""
+
+    # Include optimizer tensors that are natively placed on CPU (for example
+    # HybridDeviceOptimizer state). A disk target must not retain a large host
+    # replica; the manifest remembers where each tensor should be restored.
+    entries = list(_iter_megatron_optimizer_tensors(optimizers))
+    store.write_tensors("optimizer", entries)
+    for _, tensor in entries:
+        _empty_tensor_data(tensor)
+
+    try:
+        from transformer_engine.pytorch.module.base import _dummy_wgrads
+
+        _dummy_wgrads.clear()
+    except ImportError:
+        pass
+    get_global_memory_buffer().buffer.clear()
+    gc.collect()
+    get_torch_device().empty_cache()
+
+
+@torch.no_grad()
+def load_megatron_optimizer_from_disk(optimizers, store: DiskOffloadStore) -> None:
+    """Restore Megatron optimizer tensors from a committed disk generation."""
+
+    targets = []
+    for key, tensor in _iter_megatron_optimizer_tensors(optimizers):
+        try:
+            metadata = store.metadata("optimizer", key)
+        except KeyError:
+            # Empty or newly-created state was not part of the committed generation.
+            continue
+        restore_device = "cpu" if metadata.device_type == "cpu" else get_device_id()
+        if tensor.numel() == 0 or tensor.device.type != metadata.device_type:
+            tensor.data = torch.empty(metadata.shape, dtype=tensor.dtype, device=restore_device)
+        targets.append((key, tensor))
+    store.read_tensors("optimizer", targets)
     gc.collect()
     get_torch_device().empty_cache()
 

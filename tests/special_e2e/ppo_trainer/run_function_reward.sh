@@ -22,9 +22,23 @@ RETURN_RAW_CHAT="True"
 SKIP_TOKENIZER_INIT="True"
 
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.7}
-ACTOR_FSDP_PARAM_OFFLOAD=${ACTOR_FSDP_PARAM_OFFLOAD:-True}
-ACTOR_FSDP_OPTIMIZER_OFFLOAD=${ACTOR_FSDP_OPTIMIZER_OFFLOAD:-True}
-REF_FSDP_PARAM_OFFLOAD=${REF_FSDP_PARAM_OFFLOAD:-True}
+# Select the storage tier for all state types and roles.
+OFFLOAD_TARGET=${OFFLOAD_TARGET:-cpu}
+DISK_OFFLOAD_PATH=${DISK_OFFLOAD_PATH:-null}
+DISK_OFFLOAD_CHUNK_SIZE_MB=${DISK_OFFLOAD_CHUNK_SIZE_MB:-64}
+
+case "${OFFLOAD_TARGET}" in
+    none | cpu | disk) ;;
+    *)
+        echo "[ERROR] OFFLOAD_TARGET must be one of none, cpu, or disk; got: ${OFFLOAD_TARGET}"
+        exit 1
+        ;;
+esac
+
+if [ "${OFFLOAD_TARGET}" = disk ] && [ "${DISK_OFFLOAD_PATH}" = null ]; then
+    echo "[ERROR] DISK_OFFLOAD_PATH must point to node-local scratch storage for disk offload"
+    exit 1
+fi
 RM_PAD=${RM_PAD:-True}
 FUSED_KERNELS=${FUSED_KERNELS:-False}
 FUSED_KERNEL_BACKEND=${FUSED_KERNEL_BACKEND:-torch} # or 'triton' for triton backend
@@ -127,8 +141,10 @@ exp_name="${VERL_EXP_NAME:-$(basename "${MODEL_ID,,}")-function-reward-minimal}"
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
     actor_rollout_ref.actor.strategy=${STRATEGY} \
-    actor_rollout_ref.actor.fsdp_config.param_offload=${ACTOR_FSDP_PARAM_OFFLOAD} \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=${ACTOR_FSDP_OPTIMIZER_OFFLOAD} \
+    actor_rollout_ref.actor.fsdp_config.offload.param.target=${OFFLOAD_TARGET} \
+    actor_rollout_ref.actor.fsdp_config.offload.optimizer.target=${OFFLOAD_TARGET} \
+    actor_rollout_ref.actor.fsdp_config.offload.disk.path="${DISK_OFFLOAD_PATH}" \
+    actor_rollout_ref.actor.fsdp_config.offload.disk.chunk_size_mb=${DISK_OFFLOAD_CHUNK_SIZE_MB} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=${FSDP_SIZE} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size="${SP_SIZE}" \
     actor_rollout_ref.actor.checkpoint.save_contents=${CHECKPOINT_CONTENTS} \
@@ -145,14 +161,20 @@ exp_name="${VERL_EXP_NAME:-$(basename "${MODEL_ID,,}")-function-reward-minimal}"
     actor_rollout_ref.rollout.gpu_memory_utilization="${GPU_MEMORY_UTILIZATION}" \
     actor_rollout_ref.rollout.enable_chunked_prefill="${ENABLE_CHUNKED_PREFILL}" \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
-    actor_rollout_ref.ref.fsdp_config.param_offload="${REF_FSDP_PARAM_OFFLOAD}" \
+    actor_rollout_ref.ref.strategy=${STRATEGY} \
+    actor_rollout_ref.ref.fsdp_config.offload.param.target="${OFFLOAD_TARGET}" \
+    actor_rollout_ref.ref.fsdp_config.offload.disk.path="${DISK_OFFLOAD_PATH}" \
+    actor_rollout_ref.ref.fsdp_config.offload.disk.chunk_size_mb=${DISK_OFFLOAD_CHUNK_SIZE_MB} \
     critic.optim.lr=1e-5 \
     critic.model.use_remove_padding="${RM_PAD}" \
     critic.model.path="${MODEL_PATH}" \
     critic.model.enable_gradient_checkpointing=False \
     critic.ppo_micro_batch_size_per_gpu=${train_traj_micro_bsz_per_gpu} \
-    critic.fsdp.param_offload=True \
-    critic.fsdp.optimizer_offload=True \
+    critic.strategy=${STRATEGY} \
+    critic.fsdp.offload.param.target=${OFFLOAD_TARGET} \
+    critic.fsdp.offload.optimizer.target=${OFFLOAD_TARGET} \
+    critic.fsdp.offload.disk.path="${DISK_OFFLOAD_PATH}" \
+    critic.fsdp.offload.disk.chunk_size_mb=${DISK_OFFLOAD_CHUNK_SIZE_MB} \
     reward.custom_reward_function.path="${reward_fn_file_path}"\
     reward.custom_reward_function.name="${reward_fn_name}"\
     algorithm.use_kl_in_reward="${USE_KL}" \

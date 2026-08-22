@@ -104,8 +104,8 @@ class AutomodelEngine(BaseEngine):
         if self.engine_config.full_determinism:
             enable_full_determinism(seed=self.engine_config.seed)
 
-        self._is_offload_param = self.engine_config.param_offload
-        self._is_offload_optimizer = self.engine_config.optimizer_offload
+        self._is_offload_param = self.engine_config.get_offload_target("param") == "cpu"
+        self._is_offload_optimizer = self.engine_config.get_offload_target("optimizer") == "cpu"
 
         if self.engine_config.entropy_from_logits_with_chunking:
             entropy_from_logits = verl_F.entropy_from_logits_with_chunking

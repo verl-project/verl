@@ -228,7 +228,7 @@ jobs:
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 NPUs with Megatron (Qwen3) testing learning rate scheduler
         run: |
           ray stop --force
-          VANILLA_MBRIDGE=True ALL_OFFLOAD=True USE_REMOVE_PADDING=True VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 LR_WARMUP_STEPS=1 TOTAL_TRAIN_STEPS=2 MODEL_ID=Qwen/Qwen3-0.6B bash tests/special_e2e/run_ppo_trainer_megatron.sh
+          VANILLA_MBRIDGE=True USE_REMOVE_PADDING=True VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 LR_WARMUP_STEPS=1 TOTAL_TRAIN_STEPS=2 MODEL_ID=Qwen/Qwen3-0.6B bash tests/special_e2e/run_ppo_trainer_megatron.sh
       - name: clean up
         run: |
           rm -rf checkpoints

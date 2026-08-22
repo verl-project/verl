@@ -41,6 +41,24 @@ EP_SIZE=${EP_SIZE:-1}
 MODEL_NAME_ONLY=${MODEL_ID##*/}
 VERL_EXP_NAME=${VERL_EXP_NAME:-${MODEL_NAME_ONLY}-function-reward-minimal-fsdp-size${FSDP_SIZE}}
 
+# Select the storage tier for all state types and roles.
+OFFLOAD_TARGET=${OFFLOAD_TARGET:-cpu}
+DISK_OFFLOAD_PATH=${DISK_OFFLOAD_PATH:-null}
+DISK_OFFLOAD_CHUNK_SIZE_MB=${DISK_OFFLOAD_CHUNK_SIZE_MB:-64}
+
+case "${OFFLOAD_TARGET}" in
+    none | cpu | disk) ;;
+    *)
+        echo "[ERROR] OFFLOAD_TARGET must be one of none, cpu, or disk; got: ${OFFLOAD_TARGET}"
+        exit 1
+        ;;
+esac
+
+if [ "${OFFLOAD_TARGET}" = disk ] && [ "${DISK_OFFLOAD_PATH}" = null ]; then
+    echo "[ERROR] DISK_OFFLOAD_PATH must point to node-local scratch storage for disk offload"
+    exit 1
+fi
+
 device_name=$(python3 - <<'EOF'
 from verl.utils.device import get_device_name
 print(get_device_name())
@@ -61,8 +79,10 @@ common_params=(
     actor_rollout_ref.actor.optim.lr=5e-7 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
-    actor_rollout_ref.actor.veomni.param_offload=True \
-    actor_rollout_ref.actor.veomni.optimizer_offload=True \
+    actor_rollout_ref.actor.veomni.offload.param.target=${OFFLOAD_TARGET} \
+    actor_rollout_ref.actor.veomni.offload.optimizer.target=${OFFLOAD_TARGET} \
+    actor_rollout_ref.actor.veomni.offload.disk.path="${DISK_OFFLOAD_PATH}" \
+    actor_rollout_ref.actor.veomni.offload.disk.chunk_size_mb=${DISK_OFFLOAD_CHUNK_SIZE_MB} \
     actor_rollout_ref.actor.ppo_mini_batch_size=8 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.use_kl_loss=True \
@@ -74,7 +94,9 @@ common_params=(
     actor_rollout_ref.actor.veomni.ulysses_parallel_size="${SP_SIZE}" \
     actor_rollout_ref.actor.veomni.expert_parallel_size="${EP_SIZE}" \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
-    actor_rollout_ref.ref.veomni.param_offload=True \
+    actor_rollout_ref.ref.veomni.offload.param.target=${OFFLOAD_TARGET} \
+    actor_rollout_ref.ref.veomni.offload.disk.path="${DISK_OFFLOAD_PATH}" \
+    actor_rollout_ref.ref.veomni.offload.disk.chunk_size_mb=${DISK_OFFLOAD_CHUNK_SIZE_MB} \
     actor_rollout_ref.ref.use_torch_compile=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
@@ -84,7 +106,6 @@ common_params=(
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.enforce_eager=True \
     actor_rollout_ref.rollout.n=2 \
-    actor_rollout_ref.ref.veomni.optimizer_offload=True \
     algorithm.kl_ctrl.kl_coef=0.001 \
     trainer.critic_warmup=0 \
     trainer.logger=console \

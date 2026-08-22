@@ -22,8 +22,21 @@ actor_rollout_ref:
       min_lr_factor: 0.0
     torchtitan:
       _target_: verl.workers.config.TorchtitanEngineConfig
-      param_offload: false
-      optimizer_offload: false
+      param_offload: null
+      optimizer_offload: null
+      offload:
+        _target_: verl.workers.config.EngineOffloadConfig
+        param:
+          _target_: verl.workers.config.ComponentOffloadConfig
+          target: null
+        optimizer:
+          _target_: verl.workers.config.ComponentOffloadConfig
+          target: null
+        disk:
+          _target_: verl.workers.config.DiskOffloadConfig
+          path: null
+          chunk_size_mb: 64
+          cleanup_on_exit: true
       wrap_policy:
         min_num_params: 0
       reshard_after_forward: default
@@ -167,8 +180,21 @@ actor_rollout_ref:
       min_lr_factor: 0.0
     torchtitan:
       _target_: verl.workers.config.TorchtitanEngineConfig
-      param_offload: false
-      optimizer_offload: false
+      param_offload: null
+      optimizer_offload: null
+      offload:
+        _target_: verl.workers.config.EngineOffloadConfig
+        param:
+          _target_: verl.workers.config.ComponentOffloadConfig
+          target: null
+        optimizer:
+          _target_: verl.workers.config.ComponentOffloadConfig
+          target: null
+        disk:
+          _target_: verl.workers.config.DiskOffloadConfig
+          path: null
+          chunk_size_mb: 64
+          cleanup_on_exit: true
       wrap_policy:
         min_num_params: 0
       reshard_after_forward: default
@@ -505,8 +531,21 @@ critic:
     min_lr_factor: 0.0
   torchtitan:
     _target_: verl.workers.config.TorchtitanEngineConfig
-    param_offload: false
-    optimizer_offload: false
+    param_offload: null
+    optimizer_offload: null
+    offload:
+      _target_: verl.workers.config.EngineOffloadConfig
+      param:
+        _target_: verl.workers.config.ComponentOffloadConfig
+        target: null
+      optimizer:
+        _target_: verl.workers.config.ComponentOffloadConfig
+        target: null
+      disk:
+        _target_: verl.workers.config.DiskOffloadConfig
+        path: null
+        chunk_size_mb: 64
+        cleanup_on_exit: true
     wrap_policy:
       min_num_params: 0
     reshard_after_forward: default

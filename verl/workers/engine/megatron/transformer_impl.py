@@ -15,6 +15,7 @@
 import inspect
 import logging
 import os
+from contextlib import contextmanager
 from functools import partial
 from typing import Any, Callable, ContextManager, Iterator
 
@@ -67,15 +68,20 @@ from verl.utils.megatron_utils import (
     check_mtp_config,
     get_megatron_module_device,
     get_megatron_mtp_loss,
+    load_megatron_model_from_disk,
     load_megatron_model_to_gpu,
     load_megatron_optimizer,
+    load_megatron_optimizer_from_disk,
     offload_megatron_model_to_cpu,
+    offload_megatron_model_to_disk,
     offload_megatron_optimizer,
+    offload_megatron_optimizer_to_disk,
     patch_engine_mtp,
     register_megatron_training_hooks,
     unwrap_model,
 )
 from verl.utils.model import extract_multi_modal_inputs, load_mcore_dist_weights
+from verl.utils.offload import DiskOffloadStore
 from verl.utils.seqlen_balancing import restore_dynamic_batch
 from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizerConfig
 
@@ -194,9 +200,25 @@ class MegatronEngine(BaseEngine):
 
         set_random_seed(seed=self.engine_config.seed)
 
-        self._is_offload_param = self.engine_config.param_offload
-        self._is_offload_grad = self.engine_config.grad_offload
-        self._is_offload_optimizer = self.engine_config.optimizer_offload
+        self._offload_targets = {
+            component: self.engine_config.get_offload_target(component) for component in ("param", "grad", "optimizer")
+        }
+        self._is_offload_param = self._offload_targets["param"] != "none"
+        self._is_offload_grad = self._offload_targets["grad"] != "none"
+        self._is_offload_optimizer = self._offload_targets["optimizer"] != "none"
+        self._component_resident = {"param": True, "grad": True, "optimizer": True}
+        self._frozen_params_resident = True
+        self._grad_preserved = False
+        self._disk_store = None
+        if "disk" in self._offload_targets.values():
+            rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+            disk_config = self.engine_config.offload.disk
+            self._disk_store = DiskOffloadStore(
+                disk_config.path,
+                rank=rank,
+                chunk_size_mb=disk_config.chunk_size_mb,
+                cleanup_on_exit=disk_config.cleanup_on_exit,
+            )
 
         self.mode = None
 
@@ -566,6 +588,10 @@ class MegatronEngine(BaseEngine):
     def is_optimizer_offload_enabled(self) -> bool:
         return self._is_offload_optimizer
 
+    @property
+    def is_grad_offload_enabled(self) -> bool:
+        return self._is_offload_grad
+
     def is_mp_src_rank_with_outputs(self):
         return (
             mpu.get_tensor_model_parallel_rank() == 0
@@ -603,7 +629,7 @@ class MegatronEngine(BaseEngine):
         if self.engine_config.forward_only:
             self.optimizer = None
             self.lr_scheduler = None
-            self.to(device="cpu", model=self._is_offload_param, optimizer=False, grad=False)
+            self.offload(model=self._is_offload_param, optimizer=False, grad=False)
             log_gpu_memory_usage("After offload model during init (forward_only)", logger=logger)
             return
 
@@ -648,11 +674,11 @@ class MegatronEngine(BaseEngine):
             use_megatron_fsdp=self.engine_config.use_megatron_fsdp,
         )
 
-        self.to(
-            device="cpu",
+        self.offload(
             model=self._is_offload_param,
             optimizer=self._is_offload_optimizer,
-            grad=self._is_offload_param,
+            grad=self._is_offload_grad,
+            preserve_grad=False,
         )
 
         log_gpu_memory_usage("After offload model/optimizer/grad during init", logger=logger)
@@ -736,17 +762,178 @@ class MegatronEngine(BaseEngine):
 
         assert device in (device_name, "cpu")
         if device == device_name:
-            if model:
-                load_megatron_model_to_gpu(self.module, load_grad=grad)
+            if model or grad:
+                load_megatron_model_to_gpu(
+                    self.module,
+                    load_param=model,
+                    load_grad=grad,
+                    load_frozen_params=model,
+                )
             if optimizer and self.optimizer is not None:
                 load_megatron_optimizer(self.optimizer)
         elif device == "cpu":
-            if model:
-                offload_megatron_model_to_cpu(self.module)
+            if model or grad:
+                offload_megatron_model_to_cpu(
+                    self.module,
+                    offload_param=model,
+                    offload_grad=grad,
+                    preserve_grad=False,
+                )
             if optimizer and self.optimizer is not None:
                 offload_megatron_optimizer(self.optimizer)
         else:
             raise ValueError(f"Invalid device type: {device}")
+
+    def _require_disk_store(self) -> DiskOffloadStore:
+        if self._disk_store is None:
+            raise RuntimeError("Megatron disk offload was requested without an initialized disk store")
+        return self._disk_store
+
+    def offload(
+        self,
+        *,
+        model: bool = True,
+        optimizer: bool = True,
+        grad: bool = True,
+        preserve_grad: bool = True,
+    ) -> None:
+        """Move selected Megatron state to its independently configured target."""
+
+        selected = {
+            "param": model and self._is_offload_param and self._component_resident["param"],
+            "grad": grad and self._is_offload_grad and self._component_resident["grad"],
+            "optimizer": (
+                optimizer
+                and self.optimizer is not None
+                and self._is_offload_optimizer
+                and self._component_resident["optimizer"]
+            ),
+        }
+
+        cpu_param = selected["param"] and self._offload_targets["param"] == "cpu"
+        cpu_grad = selected["grad"] and self._offload_targets["grad"] == "cpu"
+        if cpu_param or cpu_grad:
+            offload_megatron_model_to_cpu(
+                self.module,
+                offload_param=cpu_param,
+                offload_grad=cpu_grad,
+                preserve_grad=preserve_grad,
+            )
+            if cpu_param:
+                self._component_resident["param"] = False
+                self._frozen_params_resident = False
+            if cpu_grad:
+                self._component_resident["grad"] = False
+                self._grad_preserved = preserve_grad
+
+        disk_param = selected["param"] and self._offload_targets["param"] == "disk"
+        disk_grad = selected["grad"] and self._offload_targets["grad"] == "disk"
+        if disk_param or disk_grad:
+            offload_megatron_model_to_disk(
+                self.module,
+                self._require_disk_store(),
+                offload_param=disk_param,
+                offload_grad=disk_grad,
+                preserve_grad=preserve_grad,
+            )
+            if disk_param:
+                self._component_resident["param"] = False
+                self._frozen_params_resident = False
+            if disk_grad:
+                self._component_resident["grad"] = False
+                self._grad_preserved = preserve_grad
+
+        if selected["optimizer"]:
+            if self._offload_targets["optimizer"] == "cpu":
+                offload_megatron_optimizer(self.optimizer)
+            else:
+                offload_megatron_optimizer_to_disk(self.optimizer, self._require_disk_store())
+            self._component_resident["optimizer"] = False
+
+    def onload(
+        self,
+        *,
+        model: bool = True,
+        optimizer: bool = True,
+        grad: bool = True,
+        load_frozen_params: bool = True,
+    ) -> None:
+        """Restore selected Megatron state from CPU or disk."""
+
+        selected = {
+            "param": (
+                model
+                and self._is_offload_param
+                and (not self._component_resident["param"] or (load_frozen_params and not self._frozen_params_resident))
+            ),
+            "grad": grad and self._is_offload_grad and not self._component_resident["grad"],
+            "optimizer": (
+                optimizer
+                and self.optimizer is not None
+                and self._is_offload_optimizer
+                and not self._component_resident["optimizer"]
+            ),
+        }
+
+        cpu_param = selected["param"] and self._offload_targets["param"] == "cpu"
+        cpu_grad = selected["grad"] and self._offload_targets["grad"] == "cpu"
+        if cpu_param or cpu_grad:
+            load_megatron_model_to_gpu(
+                self.module,
+                load_param=cpu_param,
+                load_grad=cpu_grad,
+                load_frozen_params=cpu_param and load_frozen_params,
+            )
+            if cpu_param:
+                self._component_resident["param"] = True
+                if load_frozen_params:
+                    self._frozen_params_resident = True
+            if cpu_grad:
+                self._component_resident["grad"] = True
+
+        disk_param = selected["param"] and self._offload_targets["param"] == "disk"
+        disk_grad = selected["grad"] and self._offload_targets["grad"] == "disk"
+        if disk_param or (disk_grad and self._grad_preserved):
+            load_megatron_model_from_disk(
+                self.module,
+                self._require_disk_store(),
+                load_param=disk_param,
+                load_grad=disk_grad and self._grad_preserved,
+                load_frozen_params=load_frozen_params,
+            )
+            if disk_param:
+                self._component_resident["param"] = True
+                if load_frozen_params:
+                    self._frozen_params_resident = True
+            if disk_grad and self._grad_preserved:
+                self._component_resident["grad"] = True
+        if disk_grad and not self._grad_preserved:
+            load_megatron_model_to_gpu(self.module, load_param=False, load_grad=True, load_frozen_params=False)
+            self._component_resident["grad"] = True
+
+        if selected["optimizer"]:
+            if self._offload_targets["optimizer"] == "cpu":
+                load_megatron_optimizer(self.optimizer)
+            else:
+                load_megatron_optimizer_from_disk(self.optimizer, self._require_disk_store())
+            self._component_resident["optimizer"] = True
+
+    @contextmanager
+    def resident(self, *, model: bool = False, optimizer: bool = False, grad: bool = False):
+        """Temporarily make selected state resident and restore its prior placement."""
+
+        requested = {"param": model, "optimizer": optimizer, "grad": grad}
+        was_resident = {name: self._component_resident[name] for name, enabled in requested.items() if enabled}
+        self.onload(model=model, optimizer=optimizer, grad=grad)
+        try:
+            yield
+        finally:
+            self.offload(
+                model=model and not was_resident.get("param", True),
+                optimizer=optimizer and not was_resident.get("optimizer", True),
+                grad=grad and not was_resident.get("grad", True),
+                preserve_grad=True,
+            )
 
     def get_data_parallel_rank(self):
         if self.engine_config.dynamic_context_parallel:
@@ -789,15 +976,18 @@ class MegatronEngine(BaseEngine):
             global_step: Integer training step number for naming.
             max_ckpt_to_keep: Maximum number of recent checkpoints to retain.
         """
-        origin_module_device = get_megatron_module_device(self.module)
-        if self._is_offload_param or origin_module_device == "cpu":
+        # Preserve the previous checkpoint behavior for modules that happen to
+        # be CPU-resident even without an enabled offload policy.
+        if not self._is_offload_param and get_megatron_module_device(self.module) == "cpu":
             load_megatron_model_to_gpu(self.module, load_grad=True)
-        self.checkpoint_mananager.save_checkpoint(
-            local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
-        )
-        torch.distributed.barrier()
-        if self._is_offload_param:
-            offload_megatron_model_to_cpu(self.module)
+        with self.resident(model=True, optimizer=self.optimizer is not None):
+            self.checkpoint_mananager.save_checkpoint(
+                local_path=local_path,
+                hdfs_path=hdfs_path,
+                global_step=global_step,
+                max_ckpt_to_keep=max_ckpt_to_keep,
+            )
+            torch.distributed.barrier()
 
     def load_checkpoint(
         self, local_path: str, hdfs_path: str | None = None, del_local_after_load: bool = True, **kwargs
@@ -810,15 +1000,12 @@ class MegatronEngine(BaseEngine):
             hdfs_path: Optional HDFS path where checkpoint is stored.
             del_local_after_load: Whether to delete local copy after loading.
         """
-        if self._is_offload_param:
-            load_megatron_model_to_gpu(self.module)
-        self.checkpoint_mananager.load_checkpoint(
-            local_path=local_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load
-        )
-        if self._is_offload_param:
-            offload_megatron_model_to_cpu(self.module)
-        if self._is_offload_optimizer:
-            offload_megatron_optimizer(self.optimizer)
+        with self.resident(model=True, optimizer=self.optimizer is not None):
+            self.checkpoint_mananager.load_checkpoint(
+                local_path=local_path,
+                hdfs_path=hdfs_path,
+                del_local_after_load=del_local_after_load,
+            )
 
     def _routed_num_tokens(self, data: TensorDict) -> torch.Tensor:
         """Real (unpadded) tokens fed to the MoE router: attention_mask in the padded RL
@@ -1029,7 +1216,7 @@ class MegatronEngine(BaseEngine):
         if non_merge_lora_sync:
             peft_config = build_peft_config_for_vllm(self.model_config.lora)
         # when lora adapter only, we only load adapter weights when base sync is done, otherwise load all weights
-        load_megatron_model_to_gpu(self.module, load_grad=False, load_frozen_params=not adapter_only)
+        self.onload(model=True, optimizer=False, grad=False, load_frozen_params=not adapter_only)
         if self.vanilla_bridge:
             per_tensor_param = self.bridge.export_weights(self.module)
         elif adapter_only:
@@ -1079,7 +1266,7 @@ class MegatronEngine(BaseEngine):
         comm-stubbed probe owns all shard geometry). Pure export, no side
         effects. Params owned by another pipeline stage yield an empty shard
         (zero-count lockstep rows; see the index builder)."""
-        load_megatron_model_to_gpu(self.module, load_grad=False)
+        self.onload(model=True, optimizer=False, grad=False)
         index = self._mcore_export_index()
 
         def _gen():

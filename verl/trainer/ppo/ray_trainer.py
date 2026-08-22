@@ -46,6 +46,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_throughout_metrics,
     compute_timing_metrics,
     compute_variance_proxy_metrics,
+    extract_disk_offload_metrics,
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import extract_reward
@@ -1257,10 +1258,11 @@ class RayPPOTrainer:
         tu.assign_non_tensor(batch_td, compute_loss=False)
         output = self.critic_wg.infer_batch(batch_td)
         output = output.get()
+        disk_metrics = extract_disk_offload_metrics(tu.get(output, "metrics"), "critic_infer")
         values = tu.get(output, "values")
         values = no_padding_2_padding(values, batch_td)
         values = tu.get_tensordict({"values": values.float()})
-        values = DataProto.from_tensordict(values)
+        values = DataProto.from_tensordict(values, meta_info={"metrics": disk_metrics})
         return values
 
     def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
@@ -1277,13 +1279,14 @@ class RayPPOTrainer:
             output = self.actor_rollout_wg.compute_log_prob(batch_td)
         else:
             output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
+        disk_metrics = extract_disk_offload_metrics(tu.get(output, "metrics"), "ref")
         # gather output
         log_probs = tu.get(output, "log_probs")
         # step 4. No padding to padding
         log_probs = no_padding_2_padding(log_probs, batch_td)
         # step 5: rebuild a tensordict and convert to dataproto
         ref_log_prob = tu.get_tensordict({"ref_log_prob": log_probs.float()})
-        ref_log_prob = DataProto.from_tensordict(ref_log_prob)
+        ref_log_prob = DataProto.from_tensordict(ref_log_prob, meta_info={"metrics": disk_metrics})
 
         return ref_log_prob
 
@@ -1302,13 +1305,15 @@ class RayPPOTrainer:
             compute_loss=False,
         )
         output = self.actor_rollout_wg.compute_log_prob(batch_td)
+        output_metrics = tu.get(output, "metrics")
+        disk_metrics = extract_disk_offload_metrics(output_metrics, "actor_infer")
         # gather output
         entropy = tu.get(output, "entropy")
         log_probs = tu.get(output, "log_probs")
         routed_experts = tu.get(output, "routed_experts")
         sum_pi_squared = tu.get(output, "sum_pi_squared") if calculate_sum_pi_squared else None
 
-        old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
+        old_log_prob_mfu = output_metrics["mfu"]
         # step 4. No padding to padding
         entropy = no_padding_2_padding(entropy, batch_td)
         log_probs = no_padding_2_padding(log_probs, batch_td)
@@ -1321,7 +1326,7 @@ class RayPPOTrainer:
         if sum_pi_squared is not None:
             result["sum_pi_squared"] = sum_pi_squared.float()
         old_log_prob = tu.get_tensordict(result)
-        old_log_prob = DataProto.from_tensordict(old_log_prob)
+        old_log_prob = DataProto.from_tensordict(old_log_prob, meta_info={"metrics": disk_metrics})
         return old_log_prob, old_log_prob_mfu
 
     def _update_actor(self, batch: DataProto) -> DataProto:
@@ -1584,6 +1589,7 @@ class RayPPOTrainer:
                     else:  # Recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
                             old_log_prob, old_log_prob_mfu = self._compute_old_log_prob(batch)
+                            metrics.update(old_log_prob.meta_info.pop("metrics", {}))
                             entropys = old_log_prob.batch["entropys"]
                             response_masks = batch.batch["response_mask"]
                             actor_config = self.config.actor_rollout_ref.actor
@@ -1619,12 +1625,14 @@ class RayPPOTrainer:
                         # compute reference log_prob
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
                             ref_log_prob = self._compute_ref_log_prob(batch)
+                            metrics.update(ref_log_prob.meta_info.pop("metrics", {}))
                             batch = batch.union(ref_log_prob)
 
                     # compute values
                     if self.use_critic:
                         with marked_timer("values", timing_raw, color="cyan"):
                             values = self._compute_values(batch)
+                            metrics.update(values.meta_info.pop("metrics", {}))
                             batch = batch.union(values)
 
                     with marked_timer("adv", timing_raw, color="brown"):
@@ -1683,7 +1691,7 @@ class RayPPOTrainer:
                     # implement critic warmup
                     if self.config.trainer.critic_warmup > self.global_steps:
                         # Still in critic warmup, only update weights to wake up rollout replicas.
-                        self.checkpoint_manager.update_weights(self.global_steps)
+                        metrics.update(self.checkpoint_manager.update_weights(self.global_steps) or {})
                     else:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
@@ -1713,7 +1721,7 @@ class RayPPOTrainer:
 
                         # update weights from trainer to rollout
                         with marked_timer("update_weights", timing_raw, color="red"):
-                            self.checkpoint_manager.update_weights(self.global_steps)
+                            metrics.update(self.checkpoint_manager.update_weights(self.global_steps) or {})
 
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
