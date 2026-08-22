@@ -93,9 +93,10 @@ class FSDPOptimizerConfig(OptimizerConfig):
         optimizer_impl (str): Module path to import optimizer from (e.g., "torch.optim", "torchao.optim",
             "bitsandbytes.optim").
         lr (float): Learning rate.
-        min_lr_ratio (Optional[float]): Minimum LR ratio for cosine schedule.
-        lr_scheduler_type (str): LR scheduler type: "constant" or "cosine".
-        num_cycles (float): Number of cosine cycles in LR schedule.
+        min_lr_ratio (Optional[float]): Minimum LR ratio for cosine and WSD schedules.
+        lr_scheduler_type (str): LR scheduler type: "constant", "cosine", or "wsd".
+        num_cycles (float): Number of cosine cycles in cosine and WSD schedules.
+        lr_wsd_stable_steps_ratio (float): Fraction of post-warmup steps assigned to WSD's stable phase.
         zero_indexed_step (bool): Whether the LR schedule uses 0-indexed steps. If True (default),
             step counting starts at 0. If False, step counting starts at 1.
     """
@@ -112,15 +113,21 @@ class FSDPOptimizerConfig(OptimizerConfig):
     num_cycles: float = 0.5
     override_optimizer_config: Optional[dict] = None
     zero_indexed_step: bool = True
+    lr_wsd_stable_steps_ratio: float = 0.9
 
     def __post_init__(self):
+        supported_scheduler_types = ["constant", "cosine", "wsd"]
         if self.warmup_style is not None:
-            assert self.warmup_style in ["constant", "cosine"]
+            assert self.warmup_style in supported_scheduler_types
             warnings.warn(
                 "`warmup_style` is deprecated, use `lr_scheduler_type` instead.", DeprecationWarning, stacklevel=2
             )
             self.lr_scheduler_type = self.warmup_style
-        assert self.lr_scheduler_type in ["constant", "cosine"]
+        assert self.lr_scheduler_type in supported_scheduler_types
+        if self.lr_scheduler_type == "wsd":
+            if self.min_lr_ratio is not None:
+                assert 0.0 <= self.min_lr_ratio <= 1.0, "`min_lr_ratio` must be within [0, 1]"
+            assert 0.0 <= self.lr_wsd_stable_steps_ratio <= 1.0, "`lr_wsd_stable_steps_ratio` must be within [0, 1]"
         return super().__post_init__()
 
 
