@@ -170,6 +170,8 @@ class McoreEngineConfig(EngineConfig):
         dist_checkpointing_path (Optional[str]): Path for distributed checkpointing.
         dist_ckpt_optim_fully_reshardable (bool): Use fully reshardable optimizer checkpoints.
         distrib_optim_fully_reshardable_mem_efficient (bool): Use memory-efficient fully reshardable format.
+        pad_bshd_to_minibatch_max (bool): Whether BSHD micro-batches use the mini-batch maximum sequence length.
+            This reduces cuDNN graph rebuilds at the cost of padding every micro-batch to the longest sample.
         seed (int): Random seed for reproducibility.
         override_ddp_config (dict[str, Any]): Override configuration for DDP.
         override_transformer_config (dict[str, Any]): Override configuration for transformer.
@@ -196,7 +198,7 @@ class McoreEngineConfig(EngineConfig):
     max_seqlen_per_dp_cp_rank: Optional[int] = None
     sequence_parallel: bool = True
     use_distributed_optimizer: bool = True
-    pad_bshd_to_minibatch_max: bool = True
+    pad_bshd_to_minibatch_max: bool = False
     pad_to_length: bool = False
     pad_to_length_bucket: int = 512
     use_dist_checkpointing: bool = False

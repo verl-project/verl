@@ -22,6 +22,7 @@ class TestMcoreEngineConfig:
         config = McoreEngineConfig()
         assert config.tensor_model_parallel_size == 1
         assert config.sequence_parallel is False  # Should be auto-corrected
+        assert config.pad_bshd_to_minibatch_max is False
         assert config.seed == 42
 
     def test_post_init_validation(self):

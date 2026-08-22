@@ -125,6 +125,29 @@ def test_preprocess_bshd_engine_preserves_1d_input_shape_on_cpu(monkeypatch):
     torch.testing.assert_close(position_ids, torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]], dtype=torch.long))
 
 
+def test_preprocess_bshd_engine_uses_final_microbatch_padding_target(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1)
+    short_microbatch = _nested_tensor([torch.arange(512)])
+    long_microbatch = _nested_tensor([torch.arange(14_010)])
+
+    short_local, _, _ = mcore_util.preprocess_bshd_engine(short_microbatch)
+    long_local, _, _ = mcore_util.preprocess_bshd_engine(long_microbatch)
+    short_global, short_global_mask, _ = mcore_util.preprocess_bshd_engine(
+        short_microbatch,
+        forced_max_seqlen=14_010,
+    )
+
+    assert short_local.shape == (1, 512)
+    assert long_local.shape == (1, 14_010)
+    assert short_local.numel() + long_local.numel() == 14_522
+
+    # The opt-in mini-batch-global target remains available to trade padding for
+    # fewer cuDNN execution-plan builds.
+    assert short_global.shape == (1, 14_010)
+    assert short_global.numel() + long_local.numel() == 28_020
+    assert short_global_mask.sum().item() == 512
+
+
 def test_preprocess_thd_engine_rounds_packed_length_to_bucket_without_cp(monkeypatch):
     mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1, cp_size=1)
     input_ids = _nested_tensor([torch.arange(513)])
