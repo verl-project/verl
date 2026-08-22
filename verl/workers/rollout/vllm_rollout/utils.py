@@ -374,10 +374,14 @@ class vLLMColocateWorkerExtension:
             if is_fp8_model(self.model_runner.vllm_config):
                 logger.info(f"FP8 model detected (async): {self.model_runner.vllm_config.quant_config}")
                 # Convert bf16 weights to fp8 format before loading
-                loaded_params = load_quanted_weights(param_updates, self.model_runner) if param_updates else []
+                loaded_params = (
+                    load_quanted_weights(param_updates, self.model_runner, peft_config=peft_config)
+                    if param_updates
+                    else []
+                )
                 # Keep the draft model in sync when present.
                 if self._use_mtp_drafter_weight_sync() and param_updates:
-                    load_quanted_weights(param_updates, self.model_runner, is_drafter=True)
+                    load_quanted_weights(param_updates, self.model_runner, is_drafter=True, peft_config=peft_config)
                 loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
                 logger.info(
                     f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}, loaded_buffers: {loaded_buffers}"
