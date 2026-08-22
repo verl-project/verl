@@ -13,7 +13,7 @@
 # limitations under the License.
 import warnings
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional
 
 from omegaconf import MISSING
 
@@ -23,11 +23,14 @@ __all__ = [
     "OptimizerConfig",
     "FSDPOptimizerConfig",
     "McoreOptimizerConfig",
+    "WEIGHT_DECAY_SCALE_KEY",
     "build_optimizer",
     "VeOmniOptimizerConfig",
     "TorchtitanOptimizerConfig",
     "AutomodelOptimizerConfig",
 ]
+
+WEIGHT_DECAY_SCALE_KEY = "_verl_weight_decay_scale"
 
 
 @dataclass
@@ -98,6 +101,9 @@ class FSDPOptimizerConfig(OptimizerConfig):
         num_cycles (float): Number of cosine cycles in LR schedule.
         zero_indexed_step (bool): Whether the LR schedule uses 0-indexed steps. If True (default),
             step counting starts at 0. If False, step counting starts at 1.
+        weight_decay_policy (str): Parameter selection policy for weight decay. ``"standard"`` excludes
+            biases and normalization parameters, while ``"all"`` preserves the legacy behavior of applying
+            weight decay to every parameter.
     """
 
     _mutable_fields = OptimizerConfig._mutable_fields.copy()
@@ -112,6 +118,7 @@ class FSDPOptimizerConfig(OptimizerConfig):
     num_cycles: float = 0.5
     override_optimizer_config: Optional[dict] = None
     zero_indexed_step: bool = True
+    weight_decay_policy: Literal["standard", "all"] = "standard"
 
     def __post_init__(self):
         if self.warmup_style is not None:
@@ -121,6 +128,7 @@ class FSDPOptimizerConfig(OptimizerConfig):
             )
             self.lr_scheduler_type = self.warmup_style
         assert self.lr_scheduler_type in ["constant", "cosine"]
+        assert self.weight_decay_policy in ["standard", "all"]
         return super().__post_init__()
 
 
@@ -295,13 +303,84 @@ class AutomodelOptimizerConfig(OptimizerConfig):
         return super().__post_init__()
 
 
-def build_optimizer(parameters, config: FSDPOptimizerConfig):
+def _get_weight_decay_parameter_groups(model, weight_decay: float):
+    """Split trainable model parameters into decay and no-decay groups."""
+    from torch import nn
+    from transformers.trainer_pt_utils import get_parameter_names
+
+    normalization_layer_types = [
+        nn.LayerNorm,
+        nn.GroupNorm,
+        nn.BatchNorm1d,
+        nn.BatchNorm2d,
+        nn.BatchNorm3d,
+        nn.SyncBatchNorm,
+        nn.InstanceNorm1d,
+        nn.InstanceNorm2d,
+        nn.InstanceNorm3d,
+    ]
+    if hasattr(nn, "RMSNorm"):
+        normalization_layer_types.append(nn.RMSNorm)
+
+    # Keep this aligned with Hugging Face Trainer's default policy. The explicit
+    # layer types cover standard torch normalization modules, while the patterns
+    # catch model-specific implementations such as LlamaRMSNorm and QwenRMSNorm.
+    forbidden_name_patterns = [
+        r"bias",
+        r"layernorm",
+        r"rmsnorm",
+        r"(?:^|\.)norm(?:$|\.)",
+        r"_norm(?:$|\.)",
+    ]
+    decay_parameter_names = set(get_parameter_names(model, normalization_layer_types, forbidden_name_patterns))
+    custom_normalization_parameter_ids = {
+        id(parameter)
+        for module in model.modules()
+        if module.__class__.__name__.lower().endswith("norm")
+        for parameter in module.parameters(recurse=False)
+    }
+
+    decay_parameters = []
+    no_decay_parameters = []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        if name in decay_parameter_names and id(parameter) not in custom_normalization_parameter_ids:
+            decay_parameters.append(parameter)
+        else:
+            no_decay_parameters.append(parameter)
+
+    parameter_groups = []
+    if decay_parameters:
+        parameter_groups.append(
+            {
+                "params": decay_parameters,
+                "weight_decay": weight_decay,
+                WEIGHT_DECAY_SCALE_KEY: 1.0,
+            }
+        )
+    if no_decay_parameters:
+        parameter_groups.append(
+            {
+                "params": no_decay_parameters,
+                "weight_decay": 0.0,
+                WEIGHT_DECAY_SCALE_KEY: 0.0,
+            }
+        )
+    if not parameter_groups:
+        raise ValueError("Cannot build an optimizer because the model has no trainable parameters.")
+
+    return parameter_groups
+
+
+def build_optimizer(model_or_parameters, config: FSDPOptimizerConfig):
     """Build an optimizer based on the configuration.
 
     Dynamically imports and instantiates an optimizer class from the specified module.
 
     Args:
-        parameters: Model parameters to optimize
+        model_or_parameters: Model to optimize. An iterable of parameters is accepted only when
+            ``weight_decay_policy="all"``.
         config: FSDPOptimizerConfig with optimizer settings
 
     Returns:
@@ -334,6 +413,24 @@ def build_optimizer(parameters, config: FSDPOptimizerConfig):
 
     if config.override_optimizer_config is not None:
         optimizer_args.update(config.override_optimizer_config)
+
+    effective_weight_decay = float(optimizer_args["weight_decay"])
+    optimizer_args["weight_decay"] = effective_weight_decay
+
+    from torch import nn
+
+    if isinstance(model_or_parameters, nn.Module):
+        if config.weight_decay_policy == "standard":
+            parameters = _get_weight_decay_parameter_groups(model_or_parameters, effective_weight_decay)
+        else:
+            parameters = model_or_parameters.parameters()
+    else:
+        if config.weight_decay_policy != "all":
+            raise ValueError(
+                "weight_decay_policy='standard' requires the model itself so parameters can be classified. "
+                "Pass an nn.Module to build_optimizer, or use weight_decay_policy='all' for legacy behavior."
+            )
+        parameters = model_or_parameters
 
     try:
         module = importlib.import_module(config.optimizer_impl)
