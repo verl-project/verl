@@ -224,6 +224,7 @@ class RLInsightLogger:
     """Logger backend that exports scalar metrics and rl-insight runtime signals."""
 
     ENABLE_ENV = "VERL_RL_INSIGHT_ENABLE"
+    MINIMUM_RL_INSIGHT_VERSION = Version("0.3.0")
     _init_done = False
     _rl_insight_module = None
     _registered_metrics: set[tuple[str | None, tuple[str, ...], str | None]] = set()
@@ -245,6 +246,17 @@ class RLInsightLogger:
         return os.getenv(cls.ENABLE_ENV) == "1"
 
     @classmethod
+    def _require_rl_insight_version(cls, feature: str) -> None:
+        """Raise immediately when an RL-Insight feature needs a newer release."""
+        module = cls._get_rl_insight()
+        installed = Version(getattr(module, "__version__", "0"))
+        if installed < cls.MINIMUM_RL_INSIGHT_VERSION:
+            raise RuntimeError(
+                f"RL-Insight >= {cls.MINIMUM_RL_INSIGHT_VERSION} is required for {feature}; "
+                f"installed version is {installed}."
+            )
+
+    @classmethod
     def init(cls, project_name=None, experiment_name=None, config=None):
         if not cls.enabled() or cls._init_done:
             return
@@ -264,9 +276,7 @@ class RLInsightLogger:
     def log(cls, data, step):
         if not cls.enabled():
             return
-        if not cls._init_done:
-            cls._get_rl_insight().init()
-            cls._init_done = True
+        cls._ensure_rl_insight_init()
         metric_gauge = cls._get_rl_insight().metric_gauge
 
         for key, value in data.items():
@@ -298,11 +308,74 @@ class RLInsightLogger:
             yield
             return
 
+        cls._ensure_rl_insight_init()
+        with cls._get_rl_insight().trace_state(state_name, state_lane_id=state_lane_id, **labels):
+            yield
+
+    @classmethod
+    def trace_span(
+        cls,
+        name: str,
+        *,
+        start_time_ns: int,
+        end_time_ns: int,
+        attributes: dict[str, Any] | None = None,
+    ) -> None:
+        """Report one completed span through rl-insight's direct trace API."""
+        if not cls.enabled():
+            return
+
+        cls._require_rl_insight_version("trace_span")
+        cls._ensure_rl_insight_init()
+        cls._get_rl_insight().trace_span(
+            name=name,
+            start_time_ns=start_time_ns,
+            end_time_ns=end_time_ns,
+            attributes=dict(attributes or {}),
+        )
+
+    @classmethod
+    def _ensure_rl_insight_init(cls) -> None:
         if not cls._init_done:
             cls._get_rl_insight().init()
             cls._init_done = True
-        with cls._get_rl_insight().trace_state(state_name, state_lane_id=state_lane_id, **labels):
-            yield
+
+    @classmethod
+    def agent_loop_session(
+        cls,
+        *,
+        experiment_name: Any | None = None,
+        sample: Any,
+        session: Any,
+        traj: Any = 0,
+        uid: Any = None,
+        global_steps: Any = None,
+        session_id: Any = None,
+    ):
+        """Return the shared agent-loop session trace state."""
+        if cls.enabled():
+            cls._require_rl_insight_version("agent_loop_session")
+
+        from verl.utils.rollout_trace import RolloutTraceConfig
+
+        rollout_config = RolloutTraceConfig.get_instance()
+        project_name = rollout_config.project_name
+        if experiment_name is None:
+            experiment_name = rollout_config.experiment_name or "default"
+        if cls.enabled() and not cls._init_done:
+            cls.init(project_name=project_name, experiment_name=experiment_name)
+        from rl_insight.agent_loop import agent_loop_session
+
+        return agent_loop_session(
+            project=project_name,
+            experiment_name=experiment_name,
+            sample=sample,
+            session=session,
+            traj=traj,
+            uid=uid,
+            global_steps=global_steps,
+            session_id=session_id,
+        )
 
     @classmethod
     def register_rollout_metrics(
