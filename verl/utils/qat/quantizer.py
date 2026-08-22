@@ -130,6 +130,12 @@ class QATQuantizer:
         param_dtype: Optional[torch.dtype] = None,
     ):
         self.mode = mode.lower()
+        supported_modes = {"w4a4", "w4a8", "w4a16"}
+        if self.mode not in supported_modes:
+            raise ValueError(f"Unsupported QAT mode {mode!r}; expected one of {sorted(supported_modes)}")
+
+        # W4A8 is currently a numerical simulation: it exports the same NVFP4
+        # weight payload as W4A16, while rollout injects FP8 activation noise.
         self._is_w4a4 = self.mode == "w4a4"  # W4A4 needs input_global_scale
         self.group_size = group_size
         self.ignore_patterns = ignore_patterns or ["lm_head", "embed_tokens", "re:.*mlp.gate$"]

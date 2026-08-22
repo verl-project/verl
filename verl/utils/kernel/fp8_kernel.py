@@ -246,7 +246,6 @@ def _scaled_fp8_blockwise_pytorch(
     """
     block_size0 = weight_block_size[0]
     block_size1 = weight_block_size[1]
-    assert block_size0 == block_size1, "Block sizes must be equal"
 
     # Save unpadded shape for later cropping
     original_shape = data_hp.shape

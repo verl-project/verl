@@ -1,13 +1,17 @@
 # NVFP4 QAT (Quantization-Aware Training) in verl
 
-Last updated: 04/02/2026
+Last updated: 2026-07-09
 
 verl supports NVFP4 Quantization-Aware Training (QAT), which applies fake quantization during training so the model learns to tolerate NVFP4 quantization error. At rollout time, weights are packed into real NVFP4 format for vLLM inference. This closes the precision gap between training and inference, preventing KL divergence explosion.
 
 | Training Backend | Training Precision | Rollout Precision | vLLM Quant Method |
 |---|---|---|---|
 | **FSDP** | BF16 + fake quantization | NVFP4 W4A16 | `compressed-tensors` |
+| **FSDP (experimental)** | BF16 parameters + FP4 weight / FP8 activation fake quantization | W4A8 numerical simulation | `compressed-tensors` |
 | **Megatron** | BF16 + fake quantization | NVFP4 W4A16 | `modelopt` |
+
+> [!WARNING]
+> W4A8 is an FSDP-only numerical simulation for dense models and the standard NVFP4 MarlinExperts path. During rollout, weights use the existing NVFP4 W4A16 `compressed-tensors` kernels. Dense layer inputs are blockwise FP8 E4M3 quantized and dequantized; for fused MoE, both the gate/up input and the post-activation down-projection input receive the same Q/DQ. This does not execute a native W4A8 kernel and must not be used to claim W4A8 latency, throughput, or memory improvements. Other NVFP4 MoE backends are not supported.
 
 > [!TIP]
 > For ready-to-run scripts, environment setup, and experimental results, see the [QAT recipe](https://github.com/verl-project/verl-recipe/tree/main/qat).
@@ -38,10 +42,29 @@ actor_rollout_ref:
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `fsdp_config.qat.enable` | Enable QAT | `False` |
-| `fsdp_config.qat.mode` | Quantization mode | `"w4a16"` |
+| `fsdp_config.qat.mode` | Quantization mode; use experimental `"w4a8"` for W4A8 simulation | `"w4a16"` |
 | `fsdp_config.qat.group_size` | Quantization group size | `16` |
 | `fsdp_config.qat.ignore_patterns` | Layers to skip. Supports `re:` prefix for regex, otherwise substring match | `["lm_head", "embed_tokens", "re:.*mlp.gate$"]` |
 | `fsdp_config.qat.quantization_config_path` | vLLM quantization config JSON path | Required |
+
+For the experimental W4A8 simulation, set `mode: "w4a8"` but continue to use the W4A16 weight configuration:
+
+```yaml
+actor_rollout_ref:
+  actor:
+    fsdp_config:
+      qat:
+        enable: true
+        mode: "w4a8"
+        group_size: 16
+        ignore_patterns:
+          - "lm_head"
+          - "embed_tokens"
+          - "re:.*mlp.gate$"
+        quantization_config_path: "recipe/qat/config/nvfp4_w4a16.json"
+```
+
+The W4A16 configuration is intentional: W4A8 simulation changes activation numerics only. FSDP still exports the same packed FP4 weights as W4A16, and verl automatically enables FP8 activation simulation in the vLLM subprocesses.
 
 ### Megatron Backend
 
@@ -73,11 +96,12 @@ actor_rollout_ref:
 
 ## Support Matrix
 
-- NVFP4 W4A16 (weight-only FP4 quantization)
-- Dense models and MoE models
-- FSDP and Megatron training backends
-- Full quantization and FFN-only quantization strategies
-- Verified on Qwen3-8B-Base and Qwen3-30B-A3B-Base
+| Mode | Training Backend | Model Type | Rollout Path | Status |
+|---|---|---|---|---|
+| W4A16 | FSDP, Megatron | Dense, MoE | Native NVFP4 W4A16 | Supported |
+| W4A8 simulation | FSDP | Dense, MoE (Marlin) | FP8 Q/DQ + W4A16 kernel | Experimental |
+
+Full and FFN-only quantization strategies are available in the linked recipe. W4A16 has been verified on Qwen3-8B-Base and Qwen3-30B-A3B-Base; W4A8 example configurations target dense Qwen3-8B-Base and MoE Qwen3-30B-A3B-Base.
 
 ---
 
@@ -85,3 +109,5 @@ actor_rollout_ref:
 
 - FSDP backend has scalability limitations for very large models. For large-scale training, use the Megatron backend.
 - FSDP uses `re:` prefix regex for `ignore_patterns`, while Megatron uses `fnmatch` glob syntax. The two are not interchangeable.
+- W4A8 uses dynamic per-token FP8 E4M3 activation blocks of shape `1 x 128`; no activation scale is stored in checkpoints or sent with the packed weights.
+- Native W4A8 kernels and Megatron W4A8 support are outside the scope of the current simulation.
