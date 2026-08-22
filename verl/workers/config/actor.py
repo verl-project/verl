@@ -180,7 +180,7 @@ class ActorConfig(BaseConfig):
     data_loader_seed: int = 42
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     optim: OptimizerConfig = field(default_factory=OptimizerConfig)
-    use_fused_kernels: bool = False
+    use_fused_kernels: bool = True
     profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
     engine: BaseConfig = field(default_factory=BaseConfig)
     rollout_n: int = MISSING  # must be override by sampling config
@@ -210,6 +210,15 @@ class ActorConfig(BaseConfig):
                     "[actor] Please set at least one of 'actor.ppo_micro_batch_size' or "
                     "'actor.ppo_micro_batch_size_per_gpu' if use_dynamic_bsz is not enabled."
                 )
+
+        if self.calculate_sum_pi_squared and self.use_fused_kernels:
+            import warnings
+            warnings.warn(
+                "calculate_sum_pi_squared=True is not supported with use_fused_kernels=True. "
+                "Automatically disabling use_fused_kernels to allow Sigma pi^2 computation.",
+                UserWarning
+            )
+            self.use_fused_kernels = False
 
         valid_loss_agg_modes = [
             "token-mean",
