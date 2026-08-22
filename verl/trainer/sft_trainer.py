@@ -31,6 +31,7 @@ from torch.utils.data import DistributedSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
+from verl.trainer.sft_val_utils import resolve_sft_val_batch_size
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint import CheckpointHandler
 from verl.utils.dataset.dataset_utils import SFTTensorCollator
@@ -253,17 +254,20 @@ class SFTTrainer:
         )
 
         if self.val_dataset:
+            val_batch_size = resolve_sft_val_batch_size(
+                config.data, self.train_batch_size_per_dp, len(self.val_dataset)
+            )
             self.val_sampler = DistributedSampler(
-                self.val_dataset, shuffle=False, num_replicas=dp_size, rank=dp_rank, drop_last=True
+                self.val_dataset, shuffle=False, num_replicas=dp_size, rank=dp_rank, drop_last=False
             )
             self.val_dataloader = StatefulDataLoader(
                 dataset=self.val_dataset,
-                batch_size=self.train_batch_size_per_dp,
+                batch_size=val_batch_size,
                 sampler=self.val_sampler,
                 collate_fn=self.collate_fn,
                 num_workers=self.config.data.num_workers,
                 pin_memory=False,
-                drop_last=True,
+                drop_last=False,
                 pin_memory_device=device_name,
             )
         else:
@@ -426,16 +430,26 @@ class SFTTrainer:
                             val_losses.append(metrics["loss"])
 
                     if self.engine.is_mp_src_rank_with_outputs():
-                        val_loss = torch.mean(torch.tensor(val_losses, device=self.device_name))
-                        # average over data parallel group
+                        n_val = torch.tensor(float(len(val_losses)), device=self.device_name)
+                        sum_val = torch.tensor(
+                            float(sum(val_losses)) if val_losses else 0.0, device=self.device_name
+                        )
                         dp_group = self.engine.get_data_parallel_group()
                         if dp_group is not None:
-                            torch.distributed.all_reduce(val_loss, op=torch.distributed.ReduceOp.AVG, group=dp_group)
-
-                    if is_logging:
-                        metric = {"val/loss": val_loss.detach().item()}
-                        tracking.log(data=metric, step=global_step)
-                        last_valid_metric = metric
+                            torch.distributed.all_reduce(n_val, op=torch.distributed.ReduceOp.SUM, group=dp_group)
+                            torch.distributed.all_reduce(sum_val, op=torch.distributed.ReduceOp.SUM, group=dp_group)
+                        if n_val.item() <= 0:
+                            log_with_rank(
+                                "Validation produced no batches; skip val/loss rather than logging NaN.",
+                                logger=logger,
+                                rank=self.rank,
+                                level=logging.WARNING,
+                                log_only_rank_0=True,
+                            )
+                        elif is_logging:
+                            metric = {"val/loss": (sum_val / n_val).detach().item()}
+                            tracking.log(data=metric, step=global_step)
+                            last_valid_metric = metric
                     torch.distributed.barrier()
 
                 if is_last_step or (self.save_freq > 0 and is_save_step):

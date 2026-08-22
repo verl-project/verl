@@ -15,7 +15,11 @@ defaults:
 
 data:
   train_batch_size: 256 # global batch size
-  micro_batch_size_per_gpu: 4  # this is also val batch size
+  micro_batch_size_per_gpu: 4
+
+  # Validation batch size per DP rank. Null uses micro_batch_size_per_gpu.
+  val_batch_size: null
+
   max_token_len_per_gpu: 8192
   use_dynamic_bsz: True
   train_files: ~/data/gsm8k/train.parquet
