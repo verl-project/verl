@@ -546,17 +546,20 @@ def maybe_patch_fsdp_module(model):
         fully_shard_module.FSDPModule = orig_fsdp_module
 
 
-def _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap):
+def _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap, *, use_fused_kernels=False):
     """Select modules to wrap individually with fully_shard in FSDP2.
 
     Matches transformer layers by class name, and embed_tokens/lm_head by name
     (with isinstance fallback). Name-based matching is needed because peft wraps
     embed_tokens in ModulesToSaveWrapper, breaking isinstance(module, nn.Embedding).
     When tie_word_embeddings is True, embed_tokens and lm_head share weights and
-    must not be wrapped separately.
+    must not be wrapped separately. Fused forwards access lm_head.weight directly,
+    so an untied lm_head remains in the root FSDP unit that owns its forward lifecycle.
     """
     _tie = getattr(model.config, "tie_word_embeddings", False)
-    _wrap_by_name = set() if _tie else {"embed_tokens", "lm_head"}
+    _wrap_by_name = set() if _tie else {"embed_tokens"}
+    if not _tie and not use_fused_kernels:
+        _wrap_by_name.add("lm_head")
 
     modules = []
     for name, module in model.named_modules():
@@ -586,7 +589,11 @@ def apply_fsdp2(model, fsdp_kwargs, config):
         fsdp_transformer_layer_cls_to_wrap = list(fsdp_transformer_layer_cls_to_wrap)
     assert len(fsdp_transformer_layer_cls_to_wrap) > 0 and fsdp_transformer_layer_cls_to_wrap[0] is not None
 
-    modules = _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap)
+    modules = _select_fsdp2_wrap_targets(
+        model,
+        fsdp_transformer_layer_cls_to_wrap,
+        use_fused_kernels=config.get("use_fused_kernels", False),
+    )
 
     for idx, module in enumerate(modules):
         # if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
