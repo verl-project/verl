@@ -129,7 +129,7 @@ class CheckpointEngineConfig(BaseConfig):
 
     _mutable_fields = {"backend"}
 
-    # Backend for checkpoint engine: naive, nccl, nixl, hccl
+    # Backend for checkpoint engine: naive, nccl, nccl_parallel, nixl, hccl
     backend: Optional[str] = "naive"
     # Bucket size in MB to transfer multiple weights at one time
     update_weights_bucket_megabytes: int = 2048

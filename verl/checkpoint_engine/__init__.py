@@ -44,6 +44,13 @@ except ImportError as e:
     NCCLCheckpointEngine = None
 
 try:
+    from .nccl_parallel_checkpoint_engine import NCCLParallelCheckpointEngine
+
+    __all__ += ["NCCLParallelCheckpointEngine"]
+except ImportError:
+    NCCLParallelCheckpointEngine = None
+
+try:
     from .hccl_checkpoint_engine import HCCLCheckpointEngine
 
     __all__ += ["HCCLCheckpointEngine"]
