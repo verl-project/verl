@@ -25,6 +25,7 @@ from transformers import AutoModelForCausalLM, LlamaConfig, PretrainedConfig, Qw
 
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.protocol import DataProto
+from verl.utils.attention_utils import index_first_axis, rearrange, unpad_input
 from verl.utils.device import get_device_name, get_torch_device
 from verl.utils.distributed import initialize_global_process_group
 from verl.utils.model import compute_position_id_with_mask, create_random_mask
@@ -35,11 +36,6 @@ from verl.utils.ulysses import (
     set_ulysses_sequence_parallel_group,
     ulysses_pad_and_slice_inputs,
 )
-
-if get_device_name() == "cuda":
-    from flash_attn.bert_padding import index_first_axis, rearrange, unpad_input
-elif get_device_name() == "npu":
-    from verl.utils.attention_utils import index_first_axis, rearrange, unpad_input
 
 # TODO(sgm): add more models for test
 # we only need one scale for each model
