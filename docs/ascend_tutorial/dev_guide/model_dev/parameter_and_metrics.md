@@ -598,7 +598,7 @@ verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有
 
 | 参数名 | 默认值 | 说明 |
 |--------|--------|------|
-| `router_replay.mode` | `disabled` | 路由重放模式，可选 disabled、record、replay |
+| `actor.megatron.router_replay.mode` / `actor.veomni.router_replay.mode` | `disabled` | 引擎侧路由重放模式，可选 disabled、R2、R3 |
 | `router_replay.record_file` | `null` | 路由记录文件路径 |
 | `router_replay.replay_file` | `null` | 路由重放文件路径 |
 

@@ -316,25 +316,6 @@ profiler:
       # Whether to fail on unknown stage or missing msprobe
       strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
 
-# Router replay configuration for MoE models
-router_replay:
-
-  # Target dataclass for this configuration
-  _target_: verl.workers.config.RouterReplayConfig
-
-  # Router replay mode: disabled, R2, R3
-  # - R2: Use R2 routing strategy (record mode)
-  # - R3: Use R3 routing strategy (record mode)
-  mode: disabled
-
-  # File path to save recorded routing decisions
-  # Required when mode is 'record', 'R2', or 'R3'
-  record_file: null
-
-  # File path to load recorded routing decisions for replay
-  # Required when mode is 'replay'
-  replay_file: null
-
 # QAT (Quantization-Aware Training) configuration
 # When enabled:
 #   - QAT is automatically applied to actor model during training
