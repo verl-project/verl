@@ -29,6 +29,7 @@ CUDA_KEYWORD_CHECK_WHITELIST = [
     "verl/plugin/platform/platform_base.py",  # docstring mentions torch.cuda
     "verl/plugin/platform/platform_cuda.py",  # CUDA platform implementation
     "verl/plugin/platform/platform_rocm.py",  # ROCm platform reuses torch.cuda via hipify
+    "verl/plugin/platform/platform_tpu.py",  # TPU platform overrides platform_cuda behaviors
     "verl/plugin/platform/platform_manager.py",  # platform auto-detection probes torch.cuda
     "verl/utils/profiler/nvtx_profile.py",  # appear in NsightSystemsProfiler
     "verl/utils/profiler/torch_profile.py",  # appear in TorchProfiler
