@@ -29,9 +29,11 @@ import torch
 from tensordict import TensorDict
 
 from verl.trainer.distillation.losses import (
+    align_padded_tensor,
     align_response_mask,
     compute_distillation_loss_range,
     compute_distillation_loss_reverse_kl_estimator,
+    distillation_loss,
 )
 from verl.utils import tensordict_utils as tu
 from verl.workers.config import ActorConfig, DistillationConfig, DistillationLossConfig
@@ -95,6 +97,35 @@ def _build_inputs(prompt_lens, response_lens, mask_len_override=None):
 def _run(model_output, data, cfg):
     losses, metrics = compute_distillation_loss_reverse_kl_estimator(None, cfg, model_output, data)
     return losses.detach().clone(), float(metrics["distillation/abs_loss"].aggregate())
+
+
+def _build_pg_inputs(length_offset):
+    prompt_lens = [3, 4, 3, 5]
+    response_lens = [5, 7, 4, 6]
+    model_output, data = _build_inputs(prompt_lens, response_lens)
+    target_len = max(response_lens)
+    source_len = target_len + length_offset
+
+    old_log_prob_segs = []
+    rollout_is_weight_segs = []
+    for _ in response_lens:
+        old_log_probs = torch.zeros(source_len)
+        old_log_probs[: min(source_len, target_len)] = -0.1
+        old_log_prob_segs.append(old_log_probs)
+
+        rollout_is_weights = torch.zeros(source_len)
+        rollout_is_weights[: min(source_len, target_len)] = 1.0
+        rollout_is_weight_segs.append(rollout_is_weights)
+
+    data["old_log_probs"] = torch.nested.nested_tensor(old_log_prob_segs, layout=torch.jagged)
+    data["rollout_is_weights"] = torch.nested.nested_tensor(rollout_is_weight_segs, layout=torch.jagged)
+    tu.assign_non_tensor(
+        data,
+        dp_size=1,
+        batch_num_tokens=None,
+        global_batch_size=None,
+    )
+    return model_output, data
 
 
 def test_reverse_kl_shape_consistent_is_noop():
@@ -161,6 +192,34 @@ def test_align_response_mask_rejects_truncating_valid_tokens():
 
     with pytest.raises(ValueError, match="valid tokens beyond"):
         align_response_mask(response_mask, losses)
+
+
+@pytest.mark.parametrize("length_offset", [-2, 2])
+def test_distillation_loss_pg_aligns_nested_ppo_inputs(length_offset):
+    actor_cfg = ActorConfig(strategy="fsdp", rollout_n=1, use_dynamic_bsz=True)
+    distillation_cfg = _make_distillation_config()
+    model_output, data = _build_pg_inputs(length_offset)
+
+    loss, metrics = distillation_loss(actor_cfg, distillation_cfg, model_output, data)
+
+    assert torch.isfinite(loss)
+    assert "distillation/ppo_kl" in metrics
+    assert "distillation/pg_clipfrac" in metrics
+
+
+def test_align_padded_tensor_preserves_dtype_and_rejects_nonzero_tail():
+    target = torch.zeros((2, 4), dtype=torch.float32)
+    source = torch.ones((2, 2), dtype=torch.float64)
+
+    aligned = align_padded_tensor(source, target, name="test tensor")
+
+    assert aligned.shape == target.shape
+    assert aligned.dtype == source.dtype
+    assert aligned.device == source.device
+    assert not aligned[:, 2:].any()
+
+    with pytest.raises(ValueError, match="nonzero values beyond"):
+        align_padded_tensor(torch.ones((2, 5)), target, name="test tensor")
 
 
 def test_global_batch_info_is_refreshed_from_current_micro_batch():

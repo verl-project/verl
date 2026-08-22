@@ -106,6 +106,44 @@ def get_distillation_loss_settings(loss_name: str) -> DistillationLossSettings:
     return DISTILLATION_SETTINGS_REGISTRY[loss_name]
 
 
+def align_padded_tensor(
+    tensor: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    name: str,
+    truncated_value_name: str = "nonzero values",
+) -> torch.Tensor:
+    """Convert ``tensor`` to dense and align its final dimension to ``target``.
+
+    Nested inputs are padded with zero. Dense and converted nested inputs are
+    then zero-padded or truncated along the final dimension while preserving
+    their dtype and device. Truncation is only safe for zero-valued padding;
+    rejecting nonzero tails prevents valid log-probs, importance weights, or
+    mask entries from being silently discarded.
+    """
+    if tensor.is_nested:
+        tensor = tensor.to_padded_tensor(0)
+
+    if tensor.ndim != target.ndim or tensor.shape[:-1] != target.shape[:-1]:
+        raise ValueError(f"{name} shape {tensor.shape} cannot align to target shape {target.shape}")
+
+    target_length = target.shape[-1]
+    current_length = tensor.shape[-1]
+    if current_length < target_length:
+        padding = torch.zeros(
+            (*tensor.shape[:-1], target_length - current_length),
+            dtype=tensor.dtype,
+            device=tensor.device,
+        )
+        tensor = torch.cat((tensor, padding), dim=-1)
+    elif current_length > target_length:
+        truncated = tensor[..., target_length:]
+        if torch.count_nonzero(truncated):
+            raise ValueError(f"{name} contains {truncated_value_name} beyond the target length")
+        tensor = tensor[..., :target_length]
+    return tensor
+
+
 def align_response_mask(response_mask: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """Convert a response mask to dense bool and align it to a padded loss tensor.
 
@@ -114,29 +152,12 @@ def align_response_mask(response_mask: torch.Tensor, target: torch.Tensor) -> to
     Those two baselines can disagree, so align the mask to ``target`` before masked
     reductions. Padding cells are ``False`` and do not contribute.
     """
-    if response_mask.is_nested:
-        response_mask = response_mask.bool().to_padded_tensor(False)
-    else:
-        response_mask = response_mask.bool()
-
-    if response_mask.ndim != target.ndim or response_mask.shape[:-1] != target.shape[:-1]:
-        raise ValueError(f"response mask shape {response_mask.shape} cannot align to target shape {target.shape}")
-
-    target_length = target.shape[-1]
-    current_length = response_mask.shape[-1]
-    if current_length < target_length:
-        padding = torch.zeros(
-            (*response_mask.shape[:-1], target_length - current_length),
-            dtype=torch.bool,
-            device=response_mask.device,
-        )
-        response_mask = torch.cat((response_mask, padding), dim=-1)
-    elif current_length > target_length:
-        truncated = response_mask[..., target_length:]
-        if truncated.any():
-            raise ValueError("response mask contains valid tokens beyond the target loss length")
-        response_mask = response_mask[..., :target_length]
-    return response_mask
+    return align_padded_tensor(
+        response_mask.bool(),
+        target,
+        name="response mask",
+        truncated_value_name="valid tokens",
+    )
 
 
 def compute_distillation_loss_range(
@@ -298,10 +319,12 @@ def distillation_loss(
         # Use negative distillation loss as reward, as done by https://thinkingmachines.ai/blog/on-policy-distillation/.
         policy_loss_fn = get_policy_loss_fn(loss_config.policy_loss_mode)
         log_prob = no_padding_2_padding(model_output["log_probs"], data)
-        old_log_prob = data["old_log_probs"]
-        if old_log_prob.is_nested:
-            old_log_prob = data["old_log_probs"].to_padded_tensor(0.0)
+        old_log_prob = align_padded_tensor(data["old_log_probs"], log_prob, name="old log probs")
         rollout_is_weights = data.get("rollout_is_weights", None)
+        if rollout_is_weights is not None:
+            rollout_is_weights = align_padded_tensor(
+                rollout_is_weights, log_prob, name="rollout importance weights"
+            )
         distillation_loss, pg_metrics = policy_loss_fn(
             old_log_prob=old_log_prob,
             log_prob=log_prob,
