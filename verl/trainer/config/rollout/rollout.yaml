@@ -291,6 +291,9 @@ checkpoint_engine:
   # when using Tensor Parallelism (TP) >= 8.
   update_weights_bucket_megabytes: 2048
 
+  # Maximum time to wait for each bucketed weight-transfer acknowledgement.
+  update_weights_ack_timeout_seconds: 30.0
+
   # Additional keyword arguments to pass to the checkpoint engine constructor
   engine_kwargs: {}
 
