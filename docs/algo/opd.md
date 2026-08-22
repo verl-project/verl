@@ -746,8 +746,8 @@ The returned scalar loss is what `engine.train_batch` backpropagates.
 - `verl/experimental/teacher_loop/teacher_model.py` — `MultiTeacherModelManager` and `TeacherModelManager`; spin up teacher inference replicas on the dedicated teacher resource pool and expose per-teacher `LLMServerClient` factories
 - `verl/experimental/teacher_loop/teacher_manager.py` — `AsyncTeacherLLMServerManager`; routes per-sample teacher calls (single- or multi-teacher) and builds teacher sampling params
 - `verl/experimental/agent_loop/agent_loop.py` — `AgentLoopWorker._compute_teacher_logprobs`; per-sample teacher dispatch from `_agent_loop_postprocess`, packs `teacher_logprobs` into the rollout output
-- `verl/trainer/distillation/fsdp/losses.py` — FSDP backend `compute_forward_kl_topk`
-- `verl/trainer/distillation/megatron/losses.py` — Megatron backend `compute_forward_kl_topk`
+- `verl/trainer/distillation/fsdp/losses.py` — FSDP backend `compute_forward_kl_topk` and `compute_reverse_kl_student_topk`
+- `verl/trainer/distillation/megatron/losses.py` — Megatron backend `compute_forward_kl_topk` and `compute_reverse_kl_student_topk`
 - `verl/workers/engine_workers.py` — `ActorRolloutRefWorker.init_model`; binds `distillation_ppo_loss` as the actor's `loss_fn` when distillation is enabled
 - `verl/workers/engine/{fsdp,megatron}/transformer_impl.py` — training-engine forward steps; invoke `distillation_ppo_loss` first as a logits processor (top-$k$ modes) and again as the final loss
 - `verl/trainer/main_ppo.py` — `is_distillation_enabled` gate; allocates the dedicated `teacher_pool` resource pool

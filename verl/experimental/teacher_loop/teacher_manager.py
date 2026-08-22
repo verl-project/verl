@@ -48,7 +48,11 @@ def _get_teacher_sampling_params(
             "on prompt_logprobs (forward pass only). Using temperature=1.0.",
             teacher_model_config.inference.temperature,
         )
-    num_logprobs = distillation_loss_config.topk if distillation_loss_config.loss_settings.use_topk else 0
+    num_logprobs = (
+        distillation_loss_config.get_teacher_logprob_topk()
+        if distillation_loss_config.loss_settings.use_topk
+        else 0
+    )
     return {
         "max_tokens": 1,
         "temperature": 1.0,

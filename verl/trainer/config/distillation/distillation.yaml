@@ -26,6 +26,10 @@ distillation_loss:
   # If distillation loss requires top-k logits, this is the value of k
   topk: 32
 
+  # Teacher log-prob retrieval budget for reverse_kl_student_topk. Defaults to topk.
+  # This field is only valid when loss_mode is reverse_kl_student_topk.
+  reverse_kl_teacher_logprob_topk: null
+
   # Whether to include task rewards alongside distillation loss.
   use_task_rewards: true
 

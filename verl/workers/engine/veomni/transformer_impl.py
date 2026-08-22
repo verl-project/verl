@@ -827,6 +827,15 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
         if use_fused_kernels and use_remove_padding:
+            distillation_loss_mode = tu.get_non_tensor_data(data=micro_batch, key="distillation_loss_mode", default=None)
+            distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
+            if distillation_use_topk and distillation_loss_mode is None:
+                raise ValueError("Top-k distillation with fused kernels requires distillation_loss_mode in the batch.")
+            if distillation_loss_mode == "reverse_kl_student_topk":
+                raise NotImplementedError(
+                    "reverse_kl_student_topk needs student logits to build the student top-k support. "
+                    "Set actor_rollout_ref.model.use_fused_kernels=False for this loss mode."
+                )
             input_ids_rmpad = model_inputs["input_ids"]
             shift_labels = output_args["input_ids_rmpad_rolled"].unsqueeze(0)
             model_inputs["labels"] = input_ids_rmpad
@@ -837,7 +846,6 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
             # chunk_topk_distill_function for fused distillation. TD keys
             # teacher_ids / teacher_logprobs are populated by verl's native
             # distillation pipeline (see verl/trainer/distillation/losses.py).
-            distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
             if distillation_use_topk and "teacher_ids" in micro_batch.keys():
                 if "teacher_logprobs" not in micro_batch.keys():
                     raise ValueError(

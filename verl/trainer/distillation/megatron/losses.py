@@ -55,6 +55,27 @@ def vocab_parallel_log_softmax(
     return vp_logits - log_sum_exp_logits.unsqueeze(dim=-1)
 
 
+def _gather_teacher_log_probs_on_student_topk(
+    student_topk_ids: torch.Tensor,
+    teacher_topk_ids: torch.Tensor,
+    teacher_topk_log_probs: torch.Tensor,
+    missing_log_prob: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gather teacher log-probs on student top-k ids from returned teacher top-k entries."""
+    matches = student_topk_ids.unsqueeze(-1) == teacher_topk_ids.unsqueeze(-2)
+    missing = torch.full(
+        student_topk_ids.shape,
+        missing_log_prob,
+        dtype=teacher_topk_log_probs.dtype,
+        device=teacher_topk_log_probs.device,
+    )
+    non_match = torch.full_like(teacher_topk_log_probs.unsqueeze(-2), torch.finfo(teacher_topk_log_probs.dtype).min)
+    matched = torch.where(matches, teacher_topk_log_probs.unsqueeze(-2), non_match)
+    has_match = matches.any(dim=-1)
+    matched = matched.max(dim=-1).values
+    return torch.where(has_match, matched, missing), has_match
+
+
 class _VocabParallelKLDivergence(torch.autograd.Function):
     """
     Adapted from:
@@ -261,6 +282,123 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
         return grad_input, None, None, None
 
 
+class _VocabParallelReverseKLDivergenceOnStudentTopK(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        vp_logits: torch.Tensor,
+        teacher_topk_log_probs: torch.Tensor,
+        teacher_topk_ids: torch.Tensor,
+        student_topk: int,
+        log_prob_min_clamp: float,
+    ):
+        from megatron.core.parallel_state import (
+            get_tensor_model_parallel_group,
+            get_tensor_model_parallel_rank,
+            get_tensor_model_parallel_world_size,
+        )
+        from megatron.core.tensor_parallel.utils import VocabUtility
+
+        vp_source_logps = vocab_parallel_log_softmax(vp_logits).float()
+        vp_source_probs = vp_source_logps.exp()
+
+        rank = get_tensor_model_parallel_rank()
+        world_size = get_tensor_model_parallel_world_size()
+        partition_vocab_size = vp_logits.size(-1)
+        vocab_start_index, vocab_end_index = VocabUtility.vocab_range_from_per_partition_vocab_size(
+            partition_vocab_size, rank, world_size
+        )
+
+        local_topk = min(student_topk, partition_vocab_size)
+        local_student_topk_logps, local_student_topk_ids = torch.topk(vp_source_logps, k=local_topk, dim=-1)
+        local_student_topk_ids = local_student_topk_ids + vocab_start_index
+        gathered_student_topk_logps = [torch.empty_like(local_student_topk_logps) for _ in range(world_size)]
+        gathered_student_topk_ids = [torch.empty_like(local_student_topk_ids) for _ in range(world_size)]
+        torch.distributed.all_gather(
+            gathered_student_topk_logps, local_student_topk_logps, group=get_tensor_model_parallel_group()
+        )
+        torch.distributed.all_gather(
+            gathered_student_topk_ids, local_student_topk_ids, group=get_tensor_model_parallel_group()
+        )
+        student_topk_logps = torch.cat(gathered_student_topk_logps, dim=-1)
+        student_topk_ids = torch.cat(gathered_student_topk_ids, dim=-1)
+        student_topk_logps, student_topk_positions = torch.topk(student_topk_logps, k=student_topk, dim=-1)
+        student_topk_ids = torch.gather(student_topk_ids, dim=-1, index=student_topk_positions)
+
+        teacher_logps_on_student_topk, overlap_mask = _gather_teacher_log_probs_on_student_topk(
+            student_topk_ids=student_topk_ids,
+            teacher_topk_ids=teacher_topk_ids,
+            teacher_topk_log_probs=teacher_topk_log_probs,
+            missing_log_prob=log_prob_min_clamp,
+        )
+
+        student_mass = student_topk_logps.exp().sum(dim=-1)
+        teacher_mass = (teacher_logps_on_student_topk.exp() * overlap_mask).sum(dim=-1)
+
+        student_topk_ids_in_vocab_mask = (student_topk_ids >= vocab_start_index) & (
+            student_topk_ids < vocab_end_index
+        )
+        student_topk_local_ids = student_topk_ids - vocab_start_index
+        student_topk_local_ids = student_topk_local_ids.clone()
+        student_topk_local_ids[~student_topk_ids_in_vocab_mask] = 0
+
+        active_topk_mask = student_topk_logps > log_prob_min_clamp
+        active_mask = student_topk_ids_in_vocab_mask & active_topk_mask
+        student_topk_logps = student_topk_logps.clamp_min(log_prob_min_clamp)
+        teacher_logps_on_student_topk = teacher_logps_on_student_topk.clamp_min(log_prob_min_clamp)
+
+        student_topk_probs = student_topk_logps.exp()
+        distillation_losses = torch.sum(
+            student_topk_probs * (student_topk_logps - teacher_logps_on_student_topk), dim=-1
+        )
+
+        grad_coeff = student_topk_probs * (student_topk_logps - teacher_logps_on_student_topk + 1.0)
+        active_grad_coeff = grad_coeff * active_mask.to(grad_coeff.dtype)
+        grad_coeff_sum = (grad_coeff * active_topk_mask.to(grad_coeff.dtype)).sum(dim=-1)
+
+        overlap_count = overlap_mask.sum(dim=-1)
+        token_advantage = teacher_logps_on_student_topk - student_topk_logps
+        overlap_token_advantage_sum = (token_advantage * overlap_mask).sum(dim=-1)
+        overlap_token_advantage = overlap_token_advantage_sum / overlap_count.clamp_min(1)
+        overlap_token_advantage = torch.where(
+            overlap_count > 0, overlap_token_advantage, torch.zeros_like(overlap_token_advantage)
+        )
+
+        ctx.save_for_backward(vp_source_probs, student_topk_local_ids, active_grad_coeff, active_mask, grad_coeff_sum)
+
+        student_mass = student_mass.detach()
+        teacher_mass = teacher_mass.detach()
+        overlap_count = overlap_count.detach()
+        overlap_token_advantage = overlap_token_advantage.detach()
+        ctx.mark_non_differentiable(student_mass, teacher_mass, overlap_count, overlap_token_advantage)
+
+        return distillation_losses, student_mass, teacher_mass, overlap_count, overlap_token_advantage
+
+    @staticmethod
+    def backward(
+        ctx,
+        grad_loss: torch.Tensor,
+        grad_student_mass: torch.Tensor,
+        grad_teacher_mass: torch.Tensor,
+        grad_overlap_count: torch.Tensor,
+        grad_overlap_token_advantage: torch.Tensor,
+    ):
+        vp_source_probs, student_topk_local_ids, active_grad_coeff, active_mask, grad_coeff_sum = ctx.saved_tensors
+
+        grad_input = -vp_source_probs * grad_coeff_sum.unsqueeze(-1)
+
+        topk = student_topk_local_ids.size(-1)
+        grad_input_2d = grad_input.view(-1, grad_input.size(-1))
+        student_topk_local_ids_flat = student_topk_local_ids.view(-1, topk)
+        active_grad_coeff_flat = active_grad_coeff.view(-1, topk) * active_mask.view(-1, topk).to(
+            active_grad_coeff.dtype
+        )
+        grad_input_2d.scatter_add_(dim=1, index=student_topk_local_ids_flat, src=active_grad_coeff_flat)
+
+        grad_input.mul_(grad_loss.unsqueeze(dim=-1))
+        return grad_input, None, None, None, None
+
+
 def compute_forward_kl_topk(
     student_logits: torch.Tensor,
     teacher_topk_log_probs: torch.Tensor,
@@ -300,6 +438,57 @@ def compute_forward_kl_topk(
             teacher_topk_log_probs_cp_split,
             teacher_topk_ids_cp_split,
             distillation_loss_config.log_prob_min_clamp,
+        )
+    )
+
+    return {
+        "distillation_losses": distillation_losses,
+        "student_mass": student_mass,
+        "teacher_mass": teacher_mass,
+        "overlap_count": overlap_count,
+        "overlap_token_advantage": overlap_token_advantage,
+    }
+
+
+def compute_reverse_kl_student_topk(
+    student_logits: torch.Tensor,
+    teacher_topk_log_probs: torch.Tensor,
+    teacher_topk_ids: torch.Tensor,
+    config: DistillationConfig,
+    data_format: str,
+) -> dict[str, torch.Tensor]:
+    """Compute truncated reverse KL on the student's top-k support."""
+    assert teacher_topk_log_probs.is_nested and teacher_topk_ids.is_nested
+
+    if data_format == "thd":
+        teacher_topk_log_probs_cp_split, *_ = preprocess_thd_engine(teacher_topk_log_probs, pre_process=True)
+        teacher_topk_ids_cp_split, *_ = preprocess_thd_engine(teacher_topk_ids, pre_process=True)
+    else:
+        teacher_topk_log_probs_cp_split, *_ = preprocess_bshd_engine(teacher_topk_log_probs, pre_process=True)
+        teacher_topk_ids_cp_split, *_ = preprocess_bshd_engine(teacher_topk_ids, pre_process=True)
+    assert teacher_topk_log_probs_cp_split.shape[:2] == teacher_topk_ids_cp_split.shape[:2] == student_logits.shape[:2]
+
+    loss_config: DistillationLossConfig = config.distillation_loss
+    if loss_config.log_prob_min_clamp is None:
+        raise ValueError("reverse_kl_student_topk requires distillation_loss.log_prob_min_clamp.")
+
+    student_topk = loss_config.topk
+    if student_topk is None:
+        raise ValueError("reverse_kl_student_topk requires distillation_loss.topk.")
+    teacher_logprob_topk = teacher_topk_ids_cp_split.shape[-1]
+    if teacher_logprob_topk < student_topk:
+        raise ValueError(
+            "Teacher log-prob payload for reverse_kl_student_topk must be at least as wide as "
+            f"distillation_loss.topk, but got {teacher_logprob_topk} < {student_topk}."
+        )
+
+    distillation_losses, student_mass, teacher_mass, overlap_count, overlap_token_advantage = (
+        _VocabParallelReverseKLDivergenceOnStudentTopK.apply(
+            student_logits,
+            teacher_topk_log_probs_cp_split,
+            teacher_topk_ids_cp_split,
+            student_topk,
+            loss_config.log_prob_min_clamp,
         )
     )
 

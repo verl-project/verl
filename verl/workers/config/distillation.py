@@ -36,6 +36,9 @@ class DistillationLossConfig(BaseConfig):
         Distillation loss function to use.
     topk (int, optional):
         Number of top tokens to consider for top-k distillation losses.
+    reverse_kl_teacher_logprob_topk (int, optional):
+        Teacher log-prob retrieval budget for reverse_kl_student_topk. Defaults
+        to topk. This is not used by other loss modes.
     use_task_rewards (bool):
         Whether to include task rewards alongside distillation loss.
     distillation_loss_coef (float):
@@ -49,7 +52,8 @@ class DistillationLossConfig(BaseConfig):
         Whether to incorporate distillation loss as a reward, as done
         by https://thinkingmachines.ai/blog/on-policy-distillation/. Recommended to use loss_mode=k1.
         Otherwise, distillation loss is directly backpropagated as a supervised loss,
-        as in https://arxiv.org/abs/2306.13649. Recommended to use loss_mode=k3 or forward_kl_topk.
+        as in https://arxiv.org/abs/2306.13649. Recommended to use loss_mode=k3, forward_kl_topk, or
+        reverse_kl_student_topk.
     policy_loss_mode (str):
         Name of the policy loss to use when use_policy_gradient is true.
     clip_ratio (float):
@@ -64,13 +68,14 @@ class DistillationLossConfig(BaseConfig):
 
     loss_mode: str = "k3"
     topk: Optional[int] = 128
+    reverse_kl_teacher_logprob_topk: Optional[int] = None
     use_task_rewards: bool = True
     distillation_loss_coef: float = 1.0
     loss_max_clamp: Optional[float] = 10.0
     log_prob_min_clamp: Optional[float] = -10.0
 
     # Chunked top-K log-probs (opt-in, avoids [B, T, V] log_softmax buffer
-    # at long context). Only consumed by ``loss_mode='forward_kl_topk'``.
+    # at long context). Consumed by top-k distributional losses.
     # Default ``False`` to preserve short-context performance (chunked path
     # has ~6x time overhead at N=14K, V=152K). Set ``True`` when hitting OOM
     # at long context (>=64K tokens, V=152K) where the baseline path OOMs.
@@ -116,12 +121,49 @@ class DistillationLossConfig(BaseConfig):
                 " token's logprob ∇logπ(a), so the top-k distributional signal (how non-sampled logits "
                 "should move) is largely unused."
             )
+        if self.use_policy_gradient and self.loss_mode == "reverse_kl_student_topk":
+            raise ValueError(
+                "reverse_kl_student_topk is a distributional top-k loss and should be used with "
+                "use_policy_gradient=False."
+            )
+        if self.reverse_kl_teacher_logprob_topk is not None and self.loss_mode != "reverse_kl_student_topk":
+            raise ValueError(
+                "distillation_loss.reverse_kl_teacher_logprob_topk is only supported with "
+                "loss_mode=reverse_kl_student_topk."
+            )
+        if self.loss_mode == "reverse_kl_student_topk":
+            if self.topk is None or self.topk <= 0:
+                raise ValueError("reverse_kl_student_topk requires distillation_loss.topk to be a positive integer.")
+            teacher_logprob_topk = self.get_teacher_logprob_topk()
+            if teacher_logprob_topk == -1:
+                raise NotImplementedError(
+                    "reverse_kl_teacher_logprob_topk=-1 is reserved for exact teacher log-prob retrieval, "
+                    "but exact retrieval is not implemented yet."
+                )
+            if teacher_logprob_topk <= 0:
+                raise ValueError(
+                    "distillation_loss.reverse_kl_teacher_logprob_topk must be positive when set, or -1 "
+                    "for exact retrieval once supported."
+                )
+            if teacher_logprob_topk < self.topk:
+                raise ValueError(
+                    "distillation_loss.reverse_kl_teacher_logprob_topk must be >= distillation_loss.topk "
+                    f"for reverse_kl_student_topk, but got {teacher_logprob_topk} < {self.topk}."
+                )
 
         if not self.use_policy_gradient and self.loss_mode == "k1":
             raise ValueError(
                 "Directly backpropagating k1 loss is incorrect since gradient of k1 loss"
                 " wrt model weights does not depend on teacher log probabilities."
             )
+
+    def get_teacher_logprob_topk(self) -> Optional[int]:
+        """Return how many teacher top log-probs to request for this loss mode."""
+        if self.loss_mode == "reverse_kl_student_topk":
+            if self.reverse_kl_teacher_logprob_topk is None:
+                return self.topk
+            return self.reverse_kl_teacher_logprob_topk
+        return self.topk
 
 
 @dataclass
@@ -202,7 +244,7 @@ class DistillationTeacherModelConfig(BaseConfig):
                     max_logprobs = topk
                 if max_logprobs < topk:
                     raise ValueError(
-                        f"VLLM max_logprobs ({max_logprobs}) must be >= distillation_loss topk "
+                        f"VLLM max_logprobs ({max_logprobs}) must be >= requested teacher logprob top-k "
                         f"({topk}) to enable distillation loss computation."
                     )
                 engine_kwargs["vllm"] = vllm_engine_kwargs
@@ -275,7 +317,7 @@ class DistillationConfig(BaseConfig):
         for teacher_model in self.teacher_models.values():
             teacher_model.validate_and_prepare_for_distillation(
                 use_topk=self.distillation_loss.loss_settings.use_topk,
-                topk=self.distillation_loss.topk,
+                topk=self.distillation_loss.get_teacher_logprob_topk(),
             )
             teacher_world_size_sum += teacher_model.world_size
         total_pool_size = self.n_gpus_per_node * self.nnodes

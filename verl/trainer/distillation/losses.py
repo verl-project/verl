@@ -139,11 +139,17 @@ def compute_topk_loss(
         case "fsdp" | "veomni":
             import verl.trainer.distillation.fsdp.losses as fsdp_losses
 
-            distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
+            if distillation_config.distillation_loss.loss_mode == "reverse_kl_student_topk":
+                distillation_loss_fn = fsdp_losses.compute_reverse_kl_student_topk
+            else:
+                distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
         case "megatron":
             import verl.trainer.distillation.megatron.losses as megatron_losses
 
-            distillation_loss_fn = megatron_losses.compute_forward_kl_topk
+            if distillation_config.distillation_loss.loss_mode == "reverse_kl_student_topk":
+                distillation_loss_fn = megatron_losses.compute_reverse_kl_student_topk
+            else:
+                distillation_loss_fn = megatron_losses.compute_forward_kl_topk
         case _:
             raise NotImplementedError(f"Unsupported strategy: {config.strategy=}")
 
@@ -302,7 +308,9 @@ def distillation_loss(
     return distillation_loss, distillation_metrics
 
 
-@register_distillation_loss(DistillationLossSettings(names=["forward_kl_topk"], use_topk=True))  # type: ignore[arg-type]
+@register_distillation_loss(
+    DistillationLossSettings(names=["forward_kl_topk", "reverse_kl_student_topk"], use_topk=True)
+)  # type: ignore[arg-type]
 def compute_forward_kl_topk(
     config: ActorConfig,
     distillation_config: DistillationConfig,
@@ -339,7 +347,9 @@ def compute_forward_kl_topk(
         # Diagnostics for tracking teacher/student top-k overlap in OPD, following
         # "Rethinking On-Policy Distillation of Large Language Models" (arXiv:2604.13016):
         # overlap ratio and average teacher-token KL contribution on overlapped tokens.
-        overlap_metrics["distillation/overlap_ratio"] = (valid_overlap_count.float().mean() / k).item()
+        overlap_ratio = (valid_overlap_count.float().mean() / k).item()
+        overlap_metrics["distillation/overlap_ratio"] = overlap_ratio
+        overlap_metrics["distillation/missing_ratio"] = 1.0 - overlap_ratio
         overlap_position_mask = response_mask_bool & (overlap_count > 0)
         if overlap_position_mask.any():
             overlap_metrics["distillation/overlap_token_advantage"] = (
