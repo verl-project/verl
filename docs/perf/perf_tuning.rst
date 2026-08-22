@@ -198,10 +198,9 @@ Reduce FSDP gradient synchronization during gradient accumulation
 
 When a PPO mini-batch is split into multiple micro-batches, the optimizer only
 steps after the final micro-batch, so gradients only need to be synchronized
-once per mini-batch. The FSDP engine automatically defers gradient
-synchronization on the non-final micro-batches and synchronizes only before the
-final backward. This applies to both the actor and the critic, and requires no
-configuration.
+once per mini-batch. By default, the FSDP engine defers gradient synchronization
+on the non-final micro-batches and synchronizes only before the final backward.
+This applies to both the actor and the critic.
 
 With :math:`M` micro-batches per mini-batch, this reduces gradient
 synchronization from :math:`M` rounds to one round. It does not remove parameter
@@ -211,9 +210,12 @@ numerically identical to synchronizing every micro-batch.
 
 .. note::
     Deferring synchronization retains unsharded gradients until the final
-    micro-batch, which slightly increases peak device memory during gradient
-    accumulation. Forward-only passes are unaffected and always keep the default
-    behavior.
+    micro-batch, which can substantially increase peak device memory during
+    gradient accumulation for large models or long packed sequences. Set
+    ``actor_rollout_ref.actor.fsdp_config.use_no_sync_for_gradient_accumulation=False``
+    (or the corresponding critic FSDP setting) to synchronize and reshard after
+    every micro-batch when memory headroom is limited. Forward-only passes are
+    unaffected.
 
 Migrating to FSDP2
 ----------------------
