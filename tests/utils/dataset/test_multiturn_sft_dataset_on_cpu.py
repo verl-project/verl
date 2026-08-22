@@ -36,6 +36,22 @@ from verl.utils.model import extract_multi_modal_inputs
 custom_model_prefix = Path("~/models").expanduser().resolve()
 
 
+def test_multiturn_sft_message_group_boundaries():
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "calling tools"},
+        {"role": "tool", "content": "first"},
+        {"role": "tool", "content": "second"},
+        {"role": "assistant", "content": "answer"},
+    ]
+
+    assert MultiTurnSFTDataset._message_group_end(messages, 0) == 2
+    assert MultiTurnSFTDataset._message_group_end(messages, 2) == 3
+    assert MultiTurnSFTDataset._message_group_end(messages, 3) == 5
+    assert MultiTurnSFTDataset._message_group_end(messages, 5) == 6
+
+
 @pytest.mark.parametrize(
     "model_path, ignore_input_ids_mismatch",
     [
@@ -50,13 +66,14 @@ def test_multiturn_sft_dataset(model_path: str, ignore_input_ids_mismatch: bool)
     test_data = {
         "messages": [
             [
+                {"role": "system", "content": "You are a powerful assistant."},
                 {"role": "user", "content": "What is 2+2?"},
                 {"role": "assistant", "content": "2+2 equals 4."},
                 {"role": "tool", "content": "And what is 4+4?"},
+                {"role": "tool", "content": "Please calculate it exactly."},
                 {"role": "assistant", "content": "4+4 equals 8."},
             ],
             [
-                # {"role": "system", "content": "You are a powerful assistant."},
                 {"role": "user", "content": "Tell me a joke."},
                 {"role": "assistant", "content": "Why did the chicken cross the road?"},
                 {"role": "tool", "content": "Why?"},
@@ -178,7 +195,7 @@ def test_multiturn_sft_dataset(model_path: str, ignore_input_ids_mismatch: bool)
 
     # Verify that system and user messages are in the non-assistant text
     for msg in test_data["messages"][0]:  # First conversation
-        if msg["role"] in ["system", "user"]:
+        if msg["role"] in ["system", "user", "tool"]:
             assert msg["content"] in non_assistant_text, (
                 f"{msg['role'].title()} message '{msg['content']}' not found in non-assistant text"
             )

@@ -184,22 +184,27 @@ class MultiTurnSFTDataset(Dataset):
     def __len__(self):
         return len(self.messages)
 
-    def _process_single_message(
+    def _process_message_group(
         self,
         index: int,
-        message: dict[str, Any],
+        messages: list[dict[str, Any]],
         full_message: list,
         tools: Optional[list[dict[str, Any]]] = None,
         enable_thinking: Optional[bool] = None,
-    ) -> tuple[list[int], list[int], list[int]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         """
-        Process a single message and return its tokenized representation.
+        Process one independently renderable message group.
+
+        A group is normally one message. Two neighbor-dependent cases are kept
+        together so isolated rendering remains identical to rendering the full
+        conversation:
+
+        * an initial ``system`` plus its following ``user`` message;
+        * one or more consecutive ``tool`` messages.
 
         Args:
             index: turn index in the conversation
-            message: A single message dictionary
-            images: List of images to be used
-            videos: List of videos to be used
+            messages: One message or a neighbor-dependent message group
             tools: List of tools to be used
             enable_thinking: Whether to enable thinking mode
 
@@ -213,7 +218,7 @@ class MultiTurnSFTDataset(Dataset):
 
         inputs = apply_chat_template(
             processor,
-            messages=[message],
+            messages=messages,
             tools=tools,
             add_generation_prompt=False,
             tokenize=True,
@@ -227,11 +232,13 @@ class MultiTurnSFTDataset(Dataset):
         attention_mask = inputs.pop("attention_mask")[0]
 
         # remove system prompt if exists
-        if index != 0 and message["role"] != "system":
+        if index != 0 and messages[0]["role"] != "system":
             input_ids = input_ids[len(self.system_prompt) :]
             attention_mask = attention_mask[len(self.system_prompt) :]
 
-        if message["role"] == "assistant":
+        if messages[0]["role"] == "assistant":
+            if len(messages) != 1:
+                raise ValueError("An assistant message cannot share an SFT rendering group")
             loss_mask = torch.ones_like(attention_mask)
             # mask out generation prompt if assistant message
             loss_mask[: len(self.generation_prompt)] = 0
@@ -239,6 +246,45 @@ class MultiTurnSFTDataset(Dataset):
             loss_mask = torch.zeros_like(attention_mask)
 
         return input_ids, loss_mask, attention_mask, inputs
+
+    def _process_single_message(
+        self,
+        index: int,
+        message: dict[str, Any],
+        full_message: list,
+        tools: Optional[list[dict[str, Any]]] = None,
+        enable_thinking: Optional[bool] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        """Backward-compatible wrapper for callers overriding the old hook."""
+        return self._process_message_group(
+            index=index,
+            messages=[message],
+            full_message=full_message,
+            tools=tools,
+            enable_thinking=enable_thinking,
+        )
+
+    @staticmethod
+    def _message_group_end(messages: list[dict[str, Any]], start: int) -> int:
+        """Return the exclusive end of the next independently renderable group."""
+        role = messages[start]["role"]
+
+        # Qwen3.5/3.6 reject a system-only conversation. System and the first
+        # user turn are both non-trainable, so rendering them together preserves
+        # the exact full-conversation prefix without changing the loss mask.
+        if start == 0 and role == "system" and start + 1 < len(messages) and messages[start + 1]["role"] == "user":
+            return start + 2
+
+        # Neighbor-aware templates wrap a consecutive tool run in one user
+        # envelope. Rendering the complete run preserves all tool-response
+        # blocks without duplicating the envelope around every result.
+        if role == "tool":
+            end = start + 1
+            while end < len(messages) and messages[end]["role"] == "tool":
+                end += 1
+            return end
+
+        return start + 1
 
     def _build_messages(self, example: dict):
         """Replace <image> and <video> placeholder in messages with corresponding image and video
@@ -298,21 +344,36 @@ class MultiTurnSFTDataset(Dataset):
         if enable_thinking is not None:
             enable_thinking = bool(enable_thinking)
 
-        # 1. tokenize each message
+        # 1. Tokenize independently renderable message groups. Most groups are
+        # one message; initial system+user and consecutive tool messages must
+        # retain their template-neighbor context.
         input_ids, loss_mask, attention_mask, multi_modal_inputs = [], [], [], {}
-        for i, message in enumerate(messages):
-            _input_ids, _loss_mask, _attention_mask, _inputs = self._process_single_message(
-                index=i,
-                message=message,
-                full_message=messages,
-                tools=tools if i == 0 else None,
-                enable_thinking=enable_thinking,
-            )
+        i = 0
+        while i < len(messages):
+            end = self._message_group_end(messages, i)
+            message_group = messages[i:end]
+            if len(message_group) == 1:
+                _input_ids, _loss_mask, _attention_mask, _inputs = self._process_single_message(
+                    index=i,
+                    message=message_group[0],
+                    full_message=messages,
+                    tools=tools if i == 0 else None,
+                    enable_thinking=enable_thinking,
+                )
+            else:
+                _input_ids, _loss_mask, _attention_mask, _inputs = self._process_message_group(
+                    index=i,
+                    messages=message_group,
+                    full_message=messages,
+                    tools=tools if i == 0 else None,
+                    enable_thinking=enable_thinking,
+                )
             input_ids.append(_input_ids)
             loss_mask.append(_loss_mask)
             attention_mask.append(_attention_mask)
             for k, v in _inputs.items():
                 multi_modal_inputs.setdefault(k, []).append(v)
+            i = end
 
         input_ids = torch.cat(input_ids, dim=0)
         loss_mask = torch.cat(loss_mask, dim=0)
@@ -423,8 +484,8 @@ class MultiTurnSFTDataset(Dataset):
             raise ValueError(f"Unknown pad mode {self.pad_mode}")
 
     def sanity_check(self, input_ids: torch.Tensor, messages: list[dict], tools: list[dict], enable_thinking: bool):
-        """Check concatenated input_ids of apply_chat_template to each turn equals
-        apply_chat_template to whole messages.
+        """Check concatenated input_ids of message-group rendering equals
+        apply_chat_template to the whole conversation.
         """
         processor = self.processor if self.processor is not None else self.tokenizer
         apply_chat_template_kwargs = {**self.apply_chat_template_kwargs}
@@ -441,7 +502,7 @@ class MultiTurnSFTDataset(Dataset):
         )
 
         error_message = (
-            "MultiTurnSFTDataset apply_chat_template to each turn separately and concat `input_ids` "
+            "MultiTurnSFTDataset apply_chat_template to message groups and concat `input_ids` "
             "as a whole sequence, which may not equal to apply_chat_template to whole messages at once.\n"
             "For example, Qwen Thinking series models add <think></think> tags to last turn, please check "
             "your tokenizer chat template settings.\n"
