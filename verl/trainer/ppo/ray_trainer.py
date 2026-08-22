@@ -40,6 +40,7 @@ from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.config import AlgoConfig
 from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
+from verl.trainer.ppo.checkpoint_callback import build_checkpoint_callback
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
@@ -329,6 +330,7 @@ class RayPPOTrainer:
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
+        self.checkpoint_callback = build_checkpoint_callback(config)
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
@@ -1034,20 +1036,29 @@ class RayPPOTrainer:
         torch.save(dataloader_state_dict, dataloader_local_path)
 
         # latest checkpointed iteration tracker (for atomic usage)
-        if (
-            hasattr(self.config.actor_rollout_ref.actor.checkpoint, "async_save")
-            and self.config.actor_rollout_ref.actor.checkpoint.async_save
-        ) or (
-            "async_save" in self.config.actor_rollout_ref.actor.checkpoint
-            and self.config.actor_rollout_ref.actor.checkpoint["async_save"]
-        ):
+        actor_checkpoint_config = self.config.actor_rollout_ref.actor.checkpoint
+        async_save = bool(
+            (hasattr(actor_checkpoint_config, "async_save") and actor_checkpoint_config.async_save)
+            or ("async_save" in actor_checkpoint_config and actor_checkpoint_config["async_save"])
+        )
+        if async_save:
             print("skip write latest_checkpointed_iteration.txt when async_save is True")
+            self.checkpoint_callback.on_save(
+                trainer=self,
+                global_step=self.global_steps,
+                checkpoint_dir=local_global_step_folder,
+                async_save=True,
+            )
             return
         local_latest_checkpointed_iteration = os.path.join(
             self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt"
         )
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
+
+        self.checkpoint_callback.on_save(
+            trainer=self, global_step=self.global_steps, checkpoint_dir=local_global_step_folder, async_save=False
+        )
 
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":

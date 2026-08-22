@@ -49,6 +49,7 @@ from verl.single_controller.ray import (
 )
 from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo import core_algos
+from verl.trainer.ppo.checkpoint_callback import build_checkpoint_callback
 from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.metric_utils import (
     RolloutMoELoadBalanceMetricsAccumulator,
@@ -124,6 +125,7 @@ class PPOTrainer(ABC):
 
     def __init__(self, config: DictConfig):
         self.config = config
+        self.checkpoint_callback = build_checkpoint_callback(config)
         self.use_critic = need_critic(self.config)
         self.use_reference_policy = need_reference_policy(self.config)
         self.use_teacher_policy = need_teacher_policy(self.config)
@@ -951,12 +953,22 @@ class PPOTrainer(ABC):
         actor_ckpt_cfg = self.config.actor_rollout_ref.actor.get("checkpoint", {})
         if actor_ckpt_cfg.get("async_save", False):
             logger.info("skip write latest_checkpointed_iteration.txt when async_save is True")
+            self.checkpoint_callback.on_save(
+                trainer=self,
+                global_step=self.global_steps,
+                checkpoint_dir=local_global_step_folder,
+                async_save=True,
+            )
             return
         local_latest_checkpointed_iteration = os.path.join(
             self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt"
         )
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
+
+        self.checkpoint_callback.on_save(
+            trainer=self, global_step=self.global_steps, checkpoint_dir=local_global_step_folder, async_save=False
+        )
 
     def _validate(self) -> dict[str, float]:
         # Lists to collect samples for the table
