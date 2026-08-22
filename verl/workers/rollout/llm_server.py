@@ -64,6 +64,9 @@ class GlobalRequestLoadBalancer:
       same request always routes to the same replica across runs.
     - **Dynamic Server Management**: Supports add/remove servers at runtime
       for hybrid scaling.
+    - **Bounded Affinity**: With ``affinity_break_margin`` set, a sticky session is
+      re-checked each turn and moved once its replica falls that many in-flight requests
+      behind the least-loaded one. Disabled (``None``) by default.
     """
 
     def __init__(
@@ -71,6 +74,7 @@ class GlobalRequestLoadBalancer:
         servers: dict[str, ray.actor.ActorHandle],
         max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE,
         full_determinism: bool = False,
+        affinity_break_margin: Optional[int] = None,
     ):
         # Allow empty initial servers: in dynamic-resource-scheduling mode all
         # replicas are hybrid and will be registered later via add_servers().
@@ -79,9 +83,34 @@ class GlobalRequestLoadBalancer:
         self._inflight_requests: dict[str, int] = {sid: 0 for sid in servers}
         self._request_id_to_server: LRUCache = LRUCache(maxsize=max_cache_size)
         self._full_determinism = full_determinism
+        # Written as `not (x >= 0)` so a NaN, which would break affinity even when the pin is
+        # least loaded, is rejected rather than silently accepted.
+        if affinity_break_margin is not None and not (affinity_break_margin >= 0):
+            raise ValueError(f"affinity_break_margin must be >= 0 or null, got {affinity_break_margin!r}")
+        self._affinity_break_margin = affinity_break_margin
+        self._affinity_kept = 0
+        self._affinity_broken = 0
+
+    def _least_loaded_server(self) -> str:
+        """Server with the fewest in-flight requests; ties go to the first registered."""
+        return min(self._inflight_requests, key=self._inflight_requests.get)
+
+    def _keep_affinity(self, server_id: str) -> bool:
+        """Whether ``server_id`` is still an acceptable home for its sticky session."""
+        # full_determinism routes by hash, so a load-dependent re-route would break it.
+        if self._affinity_break_margin is None or self._full_determinism:
+            return True
+        least = min(self._inflight_requests.values())
+        return self._inflight_requests[server_id] <= least + self._affinity_break_margin
 
     def acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
         """Acquire a server for the given request (sticky + least-loaded).
+
+        A sticky session keeps a conversation's prefix in one replica's KV cache. Held
+        unconditionally it also keeps feeding a replica that drew several long conversations
+        all of their later turns, since a cache hit returns before any load is consulted.
+        ``affinity_break_margin`` moves the session once its replica holds that many extra
+        in-flight requests: staying costs queueing delay, moving costs one re-prefill.
 
         Returns:
             A tuple of ``(server_id, actor_handle)`` in a single atomic call.
@@ -91,6 +120,14 @@ class GlobalRequestLoadBalancer:
             server_id = self._request_id_to_server[request_id]
             # Check if server is still in the active pool
             if server_id in self._inflight_requests:
+                if self._keep_affinity(server_id):
+                    self._affinity_kept += 1
+                    self._inflight_requests[server_id] += 1
+                    return server_id, self._servers[server_id]
+                self._affinity_broken += 1
+                # Re-pin, or the remaining turns re-prefill somewhere new every time.
+                server_id = self._least_loaded_server()
+                self._request_id_to_server[request_id] = server_id
                 self._inflight_requests[server_id] += 1
                 return server_id, self._servers[server_id]
             # Server was removed, clear stale cache entry and re-select
@@ -106,9 +143,7 @@ class GlobalRequestLoadBalancer:
             # which varies run-to-run, so it is bypassed entirely here.
             server_id = list(self._servers)[hash(request_id) % len(self._servers)]
         else:
-            min_count = min(self._inflight_requests.values())
-            candidates = [sid for sid, count in self._inflight_requests.items() if count == min_count]
-            server_id = candidates[0]
+            server_id = self._least_loaded_server()
         self._request_id_to_server[request_id] = server_id
         self._inflight_requests[server_id] += 1
         return server_id, self._servers[server_id]
@@ -187,6 +222,10 @@ class GlobalRequestLoadBalancer:
             "total_inflight": sum(self._inflight_requests.values()),
             "active_servers": len(self._inflight_requests),
             "registered_handles": list(self._servers.keys()),
+            # Sticky hits only, not first placements.
+            "affinity_break_margin": self._affinity_break_margin,
+            "affinity_kept": self._affinity_kept,
+            "affinity_broken": self._affinity_broken,
         }
 
     def get_total_inflight(self) -> int:
@@ -603,11 +642,12 @@ class LLMServerManager:
             servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
             max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
         )
-        # The default GlobalRequestLoadBalancer honors the full_determinism flag
-        # in acquire_server. A custom subclass overrides acquire_server and takes
-        # full control of routing, so the flag is not forwarded to it.
+        # The default GlobalRequestLoadBalancer honors full_determinism and the affinity
+        # margin in acquire_server. A custom subclass overrides acquire_server and takes full
+        # control of routing, so neither is forwarded to it.
         if load_balancer_cls is GlobalRequestLoadBalancer:
             kwargs["full_determinism"] = getattr(self.rollout_config, "full_determinism", False)
+            kwargs["affinity_break_margin"] = getattr(self.rollout_config, "affinity_break_margin", None)
         self.global_load_balancer = ray.remote(load_balancer_cls).remote(**kwargs)
 
     def get_client(self, client_cls: type[LLMServerClient] | None = None, **kwargs) -> LLMServerClient:
