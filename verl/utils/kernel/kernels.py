@@ -381,14 +381,18 @@ def efficient_entropy_triton_kernel_epilogue(
     pid_m = tl.program_id(axis=0)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    global_max = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+    global_max = tl.full((BLOCK_SIZE_M,), -float("inf"), dtype=tl.float32)
     global_accu = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
     global_entropy_b = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
     for pid_n in range(0, tl.cdiv(num_splits, BLOCK_SIZE_N)):
         offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         max_ptrs = max_ptr + offs_m[:, None] * stride_max_m + offs_n[None, :] * stride_max_n
 
-        _max = tl.load(max_ptrs, mask=(offs_m[:, None] < num_tokens) & (offs_n[None, :] < num_splits), other=0.0)
+        _max = tl.load(
+            max_ptrs,
+            mask=(offs_m[:, None] < num_tokens) & (offs_n[None, :] < num_splits),
+            other=-float("inf"),
+        )
 
         accu_ptrs = accu_ptr + offs_m[:, None] * stride_accu_m + offs_n[None, :] * stride_accu_n
         _accu = tl.load(accu_ptrs, mask=(offs_m[:, None] < num_tokens) & (offs_n[None, :] < num_splits), other=0.0)
@@ -468,7 +472,7 @@ def efficient_entropy_triton_kernel_epilogue_tp(
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
 
-    global_max = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+    global_max = tl.full((BLOCK_SIZE_M,), -float("inf"), dtype=tl.float32)
     global_accu = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
     global_entropy_b = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
     for pid_n in range(0, tl.cdiv(num_splits, BLOCK_SIZE_N)):
@@ -477,12 +481,12 @@ def efficient_entropy_triton_kernel_epilogue_tp(
         _reduced_max = tl.load(
             reduced_max_ptr + offs_m[:, None] * stride_reduced_max_m + offs_n[None, :] * stride_reduced_max_n,
             mask=(offs_m[:, None] < num_tokens) & (offs_n[None, :] < num_splits),
-            other=0.0,
+            other=-float("inf"),
         )
         _original_max = tl.load(
             original_max_ptr + offs_m[:, None] * stride_original_max_m + offs_n[None, :] * stride_original_max_n,
             mask=(offs_m[:, None] < num_tokens) & (offs_n[None, :] < num_splits),
-            other=0.0,
+            other=-float("inf"),
         )
         _accu = tl.load(
             accu_ptr + offs_m[:, None] * stride_accu_m + offs_n[None, :] * stride_accu_n,
