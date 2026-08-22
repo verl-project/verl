@@ -372,6 +372,35 @@ def align_r3_router_replay_data(layers_topk_idx: torch.Tensor, input_ids: torch.
     return torch.nested.as_nested_tensor(aligned_parts, layout=torch.jagged)
 
 
+def _distribute_router_replay_padding(
+    layers_topk_idx: torch.Tensor,
+    valid_rows: torch.Tensor,
+    num_experts: int,
+    expert_parallel_size: int,
+) -> torch.Tensor:
+    """Fill post-CP padding rows without concentrating them on one expert block.
+
+    Assignments visit EP ranks first, then slots within each rank. Consecutive
+    padding prefixes therefore have optimal EP balance and full cycles visit every expert.
+    """
+    _, _, num_layers, topk = layers_topk_idx.shape
+    padding_rows = (~valid_rows.squeeze(0).bool()).nonzero().flatten()
+    if not padding_rows.numel():
+        return layers_topk_idx
+
+    num_padding_rows = padding_rows.numel()
+    experts_per_rank = num_experts // expert_parallel_size
+    row_offsets = torch.arange(num_padding_rows, device=layers_topk_idx.device).reshape((-1, 1, 1))
+    layer_offsets = torch.arange(num_layers, device=layers_topk_idx.device).reshape((1, -1, 1))
+    columns = torch.arange(topk, device=layers_topk_idx.device).reshape((1, 1, -1))
+    assignments = row_offsets * topk + columns + layer_offsets * (num_padding_rows * topk)
+    expert_ranks = assignments.remainder(expert_parallel_size)
+    expert_slots = torch.div(assignments, expert_parallel_size, rounding_mode="floor").remainder(experts_per_rank)
+    padding_routes = expert_ranks * experts_per_rank + expert_slots
+    layers_topk_idx[:, padding_rows] = padding_routes.to(layers_topk_idx.dtype)
+    return layers_topk_idx
+
+
 def set_router_replay_data(
     layers_topk_idx,
     attention_mask,
@@ -415,6 +444,7 @@ def set_router_replay_data(
 
         cp_layout = _context_parallel_layout(tf_config)
 
+        valid_rows_rmpad = None
         replay_mask_rmpad = None
         if layers_topk_idx.is_nested:
             layers_topk_idx_rmpad, _, _ = preprocess_thd_engine(
@@ -425,6 +455,23 @@ def set_router_replay_data(
                 local_cp_size=local_cp_size,
                 cp_layout=cp_layout,
             )
+            if replay_mask is None:
+                valid_rows = torch.nested.nested_tensor_from_jagged(
+                    torch.ones(
+                        layers_topk_idx.values().shape[0],
+                        dtype=torch.bool,
+                        device=layers_topk_idx.device,
+                    ),
+                    offsets=layers_topk_idx.offsets(),
+                )
+                valid_rows_rmpad, _, _ = preprocess_thd_engine(
+                    valid_rows,
+                    pre_process=True,
+                    use_fp8_padding=use_fp8_padding,
+                    min_local_rows=min_local_rows,
+                    local_cp_size=local_cp_size,
+                    cp_layout=cp_layout,
+                )
             if replay_mask is not None:
                 replay_mask_rmpad, _, _ = preprocess_thd_engine(
                     replay_mask,
@@ -437,6 +484,17 @@ def set_router_replay_data(
         else:
             layers_topk_idx_rmpad, _ = preprocess_packed_seqs(
                 layers_topk_idx, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding
+            )
+            if replay_mask is None:
+                valid_rows_rmpad, _ = preprocess_packed_seqs(
+                    attention_mask.bool(), attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding
+                )
+        if valid_rows_rmpad is not None:
+            layers_topk_idx_rmpad = _distribute_router_replay_padding(
+                layers_topk_idx_rmpad,
+                valid_rows_rmpad,
+                tf_config.num_moe_experts,
+                tf_config.expert_model_parallel_size,
             )
         layers_topk_idx_rmpad = layers_topk_idx_rmpad.contiguous()  # 1, dynamic_bs_all, layer_num, topk
 

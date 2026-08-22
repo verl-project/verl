@@ -43,11 +43,13 @@ def test_router_record_and_replay_use_dynamic_cp_size(monkeypatch):
     monkeypatch.setattr(router_utils, "device_name", "cpu")
 
     # The route tensor reaches preprocess_thd_engine only on the replay side, and by
-    # then it is back to int16; input_ids arrive as int64.
+    # then it is back to int16; the parallel validity mask arrives as bool.
     def fake_preprocess(value, **kwargs):
         calls.append(kwargs["local_cp_size"])
         if value.dtype == torch.int16:
             value = torch.tensor([[[[1]], [[2]]]], dtype=torch.int16)
+        elif value.dtype == torch.bool:
+            value = torch.ones((1, 2), dtype=torch.bool)
         return value, object(), None
 
     # postprocess_thd_engine is dtype- and trailing-shape-preserving, so it hands
@@ -64,7 +66,13 @@ def test_router_record_and_replay_use_dynamic_cp_size(monkeypatch):
 
     input_ids = _nested([torch.arange(2)])
     recorded = []
-    config = SimpleNamespace(fp8=None, num_layers=1, moe_layer_freq=1)
+    config = SimpleNamespace(
+        fp8=None,
+        num_layers=1,
+        num_moe_experts=8,
+        expert_model_parallel_size=1,
+        moe_layer_freq=1,
+    )
     router_utils.merge_router_topk_indices(None, input_ids, recorded, config, local_cp_size=2)
 
     # int16 has no NCCL datatype, so the collective must see the uint8 view while the
@@ -76,8 +84,49 @@ def test_router_record_and_replay_use_dynamic_cp_size(monkeypatch):
     router.set_target_indices = lambda indices, replay_mask=None: target.update(indices=indices, mask=replay_mask)
     router_utils.set_router_replay_data(recorded[0], None, config, local_cp_size=2)
 
-    assert calls == [2, 2, 2]
+    assert calls == [2, 2, 2, 2]
     torch.testing.assert_close(target["indices"], torch.tensor([[1], [2]]))
+
+
+def test_r2_padding_is_distributed_before_sequence_parallel_scatter(monkeypatch):
+    monkeypatch.setattr(router_utils.mpu, "get_tensor_model_parallel_world_size", lambda: 4)
+    monkeypatch.setattr(router_utils.mpu, "get_context_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(router_utils.mpu, "get_context_parallel_rank", lambda: 0)
+    monkeypatch.setattr(router_utils, "device_name", "cpu")
+    monkeypatch.setattr(router_utils, "get_current_rank_layer_info", lambda *_args: {"start": 0, "end": 1})
+
+    target = {}
+    router = SimpleNamespace(
+        set_target_indices=lambda indices, replay_mask=None: target.update(indices=indices, mask=replay_mask)
+    )
+    monkeypatch.setattr(router_utils.RouterReplayHelper, "get_micro_batch_router_list", lambda *_args: [router])
+    scattered = []
+    monkeypatch.setattr(
+        router_utils,
+        "scatter_to_sequence_parallel_region",
+        lambda tensor: scattered.append(tensor.clone()) or tensor,
+    )
+
+    valid_routes = torch.arange(9 * 8, dtype=torch.int16).reshape(9, 1, 8).remainder(64)
+    routes = _nested([valid_routes])
+    config = SimpleNamespace(
+        fp8=None,
+        num_layers=1,
+        num_moe_experts=64,
+        expert_model_parallel_size=32,
+        moe_layer_freq=1,
+    )
+
+    router_utils.set_router_replay_data(routes, None, config, vp_rank=0)
+
+    assert len(scattered) == 1
+    pre_scatter = scattered[0]
+    assert pre_scatter.shape == (8, 1, 8)
+    torch.testing.assert_close(pre_scatter[:4], valid_routes[:4])
+    padding = pre_scatter[4:, 0]
+    rank_load = torch.bincount((padding // 2).flatten(), minlength=32)
+    torch.testing.assert_close(rank_load, torch.ones(32, dtype=torch.int64))
+    torch.testing.assert_close(target["indices"], pre_scatter[:, 0].to(torch.int64))
 
 
 def test_r3_alignment_mask_and_dcp_collection():
