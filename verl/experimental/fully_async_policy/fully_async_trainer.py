@@ -292,7 +292,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             f"[FullyAsyncTrainer] Calling sleep_replicas() on "
             f"{len(self.hybrid_checkpoint_manager.replicas)} replicas..."
         )
-        await self.hybrid_checkpoint_manager.sleep_replicas()
+        await self.hybrid_checkpoint_manager.sleep_replicas(reset_connector=False)
         print("[FullyAsyncTrainer] Initial sleep complete, GPU memory now owned by training engine")
 
     def set_message_queue_client(self, message_queue_client: MessageQueueClient):
