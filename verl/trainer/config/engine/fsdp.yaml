@@ -71,7 +71,7 @@ pad_to_length_bucket: 1024
 # Whether to use forward only in fsdp.
 forward_only: false
 
-# fsdp or fsdp2
+# fsdp or fsdp2 or fsdp_turbo
 strategy: fsdp
 
 # Mixed precision training param dtype
@@ -104,3 +104,18 @@ qat:
 
   # Path to vLLM quantization config JSON file
   quantization_config_path: null
+
+turbo_config:
+  distributed:
+    fully_shard_parallel_size: 16
+    tensor_parallel_size: 1
+    expert_parallel_size: 1
+    expert_fully_shard_parallel_size: 1
+    ulysses_parallel_size: 1
+    fsdp_plan:
+      param_dtype: bf16
+      reduce_dtype: fp32
+      output_dtype: bf16
+      fsdp_implementation: native
+      num_to_forward_prefetch: 1
+      num_to_backward_prefetch: 1

@@ -41,7 +41,12 @@ from verl.plugin.platform import get_platform
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_resource_name, get_visible_devices_keyword, is_torch_npu_available
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
-from verl.utils.profiler import DistProfiler, build_vllm_profiler_args
+from verl.utils.profiler import (
+    build_rollout_dist_profiler,
+    build_vllm_profiler_args,
+    relocate_rollout_traces,
+    rollout_profiler_global_ranks,
+)
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tracking import RLInsightLogger
 from verl.utils.vllm.vllm_quant_utils import apply_vllm_quant_patches
@@ -156,10 +161,6 @@ class vLLMHttpServer:
         self.global_steps = None
         self._warned_missing_spec_decode_stats = False
 
-        if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
-            logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
-            self.config.load_format = "auto"
-
         # used for http server
         self._server_address = ray.util.get_node_ip_address().strip("[]")
         self._server_port = None
@@ -173,7 +174,20 @@ class vLLMHttpServer:
             else:
                 logger.warning(f"agent loop only support torch and npu profiler, got {profiler_config.tool}")
                 profiler_config = None
-        self.profiler_controller = DistProfiler(self.replica_rank, config=profiler_config, tool_config=tool_config)
+        # `ranks` in the rollout profiler config are global GPU ranks (as in the training roles);
+        # map them to the replica that owns them so e.g. ranks=[0, 8] with tp=8 profiles the replicas
+        # holding global ranks 0 and 8 (replicas 0 and 1), not replica indices 0 and 8.
+        self.replica_world_size = (
+            self.config.tensor_model_parallel_size
+            * self.config.data_parallel_size
+            * self.config.pipeline_model_parallel_size
+        )
+        self.profiler_controller = build_rollout_dist_profiler(
+            self.replica_rank, self.replica_world_size, config=profiler_config, tool_config=tool_config
+        )
+        # A tp>1 engine profiles its whole replica, but the user asked for specific global GPU ranks;
+        # keep only those when relocating so ranks=[0, 8] yields exactly GPU 0 and 8, not their tp-mates.
+        self.profiler_keep_global_ranks = rollout_profiler_global_ranks(profiler_config)
 
         # used for data parallel: --data-parallel-address, --data-parallel-rpc-port
         if self.node_rank == 0:
@@ -312,11 +326,21 @@ class vLLMHttpServer:
             **engine_kwargs,
         }
 
-        # update profiler args
-        profiler_args = build_vllm_profiler_args(
-            self.profiler_controller.config, self.profiler_controller.tool_config, self.replica_rank
-        )
-        args.update(profiler_args)
+        # update profiler args, only on the replica that will actually be profiled: configuring
+        # the engine profiler everywhere makes every replica log that profiling is enabled while
+        # only the selected one is ever started.
+        if self._should_profile():
+            # vLLM >= 0.13.0 takes the profiler config as a CLI arg and warns about the legacy
+            # VLLM_TORCH_PROFILER_* environment variables it no longer reads.
+            use_cli_args = _VLLM_VERSION >= version.parse("0.13.0")
+            profiler_args = build_vllm_profiler_args(
+                self.profiler_controller.config,
+                self.profiler_controller.tool_config,
+                self.replica_rank,
+                legacy_env=not use_cli_args,
+            )
+            if use_cli_args:
+                args.update(profiler_args)
 
         if self.config.prometheus.enable:
             if self.config.prometheus.served_model_name:
@@ -811,36 +835,53 @@ class vLLMHttpServer:
             await self.engine.reset_encoder_cache()
 
     async def release_kv_cache(self):
-        """Release only kv_cache GPU memory, keeping model weights intact.
-        # TODO: support true release of kv_cache
-        """
+        """Free the kv_cache pool for the duration of a weight sync."""
+        # TODO: use the real release_kv_cache() method after vllm supports it (vllm#44890/46438)
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
+        if self.rollout_mode == RolloutMode.COLOCATED:
+            return
+        await self.engine.sleep(level=self._resolve_sleep_level())
+        await self.engine.wake_up(tags=["weights"])
 
     async def resume_kv_cache(self):
         """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
-        if self.node_rank != 0:
+        if self.node_rank != 0 or not self.config.free_cache_engine:
             return
+        if self.rollout_mode == RolloutMode.COLOCATED:
+            return
+        await self.engine.wake_up(tags=["kv_cache"])
+        await self.engine.reset_prefix_cache(reset_connector=True)
+
+    def _should_profile(self) -> bool:
+        """Whether this replica drives the engine profiler."""
+        return (
+            self.profiler_controller.check_enable()
+            and self.profiler_controller.check_this_rank()
+            and self.profiler_controller.is_discrete_mode()
+        )
 
     async def start_profile(self, **kwargs):
         if self.node_rank != 0:
             return
-        if (
-            self.profiler_controller.check_enable()
-            and self.profiler_controller.check_this_rank()
-            and self.profiler_controller.is_discrete_mode()
-        ):
+        if self._should_profile():
             await self.engine.start_profile(**kwargs)
 
     async def stop_profile(self):
         if self.node_rank != 0:
             return
-        if (
-            self.profiler_controller.check_enable()
-            and self.profiler_controller.check_this_rank()
-            and self.profiler_controller.is_discrete_mode()
-        ):
+        if self._should_profile():
             await self.engine.stop_profile()
+            # Relocate the engine's traces into save_path (when relocate_results is set) so the
+            # training worker's single end-of-run upload of the whole save_path picks them up. The
+            # rollout engine does not run the finish command itself: it shares save_path with the
+            # colocated training worker, so uploading here too would send the same directory twice.
+            relocate_rollout_traces(
+                self.profiler_controller.config,
+                self.replica_rank,
+                self.replica_world_size,
+                self.profiler_keep_global_ranks,
+            )
 
     async def set_global_steps(self, global_steps: int):
         """Set the global steps of the model weights."""
@@ -1072,6 +1113,24 @@ class vLLMHttpServer:
         """Return the tags passed to engine.wake_up(). Default includes kv_cache."""
         return ["kv_cache", "weights"]
 
+    def _resolve_sleep_level(self) -> int:
+        """Deepest sleep level whose discarded state a subsequent weight sync can restore.
+
+        MTP drafter-only weights are initialized by vLLM and are not guaranteed
+        to be restored by actor weight sync after level 2 sleep discards them.
+        lora only update adapter weights, so set sleep level to 1.
+        vllm_ascend not support sleep_level now. Enabling EP during training may lead to accuracy issues.
+        """
+        mtp_config = getattr(self.config, "mtp", None)
+        mtp_rollout_enabled = (
+            mtp_config is not None
+            and getattr(mtp_config, "enable", False)
+            and getattr(mtp_config, "enable_rollout", False)
+        )
+        if mtp_rollout_enabled or self.lora_as_adapter or is_torch_npu_available(check_device=False):
+            return 1
+        return 2
+
     async def _sleep_hybrid(self):
         """HYBRID sleep: adapters and MTP need level=1; full weights need level=2.
 
@@ -1081,21 +1140,7 @@ class vLLMHttpServer:
         leaving other DP shards' weights unreleased, which causes OOM during
         FSDP training backward when DP > 1.
         """
-        mtp_config = getattr(self.config, "mtp", None)
-        mtp_rollout_enabled = (
-            mtp_config is not None
-            and getattr(mtp_config, "enable", False)
-            and getattr(mtp_config, "enable_rollout", False)
-        )
-        # MTP drafter-only weights are initialized by vLLM and are not guaranteed
-        # to be restored by actor weight sync after level 2 sleep discards them.
-        # lora only update adapter weights, so set sleep level to 1
-        # vllm_ascend not support sleep_level now. Enabling EP during training may lead to accuracy issues.
-        if mtp_rollout_enabled or self.lora_as_adapter or is_torch_npu_available(check_device=False):
-            sleep_level = 1
-        else:
-            sleep_level = 2
-        await self.engine.sleep(level=sleep_level)
+        await self.engine.sleep(level=self._resolve_sleep_level())
         await self.engine.reset_encoder_cache()
 
 

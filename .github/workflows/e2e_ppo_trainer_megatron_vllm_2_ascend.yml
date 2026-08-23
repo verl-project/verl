@@ -86,18 +86,24 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # This image is not the uv.cu130 one: it ships its own torch-npu stack, so the
+  # shared e2e scripts must launch with ambient python instead of `uv run`.
+  VERL_USE_UV: 0
+
 jobs:
   e2e_ppo_trainer_fsdp_vllm_ascend:
     if: github.repository_owner == 'verl-project'
     runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 90 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
       options: >-
         --shm-size 16g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -168,12 +174,13 @@ jobs:
     runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
       options: >-
         --shm-size 16g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -190,7 +197,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
-          pip install trl==0.26.0
+          pip install trl==0.28.0
       - name: Check final pip list
         run: |
           pip list

@@ -13,6 +13,25 @@ ACTOR_STRATEGY=${ACTOR_STRATEGY:-fsdp2}
 ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.6}
 VANILLA_MBRIDGE=${VANILLA_MBRIDGE:-False}
 
+########################### launch ###########################
+# uv (set VERL_USE_UV=0 for system python, as the ascend image does): on GPU this
+# runs every python entrypoint here — including the Ray workers, via
+# runtime_env.py_executable — through `uv run` on the matching extras of the
+# committed uv.lock, so the job needs no install step. The rollout engine is vllm
+# throughout; the training extra follows ACTOR_STRATEGY (fsdp2 rides the `fsdp`
+# extra). NPU falls back to ambient python.
+LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ]; then
+    case "${ACTOR_STRATEGY}" in
+        megatron) TRAIN_EXTRA=megatron ;;
+        *)        TRAIN_EXTRA=fsdp ;;
+    esac
+    UV_EXTRAS=(--extra vllm --extra "${TRAIN_EXTRA}")
+    LAUNCH=(uv run --frozen --all-packages "${UV_EXTRAS[@]}" python3)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages ${UV_EXTRAS[*]}")
+fi
+
 if ((N_GPUS_TRAINING <= 0 || N_GPUS_ROLLOUT <= 0 || N_GPUS_TRAINING + N_GPUS_ROLLOUT != NUM_GPUS)); then
     echo "Invalid GPU split: total=${NUM_GPUS}, training=${N_GPUS_TRAINING}, rollout=${N_GPUS_ROLLOUT}"
     exit 1
@@ -103,13 +122,13 @@ common_params=(
 echo "Running V1 separate_async with ${ACTOR_STRATEGY}: ${N_GPUS_TRAINING} training + ${N_GPUS_ROLLOUT} rollout GPUs"
 
 if [[ "${ACTOR_STRATEGY}" == "fsdp2" ]]; then
-    python3 -m verl.trainer.main_ppo \
+    "${LAUNCH[@]}" -m verl.trainer.main_ppo \
         "${common_params[@]}" \
         actor_rollout_ref.actor.strategy=fsdp2 \
         actor_rollout_ref.actor.fsdp_config.fsdp_size=2 \
         actor_rollout_ref.actor.fsdp_config.param_offload=False \
         actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-        "$@"
+        "${RAY[@]}" "$@"
 elif [[ "${ACTOR_STRATEGY}" == "megatron" ]]; then
     TRAIN_TP=${TRAIN_TP:-2}
     if ((TRAIN_TP <= 0 || N_GPUS_TRAINING % TRAIN_TP != 0)); then
@@ -118,7 +137,7 @@ elif [[ "${ACTOR_STRATEGY}" == "megatron" ]]; then
     fi
     TRAIN_PP=$((N_GPUS_TRAINING / TRAIN_TP))
 
-    python3 -m verl.trainer.main_ppo \
+    "${LAUNCH[@]}" -m verl.trainer.main_ppo \
         model_engine=megatron \
         "${common_params[@]}" \
         actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
@@ -128,7 +147,7 @@ elif [[ "${ACTOR_STRATEGY}" == "megatron" ]]; then
         actor_rollout_ref.actor.megatron.grad_offload=False \
         actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TRAIN_TP} \
         actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${TRAIN_PP} \
-        "$@"
+        "${RAY[@]}" "$@"
 else
     echo "Unknown ACTOR_STRATEGY=${ACTOR_STRATEGY}; expected fsdp2 or megatron"
     exit 1

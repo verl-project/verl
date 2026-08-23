@@ -17,6 +17,10 @@ from types import SimpleNamespace
 
 import pytest
 
+# vllm is not part of the `cpu` extra (it conflicts with the cpu torch world), so
+# cpu_unit_tests skips this module; vllm.yml runs it in the vllm venv.
+pytest.importorskip("vllm")
+
 from verl.workers.rollout.vllm_rollout.utils import (
     _resolve_vllm_weight_sync_local_rank,
     build_cli_args_from_config,

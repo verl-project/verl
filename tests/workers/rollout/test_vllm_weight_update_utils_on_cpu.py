@@ -81,8 +81,12 @@ def _load_vllm_rollout_utils():
     fake_vllm_quant.is_fp8_model = lambda config: False
     fake_vllm_quant.load_quanted_weights = lambda weights, runner, is_drafter=False: weights
 
-    fake_platform = types.ModuleType("verl.plugin.platform")
-    fake_platform.get_platform = lambda: None
+    # NOTE: deliberately do NOT stub verl.plugin.platform. It is lightweight and
+    # imports fine on CPU. verl.utils.device binds `get_platform` at import time, so
+    # a `lambda: None` stub gets baked into verl.utils.device during this window;
+    # because only the keys in `fakes` below are restored, that fake would leak
+    # process-wide and later tests would crash in get_device_name() with
+    # "'NoneType' object has no attribute 'device_name'".
 
     fakes = {
         "vllm": fake_vllm,
@@ -91,7 +95,6 @@ def _load_vllm_rollout_utils():
         "verl.utils.vllm": fake_vllm_utils,
         "verl.utils.vllm.patch": fake_vllm_patch,
         "verl.utils.vllm.vllm_quant_utils": fake_vllm_quant,
-        "verl.plugin.platform": fake_platform,
         "verl.workers.rollout.vllm_rollout.weight_update_utils": _weight_update_utils,
     }
 

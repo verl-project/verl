@@ -22,3 +22,6 @@ torchrun --nproc-per-node=4 --standalone -m pytest -svv \
 # Regression for verl#5995 (FSDP2 + CPUOffloadPolicy state_dict crash). Only
 # needs 2 ranks to exercise CPUOffloadPolicy sharding.
 torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp2_cpu_offload_state_dict.py
+# Regression for colocated FSDP2 full-parameter model transfers. It locks in
+# PyTorch's implicit pinned allocation for non-blocking D2H Module.to().
+torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp2_pinned_model_transfer.py

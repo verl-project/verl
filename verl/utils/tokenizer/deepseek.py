@@ -20,10 +20,10 @@ model, which vLLM reimplements in ``vllm/tokenizers/deepseek_v4_encoding.py``. T
 lives in :class:`verl.experimental.agent_loop.tool_parser.DeepSeekV4ToolParser`.
 
 The checkpoint ships no usable jinja template, so :class:`DeepSeekV4ContinuousTokenBuilder` renders
-through :func:`encode_messages` rather than ``apply_chat_template``. Enabling Continuous Token
-(``data.continuous_token.enable=True`` with ``model_family=deepseekv4``) therefore removes the need
-to configure a chat template for rollout at all, and keeps the prompt byte-exact with the reference
-encoder -- ``tests/utils/test_deepseek_on_cpu.py`` replays its golden fixtures.
+through :func:`encode_messages` rather than ``apply_chat_template``. Its root ``model_type`` selects
+this builder automatically, removing the need to configure a chat template for rollout and keeping
+the prompt byte-exact with the reference encoder -- ``tests/utils/test_deepseek_on_cpu.py`` replays
+its golden fixtures.
 
 Length filtering (``data.filter_overlong_prompts=True``) is the one rollout-side path that still
 calls ``tokenizer.apply_chat_template`` directly, so leave it off for DeepSeek-V4.
@@ -281,6 +281,9 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
         messages: list[dict[str, Any]],
         *,
         tools: list[dict[str, Any]] | None = None,
+        images: list[Any] | None = None,
+        videos: list[Any] | None = None,
+        audios: list[Any] | None = None,
     ) -> list[int]:
         return self._encode(messages, tools=tools, add_bos_token=True)
 

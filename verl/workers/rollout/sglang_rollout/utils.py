@@ -26,6 +26,29 @@ from verl.workers.rollout.utils import ensure_async_iterator
 SGLANG_LORA_NAME = "verl_actor_lora_name"
 
 
+def normalize_peft_config_for_sglang(peft_config: dict) -> dict:
+    """Normalize an engine's adapter config (enums to strings) for SGLang's adapter loader."""
+    normalized = dict(peft_config)
+    for key in ("task_type", "peft_type"):
+        if key in normalized:
+            normalized[key] = getattr(normalized[key], "value", normalized[key])
+    if "peft_type" not in normalized:
+        raise ValueError(
+            "adapter config has no 'peft_type', which SGLang's adapter loader requires. See "
+            "BaseEngine.get_per_tensor_param for the keys. Keys present: " + ", ".join(sorted(normalized))
+        )
+    # A bare string must stay one: list() would tear "all-linear" into characters.
+    target_modules = normalized["target_modules"]
+    normalized["target_modules"] = target_modules if isinstance(target_modules, str) else list(target_modules)
+    return normalized
+
+
+def lora_rank_of(model_config) -> int:
+    """The LoRA rank, from whichever block carries it: megatron sets ``model.lora.rank``, fsdp
+    the flat ``model.lora_rank``."""
+    return max(int(getattr(model_config, "lora_rank", 0) or 0), int(model_config.lora.get("rank", 0) or 0))
+
+
 def lora_served_as_adapter(model_config) -> bool:
     """Whether SGLang should serve LoRA as a hot-swappable adapter.
 
@@ -38,8 +61,20 @@ def lora_served_as_adapter(model_config) -> bool:
     loaded into SGLang: the engine must not be launched with ``enable_lora`` and requests
     must not carry a ``lora_path``.
     """
-    lora_enabled = model_config.lora_rank > 0 or model_config.lora.get("rank", 0) > 0
+    lora_enabled = lora_rank_of(model_config) > 0
     return lora_enabled and not model_config.lora.get("merge", False)
+
+
+def sglang_lora_target_modules(target_modules: Any) -> list[str]:
+    """Render verl's ``model.target_modules`` as SGLang's ``lora_target_modules``."""
+    if target_modules == "all-linear":
+        return ["all"]
+    if isinstance(target_modules, str):
+        raise ValueError(
+            f"SGLang cannot serve a regex `target_modules` ({target_modules!r}); PEFT matches it "
+            f"against the whole parameter key. Use `all-linear`, or list the module names."
+        )
+    return list(target_modules)
 
 
 def broadcast_pyobj(

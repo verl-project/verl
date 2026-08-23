@@ -359,6 +359,22 @@ profiler:
   # profile results saving path
   save_path: ${oc.select:global_profiler.save_path,null}
 
+  # Pull each replica's traces up into save_path (engines otherwise write per-replica sub-dirs) so
+  # post-processing that does not walk sub-directories sees them. Default same as the actor's.
+  relocate_results: ${oc.select:actor_rollout_ref.actor.profiler.relocate_results,false}
+
+  # Shell command executed on the selected ranks when profiling finishes (after relocate_results).
+  # See actor.profiler.finish_hook_cmd for the available env vars. null disables it.
+  # Default same as the actor's.
+  finish_hook_cmd: ${oc.select:actor_rollout_ref.actor.profiler.finish_hook_cmd,null}
+
+  # Run finish_hook_cmd on all ranks. Default same as the actor's.
+  finish_hook_all_ranks: ${oc.select:actor_rollout_ref.actor.profiler.finish_hook_all_ranks,false}
+
+  # Ranks that run finish_hook_cmd. [] or [0,1,...]. Falls back to the profiled ranks when unset.
+  # save_path is usually node-local, so pick one rank per node. Default same as the actor's.
+  finish_hook_ranks: ${oc.select:actor_rollout_ref.actor.profiler.finish_hook_ranks,[]}
+
   # specific tool config
   tool_config:
 

@@ -35,7 +35,6 @@ __all__ = [
     "EngineConfig",
     "EngineRouterReplayConfig",
     "QATEngineConfig",
-    "MindSpeedEngineConfig",
 ]
 
 
@@ -298,10 +297,11 @@ class FSDPEngineConfig(EngineConfig):
     pad_to_length: bool = False
     pad_to_length_bucket: int = 1024
     qat: QATEngineConfig = field(default_factory=QATEngineConfig)
+    turbo_config: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         super().__post_init__()
-        assert self.strategy in ["fsdp", "fsdp2"], f"strategy {self.strategy} not supported"
+        assert self.strategy in ["fsdp", "fsdp2", "fsdp_turbo"], f"strategy {self.strategy} not supported"
 
 
 @dataclass
@@ -656,30 +656,6 @@ class AutomodelEngineConfig(EngineConfig):
             f"distributed_strategy {self.distributed_strategy} not supported"
         )
         assert self.pp_size == 1, "Pipeline parallelism (pp_size > 1) is not yet supported for automodel backend"
-
-
-@dataclass
-class MindSpeedEngineConfig(McoreEngineConfig):
-    """Configuration for mindspeed parallelism.
-
-    The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
-
-    Args:
-        mcore_kwargs dict[str, Any]: mindspeed_megatron engine kwargs.
-        fsdp_kwargs dict[str, Any]: mindspeed_fsdp engine kwargs.
-    """
-
-    strategy: str = "mindspeed_megatron"
-    mcore_kwargs: dict[str, Any] = field(default_factory=dict)
-    fsdp_kwargs: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        """config validation logics go here"""
-        assert self.strategy in ["mindspeed_megatron", "mindspeed_fsdp"], f"strategy {self.strategy} not supported"
-        assert self.dtype in ["bfloat16", "float16"], f"dtype {self.dtype} not supported"
-        if self.tensor_model_parallel_size == 1:
-            warnings.warn("set sequence parallel to false as TP size is 1", stacklevel=2)
-            self.sequence_parallel = False
 
 
 @dataclass
