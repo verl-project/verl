@@ -13,6 +13,8 @@
 # limitations under the License.
 import json
 import os
+import pickle
+import ssl
 from copy import deepcopy
 from pathlib import Path
 
@@ -22,6 +24,7 @@ from omegaconf import OmegaConf
 from PIL import Image
 from torch.utils.data import DataLoader
 
+import verl.utils.dataset.rl_dataset as rl_dataset_module
 from verl import DataProto
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
@@ -43,6 +46,147 @@ def get_gsm8k_data():
     local_path = os.path.join(local_folder, "train.parquet")
     os.makedirs(local_folder, exist_ok=True)
     return local_path
+
+
+class _FakeTokenizer:
+    name_or_path = "fake-processor"
+
+    def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=True, **kwargs):
+        assert add_generation_prompt
+        assert tokenize
+        return list(range(len(messages[0]["content"].split())))
+
+    def __call__(self, text, add_special_tokens=False, return_attention_mask=False):
+        assert not add_special_tokens
+        assert not return_attention_mask
+        return {"input_ids": list(range(len(text.split())))}
+
+
+class _FakeProcessor:
+    tokenizer = _FakeTokenizer()
+
+    def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=False, **kwargs):
+        assert add_generation_prompt
+        assert not tokenize
+        return messages[0]["content"]
+
+
+class _UnpickleableProcessor(_FakeProcessor):
+    def __init__(self):
+        self.context = ssl.create_default_context()
+
+
+def _mock_filter_dataset(processor=None, num_workers=2):
+    dataset = RLHFDataset.__new__(RLHFDataset)
+    dataset.processor = processor
+    dataset.tokenizer = None if processor is not None else _FakeTokenizer()
+    dataset.prompt_key = "prompt"
+    dataset.image_key = "images"
+    dataset.video_key = "videos"
+    dataset.audio_key = "audios"
+    dataset.image_patch_size = 14
+    dataset.config = OmegaConf.create({"trust_remote_code": False})
+    dataset.max_prompt_length = 2
+    dataset.filter_overlong_prompts = True
+    dataset.apply_chat_template_kwargs = {}
+    dataset.mm_processor_kwargs = {}
+    dataset.tool_schemas = None
+    dataset.num_workers = num_workers
+    return dataset
+
+
+def test_maybe_filter_out_long_prompts_uses_picklable_multiprocess_processor_filter(monkeypatch):
+    calls = []
+
+    def load_fake_processor(source, trust_remote_code=False, use_fast=True):
+        assert source == "fake-processor"
+        assert not trust_remote_code
+        assert use_fast
+        return _FakeProcessor()
+
+    monkeypatch.setattr(rl_dataset_module, "_load_filter_processor", load_fake_processor, raising=False)
+
+    class FakeDataFrame(list):
+        def filter(self, function, num_proc=None, desc=None, fn_kwargs=None):
+            calls.append(num_proc)
+            if num_proc is not None:
+                pickle.dumps((function, fn_kwargs))
+                assert fn_kwargs["processor_path"] == "fake-processor"
+                assert "processor" not in fn_kwargs
+            return FakeDataFrame([doc for doc in self if function(doc, **(fn_kwargs or {}))])
+
+    dataset = _mock_filter_dataset(processor=_UnpickleableProcessor(), num_workers=2)
+    dataframe = FakeDataFrame(
+        [
+            {"prompt": [{"role": "user", "content": "short"}]},
+            {"prompt": [{"role": "user", "content": "one two three"}]},
+        ]
+    )
+
+    filtered = dataset.maybe_filter_out_long_prompts(dataframe)
+
+    assert calls == [2]
+    assert len(filtered) == 1
+    assert filtered[0]["prompt"][0]["content"] == "short"
+
+
+def test_maybe_filter_out_long_prompts_disables_multiprocessing_without_processor_path():
+    calls = []
+
+    class PathlessProcessor(_UnpickleableProcessor):
+        tokenizer = type("PathlessTokenizer", (_FakeTokenizer,), {"name_or_path": None})()
+
+    class FakeDataFrame(list):
+        def filter(self, function, num_proc=None, desc=None, fn_kwargs=None):
+            calls.append(num_proc)
+            assert num_proc is None
+            assert "processor" in fn_kwargs
+            assert "processor_path" not in fn_kwargs
+            return FakeDataFrame([doc for doc in self if function(doc, **(fn_kwargs or {}))])
+
+    dataset = _mock_filter_dataset(processor=PathlessProcessor(), num_workers=2)
+    dataframe = FakeDataFrame(
+        [
+            {"prompt": [{"role": "user", "content": "short"}]},
+            {"prompt": [{"role": "user", "content": "one two three"}]},
+        ]
+    )
+
+    filtered = dataset.maybe_filter_out_long_prompts(dataframe)
+
+    assert calls == [None]
+    assert len(filtered) == 1
+    assert filtered[0]["prompt"][0]["content"] == "short"
+
+
+def test_maybe_filter_out_long_prompts_disables_multiprocessing_without_tokenizer_path():
+    calls = []
+
+    class PathlessTokenizer(_FakeTokenizer):
+        name_or_path = None
+
+    class FakeDataFrame(list):
+        def filter(self, function, num_proc=None, desc=None, fn_kwargs=None):
+            calls.append(num_proc)
+            assert num_proc is None
+            assert "tokenizer" in fn_kwargs
+            assert "tokenizer_path" not in fn_kwargs
+            return FakeDataFrame([doc for doc in self if function(doc, **(fn_kwargs or {}))])
+
+    dataset = _mock_filter_dataset(num_workers=2)
+    dataset.tokenizer = PathlessTokenizer()
+    dataframe = FakeDataFrame(
+        [
+            {"prompt": [{"role": "user", "content": "short"}]},
+            {"prompt": [{"role": "user", "content": "one two three"}]},
+        ]
+    )
+
+    filtered = dataset.maybe_filter_out_long_prompts(dataframe)
+
+    assert calls == [None]
+    assert len(filtered) == 1
+    assert filtered[0]["prompt"][0]["content"] == "short"
 
 
 def test_rl_dataset():
@@ -133,8 +277,8 @@ def test_build_messages_accepts_video_path_or_frame_list(videos, expected_video)
 
 def test_maybe_filter_out_long_prompts_accepts_image_path(monkeypatch):
     class FakeDataFrame(list):
-        def filter(self, fn, num_proc=None, desc=None):
-            return FakeDataFrame([doc for doc in self if fn(doc)])
+        def filter(self, fn, num_proc=None, desc=None, fn_kwargs=None):
+            return FakeDataFrame([doc for doc in self if fn(doc, **(fn_kwargs or {}))])
 
     class FakeProcessor:
         def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=False, **kwargs):
