@@ -47,7 +47,7 @@ def _packed_seq_params_supports(field_name: str) -> bool:
     return field_name in getattr(PackedSeqParams, "__dataclass_fields__", {})
 
 
-def get_fp8_padding_options(config) -> tuple[bool, Optional[str]]:
+def get_fp8_padding_options(config) -> tuple[bool, str | None]:
     """Return (use_fp8_padding, fp8_recipe) for THD preprocessing from a TransformerConfig.
 
     TE fp8 training needs the packed sequences padded to recipe-dependent block
@@ -58,7 +58,7 @@ def get_fp8_padding_options(config) -> tuple[bool, Optional[str]]:
     return use_fp8_padding, fp8_recipe
 
 
-def _compute_fp8_thd_align_size(align_size: int, fp8_recipe: Optional[str] = None) -> tuple[int, int]:
+def _compute_fp8_thd_align_size(align_size: int, fp8_recipe: str | None = None) -> tuple[int, int]:
     """Compute FP8 alignment sizes for thd-format sequences.
 
     For FP8 block quantization, each sequence must be padded to a multiple of
@@ -84,7 +84,7 @@ def preprocess_packed_seqs(
     attention_mask: torch.Tensor,
     pre_process: bool = True,
     use_fp8_padding: bool = False,
-    fp8_recipe: Optional[str] = None,
+    fp8_recipe: str | None = None,
 ) -> tuple[torch.Tensor, PackedSeqParams]:
     """
     Preprocess packed sequences
@@ -361,7 +361,7 @@ def preprocess_thd_engine(
     pre_process: bool = True,
     need_roll: bool = False,
     use_fp8_padding: bool = False,
-    fp8_recipe: Optional[str] = None,
+    fp8_recipe: str | None = None,
     local_cp_size: int | None = None,
     min_local_rows: int | None = None,
     pad_to_length_bucket: int | None = None,
