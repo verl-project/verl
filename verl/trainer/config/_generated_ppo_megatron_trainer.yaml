@@ -981,7 +981,7 @@ transfer_queue:
     storage_backend: SimpleStorage
     SimpleStorage:
       total_storage_size: 100000
-      num_data_storage_units: 8
+      num_data_storage_units: null
     MooncakeStore:
       auto_init: false
       metadata_server: localhost:50123

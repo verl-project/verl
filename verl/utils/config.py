@@ -71,6 +71,13 @@ def update_dict_with_config(dictionary: dict, config: DictConfig):
             dictionary[key] = getattr(config, key)
 
 
+def resolve_transfer_queue_config(config: DictConfig) -> None:
+    """Resolve node-dependent defaults before initializing TransferQueue."""
+    simple_storage = config.transfer_queue.backend.SimpleStorage
+    if simple_storage.num_data_storage_units is None:
+        simple_storage.num_data_storage_units = max(2, 2 * config.trainer.nnodes)
+
+
 def validate_config(
     config: DictConfig,
     use_reference_policy: bool,
