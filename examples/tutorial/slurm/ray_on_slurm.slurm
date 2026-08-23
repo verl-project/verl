@@ -43,8 +43,19 @@ get_node_ipv4() {
 }
 
 # Getting the node names
-nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
-nodes_array=("$nodes")
+mapfile -t nodes_array < <(scontrol show hostnames "$SLURM_JOB_NODELIST")
+node_count=${#nodes_array[@]}
+
+if ((node_count == 0)); then
+    printf 'scontrol did not return any nodes for SLURM_JOB_NODELIST=%s.\n' "$SLURM_JOB_NODELIST" >&2
+    exit 1
+fi
+
+if ((node_count != SLURM_JOB_NUM_NODES)); then
+    printf 'Expected %s Slurm nodes, but scontrol returned %s for SLURM_JOB_NODELIST=%s.\n' \
+        "$SLURM_JOB_NUM_NODES" "$node_count" "$SLURM_JOB_NODELIST" >&2
+    exit 1
+fi
 
 head_node=${nodes_array[0]}
 if [[ -n "$RAY_NETWORK_INTERFACE" ]]; then
