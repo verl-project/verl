@@ -685,17 +685,20 @@ class vLLMHttpServer:
                 priority=priority,
             )
 
-            # Get final response
+            # Keep the latest cumulative output because vLLM may emit an empty
+            # terminal frame after an externally aborted request.
             final_res: Optional[RequestOutput] = None
+            latest_nonempty_res: Optional[RequestOutput] = None
             async for output in generator:
                 final_res = output
+                if output.outputs:
+                    latest_nonempty_res = output
             assert final_res is not None
 
         extra_fields = {"global_steps": self.global_steps}
-        # Handle abort case: when the request is aborted by pause_generation(abort),
-        # outputs may be empty. Return empty results with stop_reason="aborted"
-        # instead of crashing with "IndexError: list index out of range".
-        if not final_res.outputs:
+        was_aborted = not final_res.outputs or final_res.outputs[0].finish_reason == "abort"
+        result_res = latest_nonempty_res
+        if result_res is None:
             return TokenOutput(
                 token_ids=[],
                 log_probs=None,
@@ -705,22 +708,22 @@ class vLLMHttpServer:
             )
 
         extract_prompt_logprobs(
-            output=final_res,
+            output=result_res,
             num_prompt_logprobs=sampling_params.prompt_logprobs,
             result_dict=extra_fields,
         )
-        token_ids = final_res.outputs[0].token_ids
+        token_ids = result_res.outputs[0].token_ids
         log_probs = None
         if sampling_params.logprobs is not None:
-            log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(final_res.outputs[0].logprobs)]
+            log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(result_res.outputs[0].logprobs)]
 
         routed_experts = None
         if self.config.enable_rollout_routing_replay:
-            routed_experts = final_res.outputs[0].routed_experts
+            routed_experts = result_res.outputs[0].routed_experts
 
         # Determine stop reason from finish_reason
-        finish_reason = final_res.outputs[0].finish_reason
-        if finish_reason == "abort":
+        finish_reason = result_res.outputs[0].finish_reason
+        if was_aborted:
             stop_reason = "aborted"
         elif finish_reason in ("stop", "length"):
             stop_reason = "completed"
@@ -729,8 +732,8 @@ class vLLMHttpServer:
 
         num_preempted = None
 
-        if hasattr(final_res.outputs[0], "num_preempted"):
-            num_preempted = final_res.outputs[0].num_preempted
+        if hasattr(result_res.outputs[0], "num_preempted"):
+            num_preempted = result_res.outputs[0].num_preempted
 
         response_kv_transfer_params = getattr(final_res, "kv_transfer_params", None)
         if response_kv_transfer_params is not None:
