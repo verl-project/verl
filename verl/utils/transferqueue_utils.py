@@ -198,7 +198,7 @@ async def _async_update_meta_with_output(output: TensorDict, meta: BatchMeta, fu
         t2 = time.time()
 
         logger.info(f"Task {func_name} (pid={os.getpid()}) is writing to TransferQueue, cost time: {t2 - t1}s)")
-        meta.extra_info = meta_data
+    meta.extra_info = meta_data
     return meta
 
 

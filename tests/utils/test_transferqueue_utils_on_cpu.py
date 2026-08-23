@@ -16,7 +16,9 @@ import gc
 import os
 
 import pytest
+from tensordict import TensorDict
 
+from verl.utils import tensordict_utils as tu
 from verl.utils import transferqueue_utils as tqu
 
 
@@ -67,3 +69,39 @@ def test_async_bridge_loop_reused_between_calls():
         assert tqu._ASYNC_BRIDGE_LOOP is first_loop
     finally:
         tqu._shutdown_async_bridge_runtime()
+
+
+def test_tqbridge_preserves_metadata_only_output(monkeypatch):
+    class FakeBatchMeta:
+        def __init__(self, size, extra_info):
+            self.size = size
+            self.extra_info = extra_info
+
+    class FakeKVBatchMeta:
+        pass
+
+    class FakeClient:
+        async def async_get_data(self, meta):
+            return TensorDict({}, batch_size=(meta.size,))
+
+    class FakeTransferQueue:
+        def init(self):
+            pass
+
+        def get_client(self):
+            return FakeClient()
+
+    monkeypatch.setattr(tqu, "BatchMeta", FakeBatchMeta)
+    monkeypatch.setattr(tqu, "KVBatchMeta", FakeKVBatchMeta)
+    monkeypatch.setattr(tqu, "tq", FakeTransferQueue())
+    monkeypatch.setattr(tqu, "TQ_INITIALIZED", False)
+
+    @tqu.tqbridge()
+    def metadata_only_stage(batch):
+        output = TensorDict({}, batch_size=batch.batch_size)
+        tu.assign_non_tensor_data(output, "metrics", {"reward": 1.5})
+        return output
+
+    result = metadata_only_stage(FakeBatchMeta(size=2, extra_info={"old": "value"}))
+
+    assert result.extra_info == {"metrics": {"reward": 1.5}}
