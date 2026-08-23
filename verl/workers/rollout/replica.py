@@ -125,6 +125,7 @@ class RolloutReplica(ABC):
         self.bundle_indices: list[int] = []
 
         self.servers: list[ActorHandle] = []
+        self.server_node_ids: list[str] = []
         self._server_address: str = None
         self._server_handle: ActorHandle = None
 
@@ -282,14 +283,31 @@ class RolloutReplica(ABC):
                 *[server.sleep.remote(reset_connector=False) for server in self.servers]
             )
 
-    async def abort_all_requests(self, checkpoint_kv: bool = False, timeout_s: float = 30.0):
+    async def abort_all_requests(
+        self,
+        checkpoint_kv: bool = False,
+        timeout_s: float = 30.0,
+        reset_prefix_cache: bool = True,
+    ):
         """Abort requests and optionally wait for external KV checkpointing."""
-        await asyncio.gather(
-            *[
-                server.abort_all_requests.remote(checkpoint_kv=checkpoint_kv, timeout_s=timeout_s)
-                for server in self.servers
-            ]
-        )
+        if reset_prefix_cache:
+            await asyncio.gather(
+                *[
+                    server.abort_all_requests.remote(checkpoint_kv=checkpoint_kv, timeout_s=timeout_s)
+                    for server in self.servers
+                ]
+            )
+        else:
+            await asyncio.gather(
+                *[
+                    server.abort_all_requests.remote(
+                        checkpoint_kv=checkpoint_kv,
+                        timeout_s=timeout_s,
+                        reset_prefix_cache=False,
+                    )
+                    for server in self.servers
+                ]
+            )
 
     async def resume_generation(self):
         """Resume generation on all servers after abort_all_requests."""
@@ -299,13 +317,23 @@ class RolloutReplica(ABC):
         """reset kv cache in each rollout server."""
         await asyncio.gather(*[server.clear_kv_cache.remote() for server in self.servers])
 
-    async def release_kv_cache(self):
+    async def release_kv_cache(self, reset_connector: bool = True):
         """Release only the kv_cache GPU memory, keeping model weights in place."""
-        await asyncio.gather(*[server.release_kv_cache.remote() for server in self.servers])
+        if reset_connector:
+            await asyncio.gather(*[server.release_kv_cache.remote() for server in self.servers])
+        else:
+            await asyncio.gather(
+                *[server.release_kv_cache.remote(reset_connector=False) for server in self.servers]
+            )
 
-    async def resume_kv_cache(self):
+    async def resume_kv_cache(self, reset_connector: bool = True):
         """Restore the kv_cache GPU memory after a weight sync."""
-        await asyncio.gather(*[server.resume_kv_cache.remote() for server in self.servers])
+        if reset_connector:
+            await asyncio.gather(*[server.resume_kv_cache.remote() for server in self.servers])
+        else:
+            await asyncio.gather(
+                *[server.resume_kv_cache.remote(reset_connector=False) for server in self.servers]
+            )
 
     async def start_profile(self, **kwargs):
         """Start profiling on the replica."""

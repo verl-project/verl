@@ -352,12 +352,13 @@ class CheckpointEngineWorker(Worker):
         initialize_global_process_group_ray(timeout_second=None, backend="cpu:gloo")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def update_weights(self, global_steps: int = None):
+    async def update_weights(self, global_steps: int = None, reset_connector: bool = True):
         weights = self.checkpoint_engine.receive_weights(global_steps=global_steps)
         await self.server_adapter.update_weights(
             weights,
             global_steps=global_steps,
             wire_format=getattr(self.checkpoint_engine, "wire_format", "named_tensors"),
+            reset_connector=reset_connector,
         )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
@@ -478,11 +479,20 @@ class CheckpointEngineManager:
         await asyncio.gather(*[r.wake_up() for r in self.replicas])
 
     @auto_await
-    async def abort_replicas(self, checkpoint_kv: bool = False, timeout_s: float = 30.0):
+    async def abort_replicas(
+        self,
+        checkpoint_kv: bool = False,
+        timeout_s: float = 30.0,
+        reset_prefix_cache: bool = True,
+    ):
         """Abort all in-flight requests on every replica."""
         if checkpoint_kv:
             await asyncio.gather(
                 *[r.abort_all_requests(checkpoint_kv=True, timeout_s=timeout_s) for r in self.replicas]
+            )
+        elif not reset_prefix_cache:
+            await asyncio.gather(
+                *[r.abort_all_requests(reset_prefix_cache=False) for r in self.replicas]
             )
         else:
             await asyncio.gather(*[r.abort_all_requests() for r in self.replicas])
@@ -493,25 +503,34 @@ class CheckpointEngineManager:
         await asyncio.gather(*[r.resume_generation() for r in self.replicas])
 
     @auto_await
-    async def release_kv_cache_replicas(self):
+    async def release_kv_cache_replicas(self, reset_connector: bool = True):
         """Release kv_cache of all rollout replicas before NCCL weight sync.
 
         Unlike sleep_replicas(), this only frees the kv_cache and leaves model
         weights untouched, so the NCCL transfer can write directly into the
         existing weight buffers.  Call resume_kv_cache_replicas() after sync.
         """
-        await asyncio.gather(*[r.release_kv_cache() for r in self.replicas])
+        await asyncio.gather(
+            *[r.release_kv_cache(reset_connector=reset_connector) for r in self.replicas]
+        )
 
     @auto_await
-    async def resume_kv_cache_replicas(self):
+    async def resume_kv_cache_replicas(self, reset_connector: bool = True):
         """Restore kv_cache of all rollout replicas after NCCL weight sync.
 
         Counterpart to release_kv_cache_replicas().
         """
-        await asyncio.gather(*[r.resume_kv_cache() for r in self.replicas])
+        await asyncio.gather(
+            *[r.resume_kv_cache(reset_connector=reset_connector) for r in self.replicas]
+        )
 
     @auto_await
-    async def update_weights(self, global_steps: int = None):
+    async def update_weights(
+        self,
+        global_steps: int = None,
+        reset_connector: bool = True,
+        requests_already_aborted: bool = False,
+    ):
         """Update weights from actor worker group to rollout replicas.
 
         Args:
@@ -520,11 +539,16 @@ class CheckpointEngineManager:
 
         # 0. update weights for sync training with colocated actor and rollout
         if self.backend == "naive":
-            ray.get(self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend))
+            ray.get(
+                self.actor_wg.update_weights(
+                    global_steps=global_steps, mode=self.backend, reset_connector=reset_connector
+                )
+            )
             return {}
 
         # 1. abort and save all unfinished requests for partial rollout
-        await self.abort_replicas()
+        if not requests_already_aborted:
+            await self.abort_replicas()
 
         # 2. create a temporay worker group for all replicas
         workers = []
@@ -534,15 +558,19 @@ class CheckpointEngineManager:
         actor_wg = self.actor_wg
 
         # 3. release kv_cache before weight sync (weights stay in place)
-        await self.release_kv_cache_replicas()
+        await self.release_kv_cache_replicas(reset_connector=reset_connector)
 
         # 4. build process group
         self.build_process_group(rollout)
 
         # 5. update weights of all workers
         results = ray.get(
-            actor_wg.update_weights(global_steps=global_steps, mode=self.backend)
-            + rollout.update_weights(global_steps=global_steps)
+            actor_wg.update_weights(
+                global_steps=global_steps, mode=self.backend, reset_connector=reset_connector
+            )
+            + rollout.update_weights(
+                global_steps=global_steps, reset_connector=reset_connector
+            )
         )
         # The sender workers return the engine's per-sync metrics (empty for
         # backends that don't track any); merge and hand them to the trainer.
@@ -558,7 +586,7 @@ class CheckpointEngineManager:
         )
 
         # 7. restore kv_cache after weight sync
-        await self.resume_kv_cache_replicas()
+        await self.resume_kv_cache_replicas(reset_connector=reset_connector)
 
         # 8. resume all unfinished requests for partial rollout
         await self.resume_generation_replicas()

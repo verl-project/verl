@@ -391,7 +391,7 @@ class ServerAdapter(BaseRollout):
             max_connections=self.config.server.max_connections,
         )
 
-    async def resume(self, tags: list[str]):
+    async def resume(self, tags: list[str], reset_connector: bool = True):
         """Resume rollout weights or kv cache in GPU memory.
 
         Args:

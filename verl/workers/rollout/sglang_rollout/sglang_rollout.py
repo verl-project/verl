@@ -272,7 +272,7 @@ class ServerAdapter(BaseRollout):
             return self._pd_tp_local_rank == 0
         return self.device_mesh["infer_tp"].get_local_rank() == 0
 
-    async def resume(self, tags: list[str]):
+    async def resume(self, tags: list[str], reset_connector: bool = True):
         """Resume rollout weights or kv cache in GPU memory.
 
         Args:

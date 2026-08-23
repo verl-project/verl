@@ -72,14 +72,23 @@ class FixedRatioDynamicSchedulePolicy(DynamicSchedulePolicyBase):
 
         return ctx.total_generated_samples - ctx.expected_samples < self.deactivate_ratio * ctx.step_required_samples
 
-    def request_rebalance(self, global_steps: int, ctx: DynamicScheduleContext) -> None:
+    def request_rebalance(
+        self,
+        global_steps: int,
+        ctx: DynamicScheduleContext,
+        reset_prefix_cache: bool = True,
+    ) -> None:
         """Redistribute requests across all active replicas after activation."""
         if not hasattr(self, "_rollouter") or self._rollouter is None:
             print("[FixedRatioDynamicSchedulePolicy] request_rebalance skipped: no rollouter reference available")
             return
 
         try:
-            result = ray.get(self._rollouter.rebalance_requests.remote())
+            result = ray.get(
+                self._rollouter.rebalance_requests.remote(
+                    reset_prefix_cache=reset_prefix_cache
+                )
+            )
             print(
                 f"[FixedRatioDynamicSchedulePolicy] request_rebalance done at step {global_steps}: "
                 f"cleared {result.get('cleared_entries', 0)} sticky entries, "

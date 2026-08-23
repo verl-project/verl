@@ -42,11 +42,12 @@ class BaseRollout(ABC):
         self.device_mesh = device_mesh
 
     @abstractmethod
-    async def resume(self, tags: list[str]):
+    async def resume(self, tags: list[str], reset_connector: bool = True):
         """Resume rollout weights or kv cache in GPU memory.
 
         Args:
             tags: weights or kv_cache.
+            reset_connector: Whether waking the rollout also resets its external KV connector.
         """
         pass
 

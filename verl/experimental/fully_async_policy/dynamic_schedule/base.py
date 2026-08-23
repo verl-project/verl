@@ -159,7 +159,12 @@ class DynamicSchedulePolicyBase(ABC):
             ctx: Unified policy context (static config + per-step state + timing).
         """
 
-    def request_rebalance(self, global_steps: int, ctx: DynamicScheduleContext) -> None:  # noqa: B027
+    def request_rebalance(  # noqa: B027
+        self,
+        global_steps: int,
+        ctx: DynamicScheduleContext,
+        reset_prefix_cache: bool = True,
+    ) -> None:
         """Redistribute requests across inference replicas after activation.
 
         Called immediately after hybrid replicas are activated and registered
@@ -171,4 +176,6 @@ class DynamicSchedulePolicyBase(ABC):
         Args:
             global_steps: Current global step (parameter version).
             ctx: Unified policy context (static config + per-step state + timing).
+            reset_prefix_cache: Whether aborting requests during rebalance also
+                resets the rollout engine's external KV connector.
         """

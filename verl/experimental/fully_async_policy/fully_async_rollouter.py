@@ -1219,7 +1219,10 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         return n
 
     async def rebalance_requests(
-        self, wait_inflight_timeout_s: float = 30.0, wait_inflight_poll_interval_s: float = 0.2
+        self,
+        wait_inflight_timeout_s: float = 30.0,
+        wait_inflight_poll_interval_s: float = 0.2,
+        reset_prefix_cache: bool = True,
     ) -> dict:
         """Redistribute in-flight requests evenly across all active replicas.
 
@@ -1256,7 +1259,12 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         # Step 2: Abort in-flight requests on all active replicas.
         active_replicas = self.llm_server_manager.get_replicas()
         if active_replicas:
-            await asyncio.gather(*[replica.abort_all_requests() for replica in active_replicas])
+            await asyncio.gather(
+                *[
+                    replica.abort_all_requests(reset_prefix_cache=reset_prefix_cache)
+                    for replica in active_replicas
+                ]
+            )
             print(f"[FullyAsyncRollouter] Rebalance step 2/4: aborted requests on {len(active_replicas)} replicas")
 
         # Step 3: Wait until release_server() from all aborted requests has actually

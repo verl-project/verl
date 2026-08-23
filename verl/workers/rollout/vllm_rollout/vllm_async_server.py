@@ -831,7 +831,9 @@ class vLLMHttpServer:
             kv_transfer_params=decode_kv_params,
         )
 
-    async def wake_up(self, tags: list[str] | None = None):
+    async def wake_up(
+        self, tags: list[str] | None = None, reset_connector: bool = True
+    ):
         if self.node_rank != 0:
             return
 
@@ -840,7 +842,7 @@ class vLLMHttpServer:
             # processes across all DP shards (unlike collective_rpc which only reaches
             # TP workers within a single shard).
             await self.engine.wake_up(tags=tags or self._get_wake_up_tags())
-            await self.engine.reset_prefix_cache(reset_connector=True)
+            await self.engine.reset_prefix_cache(reset_connector=reset_connector)
         elif self.rollout_mode == RolloutMode.COLOCATED:
             # Directly call engine to wake up without sync weights.
             await self.engine.wake_up(tags=self._get_wake_up_tags())
@@ -848,7 +850,7 @@ class vLLMHttpServer:
             # (e.g. MooncakeStoreConnector) whose entries were computed
             # against the previous weights. No-op success when no connector
             # is configured (vLLM scheduler treats it as such).
-            await self.engine.reset_prefix_cache(reset_connector=True)
+            await self.engine.reset_prefix_cache(reset_connector=reset_connector)
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip wake_up in standalone mode")
 
@@ -863,35 +865,37 @@ class vLLMHttpServer:
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
-    async def clear_kv_cache(self):
+    async def clear_kv_cache(self, reset_connector: bool = True):
         if self.node_rank == 0:
             # reset_connector=True drops any attached external KV store
             # (e.g. MooncakeStoreConnector) whose entries were computed
             # against the previous model weights. With no connector it
             # is a no-op success, so we can pass it unconditionally.
-            await self.engine.reset_prefix_cache(reset_connector=True)
+            await self.engine.reset_prefix_cache(reset_connector=reset_connector)
 
             await self.engine.reset_mm_cache()
             await self.engine.reset_encoder_cache()
 
-    async def release_kv_cache(self):
+    async def release_kv_cache(self, reset_connector: bool = True):
         """Free the kv_cache pool for the duration of a weight sync."""
         # TODO: use the real release_kv_cache() method after vllm supports it (vllm#44890/46438)
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
         if self.rollout_mode == RolloutMode.COLOCATED:
             return
-        await self.engine.sleep(level=self._resolve_sleep_level())
+        await self.engine.sleep(
+            level=self._resolve_sleep_level(), reset_connector=reset_connector
+        )
         await self.engine.wake_up(tags=["weights"])
 
-    async def resume_kv_cache(self):
+    async def resume_kv_cache(self, reset_connector: bool = True):
         """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
         if self.rollout_mode == RolloutMode.COLOCATED:
             return
         await self.engine.wake_up(tags=["kv_cache"])
-        await self.engine.reset_prefix_cache(reset_connector=True)
+        await self.engine.reset_prefix_cache(reset_connector=reset_connector)
 
     def _should_profile(self) -> bool:
         """Whether this replica drives the engine profiler."""
@@ -1259,6 +1263,7 @@ class vLLMReplica(RolloutReplica):
                 worker_cuda_visible_devices[node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node]
             )
             node_id = worker_node_ids[node_rank * gpus_per_replica_node]
+            self.server_node_ids.append(node_id)
             node_gpu_ids = worker_cuda_visible_devices[
                 node_rank * gpus_per_replica_node : (node_rank + 1) * gpus_per_replica_node
             ]
@@ -1326,7 +1331,10 @@ class vLLMReplica(RolloutReplica):
         )
 
     async def abort_all_requests(
-        self, checkpoint_kv: bool = False, timeout_s: float = 30.0
+        self,
+        checkpoint_kv: bool = False,
+        timeout_s: float = 30.0,
+        reset_prefix_cache: bool = True,
     ) -> dict[str, Any]:
         """Abort all ongoing generation requests across all servers.
 
@@ -1336,7 +1344,9 @@ class vLLMReplica(RolloutReplica):
         results = await asyncio.gather(
             *[
                 server.abort_all_requests.remote(
-                    checkpoint_kv=checkpoint_kv, timeout_s=timeout_s
+                    checkpoint_kv=checkpoint_kv,
+                    timeout_s=timeout_s,
+                    reset_prefix_cache=reset_prefix_cache,
                 )
                 for server in self.servers
             ]
@@ -1375,11 +1385,16 @@ class vLLMReplica(RolloutReplica):
 
         return {"aborted": False, "request_id": request_id, "error": "Request not found on any server"}
 
-    async def release_kv_cache(self):
+    async def release_kv_cache(self, reset_connector: bool = True):
         # Drain all in-flight requests so that vLLM worker threads go idle
         # before we touch engine.release_kv_cache()
         await self.servers[0].wait_for_requests_to_drain.remote()
-        await asyncio.gather(*[server.release_kv_cache.remote() for server in self.servers])
+        await asyncio.gather(
+            *[
+                server.release_kv_cache.remote(reset_connector=reset_connector)
+                for server in self.servers
+            ]
+        )
 
     # -----------------------------------------------------------------------
     # Hook methods for subclass overrides

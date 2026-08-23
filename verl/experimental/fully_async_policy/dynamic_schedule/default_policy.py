@@ -208,7 +208,12 @@ class DefaultDynamicSchedulePolicy(DynamicSchedulePolicyBase):
 
         return self._has_positive_net_benefit(global_steps, ctx)
 
-    def request_rebalance(self, global_steps: int, ctx: DynamicScheduleContext) -> None:
+    def request_rebalance(
+        self,
+        global_steps: int,
+        ctx: DynamicScheduleContext,
+        reset_prefix_cache: bool = True,
+    ) -> None:
         """Redistribute requests across all active replicas after activation.
 
         Performs a full rebalance via the rollouter:
@@ -225,7 +230,11 @@ class DefaultDynamicSchedulePolicy(DynamicSchedulePolicyBase):
             return
 
         try:
-            result = ray.get(self._rollouter.rebalance_requests.remote())
+            result = ray.get(
+                self._rollouter.rebalance_requests.remote(
+                    reset_prefix_cache=reset_prefix_cache
+                )
+            )
             print(
                 f"[DefaultDynamicSchedulePolicy] request_rebalance done at step {global_steps}: "
                 f"cleared {result.get('cleared_entries', 0)} sticky entries, "

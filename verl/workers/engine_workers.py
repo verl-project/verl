@@ -724,7 +724,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def update_weights(self, global_steps: int = None, mode: str = "auto"):
+    async def update_weights(
+        self, global_steps: int = None, mode: str = "auto", reset_connector: bool = True
+    ):
         """Update weights from trainer to rollout.
 
         1. For sync training with colocated trainer and rollout, update rollout directly from model engine.
@@ -778,7 +780,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # vLLM: level-1 sleep still unmaps weights → must resume.
             resume_weights = self.config.rollout.free_cache_engine
         if resume_weights:
-            await self.rollout.resume(tags=["weights"])
+            await self.rollout.resume(tags=["weights"], reset_connector=reset_connector)
         log_gpu_memory_usage("After resume weights", logger=logger)
 
         # 2. determine if we need a base weight sync (adapter path only)
@@ -797,11 +799,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 layered_summon=self.layered_summon, base_sync_done=False
             )
             await self.rollout.update_weights(
-                per_tensor_param_base, peft_config=_base_peft_config, base_sync_done=False, global_steps=global_steps
+                per_tensor_param_base,
+                peft_config=_base_peft_config,
+                base_sync_done=False,
+                global_steps=global_steps,
+                reset_connector=reset_connector,
             )
 
         await self.rollout.update_weights(
-            per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
+            per_tensor_param,
+            peft_config=peft_config,
+            base_sync_done=True,
+            global_steps=global_steps,
+            reset_connector=reset_connector,
         )
 
         log_gpu_memory_usage("After update_weights", logger=logger)
@@ -813,7 +823,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 4. resume kv_cache
         if self.config.rollout.free_cache_engine:
-            await self.rollout.resume(tags=["kv_cache"])
+            await self.rollout.resume(tags=["kv_cache"], reset_connector=reset_connector)
         log_gpu_memory_usage("After resume kv_cache", logger=logger)
 
         self.base_sync_done = True

@@ -191,14 +191,14 @@ class ServerAdapter(BaseRollout):
         future = self.server_handle.collective_rpc.remote(method, timeout=timeout, args=args, kwargs=kwargs)
         return future if non_block else await future
 
-    async def resume(self, tags: list[str]):
+    async def resume(self, tags: list[str], reset_connector: bool = True):
         """Resume rollout weights or kv cache in GPU memory.
 
         Args:
             tags: weights or kv_cache.
         """
         if self.config.free_cache_engine and self._ensure_server_handle():
-            await self.server_handle.wake_up.remote(tags=tags)
+            await self.server_handle.wake_up.remote(tags=tags, reset_connector=reset_connector)
 
     async def release(self):
         """Release weights and kv cache in GPU memory."""
@@ -217,6 +217,7 @@ class ServerAdapter(BaseRollout):
         assert wire_format == "named_tensors", (
             f"vLLM rollout only consumes full named tensors; got wire_format={wire_format!r}"
         )
+        reset_connector = kwargs.pop("reset_connector", True)
         start_time = time.time()
 
         future = await self._execute_method(
@@ -238,7 +239,7 @@ class ServerAdapter(BaseRollout):
 
         # reset caches after updating weights
         if self._has_server:
-            await self.server_handle.clear_kv_cache.remote()
+            await self.server_handle.clear_kv_cache.remote(reset_connector=reset_connector)
             if global_steps is not None:
                 await self.server_handle.set_global_steps.remote(global_steps)
 

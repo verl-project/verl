@@ -699,6 +699,58 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             self.current_param_version += 1
             self.local_trigger_step = 1
 
+    def _uses_node_coordinated_flexkv_reset(self) -> bool:
+        rollout = self.config.actor_rollout_ref.rollout
+        return str(rollout.name).lower() == "vllm" and str(rollout.kv_backend).lower() == "flexkv"
+
+    async def _reset_flexkv_before_weight_update(self) -> tuple[bool, bool]:
+        """Abort active generation and reset each node-local FlexKV server once."""
+        managers = []
+        standalone_aborted = not self.only_hybrid and bool(self.checkpoint_manager.replicas)
+        if standalone_aborted:
+            managers.append(self.checkpoint_manager)
+
+        hybrid_manager = None
+        hybrid_aborted = False
+        if self.dynamic_schedule_enabled and self.dynamic_resource_controller.has_hybrid_replicas:
+            hybrid_manager = self.hybrid_checkpoint_manager
+            managers.append(hybrid_manager)
+            hybrid_aborted = self.dynamic_resource_controller.is_hybrid_active
+
+        aborts = []
+        if standalone_aborted:
+            aborts.append(self.checkpoint_manager.abort_replicas(reset_prefix_cache=False))
+        if hybrid_aborted and hybrid_manager is not None:
+            aborts.append(hybrid_manager.abort_replicas(reset_prefix_cache=False))
+        if aborts:
+            await asyncio.gather(*aborts)
+
+        representatives = {}
+        for manager in managers:
+            for replica in manager.replicas:
+                if len(replica.server_node_ids) != len(replica.servers):
+                    raise RuntimeError(
+                        f"rollout replica {replica.replica_rank} has incomplete server node metadata"
+                    )
+                for node_id, server in zip(replica.server_node_ids, replica.servers, strict=True):
+                    representatives.setdefault(node_id, server)
+
+        if not representatives:
+            raise RuntimeError("FlexKV node-coordinated reset found no rollout server representatives")
+
+        print(
+            f"[FullyAsyncTrainer] Resetting FlexKV connector on "
+            f"{len(representatives)} physical nodes before weight update"
+        )
+        await asyncio.gather(
+            *[
+                server.clear_kv_cache.remote(reset_connector=True)
+                for server in representatives.values()
+            ]
+        )
+        print("[FullyAsyncTrainer] FlexKV node-coordinated reset complete")
+        return standalone_aborted, hybrid_aborted
+
     async def _fit_update_weights(self) -> dict | None:
         """Sync updated weights to rollout replicas.
 
@@ -738,13 +790,22 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 ctx=ctx,
             )
 
+        coordinated_flexkv_reset = self._uses_node_coordinated_flexkv_reset()
+        standalone_aborted = False
+        hybrid_aborted = False
+
         with marked_timer("timing_s/param_sync", self.timing_raw):
+            if coordinated_flexkv_reset:
+                standalone_aborted, hybrid_aborted = await self._reset_flexkv_before_weight_update()
+
             # Step 1: NCCL broadcast from trainer to standalone rollout replicas.
             # Skipped when there are no standalone replicas (e.g. rollout.nnodes=0,
             # all rollout is hybrid) -- there is nothing to sync weights to.
             if not self.only_hybrid:
                 await self.checkpoint_manager.update_weights(
                     global_steps=self.current_param_version,
+                    reset_connector=not coordinated_flexkv_reset,
+                    requests_already_aborted=standalone_aborted,
                 )
             # Step 2: When dynamic resource scheduling is enabled, the Trainer GPUs
             # also co-host hybrid rollout replicas.  Push weights to them via
@@ -753,6 +814,8 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 _act_start = time.time()
                 await self.dynamic_resource_controller.sync_hybrid_weights(
                     global_steps=self.current_param_version,
+                    reset_connector=not coordinated_flexkv_reset,
+                    requests_already_aborted=hybrid_aborted,
                 )
                 await self.dynamic_resource_controller.activate_hybrid_replicas(self.current_param_version)
 
@@ -761,6 +824,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                     self.dynamic_resource_controller.policy.request_rebalance(
                         global_steps=self.current_param_version,
                         ctx=ctx,
+                        reset_prefix_cache=not coordinated_flexkv_reset,
                     )
 
                 self.dynamic_schedule_ctx.last_activate_duration_s += time.time() - _act_start
