@@ -410,7 +410,7 @@ def _iter_nested_tensors(value, prefix: str) -> Iterator[tuple[str, torch.Tensor
     elif isinstance(value, dict):
         for key in sorted(value, key=str):
             yield from _iter_nested_tensors(value[key], f"{prefix}.{key}")
-    elif isinstance(value, (list, tuple)):
+    elif isinstance(value, list | tuple):
         for index, item in enumerate(value):
             yield from _iter_nested_tensors(item, f"{prefix}.{index}")
 

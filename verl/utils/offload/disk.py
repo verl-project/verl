@@ -32,6 +32,8 @@ from typing import Iterable
 
 import torch
 
+from verl.utils.device import get_device_name, is_device_available
+
 logger = logging.getLogger(__name__)
 
 _COMPONENTS = frozenset({"param", "grad", "optimizer"})
@@ -73,7 +75,7 @@ class TensorDiskMetadata:
         value["shape"] = tuple(value["shape"])
         # Version-1 scratch manifests written before device-aware optimizer
         # offload contained accelerator tensors only.
-        value.setdefault("device_type", "cuda")
+        value.setdefault("device_type", get_device_name())
         return cls(**value)
 
 
@@ -174,7 +176,7 @@ class DiskOffloadStore:
     def _get_staging(self) -> torch.Tensor:
         if self._staging is not None:
             return self._staging
-        pin_memory = torch.cuda.is_available()
+        pin_memory = is_device_available()
         try:
             self._staging = torch.empty(self.chunk_size, dtype=torch.uint8, device="cpu", pin_memory=pin_memory)
         except RuntimeError:
