@@ -1,7 +1,7 @@
 Ascend Install Guidance
 =================
 
-Last updated: 2026/08/03.
+Last updated: 2026/08/13.
 
 关键更新
 --------
@@ -33,7 +33,6 @@ Last updated: 2026/08/03.
    - `Docker镜像获取、构建和使用 <#1-docker镜像获取构建和使用>`_
    - `自定义安装-vLLM + FSDP/Megatron <#2-自定义安装-vllm--fsdpmegatron>`_
    - `自定义安装-SGLang + FSDP/Megatron <#3-自定义安装-sglang--fsdpmegatron>`_
-   - `训练后端拓展-MindSpeed-LLM后端部署 <#4-训练后端拓展>`_
 - `附录 <#附录>`_
 
 硬件支持
@@ -63,14 +62,6 @@ Atlas 800T A3
    * - SGLang
      - FSDP/FSDP2/Megatron
 
-训练后端拓展
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-verl将训推后端抽象解耦，支持灵活接入自定义各类训推后端，当前拓展训练后端如下：
-
-MindSpeed-LLM：MindSpeed-LLM是基于昇腾生态的大语言模型分布式训练套件，当前已接入verl，安装部署方法参照章节 `训练后端拓展-MindSpeed-LLM后端部署 <#mindspeed-llm-训练后端支持>`_
-
-
 部署指南
 --------
 
@@ -92,14 +83,14 @@ MindSpeed-LLM：MindSpeed-LLM是基于昇腾生态的大语言模型分布式训
 依赖          版本                                     说明
 ============= ======================================= ===================
 HDK           ``26.0.rc1``                            NPU硬件驱动与固件
-CANN          ``9.0.0``                               CANN软件，帮助开发者实现在昇腾软硬件平台上开发和运行AI业务
-Python        ``>=3.10, <3.12``\ ，推荐 ``3.11``      
+CANN          ``9.1.0``                               CANN软件，帮助开发者实现在昇腾软硬件平台上开发和运行AI业务
+Python        ``>=3.10, <3.13``\ ，推荐 ``3.12``      
 torch         ``2.10.0``                              PyTorch 深度学习框架基础包
-torch_npu     ``2.10.0.post2``                        NPU PyTorch 适配插件        
+torch_npu     ``2.10.0.post4``                        NPU PyTorch 适配插件        
 torchvision   ``0.25.0``                              PyTorch 图像处理库
 torchaudio    ``2.10.0``                              PyTorch 音频处理库
 triton        ``3.5.0``                               Triton，用于编写自定义算子
-triton-ascend ``3.2.1``                               NPU Triton 适配，安装命令需参考脚本 `安装脚本 <../../../scripts/install_vllm_mcore_npu.sh>`_
+triton-ascend ``3.2.2``                               NPU Triton 适配，安装命令需参考脚本 `安装脚本 <../../../scripts/install_vllm_mcore_npu.sh>`_
 transformers  ``5.10.4``                              Hugging Face 大模型库，提供模型架构与预训练权重
 vLLM          ``0.23.0``                              高性能 LLM 推理与服务引擎
 vLLM-Ascend   ``0.23.0``                              NPU vLLM 后端适配  
@@ -126,8 +117,8 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
    # 安装NPU驱动
    sudo yum install -y Atlas-A3-hdk-npu-driver-26.0.rc1
    # 安装Toolkit，可指定--install-path 自定义路径
-   sudo yum install -y Ascend-cann-toolkit-9.0.0
-   sudo yum install -y Ascend-cann-A3-ops-9.0.0
+   sudo yum install -y Ascend-cann-toolkit-9.1.0
+   sudo yum install -y Ascend-cann-A3-ops-9.1.0
    # 安装后验证
    source /usr/local/Ascend/ascend-toolkit/set_env.sh
    python3 -c "import acl;print(acl.get_soc_name())"
@@ -144,12 +135,20 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
    # 使能CANN环境， 如果您自定义了CANN的路径，请根据自定义路径修改以下使能命令
    source /usr/local/Ascend/ascend-toolkit/set_env.sh
    source /usr/local/Ascend/nnal/atb/set_env.sh
-   conda create -n verl-vllm-npu python=3.11 -y
+   conda create -n verl-vllm-npu python=3.12 -y
    conda activate verl-vllm-npu
    git clone --recursive https://github.com/verl-project/verl.git
    bash verl/scripts/install_vllm_mcore_npu.sh
    # 如果您仅需要使用FSDP后端
    # USE_MEGATRON=0 bash verl/scripts/install_vllm_mcore_npu.sh
+
+日志过滤
+^^^^^^^^^^^^^^^^^^^^^^^^
+transformers版本升级5.10.4后，可能出现大量别名废弃告警，可添加环境变量过滤冗余日志
+
+.. code:: bash
+
+   export TRANSFORMERS_VERBOSITY=error
 
 3. 自定义安装-SGLang + FSDP/Megatron
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -238,44 +237,6 @@ SGLang 使用注意事项
 
    # 使能推理 EP 时需要
    export SGLANG_DEEPEP_BF16_DISPATCH=1
-
-4. 训练后端拓展
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-MindSpeed-LLM 训练后端支持
-^^^^^^^^^^^^^^^
-
-如需使用基于 Megatron/MindSpeed 体系的 MindSpeed-LLM 训练后端，需要额外下载
-MindSpeed-LLM。需要注意的是，MindSpeed-LLM 训练后端依赖 MindSpeed-LLM
-master 分支、MindSpeed master 分支以及 Megatron-LM ``core_r0.16.0``
-分支。
-
-MindSpeed-LLM 及相关依赖的源码安装指令：
-
-.. code:: bash
-
-   # 下载 MindSpeed-LLM、MindSpeed 和 Megatron-LM
-   git clone https://gitcode.com/Ascend/MindSpeed-LLM.git
-   git clone https://gitcode.com/Ascend/MindSpeed.git
-   git clone --depth 1 --branch core_r0.16.0 https://github.com/NVIDIA/Megatron-LM.git
-
-   # 配置环境变量
-   export PYTHONPATH=$PYTHONPATH:/your/path/Megatron-LM
-   export PYTHONPATH=$PYTHONPATH:/your/path/MindSpeed
-   export PYTHONPATH=$PYTHONPATH:/your/path/MindSpeed-LLM
-
-   # 安装 mbridge
-   pip install mbridge
-
-MindSpeed-LLM 作为基于 Megatron/MindSpeed 体系的昇腾 LLM 训练后端使用时，使用方式如下：
-
-1. 使能 verl worker 模型 ``strategy`` 配置为 ``mindspeed``\ ，例如
-   ``actor_rollout_ref.actor.strategy=mindspeed``\ 。
-2. MindSpeed-LLM 自定义入参可通过 ``llm_kwargs`` 参数传入，例如对 MOE
-   模型开启 GMM 特性可使用
-   ``+actor_rollout_ref.actor.mindspeed.llm_kwargs.moe_grouped_gemm=True``\ 。
-3. 更多特性信息可参考 `MindSpeed-LLM
-   内的特性文档 <https://gitcode.com/Ascend/MindSpeed-LLM/tree/master/docs/zh/pytorch/features/mcore>`__\ 。
 
 附录
 ----------------

@@ -1,0 +1,20 @@
+# Build-context excludes shared by all verl Docker images.
+#
+# NOTE: .git is intentionally NOT excluded — some images (docker/rocm/*, the
+# experimental images) build verl with setuptools_scm, which reads .git to
+# derive the version.
+
+# Python virtual environments. Never copy a host venv into an image: the uv
+# images (docker/Dockerfile.uv.cu130) build .venv at run time from the baked
+# uv cache, and a stray host venv only bloats the build context.
+**/.venv/
+**/.venvs/
+
+# Python / tooling caches and build artifacts — never needed inside an image.
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/.ipynb_checkpoints/

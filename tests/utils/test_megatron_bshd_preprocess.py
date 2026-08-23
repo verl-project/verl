@@ -35,6 +35,8 @@ def _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size: int = 4, cp_siz
     parallel_state.get_context_parallel_group = lambda: object()
     parallel_state.get_tensor_model_parallel_world_size = lambda: tp_size
 
+    parallel_state.get_dynamic_data_context_parallel_groups = lambda group_size: ("dcp", group_size)
+
     class PackedSeqParams:
         def __init__(self, **kwargs):
             self.__dict__.update(kwargs)
@@ -121,6 +123,15 @@ def test_preprocess_bshd_engine_preserves_1d_input_shape_on_cpu(monkeypatch):
         torch.tensor([[True, True, True, False], [True, True, False, False]]),
     )
     torch.testing.assert_close(position_ids, torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]], dtype=torch.long))
+
+
+def test_preprocess_thd_engine_rounds_packed_length_to_bucket_without_cp(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1, cp_size=1)
+    input_ids = _nested_tensor([torch.arange(513)])
+
+    packed, _, _ = mcore_util.preprocess_thd_engine(input_ids, pad_to_length_bucket=512)
+
+    assert packed.shape == (1, 1024)
 
 
 def test_preprocess_bshd_engine_preserves_topk_dense_dim_on_cpu(monkeypatch):
@@ -294,3 +305,20 @@ def test_postprocess_thd_engine_rejects_unknown_cp_layout(monkeypatch):
             post_process=False,
             cp_layout="interleaved",
         )
+
+
+def test_preprocess_thd_engine_pads_short_topk_sequence_dimension(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 1)
+    topk = 64
+    teacher_logprobs = _nested_tensor([torch.arange(topk, dtype=torch.float32).reshape(1, topk)])
+
+    packed, packed_seq_params, position_ids = mcore_util.preprocess_thd_engine(
+        teacher_logprobs,
+        local_cp_size=2,
+    )
+
+    assert packed.shape == (1, 2, topk)
+    torch.testing.assert_close(packed, torch.zeros_like(packed))
+    torch.testing.assert_close(position_ids, torch.tensor([[1, 0]], dtype=torch.long))
+    assert packed_seq_params.local_cp_size == 2

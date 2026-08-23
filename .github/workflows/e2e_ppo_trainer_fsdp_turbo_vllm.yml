@@ -29,37 +29,50 @@
 #     - new workflow yaml is added to `.github/workflows`
 #     - new tests are added to workflow mentioned in 2.
 
-name: e2e_fully_async_policy_trtllm
+name: e2e_ppo_trainer_fsdp_turbo_vllm
 
 on:
   # Trigger the workflow on push or pull request,
-  # but only for the main branch
+  # but only for the main branch.
+  # For push, for now only anti-patterns are specified so it is more conservative
+  # and achieves higher coverage.
   push:
     branches:
       - main
       - v0.*
     paths:
       - "**/*.py"
-      - "!**/*.md"
-      - "!**/*.sh"
-      - "!examples/*trainer*"
-      - "!tests/**"
-      - "!verl/trainer/main_*.py"
+      # Other entrypoints
       - "!verl/trainer/fsdp_sft_trainer.py"
-      - "verl/workers/rollout/trtllm_rollout/**"
-      - "verl/experimental/fully_async_policy/**"
-      - "verl/checkpoint_engine/**"
+      # Megatron
+      - "!verl/workers/**/megatron_*.py"
   pull_request:
     branches:
       - main
       - v0.*
     paths:
-      - "verl/workers/rollout/trtllm_rollout/**"
-      - "verl/experimental/fully_async_policy/**"
-      - "verl/checkpoint_engine/**"
-      - ".github/workflows/e2e_fully_async_policy_trtllm.yml"
-      - "tests/special_e2e/run_fully_async_policy.sh"
-      - "examples/data_preprocess/gsm8k.py"
+      - "**/*.py"
+      # Other entrypoints
+      - "!docker/**"
+      # Docs
+      - "!**/*.md"
+      - "!docs/**"
+      - "!examples/**"
+      - "!tests/**"
+      - "!verl/trainer/main_*.py"
+      - "!verl/trainer/fsdp_sft_trainer.py"
+      # Megatron
+      - "!verl/workers/**/megatron_*.py"
+      # Entrypoints
+      - ".github/workflows/e2e_ppo_trainer_fsdp_turbo_vllm.yml"
+      - "examples/data_preprocess/geo3k.py"
+      - "tests/special_e2e/run_ppo_trainer_fsdp_turbo.sh"
+      - "verl/trainer/main_ppo.py"
+      - "verl/trainer/config/ppo_trainer.yaml"
+      - "verl/workers/engine/fsdp/transformer_impl.py"
+      - "verl/workers/engine/fsdp/utils.py"
+      - "verl/workers/config/engine.py"
+      - "verl/trainer/config/engine/fsdp.yaml"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -71,7 +84,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:trtllm-1.3.0rc15"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm024.dev2"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -90,53 +103,15 @@ jobs:
           faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
           mlp-image: "${{ env.IMAGE }}"
 
-  trtllm_async_unit_tests:
+  e2e_ppo_trainer_fsdp_turbo_vllm:
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
-    timeout-minutes: 30
+    timeout-minutes: 60 # Increase this timeout value as needed
     env:
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
-      HF_HUB_ENABLE_HF_TRANSFER: "0"
-      TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.9;9.0;10.0;12.0+PTX"
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 0
-      - name: Reinstall FlashInfer for runtime GPU arch
-        run: |
-          unset TORCH_CUDA_ARCH_LIST
-          pip3 install --force-reinstall --no-deps flashinfer-python
-      - name: Install the current repository
-        run: |
-          pip3 install pytest-asyncio
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
-          pip3 install --no-deps TransferQueue==0.1.8
-      - name: Run TRT-LLM async unit tests
-        run: |
-          unset TORCH_CUDA_ARCH_LIST
-          export TRTLLM_ENABLE_PDL=0
-          export TRTLLM_TEST_MODEL_PATH_ROOT="${HOME}/models"
-          ray stop --force
-          pytest -v -s --durations=20 \
-            tests/workers/rollout/rollout_trtllm/test_trtllm_abort.py
-
-  # Megatron multi-replica: 4 rollout GPUs split into 2 replicas × TP=2.
-  e2e_fully_async_policy_trtllm_megatron_multi_replica:
-    needs: setup
-    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
-    timeout-minutes: 20
-    env:
-      HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
-      HF_ENDPOINT: "https://hf-mirror.com"
-      HF_HUB_ENABLE_HF_TRANSFER: "0"
-      ACTOR_STRATEGY: "megatron"
-      ROLLOUT_NAME: "trtllm"
-      GEN_TP: "2"  # 4 rollout GPUs / TP=2 = 2 replicas
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -146,30 +121,31 @@ jobs:
           pip3 install -r requirements-test.txt
           pip3 install -r requirements.txt
           pip3 install --no-deps -e .
-          pip3 install cupy-cuda12x==14.0.1
-          pip3 uninstall -y mbridge
-          pip3 install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@e2cfe7e --ignore-requires-python --no-deps --no-build-isolation
-          pip3 install git+https://github.com/NVIDIA/Megatron-LM.git@0823c73 --ignore-requires-python --no-deps --no-build-isolation
-          pip3 install "nvidia-modelopt>=0.37.0"
+          pip3 install transformers==5.5.3
+      - name: Clone FSDPTurbo
+        run: |
+          rm -rf /FSDPTurbo
+          git clone https://gitcode.com/Ascend/FSDPTurbo.git /FSDPTurbo
       - name: Check final pip list
         run: |
           pip3 list
-      - name: Prepare GSM8K dataset
-        run: |
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
-      - name: Running TRT-LLM fully-async E2E test with Megatron (multi-replica, 2×TP=2)
+      - name: Prepare GEO3K dataset
         run: |
           ray stop --force
-          bash tests/special_e2e/run_fully_async_policy.sh \
-            data.max_response_length=128 \
-            actor_rollout_ref.rollout.n=2 \
-            actor_rollout_ref.rollout.gpu_memory_utilization=0.1 \
-            actor_rollout_ref.actor.ppo_mini_batch_size=4 \
-            actor_rollout_ref.actor.ppo_max_token_len_per_gpu=1536
+          python3 examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/models/hf_data/hiyouga/geometry3k/
+      - name: Running GEO3K E2E training tests on 8 L20 GPUs with fsdp_turbo engine (FSDP_SIZE=8, USP=1)
+        run: |
+          ray stop --force
+          export PYTHONPATH=/FSDPTurbo
+          bash tests/special_e2e/run_ppo_trainer_fsdp_turbo.sh
 
   cleanup:
     runs-on: ubuntu-latest
-    needs: [setup, trtllm_async_unit_tests, e2e_fully_async_policy_trtllm_megatron_multi_replica]
+    needs:
+      [
+        setup,
+        e2e_ppo_trainer_fsdp_turbo_vllm,
+      ]
     if: always()
     steps:
       - id: destroy-runner

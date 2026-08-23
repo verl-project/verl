@@ -51,6 +51,12 @@ class CheckpointEngineRegistry:
 
     _registry: dict[str, type["CheckpointEngine"]] = {}
 
+    # Engine modules whose import failed, keyed by module name. Each engine pulls
+    # its own transport dependency (cupy for nccl/nixl, nixl, torch_npu for hccl,
+    # ...) and `verl.checkpoint_engine` imports them all optionally, so a missing
+    # dependency would otherwise only show up as an unregistered backend.
+    _import_errors: dict[str, ImportError] = {}
+
     def register(backend: str):
         """Register a checkpoint engine.
 
@@ -65,6 +71,16 @@ class CheckpointEngineRegistry:
         return wrapper
 
     @classmethod
+    def record_import_error(cls, module: str, error: ImportError):
+        """Record an engine module that could not be imported.
+
+        Args:
+            module: The name of the checkpoint engine module.
+            error: The import error raised by the module.
+        """
+        cls._import_errors[module] = error
+
+    @classmethod
     def get(cls, backend: str) -> type["CheckpointEngine"]:
         """Get the checkpoint engine class.
 
@@ -74,6 +90,12 @@ class CheckpointEngineRegistry:
         Returns:
             The checkpoint engine class.
         """
+        if backend not in cls._registry:
+            message = f"Checkpoint engine {backend} not registered, registered backends: {sorted(cls._registry)}"
+            if cls._import_errors:
+                unavailable = ", ".join(f"{module}: {error}" for module, error in sorted(cls._import_errors.items()))
+                message += f". Engine modules that failed to import: {unavailable}"
+            raise ValueError(message)
         return cls._registry[backend]
 
     @classmethod
@@ -88,9 +110,7 @@ class CheckpointEngineRegistry:
         Returns:
             A new checkpoint engine instance.
         """
-        if backend not in cls._registry:
-            raise ValueError(f"Checkpoint engine {backend} not registered")
-        return cls._registry[backend](*args, **kwargs)
+        return cls.get(backend)(*args, **kwargs)
 
 
 class CheckpointEngine(ABC):
@@ -539,8 +559,8 @@ class CheckpointEngineManager:
 
 
 async def split_weight_chunks(
-    weights: Generator[tuple[str, torch.Tensor], None, None], bucket_size: int
-) -> AsyncGenerator[tuple[TensorMeta, torch.Tensor], None]:
+    weights: Generator[tuple[str, torch.Tensor], None, None], bucket_size: int, meta_only: bool = False
+) -> AsyncGenerator[tuple[TensorMeta, torch.Tensor | None], None]:
     """Split the weight into chunks.
 
     Args:
@@ -563,7 +583,7 @@ async def split_weight_chunks(
                 chunk_size=chunk_size,
                 offset=None,
             )
-            yield (tensor_meta, buffer[chunk_offset : chunk_offset + chunk_size])
+            yield (tensor_meta, None if meta_only else buffer[chunk_offset : chunk_offset + chunk_size])
             chunk_offset += chunk_size
 
 

@@ -43,12 +43,15 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 DEFAULT_ROUTING_CACHE_SIZE = 10000
 
 
-@ray.remote
 class GlobalRequestLoadBalancer:
     """Global sticky-session + in-flight load balancer shared by all AgentLoopWorkers.
 
     When a sticky session points to a removed server, the cache entry is
     automatically invalidated and a new server is selected.
+
+    This is a plain Python class (not a Ray actor). It is wrapped with
+    ``ray.remote(...)`` at instantiation time so callers can subclass it and
+    override :meth:`acquire_server` before registering the subclass as an actor.
 
     Key features:
     - **Atomic acquire**: ``acquire_server()`` returns ``(server_id, handle)``
@@ -56,9 +59,9 @@ class GlobalRequestLoadBalancer:
       multi-turn conversations route to the same server.
     - **Least-loaded Selection**: When no sticky session exists, selects the
       server with the fewest in-flight requests.
-    - **Deterministic Routing**: When ``full_determinism=True``, tie-breaking
-      among equally-loaded servers uses ``hash(request_id)`` so the same
-      request always routes to the same server across runs.
+    - **Deterministic Routing**: When ``full_determinism=True``, routes every
+      request by ``hash(request_id) % len(servers)`` over the full pool so the
+      same request always routes to the same replica across runs.
     - **Dynamic Server Management**: Supports add/remove servers at runtime
       for hybrid scaling.
     """
@@ -97,14 +100,14 @@ class GlobalRequestLoadBalancer:
         if not self._inflight_requests:
             raise RuntimeError("No available servers in load balancer")
 
-        min_count = min(self._inflight_requests.values())
-        candidates = [sid for sid, count in self._inflight_requests.items() if count == min_count]
-        if len(candidates) == 1:
-            server_id = candidates[0]
-        elif self._full_determinism:
-            # Deterministic tie-breaking: same request_id → same server across runs
-            server_id = candidates[hash(request_id) % len(candidates)]
+        if self._full_determinism:
+            # Full-hash routing: same request_id always lands on the same replica
+            # across runs. Least-loaded selection depends on async arrival timing,
+            # which varies run-to-run, so it is bypassed entirely here.
+            server_id = list(self._servers)[hash(request_id) % len(self._servers)]
         else:
+            min_count = min(self._inflight_requests.values())
+            candidates = [sid for sid, count in self._inflight_requests.items() if count == min_count]
             server_id = candidates[0]
         self._request_id_to_server[request_id] = server_id
         self._inflight_requests[server_id] += 1
@@ -225,6 +228,14 @@ class LLMServerClient:
         # Awaiting here risks blocking the finally clause if the LB actor is unresponsive.
         self._load_balancer.release_server.remote(server_id=server_id)
 
+    def _vllm_request_id(self, request_id: str) -> str:
+        # request_id passed to vLLM. Default: a fresh uuid per turn so each turn
+        # is an independent vLLM request. Under full_determinism the caller's
+        # request_id is passed straight through so vLLM sees a stable id across runs.
+        if getattr(self.config.actor_rollout_ref.rollout, "full_determinism", False):
+            return request_id
+        return uuid4().hex
+
     @rollout_trace_op
     async def generate(
         self,
@@ -261,7 +272,7 @@ class LLMServerClient:
                 {"priority": priority} if priority != 0 and self.config.actor_rollout_ref.rollout.name == "vllm" else {}
             )
             output: TokenOutput = await server.generate.remote(
-                request_id=uuid4().hex,  # use new request_id for each turn
+                request_id=self._vllm_request_id(request_id),  # use new request_id for each turn
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
                 image_data=image_data,
@@ -462,6 +473,12 @@ class LLMServerManager:
             else init standalone server with a new resource pool.
         rollout_resource_pool (RayResourcePool): Resource pool for the server replicas, only needed for TensorRT-LLM.
         start_rank (int): First ``replica_rank`` to assign.  Defaults to 0.
+        load_balancer_cls: Optional subclass of
+            :class:`GlobalRequestLoadBalancer` to use as the routing actor
+            (wrapped with ``ray.remote`` at instantiation). Defaults to
+            :class:`GlobalRequestLoadBalancer`, whose routing honors the
+            ``full_determinism`` flag. Pass a subclass that overrides
+            :meth:`acquire_server` to take full control of routing.
     """
 
     def __init__(
@@ -470,6 +487,7 @@ class LLMServerManager:
         worker_group: RayWorkerGroup = None,
         rollout_resource_pool: RayResourcePool = None,
         start_rank: int = 0,
+        load_balancer_cls: type | None = None,
     ):
         self.config = config
         self.rollout_config = config.actor_rollout_ref.rollout
@@ -477,6 +495,7 @@ class LLMServerManager:
         self.worker_group = worker_group
         self.rollout_resource_pool = rollout_resource_pool
         self.start_rank = start_rank
+        self._load_balancer_cls = load_balancer_cls or GlobalRequestLoadBalancer
 
         assert worker_group is not None or self.rollout_config.nnodes > 0, "nnodes must be > 0 in standalone mode"
 
@@ -579,20 +598,30 @@ class LLMServerManager:
                 )
 
     async def _init_global_load_balancer(self) -> None:
-        self.global_load_balancer = GlobalRequestLoadBalancer.remote(
+        load_balancer_cls = self._load_balancer_cls
+        kwargs = dict(
             servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
             max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
-            full_determinism=getattr(self.rollout_config, "full_determinism", False),
         )
+        # The default GlobalRequestLoadBalancer honors the full_determinism flag
+        # in acquire_server. A custom subclass overrides acquire_server and takes
+        # full control of routing, so the flag is not forwarded to it.
+        if load_balancer_cls is GlobalRequestLoadBalancer:
+            kwargs["full_determinism"] = getattr(self.rollout_config, "full_determinism", False)
+        self.global_load_balancer = ray.remote(load_balancer_cls).remote(**kwargs)
 
-    def get_client(self, client_cls=LLMServerClient, **kwargs) -> LLMServerClient:
+    def get_client(self, client_cls: type[LLMServerClient] | None = None, **kwargs) -> LLMServerClient:
         """Get the LLMServerClient to request LLM server replicas.
 
         Args:
-            client_cls: The client class to instantiate (default: ``LLMServerClient``).
-                Pass ``FullyAsyncLLMServerClient`` for abort-resume support.
+            client_cls: The client class to instantiate. Defaults to
+                :class:`LLMServerClient`. Pass a subclass to customize
+                request-id handling (e.g. a deterministic client that forwards
+                the caller's ``request_id`` straight to vLLM), or
+                :class:`FullyAsyncLLMServerClient` for abort-resume support.
             **kwargs: Forwarded to the client constructor.
         """
+        client_cls = client_cls or LLMServerClient
         return client_cls(
             config=self.config,
             load_balancer_handle=self.global_load_balancer,

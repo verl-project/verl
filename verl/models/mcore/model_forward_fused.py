@@ -14,7 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Optional
 
 import megatron.core as mcore
@@ -36,6 +38,101 @@ from verl.utils.model import CausalLMOutputForPPO
 
 from .util import postprocess_packed_seqs_for_dict_output, postprocess_thd_engine
 
+_FUSED_FORWARD_MODE_ATTR = "_verl_fused_forward_mode"
+_HOOK_MODE = "hook"
+_LEGACY_MODE = "legacy"
+
+
+def _supports_output_processor_hook(patching_model: torch.nn.Module) -> bool:
+    """Check whether the model supports Megatron's native output-processor hook.
+
+    The ``output_processor`` / ``output_processor_context`` contract was
+    introduced in Megatron Core 0.18.0. Models without this contract fall back
+    to the legacy ``forward`` monkey patch.
+
+    TODO: Remove this check and the legacy patch once all supported Megatron
+    stacks require Megatron Core 0.18.0 or newer.
+    """
+    parameters = inspect.signature(patching_model.forward).parameters
+    return {"output_processor", "output_processor_context"}.issubset(parameters)
+
+
+def _resolve_fused_forward_mode(patching_model: torch.nn.Module) -> str:
+    return _HOOK_MODE if _supports_output_processor_hook(patching_model) else _LEGACY_MODE
+
+
+def _get_fused_forward_mode(model: torch.nn.Module) -> str:
+    model = unwrap_model(model)
+    mode = getattr(model, _FUSED_FORWARD_MODE_ATTR, None)
+    if mode is None and hasattr(model, "language_model"):
+        mode = getattr(model.language_model, _FUSED_FORWARD_MODE_ATTR, None)
+    return mode if mode in (_HOOK_MODE, _LEGACY_MODE) else _LEGACY_MODE
+
+
+def _use_output_processor_hook(model: torch.nn.Module) -> bool:
+    return _get_fused_forward_mode(model) == _HOOK_MODE
+
+
+@dataclass
+class FusedOutputProcessorContext:
+    """Context passed through Megatron's native output-processor hook."""
+
+    temperature: float
+
+
+def fused_output_processor(
+    *,
+    hidden_states,
+    output_layer,
+    output_weight,
+    labels,
+    context,
+    config,
+    **_ignored,
+):
+    """Compute fused log probabilities and entropy at Megatron's postprocess boundary."""
+    output = CausalLMOutputForPPO(
+        loss=None,
+        logits=None,
+        past_key_values=None,
+        hidden_states=hidden_states,
+        attentions=None,
+    )
+
+    if config.sequence_parallel:
+        hidden_states = gather_from_sequence_parallel_region(hidden_states)
+
+    # Megatron passes the shared embedding as output_weight for tied models. For
+    # untied models the weight lives on output_layer.
+    weight = output_weight if output_weight is not None else output_layer.weight
+
+    temperature = context.temperature
+    logprobs, entropy = linear_cross_entropy(
+        hidden_states,
+        weight,
+        labels,
+        temperature,
+        "none",
+        parallel_state.get_tensor_model_parallel_group(),
+    )
+
+    if has_config_logger_enabled(config):
+        payload = OrderedDict(
+            {
+                "input_ids": _ignored.get("input_ids"),
+                "position_ids": _ignored.get("position_ids"),
+                "attention_mask": _ignored.get("attention_mask"),
+                "decoder_input": _ignored.get("decoder_input"),
+                "logprobs": logprobs,
+                "entropy": entropy,
+            }
+        )
+        log_config_to_disk(config, payload, prefix="input_and_logits")
+
+    output.entropy = entropy
+    output.log_probs = logprobs
+    return output
+
 
 def _get_patching_model(model: torch.nn.Module):
     model = unwrap_model(model)
@@ -50,19 +147,33 @@ def _get_patching_model(model: torch.nn.Module):
 
 
 def patch_fused_forward(model: torch.nn.Module):
+    model = _get_patching_model(model)
+    if model is None:
+        return
+
+    mode = getattr(model, _FUSED_FORWARD_MODE_ATTR, None)
+    if mode is None:
+        mode = _resolve_fused_forward_mode(model)
+        setattr(model, _FUSED_FORWARD_MODE_ATTR, mode)
+
+    if mode == _HOOK_MODE:
+        return
+
     assert version.parse(mcore.__version__) >= version.parse("0.13.0"), (
         "Fused forward patching requires mecore >= 0.13.0"
     )
-    model = _get_patching_model(model)
-    if model is not None:
+    if not hasattr(model, "forward_backup"):
         model.forward_backup = model.forward
         model.forward = _fused_GPTModel_forward.__get__(model, model.__class__)
 
 
 def unpatch_fused_forward(model: torch.nn.Module):
     model = _get_patching_model(model)
-    if model is not None:
+    if model is None or _get_fused_forward_mode(model) == _HOOK_MODE:
+        return
+    if hasattr(model, "forward_backup"):
         model.forward = model.forward_backup
+        delattr(model, "forward_backup")
 
 
 def fused_forward_model_gen(vision_model: bool = False):
@@ -117,7 +228,15 @@ def fused_forward_model_gen(vision_model: bool = False):
             input_args["input_ids"] = input_ids
             input_args["attention_mask"] = attention_mask
 
-        output_orig: CausalLMOutputForPPO = model(**input_args)
+        if _use_output_processor_hook(model):
+            input_args.pop("temperature", None)
+            output_orig: CausalLMOutputForPPO = model(
+                **input_args,
+                output_processor=fused_output_processor,
+                output_processor_context=FusedOutputProcessorContext(temperature=temperature),
+            )
+        else:
+            output_orig: CausalLMOutputForPPO = model(**input_args)
 
         if post_process:
             # output_orig is in type of CausalLMOutputForPPO
@@ -147,6 +266,9 @@ def fused_forward_model_engine(vision_model: bool = False):
         calculate_entropy: bool,
         pad_token_id: int,
         cp_layout: str = "zigzag",
+        local_cp_size: int | None = None,
+        router_padding_mask: Tensor | None = None,
+        pad_to_length_bucket: int | None = None,
     ):
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
@@ -163,11 +285,15 @@ def fused_forward_model_engine(vision_model: bool = False):
             use_fp8_padding=use_fp8_padding,
             fp8_recipe=fp8_recipe,
             min_local_rows=min_local_rows,
+            pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
+            local_cp_size=local_cp_size,
         )
         input_ids_rmpad = input_ids_rmpad.contiguous()
 
         model_kwargs = {}
+        if router_padding_mask is not None:
+            model_kwargs["padding_mask"] = router_padding_mask
         if "pixel_values" in multi_modal_inputs:
             model_kwargs["pixel_values"] = multi_modal_inputs["pixel_values"].to(input_ids.device)
         if "image_grid_thw" in multi_modal_inputs:
@@ -193,18 +319,27 @@ def fused_forward_model_engine(vision_model: bool = False):
             use_fp8_padding=use_fp8_padding,
             fp8_recipe=fp8_recipe,
             min_local_rows=min_local_rows,
+            pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
+            local_cp_size=local_cp_size,
         )
         labels_rmpad = labels_rmpad.contiguous()
-        output_orig: CausalLMOutputForPPO = model(
+        forward_kwargs = dict(
             input_ids=input_ids_rmpad,
             attention_mask=attention_mask,
             position_ids=None,
             packed_seq_params=packed_seq_params,
             labels=labels_rmpad,
-            temperature=temperature,
             **model_kwargs,
         )
+        if _use_output_processor_hook(model):
+            output_orig: CausalLMOutputForPPO = model(
+                **forward_kwargs,
+                output_processor=fused_output_processor,
+                output_processor_context=FusedOutputProcessorContext(temperature=temperature),
+            )
+        else:
+            output_orig: CausalLMOutputForPPO = model(temperature=temperature, **forward_kwargs)
 
         if not post_process:
             return output_orig
@@ -219,6 +354,7 @@ def fused_forward_model_engine(vision_model: bool = False):
             input_ids.shape[0],
             post_process=post_process,
             cp_layout=cp_layout,
+            local_cp_size=local_cp_size,
         )
 
         output = {"log_probs": log_probs}
@@ -234,6 +370,7 @@ def fused_forward_model_engine(vision_model: bool = False):
                 input_ids.shape[0],
                 post_process=post_process,
                 cp_layout=cp_layout,
+                local_cp_size=local_cp_size,
             )
             output["entropy"] = entropy
 
@@ -257,6 +394,7 @@ def _fused_GPTModel_forward(
     inference_params: Optional[BaseInferenceContext] = None,
     loss_mask: Optional[Tensor] = None,
     temperature: float = 1.0,
+    padding_mask: Tensor | None = None,
     **kwargs,
 ) -> CausalLMOutputForPPO:
     """
@@ -269,17 +407,26 @@ def _fused_GPTModel_forward(
 
     inference_context = deprecate_inference_params(inference_context, inference_params)
 
+    preprocess_kwargs = {}
+    if padding_mask is not None:
+        # Only forward the kwarg when set: older Megatron-Core _preprocess
+        # signatures (without MoE router padding support) stay compatible.
+        preprocess_kwargs["padding_mask"] = padding_mask
     preproc_output = model._preprocess(
         input_ids=input_ids,
         position_ids=position_ids,
         decoder_input=decoder_input,
         inference_context=inference_context,
         packed_seq_params=packed_seq_params,
+        **preprocess_kwargs,
     )
 
     (decoder_input, rotary_pos_emb, rotary_pos_cos, rotary_pos_sin, sequence_len_offset) = preproc_output[:5]
 
     decoder_extra_block_kwargs = extra_block_kwargs or {}
+    if padding_mask is not None:
+        # _preprocess scatters the mask across sequence-parallel ranks.
+        decoder_extra_block_kwargs["padding_mask"] = preproc_output[5]
     if getattr(model.config, "moe_n_hash_layers", 0) > 0 and input_ids is not None:
         decoder_extra_block_kwargs["input_ids"] = input_ids
 

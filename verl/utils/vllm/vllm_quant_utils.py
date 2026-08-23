@@ -30,6 +30,7 @@ dispatch below stays unconditional.
 
 import importlib.metadata
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -37,10 +38,14 @@ import torch
 from packaging import version
 
 try:
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
     from vllm.model_executor.layers.linear import LinearBase
 except ImportError as e:
     raise ImportError("FP8 quantization not available") from e
+
+try:
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+except ImportError:
+    FusedMoE = None
 
 from verl.utils.kernel.fp8_kernel import scaled_fp8_blockwise
 from verl.utils.vllm.vllm_fp4_utils import (
@@ -91,10 +96,12 @@ def is_fp8_model(vllm_config):
 # ``nn.Module`` class. ``FusedMoE`` is now a factory *function* that builds a
 # ``MoERunner``, and the fused expert weight tensors (``w13_weight`` /
 # ``w2_weight``) moved onto a ``RoutedExperts`` submodule owned by the runner
-# (i.e. ``experts`` -> ``experts.routed_experts``). Resolve the concrete module
-# classes once so ``isinstance`` checks keep working across vLLM versions --
-# calling ``isinstance(x, FusedMoE)`` when ``FusedMoE`` is a function raises
-# ``TypeError: isinstance() arg 2 must be a type``.
+# (i.e. ``experts`` -> ``experts.routed_experts``). vLLM 0.26.1 removed the
+# ``FusedMoE`` name entirely. Resolve the concrete module classes once so
+# ``isinstance`` checks keep working across vLLM versions -- calling
+# ``isinstance(x, FusedMoE)`` when ``FusedMoE`` is a function raises
+# ``TypeError: isinstance() arg 2 must be a type``, and ``FusedMoE`` may be
+# ``None`` when the name no longer exists.
 if isinstance(FusedMoE, type):
     # vLLM < 0.24: ``FusedMoE`` is itself the expert-weight-holding module.
     _MOE_STOP_CLASSES = (FusedMoE,)
@@ -187,11 +194,20 @@ def get_module_from_param_name(model, name: str):
     return _resolve_expert_weight_module(current_module)
 
 
+# Fast-path allowlist: leaf names that can possibly be fp8 weights.
+# Dense linear and per-expert-layout weights end in "weight".
+# Fused-MoE expert params (all experts in one tensor, no per-expert index)
+# use projection names without a ".weight" suffix, e.g. "gate_up_proj" /
+# "down_proj". Any other leaf (bias, embedding, norm, ...) is skipped before
+# the more expensive module resolution.
+_FP8_CANDIDATE_LEAVES: frozenset = frozenset({"weight", "gate_up_proj", "down_proj"})
+
+
 def is_fp8_weight(name, model):
     if name not in fp8_state.seen_params:
         fp8_state.seen_params.add(name)
-        # Filter out bias params
-        if name.endswith("weight"):
+        leaf = name.rsplit(".", 1)[-1]
+        if leaf in _FP8_CANDIDATE_LEAVES:
             module = get_module_from_param_name(model, name)
             # We currently only quantize linear and fused-MoE expert layers.
             is_fp8_linear = isinstance(module, LinearBase) and module.weight.dtype == torch.float8_e4m3fn
@@ -253,22 +269,42 @@ def apply_mxfp8_transformation_after_loading(model):
                 module.quant_method.process_weights_after_loading(module)
 
 
-def clear_rocm_attention_weight_caches(model):
-    """Drop the bf16 ``wo_a`` copy vLLM derives from the loaded weight.
+def refresh_rocm_attention_weight_caches(model):
+    """Rebuild the bf16 ``wo_a`` copy vLLM derives from the loaded weight.
 
     ``rocm_aiter_mla_sparse._get_cached_wo_a_bf16`` caches a dequantized ``wo_a``
     on the module, assuming the weight is static. A refit updates the weight but
-    not the cache, so attention would keep using the previous step's copy. The
-    rebuild is lazy, so dropping the cache here is enough.
+    not the cache, so attention would keep using the previous step's copy.
+
+    Dropping the cache and letting the lazy rebuild handle it is only correct in
+    eager mode. ``_o_proj`` runs during graph capture, so a captured graph holds
+    the buffer's address and replays the einsum without re-entering the builder:
+    a fresh allocation would leave it reading freed memory. Rebuild into the
+    original storage instead.
+
+    Must run after the live FP8 parameters have been reinstated, otherwise the
+    dequantization reads the staging buffers.
 
     Only ROCm DeepSeek-V4 builds this cache, hence the guard below.
     """
     if torch.version.hip is None or not is_deepseek_v4_model(model):
         return
 
-    for module in model.modules():
-        if hasattr(module, "_dsv4_wo_a_bf16"):
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _get_cached_wo_a_bf16
+
+    # The cache was built inside the forward pass, so it is an inference tensor
+    # and PyTorch refuses to mutate it outside InferenceMode.
+    with torch.inference_mode():
+        for module in model.modules():
+            live = getattr(module, "_dsv4_wo_a_bf16", None)
+            if live is None:
+                continue
+            n_local_groups, o_lora_rank, hidden_dim = live.shape
             del module._dsv4_wo_a_bf16
+            rebuilt = _get_cached_wo_a_bf16(module, n_local_groups, o_lora_rank, hidden_dim)
+            if rebuilt.data_ptr() != live.data_ptr():
+                live.copy_(rebuilt)
+            module._dsv4_wo_a_bf16 = live
 
 
 def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
@@ -348,11 +384,13 @@ def prepare_quanted_weights_for_loading(model):
 
 def process_quanted_weights_after_loading(model, reload_state):
     """Re-apply the inference layout undone by ``prepare_quanted_weights_for_loading``."""
-    clear_rocm_attention_weight_caches(model)
     apply_mxfp8_transformation_after_loading(model)
     reload_state = reload_state or {}
     process_fp8_weights_after_loading(reload_state.get("fp8_layers") or [])
     process_mxfp4_moe_weights_after_loading(reload_state.get("mxfp4_moe_modules") or [])
+    # Last: the rebuild reads ``wo_a``, which is only back in its inference
+    # layout once the staged FP8 params above have been reinstated.
+    refresh_rocm_attention_weight_caches(model)
 
 
 def load_quanted_weights(weights, model_runner, is_drafter=False):
@@ -380,9 +418,17 @@ def load_quanted_weights(weights, model_runner, is_drafter=False):
         if hasattr(param, "subclass_type"):
             param.orig_type = param.__class__
             param.__class__ = param.subclass_type
-    # Finally load the weights into vllm
+    # Finally load the weights into vllm.
+    # MTP completeness check assumes a single full-checkpoint load; in RL refit
+    # weights arrive bucketed, so disable it (like vLLM's own NCCL/IPC engines).
+    # ``nullcontext`` covers older vLLM without the guard.
     try:
-        loaded_params = model.load_weights(weights_quantized)
+        from vllm.model_executor.model_loader.mtp_validation import disable_mtp_completeness_check
+    except ImportError:
+        disable_mtp_completeness_check = nullcontext
+    try:
+        with disable_mtp_completeness_check():
+            loaded_params = model.load_weights(weights_quantized)
     finally:
         # Undo the type change above to the original type
         for name, param in model.named_parameters():

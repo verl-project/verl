@@ -32,7 +32,20 @@ This mode requires the P2P feature of checkpoint_engine. Please ensure you have 
 In addition, during the installation of checkpoint-engine[p2p], the transfer engine will be installed. However, This library has no prebuilt packages for Ascend devices and must be compiled from source. For detailed compilation instructions, see: [transfer-engine: ascend direct](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/design/transfer-engine/ascend_direct_transport.md)
 
 Note: Important Configuration for Ascend Devices
-1. kimi-checkpoint-engine hasn't been supported in Ascend 950.
+1. In Ascend 950, you need enable whitelist to support kimi-checkpoint-engine. you should set the following environment variable and create
+a json file to add your device ip addresses.
+
+```bash
+export HCCL_WHITELIST_DISABLE=0
+export HCCL_WHITELIST_FILE=/path/to/whitelist.json
+```
+
+In whitelist json file, you need to add IP addresses using the following format.
+
+```json
+{ "host_ip": ["ip1"], ["ip2"] }
+```
+
 2. If you are using CANN version >= 8.5.0 on Ascend devices, you must set the following environment variable to enable intra-node ROCE:
 
 ```bash

@@ -728,7 +728,12 @@ class FSDPEngine(BaseEngine):
                 if forward_only
                 else self._gradient_sync_context(is_last_micro_batch=micro_batch_idx == len(micro_batches) - 1)
             )
-            with ctx, sync_ctx:
+            # Name each micro-batch in the trace. Without this a forward-only stage
+            # (compute_log_prob / compute_ref_log_prob) is a single row with anonymous forwards
+            # inside; here every micro-batch forward (and, when training, its backward) becomes a
+            # distinguishable "micro_batch<i>" row -- nested under the update loop's "mini_batch<i>"
+            # when training, or directly under the stage for log-prob.
+            with ctx, sync_ctx, torch.profiler.record_function(f"micro_batch{micro_batch_idx}"):
                 loss, meta_info = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
 
                 if not forward_only:

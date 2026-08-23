@@ -86,13 +86,19 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # This image is not the uv.cu130 one: it ships its own ROCm torch stack, so the
+  # shared e2e scripts must launch with ambient python instead of `uv run`.
+  VERL_USE_UV: 0
+
 jobs:
   e2e_ppo_trainer_fsdp_vllm_rocm:
     if: github.repository_owner == 'verl-project'
     runs-on: [rocm-mi300]
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: "verlai/verl:rocm702-vllm020-te210-20260518"
+      # built from https://github.com/mingjielu/Training-dockerfile/blob/main/ubuntu/rocm7.14_verl_0810_py312/Dockerfile
+      image: "verlai/verl:rocm7.14_torch2.12_release_0724"
       options: >-
         --device /dev/kfd
         --device /dev/dri
@@ -111,6 +117,8 @@ jobs:
       # /root and the verl scripts reference $HOME, so pin HOME back to /root to
       # match the local `docker run` behavior and the volume mounts above.
       HOME: "/root"
+      # currently custom all reduce has some bugs on ROCM, disable it for verl CI on rocm
+      VLLM_ROCM_OVERRIDE: "+actor_rollout_ref.rollout.engine_kwargs.vllm.disable_custom_all_reduce=True"
     steps:
       - name: Check ROCm and GPU info
         run: |
@@ -139,11 +147,11 @@ jobs:
       - name: Running GSM8K E2E training tests on 8 MI300 GPUs with rmpad using function rm with validation and saving (FSDP_SIZE=8)
         run: |
           ray stop --force
-          VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 SAVE_HF_MODEL=True VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-fsdp-size8" bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+          VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 SAVE_HF_MODEL=True VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-fsdp-size8" bash tests/special_e2e/ppo_trainer/run_function_reward.sh "${VLLM_ROCM_OVERRIDE}"
       - name: Running GSM8K E2E training tests on 8 MI300 GPUs with rmpad using function rm after resuming
         run: |
           ray stop --force
-          RESUME_MODE=auto VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-fsdp-size8" bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+          RESUME_MODE=auto VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-fsdp-size8" bash tests/special_e2e/ppo_trainer/run_function_reward.sh "${VLLM_ROCM_OVERRIDE}"
       - name: Test merging FSDP checkpoints (Qwen Actor)
         run: |
           exp_name="qwen2.5-0.5b-function-reward-minimal-fsdp-size8"
@@ -151,7 +159,7 @@ jobs:
       - name: Running GSM8K E2E training tests on 8 MI300 GPUs with rmpad using function rm with validation and saving (DDP_SIZE=2, FSDP_SIZE=4)
         run: |
           ray stop --force
-          VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 SAVE_HF_MODEL=True FSDP_SIZE=4 USE_KL=True VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-ddp-size2-fsdp-size4" bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+          VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 SAVE_HF_MODEL=True FSDP_SIZE=4 USE_KL=True VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-ddp-size2-fsdp-size4" bash tests/special_e2e/ppo_trainer/run_function_reward.sh "${VLLM_ROCM_OVERRIDE}"
       - name: Test merging DDP+FSDP checkpoints (Qwen Actor)
         run: |
           exp_name="qwen2.5-0.5b-function-reward-minimal-ddp-size2-fsdp-size4"
@@ -159,7 +167,7 @@ jobs:
       - name: Running GSM8K E2E training tests on 8 MI300 GPUs with rmpad using function rm with validation and saving (FSDP2)
         run: |
           ray stop --force
-          VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 SAVE_HF_MODEL=True VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-fsdp2-size8" STRATEGY=fsdp2 bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+          VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 SAVE_HF_MODEL=True VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal-fsdp2-size8" STRATEGY=fsdp2 bash tests/special_e2e/ppo_trainer/run_function_reward.sh "${VLLM_ROCM_OVERRIDE}"
       - name: Test merging FSDP2 checkpoints (Qwen Actor)
         run: |
           exp_name="qwen2.5-0.5b-function-reward-minimal-fsdp2-size8"
@@ -167,11 +175,11 @@ jobs:
       - name: Running GSM8K E2E without rmpad using function rm
         run: |
           ray stop --force
-          RM_PAD=False bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+          RM_PAD=False bash tests/special_e2e/ppo_trainer/run_function_reward.sh "${VLLM_ROCM_OVERRIDE}"
       - name: Running GSM8K E2E training tests on 8 MI300 GPUs with rmpad using function rm (GRPO)
         run: |
           ray stop --force
-          CUSTOM_REWARD_FN=True ADV_ESTIMATOR=grpo USE_KL=True bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+          CUSTOM_REWARD_FN=True ADV_ESTIMATOR=grpo USE_KL=True bash tests/special_e2e/ppo_trainer/run_function_reward.sh "${VLLM_ROCM_OVERRIDE}"
       - name: Clean up
         run: |
           rm -rf checkpoints
@@ -181,7 +189,7 @@ jobs:
     runs-on: [rocm-mi300]
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: "verlai/verl:rocm702-vllm020-te210-20260518"
+      image: "verlai/verl:rocm7.14_torch2.12_release_0724"
       options: >-
         --device /dev/kfd
         --device /dev/dri
@@ -197,6 +205,7 @@ jobs:
     env:
       HF_HUB_ENABLE_HF_TRANSFER: "0"
       HOME: "/root"
+      VLLM_ROCM_OVERRIDE: "+actor_rollout_ref.rollout.engine_kwargs.vllm.disable_custom_all_reduce=True"
     steps:
       - name: Check ROCm and GPU info
         run: |
@@ -214,10 +223,6 @@ jobs:
         run: |
           pip install --no-deps -e .
           pip install --no-deps TransferQueue==0.1.8
-          pip uninstall -y mbridge
-          pip install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@e2cfe7e --ignore-requires-python --no-deps --no-build-isolation
-          pip install git+https://github.com/NVIDIA/Megatron-LM.git@0823c73 --ignore-requires-python --no-deps --no-build-isolation
-          pip install "nvidia-modelopt>=0.37.0"
       - name: Check final pip list
         run: |
           pip list
@@ -235,7 +240,7 @@ jobs:
           COMMON_PP=2 COMMON_VPP=null COMMON_CP=1 COMMON_TP=4 COMMON_EP=4 COMMON_ETP=1 INFER_TP=8 \
           USE_DIST_CKPT=False ALL_OFFLOAD=True SKIP_SAVE_HF_MODEL=1 \
           bash tests/special_e2e/run_ppo_trainer_megatron.sh \
-          global_profiler.tool=null actor_rollout_ref.actor.profiler.tool=null actor_rollout_ref.ref.profiler.tool=null actor_rollout_ref.rollout.profiler.tool=null critic.profiler.tool=null
+          global_profiler.tool=null actor_rollout_ref.actor.profiler.tool=null actor_rollout_ref.ref.profiler.tool=null actor_rollout_ref.rollout.profiler.tool=null critic.profiler.tool=null "${VLLM_ROCM_OVERRIDE}"
       - name: Running GSM8K E2E training tests with 3D parallelism with FP8 rollout on 8 MI300 GPUs with Megatron-Bridge (Qwen3-30B-A3B-Instruct-2507)
         run: |
           ray stop --force
@@ -246,7 +251,7 @@ jobs:
           COMMON_PP=2 COMMON_VPP=null COMMON_CP=1 COMMON_TP=4 COMMON_EP=4 COMMON_ETP=1 INFER_TP=2 \
           USE_DIST_CKPT=False ALL_OFFLOAD=True SKIP_SAVE_HF_MODEL=1 ROLLOUT_QUANTIZATION=fp8 \
           bash tests/special_e2e/run_ppo_trainer_megatron.sh \
-          global_profiler.tool=null actor_rollout_ref.actor.profiler.tool=null actor_rollout_ref.ref.profiler.tool=null actor_rollout_ref.rollout.profiler.tool=null critic.profiler.tool=null
+          global_profiler.tool=null actor_rollout_ref.actor.profiler.tool=null actor_rollout_ref.ref.profiler.tool=null actor_rollout_ref.rollout.profiler.tool=null critic.profiler.tool=null "${VLLM_ROCM_OVERRIDE}"
       - name: clean up
         run: |
           rm -rf checkpoints
@@ -258,7 +263,7 @@ jobs:
     if: ${{ always() && github.repository_owner == 'verl-project' }}
     runs-on: [rocm-mi300]
     container:
-      image: "verlai/verl:rocm702-vllm020-te210-20260518"
+      image: "verlai/verl:rocm7.14_torch2.12_release_0724"
     steps:
       - name: Clean up leftover checkpoints
         run: |

@@ -514,9 +514,11 @@ class PPOTrainer(ABC):
         )
         sample_batch_size = train_batch_size // self.parameter_sync_step
 
-        self._add_batch_to_generate()
+        prepare_metrics = self.prepare_step()
 
         metrics_aggregator = MetricsAggregator()
+        if prepare_metrics:
+            metrics_aggregator.add_step_metrics(prepare_metrics)
         combined_keys: list = []
         combined_tags: list = []
         combined_partition_id = "train"
@@ -1275,6 +1277,15 @@ class PPOTrainer(ABC):
 
         return metric_dict
 
+    def _rollout_server_managers(self) -> list:
+        """LLM server managers whose inference engines take part in rollout profiling.
+
+        Subclasses owning additional replicas (e.g. the standalone rollout of separate-async
+        training) extend this list so those engines are profiled as well.
+        """
+        managers = [getattr(self, "llm_server_manager", None)]
+        return [manager for manager in managers if manager is not None]
+
     def _start_profiling(self) -> None:
         """Start profiling for all worker groups if profiling is enabled."""
         do_profile = (
@@ -1284,14 +1295,33 @@ class PPOTrainer(ABC):
         )
 
         if do_profile:
-            self.actor_rollout_wg.start_profile(role="e2e", profile_step=self.global_steps)
-            if self.use_reference_policy:
+            # "train", not "e2e": this window only holds what the training worker itself runs
+            # (log-prob forwards and the actor update). Generation happens in the inference
+            # engines below, which write their own traces.
+            #
+            # In the hybrid engine, actor/rollout and the (colocated) reference -- and sometimes the
+            # critic -- share ONE worker group object, so ref_policy_wg / critic_wg can alias
+            # actor_rollout_wg. Each start/stop_profile round-trips to every rank and, on stop, runs
+            # the finish hook (e.g. the user's trace-upload command); driving the same physical
+            # workers more than once would fire that hook once per alias and upload the same trace
+            # file multiple times. Drive each distinct worker group exactly once.
+            self.actor_rollout_wg.start_profile(role="train", profile_step=self.global_steps)
+            seen = {id(self.actor_rollout_wg)}
+            if self.use_reference_policy and id(self.ref_policy_wg) not in seen:
+                seen.add(id(self.ref_policy_wg))
                 self.ref_policy_wg.start_profile(profile_step=self.global_steps)
-            if self.use_critic:
+            if self.use_critic and id(self.critic_wg) not in seen:
+                seen.add(id(self.critic_wg))
                 self.critic_wg.start_profile(profile_step=self.global_steps)
+            # Rollout generation is decoupled from the training step in V1 (prompts are served
+            # asynchronously and consumed from the replay buffer), so the inference engines are
+            # profiled across the whole step rather than around a single generation call.
+            for manager in self._rollout_server_managers():
+                manager.start_profile()
 
     def _stop_profiling(self) -> None:
         """Stop profiling for all worker groups if profiling is enabled."""
+        this_step_profile = self.curr_step_profile
         self.next_step_profile = (
             self.global_steps + 1 in self.config.global_profiler.steps
             if self.config.global_profiler.steps is not None
@@ -1306,11 +1336,27 @@ class PPOTrainer(ABC):
         self.curr_step_profile = self.next_step_profile
 
         if do_profile:
-            self.actor_rollout_wg.stop_profile()
-            if self.use_reference_policy:
-                self.ref_policy_wg.stop_profile()
-            if self.use_critic:
-                self.critic_wg.stop_profile()
+            # Run the finish command (e.g. the trace upload) only once, on the last profiled step, so
+            # a command that uploads the whole save_path sends each trace once instead of re-uploading
+            # the accumulating directory every step. "Last" is the largest configured step, or the
+            # run's final step if it ends earlier on a profiled step.
+            profiled_steps = self.config.global_profiler.steps
+            is_last_step = self.global_steps >= self.total_training_steps
+            run_command = bool(
+                this_step_profile and profiled_steps and (self.global_steps == max(profiled_steps) or is_last_step)
+            )
+            # See _start_profiling: skip aliased worker groups so the finish hook (and any trace
+            # upload it triggers) fires exactly once per distinct process, not once per role alias.
+            self.actor_rollout_wg.stop_profile(run_command=run_command)
+            seen = {id(self.actor_rollout_wg)}
+            if self.use_reference_policy and id(self.ref_policy_wg) not in seen:
+                seen.add(id(self.ref_policy_wg))
+                self.ref_policy_wg.stop_profile(run_command=run_command)
+            if self.use_critic and id(self.critic_wg) not in seen:
+                seen.add(id(self.critic_wg))
+                self.critic_wg.stop_profile(run_command=run_command)
+            for manager in self._rollout_server_managers():
+                manager.stop_profile()
 
     def _fetch_one_gen_batch(self) -> TensorDict:
         """Fetch one ``gen_batch_size`` chunk from the dataloader."""
@@ -1370,6 +1416,10 @@ class PPOTrainer(ABC):
         """Add one training batch to the AgentLoopManager."""
         batch = self._next_train_batch()
         self._submit_batch_to_rollout(batch)
+
+    def prepare_step(self) -> dict:
+        self._add_batch_to_generate()
+        return {}
 
     def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict | None = None) -> KVBatchMeta:
         """Compute the reward score with a colocated reward model."""
@@ -1751,10 +1801,15 @@ class PPOTrainer(ABC):
                 partition_id=batch.partition_id,
                 select_fields=["extra_fields"],
             )
-            extra_fields = spec_data["extra_fields"].tolist()
-            spec_drafts = [extra_field["spec_num_draft_tokens"] for extra_field in extra_fields]
-            spec_accepts = [extra_field["spec_num_accepted_tokens"] for extra_field in extra_fields]
-            spec_verifies = [extra_field["spec_num_verify_steps"] for extra_field in extra_fields]
+            extra_fields = spec_data.pop("extra_fields").tolist()
+            # The rollout omits the spec_* stats when the backend does not report
+            # per-request spec-decode stats; leave all three as None in that case.
+            if extra_fields and all(
+                isinstance(extra_field, dict) and "spec_num_draft_tokens" in extra_field for extra_field in extra_fields
+            ):
+                spec_drafts = [extra_field["spec_num_draft_tokens"] for extra_field in extra_fields]
+                spec_accepts = [extra_field["spec_num_accepted_tokens"] for extra_field in extra_fields]
+                spec_verifies = [extra_field["spec_num_verify_steps"] for extra_field in extra_fields]
 
         data = data.to_padded_tensor()
         data["token_level_scores"] = data["rm_scores"]

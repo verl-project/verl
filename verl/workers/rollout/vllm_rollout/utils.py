@@ -26,7 +26,7 @@ import torch
 from vllm.outputs import RequestOutput
 
 from verl.utils.device import get_device_name, is_npu_available
-from verl.utils.vllm import TensorLoRARequest, VLLMHijack
+from verl.utils.vllm import TensorLoRARequest, VLLMHijack, resolve_weight_name
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.utils.vllm.vllm_quant_utils import apply_vllm_quant_patches, is_fp8_model, load_quanted_weights
 from verl.workers.rollout.vllm_rollout.weight_update_utils import apply_buffer_updates, split_buffer_updates
@@ -263,8 +263,7 @@ class vLLMColocateWorkerExtension:
             prepare_modelopt_for_weight_reload(self.model_runner.model, device=self.device)
             logger.info("ModelOpt: prepare_modelopt_for_weight_reload completed")
         elif peft_config and base_sync_done:
-            # In async mode, make sure the old lora is removed before adding the new one
-            # TODO: this is buggy if lora span multiple buckets.
+            # Remove the old LoRA before the new one arrives (applied after is_last below).
             self.remove_lora(VLLM_LORA_INT_ID)
             logger.info("LoRA adapter sync: remove old lora and prepare new lora")
         elif is_fp8_model(self.model_runner.vllm_config):
@@ -284,13 +283,31 @@ class vLLMColocateWorkerExtension:
             device=self.device,
             use_shm=use_shm,
         )
-        receiver.receive_weights(
-            on_bucket_received=lambda weights: self._update_weights(
+        # LoRA adapters need a single complete tensor dict per ``add_lora``, but
+        # the bucketed transport may split one across buckets. Accumulate and
+        # apply only after ``is_last``; standard base weights load per bucket.
+        lora_weights: dict[str, torch.Tensor] | None = {} if (peft_config and base_sync_done) else None
+
+        def on_bucket_received(weights: list[tuple[str, torch.Tensor]], is_last: bool) -> None:
+            if lora_weights is not None:
+                # Clone: add_lora keeps these past the callback (reused IPC buffer, #6454).
+                lora_weights.update((name, tensor.clone()) for name, tensor in weights)
+                if not is_last:
+                    return
+                self._update_weights(
+                    list(lora_weights.items()),
+                    peft_config=peft_config,
+                    base_sync_done=base_sync_done,
+                )
+                lora_weights.clear()
+                return
+            self._update_weights(
                 weights,
                 peft_config=peft_config,
                 base_sync_done=base_sync_done,
             )
-        )
+
+        receiver.receive_weights(on_bucket_received=on_bucket_received)
 
         # =========================== step 3: process weights after loading ===========================
         if self._is_qat_model:
@@ -368,7 +385,12 @@ class vLLMColocateWorkerExtension:
             else:
                 if param_updates:
                     for model in self._iter_all_models():
-                        model.load_weights(param_updates)
+                        if peft_config is None:
+                            model.load_weights(param_updates)
+                        else:
+                            names = {n for n, _ in model.named_parameters(remove_duplicate=False)}
+                            names.update(n for n, _ in model.named_buffers())
+                            model.load_weights((resolve_weight_name(model, n, names), t) for n, t in param_updates)
                 loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
                 logger.info(
                     f"Loading standard weights (non-FP8, async), "
