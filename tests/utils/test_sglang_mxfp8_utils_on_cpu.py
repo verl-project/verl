@@ -120,6 +120,21 @@ def test_mxfp8_quantize_rejects_unaligned_k(monkeypatch):
         mxfp8_quantize(torch.randn(4, 48, dtype=torch.bfloat16))
 
 
+def test_quant_weights_by_name_rejects_unaligned_layer_with_remedy(monkeypatch):
+    recorded = {}
+    _install_fake_te(monkeypatch, recorded)
+
+    helper = SGLangMXFP8QuantizerHelper({})
+    # 3420 mirrors Qwen2.5-VL's vision intermediate_size (3420 % 32 == 28)
+    weights = [("visual.blocks.0.mlp.down_proj.weight", torch.randn(16, 3420, dtype=torch.bfloat16))]
+
+    async def _collect():
+        return [(k, v) async for k, v in helper.quant_weights_by_name(iter(weights))]
+
+    with pytest.raises(ValueError, match="ignored_layers"):
+        asyncio.run(_collect())
+
+
 def test_quant_weights_by_name_yields_weight_and_scale(monkeypatch):
     recorded = {}
     _install_fake_te(monkeypatch, recorded)

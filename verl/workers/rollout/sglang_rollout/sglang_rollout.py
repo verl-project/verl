@@ -324,6 +324,16 @@ class ServerAdapter(BaseRollout):
         # weight loader. Hybrid replicas pass full (name, tensor) pairs with no
         # wire_format kwarg and take the bucketed path below.
         if wire_format == "delta_flush":
+            quantization = self.config.get("quantization", None)
+            if quantization is not None:
+                # Delta payloads are applied in place as raw bf16 tensors and would
+                # bypass the weight-sync quantization below, feeding unquantized data
+                # to a server whose parameters expect fp8-serialized weights.
+                raise ValueError(
+                    f"rollout.quantization={quantization!r} is not supported with the delta "
+                    "checkpoint engine (wire_format='delta_flush'); use the bucketed weight "
+                    "sync or disable rollout quantization."
+                )
             await self._update_weights_delta(weights, global_steps=global_steps)
             return
 

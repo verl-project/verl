@@ -122,6 +122,17 @@ class SGLangMXFP8QuantizerHelper(SGLangFP8QuantizerHelper):
                 yield (k, v)
                 continue
 
+            if v.shape[-1] % MXFP8_GROUP_SIZE != 0:
+                # Falling back to bf16 here would desync from the server, whose
+                # parameters for this layer were built expecting fp8 + scales.
+                raise ValueError(
+                    f"Cannot MXFP8-quantize '{k}': last dim {v.shape[-1]} is not divisible by "
+                    f"{MXFP8_GROUP_SIZE}. Exclude this layer from quantization (consistently for "
+                    "server init and weight sync) via quantization_config.ignored_layers or the "
+                    "SGLANG_FP8_IGNORED_LAYERS env var, e.g. SGLANG_FP8_IGNORED_LAYERS=visual "
+                    "for vision-language models."
+                )
+
             if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
                 logger.debug(f"Quantizing to MXFP8: {k}")
             param_lp, param_scale = mxfp8_quantize(v.to(dtype))

@@ -267,7 +267,10 @@ differ between TE and SGLang) is small; pairing with token-level TIS is recommen
 as with the blockwise FP8 E2E recipe.
 
 Layer skipping follows the same rules as FP8 rollout (`ignored_layers`,
-`modules_to_not_convert`, or the `SGLANG_FP8_IGNORED_LAYERS` env var). If you enable
+`modules_to_not_convert`, or the `SGLANG_FP8_IGNORED_LAYERS` env var). Layers whose
+last weight dim is not a multiple of 32 cannot be MXFP8-quantized and must be excluded
+this way — e.g. vision towers of VLMs (`SGLANG_FP8_IGNORED_LAYERS=visual`); weight sync
+fails with an actionable error if such a layer is selected. If you enable
 `first_last_layers_bf16` on the training side, keep the two sides consistent by excluding
 the same layers from rollout quantization, e.g. for a 36-layer model with the first and
 last layer in bf16:
