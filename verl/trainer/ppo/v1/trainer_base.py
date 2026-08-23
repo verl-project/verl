@@ -759,6 +759,9 @@ class PPOTrainer(ABC):
         resource_pool_spec = {
             global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
         }
+        pool_accelerator_resource_key = {
+            global_pool_id: config.trainer.get("accelerator_resource_key", None),
+        }
 
         # Add separate resource pool for reward model if enabled
         if config.reward.reward_model.enable_resource_pool:
@@ -786,7 +789,11 @@ class PPOTrainer(ABC):
             resource_pool_spec["teacher_pool"] = teacher_pool
             self.mapping[Role.TeacherModel] = "teacher_pool"
 
-        self.resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
+        self.resource_pool_manager = ResourcePoolManager(
+            resource_pool_spec=resource_pool_spec,
+            mapping=self.mapping,
+            pool_accelerator_resource_key=pool_accelerator_resource_key,
+        )
 
     def _load_checkpoint(self):
         self.global_steps = 0

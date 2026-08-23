@@ -277,6 +277,7 @@ actor_rollout_ref:
     mode: async
     nnodes: 0
     n_gpus_per_node: ${oc.select:trainer.n_gpus_per_node,8}
+    accelerator_resource_key: null
     temperature: 1.0
     top_k: -1
     top_p: 1
@@ -928,6 +929,7 @@ trainer:
   validation_data_dir: null
   nnodes: 1
   n_gpus_per_node: 8
+  accelerator_resource_key: null
   save_freq: -1
   esi_redundant_time: 0
   resume_mode: auto
