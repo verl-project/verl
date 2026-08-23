@@ -1,7 +1,7 @@
 Multinode Training
 ==================
 
-Last updated: 07/29/2026.
+Last updated: 08/23/2026.
 
 .. _wuxibin89: https://github.com/wuxibin89
 
@@ -274,6 +274,8 @@ $ sky status --endpoint 8265 verl
 .. image:: https://github.com/yottalabsai/open-source/blob/main/static/verl/saved_model.png?raw=true
 
 
+.. _slurm-deployment:
+
 Option 3: Launch via Slurm
 ------------------------------
 
@@ -281,13 +283,48 @@ Ray provides users with `this <https://docs.ray.io/en/latest/cluster/vms/user-gu
 tutorial to start a Ray cluster on top of Slurm. We have verified the :doc:`GSM8K example<../examples/gsm8k_example>`
 on a Slurm cluster under a multi-node setting with the following steps.
 
-1. [Optional] If your cluster support `Apptainer or Singularity <https://apptainer.org/docs/user/main/>`_ and you wish
-to use it, convert verl's Docker image to an Apptainer image. Alternatively, set up the environment with the package
-manager available on your cluster or use other container runtimes (e.g. through `Slurm's OCI support <https://slurm.schedmd.com/containers.html>`_) available to you.
+1. [Optional] If your cluster supports `Apptainer or Singularity <https://apptainer.org/docs/user/main/>`_,
+convert a verl Docker image that matches the CPU architecture of the Slurm compute nodes. Alternatively, set up the
+environment with the package manager available on your cluster or use another container runtime, such as
+`Slurm's OCI support <https://slurm.schedmd.com/containers.html>`_.
 
-.. code:: bash
+   If a registry image publishes a manifest for the compute nodes' architecture, pull it on an Apptainer login or build
+   host with the same CPU architecture after replacing the placeholder with a current, compatible image reference:
 
-    apptainer pull /your/dest/dir/vemlp-th2.4.0-cu124-vllm0.6.3-ray2.10-te1.7-v0.0.3.sif docker://verlai/verl:vemlp-th2.4.0-cu124-vllm0.6.3-ray2.10-te1.7-v0.0.3
+   .. code-block:: bash
+
+       apptainer pull verl.sif docker://<registry>/<repository>:<tag>
+
+   Stable, officially supported pre-built GB200/aarch64 images are not currently published. On an aarch64 Docker host,
+   follow the `ARM64 build instructions
+   <https://github.com/verl-project/verl/tree/main/docker#gb200--aarch64>`_ and verify the resulting image architecture:
+
+   .. code-block:: bash
+
+       docker build -f docker/Dockerfile.stable.vllm -t verl:vllm-arm64 .
+       docker image inspect verl:vllm-arm64 --format '{{.Os}}/{{.Architecture}}'
+
+   If Apptainer and Docker are available on the same host, build the SIF directly from the local Docker daemon:
+
+   .. code-block:: bash
+
+       apptainer build verl-vllm-arm64.sif docker-daemon:verl:vllm-arm64
+
+   If Docker is only available on a separate build host, export and transfer the image before building the SIF on an
+   aarch64 Slurm login or build node:
+
+   .. code-block:: bash
+
+       # Run on the aarch64 Docker build host, then transfer the archive.
+       docker save -o verl-vllm-arm64.tar verl:vllm-arm64
+
+       # Run where Apptainer is available.
+       apptainer build verl-vllm-arm64.sif docker-archive:/path/to/verl-vllm-arm64.tar
+
+   The ``docker-daemon:`` and ``docker-archive:`` URI forms are documented in the
+   `Apptainer Docker and OCI guide <https://apptainer.org/docs/user/main/docker_and_oci.html#archives-docker-daemon>`_.
+   Set ``APPTAINER_TMPDIR`` to a scratch location with enough free space if the default temporary directory is too
+   small for the image conversion.
 
 2. Follow :doc:`GSM8K example<../examples/gsm8k_example>` to prepare the dataset and model checkpoints.
 

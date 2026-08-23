@@ -49,11 +49,23 @@ docker build -f docker/Dockerfile.stable.vllm \
 
 ### GB200 / aarch64
 
-Pre-built images for GB200 (aarch64) are not yet published. Users should build locally on an aarch64 machine. Pre-built images will be added once available.
+Stable, officially supported pre-built images for GB200 (aarch64) are not yet published. Users should build locally on
+an aarch64 machine. Stable pre-built images will be documented once available.
 
 ```sh
 docker build -f docker/Dockerfile.stable.vllm -t verl:vllm-arm64 .
+docker image inspect verl:vllm-arm64 --format '{{.Os}}/{{.Architecture}}'
 ```
+
+The inspection output should report `linux/arm64`. If Docker is on a different aarch64 host from the Slurm cluster,
+export the image for transfer:
+
+```sh
+docker save -o verl-vllm-arm64.tar verl:vllm-arm64
+```
+
+The [multi-node Slurm guide](../docs/start/multinode.rst#option-3-launch-via-slurm) covers converting either the local
+Docker daemon image or the transferred archive into an Apptainer SIF.
 
 ## uv image (`Dockerfile.uv.cu130`)
 

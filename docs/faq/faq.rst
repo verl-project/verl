@@ -1,7 +1,7 @@
 Frequently Asked Questions
 ====================================
 
-Last updated: 09/24/2025.
+Last updated: 08/23/2026.
 
 Ray related
 ------------
@@ -34,28 +34,8 @@ Then in the configuration, set the ``trainer.nnode`` config to the number of mac
 How to use verl on a Slurm-managed cluster?
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Ray provides users with `this <https://docs.ray.io/en/latest/cluster/vms/user-guides/community/slurm.html>`_ official
-tutorial to start a Ray cluster on top of Slurm. We have verified the :doc:`GSM8K example<../examples/gsm8k_example>`
-on a Slurm cluster under a multi-node setting with the following steps.
-
-1. [Optional] If your cluster support `Apptainer or Singularity <https://apptainer.org/docs/user/main/>`_ and you wish
-to use it, convert verl's Docker image to an Apptainer image. Alternatively, set up the environment with the package
-manager available on your cluster or use other container runtimes (e.g. through `Slurm's OCI support <https://slurm.schedmd.com/containers.html>`_) available to you.
-
-.. code:: bash
-
-    apptainer pull /your/dest/dir/vemlp-th2.4.0-cu124-vllm0.6.3-ray2.10-te1.7-v0.0.3.sif docker://verlai/verl:vemlp-th2.4.0-cu124-vllm0.6.3-ray2.10-te1.7-v0.0.3
-
-2. Follow :doc:`GSM8K example<../examples/gsm8k_example>` to prepare the dataset and model checkpoints.
-
-3. Modify `examples/tutorial/slurm/ray_on_slurm.slurm <https://github.com/verl-project/verl/blob/main/examples/tutorial/slurm/ray_on_slurm.slurm>`_ with your cluster's own information.
-
-4. Submit the job script to the Slurm cluster with `sbatch`.
-
-Please note that Slurm cluster setup may vary. If you encounter any issues, please refer to Ray's
-`Slurm user guide <https://docs.ray.io/en/latest/cluster/vms/user-guides/community/slurm.html>`_ for common caveats.
-
-If you changed Slurm resource specifications, please make sure to update the environment variables in the job script if necessary.
+See :ref:`the Slurm deployment guide <slurm-deployment>` for the Ray cluster setup, ARM64 Docker-to-Apptainer
+workflow, network interface configuration, and job submission steps.
 
 
 Install related
