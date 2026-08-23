@@ -1,7 +1,7 @@
 Agentic RL Training
 ===================
 
-Last updated: 07/15/2025.
+Last updated: 08/23/2026.
 
 Overview
 ----------
@@ -62,14 +62,12 @@ Follow :doc:`GSM8K example<../examples/gsm8k_example>` to prepare the dataset an
 
 There are two options required to use agent loop:
 
-- `data.return_raw_chat=True`
-- `actor_rollout_ref.rollout.mode=async`
+- ``data.return_raw_chat=True``
+- ``actor_rollout_ref.rollout.mode=async``
 
-This example uses the sglang inference engine by default, and you can also modify rollout_name to use vllm.
-
-.. code-block:: bash
-
-    bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
+Use the maintained `Agent Loop get-started tutorial <https://github.com/verl-project/verl/blob/main/examples/tutorial/agent_loop_get_started/agent_loop_tutorial.ipynb>`_
+for a complete asynchronous rollout example. The tutorial supports both vLLM and SGLang; select the backend with
+``rollout_name``. Its training configuration sets the two required options shown above.
 
 
 Multi-turn Conversations and Tool Calls
@@ -77,32 +75,19 @@ Multi-turn Conversations and Tool Calls
 
 Follow :doc:`Multi-turn Rollout Support<../sglang_multiturn/multiturn>` to prepare tool and configuration files.
 
-The Tool Agent Loop has an additional requirement: adding an "agent_name" field to the dataset. During rollout, it will choose to use tool_agent_loop or single_turn_agent (default) based on this field.
+The agent loop can be selected per sample with the dataset's ``agent_name`` field. If that field is absent,
+``actor_rollout_ref.rollout.agent.default_agent_loop`` is used. Set the default to ``tool_agent`` to use tools for
+every sample without modifying the dataset.
 
 Usage Example
 ~~~~~~~~~~~~~
 
-.. code-block:: bash
-
-    # install mlflow to view toolcall and llm trace
-    pip install mlflow
-
-    # This will download and preprocess the GSM8K dataset into ~/data/gsm8k/ and add the "agent_name" field.
-    python examples/data_preprocess/gsm8k_tool_agent_loop.py
-
-    # Start training with tool calls and enabled mlflow based trace helping to debug the rollout details
-    bash examples/sglang_multiturn/run_qwen2_5_3b_gsm8k_tool_agent_mlflow_fsdp.sh
-
-    # When training is done, start a mlflow server to view trace
-    mlflow ui -h 0.0.0.0 -p 5000 --backend-store-uri sqlite:////tmp/mlruns.db
-
-    # then you can open http://<your ip address>:5000 from browser to view trace
+The `end-to-end training section of the Agent Loop tutorial <https://github.com/verl-project/verl/blob/main/examples/tutorial/agent_loop_get_started/agent_loop_tutorial.ipynb>`_
+walks through dataset preparation, tool configuration, asynchronous rollout, and a short ``ToolAgentLoop`` training
+run. It replaces the retired launcher previously referenced here.
 
 
-Note: During training, because the model may sometimes fail to generate correct toolcall tags, an error message "Failed to decode tool call" will be output to the console, which does not indicate an abnormality in training.
-
-
-Follow :doc:`Rollout trace<../advance/rollout_trace>` to known more about trace feature.
+Follow :doc:`Rollout trace<../advance/rollout_trace>` to learn more about the trace feature.
 
 
 
@@ -130,4 +115,5 @@ System Components
 +--------------------------+-----------------------------------------------------------------------------------------------+
 
 
-Follow doc "recipe/langgraph_agent/example/README.md" for more details.
+See the `LangGraph agent example <https://github.com/verl-project/verl-recipe/tree/main/langgraph_agent/example>`_
+for an end-to-end custom agent loop.
