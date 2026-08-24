@@ -857,6 +857,36 @@ def bootstrap_metric(
     return result
 
 
+def pass_at_k(n: int, c: int, k: int) -> float:
+    """
+    Unbiased estimator of pass@k from the Codex/HumanEval paper (Chen et al., 2021).
+
+    Estimates the probability that at least one of ``k`` samples drawn WITHOUT
+    replacement from the ``n`` generated samples is correct, given that ``c`` of the
+    ``n`` are correct::
+
+        pass@k = 1 - C(n - c, k) / C(n, k)
+
+    evaluated in the numerically stable product form. Unlike a with-replacement
+    bootstrap of ``max`` (see ``bootstrap_metric``), this is unbiased. When ``k == n``
+    it reduces to the exact "any correct" indicator (1.0 if ``c > 0`` else 0.0), i.e.
+    the true pass@N.
+
+    Args:
+        n: Total number of samples generated for the prompt.
+        c: Number of correct samples (e.g. reward > 0).
+        k: The k in pass@k. Must satisfy 1 <= k <= n.
+
+    Returns:
+        The unbiased pass@k estimate in [0, 1].
+    """
+    if k > n:
+        raise ValueError(f"pass@k requires k <= n, got k={k}, n={n}")
+    if n - c < k:
+        return 1.0
+    return float(1.0 - np.prod(1.0 - k / np.arange(n - c + 1, n + 1)))
+
+
 def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> float:
     """
     Calculate a value based on majority voting.
@@ -923,6 +953,9 @@ def process_validation_metrics(
         Where metric_name includes:
         - "mean@N": Mean value across N samples
         - "std@N": Standard deviation across N samples
+        - "pass@N": Unbiased pass@N estimate (Codex/HumanEval); pass@n_resps is the exact
+          fraction of prompts with at least one correct (reward > 0) sample, and pass@1
+          equals mean@n_resps for binary rewards
         - "best@N/mean": Mean of the best values in bootstrap samples of size N
         - "best@N/std": Standard deviation of the best values in bootstrap samples
         - "worst@N/mean": Mean of the worst values in bootstrap samples
@@ -950,7 +983,7 @@ def process_validation_metrics(
     reduce_fns_best_worst = [np.max, np.min]
     n_bootstrap = 1000
 
-    # 2. cache ns list
+    # 2. cache ns list — the @N ladder shared by every validation metric (best/worst/maj/pass).
     def gen_ns(n_resps: int) -> list[int]:
         if n_resps <= 1:
             return []
@@ -994,8 +1027,15 @@ def process_validation_metrics(
                         ns_cache[n_resps] = gen_ns(n_resps)
                     ns = ns_cache[n_resps]
 
-                    # compute best/worst metrics
+                    # count correct samples (reward > 0) for the unbiased pass@k estimator
+                    n_correct = int(np.sum(np.asarray(var_vals) > 0))
+
+                    # every @N metric uses the same ladder `ns`
                     for n in ns:
+                        # unbiased pass@n (Codex/HumanEval), no bootstrap; pass@n_resps is the exact
+                        # "any correct" fraction and pass@1 equals mean@n_resps for binary rewards
+                        metric[f"pass@{n}"] = pass_at_k(n_resps, n_correct, n)
+
                         # compute best/worst metrics
                         (bon_mean, bon_std), (won_mean, won_std) = bootstrap_metric(
                             data=var_vals,
