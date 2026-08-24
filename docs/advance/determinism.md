@@ -96,7 +96,7 @@ If the policy or RM model is not covered by vLLM batch invariance, add `actor_ro
 
 ### Deterministic routing
 
-- **Actor rollout**: `SingleTurnAgentLoop` uses `request_id=f"det-{priority}"` (priority from `non_tensor_batch["priority"]`), and `GlobalRequestLoadBalancer` (with `full_determinism=True`) routes with `hash(request_id) % len(servers)` — the same request always routes to the same vLLM server across runs. (`priority` is vLLM-only; `LLMServerClient.generate()` filters it for non-vLLM backends.) When `full_determinism=True`, `LLMServerClient._vllm_request_id()` forwards this stable `request_id` to vLLM itself.
+- **Actor rollout**: `SingleTurnAgentLoop` uses `request_id=f"det-{priority}"` (priority from `non_tensor_batch["priority"]`), and `GlobalRequestLoadBalancer` (in `verl/workers/rollout/router.py`, with `full_determinism=True`) routes with `hash(request_id) % len(servers)` — the same request always routes to the same vLLM server across runs. (`priority` is vLLM-only; `LLMServerClient.generate()` filters it for non-vLLM backends.) When `full_determinism=True`, `LLMServerClient._vllm_request_id()` forwards this stable `request_id` to vLLM itself.
 - **Reward**: `NaiveRouter` routes with `binascii.crc32(request body) % len(candidates)` among equally-loaded RM replicas, so the same reward request always routes to the same replica. This neutralizes replica-level floating-point differences that seed alone cannot equalize.
 
 ### Trainer backend (V0 required)
