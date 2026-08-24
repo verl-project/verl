@@ -25,7 +25,7 @@ kl_coef=0.001
 use_kl_loss=False
 kl_loss_coef=0.001
 
-clip_ratio_low=5e-4
+clip_ratio_low=4e-4
 clip_ratio_high=5.3e-4
 
 actor_lr=1e-6
