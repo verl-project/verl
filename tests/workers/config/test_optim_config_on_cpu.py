@@ -23,13 +23,14 @@ class TestFSDPOptimizerConfigCPU:
         assert config.min_lr_ratio is None
         assert config.lr_scheduler_type == "constant"
         assert config.num_cycles == 0.5
+        assert config.lr_wsd_stable_steps_ratio == 0.9
 
-    @pytest.mark.parametrize("lr_scheduler_type", ["constant", "cosine"])
+    @pytest.mark.parametrize("lr_scheduler_type", ["constant", "cosine", "wsd"])
     def test_valid_lr_scheduler_types(self, lr_scheduler_type):
         config = FSDPOptimizerConfig(lr_scheduler_type=lr_scheduler_type, lr=0.1)
         assert config.lr_scheduler_type == lr_scheduler_type
 
-    @pytest.mark.parametrize("warmup_style", ["constant", "cosine"])
+    @pytest.mark.parametrize("warmup_style", ["constant", "cosine", "wsd"])
     def test_valid_warmup_style_types(self, warmup_style):
         config = FSDPOptimizerConfig(warmup_style=warmup_style, lr=0.1)
         assert config.lr_scheduler_type == warmup_style
@@ -46,6 +47,57 @@ class TestFSDPOptimizerConfigCPU:
     def test_num_cycles_configuration(self, num_cycles):
         config = FSDPOptimizerConfig(num_cycles=num_cycles, lr=0.1)
         assert config.num_cycles == num_cycles
+
+    @pytest.mark.parametrize("stable_ratio", [0.0, 0.5, 1.0])
+    def test_valid_wsd_stable_steps_ratio(self, stable_ratio):
+        config = FSDPOptimizerConfig(lr_scheduler_type="wsd", lr_wsd_stable_steps_ratio=stable_ratio, lr=0.1)
+        assert config.lr_wsd_stable_steps_ratio == stable_ratio
+
+    @pytest.mark.parametrize("stable_ratio", [-0.1, 1.1])
+    def test_invalid_wsd_stable_steps_ratio(self, stable_ratio):
+        with pytest.raises(AssertionError, match="lr_wsd_stable_steps_ratio"):
+            FSDPOptimizerConfig(lr_scheduler_type="wsd", lr_wsd_stable_steps_ratio=stable_ratio, lr=0.1)
+
+    @pytest.mark.parametrize("lr_scheduler_type", ["constant", "cosine"])
+    def test_unused_wsd_stable_ratio_is_not_validated(self, lr_scheduler_type):
+        config = FSDPOptimizerConfig(
+            lr_scheduler_type=lr_scheduler_type,
+            lr_wsd_stable_steps_ratio=1.1,
+            lr=0.1,
+        )
+        assert config.lr_wsd_stable_steps_ratio == 1.1
+
+    def test_legacy_positional_arguments_keep_their_meaning(self):
+        legacy_args = (
+            "",
+            0.123,
+            0.2,
+            100,
+            0.02,
+            3,
+            (0.8, 0.9),
+            0.7,
+            None,
+            "AdamW",
+            "torch.optim",
+            0.1,
+            None,
+            "cosine",
+            0.25,
+            {"eps": 1e-8},
+            False,
+        )
+
+        config = FSDPOptimizerConfig(*legacy_args)
+
+        assert config.override_optimizer_config == {"eps": 1e-8}
+        assert config.zero_indexed_step is False
+        assert config.lr_wsd_stable_steps_ratio == 0.9
+
+    @pytest.mark.parametrize("min_lr_ratio", [-0.1, 1.1])
+    def test_invalid_min_lr_ratio(self, min_lr_ratio):
+        with pytest.raises(AssertionError, match="min_lr_ratio"):
+            FSDPOptimizerConfig(lr_scheduler_type="wsd", min_lr_ratio=min_lr_ratio, lr=0.1)
 
 
 class TestMcoreOptimizerConfigMuonCPU:
