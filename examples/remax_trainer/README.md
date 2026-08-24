@@ -10,6 +10,7 @@ Reference: [ReMax: A Simple, Effective, and Efficient Reinforcement Learning Met
 |-------------------------------------------|-------|-----------|----------|
 | `run_qwen3_8b_fsdp.sh`                   | vLLM  | FSDP      | NVIDIA   |
 | `run_qwen2.5_math_7b_fsdp_sync.sh`       | vLLM  | FSDP+Sync | NVIDIA   |
+| [`../ascend_extras/remax_trainer/run_qwen3_8b_fsdp.sh`](../ascend_extras/remax_trainer/run_qwen3_8b_fsdp.sh) | vLLM (vllm_ascend) | FSDP | Ascend NPU |
 
 Override any argument via env vars at the top of the script.
 
