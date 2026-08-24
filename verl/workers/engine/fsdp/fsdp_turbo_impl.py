@@ -57,6 +57,7 @@ class FSDPTurboEngineWithLMHead(FSDPEngineWithLMHead):
         offload_policy = None
         if self.engine_config.offload_policy or self.engine_config.forward_only:
             self._is_offload_param = False
+            self._is_offload_grad = False
             self._is_offload_optimizer = False
             offload_policy = True
             self._uses_fsdp2_cpu_offload_policy = True
