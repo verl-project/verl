@@ -108,7 +108,12 @@ jobs:
       - name: Check npu and CANN info
         run: |
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-          npu-smi info
+          npu-smi info > /tmp/npu-smi-info.txt
+          cat /tmp/npu-smi-info.txt
+          if grep -Eq "Warning|Alarm|Critical|UNKNOWN" /tmp/npu-smi-info.txt; then
+            echo "One or more NPUs are unhealthy; refusing to run."
+            exit 1
+          fi
       - name: Check initial pip list from image
         run: |
           pip list
@@ -187,7 +192,12 @@ jobs:
       - name: Check npu and CANN info
         run: |
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-          npu-smi info
+          npu-smi info > /tmp/npu-smi-info.txt
+          cat /tmp/npu-smi-info.txt
+          if grep -Eq "Warning|Alarm|Critical|UNKNOWN" /tmp/npu-smi-info.txt; then
+            echo "One or more NPUs are unhealthy; refusing to run."
+            exit 1
+          fi
       - name: Check initial pip list from image
         run: |
           pip list
