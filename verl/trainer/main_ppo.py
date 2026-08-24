@@ -53,8 +53,9 @@ def run_ppo(config, task_runner_class) -> None:
     if "rl_insight" in ([trainer_logger] if isinstance(trainer_logger, str) else trainer_logger or []):
         os.environ["VERL_RL_INSIGHT_ENABLE"] = "1"
 
-    # Check if Ray is not initialized
-    if not ray.is_initialized():
+    # Only shut Ray down later when this invocation initialized it.
+    ray_initialized_here = not ray.is_initialized()
+    if ray_initialized_here:
         # Initialize Ray with a local cluster configuration
         # Set environment variables in the runtime environment to control tokenizer parallelism,
         # NCCL debug level, VLLM logging level, and allow runtime LoRA updating
@@ -73,30 +74,40 @@ def run_ppo(config, task_runner_class) -> None:
         print(f"ray init kwargs: {ray_init_kwargs}")
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
 
-    # Create a remote instance of the TaskRunner class, and
-    # Execute the `run` method of the TaskRunner instance remotely and wait for it to complete
-    if (
-        is_cuda_available
-        and config.global_profiler.tool == "nsys"
-        and config.global_profiler.get("steps") is not None
-        and len(config.global_profiler.get("steps", [])) > 0
-    ):
-        from verl.utils.import_utils import is_nvtx_available
+    runner = None
+    try:
+        # Create a remote instance of the TaskRunner class, and execute its run
+        # method remotely while waiting for completion.
+        if (
+            is_cuda_available
+            and config.global_profiler.tool == "nsys"
+            and config.global_profiler.get("steps") is not None
+            and len(config.global_profiler.get("steps", [])) > 0
+        ):
+            from verl.utils.import_utils import is_nvtx_available
 
-        assert is_nvtx_available(), "nvtx is not available in CUDA platform. Please 'pip3 install nvtx'"
-        nsight_options = OmegaConf.to_container(
-            config.global_profiler.global_tool_config.nsys.controller_nsight_options
-        )
-        runner = task_runner_class.options(runtime_env={"nsight": nsight_options}).remote()
-    else:
-        runner = task_runner_class.remote()
-    ray.get(runner.run.remote(config))
+            assert is_nvtx_available(), "nvtx is not available in CUDA platform. Please 'pip3 install nvtx'"
+            nsight_options = OmegaConf.to_container(
+                config.global_profiler.global_tool_config.nsys.controller_nsight_options
+            )
+            runner = task_runner_class.options(runtime_env={"nsight": nsight_options}).remote()
+        else:
+            runner = task_runner_class.remote()
+        ray.get(runner.run.remote(config))
 
-    # [Optional] get the path of the timeline trace file from the configuration, default to None
-    # This file is used for performance analysis
-    timeline_json_file = config.ray_kwargs.get("timeline_json_file", None)
-    if timeline_json_file:
-        ray.timeline(filename=timeline_json_file)
+        # [Optional] get the path of the timeline trace file from the configuration, default to None
+        # This file is used for performance analysis
+        timeline_json_file = config.ray_kwargs.get("timeline_json_file", None)
+        if timeline_json_file:
+            ray.timeline(filename=timeline_json_file)
+    finally:
+        if runner is not None:
+            try:
+                ray.kill(runner, no_restart=True)
+            except Exception:
+                logger.warning("Failed to release the TaskRunner actor", exc_info=True)
+        if ray_initialized_here and ray.is_initialized():
+            ray.shutdown()
 
 
 @ray.remote
@@ -114,6 +125,7 @@ class TaskRunnerV1:
         NOTE: User can customize their own agent loop manager, the only requirement is:
         1. implement `generate_sequences` method
         2. put agent loop outputs into TransferQueue
+        A custom manager may also implement `close` for graceful teardown.
         """
         from verl.trainer.ppo.v1 import AgentLoopManagerTQ
 
@@ -155,12 +167,42 @@ class TaskRunnerV1:
             self.trainer.fit(self.agent_loop_manager)
             succeeded = True
         finally:
+            cleanup_errors = []
+
+            try:
+                close_agent_loop = getattr(self.agent_loop_manager, "close", None)
+                if callable(close_agent_loop):
+                    close_agent_loop()
+            except Exception as error:
+                logger.exception("Failed to close the agent loop manager")
+                cleanup_errors.append(error)
+
+            try:
+                close_trainer = getattr(self.trainer, "close", None)
+                if callable(close_trainer):
+                    close_trainer()
+            except Exception as error:
+                logger.exception("Failed to close the trainer")
+                cleanup_errors.append(error)
+
             try:
                 tracking = getattr(self.trainer, "logger", None)
                 if tracking is not None:
                     tracking.finish(exit_code=0 if succeeded else 1)
-            finally:
+            except Exception as error:
+                logger.exception("Failed to finish experiment tracking")
+                cleanup_errors.append(error)
+
+            try:
                 tq.close()
+            except Exception as error:
+                logger.exception("Failed to close TransferQueue")
+                cleanup_errors.append(error)
+
+            # Preserve the original training exception. If training succeeded,
+            # surface cleanup failures instead of silently reporting success.
+            if succeeded and cleanup_errors:
+                raise cleanup_errors[0]
 
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)

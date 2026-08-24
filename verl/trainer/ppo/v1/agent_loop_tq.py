@@ -55,9 +55,13 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         super().__init__(*args, **kwargs)
         tq.init()
         self.background_tasks = set()
+        self._closed = False
 
     async def generate_sequences(self, batch: TensorDict) -> None:
         """Spawn agent loop for each sample in the batch without waiting for the results."""
+        if self._closed:
+            raise RuntimeError("AgentLoopWorkerTQ is closed")
+
         validate = batch["validate"] if "validate" in batch else False
         batch.pop("validate", None)
         config = self.config.actor_rollout_ref.rollout
@@ -103,6 +107,22 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             )
             self.background_tasks.add(task)
             task.add_done_callback(self.background_tasks.discard)
+
+    async def close(self) -> None:
+        """Cancel outstanding rollouts before closing this worker's TransferQueue client."""
+        if self._closed:
+            return
+
+        self._closed = True
+        tasks = list(self.background_tasks)
+        for task in tasks:
+            task.cancel()
+        try:
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            self.background_tasks.clear()
+            tq.close()
 
     async def _run_prompt(self, prompt: dict, sampling_params: dict, trajectory: dict, trace: bool = False) -> None:
         """Spawn multiple agent loops in parallel according to rollout.n or rollout.val_kwargs.n."""
@@ -231,6 +251,7 @@ class AgentLoopManagerTQ(AgentLoopManager):
     def __init__(self, *args, **kwargs):
         self.agent_loop_workers_class = AgentLoopWorkerTQ
         super().__init__(*args, **kwargs)
+        self._closed = False
 
     @classmethod
     @auto_await
@@ -248,6 +269,9 @@ class AgentLoopManagerTQ(AgentLoopManager):
         Args:
             prompts (TensorDict): Input batch from train or validation dataset.
         """
+        if self._closed:
+            raise RuntimeError("AgentLoopManagerTQ is closed")
+
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         ray.get(
             [
@@ -255,3 +279,16 @@ class AgentLoopManagerTQ(AgentLoopManager):
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=False)
             ]
         )
+
+    def close(self) -> None:
+        """Stop all agent-loop workers and release their handles."""
+        if self._closed:
+            return
+
+        self._closed = True
+        workers = list(self.agent_loop_workers)
+        try:
+            if workers:
+                ray.get([worker.close.remote() for worker in workers])
+        finally:
+            self.agent_loop_workers.clear()

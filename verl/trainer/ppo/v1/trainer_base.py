@@ -124,6 +124,14 @@ class PPOTrainer(ABC):
 
     def __init__(self, config: DictConfig):
         self.config = config
+        # Lifecycle-owned resources are initialized eagerly so close() is safe even
+        # when init() fails partway through setup.
+        self.train_dataloader = None
+        self.train_dataloader_it = None
+        self.val_dataloader = None
+        self._dump_executor = None
+        self._dump_futures = []
+        self._closed = False
         self.use_critic = need_critic(self.config)
         self.use_reference_policy = need_reference_policy(self.config)
         self.use_teacher_policy = need_teacher_policy(self.config)
@@ -497,10 +505,9 @@ class PPOTrainer(ABC):
             SkipManager.set_step(self.global_steps)
             current_epoch = (self.global_steps - 1) // self.steps_per_epoch
             if is_last_step:
-                self._shutdown_dump_executor()
                 pprint(f"Final validation metrics: {last_val_metrics}")
                 progress_bar.close()
-                return
+                break
 
         self.on_train_end()
         # Ensure dump executor is shut down when training loop ends without reaching is_last_step
@@ -1200,10 +1207,69 @@ class PPOTrainer(ABC):
 
     def _shutdown_dump_executor(self):
         """Drain pending dump futures and shut down the executor."""
-        for f in self._dump_futures:
-            f.result()
-        self._dump_futures.clear()
-        self._dump_executor.shutdown(wait=True)
+        executor = self._dump_executor
+        if executor is None:
+            return
+
+        try:
+            for f in self._dump_futures:
+                f.result()
+            self._dump_futures.clear()
+        finally:
+            executor.shutdown(wait=True)
+            self._dump_executor = None
+
+    @staticmethod
+    def _shutdown_dataloader(loader, retained_iterator=None):
+        """Shut down a StatefulDataLoader's workers and release iterator references."""
+        if loader is None and retained_iterator is None:
+            return
+
+        loader_iterator = getattr(loader, "_iterator", None)
+        iterators = []
+        for iterator in (retained_iterator, loader_iterator):
+            if iterator is not None and all(iterator is not existing for existing in iterators):
+                iterators.append(iterator)
+
+        try:
+            for iterator in iterators:
+                shutdown_workers = getattr(iterator, "_shutdown_workers", None)
+                if callable(shutdown_workers):
+                    shutdown_workers()
+        finally:
+            # StatefulDataLoader retains its most recent iterator independently
+            # of PPOTrainer.train_dataloader_it.
+            if loader is not None and hasattr(loader, "_iterator"):
+                loader._iterator = None
+
+    def close(self):
+        """Release trainer-owned local resources. Safe to call more than once."""
+        if self._closed:
+            return
+
+        cleanup_errors = []
+        try:
+            try:
+                self._shutdown_dataloader(self.train_dataloader, self.train_dataloader_it)
+            except Exception as error:
+                cleanup_errors.append(error)
+            finally:
+                self.train_dataloader_it = None
+
+            try:
+                self._shutdown_dataloader(self.val_dataloader)
+            except Exception as error:
+                cleanup_errors.append(error)
+
+            try:
+                self._shutdown_dump_executor()
+            except Exception as error:
+                cleanup_errors.append(error)
+        finally:
+            self._closed = True
+
+        if cleanup_errors:
+            raise cleanup_errors[0]
 
     def _log_rollout_data(self, batch: KVBatchMeta, timing_raw: dict, rollout_data_dir: str):
         """Fetch rollout data from TransferQueue and dump sorted by uid."""
