@@ -446,6 +446,11 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         self._completed_steps: int = 1
         # we start from step 1
         self.global_steps = 1
+        # Parameter (policy-weight) version, set by the trainer on each weight
+        # sync via reset_staleness / do_validate. This — NOT self.global_steps,
+        # which is a per-sample feed counter — is the RL "step" a rollout
+        # starts sampling against.
+        self.current_param_version = 0
         self.idle_start_time = time.time()
         self.step_start_time = time.time()
 
@@ -591,11 +596,12 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
         return utilization
 
-    async def reset_staleness(self):
+    async def reset_staleness(self, current_param_version: int = 0):
         """
         Reset staleness samples after parameter update.
         Returns timing_raw dictionary for metrics.
         """
+        self.current_param_version = current_param_version
         async with self.lock:
             self.paused = False
             # Wake the drain loop in _processor_worker so it can exit early and resume submitting
@@ -645,12 +651,23 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         """Stop rollout profiling on all replicas before the next weight sync."""
         await self.llm_server_manager.stop_profile()
 
-    def do_validate(self):
+    def do_validate(self, current_param_version: int = 0):
         """Run validation and return metrics"""
-        timing_raw = {}
-        with marked_timer("rollouter/validate_time", timing_raw, color="green"):
-            val_metrics: dict = self._validate()
-        return timing_raw | val_metrics
+        self.current_param_version = current_param_version
+        # The inherited _validate stamps test_gen_batch.meta_info["global_steps"]
+        # from self.global_steps (a per-sample feed counter here), which is what
+        # made validation rollouts show up as e.g. step 210 at param version 4.
+        # Swap in the true parameter version for the duration of validation so
+        # the gen batch records the policy version.
+        saved_global_steps = self.global_steps
+        self.global_steps = current_param_version
+        try:
+            timing_raw = {}
+            with marked_timer("rollouter/validate_time", timing_raw, color="green"):
+                val_metrics: dict = self._validate()
+            return timing_raw | val_metrics
+        finally:
+            self.global_steps = saved_global_steps
 
     async def save_checkpoint(self, local_global_step_folder: str):
         # WARNING!: Due to the asynchronous nature, there are some in-flight samples
@@ -995,6 +1012,11 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         rollout_sample.full_batch.non_tensor_batch["uid"] = np.array(
             [f"uid_{rollout_sample.sample_id}"] * len(rollout_sample.full_batch), dtype=object
         )
+        # Stamp the current parameter version so the agent loop's trajectory
+        # step is the policy version this rollout starts sampling against.
+        # Async training never set this, so every training rollout previously
+        # landed with no step.
+        rollout_sample.full_batch.meta_info["global_steps"] = self.current_param_version
         ret = await self.async_rollout_manager.generate_sequences_single(rollout_sample.full_batch)
 
         rollout_sample.full_batch = ret

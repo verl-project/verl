@@ -753,7 +753,9 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
                 self.dynamic_schedule_ctx.last_activate_duration_s += time.time() - _act_start
 
-        timing_raw = await asyncio.wrap_future(self.rollouter.reset_staleness.remote().future())
+        timing_raw = await asyncio.wrap_future(
+            self.rollouter.reset_staleness.remote(self.current_param_version).future()
+        )
 
         print(
             f"[FullyAsyncTrainer] _fit_update_weights, "
@@ -826,7 +828,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         if self.config.async_training.use_trainer_do_validate:
             await self._trainer_side_validate()
         else:
-            val_metrics = await self.rollouter.do_validate.remote()
+            val_metrics = await self.rollouter.do_validate.remote(self.current_param_version)
             self.logger.log(data=val_metrics, step=self.current_param_version)
 
     async def _trainer_side_validate(self):
@@ -852,7 +854,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         # Phase 2: Run validation via RPC to rollouter
         # ================================================================
         print("[FullyAsyncTrainer] Phase 2: Running validation")
-        val_metrics = await self.rollouter.do_validate.remote()
+        val_metrics = await self.rollouter.do_validate.remote(self.current_param_version)
         self.logger.log(data=val_metrics, step=self.current_param_version)
 
         # ================================================================
