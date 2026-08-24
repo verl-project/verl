@@ -88,8 +88,7 @@ class ServerAdapter(BaseRollout):
 
         # Map each trainer rank to its co-located vLLM server so weight-update
         # IPC handles stay on the GPU where they were created. Offset math
-        # assumes prefill_replicas == 1 (enforced by vLLMPDReplica); if that
-        # ever lifts, update both this block and vLLMPDReplica.launch_servers.
+        # assumes prefill_replicas == 1 (enforced by vLLMPDReplica).
         self._pd_role: Optional[str] = None
         self._pd_server_index: Optional[int] = None
         self._pd_tp_local_rank: Optional[int] = None

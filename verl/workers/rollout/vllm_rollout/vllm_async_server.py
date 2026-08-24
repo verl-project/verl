@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import uuid
+from collections.abc import Sequence
 from pprint import pprint
 from typing import Any, Callable, Optional
 
@@ -58,6 +59,7 @@ from verl.workers.rollout.utils import (
     qwen2_5_vl_dedup_image_tokens,
     run_uvicorn,
 )
+from verl.workers.rollout.vllm_rollout.pd_routing import DecodePeerSelector
 from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
     VLLM_LORA_NAME,
@@ -99,6 +101,7 @@ class vLLMHttpServer:
         cuda_visible_devices: str,
         disaggregation_role: str = "null",
         disaggregation_kv_transfer_config: Optional[dict] = None,
+        disaggregation_index: int = -1,
     ):
         """
         Args:
@@ -112,6 +115,7 @@ class vLLMHttpServer:
             cuda_visible_devices (str): cuda visible devices.
             disaggregation_role: PD role, or ``"null"`` for normal rollout.
             disaggregation_kv_transfer_config: vLLM KVTransferConfig dict for PD.
+            disaggregation_index: Index within the prefill or decode pool.
         """
         if disaggregation_role not in ("null", "prefill", "decode"):
             raise ValueError(f"disaggregation_role must be 'null'|'prefill'|'decode', got {disaggregation_role!r}")
@@ -125,10 +129,12 @@ class vLLMHttpServer:
         self._pd_decode_peers: list[ActorHandle] = []
         self._pd_prefill_side_channel_port: Optional[int] = None
         self._pd_prefill_engine_id: Optional[str] = None
-        self._pd_peer_idx: int = 0
+        self._pd_decode_selector: Optional[DecodePeerSelector] = None
 
         os.environ[get_visible_devices_keyword()] = cuda_visible_devices
         os.environ["VERL_REPLICA_RANK"] = str(replica_rank)
+        os.environ["VERL_PD_ROLE"] = "unified" if disaggregation_role == "null" else disaggregation_role
+        os.environ["VERL_PD_INDEX"] = str(disaggregation_index)
         # Forward the Ray job id into the vLLM worker subprocess so the
         # colocated weight-transfer IPC socket path is unique per Ray job.
         # Without this, two concurrent verl jobs on the same node both bind
@@ -248,8 +254,19 @@ class vLLMHttpServer:
         )
         assert isinstance(decode_peers, list) and decode_peers, "decode_peers must be a non-empty list"
         self._pd_decode_peers = list(decode_peers)
+        decode_addresses = await asyncio.gather(
+            *[decode_peer.get_server_address.remote() for decode_peer in decode_peers]
+        )
+        decode_peer_ids = [
+            f"http://[{host}]:{port}" if is_valid_ipv6_address(host) else f"http://{host}:{port}"
+            for host, port in decode_addresses
+        ]
         self._pd_prefill_side_channel_port = prefill_side_channel_port
         self._pd_prefill_engine_id = prefill_engine_id
+        self._pd_decode_selector = DecodePeerSelector(
+            policy_config=self.config.disaggregation.decode_policy,
+            peer_ids=decode_peer_ids,
+        )
 
     async def launch_server(self, master_address: str = None, master_port: int = None, dp_rpc_port: int = None):
         if self.node_rank != 0:
@@ -543,12 +560,15 @@ class vLLMHttpServer:
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         priority: int = 0,
         kv_transfer_params: Optional[dict] = None,
+        routing_key: Optional[str] = None,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out.
 
         Args:
             kv_transfer_params: vLLM KV-transfer payload for PD requests.
+            routing_key: Stable session identifier for hash-based decode routing.
         """
+        prompt_ids = normalize_token_ids(prompt_ids)
         if self._disaggregation_role == "prefill" and self._pd_decode_peers and kv_transfer_params is None:
             return await self._pd_dispatch(
                 prompt_ids,
@@ -559,9 +579,8 @@ class vLLMHttpServer:
                 audio_data=audio_data,
                 mm_processor_kwargs=mm_processor_kwargs,
                 priority=priority,
+                routing_key=routing_key,
             )
-
-        prompt_ids = normalize_token_ids(prompt_ids)
 
         # Calculate the maximum possible new tokens based on available context space
         # This serves as a safety upper bound. vLLM v0.20+ rejects `max_tokens < 1`
@@ -719,11 +738,11 @@ class vLLMHttpServer:
             extra_fields=extra_fields,
         )
 
-    def _select_decode_peer(self) -> ActorHandle:
-        """Round-robin across decode peers."""
-        peer = self._pd_decode_peers[self._pd_peer_idx % len(self._pd_decode_peers)]
-        self._pd_peer_idx += 1
-        return peer
+    def _select_decode_peer(self, routing_key: str, prompt_ids: Sequence[int]) -> tuple[int, ActorHandle]:
+        if self._pd_decode_selector is None:
+            raise RuntimeError("decode peer selector is not initialized")
+        index = self._pd_decode_selector.acquire(routing_key=routing_key, prompt_ids=prompt_ids)
+        return index, self._pd_decode_peers[index]
 
     async def _pd_dispatch(
         self,
@@ -735,72 +754,77 @@ class vLLMHttpServer:
         audio_data: Optional[list[Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         priority: int = 0,
+        routing_key: Optional[str] = None,
     ) -> TokenOutput:
-        """Run prefill locally, then decode on a selected peer."""
-        decode_peer = self._select_decode_peer()
-        connector = (self._disaggregation_kv_transfer_config or {}).get("kv_connector", "")
-        is_mooncake = connector == "MooncakeConnector"
+        """Reserve a decode peer, run prefill locally, then dispatch decode."""
+        effective_routing_key = routing_key or request_id
+        decode_peer_index, decode_peer = self._select_decode_peer(effective_routing_key, prompt_ids)
+        assert self._pd_decode_selector is not None
+        try:
+            connector = (self._disaggregation_kv_transfer_config or {}).get("kv_connector", "")
+            is_mooncake = connector == "MooncakeConnector"
 
-        # Prefill only materializes KV; discard its single generated token.
-        prefill_sp = dict(sampling_params)
-        prefill_sp.pop("max_tokens", None)
-        prefill_sp.pop("max_new_tokens", None)
-        prefill_sp["max_tokens"] = 1
-        transfer_id = uuid.uuid4().hex
-        prefill_kv_params = {
-            "do_remote_decode": True,
-            "do_remote_prefill": False,
-            "transfer_id": transfer_id,
-        }
-
-        prefill_out = await self.generate(
-            prompt_ids,
-            prefill_sp,
-            f"{request_id}_P",
-            image_data=image_data,
-            video_data=video_data,
-            audio_data=audio_data,
-            mm_processor_kwargs=mm_processor_kwargs,
-            priority=priority,
-            kv_transfer_params=prefill_kv_params,
-        )
-        if is_mooncake:
-            # Mooncake does not return decode params from the prefill leg.
-            decode_kv_params = {
-                "do_remote_decode": False,
-                "do_remote_prefill": True,
-                "remote_engine_id": self._pd_prefill_engine_id,
-                # Single-node PD uses Mooncake's local bootstrap address.
-                "remote_bootstrap_addr": f"http://127.0.0.1:{self._pd_prefill_side_channel_port}",
+            prefill_sp = dict(sampling_params)
+            prefill_sp.pop("max_tokens", None)
+            prefill_sp.pop("max_new_tokens", None)
+            prefill_sp["max_tokens"] = 1
+            transfer_id = uuid.uuid4().hex
+            prefill_kv_params = {
+                "do_remote_decode": True,
+                "do_remote_prefill": False,
                 "transfer_id": transfer_id,
             }
-        else:
-            decode_kv_params = prefill_out.extra_fields.get("kv_transfer_params")
-            if decode_kv_params is None:
-                raise RuntimeError(f"PD prefill leg returned no kv_transfer_params (request_id={request_id})")
 
-        return await decode_peer.generate.remote(
-            prompt_ids,
-            dict(sampling_params),
-            f"{request_id}_D",
-            image_data=image_data,
-            video_data=video_data,
-            audio_data=audio_data,
-            mm_processor_kwargs=mm_processor_kwargs,
-            priority=priority,
-            kv_transfer_params=decode_kv_params,
-        )
+            prefill_out = await self.generate(
+                prompt_ids,
+                prefill_sp,
+                f"{request_id}_P",
+                image_data=image_data,
+                video_data=video_data,
+                audio_data=audio_data,
+                mm_processor_kwargs=mm_processor_kwargs,
+                priority=priority,
+                kv_transfer_params=prefill_kv_params,
+            )
+            if is_mooncake:
+                decode_kv_params = {
+                    "do_remote_decode": False,
+                    "do_remote_prefill": True,
+                    "remote_engine_id": self._pd_prefill_engine_id,
+                    "remote_bootstrap_addr": f"http://127.0.0.1:{self._pd_prefill_side_channel_port}",
+                    "transfer_id": transfer_id,
+                }
+            else:
+                decode_kv_params = prefill_out.extra_fields.get("kv_transfer_params")
+                if decode_kv_params is None:
+                    raise RuntimeError(f"PD prefill leg returned no kv_transfer_params (request_id={request_id})")
+
+            return await decode_peer.generate.remote(
+                prompt_ids,
+                dict(sampling_params),
+                f"{request_id}_D",
+                image_data=image_data,
+                video_data=video_data,
+                audio_data=audio_data,
+                mm_processor_kwargs=mm_processor_kwargs,
+                priority=priority,
+                kv_transfer_params=decode_kv_params,
+            )
+        finally:
+            self._pd_decode_selector.release(decode_peer_index)
 
     async def wake_up(self, tags: list[str] | None = None):
         if self.node_rank != 0:
             return
 
+        cache_invalidated = False
         if self.rollout_mode == RolloutMode.HYBRID:
             # engine.wake_up() broadcasts via the DP coordinator to ALL EngineCore
             # processes across all DP shards (unlike collective_rpc which only reaches
             # TP workers within a single shard).
             await self.engine.wake_up(tags=tags or self._get_wake_up_tags())
             await self.engine.reset_prefix_cache(reset_connector=True)
+            cache_invalidated = True
         elif self.rollout_mode == RolloutMode.COLOCATED:
             # Directly call engine to wake up without sync weights.
             await self.engine.wake_up(tags=self._get_wake_up_tags())
@@ -809,19 +833,27 @@ class vLLMHttpServer:
             # against the previous weights. No-op success when no connector
             # is configured (vLLM scheduler treats it as such).
             await self.engine.reset_prefix_cache(reset_connector=True)
+            cache_invalidated = True
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip wake_up in standalone mode")
+        if cache_invalidated and self._pd_decode_selector is not None:
+            self._pd_decode_selector.clear_cache()
 
     async def sleep(self):
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
 
+        cache_invalidated = False
         if self.rollout_mode == RolloutMode.HYBRID:
             await self._sleep_hybrid()
+            cache_invalidated = True
         elif self.rollout_mode == RolloutMode.COLOCATED:
             await self.engine.sleep(level=1)
+            cache_invalidated = True
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
+        if cache_invalidated and self._pd_decode_selector is not None:
+            self._pd_decode_selector.clear_cache()
 
     async def clear_kv_cache(self):
         if self.node_rank == 0:
@@ -833,6 +865,8 @@ class vLLMHttpServer:
 
             await self.engine.reset_mm_cache()
             await self.engine.reset_encoder_cache()
+            if self._pd_decode_selector is not None:
+                self._pd_decode_selector.clear_cache()
 
     async def release_kv_cache(self):
         """Free the kv_cache pool for the duration of a weight sync."""
@@ -1244,8 +1278,11 @@ class vLLMReplica(RolloutReplica):
 
     async def sleep(self):
         """Sleep each rollout server."""
-        # Drain DP engines for safe sleep.
-        await self.servers[0].wait_for_requests_to_drain.remote()
+        # A prefill request remains in flight until its decode leg returns, so
+        # draining every request ingress is sufficient before all P/D engines sleep.
+        await asyncio.gather(
+            *[server.wait_for_requests_to_drain.remote() for _, server in self.get_request_server_endpoints()]
+        )
         await asyncio.gather(*[server.sleep.remote() for server in self.servers])
 
     async def abort_all_requests(self) -> dict[str, Any]:
@@ -1292,7 +1329,9 @@ class vLLMReplica(RolloutReplica):
     async def release_kv_cache(self):
         # Drain all in-flight requests so that vLLM worker threads go idle
         # before we touch engine.release_kv_cache()
-        await self.servers[0].wait_for_requests_to_drain.remote()
+        await asyncio.gather(
+            *[server.wait_for_requests_to_drain.remote() for _, server in self.get_request_server_endpoints()]
+        )
         await asyncio.gather(*[server.release_kv_cache.remote() for server in self.servers])
 
     # -----------------------------------------------------------------------

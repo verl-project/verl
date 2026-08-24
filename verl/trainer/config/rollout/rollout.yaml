@@ -477,7 +477,7 @@ mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
 # QAT configuration (inherited from actor's engine config)
 qat: ${oc.select:actor_rollout_ref.actor.fsdp_config.qat,${oc.select:actor_rollout_ref.actor.megatron.qat,null}}
 
-# Prefill-Decode disaggregation (SGLang only; keep rollout.name=sglang and toggle enabled=True).
+# Prefill-Decode disaggregation.
 disaggregation:
 
   # Master switch for PD disaggregation.
@@ -489,8 +489,26 @@ disaggregation:
   # Number of decode replicas.
   decode_replicas: 1
 
+  # P-to-D routing policy. round_robin preserves the original Verl behavior.
+  # Other supported values: random, power_of_two, consistent_hash,
+  # rendezvous_hash, cache_aware.
+  decode_policy:
+    type: round_robin
+
   # Decode TP override; null = same as tensor_model_parallel_size.
   decode_tensor_model_parallel_size: null
+
+  # Per-role memory utilization; null inherits rollout.gpu_memory_utilization.
+  prefill_gpu_memory_utilization: null
+  decode_gpu_memory_utilization: null
+
+  # Per-role vLLM kwargs, deep-merged over rollout.engine_kwargs.vllm.
+  prefill_engine_kwargs:
+    max_num_batched_tokens: null
+    max_num_seqs: null
+  decode_engine_kwargs:
+    max_num_batched_tokens: null
+    max_num_seqs: null
 
   # KV cache transport: nixl | mooncake | ascend | mori | fake.
   transfer_backend: nixl

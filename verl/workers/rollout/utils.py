@@ -138,20 +138,41 @@ def get_vision_placeholder_token_ids(processor) -> list[int]:
     return token_ids
 
 
-def update_prometheus_config(config: PrometheusConfig, server_addresses: list[str], rollout_name: str | None = None):
+def update_prometheus_config(
+    config: PrometheusConfig,
+    server_addresses: list[str],
+    rollout_name: str | None = None,
+    labels: list[dict[str, object] | None] | None = None,
+):
     """
     Update Prometheus configuration file with server addresses and reload on first node.
 
     server_addresses: vllm or sglang server addresses
 
     rollout_name: name of the rollout backend (e.g., "vllm", "sglang")
+
+    labels: optional Prometheus labels for each server address
     """
 
     if not server_addresses:
         logger.warning("No server addresses available to update Prometheus config")
         return
 
+    if labels is not None and len(labels) != len(server_addresses):
+        raise ValueError(
+            f"The number of metric labels ({len(labels)}) must match "
+            f"the number of server addresses ({len(server_addresses)})"
+        )
+
     try:
+        if labels is None:
+            rollout_static_configs = [{"targets": server_addresses}]
+        else:
+            rollout_static_configs = [
+                {"targets": [address], "labels": endpoint_labels or {}}
+                for address, endpoint_labels in zip(server_addresses, labels, strict=True)
+            ]
+
         # Get Prometheus config file path from environment or use default
         prometheus_config_json = {
             "global": {"scrape_interval": "10s", "evaluation_interval": "10s"},
@@ -160,7 +181,7 @@ def update_prometheus_config(config: PrometheusConfig, server_addresses: list[st
                     "job_name": "ray",
                     "file_sd_configs": [{"files": ["/tmp/ray/prom_metrics_service_discovery.json"]}],
                 },
-                {"job_name": "rollout", "static_configs": [{"targets": server_addresses}]},
+                {"job_name": "rollout", "static_configs": rollout_static_configs},
             ],
         }
 

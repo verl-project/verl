@@ -79,7 +79,17 @@ reward_model:
       enabled: false
       prefill_replicas: 1
       decode_replicas: 1
+      decode_policy:
+        type: round_robin
       decode_tensor_model_parallel_size: null
+      prefill_gpu_memory_utilization: null
+      decode_gpu_memory_utilization: null
+      prefill_engine_kwargs:
+        max_num_batched_tokens: null
+        max_num_seqs: null
+      decode_engine_kwargs:
+        max_num_batched_tokens: null
+        max_num_seqs: null
       transfer_backend: nixl
       bootstrap_port: null
       ib_device: null
