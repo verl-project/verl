@@ -119,14 +119,15 @@ class DynamicResourceController:
             print("[DynamicResourceController] No hybrid replicas registered, skipping weight sync")
             return
 
-        if not requests_already_aborted:
+        # Inactive replicas were paused before their initial sleep or during
+        # deactivation. Only an active replica can still need an abort here.
+        if self._hybrid_active and not requests_already_aborted:
             await self.hybrid_checkpoint_manager.abort_replicas(
                 reset_prefix_cache=reset_connector
             )
         await self.hybrid_checkpoint_manager.update_weights(
             global_steps=global_steps, reset_connector=reset_connector
         )
-        await self.hybrid_checkpoint_manager.resume_generation_replicas()
 
     async def activate_hybrid_replicas(self, global_steps: int) -> None:
         """Add hybrid replicas to the LB and resume generation (weight sync must be done first)."""
@@ -139,8 +140,10 @@ class DynamicResourceController:
             print("[DynamicResourceController] No hybrid replicas found, skipping activation")
             return
 
-        await self.rollouter.add_replicas.remote(hybrid_resource_ids)
+        # Device memory has already been restored by weight sync. Resume while
+        # the replicas are still outside the load balancer, then expose them.
         await self.hybrid_checkpoint_manager.resume_generation_replicas()
+        await self.rollouter.add_replicas.remote(hybrid_resource_ids)
 
         self._hybrid_active = True
         self.activate_count += 1

@@ -287,11 +287,14 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 f"addr={getattr(replica, '_server_address', '?')})"
             )
 
-        # Step 3: Sleep all hybrid replicas
+        # Step 3: Pause generation before releasing device memory. Sleeping an
+        # unpaused engine leaves its scheduler able to accept requests while
+        # request/KV pools are offloaded to CPU.
         print(
-            f"[FullyAsyncTrainer] Calling sleep_replicas() on "
+            f"[FullyAsyncTrainer] Pausing and sleeping "
             f"{len(self.hybrid_checkpoint_manager.replicas)} replicas..."
         )
+        await self.hybrid_checkpoint_manager.abort_replicas(reset_prefix_cache=False)
         await self.hybrid_checkpoint_manager.sleep_replicas(reset_connector=False)
         print("[FullyAsyncTrainer] Initial sleep complete, GPU memory now owned by training engine")
 
