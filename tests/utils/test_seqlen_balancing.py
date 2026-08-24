@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from verl import DataProto
+from verl.utils import tensordict_utils as tu
 from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device
 from verl.utils.model import create_random_mask
 from verl.utils.seqlen_balancing import (
@@ -45,6 +47,75 @@ def test_seqlen_balancing():
     reverse_idx_map = torch.tensor(reverse_idx_map)
     new_batch = batch[reverse_idx_map]
     torch.testing.assert_close(new_batch, dataproto.batch)
+
+
+def test_rearrange_micro_batches_uses_effective_lengths_when_removing_padding():
+    input_ids = torch.arange(2 * 128).reshape(2, 128)
+    attention_mask = torch.zeros((2, 128), dtype=torch.long)
+    attention_mask[:, -16:] = 1
+    batch = DataProto.from_single_dict({"input_ids": input_ids, "attention_mask": attention_mask}).batch
+    tu.assign_non_tensor_data(batch, "use_remove_padding", True)
+
+    micro_batches, micro_bsz_idx_lst = rearrange_micro_batches(batch, max_token_len=20)
+
+    assert len(micro_batches) == 2
+
+    rearranged_batch = torch.cat(micro_batches)
+    rearranged_indices = [idx for micro_bsz_idx in micro_bsz_idx_lst for idx in micro_bsz_idx]
+    reverse_idx_map = torch.tensor(get_reverse_idx(rearranged_indices))
+    torch.testing.assert_close(rearranged_batch[reverse_idx_map], batch)
+
+
+@pytest.mark.parametrize("use_remove_padding", [False, None])
+def test_rearrange_micro_batches_preserves_padded_guard_without_remove_padding(use_remove_padding):
+    input_ids = torch.arange(128).reshape(1, 128)
+    attention_mask = torch.zeros((1, 128), dtype=torch.long)
+    attention_mask[:, -16:] = 1
+    batch = DataProto.from_single_dict({"input_ids": input_ids, "attention_mask": attention_mask}).batch
+    if use_remove_padding is not None:
+        tu.assign_non_tensor_data(batch, "use_remove_padding", use_remove_padding)
+
+    with pytest.raises(AssertionError, match="maximum padded sequence length"):
+        rearrange_micro_batches(batch, max_token_len=20)
+
+
+def test_rearrange_micro_batches_rejects_effective_sequence_over_cap():
+    input_ids = torch.arange(2 * 128).reshape(2, 128)
+    attention_mask = torch.zeros((2, 128), dtype=torch.long)
+    attention_mask[0, -16:] = 1
+    attention_mask[1, -21:] = 1
+    batch = DataProto.from_single_dict({"input_ids": input_ids, "attention_mask": attention_mask}).batch
+    tu.assign_non_tensor_data(batch, "use_remove_padding", True)
+
+    with pytest.raises(AssertionError, match="maximum effective sequence length"):
+        rearrange_micro_batches(batch, max_token_len=20)
+
+
+def test_rearrange_micro_batches_rejects_nested_effective_sequence_over_cap():
+    input_ids = torch.nested.nested_tensor([torch.arange(4), torch.arange(7)], layout=torch.jagged)
+    attention_mask = torch.nested.nested_tensor(
+        [torch.ones(4, dtype=torch.long), torch.ones(7, dtype=torch.long)], layout=torch.jagged
+    )
+    batch = tu.get_tensordict({"input_ids": input_ids, "attention_mask": attention_mask})
+
+    with pytest.raises(AssertionError, match="maximum effective sequence length"):
+        rearrange_micro_batches(batch, max_token_len=6)
+
+
+@pytest.mark.parametrize("use_remove_padding", [True, False, None])
+def test_rearrange_micro_batches_uses_nested_tensor_offsets(use_remove_padding):
+    input_ids = torch.nested.nested_tensor([torch.arange(4), torch.arange(6)], layout=torch.jagged)
+    attention_mask = torch.nested.nested_tensor(
+        [torch.ones(4, dtype=torch.long), torch.ones(6, dtype=torch.long)], layout=torch.jagged
+    )
+    batch = tu.get_tensordict({"input_ids": input_ids, "attention_mask": attention_mask})
+    if use_remove_padding is not None:
+        tu.assign_non_tensor_data(batch, "use_remove_padding", use_remove_padding)
+
+    micro_batches, micro_bsz_idx_lst = rearrange_micro_batches(batch, max_token_len=6)
+
+    assert len(micro_batches) == 2
+    assert sorted(idx for micro_bsz_idx in micro_bsz_idx_lst for idx in micro_bsz_idx) == [0, 1]
 
 
 def test_dynamic_batch():

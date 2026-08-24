@@ -376,14 +376,14 @@ def rearrange_micro_batches(
     input_ids = batch["input_ids"]
     if input_ids.is_nested:
         seq_len_effective: torch.Tensor = input_ids.offsets().diff()
-        max_seq_len = max(seq_len_effective)
     else:
-        max_seq_len = batch["attention_mask"].shape[-1]
         seq_len_effective: torch.Tensor = batch["attention_mask"].sum(dim=1)
 
-    assert max_token_len >= max_seq_len, (
-        f"max_token_len must be greater than the sequence length. Got {max_token_len=} and {max_seq_len=}"
+    use_effective_seq_len = input_ids.is_nested or tu.get_non_tensor_data(
+        batch, key="use_remove_padding", default=False
     )
+    max_seq_len = seq_len_effective.max().item() if use_effective_seq_len else batch["attention_mask"].shape[-1]
+    seq_len_kind = "effective" if use_effective_seq_len else "padded"
 
     # Validate force_group_size
     batch_size = len(seq_len_effective)
@@ -400,9 +400,14 @@ def rearrange_micro_batches(
         # used to support pp
         num_micro_batches = max(min_num_micro_batch, num_micro_batches)
     if dist.is_initialized() and same_micro_num_in_dp and dp_group is not None:
-        num_micro_batches = torch.tensor([num_micro_batches], device=get_device_name())
-        dist.all_reduce(num_micro_batches, op=dist.ReduceOp.MAX, group=dp_group)
-        num_micro_batches = num_micro_batches.cpu().item()
+        sync_values = torch.tensor([num_micro_batches, max_seq_len], dtype=torch.long, device=get_device_name())
+        dist.all_reduce(sync_values, op=dist.ReduceOp.MAX, group=dp_group)
+        num_micro_batches, max_seq_len = sync_values.cpu().tolist()
+
+    assert max_token_len >= max_seq_len, (
+        f"max_token_len must be greater than or equal to the maximum {seq_len_kind} sequence length. "
+        f"Got {max_token_len=} and {max_seq_len=}"
+    )
     if num_batches_divided_by is not None:
         num_micro_batches = roundup_divisible(num_micro_batches, num_batches_divided_by)
 
