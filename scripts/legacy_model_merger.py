@@ -93,6 +93,8 @@ class ModelMergerConfig:
 
 
 class BaseModelMerger(ABC):
+    _legacy_hf_model_config_subdir = None
+
     def __init__(self, config: ModelMergerConfig):
         self.config = config
         self.hf_model_config_path = config.hf_model_config_path
@@ -103,15 +105,18 @@ class BaseModelMerger(ABC):
             )
             self.hf_model_config_path = config.hf_model_path
 
-        # Auto-detect the huggingface subdirectory.  v2 Megatron layout
-        # nests it under model/huggingface; v1 (FSDP or pre-refactor
-        # Megatron) places it directly under the checkpoint root.
+        # Auto-detect the HuggingFace artifacts saved by each checkpoint layout.
         v2_subdir = os.path.join(self.hf_model_config_path, "model", "huggingface")
         v1_subdir = os.path.join(self.hf_model_config_path, "huggingface")
+        legacy_subdir = None
+        if self._legacy_hf_model_config_subdir and config.hf_model_path is None:
+            legacy_subdir = os.path.join(self.hf_model_config_path, self._legacy_hf_model_config_subdir)
         if os.path.isdir(v2_subdir):
             self.hf_model_config_path = v2_subdir
         elif os.path.isdir(v1_subdir):
             self.hf_model_config_path = v1_subdir
+        elif legacy_subdir and os.path.isdir(legacy_subdir):
+            self.hf_model_config_path = legacy_subdir
 
         self.model_config = AutoConfig.from_pretrained(self.hf_model_config_path)
 
@@ -439,11 +444,9 @@ class FSDPModelMerger(BaseModelMerger):
 
 
 class MegatronModelMerger(BaseModelMerger):
-    def __init__(self, config: ModelMergerConfig):
-        from verl.utils.megatron_utils import \
-            get_hf_config_and_tokenizer_checkpoint_path
+    _legacy_hf_model_config_subdir = "hf_config_and_tokenizer"
 
-        config.hf_model_config_path = get_hf_config_and_tokenizer_checkpoint_path(config.local_dir)
+    def __init__(self, config: ModelMergerConfig):
         super().__init__(config)
 
         self.params_mapping = {
