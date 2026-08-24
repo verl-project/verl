@@ -237,6 +237,8 @@ https://github.com/ArronHZG/verl-community/blob/main/docs/fully_async_policy_mod
 | `rollouter/idle_ratio`                         | Rollouter idle rate                                                                                    |
 | `fully_async/count/stale_samples_processed`    | Total number of old samples used in training                                                           |
 | `fully_async/count/stale_trajectory_processed` | Total number of old trajectories used in training (one sample produces rollout.n trajectories)         |
+| `fully_async/trajectory_staleness/mean`        | Mean per-trajectory, loss-bearing-token-weighted policy-version age in the current training batch      |
+| `fully_async/trajectory_staleness/max`         | Maximum oldest-token policy-version age across trajectories in the current training batch              |
 | `fully_async/partial/total_partial_num`        | Number of partial samples processed by Trainer between two trigger_parameter_sync_step                 |
 | `fully_async/partial/partial_ratio`            | Ratio of partial samples processed by Trainer between two trigger_parameter_sync_step                  |
 | `fully_async/partial/max_partial_span`         | Maximum parameter span of partial samples processed by Trainer between two trigger_parameter_sync_step |

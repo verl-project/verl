@@ -39,6 +39,49 @@ class RolloutSample:
     rollout_status: dict[str, Any]
 
 
+def summarize_trajectory_staleness(
+    trajectory_min_param_versions: Any,
+    current_param_version: int,
+    trajectory_global_step_token_counts: Any | None = None,
+) -> tuple[int, float, int]:
+    """Summarize worst-case policy-version age across accepted trajectories.
+
+    Each trajectory is represented by the oldest policy version used to
+    generate any of its tokens for the stale count and maximum. The mean is
+    the average of each trajectory's loss-bearing-token-weighted policy age
+    when per-version token counts are available.
+    """
+    ages = [current_param_version - int(version) for version in trajectory_min_param_versions]
+    stale_count = sum(age >= 1 for age in ages)
+    max_age = max(ages, default=0)
+
+    trajectory_mean_ages = []
+    if trajectory_global_step_token_counts is not None:
+        token_counts = list(trajectory_global_step_token_counts)
+        if len(token_counts) != len(ages):
+            raise ValueError(
+                "trajectory_global_step_token_counts must have one entry per trajectory, "
+                f"got {len(token_counts)} entries for {len(ages)} trajectories"
+            )
+        for worst_age, counts_by_version in zip(ages, token_counts, strict=True):
+            if not counts_by_version:
+                trajectory_mean_ages.append(float(worst_age))
+                continue
+            total_tokens = sum(int(count) for count in counts_by_version.values())
+            if total_tokens <= 0:
+                trajectory_mean_ages.append(float(worst_age))
+                continue
+            weighted_age = sum(
+                (current_param_version - int(version)) * int(count) for version, count in counts_by_version.items()
+            )
+            trajectory_mean_ages.append(weighted_age / total_tokens)
+    else:
+        trajectory_mean_ages = [float(age) for age in ages]
+
+    mean_age = sum(trajectory_mean_ages) / len(trajectory_mean_ages) if trajectory_mean_ages else 0.0
+    return stale_count, mean_age, max_age
+
+
 def prepare_single_generation_data(batch_dict, config) -> DataProto:
     """
     Similar to the logic of ray_trainer._prepare_generate_batch, but for a single sample.
@@ -158,12 +201,19 @@ def assemble_batch_from_rollout_samples(
         "fully_async/partial/max_partial_span": max(param_version_diff),
     }
     # add meta_info
+    trajectory_min_param_versions = final_batch.non_tensor_batch["min_global_steps"]
     trajectory_param_versions = final_batch.non_tensor_batch["max_global_steps"]
+    # Optional per-trajectory dict of {policy_version: loss-bearing token count},
+    # produced by agent loops that track which policy version generated each
+    # token of a multi-turn/partial rollout. Absent → unweighted staleness.
+    trajectory_global_step_token_counts = final_batch.non_tensor_batch.get("global_step_token_counts")
 
     final_batch.meta_info.update(
         {
             "param_version_diversity": len(set(trajectory_param_versions)),
+            "trajectory_min_param_versions": trajectory_min_param_versions,
             "trajectory_param_versions": trajectory_param_versions,
+            "trajectory_global_step_token_counts": trajectory_global_step_token_counts,
             **processing_time_stats,
             **rollout_status,
             **partial_stats,

@@ -28,6 +28,7 @@ from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.fully_async_policy.detach_utils import (
     MetricsAggregator,
     assemble_batch_from_rollout_samples,
+    summarize_trajectory_staleness,
 )
 from verl.experimental.fully_async_policy.dynamic_schedule import DynamicScheduleContext
 from verl.experimental.fully_async_policy.message_queue import MessageQueueClient
@@ -1036,12 +1037,21 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         """
         if hasattr(batch, "meta_info") and batch.meta_info:
             trajectory_param_versions = batch.meta_info["trajectory_param_versions"]
-            stale_traj_count = sum(1 for v in trajectory_param_versions if self.current_param_version - v >= 1)
+            trajectory_min_param_versions = batch.meta_info.get(
+                "trajectory_min_param_versions", trajectory_param_versions
+            )
+            stale_traj_count, mean_trajectory_staleness, max_trajectory_staleness = summarize_trajectory_staleness(
+                trajectory_min_param_versions,
+                self.current_param_version,
+                batch.meta_info.get("trajectory_global_step_token_counts"),
+            )
             self.stale_trajectory_processed += stale_traj_count
             metrics.update(
                 {
                     "fully_async/count/stale_trajectory_processed": self.stale_trajectory_processed,
                     "fully_async/count/current_param_version": self.current_param_version,
+                    "fully_async/trajectory_staleness/mean": mean_trajectory_staleness,
+                    "fully_async/trajectory_staleness/max": max_trajectory_staleness,
                 }
             )
             for key, value in batch.meta_info.items():
