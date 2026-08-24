@@ -221,11 +221,19 @@ class FusedLinearForPPO(torch.nn.Module):
         input_ids: torch.LongTensor,
         temperature: float = 1.0,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
-        input_ids = input_ids.to(torch.int64)
-        return FusedLinearForPPOFunction.apply(
-            hidden_states,
+        output_shape = input_ids.shape
+        labels = input_ids.flatten().to(torch.int64)
+        hidden_states = hidden_states.flatten(0, -2)
+
+        active_rows = labels.ne(-100).nonzero().squeeze(-1)
+
+        log_probs, entropy = FusedLinearForPPOFunction.apply(
+            hidden_states.index_select(0, active_rows),
             vocab_weights,
-            input_ids,
+            labels.index_select(0, active_rows),
             temperature,
             self.chunk_size,
         )
+        log_probs = log_probs.new_zeros(labels.shape).index_copy(0, active_rows, log_probs)
+        entropy = entropy.new_zeros(labels.shape).index_copy(0, active_rows, entropy)
+        return log_probs.view(output_shape), entropy.view(output_shape)

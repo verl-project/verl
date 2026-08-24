@@ -73,7 +73,7 @@ def _init_dist():
 
 
 def test_fused_kernels_log_probs_match_under_sp():
-    """log_probs from fused-kernel + SP=2 must equal fused-kernel + SP=1.
+    """Dense and sparse fused log_probs under SP=2 must match SP=1.
 
     This is the direct regression test for #6068. The bug was that the
     fused-forward functions re-rolled the SP-sliced `input_ids` locally,
@@ -97,8 +97,8 @@ def test_fused_kernels_log_probs_match_under_sp():
     model = model.to(device=device, dtype=torch.bfloat16)
     _broadcast_params(model)
 
-    # rank-0-authoritative input. total_nnz must be divisible by sp_size.
-    total_nnz = 32
+    # Rank-0-authoritative input. Use an odd length to exercise SP padding.
+    total_nnz = 31
     if torch.distributed.get_rank() == 0:
         input_ids = torch.randint(0, config.vocab_size, (1, total_nnz), device=device)
     else:
@@ -142,27 +142,30 @@ def test_fused_kernels_log_probs_match_under_sp():
         sliced_rolled, _, _ = ulysses_pad_and_slice_inputs(
             input_ids_rmpad_rolled, position_ids_rmpad=None, sp_size=sp_size
         )
-        sp_out = model(
-            input_ids=sliced_input,
-            position_ids=sliced_pos,
-            use_cache=False,
-            return_dict=True,
-            temperature=1.0,
-            shift_labels=sliced_rolled,
-        )
-        # log_probs is (1, total_nnz/sp + pad). Gather across SP ranks → (1, total_nnz).
-        sp_log_probs_local = sp_out.log_probs  # (1, local_len)
-        sp_log_probs = gather_outputs_and_unpad(
-            sp_log_probs_local.squeeze(0),
-            gather_dim=0,
-            unpad_dim=0,
-            padding_size=pad_size,
-        ).unsqueeze(0)  # (1, total_nnz)
+        for active_rows in (None, (1, 3, 5)):
+            shift_labels = sliced_rolled
+            expected = ref_log_probs
+            if active_rows is not None:
+                active_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+                active_mask[:, active_rows] = True
+                active_mask, _, _ = ulysses_pad_and_slice_inputs(active_mask, position_ids_rmpad=None, sp_size=sp_size)
+                shift_labels = shift_labels.masked_fill(~active_mask, -100)
+                expected = torch.zeros_like(ref_log_probs)
+                expected[:, active_rows] = ref_log_probs[:, active_rows]
 
-    # bf16 matmul + chunked fused kernel — keep tolerances loose enough to absorb
-    # numerical noise but strict enough to catch the off-by-one label bug, which
-    # produces O(1) errors in the affected positions.
-    torch.testing.assert_close(sp_log_probs, ref_log_probs, atol=1e-3, rtol=1e-3)
+            sp_out = model(
+                input_ids=sliced_input,
+                position_ids=sliced_pos,
+                use_cache=False,
+                return_dict=True,
+                temperature=1.0,
+                shift_labels=shift_labels,
+            )
+            sp_log_probs = gather_outputs_and_unpad(
+                sp_out.log_probs.squeeze(0), gather_dim=0, unpad_dim=0, padding_size=pad_size
+            ).unsqueeze(0)
+
+            torch.testing.assert_close(sp_log_probs, expected, atol=1e-3, rtol=1e-3)
 
 
 if __name__ == "__main__":
