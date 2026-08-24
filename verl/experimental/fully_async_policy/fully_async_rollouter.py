@@ -25,6 +25,7 @@ import torch
 from omegaconf import DictConfig, open_dict
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager
+from verl.experimental.fully_async_policy.config_validation import validate_rollout_log_prob_config
 from verl.experimental.fully_async_policy.detach_utils import (
     RolloutSample,
     prepare_single_generation_data,
@@ -730,7 +731,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         # Validate asynchronous training configuration
         if not hasattr(self.config, "async_training"):
             raise ValueError("[FullyAsyncRollouter] Missing async_training configuration")
-        assert self.config.actor_rollout_ref.rollout.calculate_log_probs, "must rollout calculate log_probs"
+        validate_rollout_log_prob_config(self.config)
 
     async def init_workers(self):
         """Initialize distributed training workers using Ray backend.
