@@ -334,9 +334,8 @@ class RLInsightLogger:
             return
 
         module = cls._get_rl_insight()
-        if (
-            cls._rl_insight_version() < cls.MINIMUM_RL_INSIGHT_VERSION
-            or not callable(getattr(module, "trace_span", None))
+        if cls._rl_insight_version() < cls.MINIMUM_RL_INSIGHT_VERSION or not callable(
+            getattr(module, "trace_span", None)
         ):
             cls._warn_unsupported_rl_insight("trace_span")
             return
