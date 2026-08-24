@@ -664,6 +664,9 @@ class vLLMHttpServer:
                 extra_fields=extra_fields,
             )
 
+        # Prefix-cache hit count for this request; consumers surface it as
+        # OpenAI usage.prompt_tokens_details.cached_tokens.
+        extra_fields["num_cached_tokens"] = getattr(final_res, "num_cached_tokens", None)
         extract_prompt_logprobs(
             output=final_res,
             num_prompt_logprobs=sampling_params.prompt_logprobs,
