@@ -23,6 +23,7 @@ from contextlib import contextmanager
 from enum import Enum
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import orjson
@@ -228,6 +229,7 @@ class RLInsightLogger:
     _init_done = False
     _rl_insight_module = None
     _registered_metrics: set[tuple[str | None, tuple[str, ...], str | None]] = set()
+    _warned_unsupported_features: set[str] = set()
 
     def __init__(self, project_name, experiment_name, config=None):
         self.init(project_name=project_name, experiment_name=experiment_name, config=config)
@@ -246,15 +248,21 @@ class RLInsightLogger:
         return os.getenv(cls.ENABLE_ENV) == "1"
 
     @classmethod
-    def _require_rl_insight_version(cls, feature: str) -> None:
-        """Raise immediately when an RL-Insight feature needs a newer release."""
+    def _warn_unsupported_rl_insight(cls, feature: str) -> None:
+        """Warn once when an optional RL-Insight feature is unavailable."""
+        if feature in cls._warned_unsupported_features:
+            return
+        cls._warned_unsupported_features.add(feature)
+        logger.warning(
+            "RL-Insight does not support %s (requires >= %s); monitoring is disabled for this feature",
+            feature,
+            cls.MINIMUM_RL_INSIGHT_VERSION,
+        )
+
+    @classmethod
+    def _rl_insight_version(cls) -> Version:
         module = cls._get_rl_insight()
-        installed = Version(getattr(module, "__version__", "0"))
-        if installed < cls.MINIMUM_RL_INSIGHT_VERSION:
-            raise RuntimeError(
-                f"RL-Insight >= {cls.MINIMUM_RL_INSIGHT_VERSION} is required for {feature}; "
-                f"installed version is {installed}."
-            )
+        return Version(getattr(module, "__version__", "0"))
 
     @classmethod
     def init(cls, project_name=None, experiment_name=None, config=None):
@@ -325,7 +333,13 @@ class RLInsightLogger:
         if not cls.enabled():
             return
 
-        cls._require_rl_insight_version("trace_span")
+        module = cls._get_rl_insight()
+        if (
+            cls._rl_insight_version() < cls.MINIMUM_RL_INSIGHT_VERSION
+            or not callable(getattr(module, "trace_span", None))
+        ):
+            cls._warn_unsupported_rl_insight("trace_span")
+            return
         cls._ensure_rl_insight_init()
         cls._get_rl_insight().trace_span(
             name=name,
@@ -353,18 +367,40 @@ class RLInsightLogger:
         session_id: Any = None,
     ):
         """Return the shared agent-loop session trace state."""
-        if cls.enabled():
-            cls._require_rl_insight_version("agent_loop_session")
-
         from verl.utils.rollout_trace import RolloutTraceConfig
 
         rollout_config = RolloutTraceConfig.get_instance()
         project_name = rollout_config.project_name
         if experiment_name is None:
             experiment_name = rollout_config.experiment_name or "default"
+
+        def fallback_session():
+            return SimpleNamespace(
+                identity={
+                    "project": project_name or "default",
+                    "experiment_name": experiment_name,
+                    "sample": str(sample),
+                    "session": str(session),
+                    "traj": str(traj),
+                    "state_lane_id": f"experiment={experiment_name}/sample={sample}/session={session}/traj={traj}",
+                    "uid": uid or "",
+                    "global_steps": global_steps if global_steps is not None else "",
+                    "session_id": session_id or "",
+                },
+                finish=lambda **kwargs: None,
+            )
+
+        if cls.enabled() and cls._rl_insight_version() < cls.MINIMUM_RL_INSIGHT_VERSION:
+            cls._warn_unsupported_rl_insight("agent_loop_session")
+            return fallback_session()
         if cls.enabled() and not cls._init_done:
             cls.init(project_name=project_name, experiment_name=experiment_name)
-        from rl_insight.agent_loop import agent_loop_session
+
+        try:
+            from rl_insight.agent_loop import agent_loop_session
+        except ImportError:
+            cls._warn_unsupported_rl_insight("agent_loop_session")
+            return fallback_session()
 
         return agent_loop_session(
             project=project_name,
