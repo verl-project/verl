@@ -662,6 +662,12 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         If local_trigger_step == 2, 3, ..., restore the parameters of version 1 to calculate the old_log_prob,
         then restore the parameters of the current version.
         """
+        # No snapshot is needed when every actor update is immediately followed
+        # by parameter synchronization. Avoid copying a 100B+ model to CPU on
+        # every step in the common trigger_parameter_sync_step=1 configuration.
+        if self.trigger_parameter_sync_step == 1:
+            return super()._compute_old_log_prob(batch)
+
         if self.local_trigger_step == 1:
             self.actor_rollout_wg.save_model_to_cpu(1)
             old_log_prob, old_log_prob_mfu = super()._compute_old_log_prob(batch)
