@@ -265,6 +265,9 @@ def deserialize_single_tensor(arr: Any) -> torch.Tensor:
     torch_dtype = getattr(torch, dtype)
     assert isinstance(torch_dtype, torch.dtype)
 
+    if len(data) == 0:
+        return torch.empty(shape, dtype=torch_dtype)
+
     buffer = bytearray(data)
     # Create uint8 array
     arr = torch.frombuffer(buffer, dtype=torch.uint8)

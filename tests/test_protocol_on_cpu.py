@@ -1007,6 +1007,23 @@ def test_serialize_deserialize_single_tensor():
     assert original_tensor.dtype == reconstructed_tensor.dtype
 
 
+@pytest.mark.parametrize("shape", [(0,), (0, 3), (2, 0)])
+def test_numpy_serialization_round_trips_zero_element_tensor(monkeypatch, shape):
+    """A DataProto field with no elements must round-trip through the NumPy serializer."""
+    import pickle
+
+    monkeypatch.setenv("VERL_DATAPROTO_SERIALIZATION_METHOD", "numpy")
+    original = torch.empty(shape, dtype=torch.float32)
+    data = DataProto.from_dict(tensors={"empty": original})
+
+    restored = pickle.loads(pickle.dumps(data))
+
+    assert restored.batch.batch_size == data.batch.batch_size
+    assert restored.batch["empty"].shape == original.shape
+    assert restored.batch["empty"].dtype == original.dtype
+    assert torch.equal(restored.batch["empty"], original)
+
+
 def test_serialize_deserialize_tensordict_regular_tensors():
     """Test serialization and deserialization of TensorDict with regular tensors"""
     # Create test data
