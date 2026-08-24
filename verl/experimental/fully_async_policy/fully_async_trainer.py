@@ -704,7 +704,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
     def _uses_node_coordinated_flexkv_reset(self) -> bool:
         rollout = self.config.actor_rollout_ref.rollout
-        return str(rollout.name).lower() == "vllm" and str(rollout.kv_backend).lower() == "flexkv"
+        return str(rollout.name).lower() in {"vllm", "sglang"} and str(rollout.kv_backend).lower() == "flexkv"
 
     async def _reset_flexkv_before_weight_update(self) -> tuple[bool, bool]:
         """Abort active generation and reset each node-local FlexKV server once."""

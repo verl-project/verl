@@ -321,13 +321,18 @@ class ServerAdapter(BaseRollout):
             - runtime envs: https://github.com/THUDM/slime/blob/fb7605cc5fb09af0f9369d37f7192f12bddee577/slime/ray/ppo_actor.py#L39
         """
         await self._init_server_adapter()
+        reset_connector = kwargs.get("reset_connector", True)
 
         # Delta checkpoint-engine wire (standalone replicas): the generator yields
         # per-flush sparse payloads, applied in place through the verl custom
         # weight loader. Hybrid replicas pass full (name, tensor) pairs with no
         # wire_format kwarg and take the bucketed path below.
         if wire_format == "delta_flush":
-            await self._update_weights_delta(weights, global_steps=global_steps)
+            await self._update_weights_delta(
+                weights,
+                global_steps=global_steps,
+                reset_connector=reset_connector,
+            )
             return
 
         # All ranks MUST iterate the weights generator below — DTensor.full_tensor()
@@ -374,14 +379,20 @@ class ServerAdapter(BaseRollout):
                     params_batch=[(_strip_lora_base_layer(name), _to_ipc_device(t)) for name, t in params_batch],
                     device_mesh_key="infer_tp",
                     device_mesh=self.device_mesh,
+                    flush_cache=False,
                 )
 
         if self._engine is not None and self._is_server_tp_leader():
-            await self._engine.flush_cache()
+            await self._engine.flush_cache(reset_connector=reset_connector)
             if global_steps is not None:
                 await self.server_actor.set_global_steps.remote(global_steps)
 
-    async def _update_weights_delta(self, flushes, global_steps: int = None) -> None:
+    async def _update_weights_delta(
+        self,
+        flushes,
+        global_steps: int = None,
+        reset_connector: bool = True,
+    ) -> None:
         """Apply the delta engine's sparse flushes in place.
 
         ``flushes`` is ``CheckpointEngine.receive_weights``'s generator of
@@ -389,17 +400,19 @@ class ServerAdapter(BaseRollout):
         already resident on this worker's GPU. Every rank of the replica consumes
         the generator (the gather below is collective); TP0 posts one
         ``update_weights_from_tensor`` per flush with ``load_format`` pointing at
-        the verl delta loader, and the radix cache is flushed only on the last
-        flush of the stream.
+        the verl delta loader, and the radix cache is flushed once after the stream using the
+        caller-selected connector reset policy.
         """
         assert self._pd_role is None, "delta checkpoint engine does not support PD disaggregation"
         applied = 0
-        for named, is_last in flushes:
-            await self._update_weights_delta_flush(named, flush_cache=is_last)
+        for named, _is_last in flushes:
+            await self._update_weights_delta_flush(named, flush_cache=False)
             applied += 1
             del named
-        if self._engine is not None and self._is_server_tp_leader() and global_steps is not None:
-            await self.server_actor.set_global_steps.remote(global_steps)
+        if self._engine is not None and self._is_server_tp_leader():
+            await self._engine.flush_cache(reset_connector=reset_connector)
+            if global_steps is not None:
+                await self.server_actor.set_global_steps.remote(global_steps)
         logger.info("delta apply v=%s flushes=%d (in-place via sglang loader)", global_steps, applied)
 
     async def _update_weights_delta_flush(self, params_batch, flush_cache: bool) -> None:

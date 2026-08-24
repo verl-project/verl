@@ -538,24 +538,24 @@ class SGLangHttpServer:
             obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"], reset_connector=reset_connector)
             await self.tokenizer_manager.release_memory_occupation(obj, None)
 
-    async def clear_kv_cache(self):
+    async def clear_kv_cache(self, reset_connector: bool = True):
         if self.node_rank == 0:
-            await self.tokenizer_manager.flush_cache()
+            await self.tokenizer_manager.flush_cache(reset_connector=reset_connector)
 
-    async def release_kv_cache(self):
+    async def release_kv_cache(self, reset_connector: bool = True):
         """Release only kv_cache GPU memory, keeping model weights intact."""
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
-        obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
+        obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"], reset_connector=reset_connector)
         await self.tokenizer_manager.release_memory_occupation(obj, None)
 
-    async def resume_kv_cache(self):
+    async def resume_kv_cache(self, reset_connector: bool = True):
         """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
         obj = ResumeMemoryOccupationReqInput(tags=["kv_cache"])
         await self.tokenizer_manager.resume_memory_occupation(obj, None)
-        await self.tokenizer_manager.flush_cache()
+        await self.tokenizer_manager.flush_cache(reset_connector=reset_connector)
 
     async def generate(
         self,
@@ -856,6 +856,7 @@ class SGLangReplica(RolloutReplica):
             )
 
             node_id = worker_node_ids[node_rank * self.gpus_per_replica_node]
+            self.server_node_ids.append(node_id)
             node_gpu_ids = worker_service_gpu_ids[
                 node_rank * self.gpus_per_replica_node : (node_rank + 1) * self.gpus_per_replica_node
             ]
@@ -913,12 +914,19 @@ class SGLangReplica(RolloutReplica):
             else f"{server_address}:{server_port}"
         )
 
-    async def abort_all_requests(self, checkpoint_kv: bool = False, timeout_s: float = 30.0):
+    async def abort_all_requests(
+        self,
+        checkpoint_kv: bool = False,
+        timeout_s: float = 30.0,
+        reset_prefix_cache: bool = True,
+    ):
         """Abort all ongoing generation requests on the primary server.
 
         SGLang control RPCs are only served by the node-rank 0 server for a
         multi-node replica, so avoid broadcasting this call to every server.
         """
+        # SGLang abort itself does not reset the connector; the subsequent
+        # coordinated flush or release_memory_occupation call controls that.
         await self.servers[0].abort_all_requests.remote(checkpoint_kv=checkpoint_kv, timeout_s=timeout_s)
 
     async def resume_generation(self):

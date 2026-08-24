@@ -504,7 +504,7 @@ class HttpServerAdapter(EngineBase):
 
         return self._make_request("classify", payload, only_master=False)
 
-    def flush_cache(self) -> dict[str, Any]:
+    def flush_cache(self, reset_connector: bool = True) -> dict[str, Any]:
         """Flush the cache of the server.
 
         This method repeatedly attempts to flush the server cache until successful.
@@ -525,7 +525,9 @@ class HttpServerAdapter(EngineBase):
         for attempt in range(self.max_attempts * 2):  # Allow more retries for cache flush
             try:
                 response = requests.get(
-                    f"http://{self.server_args.host}:{self.server_args.port}/flush_cache", timeout=self.timeout
+                    f"http://{self.server_args.host}:{self.server_args.port}/flush_cache",
+                    params={"reset_connector": str(reset_connector).lower()},
+                    timeout=self.timeout
                 )
                 if response.status_code == 200:
                     return _read_response(response)
@@ -537,7 +539,11 @@ class HttpServerAdapter(EngineBase):
         logger.error("Failed to flush cache after maximum attempts")
         return {}
 
-    def release_memory_occupation(self, tags: Optional[list[str]] = None) -> dict[str, Any]:
+    def release_memory_occupation(
+        self,
+        tags: Optional[list[str]] = None,
+        reset_connector: bool = True,
+    ) -> dict[str, Any]:
         """Release GPU memory occupation temporarily.
 
         Args:
@@ -547,7 +553,10 @@ class HttpServerAdapter(EngineBase):
         Returns:
             Dict[str, Any]: Server response indicating memory release status
         """
-        return self._make_request("release_memory_occupation", {"tags": tags})
+        return self._make_request(
+            "release_memory_occupation",
+            {"tags": tags, "reset_connector": reset_connector},
+        )
 
     def resume_memory_occupation(self, tags: Optional[list[str]] = None) -> dict[str, Any]:
         """Resume GPU memory occupation.
@@ -728,7 +737,11 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
 
         raise RuntimeError(f"Failed to complete async request to {endpoint} after {self.max_attempts} attempts")
 
-    async def release_memory_occupation(self, tags: Optional[list[str]] = None) -> dict[str, Any]:
+    async def release_memory_occupation(
+        self,
+        tags: Optional[list[str]] = None,
+        reset_connector: bool = True,
+    ) -> dict[str, Any]:
         """Release GPU memory occupation temporarily (async version).
 
         Args:
@@ -738,7 +751,10 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
         Returns:
             Dict[str, Any]: Server response indicating memory release status
         """
-        return await self._make_async_request("release_memory_occupation", {"tags": tags})
+        return await self._make_async_request(
+            "release_memory_occupation",
+            {"tags": tags, "reset_connector": reset_connector},
+        )
 
     async def resume_memory_occupation(self, tags: Optional[list[str]] = None) -> dict[str, Any]:
         """Resume GPU memory occupation (async version).
@@ -812,7 +828,7 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
     async def available_models(self):
         return await self._make_async_request(endpoint="v1/models", method="GET")
 
-    async def flush_cache(self) -> dict[str, Any]:
+    async def flush_cache(self, reset_connector: bool = True) -> dict[str, Any]:
         """Flush the cache of the server asynchronously.
 
         Similar to the sync version, this method retries until the cache
@@ -834,7 +850,7 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
             try:
                 async with self._get_session() as session:
                     url = f"http://{self.server_args.host}:{self.server_args.port}/flush_cache"
-                    async with session.get(url) as response:
+                    async with session.get(url, params={"reset_connector": str(reset_connector).lower()}) as response:
                         if response.status == 200:
                             return await _read_async_response(response)
             except Exception as e:
