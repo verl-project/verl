@@ -39,6 +39,7 @@ def test_tinker_forward_backward_requests_model_output():
     worker = SimpleNamespace(
         loss_fn=lambda: None,
         engine=engine,
+        collect_disk_offload_metrics=lambda: {},
         engine_config=SimpleNamespace(
             forward_only=False,
             use_dynamic_bsz=False,
