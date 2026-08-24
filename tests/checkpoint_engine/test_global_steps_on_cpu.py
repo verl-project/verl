@@ -20,11 +20,21 @@ from verl.workers.engine_workers import ActorRolloutRefWorker
 
 
 class _FakeTrainerEngine:
+    is_param_offload_enabled = False
+
     def __init__(self):
         self.weights = [("w", object())]
 
     def get_per_tensor_param(self):
         return iter(self.weights), None
+
+
+class _FakeActor:
+    def __init__(self):
+        self.engine = _FakeTrainerEngine()
+
+    def collect_disk_offload_metrics(self):
+        return {}
 
 
 class _FakeCheckpointEngine:
@@ -64,7 +74,7 @@ def test_actor_worker_passes_global_steps_to_checkpoint_engine_send():
             checkpoint_engine=SimpleNamespace(backend="modelexpress"),
         ),
     )
-    worker.actor = SimpleNamespace(engine=_FakeTrainerEngine())
+    worker.actor = _FakeActor()
     worker.checkpoint_engine = checkpoint_engine
 
     asyncio.run(
