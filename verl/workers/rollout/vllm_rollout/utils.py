@@ -20,6 +20,7 @@ import os
 import platform
 import signal
 import threading
+import time
 from collections.abc import Mapping
 from types import MethodType
 from typing import Any, Literal, Optional, get_args
@@ -27,7 +28,7 @@ from typing import Any, Literal, Optional, get_args
 import torch
 from vllm.outputs import RequestOutput
 
-from verl.utils.device import get_device_name, is_npu_available
+from verl.utils.device import get_device_name, get_torch_device, is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack, resolve_weight_name
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.utils.vllm.vllm_quant_utils import apply_vllm_quant_patches, is_fp8_model, load_quanted_weights
@@ -235,6 +236,8 @@ class vLLMColocateWorkerExtension:
         """Update the weights of the rollout model."""
         from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
 
+        t_start = time.time()
+
         if self.device is None:
             # vLLM workers may leave self.device unset on non-CUDA platforms (e.g. NPU);
             # fall back to the worker's local rank on the current accelerator.
@@ -280,6 +283,8 @@ class vLLMColocateWorkerExtension:
                 patch_vllm_moe_model_weight_loader(model)
 
         # =========================== step 2: receive weights and update ===========================
+        get_torch_device().synchronize()
+        t_prepared = time.time()
         receiver = BucketedWeightReceiver(
             zmq_handle=self._get_zmq_handle(),
             device=self.device,
@@ -310,6 +315,8 @@ class vLLMColocateWorkerExtension:
             )
 
         receiver.receive_weights(on_bucket_received=on_bucket_received)
+        get_torch_device().synchronize()
+        t_received = time.time()
 
         # =========================== step 3: process weights after loading ===========================
         if self._is_qat_model:
@@ -337,6 +344,17 @@ class vLLMColocateWorkerExtension:
 
             for model, model_config in self._iter_all_models_with_config():
                 process_weights_after_loading(model, model_config, self.device)
+
+        get_torch_device().synchronize()
+        t_done = time.time()
+        if self.local_rank == 0:
+            logger.warning(
+                "update_weights_from_ipc timing: prepare=%.2fs receive=%.2fs finalize=%.2fs total=%.2fs",
+                t_prepared - t_start,
+                t_received - t_prepared,
+                t_done - t_received,
+                t_done - t_start,
+            )
 
     def _apply_buffer_updates_all_models(self, buffer_updates, main_named_buffers):
         """Apply buffer updates to the main model and any synced MTP drafter.
