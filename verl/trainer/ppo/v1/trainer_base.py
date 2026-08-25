@@ -1555,9 +1555,11 @@ class PPOTrainer(ABC):
             return batch
 
         # 1. compute log probs
+        actor_config = self.config.actor_rollout_ref.actor
+        calculate_entropy = actor_config.calculate_entropy or actor_config.entropy_coeff != 0.0
         batch.extra_info.update(
             {
-                "calculate_entropy": True,
+                "calculate_entropy": calculate_entropy,
                 "compute_loss": False,
                 "temperature": self.config.actor_rollout_ref.rollout.temperature,
             }
@@ -1565,14 +1567,19 @@ class PPOTrainer(ABC):
         output: KVBatchMeta = self.actor_rollout_wg.compute_log_prob(batch)
         assert len(output) == len(batch)
 
-        fields = ["entropy", "log_probs", "response_mask"]
+        fields = ["log_probs", "response_mask"]
+        if calculate_entropy:
+            fields.append("entropy")
         if self.config.actor_rollout_ref.rollout.calculate_log_probs:
             fields.extend(["responses", "rollout_log_probs"])
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
 
         # 2. write old_log_probs and entropy back to TransferQueue
         data["old_log_probs"] = response_from_nested(data.pop("log_probs"), data["response_mask"])
-        data["entropy"] = response_from_nested(data.pop("entropy"), data["response_mask"])
+        if calculate_entropy:
+            data["entropy"] = response_from_nested(data.pop("entropy"), data["response_mask"])
+        else:
+            data["entropy"] = torch.zeros_like(data["old_log_probs"])
         batch = tq.kv_batch_put(
             keys=batch.keys, partition_id=batch.partition_id, fields=data.select("old_log_probs", "entropy")
         )
@@ -1580,7 +1587,6 @@ class PPOTrainer(ABC):
         data = DataProto(batch=data.to_padded_tensor())
 
         # 3. calculate actor entroy metrics
-        actor_config = self.config.actor_rollout_ref.actor
         entropy_agg = agg_loss(
             loss_mat=data.batch["entropy"],
             loss_mask=data.batch["response_mask"],

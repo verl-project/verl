@@ -1294,24 +1294,26 @@ class RayPPOTrainer:
         # step 2: convert from padding to nopadding
         batch_td = left_right_2_no_padding(batch_td)
         # step 3: add meta info
+        actor_config = self.config.actor_rollout_ref.actor
+        calculate_entropy = actor_config.calculate_entropy or actor_config.entropy_coeff != 0.0
         calculate_sum_pi_squared = self.config.actor_rollout_ref.actor.get("calculate_sum_pi_squared", False)
         tu.assign_non_tensor(
             batch_td,
-            calculate_entropy=True,
+            calculate_entropy=calculate_entropy,
             calculate_sum_pi_squared=calculate_sum_pi_squared,
             compute_loss=False,
         )
         output = self.actor_rollout_wg.compute_log_prob(batch_td)
         # gather output
-        entropy = tu.get(output, "entropy")
+        entropy = tu.get(output, "entropy") if calculate_entropy else None
         log_probs = tu.get(output, "log_probs")
         routed_experts = tu.get(output, "routed_experts")
         sum_pi_squared = tu.get(output, "sum_pi_squared") if calculate_sum_pi_squared else None
 
         old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
         # step 4. No padding to padding
-        entropy = no_padding_2_padding(entropy, batch_td)
         log_probs = no_padding_2_padding(log_probs, batch_td)
+        entropy = no_padding_2_padding(entropy, batch_td) if entropy is not None else torch.zeros_like(log_probs)
         if sum_pi_squared is not None:
             sum_pi_squared = no_padding_2_padding(sum_pi_squared, batch_td)
         # step 5: rebuild a tensordict and convert to dataproto
