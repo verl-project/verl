@@ -182,7 +182,7 @@ class MultiTurnSFTDataset(Dataset):
         )
         self._generation_prompts: dict[Optional[bool], list[int]] = {None: self.generation_prompt}
         self._following_user_context_ids: dict[Optional[bool], torch.Tensor] = {}
-        self._following_user_assistant_header_ids: dict[tuple[Optional[bool], bool], torch.Tensor] = {}
+        self._following_user_assistant_headers: dict[tuple[Optional[bool], bool], tuple[int, torch.Tensor]] = {}
 
     def __len__(self):
         return len(self.messages)
@@ -239,14 +239,13 @@ class MultiTurnSFTDataset(Dataset):
                 raise ValueError("An assistant message cannot share an SFT rendering group")
             loss_mask = torch.ones_like(attention_mask)
             if use_following_user_context:
-                assistant_prefix = self._assistant_header_ids_with_following_user(
+                assistant_prefix_length, validation_prefix = self._assistant_header_with_following_user(
                     tools=tools,
                     enable_thinking=enable_thinking,
                     remove_system_prompt=index != 0,
                 )
-                assistant_prefix_length = len(assistant_prefix)
                 if len(input_ids) < assistant_prefix_length or not torch.equal(
-                    input_ids[:assistant_prefix_length], assistant_prefix
+                    input_ids[: len(validation_prefix)], validation_prefix
                 ):
                     raise AssertionError("Rendered assistant message does not start with the inferred header")
             else:
@@ -310,26 +309,30 @@ class MultiTurnSFTDataset(Dataset):
             length += 1
         return length
 
-    def _assistant_header_ids_with_following_user(
+    def _assistant_header_with_following_user(
         self,
         tools: Optional[list[dict[str, Any]]],
         enable_thinking: Optional[bool],
         remove_system_prompt: bool,
-    ) -> torch.Tensor:
-        """Infer the template-produced assistant header without using real content as a boundary signal."""
+    ) -> tuple[int, torch.Tensor]:
+        """Infer a content-independent assistant mask boundary and a stable validation prefix."""
         cache_key = (enable_thinking, remove_system_prompt)
-        if tools is None and cache_key in self._following_user_assistant_header_ids:
-            return self._following_user_assistant_header_ids[cache_key]
+        if tools is None and cache_key in self._following_user_assistant_headers:
+            return self._following_user_assistant_headers[cache_key]
 
-        # Empty and non-empty bodies diverge exactly at the content boundary. Their
-        # shared prefix therefore cannot consume real content that happens to start
-        # like a generation prompt, such as a literal ``<think>`` token. Incomplete
-        # serialized template prefixes have lost their provenance and must be
-        # normalized upstream rather than inferred from their token values here.
+        effective_enable_thinking = (
+            enable_thinking if enable_thinking is not None else self.apply_chat_template_kwargs.get("enable_thinking")
+        )
+        # Vary both reasoning and answer text so their common prefix cannot consume
+        # model output whether this template preserves or drops historical thinking.
+        # Real response content never participates in the boundary inference.
+        reasoning_probes = ("", "") if effective_enable_thinking is False else ("a", "b")
         probe_ids = []
-        for text in ("", "x"):
+        for reasoning_text, content_text in zip(reasoning_probes, ("c", "d"), strict=True):
+            message = self._text_message("assistant", content_text)
+            message["reasoning_content"] = reasoning_text
             probe_inputs = self._render_message_group(
-                messages=[self._text_message("assistant", text)],
+                messages=[message],
                 tools=tools,
                 enable_thinking=enable_thinking,
                 use_following_user_context=True,
@@ -341,12 +344,36 @@ class MultiTurnSFTDataset(Dataset):
 
         header_length = self._common_prefix_length(probe_ids[0], probe_ids[1])
         if header_length == min(len(ids) for ids in probe_ids):
-            raise AssertionError("Assistant header probes did not produce distinct message bodies")
+            raise AssertionError("Assistant header probes did not produce distinct responses")
 
-        header_ids = probe_ids[0][:header_length]
+        # Empty preserved reasoning can merge the header's final newline with the
+        # response's leading newline into one token. Use it only to derive a stable
+        # validation prefix; the non-empty probes above retain the correct number of
+        # prompt tokens to mask for both thinking modes.
+        empty_message = self._text_message("assistant", "")
+        empty_message["reasoning_content"] = ""
+        empty_inputs = self._render_message_group(
+            messages=[empty_message],
+            tools=tools,
+            enable_thinking=enable_thinking,
+            use_following_user_context=True,
+        )
+        empty_ids = empty_inputs["input_ids"][0]
+        if remove_system_prompt:
+            empty_ids = empty_ids[len(self.system_prompt) :]
+
+        validation_length = min(
+            header_length,
+            self._common_prefix_length(probe_ids[0], empty_ids),
+            self._common_prefix_length(probe_ids[1], empty_ids),
+        )
+        if validation_length == 0:
+            raise AssertionError("Assistant header probes did not produce a stable prefix")
+
+        header = (header_length, probe_ids[0][:validation_length])
         if tools is None:
-            self._following_user_assistant_header_ids[cache_key] = header_ids
-        return header_ids
+            self._following_user_assistant_headers[cache_key] = header
+        return header
 
     def _render_message_group(
         self,

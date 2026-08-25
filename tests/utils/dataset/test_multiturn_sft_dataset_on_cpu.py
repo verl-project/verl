@@ -149,6 +149,123 @@ def test_multiturn_sft_qwen35_following_user_context(model_path: str, tmp_path: 
     assert "I need to output" not in tokenizer.decode(thinking_literal_item["input_ids"])
 
 
+@pytest.mark.parametrize("model_path", [f"{custom_model_prefix}/Qwen/Qwen3.5-0.8B"])
+def test_multiturn_sft_qwen36_preserve_thinking(model_path: str, tmp_path: Path):
+    tokenizer = hf_tokenizer(model_path)
+    qwen35_condition = "{%- if loop.index0 > ns.last_query_index %}"
+    qwen36_condition = (
+        "{%- if (preserve_thinking is defined and preserve_thinking is true) or (loop.index0 > ns.last_query_index) %}"
+    )
+    assert tokenizer.chat_template.count(qwen35_condition) == 1
+    # Qwen3.6 uses the same relevant assistant rendering as Qwen3.5 plus
+    # this preserve_thinking branch, so exercise it without another model fixture.
+    tokenizer.chat_template = tokenizer.chat_template.replace(qwen35_condition, qwen36_condition)
+
+    conversations = [
+        [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "<think>reason A</think>answer A<think>"},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "<think>reason B</think>answer B"},
+        ],
+        [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "<think></think>answer A"},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "answer B"},
+        ],
+        [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "<think></think>answer A<think>"},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "answer B"},
+        ],
+        [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "reasoning_content": "reason A", "content": "answer A"},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "reasoning_content": "reason B", "content": "answer B"},
+        ],
+    ]
+    enable_thinking = [True, True, False, True]
+    test_file = tmp_path / "qwen36_preserve_thinking.parquet"
+    pd.DataFrame({"messages": conversations, "enable_thinking": enable_thinking}).to_parquet(test_file)
+
+    dataset = MultiTurnSFTDataset(
+        parquet_files=str(test_file),
+        tokenizer=tokenizer,
+        config={
+            "max_length": 512,
+            "truncation": "error",
+            "pad_mode": "no_padding",
+            "apply_chat_template_kwargs": {"preserve_thinking": True},
+        },
+    )
+    items = [dataset[index] for index in range(len(conversations))]
+    for conversation, item, item_enable_thinking in zip(conversations, items, enable_thinking, strict=True):
+        expected_ids = tokenizer.apply_chat_template(
+            conversation,
+            add_generation_prompt=False,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+            enable_thinking=item_enable_thinking,
+            preserve_thinking=True,
+        )["input_ids"][0]
+        assert torch.equal(item["input_ids"], expected_ids)
+        supervised_text = tokenizer.decode(item["input_ids"][item["loss_mask"] == 1])
+        assert "answer A" in supervised_text
+        assert "answer B" in supervised_text
+
+    think_token_id = tokenizer.convert_tokens_to_ids("<think>")
+    think_end_token_id = tokenizer.convert_tokens_to_ids("</think>")
+    for item in (items[1], items[3]):
+        assert item["loss_mask"][item["input_ids"] == think_token_id].tolist() == [0, 0]
+        assert item["loss_mask"][item["input_ids"] == think_end_token_id].tolist() == [1, 1]
+    assert items[0]["loss_mask"][items[0]["input_ids"] == think_token_id].tolist() == [0, 1, 0]
+    assert items[0]["loss_mask"][items[0]["input_ids"] == think_end_token_id].tolist() == [1, 1]
+    assert "reason A" in tokenizer.decode(items[0]["input_ids"][items[0]["loss_mask"] == 1])
+    assert "reason A" in tokenizer.decode(items[3]["input_ids"][items[3]["loss_mask"] == 1])
+
+    non_thinking_item = items[2]
+    assert non_thinking_item["loss_mask"][non_thinking_item["input_ids"] == think_token_id].tolist() == [0, 1, 0]
+    assert non_thinking_item["loss_mask"][non_thinking_item["input_ids"] == think_end_token_id].tolist() == [0, 0]
+
+    # Empty model-generated reasoning merges the prompt newline with the response's
+    # leading newline; mask that merged token while keeping </think> supervised.
+    empty_thinking_item = items[1]
+    think_end_positions = torch.nonzero(empty_thinking_item["input_ids"] == think_end_token_id).flatten()
+    assert empty_thinking_item["loss_mask"][think_end_positions - 1].tolist() == [0, 0]
+
+    drop_file = tmp_path / "qwen36_drop_thinking.parquet"
+    pd.DataFrame({"messages": [conversations[0]], "enable_thinking": [True]}).to_parquet(drop_file)
+    drop_dataset = MultiTurnSFTDataset(
+        parquet_files=str(drop_file),
+        tokenizer=tokenizer,
+        config={
+            "max_length": 512,
+            "truncation": "error",
+            "pad_mode": "no_padding",
+            "apply_chat_template_kwargs": {"preserve_thinking": False},
+        },
+    )
+    drop_item = drop_dataset[0]
+    drop_expected_ids = tokenizer.apply_chat_template(
+        conversations[0],
+        add_generation_prompt=False,
+        tokenize=True,
+        return_dict=True,
+        return_tensors="pt",
+        enable_thinking=True,
+        preserve_thinking=False,
+    )["input_ids"][0]
+    assert torch.equal(drop_item["input_ids"], drop_expected_ids)
+    assert "reason A" not in tokenizer.decode(drop_item["input_ids"])
+    assert "answer A" in tokenizer.decode(drop_item["input_ids"][drop_item["loss_mask"] == 1])
+    assert drop_item["loss_mask"][drop_item["input_ids"] == think_token_id].tolist() == [1, 0]
+    assert drop_item["loss_mask"][drop_item["input_ids"] == think_end_token_id].tolist() == [1]
+
+
 @pytest.mark.parametrize(
     "model_path, ignore_input_ids_mismatch",
     [
