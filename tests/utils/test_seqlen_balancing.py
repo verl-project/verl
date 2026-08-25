@@ -133,6 +133,46 @@ def _worker(rank, world_size, init_method, max_token_len, use_same_dp, min_mb):
     dist.destroy_process_group()
 
 
+def _constraint_error_worker(rank, world_size, init_method, scenario):
+    import verl.utils.seqlen_balancing as seqlen_balancing
+
+    dist.init_process_group(backend="gloo", init_method=init_method, world_size=world_size, rank=rank)
+    seqlen_balancing.get_device_name = lambda: "cpu"
+
+    if scenario == "oversized_group":
+        seq_lens = [6, 6, 1, 1] if rank == 0 else [4, 4, 1, 1]
+        force_group_size = 2
+        expected_error = "forced group exceeds max_token_len"
+    else:
+        seq_lens = [1, 1] if rank == 0 else [6, 6, 6]
+        force_group_size = 1
+        expected_error = "same micro-batch count across DP ranks"
+
+    max_seq_len = max(seq_lens)
+    attention_mask = torch.zeros((len(seq_lens), max_seq_len), dtype=torch.long)
+    for i, seq_len in enumerate(seq_lens):
+        attention_mask[i, :seq_len] = 1
+    batch = DataProto.from_single_dict(
+        {"input_ids": torch.zeros_like(attention_mask), "attention_mask": attention_mask}
+    ).batch
+
+    try:
+        seqlen_balancing.rearrange_micro_batches(
+            batch,
+            max_token_len=10,
+            dp_group=dist.group.WORLD,
+            same_micro_num_in_dp=True,
+            force_group_size=force_group_size,
+        )
+    except ValueError as error:
+        assert expected_error in str(error)
+    else:
+        raise AssertionError("Expected a synchronized ValueError")
+
+    dist.barrier()
+    dist.destroy_process_group()
+
+
 def test_dataproto_split_uneven():
     """Test DataProto.split with uneven splits"""
     # Create test data with 10 items
@@ -208,6 +248,19 @@ def test_seqlen_balancing_distributed_params(tmp_path):
         nprocs=world_size,
         join=True,
     )
+
+
+def test_seqlen_balancing_distributed_constraint_errors(tmp_path):
+    world_size = 2
+    for scenario in ("oversized_group", "insufficient_groups"):
+        init_file = tmp_path / f"dist_init_{scenario}"
+        init_file.write_text("")
+        mp.spawn(
+            _constraint_error_worker,
+            args=(world_size, f"file://{init_file}", scenario),
+            nprocs=world_size,
+            join=True,
+        )
 
 
 def test_group_balanced_partitions():

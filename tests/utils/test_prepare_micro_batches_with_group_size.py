@@ -24,6 +24,7 @@ Focuses on verifying that:
 4. Token budget (max_token_len) is respected per micro-batch.
 """
 
+import pytest
 import torch
 from tensordict import TensorDict
 
@@ -102,7 +103,7 @@ def test_force_group_size_2_basic():
     seq_lens = [50, 60, 80, 90, 40, 45, 100, 110]
     force_group_size = 2
     batch_size = len(seq_lens)
-    max_token_len_per_gpu = 200
+    max_token_len_per_gpu = 220
 
     batch = _make_batch(seq_lens, force_group_size, max_token_len_per_gpu)
     micro_batches, batch_idx_list = prepare_micro_batches(batch)
@@ -136,7 +137,7 @@ def test_force_group_size_4_basic():
     ]
     force_group_size = 4
     batch_size = len(seq_lens)
-    max_token_len_per_gpu = 500
+    max_token_len_per_gpu = 850
 
     batch = _make_batch(seq_lens, force_group_size, max_token_len_per_gpu)
     micro_batches, batch_idx_list = prepare_micro_batches(batch)
@@ -151,7 +152,7 @@ def test_force_group_size_reconstruction():
     """Verify that micro-batches can be reconstructed back to the original batch order."""
     seq_lens = [80, 85, 120, 130, 60, 65, 200, 210]
     force_group_size = 2
-    max_token_len_per_gpu = 300
+    max_token_len_per_gpu = 420
 
     batch = _make_batch(seq_lens, force_group_size, max_token_len_per_gpu)
     micro_batches, batch_idx_list = prepare_micro_batches(batch)
@@ -213,7 +214,7 @@ def test_force_group_size_large_group():
     ]
     force_group_size = 3
     batch_size = len(seq_lens)
-    max_token_len_per_gpu = 400
+    max_token_len_per_gpu = 650
 
     batch = _make_batch(seq_lens, force_group_size, max_token_len_per_gpu)
     micro_batches, batch_idx_list = prepare_micro_batches(batch)
@@ -239,3 +240,10 @@ def test_force_group_size_1_unchanged():
     # All samples covered exactly once.
     all_indices = [idx for indices in batch_idx_list for idx in indices]
     assert sorted(all_indices) == list(range(len(seq_lens)))
+
+
+def test_force_group_exceeding_token_limit_raises():
+    batch = _make_batch(seq_lens=[200, 210], force_group_size=2, max_token_len_per_gpu=300)
+
+    with pytest.raises(ValueError, match="forced group exceeds max_token_len"):
+        prepare_micro_batches(batch)
