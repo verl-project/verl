@@ -181,6 +181,7 @@ class MultiTurnSFTDataset(Dataset):
             self.tokenizer, **self.apply_chat_template_kwargs
         )
         self._following_user_context_ids: dict[Optional[bool], torch.Tensor] = {}
+        self._following_user_assistant_header_ids: dict[tuple[Optional[bool], bool], torch.Tensor] = {}
 
     def __len__(self):
         return len(self.messages)
@@ -237,20 +238,32 @@ class MultiTurnSFTDataset(Dataset):
                 raise ValueError("An assistant message cannot share an SFT rendering group")
             loss_mask = torch.ones_like(attention_mask)
             if use_following_user_context:
-                generation_prompt_length = self._common_prefix_length(input_ids, self.generation_prompt)
+                assistant_prefix = self._assistant_header_ids_with_following_user(
+                    tools=tools,
+                    enable_thinking=enable_thinking,
+                    remove_system_prompt=index != 0,
+                )
+                assistant_prefix_length = len(assistant_prefix)
+                if len(input_ids) < assistant_prefix_length or not torch.equal(
+                    input_ids[:assistant_prefix_length], assistant_prefix
+                ):
+                    raise AssertionError("Rendered assistant message does not start with the inferred header")
             else:
-                generation_prompt_length = len(self.generation_prompt)
-            loss_mask[:generation_prompt_length] = 0
+                assistant_prefix_length = len(self.generation_prompt)
+            loss_mask[:assistant_prefix_length] = 0
         else:
             loss_mask = torch.zeros_like(attention_mask)
 
         return input_ids, loss_mask, attention_mask, inputs
 
-    def _empty_user_message(self) -> dict[str, Any]:
-        content: str | list[dict[str, str]] = ""
+    def _text_message(self, role: str, text: str) -> dict[str, Any]:
+        content: str | list[dict[str, str]] = text
         if self.processor is not None:
-            content = [{"type": "text", "text": ""}]
-        return {"role": "user", "content": content}
+            content = [{"type": "text", "text": text}]
+        return {"role": role, "content": content}
+
+    def _empty_user_message(self) -> dict[str, Any]:
+        return self._text_message("user", "")
 
     @staticmethod
     def _is_user_query(message: dict[str, Any]) -> bool:
@@ -281,12 +294,50 @@ class MultiTurnSFTDataset(Dataset):
         return any(cls._is_user_query(message) for message in full_message[start:])
 
     @staticmethod
-    def _common_prefix_length(input_ids: torch.Tensor, prefix_ids: list[int]) -> int:
+    def _common_prefix_length(input_ids: torch.Tensor, prefix_ids: list[int] | torch.Tensor) -> int:
         length = 0
         max_length = min(len(input_ids), len(prefix_ids))
         while length < max_length and input_ids[length] == prefix_ids[length]:
             length += 1
         return length
+
+    def _assistant_header_ids_with_following_user(
+        self,
+        tools: Optional[list[dict[str, Any]]],
+        enable_thinking: Optional[bool],
+        remove_system_prompt: bool,
+    ) -> torch.Tensor:
+        """Infer the template-produced assistant header without using real content as a boundary signal."""
+        cache_key = (enable_thinking, remove_system_prompt)
+        if tools is None and cache_key in self._following_user_assistant_header_ids:
+            return self._following_user_assistant_header_ids[cache_key]
+
+        # Empty and non-empty bodies diverge exactly at the content boundary. Their
+        # shared prefix therefore cannot consume real content that happens to start
+        # like a generation prompt, such as a literal ``<think>`` token. Incomplete
+        # serialized template prefixes have lost their provenance and must be
+        # normalized upstream rather than inferred from their token values here.
+        probe_ids = []
+        for text in ("", "x"):
+            probe_inputs = self._render_message_group(
+                messages=[self._text_message("assistant", text)],
+                tools=tools,
+                enable_thinking=enable_thinking,
+                use_following_user_context=True,
+            )
+            ids = probe_inputs["input_ids"][0]
+            if remove_system_prompt:
+                ids = ids[len(self.system_prompt) :]
+            probe_ids.append(ids)
+
+        header_length = self._common_prefix_length(probe_ids[0], probe_ids[1])
+        if header_length == min(len(ids) for ids in probe_ids):
+            raise AssertionError("Assistant header probes did not produce distinct message bodies")
+
+        header_ids = probe_ids[0][:header_length]
+        if tools is None:
+            self._following_user_assistant_header_ids[cache_key] = header_ids
+        return header_ids
 
     def _render_message_group(
         self,

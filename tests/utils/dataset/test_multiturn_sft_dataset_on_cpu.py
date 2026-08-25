@@ -70,9 +70,22 @@ def test_multiturn_sft_qwen35_following_user_context(model_path: str, tmp_path: 
             {"role": "user", "content": "actual query"},
             {"role": "assistant", "content": "answer"},
         ],
+        [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "<think>I need output the <think> tag</think><think>"},
+            {"role": "user", "content": "Format error: retry."},
+            {"role": "assistant", "content": "done"},
+        ],
+        [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "<think></think><think>"},
+            {"role": "user", "content": "Format error: retry."},
+            {"role": "assistant", "content": "done"},
+        ],
     ]
+    enable_thinking = [True, True, True, False]
     test_file = tmp_path / "qwen35_following_user_context.parquet"
-    pd.DataFrame({"messages": conversations}).to_parquet(test_file)
+    pd.DataFrame({"messages": conversations, "enable_thinking": enable_thinking}).to_parquet(test_file)
 
     tokenizer = hf_tokenizer(model_path)
     dataset = MultiTurnSFTDataset(
@@ -83,13 +96,21 @@ def test_multiturn_sft_qwen35_following_user_context(model_path: str, tmp_path: 
 
     multi_user_item = dataset[0]
     system_then_assistant_item = dataset[1]
-    for conversation, item in zip(conversations, (multi_user_item, system_then_assistant_item), strict=True):
+    thinking_literal_item = dataset[2]
+    non_thinking_literal_item = dataset[3]
+    for conversation, item, item_enable_thinking in zip(
+        conversations,
+        (multi_user_item, system_then_assistant_item, thinking_literal_item, non_thinking_literal_item),
+        enable_thinking,
+        strict=True,
+    ):
         expected_ids = tokenizer.apply_chat_template(
             conversation,
             add_generation_prompt=False,
             tokenize=True,
             return_dict=True,
             return_tensors="pt",
+            enable_thinking=item_enable_thinking,
         )["input_ids"][0]
         assert torch.equal(item["input_ids"], expected_ids)
 
@@ -105,6 +126,15 @@ def test_multiturn_sft_qwen35_following_user_context(model_path: str, tmp_path: 
     )
     assert "premature response" in assistant_text
     assert "answer" in assistant_text
+
+    think_token_id = tokenizer.convert_tokens_to_ids("<think>")
+    for item in (thinking_literal_item, non_thinking_literal_item):
+        think_loss_mask = item["loss_mask"][item["input_ids"] == think_token_id]
+        # The historical assistant's final literal <think> is model output and
+        # supervised; the final assistant's template-generated <think> is not.
+        assert think_loss_mask.tolist() == [1, 0]
+
+    assert "I need output" not in tokenizer.decode(thinking_literal_item["input_ids"])
 
 
 @pytest.mark.parametrize(
