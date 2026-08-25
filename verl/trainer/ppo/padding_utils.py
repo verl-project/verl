@@ -39,6 +39,34 @@ from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
 logger = logging.getLogger(__name__)
 
+# Tokens per side (prompt / response) of the synthetic padding sample.
+#
+# This was 1, i.e. a 2-token sequence, which is below what the THD context-parallel split
+# can handle. ``preprocess_packed_seqs`` pads each row to ``align_size = tp * cp * 2`` and
+# then hands CP rank *r* the slice ``d[half * r : half * (r + 1)]``, where ``half`` is
+# derived from the *padded* length while ``d`` holds only the *valid* tokens. For a 2-token
+# row at tp=cp=2 the row pads to 8, ``half`` is 2, and rank 1 asks for ``d[2:4]`` of a
+# 2-element tensor -- an empty slice, which raises on assignment:
+#
+#     RuntimeError: The expanded size of the tensor (2) must match the existing
+#     size (0) at non-singleton dimension 0.  Target sizes: [2].  Tensor sizes: [0]
+#
+# verl's own copy of that function clamps the slice (#6001), but the vendored copies in
+# mbridge and Megatron-Bridge -- which the megatron engine dispatches to -- do not, so the
+# row still crashes there. Fixes are filed for both (ISEEKYAN/mbridge#157,
+# NVIDIA-NeMo/Megatron-Bridge#5614); making the row alignment-safe here removes the
+# dependency on which bridge version is installed.
+#
+# Measured smallest safe valid length, i.e. the length at which the unclamped split stops
+# raising: 2 at TP1/CP2, 3 at TP2/CP2, 8 at TP2/CP4, 16 at TP4/CP4. 64 tokens per side
+# (128 total) is a multiple of ``tp * cp * 2`` for every ``tp * cp`` up to 64, so the row
+# never needs alignment padding and the slice is always in range regardless of topology.
+#
+# The cost is 128 no-op tokens per padding row against a per-GPU token budget in the tens of
+# thousands. These rows still contribute no gradient (``response_mask`` is all zero) and are
+# still excluded from metrics (``is_padding``), so nothing else about them changes.
+_PADDING_TOKENS_PER_SIDE = 64
+
 
 def build_padding_position_ids(source_position_ids: Any, attention_mask: torch.Tensor) -> torch.Tensor:
     """Build padding position ids with the same rank/prefix shape as the source sample."""
@@ -72,7 +100,10 @@ def construct_minimal_padding_template(
     source_tag: dict,
     eos_token_id: int,
 ) -> tuple[dict, dict]:
-    """Construct a minimal text-only padding template of one prompt token and one response token.
+    """Construct a minimal text-only padding template.
+
+    The sequence is ``_PADDING_TOKENS_PER_SIDE`` prompt tokens plus the same number of
+    response tokens; see that constant for why it is not simply one of each.
 
     Args:
         source_td: A single sample dict retrieved from TransferQueue.
@@ -92,7 +123,7 @@ def construct_minimal_padding_template(
     template_tag = copy.deepcopy(source_tag)
 
     # Build minimal sequence
-    prompts = torch.full((1,), eos_token_id, dtype=torch.int64)
+    prompts = torch.full((_PADDING_TOKENS_PER_SIDE,), eos_token_id, dtype=torch.int64)
     input_ids = prompts.repeat(2)
     attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
     response_mask = torch.zeros_like(prompts)
@@ -120,7 +151,12 @@ def construct_minimal_padding_template(
         template_sample.pop("routed_experts", None)
 
     # Padding flag is deployed to protect metrics calculation (e.g. response length, score, reward).
-    template_tag.update(is_padding=True, prompt_len=1, response_len=1, seq_len=2)
+    template_tag.update(
+        is_padding=True,
+        prompt_len=_PADDING_TOKENS_PER_SIDE,
+        response_len=_PADDING_TOKENS_PER_SIDE,
+        seq_len=2 * _PADDING_TOKENS_PER_SIDE,
+    )
     return template_sample, template_tag
 
 
@@ -132,7 +168,7 @@ def upsample_batch_to_divisible_size(
     """Append synthetic no-op samples so the batch size becomes divisible by *batch_multiple*.
 
     The synthetic samples reuse the first real sample as a metadata template,
-    but manually construct a minimal ``prompt_len=1 / response_len=1`` sequence
+    but manually construct a minimal no-op sequence (see ``_PADDING_TOKENS_PER_SIDE``)
     and zero out reward-related fields so they do not contribute to PPO,
     entropy, or KL losses.  An ``is_padding`` flag is added in the tag for
     downstream metrics filtering.
