@@ -39,13 +39,45 @@ class RolloutSample:
     rollout_status: dict[str, Any]
 
 
-def prepare_single_generation_data(batch_dict, config) -> DataProto:
+def resolve_rollout_priorities(
+    sample_step: int | None,
+    num_rollouts: int,
+) -> np.ndarray:
+    """Derive a unique per-rollout range from the fully async producer step.
+
+    Fully async samples are expanded and queued by a single producer before
+    generation tasks run concurrently. Combining that producer's monotonic
+    sample step with the rollout index makes automatically assigned priorities
+    deterministic and unique within that producer lifecycle.
     """
-    Similar to the logic of ray_trainer._prepare_generate_batch, but for a single sample.
-    Separate the data used for generation from the original data.
+    if num_rollouts <= 0:
+        raise ValueError(f"num_rollouts must be positive, got {num_rollouts}")
+
+    if sample_step is None:
+        raise ValueError("sample_step is required to derive rollout priorities")
+    if sample_step < 0:
+        raise ValueError(f"sample_step must be non-negative, got {sample_step}")
+
+    first_priority = sample_step * num_rollouts
+    last_priority = first_priority + num_rollouts - 1
+    int64_info = np.iinfo(np.int64)
+    if first_priority < int64_info.min or last_priority > int64_info.max:
+        raise OverflowError("rollout priority exceeds int64 range")
+
+    return np.arange(num_rollouts, dtype=np.int64) + np.int64(first_priority)
+
+
+def prepare_single_generation_data(batch_dict, config, *, sample_step: int | None = None) -> DataProto:
+    """Build the generation batch for one fully async dataset sample.
+
+    Args:
+        batch_dict: Collated single-sample input from the fully async dataloader.
+        config: Trainer configuration containing rollout settings.
+        sample_step: Monotonic producer step used to derive per-rollout priorities
+            when the input does not already provide them.
 
     Returns:
-        tuple: (original_batch_dict, gen_data_for_single_sample)
+        DataProto: The sample repeated once per configured rollout.
     """
 
     full_batch = DataProto.from_single_dict(batch_dict)
@@ -66,8 +98,16 @@ def prepare_single_generation_data(batch_dict, config) -> DataProto:
     if not config.actor_rollout_ref.rollout.multi_turn.enable:
         full_batch.non_tensor_batch["agent_name"] = np.array(["single_turn_agent"] * len(full_batch), dtype=object)
 
-    # Add global step count to generated data
+    # Expand one dataset sample into independently scheduled trajectories.
     full_batch = full_batch.repeat(repeat_times=config.actor_rollout_ref.rollout.n, interleave=True)
+
+    # Match AgentLoopManager: inject priorities only when the caller did not
+    # provide them. Explicit scheduling priorities remain caller-owned.
+    if sample_step is not None and "priority" not in full_batch.non_tensor_batch:
+        full_batch.non_tensor_batch["priority"] = resolve_rollout_priorities(
+            sample_step=sample_step,
+            num_rollouts=len(full_batch),
+        )
     return full_batch
 
 
