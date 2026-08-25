@@ -23,6 +23,7 @@ class TestFSDPOptimizerConfigCPU:
         assert config.min_lr_ratio is None
         assert config.lr_scheduler_type == "constant"
         assert config.num_cycles == 0.5
+        assert config.weight_decay_policy == "standard"
 
     @pytest.mark.parametrize("lr_scheduler_type", ["constant", "cosine"])
     def test_valid_lr_scheduler_types(self, lr_scheduler_type):
@@ -41,6 +42,10 @@ class TestFSDPOptimizerConfigCPU:
     def test_invalid_warmup_style_type(self):
         with pytest.raises((ValueError, AssertionError)):
             FSDPOptimizerConfig(warmup_style="invalid_style", lr=0.1)
+
+    def test_invalid_weight_decay_policy(self):
+        with pytest.raises((ValueError, AssertionError)):
+            FSDPOptimizerConfig(weight_decay_policy="invalid", lr=0.1)
 
     @pytest.mark.parametrize("num_cycles", [0.1, 1.0, 2.5])
     def test_num_cycles_configuration(self, num_cycles):

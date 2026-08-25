@@ -13,6 +13,7 @@ actor_rollout_ref:
       lr_warmup_steps_ratio: 0.0
       total_training_steps: -1
       weight_decay: 0.01
+      weight_decay_policy: standard
       lr_warmup_steps: -1
       betas:
       - 0.9
@@ -35,7 +36,7 @@ actor_rollout_ref:
       fsdp_size: -1
       forward_prefetch: false
       model_dtype: fp32
-      use_orig_params: false
+      use_orig_params: true
       seed: 42
       full_determinism: false
       ulysses_sequence_parallel_size: 1
@@ -240,7 +241,7 @@ actor_rollout_ref:
       fsdp_size: -1
       forward_prefetch: false
       model_dtype: fp32
-      use_orig_params: false
+      use_orig_params: true
       seed: 42
       full_determinism: false
       ulysses_sequence_parallel_size: 1
@@ -535,6 +536,7 @@ critic:
     lr_warmup_steps_ratio: 0.0
     total_training_steps: -1
     weight_decay: 0.01
+    weight_decay_policy: standard
     lr_warmup_steps: -1
     betas:
     - 0.9
@@ -557,7 +559,7 @@ critic:
     fsdp_size: -1
     forward_prefetch: false
     model_dtype: fp32
-    use_orig_params: false
+    use_orig_params: true
     seed: 42
     full_determinism: false
     ulysses_sequence_parallel_size: 1

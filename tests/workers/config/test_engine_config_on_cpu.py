@@ -51,6 +51,7 @@ class TestFSDPEngineConfigCPU:
         assert config.param_offload is False
         assert config.optimizer_offload is False
         assert config.fsdp_size == -1
+        assert config.use_orig_params is True
 
     @pytest.mark.parametrize(
         "offload_params",

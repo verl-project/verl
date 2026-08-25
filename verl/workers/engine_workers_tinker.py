@@ -20,6 +20,7 @@ from verl.single_controller.base.decorator import Dispatch, make_nd_compute_data
 from verl.utils import tensordict_utils as tu
 from verl.utils.profiler import DistProfiler
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
+from verl.workers.config.optimizer import WEIGHT_DECAY_SCALE_KEY
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker
 
 
@@ -32,10 +33,11 @@ class OptimStepParams(TypedDict, total=False):
     that own scheduling should pass the resulting optimizer values here.
 
     The current implementation applies each provided key to all optimizer param
-    groups before one explicit optimizer step. For VeOmni MultiOptimizer, the
-    Tinker worker flattens the wrapped optimizers' param groups and applies the
-    same global override. Optimizer-specific or group-specific overrides require a
-    different payload shape.
+    groups before one explicit optimizer step. Weight decay respects the group's
+    ``_verl_weight_decay_scale`` marker so no-decay groups remain exempt. For
+    VeOmni MultiOptimizer, the Tinker worker flattens the wrapped optimizers'
+    param groups and applies the same global override. Optimizer-specific or
+    group-specific overrides require a different payload shape.
     """
 
     lr: float
@@ -104,7 +106,10 @@ def _apply_optim_step_params(optimizer, optim_step_params: OptimStepParams | Non
                 raise TypeError(f"{type(optimizer).__name__} has inconsistent param_group type for {key!r}")
 
     for param_group in param_groups:
-        param_group.update(normalized_params)
+        for key, value in normalized_params.items():
+            if key == "weight_decay":
+                value *= param_group.get(WEIGHT_DECAY_SCALE_KEY, 1.0)
+            param_group[key] = value
 
 
 class TinkerTrainingWorker(TrainingWorker):
