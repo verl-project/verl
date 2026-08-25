@@ -47,6 +47,58 @@ def test_seqlen_balancing():
     torch.testing.assert_close(new_batch, dataproto.batch)
 
 
+def _max_micro_batch_tokens(micro_batches):
+    return max(int(mb["attention_mask"].sum().item()) for mb in micro_batches)
+
+
+def test_micro_batch_respects_max_token_len():
+    # Random batches: every micro-batch must stay within max_token_len unless we are
+    # physically bounded by the number of samples (then num_micro_batches == batch_size).
+    torch.manual_seed(0)
+    for _ in range(20):
+        batch_size = 16
+        input_ids = torch.randint(low=0, high=10, size=(batch_size, 128))
+        attention_mask = create_random_mask(
+            input_ids=input_ids,
+            max_ratio_of_left_padding=0.1,
+            max_ratio_of_valid_token=0.9,
+            min_ratio_of_valid_token=0.5,
+        )
+        data = {"input_ids": input_ids, "attention_mask": attention_mask}
+        dataproto = DataProto.from_single_dict(data)
+        seqlens = attention_mask.sum(dim=1)
+        max_seq_len = int(seqlens.max().item())
+        # pick a cap above the longest single sequence but below the total
+        max_token_len = max(max_seq_len, int(seqlens.sum().item()) // 4)
+        micro_batches, _ = rearrange_micro_batches(dataproto.batch, max_token_len=max_token_len)
+        if len(micro_batches) < batch_size:
+            assert _max_micro_batch_tokens(micro_batches) <= max_token_len
+
+
+def test_micro_batch_physically_bounded():
+    # A few very long samples: the cap cannot be met because num_micro_batches is capped at
+    # batch_size. The function must not raise and must produce one micro-batch per sample.
+    seqlens = [90, 95, 100, 98]
+    max_len = 100
+    input_ids = torch.zeros((len(seqlens), max_len), dtype=torch.long)
+    attention_mask = torch.zeros((len(seqlens), max_len), dtype=torch.long)
+    for i, sl in enumerate(seqlens):
+        attention_mask[i, :sl] = 1
+    data = {"input_ids": input_ids, "attention_mask": attention_mask}
+    dataproto = DataProto.from_single_dict(data)
+    # cap allows a single longest sample but not any pair
+    max_token_len = max(seqlens) + 1
+    micro_batches, idx_lst = rearrange_micro_batches(dataproto.batch, max_token_len=max_token_len)
+    assert len(micro_batches) == len(seqlens)
+    # reconstruction sanity
+    flat = torch.cat(micro_batches, dim=0)
+    idx = []
+    for sub in idx_lst:
+        idx.extend(sub)
+    inv = torch.tensor(get_reverse_idx(idx))
+    torch.testing.assert_close(flat[inv], dataproto.batch)
+
+
 def test_dynamic_batch():
     input_ids = torch.randint(low=0, high=10, size=(20, 100))
 
