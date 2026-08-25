@@ -180,6 +180,7 @@ class MultiTurnSFTDataset(Dataset):
         self.system_prompt, self.generation_prompt = extract_system_prompt_and_generation(
             self.tokenizer, **self.apply_chat_template_kwargs
         )
+        self._generation_prompts: dict[Optional[bool], list[int]] = {None: self.generation_prompt}
         self._following_user_context_ids: dict[Optional[bool], torch.Tensor] = {}
         self._following_user_assistant_header_ids: dict[tuple[Optional[bool], bool], torch.Tensor] = {}
 
@@ -249,7 +250,7 @@ class MultiTurnSFTDataset(Dataset):
                 ):
                     raise AssertionError("Rendered assistant message does not start with the inferred header")
             else:
-                assistant_prefix_length = len(self.generation_prompt)
+                assistant_prefix_length = len(self._generation_prompt_ids(enable_thinking))
             loss_mask[:assistant_prefix_length] = 0
         else:
             loss_mask = torch.zeros_like(attention_mask)
@@ -264,6 +265,14 @@ class MultiTurnSFTDataset(Dataset):
 
     def _empty_user_message(self) -> dict[str, Any]:
         return self._text_message("user", "")
+
+    def _generation_prompt_ids(self, enable_thinking: Optional[bool]) -> list[int]:
+        """Return the generation prompt matching one sample's thinking mode."""
+        if enable_thinking not in self._generation_prompts:
+            apply_chat_template_kwargs = {**self.apply_chat_template_kwargs, "enable_thinking": enable_thinking}
+            _, generation_prompt = extract_system_prompt_and_generation(self.tokenizer, **apply_chat_template_kwargs)
+            self._generation_prompts[enable_thinking] = generation_prompt
+        return self._generation_prompts[enable_thinking]
 
     @staticmethod
     def _is_user_query(message: dict[str, Any]) -> bool:
