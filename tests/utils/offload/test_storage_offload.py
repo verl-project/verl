@@ -20,7 +20,7 @@ from verl.utils.fsdp_utils import (
     offload_fsdp_model_to_disk,
     offload_fsdp_optimizer_to_disk,
 )
-from verl.utils.offload import DiskOffloadStore, read_storage_refs, write_storage_refs
+from verl.utils.offload import DiskOffloadStore, read_storage_refs, release_storage_refs, write_storage_refs
 
 
 def _store(tmp_path):
@@ -53,6 +53,24 @@ def test_aliasing_storage_round_trip_preserves_views(tmp_path):
     assert left.data_ptr() == base.data_ptr()
     assert right.data_ptr() == base.data_ptr() + left.numel() * left.element_size()
     assert (id(base), id(left), id(right)) == identities
+
+
+def test_storage_refs_can_reuse_a_committed_snapshot(tmp_path):
+    store = _store(tmp_path)
+    tensor = torch.arange(300_000, dtype=torch.float32)
+    expected = tensor.clone()
+    refs = write_storage_refs(store, "param", [("weight", tensor)])
+    store.pop_io_stats()
+
+    read_storage_refs(store, "param", refs)
+    release_storage_refs(store, "param", refs)
+
+    stats = store.pop_io_stats()
+    assert set(stats) == {("onload", "param")}
+    assert tensor.untyped_storage().nbytes() == 0
+
+    read_storage_refs(store, "param", refs)
+    torch.testing.assert_close(tensor, expected, rtol=0, atol=0)
 
 
 def test_noncontiguous_view_round_trip_persists_full_storage(tmp_path):

@@ -137,10 +137,32 @@ class BaseEngine:
         self.optimizer_zero_grad()
         outputs = self.forward_backward_batch(data, loss_function, forward_only=False)
         grad_norm = self.optimizer_step()
+        self.mark_parameters_updated()
         if self.is_mp_src_rank_with_outputs():
             assert "grad_norm" not in outputs["metrics"]
             outputs["metrics"]["grad_norm"] = grad_norm
         return outputs
+
+    def mark_parameters_updated(self) -> None:
+        """Advance the local parameter version after any operation that may mutate weights.
+
+        Disk-offload backends use this version to decide whether a previously
+        committed parameter generation still represents the live model. Custom
+        weight-loading integrations must call this method before mutating model
+        parameters.
+        """
+
+        self._parameter_version = getattr(self, "_parameter_version", 0) + 1
+
+    def _record_disk_param_snapshot(self) -> None:
+        """Record that the current parameter version has committed to disk."""
+
+        self._disk_param_snapshot_version = getattr(self, "_parameter_version", 0)
+
+    def _is_disk_param_snapshot_current(self) -> bool:
+        """Whether the committed disk generation matches the live parameters."""
+
+        return getattr(self, "_disk_param_snapshot_version", None) == getattr(self, "_parameter_version", 0)
 
     def infer_batch(self, data: TensorDict, loss_function: Optional[Callable] = None) -> Any:
         """
@@ -278,6 +300,16 @@ class BaseEngine:
         del preserve_grad
         self.to(device="cpu", model=model, optimizer=optimizer, grad=grad)
 
+    def offload_after_read(self, *, model: bool = True) -> None:
+        """Offload state after a read-only operation.
+
+        Backends with reusable disk snapshots override this method to reclaim
+        resident parameter storage without rewriting an unchanged generation.
+        Other targets preserve the regular offload behavior.
+        """
+
+        self.offload(model=model, optimizer=False, grad=False, preserve_grad=True)
+
     def onload(self, *, model: bool = True, optimizer: bool = True, grad: bool = True) -> None:
         """Restore selected offloaded state to the active accelerator."""
 
@@ -370,7 +402,7 @@ class BaseEngineCtx:
             if is_onload:
                 self.engine.onload(model=self.engine.is_param_offload_enabled, optimizer=False, grad=False)
             else:
-                self.engine.offload(model=self.engine.is_param_offload_enabled, optimizer=False, grad=False)
+                self.engine.offload_after_read(model=self.engine.is_param_offload_enabled)
         elif self.mode == "train":
             kwargs = {
                 "model": self.engine.is_param_offload_enabled,

@@ -41,7 +41,6 @@ EP_SIZE=${EP_SIZE:-1}
 MODEL_NAME_ONLY=${MODEL_ID##*/}
 VERL_EXP_NAME=${VERL_EXP_NAME:-${MODEL_NAME_ONLY}-function-reward-minimal-fsdp-size${FSDP_SIZE}}
 
-# Select the storage tier for all state types and roles.
 OFFLOAD_TARGET=${OFFLOAD_TARGET:-cpu}
 DISK_OFFLOAD_PATH=${DISK_OFFLOAD_PATH:-null}
 DISK_OFFLOAD_CHUNK_SIZE_MB=${DISK_OFFLOAD_CHUNK_SIZE_MB:-64}

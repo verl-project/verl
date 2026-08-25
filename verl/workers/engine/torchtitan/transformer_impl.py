@@ -227,8 +227,6 @@ class TorchTitanEngine(BaseEngine):
         if self.engine_config.full_determinism:
             enable_full_determinism(seed=self.engine_config.seed)
 
-        # TorchTitan only supports CPU targets. Disk targets are rejected by
-        # TorchtitanEngineConfig before engine construction.
         self._is_offload_param = self.engine_config.get_offload_target("param") == "cpu"
         self._is_offload_optimizer = self.engine_config.get_offload_target("optimizer") == "cpu"
 

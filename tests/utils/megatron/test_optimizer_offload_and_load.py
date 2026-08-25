@@ -205,6 +205,7 @@ def test_precision_aware_optimizer_disk_offload_and_load(tmp_path):
         )
         offload_megatron_optimizer_to_disk(optimizer, store)
         assert precision_aware_optimizer_is_on_device(optimizer, torch.device("cpu"))
+        assert all(state.numel() == 0 for state in snapshot_optimizer_state(optimizer))
 
         load_megatron_optimizer_from_disk(optimizer, store)
         assert precision_aware_optimizer_is_on_device(optimizer, torch.device("cuda:0"))

@@ -147,6 +147,18 @@ def write_storage_refs(
 
     refs = storage_offload_refs(tensors)
     store.write_tensors(component, ((ref.key, ref.tensor) for ref in refs))
+    release_storage_refs(store, component, refs)
+    return refs
+
+
+def release_storage_refs(
+    store: DiskOffloadStore,
+    component: str,
+    refs: Iterable[StorageOffloadRef],
+) -> None:
+    """Release resident storages while retaining their committed disk generation."""
+
+    refs = list(refs)
     try:
         for ref in refs:
             ref.release()
@@ -155,7 +167,6 @@ def write_storage_refs(
         # failed offload never leaves the live model partially released.
         read_storage_refs(store, component, refs)
         raise
-    return refs
 
 
 def read_storage_refs(store: DiskOffloadStore, component: str, refs: Iterable[StorageOffloadRef]) -> None:

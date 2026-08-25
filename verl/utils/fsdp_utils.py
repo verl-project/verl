@@ -290,8 +290,7 @@ def _prepare_fsdp_model_for_disk(model) -> None:
                 raise RuntimeError("FSDP1 flat parameter did not return to its persistent local shard")
         return
 
-    # FSDP2 refuses reshard from transient forward/backward states.  VeOmni's
-    # CPU helper applies the same normalization before moving its DTensors.
+    # FSDP2 cannot reshard modules left in transient forward/backward states.
     try:
         from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
         from torch.distributed.fsdp._fully_shard._fsdp_state import _get_module_fsdp_state

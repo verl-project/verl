@@ -185,8 +185,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         """
         self.engine.initialize()
         if self.engine.has_disk_offload_store:
-            # Initialization runs before step metrics exist; do not attribute its
-            # first placement write to the next train or inference phase.
+            # Initialization precedes step metric collection.
             self.engine.pop_disk_offload_stats()
 
     def _postprocess_output(self, output, *, global_token_num, delta_time, forward_only, images_seqlens):
@@ -463,8 +462,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         result = self.engine.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
         if self.engine.has_disk_offload_store:
-            # Checkpoint latency is tracked separately; do not attribute its
-            # resident-state transitions to the next training phase.
+            # Checkpoint timing already accounts for these transitions.
             self.engine.pop_disk_offload_stats()
         return result
 
@@ -472,7 +470,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
         result = self.engine.load_checkpoint(local_path, hdfs_path, del_local_after_load)
         if self.engine.has_disk_offload_store:
-            # Loading happens outside step metric collection.
+            # Checkpoint timing already accounts for these transitions.
             self.engine.pop_disk_offload_stats()
         return result
 
@@ -787,8 +785,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             metrics = {}
             try:
                 if effective_mode == "delta_sharded":
-                    # the delta engine owns the sync state machine (seed vs steady,
-                    # snapshot prime), so it drives the training engine itself.
+                    # The delta engine owns seed and snapshot state, so it drives export itself.
                     metrics = (
                         await self.checkpoint_engine.send_weights(self.actor.engine, global_steps=global_steps) or {}
                     )
@@ -799,7 +796,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     )
             finally:
                 if self.actor.engine.is_param_offload_enabled:
-                    self.actor.engine.offload(model=True, optimizer=False, grad=False)
+                    self.actor.engine.offload_after_read()
             disk_metrics = self.actor.collect_disk_offload_metrics()
             metrics.update({f"update_weights/{key}": value for key, value in disk_metrics.items()})
             return metrics
@@ -846,9 +843,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         log_gpu_memory_usage("After update_weights", logger=logger)
 
-        # 3. Return model state to its configured offload target.
         if self.actor.engine.is_param_offload_enabled:
-            self.actor.engine.offload(model=True, optimizer=False, grad=False)
+            self.actor.engine.offload_after_read()
         aggressive_empty_cache(force_sync=True)
 
         # 4. resume kv_cache

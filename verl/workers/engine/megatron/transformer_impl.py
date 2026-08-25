@@ -66,6 +66,7 @@ from verl.utils.megatron.tensor_parallel import (
 from verl.utils.megatron_peft_utils import build_peft_config_for_vllm
 from verl.utils.megatron_utils import (
     check_mtp_config,
+    discard_megatron_param,
     get_megatron_module_device,
     get_megatron_mtp_loss,
     load_megatron_model_from_disk,
@@ -601,6 +602,7 @@ class MegatronEngine(BaseEngine):
         )
 
     def initialize(self):
+        self.mark_parameters_updated()
         self._hf_export_tasks = None
         self._build_tf_config()
         _check_dcp_unsupported_features(self.engine_config, self.model_config, tf_config=self.tf_config)
@@ -837,6 +839,9 @@ class MegatronEngine(BaseEngine):
                 preserve_grad=preserve_grad,
             )
             if disk_param:
+                self._record_disk_param_snapshot()
+        if disk_param or disk_grad:
+            if disk_param:
                 self._component_resident["param"] = False
                 self._frozen_params_resident = False
             if disk_grad:
@@ -849,6 +854,24 @@ class MegatronEngine(BaseEngine):
             else:
                 offload_megatron_optimizer_to_disk(self.optimizer, self._require_disk_store())
             self._component_resident["optimizer"] = False
+
+    def offload_after_read(self, *, model: bool = True) -> None:
+        """Reclaim read-only Megatron parameters without rewriting a current snapshot."""
+
+        reuse_param_snapshot = (
+            model
+            and self._is_offload_param
+            and self._component_resident["param"]
+            and self._offload_targets["param"] == "disk"
+            and self._is_disk_param_snapshot_current()
+        )
+        if not reuse_param_snapshot:
+            self.offload(model=model, optimizer=False, grad=False, preserve_grad=True)
+            return
+
+        discard_megatron_param(self.module)
+        self._component_resident["param"] = False
+        self._frozen_params_resident = False
 
     def onload(
         self,
@@ -976,8 +999,7 @@ class MegatronEngine(BaseEngine):
             global_step: Integer training step number for naming.
             max_ckpt_to_keep: Maximum number of recent checkpoints to retain.
         """
-        # Preserve the previous checkpoint behavior for modules that happen to
-        # be CPU-resident even without an enabled offload policy.
+        # Some checkpoint callers leave modules on CPU without enabling offload.
         if not self._is_offload_param and get_megatron_module_device(self.module) == "cpu":
             load_megatron_model_to_gpu(self.module, load_grad=True)
         with self.resident(model=True, optimizer=self.optimizer is not None):
@@ -1001,6 +1023,7 @@ class MegatronEngine(BaseEngine):
             del_local_after_load: Whether to delete local copy after loading.
         """
         with self.resident(model=True, optimizer=self.optimizer is not None):
+            self.mark_parameters_updated()
             self.checkpoint_mananager.load_checkpoint(
                 local_path=local_path,
                 hdfs_path=hdfs_path,

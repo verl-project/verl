@@ -7,14 +7,12 @@ wrap_policy:
   # Minimum number of parameters to trigger wrapping a layer with FSDP
   min_num_params: 0
 
-# Deprecated CPU-offload booleans. Null means unspecified; explicitly setting
-# true or false remains compatible but emits a deprecation warning.
+# Deprecated compatibility fields; null avoids a warning and defers to offload.
 param_offload: null
 
 optimizer_offload: null
 
-# Per-state offload targets. Parameter offload also moves gradient storage,
-# matching the existing FSDP behavior. Optimizer state is independent.
+# Gradients retain the parameter placement for backward compatibility.
 offload:
   _target_: verl.workers.config.EngineOffloadConfig
   param:

@@ -223,6 +223,7 @@ class VeOmniEngine(FSDPEngine):
         Applies device, dtype, and precision configurations, including mixed precision.
         Sets up checkpoint manager and FLOPs counter.
         """
+        self.mark_parameters_updated()
         self._build_model_optimizer()
 
         if self.enable_routing_replay:
@@ -544,6 +545,7 @@ class VeOmniEngine(FSDPEngine):
         Load VeOmni checkpoint, restoring parameters and optimizer state.
         """
         with self.resident(model=True, optimizer=self.optimizer is not None):
+            self.mark_parameters_updated()
             self.checkpoint_manager.load_checkpoint(
                 local_path=local_path,
                 hdfs_path=hdfs_path,
@@ -576,7 +578,7 @@ class VeOmniEngine(FSDPEngine):
                 yield from gen
             finally:
                 if offload_back:
-                    self.offload(model=True, optimizer=False, grad=False, preserve_grad=True)
+                    self.offload_after_read()
 
         return _with_offload_back(), meta
 
@@ -617,7 +619,7 @@ class VeOmniEngine(FSDPEngine):
                 yield from source
             finally:
                 if disk_offload_back:
-                    self.offload(model=True, optimizer=False, grad=False, preserve_grad=True)
+                    self.offload_after_read()
 
         # TODO: currently only for DeepseekV4, unify all models to export weights by converter.
         converter = get_checkpoint_tensor_converter(self.module)

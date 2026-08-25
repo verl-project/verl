@@ -617,25 +617,25 @@ critic:
     override_optimizer_config: {}
   megatron:
     _target_: verl.workers.config.McoreEngineConfig
-    param_offload: ${oc.select:actor_rollout_ref.actor.megatron.param_offload,null}
-    grad_offload: ${oc.select:actor_rollout_ref.actor.megatron.grad_offload,null}
-    optimizer_offload: ${oc.select:actor_rollout_ref.actor.megatron.optimizer_offload,null}
+    param_offload: null
+    grad_offload: null
+    optimizer_offload: null
     offload:
       _target_: verl.workers.config.EngineOffloadConfig
       param:
         _target_: verl.workers.config.ComponentOffloadConfig
-        target: ${oc.select:actor_rollout_ref.actor.megatron.offload.param.target,null}
+        target: null
       grad:
         _target_: verl.workers.config.ComponentOffloadConfig
-        target: ${oc.select:actor_rollout_ref.actor.megatron.offload.grad.target,null}
+        target: null
       optimizer:
         _target_: verl.workers.config.ComponentOffloadConfig
-        target: ${oc.select:actor_rollout_ref.actor.megatron.offload.optimizer.target,null}
+        target: null
       disk:
         _target_: verl.workers.config.DiskOffloadConfig
-        path: ${oc.select:actor_rollout_ref.actor.megatron.offload.disk.path,null}
-        chunk_size_mb: ${oc.select:actor_rollout_ref.actor.megatron.offload.disk.chunk_size_mb,64}
-        cleanup_on_exit: ${oc.select:actor_rollout_ref.actor.megatron.offload.disk.cleanup_on_exit,True}
+        path: null
+        chunk_size_mb: 64
+        cleanup_on_exit: true
     tensor_model_parallel_size: 1
     expert_model_parallel_size: 1
     expert_tensor_parallel_size: null

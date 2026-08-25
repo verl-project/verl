@@ -22,7 +22,7 @@ import logging
 import os
 import warnings
 from dataclasses import dataclass
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 import torch
 import torch.nn.functional as F
@@ -866,6 +866,28 @@ def _discard_megatron_grad(models) -> None:
     get_torch_device().empty_cache()
 
 
+def _release_megatron_entries(entries: Iterable[tuple[torch.Tensor, str]]) -> None:
+    for tensor, strategy in entries:
+        if strategy == "storage":
+            tensor.storage().resize_(0)
+        else:
+            _empty_tensor_data(tensor)
+
+
+@torch.no_grad()
+def discard_megatron_param(models) -> None:
+    """Release resident parameters while retaining their committed disk generation."""
+
+    entries = list(_model_disk_entries(models, "param"))
+    _release_megatron_entries((tensor, strategy) for _, tensor, strategy in entries)
+    for model_chunk in models:
+        cleared = _clear_te_fp8_weight_workspaces(model_chunk)
+        if cleared:
+            logger.debug("Cleared %d TE FP8 weight workspaces while discarding parameters", cleared)
+    gc.collect()
+    get_torch_device().empty_cache()
+
+
 @torch.no_grad()
 def offload_megatron_model_to_disk(
     models,
@@ -891,12 +913,7 @@ def offload_megatron_model_to_disk(
         store.invalidate("grad")
         _discard_megatron_grad(models)
 
-    # All requested writes have committed before the resident copies are released.
-    for tensor, strategy in releases:
-        if strategy == "storage":
-            tensor.storage().resize_(0)
-        else:
-            _empty_tensor_data(tensor)
+    _release_megatron_entries(releases)
 
     if offload_param:
         for model_chunk in models:
@@ -983,8 +1000,7 @@ def _iter_megatron_optimizer_tensors(optimizers) -> Iterator[tuple[str, torch.Te
             for sub_index, sub_optimizer in enumerate(getattr(inner_optimizer, "sub_optimizers", [inner_optimizer]))
         ]
         if hasattr(inner_optimizer, "sub_optimizers"):
-            # HybridDeviceOptimizer mirrors some state through its own mapping.
-            # Include non-aliased tensors as well; ``seen`` removes true aliases.
+            # HybridDeviceOptimizer exposes additional non-aliased state here.
             state_sources.append(("hybrid", inner_optimizer.state))
         for source_name, state_mapping in state_sources:
             for state_index, state in enumerate(state_mapping.values()):
@@ -1002,9 +1018,7 @@ def _iter_megatron_optimizer_tensors(optimizers) -> Iterator[tuple[str, torch.Te
 def offload_megatron_optimizer_to_disk(optimizers, store: DiskOffloadStore) -> None:
     """Persist Megatron optimizer tensors and release their resident storage."""
 
-    # Include optimizer tensors that are natively placed on CPU (for example
-    # HybridDeviceOptimizer state). A disk target must not retain a large host
-    # replica; the manifest remembers where each tensor should be restored.
+    # Disk targets must not retain HybridDeviceOptimizer's native CPU state.
     entries = list(_iter_megatron_optimizer_tensors(optimizers))
     store.write_tensors("optimizer", entries)
     for _, tensor in entries:
@@ -1030,7 +1044,7 @@ def load_megatron_optimizer_from_disk(optimizers, store: DiskOffloadStore) -> No
         try:
             metadata = store.metadata("optimizer", key)
         except KeyError:
-            # Empty or newly-created state was not part of the committed generation.
+            # Optimizer state can be created after the committed generation.
             continue
         restore_device = "cpu" if metadata.device_type == "cpu" else get_device_id()
         if tensor.numel() == 0 or tensor.device.type != metadata.device_type:

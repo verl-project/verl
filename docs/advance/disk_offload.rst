@@ -1,7 +1,7 @@
 Role-aware disk offload
 =======================
 
-Last updated: 08/23/2026.
+Last updated: 08/25/2026.
 
 Why disk offload?
 -----------------
@@ -27,13 +27,15 @@ expensive, making this constraint more common.
 
 Disk offload adds node-local NVMe as a capacity tier for this case. It avoids
 retaining a full user-space CPU copy of a component by moving state through a
-reusable staging buffer. ``chunk_size_mb`` controls the buffer size per engine
-store; temporary read buffers and operating-system page cache are additional
-and are not bounded by this setting. The trade-off is additional latency at
-phase transitions and additional storage traffic.
+pair of reusable staging buffers. ``chunk_size_mb`` controls the size of each
+buffer. An engine store allocates these buffers lazily when disk I/O first
+occurs and can then retain up to ``2 * chunk_size_mb`` of staging memory.
+Operating-system page cache and fallback read allocations on platforms without
+``preadv`` are additional and are not bounded by this setting. The trade-off is
+additional latency at phase transitions and additional storage traffic.
 
-Configuration
--------------
+Disk offload configuration
+--------------------------
 
 Disk offload is configured per role and for each state type exposed by that
 backend. The following example uses Megatron, which exposes independent
@@ -80,11 +82,16 @@ Each component accepts ``none``, ``cpu``, or ``disk`` when its backend supports
 that target. ``offload.disk.path`` is required when any component selects
 ``disk``.
 
-In the PPO trainer defaults, the reference parameter policy and the critic
-policies follow the corresponding actor settings unless they are explicitly
-overridden. Disk path, chunk size, and cleanup settings follow the actor as
-well. The example specifies the critic targets explicitly to make its effective
-policy clear.
+Megatron and VeOmni reference parameters follow the actor's parameter target
+and disk settings unless explicitly overridden. FSDP references retain their
+pre-existing forward-only CPU offload when ``param.target`` is ``null``;
+``none`` disables that implicit behavior, while ``cpu`` and ``disk`` select an
+explicit target. Critic offload settings are independent of the actor and must
+be configured explicitly.
+
+``null`` is a compatibility sentinel rather than an offload target: it allows
+the legacy boolean or backend default to decide the effective policy. Use
+``none`` to explicitly disable offload.
 
 For backward compatibility, each backend's existing boolean fields remain
 available temporarily. Megatron retains ``param_offload``, ``grad_offload``,
@@ -105,7 +112,7 @@ Disk-target support matrix
      - Disk grad
      - Disk optimizer
      - Result when configured
-   * - Megatron DDP
+   * - Megatron
      - yes
      - yes
      - yes
@@ -157,8 +164,8 @@ FSDP and VeOmni also reject combining disk targets with ``offload_policy`` and
 combinations follow verl's existing configuration style and are checked with
 ``assert``.
 
-Metrics
--------
+Disk offload metrics
+--------------------
 
 verl reports disk metrics only after a successful operation transfers a
 non-zero payload. Disabled targets, already-offloaded state, absent optimizer
@@ -177,17 +184,18 @@ For each component that performs I/O, the worker emits:
 ``param`` may be replaced by ``grad`` or ``optimizer``. PPO trainers add the
 role or phase prefix, for example ``actor/disk_offload_s/param``,
 ``ref/disk_onload_gib_s/param``, or
-``update_weights/disk_offload_s/param``.
+``update_weights/disk_onload_s/param``.
 Checkpoint transitions are excluded from these component metrics because
 checkpoint latency is already reported by the trainer's checkpoint timing.
 
-Metrics describe synchronous store operations, including accelerator/CPU
-copies performed by the store, staging, file I/O, and manifest handling. They
-do not include every surrounding backend action, such as tensor discovery,
-storage release, or allocator-cache cleanup. Across ranks, ``*_s`` is the
-maximum rank-local elapsed time, ``*_gib`` is the sum of transferred bytes, and
-``*_gib_s`` is the summed GiB divided by the maximum elapsed time. This models
-the phase boundary, which completes at the speed of its slowest rank.
+Metrics describe synchronous store API calls, including the internally
+pipelined accelerator/CPU copies, staging, file I/O, and manifest handling.
+They do not include every surrounding backend action, such as tensor
+discovery, storage release, or allocator-cache cleanup. Across ranks, ``*_s``
+is the maximum rank-local elapsed time, ``*_gib`` is the sum of transferred
+bytes, and ``*_gib_s`` is the summed GiB divided by the maximum elapsed time.
+This models the phase boundary, which completes at the speed of its slowest
+rank.
 
 The implementation uses buffered file I/O. A completed write may still reside
 in the operating-system page cache, so ``*_gib_s`` is aggregate effective
@@ -204,6 +212,16 @@ separate ``param`` and ``grad`` metrics when live gradients are actually
 serialized. The standard PPO/GRPO path clears gradients before offload, so it
 normally emits no ``grad`` disk metric.
 
+For disk-target parameters, read-only engine operations reuse a current
+generation. Reference forwards, actor old-log-prob computation, critic value
+inference, and rollout weight export restore parameters as needed, then release
+accelerator storage without rewriting unchanged parameters. Their normal phase
+metrics therefore report parameter onload but no parameter offload. Engines
+track the live parameter version against the committed generation; optimizer
+steps, checkpoint loads, and other weight replacements must mark parameters as
+updated. If the versions differ, the read-only offload path commits a new
+generation before releasing its resident copy.
+
 Disk layout and memory use
 --------------------------
 
@@ -214,15 +232,19 @@ must resolve to local storage on every node. For each component, a store uses
 one reusable flat data file plus a manifest and generation marker; it does not
 create one file per tensor.
 
-Disk I/O is synchronous and chunked. ``chunk_size_mb`` bounds each store's
-reusable CPU staging buffer, so a disk-target component does not retain a full
-user-space host-memory copy. Transient read allocations and operating-system
-page cache remain outside this bound. Accelerator storage is released only
-after the complete disk generation has been written and published for the
-current process; the files are not made crash-durable. ``cleanup_on_exit`` uses
-a Python exit handler and removes only the exact store directory carrying the
-store's ownership marker. Cleanup is best effort: abrupt worker or node
-termination can leave scratch directories behind.
+Disk I/O is chunked and double-buffered. The public store call remains
+synchronous, but internally one pinned CPU buffer can perform file I/O while
+the other transfers the adjacent chunk between host and accelerator on a
+dedicated copy stream. Reads use ``preadv`` where available to fill the staging
+buffer directly. ``chunk_size_mb`` bounds each buffer, so one active store can
+retain up to ``2 * chunk_size_mb`` of staging memory without retaining a full
+user-space copy of the component. Operating-system page cache remains outside
+this bound. Accelerator storage is released only after the complete disk
+generation has been written and published for the current process; the files
+are not made crash-durable. ``cleanup_on_exit`` uses a Python exit handler and
+removes only the exact store directory carrying the store's ownership marker.
+Cleanup is best effort: abrupt worker or node termination can leave scratch
+directories behind.
 
 Provision enough capacity for the rank-local state of every disk-target
 component and engine store on a node. Parameter, gradient, and optimizer files
@@ -252,8 +274,8 @@ disk. Cleared gradients are not restored from disk: Megatron recreates its
 gradient buffers before use, while FSDP and VeOmni allow autograd to recreate
 ``param.grad`` during the next backward pass.
 
-Limitations
------------
+Disk offload limitations
+------------------------
 
 * Disk offload for Megatron-FSDP, MindSpeed/NPU, AutoModel, FSDP Turbo, and
   TorchTitan is TBD. The current implementation rejects disk targets.
@@ -263,8 +285,8 @@ Limitations
 * The path is scratch storage, not a checkpoint.  It is not portable across
   jobs or distributed topologies, and writes are not synchronized to durable
   media before accelerator storage is released.
-* I/O is synchronous.  Async prefetch and double-buffered I/O are future
-  optimizations.
+* Store calls wait for all staged copies and file I/O to complete. Cross-phase
+  asynchronous offload and prefetch are not implemented.
 * Configuration validation uses ``assert`` to match existing verl engine
   configuration style and is disabled when Python runs with ``-O``.
 * Use local NVMe.  Shared filesystems can create severe rank-wide tail latency.

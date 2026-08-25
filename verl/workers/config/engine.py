@@ -145,7 +145,6 @@ class EngineConfig(BaseConfig):
     optimizer_offload: bool = False
     # whether to offload grad
     grad_offload: bool = False
-    # per-state target policy; explicit values supersede legacy booleans
     offload: EngineOffloadConfig = field(default_factory=EngineOffloadConfig)
     # whether the engine is forward only (e.g., ref policy)
     forward_only: bool = False
@@ -227,11 +226,7 @@ class EngineConfig(BaseConfig):
         configured_target = getattr(self.offload, component).target
         if configured_target is not None:
             return configured_target
-        # Legacy engine contexts moved/released grad storage whenever
-        # param_offload was enabled, regardless of grad_offload. Preserve that
-        # behavior only when the parameter target comes from the legacy field.
-        # On backends that expose an independent gradient policy, an explicit
-        # new grad target (including "none") takes precedence.
+        # Legacy param_offload also controlled gradient storage.
         if component == "grad" and self.param_offload and self.offload.param.target is None:
             return "cpu"
         return "cpu" if getattr(self, f"{component}_offload") else "none"
@@ -296,8 +291,6 @@ class McoreEngineConfig(EngineConfig):
 
     # sequence_parallel is not listed as a frozen field for auto-correction purpose
     _mutable_fields = EngineConfig._mutable_fields | {"sequence_parallel"}
-    # ``None`` means the legacy field was not configured. Explicit True and
-    # False are both accepted for compatibility and emit a deprecation warning.
     param_offload: Optional[bool] = None
     grad_offload: Optional[bool] = None
     optimizer_offload: Optional[bool] = None
