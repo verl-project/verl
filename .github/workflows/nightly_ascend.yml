@@ -453,7 +453,7 @@ jobs:
       - name: Running quick_start_qwen3_0_6b_fsdp2_vllm_ascend
         run: |
           ray stop --force
-          TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_vllm_ascend.sh
+          SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_vllm_ascend.sh
 
   # Test quick start vllm megatron
   quick_start_qwen3_0_6b_megatron_vllm_ascend:
@@ -490,7 +490,7 @@ jobs:
       - name: Running quick_start_qwen3_0_6b_megatron_vllm_ascend
         run: |
           ray stop --force
-          TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_vllm_ascend.sh
+          SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_vllm_ascend.sh
 
   # Test quick start sglang megatron
   quick_start_qwen3_0_6b_megatron_sglang_ascend:
@@ -527,7 +527,7 @@ jobs:
       - name: Running quick_start_qwen3_0_6b_megatron_sglang_ascend
         run: |
           ray stop --force
-          TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_sglang_ascend.sh
+          SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_sglang_ascend.sh
 
   # Test quick start sglang fsdp2
   quick_start_qwen3_0_6b_fsdp2_sglang_ascend:
@@ -564,7 +564,7 @@ jobs:
       - name: Running quick_start_qwen3_0_6b_fsdp2_sglang_ascend
         run: |
           ray stop --force
-          TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_sglang_ascend.sh
+          SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_sglang_ascend.sh
   
   # Test grpo qwen3-30b veomni fsdp
   nightlyCI_grpo-qwen3-30b-veomni-fsdp_ascend:
@@ -654,11 +654,11 @@ jobs:
       - name: Prepare GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
-      - name: Running nightlyCI_grpo-qwen3-8b-fsdp2-vllm_ascend
+      - name: Running nightlyCI_gspo-qwen3-8b-fsdp2-vllm_ascend
         run: |
           ray stop --force
           bash tests/special_npu/nightly_ci_ascend/run_gspo_qwen3_8b_fsdp2_npu.sh
-      - name: Running nightlyCI_grpo-qwen3-8b-fsdp2-vllm_ascend checking script
+      - name: Running nightlyCI_gspo-qwen3-8b-fsdp2-vllm_ascend checking script
         run: |
           cd /root/.cache/nightly_log/
           curl --fail --location --retry 3 --output check_npu.py "${ASCEND_RECIPE_BASELINE_URL}/check_npu.py"
