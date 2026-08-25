@@ -47,6 +47,13 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "WARN"))
 
 
+def _should_run_validation(val_dataloader, is_last_step, global_step, test_freq):
+    """Return whether validation should run for the current training step."""
+    if val_dataloader is None:
+        return False
+    return is_last_step or (test_freq > 0 and global_step % test_freq == 0)
+
+
 class SFTTrainer:
     def __init__(
         self,
@@ -410,11 +417,10 @@ class SFTTrainer:
                         tracking.log(data=metrics, step=global_step)
 
                 is_last_step = global_step >= self.total_training_steps
-                is_valid_step = global_step % self.test_freq == 0
                 is_save_step = global_step % self.save_freq == 0
 
                 # early exit or validation step
-                if is_last_step and self.val_dataloader is not None or (self.test_freq > 0 and is_valid_step):
+                if _should_run_validation(self.val_dataloader, is_last_step, global_step, self.test_freq):
                     # Perform validation
                     val_losses = []
                     for val_data in self.val_dataloader:

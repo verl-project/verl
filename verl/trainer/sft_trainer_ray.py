@@ -32,6 +32,7 @@ from torch.utils.data import DistributedSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
+from verl.trainer.sft_trainer import _should_run_validation
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint import CheckpointHandler, OrchestrationMode
 from verl.utils.dataset.dataset_utils import SFTTensorCollator
@@ -350,11 +351,10 @@ class SFTTrainer:
                 tracking.log(data=metrics, step=global_step)
 
                 is_last_step = global_step >= self.total_training_steps
-                is_valid_step = global_step % self.test_freq == 0
                 is_save_step = global_step % self.save_freq == 0
 
                 # early exit or validation step
-                if is_last_step and self.val_dataloader is not None or (self.test_freq > 0 and is_valid_step):
+                if _should_run_validation(self.val_dataloader, is_last_step, global_step, self.test_freq):
                     # Perform validation
                     val_losses = []
                     for val_data in self.val_dataloader:
