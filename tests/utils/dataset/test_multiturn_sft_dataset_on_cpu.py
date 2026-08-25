@@ -70,6 +70,12 @@ def test_multiturn_sft_qwen35_following_user_context(model_path: str, tmp_path: 
             {"role": "user", "content": "actual query"},
             {"role": "assistant", "content": "answer"},
         ],
+        [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "<think>unclosed literal body"},
+            {"role": "user", "content": "Format error: retry."},
+            {"role": "assistant", "content": "done"},
+        ],
     ]
     test_file = tmp_path / "qwen35_following_user_context.parquet"
     pd.DataFrame({"messages": conversations}).to_parquet(test_file)
@@ -83,7 +89,10 @@ def test_multiturn_sft_qwen35_following_user_context(model_path: str, tmp_path: 
 
     multi_user_item = dataset[0]
     system_then_assistant_item = dataset[1]
-    for conversation, item in zip(conversations, (multi_user_item, system_then_assistant_item), strict=True):
+    literal_think_item = dataset[2]
+    for conversation, item in zip(
+        conversations, (multi_user_item, system_then_assistant_item, literal_think_item), strict=True
+    ):
         expected_ids = tokenizer.apply_chat_template(
             conversation,
             add_generation_prompt=False,
@@ -105,6 +114,9 @@ def test_multiturn_sft_qwen35_following_user_context(model_path: str, tmp_path: 
     )
     assert "premature response" in assistant_text
     assert "answer" in assistant_text
+
+    assistant_text = tokenizer.decode(literal_think_item["input_ids"][literal_think_item["loss_mask"] == 1])
+    assert "<think>unclosed literal body" in assistant_text
 
 
 @pytest.mark.parametrize(
