@@ -72,7 +72,7 @@ def test_multiturn_sft_qwen35_following_user_context(model_path: str, tmp_path: 
         ],
         [
             {"role": "user", "content": "q"},
-            {"role": "assistant", "content": "<think>I need output the <think> tag</think><think>"},
+            {"role": "assistant", "content": "<think>I need to output the tag</think><think>"},
             {"role": "user", "content": "Format error: retry."},
             {"role": "assistant", "content": "done"},
         ],
@@ -134,7 +134,19 @@ def test_multiturn_sft_qwen35_following_user_context(model_path: str, tmp_path: 
         # supervised; the final assistant's template-generated <think> is not.
         assert think_loss_mask.tolist() == [1, 0]
 
-    assert "I need output" not in tokenizer.decode(thinking_literal_item["input_ids"])
+    think_end_token_id = tokenizer.convert_tokens_to_ids("</think>")
+    thinking_end_loss_mask = thinking_literal_item["loss_mask"][
+        thinking_literal_item["input_ids"] == think_end_token_id
+    ]
+    non_thinking_end_loss_mask = non_thinking_literal_item["loss_mask"][
+        non_thinking_literal_item["input_ids"] == think_end_token_id
+    ]
+    # Thinking mode only supplies the opening tag, so the model-generated closing
+    # tag is supervised. Non-thinking mode supplies the complete empty think block.
+    assert thinking_end_loss_mask.tolist() == [1]
+    assert non_thinking_end_loss_mask.tolist() == [0]
+
+    assert "I need to output" not in tokenizer.decode(thinking_literal_item["input_ids"])
 
 
 @pytest.mark.parametrize(
