@@ -128,7 +128,6 @@ python3 -m recipe.dapo.main_dapo \
     +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True \
     actor_rollout_ref.actor.megatron.param_offload=True \
     actor_rollout_ref.actor.megatron.optimizer_offload=True \
-    actor_rollout_ref.actor.megatron.grad_offload=True \
     actor_rollout_ref.ref.megatron.param_offload=True \
     ++actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=fused \
     actor_rollout_ref.actor.megatron.use_mbridge=$USE_MBRIDGE \

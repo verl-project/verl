@@ -107,7 +107,6 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.context_parallel_size=${actor_cp}
     actor_rollout_ref.actor.megatron.param_offload=${offload}
     actor_rollout_ref.actor.megatron.optimizer_offload=${optim_offload}
-    actor_rollout_ref.actor.megatron.grad_offload=${offload}
     actor_rollout_ref.actor.megatron.use_mbridge=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.apply_rope_fusion=False
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32

@@ -45,7 +45,6 @@ actor_rollout_ref:
     megatron:
       _target_: verl.workers.config.McoreEngineConfig
       param_offload: false
-      grad_offload: false
       optimizer_offload: false
       tensor_model_parallel_size: 1
       expert_model_parallel_size: 1
@@ -253,7 +252,6 @@ actor_rollout_ref:
     megatron:
       _target_: verl.workers.config.McoreEngineConfig
       param_offload: ${oc.select:actor_rollout_ref.actor.megatron.param_offload,False}
-      grad_offload: false
       optimizer_offload: false
       tensor_model_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.tensor_model_parallel_size,1}
       expert_model_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.expert_model_parallel_size,1}
@@ -586,7 +584,6 @@ critic:
   megatron:
     _target_: verl.workers.config.McoreEngineConfig
     param_offload: false
-    grad_offload: false
     optimizer_offload: false
     tensor_model_parallel_size: 1
     expert_model_parallel_size: 1

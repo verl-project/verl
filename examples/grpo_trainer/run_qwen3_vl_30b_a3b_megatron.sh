@@ -98,7 +98,6 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.use_mbridge=True
     actor_rollout_ref.actor.megatron.param_offload=True
     actor_rollout_ref.actor.megatron.optimizer_offload=True
-    actor_rollout_ref.actor.megatron.grad_offload=True
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=1
     +actor_rollout_ref.actor.optim.override_optimizer_config.overlap_cpu_optimizer_d2h_h2d=True
     +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True

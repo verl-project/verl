@@ -89,8 +89,6 @@ class EngineConfig(BaseConfig):
     param_offload: bool = False
     # whether to offload optimizer
     optimizer_offload: bool = False
-    # whether to offload grad
-    grad_offload: bool = False
     # whether the engine is forward only (e.g., ref policy)
     forward_only: bool = False
     # the strategy (backend)
@@ -152,8 +150,7 @@ class McoreEngineConfig(EngineConfig):
     The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
 
     Args:
-        param_offload (bool): Whether to offload parameters to CPU.
-        grad_offload (bool): Whether to offload gradients to CPU.
+        param_offload (bool): Whether to offload parameters to CPU and release gradient buffers while inactive.
         optimizer_offload (bool): Whether to offload optimizer states to CPU.
         tensor_model_parallel_size (int): Tensor model parallel size.
         expert_model_parallel_size (int): Expert model parallel size for MoE models.
