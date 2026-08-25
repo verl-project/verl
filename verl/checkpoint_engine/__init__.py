@@ -71,3 +71,10 @@ try:
     __all__ += ["DeltaShardedCheckpointEngine"]
 except ImportError:
     DeltaShardedCheckpointEngine = None
+
+try:
+    from .nccl_m2n_checkpoint_engine import NCCLM2NCheckpointEngine
+
+    __all__ += ["NCCLM2NCheckpointEngine"]
+except ImportError:
+    NCCLM2NCheckpointEngine = None

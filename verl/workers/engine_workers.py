@@ -753,7 +753,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 # snapshot prime), so it drives the training engine itself.
                 metrics = await self.checkpoint_engine.send_weights(self.actor.engine, global_steps=global_steps)
                 return metrics or {}
-            per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
+            if effective_mode == "nccl_m2n":
+                per_tensor_param, _ = self.actor.engine.get_per_tensor_param_reshard()
+            else:
+                per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
             metrics = await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
             return metrics or {}
 
