@@ -180,6 +180,7 @@ class MultiTurnSFTDataset(Dataset):
         self.system_prompt, self.generation_prompt = extract_system_prompt_and_generation(
             self.tokenizer, **self.apply_chat_template_kwargs
         )
+        self._following_user_context_ids: dict[Optional[bool], torch.Tensor] = {}
 
     def __len__(self):
         return len(self.messages)
@@ -188,16 +189,16 @@ class MultiTurnSFTDataset(Dataset):
         self,
         index: int,
         messages: list[dict[str, Any]],
-        full_message: list,
+        full_message: list[dict[str, Any]],
         tools: Optional[list[dict[str, Any]]] = None,
         enable_thinking: Optional[bool] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         """
         Process one independently renderable message group.
 
-        A group is normally one message. Two neighbor-dependent cases are kept
-        together so isolated rendering remains identical to rendering the full
-        conversation:
+        A group is normally one message. Neighbor-dependent messages receive
+        either adjacent messages in their group or a temporary following user
+        context so their output remains identical to full-conversation rendering.
 
         * an initial ``system`` plus its following ``user`` message;
         * one or more consecutive ``tool`` messages.
@@ -205,20 +206,105 @@ class MultiTurnSFTDataset(Dataset):
         Args:
             index: turn index in the conversation
             messages: One message or a neighbor-dependent message group
+            full_message: Complete conversation used to detect required right context
             tools: List of tools to be used
             enable_thinking: Whether to enable thinking mode
 
         Returns:
             Tuple of (input_ids, loss_mask, attention_mask, dict[str, torch.Tensor])
         """
+        role = messages[0]["role"]
+        has_following_user = self._has_following_user_query(full_message, index + len(messages))
+        use_following_user_context = len(messages) == 1 and role in {"assistant", "system"} and has_following_user
+
+        inputs = self._render_message_group(
+            messages=messages,
+            tools=tools,
+            enable_thinking=enable_thinking,
+            use_following_user_context=use_following_user_context,
+        )
+
+        input_ids = inputs.pop("input_ids")[0]
+        attention_mask = inputs.pop("attention_mask")[0]
+
+        # remove system prompt if exists
+        if index != 0 and role != "system":
+            input_ids = input_ids[len(self.system_prompt) :]
+            attention_mask = attention_mask[len(self.system_prompt) :]
+
+        if role == "assistant":
+            if len(messages) != 1:
+                raise ValueError("An assistant message cannot share an SFT rendering group")
+            loss_mask = torch.ones_like(attention_mask)
+            if use_following_user_context:
+                generation_prompt_length = self._common_prefix_length(input_ids, self.generation_prompt)
+            else:
+                generation_prompt_length = len(self.generation_prompt)
+            loss_mask[:generation_prompt_length] = 0
+        else:
+            loss_mask = torch.zeros_like(attention_mask)
+
+        return input_ids, loss_mask, attention_mask, inputs
+
+    def _empty_user_message(self) -> dict[str, Any]:
+        content: str | list[dict[str, str]] = ""
+        if self.processor is not None:
+            content = [{"type": "text", "text": ""}]
+        return {"role": "user", "content": content}
+
+    @staticmethod
+    def _is_user_query(message: dict[str, Any]) -> bool:
+        """Whether a user message is a real query rather than a tool-response envelope."""
+        if message["role"] != "user":
+            return False
+
+        content = message.get("content", "")
+        if isinstance(content, str):
+            text = content.strip()
+        elif isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict) and (item.get("type") == "text" or "text" in item):
+                    parts.append(str(item.get("text", "")))
+                else:
+                    # Preserve a non-text item in the boundary check. Qwen's
+                    # render_content emits a vision marker for the same item.
+                    parts.append("\ufffc")
+            text = "".join(parts).strip()
+        else:
+            return True
+
+        return not (text.startswith("<tool_response>") and text.endswith("</tool_response>"))
+
+    @classmethod
+    def _has_following_user_query(cls, full_message: list[dict[str, Any]], start: int) -> bool:
+        return any(cls._is_user_query(message) for message in full_message[start:])
+
+    @staticmethod
+    def _common_prefix_length(input_ids: torch.Tensor, prefix_ids: list[int]) -> int:
+        length = 0
+        max_length = min(len(input_ids), len(prefix_ids))
+        while length < max_length and input_ids[length] == prefix_ids[length]:
+            length += 1
+        return length
+
+    def _render_message_group(
+        self,
+        messages: list[dict[str, Any]],
+        tools: Optional[list[dict[str, Any]]],
+        enable_thinking: Optional[bool],
+        use_following_user_context: bool,
+    ) -> dict[str, torch.Tensor]:
+        """Render a group and remove a temporary user used only as right context."""
         processor = self.processor if self.processor is not None else self.tokenizer
         apply_chat_template_kwargs = {**self.apply_chat_template_kwargs}
         if enable_thinking is not None:
             apply_chat_template_kwargs["enable_thinking"] = enable_thinking
 
+        render_messages = [*messages, self._empty_user_message()] if use_following_user_context else messages
         inputs = apply_chat_template(
             processor,
-            messages=messages,
+            messages=render_messages,
             tools=tools,
             add_generation_prompt=False,
             tokenize=True,
@@ -228,24 +314,44 @@ class MultiTurnSFTDataset(Dataset):
         )
 
         inputs = dict(inputs)
-        input_ids = inputs.pop("input_ids")[0]
-        attention_mask = inputs.pop("attention_mask")[0]
+        if not use_following_user_context:
+            return inputs
 
-        # remove system prompt if exists
-        if index != 0 and messages[0]["role"] != "system":
-            input_ids = input_ids[len(self.system_prompt) :]
-            attention_mask = attention_mask[len(self.system_prompt) :]
+        # Render the temporary user without tools, then remove any tokenizer-level
+        # default system prompt. The remaining tokens are the exact trailing user
+        # span appended above, even when ``tools`` changes the leading system block.
+        if enable_thinking not in self._following_user_context_ids:
+            context_inputs = dict(
+                apply_chat_template(
+                    processor,
+                    messages=[self._empty_user_message()],
+                    tools=None,
+                    add_generation_prompt=False,
+                    tokenize=True,
+                    return_dict=True,
+                    return_tensors="pt",
+                    **apply_chat_template_kwargs,
+                )
+            )
+            self._following_user_context_ids[enable_thinking] = context_inputs["input_ids"][0][
+                len(self.system_prompt) :
+            ]
+        context_ids = self._following_user_context_ids[enable_thinking]
+        context_length = len(context_ids)
+        rendered_ids = inputs["input_ids"][0]
+        if (
+            context_length == 0
+            or len(rendered_ids) < context_length
+            or not torch.equal(rendered_ids[-context_length:], context_ids)
+        ):
+            raise AssertionError("Temporary following-user context is not a removable token suffix")
 
-        if messages[0]["role"] == "assistant":
-            if len(messages) != 1:
-                raise ValueError("An assistant message cannot share an SFT rendering group")
-            loss_mask = torch.ones_like(attention_mask)
-            # mask out generation prompt if assistant message
-            loss_mask[: len(self.generation_prompt)] = 0
-        else:
-            loss_mask = torch.zeros_like(attention_mask)
-
-        return input_ids, loss_mask, attention_mask, inputs
+        sequence_length = len(rendered_ids)
+        for key in ("input_ids", "attention_mask", "token_type_ids", "mm_token_type_ids"):
+            value = inputs.get(key)
+            if isinstance(value, torch.Tensor) and value.ndim >= 2 and value.shape[-1] == sequence_length:
+                inputs[key] = value[..., :-context_length]
+        return inputs
 
     def _process_single_message(
         self,

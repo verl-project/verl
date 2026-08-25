@@ -50,6 +50,61 @@ def test_multiturn_sft_message_group_boundaries():
     assert MultiTurnSFTDataset._message_group_end(messages, 2) == 3
     assert MultiTurnSFTDataset._message_group_end(messages, 3) == 5
     assert MultiTurnSFTDataset._message_group_end(messages, 5) == 6
+    assert MultiTurnSFTDataset._is_user_query(messages[1])
+    assert not MultiTurnSFTDataset._is_user_query({"role": "user", "content": "<tool_response>result</tool_response>"})
+    assert MultiTurnSFTDataset._common_prefix_length(torch.tensor([1, 2, 4]), [1, 2, 3]) == 2
+
+
+@pytest.mark.parametrize("model_path", [f"{custom_model_prefix}/Qwen/Qwen3.5-0.8B"])
+def test_multiturn_sft_qwen35_following_user_context(model_path: str, tmp_path: Path):
+    conversations = [
+        [
+            {"role": "user", "content": "Run the task."},
+            {"role": "assistant", "content": "<think>plan A</think>doing step one"},
+            {"role": "user", "content": "Format error: retry."},
+            {"role": "assistant", "content": "<think>plan B</think>doing step two"},
+        ],
+        [
+            {"role": "system", "content": "You are a powerful assistant."},
+            {"role": "assistant", "content": "premature response"},
+            {"role": "user", "content": "actual query"},
+            {"role": "assistant", "content": "answer"},
+        ],
+    ]
+    test_file = tmp_path / "qwen35_following_user_context.parquet"
+    pd.DataFrame({"messages": conversations}).to_parquet(test_file)
+
+    tokenizer = hf_tokenizer(model_path)
+    dataset = MultiTurnSFTDataset(
+        parquet_files=str(test_file),
+        tokenizer=tokenizer,
+        config={"max_length": 512, "truncation": "error", "pad_mode": "no_padding"},
+    )
+
+    multi_user_item = dataset[0]
+    system_then_assistant_item = dataset[1]
+    for conversation, item in zip(conversations, (multi_user_item, system_then_assistant_item), strict=True):
+        expected_ids = tokenizer.apply_chat_template(
+            conversation,
+            add_generation_prompt=False,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+        )["input_ids"][0]
+        assert torch.equal(item["input_ids"], expected_ids)
+
+    full_text = tokenizer.decode(multi_user_item["input_ids"])
+    assistant_text = tokenizer.decode(multi_user_item["input_ids"][multi_user_item["loss_mask"] == 1])
+    assert "plan A" not in full_text
+    assert "doing step one" in assistant_text
+    assert "plan B" in assistant_text
+    assert "doing step two" in assistant_text
+
+    assistant_text = tokenizer.decode(
+        system_then_assistant_item["input_ids"][system_then_assistant_item["loss_mask"] == 1]
+    )
+    assert "premature response" in assistant_text
+    assert "answer" in assistant_text
 
 
 @pytest.mark.parametrize(
