@@ -47,6 +47,17 @@ def test_seqlen_balancing():
     torch.testing.assert_close(new_batch, dataproto.batch)
 
 
+def test_micro_batches_respect_max_token_len():
+    input_ids = torch.zeros((8, 7), dtype=torch.long)
+    attention_mask = torch.ones_like(input_ids)
+    dataproto = DataProto.from_single_dict({"input_ids": input_ids, "attention_mask": attention_mask})
+
+    micro_batches, _ = rearrange_micro_batches(dataproto.batch, max_token_len=8)
+
+    assert len(micro_batches) == 8
+    assert all(micro_batch["attention_mask"].sum().item() <= 8 for micro_batch in micro_batches)
+
+
 def test_dynamic_batch():
     input_ids = torch.randint(low=0, high=10, size=(20, 100))
 
@@ -93,24 +104,21 @@ def _worker(rank, world_size, init_method, max_token_len, use_same_dp, min_mb):
         min_num_micro_batch=min_mb,
     )
 
-    # 4) check the enforced counts
+    # 4) check the enforced counts and token limit
     seq_len_effective: torch.Tensor = batch["attention_mask"].sum(dim=1)
     total_seqlen = seq_len_effective.sum().item()
-    local = min(len(seq_len_effective), ceildiv(total_seqlen, max_token_len))
-
+    minimum = min(len(seq_len_effective), ceildiv(total_seqlen, max_token_len))
     if min_mb is not None:
-        expected = max(local, min_mb)
-        assert len(micros) == expected
+        minimum = max(minimum, min_mb)
+    assert len(micros) >= minimum
+    assert all(micro["attention_mask"].sum().item() <= max_token_len for micro in micros)
+
     if use_same_dp:
-        # gather all local_counts
+        # All ranks must use the same final count, including any upward search.
         counts = [torch.zeros(1, device=f"{get_device_name()}:{rank}") for _ in range(world_size)]
-        counts[rank].fill_(local)
+        counts[rank].fill_(len(micros))
         dist.all_gather(counts, counts[rank])
-        expected = max(int(c.item()) for c in counts)
-        assert len(micros) == expected
-    else:
-        # if neither, we get the local natural count
-        assert len(micros) == local
+        assert len({int(count.item()) for count in counts}) == 1
 
     # 5) reconstruction sanity: concat→reverse_idx→orig
     flat = torch.cat(micros, dim=0)

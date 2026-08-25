@@ -406,8 +406,6 @@ def rearrange_micro_batches(
     if num_batches_divided_by is not None:
         num_micro_batches = roundup_divisible(num_micro_batches, num_batches_divided_by)
 
-    assert num_micro_batches <= num_groups
-
     # upcast to int64 to avoid potential overflow im `calculate_workload` computation.
     seq_len_effective = seq_len_effective.long()
 
@@ -417,11 +415,38 @@ def rearrange_micro_batches(
         workloads_per_sample = calculate_workload(seq_len_effective)
         workloads_per_sample_grouped = workloads_per_sample.view(num_groups, force_group_size)
         group_workloads = workloads_per_sample_grouped.sum(dim=1).cpu().tolist()
+        group_token_lens = seq_len_effective.view(num_groups, force_group_size).sum(dim=1).cpu().tolist()
+        workloads = group_workloads
+    else:
+        # note that seq_len_effective is a GPU tensor. We need to make it a list to avoid D2H!
+        workloads = calculate_workload(seq_len_effective).cpu().tolist()
+        group_token_lens = seq_len_effective.cpu().tolist()
 
-        # Partition groups instead of individual samples
-        micro_bsz_group_idx = get_seqlen_balanced_partitions(group_workloads, num_micro_batches, equal_size=False)
+    assert max(group_token_lens) <= max_token_len, (
+        f"A forced group exceeds the token limit. Got {max(group_token_lens)=} and {max_token_len=}"
+    )
 
-        # Convert group indices back to sample indices
+    # ceildiv(total_seqlen, max_token_len) is only a lower bound because samples are indivisible.
+    # Increase the number of micro-batches until the balanced partition also respects the hard limit.
+    step = num_batches_divided_by or 1
+    while True:
+        assert num_micro_batches <= num_groups, (
+            f"Cannot split {num_groups} groups into {num_micro_batches} non-empty micro-batches"
+        )
+        micro_bsz_group_idx = get_seqlen_balanced_partitions(workloads, num_micro_batches, equal_size=False)
+        within_limit = all(
+            sum(group_token_lens[idx] for idx in partition) <= max_token_len for partition in micro_bsz_group_idx
+        )
+        if dist.is_initialized() and same_micro_num_in_dp and dp_group is not None:
+            within_limit_tensor = torch.tensor([int(within_limit)], device=get_device_name())
+            dist.all_reduce(within_limit_tensor, op=dist.ReduceOp.MIN, group=dp_group)
+            within_limit = bool(within_limit_tensor.item())
+        if within_limit:
+            break
+        num_micro_batches += step
+
+    if force_group_size > 1:
+        # Convert group indices back to sample indices.
         micro_bsz_idx = []
         for group_partition in micro_bsz_group_idx:
             sample_partition = []
@@ -429,13 +454,8 @@ def rearrange_micro_batches(
                 start_idx = group_idx * force_group_size
                 sample_partition.extend(range(start_idx, start_idx + force_group_size))
             micro_bsz_idx.append(sample_partition)
-
-        workloads = group_workloads
     else:
-        # Original logic for force_group_size == 1
-        # note that seq_len_effective is a GPU tensor. We need to make it a list to avoid D2H!
-        workloads = calculate_workload(seq_len_effective).cpu().tolist()
-        micro_bsz_idx = get_seqlen_balanced_partitions(workloads, num_micro_batches, equal_size=False)
+        micro_bsz_idx = micro_bsz_group_idx
 
     if use_dynamic_bsz_balance:
         # Use the sum of squared sequence lengths to approximate attention computation workload
