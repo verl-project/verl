@@ -272,32 +272,73 @@ class BucketedWeightReceiver:
             (e.g. vLLM ``add_lora``, which takes one adapter dict per call) can
             defer their finalization until the whole adapter has arrived.
         """
+        # Overlap mode: ack each bucket as soon as the shared buffer is no
+        # longer referenced, so the sender can start refilling it (gather +
+        # copy of bucket i+1) while this side is still processing bucket i
+        # (e.g. online quantization + load_weights).
+        # - shm path: every tensor is already a fresh device copy (``.to``),
+        #   so the shared buffer is free once those copies complete — ack right
+        #   after them, no staging needed.
+        # - IPC path: received tensors are views into the sender's device
+        #   buffer, so stage a private copy first (one extra device copy and
+        #   one bucket of device memory).
+        # Buckets that carry raw IPC handles (oversized weights) always use the
+        # late ack, because the sender may free the source tensor once acked.
+        early_ack = os.getenv("VERL_WEIGHT_SYNC_OVERLAP", "1") == "1"
+        staging = None
         try:
             self._init_socket()
             self._init_buffer()
+            if early_ack and not self.use_shm:
+                staging = torch.empty_like(self.buffer)
+                logger.info("BucketedWeightReceiver: overlap mode enabled (early ack + staged bucket)")
 
             # receive bucket and update weights
             while True:
                 metadata = self.socket.recv_pyobj()
                 weights, tensor = [], None
-                for name, meta in metadata["bucket_meta"].items():
+                bucket_meta = metadata["bucket_meta"]
+                can_early_ack = early_ack and all(meta["handle"] is None for meta in bucket_meta.values())
+                src = self.buffer
+                acked = False
+                if can_early_ack and not self.use_shm:
+                    staging.copy_(self.buffer, non_blocking=True)
+                    # Wait for the copy to finish before acking: the sender starts
+                    # overwriting the shared buffer right after it gets the ack.
+                    get_torch_device().synchronize()
+                    self.socket.send(b"")
+                    acked = True
+                    src = staging
+                for name, meta in bucket_meta.items():
                     shape, dtype, offset, handle = meta["shape"], meta["dtype"], meta["offset"], meta["handle"]
                     if handle is not None:
                         tensor = rebuild_ipc(handle, self.device.index)
                         weights.append((name, tensor))
                         continue
                     size = dtype.itemsize * shape.numel()
-                    tensor = self.buffer[offset : offset + size].view(dtype=dtype).view(shape)
+                    tensor = src[offset : offset + size].view(dtype=dtype).view(shape)
                     if self.use_shm:
                         tensor = tensor.to(self.device)
                     weights.append((name, tensor))
+                if can_early_ack and self.use_shm:
+                    # All tensors above are independent device copies; the shm
+                    # buffer is no longer referenced once the copies complete.
+                    get_torch_device().synchronize()
+                    self.socket.send(b"")
+                    acked = True
                 is_last = metadata["is_last"]
                 on_bucket_received(weights, is_last)
                 get_torch_device().synchronize()
-                self.socket.send(b"")
-                del weights, tensor
+                if not acked:
+                    self.socket.send(b"")
+                # Drop every local reference to the shared buffer: on the shm
+                # path a lingering view keeps the memoryview exported and
+                # _cleanup's shm.close() fails with BufferError.
+                del weights, tensor, src
                 if is_last:
                     break
+            del staging
+            staging = None
         finally:
             self._cleanup()
 
