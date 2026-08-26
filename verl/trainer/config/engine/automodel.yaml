@@ -22,6 +22,9 @@ param_offload: false
 # Whether to offload optimizer state to CPU
 optimizer_offload: false
 
+# Whether to offload gradients to CPU
+grad_offload: false
+
 # Whether to enable activation checkpointing
 activation_checkpointing: false
 
