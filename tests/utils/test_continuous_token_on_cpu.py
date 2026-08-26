@@ -841,8 +841,21 @@ def test_special_builder_can_keep_separate_full_history_generation_prompt():
     assert len(tokenizer.calls) == 4
     assert [len(call["messages"]) for call in tokenizer.calls] == [2, 3, len(new_messages), len(new_messages)]
     assert [call["add_generation_prompt"] for call in tokenizer.calls] == [False, False, False, True]
+def test_default_builder_does_not_reencode_existing_trajectory_for_generation_prompt():
+    tokenizer = _RecordingTemplateTokenizer()
+    builder = ContinuousTokenBuilder(tokenizer)
+    old_messages = [
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "already encoded assistant"},
+    ]
+    new_messages = [*old_messages, {"role": "user", "content": "retry"}]
 
+    builder.tokenize_non_assistant_incremental_messages(old_messages, new_messages)
 
+    rendered_messages = [message for call in tokenizer.calls for message in call["messages"]]
+    assert old_messages[0] not in rendered_messages
+    assert old_messages[1] not in rendered_messages
+    assert new_messages[-1] in rendered_messages
 def test_default_builder_rejects_multi_message_user_or_system_groups():
     class BadGroupingBuilder(ContinuousTokenBuilder):
         def _iter_append_groups(self, appended_messages):
@@ -875,6 +888,54 @@ def test_default_builder_appends_assistant_tokens_to_runtime_stream():
     )
     assert aligned_mask == [0, 1, 1, 1]
     assert aligned_logprobs == [0.0, -0.1, -0.2, -0.3]
+
+
+def test_default_builder_encodes_prepared_assistant_continuation_once():
+    tokenizer = _RecordingTemplateTokenizer()
+    builder = ContinuousTokenBuilder(tokenizer)
+    message = {"role": "assistant", "content": "gold"}
+
+    assistant_ids = builder.tokenize_assistant_message(message)
+
+    assert assistant_ids == tokenizer.encode("gold\n", add_special_tokens=False)
+    assert len(tokenizer.calls) == 2
+    assert all(message not in call["messages"] for call in tokenizer.calls[:1])
+    assert tokenizer.calls[1]["messages"][-1] is message
+
+
+def test_qwen_builder_preserves_nested_literal_think_tags_and_trims_after_eos():
+    tokenizer = _QwenBoundaryTokenizer()
+    tokenizer.eos_token_id = tokenizer.im_end_id
+    builder = QwenContinuousTokenBuilder(tokenizer)
+    message = {
+        "role": "assistant",
+        "content": "<think>I need output the <think> tag</think><think>",
+    }
+
+    rendered_message = builder._prepare_assistant_message_for_render(message)
+    normalized_ids = builder._normalize_assistant_token_ids(
+        [1, tokenizer.im_end_id, tokenizer.newline_id],
+        message,
+    )
+
+    assert rendered_message["reasoning_content"] == "I need output the <think> tag"
+    assert rendered_message["content"] == "<think>"
+    assert normalized_ids == [1, tokenizer.im_end_id]
+
+
+def test_qwen_builder_drops_prepared_reasoning_when_thinking_is_disabled():
+    tokenizer = _QwenBoundaryTokenizer()
+    builder = QwenContinuousTokenBuilder(tokenizer, chat_template_kwargs={"enable_thinking": False})
+
+    explicit_reasoning = builder._prepare_assistant_message_for_render(
+        {"role": "assistant", "reasoning_content": "hidden", "content": "answer"}
+    )
+    embedded_reasoning = builder._prepare_assistant_message_for_render(
+        {"role": "assistant", "content": "<think>hidden</think>answer"}
+    )
+
+    assert explicit_reasoning == {"role": "assistant", "reasoning_content": "", "content": "answer"}
+    assert embedded_reasoning == {"role": "assistant", "reasoning_content": "", "content": "answer"}
 
 
 def test_assistant_alignment_validates_logprobs():
