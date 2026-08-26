@@ -22,6 +22,7 @@ infrastructure while using verl's training loop, data pipeline, and loss functio
 import gc
 import logging
 import os
+import re
 from contextlib import nullcontext
 from typing import Any, Callable, Optional
 
@@ -76,6 +77,19 @@ from .utils import (
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+_EXPERT_LORA_LEAF = {"gate_proj": "w1", "up_proj": "w3", "down_proj": "w2"}
+_EXPERT_LORA_RE = re.compile(
+    r"^model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.(lora_[AB]\..*)$"
+)
+
+
+def _ckpt_rename_expert_lora_leaf(key: str) -> str:
+    m = _EXPERT_LORA_RE.match(key)
+    if m is None:
+        return key
+    layer, expert, proj, lora_tail = m.group(1), m.group(2), m.group(3), m.group(4)
+    return f"layers.{layer}.ffn.experts.{expert}.{_EXPERT_LORA_LEAF[proj]}.{lora_tail}"
+
 
 class AutomodelEngine(BaseEngine):
     """Engine implementation using Automodel for distributed training."""
@@ -118,7 +132,10 @@ class AutomodelEngine(BaseEngine):
 
         self._is_offload_param = self.engine_config.param_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
+        self._is_offload_grad = getattr(self.engine_config, "grad_offload", self._is_offload_param)
 
+        _offload_policy = getattr(getattr(self.distributed_setup, "strategy_config", None), "offload_policy", None)
+        self._fsdp_native_offload = _offload_policy is not None
         if self.engine_config.entropy_from_logits_with_chunking:
             entropy_from_logits = verl_F.entropy_from_logits_with_chunking
         else:
@@ -164,7 +181,7 @@ class AutomodelEngine(BaseEngine):
             device="cpu",
             model=self._is_offload_param,
             optimizer=self._is_offload_optimizer,
-            grad=self._is_offload_param,
+            grad=self._is_offload_grad,
         )
 
         log_gpu_memory_usage("After offload model/optimizer/grad during init", logger=logger)
@@ -355,6 +372,15 @@ class AutomodelEngine(BaseEngine):
         device_name = get_device_name()
         assert device in (device_name, "cpu")
 
+        # FSDP2 CPUOffloadPolicy owns param placement (host->device per layer
+        # all-gather during forward, freed per reshard_after_forward). A manual
+        # model.to(cuda) would materialize the whole shard on GPU at once and,
+        # for SequenceParallel-sharded leaves like model.norm, leave the DTensor
+        # on cuda — which FSDP2's lazy_init _validate_cpu_offload_params rejects.
+        # Skip the manual load/offload entirely; FSDP2 handles placement.
+        if self._fsdp_native_offload:
+            return
+
         if device == device_name:
             if model:
                 load_automodel_model_to_gpu(self.module)
@@ -446,7 +472,8 @@ class AutomodelEngine(BaseEngine):
             offload_automodel_optimizer(self.optimizer)
 
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
-        load_automodel_model_to_gpu(self.module)
+        if not self._is_offload_param:
+            load_automodel_model_to_gpu(self.module)
 
         params = self.module.state_dict()
         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
@@ -457,6 +484,8 @@ class AutomodelEngine(BaseEngine):
 
         merge_lora = self.peft_config is not None and self.model_config.lora.get("merge", False)
 
+        _all_param_keys = list(params.keys())
+
         if self.peft_config is not None and not merge_lora:
             # Two-phase adapter sync: base_sync_done=False streams the whole base
             # model (load_format=dummy), base_sync_done=True yields adapter-only
@@ -465,9 +494,6 @@ class AutomodelEngine(BaseEngine):
                 params = {k: v for k, v in params.items() if "lora_" in k}
             else:
                 params = {k: v for k, v in params.items() if "lora_" not in k}
-
-        if self._is_offload_param:
-            offload_automodel_model_to_cpu(self.module)
 
         # One tree walk -> packed base expert specs (phase-1 split), MoE LoRA specs
         # (phase-2 split), patched-linear prefixes (phase-1 _remap), and module
@@ -488,24 +514,26 @@ class AutomodelEngine(BaseEngine):
         def param_generator():
             lora_base_sync = self.peft_config is not None and not base_sync_done
 
-            # vLLM wraps every linear leaf as ``.base_layer.`` under enable_lora;
-            # phase-1 base keys must carry the suffix to match. Detect linear
-            # leaves (weight/bias with ndim>=2) at runtime; lora_* submodules and
-            # per-expert split leaves (added from the split specs) are handled.
-            _linear_leaf_basenames = set()
+            _sd_adapter = getattr(self.module, "state_dict_adapter", None)
+            _has_ckpt_rename = _sd_adapter is not None and hasattr(_sd_adapter, "convert_single_tensor_to_hf")
+
+            _lora_linear_module_names = set()
+            _expert_split_leaves = set()
             if lora_base_sync:
-                for _mname, _mod in self.module.named_modules():
-                    for _pname, _p in _mod.named_parameters(recurse=False):
-                        if _pname in ("weight", "bias") and _p.ndim >= 2:
-                            _leaf = _mname.rpartition(".")[-1]
-                            if not _leaf.startswith("lora_"):
-                                _linear_leaf_basenames.add(_leaf)
-                            break
+                for _k in _all_param_keys:
+                    if _k.endswith(".lora_A.weight"):
+                        _lora_linear_module_names.add(_k[: -len(".lora_A.weight")])
                 for _spec in packed_expert_prefixes.values():
                     for _sub_names in _spec.splits:
-                        _linear_leaf_basenames.update(_sub_names)
+                        _expert_split_leaves.update(_sub_names)
 
-            def _remap(key):
+            def _add_base_layer(key):
+                """Insert ``.base_layer`` before the leaf of a LoRA-wrapped linear.
+
+                Operates on *internal* names (pre-adapter-rename): the DSV4 adapter's
+                rename table preserves a mid-name ``.base_layer`` segment, so adding
+                it here survives the conversion to checkpoint layout.
+                """
                 if not lora_base_sync:
                     return key
                 # lm_head/embed are not LinearBase (ParallelLMHead/VocabParallelEmbedding).
@@ -513,28 +541,49 @@ class AutomodelEngine(BaseEngine):
                     return key
                 module_k, _, _param_leaf = key.rpartition(".")
                 _, _, mod_leaf = module_k.rpartition(".")
-                if mod_leaf not in _linear_leaf_basenames:
-                    return key
-                for prefix in lora_linear_prefixes:
-                    if key.startswith(prefix + "."):
-                        return f"{prefix}.base_layer.{key[len(prefix) + 1 :]}"
-                return f"{module_k}.base_layer.{key[len(module_k) + 1 :]}"
+                if module_k in _lora_linear_module_names:
+                    return f"{module_k}.base_layer.{_param_leaf}"
+                if mod_leaf in _expert_split_leaves:
+                    for prefix in lora_linear_prefixes:
+                        if key.startswith(prefix + "."):
+                            return f"{prefix}.base_layer.{key[len(prefix) + 1 :]}"
+                    return f"{module_k}.base_layer.{key[len(module_k) + 1 :]}"
+                return key
 
             for name, param in params.items():
                 unsharded_tensor = param.full_tensor() if isinstance(param, DTensor) else param
                 # Phase 2: split MoE adapter params into per-expert lora_A/lora_B.
                 moe_lora_spec = moe_lora_prefixes.get(name)
                 if moe_lora_spec is not None and unsharded_tensor.dim() == 3:
-                    yield from split_moe_lora_adapter(moe_lora_spec, name.rsplit(".", 1)[-1], unsharded_tensor)
+                    for lora_key, lora_tensor in split_moe_lora_adapter(
+                        moe_lora_spec, name.rsplit(".", 1)[-1], unsharded_tensor
+                    ):
+                        if _has_ckpt_rename:
+                            lora_key = _ckpt_rename_expert_lora_leaf(lora_key)
+                        yield lora_key, lora_tensor
+                    continue
+                # Phase 1 base sync.
+                if _has_ckpt_rename:
+                    is_packed_expert = packed_expert_prefixes.get(name) is not None and unsharded_tensor.dim() == 3
+                    if not is_packed_expert:
+                        ckpt_name = _add_base_layer(name)
+                        for hf_key, hf_tensor in _sd_adapter.convert_single_tensor_to_hf(ckpt_name, unsharded_tensor):
+                            yield hf_key, hf_tensor
+                    else:
+                        for hf_key, hf_tensor in _sd_adapter.convert_single_tensor_to_hf(name, unsharded_tensor):
+                            if lora_base_sync:
+                                head, _, leaf = hf_key.rpartition(".")
+                                hf_key = f"{head}.base_layer.{leaf}"
+                            yield hf_key, hf_tensor
                     continue
                 # Phase 1: split packed MoE base tensors into per-expert keys.
                 spec = packed_expert_prefixes.get(name)
                 if spec is not None and unsharded_tensor.dim() == 3:
                     for expert_id in range(unsharded_tensor.size(0)):
                         for sub_name, sub_tensor in split_packed_expert(spec, unsharded_tensor, expert_id):
-                            yield _remap(f"{spec.prefix}.{expert_id}.{sub_name}"), sub_tensor
+                            yield _add_base_layer(f"{spec.prefix}.{expert_id}.{sub_name}"), sub_tensor
                     continue
-                yield _remap(name), unsharded_tensor
+                yield _add_base_layer(name), unsharded_tensor
 
         # Both phases return non-null peft_config so the rollout routes phase-1
         # base keys and phase-2 adapter tensors through resolve_weight_name
@@ -673,12 +722,12 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
                 "position_ids": position_ids_rmpad,
             }
 
-            # For TE attention backend, pass cu_seqlens
+            cu_seqlens = input_ids.offsets().to(torch.int32)
+            model_inputs["cu_seqlens"] = cu_seqlens.unsqueeze(0)
+            # TE additionally needs the THD layout metadata.
             if self.engine_config.attn_implementation == "te":
-                cu_seqlens = input_ids.offsets().to(torch.int32)
                 max_seqlen = cu_seqlens.diff().max().item()
                 model_inputs["qkv_format"] = "thd"
-                model_inputs["cu_seqlens"] = cu_seqlens.unsqueeze(0)
                 model_inputs["max_seqlen"] = max_seqlen
 
         else:

@@ -84,6 +84,8 @@ class EngineConfig(BaseConfig):
         "use_remove_padding",
         "forward_only",
         "param_offload",
+        "optimizer_offload",
+        "grad_offload",
     }
     # whether to offload param
     param_offload: bool = False

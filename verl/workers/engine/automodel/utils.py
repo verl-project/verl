@@ -98,7 +98,7 @@ def build_distributed_config_from_engine_config(engine_config, world_size):
         _resolve_strategy_config,
     )
     from nemo_automodel.components.distributed.mesh import ParallelismSizes
-    from torch.distributed.fsdp import MixedPrecisionPolicy
+    from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy
 
     from verl.utils.torch_dtypes import PrecisionType
 
@@ -111,12 +111,15 @@ def build_distributed_config_from_engine_config(engine_config, world_size):
         cast_forward_inputs=True,
     )
 
+    offload_policy = CPUOffloadPolicy() if engine_config.param_offload else None
+
     # Build the typed strategy config; verl only supports the subset of strategies
     # whose constructor accepts the fields below.
     if strategy == "fsdp2":
         strategy_config = FSDP2Config(
             sequence_parallel=engine_config.sequence_parallel,
             mp_policy=mp_policy,
+            offload_policy=offload_policy,
             activation_checkpointing=engine_config.activation_checkpointing,
             defer_fsdp_grad_sync=engine_config.defer_fsdp_grad_sync,
         )
@@ -263,6 +266,9 @@ def build_automodel_model(model_config, engine_config, distributed_setup, strate
     peft_config = build_peft_config(model_config)
     if peft_config is not None:
         kwargs["peft_config"] = peft_config
+
+    if getattr(model_config, "override_config", None):
+        kwargs["config"] = dict(model_config.override_config)
 
     model = NeMoAutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=model_config.path,
