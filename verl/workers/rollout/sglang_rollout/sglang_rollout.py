@@ -283,6 +283,9 @@ class ServerAdapter(BaseRollout):
             return
         if self._is_server_tp_leader() and self.config.free_cache_engine:
             await self._engine.resume_memory_occupation(tags=tags)
+            if "kv_cache" in tags:
+                # The restored allocation cannot use radix entries that reference the old KV blocks.
+                await self._engine.flush_cache(reset_connector=reset_connector)
 
     async def release(self):
         """Release weights and kv cache in GPU memory.
