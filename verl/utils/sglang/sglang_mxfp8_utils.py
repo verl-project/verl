@@ -25,16 +25,21 @@ import os
 
 import torch
 
+from verl.utils.mxfp8_quant import MXFP8_GROUP_SIZE, TE_MXFP8_ROW_ALIGNMENT, mxfp8_quantize
 from verl.utils.sglang.sglang_fp8_utils import SGLangFP8QuantizerHelper, build_sglang_fp8_quant_config
 from verl.workers.rollout.utils import ensure_async_iterator
 
+__all__ = [
+    "MXFP8_GROUP_SIZE",
+    "TE_MXFP8_ROW_ALIGNMENT",
+    "SGLangMXFP8QuantizerHelper",
+    "build_sglang_mxfp8_quant_config",
+    "check_sglang_mxfp8_support",
+    "mxfp8_quantize",
+]
+
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
-
-MXFP8_GROUP_SIZE = 32
-# TE's MXFP8 quantizer requires both dims 32-aligned; weights whose row count
-# is not a multiple of 32 are zero-padded before quantization and sliced after.
-TE_MXFP8_ROW_ALIGNMENT = 32
 
 
 def check_sglang_mxfp8_support() -> None:
@@ -48,49 +53,6 @@ def check_sglang_mxfp8_support() -> None:
             "The installed sglang does not support quantization='mxfp8'; upgrade to a version "
             "whose quantization registry includes 'mxfp8'."
         )
-
-
-def mxfp8_quantize(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantize a weight tensor to rowwise MXFP8 (E4M3 elements + per-32 UE8M0 scales).
-
-    Returns ``(qweight, scale)`` where ``qweight`` keeps the input shape in
-    ``float8_e4m3fn`` and ``scale`` is ``uint8`` UE8M0 with shape
-    ``[*weight.shape[:-1], k // 32]`` — the compact, unswizzled layout SGLang
-    expects for ``weight_scale_inv``.
-    """
-    try:
-        from transformer_engine.pytorch import MXFP8Quantizer
-        from transformer_engine.pytorch.constants import TE_DType
-    except ImportError as err:
-        raise ImportError(
-            "TransformerEngine (>=2.1, with MXFP8 support) is required for mxfp8 rollout "
-            "quantization: rollout weights must be quantized with the same TE quantizer the "
-            "trainer's FP8 GEMMs use."
-        ) from err
-
-    weight = weight.contiguous()
-    k = weight.shape[-1]
-    if k % MXFP8_GROUP_SIZE != 0:
-        raise ValueError(f"Last dim {k} must be divisible by {MXFP8_GROUP_SIZE} for MXFP8.")
-
-    weight_flat = weight.view(-1, k)
-    num_rows = weight_flat.shape[0]
-    pad_rows = (-num_rows) % TE_MXFP8_ROW_ALIGNMENT
-    if pad_rows:
-        padding = torch.zeros((pad_rows, k), device=weight.device, dtype=weight.dtype)
-        weight_flat = torch.cat((weight_flat, padding), dim=0)
-
-    quantizer = MXFP8Quantizer(
-        fp8_dtype=TE_DType[torch.float8_e4m3fn],
-        rowwise=True,
-        columnwise=False,
-    )
-    quantized = quantizer.quantize(weight_flat)
-    qweight = quantized._rowwise_data[:num_rows, :k].contiguous()
-    qweight = qweight.view(torch.float8_e4m3fn).view_as(weight)
-    scale = quantized._rowwise_scale_inv[:num_rows, : k // MXFP8_GROUP_SIZE]
-    scale = scale.contiguous().view(*weight.shape[:-1], k // MXFP8_GROUP_SIZE)
-    return qweight, scale
 
 
 def build_sglang_mxfp8_quant_config(hf_config=None, ignored_layers=None) -> dict:

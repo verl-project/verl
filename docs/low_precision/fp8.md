@@ -254,9 +254,16 @@ Notes:
 
 ### MXFP8 Rollout and Train-Inference Consistency
 
-With `quantization: mxfp8`, SGLang is launched in MXFP8 mode against the bf16 checkpoint
-(via a `quantization_config` override, no offline conversion needed), and weight sync
-quantizes the bf16 actor weights to MXFP8 on the fly.
+With `quantization: mxfp8`, the rollout engine (SGLang or vLLM) is launched in MXFP8 mode
+against the bf16 checkpoint (via a `quantization_config` override, no offline conversion
+needed), and weight sync quantizes the bf16 actor weights to MXFP8 on the fly.
+
+For vLLM, the config maps to `ModelOptMxFp8Config` (weight `fp8_e4m3fn` + `uint8` UE8M0
+`weight_scale`), refits reuse the same pristine-layout staging cycle as the blockwise FP8
+path, and vLLM's Marlin/emulation fallbacks allow serving MXFP8 weights on pre-Blackwell
+GPUs (SM80+) — the served weight grid is still produced by TE's quantizer, so
+train-inference weight consistency is preserved regardless of the serving kernel.
+The vLLM MoE (`ModelOptMxFp8FusedMoE`) path is wired but not yet validated end-to-end.
 
 The weight-sync quantization deliberately uses **TransformerEngine's `MXFP8Quantizer`** —
 the same quantizer the trainer's FP8 GEMMs apply to weights — so the rollout engine serves
