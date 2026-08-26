@@ -171,7 +171,6 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${ETP}
     actor_rollout_ref.actor.megatron.param_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.megatron.optimizer_offload=${ALL_OFFLOAD}
-    actor_rollout_ref.actor.megatron.grad_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.megatron.dtype=bfloat16
     # +actor_rollout_ref.actor.megatron.override_transformer_config.context_parallel_algo=kvallgather_cp_algo
     ++actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=auto

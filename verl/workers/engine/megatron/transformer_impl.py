@@ -195,7 +195,6 @@ class MegatronEngine(BaseEngine):
         set_random_seed(seed=self.engine_config.seed)
 
         self._is_offload_param = self.engine_config.param_offload
-        self._is_offload_grad = self.engine_config.grad_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
 
         self.mode = None

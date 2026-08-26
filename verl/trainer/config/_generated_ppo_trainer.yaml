@@ -162,11 +162,6 @@ actor_rollout_ref:
           steps: null
           stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
           strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
-    router_replay:
-      _target_: verl.workers.config.RouterReplayConfig
-      mode: disabled
-      record_file: null
-      replay_file: null
     qat:
       enable: false
       mode: w4a16
@@ -234,11 +229,6 @@ actor_rollout_ref:
           steps: null
           stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
           strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
-    router_replay:
-      _target_: verl.workers.config.RouterReplayConfig
-      mode: disabled
-      record_file: null
-      replay_file: null
     fsdp_config:
       _target_: verl.workers.config.FSDPEngineConfig
       wrap_policy:
@@ -967,6 +957,7 @@ trainer:
   esi_redundant_time: 0
   resume_mode: auto
   resume_from_path: null
+  checkpoint_callback_class: null
   val_before_train: true
   val_only: false
   test_freq: -1

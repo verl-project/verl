@@ -136,7 +136,6 @@ class ActorConfig(BaseConfig):
         optim (OptimizerConfig): Configuration for optimizer.
         use_fused_kernels (bool): Whether to use custom fused kernels (e.g., FlashAttention, fused MLP).
         data_loader_seed (int): Seed for data loader. If None, uses global seed.
-        router_replay (RouterReplayConfig): Configuration for router replay in MoE models.
     """
 
     _mutable_fields = BaseConfig._mutable_fields | {
@@ -185,7 +184,6 @@ class ActorConfig(BaseConfig):
     engine: BaseConfig = field(default_factory=BaseConfig)
     rollout_n: int = MISSING  # must be override by sampling config
     model_config: HFModelConfig = field(default_factory=BaseConfig)
-    router_replay: RouterReplayConfig = field(default_factory=RouterReplayConfig)
 
     # Store global batch info for loss aggregation:
     # dp_size: data parallel size

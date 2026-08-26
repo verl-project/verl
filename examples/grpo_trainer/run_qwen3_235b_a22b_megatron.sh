@@ -105,7 +105,6 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.expert_model_parallel_size=${ACTOR_EP}
     actor_rollout_ref.actor.megatron.param_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.megatron.optimizer_offload=${ALL_OFFLOAD}
-    actor_rollout_ref.actor.megatron.grad_offload=${ALL_OFFLOAD}
     +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_first_pipeline_stage=11
     +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_last_pipeline_stage=11
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform

@@ -155,7 +155,7 @@ class DSAIndexer(MegatronModule):
 
 为了解决这一通用问题，业界引入了 **Routing Replay（路由回放）** 机制。其核心思想是通过锁定特定阶段的专家路由路径，屏蔽微小扰动对路由决策的干扰，从而保证模型训练的稳定性。目前主流包含R2和R3两种变体：
 
-* **（1）Vanilla Routing Replay (R2)**： (对应`actor_rollout_ref.actor.router_replay.mode="R2"`)
+* **（1）Vanilla Routing Replay (R2)**： (对应`actor_rollout_ref.actor.megatron.router_replay.mode="R2"`，VeOmni 则为 `actor_rollout_ref.actor.veomni.router_replay.mode="R2"`)
   
   * **机制**：在梯度更新阶段，复现训练引擎在上一轮采样阶段计算出的专家路径。
   * **作用**：主要缓解**策略陈旧性**对路由的影响。随着策略的更新，当前前向传播计算出的路由可能与生成旧数据时的路由不一致，R2通过回放旧路由来维持优化信号的连贯性。
@@ -169,9 +169,11 @@ class DSAIndexer(MegatronModule):
 因此对于大尺寸 MoE 模型，在实际配置中通常推荐使用对齐更彻底的 R3 模式：
 
 ```
-actor_rollout_ref.actor.router_replay.mode="R3" \
+actor_rollout_ref.actor.megatron.router_replay.mode="R3" \
 actor_rollout_ref.rollout.enable_rollout_routing_replay=True \
 ```
+
+VeOmni 后端请改用 `actor_rollout_ref.actor.veomni.router_replay.mode="R3"`。顶层 `actor.router_replay` 已移除，不会再生效。
 
 ## 四、性能优化
 
