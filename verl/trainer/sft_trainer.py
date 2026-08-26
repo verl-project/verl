@@ -31,7 +31,7 @@ from torch.utils.data import DistributedSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
-from verl.trainer.sft_val_utils import resolve_sft_val_batch_size
+from verl.trainer.sft_val_utils import resolve_sft_val_batch_size, sft_val_num_samples
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint import CheckpointHandler
 from verl.utils.dataset.dataset_utils import SFTTensorCollator
@@ -254,9 +254,7 @@ class SFTTrainer:
         )
 
         if self.val_dataset:
-            val_batch_size = resolve_sft_val_batch_size(
-                config.data, self.train_batch_size_per_dp, len(self.val_dataset)
-            )
+            val_batch_size = resolve_sft_val_batch_size(config.data, len(self.val_dataset))
             self.val_sampler = DistributedSampler(
                 self.val_dataset, shuffle=False, num_replicas=dp_size, rank=dp_rank, drop_last=False
             )
@@ -270,6 +268,7 @@ class SFTTrainer:
                 drop_last=False,
                 pin_memory_device=device_name,
             )
+            assert len(self.val_dataloader) >= 1, "Validation dataloader is empty!"
         else:
             self.val_dataloader = None
 
@@ -420,19 +419,21 @@ class SFTTrainer:
                 # early exit or validation step
                 if is_last_step and self.val_dataloader is not None or (self.test_freq > 0 and is_valid_step):
                     # Perform validation
-                    val_losses = []
+                    val_losses_and_counts = []
                     for val_data in self.val_dataloader:
                         val_data = tu.get_tensordict(tensor_dict=val_data, non_tensor_dict=meta_info)
+                        n_samples = sft_val_num_samples(val_data)
                         output = self.training_client.infer_batch(val_data)
 
                         if self.engine.is_mp_src_rank_with_outputs():
                             metrics = tu.get(output, "metrics")
-                            val_losses.append(metrics["loss"])
+                            val_losses_and_counts.append((metrics["loss"], n_samples))
 
                     if self.engine.is_mp_src_rank_with_outputs():
-                        n_val = torch.tensor(float(len(val_losses)), device=self.device_name)
+                        n_val = torch.tensor(float(sum(n for _, n in val_losses_and_counts)), device=self.device_name)
                         sum_val = torch.tensor(
-                            float(sum(val_losses)) if val_losses else 0.0, device=self.device_name
+                            float(sum(float(loss) * n for loss, n in val_losses_and_counts)),
+                            device=self.device_name,
                         )
                         dp_group = self.engine.get_data_parallel_group()
                         if dp_group is not None:

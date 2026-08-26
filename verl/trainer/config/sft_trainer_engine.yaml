@@ -17,7 +17,7 @@ data:
   train_batch_size: 256 # global batch size
   micro_batch_size_per_gpu: 4
 
-  # Validation batch size per DP rank. Null uses micro_batch_size_per_gpu.
+  # Validation dataloader batch size. Null sends the full val set in one batch (same as PPO).
   val_batch_size: null
 
   max_token_len_per_gpu: 8192
