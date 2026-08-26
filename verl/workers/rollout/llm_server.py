@@ -42,6 +42,39 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 DEFAULT_ROUTING_CACHE_SIZE = 10000
 
+# ``request_id`` is a deprecated alias of ``session_id`` on LLMServerClient
+# and GlobalRequestLoadBalancer. Warn once per process so training logs stay
+# readable.
+_REQUEST_ID_ALIAS_WARNED = False
+
+
+def resolve_session_id(
+    session_id: Optional[str] = None,
+    *,
+    request_id: Optional[str] = None,
+) -> str:
+    """Resolve the sticky grouping id for generate / bind_route / release_route / acquire_server.
+
+    ``request_id`` remains accepted so AgentLoop callers, the two clients, and
+    LoadBalancer stay interchangeable; it is the same slot as ``session_id``,
+    not the engine per-turn id.
+    """
+    global _REQUEST_ID_ALIAS_WARNED
+    if session_id is not None and request_id is not None and session_id != request_id:
+        raise ValueError(
+            "session_id and request_id must match when both are provided, "
+            f"got session_id={session_id!r}, request_id={request_id!r}"
+        )
+    if request_id is not None:
+        if not _REQUEST_ID_ALIAS_WARNED:
+            _REQUEST_ID_ALIAS_WARNED = True
+            logger.warning("request_id is deprecated as the sticky grouping id; pass session_id= instead")
+        if session_id is None:
+            session_id = request_id
+    if type(session_id) is not str or not session_id:
+        raise ValueError(f"session_id must be a non-empty string, got {session_id!r}")
+    return session_id
+
 
 class GlobalRequestLoadBalancer:
     """Global sticky-session + in-flight load balancer shared by all AgentLoopWorkers.
@@ -55,13 +88,13 @@ class GlobalRequestLoadBalancer:
 
     Key features:
     - **Atomic acquire**: ``acquire_server()`` returns ``(server_id, handle)``
-    - **Sticky Session**: Uses LRUCache to map request_id → server_id, ensuring
+    - **Sticky Session**: Uses LRUCache to map session_id → server_id, ensuring
       multi-turn conversations route to the same server.
     - **Least-loaded Selection**: When no sticky session exists, selects the
       server with the fewest in-flight requests.
     - **Deterministic Routing**: When ``full_determinism=True``, routes every
-      request by ``hash(request_id) % len(servers)`` over the full pool so the
-      same request always routes to the same replica across runs.
+      request by ``hash(session_id) % len(servers)`` over the full pool so the
+      same session always routes to the same replica across runs.
     - **Dynamic Server Management**: Supports add/remove servers at runtime
       for hybrid scaling.
     """
@@ -80,36 +113,44 @@ class GlobalRequestLoadBalancer:
         self._request_id_to_server: LRUCache = LRUCache(maxsize=max_cache_size)
         self._full_determinism = full_determinism
 
-    def acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
-        """Acquire a server for the given request (sticky + least-loaded).
+    def acquire_server(
+        self,
+        session_id: Optional[str] = None,
+        *,
+        request_id: Optional[str] = None,
+    ) -> tuple[str, ray.actor.ActorHandle]:
+        """Acquire a server for the given sticky session (sticky + least-loaded).
+
+        ``request_id`` is a deprecated alias of ``session_id``.
 
         Returns:
             A tuple of ``(server_id, actor_handle)`` in a single atomic call.
         """
+        session_id = resolve_session_id(session_id, request_id=request_id)
         # Try sticky session first
-        if request_id in self._request_id_to_server:
-            server_id = self._request_id_to_server[request_id]
+        if session_id in self._request_id_to_server:
+            server_id = self._request_id_to_server[session_id]
             # Check if server is still in the active pool
             if server_id in self._inflight_requests:
                 self._inflight_requests[server_id] += 1
                 return server_id, self._servers[server_id]
             # Server was removed, clear stale cache entry and re-select
-            del self._request_id_to_server[request_id]
+            del self._request_id_to_server[session_id]
 
         # Select new server (least-loaded among available)
         if not self._inflight_requests:
             raise RuntimeError("No available servers in load balancer")
 
         if self._full_determinism:
-            # Full-hash routing: same request_id always lands on the same replica
+            # Full-hash routing: same session_id always lands on the same replica
             # across runs. Least-loaded selection depends on async arrival timing,
             # which varies run-to-run, so it is bypassed entirely here.
-            server_id = list(self._servers)[hash(request_id) % len(self._servers)]
+            server_id = list(self._servers)[hash(session_id) % len(self._servers)]
         else:
             min_count = min(self._inflight_requests.values())
             candidates = [sid for sid, count in self._inflight_requests.items() if count == min_count]
             server_id = candidates[0]
-        self._request_id_to_server[request_id] = server_id
+        self._request_id_to_server[session_id] = server_id
         self._inflight_requests[server_id] += 1
         return server_id, self._servers[server_id]
 
@@ -218,9 +259,9 @@ class LLMServerClient:
         self.config = config
         self._load_balancer = load_balancer_handle
 
-    async def _acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
+    async def _acquire_server(self, session_id: str) -> tuple[str, ray.actor.ActorHandle]:
         # Atomic acquire: returns (server_id, handle) in one Ray RPC.
-        server_id, handle = await self._load_balancer.acquire_server.remote(request_id=request_id)
+        server_id, handle = await self._load_balancer.acquire_server.remote(session_id=session_id)
         return server_id, handle
 
     def _release_server(self, server_id: str) -> None:
@@ -228,21 +269,22 @@ class LLMServerClient:
         # Awaiting here risks blocking the finally clause if the LB actor is unresponsive.
         self._load_balancer.release_server.remote(server_id=server_id)
 
-    def _vllm_request_id(self, request_id: str) -> str:
+    def _vllm_request_id(self, session_id: str) -> str:
         # request_id passed to vLLM. Default: a fresh uuid per turn so each turn
         # is an independent vLLM request. Under full_determinism the caller's
-        # request_id is passed straight through so vLLM sees a stable id across runs.
+        # session_id is passed straight through so vLLM sees a stable id across runs.
         if getattr(self.config.actor_rollout_ref.rollout, "full_determinism", False):
-            return request_id
+            return session_id
         return uuid4().hex
 
     @rollout_trace_op
     async def generate(
         self,
-        request_id,
+        session_id: Optional[str] = None,
         *,
         prompt_ids: list[int],
         sampling_params: dict[str, Any],
+        request_id: Optional[str] = None,
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
         audio_data: Optional[list[Any]] = None,
@@ -252,14 +294,16 @@ class LLMServerClient:
         """Generate tokens from prompt ids.
 
         Args:
-            request_id (str): request id for sticky session.
+            session_id (str): sticky grouping id (prefix / temporal locality hint).
+            request_id (str): deprecated alias of ``session_id``.
             prompt_ids (List[int]): List of prompt token ids.
             sampling_params (Dict[str, Any]): Sampling parameters for the chat completion.
 
         Returns:
             TokenOutput | DiffusionOutput: token or diffusion output
         """
-        server_id, server = await self._acquire_server(request_id)
+        session_id = resolve_session_id(session_id, request_id=request_id)
+        server_id, server = await self._acquire_server(session_id)
         try:
             multimodal_kwargs = {}
             if audio_data is not None:
@@ -272,7 +316,7 @@ class LLMServerClient:
                 {"priority": priority} if priority != 0 and self.config.actor_rollout_ref.rollout.name == "vllm" else {}
             )
             output: TokenOutput = await server.generate.remote(
-                request_id=self._vllm_request_id(request_id),  # use new request_id for each turn
+                request_id=self._vllm_request_id(session_id),  # use new request_id for each turn
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
                 image_data=image_data,
@@ -315,7 +359,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         super().__init__(config=config, load_balancer_handle=load_balancer_handle, **kwargs)
         self._only_hybrid = only_hybrid
 
-    async def _acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
+    async def _acquire_server(self, session_id: str) -> tuple[str, ray.actor.ActorHandle]:
         # Atomic acquire: returns (server_id, handle) in one Ray RPC.
         # When only_hybrid is True, hybrid replicas are the sole rollout resource and
         # the LB may be temporarily empty during weight sync / scaling transitions.
@@ -323,7 +367,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         # Otherwise raise immediately so callers see the error right away.
         while True:
             try:
-                return await super()._acquire_server(request_id)
+                return await super()._acquire_server(session_id)
             except RuntimeError as e:
                 if "No available servers in load balancer" in str(e) and self._only_hybrid:
                     await asyncio.sleep(1)
@@ -345,10 +389,11 @@ class FullyAsyncLLMServerClient(LLMServerClient):
     @rollout_trace_op
     async def generate(
         self,
-        request_id,
+        session_id: Optional[str] = None,
         *,
         prompt_ids: list[int],
         sampling_params: dict[str, Any],
+        request_id: Optional[str] = None,
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
         audio_data: Optional[list[Any]] = None,
@@ -358,7 +403,8 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         """Generate tokens from prompt ids.
 
         Args:
-            request_id (str): request id for sticky session.
+            session_id (str): sticky grouping id (prefix / temporal locality hint).
+            request_id (str): deprecated alias of ``session_id``.
             prompt_ids (List[int]): List of prompt token ids.
             sampling_params (Dict[str, Any]): Sampling parameters for the chat completion.
             image_data (Optional[List[Any]]): Image data for the chat completion.
@@ -369,6 +415,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         Returns:
             TokenOutput: token output
         """
+        session_id = resolve_session_id(session_id, request_id=request_id)
         prompt_ids = normalize_token_ids(prompt_ids)
 
         limit_key = None
@@ -404,7 +451,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         while True:
             # 1. generate tokens
             output = await super().generate(
-                request_id=request_id,
+                session_id,
                 prompt_ids=prompt_ids + final_output.token_ids,
                 sampling_params=sampling_params,
                 image_data=image_data,
