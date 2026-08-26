@@ -64,6 +64,10 @@ class ContinuousTokenBuilder:
         appends model-generated assistant tokens, and ``align_response_metadata``
         applies the recorded token edits to masks/logprobs.
 
+    SFT-facing API:
+        ``tokenize_assistant_message`` converts one prepared gold assistant
+        message into the same continuation-token shape produced by rollout.
+
     Developer extension APIs:
         Model-specific builders should subclass this class and keep the runtime
         API contracts above stable. Chat template specific behavior belongs in hooks
@@ -176,6 +180,84 @@ class ContinuousTokenBuilder:
             kind="assistant",
         )
 
+    def tokenize_assistant_message(
+        self,
+        message: dict[str, Any],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> list[int]:
+        """Encode one prepared SFT assistant message into rollout-shaped tokens.
+
+        Rollout engines already provide generated assistant token IDs and should
+        continue to call :meth:`merge_assistant_tokens` directly. SFT datasets,
+        however, start from structured assistant messages. This helper renders
+        the assistant message exactly once behind a fixed synthetic prompt and
+        removes that prompt at the token boundary. No token from the real
+        trajectory prefix is decoded or re-encoded.
+
+        Chat templates may emit whitespace after the assistant stop token even
+        though a rollout server stops at that token. The returned suffix is
+        therefore normalized to the runtime stop shape before it is merged.
+        """
+        if message.get("role") != "assistant":
+            raise ValueError(
+                f"Continuous Token assistant encoding requires role='assistant', got {message.get('role')!r}"
+            )
+
+        rendered_message = self._prepare_assistant_message_for_render(message)
+        synthetic_prompt = [_SYNTHETIC_SYSTEM_MESSAGE, _SYNTHETIC_USER_MESSAGE]
+        prompt_text = self._render_text(synthetic_prompt, add_generation_prompt=True, tools=tools)
+        completed_text = self._render_text(
+            [*synthetic_prompt, rendered_message],
+            add_generation_prompt=False,
+            tools=tools,
+        )
+        if not completed_text.startswith(prompt_text):
+            raise ValueError(
+                "Continuous Token assistant encoding requires the generation prompt to be a text prefix "
+                "of the completed assistant turn"
+            )
+
+        # Encode only the model-produced continuation. Encoding prompt+response
+        # together would let the tokenizer merge across their boundary and would
+        # no longer match rollout, where the prompt tokens already exist.
+        assistant_text = completed_text[len(prompt_text) :]
+        assistant_token_ids = normalize_token_ids(self.tokenizer.encode(assistant_text, add_special_tokens=False))
+        if not assistant_token_ids:
+            raise ValueError("Continuous Token assistant encoding produced an empty token-id suffix")
+        return self._normalize_assistant_token_ids(assistant_token_ids, message)
+
+    def _prepare_assistant_message_for_render(self, message: dict[str, Any]) -> dict[str, Any]:
+        """Normalize one prepared message before extracting its generated text."""
+        return message
+
+    def _normalize_assistant_token_ids(
+        self,
+        assistant_token_ids: list[int],
+        message: dict[str, Any],
+    ) -> list[int]:
+        """Trim template-only tokens after the final generated stop token."""
+        del message
+        eos_token_id = getattr(self.tokenizer, "eos_token_id", None)
+        if isinstance(eos_token_id, int):
+            eos_token_ids = {eos_token_id}
+        elif isinstance(eos_token_id, list | tuple | set):
+            eos_token_ids = {int(token_id) for token_id in eos_token_id if token_id is not None}
+        elif eos_token_id is None:
+            eos_token_ids = set()
+        else:
+            raise TypeError(f"Unsupported eos_token_id type: {type(eos_token_id)!r}")
+
+        if not eos_token_ids:
+            return list(assistant_token_ids)
+        for index in range(len(assistant_token_ids) - 1, -1, -1):
+            if assistant_token_ids[index] in eos_token_ids:
+                return list(assistant_token_ids[: index + 1])
+        raise ValueError(
+            "Continuous Token assistant token-id suffix does not contain eos_token_id "
+            f"{sorted(eos_token_ids)}; tail={assistant_token_ids[-16:]}"
+        )
+
     def _merge_non_assistant_token_ids(
         self, runtime_token_ids: list[int], appended_token_ids: list[int]
     ) -> MergeResult:
@@ -207,6 +289,25 @@ class ContinuousTokenBuilder:
             **self.chat_template_kwargs,
         )
         return normalize_token_ids(tokenized)
+
+    def _render_text(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        add_generation_prompt: bool,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> str:
+        rendered = apply_chat_template(
+            self.tokenizer,
+            messages,
+            tokenize=False,
+            add_generation_prompt=add_generation_prompt,
+            tools=tools,
+            **self.chat_template_kwargs,
+        )
+        if not isinstance(rendered, str):
+            raise TypeError(f"Expected chat template to render str, got {type(rendered).__name__}")
+        return rendered
 
     def render_delta_token_id(
         self,
@@ -273,8 +374,42 @@ class ContinuousTokenBuilder:
         *,
         tools: list[dict[str, Any]] | None = None,
     ) -> list[int]:
-        """Tokenize the tokens added only by ``add_generation_prompt=True``."""
-        return self.render_delta_token_id(updated_messages, [], add_generation_prompt=True, tools=tools)
+        """Tokenize a generation prompt without re-encoding trajectory messages."""
+        if not updated_messages:
+            raise ValueError("Continuous Token requires messages before a generation prompt")
+
+        if updated_messages[-1].get("role") == "tool":
+            tool_group_start = len(updated_messages) - 1
+            while tool_group_start > 0 and updated_messages[tool_group_start - 1].get("role") == "tool":
+                tool_group_start -= 1
+            tool_messages = updated_messages[tool_group_start:]
+            synthetic_tool_messages = [
+                {
+                    "role": "tool",
+                    "content": "continuous token synthetic tool response",
+                    "tool_call_id": f"continuous_token_call_{index}",
+                    "name": _DUMMY_TOOL_NAME,
+                }
+                for index in range(len(tool_messages))
+            ]
+            synthetic_context = [
+                _SYNTHETIC_SYSTEM_MESSAGE,
+                _SYNTHETIC_USER_MESSAGE,
+                self._synthetic_assistant_for_tools(synthetic_tool_messages),
+                *synthetic_tool_messages,
+            ]
+        else:
+            # Generation scaffolds for supported user/system appends are
+            # content-independent. A fixed valid context prevents this delta
+            # probe from encoding any real trajectory message a second time.
+            synthetic_context = [_SYNTHETIC_SYSTEM_MESSAGE, _SYNTHETIC_USER_MESSAGE]
+
+        return self.render_delta_token_id(
+            synthetic_context,
+            [],
+            add_generation_prompt=True,
+            tools=tools,
+        )
 
     def _iter_append_groups(self, appended_messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
         groups: list[list[dict[str, Any]]] = []
@@ -483,6 +618,42 @@ class QwenContinuousTokenBuilder(ContinuousTokenBuilder):
         self._newline_id = int(newline_ids[0])
         self._im_end_id = require_token_id(tokenizer, "<|im_end|>")
 
+    def _prepare_assistant_message_for_render(self, message: dict[str, Any]) -> dict[str, Any]:
+        """Preserve literal nested think tags in raw Qwen assistant output.
+
+        Qwen's template uses the last opening think tag when it infers
+        reasoning_content from content, which drops text when reasoning itself
+        mentions a literal think tag. Split only the outermost leading block and
+        pass the fields explicitly so every nested/generated tag survives.
+        """
+        enable_thinking = self.chat_template_kwargs.get("enable_thinking")
+        if isinstance(message.get("reasoning_content"), str):
+            if enable_thinking is not False:
+                return message
+            rendered_message = dict(message)
+            rendered_message["reasoning_content"] = ""
+            return rendered_message
+        content = message.get("content")
+        content_is_text_blocks = isinstance(content, list) and all(
+            isinstance(block, dict) and block.get("type") == "text" for block in content
+        )
+        if content_is_text_blocks:
+            content_text = "".join(str(block.get("text", "")) for block in content)
+        elif isinstance(content, str):
+            content_text = content
+        else:
+            return message
+        if not content_text.startswith("<think>") or "</think>" not in content_text:
+            return message
+
+        reasoning_content, answer_content = content_text[len("<think>") :].split("</think>", 1)
+        rendered_message = dict(message)
+        rendered_message["reasoning_content"] = reasoning_content if enable_thinking is not False else ""
+        rendered_message["content"] = (
+            [{"type": "text", "text": answer_content}] if content_is_text_blocks else answer_content
+        )
+        return rendered_message
+
     def _merge_non_assistant_token_ids(
         self, runtime_token_ids: list[int], appended_token_ids: list[int]
     ) -> MergeResult:
@@ -560,6 +731,19 @@ class GLMContinuousTokenBuilder(ContinuousTokenBuilder):
             removed_prefix_token_count=removed_prefix_token_count,
         )
 
+    def _normalize_assistant_token_ids(
+        self,
+        assistant_token_ids: list[int],
+        message: dict[str, Any],
+    ) -> list[int]:
+        # GLM templates do not terminate assistant text with EOS. Tool-call
+        # generation instead stops on <|observation|>, which is also the opening
+        # boundary of the following tool response.
+        normalized_ids = list(assistant_token_ids)
+        if message.get("tool_calls") and (not normalized_ids or normalized_ids[-1] != self._observation_id):
+            normalized_ids.append(self._observation_id)
+        return normalized_ids
+
 
 class Gemma4ContinuousTokenBuilder(ContinuousTokenBuilder):
     """Gemma4 tool-response boundary handling."""
@@ -628,12 +812,7 @@ class Gemma4ContinuousTokenBuilder(ContinuousTokenBuilder):
         last_message = updated_messages[-1]
         if last_message.get("role") not in {"user", "system"}:
             return []
-        return self.render_delta_token_id(
-            [_SYNTHETIC_SYSTEM_MESSAGE, _SYNTHETIC_USER_MESSAGE, last_message],
-            [],
-            add_generation_prompt=True,
-            tools=tools,
-        )
+        return super()._tokenize_generation_prompt_delta(updated_messages, tools=tools)
 
     def merge_non_assistant_tokens(
         self,
@@ -985,6 +1164,27 @@ class VLContinuousTokenMixin:
             tools=tools,
         )
 
+    def _render_text(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        add_generation_prompt: bool,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> str:
+        template_kwargs = dict(self.chat_template_kwargs)
+        if tools:
+            template_kwargs["tools"] = tools
+        rendered = apply_chat_template(
+            self.processor,
+            messages,
+            tokenize=False,
+            add_generation_prompt=add_generation_prompt,
+            **template_kwargs,
+        )
+        if not isinstance(rendered, str):
+            raise TypeError(f"Expected processor chat template to render str, got {type(rendered).__name__}")
+        return rendered
+
     def build_initial_tokens(
         self,
         messages: list[dict[str, Any]],
@@ -1110,6 +1310,19 @@ class GLM46VContinuousTokenBuilder(VLContinuousTokenMixin, GLMContinuousTokenBui
 
 class KimiVLContinuousTokenBuilder(VLContinuousTokenMixin, ContinuousTokenBuilder):
     """Kimi-VL (MoonViT): direct concatenation + VL processor logic."""
+
+    def _normalize_assistant_token_ids(
+        self,
+        assistant_token_ids: list[int],
+        message: dict[str, Any],
+    ) -> list[int]:
+        im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+        unk_token_id = getattr(self.tokenizer, "unk_token_id", None)
+        if isinstance(im_end_id, int) and im_end_id >= 0 and im_end_id != unk_token_id:
+            for index in range(len(assistant_token_ids) - 1, -1, -1):
+                if assistant_token_ids[index] == im_end_id:
+                    return list(assistant_token_ids[: index + 1])
+        return super()._normalize_assistant_token_ids(assistant_token_ids, message)
 
 
 class DeepSeekVL2ContinuousTokenBuilder(DeepSeekContinuousTokenBuilder):

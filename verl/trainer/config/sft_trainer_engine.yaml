@@ -39,13 +39,13 @@ data:
   apply_chat_template_kwargs: {}
   num_workers: 8
 
-  # MultiTurnSFTDataset applies chat templates to independently renderable
-  # message groups and concatenates `input_ids`
-  # as a whole sequence, which may not equal to apply_chat_template to whole messages at once.
-  # For example, Qwen Thinking series models add <think></think> tags to last turn, please check
-  # your tokenizer chat template settings.
-  # Set to True to ignore input_ids mismatch and use the concatenated input_ids as the final input_ids.
-  ignore_input_ids_mismatch: False
+  # MultiTurnSFTDataset uses append-only Continuous Token assembly, matching RL TITO.
+  # Historical tokens are never re-rendered even if the chat template would rewrite them.
+  # Auto resolves the builder family from the model config's model_type.
+  continuous_token_model_family: auto
+
+  # Extra arguments forwarded to multimodal processors during Continuous Token assembly.
+  mm_processor_kwargs: {}
 
 # Checkpoint configuration
 checkpoint:

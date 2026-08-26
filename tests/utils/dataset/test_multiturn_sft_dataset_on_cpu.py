@@ -36,43 +36,19 @@ from verl.utils.model import extract_multi_modal_inputs
 custom_model_prefix = Path("~/models").expanduser().resolve()
 
 
-def test_multiturn_sft_message_group_boundaries():
-    messages = [
-        {"role": "system", "content": "system"},
-        {"role": "user", "content": "question"},
-        {"role": "assistant", "content": "calling tools"},
-        {"role": "tool", "content": "first"},
-        {"role": "tool", "content": "second"},
-        {"role": "assistant", "content": "answer"},
-    ]
-
-    assert MultiTurnSFTDataset._message_group_end(messages, 0) == 2
-    assert MultiTurnSFTDataset._message_group_end(messages, 2) == 3
-    assert MultiTurnSFTDataset._message_group_end(messages, 3) == 5
-    assert MultiTurnSFTDataset._message_group_end(messages, 5) == 6
-    assert MultiTurnSFTDataset._is_user_query(messages[1])
-    assert not MultiTurnSFTDataset._is_user_query({"role": "user", "content": "<tool_response>result</tool_response>"})
-    assert MultiTurnSFTDataset._common_prefix_length(torch.tensor([1, 2, 4]), [1, 2, 3]) == 2
-
-
 @pytest.mark.parametrize("model_path", [f"{custom_model_prefix}/Qwen/Qwen3.5-0.8B"])
-def test_multiturn_sft_qwen35_following_user_context(model_path: str, tmp_path: Path):
+def test_multiturn_sft_qwen35_uses_append_only_continuous_tokens(model_path: str, tmp_path: Path):
+    first_turn = [
+        {"role": "user", "content": "q"},
+        {
+            "role": "assistant",
+            "content": "<think>I need output the <think> tag</think><think>",
+        },
+    ]
     conversations = [
+        first_turn,
         [
-            {"role": "user", "content": "Run the task."},
-            {"role": "assistant", "content": "<think>plan A</think>doing step one"},
-            {"role": "user", "content": "Format error: retry."},
-            {"role": "assistant", "content": "<think>plan B</think>doing step two"},
-        ],
-        [
-            {"role": "system", "content": "You are a powerful assistant."},
-            {"role": "assistant", "content": "premature response"},
-            {"role": "user", "content": "actual query"},
-            {"role": "assistant", "content": "answer"},
-        ],
-        [
-            {"role": "user", "content": "q"},
-            {"role": "assistant", "content": "<think>I need to output the tag</think><think>"},
+            *first_turn,
             {"role": "user", "content": "Format error: retry."},
             {"role": "assistant", "content": "done"},
         ],
@@ -82,83 +58,93 @@ def test_multiturn_sft_qwen35_following_user_context(model_path: str, tmp_path: 
             {"role": "user", "content": "Format error: retry."},
             {"role": "assistant", "content": "done"},
         ],
+        [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "<think>unclosed literal body"},
+            {"role": "user", "content": "Format error: retry."},
+            {"role": "assistant", "content": "done"},
+        ],
     ]
-    enable_thinking = [True, True, True, False]
-    test_file = tmp_path / "qwen35_following_user_context.parquet"
+    enable_thinking = [True, True, False, True]
+    test_file = tmp_path / "qwen35_continuous_tokens.parquet"
     pd.DataFrame({"messages": conversations, "enable_thinking": enable_thinking}).to_parquet(test_file)
 
     tokenizer = hf_tokenizer(model_path)
     dataset = MultiTurnSFTDataset(
         parquet_files=str(test_file),
         tokenizer=tokenizer,
-        config={"max_length": 512, "truncation": "error", "pad_mode": "no_padding"},
+        config={
+            "max_length": 512,
+            "truncation": "error",
+            "pad_mode": "no_padding",
+            "continuous_token_model_family": "qwen35",
+        },
     )
+    short_item, thinking_item, non_thinking_item, unclosed_item = (dataset[index] for index in range(4))
 
-    multi_user_item = dataset[0]
-    system_then_assistant_item = dataset[1]
-    thinking_literal_item = dataset[2]
-    non_thinking_literal_item = dataset[3]
-    for conversation, item, item_enable_thinking in zip(
-        conversations,
-        (multi_user_item, system_then_assistant_item, thinking_literal_item, non_thinking_literal_item),
-        enable_thinking,
-        strict=True,
-    ):
-        expected_ids = tokenizer.apply_chat_template(
-            conversation,
-            add_generation_prompt=False,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
-            enable_thinking=item_enable_thinking,
-        )["input_ids"][0]
-        assert torch.equal(item["input_ids"], expected_ids)
+    # Appending a user/retry turn never rebuilds or replaces the already-tokenized
+    # prompt + first assistant response.
+    short_length = len(short_item["input_ids"])
+    assert torch.equal(thinking_item["input_ids"][:short_length], short_item["input_ids"])
+    assert torch.equal(thinking_item["loss_mask"][:short_length], short_item["loss_mask"])
 
-    full_text = tokenizer.decode(multi_user_item["input_ids"])
-    assistant_text = tokenizer.decode(multi_user_item["input_ids"][multi_user_item["loss_mask"] == 1])
-    assert "plan A" not in full_text
-    assert "doing step one" in assistant_text
-    assert "plan B" in assistant_text
-    assert "doing step two" in assistant_text
+    thinking_text = tokenizer.decode(thinking_item["input_ids"])
+    thinking_supervised_text = tokenizer.decode(thinking_item["input_ids"][thinking_item["loss_mask"] == 1])
+    assert "I need output the <think> tag" in thinking_text
+    assert "I need output the <think> tag" in thinking_supervised_text
+    assert "done" in thinking_supervised_text
 
-    assistant_text = tokenizer.decode(
-        system_then_assistant_item["input_ids"][system_then_assistant_item["loss_mask"] == 1]
+    # A whole-conversation Qwen3.5 render drops historical reasoning. CT keeps it
+    # deliberately, matching the immutable-prefix behavior of RL TITO.
+    canonical_ids = tokenizer.apply_chat_template(
+        conversations[1],
+        add_generation_prompt=False,
+        tokenize=True,
+        enable_thinking=True,
     )
-    assert "premature response" in assistant_text
-    assert "answer" in assistant_text
+    assert thinking_item["input_ids"].tolist() != canonical_ids
+    assert "I need output" not in tokenizer.decode(canonical_ids)
 
     think_token_id = tokenizer.convert_tokens_to_ids("<think>")
-    for item in (thinking_literal_item, non_thinking_literal_item):
-        think_loss_mask = item["loss_mask"][item["input_ids"] == think_token_id]
-        # The historical assistant's final literal <think> is model output and
-        # supervised; the final assistant's template-generated <think> is not.
-        assert think_loss_mask.tolist() == [1, 0]
-
     think_end_token_id = tokenizer.convert_tokens_to_ids("</think>")
-    thinking_end_loss_mask = thinking_literal_item["loss_mask"][
-        thinking_literal_item["input_ids"] == think_end_token_id
-    ]
-    non_thinking_end_loss_mask = non_thinking_literal_item["loss_mask"][
-        non_thinking_literal_item["input_ids"] == think_end_token_id
-    ]
-    # Thinking mode only supplies the opening tag, so the model-generated closing
-    # tag is supervised. Non-thinking mode supplies the complete empty think block.
-    assert thinking_end_loss_mask.tolist() == [1]
-    assert non_thinking_end_loss_mask.tolist() == [0]
 
-    assert "I need to output" not in tokenizer.decode(thinking_literal_item["input_ids"])
+    # Thinking mode: the prompt's opening tag is not supervised; literal nested
+    # opening tags and both model-generated closing tags are supervised.
+    assert thinking_item["loss_mask"][thinking_item["input_ids"] == think_token_id].tolist() == [0, 1, 1, 0]
+    assert thinking_item["loss_mask"][thinking_item["input_ids"] == think_end_token_id].tolist() == [1, 1]
+
+    # Non-thinking mode: each empty think block belongs to the generation prompt,
+    # while the extra literal opening tag in the prepared response is model output.
+    assert non_thinking_item["loss_mask"][non_thinking_item["input_ids"] == think_token_id].tolist() == [0, 1, 0]
+    assert non_thinking_item["loss_mask"][non_thinking_item["input_ids"] == think_end_token_id].tolist() == [0, 0]
+
+    unclosed_supervised_text = tokenizer.decode(unclosed_item["input_ids"][unclosed_item["loss_mask"] == 1])
+    assert "<think>unclosed literal body" in unclosed_supervised_text
+    assert unclosed_item["loss_mask"][unclosed_item["input_ids"] == think_token_id].tolist() == [0, 1, 0]
+
+    # Qwen CT inserts the template-only newline after generated <|im_end|>; the
+    # assistant EOS remains supervised and the inserted newline does not.
+    im_end_token_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    newline_token_id = tokenizer.encode("\n", add_special_tokens=False)[0]
+    first_assistant_end = next(
+        index
+        for index, (token_id, mask) in enumerate(
+            zip(thinking_item["input_ids"].tolist(), thinking_item["loss_mask"].tolist(), strict=True)
+        )
+        if token_id == im_end_token_id and mask == 1
+    )
+    assert thinking_item["input_ids"][first_assistant_end + 1].item() == newline_token_id
+    assert thinking_item["loss_mask"][first_assistant_end + 1].item() == 0
 
 
 @pytest.mark.parametrize("model_path", [f"{custom_model_prefix}/Qwen/Qwen3.5-0.8B"])
-def test_multiturn_sft_qwen36_preserve_thinking(model_path: str, tmp_path: Path):
+def test_multiturn_sft_qwen36_preserve_thinking_does_not_rewrite_history(model_path: str, tmp_path: Path):
     tokenizer = hf_tokenizer(model_path)
     qwen35_condition = "{%- if loop.index0 > ns.last_query_index %}"
     qwen36_condition = (
         "{%- if (preserve_thinking is defined and preserve_thinking is true) or (loop.index0 > ns.last_query_index) %}"
     )
     assert tokenizer.chat_template.count(qwen35_condition) == 1
-    # Qwen3.6 uses the same relevant assistant rendering as Qwen3.5 plus
-    # this preserve_thinking branch, so exercise it without another model fixture.
     tokenizer.chat_template = tokenizer.chat_template.replace(qwen35_condition, qwen36_condition)
 
     conversations = [
@@ -188,94 +174,60 @@ def test_multiturn_sft_qwen36_preserve_thinking(model_path: str, tmp_path: Path)
         ],
     ]
     enable_thinking = [True, True, False, True]
-    test_file = tmp_path / "qwen36_preserve_thinking.parquet"
+    test_file = tmp_path / "qwen36_continuous_tokens.parquet"
     pd.DataFrame({"messages": conversations, "enable_thinking": enable_thinking}).to_parquet(test_file)
 
-    dataset = MultiTurnSFTDataset(
-        parquet_files=str(test_file),
-        tokenizer=tokenizer,
-        config={
-            "max_length": 512,
-            "truncation": "error",
-            "pad_mode": "no_padding",
-            "apply_chat_template_kwargs": {"preserve_thinking": True},
-        },
-    )
-    items = [dataset[index] for index in range(len(conversations))]
-    for conversation, item, item_enable_thinking in zip(conversations, items, enable_thinking, strict=True):
-        expected_ids = tokenizer.apply_chat_template(
-            conversation,
-            add_generation_prompt=False,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
-            enable_thinking=item_enable_thinking,
-            preserve_thinking=True,
-        )["input_ids"][0]
-        assert torch.equal(item["input_ids"], expected_ids)
+    def build_dataset(preserve_thinking: bool):
+        return MultiTurnSFTDataset(
+            parquet_files=str(test_file),
+            tokenizer=tokenizer,
+            config={
+                "max_length": 512,
+                "truncation": "error",
+                "pad_mode": "no_padding",
+                "continuous_token_model_family": "qwen35",
+                "apply_chat_template_kwargs": {"preserve_thinking": preserve_thinking},
+            },
+        )
+
+    preserve_dataset = build_dataset(True)
+    drop_dataset = build_dataset(False)
+    preserve_items = [preserve_dataset[index] for index in range(len(conversations))]
+    drop_items = [drop_dataset[index] for index in range(len(conversations))]
+
+    # preserve_thinking only controls whole-history re-rendering. CT never
+    # re-renders that history, so both settings produce the same TITO stream.
+    for preserve_item, drop_item in zip(preserve_items, drop_items, strict=True):
+        assert torch.equal(preserve_item["input_ids"], drop_item["input_ids"])
+        assert torch.equal(preserve_item["loss_mask"], drop_item["loss_mask"])
+
+    for item in preserve_items:
         supervised_text = tokenizer.decode(item["input_ids"][item["loss_mask"] == 1])
         assert "answer A" in supervised_text
         assert "answer B" in supervised_text
 
+    assert "reason A" in tokenizer.decode(preserve_items[0]["input_ids"])
+    assert "reason A" in tokenizer.decode(drop_items[0]["input_ids"])
+    assert "reason A" in tokenizer.decode(preserve_items[3]["input_ids"][preserve_items[3]["loss_mask"] == 1])
+
     think_token_id = tokenizer.convert_tokens_to_ids("<think>")
     think_end_token_id = tokenizer.convert_tokens_to_ids("</think>")
-    for item in (items[1], items[3]):
-        assert item["loss_mask"][item["input_ids"] == think_token_id].tolist() == [0, 0]
-        assert item["loss_mask"][item["input_ids"] == think_end_token_id].tolist() == [1, 1]
-    assert items[0]["loss_mask"][items[0]["input_ids"] == think_token_id].tolist() == [0, 1, 0]
-    assert items[0]["loss_mask"][items[0]["input_ids"] == think_end_token_id].tolist() == [1, 1]
-    assert "reason A" in tokenizer.decode(items[0]["input_ids"][items[0]["loss_mask"] == 1])
-    assert "reason A" in tokenizer.decode(items[3]["input_ids"][items[3]["loss_mask"] == 1])
-
-    non_thinking_item = items[2]
-    assert non_thinking_item["loss_mask"][non_thinking_item["input_ids"] == think_token_id].tolist() == [0, 1, 0]
-    assert non_thinking_item["loss_mask"][non_thinking_item["input_ids"] == think_end_token_id].tolist() == [0, 0]
-
-    # Empty model-generated reasoning merges the prompt newline with the response's
-    # leading newline; mask that merged token while keeping </think> supervised.
-    empty_thinking_item = items[1]
-    think_end_positions = torch.nonzero(empty_thinking_item["input_ids"] == think_end_token_id).flatten()
-    assert empty_thinking_item["loss_mask"][think_end_positions - 1].tolist() == [0, 0]
-
-    drop_file = tmp_path / "qwen36_drop_thinking.parquet"
-    pd.DataFrame({"messages": [conversations[0]], "enable_thinking": [True]}).to_parquet(drop_file)
-    drop_dataset = MultiTurnSFTDataset(
-        parquet_files=str(drop_file),
-        tokenizer=tokenizer,
-        config={
-            "max_length": 512,
-            "truncation": "error",
-            "pad_mode": "no_padding",
-            "apply_chat_template_kwargs": {"preserve_thinking": False},
-        },
-    )
-    drop_item = drop_dataset[0]
-    drop_expected_ids = tokenizer.apply_chat_template(
-        conversations[0],
-        add_generation_prompt=False,
-        tokenize=True,
-        return_dict=True,
-        return_tensors="pt",
-        enable_thinking=True,
-        preserve_thinking=False,
-    )["input_ids"][0]
-    assert torch.equal(drop_item["input_ids"], drop_expected_ids)
-    assert "reason A" not in tokenizer.decode(drop_item["input_ids"])
-    assert "answer A" in tokenizer.decode(drop_item["input_ids"][drop_item["loss_mask"] == 1])
-    assert drop_item["loss_mask"][drop_item["input_ids"] == think_token_id].tolist() == [1, 0]
-    assert drop_item["loss_mask"][drop_item["input_ids"] == think_end_token_id].tolist() == [1]
+    assert preserve_items[0]["loss_mask"][preserve_items[0]["input_ids"] == think_token_id].tolist() == [0, 1, 0]
+    assert preserve_items[0]["loss_mask"][preserve_items[0]["input_ids"] == think_end_token_id].tolist() == [1, 1]
+    assert preserve_items[2]["loss_mask"][preserve_items[2]["input_ids"] == think_token_id].tolist() == [0, 1, 0]
+    assert preserve_items[2]["loss_mask"][preserve_items[2]["input_ids"] == think_end_token_id].tolist() == [0, 0]
 
 
 @pytest.mark.parametrize(
-    "model_path, ignore_input_ids_mismatch",
+    "model_path, continuous_token_model_family",
     [
-        (f"{custom_model_prefix}/Qwen/Qwen2.5-0.5B", False),
-        (f"{custom_model_prefix}/Qwen/Qwen3-0.6B", True),
-        (f"{custom_model_prefix}/Qwen/Qwen3.5-0.8B", False),
+        (f"{custom_model_prefix}/Qwen/Qwen2.5-0.5B", "qwen25"),
+        (f"{custom_model_prefix}/Qwen/Qwen3-0.6B", "qwen3"),
+        (f"{custom_model_prefix}/Qwen/Qwen3.5-0.8B", "qwen35"),
     ],
 )
-def test_multiturn_sft_dataset(model_path: str, ignore_input_ids_mismatch: bool):
-    print(f"Starting test... model_path={model_path}, ignore_input_ids_mismatch={ignore_input_ids_mismatch}")
+def test_multiturn_sft_dataset(model_path: str, continuous_token_model_family: str):
+    print(f"Starting test... model_path={model_path}, family={continuous_token_model_family}")
     # Create a temporary parquet file with test data
     test_data = {
         "messages": [
@@ -312,7 +264,7 @@ def test_multiturn_sft_dataset(model_path: str, ignore_input_ids_mismatch: bool)
         "max_length": 512,
         "truncation": "error",
         "multiturn": {"messages_key": "messages"},
-        "ignore_input_ids_mismatch": ignore_input_ids_mismatch,
+        "continuous_token_model_family": continuous_token_model_family,
     }
     dataset = MultiTurnSFTDataset(parquet_files=test_file, tokenizer=tokenizer, processor=processor, config=config)
 
@@ -424,7 +376,7 @@ def test_multiturn_sft_dataset(model_path: str, ignore_input_ids_mismatch: bool)
         "max_length": 1024,
         "truncation": "error",
         "multiturn": {"messages_key": "messages"},
-        "ignore_input_ids_mismatch": ignore_input_ids_mismatch,
+        "continuous_token_model_family": continuous_token_model_family,
     }
     small_dataset = MultiTurnSFTDataset(
         parquet_files=test_file, tokenizer=tokenizer, processor=processor, config=padding_config
@@ -447,7 +399,7 @@ def test_multiturn_sft_dataset(model_path: str, ignore_input_ids_mismatch: bool)
         "truncation": "error",
         "multiturn": {"messages_key": "messages"},
         "pad_mode": "no_padding",
-        "ignore_input_ids_mismatch": ignore_input_ids_mismatch,
+        "continuous_token_model_family": continuous_token_model_family,
     }
     dataset = MultiTurnSFTDataset(parquet_files=test_file, tokenizer=tokenizer, processor=processor, config=config)
 
@@ -459,9 +411,12 @@ def test_multiturn_sft_dataset(model_path: str, ignore_input_ids_mismatch: bool)
         assert key in item0, f"Missing key {key} in no-padding mode dataset item"
         assert isinstance(item0[key], torch.Tensor), f"Expected torch.Tensor for {key} in no-padding mode"
 
-    # make sure assistant_text matches with expected
+    # Assistant continuations are rollout-shaped: template separators inserted
+    # by CT are not included in the supervised token selection.
     assistant_text = tokenizer.decode(item0["input_ids"][item0["loss_mask"] == 1])
-    assert assistant_text == "2+2 equals 4.<|im_end|>\n4+4 equals 8.<|im_end|>\n"
+    assert "2+2 equals 4." in assistant_text
+    assert "4+4 equals 8." in assistant_text
+    assert assistant_text.count("<|im_end|>") == 2
 
     print("All tests passed!")
     print("Starting test...")
@@ -474,14 +429,7 @@ def test_multiturn_sft_dataset(model_path: str, ignore_input_ids_mismatch: bool)
     ],
 )
 def test_multiturn_sft_dataset_with_chat_template_kwargs(model_path: str, apply_chat_template_kwargs: dict):
-    """Test that custom apply_chat_template_kwargs are forwarded to system prompt
-    measurement so the loss mask is not shifted when kwargs change tokenization.
-
-    Some chat templates embed configurable fields (e.g. model_identity) in the
-    system prompt. If these kwargs are not forwarded to system prompt length
-    measurement, the per-turn strip length is wrong, causing role markers to be
-    removed and the loss mask to shift.
-    """
+    """Test that custom chat-template kwargs reach all CT rendering calls."""
     test_data = {
         "messages": [
             [
@@ -507,6 +455,7 @@ def test_multiturn_sft_dataset_with_chat_template_kwargs(model_path: str, apply_
         "truncation": "error",
         "pad_mode": "no_padding",
         "apply_chat_template_kwargs": apply_chat_template_kwargs,
+        "continuous_token_model_family": "gptoss",
     }
     dataset = MultiTurnSFTDataset(parquet_files=test_file, tokenizer=tokenizer, processor=None, config=config)
 
@@ -652,7 +601,13 @@ def test_multiturn_sft_vlm_dataset_on_cpu(model_path, vlm_data_file):
     df = pd.read_parquet(vlm_data_file)
     tokenizer = hf_tokenizer(model_path)
     processor = hf_processor(model_path)
-    config = {"max_length": 1024, "pad_mode": "no_padding", "truncation": "error", "messages_key": "messages"}
+    config = {
+        "max_length": 1024,
+        "pad_mode": "no_padding",
+        "truncation": "error",
+        "messages_key": "messages",
+        "continuous_token_model_family": "qwen3vl",
+    }
     dataset = MultiTurnSFTDataset(parquet_files=vlm_data_file, tokenizer=tokenizer, processor=processor, config=config)
     assert dataset.pad_mode == DatasetPadMode.NO_PADDING
 
@@ -713,7 +668,13 @@ def test_multiturn_sft_vlm_dataloader_on_cpu(model_path, vlm_data_file):
     df = pd.read_parquet(vlm_data_file)
     tokenizer = hf_tokenizer(model_path)
     processor = hf_processor(model_path)
-    config = {"max_length": 1024, "pad_mode": "no_padding", "truncation": "error", "messages_key": "messages"}
+    config = {
+        "max_length": 1024,
+        "pad_mode": "no_padding",
+        "truncation": "error",
+        "messages_key": "messages",
+        "continuous_token_model_family": "qwen3vl",
+    }
     dataset = MultiTurnSFTDataset(parquet_files=vlm_data_file, tokenizer=tokenizer, processor=processor, config=config)
     assert dataset.pad_mode == DatasetPadMode.NO_PADDING
 
