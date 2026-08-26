@@ -15,20 +15,12 @@
 
 """Refit support for vLLM's ``Mxfp4MoEMethod`` (DeepSeek V4 routed experts).
 
-Reloading these experts means undoing the kernel's weight conversion: the refit
-stream carries checkpoint-layout tensors while the live parameters hold whatever
-layout the selected backend rewrote them into. Each expert param is handed a
-checkpoint-layout buffer to absorb the reload, then the backend's conversion is
-replayed and folded back into the live storage, so the addresses the CUDA graph
-captured stay put.
-
-Backends differ only in how much of that buffer has to be a real allocation.
-A param whose kernel layout spans the same bytes as the checkpoint one -- the
-expert weights under both DeepGEMM and Marlin -- stages as a reinterpret of its
-own storage and costs nothing. Only the block scales, which change element
-count, need an allocation, and those are a sixteenth of the weights.
-
-``verl/utils/vllm/vllm_quant_utils.py`` is the entry point that drives these.
+The refit stream carries checkpoint-layout tensors; live params hold whatever the
+backend rewrote them into. Each expert param is handed a checkpoint-layout buffer to
+absorb the reload, then the backend's conversion is replayed and folded back into the
+live storage (so the addresses the CUDA graph captured stay put). Only block scales
+(change element count) need a real allocation; expert weights stage as a reinterpret of
+their own storage. Entry point: ``verl/utils/vllm/vllm_quant_utils.py``.
 """
 
 import logging
@@ -36,10 +28,60 @@ from unittest.mock import patch
 
 import torch
 
+from verl.utils.vllm.vllm_fp8_utils import _scale_from_amax, dsv4_fp8_linear_leaf, quantize_dsv4_fp8_linear
+
 logger = logging.getLogger(__name__)
 
 _MXFP4_SF_BLOCK = 32
 _MXFP4_LIVE_ATTR = "_verl_mxfp4_live_params"
+
+# MXFP4 quantization — inlined from Megatron-Bridge quantization_utils (no megatron import here).
+_FP4_E2M1_MAX = 6.0
+
+
+def _quantize_mxfp4_e2m1_like_scale(weight, source_scale, *, name="", block_size=_MXFP4_SF_BLOCK):
+    """Quantize a 2-D weight to packed MXFP4 E2M1 using source scale geometry."""
+    if weight.ndim != 2:
+        label = f" for {name!r}" if name else ""
+        raise RuntimeError(f"MXFP4 quantized export expects a 2-D weight{label}, got {weight.ndim}D")
+    rows, cols = weight.shape
+    if cols % 2 != 0 or cols % block_size != 0 or source_scale.shape != (rows, cols // block_size):
+        label = f" for {name!r}" if name else ""
+        raise RuntimeError(
+            f"Unsupported MXFP4 geometry{label}: weight={tuple(weight.shape)} scale={tuple(source_scale.shape)}"
+        )
+    weight_f32 = weight.to(torch.float32)
+    packed = torch.empty((rows, cols // 2), dtype=torch.uint8, device=weight.device)
+    scale_f32 = torch.empty(tuple(source_scale.shape), dtype=torch.float32, device=weight.device)
+    boundaries = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0], dtype=torch.float32, device=weight.device)
+    max_chunk_elements = 16_000_000
+    rows_per_chunk = max(1, min(rows, max_chunk_elements // max(cols, 1)))
+    scale_cols = source_scale.shape[1]
+    for row_start in range(0, rows, rows_per_chunk):
+        row_end = min(row_start + rows_per_chunk, rows)
+        chunk = weight_f32[row_start:row_end].reshape(-1, scale_cols, block_size)
+        chunk_amax = chunk.abs().amax(dim=-1)
+        if source_scale.dtype == torch.uint8:
+            unrounded_scale = torch.where(
+                chunk_amax > 0,
+                chunk_amax / _FP4_E2M1_MAX,
+                torch.ones_like(chunk_amax),
+            )
+            chunk_scale = torch.exp2(torch.ceil(torch.log2(unrounded_scale)).clamp(min=-127, max=127))
+        else:
+            chunk_scale = _scale_from_amax(chunk_amax, _FP4_E2M1_MAX, source_scale.dtype)
+        scale_f32[row_start:row_end] = chunk_scale
+        normalized = chunk / chunk_scale[:, :, None]
+        codes = torch.bucketize(normalized.abs(), boundaries).to(torch.uint8)
+        codes = (codes | ((normalized < 0).to(torch.uint8) * 8)).reshape(row_end - row_start, cols)
+        lo = codes[:, 0::2].to(torch.int16)
+        hi = codes[:, 1::2].to(torch.int16)
+        packed[row_start:row_end] = (lo | (hi << 4)).to(torch.uint8)
+    if source_scale.dtype == torch.uint8:
+        output_scale = (torch.log2(scale_f32).round() + 127).clamp(min=0, max=254).to(torch.uint8)
+    else:
+        output_scale = scale_f32.to(dtype=source_scale.dtype)
+    return packed.contiguous().view(torch.int8), output_scale
 
 
 def is_deepseek_v4_model(model):
@@ -54,16 +96,46 @@ def is_deepseek_v4_model(model):
     return getattr(text_config, "model_type", None) == "deepseek_v4"
 
 
-def iter_deepseek_v4_weights(weights):
-    """Pass the refit stream through untouched apart from a dtype reinterpret.
+def _quantize_expert_to_mxfp4(weight):
+    """Quantize a 2-D bf16 expert weight to packed MXFP4 E2M1 + e8m0 scale (geometry [out, in] -> scale [out, in//32])."""
+    rows, cols = weight.shape
+    scale_geom = torch.empty(rows, cols // _MXFP4_SF_BLOCK, dtype=torch.uint8, device=weight.device)
+    packed, scale = _quantize_mxfp4_e2m1_like_scale(weight, scale_geom, name="dsv4_expert")
+    return packed, scale
 
-    A DSv4 checkpoint already ships quantized experts, so unlike the BF16 path
-    there is nothing to quantize here. The expert tensors only need to be seen
-    as the raw ``uint8`` byte layout that ``Mxfp4MoEMethod`` allocated.
+
+def iter_deepseek_v4_weights(weights):
+    """Normalize the refit stream to the packed layout vLLM expects.
+
+    Automodel loads the checkpoint through ``from_hf``, which unpacks FP4
+    experts -> bf16 and dequantizes the non-expert FP8 linears -> bf16
+    (stripping their ``.scale``). vLLM wants experts packed ``[out, in // 2]``
+    int8 + ``[out, in // 32]`` e8m0 scale, and the FP8 linears as fp8_e4m3 +
+    block scale — so both must be re-quantized here before ``load_weights``
+    (else a 2x shape mismatch, or NaN from the staging-fill scale). The
+    paired ``.scale`` is emitted right after each ``.weight``. The
+    Megatron-Bridge path already streams quantized tensors and is handled by
+    the ``int8`` branch (``uint8`` reinterpret only).
+    ``dsv4_fp8_linear_leaf`` (from ``vllm_fp8_utils``) selects the
+    checkpoint-FP8 linears; bf16-on-disk layers (compressor, norms, embed,
+    gate, head) pass through untouched.
     """
     for name, weight in weights:
+        if ".experts." in name and name.endswith(".weight") and weight.dtype == torch.bfloat16:
+            packed, scale = _quantize_expert_to_mxfp4(weight)
+            yield name, packed
+            yield name[: -len(".weight")] + ".scale", scale
+            continue
         if ".experts." in name and weight.dtype in (torch.int8, torch.float8_e8m0fnu):
             weight = weight.view(torch.uint8)
+            yield name, weight
+            continue
+        fp8_leaf = dsv4_fp8_linear_leaf(name)
+        if fp8_leaf is not None and weight.dtype == torch.bfloat16:
+            fp8_weight, scale = quantize_dsv4_fp8_linear(weight, fp8_leaf)
+            yield name, fp8_weight
+            yield name[: -len(".weight")] + ".scale", scale
+            continue
         yield name, weight
 
 
