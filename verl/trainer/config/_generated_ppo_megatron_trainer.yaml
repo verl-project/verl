@@ -381,6 +381,7 @@ actor_rollout_ref:
       _target_: verl.workers.config.CheckpointEngineConfig
       backend: naive
       update_weights_bucket_megabytes: 2048
+      overlap_bucket_processing: false
       engine_kwargs: {}
       custom_backend_module: null
     trace:

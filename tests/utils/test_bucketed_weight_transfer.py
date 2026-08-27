@@ -135,7 +135,7 @@ def _sender_fn(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm):
     asyncio.run(sender.async_send_weights(iter(weights)))
 
 
-def _receiver_fn(zmq_handle, use_shm, result_queue):
+def _receiver_fn(zmq_handle, use_shm, result_queue, overlap_bucket_processing=False):
     """Receiver process: receive weights, send back (name, dtype, shape, checksum)."""
     from verl.utils.device import get_device_name
     from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
@@ -145,6 +145,7 @@ def _receiver_fn(zmq_handle, use_shm, result_queue):
         zmq_handle=zmq_handle,
         device=device,
         use_shm=use_shm,
+        overlap_bucket_processing=overlap_bucket_processing,
     )
     received = []
     receiver.receive_weights(
@@ -158,7 +159,7 @@ def _receiver_fn(zmq_handle, use_shm, result_queue):
 # ---------------------------------------------------------------------------
 # Test helper
 # ---------------------------------------------------------------------------
-def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm):
+def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm, overlap_bucket_processing=False):
     """Spawn sender + receiver processes, then validate received tensors."""
     zmq_handle = _unique_zmq_handle()
     seed = 42
@@ -171,7 +172,7 @@ def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm):
     )
     receiver_p = ctx.Process(
         target=_receiver_fn,
-        args=(zmq_handle, use_shm, result_queue),
+        args=(zmq_handle, use_shm, result_queue, overlap_bucket_processing),
     )
 
     # Start sender first (it binds), then receiver (it connects)
@@ -240,6 +241,23 @@ class TestBucketedWeightTransferSHM:
     def test_empty_weights(self):
         _transfer_and_validate([], bucket_size_mb=1, use_shm=True)
 
+    def test_overlap_multiple_buckets(self):
+        # overlap_bucket_processing: receiver acks each bucket before processing
+        # it; received tensors must still be intact (early buffer release).
+        specs = [(f"layer{i}.weight", (128, 128), torch.float32) for i in range(20)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=True, overlap_bucket_processing=True)
+
+    def test_overlap_mixed_dtypes(self):
+        specs = [
+            ("fp32_param", (64, 64), torch.float32),
+            ("bf16_param", (64, 64), torch.bfloat16),
+            ("fp16_param", (32, 32), torch.float16),
+        ]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=True, overlap_bucket_processing=True)
+
+    def test_overlap_empty_weights(self):
+        _transfer_and_validate([], bucket_size_mb=1, use_shm=True, overlap_bucket_processing=True)
+
 
 # ---------------------------------------------------------------------------
 # CUDA IPC tests (CUDA only — IPC is not supported on NPU)
@@ -289,3 +307,17 @@ class TestBucketedWeightTransferIPC:
         specs.append(("lm_head", (1024, 1024), torch.float32))  # 4MB
 
         _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False)
+
+    def test_overlap_multiple_buckets(self):
+        # overlap_bucket_processing on the IPC path stages a private copy of
+        # each bucket before the early ack; received tensors must stay intact.
+        specs = [(f"layer{i}.weight", (128, 128), torch.float32) for i in range(20)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False, overlap_bucket_processing=True)
+
+    def test_overlap_large_weight(self):
+        # Oversized weights travel as raw IPC handles; those buckets must fall
+        # back to the late ack even when overlap_bucket_processing is enabled.
+        specs = [("embedding", (1024, 1024), torch.float32)]  # 4MB
+        specs.extend([(f"layer{i}.weight", (128,), torch.bfloat16) for i in range(5)])
+        specs.append(("lm_head", (1024, 1024), torch.float32))  # 4MB
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False, overlap_bucket_processing=True)

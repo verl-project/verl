@@ -244,6 +244,14 @@ class BucketedWeightReceiver:
         zmq_handle: ZMQ IPC socket path (must match sender)
         device: Target device for received tensors
         use_shm: Use shared memory instead of CUDA IPC
+        overlap_bucket_processing: If True, ack each bucket as soon as the
+            shared transfer buffer is no longer referenced — before the bucket
+            is processed (e.g. online quantization + load_weights) — so the
+            sender can start filling the next bucket while the current one is
+            being processed. On the IPC path this stages one private copy of
+            the bucket (one extra bucket of device memory). Buckets that carry
+            raw IPC handles (oversized weights) always use the late ack,
+            because the sender may free the source tensor once acked.
     """
 
     def __init__(
@@ -251,10 +259,12 @@ class BucketedWeightReceiver:
         zmq_handle: str,
         device: torch.device,
         use_shm: bool = False,
+        overlap_bucket_processing: bool = False,
     ):
         self.zmq_handle = zmq_handle
         self.device = device
         self.use_shm = use_shm
+        self.overlap_bucket_processing = overlap_bucket_processing
 
         self.zmq_context = zmq.Context.instance()
         self.socket = None
@@ -265,6 +275,14 @@ class BucketedWeightReceiver:
         """
         Receive weights from sender and process each bucket via callback.
 
+        The ack sent back to the sender after each bucket means "the shared
+        transfer buffer may be overwritten": the sender waits for it before
+        filling the next bucket. With ``overlap_bucket_processing`` enabled,
+        the ack is sent as soon as every tensor of the bucket has been
+        materialized into private memory (independent device copies on the
+        shm path, a staged buffer copy on the IPC path), letting the sender
+        fill bucket i+1 while the callback is still processing bucket i.
+
         Args:
             on_bucket_received: Callback function(weights: list[(name, tensor)],
             is_last: bool) called per bucket. ``is_last`` marks the final bucket
@@ -272,36 +290,29 @@ class BucketedWeightReceiver:
             (e.g. vLLM ``add_lora``, which takes one adapter dict per call) can
             defer their finalization until the whole adapter has arrived.
         """
-        # Overlap mode: ack each bucket as soon as the shared buffer is no
-        # longer referenced, so the sender can start refilling it (gather +
-        # copy of bucket i+1) while this side is still processing bucket i
-        # (e.g. online quantization + load_weights).
-        # - shm path: every tensor is already a fresh device copy (``.to``),
-        #   so the shared buffer is free once those copies complete — ack right
-        #   after them, no staging needed.
-        # - IPC path: received tensors are views into the sender's device
-        #   buffer, so stage a private copy first (one extra device copy and
-        #   one bucket of device memory).
-        # Buckets that carry raw IPC handles (oversized weights) always use the
-        # late ack, because the sender may free the source tensor once acked.
-        early_ack = os.getenv("VERL_WEIGHT_SYNC_OVERLAP", "1") == "1"
         staging = None
         try:
             self._init_socket()
             self._init_buffer()
-            if early_ack and not self.use_shm:
+            if self.overlap_bucket_processing and not self.use_shm:
+                # IPC path: received tensors are views into the sender's device
+                # buffer, so stage a private copy before releasing the buffer.
                 staging = torch.empty_like(self.buffer)
-                logger.info("BucketedWeightReceiver: overlap mode enabled (early ack + staged bucket)")
+                logger.info("BucketedWeightReceiver: overlap_bucket_processing enabled (early ack + staged bucket)")
 
             # receive bucket and update weights
             while True:
                 metadata = self.socket.recv_pyobj()
-                weights, tensor = [], None
                 bucket_meta = metadata["bucket_meta"]
-                can_early_ack = early_ack and all(meta["handle"] is None for meta in bucket_meta.values())
+                # Buckets that carry raw IPC handles (oversized weights) always
+                # use the late ack: the sender may free the source tensor once acked.
+                early_ack = self.overlap_bucket_processing and all(
+                    meta["handle"] is None for meta in bucket_meta.values()
+                )
+                weights, tensor = [], None
                 src = self.buffer
                 acked = False
-                if can_early_ack and not self.use_shm:
+                if early_ack and not self.use_shm:
                     staging.copy_(self.buffer, non_blocking=True)
                     # Wait for the copy to finish before acking: the sender starts
                     # overwriting the shared buffer right after it gets the ack.
@@ -320,7 +331,7 @@ class BucketedWeightReceiver:
                     if self.use_shm:
                         tensor = tensor.to(self.device)
                     weights.append((name, tensor))
-                if can_early_ack and self.use_shm:
+                if early_ack and self.use_shm:
                     # All tensors above are independent device copies; the shm
                     # buffer is no longer referenced once the copies complete.
                     get_torch_device().synchronize()
@@ -338,7 +349,6 @@ class BucketedWeightReceiver:
                 if is_last:
                     break
             del staging
-            staging = None
         finally:
             self._cleanup()
 
