@@ -44,7 +44,7 @@ zh/
     - [模型评测](./dev_guide/model_dev/evaluation.md) - 模型评测指南
 - [精度调试](./dev_guide/precision_analysis) 
     - [精度对齐指南](./dev_guide/precision_analysis/precision_alignment.md) - 精度对齐指南
-    - [Precision Debugger (msprobe) in verl](../en/dev_guide/precision_analysis/precision_debugger.md) - 精度问题排查工具
+    - [精度调试器](../en/dev_guide/precision_analysis/precision_debugger.md) - 精度问题排查工具
 - [性能调优](./dev_guide/performance) 
     - [昇腾性能分析指南](./dev_guide/performance/ascend_performance_analysis_guide.md) - 性能分析指南
     - [昇腾性能调优指南](./dev_guide/performance/perf_tuning_on_ascend.rst) - 性能调优指南
