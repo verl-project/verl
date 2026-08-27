@@ -21,7 +21,7 @@ zh/
 - [verl on Ascend 2026Q2 roadmap](https://github.com/verl-project/verl/issues/5526) - 2026Q2 roadmap 已发布
 
 ## 快速开始
-- [Docker 构建使用指南](./get_start/dockerfile_build_guidance.rst) - 构建并使用昇腾环境的 Docker 镜像  
+- [昇腾镜像说明](./get_start/dockerfile_build_guidance.rst) - 构建并使用昇腾环境的 Docker 镜像  
 - [自定义环境安装](./get_start/install_guidance.rst) - 在昇腾 NPU 上自定义安装 verl                                                    
 - [快速上手](./get_start/quick_start.rst) - 快速上手在昇腾 NPU 上运行 verl
 

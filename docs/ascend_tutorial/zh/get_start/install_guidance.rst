@@ -50,7 +50,7 @@ Atlas 800T A3
 框架后端支持说明
 ----------------
 
-当前NPU上支持以下常见训推后端的部署，您可以根据我们的 `镜像部署指南 <dockerfile_build_guidance.rst>`__ 直接获取发布的镜像，也可以根据下文进行自定义安装。
+当前NPU上支持以下常见训推后端的部署，您可以根据我们的 `昇腾镜像说明 <dockerfile_build_guidance.rst>`__ 直接获取发布的镜像，也可以根据下文进行自定义安装。
 
 .. list-table::
    :header-rows: 1
@@ -69,7 +69,7 @@ Atlas 800T A3
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 您可以从 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 获取相关镜像，或者自行从DockerFile构建，相关说明参照
-`镜像部署指南 <dockerfile_build_guidance.rst>`__\ 。
+`昇腾镜像说明 <dockerfile_build_guidance.rst>`__\ 。
 
 
 2. 自定义安装-vLLM + FSDP/Megatron
