@@ -166,6 +166,29 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
 
 
 @torch.no_grad()
+def _refresh_unsharded_views_after_move(handle):
+    """Re-point a handle's per-parameter views at the moved flat-parameter storage.
+
+    ``FlatParamHandle.flat_param_to()`` only refreshes the per-parameter views when
+    ``use_orig_params=True``. With ``use_orig_params=False`` (verl's default) and an
+    unsharded strategy -- which ``fsdp_size=1`` yields, because a 1-rank shard group
+    degrades to ``NO_SHARD`` -- the original views keep pointing at the pre-move
+    storage. That keeps the old device allocation alive, so the offload frees nothing
+    and the following reload allocates a second copy.
+
+    ``as_params=False`` matches how FSDP registers the views at rest for
+    ``use_orig_params=False``, so the flat parameter stays the only registered
+    ``nn.Parameter`` and ``model.parameters()`` (and the optimizer param groups) are
+    unchanged.
+    """
+    if handle._use_orig_params:
+        return  # flat_param_to() already refreshed the views
+    if handle.uses_sharded_strategy:
+        return  # sharded strategies rebuild the views on the next unshard
+    handle._use_unsharded_views(as_params=False)
+
+
+@torch.no_grad()
 def offload_fsdp_model_to_cpu(model: FSDP, empty_cache: bool = True):
     if fsdp_version(model) == 2 or fsdp_version(model) == 0:
         offload_fsdp2_model_to_cpu(model, empty_cache)
@@ -188,6 +211,7 @@ def offload_fsdp_model_to_cpu(model: FSDP, empty_cache: bool = True):
         # the following still keeps id(._local_shard) != id(.data)
         flat_param._local_shard = flat_param.data
         assert id(flat_param._local_shard) != id(flat_param.data)
+        _refresh_unsharded_views_after_move(handle)
     if empty_cache:
         get_torch_device().empty_cache()
 
@@ -229,6 +253,7 @@ def load_fsdp_model_to_gpu(model: FSDP):
         handle.flat_param_to(torch.device(f"{get_device_name()}:{device_id}"), non_blocking=True)
         # the following still keeps id(._local_shard) != id(.data)
         flat_param._local_shard = flat_param.data
+        _refresh_unsharded_views_after_move(handle)
 
 
 @torch.no_grad()

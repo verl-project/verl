@@ -25,3 +25,6 @@ torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp2_cp
 # Regression for colocated FSDP2 full-parameter model transfers. It locks in
 # PyTorch's implicit pinned allocation for non-blocking D2H Module.to().
 torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp2_pinned_model_transfer.py
+# Regression for FSDP1 param_offload under an unsharded strategy (fsdp_size=1).
+# Only needs 2 ranks to build the one-rank shard group that degrades to NO_SHARD.
+torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp1_no_shard_offload.py
