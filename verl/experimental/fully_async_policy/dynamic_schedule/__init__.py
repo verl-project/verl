@@ -15,6 +15,7 @@
 from .base import DynamicScheduleContext, DynamicSchedulePolicyBase, build_policy, register_policy
 from .default_policy import DefaultDynamicSchedulePolicy
 from .dynamic_resource_controller import DynamicResourceController
+from .fixed_ratio_policy import FixedRatioDynamicSchedulePolicy
 from .static_fully_async_policy import StaticFullyAsyncPolicy
 
 __all__ = [
@@ -24,5 +25,6 @@ __all__ = [
     "build_policy",
     "register_policy",
     "DefaultDynamicSchedulePolicy",
+    "FixedRatioDynamicSchedulePolicy",
     "StaticFullyAsyncPolicy",
 ]
