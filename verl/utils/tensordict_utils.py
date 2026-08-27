@@ -173,11 +173,20 @@ def nested_tensor_from_tensor_list(tensors: list[torch.Tensor], ragged_idx: int 
 
     cat_dim = ragged_idx - 1
     values = torch.cat(tensors, dim=cat_dim)
-    lengths = torch.tensor([tensor.shape[cat_dim] for tensor in tensors], dtype=torch.long, device=values.device)
+    sample_lengths = [tensor.shape[cat_dim] for tensor in tensors]
+    lengths = torch.tensor(sample_lengths, dtype=torch.long, device=values.device)
     offsets = torch.zeros(len(tensors) + 1, dtype=torch.long, device=values.device)
     torch.cumsum(lengths, dim=0, out=offsets[1:])
 
-    nested_tensor = torch.nested.nested_tensor_from_jagged(values=values, offsets=offsets)
+    # Without max_seqlen, `to_padded_tensor` can fall back to `values.size(0)`, over-padding or
+    # silently truncating depending on ragged_idx. See https://github.com/pytorch/pytorch/issues/159380.
+    # The `as_nested_tensor` early return uses the same logic internally; min_seqlen is passed for consistency.
+    nested_tensor = torch.nested.nested_tensor_from_jagged(
+        values=values,
+        offsets=offsets,
+        min_seqlen=min(sample_lengths),
+        max_seqlen=max(sample_lengths),
+    )
     nested_tensor._ragged_idx = ragged_idx
     return nested_tensor
 
