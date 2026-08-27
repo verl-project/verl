@@ -44,7 +44,7 @@ Atlas 900 A2 PODc
 
 Atlas 800T A3
 
-`昇腾安装指南(A5) <https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/zh/get_start/install_guidance_A5.rst>`_
+`Ascend 950 系列产品 <https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/zh/get_start/install_guidance_A5.rst>`_
 
 
 框架后端支持说明
