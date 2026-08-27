@@ -1600,7 +1600,8 @@ def compute_policy_loss_gspo(
     if rollout_is_weights is not None:
         pg_losses = pg_losses * rollout_is_weights
 
-    # for GSPO, we need to aggregate the loss at the sequence level (seq-mean-token-mean)
+    # NOTE: differ from GSPO original paper that aggregate the loss at the sequence level (seq-mean-token-mean),
+    # we support aggregate the loss in different modes, default is token-mean.
     pg_loss = agg_loss(
         loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
     )

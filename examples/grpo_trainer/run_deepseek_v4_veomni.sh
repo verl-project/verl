@@ -13,7 +13,7 @@ n_gpus_per_node=8
 trainer_nnodes=8
 
 project_name='wuxibin_dapo'
-exp_name='deepseek_v4_flash_base_ep8_sp2_qat_0824a'
+exp_name='deepseek_v4_flash_base_ep8_sp2_qat_0826b'
 
 # ===================================== Algorithm =====================================
 adv_estimator=grpo
@@ -25,8 +25,8 @@ kl_coef=0.001
 use_kl_loss=False
 kl_loss_coef=0.001
 
-clip_ratio_low=4e-4
-clip_ratio_high=5.3e-4
+clip_ratio_low=3e-4
+clip_ratio_high=4e-4
 
 actor_lr=1e-6
 critic_lr=2e-6
