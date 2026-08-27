@@ -459,6 +459,7 @@ class vLLMHttpServer:
     async def run_server(self, args: argparse.Namespace):
         engine_args = AsyncEngineArgs.from_cli_args(args)
         usage_context = UsageContext.OPENAI_API_SERVER
+        self._ensure_max_num_batched_tokens_valid(engine_args, self.model_config.hf_config)
         vllm_config = engine_args.create_engine_config(usage_context=usage_context)
         vllm_config.parallel_config.data_parallel_master_port = self._dp_master_port
 
@@ -509,6 +510,42 @@ class vLLMHttpServer:
 
         self.engine = engine_client
         self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
+
+    @staticmethod
+    def _ensure_max_num_batched_tokens_valid(engine_args: AsyncEngineArgs, hf_config=None) -> None:
+        """Keep ``max_num_batched_tokens`` >= ``max_model_len`` when chunked prefill is disabled.
+
+        vllm >= 0.24 rejects ``max_num_batched_tokens < max_model_len`` when
+        ``enable_chunked_prefill`` is False (see ``verify_max_model_len`` in
+        ``vllm/config/scheduler.py``). verl's default ``max_num_batched_tokens``
+        (8192) is below every modern model's ``max_position_embeddings``, so
+        honoring an explicit ``enable_chunked_prefill=False`` would crash at
+        startup. This raises ``max_num_batched_tokens`` to the effective
+        ``max_model_len`` (the scheduler's real batch limit under chunked-off)
+        instead.
+
+        Args:
+            engine_args: vLLM engine args (mutated in place when adjusted).
+            hf_config: HF config used to resolve ``max_model_len`` when it is
+                ``None`` (the model's ``max_position_embeddings``).
+        """
+        if engine_args.enable_chunked_prefill is not False or engine_args.max_num_batched_tokens is None:
+            return
+        if engine_args.max_model_len is None:
+            if hf_config is None:
+                return
+            eff_max_model_len = get_max_position_embeddings(hf_config)
+        else:
+            eff_max_model_len = engine_args.max_model_len
+        if engine_args.max_num_batched_tokens < eff_max_model_len:
+            logger.warning(
+                "max_num_batched_tokens (%d) < max_model_len (%d) with enable_chunked_prefill=False; "
+                "raising max_num_batched_tokens to max_model_len to satisfy vllm >= 0.24 validation. "
+                "Set actor_rollout_ref.rollout.max_num_batched_tokens explicitly to control this value.",
+                engine_args.max_num_batched_tokens,
+                eff_max_model_len,
+            )
+            engine_args.max_num_batched_tokens = eff_max_model_len
 
     async def run_headless(self, args: argparse.Namespace):
         """Run headless server in a separate thread."""
