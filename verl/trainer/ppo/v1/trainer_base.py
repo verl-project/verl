@@ -1173,7 +1173,9 @@ class PPOTrainer(ABC):
                 return bool(obj)
             elif hasattr(obj, "tolist"):
                 return obj.tolist()
-            raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+            # A generation dump is a debug artifact: stringify exotic values (datetime, Decimal,
+            # set, ...) rather than raising, which would kill the training run.
+            return str(obj)
 
         with open(filename, "w") as f:
             for i in range(n):
@@ -1220,7 +1222,7 @@ class PPOTrainer(ABC):
     def _log_rollout_data(self, batch: KVBatchMeta, timing_raw: dict, rollout_data_dir: str):
         """Fetch rollout data from TransferQueue and dump sorted by uid."""
         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
-            fields = ["uid", "prompts", "responses", "rm_scores", "reward_model"]
+            fields = ["uid", "prompts", "responses", "rm_scores", "reward_model", "extra_fields"]
             data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
             data["prompts"] = data["prompts"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
             data["responses"] = data["responses"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
@@ -1235,6 +1237,22 @@ class PPOTrainer(ABC):
                 gts = [item.get("ground_truth", None) for item in reward_model.tolist()]
             else:
                 gts = [None] * len(uids)
+
+            # Mirror ``_validate``'s unpack of ``extra_fields["reward_extra_info"]`` so the train
+            # rollout dump carries the per-sample extras the reward function attaches. Without this
+            # the dump only holds input / output / gts / score / uid.
+            reward_extra_infos_dict: dict[str, list] = {}
+            extra_fields_list = data.pop("extra_fields", None)
+            if extra_fields_list is not None:
+                for pos, extra_field in enumerate(extra_fields_list.tolist()):
+                    reward_extra_info = (
+                        extra_field.get("reward_extra_info", {}) if isinstance(extra_field, dict) else {}
+                    )
+                    for key in reward_extra_info:
+                        if key not in reward_extra_infos_dict:
+                            reward_extra_infos_dict[key] = [None] * pos
+                    for key in reward_extra_infos_dict:
+                        reward_extra_infos_dict[key].append(reward_extra_info.get(key))
 
             # Sort by uid key ({sample}_{rollout}_{output})
             sort_keys = []
@@ -1251,7 +1269,8 @@ class PPOTrainer(ABC):
             gts = [gts[i] for i in sorted_indices]
             scores = [scores[i] for i in sorted_indices]
 
-            reward_extra_infos_dict = {"uid": [batch.keys[i] for i in sorted_indices]}
+            reward_extra_infos_dict = {k: [v[i] for i in sorted_indices] for k, v in reward_extra_infos_dict.items()}
+            reward_extra_infos_dict["uid"] = [batch.keys[i] for i in sorted_indices]
 
             self._dump_generations(
                 inputs=inputs,
