@@ -22,7 +22,7 @@ Last updated: 07/28/2026.
 
 多机训练前, 请确保所有节点满足以下条件：
 
-- 各节点已按照 `install_guidance <../../get_start/install_guidance.rst>`_ 完成环境构建, 且 verl、Ray、PyTorch、torch-npu、CANN 等关键组件版本一致
+- 各节点已按照 `昇腾安装指南 <../../get_start/install_guidance.rst>`_ 完成环境构建, 且 verl、Ray、PyTorch、torch-npu、CANN 等关键组件版本一致
 - 各节点间训练网段网络互通, 可访问 Ray 端口、Dashboard 端口以及后续配置的 HCCL 端口范围。``ping`` 只能验证基础连通性, 若集群开启防火墙, 还需确认 TCP 端口未被拦截
 - 各节点的训练脚本路径及模型/数据/checkpoint 路径保持一致(推荐使用共享文件系统如 NFS)
 - 各节点均已完成 NPU 驱动与 CANN 软件栈安装, 且 ``npu-smi info`` 可正常识别设备

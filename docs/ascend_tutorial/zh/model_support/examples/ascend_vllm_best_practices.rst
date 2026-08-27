@@ -28,7 +28,7 @@ vLLM 是当前主流的高性能开源推理引擎, 昇腾已经全面原生支�
 
 环境构建
 -----------------------------------
-我们在 `install_guidance <../../get_start/install_guidance.rst>`_ 中提供了两种构建环境的方法, 1.从镜像文件DockerFile进行构建 2.从自定义Conda环境进行构建
+我们在 `昇腾安装指南 <../../get_start/install_guidance.rst>`_ 中提供了两种构建环境的方法, 1.从镜像文件DockerFile进行构建 2.从自定义Conda环境进行构建
 
 在本实践中, 我们额外指定verl 的commit id 以避免引入其他问题
 
@@ -299,7 +299,7 @@ port：可任意设置空闲端口；
 
 性能采集
 -----------------------------------
-关于NPU profiling的详细文档请参考 `ascend_profiling <../../dev_guide/performance/ascend_profiling.rst>`_
+关于NPU profiling的详细文档请参考 `Profiling采集指导 <../../dev_guide/performance/ascend_profiling.rst>`_
 
 采集完成后，开发者可以使用 `MindStudio Insight <https://www.hiascend.com/document/detail/zh/mindstudio/830/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html>`_ 进行数据解析
 

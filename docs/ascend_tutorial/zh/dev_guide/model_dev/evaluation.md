@@ -102,4 +102,4 @@ models = [
     ais_bench --models vllm_api_stream_chat --datasets math500_gen_0_shot_cot_chat_prompt
 ~~~
 ## 5.sglang推理评测
-参照 [sglang最佳实践](../../model_support/examples/ascend_sglang_best_practices.rst)中评测进行
+参照 [昇腾 SGLang 最佳实践](../../model_support/examples/ascend_sglang_best_practices.rst)中评测进行

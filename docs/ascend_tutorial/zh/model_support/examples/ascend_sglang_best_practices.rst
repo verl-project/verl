@@ -27,7 +27,7 @@ SGLang 是当前主流的高性能开源推理引擎, 昇腾已经全面原生�
 
 环境构建
 -----------------------------------
-我们在 `install_guidance <../../get_start/install_guidance.rst>`_ 中提供了两种构建环境的方法, 1.从镜像文件Dockerfile进行构建 2.从自定义Conda环境进行构建
+我们在 `昇腾安装指南 <../../get_start/install_guidance.rst>`_ 中提供了两种构建环境的方法, 1.从镜像文件Dockerfile进行构建 2.从自定义Conda环境进行构建
 
 在本实践中, 我们额外指定verl 的commit id 以避免引入其他问题
 
@@ -270,7 +270,7 @@ SOCKET_IFNAME, HCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME: 修改为对应通信网�
 
 性能采集
 -----------------------------------
-关于NPU profiling的详细文档请参考 `ascend_profiling <../../dev_guide/performance/ascend_profiling.rst>`_
+关于NPU profiling的详细文档请参考 `Profiling采集指导 <../../dev_guide/performance/ascend_profiling.rst>`_
 
 在 `Qwen3-30B`_ 的脚本中提供了基本的采集性能选项PROF_CONFIG，默认设置 global_profiler.steps=null 关闭采集， 开发者可根据实际需要进行参数修改
 

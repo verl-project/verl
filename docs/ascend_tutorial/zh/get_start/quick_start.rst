@@ -39,7 +39,7 @@ Qwen3-0.6B GSM8K GRPO Quick Start
 文档覆盖四种常用训推后端组合，便于用户在 quickstart 阶段快速选择合适的启动脚本。
 
 运行本文脚本前，请确认已完成 verl Ascend 环境安装。
-环境安装详见 `install_guidance <./install_guidance.rst>`_ 。
+环境安装详见 `昇腾安装指南 <./install_guidance.rst>`_ 。
 
 A3 每卡含 2 die，A2 每卡 1 die，如果在 A3 机器上跑示例，需要将 ``n_gpus_per_node`` 设置成 16。
 

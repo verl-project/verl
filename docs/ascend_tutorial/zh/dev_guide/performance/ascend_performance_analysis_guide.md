@@ -20,7 +20,7 @@ Last updated: 02/24/2026.
 
 ### 使能方法
 
-使能和配置教程可参考：[ascend_profiling](./ascend_profiling.rst)
+使能和配置教程可参考：[Profiling采集指导](./ascend_profiling.rst)
 
 ## 性能分析方法论
 
