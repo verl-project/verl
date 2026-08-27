@@ -1205,6 +1205,30 @@ def test_serialize_deserialize_tensordict_with_device():
         assert original_tensor.dtype == reconstructed_tensor.dtype
 
 
+def test_numpy_dataproto_serialization_skips_tensordict_consolidation(monkeypatch):
+    """NumPy serialization should not allocate an unused consolidated TensorDict."""
+    monkeypatch.setenv("VERL_DATAPROTO_SERIALIZATION_METHOD", "numpy")
+
+    data = DataProto.from_dict(
+        tensors={"obs": torch.arange(12).reshape(3, 4)},
+        non_tensors={"labels": np.array(["a", "b", "c"], dtype=object)},
+        meta_info={"step": 1},
+    )
+
+    def fail_on_consolidate(*args, **kwargs):
+        pytest.fail("TensorDict.consolidate() should not be called in NumPy serialization mode")
+
+    monkeypatch.setattr(TensorDict, "consolidate", fail_on_consolidate)
+
+    state = data.__getstate__()
+    restored = DataProto()
+    restored.__setstate__(state)
+
+    torch.testing.assert_close(restored.batch["obs"], data.batch["obs"])
+    assert restored.non_tensor_batch["labels"].tolist() == ["a", "b", "c"]
+    assert restored.meta_info == {"step": 1}
+
+
 def test_serialize_dataproto_with_empty_tensordict():
     """Tests that serializing a DataProto with an empty TensorDict does not crash.
 

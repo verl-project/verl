@@ -484,8 +484,7 @@ verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有
 
 | 参数名 | 默认值 | 说明 |
 |--------|--------|------|
-| `actor_rollout_ref.actor.megatron.param_offload` | `false` | 是否将参数卸载到 CPU |
-| `actor_rollout_ref.actor.megatron.grad_offload` | `false` | 是否将梯度卸载到 CPU |
+| `actor_rollout_ref.actor.megatron.param_offload` | `false` | 是否将参数卸载到 CPU，并在角色非活跃时释放梯度缓冲区 |
 | `actor_rollout_ref.actor.megatron.optimizer_offload` | `false` | 是否将优化器状态卸载到 CPU |
 | `actor_rollout_ref.actor.megatron.tensor_model_parallel_size` | `1` | TP 并行大小 |
 | `actor_rollout_ref.actor.megatron.expert_model_parallel_size` | `1` | 专家并行大小 |

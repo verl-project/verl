@@ -123,7 +123,6 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.context_parallel_size=${ACTOR_CP}
     actor_rollout_ref.actor.megatron.param_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.megatron.optimizer_offload=${ALL_OFFLOAD}
-    actor_rollout_ref.actor.megatron.grad_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.megatron.router_replay.mode=${ROUTER_REPLAY_MODE}
     ++actor_rollout_ref.actor.megatron.override_transformer_config.apply_dsa_kernel_fusion=True
     ++actor_rollout_ref.actor.megatron.override_transformer_config.dsa_indexer_use_sparse_loss=True

@@ -158,7 +158,6 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.actor.megatron.use_mbridge=$USE_MBRIDGE \
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=$USE_DIST_CKPT \
     actor_rollout_ref.actor.megatron.param_offload=${offload} \
-    actor_rollout_ref.actor.megatron.grad_offload=${offload} \
     actor_rollout_ref.actor.megatron.optimizer_offload=${offload} \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${ACTOR_TP} \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${ACTOR_PP} \

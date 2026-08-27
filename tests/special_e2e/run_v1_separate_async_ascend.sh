@@ -63,7 +63,6 @@ elif [[ "${ACTOR_STRATEGY}" == "megatron" ]]; then
         actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
         actor_rollout_ref.actor.megatron.param_offload=True
         actor_rollout_ref.actor.megatron.optimizer_offload=True
-        actor_rollout_ref.actor.megatron.grad_offload=True
     )
 else
     echo "Unknown ACTOR_STRATEGY=${ACTOR_STRATEGY}; expected fsdp2 or megatron"

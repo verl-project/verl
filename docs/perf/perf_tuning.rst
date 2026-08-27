@@ -174,16 +174,16 @@ LigerKernel for training performance
 
 LigerKernel provides fused Triton kernels (RMSNorm, SwiGLU, RoPE) that can improve training throughput. It works with both SFT and RL (PPO/GRPO) training, including vision-language models.
 
-1. Install liger-kernel via ``pip3 install liger-kernel``. Set ``use_liger`` in your configuration:
+1. Install Liger Kernel 0.8.2 or newer via ``pip3 install "liger-kernel>=0.8.2"``. Set ``use_liger`` in your configuration:
 
    .. code-block:: yaml
 
       model:
         use_liger: True  # Enable LigerKernel
 
-2. The default value is ``False``. When enabled, verl applies Liger's fused RMSNorm, SwiGLU, and RoPE kernels to the model. The ``fused_linear_cross_entropy`` optimization is disabled because verl computes log-probabilities via its own path.
+2. The default value is ``False``. When enabled, verl applies Liger's fused RMSNorm, SwiGLU, and RoPE kernels to the model. The model-level ``fused_linear_cross_entropy`` patch remains disabled because verl computes log-probabilities through its output-head path. With ``use_fused_kernels`` and the ``torch`` backend, that path uses Liger's fused scaled linear cross entropy from v0.8.2 or newer and falls back to verl's existing chunked ``FusedLinearForPPOFunction`` when Liger is not installed.
 
-3. ``use_liger`` is compatible with ``use_fused_kernels`` — they operate at different levels (Liger optimizes model internals, fused kernels optimize the output head). Using both together gives the best speed-memory tradeoff.
+3. ``use_liger`` is compatible with ``use_fused_kernels``. The former controls model-internal kernels, while the latter controls the output head and can use Liger's scaled cross entropy independently when ``liger-kernel>=0.8.2`` is installed.
 
 Forward prefetch in FSDP training backend
 ----------------------

@@ -39,7 +39,7 @@ class TestMcoreEngineConfig:
         with pytest.raises(AttributeError):
             config.tensor_model_parallel_size = 2  # Frozen field
 
-    @pytest.mark.parametrize("offload_field", ["param_offload", "grad_offload", "optimizer_offload"])
+    @pytest.mark.parametrize("offload_field", ["param_offload", "optimizer_offload"])
     def test_offload_flags(self, offload_field):
         config = McoreEngineConfig(**{offload_field: True})
         assert getattr(config, offload_field) is True
