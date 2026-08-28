@@ -129,7 +129,8 @@ class CheckpointEngine(ABC):
 
     # How receive_weights yields weights to the server adapter:
     #   "named_tensors" -- (name, tensor) pairs, bucketed into full-tensor loads.
-    #   "delta_flush"   -- (named_tensors, is_last) items handled by the rollout adapter.
+    #   "delta_flush"   -- (named_tensors, is_last) flushes; the seed may be dense,
+    #                       while steady updates carry sparse patches.
     wire_format = "named_tensors"
 
     @abstractmethod

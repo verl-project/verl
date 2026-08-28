@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
+import vllm
 
 from verl.utils.device import get_device_name, is_cuda_available
 
@@ -58,12 +59,13 @@ def _checkpoint_patch_api():
             CheckpointWeightPatch,
             load_checkpoint_weight_patches,
         )
-    except ModuleNotFoundError as exc:
+    except ImportError as exc:
         if exc.name != "vllm.model_executor.model_loader.checkpoint_weight_patch":
             raise
         raise RuntimeError(
-            "vLLM delta_sharded support requires a vLLM build that provides "
-            "vllm.model_executor.model_loader.checkpoint_weight_patch"
+            "checkpoint_engine.backend='delta_sharded' with vLLM requires the checkpoint patch API from "
+            f"vLLM #50723; installed vLLM {getattr(vllm, '__version__', 'unknown')} does not provide it. "
+            "Install a compatible vLLM build or select a different checkpoint engine backend."
         ) from exc
     return CheckpointWeightPatch, load_checkpoint_weight_patches
 
@@ -74,8 +76,10 @@ def require_vllm_delta_support() -> None:
     init_parameters = inspect.signature(WeightTransferEngine.__init__).parameters
     if not {"config", "vllm_config", "device", "model"}.issubset(init_parameters):
         raise RuntimeError(
-            "vLLM delta_sharded support requires WeightTransferEngine.__init__ "
-            "to accept config, vllm_config, device, and model"
+            "checkpoint_engine.backend='delta_sharded' with vLLM requires the engine-owned WeightTransferEngine "
+            "API from vLLM #44353 and the checkpoint patch API from vLLM #50723; installed vLLM "
+            f"{getattr(vllm, '__version__', 'unknown')} does not provide the required WeightTransferEngine API. "
+            "Install a compatible vLLM build or select a different checkpoint engine backend."
         )
     _checkpoint_patch_api()
 
@@ -121,7 +125,6 @@ class VerlDeltaIPCInitInfo(WeightTransferInitInfo):
 class VerlDeltaIPCUpdateInfo(WeightTransferUpdateInfo):
     """Connection details for one flush."""
 
-    use_shm: bool = False
     zmq_handle: str | None = None
 
     def __post_init__(self) -> None:
@@ -214,6 +217,10 @@ class VerlDeltaIPCWeightTransferEngine(WeightTransferEngine):
         require_vllm_delta_support()
         if not is_cuda_available or self.device.type != get_device_name():
             raise NotImplementedError("VERL delta weight transfer requires CUDA")
+        if self.parallel_config.data_parallel_size != 1:
+            raise NotImplementedError("VERL delta weight transfer requires data_parallel_size=1")
+        if self.parallel_config.pipeline_parallel_size != 1:
+            raise NotImplementedError("VERL delta weight transfer requires pipeline_parallel_size=1")
         if self.model_config.dtype != torch.bfloat16:
             raise NotImplementedError("VERL delta weight transfer supports only BF16 vLLM models")
         if getattr(self.vllm_config, "quant_config", None) is not None:
@@ -227,24 +234,16 @@ class VerlDeltaIPCWeightTransferEngine(WeightTransferEngine):
     def start_weight_update(self) -> None:
         if self._update_failed:
             raise RuntimeError(
-                "A previous delta update did not complete; restart the vLLM workers before loading more weights"
+                "A previous delta update did not complete; restart the full job so every rollout worker receives a "
+                "fresh dense seed. Restarting only the vLLM workers is unsafe because the producer snapshot may "
+                "already have advanced."
             )
         self._session_encoding = None
 
-    def _receive_payload(
-        self,
-        *,
-        use_shm: bool,
-        zmq_handle: str,
-    ) -> list[tuple[str, torch.Tensor]]:
+    def _receive_payload(self, *, zmq_handle: str) -> list[tuple[str, torch.Tensor]]:
         from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import (
             BucketedWeightReceiver,
         )
-
-        if use_shm:
-            raise NotImplementedError(
-                "VERL delta updates for vLLM require CUDA IPC; shared-memory fallback is unsupported"
-            )
 
         receiver = BucketedWeightReceiver(
             zmq_handle=zmq_handle,
@@ -274,10 +273,7 @@ class VerlDeltaIPCWeightTransferEngine(WeightTransferEngine):
     def receive_weights(self, update_info: VerlDeltaIPCUpdateInfo) -> None:
         assert update_info.zmq_handle is not None
         try:
-            payload = self._receive_payload(
-                use_shm=update_info.use_shm,
-                zmq_handle=update_info.zmq_handle,
-            )
+            payload = self._receive_payload(zmq_handle=update_info.zmq_handle)
             encoding, patches = decode_delta_payload(payload)
 
             if self._session_encoding is None:

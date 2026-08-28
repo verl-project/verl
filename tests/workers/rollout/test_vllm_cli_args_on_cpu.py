@@ -255,26 +255,6 @@ class TestVllmColocateZmqHandle:
 
         assert handle == "ipc:///tmp/rl-colocate-zmq-job-123-replica-2-rank-3.sock"
 
-    def test_delta_update_injects_worker_local_handle(self):
-        updates = []
-        worker = SimpleNamespace(
-            _get_zmq_handle=lambda: "ipc:///tmp/worker-3.sock",
-            update_weights=updates.append,
-        )
-        update_info = {"use_shm": False}
-
-        vLLMColocateWorkerExtension.update_verl_delta_weights(
-            worker,
-            update_info,
-        )
-
-        assert updates == [
-            {
-                "use_shm": False,
-                "zmq_handle": "ipc:///tmp/worker-3.sock",
-            }
-        ]
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

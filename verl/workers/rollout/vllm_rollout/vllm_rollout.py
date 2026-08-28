@@ -276,15 +276,7 @@ class ServerAdapter(BaseRollout):
                 await self.server_handle.set_global_steps.remote(global_steps)
             return
 
-        def unpack_flush(item):
-            if not isinstance(item, tuple) or len(item) != 2:
-                raise TypeError("DeltaFlush stream items must be (named_tensors, is_last)")
-            named_tensors, is_last = item
-            if not isinstance(is_last, bool):
-                raise TypeError("DeltaFlush is_last must be a bool")
-            return list(named_tensors), is_last
-
-        first_named_tensors, first_is_last = unpack_flush(first_item)
+        first_named_tensors, saw_last = first_item
         if not self._delta_weight_transfer_engine_initialized:
             await self._execute_method(
                 "init_weight_transfer_engine",
@@ -298,7 +290,7 @@ class ServerAdapter(BaseRollout):
             receiver_future = await self._execute_method(
                 "update_verl_delta_weights",
                 non_block=True,
-                kwargs={"update_info": {"use_shm": False}},
+                kwargs={"update_info": {}},
             )
             sender = BucketedWeightSender(
                 zmq_handle=self.zmq_handle,
@@ -309,13 +301,12 @@ class ServerAdapter(BaseRollout):
             if receiver_future is not None:
                 await receiver_future
 
-        await send_flush(first_named_tensors)
-        saw_last = first_is_last
-        async for item in flushes:
+        await send_flush(list(first_named_tensors))
+        async for named_tensors, is_last in flushes:
             if saw_last:
                 raise ValueError("DeltaFlush stream yielded data after is_last=True")
-            named_tensors, saw_last = unpack_flush(item)
-            await send_flush(named_tensors)
+            saw_last = is_last
+            await send_flush(list(named_tensors))
 
         if not saw_last:
             raise ValueError("DeltaFlush stream ended without is_last=True")

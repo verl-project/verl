@@ -931,9 +931,11 @@ class vLLMHttpServer:
             logger.info(f"Aborted {len(request_ids)} requests: {request_ids}")
             return {"aborted_count": len(request_ids), "request_ids": request_ids}
 
-        except Exception as e:
-            logger.error(f"Error aborting requests: {e}")
-            return {"aborted_count": 0, "request_ids": [], "error": str(e)}
+        except Exception:
+            # Weight updates must not proceed unless every in-flight request was
+            # actually aborted and the old-weight caches were cleared.
+            logger.exception("Error aborting requests")
+            raise
 
     async def resume_generation(self):
         """Resume generation after abort_all_requests (pause_generation)."""
@@ -1042,9 +1044,18 @@ class vLLMHttpServer:
             if self.config.disaggregation.enabled:
                 raise NotImplementedError("delta_sharded with vLLM does not support PD disaggregation")
             # config.pipeline_model_parallel_size > 1 is already rejected globally;
-            # engine_kwargs is forwarded verbatim to vLLM, so close that path too.
+            # engine_kwargs is forwarded verbatim to vLLM, so close topology
+            # override paths that would bypass VERL's worker and IPC mapping.
+            if int(engine_kwargs.get("data_parallel_size") or 1) > 1:
+                raise NotImplementedError("delta_sharded with vLLM requires data_parallel_size=1")
             if int(engine_kwargs.get("pipeline_parallel_size") or 1) > 1:
                 raise NotImplementedError("delta_sharded with vLLM requires pipeline_parallel_size=1")
+            engine_tp_size = engine_kwargs.get("tensor_parallel_size")
+            if engine_tp_size is not None and int(engine_tp_size) != self.config.tensor_model_parallel_size:
+                raise NotImplementedError(
+                    "delta_sharded with vLLM requires engine_kwargs tensor_parallel_size to match "
+                    "rollout.tensor_model_parallel_size"
+                )
 
             if is_moe_model(self.model_config.hf_config):
                 moe_backend = engine_kwargs.get("moe_backend")
