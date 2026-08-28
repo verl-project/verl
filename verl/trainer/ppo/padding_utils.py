@@ -74,7 +74,7 @@ def construct_minimal_padding_template(
     source_tag: dict,
     eos_token_id: int,
 ) -> tuple[dict, dict]:
-    """Construct a CP-aligned text-only padding template.
+    """Construct a text-only padding template.
 
     Args:
         source_td: A single sample dict retrieved from TransferQueue.
