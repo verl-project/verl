@@ -3,6 +3,7 @@ _target_: verl.workers.config.FSDPEngineConfig
 
 # policy for wrapping the model
 wrap_policy:
+
   # Minimum number of parameters to trigger wrapping a layer with FSDP
   min_num_params: 0
 
@@ -82,6 +83,7 @@ dtype: bfloat16 # ["bfloat16", "float16"]
 
 # QAT (Quantization-Aware Training) configuration
 qat:
+
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl.workers.config.QATEngineConfig
 
@@ -96,6 +98,7 @@ qat:
 
   # Patterns to ignore (e.g., lm_head, embed_tokens)
   ignore_patterns:
+
     - "lm_head"
     - "embed_tokens"
     - "re:.*mlp.gate$"
