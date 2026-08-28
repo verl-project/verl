@@ -39,6 +39,8 @@ from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
 logger = logging.getLogger(__name__)
 
+SYNTHETIC_PADDING_SEQ_LEN = 128
+
 
 def build_padding_position_ids(source_position_ids: Any, attention_mask: torch.Tensor) -> torch.Tensor:
     """Build padding position ids with the same rank/prefix shape as the source sample."""
@@ -72,7 +74,7 @@ def construct_minimal_padding_template(
     source_tag: dict,
     eos_token_id: int,
 ) -> tuple[dict, dict]:
-    """Construct a minimal text-only padding template of one prompt token and one response token.
+    """Construct a CP-aligned text-only padding template.
 
     Args:
         source_td: A single sample dict retrieved from TransferQueue.
@@ -92,17 +94,18 @@ def construct_minimal_padding_template(
     template_tag = copy.deepcopy(source_tag)
 
     # Build minimal sequence
-    prompts = torch.full((1,), eos_token_id, dtype=torch.int64)
-    input_ids = prompts.repeat(2)
+    responses = torch.full((1,), eos_token_id, dtype=torch.int64)
+    prompts = torch.full((SYNTHETIC_PADDING_SEQ_LEN - 1,), eos_token_id, dtype=torch.int64)
+    input_ids = torch.cat((prompts, responses))
     attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
-    response_mask = torch.zeros_like(prompts)
+    response_mask = torch.zeros_like(responses)
     position_ids = build_padding_position_ids(template_sample.get("position_ids"), attention_mask)
     routed_experts = build_padding_routed_experts(template_sample.get("routed_experts"), input_ids.size(0))
 
     # Update the fields and remove redundant parts
     template_sample.update(
         prompts=prompts,
-        responses=prompts.clone(),
+        responses=responses,
         input_ids=input_ids,
         attention_mask=attention_mask,
         position_ids=position_ids,
@@ -120,7 +123,12 @@ def construct_minimal_padding_template(
         template_sample.pop("routed_experts", None)
 
     # Padding flag is deployed to protect metrics calculation (e.g. response length, score, reward).
-    template_tag.update(is_padding=True, prompt_len=1, response_len=1, seq_len=2)
+    template_tag.update(
+        is_padding=True,
+        prompt_len=SYNTHETIC_PADDING_SEQ_LEN - 1,
+        response_len=1,
+        seq_len=SYNTHETIC_PADDING_SEQ_LEN,
+    )
     return template_sample, template_tag
 
 
@@ -132,8 +140,8 @@ def upsample_batch_to_divisible_size(
     """Append synthetic no-op samples so the batch size becomes divisible by *batch_multiple*.
 
     The synthetic samples reuse the first real sample as a metadata template,
-    but manually construct a minimal ``prompt_len=1 / response_len=1`` sequence
-    and zero out reward-related fields so they do not contribute to PPO,
+    but manually construct an aligned ``prompt_len=SYNTHETIC_PADDING_SEQ_LEN - 1 / response_len=1``
+    sequence and zero out reward-related fields so they do not contribute to PPO,
     entropy, or KL losses.  An ``is_padding`` flag is added in the tag for
     downstream metrics filtering.
 
@@ -154,7 +162,7 @@ def upsample_batch_to_divisible_size(
     source_key = batch.keys[source_idx]
     source_td = tq.kv_batch_get(keys=[source_key], partition_id=batch.partition_id)[0]
 
-    # Construct the minimal padding template of one prompt token and one response token
+    # Construct the aligned padding template
     template_sample, template_tag = construct_minimal_padding_template(source_td, batch.tags[source_idx], eos_token_id)
 
     # All padding data use the same uid (also the same trajectory_id 0 but with ascending session_ids)
