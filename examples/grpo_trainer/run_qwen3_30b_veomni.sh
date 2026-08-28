@@ -30,7 +30,7 @@ case "${DEVICE}" in
         export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:1024
         export CUDA_DEVICE_MAX_CONNECTIONS=1
         n_devices_per_node=16
-        ep_size=${ep_size:-16}
+        ep_size=${ep_size:-8}
         ;;
     *)
         echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
