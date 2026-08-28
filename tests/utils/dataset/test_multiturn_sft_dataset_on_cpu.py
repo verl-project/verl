@@ -34,6 +34,29 @@ from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
 from verl.utils.model import extract_multi_modal_inputs
 
 custom_model_prefix = Path("~/models").expanduser().resolve()
+gpt_oss_model_path = Path(
+    os.environ.get("VERL_TEST_GPT_OSS_MODEL", custom_model_prefix / "openai/gpt-oss-20b")
+).expanduser()
+
+
+def test_multiturn_sft_drops_arrow_null_message_fields():
+    messages = [
+        {"role": "assistant", "content": "done", "tool_calls": None},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"function": {"name": "lookup", "arguments": {"optional": None}}}],
+        },
+    ]
+
+    assert MultiTurnSFTDataset._drop_null_message_fields(messages) == [
+        {"role": "assistant", "content": "done"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"function": {"name": "lookup", "arguments": {"optional": None}}}],
+        },
+    ]
 
 
 @pytest.mark.parametrize("model_path", [f"{custom_model_prefix}/Qwen/Qwen3.5-0.8B"])
@@ -486,6 +509,71 @@ def test_multiturn_sft_dataset_with_chat_template_kwargs(model_path: str, apply_
                 )
 
     print("All chat_template_kwargs tests passed!")
+
+
+@pytest.mark.parametrize("model_path", [str(gpt_oss_model_path)])
+def test_multiturn_sft_gpt_oss_tool_call_uses_harmony_terminators(model_path: str, tmp_path: Path):
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": "Look up a value.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"q": {"type": "string"}},
+                    "required": ["q"],
+                },
+            },
+        }
+    ]
+    messages = [
+        {"role": "user", "content": "Look up x."},
+        {
+            "role": "assistant",
+            "content": None,
+            "thinking": "need lookup",
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": '{"q":"x"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_0", "name": "lookup", "content": "value x"},
+        {"role": "assistant", "thinking": "final thought", "content": "done"},
+    ]
+    test_file = tmp_path / "gpt_oss_tool_call.parquet"
+    pd.DataFrame({"messages": [messages], "tools": [tools]}).to_parquet(test_file)
+
+    tokenizer = hf_tokenizer(model_path)
+    dataset = MultiTurnSFTDataset(
+        parquet_files=str(test_file),
+        tokenizer=tokenizer,
+        config={
+            "max_length": 1024,
+            "truncation": "error",
+            "pad_mode": "no_padding",
+            "continuous_token_model_family": "gptoss",
+            "apply_chat_template_kwargs": {"model_identity": "You are a helpful assistant."},
+        },
+        hf_model_type="gpt_oss",
+    )
+
+    item = dataset[0]
+    input_ids = item["input_ids"]
+    loss_mask = item["loss_mask"]
+    call_id = tokenizer.convert_tokens_to_ids("<|call|>")
+    return_id = tokenizer.convert_tokens_to_ids("<|return|>")
+
+    assert loss_mask[input_ids == call_id].tolist() == [1]
+    assert loss_mask[input_ids == return_id].tolist() == [1]
+    assert "lookup" in tokenizer.decode(input_ids[loss_mask == 1])
+    assert "need lookup" in tokenizer.decode(input_ids[loss_mask == 1])
+    assert "final thought" in tokenizer.decode(input_ids[loss_mask == 1])
+    assert "done" in tokenizer.decode(input_ids[loss_mask == 1])
+    assert "value x" in tokenizer.decode(input_ids[loss_mask == 0])
 
 
 def generate_image(description: str, size: str = "256x256"):

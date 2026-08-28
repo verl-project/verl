@@ -61,15 +61,28 @@ def print_assembled_message(tokenizer, message_list, input_ids, loss_mask, attn_
     """
     Print the message after applying the chat template
     """
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
 
-    tokenized = tokenizer.apply_chat_template(message_list, add_generation_prompt=False, tokenize=False, tools=tools)
+    try:
+        tokenized = tokenizer.apply_chat_template(
+            message_list,
+            add_generation_prompt=False,
+            tokenize=False,
+            tools=tools,
+        )
+    except Exception as exc:
+        # Some registered CT protocols (notably DeepSeek-V4) use a native
+        # encoder and intentionally have no tokenizer chat_template. Debug
+        # output must not make an otherwise valid dataset item fail.
+        tokenized = f"<whole-conversation chat render unavailable: {exc}>"
     sep = "\n\n"
-    str = f"tokenized entire message:\n{tokenized}"
-    str += sep
+    assembled_text = f"tokenized entire message:\n{tokenized}"
+    assembled_text += sep
     decoded_ids = input_ids.tolist() if hasattr(input_ids, "tolist") else input_ids
-    str += f"tokenized seperately    :\n{tokenizer.decode(decoded_ids)}"
+    assembled_text += f"tokenized separately    :\n{tokenizer.decode(decoded_ids)}"
 
-    logger.debug(str)
+    logger.debug(assembled_text)
 
 
 class MultiTurnSFTDataset(Dataset):
@@ -256,7 +269,11 @@ class MultiTurnSFTDataset(Dataset):
                     f"got role={assistant_message.get('role')!r} at index {index}"
                 )
 
-            assistant_token_ids = builder.tokenize_assistant_message(assistant_message, tools=tools)
+            assistant_token_ids = builder.tokenize_assistant_message(
+                assistant_message,
+                tools=tools,
+                previous_messages=runtime_messages,
+            )
             merge_result = builder.merge_assistant_tokens(runtime_token_ids, assistant_token_ids)
             loss_mask, _ = builder.align_response_metadata(merge_result, loss_mask)
             runtime_token_ids = merge_result.token_ids
@@ -346,7 +363,9 @@ class MultiTurnSFTDataset(Dataset):
         Returns:
             messages: List of messages with replaced placeholder.
         """
-        messages: list = convert_nested_value_to_list_recursive(example[self.messages_key])
+        messages: list = self._drop_null_message_fields(
+            convert_nested_value_to_list_recursive(example[self.messages_key])
+        )
         images = example[self.image_key] if self.image_key in example else []
         videos = example[self.video_key] if self.video_key in example else []
 
@@ -381,6 +400,28 @@ class MultiTurnSFTDataset(Dataset):
         assert image_offset == len(images), f"image_offset {image_offset} != len(images) {len(images)}"
         assert video_offset == len(videos), f"video_offset {video_offset} != len(videos) {len(videos)}"
         return messages
+
+    @staticmethod
+    def _drop_null_message_fields(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Remove null optional fields that Arrow adds to message structs.
+
+        Some chat templates distinguish an absent optional key from a present
+        key whose value is null. For example, GPT-OSS treats the presence of
+        ``tool_calls`` as a tool-call turn. Parquet may add ``tool_calls=None``
+        to ordinary assistant messages when another row or turn has that field.
+
+        Normalize ``content=None`` to an empty string because it is a valid
+        OpenAI tool-call message but many Jinja templates require text. Nested
+        values are left untouched so JSON null tool arguments retain meaning.
+        """
+        return [
+            {
+                key: "" if key == "content" and value is None else value
+                for key, value in message.items()
+                if value is not None or key == "content"
+            }
+            for message in messages
+        ]
 
     def __getitem__(self, item):
         row_dict: dict = self.dataframe.iloc[item].to_dict()
