@@ -156,6 +156,30 @@ def _receiver_fn(zmq_handle, use_shm, result_queue, overlap_bucket_processing=Fa
     result_queue.put(summaries)
 
 
+def _receiver_fn_raising(zmq_handle, use_shm, result_queue, overlap_bucket_processing=False):
+    """Receiver whose bucket callback raises; reports the exception type escaping receive_weights."""
+    from verl.utils.device import get_device_name
+    from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
+
+    device = torch.device(f"{get_device_name()}:0")
+    receiver = BucketedWeightReceiver(
+        zmq_handle=zmq_handle,
+        device=device,
+        use_shm=use_shm,
+        overlap_bucket_processing=overlap_bucket_processing,
+    )
+
+    def _boom(weights, is_last):
+        raise RuntimeError("callback boom")
+
+    try:
+        receiver.receive_weights(on_bucket_received=_boom)
+    except BaseException as e:
+        result_queue.put(type(e).__name__)
+        return
+    result_queue.put("no-exception")
+
+
 # ---------------------------------------------------------------------------
 # Test helper
 # ---------------------------------------------------------------------------
@@ -240,6 +264,33 @@ class TestBucketedWeightTransferSHM:
 
     def test_empty_weights(self):
         _transfer_and_validate([], bucket_size_mb=1, use_shm=True)
+
+    def test_callback_exception_not_masked_by_cleanup(self):
+        # Regression: an exception raised by on_bucket_received must propagate
+        # as-is. Local references to the shared buffer that survive into
+        # _cleanup keep the shm memoryview exported, so shm.close() raises
+        # BufferError and masks the original exception.
+        for overlap in (False, True):
+            zmq_handle = _unique_zmq_handle()
+            ctx = mp.get_context("spawn")
+            result_queue = ctx.Queue()
+            specs = [("layer.weight", (32, 16), torch.float32)]
+            sender_p = ctx.Process(target=_sender_fn, args=(zmq_handle, specs, 42, 1, True))
+            receiver_p = ctx.Process(target=_receiver_fn_raising, args=(zmq_handle, True, result_queue, overlap))
+            sender_p.start()
+            receiver_p.start()
+            receiver_p.join(timeout=PROCESS_TIMEOUT)
+            # The receiver never acks the first bucket, so the sender is still
+            # blocked in socket.recv(); it is no longer needed for this test.
+            sender_p.terminate()
+            sender_p.join(timeout=PROCESS_TIMEOUT)
+            assert receiver_p.exitcode == 0, (
+                f"Receiver process failed with exit code {receiver_p.exitcode} (overlap={overlap})"
+            )
+            exc_type = result_queue.get(timeout=5)
+            assert exc_type == "RuntimeError", (
+                f"callback exception was masked by cleanup (overlap={overlap}): got {exc_type}"
+            )
 
     def test_overlap_multiple_buckets(self):
         # overlap_bucket_processing: receiver acks each bucket before processing

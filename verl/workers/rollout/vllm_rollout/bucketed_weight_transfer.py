@@ -290,7 +290,12 @@ class BucketedWeightReceiver:
             (e.g. vLLM ``add_lora``, which takes one adapter dict per call) can
             defer their finalization until the whole adapter has arrived.
         """
+        # Keep these names bound for the whole call so the finally block can
+        # always release them (see below).
         staging = None
+        weights: list[tuple[str, torch.Tensor]] = []
+        tensor = None
+        src = None
         try:
             self._init_socket()
             self._init_buffer()
@@ -342,14 +347,22 @@ class BucketedWeightReceiver:
                 get_torch_device().synchronize()
                 if not acked:
                     self.socket.send(b"")
-                # Drop every local reference to the shared buffer: on the shm
-                # path a lingering view keeps the memoryview exported and
-                # _cleanup's shm.close() fails with BufferError.
-                del weights, tensor, src
+                # Release this bucket's references promptly: the next recv may
+                # block while the sender refills the shared buffer. Rebinding
+                # (rather than `del`) keeps the names bound for the finally.
+                weights, tensor = [], None
+                src = None
                 if is_last:
                     break
             del staging
         finally:
+            # Drop every local reference to the shared buffer *before* cleanup:
+            # a lingering view keeps the shm memoryview exported, and
+            # _cleanup's shm.close() then raises BufferError — on the exception
+            # path that would mask the original exception (and skip unlink).
+            # (staging is a private device tensor, it never exports the shm
+            # buffer, so it does not need to be released here.)
+            del weights, tensor, src
             self._cleanup()
 
     def _init_socket(self):
