@@ -34,8 +34,14 @@ def initialize_system_prompt(tokenizer, **apply_chat_template_kwargs) -> list[in
             **apply_chat_template_kwargs,
         )
     )
-    # get system prompt tokens
-    system_prompt = token1[: -(len(token2) - len(token1))]
+    # get system prompt tokens: token1 is [system-prefix, turn1], token2 is [system-prefix, turn1,
+    # turn2] where turn1 == turn2 (same empty-content probe), so the marginal length `diff` is
+    # exactly one turn's own token count. Slicing via `len(token1) - diff` (rather than the
+    # negative-index form `token1[:-diff]`) also handles `diff == 0` correctly: Python's `x[:-0]`
+    # means `x[:0]` (empty list), not "keep everything", which silently dropped the whole system
+    # prompt whenever a turn probe added zero marginal tokens.
+    diff = len(token2) - len(token1)
+    system_prompt = token1[: len(token1) - diff]
     return system_prompt
 
 
@@ -125,8 +131,10 @@ def extract_system_prompt_and_generation(tokenizer, **apply_chat_template_kwargs
             **apply_chat_template_kwargs,
         )
     )
-    # get system prompt tokens
-    system_prompt = token1[: -(len(token2) - len(token1))]
+    # get system prompt tokens: see the identical derivation (and the `x[:-0]` pitfall it avoids)
+    # in `initialize_system_prompt` above.
+    diff = len(token2) - len(token1)
+    system_prompt = token1[: len(token1) - diff]
     # get generate prompt tokens
     token3 = normalize_token_ids(
         tokenizer.apply_chat_template(
