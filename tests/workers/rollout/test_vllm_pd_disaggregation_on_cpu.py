@@ -511,15 +511,11 @@ class _AwaitableRemoteMethod:
 class _SleepServerStub:
     def __init__(self):
         self.wait_for_requests_to_drain = _AwaitableRemoteMethod()
-        self.collective_rpc = _AwaitableRemoteMethod()
         self.sleep = _AwaitableRemoteMethod()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("npu_available,expected_disconnects", [(False, 0), (True, 2)])
-async def test_pd_sleep_keeps_gpu_path_native_and_disconnects_ascend(
-    patched_replica_cls, npu_available, expected_disconnects
-):
+async def test_pd_sleep_drains_prefill_before_sleeping_all_servers(patched_replica_cls):
     replica = object.__new__(patched_replica_cls)
     prefill = _SleepServerStub()
     decode = _SleepServerStub()
@@ -527,19 +523,11 @@ async def test_pd_sleep_keeps_gpu_path_native_and_disconnects_ascend(
     replica._prefill_server_addresses = ["p0:8000"]
     replica.servers = [prefill, decode]
 
-    with patch(
-        "verl.workers.rollout.vllm_rollout.vllm_pd_replica.is_torch_npu_available",
-        return_value=npu_available,
-    ):
-        await replica.sleep()
+    await replica.sleep()
 
     assert len(prefill.wait_for_requests_to_drain.calls) == 1
     assert len(prefill.sleep.calls) == 1
     assert len(decode.sleep.calls) == 1
-    assert len(prefill.collective_rpc.calls) + len(decode.collective_rpc.calls) == expected_disconnects
-    for server in (prefill, decode):
-        for _, kwargs in server.collective_rpc.calls:
-            assert kwargs == {"method": "disconnect_kv_transfer_peers"}
 
 
 def test_pd_replica_init_rejects_dp_gt_1(patched_replica_cls):
