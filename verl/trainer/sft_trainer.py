@@ -430,7 +430,15 @@ class SFTTrainer:
                         # average over data parallel group
                         dp_group = self.engine.get_data_parallel_group()
                         if dp_group is not None:
-                            torch.distributed.all_reduce(val_loss, op=torch.distributed.ReduceOp.AVG, group=dp_group)
+                            # temporary workaround for XPU devices
+                            # tracked internal, estimate end of 2026 will be able to resolve this issue
+                            if val_loss.device.type == "xpu":
+                                torch.distributed.all_reduce(val_loss, group=dp_group)
+                                val_loss /= torch.distributed.get_world_size(group=dp_group)
+                            else:
+                                torch.distributed.all_reduce(
+                                    val_loss, op=torch.distributed.ReduceOp.AVG, group=dp_group
+                                )
 
                     if is_logging:
                         metric = {"val/loss": val_loss.detach().item()}
