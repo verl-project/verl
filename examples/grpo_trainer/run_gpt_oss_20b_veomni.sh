@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # GRPO | GPT-OSS-20B BF16 | VeOmni actor EP | vLLM rollout EP
 #
-# This example requires a vLLM revision with streamed GPT-OSS expert loading.
+# GPT-OSS expert-parallel synchronization requires vLLM 0.28.0 or later; the
+# fix landed in vLLM commit b26039b09fc97aa00f095a99eda503b7dad594ec.
 # Use a BF16 checkpoint, for example lmsys/gpt-oss-20b-bf16, rather than the
 # original MXFP4 checkpoint.
 
