@@ -34,11 +34,9 @@ from verl import DataProto
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo import core_algos
-from verl.trainer.ppo.ray_trainer import (
-    ResourcePoolManager,
-    compute_response_mask,
-)
+from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.trainer.ppo.reward import extract_reward
+from verl.trainer.ppo.trainer_utils import compute_response_mask
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils.debug import marked_timer
 from verl.utils.import_utils import load_class_from_fqn

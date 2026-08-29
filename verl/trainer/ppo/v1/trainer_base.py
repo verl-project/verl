@@ -62,8 +62,8 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.padding_utils import upsample_batch_to_divisible_size
-from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_spec_decode_metrics
 from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
+from verl.trainer.ppo.trainer_utils import apply_kl_penalty, compute_spec_decode_metrics
 from verl.trainer.ppo.utils import (
     Role,
     create_rl_dataset,
@@ -1861,7 +1861,7 @@ class PPOTrainer(ABC):
         )
 
         # 4. per-request speculative-decoding aggregation (same metrics async PPO logs;
-        # see compute_spec_decode_metrics in verl/trainer/ppo/ray_trainer.py).
+        # see compute_spec_decode_metrics in verl/trainer/ppo/trainer_utils.py).
         metrics.update(compute_spec_decode_metrics(spec_drafts, spec_accepts, spec_verifies, non_padding_mask))
 
         # 5. off-policy staleness metrics
