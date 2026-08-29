@@ -181,6 +181,10 @@ multi_turn:
   # null for no limit (default max_length // 3)
   max_assistant_turns: null
 
+  # null for no per-assistant-turn limit; otherwise caps each assistant generation
+  # while preserving response_length as the full trajectory budget.
+  max_assistant_response_length: null
+
   # YAML config for stateful tools that subclass ``BaseTool``.
   # Use this when a tool needs per-trajectory state, async ``create``/``release``
   # lifecycle hooks, or custom rewards.
