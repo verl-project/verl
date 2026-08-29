@@ -26,7 +26,7 @@ RUN apt-get update && \
 # Install torch-2.6.0 + vllm-0.8.2
 RUN pip install --no-cache-dir vllm==0.8.2 torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 tensordict torchdata==0.11.0 \
     transformers>=4.49.0 accelerate datasets peft hf-transfer \
-    ray[default] codetiming hydra-core pandas pyarrow>=15.0.0 pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel mathruler \
+    "ray[default]==2.58.0" codetiming hydra-core pandas pyarrow>=15.0.0 pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel mathruler \
     pytest pre-commit py-spy pyext ruff tensorboard
 
 # Install flash_attn-2.7.4.post1

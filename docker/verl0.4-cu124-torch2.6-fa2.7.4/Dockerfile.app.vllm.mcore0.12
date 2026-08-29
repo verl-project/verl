@@ -26,7 +26,7 @@ RUN aria2c --max-tries=9999 https://github.com/flashinfer-ai/flashinfer/releases
 # Fix packages
 RUN pip install --no-cache-dir "tensordict==0.6.2" "transformers[hf_xet]>=4.51.0" accelerate datasets peft hf-transfer \
     "numpy<2.0.0" "pyarrow>=19.0.1" pandas \
-    ray[default] codetiming hydra-core pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel mathruler blobfile xgrammar \
+    "ray[default]==2.58.0" codetiming hydra-core pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel mathruler blobfile xgrammar \
     pytest py-spy pyext pre-commit ruff
 
 RUN pip uninstall -y pynvml nvidia-ml-py && \

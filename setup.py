@@ -35,7 +35,7 @@ install_requires = [
     "pyarrow>=19.0.0",
     "pybind11",
     "pylatexenc",
-    "ray[default]>=2.41.0",
+    "ray[default]==2.58.0",
     "torchdata",
     "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
     # 5.6.0 ships a broken flash-attention path (crashes on s_aux=None for

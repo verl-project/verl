@@ -38,7 +38,7 @@ FROM lmsysorg/sglang:v0.4.5-rocm630
         peft \
         "pyarrow>=15.0.0" \
         pylatexenc \
-        "ray[data,train,tune,serve]" \
+        "ray[data,train,tune,serve]==2.58.0" \
         torchdata \
         transformers \
         wandb \
