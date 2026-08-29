@@ -499,6 +499,7 @@ class LLMServerManager:
         rollout_resource_pool: RayResourcePool = None,
         start_rank: int = 0,
         load_balancer_cls: type | None = None,
+        replica_init_kwargs: Optional[dict[str, Any]] = None,
     ):
         self.config = config
         self.rollout_config = config.actor_rollout_ref.rollout
@@ -507,6 +508,9 @@ class LLMServerManager:
         self.rollout_resource_pool = rollout_resource_pool
         self.start_rank = start_rank
         self._load_balancer_cls = load_balancer_cls or GlobalRequestLoadBalancer
+        # Forwarded verbatim to each RolloutReplica constructor. Standard replicas
+        # ignore it; RemoteBackend plugins use it to pass a reconnect handle.
+        self.replica_init_kwargs: dict[str, Any] = replica_init_kwargs or {}
 
         assert worker_group is not None or self.rollout_config.nnodes > 0, "nnodes must be > 0 in standalone mode"
 
@@ -570,6 +574,7 @@ class LLMServerManager:
                 config=self.rollout_config,
                 model_config=self.model_config,
                 gpus_per_node=self.rollout_config.n_gpus_per_node,
+                **self.replica_init_kwargs,
             )
             for replica_rank in range(num_replicas)
         ]
