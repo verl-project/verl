@@ -280,7 +280,7 @@ RUN pip install "git+https://github.com/YangWang92/torch_memory_saver_numa.git@n
 ########################################
 # need to add this patch: https://github.com/ray-project/ray/pull/53531/files
 RUN pip uninstall ray -y
-RUN pip install "ray[data,train,tune,serve]>=2.47.0" 
+RUN pip install "ray[data,train,tune,serve]==2.58.0"
 ########################################
 ########################################
 ########################################

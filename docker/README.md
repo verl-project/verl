@@ -92,6 +92,15 @@ manual sync flow, the baked-cache mechanics, and re-locking — see the
 
 After pulling the desired Docker image and installing desired inference and training frameworks, you can run it with the following steps:
 
+### Ray dashboard security
+
+Treat the Ray dashboard, Jobs API, and Serve API as cluster control-plane
+endpoints. Do not expose them directly to an untrusted network. Ray 2.52 and
+later support optional token authentication, but it is disabled by default and
+does not replace network isolation. See the
+[Ray security documentation](https://docs.ray.io/en/latest/ray-security/index.html)
+and [token authentication guide](https://docs.ray.io/en/latest/ray-core/internals/token-authentication.html).
+
 1. Launch the desired Docker image and attach into it:
 
 ```sh
@@ -124,4 +133,3 @@ pip3 install -e .[sglang]
 - 2026/01/17: update vllm stable image to torch==2.9.1, cudnn==9.16, deepep==1.2.1
 - 2025/12/23: update vllm stable image to vllm==0.12.0; update sglang stable image to sglang==0.5.6
 - 2025/11/18: update vllm stable image to vllm==0.11.1; update sglang stable image to sglang==0.5.5
-

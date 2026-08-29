@@ -100,7 +100,7 @@ PY
 RUN python3 -c "import transformers, accelerate; print('transformers:', transformers.__version__, 'accelerate:', accelerate.__version__)"
 
 # Pin Ray to a version compatible with TRT-LLM 1.3.0rc15
-RUN pip install --no-cache-dir "ray[default]==2.54.1"
+RUN pip install --no-cache-dir "ray[default]==2.58.0"
 
 # ==============================================================================
 # Install a specific TensorRT-LLM on demand

@@ -62,7 +62,7 @@ RUN pip install --resume-retries 999 --no-cache-dir torch==2.6.0 torchvision==0.
 
 RUN pip install --resume-retries 999 --no-cache-dir "tensordict==0.6.2" torchdata "transformers[hf_xet]>=4.51.0" accelerate datasets peft hf-transfer \
     "numpy<2.0.0" "pyarrow>=19.0.1" pandas \
-    ray[default] codetiming hydra-core pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel mathruler blobfile xgrammar \
+    "ray[default]==2.58.0" codetiming hydra-core pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel mathruler blobfile xgrammar \
     pytest py-spy pyext pre-commit ruff
 
 # Install flash-attn-2.7.4.post1 (cxx11abi=False)
@@ -110,4 +110,3 @@ RUN pip config unset global.index-url && \
 
 RUN apt-get update && \
     apt-get install -y libfreeimage3 libfreeimage-dev zlib1g htop
-

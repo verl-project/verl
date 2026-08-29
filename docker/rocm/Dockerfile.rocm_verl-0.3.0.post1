@@ -43,7 +43,7 @@ RUN pip install "tensordict==0.6.2" --no-deps && \
     peft \
     "pyarrow>=15.0.0" \
     pylatexenc \
-    "ray[data,train,tune,serve]<2.45.0" \
+    "ray[data,train,tune,serve]==2.58.0" \
     torchdata \
     transformers \
     wandb \
