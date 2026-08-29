@@ -15,6 +15,7 @@
 The concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP)
 """
 
+import functools
 import gc
 import logging
 import os
@@ -82,6 +83,48 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 device_name = get_device_name()
+
+
+def _guard_fsdp2_accumulated_grad() -> None:
+    """Work around an AttributeError in torch's FSDP2 gradient accumulation.
+
+    `FSDPParam.to_accumulated_grad_if_needed` reads `self._unsharded_param`
+    without checking that it exists. That attribute is created by
+    `init_unsharded_param` (which guards its own access with `hasattr`) and
+    dropped by `free_unsharded_param`, so a parameter that never took part in the
+    forward pass does not have it, and training dies with
+
+        AttributeError: 'FSDPParam' object has no attribute '_unsharded_param'
+
+    Seen on a Qwen3.5 VL model under text-only batches, where the vision tower is
+    never gathered. Such a parameter has no unsharded gradient to upcast, which is
+    the case the method already returns early for, so returning is what it means
+    to do.
+
+    Fixed upstream in pytorch/pytorch#194058. This shim keeps verl working on the
+    torch releases that carry the bug and becomes a no-op once the fix lands: it
+    only inserts an early return for the case that would otherwise raise.
+    """
+    try:
+        from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
+    except ImportError:
+        return
+
+    original = getattr(FSDPParam, "to_accumulated_grad_if_needed", None)
+    if original is None or getattr(original, "_verl_guarded", False):
+        return
+
+    @functools.wraps(original)
+    def to_accumulated_grad_if_needed(self):
+        if getattr(self, "_unsharded_param", None) is None:
+            return
+        return original(self)
+
+    to_accumulated_grad_if_needed._verl_guarded = True
+    FSDPParam.to_accumulated_grad_if_needed = to_accumulated_grad_if_needed
+
+
+_guard_fsdp2_accumulated_grad()
 
 
 class FSDPEngine(BaseEngine):
