@@ -32,6 +32,18 @@ from tqdm import tqdm
 from .base_model_merger import BaseModelMerger
 
 
+def merge_non_dtensor_shards(shards: list[torch.Tensor]) -> torch.Tensor:
+    """Merge the per-rank copies of a plain (non-DTensor) tensor.
+
+    FSDP2 replicates buffers instead of sharding them, so identical copies are returned
+    as-is (concatenating them would be wrong, and fails outright for 0-d tensors).
+    Shards that differ across ranks are concatenated on dim 0 as before.
+    """
+    if all(torch.equal(shards[0], shard) for shard in shards[1:]):
+        return shards[0]
+    return torch.cat(shards, dim=0)
+
+
 class FSDPModelMerger(BaseModelMerger):
     """
     Model merger for FSDP (Fully Sharded Data Parallel) checkpoints.
@@ -199,7 +211,7 @@ class FSDPModelMerger(BaseModelMerger):
                     # 2-D list, FSDP + TP
                     raise NotImplementedError("FSDP + TP is not supported yet")
             else:
-                state_dict[key] = torch.cat(state_dict[key], dim=0)
+                state_dict[key] = merge_non_dtensor_shards(state_dict[key])
 
         return state_dict
 
