@@ -230,6 +230,7 @@ class ServerAdapter(BaseRollout):
             zmq_handle=self.zmq_handle,
             bucket_size_mb=bucket_size_mb,
             use_shm=self.use_shm,
+            ack_timeout_ms=int(self.config.checkpoint_engine.update_weights_ack_timeout_seconds * 1000),
         )
         await sender.async_send_weights(weights)
 
