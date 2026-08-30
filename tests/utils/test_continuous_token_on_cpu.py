@@ -27,6 +27,8 @@ from verl.utils.tokenizer.continuous_token import (
     KimiVLContinuousTokenBuilder,
     MergeResult,
     MiniMaxContinuousTokenBuilder,
+    Qwen3ContinuousTokenBuilder,
+    Qwen35ContinuousTokenBuilder,
     QwenContinuousTokenBuilder,
     QwenVLContinuousTokenBuilder,
 )
@@ -141,6 +143,38 @@ class _QwenBoundaryTokenizer(_TemplateTokenizer):
         if token == "<|im_end|>":
             return self.im_end_id
         return 0
+
+
+class _RecordingQwenTokenizer(_QwenBoundaryTokenizer):
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        tools=None,
+        return_dict=False,
+        **kwargs,
+    ):
+        self.calls.append(
+            {
+                "messages": list(messages),
+                "add_generation_prompt": add_generation_prompt,
+                "tools": tools,
+                "kwargs": dict(kwargs),
+            }
+        )
+        return super().apply_chat_template(
+            messages,
+            tokenize=tokenize,
+            add_generation_prompt=add_generation_prompt,
+            tools=tools,
+            return_dict=return_dict,
+            **kwargs,
+        )
 
 
 class _GLMBoundaryTokenizer(_TemplateTokenizer):
@@ -295,8 +329,8 @@ def test_builtin_family_surface():
         (ContinuousTokenModelFamily.DEFAULT, ContinuousTokenBuilder),
         (ContinuousTokenModelFamily.QWEN, QwenContinuousTokenBuilder),
         (ContinuousTokenModelFamily.QWEN25, QwenContinuousTokenBuilder),
-        (ContinuousTokenModelFamily.QWEN3, QwenContinuousTokenBuilder),
-        (ContinuousTokenModelFamily.QWEN35, QwenContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.QWEN3, Qwen3ContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.QWEN35, Qwen35ContinuousTokenBuilder),
         (ContinuousTokenModelFamily.MINIMAX, MiniMaxContinuousTokenBuilder),
         (ContinuousTokenModelFamily.MINIMAX_M2, MiniMaxContinuousTokenBuilder),
         (ContinuousTokenModelFamily.MINIMAX_M25, MiniMaxContinuousTokenBuilder),
@@ -391,7 +425,7 @@ def test_auto_family_is_resolved_at_factory_time():
         _QwenBoundaryTokenizer(),
         hf_model_type="qwen3",
     )
-    assert isinstance(builder, QwenContinuousTokenBuilder)
+    assert isinstance(builder, Qwen3ContinuousTokenBuilder)
 
 
 def test_qwen2_auto_uses_qwen_builder_and_newline_boundary_logic():
@@ -457,7 +491,7 @@ def test_qwen3_builder_inserts_missing_newline_after_im_end():
     tokenizer = _QwenBoundaryTokenizer()
     builder = create_continuous_token_builder(tokenizer, model_family="qwen3")
 
-    assert isinstance(builder, QwenContinuousTokenBuilder)
+    assert isinstance(builder, Qwen3ContinuousTokenBuilder)
     result = builder._merge_non_assistant_token_ids([1, tokenizer.im_end_id], [2, 3])
 
     assert result.token_ids == [1, tokenizer.im_end_id, tokenizer.newline_id, 2, 3]
@@ -477,13 +511,72 @@ def test_qwen35_builder_uses_qwen3_newline_boundary_logic():
     tokenizer = _QwenBoundaryTokenizer()
     builder = create_continuous_token_builder(tokenizer, model_family="qwen35")
 
-    assert isinstance(builder, QwenContinuousTokenBuilder)
+    assert isinstance(builder, Qwen35ContinuousTokenBuilder)
     result = builder._merge_non_assistant_token_ids([1, tokenizer.im_end_id], [2])
 
     assert result.token_ids == [1, tokenizer.im_end_id, tokenizer.newline_id, 2]
     assert result.inserted_token_ids == [tokenizer.newline_id]
     assert result.appended_token_count == 1
     assert result.kind == "non_assistant"
+
+
+@pytest.mark.parametrize(
+    ("model_family", "builder_cls"),
+    [
+        ("qwen3", Qwen3ContinuousTokenBuilder),
+        ("qwen35", Qwen35ContinuousTokenBuilder),
+    ],
+)
+def test_qwen3_family_generation_prompt_delta_is_bounded_and_equivalent(model_family, builder_cls):
+    tokenizer = _RecordingQwenTokenizer()
+    tools = [{"type": "function", "function": {"name": "lookup"}}]
+    history = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "second question"},
+        {"role": "assistant", "content": "tool request"},
+        {"role": "tool", "content": "tool result", "name": "lookup"},
+    ]
+
+    bounded_builder = create_continuous_token_builder(
+        tokenizer,
+        model_family=model_family,
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    assert isinstance(bounded_builder, builder_cls)
+    tokenizer.calls.clear()
+    bounded_ids = bounded_builder._tokenize_generation_prompt_delta(history, tools=tools)
+    bounded_calls = list(tokenizer.calls)
+
+    # The generic builder is the correctness baseline for the same template.
+    fallback_builder = QwenContinuousTokenBuilder(
+        tokenizer,
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    tokenizer.calls.clear()
+    fallback_ids = fallback_builder._tokenize_generation_prompt_delta(history, tools=tools)
+    fallback_calls = list(tokenizer.calls)
+
+    assert bounded_ids == fallback_ids
+    assert [len(call["messages"]) for call in bounded_calls] == [2, 2]
+    assert all(call["tools"] is tools for call in bounded_calls)
+    assert all(call["kwargs"] == {"enable_thinking": False} for call in bounded_calls)
+    assert [len(call["messages"]) for call in fallback_calls] == [len(history), len(history)]
+    assert all(call["tools"] is tools for call in fallback_calls)
+
+
+def test_generic_builder_keeps_full_history_generation_prompt_fallback():
+    tokenizer = _RecordingQwenTokenizer()
+    builder = ContinuousTokenBuilder(tokenizer)
+    history = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "answer"},
+        {"role": "tool", "content": "result"},
+    ]
+
+    builder._tokenize_generation_prompt_delta(history)
+
+    assert [len(call["messages"]) for call in tokenizer.calls] == [len(history), len(history)]
 
 
 def test_minimax_builder_inserts_missing_newline_after_eos():

@@ -439,9 +439,11 @@ class GptOssContinuousTokenBuilder(ContinuousTokenBuilder):
 class QwenContinuousTokenBuilder(ContinuousTokenBuilder):
     """Qwen ChatML boundary handling.
 
-    Qwen2.5, Qwen3, and Qwen3.5 templates render ``<|im_end|>\n`` after a turn,
-    while generation may stop at ``<|im_end|>``. When the runtime prefix ends
-    there, insert the missing newline before appending non-assistant tokens.
+    Qwen2/Qwen2.5 templates render ``<|im_end|>\n`` after a turn, while
+    generation may stop at ``<|im_end|>``. When the runtime prefix ends there,
+    insert the missing newline before appending non-assistant tokens. Qwen3 and
+    Qwen3.5 use the specialized subclasses below so their generation scaffold
+    can be derived without re-rendering the full history.
     """
 
     def __init__(self, tokenizer: Any, **kwargs: Any):
@@ -466,6 +468,40 @@ class QwenContinuousTokenBuilder(ContinuousTokenBuilder):
             kind="non_assistant",
             inserted_token_ids=inserted_token_ids,
         )
+
+
+class _QwenGenerationPromptContinuousTokenBuilder(QwenContinuousTokenBuilder):
+    """Qwen builder with a bounded generation-prompt render.
+
+    Qwen3-family generation scaffolds are controlled by template arguments
+    rather than the accumulated messages. Historical-message handling remains
+    in the regular incremental turn renders; this hook only derives the final
+    scaffold from a small, valid conversation. Keeping the optimization in a
+    separate subclass leaves ``QwenContinuousTokenBuilder`` as the
+    compatibility path for Qwen2/Qwen2.5 and custom templates.
+    """
+
+    def _tokenize_generation_prompt_delta(
+        self,
+        updated_messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> list[int]:
+        del updated_messages
+        return self.render_delta_token_id(
+            [_SYNTHETIC_SYSTEM_MESSAGE, _SYNTHETIC_USER_MESSAGE],
+            [],
+            add_generation_prompt=True,
+            tools=tools,
+        )
+
+
+class Qwen3ContinuousTokenBuilder(_QwenGenerationPromptContinuousTokenBuilder):
+    """Qwen3 text builder with bounded generation-prompt tokenization."""
+
+
+class Qwen35ContinuousTokenBuilder(_QwenGenerationPromptContinuousTokenBuilder):
+    """Qwen3.5 text builder with bounded generation-prompt tokenization."""
 
 
 class MiniMaxContinuousTokenBuilder(ContinuousTokenBuilder):
