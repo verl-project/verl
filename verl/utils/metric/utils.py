@@ -25,10 +25,17 @@ import torch
 def reduce_metrics(metrics: dict[str, Union["Metric", list[Any]]]) -> dict[str, Any]:
     """
     Reduces a dictionary of metric lists by computing the mean, max, or min of each list.
-    The reduce operation is determined by the key name:
-    - If the key contains "max", np.max is used
-    - If the key contains "min", np.min is used
-    - Otherwise, np.mean is used
+    The reduction is chosen from the **final path segment** of the key:
+
+    - a key whose final segment is ``"max"`` (e.g. ``"critic/values/max"``) -> ``np.max``
+    - a key whose final segment is ``"min"`` (e.g. ``"response_length/min"``) -> ``np.min``
+    - otherwise -> ``np.mean``
+
+    Matching only the final segment avoids mis-reducing keys in which ``"max"``/``"min"``
+    appears mid-key (e.g. ``"global_seqlen/minmax_diff"``, ``"perf/max_memory_allocated_gb"``);
+    such names describe a per-value property, not the cross-batch reduction. For explicit
+    control, wrap values in a :class:`Metric` with the desired :class:`AggregationType`.
+    Empty lists reduce to ``NaN`` (``np.max``/``np.min`` would otherwise raise on empty input).
 
     Args:
         metrics: A dictionary mapping metric names to lists of metric values.
@@ -40,21 +47,27 @@ def reduce_metrics(metrics: dict[str, Union["Metric", list[Any]]]) -> dict[str, 
         >>> metrics = {
         ...     "loss": [1.0, 2.0, 3.0],
         ...     "accuracy": [0.8, 0.9, 0.7],
-        ...     "max_reward": [5.0, 8.0, 6.0],
-        ...     "min_error": [0.1, 0.05, 0.2]
+        ...     "reward/max": [5.0, 8.0, 6.0],
+        ...     "error/min": [0.1, 0.05, 0.2],
         ... }
         >>> reduce_metrics(metrics)
-        {"loss": 2.0, "accuracy": 0.8, "max_reward": 8.0, "min_error": 0.05}
+        {"loss": 2.0, "accuracy": 0.8, "reward/max": 8.0, "error/min": 0.05}
     """
     for key, val in metrics.items():
         if isinstance(val, Metric):
             metrics[key] = val.aggregate()
-        elif "max" in key:
-            metrics[key] = np.max(val)
-        elif "min" in key:
-            metrics[key] = np.min(val)
+        elif len(val) == 0:
+            # np.max([])/np.min([]) raise ValueError, so normalise to NaN here.
+            metrics[key] = float("nan")
         else:
-            metrics[key] = np.mean(val)
+            # avoid matching on mid-key "max"/"min" segments
+            leaf = key.rsplit("/", 1)[-1]
+            if leaf == "max":
+                metrics[key] = np.max(val)
+            elif leaf == "min":
+                metrics[key] = np.min(val)
+            else:
+                metrics[key] = np.mean(val)
     return metrics
 
 
@@ -131,9 +144,10 @@ class Metric:
             case AggregationType.SUM:
                 return np.sum(values)
             case AggregationType.MIN:
-                return np.min(values)
+                # np.min([])/np.max([]) raise; mirror reduce_metrics and return NaN.
+                return np.min(values) if len(values) else float("nan")
             case AggregationType.MAX:
-                return np.max(values)
+                return np.max(values) if len(values) else float("nan")
 
     @classmethod
     def aggregate_dp(cls, metric_lists: list["Metric"]) -> float:
