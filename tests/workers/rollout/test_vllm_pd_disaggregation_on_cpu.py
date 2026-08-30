@@ -11,14 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""GPU-free unit tests for vLLM PD disaggregation config + replica plumbing.
+"""Accelerator-free unit tests for vLLM PD config and replica plumbing.
 
 Covers Phase 1 of the verl-vllm-pd-disagg series:
   * ``DisaggregationConfig`` validation rules
   * ``RolloutConfig`` post_init coercion + name-vs-disagg.enabled gate
   * ``get_rollout_replica_class("vllm", disaggregation_enabled=True)`` resolves to ``vLLMPDReplica``
-  * ``vLLMPDReplica`` config validation paths (NIXL-only, single-node MVP)
-  * ``vLLMPDReplica._build_kv_transfer_config`` JSON shape
+  * ``vLLMPDReplica`` config validation paths
+  * GPU and Ascend connector selection/config shapes
 
 Phase 2 (NIXL 1P:1D smoke) and Phase 3 (1P:ND scaling) add live Ray-actor and
 vLLM-engine tests behind ``@pytest.mark.skipif(not CUDA_AVAILABLE)``.
@@ -31,7 +31,8 @@ from unittest.mock import patch
 
 import pytest
 
-from verl.workers.config import DisaggregationConfig, RolloutConfig
+from verl.workers.config import DisaggregationConfig, RolloutConfig, RoutingPolicyConfig
+from verl.workers.rollout.vllm_rollout.pd_routing import DecodePeerSelector
 
 # ---------------------------------------------------------------------------
 # DisaggregationConfig validation
@@ -52,6 +53,24 @@ def test_disaggregation_enabled_nixl_accepted():
     cfg = DisaggregationConfig(enabled=True, transfer_backend="nixl")
     assert cfg.enabled is True
     assert cfg.transfer_backend == "nixl"
+
+
+def test_disaggregation_decode_policy_uses_vllm_router_defaults():
+    cfg = DisaggregationConfig(enabled=True)
+    assert cfg.decode_policy.type == "round_robin"
+    assert cfg.decode_policy.load_check_interval_secs == 5
+    assert cfg.decode_policy.virtual_nodes == 160
+    assert cfg.decode_policy.cache_threshold == 0.3
+    assert cfg.decode_policy.balance_abs_threshold == 64
+    assert cfg.decode_policy.balance_rel_threshold == 1.5
+    assert cfg.decode_policy.eviction_interval_secs == 120
+    assert cfg.decode_policy.max_tree_size == 2**26
+
+    for policy in ("random", "power_of_two", "consistent_hash", "rendezvous_hash", "cache_aware"):
+        assert DisaggregationConfig(
+            enabled=True,
+            decode_policy=RoutingPolicyConfig(type=policy),
+        ).decode_policy.type == policy
 
 
 @pytest.mark.parametrize("backend", ["nixl", "mooncake", "ascend", "mori", "fake"])
@@ -185,6 +204,10 @@ def _build_kv_cfg(
     engine_id: str = "test-eid",
     transfer_backend: str = "nixl",
     mooncake_protocol=None,
+    use_ascend_mooncake_v1: bool = False,
+    kv_port=None,
+    prefill_tp=None,
+    decode_tp=None,
 ):
     # Lazy import: only meaningful when vllm-rollout deps are importable.
     pytest.importorskip("vllm")
@@ -195,7 +218,24 @@ def _build_kv_cfg(
         engine_id=engine_id,
         transfer_backend=transfer_backend,
         mooncake_protocol=mooncake_protocol,
+        use_ascend_mooncake_v1=use_ascend_mooncake_v1,
+        kv_port=kv_port,
+        prefill_tp=prefill_tp,
+        decode_tp=decode_tp,
     )
+
+
+@pytest.mark.parametrize(
+    "npu_available,expected",
+    [(False, False), (True, True)],
+)
+def test_ascend_detection_follows_verl_npu_availability(npu_available, expected):
+    pytest.importorskip("vllm")
+    from verl.workers.rollout.vllm_rollout import vllm_pd_replica as mod
+
+    with patch.object(mod, "is_torch_npu_available", return_value=npu_available) as is_npu:
+        assert mod.vLLMPDReplica._is_ascend_platform() is expected
+    is_npu.assert_called_once_with(check_device=False)
 
 
 def test_build_kv_transfer_config_prefill_role_maps_to_kv_producer():
@@ -247,6 +287,25 @@ def test_build_kv_transfer_config_mooncake_protocol_ignored_for_nixl():
     assert "kv_connector_extra_config" not in cfg
 
 
+@pytest.mark.parametrize("role,expected_role", [("prefill", "kv_producer"), ("decode", "kv_consumer")])
+def test_build_kv_transfer_config_ascend_mooncake_v1(role, expected_role):
+    cfg = _build_kv_cfg(
+        role=role,
+        transfer_backend="mooncake",
+        use_ascend_mooncake_v1=True,
+        kv_port=19001,
+        prefill_tp=4,
+        decode_tp=2,
+    )
+    assert cfg["kv_connector"] == "MooncakeConnectorV1"
+    assert cfg["kv_role"] == expected_role
+    assert cfg["kv_port"] == 19001
+    assert cfg["kv_connector_extra_config"] == {
+        "prefill": {"dp_size": 1, "tp_size": 4},
+        "decode": {"dp_size": 1, "tp_size": 2},
+    }
+
+
 @pytest.mark.parametrize("protocol", ["nvlink", "local", "rdma", "tcp"])
 def test_disagg_config_accepts_known_mooncake_protocols(protocol):
     DisaggregationConfig(enabled=True, transfer_backend="mooncake", mooncake_protocol=protocol)
@@ -280,6 +339,10 @@ def _make_pd_config(**overrides) -> RolloutConfig:
         decode_replicas=overrides.pop("decode_replicas", 1),
         transfer_backend=overrides.pop("transfer_backend", "nixl"),
         decode_tensor_model_parallel_size=overrides.pop("decode_tensor_model_parallel_size", None),
+        prefill_gpu_memory_utilization=overrides.pop("prefill_gpu_memory_utilization", None),
+        decode_gpu_memory_utilization=overrides.pop("decode_gpu_memory_utilization", None),
+        prefill_engine_kwargs=overrides.pop("prefill_engine_kwargs", {}),
+        decode_engine_kwargs=overrides.pop("decode_engine_kwargs", {}),
         ib_device=overrides.pop("ib_device", None),
     )
     return RolloutConfig(
@@ -387,15 +450,89 @@ def test_pd_replica_init_rejects_multi_prefill(patched_replica_cls):
         patched_replica_cls(replica_rank=0, config=cfg, model_config=None, gpus_per_node=8)
 
 
-def test_pd_replica_init_rejects_dp_gt_1(patched_replica_cls):
-    cfg = _make_pd_config(data_parallel_size=2)
-    with pytest.raises(NotImplementedError, match="data_parallel_size=1"):
-        patched_replica_cls(replica_rank=0, config=cfg, model_config=None, gpus_per_node=8)
-
-
 def test_pd_replica_init_rejects_oversized_world(patched_replica_cls):
     cfg = _make_pd_config(decode_replicas=8)  # 1 + 8 = 9 GPUs needed
     with pytest.raises(NotImplementedError, match="single-node only"):
+        patched_replica_cls(replica_rank=0, config=cfg, model_config=None, gpus_per_node=8)
+
+
+def test_pd_role_engine_kwargs_deep_merge_without_cross_role_mutation(patched_replica_cls):
+    cfg = _make_pd_config(
+        prefill_gpu_memory_utilization=0.85,
+        decode_gpu_memory_utilization=0.7,
+        prefill_engine_kwargs={"max_num_batched_tokens": 65536, "max_num_seqs": None},
+        decode_engine_kwargs={"max_num_batched_tokens": 2048, "max_num_seqs": 256},
+        engine_kwargs={"vllm": {"max_num_seqs": 512}},
+    )
+    replica = patched_replica_cls(replica_rank=0, config=cfg, model_config=None, gpus_per_node=8)
+
+    prefill = replica._build_pd_role_config("prefill", tp=1)
+    decode = replica._build_pd_role_config("decode", tp=1)
+
+    assert prefill.gpu_memory_utilization == 0.85
+    assert decode.gpu_memory_utilization == 0.7
+    assert prefill.engine_kwargs["vllm"] == {"max_num_batched_tokens": 65536, "max_num_seqs": 512}
+    assert decode.engine_kwargs["vllm"] == {"max_num_batched_tokens": 2048, "max_num_seqs": 256}
+    assert cfg.engine_kwargs["vllm"] == {"max_num_seqs": 512}
+
+
+def test_pd_replica_exposes_prefill_request_and_all_metrics_endpoints(patched_replica_cls):
+    cfg = _make_pd_config(decode_replicas=2)
+    replica = patched_replica_cls(replica_rank=0, config=cfg, model_config=None, gpus_per_node=8)
+    prefill_handles = [object()]
+    replica._prefill_servers = prefill_handles
+    replica._decode_servers = [object(), object()]
+    replica._prefill_server_addresses = ["p0:8000"]
+    replica._decode_server_addresses = ["d0:8000", "d1:8000"]
+
+    assert replica.get_request_server_endpoints() == [
+        ("p0:8000", prefill_handles[0]),
+    ]
+    assert [labels["pd_role"] for _, labels in replica.get_metrics_server_endpoints()] == [
+        "prefill",
+        "decode",
+        "decode",
+    ]
+
+
+class _AwaitableRemoteMethod:
+    def __init__(self):
+        self.calls = []
+
+    def remote(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+
+        async def _done():
+            return None
+
+        return _done()
+
+
+class _SleepServerStub:
+    def __init__(self):
+        self.wait_for_requests_to_drain = _AwaitableRemoteMethod()
+        self.sleep = _AwaitableRemoteMethod()
+
+
+@pytest.mark.asyncio
+async def test_pd_sleep_drains_prefill_before_sleeping_all_servers(patched_replica_cls):
+    replica = object.__new__(patched_replica_cls)
+    prefill = _SleepServerStub()
+    decode = _SleepServerStub()
+    replica._prefill_servers = [prefill]
+    replica._prefill_server_addresses = ["p0:8000"]
+    replica.servers = [prefill, decode]
+
+    await replica.sleep()
+
+    assert len(prefill.wait_for_requests_to_drain.calls) == 1
+    assert len(prefill.sleep.calls) == 1
+    assert len(decode.sleep.calls) == 1
+
+
+def test_pd_replica_init_rejects_dp_gt_1(patched_replica_cls):
+    cfg = _make_pd_config(data_parallel_size=2)
+    with pytest.raises(NotImplementedError, match="data_parallel_size=1"):
         patched_replica_cls(replica_rank=0, config=cfg, model_config=None, gpus_per_node=8)
 
 
@@ -421,10 +558,11 @@ def test_pd_replica_init_requires_disaggregation_enabled(patched_replica_cls):
 class _DispatchStub:
     """Minimal vLLMHttpServer-like instance for unbound-method tests."""
 
-    def __init__(self, decode_peers, role="prefill", connector="NixlConnector"):
+    def __init__(self, decode_peers, role="prefill", connector="NixlConnector", policy="round_robin"):
         self._disaggregation_role = role
         self._pd_decode_peers = list(decode_peers)
-        self._pd_peer_idx = 0
+        peer_ids = [f"http://decode-{index}:8000" for index in range(len(self._pd_decode_peers))]
+        self._pd_decode_selector = DecodePeerSelector(RoutingPolicyConfig(type=policy), peer_ids)
         # Used by _pd_dispatch to branch between NIXL (read kv_transfer_params
         # back from prefill) and Mooncake (construct it locally from prefill
         # engine_id + bootstrap addr).
@@ -433,13 +571,13 @@ class _DispatchStub:
         self._pd_prefill_side_channel_host = "127.0.0.1"
         self._pd_prefill_side_channel_port = 5559
 
-    def _select_decode_peer(self):
+    def _select_decode_peer(self, routing_key, prompt_ids):
         # Borrow the real implementation to keep the stub aligned with
         # production rotation semantics — _pd_dispatch's behavior must not
         # depend on the test's peer-selection policy.
         from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 
-        return vLLMHttpServer._select_decode_peer(self)
+        return vLLMHttpServer._select_decode_peer(self, routing_key, prompt_ids)
 
 
 def _import_http_server():
@@ -452,16 +590,15 @@ def _import_http_server():
 def test_select_decode_peer_round_robin_cycles():
     server_cls = _import_http_server()
     stub = _DispatchStub(decode_peers=["peer0", "peer1", "peer2"])
-    picks = [server_cls._select_decode_peer(stub) for _ in range(7)]
+    picks = [server_cls._select_decode_peer(stub, "session", [1])[1] for _ in range(7)]
     assert picks == ["peer0", "peer1", "peer2", "peer0", "peer1", "peer2", "peer0"]
-    # Internal counter advances exactly once per call.
-    assert stub._pd_peer_idx == 7
+    assert stub._pd_decode_selector.pending_requests == [3, 2, 2]
 
 
 def test_select_decode_peer_single_peer_returns_same():
     server_cls = _import_http_server()
     stub = _DispatchStub(decode_peers=["only_peer"])
-    assert all(server_cls._select_decode_peer(stub) == "only_peer" for _ in range(5))
+    assert all(server_cls._select_decode_peer(stub, "session", [1])[1] == "only_peer" for _ in range(5))
 
 
 def test_select_decode_peer_distribution_balanced_at_32_with_3_peers():
@@ -471,7 +608,7 @@ def test_select_decode_peer_distribution_balanced_at_32_with_3_peers():
     future change that randomizes for cache-locality but loses balance)."""
     server_cls = _import_http_server()
     stub = _DispatchStub(decode_peers=["peer0", "peer1", "peer2"])
-    counts = Counter(server_cls._select_decode_peer(stub) for _ in range(32))
+    counts = Counter(server_cls._select_decode_peer(stub, "session", [1])[1] for _ in range(32))
     assert sorted(counts.values()) == [10, 11, 11], (
         f"expected (10, 11, 11) hit counts under strict round-robin, got {dict(counts)}"
     )
@@ -547,6 +684,7 @@ async def test_pd_dispatch_routes_prefill_leg_then_decode_peer():
     assert dkw.kwargs["priority"] == 0
 
     assert result.token_ids == expected_decode_token_ids
+    assert stub._pd_decode_selector.pending_requests == [0]
 
 
 @pytest.mark.asyncio
@@ -616,6 +754,38 @@ async def test_pd_dispatch_raises_when_prefill_returns_no_kv_params():
             sampling_params={"max_tokens": 8},
             request_id="req-bare",
         )
+    assert stub._pd_decode_selector.pending_requests == [0]
+
+
+@pytest.mark.asyncio
+async def test_pd_dispatch_releases_reservation_when_decode_is_cancelled():
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from verl.workers.rollout.replica import TokenOutput
+
+    server_cls = _import_http_server()
+    decode_peer = MagicMock()
+
+    async def cancelled_decode():
+        raise asyncio.CancelledError
+
+    decode_peer.generate.remote = MagicMock(return_value=cancelled_decode())
+
+    async def fake_generate(prompt_ids, sampling_params, request_id, **kw):
+        return TokenOutput(token_ids=[0], stop_reason="completed", extra_fields={"kv_transfer_params": {}})
+
+    stub = _DispatchStub(decode_peers=[decode_peer])
+    stub.generate = fake_generate
+
+    with pytest.raises(asyncio.CancelledError):
+        await server_cls._pd_dispatch(
+            stub,
+            prompt_ids=[1],
+            sampling_params={"max_tokens": 8},
+            request_id="req-cancelled",
+        )
+    assert stub._pd_decode_selector.pending_requests == [0]
 
 
 def _make_awaitable_token_output(token_ids):

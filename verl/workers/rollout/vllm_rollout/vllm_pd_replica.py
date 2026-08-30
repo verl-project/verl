@@ -11,15 +11,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""vLLM PD-disaggregated replica: 1 prefill + N decode servers per replica,
-asymmetric TP supported. MVP: prefill_replicas=1, single-node only."""
+"""vLLM PD-disaggregated replica with one prefill and N decode servers.
+
+Asymmetric TP is supported, and the complete PD replica must fit on one node.
+GPU keeps vLLM's native NIXL/Mooncake connectors; Ascend uses
+vLLM-Ascend's MooncakeConnectorV1.
+"""
 
 import asyncio
+import copy
 import logging
 import os
 import uuid
+from collections.abc import Mapping
 from dataclasses import replace as _dc_replace
-from typing import Optional
+from typing import Any, Optional
 
 import ray
 from ray.actor import ActorHandle
@@ -31,6 +37,30 @@ from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
+
+
+def _deep_merge_dict(base: Mapping[str, Any], overrides: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a recursive merge without mutating either input."""
+    merged = {key: copy.deepcopy(value) for key, value in base.items()}
+    for key, value in overrides.items():
+        if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
+            merged[key] = _deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _drop_none_values(values: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove unset Hydra schema values before applying role overrides."""
+    result: dict[str, Any] = {}
+    for key, value in values.items():
+        if isinstance(value, Mapping):
+            nested = _drop_none_values(value)
+            if nested:
+                result[key] = nested
+        elif value is not None:
+            result[key] = value
+    return result
 
 
 class vLLMPDReplica(vLLMReplica):
@@ -100,12 +130,21 @@ class vLLMPDReplica(vLLMReplica):
 
         self._prefill_servers: list[ActorHandle] = []
         self._decode_servers: list[ActorHandle] = []
+        self._prefill_server_addresses: list[str] = []
+        self._decode_server_addresses: list[str] = []
 
     async def launch_servers(self):
         assert len(self.workers) == self.world_size, (
             f"worker count {len(self.workers)} != PD world size {self.world_size}"
         )
-        assert not is_torch_npu_available(check_device=False), "vLLM PD on NPU not validated"
+        use_ascend_mooncake_v1 = self._is_ascend_platform()
+        transfer_backend = self.config.disaggregation.transfer_backend
+        if use_ascend_mooncake_v1 and transfer_backend == "nixl":
+            logger.warning(
+                "NixlConnector is not supported for Ascend PD; falling back to "
+                "MooncakeConnectorV1"
+            )
+            transfer_backend = "mooncake"
 
         worker_infos = await asyncio.gather(
             *[
@@ -120,16 +159,13 @@ class vLLMPDReplica(vLLMReplica):
             ]
         )
 
-        # Bind the side-channel on the prefill worker's node.
         prefill_host_ip = worker_infos[0][2]
         prefill_engine_id = uuid.uuid4().hex
-
         prefill_end = self._prefill_tp
-        prefill_workers = self.workers[0:prefill_end]
+        prefill_workers = self.workers[:prefill_end]
         prefill_node_id = worker_infos[0][0]
-        prefill_devs = self._collect_cuda_devices(worker_infos[0:prefill_end])
+        prefill_devs = self._collect_cuda_devices(worker_infos[:prefill_end])
 
-        # Keep side-channel sockets reserved until all actors bind.
         reserved_socks = []
         prefill_side_channel_port, prefill_sock = get_free_port(prefill_host_ip, with_alive_sock=True)
         reserved_socks.append(prefill_sock)
@@ -137,12 +173,17 @@ class vLLMPDReplica(vLLMReplica):
             prefill_kv_cfg = self._build_kv_transfer_config(
                 role="prefill",
                 engine_id=prefill_engine_id,
-                transfer_backend=self.config.disaggregation.transfer_backend,
+                transfer_backend=transfer_backend,
                 mooncake_protocol=self.config.disaggregation.mooncake_protocol,
+                use_ascend_mooncake_v1=use_ascend_mooncake_v1,
+                kv_port=prefill_side_channel_port,
+                prefill_tp=self._prefill_tp,
+                decode_tp=self._decode_tp,
             )
             self._prefill_servers = [
                 self._spawn_pd_server(
                     role="prefill",
+                    pd_index=0,
                     workers=prefill_workers,
                     node_id=prefill_node_id,
                     cuda_visible_devices=prefill_devs,
@@ -168,12 +209,17 @@ class vLLMPDReplica(vLLMReplica):
                 decode_kv_cfg = self._build_kv_transfer_config(
                     role="decode",
                     engine_id=uuid.uuid4().hex,
-                    transfer_backend=self.config.disaggregation.transfer_backend,
+                    transfer_backend=transfer_backend,
                     mooncake_protocol=self.config.disaggregation.mooncake_protocol,
+                    use_ascend_mooncake_v1=use_ascend_mooncake_v1,
+                    kv_port=decode_side_channel_port,
+                    prefill_tp=self._prefill_tp,
+                    decode_tp=self._decode_tp,
                 )
                 self._decode_servers.append(
                     self._spawn_pd_server(
                         role="decode",
+                        pd_index=i,
                         workers=workers_i,
                         node_id=node_id_i,
                         cuda_visible_devices=devs_i,
@@ -198,29 +244,76 @@ class vLLMPDReplica(vLLMReplica):
                 sock.close()
 
         await self._prefill_servers[0].set_pd_peer.remote(
-            self._decode_servers,
-            prefill_side_channel_port,
-            prefill_engine_id,
+            decode_peers=self._decode_servers,
+            prefill_side_channel_port=prefill_side_channel_port,
+            prefill_engine_id=prefill_engine_id,
         )
 
         self.servers = list(self._prefill_servers) + list(self._decode_servers)
-        prefill_address, prefill_port = await self._prefill_servers[0].get_server_address.remote()
-        self._server_handle = self._prefill_servers[0]
-        self._server_address = (
-            f"[{prefill_address}]:{prefill_port}"
-            if is_valid_ipv6_address(prefill_address)
-            else f"{prefill_address}:{prefill_port}"
+        prefill_addresses = await asyncio.gather(
+            *[server.get_server_address.remote() for server in self._prefill_servers]
         )
+        decode_addresses = await asyncio.gather(
+            *[server.get_server_address.remote() for server in self._decode_servers]
+        )
+        self._prefill_server_addresses = [
+            f"[{host}]:{port}" if is_valid_ipv6_address(host) else f"{host}:{port}"
+            for host, port in prefill_addresses
+        ]
+        self._decode_server_addresses = [
+            f"[{host}]:{port}" if is_valid_ipv6_address(host) else f"{host}:{port}"
+            for host, port in decode_addresses
+        ]
+        self._server_handle = self._prefill_servers[0]
+        self._server_address = self._prefill_server_addresses[0]
 
         logger.info(
-            "vLLMPDReplica rank=%s launched: prefill=%s (engine_id=%s, side_channel=%s:%d), decodes=%d",
+            "vLLMPDReplica rank=%s launched: prefills=%s, decodes=%s",
             self.replica_rank,
-            self._server_address,
-            prefill_engine_id,
-            prefill_host_ip,
-            prefill_side_channel_port,
-            len(self._decode_servers),
+            self._prefill_server_addresses,
+            self._decode_server_addresses,
         )
+
+    def get_request_server_endpoints(self) -> list[tuple[str, ActorHandle]]:
+        """Expose every prefill server to the session-aware request router."""
+        if not self._prefill_servers or len(self._prefill_server_addresses) != len(self._prefill_servers):
+            raise RuntimeError("PD prefill servers have not been launched")
+        return list(zip(self._prefill_server_addresses, self._prefill_servers, strict=True))
+
+    async def sleep(self):
+        """Drain PD requests, then sleep all P/D servers."""
+        await asyncio.gather(
+            *[server.wait_for_requests_to_drain.remote() for _, server in self.get_request_server_endpoints()]
+        )
+        await asyncio.gather(*[server.sleep.remote() for server in self.servers])
+
+    def get_metrics_server_endpoints(self) -> list[tuple[str, dict[str, Any]]]:
+        """Expose all P/D vLLM metrics endpoints without changing request routing."""
+        if len(self._prefill_server_addresses) != len(self._prefill_servers):
+            raise RuntimeError("PD prefill metrics endpoints are not ready")
+        if len(self._decode_server_addresses) != len(self._decode_servers):
+            raise RuntimeError("PD decode metrics endpoints are not ready")
+        return [
+            *[
+                (
+                    address,
+                    {"request_endpoint": index, "pd_role": "prefill", "pd_index": index},
+                )
+                for index, address in enumerate(self._prefill_server_addresses)
+            ],
+            *[
+                (
+                    address,
+                    {"request_endpoint": -1, "pd_role": "decode", "pd_index": index},
+                )
+                for index, address in enumerate(self._decode_server_addresses)
+            ],
+        ]
+
+    @staticmethod
+    def _is_ascend_platform() -> bool:
+        """Follow Verl's existing NPU availability convention."""
+        return is_torch_npu_available(check_device=False)
 
     @staticmethod
     def _collect_cuda_devices(worker_infos) -> str:
@@ -232,29 +325,79 @@ class vLLMPDReplica(vLLMReplica):
         engine_id: str,
         transfer_backend: str,
         mooncake_protocol: Optional[str] = None,
+        use_ascend_mooncake_v1: bool = False,
+        kv_port: Optional[int] = None,
+        prefill_tp: Optional[int] = None,
+        decode_tp: Optional[int] = None,
     ) -> dict:
         """Assemble vLLM's ``--kv-transfer-config`` payload."""
         role_to_kv_role = {
             "prefill": "kv_producer",
             "decode": "kv_consumer",
         }
-        connector = {
-            "nixl": "NixlConnector",
-            "mooncake": "MooncakeConnector",
-        }[transfer_backend]
+        if use_ascend_mooncake_v1:
+            if transfer_backend != "mooncake":
+                raise ValueError("Ascend PD requires transfer_backend='mooncake'")
+            if kv_port is None or prefill_tp is None or decode_tp is None:
+                raise ValueError(
+                    "MooncakeConnectorV1 requires kv_port, prefill_tp, and decode_tp"
+                )
+            connector = "MooncakeConnectorV1"
+        else:
+            connector = {
+                "nixl": "NixlConnector",
+                "mooncake": "MooncakeConnector",
+            }[transfer_backend]
         cfg: dict = {
             "kv_connector": connector,
             "kv_role": role_to_kv_role[role],
             "engine_id": engine_id,
             "kv_buffer_device": get_device_name(),
         }
-        if transfer_backend == "mooncake" and mooncake_protocol:
+        if use_ascend_mooncake_v1:
+            cfg["kv_port"] = kv_port
+            cfg["kv_connector_extra_config"] = {
+                "prefill": {"dp_size": 1, "tp_size": prefill_tp},
+                "decode": {"dp_size": 1, "tp_size": decode_tp},
+            }
+        elif transfer_backend == "mooncake" and mooncake_protocol:
             cfg["kv_connector_extra_config"] = {"mooncake_protocol": mooncake_protocol}
         return cfg
+
+    def _build_pd_role_config(self, role: str, tp: int) -> RolloutConfig:
+        """Apply role-local vLLM settings without mutating the shared config."""
+        if role not in ("prefill", "decode"):
+            raise ValueError(f"unknown PD role: {role!r}")
+
+        disagg = self.config.disaggregation
+        role_gpu_memory_utilization = (
+            disagg.prefill_gpu_memory_utilization
+            if role == "prefill"
+            else disagg.decode_gpu_memory_utilization
+        )
+        role_engine_kwargs = (
+            disagg.prefill_engine_kwargs if role == "prefill" else disagg.decode_engine_kwargs
+        )
+        engine_kwargs = copy.deepcopy(self.config.engine_kwargs)
+        global_vllm_kwargs = engine_kwargs.get("vllm", {}) or {}
+        role_engine_kwargs = _drop_none_values(role_engine_kwargs or {})
+        engine_kwargs["vllm"] = _deep_merge_dict(global_vllm_kwargs, role_engine_kwargs)
+
+        return _dc_replace(
+            self.config,
+            tensor_model_parallel_size=tp,
+            gpu_memory_utilization=(
+                role_gpu_memory_utilization
+                if role_gpu_memory_utilization is not None
+                else self.config.gpu_memory_utilization
+            ),
+            engine_kwargs=engine_kwargs,
+        )
 
     def _spawn_pd_server(
         self,
         role: str,
+        pd_index: int,
         workers: list[ActorHandle],
         node_id: str,
         cuda_visible_devices: str,
@@ -267,7 +410,7 @@ class vLLMPDReplica(vLLMReplica):
         zmq_base_trainer_rank: int = 0,
     ) -> ActorHandle:
         """Construct one PD ``vLLMHttpServer`` actor."""
-        per_role_config = _dc_replace(self.config, tensor_model_parallel_size=tp)
+        per_role_config = self._build_pd_role_config(role, tp)
 
         env_vars = {
             "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
@@ -301,5 +444,6 @@ class vLLMPDReplica(vLLMReplica):
             nnodes=1,
             cuda_visible_devices=cuda_visible_devices,
             disaggregation_role=role,
+            disaggregation_index=pd_index,
             disaggregation_kv_transfer_config=kv_transfer_config,
         )
