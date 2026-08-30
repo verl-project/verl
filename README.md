@@ -106,7 +106,7 @@ verl is fast with:
 - Scales up to 671B models and hundreds of GPUs with [expert parallelism](https://github.com/verl-project/verl/pull/1467)
 - Multi-gpu [LoRA RL](https://verl.readthedocs.io/en/latest/advance/ppo_lora.html) support to save memory.
 - Experiment tracking with wandb, swanlab, mlflow and tensorboard.
-- Hardware Support: Supports NVIDIA, AMD, [Ascend](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/README.md)
+- Hardware Support: Supports NVIDIA, AMD, [Ascend](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/zh/README.md)
 
 ## Getting Started
 
