@@ -865,6 +865,9 @@ class RayPPOTrainer:
                 wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(
                     OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
                 )
+                wg_kwargs["profiler_discrete"] = bool(
+                    OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "discrete")
+                )
         wg_kwargs["device_name"] = self.device_name
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
