@@ -39,10 +39,6 @@ total_epochs=${TOTAL_EPOCHS:-30}
 save_freq=${SAVE_FREQ:-5}
 test_freq=${TEST_FREQ:-5}
 
-# Precision alignment determinism (set DETERMINISM=false for perf runs)
-DETERMINISM=${DETERMINISM:-true}
-SEED=${SEED:-42}
-
 project_name=${PROJECT_NAME:-verl_distill_geo3k}
 experiment_name=${EXPERIMENT_NAME:-qwen3_5_2b_from_qwen3_5_35b_geo3k}
 
@@ -55,10 +51,6 @@ max_num_tokens=$(( max_prompt_length + max_response_length + 1 ))
 ########################### device env ###########################
 case "${DEVICE}" in
     gpu)
-        if [ "${DETERMINISM}" = "true" ]; then
-            export VLLM_ENABLE_V1_MULTIPROCESSING=0
-            export CUBLAS_WORKSPACE_CONFIG=":16:8"
-        fi
         ;;
     npu)
         export HCCL_CONNECT_TIMEOUT=1500
@@ -72,13 +64,6 @@ case "${DEVICE}" in
         export HCCL_BUFFSIZE=610
         export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:1024
         export CUDA_DEVICE_MAX_CONNECTIONS=1
-        if [ "${DETERMINISM}" = "true" ]; then
-            export CLOSE_MATMUL_K_SHIFT=1
-            export ATB_MATMUL_SHUFFLE_K_ENABLE=0
-            export LCCL_DETERMINISTIC=1
-            export ATB_LLM_LCOC_ENABLE=0
-            export VLLM_ENABLE_V1_MULTIPROCESSING=0
-        fi
         ;;
     *)
         echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
@@ -184,37 +169,13 @@ if [ "${DEVICE}" = "npu" ]; then
     ROLLOUT+=(+actor_rollout_ref.rollout.engine_kwargs.vllm_mm_processor_cache_gb=0)
 fi
 
-########################### determinism (precision alignment) ###########################
-if [ "${DETERMINISM}" = "true" ]; then
-    DATA+=(
-        data.shuffle=False
-        data.validation_shuffle=False
-        data.seed=${SEED}
-    )
-    ACTOR+=(
-        actor_rollout_ref.actor.data_loader_seed=${SEED}
-        actor_rollout_ref.actor.fsdp_config.seed=${SEED}
-        actor_rollout_ref.actor.fsdp_config.full_determinism=True
-    )
-    REF+=(
-        actor_rollout_ref.ref.fsdp_config.seed=${SEED}
-        actor_rollout_ref.ref.fsdp_config.full_determinism=True
-    )
-    ROLLOUT+=(
-        actor_rollout_ref.rollout.seed=${SEED}
-    )
-    EXTRA+=(
-        +distillation.teacher_models.teacher_model.inference.seed=${SEED}
-    )
-fi
-
 ########################### launch ###########################
 # uv (set VERL_USE_UV=0 for system python): GPU vllm/sglang × fsdp run the driver and every Ray worker
 # (runtime_env.py_executable) through `uv run` on the matching extras of the committed uv.lock;
 # other backends / NPU fall back to ambient python. Run from the verl repo root.
 LAUNCH=(python3)
 RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
-if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE}" = gpu ] && { [ "${INFER_BACKEND}" = vllm ] || [ "${INFER_BACKEND}" = sglang ]; }; then
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ] && { [ "${INFER_BACKEND}" = vllm ] || [ "${INFER_BACKEND}" = sglang ]; }; then
     LAUNCH=(uv run --frozen --all-packages --extra "${INFER_BACKEND}" --extra fsdp python3)
     RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages --extra ${INFER_BACKEND} --extra fsdp")
 fi
