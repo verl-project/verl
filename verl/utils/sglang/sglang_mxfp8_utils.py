@@ -25,7 +25,12 @@ import os
 
 import torch
 
-from verl.utils.mxfp8_quant import MXFP8_GROUP_SIZE, TE_MXFP8_ROW_ALIGNMENT, mxfp8_quantize
+from verl.utils.mxfp8_quant import (
+    MXFP8_GROUP_SIZE,
+    MXFP8_KEEP_HIGH_PRECISION_LAYERS,
+    TE_MXFP8_ROW_ALIGNMENT,
+    mxfp8_quantize,
+)
 from verl.utils.sglang.sglang_fp8_utils import SGLangFP8QuantizerHelper, build_sglang_fp8_quant_config
 from verl.workers.rollout.utils import ensure_async_iterator
 
@@ -65,6 +70,14 @@ def build_sglang_mxfp8_quant_config(hf_config=None, ignored_layers=None) -> dict
     quant_config = build_sglang_fp8_quant_config(hf_config, ignored_layers)
     quant_config["quant_method"] = "mxfp8"
     quant_config["weight_block_size"] = [1, 32]
+    # See MXFP8_KEEP_HIGH_PRECISION_LAYERS: quantizing lm_head under MXFP8
+    # produces nan logits. Only the vLLM path was reproduced on Blackwell, but
+    # the argument is engine-independent, so keep both engines consistent.
+    merged = list(quant_config.get("ignored_layers") or [])
+    for name in MXFP8_KEEP_HIGH_PRECISION_LAYERS:
+        if name not in merged:
+            merged.append(name)
+    quant_config["ignored_layers"] = merged
     return quant_config
 
 

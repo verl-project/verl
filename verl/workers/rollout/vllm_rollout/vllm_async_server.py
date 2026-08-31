@@ -1096,9 +1096,11 @@ class vLLMHttpServer:
                     # the ModelOpt MXFP8 config (weight fp8_e4m3fn + uint8 UE8M0
                     # weight_scale, block size [1, 32]). Weight sync quantizes with
                     # TE's MXFP8Quantizer so rollout serves the training weight grid.
+                    from verl.utils.mxfp8_quant import MXFP8_KEEP_HIGH_PRECISION_LAYERS
+
                     quant_kwargs = {
                         "quant_method": "mxfp8",
-                        "ignored_layers": all_mlp_gate_layers,
+                        "ignored_layers": all_mlp_gate_layers + list(MXFP8_KEEP_HIGH_PRECISION_LAYERS),
                     }
 
                 hf_overrides["quantization_config"] = dict(quant_kwargs)

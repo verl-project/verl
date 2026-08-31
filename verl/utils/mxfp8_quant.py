@@ -24,6 +24,21 @@ reintroduce train-inference mismatch.
 import torch
 
 MXFP8_GROUP_SIZE = 32
+# Layers that must stay in high precision under MXFP8 rollout quantization.
+#
+# ``lm_head`` projects the hidden state onto the full vocabulary. Its dynamic
+# range does not survive MXFP8's 32-element blocks along K: quantizing it makes
+# the logits ``nan``, which silently degrades sampling — generations never emit
+# EOS and run to ``max_response_length``, so reward stays at 0 while the run
+# still exits 0. Verified on 2xB200 (Qwen3-8B, gsm8k): with ``lm_head``
+# quantized, ``training/rollout_probs_diff_mean`` and ``rollout_corr/*`` are all
+# ``nan`` and reward is 0.0 for every step; excluding it restores reward
+# (0.268 -> 0.393 over 3 steps) and clears every ``nan``.
+#
+# The embedding is listed for symmetry: it shares the vocabulary dimension and
+# the same argument applies if an engine ever routes it through a quantized
+# linear.
+MXFP8_KEEP_HIGH_PRECISION_LAYERS = ("lm_head", "model.embed_tokens")
 # TE's MXFP8 quantizer requires both dims 32-aligned; weights whose row count
 # is not a multiple of 32 are zero-padded before quantization and sliced after.
 TE_MXFP8_ROW_ALIGNMENT = 32
