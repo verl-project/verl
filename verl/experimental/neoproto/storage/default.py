@@ -212,9 +212,14 @@ class DefaultStorageEngine(_BaseStorageEngine):
 
     # ------------------------------------------------------------------
     def _ray_available(self) -> bool:
-        """Return True when Ray's object-store put/get APIs are importable."""
+        """Return True only inside an initialized Ray process.
+
+        Library-level ``DataProto`` construction must not auto-start a Ray
+        cluster. Trainers and Ray actors initialize Ray before using the
+        object-store path; standalone callers use the local fallback.
+        """
         try:
-            return callable(getattr(ray, "put", None)) and callable(getattr(ray, "get", None))
+            return ray.is_initialized()
         except Exception:  # pragma: no cover
             return False
 

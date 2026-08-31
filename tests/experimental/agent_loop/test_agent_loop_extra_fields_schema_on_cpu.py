@@ -30,7 +30,6 @@ from verl.experimental.agent_loop.agent_loop import (
     _InternalAgentLoopOutput,
 )
 from verl.experimental.agent_loop.single_turn_agent_loop import SingleTurnAgentLoop
-from verl.protocol import DataProto
 from verl.utils.dataset.rl_dataset import RLHFDataset
 from verl.workers.rollout.replica import TokenOutput
 
@@ -232,7 +231,6 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
         {
             "reward_loop_worker_handles": None,
             "distillation_enabled": False,
-            "data_proto_cls": DataProto,
         },
     )()
     merged = AgentLoopWorker._postprocess(

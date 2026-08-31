@@ -136,9 +136,6 @@ trainer:
   # Directory for logging rollout data; no dump if null
   rollout_data_dir: null
 
-  # Directory for test-only, per-step tensor snapshots; no dump if null
-  correctness_dump_dir: null
-
   # Directory for logging validation data; no dump if null
   validation_data_dir: null
 
@@ -202,12 +199,6 @@ trainer:
 
   # Whether to use V1 trainer
   use_v1: false
-
-  # V0 trainer data plane: "classic" or experimental "neoproto"
-  data_plane: classic
-
-  # Fail instead of silently falling back when a NeoProto worker result is malformed
-  neoproto_strict_mode: false
 
   # V1 trainer mode configs
   v1:

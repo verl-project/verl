@@ -8,8 +8,9 @@
 """
 :class:`NeoProto` -- ref/index-only base container.
 
-This is the backbone behind the NeoProto :class:`~verl.experimental.neoproto.views.data_proto.DataProto`
-compatibility view used by the V0 trainer when ``trainer.data_plane=neoproto``.
+This is the backbone behind the public NeoProto-backed
+:class:`~verl.experimental.neoproto.views.data_proto.DataProto` compatibility
+view used by the V0 trainer.
 
 Design principles
 -----------------
@@ -517,8 +518,7 @@ class NeoProto:
             raise ValueError("chunks must be > 0")
         if n == 0:
             return [self] if chunks == 1 else [self.empty_like() for _ in range(chunks)]
-        if n % chunks != 0:
-            raise ValueError(f"batch size {n} not divisible by {chunks}")
+        assert n % chunks == 0, f"batch size {n} not divisible by {chunks}"
         step = n // chunks
         base = (
             self.dim0_index.sample_indices
@@ -1300,7 +1300,8 @@ class NeoProto:
     @staticmethod
     def _index_along(value: Any, axis: int, indices: np.ndarray) -> Any:
         if _HAVE_TORCH and isinstance(value, torch.Tensor):
-            return value.index_select(axis, torch.as_tensor(indices, dtype=torch.long, device=value.device))
+            writable_indices = np.asarray(indices).copy()
+            return value.index_select(axis, torch.as_tensor(writable_indices, dtype=torch.long, device=value.device))
         if isinstance(value, np.ndarray):
             return np.take(value, indices, axis=axis)
         if isinstance(value, list):

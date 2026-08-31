@@ -44,7 +44,7 @@ def test_seqlen_balancing():
     reverse_idx_map = get_reverse_idx(micro_bsz_idx)
     reverse_idx_map = torch.tensor(reverse_idx_map)
     new_batch = batch[reverse_idx_map]
-    torch.testing.assert_close(new_batch, dataproto.batch)
+    torch.testing.assert_close(new_batch, dataproto.to_tensordict())
 
 
 def test_dynamic_batch():

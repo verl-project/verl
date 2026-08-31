@@ -45,11 +45,10 @@ from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
+from verl import DataProto
 from verl.experimental.agent_loop.utils import resolve_config_path
-from verl.protocol import DataProto
 from verl.tools.tool_registry import load_all_tools
 from verl.trainer.distillation import is_distillation_enabled
-from verl.trainer.ppo.data_plane import resolve_data_proto_cls
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.model import compute_position_id_with_mask
@@ -506,8 +505,6 @@ class AgentLoopWorker:
         self.llm_client = llm_client
         self.teacher_client = teacher_client
         self.reward_loop_worker_handles = reward_loop_worker_handles
-        self.data_proto_cls = resolve_data_proto_cls(config)
-
         rollout_config, model_config = config.actor_rollout_ref.rollout, config.actor_rollout_ref.model
         self.rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config)
@@ -997,7 +994,7 @@ class AgentLoopWorker:
                     "response_len": np.array([len(o.response_ids) for o in outputs]),
                 }
 
-                data = self.data_proto_cls(
+                data = DataProto(
                     batch=batch,
                     non_tensor_batch=non_tensor_batch,
                 )
@@ -1119,7 +1116,7 @@ class AgentLoopWorker:
         else:
             meta_info = {"metrics": metrics}
 
-        return self.data_proto_cls(
+        return DataProto(
             batch=batch,
             non_tensor_batch=non_tensor_batch,
             meta_info=meta_info,

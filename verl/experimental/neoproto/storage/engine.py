@@ -633,14 +633,12 @@ class RefTable:
         return self.copy()
 
     def __del__(self):
-        # flattern the gc queue and release all refs in it
-        ref_list = []
-        for ref in self._gc_queue:
-            if isinstance(ref, Ref):
-                ref_list.append(ref)
-            elif isinstance(ref, list | np.ndarray):
-                ref_list.extend(ref)
-        _release_ref_container(ref_list)
+        # Do not force-free overwritten Ray ObjectRefs here. RefTables are
+        # copied across chunk views and processes, so another live table may
+        # still reference the same object. Dropping this queue lets Ray's
+        # distributed reference counting reclaim objects safely. Explicit
+        # ``NeoProto.release()`` remains available for owned data.
+        self._gc_queue.clear()
 
     # ------------------------------------------------------------------
     # Columnar pickling. Avoids per-Ref serialization for homogeneous per-sample

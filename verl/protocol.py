@@ -331,7 +331,7 @@ class DataProto:
         self.check_consistency()
 
     def new_like(self, batch=None, non_tensor_batch=None, meta_info=None) -> "DataProto":
-        """Construct an output container with the same concrete data-plane type."""
+        """Construct an output container with the same concrete batch type."""
         return type(self)(
             batch=batch,
             non_tensor_batch={} if non_tensor_batch is None else non_tensor_batch,
@@ -339,31 +339,15 @@ class DataProto:
         )
 
     def prefetch(self, keys=None, *, device: str = "cpu") -> dict[str, Any]:
-        """Eagerly cache selected fields when supported by the data plane.
+        """Eagerly cache selected fields when supported by the batch type.
 
-        Classic :class:`DataProto` is already materialized, so this is a no-op.
+        The legacy :class:`DataProto` is already materialized, so this is a no-op.
         """
         del keys, device
         return {}
 
     def clear_cache(self) -> None:
         """Drop optional lazy materialization caches."""
-
-    @classmethod
-    def reset_materialize_stats(cls) -> None:
-        """Reset optional data-plane materialization counters."""
-
-    @classmethod
-    def pop_materialize_stats(cls) -> dict[str, float]:
-        """Return optional data-plane materialization counters."""
-        return {}
-
-    def prepare_dispatch(self, chunks) -> None:
-        """Prepare chunk metadata before transport.
-
-        The classic data plane requires no extra transport metadata.
-        """
-        del chunks
 
     def set_control_fields(self, **kwargs) -> "DataProto":
         """Attach transient worker control fields to this batch."""
@@ -1332,7 +1316,7 @@ class BatchData:
             prepare(chunks)
 
     def set_control_fields(self, **kwargs):
-        """Set worker control fields without branching on a concrete data plane."""
+        """Set worker control fields without branching on a concrete batch type."""
         data = self._data
         if isinstance(data, TensorDict):
             from verl.utils import tensordict_utils as tu
