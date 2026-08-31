@@ -90,14 +90,18 @@ vllm = [
     "torch==2.11.0",
     "torchvision==0.26.0",
     "torchaudio==2.11.0",
-    # PyPI's 0.24.0 wheel is already a cu130 / torch-2.11 abi3 build, so it needs
-    # no wheelhouse routing and no source build.
-    "vllm==0.24.0",
-    # flashinfer is a transitive dep vllm 0.24 hard-pins to ==0.6.12 (pure-python
-    # from PyPI); the wheelhouse's 0.6.13 doesn't match, so it isn't routed.
+    # Per-token NVFP4 routed experts require vLLM's per_token_activation kernel
+    # argument and native graph-stable reload lifecycle, released in 0.26.0.
+    "vllm @ https://github.com/vllm-project/vllm/releases/download/v0.26.0/vllm-0.26.0-cp38-abi3-manylinux_2_28_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "vllm @ https://github.com/vllm-project/vllm/releases/download/v0.26.0/vllm-0.26.0-cp38-abi3-manylinux_2_28_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "vllm==0.26.0 ; sys_platform != 'linux' or (platform_machine != 'aarch64' and platform_machine != 'x86_64')",
+    "flashinfer-python==0.6.14",
+    "flashinfer-cubin==0.6.14",
+    "flashinfer-jit-cache==0.6.14",
+    "nvidia-cutlass-dsl[cu13]==4.6.0",
+    "quack-kernels==0.6.1",
     "mbridge",
-    # vllm 0.24 needs transformers 5.5.3 (enforced in override-dependencies below).
-    "transformers==5.5.3",
+    "transformers==5.12.1",
 ]
 
 sglang = [
@@ -143,12 +147,12 @@ fsdp = [
     "liger-kernel>=0.8.2",
     "trl==0.27.0",
     # transformers NOT pinned here: trainers inherit the synced engine's version
-    # (vllm 5.5.3 / sglang 5.3.0). See override-dependencies below.
+    # (vllm 5.12.1 / sglang 5.3.0). See override-dependencies below.
 ]
 
-# apex / TE / flash-attn / megatron-bridge come prebuilt from the wheelhouse;
-# megatron-core is git-sourced (built at sync time). onnxscript: works around an
-# undeclared TE import.
+# apex / flash-attn / megatron-bridge come prebuilt from the wheelhouse;
+# the exact TE source pin below is built at sync time. megatron-core is also
+# git-sourced. onnxscript works around an undeclared TE import.
 megatron = [
     "verl[verl-core]",
     "verl[flash-attn-cu130torch211]",
@@ -159,6 +163,8 @@ megatron = [
     "nvidia-mathdx",
     "apex",
     "transformer-engine",
+    # Exact build dependency used by the audited TE e7c550c5 source build.
+    "nvidia-cudnn-frontend==1.25.0",
     "onnxscript",
     "trl==0.27.0",
     "matplotlib",
@@ -295,6 +301,8 @@ verl = [
 # One universal uv.lock: `uv lock` resolves every extra; conflicting extras
 # coexist in the lock but never in one venv. See docs/start/install.rst.
 [tool.uv]
+preview = true
+no-build-isolation-package = ["transformer-engine"]
 # Linux + Python 3.12 on both CPU arches verl ships CUDA images for: x86_64 and
 # aarch64 (GH200 / GB200 superchips).
 #
@@ -307,12 +315,11 @@ verl = [
 # That works because everything the cu130 backends need is published for both:
 # torch / torchvision / torchaudio cu130 (download.pytorch.org ships
 # manylinux_2_28_aarch64), vllm / sglang / sglang-kernel / cupy-cuda13x /
-# sglang-router (PyPI), and the three native wheelhouse builds apex /
-# flash-attn / transformer-engine (the wheelhouse builds those on
-# ubuntu-24.04-arm with TORCH_CUDA_ARCH_LIST "9.0;10.0" — the only CUDA parts an
-# arm64 wheel can land on). megatron-bridge is py3-none-any; megatron-core /
-# mbridge build from git. The second entry costs one extra package (sglang's
-# aarch64-only decord2) and leaves every pinned version unchanged.
+# sglang-router (PyPI), the native wheelhouse builds apex / flash-attn, and the
+# exact git-sourced Transformer Engine pin. megatron-bridge is py3-none-any;
+# megatron-core / mbridge also build from git. The second entry costs one extra
+# package (sglang's aarch64-only decord2) and leaves every pinned version
+# unchanged.
 #
 # If a package ever IS arch-specific, do NOT fork the backend into
 # `megatron-x86_64` / `megatron-aarch64` extras — that doubles the conflict
@@ -346,7 +353,7 @@ conflicts = [
 
 # Global override pins:
 #   * transformers tracks the inference engine (overrides are absolute): vllm ->
-#     5.5.3, sglang/cpu -> 5.3.0. An `extra` marker matches only a requirement
+#     5.12.1, sglang/cpu -> 5.3.0. An `extra` marker matches only a requirement
 #     verl declares under that extra, never a transitive one, and an override
 #     that matches nothing drops the requirement — so verl-core carries the
 #     baseline. Its entry is a range, not a pin, so it intersects with the
@@ -361,19 +368,28 @@ conflicts = [
 #     so installing both leaves whichever landed last on disk. TransformerEngine
 #     imports flash_attn.cute.interface as soon as flash-attn-4's dist metadata
 #     exists, so once 2.8.3's older copy wins, `import megatron.core` dies with
-#     "No module named 'cutlass.utils.ampere_helpers'" — a module the
-#     nvidia-cutlass-dsl 4.5 that flashinfer pulls in no longer has.
+#     "No module named 'cutlass.utils.ampere_helpers'" — a module absent from
+#     newer CUTLASS DSL releases. The vLLM 0.26 fork pins FlashInfer 0.6.14 and
+#     CUTLASS DSL 4.6 explicitly above.
 #     docker/Dockerfile.stable.sglang settles the same clash with
 #     `pip uninstall -y flash-attn-4`; sglang itself only imports fa4 for its
 #     non-default "fa4" attention backend.
 override-dependencies = [
-    "transformers==5.5.3 ; extra == 'vllm'",
+    "transformers==5.12.1 ; extra == 'vllm'",
     "transformers==5.3.0 ; extra == 'sglang'",
     "transformers==5.3.0 ; extra == 'cpu'",
-    "transformers>=5.3.0,<=5.5.3 ; extra == 'verl-core'",
+    "transformers>=5.3.0,<=5.12.1 ; extra == 'verl-core'",
     "numpy>=2.0.0",
     "kernels>=0.10.2,<0.11",
     "flash-attn-4 ; platform_machine == 'flash-attn-4-excluded'",
+    # Match the current NeMo RL PR #3566 runtime used to validate TE
+    # 2.18.0+e7c550c5 with vLLM 0.26 on GB200. Torch 2.11 declares older exact
+    # CUDA library pins, so these must be overrides rather than ordinary direct
+    # dependencies.
+    "nvidia-cublas==13.5.1.27 ; sys_platform == 'linux'",
+    "nvidia-cudnn-cu13==9.20.0.48 ; sys_platform == 'linux'",
+    "nvidia-cudnn-frontend==1.25.0 ; sys_platform == 'linux'",
+    "nvidia-nccl-cu13==2.30.7 ; sys_platform == 'linux'",
     # aarch64 only: nvidia-cusparselt-cu13 0.8.0/0.8.1 ship an internal WHEEL tag
     # of `manylinux2014_sbsa` while the filename says `aarch64`. uv rejects the
     # mismatch and reinstalls the package on EVERY `uv run`; 100+ concurrent Ray
@@ -398,6 +414,22 @@ version = "0.18.0"
 requires-dist = ["torch>=2.6.0", "numpy", "packaging>=24.2"]
 
 [[tool.uv.dependency-metadata]]
+name = "transformer-engine"
+version = "2.18.0+e7c550c5"
+requires-dist = [
+    "einops",
+    "importlib-metadata>=1.0",
+    "nvdlfw-inspect",
+    "nvidia-cudnn-frontend>=1.25.0",
+    "onnx",
+    "onnxscript",
+    "packaging",
+    "pydantic",
+    "torch>=2.1",
+]
+provides-extras = ["core-cu13", "pytorch"]
+
+[[tool.uv.dependency-metadata]]
 name = "mbridge"
 version = "0.15.1"
 requires-dist = []
@@ -420,11 +452,10 @@ name = "veomni"
 version = "0.1.11"
 requires-dist = []
 
-# Heavy native packages come prebuilt from the verl wheelhouse (cu130 / torch 2.11
-# / cp312, built for x86_64 AND aarch64) — no source build here. megatron-bridge
-# rides along (pure-python wheel off the same wheelhouse, so no git clone / build
-# either), and being py3-none-any it is the one wheelhouse component with a single
-# arch-independent build.
+# Heavy native packages except Transformer Engine come prebuilt from the verl
+# wheelhouse (cu130 / torch 2.11 / cp312, built for x86_64 AND aarch64).
+# Transformer Engine is deliberately built from the exact audited source commit
+# below. megatron-bridge rides along as a pure-python wheel.
 #
 # The inference engines are deliberately NOT routed: upstream publishes cu130 /
 # torch-2.11 wheels for the pinned vllm / sglang / sglang-kernel versions on PyPI,
@@ -435,8 +466,10 @@ requires-dist = []
 [tool.uv.sources]
 apex                 = { index = "verl-wheelhouse" }
 flash-attn           = { index = "verl-wheelhouse" }
-transformer-engine   = { index = "verl-wheelhouse" }
+transformer-engine   = { git = "https://github.com/NVIDIA/TransformerEngine.git", rev = "e7c550c5f80636cf841a8204b1d6f85a5f3f28b7" }
 megatron-bridge      = { index = "verl-wheelhouse" }
+flashinfer-cubin     = { index = "flashinfer" }
+flashinfer-jit-cache = { index = "flashinfer-cu130" }
 
 # megatron-core / mbridge aren't in the wheelhouse; git-sourced (built at sync
 # time). The wheelhouse megatron-bridge 0.5.2 (r0.5.0 branch) pairs with
@@ -469,6 +502,11 @@ torchaudio = [
     { index = "pytorch-cpu",   extra = "cpu" },
 ]
 
+[tool.uv.extra-build-dependencies]
+transformer-engine = [
+    { requirement = "torch", match-runtime = true },
+]
+
 [[tool.uv.index]]
 name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
@@ -486,4 +524,14 @@ explicit = true
 [[tool.uv.index]]
 name = "verl-wheelhouse"
 url = "https://verl-project.github.io/verl-wheelhouse/simple/"
+explicit = true
+
+[[tool.uv.index]]
+name = "flashinfer"
+url = "https://flashinfer.ai/whl"
+explicit = true
+
+[[tool.uv.index]]
+name = "flashinfer-cu130"
+url = "https://flashinfer.ai/whl/cu130"
 explicit = true

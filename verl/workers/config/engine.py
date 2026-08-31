@@ -35,6 +35,7 @@ __all__ = [
     "EngineConfig",
     "EngineRouterReplayConfig",
     "QATEngineConfig",
+    "RealNVFP4EngineConfig",
 ]
 
 
@@ -144,6 +145,43 @@ class QATEngineConfig(BaseConfig):
 
 
 @dataclass
+class RealNVFP4EngineConfig(BaseConfig):
+    """Real W4A4 execution through Megatron-Core and Transformer Engine.
+
+    Unlike :class:`QATEngineConfig`, this mode does not replace linear layers
+    with ModelOpt fake-quant modules.  Megatron-Core enables Transformer
+    Engine's per-module NVFP4 recipe for routed-expert MLP training. Refit
+    keeps BF16 master weights on the wire and quantizes them in the vLLM
+    worker; attention remains BF16 on both sides.
+    """
+
+    enable: bool = False
+    fp4_format: str = "e2m1"
+    fp4_recipe: str = "nvfp4"
+    backward_override: str = "dequantized"
+    group_size: int = 16
+    fp4_param: bool = False
+    te_precision_config_file: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.fp4_format != "e2m1":
+            raise ValueError("real_nvfp4 currently requires fp4_format='e2m1'")
+        if self.fp4_recipe != "nvfp4":
+            raise ValueError("real_nvfp4 currently requires fp4_recipe='nvfp4'")
+        if self.backward_override not in {"dequantized", "high_precision"}:
+            raise ValueError(
+                "real_nvfp4.backward_override must be 'dequantized' or 'high_precision', "
+                f"got {self.backward_override!r}"
+            )
+        if self.group_size != 16:
+            raise ValueError("NVFP4 requires real_nvfp4.group_size=16")
+        if self.fp4_param:
+            raise ValueError("real_nvfp4 requires fp4_param=False so Adam and refit retain BF16 master weights")
+        if self.enable and not self.te_precision_config_file:
+            raise ValueError("real_nvfp4.te_precision_config_file is required for audited per-module precision")
+
+
+@dataclass
 class McoreEngineConfig(EngineConfig):
     """Configuration for Megatron parallelism.
 
@@ -209,12 +247,22 @@ class McoreEngineConfig(EngineConfig):
     use_megatron_fsdp: bool = False
     strategy: str = "megatron"
     qat: QATEngineConfig = field(default_factory=QATEngineConfig)
+    real_nvfp4: RealNVFP4EngineConfig = field(default_factory=RealNVFP4EngineConfig)
 
     def __post_init__(self) -> None:
         super().__post_init__()
         """config validation logics go here"""
         assert self.strategy == "megatron"
         assert self.dtype in ["bfloat16", "float16"], f"dtype {self.dtype} not supported"
+        if self.real_nvfp4.enable:
+            if self.qat.enable:
+                raise ValueError("real_nvfp4 and legacy ModelOpt QAT are mutually exclusive")
+            if self.dtype != "bfloat16":
+                raise ValueError("real_nvfp4 currently requires dtype='bfloat16'")
+            if self.vanilla_mbridge:
+                raise ValueError("real_nvfp4 requires vanilla_mbridge=False")
+            if self.use_megatron_fsdp:
+                raise ValueError("real_nvfp4 is a Megatron-DDP path and does not support Megatron-FSDP")
         if self.vanilla_mbridge:
             warnings.warn(
                 "The legacy mbridge backend selected by `vanilla_mbridge=True` is deprecated and will be removed "

@@ -59,7 +59,15 @@ class Tracking:
         "rl_insight",
     ]
 
-    def __init__(self, project_name, experiment_name, default_backend: str | list[str] = "console", config=None):
+    def __init__(
+        self,
+        project_name,
+        experiment_name,
+        default_backend: str | list[str] = "console",
+        config=None,
+        wandb_run_id: str | None = None,
+        wandb_resume: str | None = None,
+    ):
         if isinstance(default_backend, str):
             default_backend = [default_backend]
         for backend in default_backend:
@@ -82,7 +90,18 @@ class Tracking:
             if config and config["trainer"].get("wandb_proxy", None):
                 settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
             entity = os.environ.get("WANDB_ENTITY", None)
-            wandb.init(project=project_name, name=experiment_name, entity=entity, config=config, settings=settings)
+            wandb_init_kwargs = {
+                "project": project_name,
+                "name": experiment_name,
+                "entity": entity,
+                "config": config,
+                "settings": settings,
+            }
+            if wandb_run_id is not None:
+                wandb_init_kwargs["id"] = wandb_run_id
+            if wandb_resume is not None:
+                wandb_init_kwargs["resume"] = wandb_resume
+            wandb.init(**wandb_init_kwargs)
             self.logger["wandb"] = wandb
 
         if "trackio" in default_backend:

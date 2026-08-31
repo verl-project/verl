@@ -47,10 +47,24 @@ def _packed_seq_params_supports(field_name: str) -> bool:
     return field_name in getattr(PackedSeqParams, "__dataclass_fields__", {})
 
 
-def _compute_fp8_thd_align_size(align_size: int) -> tuple[int, int]:
-    """Compute FP8 alignment sizes for thd-format sequences.
+def use_transformer_engine_padding(config) -> bool:
+    """Whether packed THD rows need Transformer Engine low-precision alignment.
 
-    For FP8 block quantization, each sequence must be padded to a multiple of
+    Transformer Engine applies the same leading-dimension alignment contract
+    to FP4 and FP8 GEMMs.  VERL historically enabled packed-sequence padding
+    only for FP8, which leaves arbitrary remove-padding token counts invalid
+    for Megatron-Core's NVFP4 recipe.
+    """
+
+    fp8 = getattr(config, "fp8", None)
+    fp4 = getattr(config, "fp4", None)
+    return fp8 in {"e4m3", "hybrid"} or (fp4 is not None and fp4 is not False)
+
+
+def _compute_fp8_thd_align_size(align_size: int) -> tuple[int, int]:
+    """Compute TE FP8/FP4 alignment sizes for thd-format sequences.
+
+    For low-precision block quantization, each sequence must be padded to a multiple of
     lcm(16, align_size), and the total padded length must be divisible by
     (align_size * 128) for TransformerEngine compatibility.
 

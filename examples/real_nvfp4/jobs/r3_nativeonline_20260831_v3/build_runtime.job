@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+#SBATCH --account=general_sa
+#SBATCH --partition=36x2-a01r,tcpo,batch
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=8
+#SBATCH --time=03:00:00
+#SBATCH --job-name=verl-rn4pt-build
+
+set -euo pipefail
+source /lustre/fsw/general_sa/shuazhang/python_space/verl_for_nvfp4_20251031/verl_nvfp4_e2e_r3_20260831_v3/examples/real_nvfp4/jobs/r3_nativeonline_20260831_v3/manifest.sh
+rn4pt_validate_static
+[[ -s "$RN4PT_PROBE_PASS" ]] || rn4pt_die "runtime probe has not passed"
+[[ ! -e "$RN4PT_RUNTIME_IMAGE" && ! -e "$RN4PT_RUNTIME_IMAGE.sha256" ]] || \
+  rn4pt_die "versioned runtime image already exists"
+
+mkdir -p "$RN4PT_STATE"
+readonly BUILD_LOG=$RN4PT_STATE/build_${SLURM_JOB_ID:?}.log
+readonly TMP_IMAGE=$RN4PT_RUNTIME_IMAGE.building.${SLURM_JOB_ID}
+[[ "$TMP_IMAGE" = "$RN4PT_RUNTIME_IMAGE.building.${SLURM_JOB_ID}" && ! -e "$TMP_IMAGE" ]]
+
+cleanup_failed_build() {
+  local rc=$?
+  if [[ $rc -ne 0 && -e "$TMP_IMAGE" ]]; then
+    rm -f -- "$TMP_IMAGE"
+  fi
+  return "$rc"
+}
+trap cleanup_failed_build EXIT
+
+read -r -d '' INNER <<INNER_EOF || true
+set -euo pipefail
+readonly SRC=$RN4PT_VERL
+readonly DST=$RN4PT_IMAGE_ENV
+[[ ! -e "\$DST" ]]
+cp -a "\$SRC" "\$DST"
+cd "\$DST"
+test "\$(uname -m)" = aarch64
+UV_BIN=\$(command -v uv || true)
+if [[ -z "\$UV_BIN" && -x /opt/verl-real-nvfp4/.venv/bin/uv ]]; then
+  UV_BIN=/opt/verl-real-nvfp4/.venv/bin/uv
+fi
+[[ -n "\$UV_BIN" && -x "\$UV_BIN" ]]
+export UV_PROJECT_ENVIRONMENT="\$DST/.venv"
+export UV_HTTP_TIMEOUT=600
+export UV_LINK_MODE=copy
+export UV_CONCURRENT_DOWNLOADS=4
+export UV_CONCURRENT_BUILDS=1
+export UV_CONCURRENT_INSTALLS=4
+export CUDA_HOME=/usr/local/cuda
+export NVTE_FRAMEWORK=pytorch
+export NVTE_CUDA_ARCHS=100a
+export NVTE_WITH_NCCL_EP=0
+export MAX_JOBS=8
+export CMAKE_BUILD_PARALLEL_LEVEL=8
+"\$UV_BIN" sync --frozen --extra megatron --extra vllm
+"\$DST/.venv/bin/python" - <<'PY'
+import inspect
+import platform
+from importlib.metadata import version
+from pathlib import Path
+
+expected = {
+    "vllm": "0.26.0",
+    "megatron-core": "0.18.0",
+    "megatron-bridge": "0.5.2",
+    "transformer-engine": "2.18.0+e7c550c5",
+    "nvidia-cublas": "13.5.1.27",
+    "nvidia-cudnn-cu13": "9.20.0.48",
+    "nvidia-cudnn-frontend": "1.25.0",
+    "nvidia-nccl-cu13": "2.30.7",
+    "nvidia-modelopt": "0.44.0",
+    "flashinfer-python": "0.6.14",
+    "flashinfer-cubin": "0.6.14",
+    "flashinfer-jit-cache": "0.6.14+cu130",
+    "nvidia-cutlass-dsl": "4.6.0",
+    "quack-kernels": "0.6.1",
+    "transformers": "5.12.1",
+}
+actual = {name: version(name) for name in expected}
+assert actual == expected, (actual, expected)
+assert platform.machine() == "aarch64"
+
+import transformer_engine
+
+te_root = Path(transformer_engine.__file__).resolve().parent
+packed_markers = {
+    te_root / "pytorch/module/grouped_linear.py": "wgrad_packed = torch.empty(",
+    te_root / "pytorch/ops/basic/grouped_linear.py": "grad_weights_packed = torch.empty(",
+}
+assert all(marker in path.read_text() for path, marker in packed_markers.items()), packed_markers
+dequantized_paths = [
+    te_root / "pytorch/module/grouped_linear.py",
+    te_root / "pytorch/module/linear.py",
+]
+for path in dequantized_paths:
+    lines = path.read_text().splitlines()
+    assert any(
+        'elif backward_override == "dequantized":' in line
+        and any("save_original_input = False" in following for following in lines[index + 1 : index + 4])
+        for index, line in enumerate(lines)
+    ), path
+
+from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import make_nvfp4_moe_kernel
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.model_executor.layers.quantization import get_quantization_config
+from vllm.model_executor.layers.quantization.online.nvfp4 import (
+    Nvfp4OnlineMoEMethod,
+    _quantize_moe_weight_to_nvfp4,
+)
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from megatron.core.transformer.transformer_config import TransformerConfig
+
+assert "per_token_activation" in inspect.signature(make_nvfp4_moe_kernel).parameters
+assert get_quantization_config("nvfp4_per_token").__name__ == "OnlineQuantizationConfig"
+assert Nvfp4OnlineMoEMethod.__name__ == "Nvfp4OnlineMoEMethod"
+assert tuple(inspect.signature(_quantize_moe_weight_to_nvfp4).parameters) == ("weight",)
+assert tuple(inspect.signature(MoERunner._apply_quant_method).parameters) == (
+    "self", "hidden_states", "router_logits", "shared_experts_input", "input_ids"
+)
+reload_signature = inspect.signature(GPUModelRunner.reload_weights)
+assert tuple(reload_signature.parameters) == (
+    "self", "weights_iterator", "weights_path", "is_checkpoint_format"
+)
+assert reload_signature.parameters["is_checkpoint_format"].default is True
+assert callable(getattr(GPUModelRunner, "get_model", None))
+assert {
+    "first_last_layers_bf16",
+    "num_layers_at_start_in_bf16",
+    "num_layers_at_end_in_bf16",
+} <= TransformerConfig.__dataclass_fields__.keys()
+
+# Import the actual Verl frontend/worker integration against 0.26, rather than
+# proving only isolated vLLM APIs.
+from verl.workers.rollout.vllm_rollout.utils import vLLMColocateWorkerExtension
+from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
+from verl.utils.real_nvfp4 import REAL_NVFP4_TE_COMMIT, REAL_NVFP4_TE_VERSION
+
+assert vLLMColocateWorkerExtension is not None and vLLMHttpServer is not None
+assert REAL_NVFP4_TE_COMMIT == "$RN4PT_TE_COMMIT"
+assert REAL_NVFP4_TE_VERSION == "$RN4PT_TE_VERSION"
+print("REAL_NVFP4_PERTOKEN_IMAGE_DEPS_PASS", actual, flush=True)
+PY
+INNER_EOF
+
+srun --container-image="$RN4PT_BASE_IMAGE" \
+  --container-name="verl-rn4pt-build-${SLURM_JOB_ID}" \
+  --container-mounts=/lustre/fsw/general_sa/shuazhang:/lustre/fsw/general_sa/shuazhang \
+  --container-save="$TMP_IMAGE" \
+  bash -lc "export CUDA_VISIBLE_DEVICES=0; $INNER" 2>&1 | tee "$BUILD_LOG"
+
+grep -q 'REAL_NVFP4_PERTOKEN_IMAGE_DEPS_PASS' "$BUILD_LOG"
+[[ -s "$TMP_IMAGE" ]]
+mv "$TMP_IMAGE" "$RN4PT_RUNTIME_IMAGE"
+sha256sum "$RN4PT_RUNTIME_IMAGE" >"$RN4PT_RUNTIME_IMAGE.sha256"
+printf 'job_id=%s\nlog=%s\nimage=%s\n' \
+  "$SLURM_JOB_ID" "$BUILD_LOG" "$RN4PT_RUNTIME_IMAGE" >"$RN4PT_BUILD_PASS"
+trap - EXIT
+echo "REAL_NVFP4_PERTOKEN_BUILD_PASS job_id=$SLURM_JOB_ID image=$RN4PT_RUNTIME_IMAGE"

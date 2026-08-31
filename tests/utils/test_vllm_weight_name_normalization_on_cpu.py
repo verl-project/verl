@@ -647,6 +647,28 @@ class _FakeBucketReceiver:
             on_bucket_received(weights, is_last)
 
 
+class _FakeNativeReloadReceiver:
+    def __init__(self, weights):
+        self.weights = weights
+        self.own_tensors = None
+        self.defer_last_ack = None
+        self.iterator_exhausted = False
+        self.completed_ack = False
+
+    def iter_weights(self, own_tensors=False, defer_last_ack=False):
+        self.own_tensors = own_tensors
+        self.defer_last_ack = defer_last_ack
+        yield from self.weights
+        self.iterator_exhausted = True
+
+    def complete_deferred_last_ack(self):
+        self.completed_ack = True
+
+    @staticmethod
+    def close_weight_iterator(iterator):
+        iterator.close()
+
+
 def test_update_weights_from_ipc_accumulates_lora_across_buckets(monkeypatch):
     """A LoRA adapter split across two buckets yields one add_lora with all tensors."""
     # Unlike the resolver tests above (which fully stub sys.modules), this drives the
@@ -730,3 +752,57 @@ def test_update_weights_from_ipc_standard_loads_per_bucket(monkeypatch):
     worker.update_weights_from_ipc(peft_config=None, base_sync_done=False)
 
     assert loaded == ["q.weight", "k.weight"]
+
+
+def test_real_nvfp4_update_uses_native_reload_weights(monkeypatch):
+    pytest.importorskip("vllm")
+    import verl.utils.real_nvfp4 as real_nvfp4
+    import verl.workers.rollout.vllm_rollout.bucketed_weight_transfer as bwt
+
+    receiver = _FakeNativeReloadReceiver(
+        [("model.layers.0.mlp.experts.0.down_proj.weight", torch.ones(1, dtype=torch.bfloat16))]
+    )
+    monkeypatch.setattr(bwt, "BucketedWeightReceiver", lambda *a, **k: receiver)
+
+    attestations = []
+    monkeypatch.setattr(real_nvfp4, "real_nvfp4_expected_counts", lambda hf_config: (1, 1))
+    monkeypatch.setattr(
+        real_nvfp4,
+        "attest_vllm_native_nvfp4_runtime",
+        lambda model, expected_moe_layers: attestations.append((model, expected_moe_layers)),
+    )
+    monkeypatch.setattr(real_nvfp4, "vllm_native_nvfp4_fingerprint", lambda model: 2)
+    monkeypatch.setattr(
+        _vllm_rollout_utils,
+        "get_torch_device",
+        lambda: types.SimpleNamespace(synchronize=lambda: None),
+    )
+
+    model = _FakeModel({"q.weight": torch.empty(0)})
+    reload_calls = []
+
+    def _reload_weights(*, weights_iterator, is_checkpoint_format):
+        reload_calls.append((list(weights_iterator), is_checkpoint_format))
+
+    worker = _make_worker(model)
+    worker.model_runner.reload_weights = _reload_weights
+    worker.device = torch.device("cpu")
+    worker.local_rank = 0
+    worker._is_qat_model = False
+    worker._is_modelopt_qat = False
+    worker._is_real_nvfp4 = True
+    worker._real_nvfp4_last_fingerprint = 1
+    worker._real_nvfp4_refit_index = 0
+    worker.model_runner.vllm_config.model_config.hf_config = types.SimpleNamespace(num_hidden_layers=1)
+    worker._get_zmq_handle = lambda: "ipc:///tmp/test-native-nvfp4-reload.sock"
+
+    worker.update_weights_from_ipc(peft_config=None, base_sync_done=False)
+
+    assert receiver.own_tensors is True
+    assert receiver.defer_last_ack is True
+    assert receiver.completed_ack is True
+    assert reload_calls[0][1] is True
+    assert [name for name, _ in reload_calls[0][0]] == ["model.layers.0.mlp.experts.0.down_proj.weight"]
+    assert attestations == [(model, 1)]
+    assert worker._real_nvfp4_last_fingerprint == 2
+    assert worker._real_nvfp4_refit_index == 1

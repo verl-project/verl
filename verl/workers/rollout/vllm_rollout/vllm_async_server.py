@@ -280,12 +280,15 @@ class vLLMHttpServer:
 
             set_expandable_segments(True)
 
-        quantization, hf_overrides = self._apply_quantization()
+        quantization, hf_overrides = self._apply_quantization(engine_kwargs)
 
         compilation_config = engine_kwargs.pop("compilation_config", None) or {}
         if isinstance(compilation_config, str):
             compilation_config = json.loads(compilation_config)
         compilation_config.setdefault("cudagraph_mode", "FULL_AND_PIECEWISE")
+        real_nvfp4_config = getattr(self.config, "real_nvfp4", {}) or {}
+        if real_nvfp4_config.get("enable", False) and compilation_config["cudagraph_mode"] != "FULL_DECODE_ONLY":
+            raise ValueError("the formal real_nvfp4 recipe requires compilation_config.cudagraph_mode=FULL_DECODE_ONLY")
 
         # FULL cuda graph is not yet supported with DCP, downgrade to PIECEWISE
         dcp_size = engine_kwargs.get("decode_context_parallel_size", 1) or 1
@@ -326,6 +329,22 @@ class vLLMHttpServer:
             "compilation_config": compilation_config,
             **engine_kwargs,
         }
+
+        if real_nvfp4_config.get("enable", False):
+            logger.warning(
+                "VERL_REAL_NVFP4_ENGINE_CONTRACT PASS "
+                "cudagraph=%s enforce_eager=%d max_num_seqs=%d "
+                "max_num_batched_tokens=%d tp=%d pp=%d ep=%d "
+                "moe_backend=%s",
+                json.loads(compilation_config)["cudagraph_mode"],
+                int(bool(self.config.enforce_eager)),
+                int(self.config.max_num_seqs),
+                int(self.config.max_num_batched_tokens),
+                int(self.config.tensor_model_parallel_size),
+                int(self.config.pipeline_model_parallel_size),
+                int(self.config.expert_parallel_size),
+                args["moe_backend"],
+            )
 
         # update profiler args, only on the replica that will actually be profiled: configuring
         # the engine profiler everywhere makes every replica log that profiling is enabled while
@@ -681,6 +700,13 @@ class vLLMHttpServer:
         routed_experts = None
         if self.config.enable_rollout_routing_replay:
             routed_experts = final_res.outputs[0].routed_experts
+            real_nvfp4_config = getattr(self.config, "real_nvfp4", {}) or {}
+            if real_nvfp4_config.get("enable", False):
+                from verl.utils.real_nvfp4.r3_monolithic_capture import (
+                    attest_r3_rollout_routes,
+                )
+
+                routed_experts = attest_r3_rollout_routes(routed_experts)
 
         # Determine stop reason from finish_reason
         finish_reason = final_res.outputs[0].finish_reason
@@ -1103,14 +1129,88 @@ class vLLMHttpServer:
             max_new_tokens=self.config.response_length,
         )
 
-    def _apply_quantization(self) -> tuple[Optional[str], dict]:
+    def _apply_quantization(self, engine_kwargs: dict) -> tuple[Optional[str], dict]:
         """Process quantization config. Returns (quantization_str, hf_overrides)."""
         quantization = self.config.quantization
         hf_overrides = {}
 
+        # Real W4A4: vLLM 0.26's native online MoE quantization consumes the
+        # BF16 refit stream, quantizes each complete expert layer to NVFP4, and
+        # executes dynamic/per-token activation quantization. This must be
+        # handled before the legacy ModelOpt QAT/Marlin path.
+        real_nvfp4_config = getattr(self.config, "real_nvfp4", {}) or {}
+        if real_nvfp4_config.get("enable", False):
+            reserved_engine_kwargs = {
+                "dtype",
+                "enable_expert_parallel",
+                "enforce_eager",
+                "hf_overrides",
+                "load_format",
+                "max_num_seqs",
+                "moe_backend",
+                "pipeline_parallel_size",
+                "quantization",
+                "quantization_config",
+                "tensor_parallel_size",
+                "worker_extension_cls",
+            }
+            conflicts = sorted(reserved_engine_kwargs.intersection(engine_kwargs))
+            if conflicts:
+                raise ValueError(
+                    f"real_nvfp4 reserves core vLLM engine settings; remove engine_kwargs overrides for {conflicts}"
+                )
+            if engine_kwargs.get("kv_cache_dtype", "auto") != "auto":
+                raise ValueError("real_nvfp4 rollout requires kv_cache_dtype=auto")
+            if engine_kwargs.get("speculative_config"):
+                raise ValueError("real_nvfp4 rollout does not support speculative decoding")
+            qat_config_dict = getattr(self.config, "qat", {}) or {}
+            if qat_config_dict.get("enable", False):
+                raise ValueError("real_nvfp4 and legacy QAT rollout cannot both be enabled")
+            if self.config.dtype != "bfloat16":
+                raise ValueError("real_nvfp4 rollout requires dtype=bfloat16")
+            if self.config.load_format != "dummy":
+                raise ValueError("real_nvfp4 rollout requires load_format=dummy")
+            if self.config.expert_parallel_size != 1:
+                raise ValueError("real_nvfp4 rollout requires vLLM expert_parallel_size=1")
+            if self.config.tensor_model_parallel_size != 1:
+                raise ValueError("real_nvfp4 rollout currently requires vLLM tensor_model_parallel_size=1")
+            if self.config.pipeline_model_parallel_size != 1:
+                raise ValueError("real_nvfp4 rollout currently requires vLLM pipeline_model_parallel_size=1")
+            if self.config.enforce_eager:
+                raise ValueError("real_nvfp4 rollout requires CUDA Graphs (enforce_eager=False)")
+            if not self.config.enable_rollout_routing_replay:
+                raise ValueError("the formal real_nvfp4 recipe requires rollout R3 capture")
+            if self.config.mtp is not None and self.config.mtp.enable:
+                raise ValueError("real_nvfp4 rollout does not support speculative decoding/MTP")
+            if self.config.quantization is not None:
+                raise ValueError("real_nvfp4 owns the vLLM quantization setting")
+            checkpoint_backend = getattr(self.config.checkpoint_engine, "backend", None)
+            if checkpoint_backend != "naive":
+                raise ValueError(
+                    f"real_nvfp4 requires the colocated naive IPC checkpoint backend, got {checkpoint_backend!r}"
+                )
+            from verl.utils.real_nvfp4 import (
+                NVFP4_PER_TOKEN_METHOD,
+                REAL_NVFP4_MOE_BACKEND,
+                validate_real_nvfp4_model_contract,
+            )
+
+            validate_real_nvfp4_model_contract(self.model_config.hf_config)
+            os.environ["VERL_VLLM_REAL_NVFP4_ENABLED"] = "1"
+            quantization = NVFP4_PER_TOKEN_METHOD
+            engine_kwargs["moe_backend"] = REAL_NVFP4_MOE_BACKEND
+            logger.warning(
+                "VERL_REAL_NVFP4_ROLLOUT_ATTESTATION configured "
+                "method=vllm_native_nvfp4_per_token "
+                "backend=FLASHINFER_TRTLLM scope=routed_expert_mlp "
+                "attention=bf16 activation=per_token"
+            )
+
         # Handle QAT (Quantization-Aware Training) configuration
         qat_config_dict = getattr(self.config, "qat", {}) or {}
-        if qat_config_dict.get("enable", False):
+        if real_nvfp4_config.get("enable", False):
+            pass
+        elif qat_config_dict.get("enable", False):
             from verl.utils.qat import QATConfig, load_quantization_config
 
             qat_config = QATConfig(**qat_config_dict)

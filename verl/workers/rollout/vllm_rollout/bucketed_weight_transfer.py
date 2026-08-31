@@ -20,6 +20,7 @@ Not recommended depending on vllm for this file.
 import gc
 import logging
 import os
+from collections.abc import Iterator
 from multiprocessing import shared_memory
 from typing import Callable, TypedDict
 
@@ -265,6 +266,9 @@ class BucketedWeightReceiver:
         self.socket = None
         self.buffer = None
         self.shm = None
+        self.iterator_exhausted = False
+        self._defer_last_ack = False
+        self._last_ack_deferred = False
 
     def receive_weights(self, on_bucket_received: callable):
         """
@@ -305,6 +309,128 @@ class BucketedWeightReceiver:
                     break
         finally:
             self._cleanup()
+
+    def iter_weights(
+        self,
+        own_tensors: bool = False,
+        defer_last_ack: bool = False,
+    ) -> Iterator[tuple[str, torch.Tensor]]:
+        """Yield one complete weight-sync stream as a flat iterator.
+
+        ``vLLM.model_runner.reload_weights`` consumes one iterator for the whole
+        model, while the transport reuses the same IPC bucket after every ACK.
+        Native layerwise reload may retain a tensor until the rest of its layer
+        arrives, so callers must set ``own_tensors=True`` for that path.  Each
+        yielded tensor is then cloned before its source bucket is acknowledged.
+
+        If the consumer fails or returns before exhausting the iterator, close
+        the iterator.  The generator acknowledges the current bucket and drains
+        the remainder of the round so the colocated sender cannot deadlock.
+        """
+        self.iterator_exhausted = False
+        self._defer_last_ack = defer_last_ack
+        self._last_ack_deferred = False
+        try:
+            self._init_socket()
+            self._init_buffer()
+        except BaseException:
+            self._cleanup()
+            raise
+        return self._iter_weights(own_tensors=own_tensors)
+
+    def _iter_weights(self, own_tensors: bool) -> Iterator[tuple[str, torch.Tensor]]:
+        """Generator body for :meth:`iter_weights` after eager handshake."""
+        is_last = False
+        try:
+            while True:
+                metadata = self.socket.recv_pyobj()
+                is_last = metadata["is_last"]
+                weights, tensor = [], None
+                try:
+                    for name, meta in metadata["bucket_meta"].items():
+                        shape, dtype, offset, handle = meta["shape"], meta["dtype"], meta["offset"], meta["handle"]
+                        if handle is not None:
+                            tensor = rebuild_ipc(handle, self.device.index)
+                        else:
+                            size = dtype.itemsize * shape.numel()
+                            tensor = self.buffer[offset : offset + size].view(dtype=dtype).view(shape)
+                            if self.use_shm:
+                                tensor = tensor.to(self.device)
+                        if own_tensors:
+                            tensor = tensor.clone()
+                        weights.append((name, tensor))
+
+                    yield from weights
+                finally:
+                    # clone/to/copy operations above may still be queued on the
+                    # current stream. Fence them before allowing sender reuse.
+                    get_torch_device().synchronize()
+                    if is_last and self._defer_last_ack:
+                        self._last_ack_deferred = True
+                    else:
+                        self.socket.send(b"")
+                    del weights, tensor
+
+                if is_last:
+                    self.iterator_exhausted = True
+                    break
+        except GeneratorExit:
+            if not is_last:
+                self._drain_remaining_buckets_after_failure()
+            raise
+        except BaseException:
+            if not is_last:
+                self._drain_remaining_buckets_after_failure()
+            raise
+        finally:
+            if not self._last_ack_deferred:
+                self._cleanup()
+
+    def complete_deferred_last_ack(self) -> None:
+        """Release the final sender only after native reload has finalized."""
+
+        if not self._last_ack_deferred or self.socket is None:
+            raise RuntimeError("no deferred final weight-sync ACK is pending")
+        try:
+            get_torch_device().synchronize()
+            self.socket.send(b"")
+        finally:
+            self._last_ack_deferred = False
+            self._cleanup()
+
+    def close_weight_iterator(self, iterator: Iterator[tuple[str, torch.Tensor]]) -> None:
+        """Close an iterator and release a sender even if it was never consumed."""
+        try:
+            close = getattr(iterator, "close", None)
+            if close is not None:
+                close()
+        finally:
+            # Closing a never-started generator does not execute its body. The
+            # handshake above was eager, so explicitly drain that case.
+            if self.socket is not None:
+                try:
+                    if self._last_ack_deferred:
+                        get_torch_device().synchronize()
+                        self.socket.send(b"")
+                        self._last_ack_deferred = False
+                    else:
+                        self._drain_remaining_buckets_after_failure()
+                finally:
+                    self._cleanup()
+
+    def _drain_remaining_buckets_after_failure(self) -> None:
+        try:
+            self._drain_remaining_buckets()
+        except Exception:
+            logger.exception("Failed to drain IPC sender after native reload failure")
+
+    def _drain_remaining_buckets(self) -> None:
+        """ACK and discard the rest of a failed iterator-based sync round."""
+        while True:
+            metadata = self.socket.recv_pyobj()
+            self.socket.send(b"")
+            if metadata["is_last"]:
+                return
 
     def _init_socket(self):
         """Initialize ZMQ REP socket and connect."""

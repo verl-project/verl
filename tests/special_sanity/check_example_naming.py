@@ -88,6 +88,9 @@ DEFAULT_IGNORE_DIRS = (
     "examples/profile",
     "examples/tutorial",
     "examples/vllm_omni",
+    # Slurm build/probe/submission helpers are orchestration scripts rather
+    # than trainer entry points and intentionally use operational names.
+    "examples/real_nvfp4/jobs",
     # MTP scripts encode async/multinode dispatch in the filename; they pre-
     # date this convention. Migrate separately rather than block this hook.
     "examples/mtp_trainer",

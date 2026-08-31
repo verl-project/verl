@@ -18,8 +18,10 @@ and because CUDA IPC requires distinct processes.
 """
 
 import asyncio
+import importlib.util
 import multiprocessing as mp
 import uuid
+from pathlib import Path
 
 import pytest
 import torch
@@ -32,6 +34,15 @@ PROCESS_TIMEOUT = 60
 # which would make subsequent fork-based multiprocessing in other tests unsafe.
 HAS_ACCELERATOR = get_device_name() != "cpu"
 HAS_CUDA = "cuda" in get_device_name()
+
+
+def _load_bucketed_weight_transfer():
+    module_path = Path(__file__).resolve().parents[2] / "verl/workers/rollout/vllm_rollout/bucketed_weight_transfer.py"
+    spec = importlib.util.spec_from_file_location("bucketed_weight_transfer_iterator_test", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _unique_zmq_handle():
@@ -72,6 +83,23 @@ class _FakeSocket:
 class _FakeTorchDevice:
     def synchronize(self):
         pass
+
+
+class _ScriptedReceiverSocket:
+    def __init__(self, payloads, buffer, replacement):
+        self.payloads = iter(payloads)
+        self.buffer = buffer
+        self.replacement = replacement
+        self.acks = 0
+
+    def recv_pyobj(self):
+        return next(self.payloads)
+
+    def send(self, payload):
+        assert payload == b""
+        self.acks += 1
+        if self.acks == 1:
+            self.buffer.copy_(self.replacement.view(torch.uint8))
 
 
 def test_sender_accepts_strided_tensor(monkeypatch):
@@ -117,6 +145,116 @@ def test_sender_accepts_strided_tensor(monkeypatch):
     assert buffer.dtype == torch.uint8
     assert buffer.numel() == weight.nbytes
     assert torch.equal(recovered, weight)
+
+
+def _receiver_metadata(name, tensor, is_last):
+    return {
+        "bucket_meta": {
+            name: {
+                "name": name,
+                "shape": tensor.shape,
+                "dtype": tensor.dtype,
+                "offset": 0,
+                "handle": None,
+            }
+        },
+        "is_last": is_last,
+    }
+
+
+def test_receiver_iterator_owns_tensors_before_bucket_ack(monkeypatch):
+    bucketed_weight_transfer = _load_bucketed_weight_transfer()
+
+    first = torch.tensor([1.0, 2.0])
+    second = torch.tensor([9.0, 10.0])
+    buffer = first.clone().view(torch.uint8)
+    socket = _ScriptedReceiverSocket(
+        [_receiver_metadata("first", first, False), _receiver_metadata("second", second, True)],
+        buffer,
+        second,
+    )
+    receiver = bucketed_weight_transfer.BucketedWeightReceiver("unused", torch.device("cpu"))
+
+    monkeypatch.setattr(receiver, "_init_socket", lambda: setattr(receiver, "socket", socket))
+    monkeypatch.setattr(receiver, "_init_buffer", lambda: setattr(receiver, "buffer", buffer))
+    monkeypatch.setattr(receiver, "_cleanup", lambda: None)
+    monkeypatch.setattr(bucketed_weight_transfer, "get_torch_device", lambda: _FakeTorchDevice())
+
+    received = list(receiver.iter_weights(own_tensors=True))
+
+    assert socket.acks == 2
+    torch.testing.assert_close(received[0][1], first)
+    torch.testing.assert_close(received[1][1], second)
+
+
+def test_receiver_can_defer_final_ack_until_reload_finalize(monkeypatch):
+    bucketed_weight_transfer = _load_bucketed_weight_transfer()
+
+    final = torch.tensor([3.0])
+    buffer = final.clone().view(torch.uint8)
+    socket = _ScriptedReceiverSocket([_receiver_metadata("final", final, True)], buffer, final)
+    receiver = bucketed_weight_transfer.BucketedWeightReceiver("unused", torch.device("cpu"))
+
+    monkeypatch.setattr(receiver, "_init_socket", lambda: setattr(receiver, "socket", socket))
+    monkeypatch.setattr(receiver, "_init_buffer", lambda: setattr(receiver, "buffer", buffer))
+    monkeypatch.setattr(receiver, "_cleanup", lambda: None)
+    monkeypatch.setattr(bucketed_weight_transfer, "get_torch_device", lambda: _FakeTorchDevice())
+
+    received = list(receiver.iter_weights(own_tensors=True, defer_last_ack=True))
+    assert received[0][0] == "final"
+    assert socket.acks == 0
+    assert receiver.iterator_exhausted is True
+
+    receiver.complete_deferred_last_ack()
+    assert socket.acks == 1
+
+
+def test_receiver_iterator_close_drains_sender(monkeypatch):
+    bucketed_weight_transfer = _load_bucketed_weight_transfer()
+
+    first = torch.tensor([1.0])
+    second = torch.tensor([2.0])
+    buffer = first.clone().view(torch.uint8)
+    socket = _ScriptedReceiverSocket(
+        [_receiver_metadata("first", first, False), _receiver_metadata("second", second, True)],
+        buffer,
+        second,
+    )
+    receiver = bucketed_weight_transfer.BucketedWeightReceiver("unused", torch.device("cpu"))
+
+    monkeypatch.setattr(receiver, "_init_socket", lambda: setattr(receiver, "socket", socket))
+    monkeypatch.setattr(receiver, "_init_buffer", lambda: setattr(receiver, "buffer", buffer))
+    monkeypatch.setattr(receiver, "_cleanup", lambda: None)
+    monkeypatch.setattr(bucketed_weight_transfer, "get_torch_device", lambda: _FakeTorchDevice())
+
+    iterator = receiver.iter_weights(own_tensors=True)
+    assert next(iterator)[0] == "first"
+    iterator.close()
+
+    assert socket.acks == 2
+
+
+def test_receiver_never_consumed_iterator_drains_sender(monkeypatch):
+    bucketed_weight_transfer = _load_bucketed_weight_transfer()
+
+    first = torch.tensor([1.0])
+    second = torch.tensor([2.0])
+    buffer = first.clone().view(torch.uint8)
+    socket = _ScriptedReceiverSocket(
+        [_receiver_metadata("first", first, False), _receiver_metadata("second", second, True)],
+        buffer,
+        second,
+    )
+    receiver = bucketed_weight_transfer.BucketedWeightReceiver("unused", torch.device("cpu"))
+
+    monkeypatch.setattr(receiver, "_init_socket", lambda: setattr(receiver, "socket", socket))
+    monkeypatch.setattr(receiver, "_init_buffer", lambda: setattr(receiver, "buffer", buffer))
+    monkeypatch.setattr(receiver, "_cleanup", lambda: None)
+
+    iterator = receiver.iter_weights(own_tensors=True)
+    receiver.close_weight_iterator(iterator)
+
+    assert socket.acks == 2
 
 
 # ---------------------------------------------------------------------------

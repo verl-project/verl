@@ -1421,7 +1421,13 @@ class RayPPOTrainer:
             experiment_name=self.config.trainer.experiment_name,
             default_backend=self.config.trainer.logger,
             config=OmegaConf.to_container(self.config, resolve=True),
+            wandb_run_id=self.config.trainer.get("wandb_run_id", None),
+            wandb_resume=self.config.trainer.get("wandb_resume", None),
         )
+        # Keep the tracker reachable by task runners so they can flush and
+        # finalize it before the Ray actor's event loop starts tearing down.
+        # Relying on Tracking.__del__ loses the final history row with W&B.
+        self.logger = logger
 
         self.global_steps = 0
 
