@@ -57,6 +57,7 @@ actor_rollout_ref:
       dsa_indexer_implementation: eager
       dsa_attention_implementation: eager
       mhc_implementation: eager
+      qat_implementation: none
       force_use_huggingface: false
       activation_gpu_limit: 0.0
       basic_modules: []
@@ -251,6 +252,7 @@ actor_rollout_ref:
       dsa_indexer_implementation: eager
       dsa_attention_implementation: eager
       mhc_implementation: eager
+      qat_implementation: none
       force_use_huggingface: false
       activation_gpu_limit: 0.0
       basic_modules: []
@@ -556,6 +558,7 @@ critic:
     dsa_indexer_implementation: eager
     dsa_attention_implementation: eager
     mhc_implementation: eager
+    qat_implementation: none
     force_use_huggingface: false
     activation_gpu_limit: 0.0
     basic_modules: []

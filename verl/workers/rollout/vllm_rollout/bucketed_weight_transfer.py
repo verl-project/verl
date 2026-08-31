@@ -125,6 +125,11 @@ class BucketedWeightSender:
                 # transfer volume.
                 # weight = weight.to(dtype, non_blocking=True)
 
+                # Align each tensor before the receiver views the byte buffer
+                # using that tensor's dtype.
+                alignment = weight.element_size()
+                offset = (offset + alignment - 1) // alignment * alignment
+
                 # fill the tensor bucket
                 if offset + weight.nbytes > self.bucket_size and len(bucket_meta) > 0:
                     get_torch_device().synchronize()

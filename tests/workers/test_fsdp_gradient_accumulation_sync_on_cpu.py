@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from contextlib import contextmanager, nullcontext
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -48,9 +49,12 @@ class _FSDP2Module:
         self.events.append(enabled)
 
 
-def _make_engine(module):
+def _make_engine(module, *, use_no_sync_for_gradient_accumulation=True):
     engine = object.__new__(FSDPEngine)
     engine.module = module
+    engine.engine_config = SimpleNamespace(
+        use_no_sync_for_gradient_accumulation=use_no_sync_for_gradient_accumulation,
+    )
     return engine
 
 
@@ -88,6 +92,36 @@ def test_gradient_sync_context_keeps_sync_for_final_micro_batch(monkeypatch):
         module.events.append("backward")
 
     assert module.events == ["backward"]
+
+
+@pytest.mark.parametrize("version,module_cls", [(1, _FSDP1Module), (2, _FSDP2Module)])
+def test_gradient_sync_context_keeps_sync_when_disabled(monkeypatch, version, module_cls):
+    module = module_cls()
+    engine = _make_engine(module, use_no_sync_for_gradient_accumulation=False)
+    monkeypatch.setattr(transformer_impl, "fsdp_version", lambda _: version)
+
+    with engine._gradient_sync_context(is_last_micro_batch=False):
+        module.events.append("backward")
+
+    assert module.events == ["backward"]
+
+
+@pytest.mark.parametrize("version,module_cls", [(1, _FSDP1Module), (2, _FSDP2Module)])
+def test_gradient_sync_context_defaults_to_deferred_sync_for_legacy_config(
+    monkeypatch,
+    version,
+    module_cls,
+):
+    module = module_cls()
+    engine = _make_engine(module)
+    engine.engine_config = SimpleNamespace()
+    monkeypatch.setattr(transformer_impl, "fsdp_version", lambda _: version)
+
+    with engine._gradient_sync_context(is_last_micro_batch=False):
+        module.events.append("backward")
+
+    expected = ["enter", "backward", "exit"] if version == 1 else [False, "backward", True]
+    assert module.events == expected
 
 
 def test_forward_backward_batch_syncs_only_final_micro_batch(monkeypatch):

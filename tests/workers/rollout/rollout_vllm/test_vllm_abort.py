@@ -23,7 +23,25 @@ Usage:
 import asyncio
 import os
 import time
+from types import SimpleNamespace
 from uuid import uuid4
+
+import pytest
+
+
+def test_abort_all_requests_propagates_pause_failure():
+    from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
+
+    async def fail_pause_generation(**_kwargs):
+        raise RuntimeError("pause failed")
+
+    server = vLLMHttpServer.__new__(vLLMHttpServer)
+    server.engine = SimpleNamespace(
+        output_processor=SimpleNamespace(request_states={}),
+        pause_generation=fail_pause_generation,
+    )
+    with pytest.raises(RuntimeError, match="pause failed"):
+        asyncio.run(server.abort_all_requests())
 
 
 def test_vllm_abort():
