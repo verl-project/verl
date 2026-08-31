@@ -417,42 +417,8 @@ class ContinuousTokenBuilder:
         *,
         tools: list[dict[str, Any]] | None = None,
     ) -> list[int]:
-        """Tokenize a generation prompt without re-encoding trajectory messages."""
-        if not updated_messages:
-            raise ValueError("Continuous Token requires messages before a generation prompt")
-
-        if updated_messages[-1].get("role") == "tool":
-            tool_group_start = len(updated_messages) - 1
-            while tool_group_start > 0 and updated_messages[tool_group_start - 1].get("role") == "tool":
-                tool_group_start -= 1
-            tool_messages = updated_messages[tool_group_start:]
-            synthetic_tool_messages = [
-                {
-                    "role": "tool",
-                    "content": "continuous token synthetic tool response",
-                    "tool_call_id": f"continuous_token_call_{index}",
-                    "name": _DUMMY_TOOL_NAME,
-                }
-                for index in range(len(tool_messages))
-            ]
-            synthetic_context = [
-                _SYNTHETIC_SYSTEM_MESSAGE,
-                _SYNTHETIC_USER_MESSAGE,
-                self._synthetic_assistant_for_tools(synthetic_tool_messages),
-                *synthetic_tool_messages,
-            ]
-        else:
-            # Generation scaffolds for supported user/system appends are
-            # content-independent. A fixed valid context prevents this delta
-            # probe from encoding any real trajectory message a second time.
-            synthetic_context = [_SYNTHETIC_SYSTEM_MESSAGE, _SYNTHETIC_USER_MESSAGE]
-
-        return self.render_delta_token_id(
-            synthetic_context,
-            [],
-            add_generation_prompt=True,
-            tools=tools,
-        )
+        """Tokenize the tokens added only by ``add_generation_prompt=True``."""
+        return self.render_delta_token_id(updated_messages, [], add_generation_prompt=True, tools=tools)
 
     def _iter_append_groups(self, appended_messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
         groups: list[list[dict[str, Any]]] = []
@@ -812,6 +778,11 @@ class MiniMaxText01ContinuousTokenBuilder(ContinuousTokenBuilder):
         del message
         return {self._eos_id}
 
+    def _should_fuse_generation_prompt_with_last_group(self) -> bool:
+        # Text-01 append hooks encode role payloads directly, while the next
+        # assistant header is a fixed scaffold appended by the hook below.
+        return False
+
     def _merge_non_assistant_token_ids(
         self, runtime_token_ids: list[int], appended_token_ids: list[int]
     ) -> MergeResult:
@@ -833,8 +804,9 @@ class MiniMaxText01ContinuousTokenBuilder(ContinuousTokenBuilder):
         *,
         previous_messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        add_generation_prompt: bool = False,
     ) -> list[int]:
-        del tools
+        del tools, add_generation_prompt
         response_text = _format_minimax_legacy_tool_responses(tool_messages, previous_messages)
         return normalize_token_ids(self.tokenizer.encode(response_text, add_special_tokens=False))
 
@@ -843,8 +815,9 @@ class MiniMaxText01ContinuousTokenBuilder(ContinuousTokenBuilder):
         message: dict[str, Any],
         *,
         tools: list[dict[str, Any]] | None = None,
+        add_generation_prompt: bool = False,
     ) -> list[int]:
-        del tools
+        del tools, add_generation_prompt
         return self._render_tokens([message], add_generation_prompt=False, tools=None)
 
     def _tokenize_generation_prompt_delta(
@@ -1859,8 +1832,9 @@ class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxText01Conti
         *,
         previous_messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        add_generation_prompt: bool = False,
     ) -> list[int]:
-        del tools
+        del tools, add_generation_prompt
         response_text = _format_minimax_legacy_tool_responses(tool_messages, previous_messages)
         return normalize_token_ids(self.tokenizer.encode(response_text, add_special_tokens=False))
 
@@ -1869,11 +1843,12 @@ class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxText01Conti
         message: dict[str, Any],
         *,
         tools: list[dict[str, Any]] | None = None,
+        add_generation_prompt: bool = False,
     ) -> list[int]:
         # MiniMax-VL places tool declarations after conversation messages, so
         # probing with them would move already-committed declarations. A single
         # user/system turn is independently serializable through the processor.
-        del tools
+        del tools, add_generation_prompt
         return self._render_tokens([message], add_generation_prompt=False, tools=None)
 
     def _tokenize_generation_prompt_delta(
@@ -2013,8 +1988,9 @@ class KimiVLContinuousTokenBuilder(VLContinuousTokenMixin, ContinuousTokenBuilde
         *,
         previous_messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        add_generation_prompt: bool = False,
     ) -> list[int]:
-        del tool_messages, previous_messages, tools
+        del tool_messages, previous_messages, tools, add_generation_prompt
         raise ValueError("Kimi-VL Continuous Token does not support structured tool responses")
 
     def _normalize_assistant_token_ids(

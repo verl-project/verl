@@ -34,6 +34,9 @@ from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
 from verl.utils.model import extract_multi_modal_inputs
 
 custom_model_prefix = Path("~/models").expanduser().resolve()
+qwen35_model_path = Path(
+    os.environ.get("VERL_TEST_QWEN35_MODEL", custom_model_prefix / "Qwen/Qwen3.5-0.8B")
+).expanduser()
 gpt_oss_model_path = Path(
     os.environ.get("VERL_TEST_GPT_OSS_MODEL", custom_model_prefix / "openai/gpt-oss-20b")
 ).expanduser()
@@ -59,7 +62,7 @@ def test_multiturn_sft_drops_arrow_null_message_fields():
     ]
 
 
-@pytest.mark.parametrize("model_path", [f"{custom_model_prefix}/Qwen/Qwen3.5-0.8B"])
+@pytest.mark.parametrize("model_path", [str(qwen35_model_path)])
 def test_multiturn_sft_qwen35_uses_append_only_continuous_tokens(model_path: str, tmp_path: Path):
     first_turn = [
         {"role": "user", "content": "q"},
@@ -160,7 +163,7 @@ def test_multiturn_sft_qwen35_uses_append_only_continuous_tokens(model_path: str
     assert thinking_item["loss_mask"][first_assistant_end + 1].item() == 0
 
 
-@pytest.mark.parametrize("model_path", [f"{custom_model_prefix}/Qwen/Qwen3.5-0.8B"])
+@pytest.mark.parametrize("model_path", [str(qwen35_model_path)])
 def test_multiturn_sft_qwen36_preserve_thinking_does_not_rewrite_history(model_path: str, tmp_path: Path):
     tokenizer = hf_tokenizer(model_path)
     qwen35_condition = "{%- if loop.index0 > ns.last_query_index %}"
@@ -448,7 +451,7 @@ def test_multiturn_sft_dataset(model_path: str, continuous_token_model_family: s
 @pytest.mark.parametrize(
     "model_path, apply_chat_template_kwargs",
     [
-        (f"{custom_model_prefix}/openai/gpt-oss-20b", {"model_identity": "You are a helpful assistant."}),
+        (str(gpt_oss_model_path), {"model_identity": "You are a helpful assistant."}),
     ],
 )
 def test_multiturn_sft_dataset_with_chat_template_kwargs(model_path: str, apply_chat_template_kwargs: dict):
