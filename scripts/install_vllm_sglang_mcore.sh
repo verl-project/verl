@@ -14,7 +14,7 @@ pip install --no-cache-dir "vllm==0.24.0"
 echo "2. install basic packages"
 pip install "transformers[hf_xet]>=4.51.0" accelerate datasets peft hf-transfer \
     "numpy>=2.0.0" "pyarrow>=15.0.0" pandas "tensordict>=0.8.0,<=0.10.0,!=0.9.0" torchdata \
-    ray[default] codetiming hydra-core pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel mathruler \
+    "ray[default]==2.58.0" codetiming hydra-core pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel mathruler \
     pytest py-spy pre-commit ruff tensorboard 
 
 pip install "nvidia-ml-py>=12.560.30" "fastapi[standard]>=0.115.0" "optree>=0.13.0" "pydantic>=2.9" "grpcio>=1.62.1"

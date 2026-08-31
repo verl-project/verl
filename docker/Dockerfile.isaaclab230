@@ -42,7 +42,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     /workspace/isaaclab/_isaac_sim/python.sh -m pip install transformers[hf_xet]
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    /workspace/isaaclab/_isaac_sim/python.sh -m pip install --upgrade numpy==1.26.4 ray[default] \
+    /workspace/isaaclab/_isaac_sim/python.sh -m pip install --upgrade numpy==1.26.4 "ray[default]==2.58.0" \
     accelerate codetiming datasets dill hydra-core pandas peft pyarrow>=19.0.0 pybind11 pylatexenc
 
 # openvla-oft
