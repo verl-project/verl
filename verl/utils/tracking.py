@@ -35,6 +35,21 @@ MLFLOW_MAX_ATTEMPTS = 3
 MLFLOW_SLEEP_SECONDS = 5
 
 
+def mlflow_experiment_name(project_name: str) -> str:
+    """Optionally nest the MLflow experiment under a root path.
+
+    Managed MLflow backends (e.g. Databricks) require the experiment to be an absolute workspace path,
+    whereas ``project_name`` is typically a bare name that is also reused as a path component
+    (e.g. ``trainer.default_local_dir``). ``VERL_MLFLOW_EXPERIMENT_PREFIX`` nests a bare ``project_name``
+    under that prefix; an already-absolute name is left untouched, and an unset or empty prefix returns
+    ``project_name`` unchanged.
+    """
+    prefix = os.environ.get("VERL_MLFLOW_EXPERIMENT_PREFIX")
+    if prefix and not project_name.startswith("/"):
+        return f"{prefix.rstrip('/')}/{project_name}"
+    return project_name
+
+
 class Tracking:
     """A unified tracking interface for logging experiment data to multiple backends.
 
@@ -113,7 +128,7 @@ class Tracking:
                     else:
                         # Project_name is actually experiment_name in MLFlow
                         # If experiment does not exist, will create a new experiment
-                        experiment = mlflow.set_experiment(project_name)
+                        experiment = mlflow.set_experiment(mlflow_experiment_name(project_name))
                         mlflow.start_run(experiment_id=experiment.experiment_id, run_name=experiment_name)
 
                     mlflow.log_params(_compute_mlflow_params_from_objects(config))
