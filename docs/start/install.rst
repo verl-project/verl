@@ -164,7 +164,7 @@ Other backends
 
 Ascend NPU, AMD ROCm, aarch64 GPUs, and ``trtllm`` are outside the uv
 workflow. Use the standalone Dockerfiles instead — for example
-``docker/ascend/`` (Ascend), ``docker/Dockerfile.rocm`` (AMD), or
+``docker/ascend/`` (Ascend), ``docker/rocm/Dockerfile.rocm`` (AMD), or
 ``docker/Dockerfile.stable.trtllm`` (TensorRT-LLM).
 
 Upgrade or modify dependencies
@@ -370,13 +370,13 @@ Install with AMD GPUs - ROCM kernel support
 When you run on AMD GPUs (MI300) with ROCM platform, you cannot use the previous quickstart to run verl. You should follow the following steps to build a docker and run it.
 If you encounter any issues in using AMD GPUs running verl, feel free to contact me - `Yusheng Su <https://yushengsu-thu.github.io/>`_.
 
-Find the docker for AMD ROCm: `docker/Dockerfile.rocm <https://github.com/verl-project/verl/blob/main/docker/Dockerfile.rocm>`_
+Find the docker for AMD ROCm: `docker/rocm/Dockerfile.rocm <https://github.com/verl-project/verl/blob/main/docker/rocm/Dockerfile.rocm>`_
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 
 .. code-block:: bash
 
     #  Build the docker in the repo dir:
-    # docker build -f docker/Dockerfile.rocm -t verl-rocm:03.04.2015 .
+    # docker build -f docker/rocm/Dockerfile.rocm -t verl-rocm:03.04.2015 .
     # docker images # you can find your built docker
     FROM rocm/vllm:rocm6.2_mi300_ubuntu20.04_py3.9_vllm_0.6.4
 

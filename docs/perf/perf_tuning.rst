@@ -60,7 +60,7 @@ Below are key factors for tuning vLLM-based rollout. Before tuning, we recommend
   Must to set ``enforce_eager=False`` to use ``cudagraph_capture_sizes``.
 
 More tuning details such as dealing with Preemption and Chunked-prefill
-can be found in `vLLM official tuning guide <https://docs.vllm.ai/en/latest/performance/optimization.html>`_ 
+can be found in `vLLM official tuning guide <https://docs.vllm.ai/en/latest/configuration/optimization/>`_ 
 
 For optimal performance, we recommend using vLLM v0.8.3 or later. See https://github.com/verl-project/verl/blob/main/docs/README_vllm0.8.md for details.
 

@@ -4,7 +4,7 @@
 Last updated: 06/06/2026.
 
 .. _Qwen3-30B: https://github.com/verl-project/verl/blob/release/v0.7.1/examples/grpo_trainer/run_qwen3moe-30b_grpo_megatron_vllm_npu.sh
-.. _doclink: https://github.com/verl-project/verl/blob/c98cb8cc/docs/ascend_tutorial/examples/ascend_vllm_best_pratice.rst
+.. _doclink: https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/zh/model_support/examples/ascend_vllm_best_practices.rst
 引言
 ----------------------------------
 
