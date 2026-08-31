@@ -784,6 +784,65 @@ def test_default_builder_tokenizes_system_and_user_appends_with_generation_promp
     assert incremental == [ord(char) for char in expected]
 
 
+def test_default_builder_fuses_generation_prompt_into_last_append_group():
+    tokenizer = _RecordingTemplateTokenizer()
+    builder = ContinuousTokenBuilder(tokenizer, chat_template_kwargs={"enable_thinking": False})
+    tools = [{"type": "function", "function": {"name": "lookup"}}]
+    old_messages = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "second question"},
+    ]
+    new_messages = old_messages + [
+        {"role": "tool", "content": "first result", "name": "lookup"},
+        {"role": "tool", "content": "second result", "name": "lookup"},
+    ]
+
+    builder.tokenize_non_assistant_incremental_messages(old_messages, new_messages, tools=tools)
+
+    assert len(tokenizer.calls) == 2
+    assert [len(call["messages"]) for call in tokenizer.calls] == [3, 5]
+    assert [call["add_generation_prompt"] for call in tokenizer.calls] == [False, True]
+    assert all(call["tools"] is tools for call in tokenizer.calls)
+    assert all(call["kwargs"] == {"enable_thinking": False} for call in tokenizer.calls)
+
+
+def test_default_builder_only_fuses_generation_prompt_into_final_append_group():
+    tokenizer = _RecordingTemplateTokenizer()
+    builder = ContinuousTokenBuilder(tokenizer)
+    old_messages = [{"role": "user", "content": "question"}]
+    new_messages = old_messages + [
+        {"role": "system", "content": "policy"},
+        {"role": "user", "content": "retry"},
+    ]
+
+    builder.tokenize_non_assistant_incremental_messages(old_messages, new_messages)
+
+    assert len(tokenizer.calls) == 4
+    assert [call["add_generation_prompt"] for call in tokenizer.calls] == [False, False, False, True]
+
+
+def test_special_builder_can_keep_separate_full_history_generation_prompt():
+    class FullHistoryGenerationPromptBuilder(ContinuousTokenBuilder):
+        def _should_fuse_generation_prompt_with_last_group(self):
+            return False
+
+    tokenizer = _RecordingTemplateTokenizer()
+    builder = FullHistoryGenerationPromptBuilder(tokenizer)
+    old_messages = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "second question"},
+    ]
+    new_messages = old_messages + [{"role": "user", "content": "retry"}]
+
+    builder.tokenize_non_assistant_incremental_messages(old_messages, new_messages)
+
+    assert len(tokenizer.calls) == 4
+    assert [len(call["messages"]) for call in tokenizer.calls] == [2, 3, len(new_messages), len(new_messages)]
+    assert [call["add_generation_prompt"] for call in tokenizer.calls] == [False, False, False, True]
+
+
 def test_default_builder_rejects_multi_message_user_or_system_groups():
     class BadGroupingBuilder(ContinuousTokenBuilder):
         def _iter_append_groups(self, appended_messages):
