@@ -1386,15 +1386,21 @@ def test_minimax_text01_builder_prepares_structured_tool_history():
 def test_minimax_text01_builder_normalizes_unconditional_generation_scaffold():
     tokenizer = _MiniMaxText01UnconditionalScaffoldTokenizer()
     builder = MiniMaxText01ContinuousTokenBuilder(tokenizer)
+    previous_messages = [{"role": "assistant", "content": "gold"}]
+    updated_messages = [*previous_messages, {"role": "user", "content": "retry"}]
+    runtime_ids = [7, tokenizer.eos_token_id]
 
     assistant_ids = builder.tokenize_assistant_message({"role": "assistant", "content": "gold"})
-    user_ids = builder._tokenize_single_non_tool({"role": "user", "content": "retry"})
+    user_ids = builder._tokenize_single_non_tool({"role": "user", "content": "retry"}, add_generation_prompt=True)
+    result = builder.merge_non_assistant_tokens(previous_messages, updated_messages, runtime_ids)
 
+    assert builder._should_fuse_generation_prompt_with_last_group() is False
     assert assistant_ids == tokenizer.encode("gold<end_of_sentence>", add_special_tokens=False)
     assert user_ids == tokenizer.encode(
         "<beginning_of_sentence>user name=user\nretry<end_of_sentence>\n",
         add_special_tokens=False,
     )
+    assert result.token_ids == runtime_ids + [ord("\n")] + user_ids + builder._generation_scaffold_ids
 
 
 def test_minimax_builder_reconstructs_empty_and_nonempty_reasoning_continuations():
@@ -1738,6 +1744,21 @@ def test_minimax_vl_builder_extracts_assistant_after_unconditional_scaffold():
     assert assistant_ids == tokenizer.encode("gold<end_of_sentence>", add_special_tokens=False)
 
 
+def test_minimax_vl_builder_keeps_generation_scaffold_separate_for_user_append():
+    tokenizer = _MiniMaxVLAssistantTokenizer()
+    processor = _MockMiniMaxVLAssistantProcessor(tokenizer)
+    builder = MiniMaxVLContinuousTokenBuilder(tokenizer, processor)
+    previous_messages = [{"role": "assistant", "content": "gold"}]
+    updated_messages = [*previous_messages, {"role": "user", "content": "retry"}]
+    runtime_ids = [7, tokenizer.eos_token_id]
+
+    user_ids = builder._tokenize_single_non_tool({"role": "user", "content": "retry"}, add_generation_prompt=True)
+    result = builder.merge_non_assistant_tokens(previous_messages, updated_messages, runtime_ids)
+
+    assert builder._should_fuse_generation_prompt_with_last_group() is False
+    assert result.token_ids == runtime_ids + [ord("\n")] + user_ids + builder._vl_scaffold_ids
+
+
 def test_minimax_vl_builder_formats_openai_tool_response_as_function_message():
     tokenizer = _MiniMaxVLAssistantTokenizer()
     processor = _MockMiniMaxVLAssistantProcessor(tokenizer)
@@ -1863,6 +1884,7 @@ def test_kimi_vl_builder_rejects_unsupported_structured_tool_responses():
         builder._tokenize_tool_group(
             [{"role": "tool", "name": "lookup", "content": "value"}],
             previous_messages=[],
+            add_generation_prompt=True,
         )
 
 
