@@ -708,9 +708,9 @@ class SGLangHttpServer:
         # Re-key backend spec-decoding stats to the rollout-common names.
         if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
             extra_fields["spec_num_draft_tokens"] = int(
-                meta_info.get("spec_draft_token_num", self.config.mtp.speculative_num_draft_tokens)
+                meta_info.get("spec_num_proposed_drafts", self.config.mtp.speculative_num_draft_tokens)
             )
-            extra_fields["spec_num_accepted_tokens"] = int(meta_info.get("spec_accept_token_num", 0))
+            extra_fields["spec_num_accepted_tokens"] = int(meta_info.get("spec_num_correct_drafts", 0))
             extra_fields["spec_num_verify_steps"] = int(meta_info.get("spec_verify_ct", 0))
 
         return TokenOutput(
