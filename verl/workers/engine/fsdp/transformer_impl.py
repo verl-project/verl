@@ -1074,7 +1074,25 @@ class FSDPEngine(BaseEngine):
             log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
 
     def disable_adapter(self) -> ContextManager:
-        return self.module.disable_adapter()
+        # torch.distributed fully_shard changes the root module class and does
+        # not preserve PEFT's dynamically forwarded disable_adapter method.
+        # The original PEFT model remains available as the wrapped module.
+        if hasattr(self.module, "disable_adapter"):
+            return self.module.disable_adapter()
+        wrapped_module = getattr(self.module, "_fsdp_wrapped_module", None)
+        if wrapped_module is not None and hasattr(wrapped_module, "disable_adapter"):
+            return wrapped_module.disable_adapter()
+        if hasattr(self.module, "disable_adapters") and hasattr(self.module, "enable_adapters"):
+            @contextmanager
+            def adapter_disabled():
+                self.module.disable_adapters()
+                try:
+                    yield
+                finally:
+                    self.module.enable_adapters()
+
+            return adapter_disabled()
+        raise AttributeError("FSDP-wrapped PEFT model does not expose disable_adapter")
 
 
 class EngineEvalModeCtx(BaseEngineCtx):
