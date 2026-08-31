@@ -36,7 +36,7 @@ teacher_ep=${TEACHER_EP:-8}
 teacher_gpu_mem_util=${TEACHER_GPU_MEM_UTIL:-0.4}
 
 total_epochs=${TOTAL_EPOCHS:-30}
-save_freq=${SAVE_FREQ:-5}
+save_freq=${SAVE_FREQ:-200}
 test_freq=${TEST_FREQ:-5}
 
 project_name=${PROJECT_NAME:-verl_distill_geo3k}
