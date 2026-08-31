@@ -33,7 +33,10 @@ set -euo pipefail
 readonly SRC=$RN4PT_VERL
 readonly DST=$RN4PT_IMAGE_ENV
 [[ ! -e "\$DST" ]]
-cp -a "\$SRC" "\$DST"
+mkdir -p "\$DST"
+git -C "\$SRC" archive "$RN4PT_SOURCE_COMMIT" | tar -x -C "\$DST"
+mkdir -p "\$DST/recipe"
+git -C "\$SRC/recipe" archive "$RN4PT_RECIPE_COMMIT" | tar -x -C "\$DST/recipe"
 cd "\$DST"
 test "\$(uname -m)" = aarch64
 UV_BIN=\$(command -v uv || true)
@@ -153,7 +156,8 @@ grep -q 'REAL_NVFP4_PERTOKEN_IMAGE_DEPS_PASS' "$BUILD_LOG"
 [[ -s "$TMP_IMAGE" ]]
 mv "$TMP_IMAGE" "$RN4PT_RUNTIME_IMAGE"
 sha256sum "$RN4PT_RUNTIME_IMAGE" >"$RN4PT_RUNTIME_IMAGE.sha256"
-printf 'job_id=%s\nlog=%s\nimage=%s\n' \
-  "$SLURM_JOB_ID" "$BUILD_LOG" "$RN4PT_RUNTIME_IMAGE" >"$RN4PT_BUILD_PASS"
+printf 'job_id=%s\nlog=%s\nimage=%s\nsource_commit=%s\nlock_sha256=%s\n' \
+  "$SLURM_JOB_ID" "$BUILD_LOG" "$RN4PT_RUNTIME_IMAGE" \
+  "$RN4PT_SOURCE_COMMIT" "$RN4PT_LOCK_SHA256" >"$RN4PT_BUILD_PASS"
 trap - EXIT
 echo "REAL_NVFP4_PERTOKEN_BUILD_PASS job_id=$SLURM_JOB_ID image=$RN4PT_RUNTIME_IMAGE"

@@ -30,6 +30,10 @@ readonly RN4PT_VERL_BASE_COMMIT=b356f4301e67c9896c9f1690785e096242c08705
 readonly RN4PT_RECIPE_COMMIT=e7f889574b8301cc0f0fc1d57c6d67f31ffeb689
 readonly RN4PT_TE_COMMIT=e7c550c5f80636cf841a8204b1d6f85a5f3f28b7
 readonly RN4PT_TE_VERSION=2.18.0+e7c550c5
+RN4PT_SOURCE_COMMIT=$(git -C "$RN4PT_VERL" rev-parse HEAD)
+readonly RN4PT_SOURCE_COMMIT
+RN4PT_LOCK_SHA256=$(sha256sum "$RN4PT_VERL/uv.lock" | awk '{print $1}')
+readonly RN4PT_LOCK_SHA256
 readonly RN4PT_PROBE_PASS=$RN4PT_STATE/probe.pass
 readonly RN4PT_BUILD_PASS=$RN4PT_STATE/build.pass
 readonly RN4PT_PREFLIGHT_PASS=$RN4PT_STATE/preflight.pass
@@ -40,6 +44,8 @@ rn4pt_die() { echo "REAL_NVFP4_PERTOKEN_REFUSED: $*" >&2; return 2; }
 rn4pt_validate_static() {
   local path
   [[ -d "$RN4PT_VERL/.git" || -f "$RN4PT_VERL/.git" ]] || rn4pt_die "worktree missing" || return
+  [[ -z "$(git -C "$RN4PT_VERL" status --porcelain --untracked-files=normal)" ]] || \
+    rn4pt_die "worktree must be clean so the runtime image and source commit cannot diverge" || return
   [[ ! -e "$RN4PT_VERL/.venv" && ! -L "$RN4PT_VERL/.venv" ]] || \
     rn4pt_die "worktree .venv would leak a host environment into the runtime image" || return
   git -C "$RN4PT_VERL" merge-base --is-ancestor "$RN4PT_VERL_BASE_COMMIT" HEAD || \
@@ -99,6 +105,11 @@ rn4pt_validate_static() {
 }
 
 rn4pt_require_runtime_image() {
+  [[ -s "$RN4PT_BUILD_PASS" ]] || rn4pt_die "runtime build state missing" || return
+  grep -Fxq "source_commit=$RN4PT_SOURCE_COMMIT" "$RN4PT_BUILD_PASS" || \
+    rn4pt_die "runtime image was built from a different source commit" || return
+  grep -Fxq "lock_sha256=$RN4PT_LOCK_SHA256" "$RN4PT_BUILD_PASS" || \
+    rn4pt_die "runtime image was built from a different uv.lock" || return
   [[ -s "$RN4PT_RUNTIME_IMAGE" ]] || rn4pt_die "runtime image missing: $RN4PT_RUNTIME_IMAGE" || return
   [[ -s "$RN4PT_RUNTIME_IMAGE.sha256" ]] || rn4pt_die "runtime image checksum missing" || return
   sha256sum -c "$RN4PT_RUNTIME_IMAGE.sha256" || rn4pt_die "runtime image checksum mismatch" || return
