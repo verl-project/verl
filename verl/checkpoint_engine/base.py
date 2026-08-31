@@ -128,8 +128,9 @@ class CheckpointEngine(ABC):
     """
 
     # How receive_weights yields weights to the server adapter:
-    #   "named_tensors" -- (name, tensor) pairs, bucketed into full-tensor loads.
-    #   "delta_flush"   -- per-flush sparse payloads applied via a custom loader.
+    #   "named_tensors"            -- (name, tensor) pairs containing full tensors.
+    #   "rank_local_named_tensors" -- (name, tensor) pairs already sharded for each destination rank.
+    #   "delta_flush"              -- per-flush sparse payloads applied via a custom loader.
     wire_format = "named_tensors"
 
     @abstractmethod
@@ -323,6 +324,8 @@ class CheckpointEngineWorker(Worker):
 
         self.server_adapter: BaseRollout = server_adapter
         backend = self.rollout_config.checkpoint_engine.backend
+        if backend == "nccl_m2n" and self.rollout_config.name != "vllm":
+            raise NotImplementedError("checkpoint_engine.backend='nccl_m2n' currently requires rollout.name='vllm'")
         if backend == "delta_sharded" and self.rollout_config.name != "sglang":
             raise NotImplementedError(
                 f"checkpoint_engine.backend={backend!r} currently supports only the sglang rollout "

@@ -901,7 +901,8 @@ class FSDPEngine(BaseEngine):
         """Like :meth:`get_per_tensor_param`, but yields each rank's *local* FSDP shard
         ``(name, local_flat_shard_bf16, ShardSpec)`` instead of all-gathering the full
         tensor. Pure DTensor export, no side effects -- delta bookkeeping lives in
-        :meth:`get_per_tensor_param_delta_shard`. Non-LoRA base path only."""
+        :meth:`get_per_tensor_param_delta_shard`; the ``nccl_m2n`` checkpoint
+        backend consumes the rank-local tensors directly. Non-LoRA base path only."""
 
         # FSDP1's (SHARDED_)STATE_DICT export runs through the unshard machinery and
         # asserts flat params are GPU-resident; FSDP2 state_dict() only collects
@@ -928,6 +929,13 @@ class FSDPEngine(BaseEngine):
                 yield name, local.reshape(-1), spec
 
         return _gen(), None
+
+    def get_per_tensor_param_reshard(self, **kwargs):
+        """Yield raw FSDP shards in the Reshard transport contract."""
+
+        if self._is_lora or self._qat_enabled:
+            raise NotImplementedError("FSDP Reshard export does not support LoRA or QAT")
+        return self.get_per_tensor_param_shard(**kwargs)
 
     def _hf_delta_entry(self, name, spec, place, lidx, lval):
         """Per-param HF delta entry builder: this engine handles DTensor identity
