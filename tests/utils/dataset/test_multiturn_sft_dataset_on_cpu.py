@@ -34,29 +34,238 @@ from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
 from verl.utils.model import extract_multi_modal_inputs
 
 custom_model_prefix = Path("~/models").expanduser().resolve()
+qwen35_model_path = Path(
+    os.environ.get("VERL_TEST_QWEN35_MODEL", custom_model_prefix / "Qwen/Qwen3.5-0.8B")
+).expanduser()
+gpt_oss_model_path = Path(
+    os.environ.get("VERL_TEST_GPT_OSS_MODEL", custom_model_prefix / "openai/gpt-oss-20b")
+).expanduser()
+
+
+def test_multiturn_sft_drops_arrow_null_message_fields():
+    messages = [
+        {"role": "assistant", "content": "done", "tool_calls": None},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"function": {"name": "lookup", "arguments": {"optional": None}}}],
+        },
+    ]
+
+    assert MultiTurnSFTDataset._drop_null_message_fields(messages) == [
+        {"role": "assistant", "content": "done"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"function": {"name": "lookup", "arguments": {"optional": None}}}],
+        },
+    ]
+
+
+@pytest.mark.parametrize("model_path", [str(qwen35_model_path)])
+def test_multiturn_sft_qwen35_uses_append_only_continuous_tokens(model_path: str, tmp_path: Path):
+    first_turn = [
+        {"role": "user", "content": "q"},
+        {
+            "role": "assistant",
+            "content": "<think>I need output the <think> tag</think><think>",
+        },
+    ]
+    conversations = [
+        first_turn,
+        [
+            *first_turn,
+            {"role": "user", "content": "Format error: retry."},
+            {"role": "assistant", "content": "done"},
+        ],
+        [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "<think></think><think>"},
+            {"role": "user", "content": "Format error: retry."},
+            {"role": "assistant", "content": "done"},
+        ],
+        [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "<think>unclosed literal body"},
+            {"role": "user", "content": "Format error: retry."},
+            {"role": "assistant", "content": "done"},
+        ],
+    ]
+    enable_thinking = [True, True, False, True]
+    test_file = tmp_path / "qwen35_continuous_tokens.parquet"
+    pd.DataFrame({"messages": conversations, "enable_thinking": enable_thinking}).to_parquet(test_file)
+
+    tokenizer = hf_tokenizer(model_path)
+    dataset = MultiTurnSFTDataset(
+        parquet_files=str(test_file),
+        tokenizer=tokenizer,
+        config={
+            "max_length": 512,
+            "truncation": "error",
+            "pad_mode": "no_padding",
+            "continuous_token_model_family": "qwen35",
+        },
+    )
+    short_item, thinking_item, non_thinking_item, unclosed_item = (dataset[index] for index in range(4))
+
+    # Appending a user/retry turn never rebuilds or replaces the already-tokenized
+    # prompt + first assistant response.
+    short_length = len(short_item["input_ids"])
+    assert torch.equal(thinking_item["input_ids"][:short_length], short_item["input_ids"])
+    assert torch.equal(thinking_item["loss_mask"][:short_length], short_item["loss_mask"])
+
+    thinking_text = tokenizer.decode(thinking_item["input_ids"])
+    thinking_supervised_text = tokenizer.decode(thinking_item["input_ids"][thinking_item["loss_mask"] == 1])
+    assert "I need output the <think> tag" in thinking_text
+    assert "I need output the <think> tag" in thinking_supervised_text
+    assert "done" in thinking_supervised_text
+
+    # A whole-conversation Qwen3.5 render drops historical reasoning. CT keeps it
+    # deliberately, matching the immutable-prefix behavior of RL TITO.
+    canonical_ids = tokenizer.apply_chat_template(
+        conversations[1],
+        add_generation_prompt=False,
+        tokenize=True,
+        enable_thinking=True,
+    )
+    assert thinking_item["input_ids"].tolist() != canonical_ids
+    assert "I need output" not in tokenizer.decode(canonical_ids)
+
+    think_token_id = tokenizer.convert_tokens_to_ids("<think>")
+    think_end_token_id = tokenizer.convert_tokens_to_ids("</think>")
+
+    # Thinking mode: the prompt's opening tag is not supervised; literal nested
+    # opening tags and both model-generated closing tags are supervised.
+    assert thinking_item["loss_mask"][thinking_item["input_ids"] == think_token_id].tolist() == [0, 1, 1, 0]
+    assert thinking_item["loss_mask"][thinking_item["input_ids"] == think_end_token_id].tolist() == [1, 1]
+
+    # Non-thinking mode: each empty think block belongs to the generation prompt,
+    # while the extra literal opening tag in the prepared response is model output.
+    assert non_thinking_item["loss_mask"][non_thinking_item["input_ids"] == think_token_id].tolist() == [0, 1, 0]
+    assert non_thinking_item["loss_mask"][non_thinking_item["input_ids"] == think_end_token_id].tolist() == [0, 0]
+
+    unclosed_supervised_text = tokenizer.decode(unclosed_item["input_ids"][unclosed_item["loss_mask"] == 1])
+    assert "<think>unclosed literal body" in unclosed_supervised_text
+    assert unclosed_item["loss_mask"][unclosed_item["input_ids"] == think_token_id].tolist() == [0, 1, 0]
+
+    # Qwen CT inserts the template-only newline after generated <|im_end|>; the
+    # assistant EOS remains supervised and the inserted newline does not.
+    im_end_token_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    newline_token_id = tokenizer.encode("\n", add_special_tokens=False)[0]
+    first_assistant_end = next(
+        index
+        for index, (token_id, mask) in enumerate(
+            zip(thinking_item["input_ids"].tolist(), thinking_item["loss_mask"].tolist(), strict=True)
+        )
+        if token_id == im_end_token_id and mask == 1
+    )
+    assert thinking_item["input_ids"][first_assistant_end + 1].item() == newline_token_id
+    assert thinking_item["loss_mask"][first_assistant_end + 1].item() == 0
+
+
+@pytest.mark.parametrize("model_path", [str(qwen35_model_path)])
+def test_multiturn_sft_qwen36_preserve_thinking_does_not_rewrite_history(model_path: str, tmp_path: Path):
+    tokenizer = hf_tokenizer(model_path)
+    qwen35_condition = "{%- if loop.index0 > ns.last_query_index %}"
+    qwen36_condition = (
+        "{%- if (preserve_thinking is defined and preserve_thinking is true) or (loop.index0 > ns.last_query_index) %}"
+    )
+    assert tokenizer.chat_template.count(qwen35_condition) == 1
+    tokenizer.chat_template = tokenizer.chat_template.replace(qwen35_condition, qwen36_condition)
+
+    conversations = [
+        [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "<think>reason A</think>answer A<think>"},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "<think>reason B</think>answer B"},
+        ],
+        [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "<think></think>answer A"},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "answer B"},
+        ],
+        [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "<think></think>answer A<think>"},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "answer B"},
+        ],
+        [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "reasoning_content": "reason A", "content": "answer A"},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "reasoning_content": "reason B", "content": "answer B"},
+        ],
+    ]
+    enable_thinking = [True, True, False, True]
+    test_file = tmp_path / "qwen36_continuous_tokens.parquet"
+    pd.DataFrame({"messages": conversations, "enable_thinking": enable_thinking}).to_parquet(test_file)
+
+    def build_dataset(preserve_thinking: bool):
+        return MultiTurnSFTDataset(
+            parquet_files=str(test_file),
+            tokenizer=tokenizer,
+            config={
+                "max_length": 512,
+                "truncation": "error",
+                "pad_mode": "no_padding",
+                "continuous_token_model_family": "qwen35",
+                "apply_chat_template_kwargs": {"preserve_thinking": preserve_thinking},
+            },
+        )
+
+    preserve_dataset = build_dataset(True)
+    drop_dataset = build_dataset(False)
+    preserve_items = [preserve_dataset[index] for index in range(len(conversations))]
+    drop_items = [drop_dataset[index] for index in range(len(conversations))]
+
+    # preserve_thinking only controls whole-history re-rendering. CT never
+    # re-renders that history, so both settings produce the same TITO stream.
+    for preserve_item, drop_item in zip(preserve_items, drop_items, strict=True):
+        assert torch.equal(preserve_item["input_ids"], drop_item["input_ids"])
+        assert torch.equal(preserve_item["loss_mask"], drop_item["loss_mask"])
+
+    for item in preserve_items:
+        supervised_text = tokenizer.decode(item["input_ids"][item["loss_mask"] == 1])
+        assert "answer A" in supervised_text
+        assert "answer B" in supervised_text
+
+    assert "reason A" in tokenizer.decode(preserve_items[0]["input_ids"])
+    assert "reason A" in tokenizer.decode(drop_items[0]["input_ids"])
+    assert "reason A" in tokenizer.decode(preserve_items[3]["input_ids"][preserve_items[3]["loss_mask"] == 1])
+
+    think_token_id = tokenizer.convert_tokens_to_ids("<think>")
+    think_end_token_id = tokenizer.convert_tokens_to_ids("</think>")
+    assert preserve_items[0]["loss_mask"][preserve_items[0]["input_ids"] == think_token_id].tolist() == [0, 1, 0]
+    assert preserve_items[0]["loss_mask"][preserve_items[0]["input_ids"] == think_end_token_id].tolist() == [1, 1]
+    assert preserve_items[2]["loss_mask"][preserve_items[2]["input_ids"] == think_token_id].tolist() == [0, 1, 0]
+    assert preserve_items[2]["loss_mask"][preserve_items[2]["input_ids"] == think_end_token_id].tolist() == [0, 0]
 
 
 @pytest.mark.parametrize(
-    "model_path, ignore_input_ids_mismatch",
+    "model_path, continuous_token_model_family",
     [
-        (f"{custom_model_prefix}/Qwen/Qwen2.5-0.5B", False),
-        (f"{custom_model_prefix}/Qwen/Qwen3-0.6B", True),
-        (f"{custom_model_prefix}/Qwen/Qwen3.5-0.8B", False),
+        (f"{custom_model_prefix}/Qwen/Qwen2.5-0.5B", "qwen25"),
+        (f"{custom_model_prefix}/Qwen/Qwen3-0.6B", "qwen3"),
+        (f"{custom_model_prefix}/Qwen/Qwen3.5-0.8B", "qwen35"),
     ],
 )
-def test_multiturn_sft_dataset(model_path: str, ignore_input_ids_mismatch: bool):
-    print(f"Starting test... model_path={model_path}, ignore_input_ids_mismatch={ignore_input_ids_mismatch}")
+def test_multiturn_sft_dataset(model_path: str, continuous_token_model_family: str):
+    print(f"Starting test... model_path={model_path}, family={continuous_token_model_family}")
     # Create a temporary parquet file with test data
     test_data = {
         "messages": [
             [
+                {"role": "system", "content": "You are a powerful assistant."},
                 {"role": "user", "content": "What is 2+2?"},
                 {"role": "assistant", "content": "2+2 equals 4."},
                 {"role": "tool", "content": "And what is 4+4?"},
+                {"role": "tool", "content": "Please calculate it exactly."},
                 {"role": "assistant", "content": "4+4 equals 8."},
             ],
             [
-                # {"role": "system", "content": "You are a powerful assistant."},
                 {"role": "user", "content": "Tell me a joke."},
                 {"role": "assistant", "content": "Why did the chicken cross the road?"},
                 {"role": "tool", "content": "Why?"},
@@ -81,7 +290,7 @@ def test_multiturn_sft_dataset(model_path: str, ignore_input_ids_mismatch: bool)
         "max_length": 512,
         "truncation": "error",
         "multiturn": {"messages_key": "messages"},
-        "ignore_input_ids_mismatch": ignore_input_ids_mismatch,
+        "continuous_token_model_family": continuous_token_model_family,
     }
     dataset = MultiTurnSFTDataset(parquet_files=test_file, tokenizer=tokenizer, processor=processor, config=config)
 
@@ -178,7 +387,7 @@ def test_multiturn_sft_dataset(model_path: str, ignore_input_ids_mismatch: bool)
 
     # Verify that system and user messages are in the non-assistant text
     for msg in test_data["messages"][0]:  # First conversation
-        if msg["role"] in ["system", "user"]:
+        if msg["role"] in ["system", "user", "tool"]:
             assert msg["content"] in non_assistant_text, (
                 f"{msg['role'].title()} message '{msg['content']}' not found in non-assistant text"
             )
@@ -193,7 +402,7 @@ def test_multiturn_sft_dataset(model_path: str, ignore_input_ids_mismatch: bool)
         "max_length": 1024,
         "truncation": "error",
         "multiturn": {"messages_key": "messages"},
-        "ignore_input_ids_mismatch": ignore_input_ids_mismatch,
+        "continuous_token_model_family": continuous_token_model_family,
     }
     small_dataset = MultiTurnSFTDataset(
         parquet_files=test_file, tokenizer=tokenizer, processor=processor, config=padding_config
@@ -216,7 +425,7 @@ def test_multiturn_sft_dataset(model_path: str, ignore_input_ids_mismatch: bool)
         "truncation": "error",
         "multiturn": {"messages_key": "messages"},
         "pad_mode": "no_padding",
-        "ignore_input_ids_mismatch": ignore_input_ids_mismatch,
+        "continuous_token_model_family": continuous_token_model_family,
     }
     dataset = MultiTurnSFTDataset(parquet_files=test_file, tokenizer=tokenizer, processor=processor, config=config)
 
@@ -228,9 +437,12 @@ def test_multiturn_sft_dataset(model_path: str, ignore_input_ids_mismatch: bool)
         assert key in item0, f"Missing key {key} in no-padding mode dataset item"
         assert isinstance(item0[key], torch.Tensor), f"Expected torch.Tensor for {key} in no-padding mode"
 
-    # make sure assistant_text matches with expected
+    # Assistant continuations are rollout-shaped: template separators inserted
+    # by CT are not included in the supervised token selection.
     assistant_text = tokenizer.decode(item0["input_ids"][item0["loss_mask"] == 1])
-    assert assistant_text == "2+2 equals 4.<|im_end|>\n4+4 equals 8.<|im_end|>\n"
+    assert "2+2 equals 4." in assistant_text
+    assert "4+4 equals 8." in assistant_text
+    assert assistant_text.count("<|im_end|>") == 2
 
     print("All tests passed!")
     print("Starting test...")
@@ -239,18 +451,11 @@ def test_multiturn_sft_dataset(model_path: str, ignore_input_ids_mismatch: bool)
 @pytest.mark.parametrize(
     "model_path, apply_chat_template_kwargs",
     [
-        (f"{custom_model_prefix}/openai/gpt-oss-20b", {"model_identity": "You are a helpful assistant."}),
+        (str(gpt_oss_model_path), {"model_identity": "You are a helpful assistant."}),
     ],
 )
 def test_multiturn_sft_dataset_with_chat_template_kwargs(model_path: str, apply_chat_template_kwargs: dict):
-    """Test that custom apply_chat_template_kwargs are forwarded to system prompt
-    measurement so the loss mask is not shifted when kwargs change tokenization.
-
-    Some chat templates embed configurable fields (e.g. model_identity) in the
-    system prompt. If these kwargs are not forwarded to system prompt length
-    measurement, the per-turn strip length is wrong, causing role markers to be
-    removed and the loss mask to shift.
-    """
+    """Test that custom chat-template kwargs reach all CT rendering calls."""
     test_data = {
         "messages": [
             [
@@ -276,6 +481,7 @@ def test_multiturn_sft_dataset_with_chat_template_kwargs(model_path: str, apply_
         "truncation": "error",
         "pad_mode": "no_padding",
         "apply_chat_template_kwargs": apply_chat_template_kwargs,
+        "continuous_token_model_family": "gptoss",
     }
     dataset = MultiTurnSFTDataset(parquet_files=test_file, tokenizer=tokenizer, processor=None, config=config)
 
@@ -306,6 +512,71 @@ def test_multiturn_sft_dataset_with_chat_template_kwargs(model_path: str, apply_
                 )
 
     print("All chat_template_kwargs tests passed!")
+
+
+@pytest.mark.parametrize("model_path", [str(gpt_oss_model_path)])
+def test_multiturn_sft_gpt_oss_tool_call_uses_harmony_terminators(model_path: str, tmp_path: Path):
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": "Look up a value.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"q": {"type": "string"}},
+                    "required": ["q"],
+                },
+            },
+        }
+    ]
+    messages = [
+        {"role": "user", "content": "Look up x."},
+        {
+            "role": "assistant",
+            "content": None,
+            "thinking": "need lookup",
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": '{"q":"x"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_0", "name": "lookup", "content": "value x"},
+        {"role": "assistant", "thinking": "final thought", "content": "done"},
+    ]
+    test_file = tmp_path / "gpt_oss_tool_call.parquet"
+    pd.DataFrame({"messages": [messages], "tools": [tools]}).to_parquet(test_file)
+
+    tokenizer = hf_tokenizer(model_path)
+    dataset = MultiTurnSFTDataset(
+        parquet_files=str(test_file),
+        tokenizer=tokenizer,
+        config={
+            "max_length": 1024,
+            "truncation": "error",
+            "pad_mode": "no_padding",
+            "continuous_token_model_family": "gptoss",
+            "apply_chat_template_kwargs": {"model_identity": "You are a helpful assistant."},
+        },
+        hf_model_type="gpt_oss",
+    )
+
+    item = dataset[0]
+    input_ids = item["input_ids"]
+    loss_mask = item["loss_mask"]
+    call_id = tokenizer.convert_tokens_to_ids("<|call|>")
+    return_id = tokenizer.convert_tokens_to_ids("<|return|>")
+
+    assert loss_mask[input_ids == call_id].tolist() == [1]
+    assert loss_mask[input_ids == return_id].tolist() == [1]
+    assert "lookup" in tokenizer.decode(input_ids[loss_mask == 1])
+    assert "need lookup" in tokenizer.decode(input_ids[loss_mask == 1])
+    assert "final thought" in tokenizer.decode(input_ids[loss_mask == 1])
+    assert "done" in tokenizer.decode(input_ids[loss_mask == 1])
+    assert "value x" in tokenizer.decode(input_ids[loss_mask == 0])
 
 
 def generate_image(description: str, size: str = "256x256"):
@@ -421,7 +692,13 @@ def test_multiturn_sft_vlm_dataset_on_cpu(model_path, vlm_data_file):
     df = pd.read_parquet(vlm_data_file)
     tokenizer = hf_tokenizer(model_path)
     processor = hf_processor(model_path)
-    config = {"max_length": 1024, "pad_mode": "no_padding", "truncation": "error", "messages_key": "messages"}
+    config = {
+        "max_length": 1024,
+        "pad_mode": "no_padding",
+        "truncation": "error",
+        "messages_key": "messages",
+        "continuous_token_model_family": "qwen3vl",
+    }
     dataset = MultiTurnSFTDataset(parquet_files=vlm_data_file, tokenizer=tokenizer, processor=processor, config=config)
     assert dataset.pad_mode == DatasetPadMode.NO_PADDING
 
@@ -482,7 +759,13 @@ def test_multiturn_sft_vlm_dataloader_on_cpu(model_path, vlm_data_file):
     df = pd.read_parquet(vlm_data_file)
     tokenizer = hf_tokenizer(model_path)
     processor = hf_processor(model_path)
-    config = {"max_length": 1024, "pad_mode": "no_padding", "truncation": "error", "messages_key": "messages"}
+    config = {
+        "max_length": 1024,
+        "pad_mode": "no_padding",
+        "truncation": "error",
+        "messages_key": "messages",
+        "continuous_token_model_family": "qwen3vl",
+    }
     dataset = MultiTurnSFTDataset(parquet_files=vlm_data_file, tokenizer=tokenizer, processor=processor, config=config)
     assert dataset.pad_mode == DatasetPadMode.NO_PADDING
 

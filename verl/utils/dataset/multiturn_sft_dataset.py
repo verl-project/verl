@@ -36,7 +36,9 @@ from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.dataset.vision_utils import process_image, process_video
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.py_functional import convert_nested_value_to_list_recursive
-from verl.utils.tokenizer.chat_template import apply_chat_template, extract_system_prompt_and_generation
+from verl.utils.tokenizer import build_multimodal_processor_inputs, get_processor_token_id
+from verl.utils.tokenizer.continuous_token import ContinuousTokenBuilder
+from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -59,15 +61,28 @@ def print_assembled_message(tokenizer, message_list, input_ids, loss_mask, attn_
     """
     Print the message after applying the chat template
     """
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
 
-    tokenized = tokenizer.apply_chat_template(message_list, add_generation_prompt=False, tokenize=False, tools=tools)
+    try:
+        tokenized = tokenizer.apply_chat_template(
+            message_list,
+            add_generation_prompt=False,
+            tokenize=False,
+            tools=tools,
+        )
+    except Exception as exc:
+        # Some registered CT protocols (notably DeepSeek-V4) use a native
+        # encoder and intentionally have no tokenizer chat_template. Debug
+        # output must not make an otherwise valid dataset item fail.
+        tokenized = f"<whole-conversation chat render unavailable: {exc}>"
     sep = "\n\n"
-    str = f"tokenized entire message:\n{tokenized}"
-    str += sep
+    assembled_text = f"tokenized entire message:\n{tokenized}"
+    assembled_text += sep
     decoded_ids = input_ids.tolist() if hasattr(input_ids, "tolist") else input_ids
-    str += f"tokenized seperately    :\n{tokenizer.decode(decoded_ids)}"
+    assembled_text += f"tokenized separately    :\n{tokenizer.decode(decoded_ids)}"
 
-    logger.debug(str)
+    logger.debug(assembled_text)
 
 
 class MultiTurnSFTDataset(Dataset):
@@ -80,6 +95,7 @@ class MultiTurnSFTDataset(Dataset):
         config (DictConfig): Options like cache_dir, prompt_key, max_prompt_length, truncation, etc.
         processor (ProcessorMixin, optional): Multimodal preprocessor for images/videos.
         max_samples (int, optional): Limit the number of samples. Defaults to -1 (use all).
+        hf_model_type (str, optional): Root Hugging Face model_type used to select the CT builder.
     """
 
     def __init__(
@@ -89,6 +105,7 @@ class MultiTurnSFTDataset(Dataset):
         config: DictConfig,
         processor: Optional[ProcessorMixin] = None,
         max_samples: int = -1,
+        hf_model_type: Optional[str] = None,
     ):
         # Set defaults and extract parameters from config if provided
         config = config or {}
@@ -113,7 +130,9 @@ class MultiTurnSFTDataset(Dataset):
         self.shuffle = config.get("shuffle", False)
         self.seed = config.get("seed")
         self.max_samples = max_samples
-        self.ignore_input_ids_mismatch = config.get("ignore_input_ids_mismatch", False)
+        self.continuous_token_model_family = config.get("continuous_token_model_family", "auto")
+        self.mm_processor_kwargs = config.get("mm_processor_kwargs", {})
+        self.hf_model_type = hf_model_type
         assert self.truncation in ["error", "left", "right"]
 
         if not isinstance(parquet_files, list | ListConfig):
@@ -124,6 +143,7 @@ class MultiTurnSFTDataset(Dataset):
             tokenizer = hf_tokenizer(tokenizer)
         self.tokenizer: PreTrainedTokenizer = tokenizer
         self.processor = processor
+        self._continuous_token_builders: dict[Optional[bool], ContinuousTokenBuilder] = {}
 
         self._download()
         self._read_files_and_process()
@@ -175,70 +195,161 @@ class MultiTurnSFTDataset(Dataset):
         else:
             self.enable_thinking = None
 
-        # system prompt: <|im_start|>system\nYou are a helpful assistant.<|im_end|>\n
-        # generation prompt: <|im_start|>assistant\n
-        self.system_prompt, self.generation_prompt = extract_system_prompt_and_generation(
-            self.tokenizer, **self.apply_chat_template_kwargs
-        )
-
     def __len__(self):
         return len(self.messages)
 
-    def _process_single_message(
+    def _get_continuous_token_builder(self, enable_thinking: Optional[bool]) -> ContinuousTokenBuilder:
+        """Return a CT builder whose template kwargs match one sample."""
+        if enable_thinking not in self._continuous_token_builders:
+            apply_chat_template_kwargs = dict(self.apply_chat_template_kwargs)
+            if enable_thinking is not None:
+                apply_chat_template_kwargs["enable_thinking"] = enable_thinking
+            self._continuous_token_builders[enable_thinking] = create_continuous_token_builder(
+                self.tokenizer,
+                model_family=self.continuous_token_model_family,
+                hf_model_type=self.hf_model_type,
+                chat_template_kwargs=apply_chat_template_kwargs,
+                mm_processor_kwargs=self.mm_processor_kwargs,
+                processor=self.processor,
+            )
+        return self._continuous_token_builders[enable_thinking]
+
+    @staticmethod
+    def _collect_media(messages: list[dict[str, Any]]) -> tuple[list[Any], list[Any]]:
+        images: list[Any] = []
+        videos: list[Any] = []
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") in {"image", "image_url"} and block.get("image") is not None:
+                    images.append(block["image"])
+                elif block.get("type") == "video" and block.get("video") is not None:
+                    videos.append(block["video"])
+        return images, videos
+
+    def _build_continuous_tokens(
         self,
-        index: int,
-        message: dict[str, Any],
-        full_message: list,
-        tools: Optional[list[dict[str, Any]]] = None,
-        enable_thinking: Optional[bool] = None,
-    ) -> tuple[list[int], list[int], list[int]]:
-        """
-        Process a single message and return its tokenized representation.
+        messages: list[dict[str, Any]],
+        *,
+        tools: Optional[list[dict[str, Any]]],
+        enable_thinking: Optional[bool],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Assemble an SFT trajectory with the same append-only contract as RL TITO."""
+        if not messages:
+            raise ValueError("MultiTurnSFTDataset requires at least one message")
 
-        Args:
-            index: turn index in the conversation
-            message: A single message dictionary
-            images: List of images to be used
-            videos: List of videos to be used
-            tools: List of tools to be used
-            enable_thinking: Whether to enable thinking mode
-
-        Returns:
-            Tuple of (input_ids, loss_mask, attention_mask, dict[str, torch.Tensor])
-        """
-        processor = self.processor if self.processor is not None else self.tokenizer
-        apply_chat_template_kwargs = {**self.apply_chat_template_kwargs}
-        if enable_thinking is not None:
-            apply_chat_template_kwargs["enable_thinking"] = enable_thinking
-
-        inputs = apply_chat_template(
-            processor,
-            messages=[message],
-            tools=tools,
-            add_generation_prompt=False,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
-            **apply_chat_template_kwargs,
+        builder = self._get_continuous_token_builder(enable_thinking)
+        first_assistant_index = next(
+            (index for index, message in enumerate(messages) if message.get("role") == "assistant"),
+            len(messages),
         )
+        if first_assistant_index == 0:
+            raise ValueError("Continuous Token SFT requires a non-assistant prompt before the first assistant message")
 
-        inputs = dict(inputs)
-        input_ids = inputs.pop("input_ids")[0]
-        attention_mask = inputs.pop("attention_mask")[0]
+        runtime_messages = list(messages[:first_assistant_index])
+        initial_images, initial_videos = self._collect_media(runtime_messages)
+        runtime_token_ids = builder.build_initial_tokens(
+            runtime_messages,
+            tools=tools,
+            images=initial_images or None,
+            videos=initial_videos or None,
+        )
+        loss_mask = [0] * len(runtime_token_ids)
 
-        # remove system prompt if exists
-        if index != 0 and message["role"] != "system":
-            input_ids = input_ids[len(self.system_prompt) :]
-            attention_mask = attention_mask[len(self.system_prompt) :]
+        index = first_assistant_index
+        while index < len(messages):
+            assistant_message = messages[index]
+            if assistant_message.get("role") != "assistant":
+                raise ValueError(
+                    "Continuous Token SFT expected an assistant message after a generation prompt, "
+                    f"got role={assistant_message.get('role')!r} at index {index}"
+                )
 
-        if message["role"] == "assistant":
-            loss_mask = torch.ones_like(attention_mask)
-            # mask out generation prompt if assistant message
-            loss_mask[: len(self.generation_prompt)] = 0
-        else:
-            loss_mask = torch.zeros_like(attention_mask)
+            assistant_token_ids = builder.tokenize_assistant_message(
+                assistant_message,
+                tools=tools,
+                previous_messages=runtime_messages,
+            )
+            merge_result = builder.merge_assistant_tokens(runtime_token_ids, assistant_token_ids)
+            loss_mask, _ = builder.align_response_metadata(merge_result, loss_mask)
+            runtime_token_ids = merge_result.token_ids
+            runtime_messages.append(assistant_message)
+            index += 1
 
-        return input_ids, loss_mask, attention_mask, inputs
+            non_assistant_end = index
+            while non_assistant_end < len(messages) and messages[non_assistant_end].get("role") != "assistant":
+                non_assistant_end += 1
+            if non_assistant_end == index:
+                if index < len(messages):
+                    raise ValueError("Continuous Token SFT does not support consecutive assistant messages")
+                continue
+
+            updated_messages = [*runtime_messages, *messages[index:non_assistant_end]]
+            merge_result = builder.merge_non_assistant_tokens(
+                runtime_messages,
+                updated_messages,
+                runtime_token_ids,
+                tools=tools,
+            )
+            loss_mask, _ = builder.align_response_metadata(merge_result, loss_mask)
+            runtime_token_ids = merge_result.token_ids
+            runtime_messages = updated_messages
+            index = non_assistant_end
+
+        input_ids = torch.tensor(runtime_token_ids, dtype=torch.long)
+        loss_mask_tensor = torch.tensor(loss_mask, dtype=torch.long)
+        attention_mask = torch.ones_like(input_ids)
+        if input_ids.shape != loss_mask_tensor.shape:
+            raise AssertionError(
+                f"Continuous Token input/loss shape mismatch: {input_ids.shape} != {loss_mask_tensor.shape}"
+            )
+        return input_ids, loss_mask_tensor, attention_mask
+
+    def _build_multi_modal_inputs(
+        self,
+        input_ids: torch.Tensor,
+        messages: list[dict[str, Any]],
+    ) -> dict[str, torch.Tensor]:
+        """Rebuild only multimodal tensors from the final TITO token stream."""
+        if self.processor is None:
+            return {}
+
+        images, videos = self._collect_media(messages)
+        image_token_id = get_processor_token_id(self.processor, "image")
+        video_token_id = get_processor_token_id(self.processor, "video")
+        collapse_ids = {token_id for token_id in (image_token_id, video_token_id) if token_id is not None}
+        collapsed_ids: list[int] = []
+        previous_token_id = None
+        for token_id in input_ids.tolist():
+            if token_id in collapse_ids and token_id == previous_token_id:
+                continue
+            collapsed_ids.append(token_id)
+            previous_token_id = token_id
+
+        current_text = self.tokenizer.decode(collapsed_ids, skip_special_tokens=True)
+        processor_inputs = build_multimodal_processor_inputs(
+            self.processor,
+            text=[current_text],
+            images=images or None,
+            videos=videos or None,
+            mm_processor_kwargs=self.mm_processor_kwargs or None,
+        )
+        processor_inputs.pop("input_ids", None)
+        processor_inputs.pop("attention_mask", None)
+        processor_inputs.pop("mm_token_type_ids", None)
+        if hasattr(processor_inputs, "convert_to_tensors"):
+            processor_inputs = processor_inputs.convert_to_tensors("pt")
+        multi_modal_inputs = dict(processor_inputs)
+        image_grid_thw = multi_modal_inputs.get("image_grid_thw")
+        if image_grid_thw is not None:
+            multi_modal_inputs["images_seqlens"] = torch.repeat_interleave(
+                image_grid_thw[:, 1] * image_grid_thw[:, 2], image_grid_thw[:, 0]
+            )
+        return multi_modal_inputs
 
     def _build_messages(self, example: dict):
         """Replace <image> and <video> placeholder in messages with corresponding image and video
@@ -252,7 +363,9 @@ class MultiTurnSFTDataset(Dataset):
         Returns:
             messages: List of messages with replaced placeholder.
         """
-        messages: list = convert_nested_value_to_list_recursive(example[self.messages_key])
+        messages: list = self._drop_null_message_fields(
+            convert_nested_value_to_list_recursive(example[self.messages_key])
+        )
         images = example[self.image_key] if self.image_key in example else []
         videos = example[self.video_key] if self.video_key in example else []
 
@@ -288,6 +401,28 @@ class MultiTurnSFTDataset(Dataset):
         assert video_offset == len(videos), f"video_offset {video_offset} != len(videos) {len(videos)}"
         return messages
 
+    @staticmethod
+    def _drop_null_message_fields(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Remove null optional fields that Arrow adds to message structs.
+
+        Some chat templates distinguish an absent optional key from a present
+        key whose value is null. For example, GPT-OSS treats the presence of
+        ``tool_calls`` as a tool-call turn. Parquet may add ``tool_calls=None``
+        to ordinary assistant messages when another row or turn has that field.
+
+        Normalize ``content=None`` to an empty string because it is a valid
+        OpenAI tool-call message but many Jinja templates require text. Nested
+        values are left untouched so JSON null tool arguments retain meaning.
+        """
+        return [
+            {
+                key: "" if key == "content" and value is None else value
+                for key, value in message.items()
+                if value is not None or key == "content"
+            }
+            for message in messages
+        ]
+
     def __getitem__(self, item):
         row_dict: dict = self.dataframe.iloc[item].to_dict()
         messages = self._build_messages(row_dict)
@@ -298,52 +433,21 @@ class MultiTurnSFTDataset(Dataset):
         if enable_thinking is not None:
             enable_thinking = bool(enable_thinking)
 
-        # 1. tokenize each message
-        input_ids, loss_mask, attention_mask, multi_modal_inputs = [], [], [], {}
-        for i, message in enumerate(messages):
-            _input_ids, _loss_mask, _attention_mask, _inputs = self._process_single_message(
-                index=i,
-                message=message,
-                full_message=messages,
-                tools=tools if i == 0 else None,
-                enable_thinking=enable_thinking,
-            )
-            input_ids.append(_input_ids)
-            loss_mask.append(_loss_mask)
-            attention_mask.append(_attention_mask)
-            for k, v in _inputs.items():
-                multi_modal_inputs.setdefault(k, []).append(v)
-
-        input_ids = torch.cat(input_ids, dim=0)
-        loss_mask = torch.cat(loss_mask, dim=0)
-        attention_mask = torch.cat(attention_mask, dim=0)
-        assert input_ids.shape == loss_mask.shape == attention_mask.shape, (
-            f"Shape mismatch: {input_ids.shape}, {loss_mask.shape}, {attention_mask.shape}"
+        # 1. Build the initial prompt once, then append assistant and
+        # non-assistant tokens with the same CT merge contract used by RL TITO.
+        input_ids, loss_mask, attention_mask = self._build_continuous_tokens(
+            messages,
+            tools=tools,
+            enable_thinking=enable_thinking,
         )
+        multi_modal_inputs = self._build_multi_modal_inputs(input_ids, messages)
 
         print_assembled_message(self.tokenizer, messages, input_ids, loss_mask, attention_mask, tools)
-        self.sanity_check(input_ids, messages, tools, enable_thinking)
-
-        # Since the tokenizer may return user-customized results, we need to filter out inconsistent tensor shapes
-        keys_to_remove = []
-        for k, v in multi_modal_inputs.items():
-            if k == "mm_token_type_ids":
-                keys_to_remove.append(k)
-                continue
-            if len(v) > 0 and v[0] is not None and isinstance(v[0], torch.Tensor):
-                # Check if all tensors in the list have the same shape
-                first_shape = v[0].shape[1:]
-                if not all(tensor.shape[1:] == first_shape for tensor in v):
-                    keys_to_remove.append(k)
-
-        for k in keys_to_remove:
-            del multi_modal_inputs[k]
-
-        for k, v in multi_modal_inputs.items():
-            multi_modal_inputs[k] = torch.concat(v, dim=0)
 
         # 2. handle position_ids for Qwen-VL series models
-        if self.processor is not None and "Qwen2VLImageProcessor" in self.processor.image_processor.__class__.__name__:
+        image_processor = getattr(self.processor, "image_processor", None)
+        image_processor_name = type(image_processor).__name__ if image_processor is not None else ""
+        if "Qwen" in image_processor_name and "VLImageProcessor" in image_processor_name:
             image_grid_thw = multi_modal_inputs.get("image_grid_thw", None)
             video_grid_thw = multi_modal_inputs.get("video_grid_thw", None)
             second_per_grid_ts = multi_modal_inputs.get("second_per_grid_ts", None)
@@ -421,36 +525,3 @@ class MultiTurnSFTDataset(Dataset):
             return res
         else:
             raise ValueError(f"Unknown pad mode {self.pad_mode}")
-
-    def sanity_check(self, input_ids: torch.Tensor, messages: list[dict], tools: list[dict], enable_thinking: bool):
-        """Check concatenated input_ids of apply_chat_template to each turn equals
-        apply_chat_template to whole messages.
-        """
-        processor = self.processor if self.processor is not None else self.tokenizer
-        apply_chat_template_kwargs = {**self.apply_chat_template_kwargs}
-        if enable_thinking is not None:
-            apply_chat_template_kwargs["enable_thinking"] = enable_thinking
-        inputs = processor.apply_chat_template(
-            messages,
-            tools=tools,
-            add_generation_prompt=False,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
-            **apply_chat_template_kwargs,
-        )
-
-        error_message = (
-            "MultiTurnSFTDataset apply_chat_template to each turn separately and concat `input_ids` "
-            "as a whole sequence, which may not equal to apply_chat_template to whole messages at once.\n"
-            "For example, Qwen Thinking series models add <think></think> tags to last turn, please check "
-            "your tokenizer chat template settings.\n"
-            "Set `ignore_input_ids_mismatch=True` to ignore input_ids mismatch and use the concatenated "
-            "input_ids as the final input_ids. "
-        )
-
-        if not torch.equal(input_ids, inputs["input_ids"].squeeze(0)):
-            if self.ignore_input_ids_mismatch:
-                logger.warning_once(error_message)
-            else:
-                raise AssertionError(error_message)

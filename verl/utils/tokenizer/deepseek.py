@@ -287,6 +287,53 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
     ) -> list[int]:
         return self._encode(messages, tools=tools, add_bos_token=True)
 
+    def _render_text(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        add_generation_prompt: bool,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> str:
+        """Render SFT assistant probes through the native V4 encoder."""
+        return encode_messages(
+            messages,
+            tools=tools,
+            add_generation_prompt=add_generation_prompt,
+            add_bos_token=True,
+            enable_thinking=self._enable_thinking,
+            drop_thinking=self._drop_thinking,
+            reasoning_effort=self._reasoning_effort,
+        )
+
+    def _assistant_terminator_ids(self, message: dict[str, Any]) -> set[int]:
+        del message
+        return {self._eos_id}
+
+    def _prepare_assistant_message_for_render(self, message: dict[str, Any]) -> dict[str, Any]:
+        """Split a serialized outer think block without losing nested literals."""
+        if isinstance(message.get("reasoning_content"), str) or isinstance(message.get("reasoning"), str):
+            return message
+
+        content = message.get("content")
+        if isinstance(content, list):
+            if not all(isinstance(part, dict) and part.get("type") == "text" for part in content):
+                return message
+            content_text = "".join(str(part.get("text", "")) for part in content)
+            content_is_text_blocks = True
+        elif isinstance(content, str):
+            content_text = content
+            content_is_text_blocks = False
+        else:
+            return message
+        if not content_text.startswith(THINK_START_TOKEN) or THINK_END_TOKEN not in content_text:
+            return message
+
+        reasoning, answer = content_text[len(THINK_START_TOKEN) :].split(THINK_END_TOKEN, 1)
+        rendered_message = dict(message)
+        rendered_message["reasoning_content"] = reasoning if self._enable_thinking else ""
+        rendered_message["content"] = [{"type": "text", "text": answer}] if content_is_text_blocks else answer
+        return rendered_message
+
     def tokenize_non_assistant_incremental_messages(
         self,
         previous_messages: list[dict[str, Any]],
@@ -298,7 +345,10 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
         appended_messages = updated_messages[len(previous_messages) :]
         if not appended_messages:
             return []
-        self._assert_prefix_is_stable(previous_messages, tools=tools)
+        # The committed prefix is intentionally immutable. In particular,
+        # ``drop_thinking`` may make a canonical full-history render discard
+        # earlier reasoning after a new user turn, but CT appends only the new
+        # segment and never adopts that retroactive rewrite.
         # ``tools`` is omitted: the tool preamble already sits in the prompt prefix.
         return self._encode(appended_messages, tools=None, add_bos_token=False)
 
@@ -319,30 +369,6 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
             reasoning_effort=self._reasoning_effort,
         )
         return normalize_token_ids(self.tokenizer.encode(text, add_special_tokens=False))
-
-    def _assert_prefix_is_stable(
-        self,
-        previous_messages: list[dict[str, Any]],
-        *,
-        tools: list[dict[str, Any]] | None,
-    ) -> None:
-        """Reject appends whose prefix a full re-render would not reproduce.
-
-        ``drop_thinking`` keeps reasoning only for assistant turns after the last user turn, so
-        appending a user turn retroactively strips reasoning from turns already committed to the
-        runtime sequence. The encoder disables dropping whenever tools are present, which is the
-        case for tool-calling rollouts; thinking mode otherwise requires ``drop_thinking=False``.
-        """
-        if not (self._enable_thinking and self._drop_thinking):
-            return
-        if tools or any(message.get("tools") for message in previous_messages):
-            return
-        if any(message.get("role") == "assistant" for message in previous_messages):
-            raise ValueError(
-                "DeepSeek-V4 Continuous Token cannot append after an assistant turn when thinking is "
-                "enabled and drop_thinking is on, because dropping reasoning would rewrite the "
-                "committed prefix. Pass tools, or set drop_thinking=False in chat_template_kwargs."
-            )
 
     def _merge_non_assistant_token_ids(
         self, runtime_token_ids: list[int], appended_token_ids: list[int]
