@@ -34,9 +34,11 @@ from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.inputs import TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
+from vllm.transformers_utils.config import is_interleaved
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.metrics.loggers import PrometheusStatLogger
 
 from verl.plugin.platform import get_platform
 from verl.utils.config import omega_conf_to_dataclass
@@ -71,6 +73,12 @@ from verl.workers.rollout.vllm_rollout.utils import (
 )
 
 _VLLM_VERSION = version.parse(vllm.__version__)
+_VLLM_HYBRID_ROUTING_REPLAY_MIN_VERSION = version.parse("0.22.0")
+
+
+def _hybrid_routing_replay_requires_vllm_022(hf_config: Any, vllm_version: version.Version) -> bool:
+    return is_interleaved(hf_config) and vllm_version < _VLLM_HYBRID_ROUTING_REPLAY_MIN_VERSION
+
 
 if os.getenv("VERL_USE_GPT_OSS", "0") == "1":
     get_encoding()
@@ -78,6 +86,36 @@ if os.getenv("VERL_USE_GPT_OSS", "0") == "1":
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
+
+# TODO: remove this VLLM_PORT partition after vLLM RFC
+# https://github.com/vllm-project/vllm/issues/51275 lands in the pinned vLLM
+# (at least #51018 world-group bind-at-time; also #50969 if Ray V2 executor).
+# This is only Category II scan-start mitigation for get_open_port() TOCTOU.
+# Do not add a range-end fallback. Do not delete until the runtime image
+# actually contains those commits and colocated replica cold-start is
+# re-verified without VLLM_PORT.
+_VLLM_PORT_BASE = 25000
+_VLLM_PORT_STRIDE = 32
+_MAX_TCP_PORT = 65535
+
+
+def _get_vllm_port_start(replica_rank: int, node_rank: int, nnodes: int) -> int:
+    """Return a disjoint vLLM internal port-scan start for one server actor.
+
+    TODO: drop this helper with the VLLM_PORT injection below after vLLM #51275.
+    """
+    if replica_rank < 0 or nnodes < 1 or not 0 <= node_rank < nnodes:
+        raise ValueError(
+            f"Invalid vLLM server rank: replica_rank={replica_rank}, node_rank={node_rank}, nnodes={nnodes}"
+        )
+
+    port = _VLLM_PORT_BASE + (replica_rank * nnodes + node_rank) * _VLLM_PORT_STRIDE
+    if port + _VLLM_PORT_STRIDE - 1 > _MAX_TCP_PORT:
+        raise ValueError(
+            f"vLLM port partition exceeds TCP range: "
+            f"replica_rank={replica_rank}, node_rank={node_rank}, nnodes={nnodes}, port={port}"
+        )
+    return port
 
 
 class vLLMHttpServer:
@@ -413,18 +451,14 @@ class vLLMHttpServer:
             args.update(lora_args)
 
         if self.config.enable_rollout_routing_replay:
-            # R3 (Rollout Router Replay) relies on vLLM's ``enable_return_routed_experts``
-            # path (RoutedExpertsManager / RoutedExpertsCapturer), which is only correct
-            # for hybrid-attention MoE models (e.g. Qwen3.5, whose linear + full attention
-            # layout produces >1 KV-cache group) starting from vLLM 0.22.0. Earlier
-            # releases either lack the feature or under-size the routed-experts host
-            # buffer and crash with an IndexError. Fail fast with an actionable message
-            # instead of surfacing an opaque runtime error deep inside vLLM.
-            if _VLLM_VERSION < version.parse("0.22.0"):
+            # vLLM already supports routed-experts capture for standard-attention MoE
+            # models before 0.22.0. Hybrid-attention models create multiple KV-cache
+            # groups, whose routed-experts host buffer is under-sized on older versions.
+            if _hybrid_routing_replay_requires_vllm_022(self.model_config.hf_config, _VLLM_VERSION):
                 raise RuntimeError(
-                    "rollout.enable_rollout_routing_replay=True requires vLLM >= 0.22.0 "
-                    f"(installed: {vllm.__version__}). Upgrade vLLM (e.g. `pip install -U "
-                    "'vllm>=0.22.0'`) or disable enable_rollout_routing_replay."
+                    "rollout.enable_rollout_routing_replay=True with a hybrid-attention model "
+                    f"requires vLLM >= 0.22.0 (installed: {vllm.__version__}). Upgrade vLLM "
+                    "(e.g. `pip install -U 'vllm>=0.22.0'`) or disable enable_rollout_routing_replay."
                 )
             args.update({"enable_return_routed_experts": True})
 
@@ -857,6 +891,65 @@ class vLLMHttpServer:
         await self.engine.wake_up(tags=["kv_cache"])
         await self.engine.reset_prefix_cache(reset_connector=True)
 
+    async def snapshot(self) -> dict[str, Any]:
+        """Return live KV-cache and scheduler queue observations.
+
+        Values come from vLLM's PrometheusStatLogger gauges so callers can
+        route or admit traffic without scraping the HTTP metrics endpoint.
+        """
+        prometheus_logger = self._prometheus_logger
+        kv_cache_usage = self._prometheus_values(
+            prometheus_logger.gauge_kv_cache_usage,
+            "vllm:kv_cache_usage_perc",
+        )
+        if not kv_cache_usage:
+            raise RuntimeError("vLLM KV-cache gauges are unavailable")
+        return {
+            "kv_cache_usage": max(kv_cache_usage),
+            "num_waiting_requests": int(
+                sum(
+                    self._prometheus_values(
+                        prometheus_logger.gauge_scheduler_waiting,
+                        "vllm:num_requests_waiting",
+                    )
+                )
+            ),
+            "num_running_requests": int(
+                sum(
+                    self._prometheus_values(
+                        prometheus_logger.gauge_scheduler_running,
+                        "vllm:num_requests_running",
+                    )
+                )
+            ),
+        }
+
+    @staticmethod
+    def _prometheus_values(metrics_by_engine: dict[int, Any], sample_name: str) -> list[float]:
+        return [
+            float(sample.value)
+            for metric in metrics_by_engine.values()
+            for family in metric.collect()
+            for sample in family.samples
+            if sample.name == sample_name
+        ]
+
+    @property
+    def _prometheus_logger(self) -> PrometheusStatLogger:
+        # vLLM has moved PrometheusStatLogger between logger_manager attributes.
+        logger_manager = self.engine.logger_manager
+        assert logger_manager is not None
+
+        prometheus_logger = getattr(logger_manager, "prometheus_logger", None)
+        if isinstance(prometheus_logger, PrometheusStatLogger):
+            return prometheus_logger
+
+        for stat_logger in getattr(logger_manager, "stat_loggers", []):
+            if isinstance(stat_logger, PrometheusStatLogger):
+                return stat_logger
+
+        raise RuntimeError("Unable to locate vLLM PrometheusStatLogger on logger_manager.")
+
     def _should_profile(self) -> bool:
         """Whether this replica drives the engine profiler."""
         return (
@@ -1262,6 +1355,15 @@ class vLLMReplica(RolloutReplica):
                 **{var: "1" for var in get_platform().ray_noset_envvars()},
                 **get_platform().rollout_env_vars(),
             }
+            # TODO: drop VLLM_PORT injection after vLLM #51275; see `_get_vllm_port_start`.
+            vllm_port_start = _get_vllm_port_start(self.replica_rank, node_rank, nnodes)
+            env_vars["VLLM_PORT"] = str(vllm_port_start)
+            logger.info(
+                "Using vLLM internal port-scan start %s for replica_rank=%s node_rank=%s",
+                vllm_port_start,
+                self.replica_rank,
+                node_rank,
+            )
 
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(

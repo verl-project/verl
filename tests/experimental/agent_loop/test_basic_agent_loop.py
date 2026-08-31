@@ -475,6 +475,9 @@ class TestLoadBalancerStickySession:
         ray.get(lb.release_server.remote(server_id=s0))
         s1 = ray.get(lb.acquire_server.remote(request_id="conv-abc"))[0]
         assert s0 == s1
+        # session_id is the preferred sticky key; request_id remains an alias
+        s2 = ray.get(lb.acquire_server.remote(session_id="conv-abc"))[0]
+        assert s2 == s0
 
 
 class TestLoadBalancerHybrid:
