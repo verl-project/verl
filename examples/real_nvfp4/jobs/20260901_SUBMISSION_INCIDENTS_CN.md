@@ -19,6 +19,7 @@
 1. v8：vLLM 0.26 + MCore 0.18 + TE 2.18，已完成 20-step 训练。
 2. v10：以 v8 为 base，只加入 vLLM 合入 0.26 之后的 #50029 和 #50074 精确 backport。
 3. v11：以 v10 为 base，只给 FlashInfer TRTLLM NVFP4 MoE 的两个调用点加 `enable_pdl=False`，用于单变量诊断。没有升级任何依赖，也没有关闭 CUDA graph。
+4. v12：以 **v8** 为 base，只加 `enable_pdl=False`，**不带** #50029/#50074。它把「修好启动挂死」和「破坏 rollout 数值」两件事彻底拆开，见坑 10。
 
 镜像均为版本化只写一次；不能覆盖旧镜像。这样能确保 job、source commit、lock hash、镜像 checksum 一一对应。
 
@@ -38,6 +39,8 @@
 | 2694814 | v11 build | COMPLETED，1m31s | v11 镜像和 checksum 已生成，两个 PDL-off marker 存在。 |
 | 2694819 | v11 preflight | COMPLETED，3m09s | 两处 PDL API/源码断言、TE W4A4 两轮前反向、packing/reload、R3 均通过；48 passed, 5 skipped。 |
 | 2694835 | v11 8-node 3-step | COMPLETED，21m53s | 32/32 server；CG/max128；3 steps；多次 native refit；R3 48 layers；399 GiB full-Adam checkpoint；Slurm exit 0。 |
+| 2695274 | v12 probe | COMPLETED，50s | v8 base 可用。 |
+| 2695276 | v12 build | 见下 | v8 + 仅 PDL-off 的单变量镜像。 |
 
 ## 坑 1：正式 long job 没有 W&B，不等于训练跑了很久
 
@@ -150,9 +153,52 @@ Job 2694835 的 512 个 responses 每一步都达到 20,480 token 上限，rewar
 1. 已完成：v11 preflight PASS，并打印两处 `enable_pdl` API/源码断言。
 2. 已完成：v11 8-node startup 32/32 ready，保持 CG on 和 max 128。
 3. 已完成零更新路径：multi-step refit、R3、有限值扫描和 full-Adam checkpoint。
-4. 待完成：使用非零 reward variance 的短测验证 optimizer 实际更新，以及 step 后 reload `changed=1`。
-5. 待完成：再重复一次 32-server startup 或用上述非零更新短测同时覆盖概率性 startup gate。
-6. 通过后从诊断 bundle 派生正式、全新命名的 long-run chain；不要直接把 `diag` bundle 当正式 recipe。
+4. 已定论：v11 的零更新来自坏掉的 rollout，不是合法零更新；见坑 10。
+5. 进行中：v12（v8 + 仅 PDL-off）走 probe → build → preflight → 8-node 20-step `short`。该 short 必须同时满足两组判据：
+   - 启动：`launch_server` 32/32、`actor_rollout_init_model` 32/32。
+   - 数值：`rollout_corr/kl` < 0.02、ESS > 0.97、`actor/entropy` < 1.5、`response_length/clip_ratio` 远小于 1、`actor/grad_norm` > 0，且长度斜率非负。
+6. 通过后从 v12 派生正式、全新命名的 4 段 long-run chain（参考 v9 的 chain harness），与 bf16 `gb200_30B_bf16_megatron_0603` 对照；不要直接把 `diag` bundle 当正式 recipe。
+
+## 坑 10：v11 rollout 输出崩溃，根因是 #50074 的单 hunk 回移，不是 PDL
+
+### 现象
+
+Job 2694835 启动 32/32、refit/R3/checkpoint 全通过，但 3 个 step 的 rollout 输出是几乎纯符号（`%`、`"`、`:`）并循环到 20,480 上限。
+
+### 同步骤对照（W&B，只读）
+
+| 指标 | v8 j2694027 前 3 步 | v11 j2694835 全部 3 步 |
+| --- | --- | --- |
+| `response_length/mean` | 933 / 934 / 989 | 20480 / 20480 / 20480 |
+| `response_length/clip_ratio` | 0.002 / 0 / 0 | 1.0 / 1.0 / 1.0 |
+| `rollout_corr/kl` | 0.0082 / 0.0080 / 0.0080 | 4.01 / 4.47 / 4.32 |
+| `rollout_corr/rollout_is_eff_sample_size` | 0.987 / 0.986 / 0.986 | 0.222 / 0.167 / 0.176 |
+| `actor/entropy` | 0.872 / 0.823 / 0.893 | 6.19 / 6.31 / 6.25 |
+| `critic/score/mean` | −0.582 / −0.750 / −0.773 | −1 / −1 / −1 |
+
+entropy 从 0.87 跳到 6.2 说明 rollout 分布接近未训练/随机，而不是「数据恰好全错」。因此坑 8 里「零更新是合法路径」的说法只对后半段成立：advantage 确实全 0，但前提是 rollout 本身已经坏掉。
+
+### 源码级根因（在镜像内 vLLM 0.26 源码中核对，不是推测）
+
+1. `Nvfp4OnlineMoEMethod._quantize_weights` 每次 reload 都用 `replace_parameter` 把 `w13_weight_scale` / `w2_weight_scale` / 两个 `*_scale_2` 重新绑定成**全新的 tensor 对象**。
+2. `make_nvfp4_moe_quant_config` 是**按引用**捕获这些 tensor 的（`w1_scale=w13_scale`、`g1_alphas=w13_scale_2` …），源码注释明确写着「quant config 与注册的 parameter 引用同一个 tensor」。
+3. `TrtllmNvfp4MoE.process_weights_after_loading` 依赖这个同一性：它对 `layer.*_scale_2` 做 in-place `mul_`，再用 `self.quant_config.g1_alphas` 推 `g1_scale_c`，注释写着「g1_alphas 在这里只设置一次，之后不再改变」。
+4. 我们回移的 `if self.moe_kernel is None:` 让**第一次**创建的 quant_config 一直存活。于是首次 refit 之后，kernel 拿的是 **dummy 初始化权重的 scale**，而 `OnlineMoEMethodBase.apply_monolithic` 每次 forward 又直接读 `layer.w13_weight` / `layer.w2_weight` 的**新**权重。
+
+新权重 + 旧 scale = 完全错位的反量化，正好对应观察到的近似均匀分布输出。
+
+### 结论与处理
+
+- **单 hunk 回移 #50074 在 vLLM 0.26 上是无效的**：上游那次提交依赖它所在版本的参数替换/引用生命周期，0.26 不具备该上下文。若将来确实需要它，必须同时每次 reload 重建 `self.moe_quant_config` 并回写到 `moe_kernel.fused_experts`（与 2026-03 CUTLASS 那次的教训相同）。
+- #50029 在本次事件中**未被单独证伪**，但它同样改动在线量化路径，因此一并从 v12 中排除，避免再次混淆变量。
+- v8 已经用 20 个 step 证明：0.26 每次 reload 重建 quant_config + kernel 的原始做法在 CG 打开时数值是自洽的（`rollout_corr/kl` 0.008，ESS 0.99），所以 #50074 不是必需项。
+- v12 = v8 + 仅 PDL-off。bundle：`examples/real_nvfp4/jobs/r3_nativeonline_pdl_off_v8base_20260901_v12/`。
+
+## 坑 11：不要只用 3-step 当 8 节点验收
+
+3-step 只能覆盖启动和一次 refit 闭环。v11 就是「3 步全绿但模型是坏的」。8 节点验收一律直接用 20-step `short` 弧：它同时给出启动 gate 和可判读的曲线（长度斜率、KL、ESS、entropy、grad_norm），代价只多约 20 分钟。
+
+参考基线（v8 j2694027，20 steps）：`response_length/mean` 斜率 **+4.08 token/step**，`critic/score/mean` 斜率 +0.0097/step，entropy 0.80→0.46，`rollout_corr/kl` 0.0077→0.0061。这是目前唯一可信的健康区间；对照 NeMo RL all-MLP/no-3loss 的 +16.9 token/step 长期斜率，20 步还太短，只能用来排除「长度不涨/负斜率」这一类实现错误。
 
 ## 关键路径
 
