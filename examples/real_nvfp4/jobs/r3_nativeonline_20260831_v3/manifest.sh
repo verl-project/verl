@@ -62,10 +62,12 @@ rn4pt_validate_static() {
     [[ -f "$path" && ! -L "$path" && -s "$path" ]] || rn4pt_die "missing input: $path" || return
   done
   bash -n "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" "$RN4PT_BUNDLE"/*.sh "$RN4PT_BUNDLE"/*.job || return
-  if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ]; then
-    uv -q lock --check --directory "$RN4PT_VERL" || rn4pt_die "uv.lock is stale" || return
-  else
-    rn4pt_die "real NVFP4 bundle requires uv on the GPU branch" || return
+  if [ "${RN4PT_SKIP_UV_LOCK_CHECK:-0}" != 1 ]; then
+    if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ]; then
+      uv -q lock --check --directory "$RN4PT_VERL" || rn4pt_die "uv.lock is stale" || return
+    else
+      rn4pt_die "real NVFP4 bundle requires uv on the GPU branch" || return
+    fi
   fi
   grep -q "platform_machine == 'aarch64'" "$RN4PT_VERL/uv.lock" || rn4pt_die "uv.lock lacks aarch64" || return
   grep -q 'vllm-0.26.0-cp38-abi3-manylinux_2_28_aarch64.whl' "$RN4PT_VERL/uv.lock" || \
