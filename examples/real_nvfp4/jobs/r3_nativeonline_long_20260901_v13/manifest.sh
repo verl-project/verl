@@ -54,5 +54,5 @@ long_validate_static() {
 if [[ "${BASH_SOURCE[0]}" = "$0" ]]; then
   long_validate_static || exit $?
   rn4pt_require_runtime_image || exit $?
-  echo "REAL_NVFP4_LONG_STATIC_PASS version=$LONG_VERSION exp=$LONG_EXP targets=80,160,240,320"
+  echo "REAL_NVFP4_LONG_STATIC_PASS version=$LONG_VERSION exp=$LONG_EXP targets=80,150,210,265"
 fi
