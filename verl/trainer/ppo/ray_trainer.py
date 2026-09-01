@@ -34,7 +34,6 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
 from verl import DataProto
-from verl.experimental.neoproto.storage import DefaultStorageEngine, set_default_storage_engine
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
@@ -330,9 +329,8 @@ class RayPPOTrainer:
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
-        # NeoProto is the single trainer data path. ``DataProto`` is its
-        # backward-compatible public API, not a runtime-selectable alternative.
-        set_default_storage_engine(DefaultStorageEngine())
+        # ``DataProto`` is the NeoProto-backed public API. Storage remains
+        # independently selectable and defaults to the Ray object store.
         if os.environ.get("NEO_BRIDGE_FULL_MATERIALIZE", "0") != "0":
             raise RuntimeError("The NeoProto-only trainer forbids NEO_BRIDGE_FULL_MATERIALIZE")
 

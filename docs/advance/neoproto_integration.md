@@ -2,9 +2,10 @@
 
 Last updated: 08/19/2026.
 
-NeoProto is the default and only data path for the V0 `RayPPOTrainer`. Batch
+NeoProto is the default data representation for the V0 `RayPPOTrainer`. Batch
 payloads stay in a storage engine while the driver manipulates schemas,
-references, and index views. There is no runtime classic/NeoProto selector.
+references, and index views. There is no runtime classic/NeoProto selector;
+storage selection remains independent and defaults to the Ray object store.
 
 ## Public compatibility API
 
