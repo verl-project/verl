@@ -37,6 +37,7 @@
 | 2694812 | v11 probe | COMPLETED，48s | PDL-off 诊断链的 base 可用。 |
 | 2694814 | v11 build | COMPLETED，1m31s | v11 镜像和 checksum 已生成，两个 PDL-off marker 存在。 |
 | 2694819 | v11 preflight | COMPLETED，3m09s | 两处 PDL API/源码断言、TE W4A4 两轮前反向、packing/reload、R3 均通过；48 passed, 5 skipped。 |
+| 2694835 | v11 8-node 3-step | COMPLETED，21m53s | 32/32 server；CG/max128；3 steps；多次 native refit；R3 48 layers；399 GiB full-Adam checkpoint；Slurm exit 0。 |
 
 ## 坑 1：正式 long job 没有 W&B，不等于训练跑了很久
 
@@ -75,6 +76,18 @@ FlashInfer TRTLLM NVFP4 MoE 在 SM100、128 bucket/concurrency、PDL/cooperative
 
 v11 只给两处 TRTLLM NVFP4 MoE API 显式传 `enable_pdl=False`。CUDA graph、`max_num_seqs=128`、backend、quantization、reload 和训练合同全部不变。只有 32/32 startup 通过后，才能把 PDL 视为强因果；一次通过后还需重复启动或完成 multi-step reload，防止把概率事件误判成修复。
 
+### v11 验证结果
+
+Job 2694835 在 v10 曾经稳定暴露 30/32 的同一 8-node 规模上完成：
+
+- `vLLMHttpServer.launch_server` 32/32 FINISHED；`actor_rollout_init_model` 32/32 FINISHED。
+- 32 个 server 都完成 `FULL_DECODE_ONLY` CUDA graph capture 和 48-layer W4A4 rollout attestation。
+- 初始 refit 和 step 后 refit 都接收完整的 18,432 个 BF16 expert weights，并使用 native reload/post-finalize ACK。
+- 完成 3 个 global steps、R3 48-layer replay、最终 validation 和 global_step_3 full-Adam checkpoint。
+- checkpoint 约 399 GiB；optimizer `dist_ckpt` 35 files、366,450,559,551 bytes。
+
+因此 PDL 是本次 startup hang 的强因果变量。正式化前仍建议再跑一个有非零 advantage 的短实验，因为 2694835 只覆盖了零更新路径。
+
 ## 坑 3：#50029 与 #50074 的作用不能混为一谈
 
 - vLLM #50029：改为逐 expert 直接 packing，减少整块 FP32/BF16 临时量并改善精度/显存。v10 证明它不是这次 startup hang 的充分修复，但仍应保留。
@@ -112,13 +125,34 @@ v11 只给两处 TRTLLM NVFP4 MoE API 显式传 `enable_pdl=False`。CUDA graph�
 
 这两项已分别由 commit `4f3f2124` 和 `729ff9b3` 修复。以后复用 bundle 时必须先在登录节点做 `bash -n`、`shellcheck`，并实际走一次不提交或 probe 入口验证 wrapper。
 
+## 坑 8：全 -1 reward 会让 3-step 看起来“训练没动”
+
+Job 2694835 的 512 个 responses 每一步都达到 20,480 token 上限，reward 全为 -1。prompt group 内 reward 相同，GRPO advantage 因而全为 0；对应结果是：
+
+- `actor/loss=0`、`actor/grad_norm=0`；
+- step 后 refit 的 `changed=0`，packed fingerprint 不变；
+- response length 一直为 20,480；final AIME accuracy 为 0。
+
+这不是 native reload 失败：初始 dummy rollout model 的 `refit=0 changed=1`，后续每轮仍完成 32/32 export/reload/ACK，只是 optimizer 合法地产生零更新。这个 job 可以证明启动、CG、W4A4 rollout、refit、R3、训练循环和 checkpoint 闭环，不能证明 reward/response 曲线会正常学习。下一次短测必须使用能产生非零 reward variance 的数据/奖励配置，并检查 `grad_norm>0` 和至少一次 step 后 `changed=1`。
+
+## 坑 9：训练成功后的 teardown traceback 不能误判成训练失败
+
+2694835 在 W&B 同步和 Ray job success 之后，清理 DataLoader/Ray descendants 时出现：
+
+- `DataLoader worker ... killed by signal: Killed`；
+- W&B service teardown `BrokenPipeError`；
+- `srun: forcing job termination`。
+
+这些发生在以下语义 gate 之后：Training Progress 100%、Final validation、W&B finished、full-Adam checkpoint PASS、Ray job succeeded。train harness 会在这些 gate 全部通过后接受 descendant cleanup signal；该 job 的 Slurm 状态最终为 `COMPLETED 0:0`。判断标准必须是最终 Slurm exit + semantic/checkpoint gates，不能只搜索 traceback 字样。
+
 ## 下一步验收门
 
-1. v11 preflight 必须 PASS，并打印两处 `enable_pdl` API/源码断言。
-2. v11 8-node startup 必须 32/32 ready，保持 CG on 和 max 128。
-3. 至少完成一个 multi-step 训练/refit；检查 reload 前后输出有限、R3 replay、rollout/training mismatch、response length 和 checkpoint。
-4. 若 v11 仍挂，不回退 vLLM 0.26；下一候选是保持 quant/reload 不变，单独对比 `flashinfer_cutlass`，或对 TRTLLM 首个 dummy forward 做 kernel-level timeout/trace。
-5. 只有通过上述门，才从诊断 bundle 派生正式、全新命名的 long-run chain。
+1. 已完成：v11 preflight PASS，并打印两处 `enable_pdl` API/源码断言。
+2. 已完成：v11 8-node startup 32/32 ready，保持 CG on 和 max 128。
+3. 已完成零更新路径：multi-step refit、R3、有限值扫描和 full-Adam checkpoint。
+4. 待完成：使用非零 reward variance 的短测验证 optimizer 实际更新，以及 step 后 reload `changed=1`。
+5. 待完成：再重复一次 32-server startup 或用上述非零更新短测同时覆盖概率性 startup gate。
+6. 通过后从诊断 bundle 派生正式、全新命名的 long-run chain；不要直接把 `diag` bundle 当正式 recipe。
 
 ## 关键路径
 
