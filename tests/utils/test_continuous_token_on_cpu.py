@@ -288,6 +288,41 @@ class _GptOssGenerationRewriteTokenizer(_TemplateTokenizer):
         return rendered
 
 
+class _GptOssRollbackTokenizer(_TemplateTokenizer):
+    """Model the GPT-OSS channel format used by rollback context encoding."""
+
+    _generation_prompt = "<|start|>assistant<|channel|>analysis<|message|>"
+
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        tools=None,
+        return_dict=False,
+        **kwargs,
+    ):
+        del tools, return_dict, kwargs
+        rendered = ""
+        for message in messages:
+            role = message["role"]
+            content = message.get("content", "")
+            if role == "assistant":
+                thinking = message.get("thinking") or message.get("reasoning_content") or message.get("reasoning")
+                if thinking:
+                    rendered += f"<|start|>assistant<|channel|>analysis<|message|>{thinking}<|end|>"
+                rendered += f"<|start|>assistant<|channel|>final<|message|>{content}<|end|>"
+            elif role in {"system", "user"}:
+                rendered += f"<|start|>{role}<|message|>{content}<|end|>"
+            else:
+                raise ValueError(f"Unsupported GPT-OSS rollback test role: {role!r}")
+        if add_generation_prompt:
+            rendered += self._generation_prompt
+        if tokenize:
+            return self.encode(rendered, add_special_tokens=False)
+        return rendered
+
+
 class _MissingSpecialTokenTokenizer(_TemplateTokenizer):
     def convert_tokens_to_ids(self, token):
         return None
@@ -774,14 +809,17 @@ def test_gpt_oss_builder_formats_tool_responses_with_resolved_tool_name():
 
 def test_gpt_oss_builder_formats_plain_assistant_context_with_end_not_return():
     builder = GptOssContinuousTokenBuilder(_TemplateTokenizer())
-    message = {"role": "assistant", "content": "assistant answer", "thinking": "hidden reasoning"}
+    message = {"role": "assistant", "content": "assistant answer", "thinking": "rollback reasoning"}
 
     token_ids = builder._tokenize_single_non_tool(message)
 
-    expected = "<|start|>assistant<|channel|>final<|message|>assistant answer<|end|>"
+    expected = (
+        "<|start|>assistant<|channel|>analysis<|message|>rollback reasoning<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>assistant answer<|end|>"
+    )
     assert token_ids == [ord(char) for char in expected]
     assert "<|return|>" not in "".join(chr(token_id) for token_id in token_ids)
-    assert "hidden reasoning" not in "".join(chr(token_id) for token_id in token_ids)
+    assert "rollback reasoning" in "".join(chr(token_id) for token_id in token_ids)
 
 
 def test_gpt_oss_builder_prefers_tool_message_name_over_context_id():
@@ -1061,6 +1099,48 @@ def test_default_builder_tokenizes_rewritten_assistant_as_context():
     assert result.kind == "context"
     assert aligned_mask == [1] + [0] * len(incremental)
     assert aligned_logprobs == [-0.1] + [0.0] * len(incremental)
+
+
+def test_gpt_oss_rollback_context_followup_and_generation_prompt_end_to_end():
+    tokenizer = _GptOssRollbackTokenizer()
+    builder = GptOssContinuousTokenBuilder(tokenizer)
+    rollback_checkpoint = [
+        {"role": "system", "content": "policy"},
+        {"role": "user", "content": "question"},
+    ]
+    updated_messages = rollback_checkpoint + [
+        {
+            "role": "assistant",
+            "content": "rewritten answer",
+            "thinking": "preserved rollback reasoning",
+        },
+        {"role": "user", "content": "continue"},
+    ]
+    runtime_ids = builder._render_tokens(rollback_checkpoint, add_generation_prompt=False)
+    expected_ids = builder._render_tokens(updated_messages, add_generation_prompt=True)
+
+    result = builder.merge_context_tokens(rollback_checkpoint, updated_messages, runtime_ids)
+    aligned_mask, aligned_logprobs = builder.align_response_metadata(
+        result,
+        [1] * len(runtime_ids),
+        [-0.1] * len(runtime_ids),
+    )
+
+    assert result.token_ids == expected_ids
+    assert result.kind == "context"
+    assert result.inserted_token_ids == []
+    assert result.removed_prefix_token_count == 0
+    assert aligned_mask == [1] * len(runtime_ids) + [0] * result.appended_token_count
+    assert aligned_logprobs == [-0.1] * len(runtime_ids) + [0.0] * result.appended_token_count
+
+    appended_text = "".join(chr(token_id) for token_id in result.token_ids[len(runtime_ids) :])
+    assert appended_text == (
+        "<|start|>assistant<|channel|>analysis<|message|>preserved rollback reasoning<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>rewritten answer<|end|>"
+        "<|start|>user<|message|>continue<|end|>"
+        f"{tokenizer._generation_prompt}"
+    )
+    assert "preserved rollback reasoning" in appended_text
 
 
 @pytest.mark.parametrize("family", _ROLLBACK_TEMPLATE_EQUIVALENCE_FAMILIES)

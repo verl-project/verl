@@ -444,8 +444,9 @@ class GptOssContinuousTokenBuilder(ContinuousTokenBuilder):
         if message.get("role") == "assistant" and not message.get("tool_calls"):
             del add_generation_prompt, tools
             # Context incremental messages currently reject a final assistant turn,
-            # so a plain GPT-OSS assistant here is always historical context and
-            # must close with <|end|>, not the training-only final <|return|>.
+            # so a plain GPT-OSS assistant here is always historical context. Keep
+            # its analysis/reasoning channel before the final channel, and close
+            # both with <|end|> rather than the training-only final <|return|>.
             # If final assistant context is supported in the future, this function may need change.
             return self.tokenizer.encode(self._format_plain_assistant_context(message), add_special_tokens=False)
         return super()._tokenize_single_non_tool(
@@ -490,8 +491,18 @@ class GptOssContinuousTokenBuilder(ContinuousTokenBuilder):
 
     @staticmethod
     def _format_plain_assistant_context(message: dict[str, Any]) -> str:
+        thinking = message.get("thinking")
+        if thinking is None:
+            thinking = message.get("reasoning_content")
+        if thinking is None:
+            thinking = message.get("reasoning")
+
+        rendered = ""
+        if thinking:
+            thinking_text = _stringify_tool_content(thinking)
+            rendered += f"<|start|>assistant<|channel|>analysis<|message|>{thinking_text}<|end|>"
         content = _stringify_tool_content(message.get("content", ""))
-        return f"<|start|>assistant<|channel|>final<|message|>{content}<|end|>"
+        return rendered + f"<|start|>assistant<|channel|>final<|message|>{content}<|end|>"
 
 
 class QwenContinuousTokenBuilder(ContinuousTokenBuilder):
