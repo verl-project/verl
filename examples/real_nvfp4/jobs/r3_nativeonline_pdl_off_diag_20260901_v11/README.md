@@ -8,6 +8,9 @@ CUDA graphs remain enabled in `FULL_DECODE_ONLY` mode, `max_num_seqs` remains
 The first acceptance gate is an 8-node, 32-server startup run. This bundle is
 diagnostic until that gate and a multi-step reload run both pass.
 
+The full incident timeline and all submission pitfalls are recorded in
+[`../20260901_SUBMISSION_INCIDENTS_CN.md`](../20260901_SUBMISSION_INCIDENTS_CN.md).
+
 ```bash
 ./submit.sh probe
 ./submit.sh build
