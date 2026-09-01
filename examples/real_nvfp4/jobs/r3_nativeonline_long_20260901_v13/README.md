@@ -3,7 +3,7 @@
 Promotes the v12 runtime (validated v8 image + `enable_pdl=False`) into one
 fresh, continuous 8-node long run. Contains no Slime three-loss implementation.
 
-Four jobs target global steps 80, 150, 210 and 265 (shrinking chunks, because
+Four jobs target global steps 80, 150, 210 and 260 (shrinking chunks, because
 step time tracks response length and every partition caps at 5h). They share one W&B run ID
 and one checkpoint namespace, and are chained with `afterok`.
 

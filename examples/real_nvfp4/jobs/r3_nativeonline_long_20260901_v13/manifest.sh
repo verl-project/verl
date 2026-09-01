@@ -27,6 +27,19 @@ long_validate_static() {
   git -C "$RN4PT_VERL" merge-base --is-ancestor "$LONG_VALIDATED_IMPLEMENTATION_COMMIT" HEAD || \
     long_die "validated v8 implementation commit is not an ancestor" || return
   bash -n "$LONG_BUNDLE"/*.sh "$LONG_BUNDLE"/*.job || return
+  # submit.sh and train.job each carry the chunk target list and train.job
+  # rejects a mismatch at runtime, so a divergence would only surface after the
+  # previous chunk had already burned hours. Compare them here instead.
+  local submit_targets train_targets
+  submit_targets=$(sed -n 's/^readonly -a TARGET_STEPS=(\(.*\))$/\1/p' "$LONG_BUNDLE/submit.sh")
+  train_targets=$(sed -n 's/^readonly -a TARGET_STEPS=(0 \(.*\))$/\1/p' "$LONG_BUNDLE/train.job")
+  [[ -n "$submit_targets" && "$submit_targets" = "$train_targets" ]] || \
+    long_die "chunk targets diverge: submit=[$submit_targets] train=[$train_targets]" || return
+  local target
+  for target in $submit_targets; do
+    (( target % 10 == 0 )) || \
+      long_die "chunk target $target is not a trainer.save_freq multiple" || return
+  done
   [[ -s "$RN4PT_PREFLIGHT_PASS" ]] || long_die "v12 preflight state is missing" || return
   # v12 goes straight from preflight to the 8-node 20-step short arm, which is
   # strictly stronger than the 1-node smoke: it gates the probabilistic 32/32
@@ -54,5 +67,5 @@ long_validate_static() {
 if [[ "${BASH_SOURCE[0]}" = "$0" ]]; then
   long_validate_static || exit $?
   rn4pt_require_runtime_image || exit $?
-  echo "REAL_NVFP4_LONG_STATIC_PASS version=$LONG_VERSION exp=$LONG_EXP targets=80,150,210,265"
+  echo "REAL_NVFP4_LONG_STATIC_PASS version=$LONG_VERSION exp=$LONG_EXP targets=80,150,210,260"
 fi

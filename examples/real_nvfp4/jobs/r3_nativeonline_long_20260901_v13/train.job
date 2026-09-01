@@ -14,7 +14,10 @@ rn4pt_require_runtime_image
 
 readonly CHUNK_INDEX=${LONG_CHUNK_INDEX:?LONG_CHUNK_INDEX is required}
 readonly TARGET_STEP=${LONG_TARGET_STEP:?LONG_TARGET_STEP is required}
-readonly -a TARGET_STEPS=(0 80 160 240 320)
+# Must stay in sync with submit.sh. Shrinking chunks because step time tracks
+# response length; every target is a save_freq multiple so the chunk's final
+# full-Adam checkpoint is written on the regular cadence.
+readonly -a TARGET_STEPS=(0 80 150 210 260)
 [[ "$CHUNK_INDEX" =~ ^[1-4]$ ]] || long_die "chunk index must be 1..4"
 [[ "$TARGET_STEP" = "${TARGET_STEPS[$CHUNK_INDEX]}" ]] || \
   long_die "chunk $CHUNK_INDEX must target step ${TARGET_STEPS[$CHUNK_INDEX]}"

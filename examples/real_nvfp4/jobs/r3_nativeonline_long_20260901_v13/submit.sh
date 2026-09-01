@@ -15,7 +15,7 @@ rn4pt_require_runtime_image
 # Shrinking chunks. Every partition caps at 5h and step time tracks response
 # length: v8 averaged 110s/step at ~1.0k tokens, and a healthy run grows length,
 # so equal 80-step chunks would overrun the wall clock near the end.
-readonly -a TARGET_STEPS=(80 150 210 265)
+readonly -a TARGET_STEPS=(80 150 210 260)
 echo "REAL_NVFP4_LONG_AUDIT_PASS exp=$LONG_EXP targets=${TARGET_STEPS[*]} dependency=afterok"
 if [[ "$ACTION" = audit ]]; then
   exit 0
