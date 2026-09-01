@@ -262,7 +262,7 @@ class vLLMColocateWorkerExtension:
             monkey_patch_compute_logits(model, vocab_size, banned_token_ids)
             # patch weight loader to support MoE model
             patch_vllm_moe_model_weight_loader(model)
-            if self._is_real_nvfp4:
+            if getattr(self, "_is_real_nvfp4", False):
                 from verl.utils.real_nvfp4 import (
                     attest_vllm_native_nvfp4_runtime,
                     require_vllm_native_reload_contract,
@@ -299,7 +299,7 @@ class vLLMColocateWorkerExtension:
             for model in self._iter_all_models():
                 restore_moe_expert_maps(model)
 
-        if self._is_real_nvfp4:
+        if getattr(self, "_is_real_nvfp4", False):
             if peft_config is not None:
                 raise NotImplementedError("real W4A4 native reload does not support LoRA weight sync")
             if self._use_mtp_drafter_weight_sync():

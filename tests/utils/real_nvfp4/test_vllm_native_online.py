@@ -153,22 +153,30 @@ class _FakeMoERunner:
         input_ids=None,
     ):
         if self.routed_experts.quant_method.is_monolithic:
-            return None, self.routed_experts.forward_monolithic(
-                x=hidden_states,
+            result = (
+                None,
+                self.routed_experts.forward_monolithic(
+                    x=hidden_states,
+                    router_logits=router_logits,
+                    input_ids=input_ids,
+                ),
+            )
+        else:
+            topk_weights, topk_ids = self.router.select_experts(
+                hidden_states=hidden_states,
                 router_logits=router_logits,
+                topk_indices_dtype=self._quant_method.topk_indices_dtype,
                 input_ids=input_ids,
             )
-        topk_weights, topk_ids = self.router.select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            topk_indices_dtype=self._quant_method.topk_indices_dtype,
-            input_ids=input_ids,
-        )
-        return None, self.routed_experts.forward_modular(
-            x=hidden_states,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-        )
+            result = (
+                None,
+                self.routed_experts.forward_modular(
+                    x=hidden_states,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                ),
+            )
+        return result
 
 
 def test_monolithic_r3_capture_patch_fires_only_when_needed():
