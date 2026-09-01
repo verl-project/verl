@@ -203,6 +203,7 @@ class RolloutReplica(ABC):
             resource_pool_spec=resource_pool_spec,
             mapping=None,
             max_colocate_count=2,
+            pool_accelerator_resource_key={resource_pool_name: self.config.accelerator_resource_key},
         )
         resource_pool_manager.create_resource_pool()
         self.resource_pool = resource_pool_manager.resource_pool_dict[resource_pool_name]

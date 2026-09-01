@@ -32,6 +32,7 @@ def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
     """
     resource_pool_spec = {}
     mapping = {}
+    pool_accelerator_resource_key = {}
 
     # Actor/Critic resource pool
     training_roles = [Role.Actor, Role.ActorRollout, Role.Critic, Role.RefPolicy]
@@ -41,6 +42,7 @@ def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
 
         trainer_pool = [config.trainer.n_gpus_per_node] * config.trainer.nnodes
         resource_pool_spec["trainer_pool"] = trainer_pool
+        pool_accelerator_resource_key["trainer_pool"] = config.trainer.get("accelerator_resource_key", None)
 
         for role in training_roles:
             if role in roles:
@@ -56,7 +58,11 @@ def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
         assert rm_cfg.n_gpus_per_node > 0, "config.reward.reward_model.n_gpus_per_node must be greater than 0"
         assert rm_cfg.nnodes > 0, "config.reward.reward_model.nnodes must be greater than 0"
 
-    return ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
+    return ResourcePoolManager(
+        resource_pool_spec=resource_pool_spec,
+        mapping=mapping,
+        pool_accelerator_resource_key=pool_accelerator_resource_key,
+    )
 
 
 def create_role_worker_mapping(config):

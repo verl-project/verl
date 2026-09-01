@@ -273,6 +273,10 @@ class RolloutConfig(BaseConfig):
 
     disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
 
+    # Ray custom-resource key for standalone rollout placement. Kept at the end
+    # to preserve positional compatibility for existing RolloutConfig callers.
+    accelerator_resource_key: Optional[str] = None
+
     def __post_init__(self):
         """Validate the rollout config"""
         # Deprecation warning for mode field - only async mode is supported

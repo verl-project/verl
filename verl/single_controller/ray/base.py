@@ -22,7 +22,7 @@ from typing import Any, Optional
 import numpy as np
 import ray
 from ray.experimental.state.api import get_actor
-from ray.util.placement_group import PlacementGroup, placement_group
+from ray.util.placement_group import PlacementGroup, placement_group, remove_placement_group
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy, PlacementGroupSchedulingStrategy
 
 from verl.plugin.platform import get_platform
@@ -119,6 +119,7 @@ class RayResourcePool(ResourcePool):
         max_colocate_count: int = 10,
         detached=False,
         accelerator_type: Optional[str] = None,
+        placement_group_timeout_s: Optional[float] = None,
     ) -> None:
         super().__init__(process_on_nodes, max_colocate_count)
         self.use_gpu = use_gpu
@@ -127,6 +128,40 @@ class RayResourcePool(ResourcePool):
         self.pgs = None
         self.detached = detached
         self.accelerator_type = accelerator_type
+        self.placement_group_timeout_s = placement_group_timeout_s
+
+    def _cleanup_placement_groups(self, pgs: list[PlacementGroup]) -> None:
+        for pg in pgs:
+            try:
+                remove_placement_group(pg)
+            except Exception:
+                logger.exception("Failed to remove placement group after resource-pool creation failed")
+
+    def _placement_timeout_message(self) -> str:
+        resource_key = self.accelerator_type
+        try:
+            resources_per_node = ray._private.state.available_resources_per_node()
+        except Exception:
+            logger.exception("Failed to inspect Ray node resources after placement-group timeout")
+            resources_per_node = {}
+
+        node_summaries = []
+        for node_id, resources in sorted(resources_per_node.items()):
+            gpu = resources.get("GPU", resources.get("NPU", 0))
+            custom_resource = resources.get(resource_key, 0) if resource_key is not None else None
+            node_summaries.append(
+                f"{node_id}: GPU/NPU={gpu}, {resource_key}={custom_resource}"
+                if resource_key is not None
+                else f"{node_id}: GPU/NPU={gpu}"
+            )
+
+        observed = "; ".join(node_summaries) if node_summaries else "no live Ray node resources reported"
+        return (
+            f"Timed out after {self.placement_group_timeout_s} seconds while creating resource pool "
+            f"'{self.name_prefix}' with process_on_nodes={self._store} and "
+            f"accelerator_resource_key={resource_key!r}. Observed available resources: {observed}. "
+            "Check the Ray node --resources declarations, per-node capacity, and autoscaler status."
+        )
 
     def get_placement_groups(self, strategy="STRICT_PACK", name=None, device_name="cuda"):
         if self.pgs is not None:
@@ -152,12 +187,29 @@ class RayResourcePool(ResourcePool):
 
         lifetime = "detached" if self.detached else None
 
-        pgs = [
-            placement_group(bundles=bundles, strategy=strategy, name=pg_name_prefix + str(idx), lifetime=lifetime)
-            for idx, bundles in enumerate(pg_scheme)
-        ]
+        pgs = []
+        try:
+            for idx, bundles in enumerate(pg_scheme):
+                pgs.append(
+                    placement_group(
+                        bundles=bundles,
+                        strategy=strategy,
+                        name=pg_name_prefix + str(idx),
+                        lifetime=lifetime,
+                    )
+                )
 
-        ray.get([pg.ready() for pg in pgs])
+            ready_refs = [pg.ready() for pg in pgs]
+            if self.placement_group_timeout_s is None:
+                ray.get(ready_refs)
+            else:
+                ray.get(ready_refs, timeout=self.placement_group_timeout_s)
+        except ray.exceptions.GetTimeoutError as exc:
+            self._cleanup_placement_groups(pgs)
+            raise TimeoutError(self._placement_timeout_message()) from exc
+        except Exception:
+            self._cleanup_placement_groups(pgs)
+            raise
 
         self.pgs = sort_placement_group_by_node_ip(pgs)
         return pgs
@@ -191,6 +243,49 @@ class ResourcePoolManager:
     mapping: dict[int, str]
     max_colocate_count: int = 3
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
+    pool_accelerator_resource_key: dict[str, Optional[str]] = field(default_factory=dict)
+    accelerator_placement_timeout_s: Optional[float] = 300.0
+
+    def __post_init__(self):
+        unknown_pools = self.pool_accelerator_resource_key.keys() - self.resource_pool_spec.keys()
+        if unknown_pools:
+            raise ValueError(
+                f"Accelerator resource keys were configured for unknown resource pools: {sorted(unknown_pools)}"
+            )
+
+        normalized_resource_keys = {}
+        for pool_name, resource_key in self.pool_accelerator_resource_key.items():
+            if resource_key is None:
+                normalized_resource_keys[pool_name] = None
+                continue
+            if not isinstance(resource_key, str) or resource_key.strip().lower() in {"", "none", "null"}:
+                raise ValueError(
+                    f"Invalid accelerator resource key for resource pool '{pool_name}': {resource_key!r}. "
+                    "Use a non-empty Ray custom-resource key, or null."
+                )
+            normalized_resource_keys[pool_name] = resource_key.strip()
+        self.pool_accelerator_resource_key = normalized_resource_keys
+
+        if self.accelerator_placement_timeout_s is not None and self.accelerator_placement_timeout_s <= 0:
+            raise ValueError("accelerator_placement_timeout_s must be positive or null")
+
+    def describe_resource_pools(self) -> str:
+        """Return a compact report of the resolved automatic resource-pool topology."""
+        mapping = self.mapping or {}
+        lines = ["Resolved resource pools:"]
+        for pool_name, process_on_nodes in self.resource_pool_spec.items():
+            roles = sorted(
+                getattr(role, "name", str(role))
+                for role, mapped_pool_name in mapping.items()
+                if mapped_pool_name == pool_name
+            )
+            resource_key = self.pool_accelerator_resource_key.get(pool_name)
+            lines.append(
+                f"- {pool_name}: roles={roles or ['standalone']}, nodes={len(process_on_nodes)}, "
+                f"processes_per_node={process_on_nodes}, total_gpus={sum(process_on_nodes)}, "
+                f"accelerator_resource_key={resource_key!r}"
+            )
+        return "\n".join(lines)
 
     def create_resource_pool(self):
         """Create Ray resource pools for distributed training.
@@ -200,16 +295,22 @@ class ResourcePoolManager:
         For FSDP backend, uses max_colocate_count=1 to merge WorkerGroups.
         For Megatron backend, uses max_colocate_count>1 for different models.
         """
+        logger.info("%s", self.describe_resource_pools())
         for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
             # max_colocate_count means the number of WorkerGroups (i.e. processes) in each RayResourcePool
             # For FSDP backend, using max_colocate_count=3: actor_critic_ref, rollout, reward model (optional)
             # For Megatron backend, we recommend using max_colocate_count>1
             # that can utilize different WorkerGroup for differnt models
+            accelerator_resource_key = self.pool_accelerator_resource_key.get(resource_pool_name)
             resource_pool = RayResourcePool(
                 process_on_nodes=process_on_nodes,
                 use_gpu=True,
                 max_colocate_count=self.max_colocate_count,
                 name_prefix=resource_pool_name,
+                accelerator_type=accelerator_resource_key,
+                placement_group_timeout_s=(
+                    self.accelerator_placement_timeout_s if accelerator_resource_key is not None else None
+                ),
             )
             self.resource_pool_dict[resource_pool_name] = resource_pool
 
@@ -309,6 +410,8 @@ def split_resource_pool(
             use_gpu=resource_pool.use_gpu,
             name_prefix=f"{resource_pool.name_prefix}_split_{split_idx}",
             max_colocate_count=resource_pool.max_colocate_count,
+            accelerator_type=resource_pool.accelerator_type,
+            placement_group_timeout_s=resource_pool.placement_group_timeout_s,
             placement_groups=placement_groups,
             start_bundle_index=start_bundle_idx_list[split_idx],
             subgroup_world_size=split_size_list[split_idx],

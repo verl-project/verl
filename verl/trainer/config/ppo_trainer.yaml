@@ -166,6 +166,10 @@ trainer:
   # Number of GPUs per node
   n_gpus_per_node: 8
 
+  # Ray custom-resource key used to place the trainer/global resource pool.
+  # Example: "accelerator_type:H100". Null preserves the legacy scheduling behavior.
+  accelerator_resource_key: null
+
   # Save frequency (by iteration) for model checkpoints
   save_freq: -1
 
