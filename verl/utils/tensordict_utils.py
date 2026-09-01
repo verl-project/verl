@@ -930,20 +930,23 @@ def list_of_dict_to_tensordict(list_of_dicts: list[dict[str, Any]]) -> TensorDic
     dict_of_lists = {key: [d[key] for d in list_of_dicts] for key in keys}
     batch_size = len(list_of_dicts)
 
-    final_data = {
-        key: (
-            torch.stack(val_list)
-            if val_list
-            and all(isinstance(item, torch.Tensor) for item in val_list)
-            and all(item.shape == val_list[0].shape for item in val_list)
-            else (
-                torch.nested.as_nested_tensor(val_list, layout=torch.jagged)
-                if val_list and all(isinstance(item, torch.Tensor) for item in val_list)
-                else NonTensorStack(*val_list)
-            )
-        )
-        for key, val_list in dict_of_lists.items()
-    }
+    def _pack(val_list):
+        if not val_list or not all(isinstance(item, torch.Tensor) for item in val_list):
+            return NonTensorStack(*val_list)
+        # Scalar (0-d) tensors have no dimension to be ragged along -> stack.
+        if all(item.dim() == 0 for item in val_list):
+            return torch.stack(val_list)
+        # For everything else build a nested tensor unconditionally. Do NOT decide
+        # dense-vs-ragged from shape equality: that check is vacuously true for a
+        # length-1 list (the sole item always "matches" its own shape) and also
+        # misfires whenever several genuinely ragged items coincidentally share a
+        # length -- e.g. a group of rollout responses that all saturate
+        # max_response_length. Either case silently produced a dense tensor for a
+        # field the caller treats as nested, so a downstream .offsets() raised
+        # ``AttributeError: 'Tensor' object has no attribute 'offsets'``.
+        return nested_tensor_from_tensor_list(val_list)
+
+    final_data = {key: _pack(val_list) for key, val_list in dict_of_lists.items()}
 
     td = TensorDict(final_data, batch_size=[batch_size])
 
