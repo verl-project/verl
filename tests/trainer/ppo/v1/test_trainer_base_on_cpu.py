@@ -12,9 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import datetime
+import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
+import torch
 from omegaconf import OmegaConf
+from transfer_queue import KVBatchMeta
 
 from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer
@@ -163,3 +169,72 @@ def test_builtin_filter_groups_warns_when_total_generation_limit_is_configured()
         "use max_inflight_gen_batches to bound concurrent Sync DAPO generation.",
         10,
     )
+
+
+def _dumped_rollout(keys: list[str], reward_extra_infos: list[dict | None]) -> dict:
+    """Run ``_log_rollout_data`` over a stubbed TransferQueue read and return the kwargs it passed
+    to ``_dump_generations``. The stub honours ``select_fields`` like the real queue, so a field the
+    trainer stops requesting is a field it stops receiving.
+    """
+    n = len(keys)
+    data = {
+        "uid": np.array(keys, dtype=object),
+        "prompts": torch.nested.nested_tensor([[10 + i] for i in range(n)], layout=torch.jagged),
+        "responses": torch.nested.nested_tensor([[20 + i] for i in range(n)], layout=torch.jagged),
+        "rm_scores": torch.arange(n, dtype=torch.float32).unsqueeze(1),
+        "reward_model": np.array([{"ground_truth": f"gt{i}"} for i in range(n)], dtype=object),
+        "extra_fields": np.array(
+            [{} if extra is None else {"reward_extra_info": extra} for extra in reward_extra_infos], dtype=object
+        ),
+    }
+
+    def kv_batch_get(keys, partition_id, select_fields):
+        return {field: data[field] for field in select_fields}
+
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    # Decode ids to their digits so dumped text stays traceable to its sample.
+    trainer.tokenizer = SimpleNamespace(pad_token_id=0, decode=lambda ids, skip_special_tokens=True: str(int(ids[0])))
+    batch = KVBatchMeta(keys=list(keys), tags=[{} for _ in keys], partition_id="train")
+
+    with (
+        patch("verl.trainer.ppo.v1.trainer_base.tq.kv_batch_get", side_effect=kv_batch_get),
+        patch.object(_StubTrainer, "_dump_generations") as dump_generations,
+    ):
+        trainer._log_rollout_data(batch, {}, "/dev/null/never-written")
+
+    return dump_generations.call_args.kwargs
+
+
+def test_rollout_dump_carries_reward_extra_info_sorted_by_uid():
+    dumped = _dumped_rollout(["u1_0_0", "u0_0_0"], [{"acc": 1.0}, {"acc": 0.0}])
+
+    assert dumped["reward_extra_infos_dict"] == {"acc": [0.0, 1.0], "uid": ["u0_0_0", "u1_0_0"]}
+    assert dumped["gts"] == ["gt1", "gt0"]
+    assert dumped["scores"] == [1.0, 0.0]
+    assert dumped["outputs"] == ["21", "20"]
+
+
+def test_rollout_dump_pads_reward_extra_info_keys_missing_from_some_samples():
+    dumped = _dumped_rollout(["u0_0_0", "u1_0_0", "u2_0_0"], [{"acc": 1.0}, None, {"acc": 0.0, "pred": "x"}])
+
+    assert dumped["reward_extra_infos_dict"] == {
+        "acc": [1.0, None, 0.0],
+        "pred": [None, None, "x"],
+        "uid": ["u0_0_0", "u1_0_0", "u2_0_0"],
+    }
+
+
+def test_generation_dump_writes_sparse_and_exotic_values(tmp_path):
+    PPOTrainer._write_generations(
+        inputs=["p"],
+        outputs=["o"],
+        gts=["g"],
+        scores=[1.0],
+        reward_extra_infos_dict={"acc": [None], "stamp": [datetime.date(2026, 8, 27)]},
+        dump_path=str(tmp_path),
+        global_steps=3,
+    )
+
+    row = json.loads((tmp_path / "3.jsonl").read_text())
+    assert row["acc"] is None
+    assert row["stamp"] == "2026-08-27"
