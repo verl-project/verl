@@ -9,6 +9,7 @@
 
 set -euo pipefail
 export RN4PT_SKIP_UV_LOCK_CHECK=1
+# shellcheck disable=SC1091
 source /lustre/fsw/general_sa/shuazhang/python_space/verl_for_nvfp4_20251031/verl_nvfp4_e2e_r3_20260831_v3/examples/real_nvfp4/jobs/r3_nativeonline_20260831_v3/manifest.sh
 rn4pt_validate_static
 [[ -s "$RN4PT_BUILD_PASS" ]] || rn4pt_die "runtime build has not passed"
@@ -54,7 +55,7 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 expected = {
     "vllm": "0.26.0",
-    "megatron-core": "0.18.0",
+    "megatron-core": "0.18.0+ba7b5ebce",
     "transformer-engine": "2.18.0+e7c550c5",
     "transformers": "5.12.1",
 }

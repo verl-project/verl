@@ -77,7 +77,7 @@ from pathlib import Path
 
 expected = {
     "vllm": "0.26.0",
-    "megatron-core": "0.18.0",
+    "megatron-core": "0.18.0+ba7b5ebce",
     "megatron-bridge": "0.5.2",
     "transformer-engine": "2.18.0+e7c550c5",
     "nvidia-cublas": "13.5.1.27",
