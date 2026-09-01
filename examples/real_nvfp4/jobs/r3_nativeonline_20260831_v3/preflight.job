@@ -99,12 +99,12 @@ grouped = GroupedLinear(
     bias=False,
     params_dtype=torch.bfloat16,
 ).cuda()
-m_splits = torch.tensor([8, 8, 8, 8], dtype=torch.int64, device="cpu")
+m_splits = torch.tensor([16, 16, 16, 16], dtype=torch.int64, device="cpu")
 grouped_losses = []
 for step in range(2):
     grouped.zero_grad(set_to_none=True)
     grouped_x = torch.randn(
-        32,
+        64,
         64,
         device="cuda",
         dtype=torch.bfloat16,

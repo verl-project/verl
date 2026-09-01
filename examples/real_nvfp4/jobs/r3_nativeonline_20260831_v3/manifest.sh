@@ -111,9 +111,18 @@ rn4pt_validate_static() {
 }
 
 rn4pt_require_runtime_image() {
+  local built_source
   [[ -s "$RN4PT_BUILD_PASS" ]] || rn4pt_die "runtime build state missing" || return
-  grep -Fxq "source_commit=$RN4PT_SOURCE_COMMIT" "$RN4PT_BUILD_PASS" || \
-    rn4pt_die "runtime image was built from a different source commit" || return
+  built_source=$(sed -n 's/^source_commit=//p' "$RN4PT_BUILD_PASS")
+  [[ -n "$built_source" ]] || rn4pt_die "runtime image source commit is missing" || return
+  if [[ "$built_source" != "$RN4PT_SOURCE_COMMIT" ]]; then
+    git -C "$RN4PT_VERL" cat-file -e "$built_source^{commit}" || \
+      rn4pt_die "runtime image source commit is unavailable" || return
+    git -C "$RN4PT_VERL" diff --quiet "$built_source" "$RN4PT_SOURCE_COMMIT" -- \
+      . ":(exclude)examples/real_nvfp4/jobs/r3_nativeonline_20260831_v3" || \
+      rn4pt_die "runtime payload changed after the image build" || return
+    echo "REAL_NVFP4_PERTOKEN_HARNESS_ONLY source_commit=$RN4PT_SOURCE_COMMIT image_source_commit=$built_source"
+  fi
   grep -Fxq "lock_sha256=$RN4PT_LOCK_SHA256" "$RN4PT_BUILD_PASS" || \
     rn4pt_die "runtime image was built from a different uv.lock" || return
   [[ -s "$RN4PT_RUNTIME_IMAGE" ]] || rn4pt_die "runtime image missing: $RN4PT_RUNTIME_IMAGE" || return
