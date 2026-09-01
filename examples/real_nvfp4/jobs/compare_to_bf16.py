@@ -36,6 +36,7 @@ METRICS = [
     "rollout_corr/kl",
     "rollout_corr/rollout_is_eff_sample_size",
 ]
+MIN_SLOPE_VERDICT_STEPS = 80
 DEFAULT_REFERENCE = "/lustre/fsw/general_sa/shuazhang/tmp_inspect_20260901/bf16_ref_0603.json"
 BF16_RUN_IDS = [
     "7a6qxjqp", "6bgjqwzb", "7xommzdu", "7fs8133e", "ilz3hbo1", "oe8mnow8",
@@ -111,8 +112,18 @@ def main() -> int:
         f"\nresponse length is the primary signal: W4A4 {length_slope:+.2f} tok/step "
         f"vs BF16 {slope(steps[: len(bf_length)], bf_length):+.2f} tok/step over the same {n} steps."
     )
-    if length_slope < 0:
-        print("NEGATIVE length slope - this is the failure signature of a wrong quantization scope or refit.")
+    # The BF16 reference is itself nearly flat early (+1.5 tok/step over steps
+    # 1-20, +4.9 over 1-40) and only takes off afterwards (+20.1 over 41-80,
+    # +35.3 over 81-150). Flagging a negative slope before the reference has
+    # taken off cries wolf on a healthy run, so require a window long enough to
+    # cover the take-off.
+    if n < MIN_SLOPE_VERDICT_STEPS:
+        print(
+            f"too early for a verdict: the BF16 reference only reaches +4.9 tok/step by step 40 "
+            f"and takes off over steps 41-80; re-check at step {MIN_SLOPE_VERDICT_STEPS}."
+        )
+    elif length_slope < 0:
+        print("NEGATIVE length slope past the reference take-off - the failure signature of a wrong quantization scope or refit.")
     return 0
 
 
