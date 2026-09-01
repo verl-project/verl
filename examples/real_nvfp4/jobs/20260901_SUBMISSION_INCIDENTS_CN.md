@@ -40,7 +40,10 @@
 | 2694819 | v11 preflight | COMPLETED，3m09s | 两处 PDL API/源码断言、TE W4A4 两轮前反向、packing/reload、R3 均通过；48 passed, 5 skipped。 |
 | 2694835 | v11 8-node 3-step | COMPLETED，21m53s | 32/32 server；CG/max128；3 steps；多次 native refit；R3 48 layers；399 GiB full-Adam checkpoint；Slurm exit 0。 |
 | 2695274 | v12 probe | COMPLETED，50s | v8 base 可用。 |
-| 2695276 | v12 build | 见下 | v8 + 仅 PDL-off 的单变量镜像。 |
+| 2695276 | v12 build | COMPLETED，1m31s | v8 + 仅 PDL-off。构建日志只有 PDL-off marker，没有 packing/reload marker，依赖版本未变。 |
+| 2695349 | v12 preflight | COMPLETED，2m53s | 两处 `enable_pdl` 断言 + TE W4A4 前反向 + packing/reload + R3；48 passed, 5 skipped。 |
+| 2695358 | v12 8-node 20-step | COMPLETED，39m48s | **32/32 启动 + v8 档数值**，见坑 12。数值门通过后放行长跑链。 |
+| 2695466-9 | v13 长跑链 4 段 | 已提交 | 目标 step 80/150/210/260，`afterok` 串联，共享一个 W&B run。 |
 
 ## 坑 1：正式 long job 没有 W&B，不等于训练跑了很久
 
@@ -215,6 +218,43 @@ attestation 全绿，模型却在跑错位的 scale。
 这条改动会动 `verl/utils/real_nvfp4/vllm_runtime.py`，属于 runtime payload，必须重建镜像
 并重跑 preflight，因此不放在当前长跑的关键路径上。v12 不带任何 backport，不可能触发该失效
 模式。
+
+## 坑 12（已定论）：两个 backport 才是 rollout 崩溃的原因，PDL-off 对数值中性
+
+v12 = v8 镜像 + 只加 `enable_pdl=False`，两个 post-0.26 backport 全部不带。Job 2695358 同时
+拿到了两个门：
+
+- 启动：32/32。W&B 只在全部 32 个 server ready 之后才注册，本次正常注册并进入 `Training Progress`，
+  用时约 9 分钟。这是 PDL-off 的第 2 次 32/32（v11 是第 1 次）。
+- 数值：完整落在 v8 区间。
+
+| 指标 | v8 j2694027 | **v12 j2695358** | v11 j2694835 |
+| --- | --- | --- | --- |
+| `response_length/mean` 前三步 | 933 / 934 / 989 | **894 / 931 / 1000** | 20480 ×3 |
+| `actor/entropy` 前三步 | 0.87 / 0.82 / 0.89 | **0.72 / 0.87 / 0.67** | 6.19 / 6.31 / 6.25 |
+| `rollout_corr/kl` 前三步 | .0082 / .0080 / .0080 | **.0086 / .0078 / .0073** | 4.01 / 4.47 / 4.32 |
+| ESS 最小值（20 步） | 0.9858 | **0.9856** | 0.167 |
+| `actor/grad_norm` 最小值 | 0.0924 | **0.0944** | 0 |
+| 长度斜率（20 步） | +4.08 tok/step | **+3.61 tok/step** | 0 |
+
+结论：`enable_pdl=False` 不改变数值；v11 的崩溃来自 #50029/#50074。由于两者一起被移除，本次
+并未区分是哪一个单独致命；坑 10 的源码链条指向 #50074，若将来要重新引入必须按坑 10 的写法修正。
+
+与 BF16 参照（`gb200_30B_bf16_megatron_0603`，见 `BF16_REFERENCE_0603.md`）同步步对比，前 10 步：
+W4A4 长度斜率 **+9.75 tok/step**，BF16 **+13.79 tok/step**，同号同量级。旧实现是 −0.67 tok/step。
+
+## 坑 13：数值门必须独立于结构门存在
+
+v11 的教训是结构门全绿不代表模型是对的。现在 `audit_short_metrics.py` 在放行长跑前强制检查
+KL / ESS / entropy / 截断率 / grad_norm / 长度斜率，并已用 v8（PASS）和 v11（被 5 条同时拒绝）
+双向验证过。长跑链的 `long_validate_static` 没有这个 `short_metrics.pass` 就拒绝 release。
+
+另外在准备 v13 时抓到两个本来会在数小时后才暴露的链路缺陷：
+
+1. `train.job` 自带一份 chunk 目标数组并在运行时校验，只改 `submit.sh` 会让 chunk 2 在 chunk 1
+   跑完数小时后才因目标不匹配退出。现已在 `long_validate_static` 里比对两份数组。
+2. 末段目标必须是 `trainer.save_freq` 的倍数，否则该 chunk 的收尾 full-Adam checkpoint 不会按
+   常规节奏落盘。目标已从 265 调整为 260，并加了整除断言。
 
 ## 关键路径
 
