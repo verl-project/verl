@@ -46,6 +46,7 @@ from verl.workers.rollout.sglang_rollout.utils import (
     lora_served_as_adapter,
     normalize_peft_config_for_sglang,
 )
+from verl.workers.rollout.topology import get_rollout_replica_world_size
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -144,24 +145,9 @@ class ServerAdapter(BaseRollout):
 
         rank = int(os.environ["RANK"])
         local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
-        # PD asymmetric layout inflates per-replica footprint; must match
-        # agent_loop.py:_initialize_llm_servers or trainer-to-replica mapping breaks.
         disagg = getattr(self.config, "disaggregation", None)
         prefill_tp = self.config.tensor_model_parallel_size
-        if disagg is not None and getattr(disagg, "enabled", False):
-            # Inline decode_tp default: OmegaConf/Ray serialization drops dataclass methods.
-            decode_tp = (
-                disagg.decode_tensor_model_parallel_size
-                if disagg.decode_tensor_model_parallel_size is not None
-                else prefill_tp
-            )
-            rollout_world_size = (
-                (prefill_tp * disagg.prefill_replicas + decode_tp * disagg.decode_replicas)
-                * self.config.data_parallel_size
-                * self.config.pipeline_model_parallel_size
-            )
-        else:
-            rollout_world_size = prefill_tp * self.config.data_parallel_size * self.config.pipeline_model_parallel_size
+        rollout_world_size = get_rollout_replica_world_size(self.config)
         if replica_rank == -1:
             self.replica_rank = rank // rollout_world_size
         else:
