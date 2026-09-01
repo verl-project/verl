@@ -23,6 +23,7 @@ from tensordict import TensorDict
 
 from verl import DataProto
 from verl.protocol import (
+    DataProtoItem,
     deserialize_single_tensor,
     deserialize_tensordict,
     serialize_single_tensor,
@@ -150,6 +151,39 @@ def test_tensor_dict_constructor():
 
     with pytest.raises(AssertionError):
         data = DataProto.from_dict(tensors={"obs": obs, "act": act}, num_batch_dims=3)
+
+
+def test_dataproto_item_consistency():
+    data = DataProto.from_dict(
+        tensors={"obs": torch.randn(2, 3)},
+        non_tensors={"label": ["a", "b"]},
+        meta_info={"split": "train"},
+    )
+
+    item = data[0]
+
+    assert item.batch.batch_size == torch.Size([])
+    assert item.non_tensor_batch == {"label": "a"}
+    assert item.meta_info == {"split": "train"}
+
+
+def test_dataproto_item_rejects_batched_tensordict():
+    batch = TensorDict({"obs": torch.randn(1, 3)}, batch_size=[1])
+
+    with pytest.raises(AssertionError, match="must represent a single item"):
+        DataProtoItem(batch=batch)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"non_tensor_batch": []}, "non_tensor_batch must be a dict"),
+        ({"meta_info": []}, "meta_info must be a dict"),
+    ],
+)
+def test_dataproto_item_rejects_non_dict_metadata(kwargs, message):
+    with pytest.raises(AssertionError, match=message):
+        DataProtoItem(**kwargs)
 
 
 def test_tensor_dict_make_iterator():
