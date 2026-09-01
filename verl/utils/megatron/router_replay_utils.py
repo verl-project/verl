@@ -40,6 +40,7 @@ from verl.models.mcore.util import (
     postprocess_thd_engine,
     preprocess_packed_seqs,
     preprocess_thd_engine,
+    use_transformer_engine_padding,
 )
 from verl.utils.device import get_device_name
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction
@@ -404,17 +405,17 @@ def set_router_replay_data(
         None: The function updates internal RouterReplay instances in-place.
     """
     with torch.no_grad():
-        fp8 = tf_config.fp8
-        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+        # Keep replay targets and masks on exactly the same packed-THD row layout as
+        # the model forward.  Transformer Engine requires this alignment for both
+        # FP8 and FP4; checking only ``tf_config.fp8`` leaves NVFP4 model rows padded
+        # while replay tensors contain valid rows only.
+        use_fp8_padding = use_transformer_engine_padding(tf_config)
         cp_layout = _context_parallel_layout(tf_config)
         min_local_rows = (
             tf_config.csa_window_size
             if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid"
             else None
         )
-
-        cp_layout = _context_parallel_layout(tf_config)
-
         replay_mask_rmpad = None
         if layers_topk_idx.is_nested:
             layers_topk_idx_rmpad, _, _ = preprocess_thd_engine(

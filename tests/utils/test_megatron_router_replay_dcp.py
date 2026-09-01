@@ -106,6 +106,50 @@ def test_r3_alignment_mask_and_dcp_collection():
     assert [part.shape[0] for part in losses[1]["model_output"]["routed_experts"].unbind()] == [3]
 
 
+def test_r3_replay_uses_transformer_engine_padding_for_nvfp4(monkeypatch):
+    calls = []
+    target = {}
+    router = SimpleNamespace(
+        set_target_indices=lambda indices, replay_mask=None: target.update(indices=indices, mask=replay_mask)
+    )
+    monkeypatch.setattr(router_utils, "iter_model_routers", lambda _model: [(1, router)])
+    monkeypatch.setattr(router_utils, "scatter_to_sequence_parallel_region", lambda tensor: tensor)
+    monkeypatch.setattr(router_utils, "device_name", "cpu")
+
+    def fake_preprocess(value, **kwargs):
+        calls.append(kwargs["use_fp8_padding"])
+        trailing_shape = value.shape[2:] if value.is_nested else value.shape[1:]
+        padded = torch.zeros((1, 128, *trailing_shape), dtype=value.dtype)
+        padded[0, : value.values().shape[0]] = value.values()
+        return padded, object(), None
+
+    monkeypatch.setattr(router_utils, "preprocess_thd_engine", fake_preprocess)
+
+    routes = _nested([torch.ones((95, 1, 1), dtype=torch.int16)])
+    replay_mask = _nested([torch.ones(95, dtype=torch.bool)])
+    config = SimpleNamespace(
+        fp8=None,
+        fp4="e2m1",
+        num_layers=1,
+        moe_layer_freq=1,
+        experimental_attention_variant=None,
+    )
+
+    router_utils.set_router_replay_data(
+        routes,
+        None,
+        config,
+        replay_mask=replay_mask,
+        model=object(),
+    )
+
+    assert calls == [True, True]
+    assert target["indices"].shape == (128, 1)
+    assert target["mask"].shape == (128,)
+    assert target["mask"][:95].all()
+    assert not target["mask"][95:].any()
+
+
 def test_pp_gather_normalizes_nested_routes_to_cpu(monkeypatch):
     # The nested branch rides all_gather_object, which pickles the tensor, so int16
     # needs no uint8 reinterpretation here.
