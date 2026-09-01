@@ -450,6 +450,7 @@ actor_rollout_ref:
     use_fused_kernels: false
     fused_kernel_options:
       impl_backend: torch
+    use_ref_prefix_cache: false
     tiled_mlp:
       enabled: false
       num_shards: 4
@@ -690,6 +691,7 @@ critic:
     use_fused_kernels: false
     fused_kernel_options:
       impl_backend: torch
+    use_ref_prefix_cache: false
     tiled_mlp:
       enabled: false
       num_shards: 4
