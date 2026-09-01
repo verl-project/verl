@@ -7,8 +7,8 @@ mkdir -p "$RN4PT_STATE" "$RN4PT_LOGS"
 
 readonly PHASE=${1:-}
 case "$PHASE" in
-  probe|build|preflight|smoke|short) ;;
-  *) rn4pt_die "usage: $0 probe|build|preflight|smoke|short" ;;
+  probe|build|preflight|smoke|recover-smoke|short) ;;
+  *) rn4pt_die "usage: $0 probe|build|preflight|smoke|recover-smoke|short" ;;
 esac
 
 if squeue -h -u "$USER" -t RUNNING,PENDING -o '%j' | grep -q '^verl-rn4pt-'; then
@@ -39,6 +39,14 @@ case "$PHASE" in
     nodes=1
     time_limit=01:30:00
     ;;
+  recover-smoke)
+    [[ -s "$RN4PT_PREFLIGHT_PASS" ]] || rn4pt_die "preflight.pass is required"
+    [[ ! -e "$RN4PT_SMOKE_PASS" ]] || rn4pt_die "smoke.pass already exists"
+    [[ "${RECOVER_JOB_ID:-}" =~ ^[0-9]+$ ]] || rn4pt_die "set RECOVER_JOB_ID to the completed smoke job"
+    job_file=$RN4PT_BUNDLE/recover_smoke.job
+    nodes=1
+    time_limit=00:15:00
+    ;;
   short)
     [[ -s "$RN4PT_SMOKE_PASS" ]] || rn4pt_die "smoke.pass is required"
     job_file=$RN4PT_BUNDLE/train.job
@@ -55,6 +63,8 @@ sbatch_args=(
 )
 if [[ "$PHASE" = smoke || "$PHASE" = short ]]; then
   sbatch_args+=(--export="ALL,ARM=$PHASE")
+elif [[ "$PHASE" = recover-smoke ]]; then
+  sbatch_args+=(--export="ALL,RECOVER_JOB_ID=$RECOVER_JOB_ID")
 fi
 job_id=$(sbatch "${sbatch_args[@]}" "$job_file")
 printf '%s\n' "$job_id" >"$RN4PT_STATE/$PHASE.jobid"

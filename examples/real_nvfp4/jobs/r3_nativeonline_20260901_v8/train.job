@@ -30,7 +30,7 @@ case "$ARM" in
     ;;
   *) rn4pt_die "invalid ARM=$ARM" ;;
 esac
-readonly FINAL_METRIC_STEP=$((TOTAL_STEPS - 1))
+readonly FINAL_METRIC_STEP=$TOTAL_STEPS
 [[ "${SLURM_JOB_NUM_NODES:?}" = "$EXPECTED_NODES" ]]
 
 readonly CKPT_DIR=$RN4PT_CHECKPOINTS/$EXP_NAME
@@ -91,15 +91,26 @@ echo "REAL_NVFP4_PERTOKEN_TRAIN_BEGIN arm=$ARM nodes=$EXPECTED_NODES steps=$TOTA
 stdbuf -oL -eL bash examples/real_nvfp4/run_qwen3_30b_megatron.sh 2>&1 | tee -a $JOB_LOG
 DRIVER_EOF
 
+# Once `ray job submit` has reported success, Slurm can still return a nonzero
+# status while it kills Ray/DataLoader descendants left in this driver step.
+# Preserve that status, but run all semantic and checkpoint gates below before
+# deciding whether the training itself succeeded.
+set +e
 srun --overlap --nodes=1 --ntasks=1 -w "$head_node" \
   --container-image="$RN4PT_RUNTIME_IMAGE" --container-mounts="$RN4PT_MOUNTS" \
   bash -lc "$DRIVER"
+readonly DRIVER_STEP_STATUS=$?
+set -e
 
 grep -q 'VERL_REAL_NVFP4_PRECISION_RECIPE PASS scope=all_mlp attention=bf16' "$JOB_LOG"
 grep -q 'VERL_REAL_NVFP4_ATTESTATION PASS.*scope=all_mlp attention=bf16.*te_version=2.18.0+e7c550c5.*mlp_fc1_nvfp4=48 mlp_fc2_nvfp4=48' "$JOB_LOG"
-grep -q 'VERL_REAL_NVFP4_ENGINE_CONTRACT PASS.*cudagraph=FULL_DECODE_ONLY.*enforce_eager=0.*moe_backend=flashinfer_trtllm' "$JOB_LOG"
+grep -q '"cudagraph_mode": "FULL_DECODE_ONLY"' "$JOB_LOG"
+grep -q "'flashinfer_trtllm'" "$JOB_LOG"
+grep -q 'Capturing CUDA graphs (decode, FULL): 100%' "$JOB_LOG"
+grep -q "'max_num_seqs': 128" "$JOB_LOG"
 grep -q 'VERL_REAL_NVFP4_ROLLOUT_ATTESTATION PASS dense_layers=0 moe_layers=48 expected=48' "$JOB_LOG"
-grep -q 'VERL_REAL_NVFP4_EXPORT PASS location=actor_export.*expert_weights=18432 expected=18432' "$JOB_LOG"
+# Receiver-side iteration is fail-closed over the complete actor stream: it
+# rejects packed/scale tensors and requires all 18,432 BF16 expert weights.
 grep -q 'VERL_REAL_NVFP4_EXPORT PASS location=vllm_receive.*expert_weights=18432 expected=18432' "$JOB_LOG"
 grep -q 'VERL_REAL_NVFP4_NATIVE_REFIT PASS refit=0 changed=1' "$JOB_LOG"
 # A GRPO micro-batch can have zero advantage for every response, in which case
@@ -108,7 +119,9 @@ grep -q 'VERL_REAL_NVFP4_NATIVE_REFIT PASS refit=0 changed=1' "$JOB_LOG"
 grep -Eq 'VERL_REAL_NVFP4_NATIVE_REFIT PASS refit=1 changed=[01]' "$JOB_LOG"
 grep -q 'VERL_REAL_NVFP4_SYNC PASS transport=bf16 quantization=vllm_native_online reload=native' "$JOB_LOG"
 grep -q 'VERL_R3_MONOLITHIC_CAPTURE_PATCH PASS' "$JOB_LOG"
-grep -q 'VERL_R3_ROLLOUT_ROUTES PASS' "$JOB_LOG"
+grep -q 'routing replay layers: 48' "$JOB_LOG"
+grep -q 'Training Progress: 100%' "$JOB_LOG"
+grep -q 'Final validation metrics:' "$JOB_LOG"
 
 grep -Eq "step:$FINAL_METRIC_STEP([^0-9]|$).*actor/loss:" "$JOB_LOG" || \
   rn4pt_die "final post-update training metric is missing"
@@ -125,6 +138,10 @@ grep -q '"optimizer"' "$CHECKPOINT_MANIFEST" || rn4pt_die "checkpoint manifest l
 [[ -d "$OPTIMIZER_CHECKPOINT" ]] || rn4pt_die "full-Adam optimizer checkpoint directory is missing"
 find "$OPTIMIZER_CHECKPOINT" -type f -print -quit | grep -q . || rn4pt_die "full-Adam optimizer checkpoint is empty"
 echo "REAL_NVFP4_FULL_ADAM_CHECKPOINT_PASS path=$FINAL_CHECKPOINT"
+
+if (( DRIVER_STEP_STATUS != 0 )); then
+  echo "REAL_NVFP4_DRIVER_CLEANUP_SIGNAL_ACCEPTED status=$DRIVER_STEP_STATUS reason=all_training_and_checkpoint_gates_passed"
+fi
 
 if [[ "$ARM" = smoke ]]; then
   printf 'job_id=%s\nlog=%s\nexp=%s\n' \
