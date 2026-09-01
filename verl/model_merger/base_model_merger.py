@@ -68,6 +68,12 @@ def parse_args():
     merge_parser.add_argument(
         "--private", action="store_true", help="Whether to upload the model to a private Hugging Face repository"
     )
+    merge_parser.add_argument(
+        "--fuse-lora",
+        action="store_true",
+        help="Fuse LoRA adapter weights into the base model before saving. "
+        "Without this flag, LoRA checkpoints are split into base model + separate adapter directory.",
+    )
 
     test_parser = subparsers.add_parser(
         "test", parents=[base_op_parser], help="Test merged model against a reference Hugging Face model"
@@ -115,6 +121,7 @@ class ModelMergerConfig:
     hf_model_config_path: Optional[str] = None
     hf_upload: bool = field(init=False)
     use_cpu_initialization: bool = False
+    fuse_lora: bool = False
 
     def __post_init__(self):
         self.hf_upload = self.operation == "merge" and bool(self.hf_upload_path)
@@ -157,6 +164,7 @@ def generate_config_from_args(args: argparse.Namespace) -> ModelMergerConfig:
             target_dir=args.target_dir,
             hf_upload_path=args.hf_upload_path,
             private=args.private,
+            fuse_lora=getattr(args, "fuse_lora", False),
             test_hf_dir=None,
         )
         os.makedirs(config.target_dir, exist_ok=True)
@@ -407,6 +415,48 @@ class BaseModelMerger(ABC):
 
         return lora_path
 
+    def _fuse_lora_into_model(self, state_dict: dict[str, torch.Tensor], model) -> Optional[str]:
+        """Fuse LoRA adapter weights into the base model.
+
+        Loads the base weights into the model, applies the LoRA adapter
+        using PEFT, calls merge_and_unload() to fold the adapter into
+        the base weights, and replaces state_dict contents with the
+        fused weights.
+
+        Returns:
+            None (no separate adapter directory is created).
+        """
+        lora_params_names = [name for name in state_dict.keys() if "lora_" in name]
+        if len(lora_params_names) == 0:
+            return None
+
+        import peft
+
+        # First, save the adapter to a temp directory so PeftModel can load it
+        lora_path = self.save_lora_adapter(state_dict)
+        if lora_path is None:
+            return None
+
+        # state_dict now has only base weights (save_lora_adapter pops LoRA keys).
+        # Load base weights into the model.
+        model.load_state_dict(state_dict, strict=False)
+
+        # Apply LoRA adapter and fuse
+        print(f"Fusing LoRA adapter into base model weights...")
+        peft_model = peft.PeftModel.from_pretrained(model, lora_path)
+        fused_model = peft_model.merge_and_unload()
+
+        # Replace state_dict with fused weights
+        state_dict.clear()
+        state_dict.update(fused_model.state_dict())
+
+        # Clean up the temp adapter directory
+        import shutil
+        shutil.rmtree(lora_path)
+
+        print(f"LoRA adapter fused into model weights.")
+        return None
+
     def save_hf_model_and_tokenizer(self, state_dict: dict[str, torch.Tensor]):
         auto_model_class = self.get_transformers_auto_model_class()
         with init_empty_weights():
@@ -416,7 +466,10 @@ class BaseModelMerger(ABC):
         model.to_empty(device="cpu")
         model = self.patch_model_generation_config(model)
 
-        lora_path = self.save_lora_adapter(state_dict)
+        if self.config.fuse_lora:
+            lora_path = self._fuse_lora_into_model(state_dict, model)
+        else:
+            lora_path = self.save_lora_adapter(state_dict)
         if lora_path:
             print(f"Saving lora adapter to {lora_path}")
 
