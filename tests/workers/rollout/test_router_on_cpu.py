@@ -122,9 +122,10 @@ class TestRequireFields:
         assert ray.get(lb.require_release_fields.remote()) == ["request_id"]
 
     def test_client_acquire_serializes_only_declared_fields(self, ray_session, tmp_path):
-        """_acquire_server lazily queries require_acquire_fields (one light
-        RPC, then cached) and filters the packed generate() kwargs by it;
-        sampling_params and friends never cross the wire."""
+        """_acquire_server lazily queries both field declarations (two light
+        RPCs issued concurrently, then cached) and filters the packed
+        generate() kwargs by the acquire declaration; sampling_params and
+        friends never cross the wire."""
         import asyncio
 
         from omegaconf import OmegaConf
@@ -145,9 +146,10 @@ class TestRequireFields:
                 image_data=["img-bytes"],
             )
         )
-        # Declaration queried and cached on first acquire.
+        # Both declarations queried and cached on first acquire, so the
+        # release path never has to block the event loop on a lookup.
         assert client._lb_require_acquire_fields == ["prompt_ids"]
-        assert client._lb_require_release_fields is None  # release not queried yet
+        assert client._lb_require_release_fields == ["request_id"]
         # The mock received only (request_id, prompt_ids) — sampling_params /
         # image_data stayed in-process.
         calls = ray.get(lb.get_acquire_calls.remote())
@@ -172,6 +174,7 @@ class TestRequireFields:
             )
         )
         assert client._lb_require_acquire_fields == []
+        assert client._lb_require_release_fields == []
         # Routed fine on request_id alone (sticky/least-inflight).
         assert ray.get(lb.get_status.remote())["total_inflight"] == 1
 

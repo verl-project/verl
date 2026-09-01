@@ -71,16 +71,18 @@ class LLMServerClient:
         # Atomic acquire: returns (server_id, handle) in one Ray RPC.
         # Only the declared fields are serialized.
         if self._lb_require_acquire_fields is None:
-            self._lb_require_acquire_fields = list(await self._load_balancer.require_acquire_fields.remote())
+            acquire_fields, release_fields = await asyncio.gather(
+                self._load_balancer.require_acquire_fields.remote(),
+                self._load_balancer.require_release_fields.remote(),
+            )
+            self._lb_require_acquire_fields = list(acquire_fields)
+            self._lb_require_release_fields = list(release_fields)
         fields = {name: extra[name] for name in self._lb_require_acquire_fields if name in extra}
         return await self._load_balancer.acquire_server.remote(request_id=request_id, **fields)
 
     def _release_server(self, server_id: str, request_id: str | None = None) -> None:
         # Fire-and-forget: release is just a counter decrement, no need to await.
         # Awaiting here risks blocking the finally clause if the LB actor is unresponsive.
-        # Only the release-declared fields are serialized (default: server_id only).
-        if self._lb_require_release_fields is None:
-            self._lb_require_release_fields = list(ray.get(self._load_balancer.require_release_fields.remote()))
         pool = {"request_id": request_id}
         fields = {name: pool[name] for name in self._lb_require_release_fields if name in pool}
         self._load_balancer.release_server.remote(server_id=server_id, **fields)
