@@ -103,7 +103,7 @@ jobs:
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
-      TRANSFORMERS_VERBOSITY: 'error'
+      TRANSFORMERS_VERBOSITY: "error"
     steps:
       - name: Check npu and CANN info
         run: |
@@ -187,7 +187,7 @@ jobs:
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
-      TRANSFORMERS_VERBOSITY: 'error'
+      TRANSFORMERS_VERBOSITY: "error"
     steps:
       - name: Check npu and CANN info
         run: |
@@ -228,7 +228,6 @@ jobs:
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
             MODEL_ID=Qwen/Qwen3.5-2B \
             ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True \
-            SP_SIZE=2 \
             bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Running GEO3K VLM PPO E2E training tests on 8 L20 GPUs with rmpad using function rm
         run: |
@@ -237,7 +236,6 @@ jobs:
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
             MODEL_ID=Qwen/Qwen3.5-2B \
             ADV_ESTIMATOR=gae RM_PAD=True USE_KL=True \
-            SP_SIZE=2 \
             bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Running GEO3K VLM GRPO E2E lora training tests on 8 L20 GPUs with rmpad using function rm
         run: |
@@ -246,7 +244,6 @@ jobs:
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
             MODEL_ID=Qwen/Qwen3.5-2B \
             ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True \
-            SP_SIZE=2 \
             LORA_RANK=32 LORA_EXCLUDE=".*visual.*" \
             bash tests/special_e2e/ppo_trainer/run_function_reward.sh \
               +actor_rollout_ref.model.lora.fully_sharded_loras=True
