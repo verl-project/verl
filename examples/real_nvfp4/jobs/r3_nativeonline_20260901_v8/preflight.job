@@ -9,7 +9,7 @@
 
 set -euo pipefail
 export RN4PT_SKIP_UV_LOCK_CHECK=1
-# shellcheck disable=SC1091
+# shellcheck disable=SC1090
 source "${RN4PT_MANIFEST_OVERRIDE:-/lustre/fsw/general_sa/shuazhang/python_space/verl_for_nvfp4_20251031/verl_nvfp4_e2e_r3_20260831_v3/examples/real_nvfp4/jobs/r3_nativeonline_20260901_v8/manifest.sh}"
 rn4pt_validate_static
 [[ -s "$RN4PT_BUILD_PASS" ]] || rn4pt_die "runtime build has not passed"
@@ -65,6 +65,7 @@ expected = {
 actual = {name: version(name) for name in expected}
 assert actual == expected, (actual, expected)
 assert torch.cuda.is_available()
+disable_trtllm_moe_pdl = bool(int("${RN4PT_VLLM_DISABLE_TRTLLM_MOE_PDL:-0}"))
 assert "per_token_activation" in inspect.signature(make_nvfp4_moe_kernel).parameters
 assert get_quantization_config("nvfp4_per_token").__name__ == "OnlineQuantizationConfig"
 assert Nvfp4OnlineMoEMethod.__name__ == "Nvfp4OnlineMoEMethod"
@@ -199,6 +200,22 @@ if hotfix_required:
         "reload=${RN4PT_VLLM_RELOAD_KERNEL_COMMIT:-}",
         flush=True,
     )
+
+trtllm_moe_source = distribution("vllm").locate_file(
+    "vllm/model_executor/layers/fused_moe/experts/trtllm_nvfp4_moe.py"
+).read_text()
+if disable_trtllm_moe_pdl:
+    assert trtllm_moe_source.count("enable_pdl=False,") == 2
+    from flashinfer.fused_moe import (
+        trtllm_fp4_block_scale_moe,
+        trtllm_fp4_block_scale_routed_moe,
+    )
+
+    assert "enable_pdl" in inspect.signature(trtllm_fp4_block_scale_moe).parameters
+    assert "enable_pdl" in inspect.signature(
+        trtllm_fp4_block_scale_routed_moe
+    ).parameters
+    print("REAL_NVFP4_VLLM_TRTLLM_MOE_PDL_OFF_REGRESSION_PASS", flush=True)
 
 from verl.utils.real_nvfp4.r3_monolithic_capture import patch_vllm_monolithic_moe_r3_capture
 from verl.utils.real_nvfp4.vllm_runtime import NVFP4_PER_TOKEN_METHOD, REAL_NVFP4_MOE_BACKEND

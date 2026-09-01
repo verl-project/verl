@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# shellcheck disable=SC1091
-source "$(dirname "$0")/manifest.sh"
+# shellcheck disable=SC1090
+source "${RN4PT_MANIFEST_OVERRIDE:-$(dirname "$0")/manifest.sh}"
 rn4pt_validate_static
 mkdir -p "$RN4PT_STATE" "$RN4PT_LOGS"
 
