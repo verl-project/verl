@@ -28,7 +28,6 @@ from verl.tools.base_tool import BaseTool, OpenAIFunctionToolSchema
 from verl.tools.schemas import ToolResponse
 from verl.utils import hf_tokenizer
 
-
 VIDEO_PATH = os.path.expanduser("~/models/hf_data/test-videos/space_woaudio.mp4")
 
 # The sglang server adapter refuses video prompts (it cannot forward verl's decoded
