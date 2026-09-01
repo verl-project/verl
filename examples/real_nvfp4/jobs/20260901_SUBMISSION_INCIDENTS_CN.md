@@ -200,6 +200,22 @@ entropy 从 0.87 跳到 6.2 说明 rollout 分布接近未训练/随机，而不
 
 参考基线（v8 j2694027，20 steps）：`response_length/mean` 斜率 **+4.08 token/step**，`critic/score/mean` 斜率 +0.0097/step，entropy 0.80→0.46，`rollout_corr/kl` 0.0077→0.0061。这是目前唯一可信的健康区间；对照 NeMo RL all-MLP/no-3loss 的 +16.9 token/step 长期斜率，20 步还太短，只能用来排除「长度不涨/负斜率」这一类实现错误。
 
+## 待办：rollout attestation 有一个能让 v11 蒙混过关的盲点
+
+`attest_vllm_native_nvfp4_runtime` 和 `vllm_native_nvfp4_fingerprint` 都是从 **layer**
+上读 `w13_weight_scale` / `w2_weight_scale` / `*_scale_2`。v11 的坏路径里这些 layer 张量
+恰恰是**新的、正确的**；错的是 kernel 手里那份 `moe_quant_config` 仍指向旧对象。所以两个
+attestation 全绿，模型却在跑错位的 scale。
+
+建议在提交上游 PR 之前补一条恒等断言：`quant_method.moe_quant_config` 的
+`w1_scale` / `w2_scale` / `g1_alphas` / `g2_alphas` 必须与 layer 上对应 parameter 是
+**同一个对象**（`data_ptr` 相等）。原生 0.26 天然满足（`_setup_kernel` 先 `replace_parameter`
+再建 config），任何破坏该同一性的改动都会被当场挡住。
+
+这条改动会动 `verl/utils/real_nvfp4/vllm_runtime.py`，属于 runtime payload，必须重建镜像
+并重跑 preflight，因此不放在当前长跑的关键路径上。v12 不带任何 backport，不可能触发该失效
+模式。
+
 ## 关键路径
 
 - v10 日志：`ray_log/verl_real_nvfp4_r3_nativeonline_post026_20260901_v10/`
