@@ -279,7 +279,7 @@ jobs:
           $UV_RUN ray stop --force
           ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True STRATEGY=fsdp2 bash tests/special_e2e/ppo_trainer/run_function_reward.sh
 
-  e2e_ppo_trainer_fsdp-qwen2_5vl-3b:
+  e2e_ppo_trainer_fsdp-qwen3_5-2b:
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 40 # Increase this timeout value as needed
@@ -312,7 +312,7 @@ jobs:
           $UV_RUN ray stop --force
           TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
-            MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
+            MODEL_ID=Qwen/Qwen3.5-2B \
             ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True \
             SP_SIZE=2 \
             bash tests/special_e2e/ppo_trainer/run_function_reward.sh
@@ -322,7 +322,7 @@ jobs:
           $UV_RUN ray stop --force
           TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
-            MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
+            MODEL_ID=Qwen/Qwen3.5-2B \
             ADV_ESTIMATOR=gae RM_PAD=True USE_KL=True \
             SP_SIZE=2 \
             bash tests/special_e2e/ppo_trainer/run_function_reward.sh
@@ -331,7 +331,7 @@ jobs:
           $UV_RUN ray stop --force
           TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
-            MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
+            MODEL_ID=Qwen/Qwen3.5-2B \
             ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True \
             SP_SIZE=2 \
             LORA_RANK=32 LORA_EXCLUDE=".*visual.*" \
@@ -343,7 +343,7 @@ jobs:
       [
         setup,
         e2e_ppo_trainer_megatron-moe-expert-parallel,
-        e2e_ppo_trainer_fsdp-qwen2_5vl-3b,
+        e2e_ppo_trainer_fsdp-qwen3_5-2b,
         e2e_ppo_trainer_fsdp_vllm,
       ]
     if: always()

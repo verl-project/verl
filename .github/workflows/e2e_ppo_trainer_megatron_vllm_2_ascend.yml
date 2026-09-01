@@ -176,7 +176,7 @@ jobs:
           ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True STRATEGY=fsdp2 bash tests/special_e2e/ppo_trainer/run_function_reward.sh \
             +actor_rollout_ref.model.lora.fully_sharded_loras=True
 
-  e2e_ppo_trainer_fsdp-qwen2_5vl-3b_ascend:
+  e2e_ppo_trainer_fsdp-qwen3_5-2b_ascend:
     if: github.repository_owner == 'verl-project'
     runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 60 # Increase this timeout value as needed
@@ -225,7 +225,7 @@ jobs:
           ray stop --force
           TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
-            MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
+            MODEL_ID=Qwen/Qwen3.5-2B \
             ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True \
             SP_SIZE=2 \
             bash tests/special_e2e/ppo_trainer/run_function_reward.sh
@@ -234,7 +234,7 @@ jobs:
           ray stop --force
           TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
-            MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
+            MODEL_ID=Qwen/Qwen3.5-2B \
             ADV_ESTIMATOR=gae RM_PAD=True USE_KL=True \
             SP_SIZE=2 \
             bash tests/special_e2e/ppo_trainer/run_function_reward.sh
@@ -243,7 +243,7 @@ jobs:
           ray stop --force
           TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
-            MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
+            MODEL_ID=Qwen/Qwen3.5-2B \
             ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True \
             SP_SIZE=2 \
             LORA_RANK=32 LORA_EXCLUDE=".*visual.*" \

@@ -40,6 +40,10 @@ def test_abort_all_requests_propagates_pause_failure():
         output_processor=SimpleNamespace(request_states={}),
         pause_generation=fail_pause_generation,
     )
+    server._submission_paused = False
+    server._admitting = 0
+    server._resume_event = asyncio.Event()
+    server._resume_event.set()
     with pytest.raises(RuntimeError, match="pause failed"):
         asyncio.run(server.abort_all_requests())
 
