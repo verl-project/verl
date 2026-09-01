@@ -4,7 +4,7 @@ codetiming
 datasets
 dill
 hydra-core
-liger-kernel
+liger-kernel>=0.8.2
 numpy>=2.0.0
 pandas
 peft
@@ -25,4 +25,4 @@ fastapi
 latex2sympy2_extended
 math_verify
 tensorboard
-TransferQueue==0.1.8
+TransferQueue @ git+https://github.com/Ascend/TransferQueue.git@main

@@ -43,6 +43,7 @@ actor_rollout_ref:
       entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_chunk_size,2048}
       use_torch_compile: true
       entropy_checkpointing: ${oc.select:actor_rollout_ref.actor.entropy_checkpointing,False}
+      use_no_sync_for_gradient_accumulation: false
       pad_to_length: ${oc.select:actor_rollout_ref.actor.pad_to_length,False}
       pad_to_length_bucket: 1024
       forward_only: false
@@ -59,6 +60,20 @@ actor_rollout_ref:
         - re:.*mlp.gate$
         activation_observer: static_minmax
         quantization_config_path: null
+      turbo_config:
+        distributed:
+          fully_shard_parallel_size: 16
+          tensor_parallel_size: 1
+          expert_parallel_size: 1
+          expert_fully_shard_parallel_size: 1
+          ulysses_parallel_size: 1
+          fsdp_plan:
+            param_dtype: bf16
+            reduce_dtype: fp32
+            output_dtype: bf16
+            fsdp_implementation: native
+            num_to_forward_prefetch: 1
+            num_to_backward_prefetch: 1
     _target_: verl.workers.config.FSDPActorConfig
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: fsdp
@@ -113,6 +128,10 @@ actor_rollout_ref:
       all_ranks: false
       ranks: []
       save_path: ${oc.select:global_profiler.save_path,null}
+      relocate_results: ${oc.select:global_profiler.relocate_results,false}
+      finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+      finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+      finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
       tool_config:
         nsys:
           _target_: verl.utils.profiler.config.NsightToolConfig
@@ -144,11 +163,6 @@ actor_rollout_ref:
           steps: null
           stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
           strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
-    router_replay:
-      _target_: verl.workers.config.RouterReplayConfig
-      mode: disabled
-      record_file: null
-      replay_file: null
     qat:
       enable: false
       mode: w4a16
@@ -181,6 +195,10 @@ actor_rollout_ref:
       all_ranks: false
       ranks: []
       save_path: ${oc.select:global_profiler.save_path,null}
+      relocate_results: ${oc.select:global_profiler.relocate_results,false}
+      finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+      finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+      finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
       tool_config:
         nsys:
           _target_: verl.utils.profiler.config.NsightToolConfig
@@ -212,11 +230,6 @@ actor_rollout_ref:
           steps: null
           stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
           strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
-    router_replay:
-      _target_: verl.workers.config.RouterReplayConfig
-      mode: disabled
-      record_file: null
-      replay_file: null
     fsdp_config:
       _target_: verl.workers.config.FSDPEngineConfig
       wrap_policy:
@@ -236,6 +249,7 @@ actor_rollout_ref:
       entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.ref.entropy_from_logits_chunk_size,2048}
       use_torch_compile: true
       entropy_checkpointing: ${oc.select:actor_rollout_ref.ref.entropy_checkpointing,False}
+      use_no_sync_for_gradient_accumulation: false
       pad_to_length: ${oc.select:actor_rollout_ref.ref.pad_to_length,False}
       pad_to_length_bucket: ${oc.select:actor_rollout_ref.actor.fsdp_config.pad_to_length_bucket,1024}
       forward_only: true
@@ -252,6 +266,20 @@ actor_rollout_ref:
         - re:.*mlp.gate$
         activation_observer: static_minmax
         quantization_config_path: null
+      turbo_config:
+        distributed:
+          fully_shard_parallel_size: 16
+          tensor_parallel_size: 1
+          expert_parallel_size: 1
+          expert_fully_shard_parallel_size: 1
+          ulysses_parallel_size: 1
+          fsdp_plan:
+            param_dtype: bf16
+            reduce_dtype: fp32
+            output_dtype: bf16
+            fsdp_implementation: native
+            num_to_forward_prefetch: 1
+            num_to_backward_prefetch: 1
     _target_: verl.workers.config.FSDPActorConfig
     ulysses_sequence_parallel_size: ${oc.select:actor_rollout_ref.actor.ulysses_sequence_parallel_size,1}
     entropy_from_logits_with_chunking: false
@@ -357,6 +385,10 @@ actor_rollout_ref:
       all_ranks: ${oc.select:actor_rollout_ref.actor.profiler.all_ranks,false}
       ranks: ${oc.select:actor_rollout_ref.actor.profiler.ranks,[]}
       save_path: ${oc.select:global_profiler.save_path,null}
+      relocate_results: ${oc.select:actor_rollout_ref.actor.profiler.relocate_results,false}
+      finish_hook_cmd: ${oc.select:actor_rollout_ref.actor.profiler.finish_hook_cmd,null}
+      finish_hook_all_ranks: ${oc.select:actor_rollout_ref.actor.profiler.finish_hook_all_ranks,false}
+      finish_hook_ranks: ${oc.select:actor_rollout_ref.actor.profiler.finish_hook_ranks,[]}
       tool_config:
         npu:
           _target_: verl.utils.profiler.config.NPUToolConfig
@@ -535,6 +567,7 @@ critic:
     entropy_from_logits_chunk_size: 2048
     use_torch_compile: true
     entropy_checkpointing: false
+    use_no_sync_for_gradient_accumulation: false
     pad_to_length: false
     pad_to_length_bucket: 1024
     forward_only: false
@@ -551,6 +584,20 @@ critic:
       - re:.*mlp.gate$
       activation_observer: static_minmax
       quantization_config_path: null
+    turbo_config:
+      distributed:
+        fully_shard_parallel_size: 16
+        tensor_parallel_size: 1
+        expert_parallel_size: 1
+        expert_fully_shard_parallel_size: 1
+        ulysses_parallel_size: 1
+        fsdp_plan:
+          param_dtype: bf16
+          reduce_dtype: fp32
+          output_dtype: bf16
+          fsdp_implementation: native
+          num_to_forward_prefetch: 1
+          num_to_backward_prefetch: 1
   _target_: verl.workers.config.FSDPCriticConfig
   rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
   strategy: fsdp
@@ -582,6 +629,10 @@ critic:
     all_ranks: false
     ranks: []
     save_path: ${oc.select:global_profiler.save_path,null}
+    relocate_results: ${oc.select:global_profiler.relocate_results,false}
+    finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+    finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+    finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
     tool_config:
       nsys:
         _target_: verl.utils.profiler.config.NsightToolConfig
@@ -909,6 +960,7 @@ trainer:
   esi_redundant_time: 0
   resume_mode: auto
   resume_from_path: null
+  checkpoint_callback_class: null
   val_before_train: true
   val_only: false
   test_freq: -1
@@ -929,6 +981,15 @@ trainer:
     separate_async:
       num_warmup_batches: 1
       parameter_sync_step: 4
+      hybrid_rollout:
+        _target_: verl.trainer.config.HybridRolloutSwitchConfig
+        enable_switch: false
+        switch_threshold_ratio: 0.4
+        adaptive_switch_threshold: true
+        switch_threshold_step_up: 0.05
+        switch_threshold_step_down: 0.03
+        switch_threshold_release_steps: 2
+        switch_cost_window_size: 3
     sampler:
       max_off_policy_threshold: 8
       max_off_policy_strategy: drop
@@ -943,6 +1004,10 @@ global_profiler:
   steps: null
   profile_continuous_steps: false
   save_path: outputs/profile
+  relocate_results: false
+  finish_hook_cmd: null
+  finish_hook_all_ranks: false
+  finish_hook_ranks: []
   global_tool_config:
     nsys:
       _target_: verl.utils.profiler.config.NsightToolConfig
@@ -990,4 +1055,6 @@ skip:
 ray_kwargs:
   ray_init:
     num_cpus: null
+    runtime_env:
+      py_executable: null
   timeline_json_file: null

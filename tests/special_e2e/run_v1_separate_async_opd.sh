@@ -10,6 +10,20 @@ export VLLM_USE_V1=1
 export NCCL_CUMEM_ENABLE=0
 export NCCL_CUMEM_HOST_ENABLE=0
 
+########################### launch ###########################
+# uv (set VERL_USE_UV=0 for system python, as the non-uv images do): on GPU this
+# runs every python entrypoint here — including the Ray workers, via
+# runtime_env.py_executable — through `uv run` on the matching extras of the
+# committed uv.lock, so the job needs no install step. This script is vllm x
+# megatron throughout. NPU falls back to ambient python.
+LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ]; then
+    UV_EXTRAS=(--extra vllm --extra megatron)
+    LAUNCH=(uv run --frozen --all-packages "${UV_EXTRAS[@]}" python3)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages ${UV_EXTRAS[*]}")
+fi
+
 NUM_GPUS=${NUM_GPUS:-8}
 N_GPUS_TRAINING=${N_GPUS_TRAINING:-4}
 N_GPUS_ROLLOUT=${N_GPUS_ROLLOUT:-2}
@@ -117,7 +131,6 @@ params=(
     actor_rollout_ref.actor.megatron.vanilla_mbridge=False
     actor_rollout_ref.actor.megatron.param_offload=False
     actor_rollout_ref.actor.megatron.optimizer_offload=False
-    actor_rollout_ref.actor.megatron.grad_offload=False
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TRAIN_TP}
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${TRAIN_PP}
     actor_rollout_ref.rollout.name=vllm
@@ -198,6 +211,6 @@ echo "Student: ${STUDENT_MODEL}"
 echo "Teachers: ${GSM8K_TEACHER_MODEL}, ${GEO3K_TEACHER_MODEL}"
 echo "GPUs: ${N_GPUS_TRAINING} training + ${N_GPUS_ROLLOUT} rollout + ${N_GPUS_TEACHERS} teachers"
 
-python3 -m verl.trainer.main_ppo "${params[@]}" "$@"
+"${LAUNCH[@]}" -m verl.trainer.main_ppo "${params[@]}" "${RAY[@]}" "$@"
 
 echo "V1 separate_async Multi-Teacher OPD E2E completed successfully"

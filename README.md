@@ -48,6 +48,9 @@ verl is fast with:
 </p>
 
 ## News
+- [2026/08] [verl-vla](https://github.com/verl-project/verl-vla) `v0.1.0` is released: a unified VLA post-training framework for human-in-the-loop data collection, supervised fine-tuning, and reinforcement learning across simulators, real robots, and distributed cloud-edge resources, built on top of verl.
+- [2026/08] [VeRL-Tinker](https://github.com/verl-project/verl-recipe/tree/main/verl_tinker) is released: keep the Tinker Cookbook loop you know, and run SFT, RL, and distillation on verl-managed GPU workers you control; read the blog [here](https://verl-project.github.io/posts/2026-08-11-verl-tinker/).
+- [2026/08] [VeRL-Omni](https://github.com/verl-project/verl-omni) `v0.2.0` is released: faster diffusion RL, rebuilt Qwen3-Omni multimodal training (DPO & GSPO), plus LTX-2.3, Qwen-Image-Edit support and more.
 - [2026/07] [RL-Insight](https://github.com/verl-project/rl-insight) is released: online observability for reinforcement learning training. RL-Insight connects training-side metrics, RL state traces, and service dashboards across distributed rollout and optimization workloads.
 - [2026/06] [verl-SpeCo](https://github.com/verl-project/verl-SpeCo) is pre-released: a co-training framework for speculative decoding across RL training and inference, keeping draft models aligned during training and reusable for accelerated serving, built on top of verl.
 - [2026/05] [uni-agent](https://github.com/verl-project/uni-agent) is released: a unified agent framework to build, run, and train LLM agents at scale, built on top of verl.
@@ -103,7 +106,7 @@ verl is fast with:
 - Scales up to 671B models and hundreds of GPUs with [expert parallelism](https://github.com/verl-project/verl/pull/1467)
 - Multi-gpu [LoRA RL](https://verl.readthedocs.io/en/latest/advance/ppo_lora.html) support to save memory.
 - Experiment tracking with wandb, swanlab, mlflow and tensorboard.
-- Hardware Support: Supports NVIDIA, AMD, [Ascend](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/README.md)
+- Hardware Support: Supports NVIDIA, AMD, [Ascend](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/zh/README.md)
 
 ## Getting Started
 

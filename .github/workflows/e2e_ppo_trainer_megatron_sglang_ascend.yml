@@ -85,13 +85,18 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # This image is not the uv.cu130 one: it ships its own torch-npu stack, so the
+  # shared e2e scripts must launch with ambient python instead of `uv run`.
+  VERL_USE_UV: 0
+
 jobs:
   e2e_ppo_trainer_megatron-deepseek_ascend:
     if: github.repository_owner == 'verl-project'
     runs-on: linux-aarch64-a3-8
     timeout-minutes: 90 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann8.5.0-torch_npu2.8.0post2-a3-ubuntu22.04-py3.11-sglang
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -111,6 +116,7 @@ jobs:
       UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
       PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
       PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -133,12 +139,6 @@ jobs:
       - name: Check final pip list
         run: |
           uv pip list
-      - name: Configure related dependencies
-        run: |
-          rm -rf /Megatron-LM
-          git clone --depth 1 --branch core_r0.18.0 https://github.com/NVIDIA/Megatron-LM.git /Megatron-LM
-          rm -rf /MindSpeed
-          git clone --depth 1 --branch core_r0.18.0 https://gitcode.com/ascend/MindSpeed.git /MindSpeed
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
@@ -176,7 +176,7 @@ jobs:
     runs-on: linux-aarch64-a3-8
     timeout-minutes: 90 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann8.5.0-torch_npu2.8.0post2-a3-ubuntu22.04-py3.11-sglang
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -196,6 +196,7 @@ jobs:
       UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
       PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
       PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -218,12 +219,6 @@ jobs:
       - name: Check final pip list
         run: |
           uv pip list
-      - name: Configure related dependencies
-        run: |
-          rm -rf /Megatron-LM
-          git clone --depth 1 --branch core_r0.18.0 https://github.com/NVIDIA/Megatron-LM.git /Megatron-LM
-          rm -rf /MindSpeed
-          git clone --depth 1 --branch core_r0.18.0 https://gitcode.com/ascend/MindSpeed.git /MindSpeed
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models

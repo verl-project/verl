@@ -188,6 +188,26 @@ profiler:
   # profile results saving path
   save_path: ${oc.select:global_profiler.save_path,null}
 
+  # When profiling finishes, move backend artifacts written to a framework-fixed location into
+  # save_path. Currently only affects nsys: Ray hardcodes its Nsight output dir
+  # (/tmp/ray/session_latest/logs/nsight). Runs on the profiled ranks.
+  # Default same as relocate_results in global config.
+  relocate_results: ${oc.select:global_profiler.relocate_results,false}
+
+  # Shell command executed on the selected ranks ONCE, after the last profiled step (relocate_results
+  # still runs every profiled step, so traces accumulate in save_path). Running once means an upload
+  # of the whole save_path sends each trace exactly once. Env vars available: VERL_PROFILE_SAVE_PATH,
+  # VERL_PROFILE_TOOL, VERL_PROFILE_RANK, VERL_PROFILE_PID, VERL_PROFILE_ROLE, VERL_PROFILE_RAY_NSIGHT_DIR
+  # (nsys only). null disables it. Default same as finish_hook_cmd in global config.
+  finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+
+  # Run finish_hook_cmd on all ranks. Default same as global config.
+  finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+
+  # Ranks that run finish_hook_cmd. [] or [0,1,...]. Falls back to the profiled ranks when unset.
+  # save_path is usually node-local, so pick one rank per node. Default same as global config.
+  finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
+
   # specific tool config which only related to the role
   tool_config:
 
@@ -227,31 +247,41 @@ profiler:
 
       # Contents to profile, can be empty
       # options: cuda, cpu, memory, shapes, stack
+      # CPU activity is collected either way, since the per-stage markers (update_actor,
+      # compute_log_prob, ...) are CPU-side events and a device-only trace cannot locate them.
       contents: []
 
       # True for each task has its own database, False for all tasks in one training step share one database.
       discrete: false
 
-      # Optional torch.profiler.schedule. Enabled only when active > 0, in which case
-      # profiler.step() advances wait/warmup/active/repeat once per mini-batch.
+      # Optional torch.profiler.schedule over the update loop's mini-batches. Enabled only when
+      # active > 0, in which case profiler.step() (advanced once per update mini-batch) walks it.
+      # discrete: true  -> the update stage gets its own scheduled trace; skip_first/wait/warmup
+      #                    drop leading mini-batches and only the active window is kept. Log-prob
+      #                    and rollout stages get their own full traces.
+      # discrete: false -> one continuous trace per process keeps every stage in full plus the
+      #                    first `active` update mini-batches; skip_first/wait/warmup/repeat are
+      #                    ignored (dropping leading mini-batches would also drop the earlier stages).
+      # Either mode: no "ProfilerStep#<n>" rows are written (a step() here is a mini-batch, not an RL
+      # step); the sub-sampling still happens, only the boundary labels are suppressed.
       schedule:
 
         # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
         _target_: verl.utils.profiler.config.TorchProfilerScheduleConfig
 
-        # Number of steps to skip before the first cycle
+        # Mini-batches to skip before the first cycle (discrete only)
         skip_first: 0
 
-        # Idle steps (no collection) at the start of each cycle
+        # Idle mini-batches (no collection) at the start of each cycle (discrete only)
         wait: 0
 
-        # Warmup steps (tracing on, data discarded) each cycle
+        # Warmup mini-batches (tracing on, data discarded) each cycle (discrete only)
         warmup: 0
 
-        # Active steps to record each cycle; <= 0 disables scheduling
+        # Mini-batches to record each cycle; <= 0 disables scheduling (record the whole update loop)
         active: 0
 
-        # Number of cycles to repeat; 0 repeats until profiling stops
+        # Number of cycles to repeat; 0 repeats until profiling stops (discrete only)
         repeat: 0
 
     # torch memory profiler config
@@ -285,25 +315,6 @@ profiler:
 
       # Whether to fail on unknown stage or missing msprobe
       strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
-
-# Router replay configuration for MoE models
-router_replay:
-
-  # Target dataclass for this configuration
-  _target_: verl.workers.config.RouterReplayConfig
-
-  # Router replay mode: disabled, R2, R3
-  # - R2: Use R2 routing strategy (record mode)
-  # - R3: Use R3 routing strategy (record mode)
-  mode: disabled
-
-  # File path to save recorded routing decisions
-  # Required when mode is 'record', 'R2', or 'R3'
-  record_file: null
-
-  # File path to load recorded routing decisions for replay
-  # Required when mode is 'replay'
-  replay_file: null
 
 # QAT (Quantization-Aware Training) configuration
 # When enabled:

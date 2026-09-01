@@ -24,6 +24,22 @@
 #   - MindSpeed==0.16.0
 #   - Megatron-Bridge==de93536e
 #
+# Requirements on Ascend (Mindspeed-Bridge):
+#   - 8 NPUs (2*64GB each, e.g. 1x8 A3)
+#   - Megatron-LM==core_v0.18.0
+#   - Megatron-Bridge==v0.5.0
+#   - MindSpeed==core_r0.18.0
+#   - MegatronAdaptor==core_r0.18.0
+#   - TransformerEngineNPU==main
+#   -   pip install decorator pybind11 diffusers
+#   - MindSpeed-Ops==master
+#   - Mindspeed-Bridge==master
+#   - flash-linear-attention-npu==v26.1.0
+#       Installation reference: https://github.com/flashserve/flash-linear-attention-npu/blob/v26.1.0/README.md
+#   - Set USE_MINDSPEED_BRIDGE=True to enable ascend GDN performance optimization:
+#       +actor_rollout_ref.actor.megatron.override_transformer_config.use_triton_gdn=False
+#       +actor_rollout_ref.actor.megatron.override_transformer_config.use_ascend_gdn=True
+#
 # Qwen3.5 architecture notes:
 #   Qwen3.5 uses Gated Delta Net (GDN) linear attention which currently does
 #   NOT support packed sequences (THD format) in Megatron-LM. Therefore:
@@ -74,6 +90,8 @@ case "${DEVICE}" in
 esac
 
 ALL_OFFLOAD=${ALL_OFFLOAD:-True}
+# Set to True when using Mindspeed-Bridge to enable ascend GDN performance optimization
+USE_MINDSPEED_BRIDGE=${USE_MINDSPEED_BRIDGE:-False}
 
 rollout_name="vllm"
 project_name='verl_grpo_qwen3_5_35b_geo3k'
@@ -124,7 +142,6 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${ETP}
     actor_rollout_ref.actor.megatron.param_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.megatron.optimizer_offload=${ALL_OFFLOAD}
-    actor_rollout_ref.actor.megatron.grad_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.megatron.dtype=bfloat16
     ++actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=auto
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
@@ -199,10 +216,13 @@ case "${DEVICE}" in
             +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
             +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=alltoall
             +actor_rollout_ref.actor.megatron.override_transformer_config.use_naive_l2norm=True
-
-            +actor_rollout_ref.actor.megatron.override_transformer_config.use_triton_gdn=False
-            +actor_rollout_ref.actor.megatron.override_transformer_config.use_ascend_gdn=True
         )
+        if [ "${USE_MINDSPEED_BRIDGE}" = "True" ]; then
+          ACTOR+=(
+              +actor_rollout_ref.actor.megatron.override_transformer_config.use_triton_gdn=False
+              +actor_rollout_ref.actor.megatron.override_transformer_config.use_ascend_gdn=True
+          )
+        fi
         ROLLOUT+=(
             actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
             actor_rollout_ref.rollout.gpu_memory_utilization=0.65
@@ -223,7 +243,16 @@ esac
 
 ########################### Launch ###########################
 
-python3 -m verl.trainer.main_ppo \
+# uv (set VERL_USE_UV=0 for system python): GPU vllm/sglang × megatron run the driver and every Ray worker
+# (runtime_env.py_executable) through `uv run` on the matching extras of the committed uv.lock;
+# other backends / NPU fall back to ambient python. Run from the verl repo root.
+LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ] && { [ "${rollout_name}" = vllm ] || [ "${rollout_name}" = sglang ]; }; then
+    LAUNCH=(uv run --frozen --all-packages --extra "${rollout_name}" --extra megatron python3)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages --extra ${rollout_name} --extra megatron")
+fi
+"${LAUNCH[@]}" -m verl.trainer.main_ppo \
     "${DATA[@]}" \
     "${ALGORITHM[@]}" \
     "${MODEL[@]}" \
@@ -232,4 +261,5 @@ python3 -m verl.trainer.main_ppo \
     "${REF[@]}" \
     "${TRAINER[@]}" \
     "${EXTRA[@]}" \
+    "${RAY[@]}" \
     "$@"

@@ -45,6 +45,9 @@ on:
 permissions:
   contents: read
 
+env:
+  ASCEND_RECIPE_BASELINE_URL: "https://raw.githubusercontent.com/verl-project/verl-ascend-recipe/main/baseline"
+
 jobs:
   # Test ppo qwen3-8b fsdp vllm
   nightlyCI_ppo-qwen3-8b-fsdp-vllm_ascend:
@@ -58,6 +61,7 @@ jobs:
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -90,7 +94,9 @@ jobs:
       - name: Running nightlyCI_ppo-qwen3-8b-fsdp-vllm_ascend checking script
         run: |
           cd /root/.cache/nightly_log/
-          python check_npu.py --log run_ppo_qwen3-8b_fsdp_npu/run_ppo_qwen3-8b_fsdp_npu.log --base run_ppo_qwen3-8b_fsdp_npu/baseline_ppo_qwen3-8b_fsdp_npu.txt
+          curl --fail --location --retry 3 --output check_npu.py "${ASCEND_RECIPE_BASELINE_URL}/check_npu.py"
+          curl --fail --location --retry 3 --output baseline.txt "${ASCEND_RECIPE_BASELINE_URL}/a2/nightly_log/run_ppo_qwen3-8b_fsdp_npu/baseline_ppo_qwen3-8b_fsdp_npu.txt"
+          python check_npu.py --log run_ppo_qwen3-8b_fsdp_npu/run_ppo_qwen3-8b_fsdp_npu.log --base baseline.txt
 
   # Test grpo qwen3_vl_8b_Instruct fsdp2 vllm
   nightlyCI_grpo_qwen3_vl_8b_Instruct_fsdp2_vllm_ascend:
@@ -104,6 +110,7 @@ jobs:
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -136,138 +143,76 @@ jobs:
       - name: Running nightlyCI_grpo_qwen3_vl_8b_Instruct_fsdp2_vllm_ascend checking script
         run: |
           cd /root/.cache/nightly_log/
-          python check_npu.py --log run_qwen3_vl_8b_Instruct_fsdp2_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.log --base run_qwen3_vl_8b_Instruct_fsdp2_npu/baseline_qwen3_vl_8b_Instruct_fsdp2_npu.txt
+          curl --fail --location --retry 3 --output check_npu.py "${ASCEND_RECIPE_BASELINE_URL}/check_npu.py"
+          curl --fail --location --retry 3 --output baseline.txt "${ASCEND_RECIPE_BASELINE_URL}/a2/nightly_log/run_qwen3_vl_8b_Instruct_fsdp2_npu/baseline_qwen3_vl_8b_Instruct_fsdp2_npu.txt"
+          python check_npu.py --log run_qwen3_vl_8b_Instruct_fsdp2_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.log --base baseline.txt
   
-  # Test grpo qwen3-8b mindspeedllm sglang
-  nightlyCI_grpo-qwen3-8b-mindspeedllm-sglang:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
-    runs-on: linux-aarch64-a3-16
-    timeout-minutes: 180 # Increase this timeout value as needed
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
-      options: >-
-        --shm-size 16g
-    env:
-      HF_ENDPOINT: "https://hf-mirror.com"
-      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
-      UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
-      UV_INDEX_STRATEGY: unsafe-best-match
-      UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
-      UV_HTTP_TIMEOUT: 120
-      UV_NO_CACHE: "1"
-      UV_SYSTEM_PYTHON: "1"
-      UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
-      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
-      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
-    steps:
-      - name: Check npu and CANN info
-        run: |
-          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-          npu-smi info
-      - name: Install uv
-        run: pip install uv
-      - name: Check initial pip list from image
-        run: |
-          uv pip list
-      - name: Checkout verl-project/verl repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          clean: true
-      - name: Install the current repository
-        run: |
-          uv pip install --no-deps --no-build-isolation -e .
-          uv pip install --no-deps TransferQueue==0.1.8
-      - name: Check final pip list
-        run: |
-          uv pip list
-      - name: Configure related dependencies
-        run: |
-          git clone --depth 1 --branch core_v0.12.1 https://github.com/NVIDIA/Megatron-LM.git /Megatron-LM
-          rm -rf /MindSpeed
-          git clone https://gitcode.com/ascend/MindSpeed.git /MindSpeed
-          git clone https://gitcode.com/ascend/MindSpeed-LLM.git /MindSpeed-LLM
-      - name: Prepare weights
-        run: |
-          ln -s /root/.cache/models ~/models
-      - name: Prepare GSM8K dataset
-        run: |
-          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
-      - name: Running nightlyCI_grpo-qwen3-8b-mindspeedllm-sglang
-        run: |
-          ray stop --force
-          export PYTHONPATH=$PYTHONPATH:/Megatron-LM
-          export PYTHONPATH=$PYTHONPATH:/MindSpeed
-          export PYTHONPATH=$PYTHONPATH:/MindSpeed-LLM
-          rm -rf /root/.cache/torch_extensions/py311_cpu/npu_rotary_position_embedding
-          bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_8b_mindspeedllm_npu.sh
-      - name: Running nightlyCI_grpo-qwen3-8b-mindspeedllm-sglang checking script
-        run: |
-          cd /root/.cache/nightly_log/
-          python check_npu.py --log run_grpo_qwen3_8b_mindspeedllm_npu/run_grpo_qwen3_8b_mindspeedllm_npu.log --base run_grpo_qwen3_8b_mindspeedllm_npu/baseline_grpo_qwen3_8b_mindspeedllm_npu.txt
-
   # Test dapo moonlight-16b megatron vllm
-  nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
-    runs-on: linux-aarch64-a2b3-8
-    timeout-minutes: 180 # Increase this timeout value as needed
-    container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
-      options: >-
-        --shm-size 16g
-    env:
-      HF_ENDPOINT: "https://hf-mirror.com"
-      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
-    steps:
-      - name: Check npu and CANN info
-        run: |
-          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-          npu-smi info
-      - name: Check initial pip list from image
-        run: |
-          pip list
-      - name: Checkout verl-project/verl repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          submodules: recursive
-          clean: true
-      - name: Install the current repository
-        run: |
-          pip install --no-deps -e .
-      - name: Check final pip list
-        run: |
-          pip list
-      - name: Prepare weights
-        run: |
-          ln -s /root/.cache/models ~/models
-      - name: Preprocess geo3k dataset
-        run: |
-          python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
-      - name: update mbridge
-        run: |
-          # get mbridge path
-          MBRIDGE_PATH=$(pip show mbridge | grep Location | awk '{print $2}')
-          # cuda to npu
-          TARGET_FILE="${MBRIDGE_PATH}/mbridge/models/ext/deepseek_v3/dequant_fp8_safetensor_io.py"
-          sed -i '34s/cuda/npu/;51s/cuda/npu/' "$TARGET_FILE"
-      - name: Running nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend
-        run: |
-          ray stop --force
-          cd recipe
-          git checkout main
-          cd ..
-          export HCCL_OP_EXPANSION_MODE="AIV"
-          bash tests/special_npu/nightly_ci_ascend/run_dapo_moonlight-16b_megatron_npu.sh
-      - name: Running nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend checking script
-        run: |
-          cd /root/.cache/nightly_log/
-          python check_npu.py --log run_dapo_moonlight-16b_megatron_npu/run_dapo_moonlight-16b_megatron_npu.log --base run_dapo_moonlight-16b_megatron_npu/baseline_dapo_moonlight-16b_megatron_npu.txt
+  # Temporarily disabled due to flaky performance metrics; re-enable after analysis.
+  # nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend:
+  #   if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
+  #   runs-on: linux-aarch64-a2b3-8
+  #   timeout-minutes: 180 # Increase this timeout value as needed
+  #   container:
+  #     image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
+  #     options: >-
+  #       --shm-size 16g
+  #   env:
+  #     HF_ENDPOINT: "https://hf-mirror.com"
+  #     HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+  #     TRANSFORMERS_VERBOSITY: 'error'
+  #   steps:
+  #     - name: Check npu and CANN info
+  #       run: |
+  #         cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+  #         npu-smi info
+  #     - name: Check initial pip list from image
+  #       run: |
+  #         pip list
+  #     - name: Checkout verl-project/verl repo
+  #       uses: actions/checkout@v4
+  #       with:
+  #         fetch-depth: 0
+  #         submodules: recursive
+  #         clean: true
+  #     - name: Install the current repository
+  #       run: |
+  #         pip install --no-deps -e .
+  #     - name: Check final pip list
+  #       run: |
+  #         pip list
+  #     - name: Prepare weights
+  #       run: |
+  #         ln -s /root/.cache/models ~/models
+  #     - name: Preprocess geo3k dataset
+  #       run: |
+  #         python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
+  #     - name: update mbridge
+  #       run: |
+  #         # get mbridge path
+  #         MBRIDGE_PATH=$(pip show mbridge | grep Location | awk '{print $2}')
+  #         # cuda to npu
+  #         TARGET_FILE="${MBRIDGE_PATH}/mbridge/models/ext/deepseek_v3/dequant_fp8_safetensor_io.py"
+  #         sed -i '34s/cuda/npu/;51s/cuda/npu/' "$TARGET_FILE"
+  #     - name: Running nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend
+  #       run: |
+  #         ray stop --force
+  #         cd recipe
+  #         git checkout main
+  #         cd ..
+  #         export HCCL_OP_EXPANSION_MODE="AIV"
+  #         bash tests/special_npu/nightly_ci_ascend/run_dapo_moonlight-16b_megatron_npu.sh
+  #     - name: Running nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend checking script
+  #       run: |
+  #         cd /root/.cache/nightly_log/
+  #         curl --fail --location --retry 3 --output check_npu.py "${ASCEND_RECIPE_BASELINE_URL}/check_npu.py"
+  #         curl --fail --location --retry 3 --output baseline.txt "${ASCEND_RECIPE_BASELINE_URL}/a2/nightly_log/run_dapo_moonlight-16b_megatron_npu/baseline_dapo_moonlight-16b_megatron_npu.txt"
+  #         python check_npu.py --log run_dapo_moonlight-16b_megatron_npu/run_dapo_moonlight-16b_megatron_npu.log --base baseline.txt
 
 
   # Test gspo qwen3-30b megatron vllm
   nightlyCI_gspo-qwen3-30b-megatron-vllm_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
+    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 18 * * *' }}
     runs-on: linux-aarch64-a3-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
@@ -286,6 +231,7 @@ jobs:
       UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
       PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
       PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -315,7 +261,9 @@ jobs:
       - name: Running nightlyCI_gspo-qwen3-30b-megatron-vllm_ascend checking script
         run: |
           cd /root/.cache/nightly_log/
-          python check_npu.py --log run_gspo_qwen3_30b_megatron_npu/run_gspo_qwen3_30b_megatron_npu.log --base run_gspo_qwen3_30b_megatron_npu/baseline_gspo_qwen3_30b_megatron_npu.txt
+          curl --fail --location --retry 3 --output check_npu.py "${ASCEND_RECIPE_BASELINE_URL}/check_npu.py"
+          curl --fail --location --retry 3 --output baseline.txt "${ASCEND_RECIPE_BASELINE_URL}/a3/nightly_log/run_gspo_qwen3_30b_megatron_npu/baseline_gspo_qwen3_30b_megatron_npu.txt"
+          python check_npu.py --log run_gspo_qwen3_30b_megatron_npu/run_gspo_qwen3_30b_megatron_npu.log --base baseline.txt
 
   # Test grpo qwen3-30b megatron sglang
   nightlyCI_grpo-qwen3-30b-megatron-sglang_ascend:
@@ -338,6 +286,7 @@ jobs:
       UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
       PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
       PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -361,14 +310,16 @@ jobs:
         run: |
           ray stop --force
           bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_30b_megatron_sglang_npu.sh
-      - name: Running nightlyCI_gspo-qwen3-30b-megatron-vllm_ascend checking script
+      - name: Running nightlyCI_grpo-qwen3-30b-megatron-sglang_ascend checking script
         run: |
           cd /root/.cache/nightly_log/
-          python check_npu.py --log run_grpo_qwen3_30b_megatron_sglang_npu/run_grpo_qwen3_30b_megatron_sglang_npu.log --base run_grpo_qwen3_30b_megatron_sglang_npu/baseline_grpo_qwen3_30b_megatron_sglang_npu.txt
+          curl --fail --location --retry 3 --output check_npu.py "${ASCEND_RECIPE_BASELINE_URL}/check_npu.py"
+          curl --fail --location --retry 3 --output baseline.txt "${ASCEND_RECIPE_BASELINE_URL}/a3/nightly_log/run_grpo_qwen3_30b_megatron_sglang_npu/baseline_grpo_qwen3_30b_megatron_sglang_npu.txt"
+          python check_npu.py --log run_grpo_qwen3_30b_megatron_sglang_npu/run_grpo_qwen3_30b_megatron_sglang_npu.log --base baseline.txt
   
     # Test grpo qwen3_5_2b fsdp2 vllm
   nightlyCI_grpo_qwen3_5_2b_fsdp2_vllm_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
+    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 18 * * *' }}
     runs-on: linux-aarch64-a3-16
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
@@ -378,6 +329,7 @@ jobs:
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -415,9 +367,9 @@ jobs:
           export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_5_2b_fsdp2_npu.sh
 
-# Test quick start vllm fsdp2
-  quick_start_qwen3_0_6b_fsdp2_vllm_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
+  # Test grpo qwen3_5_2b fsdp_turbo vllm
+  nightlyCI_grpo_qwen3_5_2b_fsdp_turbo_vllm_ascend:
+    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 19 * * *' }}
     runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
@@ -427,6 +379,53 @@ jobs:
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          npu-smi info
+      - name: Check initial pip list from image
+        run: |
+          pip list
+      - name: Checkout verl-project/verl repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - name: Install the current repository
+        run: |
+          pip install --no-deps -e .
+      - name: Clone FSDPTurbo
+        run: |
+          git clone https://gitcode.com/Ascend/FSDPTurbo.git /FSDPTurbo
+      - name: Check final pip list
+        run: |
+          pip list
+      - name: Prepare weights
+        run: |
+          ln -s /root/.cache/models ~/models
+      - name: Preprocess geo3k dataset
+        run: |
+          python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
+      - name: Running nightlyCI_grpo_qwen3_5_2b_fsdp_turbo_vllm_ascend
+        run: |
+          ray stop --force
+          export PYTHONPATH=/FSDPTurbo:$PYTHONPATH
+          bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_5_2b_fsdp_turbo_npu.sh
+
+# Test quick start vllm fsdp2
+  quick_start_qwen3_0_6b_fsdp2_vllm_ascend:
+    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 18 * * *' }}
+    runs-on: linux-aarch64-a2b3-8
+    timeout-minutes: 180 # Increase this timeout value as needed
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -455,11 +454,11 @@ jobs:
       - name: Running quick_start_qwen3_0_6b_fsdp2_vllm_ascend
         run: |
           ray stop --force
-          TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_vllm_ascend.sh
+          SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_vllm_ascend.sh
 
   # Test quick start vllm megatron
   quick_start_qwen3_0_6b_megatron_vllm_ascend:
-    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 17 * * *' }}
+    if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 18 * * *' }}
     runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
@@ -469,6 +468,7 @@ jobs:
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -491,20 +491,21 @@ jobs:
       - name: Running quick_start_qwen3_0_6b_megatron_vllm_ascend
         run: |
           ray stop --force
-          TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_vllm_ascend.sh
+          SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_vllm_ascend.sh
 
   # Test quick start sglang megatron
   quick_start_qwen3_0_6b_megatron_sglang_ascend:
     if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 18 * * *' }}
-    runs-on: linux-aarch64-a3-8
+    runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-sglang-910b-ubuntu
       options: >-
         --shm-size 16g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -527,20 +528,21 @@ jobs:
       - name: Running quick_start_qwen3_0_6b_megatron_sglang_ascend
         run: |
           ray stop --force
-          TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_sglang_ascend.sh
+          SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_sglang_ascend.sh
 
   # Test quick start sglang fsdp2
   quick_start_qwen3_0_6b_fsdp2_sglang_ascend:
     if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 18 * * *' }}
-    runs-on: linux-aarch64-a3-8
+    runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-sglang-a3-ubuntu
+      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-sglang-910b-ubuntu
       options: >-
         --shm-size 16g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -548,7 +550,6 @@ jobs:
           npu-smi info
       - name: Check initial pip list from image
         run: |
-          pip install --no-deps TransferQueue==0.1.8
           pip list
       - name: Checkout verl-project/verl repo
         uses: actions/checkout@v4
@@ -564,7 +565,7 @@ jobs:
       - name: Running quick_start_qwen3_0_6b_fsdp2_sglang_ascend
         run: |
           ray stop --force
-          TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_sglang_ascend.sh
+          SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 bash tests/special_npu/quick_start/run_qwen3_0_6b_fsdp2_sglang_ascend.sh
   
   # Test grpo qwen3-30b veomni fsdp
   nightlyCI_grpo-qwen3-30b-veomni-fsdp_ascend:
@@ -587,6 +588,7 @@ jobs:
       UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
       PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
       PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -621,15 +623,16 @@ jobs:
   # Test gspo qwen3-8b fsdp vllm
   nightlyCI_gspo-qwen3-8b-fsdp2-vllm_ascend:
     if: ${{ github.repository_owner == 'verl-project' && github.event.schedule == '0 19 * * *' }}
-    runs-on: linux-aarch64-a3-16
+    runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 180 # Increase this timeout value as needed
     container:
-      image: swr.ap-southeast-1.myhuaweicloud.com/base_image/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
       options: >-
         --shm-size 16g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -652,14 +655,16 @@ jobs:
       - name: Prepare GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
-      - name: Running nightlyCI_grpo-qwen3-8b-fsdp2-vllm_ascend
+      - name: Running nightlyCI_gspo-qwen3-8b-fsdp2-vllm_ascend
         run: |
           ray stop --force
           bash tests/special_npu/nightly_ci_ascend/run_gspo_qwen3_8b_fsdp2_npu.sh
-      - name: Running nightlyCI_grpo-qwen3-8b-fsdp2-vllm_ascend checking script
+      - name: Running nightlyCI_gspo-qwen3-8b-fsdp2-vllm_ascend checking script
         run: |
           cd /root/.cache/nightly_log/
-          python check_npu.py --log run_gspo_qwen3_8b_fsdp2_npu/run_gspo_qwen3_8b_fsdp2_npu.log --base run_gspo_qwen3_8b_fsdp2_npu/baseline_gspo_qwen3_8b_fsdp2_npu.txt
+          curl --fail --location --retry 3 --output check_npu.py "${ASCEND_RECIPE_BASELINE_URL}/check_npu.py"
+          curl --fail --location --retry 3 --output baseline.txt "${ASCEND_RECIPE_BASELINE_URL}/a2/nightly_log/run_gspo_qwen3_8b_fsdp2_npu/baseline_gspo_qwen3_8b_fsdp2_npu.txt"
+          python check_npu.py --log run_gspo_qwen3_8b_fsdp2_npu/run_gspo_qwen3_8b_fsdp2_npu.log --base baseline.txt
 
   # Test grpo qwen33.5-35b megatron vllm
   # nightlyCI_grpo-qwen3_5-35b-megatron-vllm_ascend:

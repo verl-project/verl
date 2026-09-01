@@ -125,7 +125,7 @@ class AgentLoopOutput(BaseModel):
 
         routed_experts = output.pop("routed_experts", None)
         if routed_experts is not None:
-            routed_experts = torch.tensor(routed_experts, dtype=torch.int64)
+            routed_experts = torch.tensor(routed_experts, dtype=torch.int16)
             # Router replay indexes this field by absolute token position, so it must
             # span the whole sequence. The rollout engine records fewer rows than that:
             # it only sees tokens fed through the model, and multi-turn loops stop
@@ -144,9 +144,12 @@ class AgentLoopOutput(BaseModel):
             rm_scores[-1] = reward_score
             output["rm_scores"] = rm_scores
 
+        # Mutating a default dict does not add the field to Pydantic's fields-set,
+        # so model_dump(exclude_unset=True) can omit populated extra fields.
+        extra_fields = output.setdefault("extra_fields", self.extra_fields.copy())
         teacher_ids, teacher_logprobs = (
-            output["extra_fields"].pop("teacher_ids", None),
-            output["extra_fields"].pop("teacher_logprobs", None),
+            extra_fields.pop("teacher_ids", None),
+            extra_fields.pop("teacher_logprobs", None),
         )
         if teacher_ids is not None:
             output["teacher_ids"] = teacher_ids
@@ -760,6 +763,7 @@ class AgentLoopWorker:
                 experts_tensor = output.routed_experts
             else:
                 raise TypeError(f"Unsupported type for routed_experts: {type(output.routed_experts)}")
+            experts_tensor = experts_tensor.to(torch.int16)
             routed_experts = torch.zeros(1, total_length, layer_num, topk_num, dtype=experts_tensor.dtype)
 
             # Calculate start position: left padding means original prompt starts at the end

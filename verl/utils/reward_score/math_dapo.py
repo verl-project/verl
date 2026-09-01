@@ -235,7 +235,14 @@ def verify(
         correct, pred = is_correct_strict_box(solution_str, answer, pause_tokens_index)
         return correct == 1, pred
 
+    # Prefer Minerva (`Answer: ...`); fall back to `\boxed{}` when it fails.
     correct, pred = is_correct_minerva(solution_str, answer)
+    if pred != "[INVALID]":
+        return correct, pred
+
+    box_correct, box_pred = is_correct_strict_box(solution_str, answer, pause_tokens_index)
+    if box_pred is not None:
+        return box_correct == 1, box_pred
     return correct, pred
 
 
@@ -259,7 +266,7 @@ def compute_score(
     # Limit solution length for efficiency
     solution_str = solution_str[-300:]  # The longest answer in MATH-500 has 159 characters
 
-    # Verify the solution
+    # Verify the solution (Minerva first, then `\boxed{}` fallback unless strict_box_verify)
     correct, pred = verify(solution_str, ground_truth, strict_box_verify, pause_tokens_index)
 
     reward = 1.0 if correct else -1.0

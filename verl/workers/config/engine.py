@@ -35,7 +35,6 @@ __all__ = [
     "EngineConfig",
     "EngineRouterReplayConfig",
     "QATEngineConfig",
-    "MindSpeedEngineConfig",
 ]
 
 
@@ -90,8 +89,6 @@ class EngineConfig(BaseConfig):
     param_offload: bool = False
     # whether to offload optimizer
     optimizer_offload: bool = False
-    # whether to offload grad
-    grad_offload: bool = False
     # whether the engine is forward only (e.g., ref policy)
     forward_only: bool = False
     # the strategy (backend)
@@ -153,8 +150,7 @@ class McoreEngineConfig(EngineConfig):
     The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
 
     Args:
-        param_offload (bool): Whether to offload parameters to CPU.
-        grad_offload (bool): Whether to offload gradients to CPU.
+        param_offload (bool): Whether to offload parameters to CPU and release gradient buffers while inactive.
         optimizer_offload (bool): Whether to offload optimizer states to CPU.
         tensor_model_parallel_size (int): Tensor model parallel size.
         expert_model_parallel_size (int): Expert model parallel size for MoE models.
@@ -261,6 +257,9 @@ class FSDPEngineConfig(EngineConfig):
             debugging.
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
         dtype (str): Mixed precision training param dtype, default "bfloat16"
+        use_no_sync_for_gradient_accumulation (bool): Whether to defer FSDP gradient synchronization until the
+            final micro-batch. Disabling this reduces peak memory by synchronizing and resharding gradients after
+            every micro-batch. default True
         pad_to_length (bool): Round every packed micro-batch up to a multiple of
             ``pad_to_length_bucket`` tokens, so the packed shape only takes a handful of distinct
             values instead of a new one per micro-batch, which avoids repeated kernel
@@ -294,14 +293,16 @@ class FSDPEngineConfig(EngineConfig):
     entropy_from_logits_chunk_size: int = 2048
     use_torch_compile: bool = True
     entropy_checkpointing: bool = False
+    use_no_sync_for_gradient_accumulation: bool = True
     strategy: str = "fsdp"
     pad_to_length: bool = False
     pad_to_length_bucket: int = 1024
     qat: QATEngineConfig = field(default_factory=QATEngineConfig)
+    turbo_config: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         super().__post_init__()
-        assert self.strategy in ["fsdp", "fsdp2"], f"strategy {self.strategy} not supported"
+        assert self.strategy in ["fsdp", "fsdp2", "fsdp_turbo"], f"strategy {self.strategy} not supported"
 
 
 @dataclass
@@ -436,6 +437,7 @@ class VeOmniEngineConfig(EngineConfig):
     dsa_indexer_implementation: str = "eager"
     dsa_attention_implementation: str = "eager"
     mhc_implementation: str = "eager"
+    qat_implementation: str = "none"
     force_use_huggingface: bool = False
     activation_gpu_limit: float = 0.0
     basic_modules: Optional[list[str]] = field(default_factory=list)
@@ -656,30 +658,6 @@ class AutomodelEngineConfig(EngineConfig):
             f"distributed_strategy {self.distributed_strategy} not supported"
         )
         assert self.pp_size == 1, "Pipeline parallelism (pp_size > 1) is not yet supported for automodel backend"
-
-
-@dataclass
-class MindSpeedEngineConfig(McoreEngineConfig):
-    """Configuration for mindspeed parallelism.
-
-    The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
-
-    Args:
-        mcore_kwargs dict[str, Any]: mindspeed_megatron engine kwargs.
-        fsdp_kwargs dict[str, Any]: mindspeed_fsdp engine kwargs.
-    """
-
-    strategy: str = "mindspeed_megatron"
-    mcore_kwargs: dict[str, Any] = field(default_factory=dict)
-    fsdp_kwargs: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        """config validation logics go here"""
-        assert self.strategy in ["mindspeed_megatron", "mindspeed_fsdp"], f"strategy {self.strategy} not supported"
-        assert self.dtype in ["bfloat16", "float16"], f"dtype {self.dtype} not supported"
-        if self.tensor_model_parallel_size == 1:
-            warnings.warn("set sequence parallel to false as TP size is 1", stacklevel=2)
-            self.sequence_parallel = False
 
 
 @dataclass

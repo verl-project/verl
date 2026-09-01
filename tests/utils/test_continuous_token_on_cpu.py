@@ -379,13 +379,12 @@ class _DeepSeekToolOutputTokenizer(_DeepSeekBoundaryTokenizer):
         return rendered
 
 
-_TEXT_FAMILIES = (
+_ROLLBACK_TEMPLATE_EQUIVALENCE_FAMILIES = (
     "default",
     "qwen",
     "qwen25",
     "qwen3",
     "qwen35",
-    "mimo",
     "minimax",
     "minimaxm2",
     "minimaxm25",
@@ -393,7 +392,6 @@ _TEXT_FAMILIES = (
     "glm47",
     "glm5",
     "gemma4",
-    "gptoss",
     "deepseek",
 )
 
@@ -1065,8 +1063,8 @@ def test_default_builder_tokenizes_rewritten_assistant_as_context():
     assert aligned_logprobs == [-0.1] + [0.0] * len(incremental)
 
 
-@pytest.mark.parametrize("family", _TEXT_FAMILIES)
-def test_all_text_families_merge_rewritten_assistant_as_zero_loss_context(family):
+@pytest.mark.parametrize("family", _ROLLBACK_TEMPLATE_EQUIVALENCE_FAMILIES)
+def test_template_compatible_families_merge_rewritten_assistant_as_zero_loss_context(family):
     tokenizer = _tokenizer_for_text_family(family)
     builder = create_continuous_token_builder(tokenizer, model_family=family)
     rollback_checkpoint = [
@@ -1190,6 +1188,65 @@ def test_rewritten_assistant_tool_call_is_visible_to_following_tool_group(builde
         incremental[index : index + len(expected_tool_ids)] == expected_tool_ids
         for index in range(len(incremental) - len(expected_tool_ids) + 1)
     )
+
+
+def test_default_builder_fuses_generation_prompt_into_last_append_group():
+    tokenizer = _RecordingTemplateTokenizer()
+    builder = ContinuousTokenBuilder(tokenizer, chat_template_kwargs={"enable_thinking": False})
+    tools = [{"type": "function", "function": {"name": "lookup"}}]
+    old_messages = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "second question"},
+    ]
+    new_messages = old_messages + [
+        {"role": "tool", "content": "first result", "name": "lookup"},
+        {"role": "tool", "content": "second result", "name": "lookup"},
+    ]
+
+    builder.tokenize_context_incremental_messages(old_messages, new_messages, tools=tools)
+
+    assert len(tokenizer.calls) == 2
+    assert [len(call["messages"]) for call in tokenizer.calls] == [3, 5]
+    assert [call["add_generation_prompt"] for call in tokenizer.calls] == [False, True]
+    assert all(call["tools"] is tools for call in tokenizer.calls)
+    assert all(call["kwargs"] == {"enable_thinking": False} for call in tokenizer.calls)
+
+
+def test_default_builder_only_fuses_generation_prompt_into_final_append_group():
+    tokenizer = _RecordingTemplateTokenizer()
+    builder = ContinuousTokenBuilder(tokenizer)
+    old_messages = [{"role": "user", "content": "question"}]
+    new_messages = old_messages + [
+        {"role": "system", "content": "policy"},
+        {"role": "user", "content": "retry"},
+    ]
+
+    builder.tokenize_context_incremental_messages(old_messages, new_messages)
+
+    assert len(tokenizer.calls) == 4
+    assert [call["add_generation_prompt"] for call in tokenizer.calls] == [False, False, False, True]
+
+
+def test_special_builder_can_keep_separate_full_history_generation_prompt():
+    class FullHistoryGenerationPromptBuilder(ContinuousTokenBuilder):
+        def _should_fuse_generation_prompt_with_last_group(self):
+            return False
+
+    tokenizer = _RecordingTemplateTokenizer()
+    builder = FullHistoryGenerationPromptBuilder(tokenizer)
+    old_messages = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "second question"},
+    ]
+    new_messages = old_messages + [{"role": "user", "content": "retry"}]
+
+    builder.tokenize_context_incremental_messages(old_messages, new_messages)
+
+    assert len(tokenizer.calls) == 4
+    assert [len(call["messages"]) for call in tokenizer.calls] == [2, 3, len(new_messages), len(new_messages)]
+    assert [call["add_generation_prompt"] for call in tokenizer.calls] == [False, False, False, True]
 
 
 def test_default_builder_rejects_multi_message_user_or_system_groups():
@@ -1677,6 +1734,10 @@ class TestWiringVLFactory:
         class MockTokenizer:
             name_or_path = "google/gemma-4-27b-it"
 
+            def encode(self, text, add_special_tokens=False):
+                del add_special_tokens
+                return [198] if text == "<turn|>\n" else [1, 2, 3]
+
             def convert_tokens_to_ids(self, token):
                 return {"<|tool_response>": 12345}.get(token, 0)
 
@@ -1689,6 +1750,37 @@ class TestWiringVLFactory:
             processor=MockProcessor(),
         )
         assert isinstance(builder, Gemma4VLContinuousTokenBuilder)
+        assert builder.supports_multimodal() is True
+
+    def test_qwen35_unified_with_processor_upgrades_to_vl(self):
+        """Qwen3.5 (unified checkpoint, no vl marker) + processor -> Qwen VL builder."""
+        from verl.utils.tokenizer.continuous_token import QwenVLContinuousTokenBuilder
+        from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
+
+        class MockTokenizer:
+            name_or_path = "Qwen/Qwen3.5-35B-A3B"
+
+            def encode(self, text, add_special_tokens=False):
+                return [198] if text == "\n" else [1, 2, 3]
+
+            def convert_tokens_to_ids(self, token):
+                mapping = {
+                    "<|im_end|>": 151645,
+                    "<|vision_start|>": 151652,
+                    "<|vision_end|>": 151653,
+                    "<|image_pad|>": 151655,
+                }
+                return mapping.get(token, 0)
+
+        class MockProcessor:
+            image_processor = type("IP", (), {"merge_size": 2})()
+
+        builder = create_continuous_token_builder(
+            MockTokenizer(),
+            hf_model_type="qwen3_5_moe",
+            processor=MockProcessor(),
+        )
+        assert isinstance(builder, QwenVLContinuousTokenBuilder)
         assert builder.supports_multimodal() is True
 
     def test_text_specific_family_with_processor_raises(self):

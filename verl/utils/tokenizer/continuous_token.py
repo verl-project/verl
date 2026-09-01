@@ -69,9 +69,9 @@ class ContinuousTokenBuilder:
         Model-specific builders should subclass this class and keep the runtime
         API contracts above stable. Chat template specific behavior belongs in hooks
         such as ``_tokenize_tool_group``, ``_tokenize_single_non_tool``,
+        ``_should_fuse_generation_prompt_with_last_group``,
         ``_tokenize_generation_prompt_delta``, and ``_merge_context_token_ids``.
-        ``render_delta_token_id`` is the shared suffix-diff helper those hooks can
-        reuse.
+        ``render_delta_token_id`` is the shared suffix-diff helper those hooks can reuse.
     """
 
     allowed_append_roles: frozenset[str] = _SUPPORTED_APPEND_ROLES
@@ -122,7 +122,10 @@ class ContinuousTokenBuilder:
         processed_messages = list(previous_messages)
 
         groups = self._iter_append_groups(appended_messages)
-        for group_index, group in enumerate(groups):
+        fuse_generation_prompt = self._should_fuse_generation_prompt_with_last_group()
+
+        for index, group in enumerate(groups):
+            add_generation_prompt = fuse_generation_prompt and index == len(groups) - 1
             role = group[0].get("role")
             if role == "tool":
                 incremental_ids.extend(
@@ -130,6 +133,7 @@ class ContinuousTokenBuilder:
                         group,
                         previous_messages=processed_messages,
                         tools=tools,
+                        add_generation_prompt=add_generation_prompt,
                     )
                 )
             elif role in {"user", "system", "assistant"}:
@@ -138,20 +142,21 @@ class ContinuousTokenBuilder:
                     raise ValueError(
                         f"Continuous Token expects one {role!r} message per append group, got {len(group)}"
                     )
-                if role == "assistant" and group_index == len(groups) - 1:
+                if role == "assistant" and index == len(groups) - 1:
                     raise ValueError("Continuous Token context incremental messages cannot end with assistant")
                 incremental_ids.extend(
                     self._tokenize_single_non_tool(
                         group[0],
-                        add_generation_prompt=False,
                         tools=tools,
+                        add_generation_prompt=add_generation_prompt,
                     )
                 )
             else:
                 raise ValueError(f"Unsupported Continuous Token append role: {role!r}")
             processed_messages.extend(group)
 
-        incremental_ids.extend(self._tokenize_generation_prompt_delta(updated_messages, tools=tools))
+        if not fuse_generation_prompt:
+            incremental_ids.extend(self._tokenize_generation_prompt_delta(updated_messages, tools=tools))
         return incremental_ids
 
     def merge_context_tokens(
@@ -230,11 +235,13 @@ class ContinuousTokenBuilder:
         *,
         previous_messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        add_generation_prompt: bool = False,
     ) -> list[int]:
         synthetic_assistant = self._synthetic_assistant_for_tools(tool_messages)
         return self.render_delta_token_id(
             [_SYNTHETIC_SYSTEM_MESSAGE, _SYNTHETIC_USER_MESSAGE, synthetic_assistant],
             tool_messages,
+            add_generation_prompt=add_generation_prompt,
             tools=tools,
         )
 
@@ -242,8 +249,8 @@ class ContinuousTokenBuilder:
         self,
         message: dict[str, Any],
         *,
-        add_generation_prompt: bool = False,
         tools: list[dict[str, Any]] | None = None,
+        add_generation_prompt: bool = False,
     ) -> list[int]:
         return self.render_delta_token_id(
             [_SYNTHETIC_SYSTEM_MESSAGE, _SYNTHETIC_USER_MESSAGE],
@@ -251,6 +258,15 @@ class ContinuousTokenBuilder:
             add_generation_prompt=add_generation_prompt,
             tools=tools,
         )
+
+    def _should_fuse_generation_prompt_with_last_group(self) -> bool:
+        """Whether the last append-group render should also add the generation prompt.
+
+        Builders whose chat template derives the generation scaffold from more than
+        the appended group may return ``False`` and implement
+        :meth:`_tokenize_generation_prompt_delta` using the required history.
+        """
+        return True
 
     def _tokenize_generation_prompt_delta(
         self,
@@ -438,14 +454,20 @@ class GptOssContinuousTokenBuilder(ContinuousTokenBuilder):
             tools=tools,
         )
 
+    def _should_fuse_generation_prompt_with_last_group(self) -> bool:
+        # Tool responses are encoded directly rather than through a chat-template
+        # suffix diff, so keep generation-prompt derivation as a separate step.
+        return False
+
     def _tokenize_tool_group(
         self,
         tool_messages: list[dict[str, Any]],
         *,
         previous_messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        add_generation_prompt: bool = False,
     ) -> list[int]:
-        del tools
+        del tools, add_generation_prompt
         response_text = "".join(
             self._format_tool_response(
                 tool_message,
@@ -659,13 +681,20 @@ class Gemma4ContinuousTokenBuilder(ContinuousTokenBuilder):
         rendered_ids = self._render_tokens(processed_messages, add_generation_prompt=False, tools=tools)
         return rendered_ids[-len(separator_ids) :] == separator_ids
 
+    def _should_fuse_generation_prompt_with_last_group(self) -> bool:
+        # Gemma4's generation scaffold depends on the preceding message type and
+        # is handled by the model-specific hook below.
+        return False
+
     def _tokenize_tool_group(
         self,
         tool_messages: list[dict[str, Any]],
         *,
         previous_messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        add_generation_prompt: bool = False,
     ) -> list[int]:
+        del add_generation_prompt
         tool_calls = []
         rendered_tool_messages = []
         for index, tool_message in enumerate(tool_messages):
@@ -976,7 +1005,10 @@ class DeepSeekContinuousTokenBuilder(ContinuousTokenBuilder):
         processed_messages = list(previous_messages)
 
         groups = self._iter_append_groups(appended_messages)
-        for group_index, group in enumerate(groups):
+        fuse_generation_prompt = self._should_fuse_generation_prompt_with_last_group()
+
+        for index, group in enumerate(groups):
+            add_generation_prompt = fuse_generation_prompt and index == len(groups) - 1
             role = group[0].get("role")
             if role == "tool":
                 incremental_ids.extend(
@@ -984,6 +1016,7 @@ class DeepSeekContinuousTokenBuilder(ContinuousTokenBuilder):
                         group,
                         previous_messages=processed_messages,
                         tools=tools,
+                        add_generation_prompt=add_generation_prompt,
                     )
                 )
             elif role in {"user", "system", "assistant"}:
@@ -991,14 +1024,14 @@ class DeepSeekContinuousTokenBuilder(ContinuousTokenBuilder):
                     raise ValueError(
                         f"Continuous Token expects one {role!r} message per append group, got {len(group)}"
                     )
-                if role == "assistant" and group_index == len(groups) - 1:
+                if role == "assistant" and index == len(groups) - 1:
                     raise ValueError("Continuous Token context incremental messages cannot end with assistant")
                 if role == "user":
                     self._strip_trailing_tool_outputs_end(incremental_ids)
                 incremental_ids.extend(
                     self._tokenize_single_non_tool(
                         group[0],
-                        add_generation_prompt=False,
+                        add_generation_prompt=add_generation_prompt,
                         tools=tools,
                     )
                 )
@@ -1006,7 +1039,8 @@ class DeepSeekContinuousTokenBuilder(ContinuousTokenBuilder):
                 raise ValueError(f"Unsupported Continuous Token append role: {role!r}")
             processed_messages.extend(group)
 
-        incremental_ids.extend(self._tokenize_generation_prompt_delta(updated_messages, tools=tools))
+        if not fuse_generation_prompt:
+            incremental_ids.extend(self._tokenize_generation_prompt_delta(updated_messages, tools=tools))
         return incremental_ids
 
     def merge_context_tokens(
