@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>StarMapCompression Metrics</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <h1>StarMapCompression: RL Compression Metrics</h1>
+    <canvas id="metricsChart" width="800" height="400"></canvas>
+    <script>
+        fetch('starmap_metrics.jsonl')
+            .then(response => response.text())
+            .then(data => {
+                const lines = data.trim().split('\n');
+                const metrics = lines.map(line => JSON.parse(line));
+                const steps = metrics.map(m => m.step);
+                const numPoints = metrics.map(m => m.num_points);
+                const rewards = metrics.map(m => m.reward);
+
+                const ctx = document.getElementById('metricsChart').getContext('2d');
+                new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: steps,
+                        datasets: [
+                            {
+                                label: 'Number of Points',
+                                data: numPoints,
+                                borderColor: 'blue',
+                                fill: false
+                            },
+                            {
+                                label: 'Reward',
+                                data: rewards,
+                                borderColor: 'green',
+                                fill: false
+                            }
+                        ]
+                    },
+                    options: {
+                        scales: {
+                            x: { title: { display: true, text: 'Step' } },
+                            y: { title: { display: true, text: 'Value' } }
+                        }
+                    }
+                });
+            });
+    </script>
+</body>
+</html>

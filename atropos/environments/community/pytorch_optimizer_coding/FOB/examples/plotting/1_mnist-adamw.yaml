@@ -1,0 +1,27 @@
+task:
+  name: mnist
+optimizer:
+  name: adamw_baseline
+  learning_rate: [1.0e-2, 1.0e-3]
+  weight_decay: [0.1, 0.01]
+engine:
+  data_dir: ./examples/data
+  output_dir: ./examples/plotting/outputs
+  seed: [1, 2]
+evaluation:
+  output_dir: ./examples/plotting
+  experiment_name: 1_mnist-adamw
+  checkpoints:
+    - last
+  output_types:
+    - png
+  plot:
+    std: True
+    x_axis:
+      - optimizer.weight_decay
+    y_axis:
+      - optimizer.learning_rate
+  plotstyle:
+    tight_layout: False  # the title is a little bit squeezed with this
+    text:
+      usetex: True
