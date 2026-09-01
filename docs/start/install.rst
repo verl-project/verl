@@ -440,6 +440,274 @@ After pulling the desired Docker image and installing desired inference and trai
     pip3 install -e ".[sglang]"
 
 
+Install with uv
+---------------------------------------------------------
+
+verl provides a `uv <https://docs.astral.sh/uv/>`_ workflow that installs the
+exact packages for the backends you choose into a single project virtual
+environment (``.venv``), kept reproducible by one ``uv.lock``. You select
+backends as **extras**:
+
+- Inference: ``vllm`` or ``sglang``.
+- Training: ``fsdp`` or ``megatron``.
+- ``cpu``: GPU-free, for CI / quick checks.
+
+.. note::
+
+   The uv workflow targets **Linux x86_64 with Python 3.12**. For Ascend NPU,
+   AMD ROCm, or aarch64 GPUs, use the dedicated images / sections instead.
+
+.. note::
+
+   ``uv sync`` never compiles a native package from source. ``apex``,
+   ``transformer-engine`` and ``flash-attn`` — plus the pure-python
+   ``megatron-bridge`` — are pulled **prebuilt** from the verl wheelhouse index
+   (`verl-project.github.io/verl-wheelhouse
+   <https://verl-project.github.io/verl-wheelhouse/simple/>`_, wired in
+   ``pyproject.toml`` under ``[tool.uv.index]`` / ``[tool.uv.sources]``); those
+   wheels are built for cu130 / torch 2.11 / CPython 3.12. The inference engines
+   (``vllm``, ``sglang``, ``sglang-kernel``) come straight from PyPI, whose
+   wheels for the pinned versions are already cu130 / torch-2.11 builds. Only the
+   git-sourced ``megatron-core`` (``core_v0.18.0``, paired with
+   ``megatron-bridge`` 0.5.2) and ``mbridge`` are built at sync time.
+
+Run with the uv Docker image
+:::::::::::::::::::::::::::::::::::::::::::::::::::::
+
+Build the image once, then pick your backend combination at run time:
+
+.. code:: bash
+
+   DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.uv.cu130 -t verl:uv-cu130 .
+
+   docker run --rm -it --gpus all verl:uv-cu130 bash
+   # then, inside the container, sync the backends you want and train:
+   python3 manage_envs.py sync vllm fsdp -- --frozen
+   python3 -m verl.trainer.main_ppo trainer.n_gpus_per_node=8 ...
+
+   # switch combination at any time — it re-points the same .venv:
+   python3 manage_envs.py sync sglang megatron -- --frozen
+
+Every role in a job (rollout and training) runs from the same ``.venv``.
+
+Valid backend combinations
+:::::::::::::::::::::::::::::::::::::::::::::::::::
+
+A typical run combines **one inference engine** with **one training backend**,
+for example ``vllm fsdp``. The rules:
+
+- Choose at most one inference engine: ``vllm`` **or** ``sglang`` (not both).
+- Add a training backend: ``fsdp`` (default) or ``megatron``.
+- ``cpu`` is GPU-free and is used on its own.
+
+``manage_envs.py`` validates your selection and explains any conflict, so when
+in doubt run ``python manage_envs.py list`` to see the backends and your
+current ``.venv``.
+
+Other backends
+::::::::::::::::
+
+Ascend NPU, AMD ROCm, aarch64 GPUs, and ``trtllm`` are outside the uv
+workflow. Use the standalone Dockerfiles instead — for example
+``docker/ascend/`` (Ascend), ``docker/rocm/Dockerfile.rocm`` (AMD), or
+``docker/Dockerfile.stable.trtllm`` (TensorRT-LLM).
+
+Upgrade or modify dependencies
+::::::::::::::::::::::::::::::::::::
+
+To upgrade, downgrade, or pin a package (e.g. ``vllm``), edit its version in
+``pyproject.toml``, refresh the lockfile, and validate:
+
+.. code:: bash
+
+   # 1. edit pyproject.toml — e.g. bump the vllm pin in the [vllm] extra
+   # 2. refresh the lockfile and check the combination resolves:
+   python manage_envs.py lock                 # regenerate uv.lock
+   python manage_envs.py sync vllm fsdp       # install + validate
+   # 3. commit the manifest and the lockfile together:
+   git add pyproject.toml uv.lock
+
+Package versions live under ``[project.optional-dependencies]`` in
+``pyproject.toml`` (one block per backend); a few project-wide pins
+(``numpy``, ``kernels``, ``transformers``) live under
+``[tool.uv].override-dependencies``. Update every place the package appears.
+
+``transformers`` is pinned project-wide to ``5.9.0``, so every backend combo
+gets the same version regardless of which engine it was synced with. The
+override is unmarked and overrides are absolute, so it also replaces the
+engines' own requirements (``vllm`` asks ``>=5.5.3``, ``sglang`` hard-pins
+``==5.6.0``). Keep the pin inside the window declared in ``setup.py`` /
+``requirements.txt`` (``>=5.5.3,!=5.6.0,<5.11``) and bump the ``kernels``
+override alongside it, since its window tracks the pinned ``transformers``.
+
+To try a version without committing, install it into an already-synced
+``.venv`` (reverted on the next ``sync``)::
+
+   source .venv/bin/activate
+   uv pip install -U vllm        # or: uv pip install vllm==<version>
+
+.. note::
+
+   Upgrading ``vllm`` / ``sglang`` may require a matching ``torch`` (all GPU
+   backends share the same ``torch``), and a large ``torch`` / CUDA bump may
+   need a different Docker base image.
+
+
+Install with uv in a custom environment
+---------------------------------------------
+
+If you are not using the Docker image, install into your own host or base
+image. ``uv sync`` installs Python packages only, so bring a base whose CUDA
+runtime matches the GPU backends you sync.
+
+Pick a base image
+::::::::::::::::::::
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Extra(s)
+     - Recommended base image
+   * - ``vllm`` / ``fsdp`` / ``megatron``
+     - ``nvidia/cuda:13.0.2-devel-ubuntu24.04`` (matches ``docker/Dockerfile.uv.cu130``)
+   * - ``sglang``
+     - ``lmsysorg/sglang:v0.5.12`` or ``nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04``
+   * - ``cpu`` (CI / sanity)
+     - any x86_64 Linux host with Python 3.12; no GPU needed
+
+Set up and sync
+:::::::::::::::::::::::
+
+.. code:: bash
+
+   # one-time: install uv
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+
+   git clone https://github.com/verl-project/verl.git
+   cd verl
+
+   # create / update .venv for a backend combination:
+   python manage_envs.py sync vllm fsdp        # vLLM rollout + FSDP training
+   python manage_envs.py sync sglang megatron  # SGLang rollout + Megatron training
+   python manage_envs.py sync cpu              # GPU-free, for CI / quick checks
+
+``manage_envs.py`` is the recommended entry point: it validates your
+combination and drives ``uv`` with the right flags. Other useful
+commands:
+
+.. code:: bash
+
+   python manage_envs.py list                # backends, valid combinations, .venv state
+   python manage_envs.py shell vllm fsdp     # sync, then open a shell in the .venv
+   python manage_envs.py clean               # delete the .venv to start over
+   python manage_envs.py --help
+
+   # forward flags to uv after `--`, e.g. force a clean reinstall:
+   python manage_envs.py sync vllm fsdp -- --reinstall
+
+The equivalent raw ``uv`` command is::
+
+   uv sync --python 3.12 --extra vllm --extra fsdp
+
+Name a separate venv
+::::::::::::::::::::::
+
+By default every combination reuses the same ``.venv``. To keep several
+combinations (or per-user / per-run envs) side by side, add ``--name NAME`` (or
+set ``VERL_VENV_NAME``)::
+
+   python manage_envs.py sync --name vllm-mega vllm megatron
+   python manage_envs.py sync --name sglang-fsdp sglang fsdp
+
+``.venv`` always tracks the combination you synced most recently, so activation
+is unchanged::
+
+   source .venv/bin/activate
+
+The same ``--name`` works with ``run`` / ``shell`` / ``clean`` / ``list`` (for
+``sync`` / ``run`` put it before the extras); ``python manage_envs.py list``
+shows what you have.
+
+Keep your own build of a package
+::::::::::::::::::::::::::::::::::
+
+If you have an in-house build of a package (for example a custom ``ray`` or
+``wandb``) that must not be overwritten, list it in ``VERL_UV_NO_INSTALL`` and
+install it yourself after syncing::
+
+   export VERL_UV_NO_INSTALL="ray wandb"
+   python manage_envs.py sync vllm fsdp      # installs everything except ray / wandb
+   uv pip install <your ray / wandb wheels>
+
+Run code in the .venv
+:::::::::::::::::::::::
+
+.. code:: bash
+
+   # activate it:
+   source .venv/bin/activate
+   python -m verl.trainer.main_ppo ...
+
+   # or run without activating:
+   python manage_envs.py run vllm fsdp -- python -m verl.trainer.main_ppo ...
+
+All Ray worker groups in a job share this single ``.venv`` — sync one
+combination that covers every role you need (e.g. ``vllm megatron``), then
+launch normally.
+
+Example scripts and the ``VERL_USE_UV`` toggle
+::::::::::::::::::::::::::::::::::::::::::::::::::
+
+The launch scripts under ``examples/`` (vllm/sglang × fsdp/megatron) use this
+``.venv`` automatically: run from the repo root, they start the trainer with
+``uv run --frozen --all-packages --extra <engine> --extra <trainer>``, which
+materializes the ``.venv`` from the committed ``uv.lock`` on first use, and they
+hand the same command to Ray as
+``ray_kwargs.ray_init.runtime_env.py_executable`` so the TaskRunner and every
+worker actor resolve that same environment. During the transition you can opt
+out and use the ambient/system python instead by setting ``VERL_USE_UV=0``, which
+also leaves ``py_executable`` at its ``null`` default::
+
+    # default: run inside the uv-managed .venv
+    bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
+
+    # transition fallback: system python, no uv
+    VERL_USE_UV=0 bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
+
+NPU / trtllm and other non-uv backends already fall back to system python
+regardless of ``VERL_USE_UV``: every uv branch is additionally gated on
+``[ "${DEVICE:-gpu}" = gpu ]``, so ``DEVICE=npu`` never reaches uv (the lockfile
+resolves the CUDA backends only) and Ascend runs keep the ambient interpreter,
+including for Ray workers. ``tests/special_sanity/check_uv_gpu_only.py`` (a
+pre-commit hook) enforces that: uv commands must sit inside that gate, and
+NPU-only trees such as ``examples/ascend_extras/`` and ``tests/special_npu/``
+must not reference uv at all.
+
+Troubleshooting
+:::::::::::::::
+
+- **``uv: command not found``** — ``curl -LsSf https://astral.sh/uv/install.sh | sh``.
+- **A combination is rejected** — you selected two inference engines; pick
+  ``vllm`` **or** ``sglang``.
+- **``No solution found`` for ``apex`` / ``transformer-engine`` /
+  ``flash-attn``** — these are pulled prebuilt from the verl wheelhouse (see the
+  note under *Install with uv*). It means the resolver found no matching wheel
+  for your platform or the wheelhouse was unreachable; the uv flow supports only
+  cu130 / torch 2.11 / CPython 3.12 on Linux x86_64.
+- **``No solution found`` for ``vllm`` / ``sglang`` / ``sglang-kernel``** — these
+  come from PyPI, which publishes them only for Linux x86_64 (and ``sglang``
+  only for glibc >= 2.34), so the same platform limits apply.
+- **``uv sync`` / ``uv lock`` fails on macOS** — the uv workflow is Linux
+  x86_64 only; use a Linux host or the Docker image.
+- **Start over** — ``python manage_envs.py clean`` then sync again.
+
+Some system-level pieces are not handled by ``uv sync`` (the Dockerfiles set
+them up): system apt packages, GDRCopy + DeepEP for MoE all-to-all, Mooncake
+for SGLang KV-cache transfer, the flashinfer JIT cache, and sgl-router. See
+``docker/Dockerfile.stable.{vllm,sglang}`` for reference.
+
+
 Install with AMD GPUs - ROCM kernel support
 ------------------------------------------------------------------
 
