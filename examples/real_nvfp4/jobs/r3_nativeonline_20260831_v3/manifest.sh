@@ -42,7 +42,7 @@ readonly RN4PT_SMOKE_PASS=$RN4PT_STATE/smoke.pass
 rn4pt_die() { echo "REAL_NVFP4_PERTOKEN_REFUSED: $*" >&2; return 2; }
 
 rn4pt_validate_static() {
-  local path
+  local path scan_status
   [[ -d "$RN4PT_VERL/.git" || -f "$RN4PT_VERL/.git" ]] || rn4pt_die "worktree missing" || return
   [[ -z "$(git -C "$RN4PT_VERL" status --porcelain --untracked-files=normal)" ]] || \
     rn4pt_die "worktree must be clean so the runtime image and source commit cannot diverge" || return
@@ -98,10 +98,14 @@ rn4pt_validate_static() {
   grep -q 'defer_last_ack=True' "$RN4PT_VERL/verl/workers/rollout/vllm_rollout/utils.py" || rn4pt_die "post-finalize ACK missing" || return
   grep -q 'require_vllm_native_reload_contract' "$RN4PT_VERL/verl/workers/rollout/vllm_rollout/utils.py" || rn4pt_die "native reload API gate missing" || return
   grep -q 'VERL_REAL_NVFP4_ENGINE_CONTRACT PASS' "$RN4PT_VERL/verl/workers/rollout/vllm_rollout/vllm_async_server.py" || rn4pt_die "engine runtime contract marker missing" || return
-  ! rg -q 'three_stability|adv_length_norm_enable|seg_gate_enable|alignment_loss_enable|GP95_|custom[-_]loss' \
-    "$RN4PT_VERL/verl" \
-    "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" \
-    "$RN4PT_ROOT/main_dapo_compat.py" || rn4pt_die "three-loss implementation leaked into branch" || return
+  if git -C "$RN4PT_VERL" grep -Eq \
+    'three_stability|adv_length_norm_enable|seg_gate_enable|alignment_loss_enable|GP95_|custom[-_]loss' -- \
+    verl examples/real_nvfp4/run_qwen3_30b_megatron.sh examples/real_nvfp4/main_dapo_compat.py; then
+    rn4pt_die "three-loss implementation leaked into branch" || return
+  else
+    scan_status=$?
+    [[ $scan_status -eq 1 ]] || rn4pt_die "three-loss source scan failed" || return
+  fi
   git -C "$RN4PT_VERL" diff --check || return
   git -C "$RN4PT_VERL" diff --cached --check || return
 }

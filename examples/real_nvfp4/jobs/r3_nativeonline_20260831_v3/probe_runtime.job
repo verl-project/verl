@@ -21,9 +21,12 @@ UV_BIN=$(command -v uv || true)
 if [[ -z "$UV_BIN" && -x /opt/verl-real-nvfp4/.venv/bin/uv ]]; then
   UV_BIN=/opt/verl-real-nvfp4/.venv/bin/uv
 fi
-[[ -n "$UV_BIN" && -x "$UV_BIN" ]]
-echo "UV_CANDIDATE=$UV_BIN"
-"$UV_BIN" --version
+if [[ -n "$UV_BIN" && -x "$UV_BIN" ]]; then
+  echo "UV_CANDIDATE=$UV_BIN"
+  "$UV_BIN" --version
+else
+  echo "UV_CANDIDATE=MISSING"
+fi
 find /opt -maxdepth 4 -name pyvenv.cfg -print 2>/dev/null | sort
 for candidate in \
   /opt/verl-real-nvfp4/.venv/bin/python \
@@ -70,7 +73,7 @@ srun --container-image="$RN4PT_BASE_IMAGE" \
 
 grep -q '^arch=aarch64 ' "$PROBE_LOG" || rn4pt_die "base image is not aarch64"
 grep -q '^PYTHON_CANDIDATE=' "$PROBE_LOG" || rn4pt_die "base image has no usable Python"
-grep -q '^UV_CANDIDATE=' "$PROBE_LOG" || rn4pt_die "base image has no usable uv"
+grep -q '^pip ' "$PROBE_LOG" || rn4pt_die "base image has neither uv nor a usable pip bootstrap"
 for required_command in gcc g++ cmake ninja git; do
   grep -q "/$required_command$" "$PROBE_LOG" || rn4pt_die "base image lacks $required_command"
 done
