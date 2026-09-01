@@ -11,8 +11,8 @@ case "$PHASE" in
   *) rn4pt_die "usage: $0 probe|build|preflight|smoke|short" ;;
 esac
 
-if squeue -h -u "$USER" -t RUNNING,PENDING | grep -q .; then
-  rn4pt_die "existing running/pending jobs found; inspect before submitting another test"
+if squeue -h -u "$USER" -t RUNNING,PENDING -o '%j' | grep -q '^verl-rn4pt-'; then
+  rn4pt_die "an existing real-NVFP4 bundle job is already running or pending"
 fi
 
 case "$PHASE" in
