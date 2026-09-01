@@ -10,7 +10,7 @@
 set -euo pipefail
 export RN4PT_SKIP_UV_LOCK_CHECK=1
 # shellcheck disable=SC1091
-source /lustre/fsw/general_sa/shuazhang/python_space/verl_for_nvfp4_20251031/verl_nvfp4_e2e_r3_20260831_v3/examples/real_nvfp4/jobs/r3_nativeonline_20260901_v8/manifest.sh
+source "${RN4PT_MANIFEST_OVERRIDE:-/lustre/fsw/general_sa/shuazhang/python_space/verl_for_nvfp4_20251031/verl_nvfp4_e2e_r3_20260831_v3/examples/real_nvfp4/jobs/r3_nativeonline_20260901_v8/manifest.sh}"
 rn4pt_validate_static
 [[ -s "$RN4PT_BUILD_PASS" ]] || rn4pt_die "runtime build has not passed"
 rn4pt_require_runtime_image
@@ -37,7 +37,9 @@ cd $RN4PT_VERL
 python - <<'PY'
 import inspect
 import json
-from importlib.metadata import version
+from importlib.metadata import distribution, version
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import torch
 import transformer_engine.pytorch as te
@@ -47,6 +49,7 @@ from transformer_engine.common.recipe import NVFP4BlockScaling
 from transformer_engine.pytorch.module.grouped_linear import GroupedLinear
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import make_nvfp4_moe_kernel
 from vllm.model_executor.layers.quantization import get_quantization_config
+from vllm.model_executor.layers.quantization.online import nvfp4 as nvfp4_online
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
     _quantize_moe_weight_to_nvfp4,
@@ -137,6 +140,66 @@ assert packed.dtype == torch.uint8 and tuple(packed.shape) == (4, 128, 32)
 assert scale.dtype == torch.float8_e4m3fn and tuple(scale.shape) == (4, 128, 4)
 assert scale2.dtype == torch.float32 and tuple(scale2.shape) == (4,)
 
+hotfix_required = bool("${RN4PT_VLLM_EXPERT_PACKING_COMMIT:-}")
+if hotfix_required:
+    # Exact vLLM #50029 regression semantics: online packing must quantize each
+    # original expert directly, without a whole-tensor FP32/BF16 temporary.
+    expected = [
+        nvfp4_online.scaled_fp4_quant(
+            expert_weight,
+            expert_scale,
+            is_sf_swizzled_layout=False,
+        )
+        for expert_weight, expert_scale in zip(weight, 1.0 / scale2, strict=True)
+    ]
+    assert torch.equal(packed, torch.stack([value for value, _ in expected]))
+    assert torch.equal(scale, torch.stack([value for _, value in expected]))
+
+    source = distribution("vllm").locate_file(
+        "vllm/model_executor/layers/quantization/online/nvfp4.py"
+    ).read_text()
+    assert "quantized_experts = [" in source
+    assert "scaled = scaled.reshape(-1, k)" not in source
+    assert "if self.moe_kernel is None:" in source
+
+    # Exact vLLM #50074 lifecycle semantics: reload converts and processes the
+    # new weights again, but CUDA-graph users keep one stable kernel object.
+    method = object.__new__(Nvfp4OnlineMoEMethod)
+    method.moe = SimpleNamespace(is_act_and_mul=True)
+    method.nvfp4_backend = object()
+    method.experts_cls = object
+    method.moe_quant_config = None
+    method.moe_kernel = None
+    layer = Mock()
+    convert_weights = Mock(return_value=tuple(object() for _ in range(8)))
+    process_weights = Mock()
+    kernel = SimpleNamespace(
+        fused_experts=SimpleNamespace(
+            process_weights_after_loading=process_weights,
+        )
+    )
+    make_kernel = Mock(return_value=kernel)
+    get_quant_config = Mock(return_value=object())
+    method.get_fused_moe_quant_config = get_quant_config
+    with (
+        patch.object(nvfp4_online, "convert_to_nvfp4_moe_kernel_format", convert_weights),
+        patch.object(nvfp4_online, "replace_parameter", Mock()),
+        patch.object(nvfp4_online, "make_nvfp4_moe_kernel", make_kernel),
+    ):
+        method._setup_kernel(layer)
+        method._setup_kernel(layer)
+    assert method.moe_kernel is kernel
+    assert convert_weights.call_count == 2
+    assert process_weights.call_count == 2
+    make_kernel.assert_called_once()
+    get_quant_config.assert_called_once()
+    print(
+        "REAL_NVFP4_VLLM_POST026_REGRESSION_PASS",
+        "packing=${RN4PT_VLLM_EXPERT_PACKING_COMMIT:-}",
+        "reload=${RN4PT_VLLM_RELOAD_KERNEL_COMMIT:-}",
+        flush=True,
+    )
+
 from verl.utils.real_nvfp4.r3_monolithic_capture import patch_vllm_monolithic_moe_r3_capture
 from verl.utils.real_nvfp4.vllm_runtime import NVFP4_PER_TOKEN_METHOD, REAL_NVFP4_MOE_BACKEND
 from verl.workers.rollout.vllm_rollout.utils import vLLMColocateWorkerExtension
@@ -191,6 +254,9 @@ srun --container-image="$RN4PT_RUNTIME_IMAGE" \
 
 grep -q 'REAL_NVFP4_PERTOKEN_GPU_API_PASS' "$PREFLIGHT_LOG"
 grep -q 'REAL_NVFP4_PERTOKEN_PREFLIGHT_INNER_PASS' "$PREFLIGHT_LOG"
+if [[ -n "${RN4PT_VLLM_EXPERT_PACKING_COMMIT:-}" ]]; then
+  grep -q 'REAL_NVFP4_VLLM_POST026_REGRESSION_PASS' "$PREFLIGHT_LOG"
+fi
 printf 'job_id=%s\nlog=%s\nimage=%s\n' \
   "$SLURM_JOB_ID" "$PREFLIGHT_LOG" "$RN4PT_RUNTIME_IMAGE" >"$RN4PT_PREFLIGHT_PASS"
 echo "REAL_NVFP4_PERTOKEN_PREFLIGHT_PASS job_id=$SLURM_JOB_ID log=$PREFLIGHT_LOG"
