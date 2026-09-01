@@ -11,9 +11,6 @@ TRAIN_FILES=${TRAIN_FILES:-$HOME/data/gsm8k/train.parquet}
 VAL_FILES=${VAL_FILES:-$HOME/data/gsm8k/test.parquet}
 MAX_PROMPT_LEN=${MAX_PROMPT_LEN:-512}
 MAX_RESPONSE_LEN=${MAX_RESPONSE_LEN:-512}
-# vLLM rejects enable_chunked_prefill=False when max_num_batched_tokens < max_model_len.
-# VL models default max_model_len to max_position_embeddings (e.g. 128k), so pin it to
-# the actual prompt+response budget used by this E2E script.
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-$((MAX_PROMPT_LEN + MAX_RESPONSE_LEN))}
 
 ENGINE=${ENGINE:-vllm}
@@ -36,7 +33,7 @@ ADV_ESTIMATOR=${ADV_ESTIMATOR:-gae}
 LOSS_MODE=${LOSS_MODE:-vanilla}
 USE_KL=${USE_KL:-False}
 CUSTOM_REWARD_FN=${CUSTOM_REWARD_FN:-False}
-ENABLE_CHUNKED_PREFILL=${ENABLE_CHUNKED_PREFILL:-True} # For vLLM VLM placeholder issue: https://github.com/vllm-project/vllm/issues/15185
+ENABLE_CHUNKED_PREFILL=${ENABLE_CHUNKED_PREFILL:-True}
 STRATEGY=${STRATEGY:-fsdp}
 # LoRA config
 LORA_RANK=${LORA_RANK:-0}

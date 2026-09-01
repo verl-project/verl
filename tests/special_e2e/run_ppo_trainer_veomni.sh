@@ -35,9 +35,6 @@ TRAIN_FILES=${TRAIN_FILES:-${HOME}/data/gsm8k/train.parquet}
 VAL_FILES=${VAL_FILES:-${HOME}/data/gsm8k/test.parquet}
 MAX_PROMPT_LEN=${MAX_PROMPT_LEN:-512}
 MAX_RESPONSE_LEN=${MAX_RESPONSE_LEN:-128}
-# vLLM rejects enable_chunked_prefill=False when max_num_batched_tokens < max_model_len.
-# Qwen2.5 / Qwen3-VL default max_model_len to max_position_embeddings (32k / 128k),
-# so pin it to the actual prompt+response budget used by this E2E script.
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-$((MAX_PROMPT_LEN + MAX_RESPONSE_LEN))}
 VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-True}
 NUM_GPUS=${NUM_GPUS:-8}
@@ -84,7 +81,6 @@ common_params=(
     actor_rollout_ref.ref.use_torch_compile=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
-    actor_rollout_ref.rollout.enable_chunked_prefill=False \
     actor_rollout_ref.rollout.max_model_len="${MAX_MODEL_LEN}" \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \

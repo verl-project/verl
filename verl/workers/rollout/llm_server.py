@@ -21,6 +21,7 @@ Utility classes for manage and request LLM servers:
 import asyncio
 import logging
 import os
+import random
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -108,7 +109,7 @@ class GlobalRequestLoadBalancer:
         else:
             min_count = min(self._inflight_requests.values())
             candidates = [sid for sid, count in self._inflight_requests.items() if count == min_count]
-            server_id = candidates[0]
+            server_id = random.choice(candidates)
         self._request_id_to_server[request_id] = server_id
         self._inflight_requests[server_id] += 1
         return server_id, self._servers[server_id]

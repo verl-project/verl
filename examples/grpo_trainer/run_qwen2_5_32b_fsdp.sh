@@ -86,7 +86,6 @@ ROLLOUT=(
     actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP}
     actor_rollout_ref.rollout.name=${INFER_BACKEND}
     actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL}
-    actor_rollout_ref.rollout.enable_chunked_prefill=False
     actor_rollout_ref.rollout.enforce_eager=False
     actor_rollout_ref.rollout.free_cache_engine=True
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096

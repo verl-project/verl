@@ -126,7 +126,6 @@ ROLLOUT=(
     actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP}
     actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL}
     actor_rollout_ref.rollout.n=5
-    actor_rollout_ref.rollout.enable_chunked_prefill=False
     actor_rollout_ref.rollout.max_num_batched_tokens=4096
     actor_rollout_ref.rollout.free_cache_engine=True
     actor_rollout_ref.rollout.enforce_eager=False

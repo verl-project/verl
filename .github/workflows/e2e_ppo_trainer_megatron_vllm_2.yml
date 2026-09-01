@@ -313,7 +313,7 @@ jobs:
           TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
             MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
-            ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True ENABLE_CHUNKED_PREFILL=False \
+            ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True \
             SP_SIZE=2 \
             bash tests/special_e2e/ppo_trainer/run_function_reward.sh
 
@@ -323,7 +323,7 @@ jobs:
           TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
             MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
-            ADV_ESTIMATOR=gae RM_PAD=True USE_KL=True ENABLE_CHUNKED_PREFILL=False \
+            ADV_ESTIMATOR=gae RM_PAD=True USE_KL=True \
             SP_SIZE=2 \
             bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Running GEO3K VLM GRPO E2E lora training tests on 8 L20 GPUs with rmpad using function rm
@@ -332,7 +332,7 @@ jobs:
           TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
             MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
-            ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True ENABLE_CHUNKED_PREFILL=False \
+            ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True \
             SP_SIZE=2 \
             LORA_RANK=32 LORA_EXCLUDE=".*visual.*" \
             bash tests/special_e2e/ppo_trainer/run_function_reward.sh
