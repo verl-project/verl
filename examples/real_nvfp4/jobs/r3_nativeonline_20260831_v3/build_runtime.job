@@ -9,6 +9,7 @@
 
 set -euo pipefail
 export RN4PT_SKIP_UV_LOCK_CHECK=1
+# shellcheck disable=SC1091
 source /lustre/fsw/general_sa/shuazhang/python_space/verl_for_nvfp4_20251031/verl_nvfp4_e2e_r3_20260831_v3/examples/real_nvfp4/jobs/r3_nativeonline_20260831_v3/manifest.sh
 rn4pt_validate_static
 [[ -s "$RN4PT_PROBE_PASS" ]] || rn4pt_die "runtime probe has not passed"
@@ -44,7 +45,17 @@ UV_BIN=\$(command -v uv || true)
 if [[ -z "\$UV_BIN" && -x /opt/verl-real-nvfp4/.venv/bin/uv ]]; then
   UV_BIN=/opt/verl-real-nvfp4/.venv/bin/uv
 fi
+if [[ -z "\$UV_BIN" ]]; then
+  /usr/bin/python3 -m pip install \
+    --break-system-packages \
+    --disable-pip-version-check \
+    --no-cache-dir \
+    'uv==0.11.26'
+  hash -r
+  UV_BIN=\$(command -v uv || true)
+fi
 [[ -n "\$UV_BIN" && -x "\$UV_BIN" ]]
+"\$UV_BIN" --version | grep -q '^uv 0\.11\.26 '
 export UV_PROJECT_ENVIRONMENT="\$DST/.venv"
 export UV_HTTP_TIMEOUT=600
 export UV_LINK_MODE=copy
