@@ -256,6 +256,23 @@ KL / ESS / entropy / 截断率 / grad_norm / 长度斜率，并已用 v8（PASS�
 2. 末段目标必须是 `trainer.save_freq` 的倍数，否则该 chunk 的收尾 full-Adam checkpoint 不会按
    常规节奏落盘。目标已从 265 调整为 260，并加了整除断言。
 
+## 坑 14：Slurm `.out` 停止增长 ≠ 训练卡住（Ray driver 日志转发会缓冲十几分钟）
+
+v13 chunk 1（job 2695466）启动后，`.out` 和 `tee` 出来的 chunk log 在 08:42 之后整整 10 分钟
+没有任何新字节，形态上很像坑 2 的启动挂死。实际情况是训练早就在跑。
+
+区分方法（按可信度排序，不要只看日志）：
+
+1. **Ray 精确任务状态**（最可信）：
+   `srun --overlap --jobid=<job> --nodes=1 -w <head> --container-image=<runtime> ... \
+    ray list tasks --address http://<head>:$((29000 + jobid % 10000)) --filter name=<method>`
+   当时结果是 `launch_server 32/32 FINISHED`、`actor_rollout_init_model 32/32 FINISHED`、
+   `actor_rollout_update_actor 128 FINISHED`。
+2. **W&B**：run 已注册且 history 在增长，就说明 32 个 server 全部 ready 且训练在推进。
+3. **GPU 形态**：真正的坑 2 挂死是少数 worker 固定在约 21.7 GiB 且 GPU/CPU 接近 100%。
+   本次是 7 个节点全部约 141 GiB、GPU 0%、VLLM::Worker CPU 约 35–47%，属于正常运行态。
+
+**结论：不要用 `.out` 的 mtime 判断 chunk 是否存活。** 监控要挂在 W&B step 增长或 Ray 任务状态上。
 ## 关键路径
 
 - v10 日志：`ray_log/verl_real_nvfp4_r3_nativeonline_post026_20260901_v10/`
