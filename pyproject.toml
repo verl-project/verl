@@ -145,6 +145,7 @@ fsdp = [
     "torchaudio==2.11.0",
     "liger-kernel>=0.8.2",
     "trl==0.27.0",
+    "flash-linear-attention==0.5.2",
     # transformers NOT pinned here: verl-core carries it and the project-wide
     # override below settles the version (5.9.0). See override-dependencies.
 ]

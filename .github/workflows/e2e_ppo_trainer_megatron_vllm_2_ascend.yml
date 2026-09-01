@@ -210,6 +210,7 @@ jobs:
         run: |
           pip install --no-deps -e .
           pip install trl==0.28.0
+          pip install flash-linear-attention==0.5.2
       - name: Check final pip list
         run: |
           pip list
