@@ -128,7 +128,7 @@ rn4pt_require_runtime_image() {
     git -C "$RN4PT_VERL" cat-file -e "$built_source^{commit}" || \
       rn4pt_die "runtime image source commit is unavailable" || return
     git -C "$RN4PT_VERL" diff --quiet "$built_source" "$RN4PT_SOURCE_COMMIT" -- \
-      . ":(exclude)examples/real_nvfp4/jobs/r3_nativeonline_20260901_v8" || \
+      . ":(exclude,glob)examples/real_nvfp4/jobs/**" || \
       rn4pt_die "runtime payload changed after the image build" || return
     echo "REAL_NVFP4_PERTOKEN_HARNESS_ONLY source_commit=$RN4PT_SOURCE_COMMIT image_source_commit=$built_source"
   fi
