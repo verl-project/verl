@@ -29,6 +29,20 @@ NeMo 同期 +0.09、BF16 +0.18。
 - NeMo 指标名与 verl 不同：长度是 `train/mean_gen_tokens_per_sample`，
   reward 是 `train/reward`，entropy 是 `train/approx_entropy`。
 
+### 1b. 全链 260 步（chunk 4 实际已完成）
+
+chunk 4（2695469）实际跑完了，`chunk_4.pass` 存在，W&B 有 260 步。补上末段：
+
+| 窗口 | verl W4A4 长度 | 斜率 | verl W4A4 score | BF16 长度 | BF16 score | NeMo R3-off 长度 | NeMo reward |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 121–160 | 997 | +2.53 | −0.174 | 5256 | +0.114 | 3768 | +0.049 |
+| 161–210 | 1037 | +1.95 | −0.106 | 6158 | +0.177 | 4027 | +0.093 |
+| 211–260 | 1188 | +1.74 | −0.089 | 7126 | +0.197 | 4665 | +0.167 |
+
+`critic/score/mean` 在 step 260 已经**转正到 +0.055**（step 210 时是 −0.031），说明仍在学习。
+长度全程斜率 +0.88 tok/step、末段 +1.74 tok/step——**不是冻住，方向也是正的（旧实现是 −0.67），
+但比三条参照慢一个数量级**。定性结论不变。
+
 ## 2. 已排除
 
 **不是实现坏了。** KL 0.0044、ESS 0.9930、每步 refit + R3 48 层 + attestation 全过、
@@ -84,11 +98,18 @@ exp `verl_30b_bf16_control_8n_20260902_v14`。**相对 W4A4 arm 只改一个变�
 
 若对照涨，优先查 verl 特有、且与精度耦合的项：
 
-- **TIS**：verl 有 `algorithm.rollout_correction.rollout_is=token` +
-  `rollout_is_threshold=2.0`；NeMo 的 `grpo.seq_logprob_error_threshold=None`，没有等价的
-  token 级 IS 截断。W4A4 的 mismatch 是尾部集中的（历史结论：按 rollout_logp 排序的
-  bottom 20% 贡献约 74% 的 |delta|），长序列累积更多尾部 token，可能被 IS 阈值选择性压制，
-  而 BF16 的 KL 只有 0.0012 时该机制几乎不触发。注意 ESS 0.993 说明整体加权损失很小，
-  所以要看的是**长序列上的选择性**，不是批级聚合。
+- ~~**TIS**~~ **已量化，基本排除。** verl 用 `rollout_is=token` + `threshold=2.0`，
+  即单边上截断 `w = min(exp(old_logp - rollout_logp), 2.0)`；NeMo 的
+  `grpo.seq_logprob_error_threshold=None` 没有等价物。W&B 里的绑定比例：
+
+  | | `rollout_is_ratio_fraction_high` | `..._fraction_low` | `rollout_is_std` | seq 级 |
+  | --- | --- | --- | --- | --- |
+  | W4A4 | 0.0011 | 0.0028 | 0.089 | 0.0 |
+  | BF16 | 0.00007 | 0.00017 | 0.037 | 0.0 |
+
+  W4A4 触界频率是 BF16 的约 15 倍、权重离散度约 2.4 倍——**确实是随精度变化的真实效应**，
+  但绝对量只有约 0.4% 的 token，且 sequence 级触界恒为 0。和 dynamic sampling 同样的教训：
+  先量化再定性。若对照实验指向 W4A4 路径，可以用一个 flag
+  （`algorithm.rollout_correction.rollout_is=null`）做 TIS-off 臂来彻底证伪，成本很低。
 - NeMo 开了 `reward_shaping`（overlong buffer 512 / penalty 1），verl 这条关着。
   当前长度离 20480 很远，该项应当是惰性的，属于低优先级。
