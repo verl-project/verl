@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import ctypes
+import dataclasses
+import functools
 import json
 import logging
 import os
@@ -25,11 +27,10 @@ from typing import Any, Literal, Optional, get_args
 import torch
 from vllm.outputs import RequestOutput
 
-from verl.plugin.platform import get_platform
-from verl.utils.device import is_npu_available
-from verl.utils.vllm import TensorLoRARequest, VLLMHijack
+from verl.utils.device import get_device_name, is_npu_available
+from verl.utils.vllm import TensorLoRARequest, VLLMHijack, resolve_weight_name
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
-from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches, is_fp8_model, load_quanted_weights
+from verl.utils.vllm.vllm_quant_utils import apply_vllm_quant_patches, is_fp8_model, load_quanted_weights
 from verl.workers.rollout.vllm_rollout.weight_update_utils import apply_buffer_updates, split_buffer_updates
 
 logger = logging.getLogger(__file__)
@@ -77,24 +78,6 @@ def set_death_signal():
     libc.prctl(1, signal.SIGKILL)
     if os.getppid() == 1:
         os.kill(os.getpid(), signal.SIGKILL)
-
-
-def get_device_uuid(device_id: int) -> str:
-    from vllm.platforms import current_platform
-
-    # Convert torch.npu.current_device to its corresponding ASCEND_RT_VISIBLE_DEVICES.
-    if is_npu_available:
-        if os.getenv("ASCEND_RT_VISIBLE_DEVICES") is not None:
-            npu_visible_devices = os.environ["ASCEND_RT_VISIBLE_DEVICES"].split(",")
-            assert device_id < len(npu_visible_devices), f"device_id {device_id} must less than {npu_visible_devices}"
-            return "NPU-" + npu_visible_devices[device_id]
-        else:
-            return f"NPU-{device_id}"
-    else:
-        try:
-            return current_platform.get_device_uuid(device_id)
-        except Exception:
-            return get_platform().get_device_uuid(device_id=device_id)
 
 
 def get_vllm_max_lora_rank(lora_rank: int):
@@ -176,10 +159,17 @@ class vLLMColocateWorkerExtension:
         # 1. patch for Lora
         VLLMHijack.hijack()
         vllm_config = kwargs.get("vllm_config")
+        weight_transfer_config = getattr(vllm_config, "weight_transfer_config", None)
+        if getattr(weight_transfer_config, "backend", None) == "verl_delta_ipc":
+            from verl.workers.rollout.vllm_rollout.delta_weight_transfer import (
+                register_verl_delta_weight_transfer_engine,
+            )
+
+            register_verl_delta_weight_transfer_engine()
         # 2. patch online fp8 quant. Some models, including DeepSeek-V4, get
         # fp8 from the HF config rather than an explicit rollout quantization arg.
         if os.environ.get("VERL_VLLM_FP8_QUANT_ENABLED", "0") == "1" or is_fp8_model(vllm_config):
-            apply_vllm_fp8_patches()
+            apply_vllm_quant_patches()
         # 3. patch QAT (compressed-tensors NVFP4) for dynamic weight loading
         quant_config = getattr(vllm_config, "quant_config", None) if vllm_config else None
         _is_qat_model = getattr(quant_config, "quant_format", None) == "nvfp4-pack-quantized"
@@ -250,20 +240,24 @@ class vLLMColocateWorkerExtension:
 
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
-        from vllm.platforms import current_platform
-
         from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
 
-        if current_platform.device_type == "npu" and self.device is None:
-            self.device = torch.device(f"npu:{self.local_rank}")
+        if self.device is None:
+            # vLLM workers may leave self.device unset on non-CUDA platforms (e.g. NPU);
+            # fall back to the worker's local rank on the current accelerator.
+            self.device = torch.device(f"{get_device_name()}:{self.local_rank}")
 
-        # In async mode, make sure the old lora is removed before adding the new one
-        if peft_config and base_sync_done:
-            self.remove_lora(VLLM_LORA_INT_ID)
+        # =========================== step 1: prepare for weight loading ===========================
+        quant_reload_states = None
 
-        use_standard_weight_load = not (peft_config and base_sync_done) and not is_fp8_model(
-            self.model_runner.vllm_config
-        )
+        # The engine came up on dummy weights, whose init zeroes integer buffers on
+        # ROCm -- including the expert-parallel routing maps, which no weight stream
+        # restores. Repair them before the reload so the rollout routes correctly.
+        if torch.version.hip is not None:
+            from verl.utils.vllm.rocm_vllm_moe_expert_map import restore_moe_expert_maps
+
+            for model in self._iter_all_models():
+                restore_moe_expert_maps(model)
 
         if self._is_qat_model:
             # QAT (compressed-tensors): Prepare for weight loading BEFORE receiving any buckets
@@ -277,32 +271,54 @@ class vLLMColocateWorkerExtension:
 
             prepare_modelopt_for_weight_reload(self.model_runner.model, device=self.device)
             logger.info("ModelOpt: prepare_modelopt_for_weight_reload completed")
-        elif use_standard_weight_load:
-            # Re-apply here because async IPC weight sync can happen long after init and lose MoE weight_loader attrs.
+        elif peft_config and base_sync_done:
+            # Remove the old LoRA before the new one arrives (applied after is_last below).
+            self.remove_lora(VLLM_LORA_INT_ID)
+            logger.info("LoRA adapter sync: remove old lora and prepare new lora")
+        elif is_fp8_model(self.model_runner.vllm_config):
+            from verl.utils.vllm.vllm_quant_utils import prepare_quanted_weights_for_loading
+
+            quant_reload_states = [
+                (model, prepare_quanted_weights_for_loading(model)) for model in self._iter_all_models()
+            ]
+        else:
+            # TODO(wuxibin): not need anymore for newer vllm version.
             for model in self._iter_all_models():
                 patch_vllm_moe_model_weight_loader(model)
 
-        assert self.device is not None
-        quant_reload_state = False
-        if is_fp8_model(self.model_runner.vllm_config) and not (peft_config and base_sync_done):
-            from verl.utils.vllm.vllm_fp8_utils import prepare_quanted_weights_for_loading
-
-            quant_reload_state = prepare_quanted_weights_for_loading(self.model_runner)
-
+        # =========================== step 2: receive weights and update ===========================
         receiver = BucketedWeightReceiver(
             zmq_handle=self._get_zmq_handle(),
             device=self.device,
             use_shm=use_shm,
         )
-        receiver.receive_weights(
-            on_bucket_received=lambda weights: self._update_weights(
+        # LoRA adapters need a single complete tensor dict per ``add_lora``, but
+        # the bucketed transport may split one across buckets. Accumulate and
+        # apply only after ``is_last``; standard base weights load per bucket.
+        lora_weights: dict[str, torch.Tensor] | None = {} if (peft_config and base_sync_done) else None
+
+        def on_bucket_received(weights: list[tuple[str, torch.Tensor]], is_last: bool) -> None:
+            if lora_weights is not None:
+                # Clone: add_lora keeps these past the callback (reused IPC buffer, #6454).
+                lora_weights.update((name, tensor.clone()) for name, tensor in weights)
+                if not is_last:
+                    return
+                self._update_weights(
+                    list(lora_weights.items()),
+                    peft_config=peft_config,
+                    base_sync_done=base_sync_done,
+                )
+                lora_weights.clear()
+                return
+            self._update_weights(
                 weights,
                 peft_config=peft_config,
                 base_sync_done=base_sync_done,
-                quant_prepared=bool(quant_reload_state),
             )
-        )
 
+        receiver.receive_weights(on_bucket_received=on_bucket_received)
+
+        # =========================== step 3: process weights after loading ===========================
         if self._is_qat_model:
             # QAT (compressed-tensors): call process_weights_after_loading AFTER all buckets are received
             from verl.utils.qat import manual_process_weights_after_loading
@@ -315,12 +331,14 @@ class vLLMColocateWorkerExtension:
 
             modelopt_process_weights_after_loading(self.model_runner.model)
             logger.info("ModelOpt QAT: process_weights_after_loading completed")
-        elif quant_reload_state:
-            from verl.utils.vllm.vllm_fp8_utils import process_quanted_weights_after_loading
+        elif peft_config and base_sync_done:
+            logger.info("LoRA adapter sync, no post-process needed")
+        elif is_fp8_model(self.model_runner.vllm_config):
+            from verl.utils.vllm.vllm_quant_utils import process_quanted_weights_after_loading
 
-            process_quanted_weights_after_loading(self.model_runner, quant_reload_state)
-            logger.info("FP8/MXFP4: process_weights_after_loading completed")
-        elif use_standard_weight_load:
+            for model, reload_state in quant_reload_states:
+                process_quanted_weights_after_loading(model, reload_state)
+        else:
             # Some post-load transforms are non-idempotent; run once after all buckets.
             from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
@@ -344,7 +362,6 @@ class vLLMColocateWorkerExtension:
         weights: list[tuple[str, torch.Tensor]],
         peft_config: dict,
         base_sync_done: bool,
-        quant_prepared: bool = False,
     ):
         if peft_config and base_sync_done:
             # Clone out of the receiver's reused IPC bucket buffer: add_lora keeps these tensors
@@ -366,13 +383,10 @@ class vLLMColocateWorkerExtension:
             if is_fp8_model(self.model_runner.vllm_config):
                 logger.info(f"FP8 model detected (async): {self.model_runner.vllm_config.quant_config}")
                 # Convert bf16 weights to fp8 format before loading
-                reload_kwargs = {"prepare_model": not quant_prepared, "process_model": not quant_prepared}
-                loaded_params = (
-                    load_quanted_weights(param_updates, self.model_runner, **reload_kwargs) if param_updates else []
-                )
+                loaded_params = load_quanted_weights(param_updates, self.model_runner) if param_updates else []
                 # Keep the draft model in sync when present.
                 if self._use_mtp_drafter_weight_sync() and param_updates:
-                    load_quanted_weights(param_updates, self.model_runner, is_drafter=True, **reload_kwargs)
+                    load_quanted_weights(param_updates, self.model_runner, is_drafter=True)
                 loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
                 logger.info(
                     f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}, loaded_buffers: {loaded_buffers}"
@@ -380,7 +394,12 @@ class vLLMColocateWorkerExtension:
             else:
                 if param_updates:
                     for model in self._iter_all_models():
-                        model.load_weights(param_updates)
+                        if peft_config is None:
+                            model.load_weights(param_updates)
+                        else:
+                            names = {n for n, _ in model.named_parameters(remove_duplicate=False)}
+                            names.update(n for n, _ in model.named_buffers())
+                            model.load_weights((resolve_weight_name(model, n, names), t) for n, t in param_updates)
                 loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
                 logger.info(
                     f"Loading standard weights (non-FP8, async), "
@@ -404,6 +423,12 @@ class vLLMColocateWorkerExtension:
         trainer_rank = int(trainer_rank_base) + local_rank if trainer_rank_base is not None else local_rank
         return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{trainer_rank}.sock"
 
+    def update_verl_delta_weights(self, update_info: dict) -> None:
+        """Add this worker's IPC endpoint and forward the delta update to vLLM."""
+        worker_update_info = dict(update_info)
+        worker_update_info["zmq_handle"] = self._get_zmq_handle()
+        self.update_weights(worker_update_info)
+
 
 class SuppressSignalInThread:
     def __enter__(self):
@@ -422,6 +447,20 @@ class SuppressSignalInThread:
         signal.signal = self.original_signal
 
 
+@functools.lru_cache(maxsize=1)
+def _optional_bool_vllm_args() -> set[str]:
+    """Return the names of vLLM `AsyncEngineArgs` fields typed exactly `bool | None`.
+
+    For such fields an omitted flag leaves the None default, which vLLM can
+    resolve to True at engine-config time (e.g. `enable_prefix_caching`), so
+    an explicit False must be serialized as `--no-<flag>` instead of being
+    dropped.
+    """
+    from vllm.engine.arg_utils import AsyncEngineArgs
+
+    return {f.name for f in dataclasses.fields(AsyncEngineArgs) if set(get_args(f.type)) == {bool, type(None)}}
+
+
 def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     """
     Convert a config dictionary to CLI arguments for vLLM server.
@@ -429,7 +468,8 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     Handles different value types appropriately:
     - None: skipped
     - bool True: adds '--key'
-    - bool False: skipped
+    - bool False: adds '--no-key' for Optional[bool] engine args (whose None
+      default resolves to True), otherwise skipped
     - list: expands to '--key item1 item2 ...'
     - empty list: skipped (vLLM uses nargs="+" which requires at least one value)
     - dict: JSON serialized
@@ -448,6 +488,9 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
         if isinstance(v, bool):
             if v:
                 cli_args.append(f"--{k}")
+            elif k.replace("-", "_") in _optional_bool_vllm_args():
+                # Absent flag resolves to True at engine-config time.
+                cli_args.append(f"--no-{k}")
         elif isinstance(v, list):
             if not v:
                 # Skip empty lists - vLLM uses nargs="+" which requires at least one value

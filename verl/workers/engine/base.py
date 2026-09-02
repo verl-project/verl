@@ -154,7 +154,9 @@ class BaseEngine:
 
         Returns:
             Generator[tuple[str, torch.Tensor]]: A generator that yields tuples of parameter names and tensors.
-            Optional[dict]: Optional peft config.
+            Optional[dict]: None without an adapter, else a PEFT config carrying peft_type,
+                task_type, r, lora_alpha, target_modules, lora_dropout and bias -- the first
+                two as enum members, not strings.
         """
         raise NotImplementedError
 
@@ -178,9 +180,15 @@ class BaseEngine:
         """
         raise NotImplementedError
 
+    # Host-memory policy for the delta diff base: pinned (cudaHostAlloc) gives a
+    # faster H2D on the diff read-back but competes with every other pinned pool
+    # on the node; backends whose memory profile makes that competition
+    # dangerous override this to False (see MegatronEngine).
+    delta_pin_snapshots: bool = True
+
     def prime_delta_snapshots(self) -> None:
         """
-        Pin this rank's CURRENT shards as the delta diff base. Called right after the
+        Snapshot this rank's CURRENT shards as the delta diff base. Called right after the
         seed sync (which streams :meth:`get_per_tensor_param`'s full HF export):
         weights do not move during the sync, so the snapshots equal exactly what the
         rollout side received and the first
@@ -189,11 +197,12 @@ class BaseEngine:
         Concrete here: it only consumes :meth:`get_per_tensor_param_shard`, so any
         engine that implements the shard export gets it for free.
         """
+        from verl.utils.device import is_cuda_available
         from verl.workers.engine.utils import prime_delta_snapshots
 
         self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
         gen, _ = self.get_per_tensor_param_shard()
-        prime_delta_snapshots(gen, self._delta_shard_snap)
+        prime_delta_snapshots(gen, self._delta_shard_snap, pin=is_cuda_available and self.delta_pin_snapshots)
 
     def get_per_tensor_param_delta_shard(self, **kwargs) -> tuple[Generator, Optional[dict]]:
         """

@@ -88,7 +88,7 @@ bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
 | Qwen3.5-35B-A3B (MoE) |        | ✓        |          | VeOmni          | nvidia    |
 | Qwen3.5-122B-A10B     | ✓      |          |          | Megatron        | nvidia    |
 | DeepSeek-V3 671B      | ✓      |          |          | Megatron        | nvidia    |
-| DeepSeek-V4-Flash     | ✓      |          |          | Megatron        | nvidia    |
+| DeepSeek-V4-Flash     | ✓      |          |          | Megatron        | nvidia, amd    |
 | GLM-4.1V-9B           | ✓      |          |          | FSDP            | nvidia    |
 | MiniCPM-o-2.6         | ✓      |          |          | FSDP            | nvidia    |
 | Moonlight-16B-A3B     | ✓      |          |          | Megatron        | nvidia    |

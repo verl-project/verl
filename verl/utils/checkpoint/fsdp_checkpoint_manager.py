@@ -139,6 +139,40 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         unwrap = getattr(self.model, "_fsdp_wrapped_module", self.model)
         return hasattr(unwrap, "peft_config")
 
+    def _backfill_optimizer_state(self, state_dict: dict) -> dict:
+        """Fill in entries that a flattened DSD optimizer checkpoint does not contain.
+
+        Engines that save through ``torch.distributed.checkpoint.state_dict`` with
+        ``flatten_optimizer_state_dict=True`` (veomni's ``MultiOptimizer``) only persist
+        params that already own optimizer state, i.e. params that received a gradient at
+        least once. Params that never do -- the DeepSeek-V4 sparse-attention indexer for
+        instance, whose forward only returns top-k indices -- are absent from the file,
+        and torch's unflatten path turns each of their missing entries into an empty dict
+        rather than skipping it, which then fails in ``Adam.__setstate__``. Backfilling
+        from the freshly initialized optimizer mirrors what DCP's ``allow_partial_load``
+        does: those params resume with default state.
+        """
+        if "state" in state_dict or "param_groups" in state_dict:
+            # Plain optimizer state dict; torch already tolerates params without state.
+            return state_dict
+
+        current_state_dict = self.optimizer.state_dict()
+        if "state" in current_state_dict or "param_groups" in current_state_dict:
+            return state_dict
+
+        missing_keys = [key for key in current_state_dict if key not in state_dict]
+        if not missing_keys:
+            return state_dict
+
+        log_with_rank(
+            f"{len(missing_keys)} optimizer state entries are absent from the checkpoint and keep their "
+            f"initial value, e.g. {missing_keys[:5]}",
+            rank=self.rank,
+            logger=logger,
+            log_only_rank_0=True,
+        )
+        return {**current_state_dict, **state_dict}
+
     def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load=False):
         """
         Load an FSDP checkpoint for this rank.
@@ -199,6 +233,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 remote_optim_path = os.path.join(local_path, f"optim_world_size_{self.world_size}_rank_{self.rank}.pt")
                 local_optim_path = copy_to_local(remote_optim_path)
                 optimizer_state_dict = torch.load(local_optim_path, weights_only=False)
+                optimizer_state_dict = self._backfill_optimizer_state(optimizer_state_dict)
                 self.optimizer.load_state_dict(optimizer_state_dict)
                 log_with_rank(f"Loaded optimizer from {remote_optim_path}", rank=self.rank, logger=logger)
 
@@ -365,7 +400,11 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             # If we have a custom model, we copy the file defining it in the folder and set the attributes so it can be
             # loaded from the Hub.
             if hasattr(model_config, "auto_map"):
-                custom_object_save(unwrap_model, hf_config_tokenizer_path, config=model_config)
+                # custom_object_save copies the source of type(obj).__module__, so it needs the base
+                # model's module. For a PEFT model unwrap_model is the PeftModel wrapper, so unwrap it
+                # first; get_base_model() is peft-only (a plain model lacks it and is passed through).
+                save_obj = unwrap_model.get_base_model() if hasattr(unwrap_model, "get_base_model") else unwrap_model
+                custom_object_save(save_obj, hf_config_tokenizer_path, config=model_config)
 
             # Also save runtime FSDP config
             fsdp_config_path = os.path.join(local_path, "fsdp_config.json")

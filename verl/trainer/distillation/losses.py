@@ -259,6 +259,12 @@ def distillation_loss(
         # clamping min is for k1 loss which can be negative
         distillation_losses = distillation_losses.clamp(min=-loss_config.loss_max_clamp, max=loss_config.loss_max_clamp)
 
+    # global batch info for loss aggregation
+    config.global_batch_info["dp_size"] = data["dp_size"]
+    config.global_batch_info["batch_num_tokens"] = data["batch_num_tokens"]
+    config.global_batch_info["global_batch_size"] = data["global_batch_size"]
+    config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
+
     if loss_config.use_policy_gradient:
         # Use negative distillation loss as reward, as done by https://thinkingmachines.ai/blog/on-policy-distillation/.
         policy_loss_fn = get_policy_loss_fn(loss_config.policy_loss_mode)

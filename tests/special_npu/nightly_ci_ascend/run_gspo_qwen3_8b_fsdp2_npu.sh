@@ -3,7 +3,6 @@
 
 set -xeuo pipefail
 
-export RAY_DEDUP_LOGS=0
 export HYDRA_FULL_ERROR=1
 export TASK_QUEUE_ENABLE=1
 export HCCL_EXEC_TIMEOUT=3600
@@ -23,7 +22,7 @@ mkdir -p "$LOG_DIR"
 rm -rf "$LOG_DIR/$SCRIPT_NAME.log"
 
 # ---- user-adjustable (CI defaults keep runtime short) ----
-NGPUS_PER_NODE=${NGPUS_PER_NODE:-16}
+NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-32}
 PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-16}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-2048}

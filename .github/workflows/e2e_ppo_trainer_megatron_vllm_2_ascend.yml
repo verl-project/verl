@@ -86,23 +86,34 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # This image is not the uv.cu130 one: it ships its own torch-npu stack, so the
+  # shared e2e scripts must launch with ambient python instead of `uv run`.
+  VERL_USE_UV: 0
+
 jobs:
   e2e_ppo_trainer_fsdp_vllm_ascend:
     if: github.repository_owner == 'verl-project'
     runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 90 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
       options: >-
         --shm-size 16g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      TRANSFORMERS_VERBOSITY: "error"
     steps:
       - name: Check npu and CANN info
         run: |
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-          npu-smi info
+          npu-smi info > /tmp/npu-smi-info.txt
+          cat /tmp/npu-smi-info.txt
+          if grep -Eq "Warning|Alarm|Critical|UNKNOWN" /tmp/npu-smi-info.txt; then
+            echo "One or more NPUs are unhealthy; refusing to run."
+            exit 1
+          fi
       - name: Check initial pip list from image
         run: |
           pip list
@@ -151,7 +162,8 @@ jobs:
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with grpo lora using function rm with use_shm and layered_summon
         run: |
           ray stop --force
-          ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True TOTAL_TRAIN_STEPS=1 SAVE_FREQ=1 FSDP_SIZE=4 VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal" bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+          ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True TOTAL_TRAIN_STEPS=1 SAVE_FREQ=1 FSDP_SIZE=4 VERL_EXP_NAME="qwen2.5-0.5b-function-reward-minimal" bash tests/special_e2e/ppo_trainer/run_function_reward.sh \
+            +actor_rollout_ref.model.lora.fully_sharded_loras=True
       - name: Test GRPO LoRA checkpoints merging function
         run: |
           export EXP_NAME="qwen2.5-0.5b-function-reward-minimal"
@@ -161,24 +173,31 @@ jobs:
       - name: Running GSM8K E2E training tests on 8 L20 GPUs with grpo lora using function rm with use_shm and layered_summon with fsdp2
         run: |
           ray stop --force
-          ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True STRATEGY=fsdp2 bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+          ADV_ESTIMATOR=grpo USE_SHM=True LORA_RANK=32 LOAD_FORMAT=safetensors LAYERED_SUMMON=True STRATEGY=fsdp2 bash tests/special_e2e/ppo_trainer/run_function_reward.sh \
+            +actor_rollout_ref.model.lora.fully_sharded_loras=True
 
-  e2e_ppo_trainer_fsdp-qwen2_5vl-3b_ascend:
+  e2e_ppo_trainer_fsdp-qwen3_5-2b_ascend:
     if: github.repository_owner == 'verl-project'
     runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
       options: >-
         --shm-size 16g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      TRANSFORMERS_VERBOSITY: "error"
     steps:
       - name: Check npu and CANN info
         run: |
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-          npu-smi info
+          npu-smi info > /tmp/npu-smi-info.txt
+          cat /tmp/npu-smi-info.txt
+          if grep -Eq "Warning|Alarm|Critical|UNKNOWN" /tmp/npu-smi-info.txt; then
+            echo "One or more NPUs are unhealthy; refusing to run."
+            exit 1
+          fi
       - name: Check initial pip list from image
         run: |
           pip list
@@ -190,7 +209,8 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
-          pip install trl==0.26.0
+          pip install trl==0.28.0
+          pip install flash-linear-attention==0.5.2
       - name: Check final pip list
         run: |
           pip list
@@ -206,26 +226,24 @@ jobs:
           ray stop --force
           TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
-            MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
-            ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True ENABLE_CHUNKED_PREFILL=False \
-            SP_SIZE=2 \
+            MODEL_ID=Qwen/Qwen3.5-2B \
+            ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True \
             bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Running GEO3K VLM PPO E2E training tests on 8 L20 GPUs with rmpad using function rm
         run: |
           ray stop --force
           TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
-            MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
-            ADV_ESTIMATOR=gae RM_PAD=True USE_KL=True ENABLE_CHUNKED_PREFILL=False \
-            SP_SIZE=2 \
+            MODEL_ID=Qwen/Qwen3.5-2B \
+            ADV_ESTIMATOR=gae RM_PAD=True USE_KL=True \
             bash tests/special_e2e/ppo_trainer/run_function_reward.sh
       - name: Running GEO3K VLM GRPO E2E lora training tests on 8 L20 GPUs with rmpad using function rm
         run: |
           ray stop --force
           TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
-            MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
-            ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True ENABLE_CHUNKED_PREFILL=False \
-            SP_SIZE=2 \
+            MODEL_ID=Qwen/Qwen3.5-2B \
+            ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True \
             LORA_RANK=32 LORA_EXCLUDE=".*visual.*" \
-            bash tests/special_e2e/ppo_trainer/run_function_reward.sh
+            bash tests/special_e2e/ppo_trainer/run_function_reward.sh \
+              +actor_rollout_ref.model.lora.fully_sharded_loras=True

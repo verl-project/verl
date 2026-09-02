@@ -52,7 +52,7 @@ def get_per_tensor_param(model, device_mesh):
         for src_ep_rank in range(ep_size):
             tensor = unsharded_tensor if src_ep_rank == ep_rank else buffer
             torch.distributed.broadcast(tensor, group_src=src_ep_rank, group=ep_group)
-            yield from process_func(name, tensor, ep_rank=src_ep_rank)
+            yield from process_func(name, tensor, expert_id_base=src_ep_rank * tensor.size(0))
 
 
 def test_veomni_export_unfused_experts():

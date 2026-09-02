@@ -648,6 +648,97 @@ class KimiToolParser(ToolParser):
         return content, function_calls
 
 
+@ToolParser.register("deepseek_v4")
+class DeepSeekV4ToolParser(ToolParser):
+    """Tool parser for DeepSeek-V4 DSML function calls.
+
+    Format::
+
+        <｜DSML｜tool_calls>
+        <｜DSML｜invoke name="func_name">
+        <｜DSML｜parameter name="key" string="true">str_val</｜DSML｜parameter>
+        <｜DSML｜parameter name="count" string="false">5</｜DSML｜parameter>
+        </｜DSML｜invoke>
+        </｜DSML｜tool_calls>
+
+    ``string="true"`` marks a raw string value, ``string="false"`` a JSON value. The model
+    closes a tool-calling turn with EOS, so no extra stop tokens are needed.
+
+    Reference: the encoding README shipped with the DeepSeek-V4 series models.
+    """
+
+    def __init__(self, tokenizer) -> None:
+        super().__init__(tokenizer)
+        self.dsml_token = "｜DSML｜"
+        self.eos_token = "<｜end▁of▁sentence｜>"
+        self.think_end_token = "</think>"
+        self.tool_calls_start_token = f"<{self.dsml_token}tool_calls>"
+        self.tool_calls_end_token = f"</{self.dsml_token}tool_calls>"
+
+        dsml = regex.escape(self.dsml_token)
+        self.tool_calls_regex = regex.compile(rf"<{dsml}tool_calls>(.*?)</{dsml}tool_calls>", regex.DOTALL)
+        self.invoke_regex = regex.compile(rf'<{dsml}invoke name="(.*?)">(.*?)</{dsml}invoke>', regex.DOTALL)
+        self.parameter_regex = regex.compile(
+            rf'<{dsml}parameter name="(.*?)" string="(true|false)">(.*?)</{dsml}parameter>',
+            regex.DOTALL,
+        )
+
+    def _parse_tool_calls(self, tool_calls_text: str) -> list[FunctionCall]:
+        function_calls: list[FunctionCall] = []
+        for name, body in self.invoke_regex.findall(tool_calls_text):
+            arguments: dict[str, Any] = {}
+            for param_name, is_string, value in self.parameter_regex.findall(body):
+                if is_string == "true":
+                    arguments[param_name] = value
+                    continue
+                try:
+                    arguments[param_name] = json.loads(value)
+                except Exception:
+                    logger.warning(
+                        f"DeepSeek-V4 parameter '{param_name}' of tool '{name}' is marked as non-string but "
+                        f"is not valid JSON, keeping the raw value."
+                    )
+                    arguments[param_name] = value
+            function_calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
+        return function_calls
+
+    @rollout_trace_op
+    async def extract_tool_calls(
+        self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
+    ) -> tuple[str, list[FunctionCall]]:
+        del tools
+        loop = get_event_loop()
+        # The turn delimiters are special tokens, so the markup only survives decoding with them on.
+        text = await loop.run_in_executor(None, lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=False))
+        for token in (self.tokenizer.pad_token, self.eos_token):
+            if token:
+                text = text.replace(token, "")
+
+        if self.tool_calls_start_token not in text:
+            return self._strip_reasoning(text), []
+
+        function_calls: list[FunctionCall] = []
+        for match in self.tool_calls_regex.findall(text):
+            try:
+                function_calls.extend(self._parse_tool_calls(match))
+            except Exception as e:
+                logger.error(f"Failed to decode DeepSeek-V4 tool call: {e}")
+
+        # Drop the blank line the encoder writes between the answer and the tool call block.
+        content = self._strip_reasoning(text[: text.index(self.tool_calls_start_token)])
+        return content.removesuffix("\n\n"), function_calls
+
+    def _strip_reasoning(self, text: str) -> str:
+        """Keep only what the model wrote for the user.
+
+        A thinking-mode prompt ends with ``<think>``, so a completion opens with reasoning and
+        closes it with ``</think>``. A chat-mode prompt already closed the block, so the
+        completion has no ``</think>`` and is returned unchanged.
+        """
+        _, _, content = text.rpartition(self.think_end_token)
+        return content
+
+
 @ToolParser.register("gemma4")
 class Gemma4ToolParser(ToolParser):
     """Tool parser for Google Gemma 4 models.

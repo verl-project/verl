@@ -54,9 +54,15 @@ actor_rollout_ref:
       causal_conv1d_implementation: eager
       chunk_gated_delta_rule_implementation: eager
       load_balancing_loss_implementation: eager
+      dsa_indexer_implementation: eager
+      dsa_attention_implementation: eager
+      mhc_implementation: eager
+      qat_implementation: none
       force_use_huggingface: false
       activation_gpu_limit: 0.0
       basic_modules: []
+      pad_to_length: ${oc.select:actor_rollout_ref.actor.pad_to_length,False}
+      pad_to_length_bucket: 1024
       router_replay:
         _target_: verl.workers.config.EngineRouterReplayConfig
         mode: disabled
@@ -82,6 +88,7 @@ actor_rollout_ref:
       clip_cov_ub: 5.0
       kl_cov_ratio: 0.0002
       ppo_kl_coef: 0.1
+      dro_beta: null
     clip_ratio_c: 3.0
     loss_agg_mode: token-mean
     loss_scale_factor: null
@@ -113,6 +120,10 @@ actor_rollout_ref:
       all_ranks: false
       ranks: []
       save_path: ${oc.select:global_profiler.save_path,null}
+      relocate_results: ${oc.select:global_profiler.relocate_results,false}
+      finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+      finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+      finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
       tool_config:
         nsys:
           _target_: verl.utils.profiler.config.NsightToolConfig
@@ -144,11 +155,6 @@ actor_rollout_ref:
           steps: null
           stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
           strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
-    router_replay:
-      _target_: verl.workers.config.RouterReplayConfig
-      mode: disabled
-      record_file: null
-      replay_file: null
     qat:
       enable: false
       mode: w4a16
@@ -160,6 +166,7 @@ actor_rollout_ref:
       activation_observer: static_minmax
       quantization_config_path: null
     use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
+    pad_to_length: false
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: veomni
@@ -175,6 +182,10 @@ actor_rollout_ref:
       all_ranks: false
       ranks: []
       save_path: ${oc.select:global_profiler.save_path,null}
+      relocate_results: ${oc.select:global_profiler.relocate_results,false}
+      finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+      finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+      finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
       tool_config:
         nsys:
           _target_: verl.utils.profiler.config.NsightToolConfig
@@ -206,11 +217,6 @@ actor_rollout_ref:
           steps: null
           stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
           strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
-    router_replay:
-      _target_: verl.workers.config.RouterReplayConfig
-      mode: disabled
-      record_file: null
-      replay_file: null
     veomni:
       _target_: verl.workers.config.VeOmniEngineConfig
       param_offload: ${oc.select:actor_rollout_ref.actor.veomni.param_offload,False}
@@ -243,13 +249,20 @@ actor_rollout_ref:
       causal_conv1d_implementation: eager
       chunk_gated_delta_rule_implementation: eager
       load_balancing_loss_implementation: ${oc.select:actor_rollout_ref.actor.veomni.load_balancing_loss_implementation,eager}
+      dsa_indexer_implementation: eager
+      dsa_attention_implementation: eager
+      mhc_implementation: eager
+      qat_implementation: none
       force_use_huggingface: false
       activation_gpu_limit: 0.0
       basic_modules: []
+      pad_to_length: ${oc.select:actor_rollout_ref.ref.pad_to_length,False}
+      pad_to_length_bucket: ${oc.select:actor_rollout_ref.actor.veomni.pad_to_length_bucket,1024}
       router_replay:
         _target_: verl.workers.config.EngineRouterReplayConfig
         mode: disabled
     _target_: verl.workers.config.VeOmniActorConfig
+    pad_to_length: ${oc.select:actor_rollout_ref.actor.pad_to_length,False}
   rollout:
     _target_: verl.workers.config.RolloutConfig
     name: ???
@@ -275,7 +288,7 @@ actor_rollout_ref:
     pipeline_model_parallel_size: 1
     max_num_batched_tokens: 8192
     max_model_len: null
-    max_num_seqs: 1024
+    max_num_seqs: 256
     enable_chunked_prefill: true
     enable_prefix_caching: true
     logprobs_mode: processed_logprobs
@@ -302,6 +315,7 @@ actor_rollout_ref:
       temperature: 0
       'n': 1
       do_sample: false
+    router_config_path: null
     multi_turn:
       _target_: verl.workers.config.MultiTurnConfig
       enable: false
@@ -349,6 +363,10 @@ actor_rollout_ref:
       all_ranks: ${oc.select:actor_rollout_ref.actor.profiler.all_ranks,false}
       ranks: ${oc.select:actor_rollout_ref.actor.profiler.ranks,[]}
       save_path: ${oc.select:global_profiler.save_path,null}
+      relocate_results: ${oc.select:actor_rollout_ref.actor.profiler.relocate_results,false}
+      finish_hook_cmd: ${oc.select:actor_rollout_ref.actor.profiler.finish_hook_cmd,null}
+      finish_hook_all_ranks: ${oc.select:actor_rollout_ref.actor.profiler.finish_hook_all_ranks,false}
+      finish_hook_ranks: ${oc.select:actor_rollout_ref.actor.profiler.finish_hook_ranks,[]}
       tool_config:
         npu:
           _target_: verl.utils.profiler.config.NPUToolConfig
@@ -487,9 +505,6 @@ data:
     name: null
   return_multi_modal_inputs: true
   apply_chat_template_kwargs: {}
-  continuous_token:
-    enable: false
-    model_family: auto
   mm_processor_kwargs: {}
 critic:
   optim:
@@ -541,9 +556,15 @@ critic:
     causal_conv1d_implementation: eager
     chunk_gated_delta_rule_implementation: eager
     load_balancing_loss_implementation: eager
+    dsa_indexer_implementation: eager
+    dsa_attention_implementation: eager
+    mhc_implementation: eager
+    qat_implementation: none
     force_use_huggingface: false
     activation_gpu_limit: 0.0
     basic_modules: []
+    pad_to_length: false
+    pad_to_length_bucket: 1024
     router_replay:
       _target_: verl.workers.config.EngineRouterReplayConfig
       mode: disabled
@@ -578,6 +599,10 @@ critic:
     all_ranks: false
     ranks: []
     save_path: ${oc.select:global_profiler.save_path,null}
+    relocate_results: ${oc.select:global_profiler.relocate_results,false}
+    finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+    finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+    finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
     tool_config:
       nsys:
         _target_: verl.utils.profiler.config.NsightToolConfig
@@ -864,6 +889,25 @@ distillation:
         response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
         temperature: ${oc.select:actor_rollout_ref.rollout.temperature}
   teacher_key: data_source
+transfer_queue:
+  enable: false
+  metrics:
+    enabled: false
+    port: 0
+  backend:
+    storage_backend: SimpleStorage
+    SimpleStorage:
+      total_storage_size: 100000
+      num_data_storage_units: 8
+    MooncakeStore:
+      auto_init: false
+      metadata_server: localhost:50123
+      master_server_address: localhost:50124
+      local_hostname: localhost
+      protocol: tcp
+      global_segment_size: 4294967296
+      local_buffer_size: 1073741824
+      device_name: ''
 trainer:
   balance_batch: true
   total_epochs: 30
@@ -882,6 +926,7 @@ trainer:
   esi_redundant_time: 0
   resume_mode: auto
   resume_from_path: null
+  checkpoint_callback_class: null
   val_before_train: true
   val_only: false
   test_freq: -1
@@ -902,6 +947,15 @@ trainer:
     separate_async:
       num_warmup_batches: 1
       parameter_sync_step: 4
+      hybrid_rollout:
+        _target_: verl.trainer.config.HybridRolloutSwitchConfig
+        enable_switch: false
+        switch_threshold_ratio: 0.4
+        adaptive_switch_threshold: true
+        switch_threshold_step_up: 0.05
+        switch_threshold_step_down: 0.03
+        switch_threshold_release_steps: 2
+        switch_cost_window_size: 3
     sampler:
       max_off_policy_threshold: 8
       max_off_policy_strategy: drop
@@ -916,6 +970,10 @@ global_profiler:
   steps: null
   profile_continuous_steps: false
   save_path: outputs/profile
+  relocate_results: false
+  finish_hook_cmd: null
+  finish_hook_all_ranks: false
+  finish_hook_ranks: []
   global_tool_config:
     nsys:
       _target_: verl.utils.profiler.config.NsightToolConfig
@@ -943,25 +1001,6 @@ global_profiler:
       steps: null
       stages: null
       strict: false
-transfer_queue:
-  enable: false
-  metrics:
-    enabled: false
-    port: 0
-  backend:
-    storage_backend: SimpleStorage
-    SimpleStorage:
-      total_storage_size: 100000
-      num_data_storage_units: 8
-    MooncakeStore:
-      auto_init: false
-      metadata_server: localhost:50123
-      master_server_address: localhost:50124
-      local_hostname: localhost
-      protocol: tcp
-      global_segment_size: 4294967296
-      local_buffer_size: 1073741824
-      device_name: ''
 skip:
   _target_: verl.utils.skip.SkipManagerConfig
   rollout:
@@ -982,4 +1021,6 @@ skip:
 ray_kwargs:
   ray_init:
     num_cpus: null
+    runtime_env:
+      py_executable: null
   timeline_json_file: null

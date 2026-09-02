@@ -36,11 +36,9 @@ from megatron.core.transformer import MLATransformerConfig, TransformerConfig
 from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
 from megatron.core.utils import get_attr_wrapped_model
-from tensordict import TensorDict
 from transformers import PretrainedConfig
 
 import verl.utils.megatron.tensor_parallel as tp_utils
-from verl.utils import tensordict_utils as tu
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.fs import local_mkdir_safe
 from verl.utils.model import normalize_model_name
@@ -55,11 +53,108 @@ def get_model_config(model):
     return get_attr_wrapped_model(model, "config", allow_none=False)
 
 
+def _assert_muon_layer_wise_ddp_supported() -> None:
+    """Fail closed when Megatron-Core cannot build LayerWise DDP layouts."""
+    try:
+        from megatron.core.optimizer.layer_wise_optimizer import (  # noqa: F401
+            LayerWiseDistributedOptimizer,
+            tag_params_for_buffer_routing,
+        )
+    except ImportError as exc:
+        raise ValueError(
+            "Muon layer-wise distributed optimizer requires Megatron-Core "
+            "layer_wise_optimizer support. Upgrade megatron-core or disable "
+            "use_layer_wise_distributed_optimizer."
+        ) from exc
+    try:
+        DistributedDataParallelConfig(use_layer_wise_param_layout=True)
+    except TypeError as exc:
+        raise ValueError(
+            "Muon layer-wise distributed optimizer requires DistributedDataParallelConfig."
+            "use_layer_wise_param_layout. Upgrade megatron-core or disable "
+            "use_layer_wise_distributed_optimizer."
+        ) from exc
+
+
+def wrap_model_chunks_with_layerwise_aware_ddp(
+    model_chunks,
+    tfconfig,
+    *,
+    use_distributed_optimizer: bool = True,
+    use_layer_wise_distributed_optimizer: bool = False,
+    override_ddp_config: dict | None = None,
+):
+    """Wrap model chunks in Megatron DDP, with optional LayerWise (Muon) param layouts.
+
+    Mirrors ``megatron.training.training.wrap_model_chunks_with_ddp`` so Muon gets
+    ``tag_params_for_buffer_routing`` + ``compute_full_param_layout`` before DDP
+    construction — verl's plain DDP wrap omits this and causes redundant buffers.
+    """
+    from megatron.core.distributed import (
+        DistributedDataParallel as DDP,
+    )
+    from megatron.core.optimizer.layer_wise_optimizer import (
+        LayerWiseDistributedOptimizer,
+        tag_params_for_buffer_routing,
+    )
+    from megatron.core.process_groups_config import ProcessGroupCollection
+    from megatron.core.utils import get_pg_size
+
+    ddp_config_dict = {
+        "use_distributed_optimizer": use_distributed_optimizer,
+        "grad_reduce_in_fp32": True,
+        "overlap_grad_reduce": False,
+    }
+    if override_ddp_config is not None:
+        ddp_config_dict.update(override_ddp_config)
+    ddp_config = DistributedDataParallelConfig(**ddp_config_dict)
+
+    per_chunk_layouts = [None] * len(model_chunks)
+    if use_layer_wise_distributed_optimizer:
+        tag_params_for_buffer_routing(model_chunks)
+        # Match Megatron training.py: LayerWise path needs DistOpt-style layout for scalar buffers.
+        ddp_config.use_distributed_optimizer = True
+        if ddp_config_dict.get("use_layer_wise_param_layout") is None:
+            ddp_config.use_layer_wise_param_layout = True
+        layout_pgs = ProcessGroupCollection.use_mpu_process_groups()
+        assert layout_pgs.dp_cp is not None, "dp_cp process group required for LayerWise param layout"
+        dp_size = get_pg_size(layout_pgs.dp_cp)
+        expt_dp_size = get_pg_size(getattr(layout_pgs, "expt_dp", None))
+        for i, chunk in enumerate(model_chunks):
+            all_params = [p for p in chunk.parameters() if p.requires_grad]
+            per_chunk_layouts[i] = LayerWiseDistributedOptimizer.compute_full_param_layout(
+                all_params,
+                ddp_config.bucket_size,
+                dp_size,
+                ddp_config,
+                expert_data_parallel_world_size=expt_dp_size,
+            )
+
+    ddp_models = []
+    for model_chunk_idx, (model_chunk, layout) in enumerate(zip(model_chunks, per_chunk_layouts, strict=True)):
+        chunk_kwargs = {}
+        if layout is not None:
+            chunk_kwargs["full_param_layout"] = layout
+        ddp_models.append(
+            DDP(
+                config=tfconfig,
+                module=model_chunk,
+                disable_bucketing=(model_chunk_idx > 0),
+                ddp_config=ddp_config,
+                **chunk_kwargs,
+            )
+        )
+    for model_module in ddp_models:
+        model_module.broadcast_params()
+    return ddp_models
+
+
 def get_model(
     model_provider_func,
     model_type=ModelType.encoder_or_decoder,
     wrap_with_ddp=True,
     use_distributed_optimizer=True,
+    use_layer_wise_distributed_optimizer=False,
     transformer_config=None,
     override_ddp_config=None,
 ):
@@ -146,32 +241,13 @@ def get_model(
         model = [Float16Module(config, model_module) for model_module in model]
 
     if wrap_with_ddp:
-        # Default to reducing grads in fp32. When the precision-aware optimizer is
-        # opted into with a sub-fp32 `main_grads_dtype`, the engine injects
-        # `grad_reduce_in_fp32=False` via `override_ddp_config` so the DDP grad
-        # bucket dtype matches the optimizer's grad buffer. User overrides still win.
-        ddp_models = []
-        ddp_config_dict = {
-            "use_distributed_optimizer": use_distributed_optimizer,
-            "grad_reduce_in_fp32": True,
-            "overlap_grad_reduce": False,
-        }
-        if override_ddp_config is not None:
-            ddp_config_dict.update(override_ddp_config)
-        ddp_config = DistributedDataParallelConfig(**ddp_config_dict)
-        for model_chunk_idx, model_chunk in enumerate(model):
-            ddp_model = DDP(
-                config=tfconfig,
-                module=model_chunk,
-                disable_bucketing=(model_chunk_idx > 0),
-                ddp_config=ddp_config,
-            )
-            ddp_models.append(ddp_model)
-        model = ddp_models
-        # # Broadcast params from data parallel src rank to other data parallel ranks.
-        # # if args.data_parallel_random_init:
-        for model_module in model:
-            model_module.broadcast_params()
+        model = wrap_model_chunks_with_layerwise_aware_ddp(
+            model,
+            tfconfig,
+            use_distributed_optimizer=use_distributed_optimizer,
+            use_layer_wise_distributed_optimizer=use_layer_wise_distributed_optimizer,
+            override_ddp_config=override_ddp_config,
+        )
     return model
 
 
@@ -214,6 +290,7 @@ class McoreModuleWrapperConfig:
     share_embeddings_and_output_weights: bool = False
     wrap_with_ddp: bool = True
     use_distributed_optimizer: bool = True
+    use_layer_wise_distributed_optimizer: bool = False
     use_megatron_fsdp: bool = False
 
 
@@ -230,7 +307,12 @@ def make_megatron_module(
 ):
     from verl.models.mcore.config_converter import get_hf_rope_theta
 
-    hf_config.rope_theta = get_hf_rope_theta(hf_config)
+    try:
+        hf_config.rope_theta = get_hf_rope_theta(hf_config)
+    except AttributeError:
+        # NoPE / hybrid-SSM configs (e.g. NemotronH) carry no rope at all; the
+        # provider/bridge owns rotary setup, so absence is not an error here.
+        pass
 
     if override_model_config is None:
         override_model_config = {}
@@ -254,9 +336,6 @@ def make_megatron_module(
         if override_model_config.get("moe_config", {}).get("freeze_moe_router", False):
             post_model_creation_callbacks.append(freeze_moe_router)
         if provider is not None:
-            from megatron.bridge.peft.utils import create_peft_hook, load_peft_adapter_checkpoint
-            from megatron.bridge.training.utils.config_utils import create_ddp_config
-
             # When using PEFT with Megatron-Bridge, we must apply PEFT transformation
             # BEFORE wrapping the model in DDP. This is required because:
             # 1. PEFT freezes base model parameters (requires_grad=False)
@@ -267,6 +346,8 @@ def make_megatron_module(
             # Register PEFT transformation as pre-wrap hook if peft_cls is specified
             # This must happen BEFORE DDP wrapping to avoid KeyError with frozen parameters
             if peft_cls is not None:
+                from megatron.bridge.peft.utils import create_peft_hook, load_peft_adapter_checkpoint
+
                 from verl.utils.megatron_peft_utils import print_adapter_info
 
                 provider.register_pre_wrap_hook(create_peft_hook(peft_cls, training=True))
@@ -297,23 +378,68 @@ def make_megatron_module(
             for callback in post_model_creation_callbacks:
                 provider.register_pre_wrap_hook(callback)
 
+            layer_wise_ddp = wrap_config.wrap_with_ddp and wrap_config.use_layer_wise_distributed_optimizer
+            if layer_wise_ddp:
+                if wrap_config.use_megatron_fsdp:
+                    raise ValueError(
+                        "Muon layer-wise distributed optimizer is incompatible with Megatron FSDP. "
+                        "Set use_megatron_fsdp=False or disable use_layer_wise_distributed_optimizer."
+                    )
+                _assert_muon_layer_wise_ddp_supported()
+
             # Create DDP config if needed
-            ddp_config = create_ddp_config(
-                wrap_with_ddp=wrap_config.wrap_with_ddp,
-                use_distributed_optimizer=wrap_config.use_distributed_optimizer,
-                use_megatron_fsdp=wrap_config.use_megatron_fsdp,
-                overrides=override_ddp_config,
-            )
+
+            # Megatron-Bridge >= v0.5.0 provides apply_overrides_and_finalize.
+            # Megatron-Bridge <  v0.5.0 does not, so we fall back to manual setattr + finalize.
+            try:
+                from megatron.bridge.training.utils.config_utils import create_ddp_config
+
+                ddp_config = create_ddp_config(
+                    wrap_with_ddp=wrap_config.wrap_with_ddp and not layer_wise_ddp,
+                    use_distributed_optimizer=wrap_config.use_distributed_optimizer,
+                    use_megatron_fsdp=wrap_config.use_megatron_fsdp,
+                    overrides=override_ddp_config,
+                )
+            except ImportError:
+                ddp_config = None
+                if wrap_config.wrap_with_ddp and not layer_wise_ddp:
+                    from megatron.bridge.training.config import DistributedDataParallelConfig
+
+                    ddp_config_dict = {
+                        "use_distributed_optimizer": wrap_config.use_distributed_optimizer,
+                    }
+                    if wrap_config.use_megatron_fsdp:
+                        ddp_config_dict["use_distributed_optimizer"] = True
+                        ddp_config_dict.setdefault("check_for_nan_in_grad", True)
+                        ddp_config_dict.setdefault("use_megatron_fsdp", True)
+                        ddp_config_dict.setdefault("data_parallel_sharding_strategy", "optim_grads_params")
+                        ddp_config_dict.setdefault("overlap_grad_reduce", True)
+                    if override_ddp_config is not None:
+                        ddp_config_dict.update(override_ddp_config)
+                    ddp_config = DistributedDataParallelConfig(**ddp_config_dict)
+                    ddp_config.finalize()
 
             # Now call provide_distributed_model with all hooks registered
             # Hooks will be applied automatically before DDP wrapping
             model = provider.provide_distributed_model(
-                wrap_with_ddp=wrap_config.wrap_with_ddp,
+                wrap_with_ddp=wrap_config.wrap_with_ddp and not layer_wise_ddp,
                 ddp_config=ddp_config,
                 fp16=provider.fp16,
                 bf16=provider.bf16,
                 use_megatron_fsdp=wrap_config.use_megatron_fsdp,
             )
+
+            if layer_wise_ddp:
+                if not isinstance(model, list):
+                    model = [model]
+                bridge_tf_config = get_model_config(model[0])
+                model = wrap_model_chunks_with_layerwise_aware_ddp(
+                    model,
+                    bridge_tf_config,
+                    use_distributed_optimizer=wrap_config.use_distributed_optimizer,
+                    use_layer_wise_distributed_optimizer=True,
+                    override_ddp_config=override_ddp_config,
+                )
 
             # Extract TransformerConfig from the created model
             tf_config = get_model_config(model[0] if isinstance(model, list) else model)
@@ -330,11 +456,22 @@ def make_megatron_module(
 
             model = bridge.get_model(
                 post_model_creation_callbacks=post_model_creation_callbacks,
-                wrap_with_ddp=wrap_config.wrap_with_ddp,
+                wrap_with_ddp=wrap_config.wrap_with_ddp and not wrap_config.use_layer_wise_distributed_optimizer,
                 fp16=tf_config.fp16,
                 bf16=tf_config.bf16,
                 ddp_config=ddp_config,
             )
+            if wrap_config.wrap_with_ddp and wrap_config.use_layer_wise_distributed_optimizer:
+                if not isinstance(model, list):
+                    model = [model]
+                mbridge_tf_config = get_model_config(model[0])
+                model = wrap_model_chunks_with_layerwise_aware_ddp(
+                    model,
+                    mbridge_tf_config,
+                    use_distributed_optimizer=wrap_config.use_distributed_optimizer,
+                    use_layer_wise_distributed_optimizer=True,
+                    override_ddp_config=override_ddp_config,
+                )
 
         if isinstance(tf_config, MLATransformerConfig):
             # Keep the same behavior as hf_to_mcore_config_dpskv3
@@ -363,6 +500,7 @@ def make_megatron_module(
             megatron_model_provider,
             wrap_with_ddp=wrap_config.wrap_with_ddp,
             use_distributed_optimizer=wrap_config.use_distributed_optimizer,
+            use_layer_wise_distributed_optimizer=wrap_config.use_layer_wise_distributed_optimizer,
             override_ddp_config=override_ddp_config,
         )
     return model, tf_config
@@ -1585,8 +1723,12 @@ def mapping_string_to_attn_backend(args: dict) -> dict:
 
 
 def get_megatron_mtp_loss(n_micro_batch):
-    # Calculate MTP loss scale similar to Megatron-LM implementation
-    mtp_loss_scale = 1.0 / n_micro_batch
+    # Newer MCore tracks raw loss sums and token counts across all microbatches,
+    # then computes the weighted mean in track_mtp_metrics. Older versions
+    # accumulate one normalized loss per microbatch and still need averaging.
+    tracker = MTPLossLoggingHelper.tracker
+    uses_global_token_mean = "loss_sums" in tracker and tracker.get("calculate_per_token_loss", True)
+    mtp_loss_scale = 1.0 if uses_global_token_mean else 1.0 / n_micro_batch
 
     # Create a dummy total_loss_dict to collect MTP metrics
     total_loss_dict = {}
@@ -1630,84 +1772,6 @@ def get_megatron_module_device(models: list[Any]) -> str:
         return "cpu"
     else:
         return get_device_name()
-
-
-def dynamic_cp_split_batch(
-    batch: TensorDict, engine_config: McoreEngineConfig, dp_size: int, dp_rank: int
-) -> TensorDict:
-    """
-    Split the batch into sub-batches for dynamic context parallel.
-
-    we can spilt a microbatch into several sub-batches with different local_cp_size, but for simplicity now,
-    we only split the batch into a fixed local_cp_size.
-
-    """
-    input_ids = batch["input_ids"]
-    assert input_ids.is_nested, "input_ids must be a nested tensor"
-    seq_len_effective: torch.Tensor = input_ids.offsets().diff()
-    max_seq_len = max(seq_len_effective)
-    # if num of sequences is less than dp_size, we don't need to split the batch
-    local_cp_size = None
-    if len(seq_len_effective) < dp_size:
-        local_cp_size = dp_size
-        return batch
-    else:
-        # decide the local_cp_size based on the max_seq_len and dp_size
-        max_seqlen_per_dp_cp_rank = engine_config.max_seqlen_per_dp_cp_rank
-        import math
-
-        local_cp_size = math.ceil(max_seq_len / max_seqlen_per_dp_cp_rank)
-        # round up to the nearest power of 2, for [1,2,3,4,5,6,7,8] -> [1,2,4,4,8,8,8,8]
-        local_cp_size = 1 << (local_cp_size - 1).bit_length()
-
-        assert local_cp_size <= dp_size, (
-            "local_cp_size must be less than or equal to dp_size, try to increase max_seqlen_per_dp_cp_rank"
-        )
-        if local_cp_size < dp_size:
-            # split the batch into local_cp_size sub-batches
-            local_dp_rank = dp_rank // local_cp_size
-            local_dp_size = dp_size // local_cp_size
-            indices = list(range(len(seq_len_effective)))
-            num_seq_per_local_cp = math.ceil(len(seq_len_effective) / local_dp_size)
-            start_idx = local_dp_rank * num_seq_per_local_cp
-            end_idx = min(start_idx + num_seq_per_local_cp, len(seq_len_effective))
-            selected_indices = indices[start_idx:end_idx]
-            batch = tu.index_select_tensor_dict(batch, selected_indices)
-
-    # print(f"rank={torch.distributed.get_rank()}, local_cp_size={local_cp_size} max_seq_len={max_seq_len}")
-    tu.assign_non_tensor_data(batch, "local_cp_size", local_cp_size)
-    return batch
-
-
-def dynamic_cp_merge_output(
-    outputs: dict[str, torch.Tensor],
-    dp_size: int,
-    dp_rank: int,
-    local_cp_size: int,
-) -> TensorDict:
-    """
-    Merge the outputs from different sub-batches for dynamic context parallel.
-    """
-    if local_cp_size == dp_size:
-        return outputs
-
-    merged_output = {}
-    for k in outputs:
-        data_local = outputs[k]
-        object_list = [None for _ in range(dp_size)]
-        torch.distributed.all_gather_object(
-            object_list=object_list, obj=data_local, group=mpu.get_data_parallel_group()
-        )
-
-        to_merge = object_list[(dp_rank % local_cp_size) :: local_cp_size]
-        merged = torch.nested.nested_tensor(
-            sum([list(x.to(data_local.device).unbind()) for x in to_merge], []), layout=torch.jagged
-        )
-        merged_output[k] = merged
-        # print(f'local_cp_size={local_cp_size}, dp_rank={dp_rank}, key={k},
-        # data_local shape={data_local.shape}, merged shape={merged_output[k].shape} ')
-
-    return merged_output
 
 
 def _get_mtp_num_layers(hf_config):

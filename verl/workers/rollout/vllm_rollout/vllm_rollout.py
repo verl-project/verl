@@ -33,29 +33,17 @@ from typing import Any, Generator, Optional
 
 import ray
 import torch
-from packaging import version as vs
 from torch.distributed.device_mesh import DeviceMesh
 
 from verl import DataProto
-from verl.third_party.vllm import VLLM_SLEEP_LEVEL, get_version
-from verl.utils.device import get_device_id, is_support_ipc
+from verl.third_party.vllm import VLLM_SLEEP_LEVEL
+from verl.utils.device import is_support_ipc
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
 from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
-from verl.workers.rollout.vllm_rollout.utils import get_device_uuid
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
-
-
-def _check_vllm_version_for_sleep_level():
-    # https://github.com/vllm-project/vllm/issues/25171
-    minver = "0.11.0"
-    current_version = get_version("vllm")
-    if not current_version:
-        logger.warning("Could not determine vLLM version, assuming an older version for sleep_level configuration.")
-        return False
-    return vs.parse(current_version) >= vs.parse(minver)
 
 
 class ServerAdapter(BaseRollout):
@@ -134,13 +122,12 @@ class ServerAdapter(BaseRollout):
         else:
             self._has_server = self.rollout_rank == 0
 
-        if config.layered_summon or (config.expert_parallel_size > 1 and not _check_vllm_version_for_sleep_level()):
+        if config.layered_summon:
             logger.warning("Setting the sleep level to 1 may cause a memory overflow.")
             self.sleep_level = 1
         else:
             self.sleep_level = VLLM_SLEEP_LEVEL
 
-        self.device_uuid = get_device_uuid(get_device_id())
         # Use replica_rank + node-local rank to form ZMQ handle instead of GPU UUID,
         # because CheckpointEngineWorker and vLLM worker may see different GPU UUIDs
         # when CUDA_VISIBLE_DEVICES differs between processes (common on ROCm/AMD).
@@ -154,6 +141,7 @@ class ServerAdapter(BaseRollout):
         self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{self.replica_rank}-rank-{local_rank}.sock"
 
         self.use_shm = not is_support_ipc()
+        self._delta_weight_transfer_engine_initialized = False
         if self.use_shm:
             logger.warning(
                 "IPC is not supported on your devices. Falling back to shared memory for weight transfer, "
@@ -226,9 +214,15 @@ class ServerAdapter(BaseRollout):
         wire_format: str = "named_tensors",
         **kwargs,
     ):
-        """Update model weights via CUDA IPC (fallback to shared memory if IPC not supported) to inference workers."""
+        """Update rollout weights from full tensors or DeltaFlush payloads.
+
+        Full-tensor updates may fall back to shared memory; delta updates
+        require colocated CUDA IPC.
+        """
+        if wire_format == "delta_flush":
+            return await self._update_delta_weights(weights, global_steps=global_steps)
         assert wire_format == "named_tensors", (
-            f"vLLM rollout only consumes full named tensors; got wire_format={wire_format!r}"
+            f"vLLM rollout supports wire_format='named_tensors' or 'delta_flush'; got {wire_format!r}"
         )
         start_time = time.time()
 
@@ -257,6 +251,72 @@ class ServerAdapter(BaseRollout):
 
         if self.replica_rank == 0 and self.rollout_rank == 0:
             logger.info(f"update_weights done, time cost: {time.time() - start_time:.2f}s")
+
+    async def _update_delta_weights(
+        self,
+        weights,
+        *,
+        global_steps: int | None,
+    ) -> None:
+        """Send one delta weight update as a stream of DeltaFlush payloads."""
+
+        from verl.workers.rollout.utils import ensure_async_iterator
+
+        if self.use_shm:
+            raise NotImplementedError("delta_sharded with vLLM requires colocated CUDA IPC")
+
+        flushes = ensure_async_iterator(weights)
+        try:
+            first_item = await anext(flushes)
+        except StopAsyncIteration:
+            # A steady sync with no changed BF16 values sends only a terminal
+            # marker: weights are unchanged, so advance the step tag without
+            # touching the transfer engine or the KV cache.
+            if global_steps is not None and self._ensure_server_handle():
+                await self.server_handle.set_global_steps.remote(global_steps)
+            return
+
+        first_named_tensors, saw_last = first_item
+        if not self._delta_weight_transfer_engine_initialized:
+            await self._execute_method(
+                "init_weight_transfer_engine",
+                kwargs={"init_info": {}},
+            )
+            self._delta_weight_transfer_engine_initialized = True
+
+        await self._execute_method("start_weight_update")
+
+        async def send_flush(flush_tensors: list[tuple[str, torch.Tensor]]) -> None:
+            receiver_future = await self._execute_method(
+                "update_verl_delta_weights",
+                non_block=True,
+                kwargs={"update_info": {}},
+            )
+            sender = BucketedWeightSender(
+                zmq_handle=self.zmq_handle,
+                bucket_size_mb=self.config.checkpoint_engine.update_weights_bucket_megabytes,
+                use_shm=False,
+            )
+            await sender.async_send_weights(iter(flush_tensors))
+            if receiver_future is not None:
+                await receiver_future
+
+        await send_flush(list(first_named_tensors))
+        async for named_tensors, is_last in flushes:
+            if saw_last:
+                raise ValueError("DeltaFlush stream yielded data after is_last=True")
+            saw_last = is_last
+            await send_flush(list(named_tensors))
+
+        if not saw_last:
+            raise ValueError("DeltaFlush stream ended without is_last=True")
+
+        await self._execute_method("finish_weight_update")
+
+        if self._has_server:
+            await self.server_handle.clear_kv_cache.remote()
+            if global_steps is not None:
+                await self.server_handle.set_global_steps.remote(global_steps)
 
     def _get_server_name_prefix(self) -> str:
         """Return the Ray actor name prefix matching the rollout type (e.g. 'vllm_')."""

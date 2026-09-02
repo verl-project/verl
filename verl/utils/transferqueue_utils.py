@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import atexit
 import copy
 import functools
 import inspect
@@ -68,32 +69,82 @@ logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 TQ_INITIALIZED = False
+_ASYNC_BRIDGE_LOOP: asyncio.AbstractEventLoop | None = None
+_ASYNC_BRIDGE_THREAD: threading.Thread | None = None
+_ASYNC_BRIDGE_LOCK = threading.Lock()
 
 
-# TODO (TQ): verl will make all actor async, so this can be cleanup later.
+def _run_event_loop_forever(loop: asyncio.AbstractEventLoop, ready: threading.Event) -> None:
+    asyncio.set_event_loop(loop)
+    ready.set()
+    loop.run_forever()
+
+
+def _shutdown_async_bridge_runtime(
+    loop: asyncio.AbstractEventLoop | None = None,
+    thread: threading.Thread | None = None,
+) -> None:
+    global _ASYNC_BRIDGE_LOOP, _ASYNC_BRIDGE_THREAD
+
+    # No explicit runtime provided: shutdown the shared global runtime.
+    if loop is None and thread is None:
+        with _ASYNC_BRIDGE_LOCK:
+            loop = _ASYNC_BRIDGE_LOOP
+            thread = _ASYNC_BRIDGE_THREAD
+            _ASYNC_BRIDGE_LOOP = None
+            _ASYNC_BRIDGE_THREAD = None
+
+    if thread is not None and thread.is_alive():
+        try:
+            loop.call_soon_threadsafe(loop.stop)
+        except RuntimeError:
+            # The loop may already be closed if shutdown races with process teardown.
+            pass
+        thread.join()
+
+    if loop is not None and not loop.is_closed():
+        loop.close()
+
+
+def _get_async_bridge_loop() -> asyncio.AbstractEventLoop:
+    global _ASYNC_BRIDGE_LOOP, _ASYNC_BRIDGE_THREAD
+    with _ASYNC_BRIDGE_LOCK:
+        loop = _ASYNC_BRIDGE_LOOP
+        if loop is not None:
+            return loop
+
+        # lazy init the event loop & thread
+        ready = threading.Event()
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(
+            target=_run_event_loop_forever,
+            args=(loop, ready),
+            name="batchmeta tensordict converter",
+            daemon=True,
+        )
+        thread.start()
+        if not ready.wait(timeout=5):
+            _shutdown_async_bridge_runtime(loop, thread)
+            raise RuntimeError("Failed to start TransferQueue async bridge event loop.")
+        _ASYNC_BRIDGE_LOOP = loop
+        _ASYNC_BRIDGE_THREAD = thread
+        return loop
+
+
+atexit.register(_shutdown_async_bridge_runtime)
+
+
 def _run_async_in_temp_loop(async_func: Callable[..., Any], *args, **kwargs) -> Any:
-    # Use a temporary event loop in a new thread because event
-    # loop may already exist in server mode
-    tmp_event_loop = asyncio.new_event_loop()
-    thread = threading.Thread(
-        target=tmp_event_loop.run_forever,
-        name="batchmeta tensordict converter",
-        daemon=True,
-    )
-
-    def run_coroutine(coroutine):
-        if not thread.is_alive():
-            thread.start()
-        future = asyncio.run_coroutine_threadsafe(coroutine, tmp_event_loop)
-        return future.result()
-
+    # Use a shared event loop in a background thread because event
+    # loop may already exist in server mode.
+    loop = _get_async_bridge_loop()
+    coroutine = async_func(*args, **kwargs)
     try:
-        return run_coroutine(async_func(*args, **kwargs))
-    finally:
-        if thread.is_alive():
-            tmp_event_loop.call_soon_threadsafe(tmp_event_loop.stop)
-            thread.join()
-        tmp_event_loop.close()
+        future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+    except RuntimeError:
+        coroutine.close()
+        raise
+    return future.result()
 
 
 def _find_meta(*args, **kwargs):

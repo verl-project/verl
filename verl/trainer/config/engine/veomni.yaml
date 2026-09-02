@@ -73,6 +73,10 @@ rms_norm_gated_implementation: eager
 causal_conv1d_implementation: eager
 chunk_gated_delta_rule_implementation: eager
 load_balancing_loss_implementation: eager
+dsa_indexer_implementation: eager
+dsa_attention_implementation: eager
+mhc_implementation: eager
+qat_implementation: none
 
 force_use_huggingface: false
 
@@ -80,6 +84,18 @@ activation_gpu_limit: 0.0
 
 # List of basic modules to use
 basic_modules: []
+
+# Round every packed micro-batch up to a multiple of `pad_to_length_bucket` tokens, so the packed
+# shape only takes a few distinct values instead of a new one per micro-batch (avoids kernel
+# recompilation / re-autotuning). Requires use_remove_padding=True. Pad tokens are stripped before
+# the loss but still cost a forward.
+pad_to_length: false
+
+# Padding granularity in tokens, on the global packed sequence (before the SP split). Rounded up
+# internally to a multiple of ulysses_parallel_size. Smaller wastes fewer tokens but admits more
+# shapes; set it to `max_token_len_per_gpu * ulysses_parallel_size` to collapse every within-budget
+# micro-batch onto a single shape. Only read when pad_to_length=true.
+pad_to_length_bucket: 1024
 
 router_replay:
 

@@ -13,10 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import logging
 import math
 import os
-from typing import Optional
+from dataclasses import fields, is_dataclass
+from typing import Literal
 
 import torch
 from megatron.core import parallel_state as mpu
@@ -27,6 +29,22 @@ from verl.utils.model import CausalLMOutputForPPO
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+ContextParallelLayout = Literal["zigzag", "contiguous"]
+
+# Older Megatron-core releases have no ``cp_partition_mode`` field on PackedSeqParams; they
+# support only the zigzag CP layout. Inspect ``__init__`` rather than dataclass fields so that
+# duck-typed replacements (e.g. test stubs taking ``**kwargs``) also count as supporting it.
+_PACKED_SEQ_PARAMS_INIT_PARAMS = inspect.signature(PackedSeqParams.__init__).parameters
+_PACKED_SEQ_PARAMS_HAS_CP_PARTITION_MODE = "cp_partition_mode" in _PACKED_SEQ_PARAMS_INIT_PARAMS or any(
+    p.kind is inspect.Parameter.VAR_KEYWORD for p in _PACKED_SEQ_PARAMS_INIT_PARAMS.values()
+)
+
+
+def _packed_seq_params_supports(field_name: str) -> bool:
+    if is_dataclass(PackedSeqParams):
+        return field_name in {field.name for field in fields(PackedSeqParams)}
+    return field_name in getattr(PackedSeqParams, "__dataclass_fields__", {})
 
 
 def _compute_fp8_thd_align_size(align_size: int) -> tuple[int, int]:
@@ -319,15 +337,22 @@ def preprocess_thd_engine(
     pre_process: bool = True,
     need_roll: bool = False,
     use_fp8_padding: bool = False,
-    local_cp_size: Optional[int] = None,
-    min_local_rows: Optional[int] = None,
-) -> tuple[torch.Tensor, PackedSeqParams, Optional[torch.Tensor]]:
+    local_cp_size: int | None = None,
+    min_local_rows: int | None = None,
+    pad_to_length_bucket: int | None = None,
+    cp_layout: ContextParallelLayout = "zigzag",
+) -> tuple[torch.Tensor, PackedSeqParams, torch.Tensor | None]:
+    """Pack nested THD sequences and shard their rows across CP ranks.
+
+    ``zigzag`` is the default causal-attention layout: each rank receives a
+    chunk from both ends of every sequence. ``contiguous`` assigns each rank
+    one consecutive interval of the *global padded THD buffer*. The latter is
+    required by attention variants whose CP kernels address rows through one
+    rank-local ``global_start``.
     """
-    Preprocess packed sequences
-    CP splits sequence into CP*2 chunks, and each GPU gets 2 chunks (GPU0 gets first and last chunks, GPU1
-    gets second and second last chunks, and so on), this is for load balancing with causal masking.
-    See https://github.com/NVIDIA/TransformerEngine/issues/1368
-    """
+    if cp_layout not in ("zigzag", "contiguous"):
+        raise ValueError(f"Unsupported context parallel layout: {cp_layout}")
+
     batch_size = input_ids.shape[0]
 
     tp_size = mpu.get_tensor_model_parallel_world_size()
@@ -342,7 +367,10 @@ def preprocess_thd_engine(
     else:
         cp_size = mpu.get_context_parallel_world_size()
         cp_rank = mpu.get_context_parallel_rank()
-    align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
+    if _packed_seq_params_supports("cp_partition_mode"):
+        extra_packed_args["cp_partition_mode"] = cp_layout
+    cp_layout_factor = 2 if cp_layout == "zigzag" and cp_size > 1 else 1
+    align_size = tp_size * cp_size * cp_layout_factor
     seqlens_in_batch = input_ids.offsets().diff()
 
     if use_fp8_padding:
@@ -372,6 +400,16 @@ def preprocess_thd_engine(
             cu_seqlens_padded[-1] += pad_size_last
             seqlens_in_batch_padded[-1] += pad_size_last
 
+    if pad_to_length_bucket is not None:
+        if pad_to_length_bucket <= 0:
+            raise ValueError("pad_to_length_bucket must be a positive integer")
+        total_alignment = math.lcm(pad_to_length_bucket, cp_size)
+        if use_fp8_padding:
+            total_alignment = math.lcm(total_alignment, total_align)
+        pad_size_last = (-cu_seqlens_padded[-1]) % total_alignment
+        cu_seqlens_padded[-1] += pad_size_last
+        seqlens_in_batch_padded[-1] += pad_size_last
+
     # ----------------------------------------------------------------------------
     # Move the index information needed in the subsequent loop to the CPU at once,
     # to avoid frequent .item() calls in the loop that cause D2H synchronization
@@ -391,8 +429,35 @@ def preprocess_thd_engine(
         if need_roll:
             saved_roll_dict = {}
             saved_position_roll_dict = {}
+        local_global_start = shape[0] * cp_rank
+        local_global_end = local_global_start + shape[0]
         for i in range(batch_size):
             # Use Python int, so no GPU→CPU sync in the loop
+            if cp_layout == "contiguous":
+                seq_global_start = cu_seqlens_padded_cpu[i]
+                seq_valid_end = seq_global_start + seqlens_in_batch_cpu[i]
+                copy_global_start = max(local_global_start, seq_global_start)
+                copy_global_end = min(local_global_end, seq_valid_end)
+                if copy_global_start >= copy_global_end:
+                    continue
+
+                source_start = copy_global_start - seq_global_start
+                source_end = copy_global_end - seq_global_start
+                destination_start = copy_global_start - local_global_start
+                destination_end = copy_global_end - local_global_start
+                d = input_ids[i]
+                if need_roll:
+                    source_indices = torch.arange(source_start, source_end, device=d.device)
+                    source_indices = (source_indices + 1) % seqlens_in_batch_cpu[i]
+                    input_ids_rmpad[destination_start:destination_end] = torch.index_select(d, 0, source_indices)
+                    position_ids_rmpad[destination_start:destination_end] = source_indices
+                else:
+                    input_ids_rmpad[destination_start:destination_end] = d[source_start:source_end]
+                    position_ids_rmpad[destination_start:destination_end] = torch.arange(
+                        source_start, source_end, dtype=torch.long, device=input_ids.device
+                    )
+                continue
+
             if cp_size <= 1:
                 seqlen = seqlens_in_batch_cpu[i]
                 start_idx = cu_seqlens_padded_cpu[i]
@@ -410,13 +475,12 @@ def preprocess_thd_engine(
             start_idx = cu_seqlens_padded_cpu[i] // cp_size
             # split to 2 chunks
             d = input_ids[i]
-            # If the number of elements in `d` is smaller than the required
-            # alignment size, pad the tensor with zeros so that its total
-            # length matches `align_size`. This ensures size alignment for
-            # downstream operations (e.g., communication or memory alignment).
-            if d.numel() < align_size:
-                original_size = d.numel()
-                pad = torch.zeros(align_size - d.numel(), dtype=d.dtype, device=d.device)
+            # Alignment applies to the sequence dimension. Extra trailing
+            # dimensions (for example top-k teacher logits) must not affect
+            # whether a short sequence is padded.
+            if d.shape[0] < align_size:
+                original_size = d.shape[0]
+                pad = torch.zeros((align_size - d.shape[0], *d.shape[1:]), dtype=d.dtype, device=d.device)
                 d = torch.cat([d, pad], dim=0)
                 logger.warning_once(
                     f"Padding tensor for context parallel alignment, original_size={original_size}, "
@@ -463,7 +527,7 @@ def preprocess_thd_engine(
                             start_idx + half_seqlen + remain_len - 1
                         ]
 
-        if need_roll:
+        if need_roll and cp_layout == "zigzag":
             input_ids_rmpad = torch.roll(input_ids_rmpad, shifts=-1, dims=0)
             position_ids_rmpad = torch.roll(position_ids_rmpad, shifts=-1, dims=0)
             if len(saved_roll_dict) > 0:
@@ -471,6 +535,18 @@ def preprocess_thd_engine(
                     input_ids_rmpad[k] = v
                 for k, v in saved_position_roll_dict.items():
                     position_ids_rmpad[k] = v
+
+    if _PACKED_SEQ_PARAMS_HAS_CP_PARTITION_MODE:
+        # Tell the attention kernels how the rows above were sharded across CP ranks. The rows
+        # are already split according to `cp_layout`, but PackedSeqParams defaults to "zigzag",
+        # so without this an attention variant that requires a contiguous split (DeepSeek-V4)
+        # raises "DSv4 THD CP requires a contiguous CP partition." on every forward.
+        extra_packed_args["cp_partition_mode"] = cp_layout
+    elif cp_layout != "zigzag" and cp_size > 1:
+        raise ValueError(
+            f"cp_layout='{cp_layout}' requires PackedSeqParams.cp_partition_mode, which this "
+            "Megatron-core version does not provide. Upgrade Megatron-core or use the zigzag layout."
+        )
 
     packed_seq_params = PackedSeqParams(
         qkv_format="thd",
@@ -494,11 +570,14 @@ def postprocess_thd_engine(
     input_ids: torch.Tensor,
     batch_size: int,
     post_process: bool = True,
-    local_cp_size: Optional[int] = None,
+    local_cp_size: int | None = None,
+    cp_layout: ContextParallelLayout = "zigzag",
 ) -> torch.Tensor:
     """
     Postprocess packed sequences
     """
+    if cp_layout not in ("zigzag", "contiguous"):
+        raise ValueError(f"Unsupported context parallel layout: {cp_layout}")
     if not post_process:
         return output
 
@@ -532,6 +611,13 @@ def postprocess_thd_engine(
     else:
         output_list = [output]
 
+    if cp_layout == "contiguous":
+        packed_output = torch.cat([rank_output[0] for rank_output in output_list], dim=0)
+        for i in range(batch_size):
+            sequence_start = cu_padded_cpu[i]
+            output_new.append(packed_output[sequence_start : sequence_start + seq_lens_cpu[i]])
+        return torch.nested.as_nested_tensor(output_new, layout=torch.jagged)
+
     for i in range(batch_size):
         if cp_size <= 1:
             s = seq_lens_cpu[i]
@@ -542,7 +628,7 @@ def postprocess_thd_engine(
         half_seqlen = s_len_padded_chunk // 2
         s_len = seq_lens_cpu[i]
         s_len_padded = s_len_padded_chunk * cp_size
-        tmp = torch.empty(s_len_padded, *output.shape[2:], device=output.device)
+        tmp = torch.empty(s_len_padded, *output.shape[2:], device=output.device, dtype=output.dtype)
         for j in range(cp_size):
             o = output_list[j][0]
             # split to 2 chunks
@@ -574,7 +660,7 @@ def preprocess_bshd_engine(
     pre_process: bool = True,
     need_roll: bool = False,
     use_fp8_padding: bool = False,
-    forced_max_seqlen: Optional[int] = None,
+    forced_max_seqlen: int | None = None,
 ):
     """
     Preprocess bshd sequences
@@ -763,21 +849,17 @@ def postprocess_bshd_engine(
 
 
 def build_vlm_attn_mask_thd(input_ids: torch.Tensor, pad_token_id: int = None):
-    input_ids_rmpad = input_ids.to_padded_tensor(pad_token_id)
-
-    if is_npu_available:
-        return input_ids_rmpad, None
-
+    input_ids_with_pad = input_ids.to_padded_tensor(pad_token_id)
     seqlens_in_batch = input_ids.offsets().diff()
-    attention_mask = torch.zeros_like(input_ids_rmpad, dtype=torch.bool)
+    attention_mask = torch.zeros_like(input_ids_with_pad, dtype=torch.bool)
     for i, seqlen in enumerate(seqlens_in_batch):
         attention_mask[i, :seqlen] = True
 
-    return input_ids_rmpad, attention_mask
+    return input_ids_with_pad, attention_mask
 
 
 def build_vlm_attn_mask_bshd(
-    input_ids: torch.Tensor, batch_size: int, pad_token_id: int = None, forced_max_seqlen: Optional[int] = None
+    input_ids: torch.Tensor, batch_size: int, pad_token_id: int = None, forced_max_seqlen: int | None = None
 ):
     seqlens_in_batch = input_ids.offsets().diff()
     # When ``forced_max_seqlen`` is given, pad to the mini-batch global max (raw, unaligned)

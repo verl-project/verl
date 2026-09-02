@@ -17,13 +17,17 @@ Puts the delta on the trainer->rollout wire: the trainer byte-diffs against a
 pinned-CPU snapshot and broadcasts only the changed ``(position, value)`` pairs
 over the same ``ray.util.collective`` NCCL group the full-weight
 :class:`NCCLCheckpointEngine` uses (actor rank0 -> rollout CheckpointEngineWorkers).
-Each rollout worker then hands its local copy of the sparse payload to its
-colocated SGLang TP worker via same-GPU ``update_weights_from_tensor`` IPC, where
-the verl-shipped :mod:`verl.workers.rollout.sglang_rollout.delta_loader` (registered through SGLang's
-stock ``--custom-weight-loader`` hook — no SGLang fork or patch needed) decodes
-and masked-applies it *in place* onto the live weights. No full-model mirror is
-staged anywhere on the rollout side: receiver peak memory is one bucket plus one
-decode chunk, independent of model size.
+With SGLang, each rollout worker hands its local copy of the sparse payload to
+its colocated SGLang TP worker via same-GPU ``update_weights_from_tensor`` IPC,
+where the verl-shipped :mod:`verl.workers.rollout.sglang_rollout.delta_loader`
+(registered through SGLang's stock ``--custom-weight-loader`` hook — no SGLang
+fork or patch needed) decodes and masked-applies it *in place* onto the live
+weights. No full-model mirror is staged anywhere on the rollout side: receiver
+peak memory is one bucket plus one decode chunk, independent of model size.
+
+With vLLM, the rollout adapter forwards the same payload over same-GPU IPC to
+VERL's registered weight-transfer backend. It decodes each flush into vLLM
+checkpoint patches, whose loader reuses native ``model.load_weights()`` mapping.
 
 The first (seed) sync streams the backend's FULL HF export (``get_per_tensor_
 param()``) over the values-only wire -- every backend already knows how to
@@ -47,6 +51,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from unittest.mock import patch
@@ -62,7 +67,7 @@ from .base import CheckpointEngineRegistry
 from .delta_sync.encode import DeltaFlush, DeltaParam
 from .delta_sync.encode import checksum as _checksum
 from .delta_sync.sparse_gather import gather_slot_entries_to_rank0
-from .nccl_checkpoint_engine import MasterMetadata, NCCLCheckpointEngine
+from .nccl_checkpoint_engine import MasterMetadata, NCCLCheckpointEngine, WorkerMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -245,22 +250,23 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
 
     wire_format = "delta_flush"
 
-    def prepare(self) -> MasterMetadata | None:
+    def prepare(self) -> WorkerMetadata:
         # Delta broadcasts small per-flush buffers directly, so skip the parent's
         # 2 * bucket_size fixed buffers. Still hand back the master zmq endpoint
         # that build_topology() distributes to the rollout workers.
-        return MasterMetadata(zmq_ip=self.ip, zmq_port=self.listen_port) if self.is_master else None
+        #
+        # Only rank 0 broadcasts here (see the assert in send_weights) and this engine has no relay
+        # path, so it always takes the parent's single-sender topology.
+        master = (
+            MasterMetadata(zmq_ip=self.ip, zmq_port=self.listen_port, multi_sender=False) if self.is_master else None
+        )
+        return WorkerMetadata(node_id=self.get_node_id(), master=master)
 
     # ---- trainer side ----
     # ---- shared STREAMING wire ----
-    # Broadcast each flush the moment it is produced and free it, instead of materializing every
-    # flush up front. Peak device memory stays ~2 buckets (like NCCLCheckpointEngine's send/recv
-    # buffers) rather than the whole model -- required for large models where the first (full-seed)
-    # sync would otherwise hold the entire delta on rank 0. Wire: one zmq manifest + NCCL broadcast
-    # per flush, with an ``is_last`` flag so the receiver loops until the stream ends. Each
-    # CheckpointEngineWorker then hands its local copy of the sparse payload to its colocated
-    # SGLang TP worker (same-GPU IPC), where the verl-shipped custom weight loader applies it
-    # in place -- no full-model staging anywhere on the rollout side.
+    # Stream each flush as soon as it is produced so trainer peak memory stays near two buckets,
+    # including during the full seed. Each ZMQ manifest + NCCL broadcast carries ``is_last``;
+    # rollout adapters then forward that flush over same-GPU IPC to their backend-specific consumer.
     def _publish_flush(self, flush: DeltaFlush, first: bool, is_last: bool) -> None:
         meta = {
             "is_full": first,
@@ -290,7 +296,9 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         collective.broadcast(pos_cp, src_rank=0, group_name=self.group_name)
         collective.broadcast(val_cp, src_rank=0, group_name=self.group_name)
 
-    def _publish_values_flush(self, params: list[DeltaParam], values: torch.Tensor, is_last: bool) -> None:
+    def _publish_values_flush(
+        self, params: list[DeltaParam], values: torch.Tensor, is_last: bool, verify: bool = False
+    ) -> None:
         """Publish a values-only (full-coverage, positions-free) flush -- used by the first
         sync. The wire encoding tag stays ``"dense"`` -- it is protocol, shared with the
         receiver's delta_loader decode."""
@@ -306,6 +314,8 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             "val_dtype": str(values.dtype).replace("torch.", ""),
             "spec": {
                 "encoding": "dense",
+                "verify": verify,
+                "is_last": is_last,
                 "params": [vars(p) for p in params],
                 "checksum": int(_checksum(empty_pos, values)),
             },
@@ -318,6 +328,26 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         val_cp[:] = cp.asarray(val_u8)
         collective.broadcast(val_cp, src_rank=0, group_name=self.group_name)
 
+    def _release_staging_pool(self, phase: str) -> None:
+        """Return the cupy staging pool's blocks to CUDA and log the evidence:
+        ``held`` is what the pool would have kept from the device without this
+        release, and the device-free delta shows the memory actually coming
+        back (warning level so the default worker log level records it)."""
+        from verl.utils.device import get_torch_device
+
+        pool = cp.get_default_memory_pool()
+        held = pool.total_bytes()
+        free_before, _ = get_torch_device().mem_get_info()
+        pool.free_all_blocks()
+        free_after, _ = get_torch_device().mem_get_info()
+        logger.warning(
+            "cupy staging pool after %s send: held %.2fGB; device free %.2f->%.2fGB on release",
+            phase,
+            held / (1 << 30),
+            free_before / (1 << 30),
+            free_after / (1 << 30),
+        )
+
     def _publish_terminal(self, first: bool) -> None:
         """End-of-stream marker when zero flushes were produced (no broadcast, just a signal)."""
         meta = {"is_full": first, "encoding": self.encoding, "is_last": True, "terminal_empty": True}
@@ -326,16 +356,11 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
 
     # ---- rollout worker side ----
     def receive_weights(self, global_steps: int | None = None) -> Iterator[tuple[list[tuple[str, torch.Tensor]], bool]]:
-        """Yield the sparse flushes for the server adapter to apply in place.
+        """Yield delta flushes for the rollout adapter to consume.
 
-        Each item is ``(named_tensors, is_last)``: the sentinel-encoded flush
-        (``__delta_spec__`` json bytes, optional ``__positions__``, ``__values__``)
-        received into this worker's own GPU buffer -- one flush resident at a
-        time, freed as soon as the consumer drops it. The sglang server adapter
-        forwards each flush over same-GPU CUDA IPC to the verl-shipped
-        ``delta_loader.apply_delta`` (registered through the custom-weight-loader
-        hook), which decodes and masked-applies it against SGLang's live weights;
-        no full-model mirror is staged anywhere.
+        Each ``(named_tensors, is_last)`` item contains a JSON manifest, optional
+        int32 position bytes, and patch values. The generator keeps at most one
+        received GPU flush live at a time.
         """
         assert self.rank > 0, "Rank 0 should not receive weights."
         applied = 0
@@ -370,15 +395,26 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                 break
         logger.info("delta recv v=%s flushes=%d (yielded to server adapter)", global_steps, applied)
 
-    def __init__(self, *args, encoding: str = "indices", batch_gather: int = 32, **kwargs) -> None:
+    def __init__(
+        self, *args, encoding: str = "indices", batch_gather: int = 32, verify_every: int = 0, **kwargs
+    ) -> None:
         super().__init__(*args, **kwargs)
         assert encoding == "indices", f"delta_sharded ships only the 'indices' position encoding; got {encoding!r}"
         self.encoding = encoding
+        # SGLang supports verify_every > 0; vLLM rejects it at startup.
+        self.verify_every = int(verify_every)
         self._shard_seeded = False
         # Gather the per-param sparse deltas in groups of this many parameters
         # (one count-matrix all_gather + two padded gathers per group instead of
         # three collectives per parameter).
         self.batch_gather = int(batch_gather)
+
+    def _verify_due(self) -> bool:
+        """True on every K-th steady sync when constructed with ``verify_every=K``."""
+        if self.verify_every <= 0:
+            return False
+        self._steady_count = getattr(self, "_steady_count", 0) + 1
+        return self._steady_count % self.verify_every == 0
 
     def _assemble_flush(self, per_param: list[_FlushPiece]) -> DeltaFlush:
         """Build one DeltaFlush (indices encoding) from rank 0's gathered per-param deltas.
@@ -435,6 +471,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         self,
         weights: Generator[tuple[str, torch.Tensor], None, None],
         global_steps: int | None = None,
+        verify: bool = False,
     ) -> dict[str, float] | None:
         """First sync: stream the backend's FULL HF export over the values-only wire.
 
@@ -445,6 +482,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         generator (the per-tensor assembly is collective); rank 0 buckets. Resume
         works by construction: whatever the trainer restored is what ships."""
         is_r0 = self.is_master
+        t0 = time.time()
         n_flushes = 0
         total_elems = 0
         wire_bytes = 0
@@ -472,13 +510,20 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         def _publish_values(pending, is_last: bool) -> None:
             nonlocal n_flushes, wire_bytes
             params, values = pending
-            self._publish_values_flush(params, values, is_last=is_last)
+            self._publish_values_flush(params, values, is_last=is_last, verify=verify)
             n_flushes += 1
             wire_bytes += int(values.nbytes)
 
         bkt = _FlushBucket(self.bucket_size, _assemble_values, _publish_values)
 
+        seen_names: set = set()
         for name, tensor in weights:
+            # duplicate names in a full export mean two source params mapped to
+            # the same HF tensor -- the receiver would apply whichever came last
+            # and the delta diff base would silently disagree with the trainer
+            # (observed: NemotronH A_log). Fail loud instead.
+            assert name not in seen_names, f"full export yields duplicate HF tensor {name!r}"
+            seen_names.add(name)
             tensor = tensor.detach()
             if tensor.is_floating_point() and tensor.dtype != self.rollout_dtype:
                 tensor = tensor.to(self.rollout_dtype)
@@ -489,7 +534,6 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             total_elems += int(flat.numel())
             bkt.add(_ValuesPiece(name, str(flat.dtype).replace("torch.", ""), list(tensor.shape), flat), flat.nbytes)
 
-        self._shard_seeded = True
         if not is_r0:
             return
         bkt.seal()
@@ -497,7 +541,22 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             bkt.emit(is_last=True)
         else:
             self._publish_terminal(True)
-        logger.info("delta-sharded send v=%s FULL-SEED flushes=%d elems=%d", global_steps, n_flushes, total_elems)
+        # warning level on purpose: worker default log level swallows info, and the
+        # one-off seed cost is the number people ask for when sizing a run.
+        # the cupy staging pool does not return its blocks to CUDA on its own;
+        # after streaming up to 2x bucket_size through it, give the memory back
+        # so the trainer's next optimizer/forward pass can use it (raw cudaMalloc
+        # OOMs on tight mcore shapes otherwise).
+        self._release_staging_pool("seed")
+        logger.warning(
+            "delta-sharded FULL-%s v=%s done in %.1fs (flushes=%d elems=%d wire=%.1fGB)",
+            "VERIFY" if verify else "SEED",
+            global_steps,
+            time.time() - t0,
+            n_flushes,
+            total_elems,
+            wire_bytes / (1 << 30),
+        )
         if not total_elems:
             return None
         return {
@@ -531,6 +590,8 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             # weights do not move during the sync, so the snapshots equal exactly
             # what the rollout just received.
             engine.prime_delta_snapshots()
+            # The seed is complete only after its baseline snapshots are ready.
+            self._shard_seeded = True
             return metrics
         weights, _ = engine.get_per_tensor_param_delta_shard()
         is_r0 = self.is_master
@@ -574,13 +635,25 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             gq.put(pg, slots, dtype_str, counts, hf_idx, hf_val)
         gq.flush_all()
 
+        # For SGLang, verify_every=K appends a dense state-verification sweep to
+        # every K-th steady sync inside the same receive stream. The steady bucket
+        # keeps ``is_last`` unset, and the sweep's final flush carries it. The
+        # receiver bit-compares each destination before overwriting it and fails
+        # on any mismatch (see delta_loader._verify_dense).
+        verify = self._verify_due()
+        if is_r0:
+            bkt.seal()  # seal the final partial bucket into the pending flush
+            if bkt.pending is not None:
+                bkt.emit(is_last=not verify)
+            elif not verify:
+                self._publish_terminal(False)
+        if verify:
+            # collective on every rank: the full export assembles per tensor.
+            full, _ = engine.get_per_tensor_param()
+            self._send_full_seed(full, global_steps, verify=True)
         if not is_r0:
             return
-        bkt.seal()  # seal the final partial bucket into the pending flush
-        if bkt.pending is not None:
-            bkt.emit(is_last=True)
-        else:
-            self._publish_terminal(False)
+        self._release_staging_pool("steady")  # return staging blocks to CUDA between syncs
         logger.info("delta-sharded send v=%s delta flushes=%d (streamed)", global_steps, n_flushes)
         if not total_elems:
             return None

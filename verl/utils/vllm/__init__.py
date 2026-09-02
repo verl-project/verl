@@ -14,7 +14,7 @@
 
 
 from .npu_vllm_patch import apply_npu_vllm_patches
-from .utils import TensorLoRARequest, VLLMHijack, is_version_ge
+from .utils import TensorLoRARequest, VLLMHijack, is_version_ge, resolve_weight_name
 
 # The contents of vllm/patch.py should not be imported here, because the contents of
 # patch.py should be imported after the vllm LLM instance is created. Therefore,
@@ -29,4 +29,5 @@ __all__ = [
     "TensorLoRARequest",
     "VLLMHijack",
     "is_version_ge",
+    "resolve_weight_name",
 ]

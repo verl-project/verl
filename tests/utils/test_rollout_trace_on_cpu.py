@@ -18,6 +18,7 @@ import types
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import BaseModel
 
 from verl.utils.rollout_trace import RolloutTraceConfig, rollout_trace_attr, rollout_trace_op
 
@@ -67,6 +68,17 @@ def mock_trackio_client():
         yield mock_trackio
 
 
+@pytest.fixture
+def mock_mlflow_client():
+    """Mocks the mlflow module, yielding the mock module and active span."""
+    mock_mlflow = MagicMock()
+    mock_span = MagicMock()
+    mock_mlflow.start_span.return_value.__enter__.return_value = mock_span
+
+    with patch.dict(sys.modules, {"mlflow": mock_mlflow}):
+        yield mock_mlflow, mock_span
+
+
 class TracedClass:
     @rollout_trace_op
     # @weave.op
@@ -109,6 +121,24 @@ class ChatTraceClass:
         }
 
 
+class GeneratedTokenOutput(BaseModel):
+    token_ids: list[int]
+
+
+class FakeTokenizer:
+    def decode(self, token_ids):
+        return "decoded:" + ",".join(str(token_id) for token_id in token_ids)
+
+
+class LLMGenerateTraceClass:
+    def __init__(self):
+        self.tokenizer = FakeTokenizer()
+
+    @rollout_trace_op
+    async def generate(self, *, prompt_ids):
+        return GeneratedTokenOutput(token_ids=[3, 4])
+
+
 async def test_rollout_trace_on_untraced_class():
     """Tests that the decorator works correctly when no backend is configured."""
     instance = UntracedClass()
@@ -132,6 +162,30 @@ async def test_rollout_trace_with_tracer(mock_weave_client):
 
     mock_call = mock_weave_client.create_call.return_value
     mock_weave_client.finish_call.assert_called_once_with(mock_call, output=result)
+
+
+async def test_token2text_decodes_llm_generate_input_and_output(mock_mlflow_client):
+    """Per-turn LLM traces decode prompt input ids and generated output ids."""
+    _, mock_span = mock_mlflow_client
+    RolloutTraceConfig.init(
+        project_name="my-project",
+        experiment_name="my-experiment",
+        backend="mlflow",
+        token2text=True,
+    )
+
+    instance = LLMGenerateTraceClass()
+    result = await instance.generate(prompt_ids=[1, 2])
+
+    assert result == GeneratedTokenOutput(token_ids=[3, 4])
+    mock_span.set_inputs.assert_called_once_with({"prompt_ids": [1, 2]})
+    mock_span.set_outputs.assert_called_once_with(
+        {
+            "token_ids": [3, 4],
+            "prompt_text": "decoded:1,2",
+            "response_text": "decoded:3,4",
+        }
+    )
 
 
 async def test_rollout_trace_with_exception(mock_weave_client):

@@ -50,9 +50,9 @@ TEST_REQUIRES = ["pytest", "pre-commit", "py-spy", "pytest-asyncio", "pytest-rer
 # Empty since PRIME code scoring dropped `pyext`; kept so `verl[prime]` stays installable.
 PRIME_REQUIRES = []
 GEO_REQUIRES = ["mathruler", "torchvision", "qwen_vl_utils"]
-GPU_REQUIRES = ["liger-kernel", "flash-attn"]
+GPU_REQUIRES = ["liger-kernel>=0.8.2", "flash-attn"]
 MATH_REQUIRES = ["math-verify"]  # Add math-verify as an optional dependency
-VLLM_REQUIRES = ["tensordict>=0.8.0,<=0.10.0,!=0.9.0", "vllm>=0.8.5,<=0.12.0"]
+VLLM_REQUIRES = ["tensordict>=0.8.0,<=0.10.0,!=0.9.0", "vllm>=0.18.0"]
 TRTLLM_REQUIRES = ["tensorrt-llm>=1.2.0rc6"]
 SGLANG_REQUIRES = [
     "tensordict>=0.8.0,<=0.10.0,!=0.9.0",

@@ -151,6 +151,42 @@ class McoreOptimizerConfig(OptimizerConfig):
             enabled ("fp32" or "bf16"). Mirrors Megatron's ``--exp-avg-dtype``.
         exp_avg_sq_dtype (str): dtype of the Adam second moment (v) when the precision-aware optimizer
             is enabled ("fp32" or "bf16"). Mirrors Megatron's ``--exp-avg-sq-dtype``.
+        optimizer (str): Optimizer algorithm; "adam"/"sgd" use Megatron's classic optimizers, while
+            "muon" route through Megatron-Core's emerging_optimizers path (which builds
+            the tensor-parallel-aware Muon optimizer). The ``muon_*`` fields below only take effect when
+            a Muon algorithm is selected and are ignored otherwise.
+        use_layer_wise_distributed_optimizer (bool): Wrap the emerging (Muon) optimizer with Megatron's
+            LayerWiseDistributedOptimizer. Only relevant for Muon; mirrors Megatron's
+            ``--use-layer-wise-distributed-optimizer``.
+        use_layer_wise_param_layout (bool): Use Megatron's padded shard-aligned DDP layout for LayerWise
+            buffers (master weights in param buffer). Default None → auto True when Muon+LayerWise.
+        muon_momentum (float): Momentum of the internal SGD in Muon. Mirrors Megatron's ``--muon-momentum``.
+        muon_nesterov (bool): Use Nesterov-style momentum in Muon's internal SGD.
+        muon_split_qkv (bool): Split fused QKV parameters before the Muon update.
+        muon_scale_mode (str): Scale-factor mode for the Muon update (e.g. "spectral"/"unit_rms_norm").
+        muon_coefficient_type (str): Newton-Schulz coefficient type (e.g. "quintic"); valid values are
+            discovered from the installed ``emerging_optimizers`` package.
+        muon_num_ns_steps (int): Number of Newton-Schulz iteration steps.
+        muon_tp_mode (str): How the Newton-Schulz calculation is performed for tensor-parallel weights
+            (e.g. "blockwise").
+        muon_fp32_matmul_prec (str): Precision for Muon's fp32 matmul (e.g. "medium").
+        muon_extra_scale_factor (float): Additional scale factor applied to the Muon update. Muon's
+            effective step size is ``lr * muon_extra_scale_factor``; the Megatron-Core default of
+            ``1.0`` is *not* AdamW-comparable, so reusing an AdamW learning rate unchanged gives a
+            much larger effective step. Prefer ``muon_match_adamw_update_rms`` over hard-coding a
+            constant here.
+        muon_match_adamw_update_rms (bool): Derive ``muon_extra_scale_factor`` from
+            ``sqrt((1 - betas[0]) / (1 + betas[0]))``, the closed form that analytically matches
+            AdamW's update RMS norm (emerging_optimizers 0.3.0 ``get_muon_scale_factor`` docstring;
+            https://kexue.fm/archives/11267; https://arxiv.org/abs/2502.16982). At the default
+            ``betas[0] = 0.9`` this resolves to ~0.2294. The resolved value is logged on rank 0.
+            verl-side only -- it is not forwarded to Megatron-Core. Conflicts with an explicitly set
+            ``muon_extra_scale_factor`` and raises in that case.
+        muon_scalar_optimizer (str): Optimizer intended for the non-matrix ("scalar") parameters
+            (embeddings, biases, norms) when Muon is selected. Megatron-Core declares this field
+            but no Megatron-Core code path currently reads it, so the effective (and only
+            recommended) behaviour is the default, "adam"; setting any other value is a silent
+            no-op today. Forwarded as-is for forward-compatibility.
     """
 
     optimizer: str = "adam"
@@ -166,6 +202,26 @@ class McoreOptimizerConfig(OptimizerConfig):
     main_grads_dtype: str = "fp32"
     exp_avg_dtype: str = "fp32"
     exp_avg_sq_dtype: str = "fp32"
+    # Muon (emerging optimizer) options. Only consumed when `optimizer` selects a Muon algorithm;
+    # each field mirrors the like-named field on Megatron-Core's OptimizerConfig and is passed through
+    # by `init_megatron_optim_config`. Defaults track Megatron-Core so leaving them unset reproduces
+    # Megatron's built-in Muon defaults.
+    use_layer_wise_distributed_optimizer: bool = False
+    use_layer_wise_param_layout: bool | None = None
+    muon_momentum: float = 0.95
+    muon_nesterov: bool = False
+    muon_split_qkv: bool = True
+    muon_scale_mode: str = "spectral"
+    muon_coefficient_type: str = "quintic"
+    muon_num_ns_steps: int = 5
+    muon_tp_mode: str = "blockwise"
+    muon_fp32_matmul_prec: str = "medium"
+    muon_extra_scale_factor: float = 1.0
+    muon_scalar_optimizer: str = "adam"
+    # verl-side convenience, not forwarded to Megatron: derives muon_extra_scale_factor
+    # from betas[0] instead of hard-coding a constant. See
+    # verl.utils.megatron.optimizer.adamw_rms_match_scale_factor.
+    muon_match_adamw_update_rms: bool = False
     override_optimizer_config: Optional[dict] = None
 
     def __post_init__(self):

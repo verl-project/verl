@@ -47,6 +47,7 @@ from verl.utils.megatron_utils import get_model
 from verl.utils.tokenizer import hf_processor, hf_tokenizer
 
 from .base_model_merger import BaseModelMerger, ModelMergerConfig
+from .output_validation import validate_hf_model_output
 
 
 @contextmanager
@@ -478,6 +479,7 @@ class MegatronModelMerger(BaseModelMerger):
             print(f"model saved to {target_dir} with {numel=}")
 
             self.model_config.save_pretrained(self.config.target_dir)
+            self.save_generation_config(self.config.target_dir)
 
             processor = hf_processor(self.hf_model_config_path, trust_remote_code=self.config.trust_remote_code)
             tokenizer = hf_tokenizer(self.hf_model_config_path, trust_remote_code=self.config.trust_remote_code)
@@ -487,6 +489,8 @@ class MegatronModelMerger(BaseModelMerger):
             if tokenizer is not None:
                 print(f"Saving tokenizer to {self.config.target_dir}")
                 tokenizer.save_pretrained(self.config.target_dir)
+
+            validate_hf_model_output(self.config.target_dir)
 
     def merge_and_save(self):
         from verl.utils.megatron_utils import get_model_dist_checkpoint_path
@@ -503,7 +507,7 @@ class MegatronModelMerger(BaseModelMerger):
             self._validate_state_dict(merged_state_dict)
         elif self.config.operation == "merge":
             self.save_hf_model_and_tokenizer(merged_state_dict)
-            if self.config.hf_upload:
+            if self.config.hf_upload and self.rank == 0:
                 self.upload_to_huggingface()
         else:
             raise ValueError(f"Unknown operation: {self.config.operation}")

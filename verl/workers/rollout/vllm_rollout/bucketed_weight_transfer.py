@@ -27,7 +27,7 @@ import torch
 import zmq
 from torch.multiprocessing.reductions import reduce_tensor
 
-from verl.utils.device import get_device_id, get_device_name, get_torch_device
+from verl.utils.device import get_device_id, get_device_name, get_torch_device, is_support_ipc
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -125,6 +125,11 @@ class BucketedWeightSender:
                 # transfer volume.
                 # weight = weight.to(dtype, non_blocking=True)
 
+                # Align each tensor before the receiver views the byte buffer
+                # using that tensor's dtype.
+                alignment = weight.element_size()
+                offset = (offset + alignment - 1) // alignment * alignment
+
                 # fill the tensor bucket
                 if offset + weight.nbytes > self.bucket_size and len(bucket_meta) > 0:
                     get_torch_device().synchronize()
@@ -212,7 +217,8 @@ class BucketedWeightSender:
             del self.shm
             self.shm = None
         gc.collect()
-        get_torch_device().ipc_collect()
+        if is_support_ipc():
+            get_torch_device().ipc_collect()
         get_torch_device().empty_cache()
 
     def _direct_send_large_weight(self, name: str, weight: torch.Tensor):
@@ -265,7 +271,11 @@ class BucketedWeightReceiver:
         Receive weights from sender and process each bucket via callback.
 
         Args:
-            on_bucket_received: Callback function(weights: list[(name, tensor)]) called per bucket.
+            on_bucket_received: Callback function(weights: list[(name, tensor)],
+            is_last: bool) called per bucket. ``is_last`` marks the final bucket
+            of a weight-sync round so consumers that need the complete tensor set
+            (e.g. vLLM ``add_lora``, which takes one adapter dict per call) can
+            defer their finalization until the whole adapter has arrived.
         """
         try:
             self._init_socket()
@@ -286,11 +296,12 @@ class BucketedWeightReceiver:
                     if self.use_shm:
                         tensor = tensor.to(self.device)
                     weights.append((name, tensor))
-                on_bucket_received(weights)
+                is_last = metadata["is_last"]
+                on_bucket_received(weights, is_last)
                 get_torch_device().synchronize()
                 self.socket.send(b"")
                 del weights, tensor
-                if metadata["is_last"]:
+                if is_last:
                     break
         finally:
             self._cleanup()
@@ -331,5 +342,6 @@ class BucketedWeightReceiver:
             del self.shm
             self.shm = None
         gc.collect()
-        get_torch_device().ipc_collect()
+        if is_support_ipc():
+            get_torch_device().ipc_collect()
         get_torch_device().empty_cache()

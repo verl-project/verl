@@ -178,3 +178,52 @@ def test_dense_flush_applies_full_tensors():
 
     for name, expected in named:
         assert torch.equal(model.params[name].view(torch.int16), expected.view(torch.int16)), name
+
+
+def _dense_verify_flush(named, is_last=True, verify=True):
+    params, pieces, val_off = [], [], 0
+    for name, t in named:
+        flat = t.contiguous().view(-1)
+        params.append(
+            {
+                "name": name,
+                "dtype": str(t.dtype).replace("torch.", ""),
+                "shape": list(t.shape),
+                "pos_start": 0,
+                "pos_end": 0,
+                "pos_width": 4,
+                "val_start": val_off,
+                "val_end": val_off + flat.numel(),
+            }
+        )
+        pieces.append(flat)
+        val_off += flat.numel()
+    values = torch.cat(pieces)
+    spec = {
+        "encoding": "dense",
+        "verify": verify,
+        "is_last": is_last,
+        "params": params,
+        "checksum": int(checksum(torch.empty(0, dtype=torch.uint8), values)),
+    }
+    spec_t = torch.frombuffer(bytearray(json.dumps(spec).encode()), dtype=torch.uint8)
+    return [("__delta_spec__", spec_t), ("__values__", values)]
+
+
+def test_verify_sweep_passes_on_identical_state():
+    """A verify flush against a bit-identical model reports zero mismatches."""
+    named = _make_named()
+    model = _FakeModel([(n, t.clone()) for n, t in named])
+    apply_delta(model, _dense_verify_flush(named))  # must not raise
+
+
+def test_verify_sweep_fails_loud_on_divergence():
+    """A single flipped element in the server state must fail the sweep."""
+    import pytest
+
+    named = _make_named()
+    diverged = [(n, t.clone()) for n, t in named]
+    diverged[1][1].view(-1)[3] += 1.0
+    model = _FakeModel(diverged)
+    with pytest.raises(RuntimeError, match="verification FAILED"):
+        apply_delta(model, _dense_verify_flush(named))

@@ -79,19 +79,8 @@ def apply_npu_vllm_patches() -> None:
     if not is_torch_npu_available(check_device=False):
         return
 
-    import vllm
-    from packaging import version
+    # Disable flash_attn in RotaryEmbedding (NPU)
+    from vllm.model_executor.layers import fused_moe
 
-    _VLLM_VERSION = version.parse(vllm.__version__)
-    if _VLLM_VERSION >= version.parse("0.13.0") and _VLLM_VERSION <= version.parse("0.14.0"):
-        # Disable flash_attn in RotaryEmbedding (NPU) when VLLM >= 0.13
-        from vllm.model_executor.layers.fused_moe import FusedMoE
-
-        patch_vllm013_rotary_emb()
-        _patch_legacy_fused_moe_weight_loader(FusedMoE)
-    elif _VLLM_VERSION >= version.parse("0.18.0"):
-        # Disable flash_attn in RotaryEmbedding (NPU) when VLLM >= 0.18
-        from vllm.model_executor.layers.fused_moe import FusedMoE
-
-        patch_vllm013_rotary_emb()
-        _patch_legacy_fused_moe_weight_loader(FusedMoE)
+    patch_vllm013_rotary_emb()
+    _patch_legacy_fused_moe_weight_loader(getattr(fused_moe, "FusedMoE", None))

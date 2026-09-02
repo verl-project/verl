@@ -84,6 +84,7 @@ verl is fast with:
    algo/otb.md
    algo/dppo.md
    algo/opd.md
+   algo/dro.md
 
 .. toctree::
    :maxdepth: 1
@@ -102,6 +103,7 @@ verl is fast with:
    :caption: Performance Tuning Guide
 
    perf/dpsk.md
+   advance/dynamic_context_parallel
    perf/best_practices
    perf/perf_tuning
    perf/rollout_kv_offload.md
@@ -126,6 +128,7 @@ verl is fast with:
 
    advance/one_step_off
    advance/delta_weight_sync
+   advance/v1_async_trainer
    advance/fully_async
    advance/async-on-policy-distill
    advance/dynamic_schedule
@@ -158,6 +161,7 @@ verl is fast with:
    advance/grafana_prometheus.md
    advance/mtp.md
    advance/determinism.md
+   advance/fsdp_turbo_backend
 
 .. toctree::
    :maxdepth: 1

@@ -37,6 +37,15 @@ def enable_full_determinism(seed: int):
     os.environ["PYTHONHASHSEED"] = str(seed)
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
     os.environ["FLASH_ATTENTION_DETERMINISTIC"] = "1"
+    os.environ["NCCL_DETERMINISTIC"] = "1"
+    os.environ["NCCL_ALGO"] = "Ring"
+    os.environ["NCCL_PROTO"] = "Simple"
+    # flash-attn's Triton cross-entropy kernel (used by logprobs_from_logits to
+    # compute log_probs) has a non-deterministic reduction that is NOT covered by
+    # FLASH_ATTENTION_DETERMINISTIC (only governs attention kernels' backward) nor
+    # by torch.use_deterministic_algorithms (Triton custom ops don't trigger
+    # warn_only). Force the pure-PyTorch log_softmax+gather path instead.
+    os.environ.setdefault("VERL_DISABLE_FLASH_ATTN_CE", "1")
     if is_npu_available:
         # The environment variable required to enable deterministic mode on Ascend NPUs.
         os.environ["HCCL_DETERMINISTIC"] = "true"
@@ -52,6 +61,32 @@ def enable_full_determinism(seed: int):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.enabled = False
+
+
+def pad_packed_inputs(
+    input_ids_rmpad: torch.Tensor,
+    position_ids_rmpad: torch.Tensor | None,
+    pad_size: int,
+    pad_value: float = 0,
+):
+    """Right-pad a packed ``(1, total_nnz)`` batch by ``pad_size`` tokens.
+
+    Mirrors the padding :func:`verl.utils.ulysses.ulysses_pad` applies to reach a multiple of the
+    sequence-parallel size: the appended ``position_ids`` restart from 0, so the pad tokens form
+    one trailing varlen segment instead of extending the last real sequence.
+    """
+    if pad_size <= 0:
+        return input_ids_rmpad, position_ids_rmpad
+
+    input_ids_rmpad = torch.nn.functional.pad(input_ids_rmpad, (0, pad_size), value=pad_value)
+    if position_ids_rmpad is not None:
+        pad_position_ids = torch.arange(
+            pad_size, dtype=position_ids_rmpad.dtype, device=position_ids_rmpad.device
+        ).unsqueeze(0)
+        if position_ids_rmpad.dim() == 3:  # (rope_dim, 1, total_nnz) mRoPE layout
+            pad_position_ids = pad_position_ids.unsqueeze(0).repeat(position_ids_rmpad.size(0), 1, 1)
+        position_ids_rmpad = torch.cat((position_ids_rmpad, pad_position_ids), dim=-1)
+    return input_ids_rmpad, position_ids_rmpad
 
 
 def prepare_micro_batches(
@@ -198,7 +233,7 @@ def hf_delta_export(gen, snaps: dict, entry_fn):
     pass."""
     from verl.checkpoint_engine.delta_sync.sparse_gather import shard_delta_indices
 
-    from .spec import derive_placement
+    from .spec import derive_dtensor_placement
 
     for name, local, spec in gen:
         local = local.detach().contiguous().view(-1)
@@ -206,7 +241,12 @@ def hf_delta_export(gen, snaps: dict, entry_fn):
         assert snap is not None and snap.numel() == local.numel(), (
             f"{name}: no seed snapshot for this shard; run the seed export first"
         )
-        place, contributes, pg = derive_placement(spec)
+        if spec.place is not None:
+            # explicit exporter override: the backend declared the whole triple
+            # (hybrid geometries are not derivable from DTensor facts alone).
+            place, contributes, pg = spec.place, spec.contributes, spec.gather_group
+        else:
+            place, contributes, pg = derive_dtensor_placement(spec)
         if contributes:
             base = snap.to(local.device, non_blocking=True)
             lidx, lval = shard_delta_indices(local, base, 0)
@@ -218,18 +258,20 @@ def hf_delta_export(gen, snaps: dict, entry_fn):
         yield (*entry_fn(name, spec, place, lidx, lval), pg)
 
 
-def prime_delta_snapshots(gen, snaps: dict) -> None:
-    """Pin each rank's current shards to CPU as the steady diff base. Run right
-    after the seed's full-weight sync: weights do not move during the sync, so
-    the snapshots equal exactly what the rollout side received."""
-    from verl.utils.device import is_cuda_available
+def prime_delta_snapshots(gen, snaps: dict, pin: bool) -> None:
+    """Snapshot each rank's current shards to CPU as the steady diff base. Run
+    right after the seed's full-weight sync: weights do not move during the
+    sync, so the snapshots equal exactly what the rollout side received.
 
+    ``pin`` selects pinned vs pageable host memory and is the ENGINE's call
+    (``BaseEngine.delta_pin_snapshots``): pinning a whole shard set
+    (cudaHostAlloc) competes with everything else that pins on the node and its
+    failure surfaces as a CUDA out-of-memory; pageable costs a slower H2D on
+    the diff read-back but cannot OOM the device."""
     for name, local, _spec in gen:
         local = local.detach().contiguous().view(-1)
         snap = snaps.get(name)
         if snap is None or snap.numel() != local.numel():
-            # pinned host memory needs an accelerator context; degrade gracefully
-            # on CPU-only environments (unit tests) where pinning is meaningless.
-            snap = torch.empty_like(local, device="cpu", pin_memory=is_cuda_available)
+            snap = torch.empty_like(local, device="cpu", pin_memory=pin)
             snaps[name] = snap
         snap.copy_(local, non_blocking=True)

@@ -33,7 +33,7 @@ function based on the datasets (or applications) utilized in PPO
 training.
 
 For example, we already provide reward functions for `GSM8k <https://github.com/verl-project/verl/blob/main/verl/utils/reward_score/gsm8k.py>`_ 
-and `MATH <https://github.com/verl-project/verl/blob/main/verl/utils/reward_score/math.py>`_
+and `MATH <https://github.com/verl-project/verl/blob/main/verl/utils/reward_score/math_reward.py>`_
 datasets in the ``_select_rm_score_fn``. In the ``RewardManager``, we
 will compute the reward score based on the data_source to select
 corresponding reward functions. For some RLHF datasets (e.g.,
