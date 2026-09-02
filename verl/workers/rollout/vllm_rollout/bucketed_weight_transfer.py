@@ -281,6 +281,7 @@ class BucketedWeightReceiver:
             (e.g. vLLM ``add_lora``, which takes one adapter dict per call) can
             defer their finalization until the whole adapter has arrived.
         """
+        is_last = False
         try:
             self._init_socket()
             self._init_buffer()
@@ -288,25 +289,37 @@ class BucketedWeightReceiver:
             # receive bucket and update weights
             while True:
                 metadata = self.socket.recv_pyobj()
-                weights, tensor = [], None
-                for name, meta in metadata["bucket_meta"].items():
-                    shape, dtype, offset, handle = meta["shape"], meta["dtype"], meta["offset"], meta["handle"]
-                    if handle is not None:
-                        tensor = rebuild_ipc(handle, self.device.index)
-                        weights.append((name, tensor))
-                        continue
-                    size = dtype.itemsize * shape.numel()
-                    tensor = self.buffer[offset : offset + size].view(dtype=dtype).view(shape)
-                    if self.use_shm:
-                        tensor = tensor.to(self.device)
-                    weights.append((name, tensor))
                 is_last = metadata["is_last"]
-                on_bucket_received(weights, is_last)
-                get_torch_device().synchronize()
-                self.socket.send(b"")
-                del weights, tensor
+                weights, tensor = [], None
+                try:
+                    for name, meta in metadata["bucket_meta"].items():
+                        shape, dtype, offset, handle = meta["shape"], meta["dtype"], meta["offset"], meta["handle"]
+                        if handle is not None:
+                            tensor = rebuild_ipc(handle, self.device.index)
+                            weights.append((name, tensor))
+                            continue
+                        size = dtype.itemsize * shape.numel()
+                        tensor = self.buffer[offset : offset + size].view(dtype=dtype).view(shape)
+                        if self.use_shm:
+                            tensor = tensor.to(self.device)
+                        weights.append((name, tensor))
+                    on_bucket_received(weights, is_last)
+                finally:
+                    # ACK even when the callback raised. The colocated sender is
+                    # blocked in ``socket.recv()`` for *this* bucket, and verl
+                    # awaits the receiver's future only after the send loop
+                    # finishes, so skipping the ACK converts a real consumer
+                    # error into a silent hang that burns the whole wall clock.
+                    get_torch_device().synchronize()
+                    self.socket.send(b"")
+                    del weights, tensor
                 if is_last:
                     break
+        except BaseException:
+            logger.exception("bucketed weight receive failed; draining the sender before re-raising")
+            if not is_last:
+                self._drain_remaining_buckets_after_failure()
+            raise
         finally:
             self._cleanup()
 
