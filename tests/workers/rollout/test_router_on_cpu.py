@@ -13,14 +13,22 @@
 # limitations under the License.
 """Unit tests for verl.workers.rollout.router"""
 
+import asyncio
 import logging
+import os
+import time
 from typing import Any
 
 import pytest
 import ray
 import yaml
+from omegaconf import OmegaConf
 
+from verl.utils.import_utils import resolve_config_path
+from verl.workers.rollout.llm_server import LLMServerClient, LLMServerManager
 from verl.workers.rollout.router import GlobalRequestLoadBalancer, get_router_handle
+
+MOCK_PLUGIN_FQN = __name__ + "._MockPluginLoadBalancer"
 
 
 @ray.remote
@@ -36,6 +44,8 @@ class _MockPluginLoadBalancer:
         self._router_kwargs = dict(router_kwargs)
         self.releases: list[tuple] = []
         self.acquire_calls: list[tuple] = []
+        self.acquire_field_queries = 0
+        self.release_field_queries = 0
 
     def get_router_kwargs(self) -> dict:
         """Return the kwargs dict passed to the constructor."""
@@ -49,12 +59,18 @@ class _MockPluginLoadBalancer:
         """Return recorded acquire_server calls as (request_id, prompt_ids)."""
         return list(self.acquire_calls)
 
+    def get_require_query_counts(self) -> tuple[int, int]:
+        """Return (require_acquire_fields, require_release_fields) RPC counts."""
+        return (self.acquire_field_queries, self.release_field_queries)
+
     def require_acquire_fields(self) -> list[str]:
         """Protocol: this content-aware mock routes on prompt token ids."""
+        self.acquire_field_queries += 1
         return ["prompt_ids"]
 
     def require_release_fields(self) -> list[str]:
         """Protocol: attribute releases by request_id."""
+        self.release_field_queries += 1
         return ["request_id"]
 
     def acquire_server(self, request_id: str, prompt_ids: list[int] | None = None) -> tuple[str, Any]:
@@ -102,6 +118,90 @@ class _MockPluginLoadBalancer:
         return sum(self._inflight.values())
 
 
+@pytest.fixture(scope="module")
+def ray_session():
+    ray.init(ignore_reinit_error=True)
+    yield
+    ray.shutdown()
+
+
+def _write_router_yaml(tmp_path, router_class, **kwargs):
+    """Write a plugin router YAML and return its path."""
+    content = {"router_class": router_class, **kwargs}
+    yaml_path = tmp_path / "router.yaml"
+    yaml_path.write_text(yaml.dump(content))
+    return str(yaml_path)
+
+
+def _plugin_lb(servers, tmp_path, **kwargs):
+    """Router handle backed by _MockPluginLoadBalancer, loaded from a temp YAML."""
+    yaml_path = _write_router_yaml(tmp_path, MOCK_PLUGIN_FQN, **kwargs)
+    return get_router_handle(servers=servers, router_config_path=yaml_path)
+
+
+class TestGetRouterHandleDefault:
+    @pytest.mark.parametrize("path", [None, ""])
+    def test_none_or_empty_path_defaults_to_sticky_inflight(self, ray_session, path):
+        lb = get_router_handle(servers={"s0": None, "s1": None}, router_config_path=path)
+        status = ray.get(lb.get_status.remote())
+        assert status["active_servers"] == 2
+        assert status["total_inflight"] == 0
+
+
+class TestGetRouterHandlePluginExtensionYaml:
+    """Plugin router via external YAML (router_config_path): the ``router_class``
+    FQN is imported and the whole YAML dict is passed to the constructor as
+    ``router_kwargs``."""
+
+    def test_missing_yaml_file_raises(self, ray_session):
+        with pytest.raises(FileNotFoundError, match="Router config file not found"):
+            get_router_handle(servers={"s0": None}, router_config_path="/nonexistent/path/router.yaml")
+
+    def test_yaml_missing_router_class_raises(self, ray_session, tmp_path):
+        yaml_path = tmp_path / "no_class.yaml"
+        yaml_path.write_text(yaml.dump({"some_key": "value"}))
+        with pytest.raises(ValueError, match="must contain 'router_class'"):
+            get_router_handle(servers={"s0": None}, router_config_path=str(yaml_path))
+
+    def test_add_remove_get_all_servers(self, ray_session, tmp_path):
+        lb = _plugin_lb({"s0": None}, tmp_path)
+        ray.get(lb.add_servers.remote({"s1": None, "s2": None}))
+        assert sorted(ray.get(lb.get_all_servers.remote())) == ["s0", "s1", "s2"]
+        ray.get(lb.remove_servers.remote(["s0"]))
+        assert ray.get(lb.get_all_servers.remote()) == ["s1", "s2"]
+
+    def test_release_and_get_status(self, ray_session, tmp_path):
+        lb = _plugin_lb({"s0": None, "s1": None}, tmp_path)
+        ray.get(lb.acquire_server.remote("a", prompt_ids=[1]))  # s0: 1
+        ray.get(lb.acquire_server.remote("a", prompt_ids=[1]))  # s1: 1 (mock has no sticky: least-loaded)
+        ray.get(lb.acquire_server.remote("b", prompt_ids=[1]))  # s0: 2 (tie: first server wins)
+        # The mock is deterministic: assert the distribution, not just the total.
+        assert ray.get(lb.get_status.remote())["servers"] == {"s0": 2, "s1": 1}
+        assert ray.get(lb.get_status.remote())["total_inflight"] == 3
+        ray.get(lb.release_server.remote("s0"))
+        assert ray.get(lb.get_status.remote())["total_inflight"] == 2
+
+    def test_empty_pool_raises(self, ray_session, tmp_path):
+        lb = _plugin_lb({"s0": None}, tmp_path)
+        ray.get(lb.remove_servers.remote(["s0"]))
+        with pytest.raises(ray.exceptions.RayTaskError, match="No available servers"):
+            ray.get(lb.acquire_server.remote("req", prompt_ids=[1]))
+
+    def test_yaml_forwards_composed_dict_to_constructor(self, ray_session, tmp_path):
+        """The whole YAML dict (router_class included) is passed as router_kwargs."""
+        lb = _plugin_lb({"s0": None}, tmp_path, extra_param="hello")
+        kwargs = ray.get(lb.get_router_kwargs.remote())
+        assert kwargs == {"router_class": MOCK_PLUGIN_FQN, "extra_param": "hello"}
+
+    def test_yaml_defaults_block_rejected(self, ray_session, tmp_path):
+        """A Hydra 'defaults' block is not composed — reject it with guidance
+        instead of silently passing it through as a plain field."""
+        main = tmp_path / "composed.yaml"
+        main.write_text(yaml.dump({"defaults": [{"strategy": "kvc"}], "router_class": MOCK_PLUGIN_FQN}))
+        with pytest.raises(ValueError, match="uses a Hydra 'defaults' block"):
+            get_router_handle(servers={"s0": None}, router_config_path=str(main))
+
+
 class TestRequireFields:
     """Balancers declare which generate() kwargs they consume at acquire time.
     LLMServerClient._acquire_server packs all keyword args locally (free,
@@ -113,31 +213,14 @@ class TestRequireFields:
         assert lb.require_acquire_fields() == []
         assert lb.require_release_fields() == []
 
-    def test_plugin_declares_prompt_ids(self, ray_session, tmp_path):
-        yaml_path = TestGetRouterHandlePluginExtensionYaml._write_router_yaml(
-            tmp_path, __name__ + "._MockPluginLoadBalancer"
-        )
-        lb = get_router_handle(servers={"s0": None}, router_config_path=yaml_path)
-        assert ray.get(lb.require_acquire_fields.remote()) == ["prompt_ids"]
-        assert ray.get(lb.require_release_fields.remote()) == ["request_id"]
-
     def test_client_acquire_serializes_only_declared_fields(self, ray_session, tmp_path):
-        """_acquire_server lazily queries both field declarations (two light
-        RPCs issued concurrently, then cached) and filters the packed
-        generate() kwargs by the acquire declaration; sampling_params and
-        friends never cross the wire."""
-        import asyncio
-
-        from omegaconf import OmegaConf
-
-        from verl.workers.rollout.llm_server import LLMServerClient
-
-        yaml_path = TestGetRouterHandlePluginExtensionYaml._write_router_yaml(
-            tmp_path, __name__ + "._MockPluginLoadBalancer"
-        )
-        lb = get_router_handle(servers={"s0": None}, router_config_path=yaml_path)
+        """Declarations are queried lazily exactly once (verified via the mock's
+        query counters), then cached; only the declared fields cross the wire on
+        both acquire and release — sampling_params and friends stay in-process."""
+        lb = _plugin_lb({"s0": None}, tmp_path)
         client = LLMServerClient(config=OmegaConf.create({}), load_balancer_handle=lb)
-        assert client._lb_require_acquire_fields is None  # not queried yet
+        # Lazily queried: nothing hit the actor at construction time.
+        assert ray.get(lb.get_require_query_counts.remote()) == (0, 0)
         sid, _ = asyncio.run(
             client._acquire_server(
                 "req-1",
@@ -146,24 +229,23 @@ class TestRequireFields:
                 image_data=["img-bytes"],
             )
         )
-        # Both declarations queried and cached on first acquire, so the
-        # release path never has to block the event loop on a lookup.
-        assert client._lb_require_acquire_fields == ["prompt_ids"]
-        assert client._lb_require_release_fields == ["request_id"]
-        # The mock received only (request_id, prompt_ids) — sampling_params /
-        # image_data stayed in-process.
+        # Both declarations queried exactly once on first acquire.
+        assert ray.get(lb.get_require_query_counts.remote()) == (1, 1)
+        sid, _ = asyncio.run(client._acquire_server("req-2", prompt_ids=[4]))
+        # Cached: the second acquire re-queries nothing.
+        assert ray.get(lb.get_require_query_counts.remote()) == (1, 1)
+        # The mock received only (request_id, prompt_ids) per call —
+        # sampling_params / image_data stayed in-process.
         calls = ray.get(lb.get_acquire_calls.remote())
-        assert calls == [("req-1", [1, 2, 3])]
+        assert calls == [("req-1", [1, 2, 3]), ("req-2", [4])]
+        # Release side: the ["request_id"] declaration carries just the id. Ray
+        # serializes actor tasks, so this RPC submitted after the release sees it.
+        client._release_server(sid, request_id="req-2")
+        assert ray.get(lb.get_releases.remote()) == [(sid, "req-2")]
 
     def test_client_acquire_with_empty_declaration_sends_request_id_only(self, ray_session):
         """The default balancer declares [] — the acquire RPC carries
         request_id only and matches the single-arg acquire signature."""
-        import asyncio
-
-        from omegaconf import OmegaConf
-
-        from verl.workers.rollout.llm_server import LLMServerClient
-
         lb = ray.remote(GlobalRequestLoadBalancer).remote(servers={"s0": None, "s1": None})
         client = LLMServerClient(config=OmegaConf.create({}), load_balancer_handle=lb)
         sid, _ = asyncio.run(
@@ -173,21 +255,14 @@ class TestRequireFields:
                 sampling_params={"temperature": 1.0},
             )
         )
-        assert client._lb_require_acquire_fields == []
-        assert client._lb_require_release_fields == []
-        # Routed fine on request_id alone (sticky/least-inflight).
-        assert ray.get(lb.get_status.remote())["total_inflight"] == 1
+        # Routed fine on request_id alone (sticky/least-inflight): the single-arg
+        # acquire signature accepted the RPC, so no extra fields were sent.
+        assert ray.get(lb.get_total_inflight.remote()) == 1
 
     def test_legacy_signatures_survive_client_path(self, ray_session):
         """A subclass overriding acquire/release with main's pre-plugin
         signatures keeps working through the client: the default ([], [])
         declaration sends request_id/server_id only."""
-        import asyncio
-        import time
-
-        from omegaconf import OmegaConf
-
-        from verl.workers.rollout.llm_server import LLMServerClient
 
         @ray.remote
         class _LegacyBalancer(GlobalRequestLoadBalancer):
@@ -207,111 +282,14 @@ class TestRequireFields:
             )
         )
         client._release_server(sid, request_id="req-1")  # fire-and-forget
-        time.sleep(1)  # let the actor process the release
-        # Both legacy overrides executed (no swallowed TypeError): the counter
-        # went up on acquire and back down on release.
-        assert ray.get(lb.get_status.remote())["total_inflight"] == 0
-
-
-@pytest.fixture(scope="module")
-def ray_session():
-    ray.init(ignore_reinit_error=True)
-    yield
-    ray.shutdown()
-
-
-class TestGetRouterHandleDefault:
-    def test_none_config_defaults_to_sticky_inflight(self, ray_session):
-        lb = get_router_handle(servers={"s0": None, "s1": None}, router_config_path=None)
-        status = ray.get(lb.get_status.remote())
-        assert status["active_servers"] == 2
-        assert status["total_inflight"] == 0
-
-    def test_empty_router_config_defaults_to_sticky_inflight(self, ray_session):
-        lb = get_router_handle(servers={"a": None, "b": None}, router_config_path="")
-        status = ray.get(lb.get_status.remote())
-        assert status["active_servers"] == 2
-
-
-class TestGetRouterHandlePluginExtensionYaml:
-    """Plugin router via external YAML (router_config_path), with Hydra
-    ``defaults`` composition and pkg:// package-relative resolution."""
-
-    @staticmethod
-    def _write_router_yaml(tmp_path, router_class, **kwargs):
-        """Write a temporary router YAML and return its path."""
-        content = {"router_class": router_class, **kwargs}
-        yaml_path = tmp_path / "router.yaml"
-        yaml_path.write_text(yaml.dump(content))
-        return str(yaml_path)
-
-    def test_missing_yaml_file_raises(self, ray_session):
-        config = "/nonexistent/path/router.yaml"
-        with pytest.raises(FileNotFoundError, match="Router config file not found"):
-            get_router_handle(servers={"s0": None}, router_config_path=config)
-
-    def test_yaml_missing_router_class_raises(self, ray_session, tmp_path):
-        yaml_path = tmp_path / "no_class.yaml"
-        yaml_path.write_text(yaml.dump({"some_key": "value"}))
-        config = str(yaml_path)
-        with pytest.raises(ValueError, match="must contain 'router_class'"):
-            get_router_handle(servers={"s0": None}, router_config_path=config)
-
-    def test_acquire_least_loaded(self, ray_session, tmp_path):
-        yaml_path = self._write_router_yaml(tmp_path, __name__ + "._MockPluginLoadBalancer")
-        config = yaml_path
-        lb = get_router_handle(servers={"s0": None, "s1": None, "s2": None}, router_config_path=config)
-        s_a, _ = ray.get(lb.acquire_server.remote("a", prompt_ids=[1]))
-        s_b, _ = ray.get(lb.acquire_server.remote("b", prompt_ids=[1]))
-        s_c, _ = ray.get(lb.acquire_server.remote("c", prompt_ids=[1]))
-        assert len({s_a, s_b, s_c}) == 3
-
-    def test_add_remove_get_all_servers(self, ray_session, tmp_path):
-        yaml_path = self._write_router_yaml(tmp_path, __name__ + "._MockPluginLoadBalancer")
-        config = yaml_path
-        lb = get_router_handle(servers={"s0": None}, router_config_path=config)
-        ray.get(lb.add_servers.remote({"s1": None, "s2": None}))
-        assert sorted(ray.get(lb.get_all_servers.remote())) == ["s0", "s1", "s2"]
-        ray.get(lb.remove_servers.remote(["s0"]))
-        assert ray.get(lb.get_all_servers.remote()) == ["s1", "s2"]
-
-    def test_release_and_get_status(self, ray_session, tmp_path):
-        yaml_path = self._write_router_yaml(tmp_path, __name__ + "._MockPluginLoadBalancer")
-        config = yaml_path
-        lb = get_router_handle(servers={"s0": None, "s1": None}, router_config_path=config)
-        ray.get(lb.acquire_server.remote("a", prompt_ids=[1]))  # s0: 1
-        ray.get(lb.acquire_server.remote("a", prompt_ids=[1]))  # s0: 2
-        ray.get(lb.acquire_server.remote("b", prompt_ids=[1]))  # s1: 1
-        assert ray.get(lb.get_status.remote())["total_inflight"] == 3
-        ray.get(lb.release_server.remote("s0"))
-        assert ray.get(lb.get_status.remote())["total_inflight"] == 2
-
-    def test_empty_pool_raises(self, ray_session, tmp_path):
-        yaml_path = self._write_router_yaml(tmp_path, __name__ + "._MockPluginLoadBalancer")
-        config = yaml_path
-        lb = get_router_handle(servers={"s0": None}, router_config_path=config)
-        ray.get(lb.remove_servers.remote(["s0"]))
-        with pytest.raises(ray.exceptions.RayTaskError, match="No available servers"):
-            ray.get(lb.acquire_server.remote("req", prompt_ids=[1]))
-
-    def test_yaml_forwards_composed_dict_to_constructor(self, ray_session, tmp_path):
-        """The whole composed YAML dict (router_class included) is passed as kwargs."""
-        yaml_path = self._write_router_yaml(tmp_path, __name__ + "._MockPluginLoadBalancer", extra_param="hello")
-        config = yaml_path
-        lb = get_router_handle(servers={"s0": None}, router_config_path=config)
-        kwargs = ray.get(lb.get_router_kwargs.remote())
-        assert kwargs.get("extra_param") == "hello"
-        assert kwargs.get("router_class") == __name__ + "._MockPluginLoadBalancer"
-
-    def test_yaml_defaults_block_rejected(self, ray_session, tmp_path):
-        """A Hydra 'defaults' block is not composed — reject it with guidance
-        instead of silently passing it through as a plain field."""
-        main = tmp_path / "composed.yaml"
-        main.write_text(
-            yaml.dump({"defaults": [{"strategy": "kvc"}], "router_class": __name__ + "._MockPluginLoadBalancer"})
-        )
-        with pytest.raises(ValueError, match="defaults.*not.*supported|not supported"):
-            get_router_handle(servers={"s0": None}, router_config_path=str(main))
+        # The release RPC is fire-and-forget (no awaitable ref), so poll the
+        # actor until the counter drops instead of sleeping a fixed interval.
+        deadline = time.monotonic() + 10
+        while (inflight := ray.get(lb.get_total_inflight.remote())) != 0:
+            assert time.monotonic() < deadline, (
+                f"fire-and-forget release was not processed within 10s (total_inflight={inflight})"
+            )
+            time.sleep(0.05)
 
 
 class TestResolveConfigPath:
@@ -319,22 +297,14 @@ class TestResolveConfigPath:
     absolute → CWD → verl project root → verl package dir."""
 
     def test_absolute_path_passthrough(self):
-        from verl.utils.import_utils import resolve_config_path
-
         assert resolve_config_path("/abs/path/router.yaml") == "/abs/path/router.yaml"
 
     def test_relative_path_found_in_cwd(self, tmp_path, monkeypatch):
-        import os
-
-        from verl.utils.import_utils import resolve_config_path
-
         (tmp_path / "router.yaml").write_text("router_class: x.Y")
         monkeypatch.chdir(tmp_path)
         assert resolve_config_path("router.yaml") == os.path.join(tmp_path, "router.yaml")
 
     def test_relative_path_not_found_raises(self, tmp_path, monkeypatch):
-        from verl.utils.import_utils import resolve_config_path
-
         monkeypatch.chdir(tmp_path)
         with pytest.raises(FileNotFoundError, match="configuration file not found"):
             resolve_config_path("no_such_router.yaml")
@@ -347,30 +317,19 @@ class TestReleaseServerSignature:
 
     def test_release_accepts_request_id_only(self, ray_session, tmp_path):
         """release_server takes (server_id, request_id) — no prompt_ids."""
-        yaml_path = TestGetRouterHandlePluginExtensionYaml._write_router_yaml(
-            tmp_path, __name__ + "._MockPluginLoadBalancer"
-        )
-        config = yaml_path
-        lb = get_router_handle(servers={"s0": None, "s1": None}, router_config_path=config)
+        lb = _plugin_lb({"s0": None, "s1": None}, tmp_path)
         sid, _ = ray.get(lb.acquire_server.remote("req-1", prompt_ids=[1, 2, 3]))
         ray.get(lb.release_server.remote(sid, request_id="req-1"))
         recs = ray.get(lb.get_releases.remote())
         assert recs == [(sid, "req-1")]
         # In-flight decremented alongside the recording
-        assert ray.get(lb.get_status.remote())["total_inflight"] == 0
+        assert ray.get(lb.get_total_inflight.remote()) == 0
 
     def test_default_balancer_release_ignores_request_id(self, ray_session):
         lb = ray.remote(GlobalRequestLoadBalancer).remote(servers={"s0": None, "s1": None})
         sid, _ = ray.get(lb.acquire_server.remote("req-1"))
         ray.get(lb.release_server.remote(sid, request_id="req-1"))
-        assert ray.get(lb.get_status.remote())["total_inflight"] == 0
-
-
-def _write_plugin_yaml(tmp_path, router_class):
-    """Write a plugin router YAML and return its path."""
-    path = tmp_path / "router.yaml"
-    path.write_text(yaml.dump({"router_class": router_class}))
-    return str(path)
+        assert ray.get(lb.get_total_inflight.remote()) == 0
 
 
 class TestGetRouterHandlePrecedence:
@@ -383,7 +342,7 @@ class TestGetRouterHandlePrecedence:
         """load_balancer_cls takes precedence over router_config_path; the
         YAML is ignored and a warning is logged."""
         # A YAML that would, if loaded, point at a *different* class.
-        bogus_yaml = _write_plugin_yaml(tmp_path, "nonexistent.BogusRouter")
+        bogus_yaml = _write_router_yaml(tmp_path, "nonexistent.BogusRouter")
         caplog.set_level(logging.WARNING, logger="verl.workers.rollout.router")
 
         lb = get_router_handle(
@@ -401,21 +360,20 @@ class TestGetRouterHandlePrecedence:
         )
 
     def test_router_config_path_missing_from_struct_config_does_not_raise(self, ray_session):
-        """A struct/DictConfig rollout config without ``router_config_path``
-        (e.g. verl-omni's DiffusionRolloutConfig) must not raise when the
-        manager reads it via getattr-default."""
-        from omegaconf import OmegaConf
-
-        # Simulate a downstream rollout config that predates this field.
+        """A struct rollout config without ``router_config_path`` (e.g. verl-omni's
+        DiffusionRolloutConfig) must not raise when the manager initializes the
+        router — the field is read defensively, not by direct attribute access."""
+        # Bypass the heavy __init__ (replica launch); this test only exercises
+        # _init_global_load_balancer's config reads.
         rollout_config = OmegaConf.create({"full_determinism": False})  # no router_config_path key
+        OmegaConf.set_struct(rollout_config, True)  # direct attribute access would now raise
+        manager = LLMServerManager.__new__(LLMServerManager)
+        manager.rollout_config = rollout_config
+        manager.server_addresses = ["s0", "s1"]
+        manager.server_handles = [None, None]
+        manager._load_balancer_cls = None
 
-        # This is the exact access pattern in LLMServerManager._init_global_load_balancer.
-        path = getattr(rollout_config, "router_config_path", None)
-        assert path is None
+        asyncio.run(manager._init_global_load_balancer())
 
-        lb = get_router_handle(
-            servers={"s0": None, "s1": None},
-            router_config_path=path,
-            full_determinism=getattr(rollout_config, "full_determinism", False),
-        )
-        assert ray.get(lb.get_status.remote())["active_servers"] == 2
+        status = ray.get(manager.global_load_balancer.get_status.remote())
+        assert status["active_servers"] == 2

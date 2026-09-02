@@ -170,7 +170,7 @@ val_kwargs:
   do_sample: False
 
 # Null uses the built-in router; set a plugin YAML path to use an external router.
-# Supports pkg://<package>/<path>.
+# Relative paths resolve against the working directory, then the verl package root.
 router_config_path: null
 
 # Multi-turn tool config.
