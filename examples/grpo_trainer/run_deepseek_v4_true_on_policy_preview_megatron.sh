@@ -11,11 +11,9 @@
 #   docker://iseekyan/verl:ds4_vllm_align.preview-amd64
 # Sources:
 #   VERL_ROOT: verl-project/verl main checkout
-#   MEGATRON_ROOT: pinned Megatron preview checkout created with:
+#   MEGATRON_ROOT: Megatron preview branch checkout created with:
 #     git clone --branch ds4_vllm_align_preview \
 #       https://github.com/ISEEKYAN/Megatron-LM.git "${MEGATRON_ROOT}"
-#     git -C "${MEGATRON_ROOT}" checkout \
-#       6566f0ad8c5f07d52b8960b13c77f9ae04172110
 set -euo pipefail
 
 # Required env: VERL_ROOT, MEGATRON_ROOT, MODEL_PATH, TRAIN_FILES, VAL_FILES.
@@ -78,7 +76,7 @@ done
 
 # --- Required repositories and inputs ---
 : "${VERL_ROOT:?mount VERL and set VERL_ROOT}"
-: "${MEGATRON_ROOT:?mount pinned ISEEKYAN/Megatron-LM ds4_vllm_align_preview and set MEGATRON_ROOT}"
+: "${MEGATRON_ROOT:?mount ISEEKYAN/Megatron-LM ds4_vllm_align_preview and set MEGATRON_ROOT}"
 : "${MODEL_PATH:?set MODEL_PATH to a DS4 config/tokenizer directory or checkpoint}"
 : "${TRAIN_FILES:?set TRAIN_FILES to DAPO-format training parquet}"
 : "${VAL_FILES:?set VAL_FILES to DAPO-format validation parquet}"
