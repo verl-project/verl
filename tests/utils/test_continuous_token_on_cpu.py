@@ -34,6 +34,7 @@ from verl.utils.tokenizer.continuous_token import (
     QwenContinuousTokenBuilder,
     QwenVLContinuousTokenBuilder,
     VLContinuousTokenBuilder,
+    extract_image_references,
 )
 from verl.utils.tokenizer.continuous_token_wiring import (
     CONTINUOUS_TOKEN_BUILDER_FAMILIES,
@@ -49,6 +50,38 @@ from verl.utils.tokenizer.deepseek import DeepSeekV4ContinuousTokenBuilder
 
 class _DummyTokenizer:
     name_or_path = "Qwen/Qwen3-8B"
+
+
+class _ImageReferenceWithAmbiguousTruthValue:
+    def __bool__(self):
+        raise AssertionError("image references must not be coerced to bool")
+
+
+_IMAGE_REFERENCE = _ImageReferenceWithAmbiguousTruthValue()
+
+
+@pytest.mark.parametrize(
+    ("block", "expected"),
+    [
+        pytest.param(
+            {"type": "image", "image": _IMAGE_REFERENCE},
+            _IMAGE_REFERENCE,
+            id="image-object",
+        ),
+        pytest.param(
+            {"type": "image_url", "image_url": "/tmp/a.png"},
+            "/tmp/a.png",
+            id="image-url-string",
+        ),
+        pytest.param(
+            {"type": "image_url", "image_url": {"url": "/tmp/a.png"}},
+            "/tmp/a.png",
+            id="image-url-dict",
+        ),
+    ],
+)
+def test_extract_image_references(block, expected):
+    assert extract_image_references([{"role": "user", "content": [block]}]) == [expected]
 
 
 class _TemplateTokenizer:

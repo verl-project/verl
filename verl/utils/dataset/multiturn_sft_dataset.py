@@ -37,7 +37,7 @@ from verl.utils.dataset.vision_utils import process_image, process_video
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.py_functional import convert_nested_value_to_list_recursive
 from verl.utils.tokenizer import build_multimodal_processor_inputs, get_processor_token_id
-from verl.utils.tokenizer.continuous_token import ContinuousTokenBuilder
+from verl.utils.tokenizer.continuous_token import ContinuousTokenBuilder, extract_image_references
 from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
 
 logger = logging.getLogger(__file__)
@@ -216,7 +216,7 @@ class MultiTurnSFTDataset(Dataset):
 
     @staticmethod
     def _collect_media(messages: list[dict[str, Any]]) -> tuple[list[Any], list[Any]]:
-        images: list[Any] = []
+        images = extract_image_references(messages)
         videos: list[Any] = []
         for message in messages:
             content = message.get("content")
@@ -225,9 +225,7 @@ class MultiTurnSFTDataset(Dataset):
             for block in content:
                 if not isinstance(block, dict):
                     continue
-                if block.get("type") in {"image", "image_url"} and block.get("image") is not None:
-                    images.append(block["image"])
-                elif block.get("type") == "video" and block.get("video") is not None:
+                if block.get("type") == "video" and block.get("video") is not None:
                     videos.append(block["video"])
         return images, videos
 
@@ -411,17 +409,30 @@ class MultiTurnSFTDataset(Dataset):
         to ordinary assistant messages when another row or turn has that field.
 
         Normalize ``content=None`` to an empty string because it is a valid
-        OpenAI tool-call message but many Jinja templates require text. Nested
-        values are left untouched so JSON null tool arguments retain meaning.
+        OpenAI tool-call message but many Jinja templates require text. Null
+        fields directly inside structured content blocks are also removed:
+        Arrow unions their schemas across blocks, while multimodal templates
+        may treat the presence of an ``image_url`` key as an image even when
+        its value is null. Deeper nested values are left untouched so JSON null
+        tool arguments retain meaning.
         """
-        return [
-            {
+        normalized_messages = []
+        for message in messages:
+            normalized_message = {
                 key: "" if key == "content" and value is None else value
                 for key, value in message.items()
                 if value is not None or key == "content"
             }
-            for message in messages
-        ]
+            content = normalized_message.get("content")
+            if isinstance(content, list):
+                normalized_message["content"] = [
+                    {key: value for key, value in block.items() if value is not None}
+                    if isinstance(block, dict)
+                    else block
+                    for block in content
+                ]
+            normalized_messages.append(normalized_message)
+        return normalized_messages
 
     def __getitem__(self, item):
         row_dict: dict = self.dataframe.iloc[item].to_dict()

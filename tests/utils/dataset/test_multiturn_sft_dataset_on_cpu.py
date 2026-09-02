@@ -40,6 +40,9 @@ qwen35_model_path = Path(
 gpt_oss_model_path = Path(
     os.environ.get("VERL_TEST_GPT_OSS_MODEL", custom_model_prefix / "openai/gpt-oss-20b")
 ).expanduser()
+qwen3_vl_model_path = Path(
+    os.environ.get("VERL_TEST_QWEN3_VL_MODEL", custom_model_prefix / "Qwen/Qwen3-VL-2B-Instruct")
+).expanduser()
 
 
 def test_multiturn_sft_drops_arrow_null_message_fields():
@@ -50,6 +53,13 @@ def test_multiturn_sft_drops_arrow_null_message_fields():
             "content": None,
             "tool_calls": [{"function": {"name": "lookup", "arguments": {"optional": None}}}],
         },
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "/tmp/image.png"}, "text": None},
+                {"type": "text", "text": "Describe the image.", "image_url": None},
+            ],
+        },
     ]
 
     assert MultiTurnSFTDataset._drop_null_message_fields(messages) == [
@@ -58,6 +68,13 @@ def test_multiturn_sft_drops_arrow_null_message_fields():
             "role": "assistant",
             "content": "",
             "tool_calls": [{"function": {"name": "lookup", "arguments": {"optional": None}}}],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "/tmp/image.png"}},
+                {"type": "text", "text": "Describe the image."},
+            ],
         },
     ]
 
@@ -685,7 +702,7 @@ def vlm_data_file():
 @pytest.mark.parametrize(
     "model_path",
     [
-        f"{custom_model_prefix}/Qwen/Qwen3-VL-2B-Instruct",
+        str(qwen3_vl_model_path),
     ],
 )
 def test_multiturn_sft_vlm_dataset_on_cpu(model_path, vlm_data_file):
@@ -749,10 +766,89 @@ def test_multiturn_sft_vlm_dataset_on_cpu(model_path, vlm_data_file):
             assert image_grid_thw is None, "image_grid_thw should be None when no image is provided"
 
 
+@pytest.mark.parametrize("model_path", [str(qwen3_vl_model_path)])
+def test_multiturn_sft_vlm_structured_image_url_on_cpu(model_path: str, tmp_path: Path):
+    image_path = tmp_path / "structured-image.png"
+    Image.new("RGB", (64, 64), color="blue").save(image_path)
+
+    def text_content(text: str) -> list[dict[str, str]]:
+        return [{"type": "text", "text": text}]
+
+    image_block = {
+        "type": "image_url",
+        "image_url": {"url": str(image_path)},
+    }
+    conversations = [
+        [
+            {
+                "role": "user",
+                "content": [image_block, {"type": "text", "text": "Describe this image."}],
+            },
+            {"role": "assistant", "content": text_content("A small test image.")},
+        ],
+        [
+            {"role": "user", "content": text_content("Prepare to inspect another image.")},
+            {"role": "assistant", "content": text_content("I am ready.")},
+            {
+                "role": "user",
+                "content": [image_block, {"type": "text", "text": "Describe the later image."}],
+            },
+            {"role": "assistant", "content": text_content("The later image is a small test image.")},
+        ],
+    ]
+    test_file = tmp_path / "structured_image_url.parquet"
+    pd.DataFrame({"messages": conversations}).to_parquet(test_file)
+
+    dataframe = pd.read_parquet(test_file)
+    assert "images" not in dataframe.columns
+
+    tokenizer = hf_tokenizer(model_path)
+    processor = hf_processor(model_path)
+    dataset = MultiTurnSFTDataset(
+        parquet_files=str(test_file),
+        tokenizer=tokenizer,
+        processor=processor,
+        config={
+            "max_length": 2048,
+            "pad_mode": "no_padding",
+            "truncation": "error",
+            "messages_key": "messages",
+            "continuous_token_model_family": "qwen3vl",
+        },
+    )
+
+    expected_assistant_texts = [
+        ["A small test image."],
+        ["I am ready.", "The later image is a small test image."],
+    ]
+    for index, expected_texts in enumerate(expected_assistant_texts):
+        item = dataset[index]
+        input_ids = item["input_ids"]
+        loss_mask = item["loss_mask"]
+        multi_modal_inputs = item["multi_modal_inputs"]
+        pixel_values = multi_modal_inputs["pixel_values"]
+        image_grid_thw = multi_modal_inputs["image_grid_thw"]
+
+        assert input_ids.shape == loss_mask.shape
+        assert pixel_values is not None
+        assert image_grid_thw.shape == (1, 3)
+
+        num_patches = image_grid_thw.prod(dim=1).sum()
+        assert pixel_values.shape[0] == num_patches
+        expected_image_tokens = num_patches // (processor.image_processor.merge_size**2)
+        image_positions = input_ids == processor.image_token_id
+        assert image_positions.sum() == expected_image_tokens
+        assert torch.all(loss_mask[image_positions] == 0)
+
+        assistant_text = tokenizer.decode(input_ids[loss_mask == 1], skip_special_tokens=True)
+        for expected_text in expected_texts:
+            assert expected_text in assistant_text
+
+
 @pytest.mark.parametrize(
     "model_path",
     [
-        f"{custom_model_prefix}/Qwen/Qwen3-VL-2B-Instruct",
+        str(qwen3_vl_model_path),
     ],
 )
 def test_multiturn_sft_vlm_dataloader_on_cpu(model_path, vlm_data_file):
