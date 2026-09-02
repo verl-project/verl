@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import logging
 from types import SimpleNamespace
 
@@ -2895,6 +2896,77 @@ class _RecordingTemplateProcessor(_MockQwenVLProcessor):
             tools=tools,
             return_dict=return_dict,
             **kwargs,
+        )
+
+
+class _BlockReplacingTemplateProcessor(_MockQwenVLProcessor):
+    """VL processor that rewrites structured image blocks in place.
+
+    This mirrors what a real Qwen3-VL processor does to an OpenAI-style
+    ``image_url`` block: it replaces the block with an internal
+    ``{"type": "image", "url": ...}`` form. That rewrite drops the ``image_url``
+    key, and :func:`extract_image_references` reads ``image`` / ``image_url``
+    rather than a processor-internal bare ``url``, so a leaked rewrite makes the
+    image disappear from the caller's messages entirely.
+    """
+
+    def apply_chat_template(
+        self, messages, tokenize=False, add_generation_prompt=False, tools=None, return_dict=False, **kwargs
+    ):
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for index, block in enumerate(content):
+                if not isinstance(block, dict) or block.get("type") != "image_url":
+                    continue
+                image_url = block.get("image_url")
+                url = image_url.get("url") if isinstance(image_url, dict) else image_url
+                content[index] = {"type": "image", "url": url}
+        return super().apply_chat_template(
+            messages,
+            tokenize=tokenize,
+            add_generation_prompt=add_generation_prompt,
+            tools=tools,
+            return_dict=return_dict,
+            **kwargs,
+        )
+
+
+def test_vl_builder_does_not_mutate_caller_messages():
+    """Rendering must not rewrite the caller's messages.
+
+    VL builders accept structured ``image_url`` content blocks, and callers keep
+    using the same message list after Continuous Token assembly (the SFT dataset
+    rebuilds its multimodal tensors from it). A processor that rewrites message
+    containers in place would therefore strip the media references out from under
+    the caller, so the render has to work on copied containers.
+    """
+
+    def render_tokens(builder, messages):
+        builder.build_initial_tokens(messages, images=extract_image_references(messages))
+
+    def render_text(builder, messages):
+        builder._render_text(messages, add_generation_prompt=True)
+
+    for render_name, render in (("token render", render_tokens), ("text render", render_text)):
+        builder = QwenVLContinuousTokenBuilder(_MockQwenVLTokenizer(), _BlockReplacingTemplateProcessor())
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "/tmp/a.png"}},
+                    {"type": "text", "text": "Describe this image."},
+                ],
+            }
+        ]
+        expected = copy.deepcopy(messages)
+
+        render(builder, messages)
+
+        assert messages == expected, f"{render_name}: processor rewrite leaked into the caller's messages"
+        assert extract_image_references(messages) == ["/tmp/a.png"], (
+            f"{render_name}: structured image_url must still be recoverable after rendering"
         )
 
 
