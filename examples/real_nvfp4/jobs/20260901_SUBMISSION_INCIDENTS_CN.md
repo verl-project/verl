@@ -298,6 +298,32 @@ commit cannot diverge`。
 判据：检查 `run_state/<version>/<phase>.jobid` 是不是还是旧的 job id。
 处理：给提交命令留足超时（>= 10 分钟）或放到后台跑，不要盲目重提。
 
+## 坑 17：从没跑过的路径不要直接上 8 节点长跑
+
+BF16 对照（2702860）跑满 5 小时 TIMEOUT，**一步训练都没有**。现场：
+
+- 卡在 Megatron `WorkerDict` 初始化。32 个 worker 里**只有 1 个**输出过东西，
+  且都没到 `ProcessGroupNCCL` / NUMA 那一行。
+- 没有 `launch_server`、没有 CUDA graph capture、W&B 没有任何 history。
+- 没有任何报错或 traceback，就是静默不动。
+- 同一镜像上的 W4A4 run 在这个阶段 2 分钟就过，32 个 worker 齐刷刷输出。
+
+一个待解释的观察（**尚不足以定为根因**）：`ray status` 里
+BF16 是 **8 个 active node**、W4A4 是 **9 个**，而两边都报 `0.0/32.0 GPU`。
+多出来的第 9 个是 driver 自己那个 `ray start --address --num-cpus 0 --num-gpus 0`
+的零资源节点。也就是说 BF16 那次在 `ray status` 时 driver 的 Ray 节点还没注册上，
+像是启动竞态。但 32 个 GPU 都在，placement group 本应可满足，所以还不能据此定论。
+
+**真正的教训是流程上的**：`PRECISION_MODE=bf16` 在此之前**从未被执行过**
+（v6/v7/v8 的 smoke 全是 `real_nvfp4`；README 写了它是 matched control，但没人跑过）。
+把一条未验证路径直接放到 8 节点 × 5 小时，失败的代价是 5 小时和 8 个节点。
+
+处理：给 `bf16_control_20260902_v14` 加了 `smoke` 阶段（1 节点、`ARM=smoke`、3 步、
+1 小时上限），任何新路径先在 1 节点上证明，再上 8 节点。
+
+`train.job` 里 Ray 集群成型用的是固定 `sleep 15`，不是"等到 N 个节点就位"。
+若后续再出现同形态挂死，优先把它改成显式等待。
+
 ## 关键路径
 
 - v10 日志：`ray_log/verl_real_nvfp4_r3_nativeonline_post026_20260901_v10/`
