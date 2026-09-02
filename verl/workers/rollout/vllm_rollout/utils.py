@@ -368,6 +368,39 @@ class vLLMColocateWorkerExtension:
             )
             return
 
+        # vLLM 0.26 reworked MoE loading into RoutedExperts, whose weight_loader
+        # indexes a per-expert 2D view. verl's legacy `model.load_weights` path
+        # still hands it the stacked 3D expert param and dies with
+        # "shard_dim=0 is not a valid data dimension for a 3D tensor", so plain
+        # BF16 MoE weight sync cannot work on 0.26 (verl main still pins 0.24).
+        # Native reload is the same API real NVFP4 already uses successfully on
+        # this vLLM, so allow non-quantized runs to opt into it.
+        if os.environ.get("VERL_VLLM_NATIVE_RELOAD") == "1":
+            if peft_config is not None:
+                raise NotImplementedError("native reload weight sync does not support LoRA")
+            receiver = BucketedWeightReceiver(
+                zmq_handle=self._get_zmq_handle(),
+                device=self.device,
+                use_shm=use_shm,
+            )
+            weights_iterator = receiver.iter_weights(own_tensors=True, defer_last_ack=True)
+            try:
+                self.model_runner.reload_weights(
+                    weights_iterator=weights_iterator,
+                    is_checkpoint_format=True,
+                )
+                if not receiver.iterator_exhausted:
+                    raise RuntimeError("vLLM reload_weights returned before consuming the full weight stream")
+                get_torch_device().synchronize()
+                receiver.complete_deferred_last_ack()
+            finally:
+                close = getattr(weights_iterator, "close", None)
+                if close is not None:
+                    close()
+                receiver.close_weight_iterator(weights_iterator)
+            logger.warning("VERL_VLLM_NATIVE_RELOAD PASS reload=native")
+            return
+
         if self._is_qat_model:
             # QAT (compressed-tensors): Prepare for weight loading BEFORE receiving any buckets
             from verl.utils.qat import prepare_qat_for_load_weights
