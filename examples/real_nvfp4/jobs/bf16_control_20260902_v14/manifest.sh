@@ -7,6 +7,9 @@ readonly RN4PT_VERL=$RN4PT_WORKSPACE/verl_nvfp4_e2e_r3_20260831_v3
 readonly RN4PT_ROOT=$RN4PT_VERL/examples/real_nvfp4
 readonly RN4PT_BUNDLE=${RN4PT_BUNDLE_OVERRIDE:-$RN4PT_ROOT/jobs/bf16_control_20260902_v14}
 readonly RN4PT_JOB_IMPL=$RN4PT_ROOT/jobs/bf16_control_20260902_v14
+# The image is v12's, built by the v8 bundle's build job, so the build-time
+# marker gates must keep pointing at the bundle that actually produced it.
+readonly RN4PT_BUILD_JOB_IMPL=$RN4PT_ROOT/jobs/r3_nativeonline_20260901_v8
 readonly RN4PT_STATE=$RN4PT_WORKSPACE/run_state/$RN4PT_VERSION
 readonly RN4PT_LOGS=$RN4PT_WORKSPACE/ray_log/$RN4PT_VERSION
 readonly RN4PT_CHECKPOINTS=$RN4PT_WORKSPACE/checkpoints/DAPO-NVFP4-QAT/$RN4PT_VERSION
@@ -94,7 +97,7 @@ rn4pt_validate_static() {
   if [[ "${RN4PT_VLLM_DISABLE_TRTLLM_MOE_PDL:-0}" = 1 ]]; then
     grep -q 'enable_pdl=False' "$RN4PT_ROOT/runtime_backports/disable_vllm_trtllm_nvfp4_moe_pdl.py" || \
       rn4pt_die "TRTLLM NVFP4 MoE PDL-off patch missing" || return
-    grep -q 'REAL_NVFP4_VLLM_TRTLLM_MOE_PDL_OFF_PASS' "$RN4PT_JOB_IMPL/build_runtime.job" || \
+    grep -q 'REAL_NVFP4_VLLM_TRTLLM_MOE_PDL_OFF_PASS' "$RN4PT_BUILD_JOB_IMPL/build_runtime.job" || \
       rn4pt_die "TRTLLM NVFP4 MoE PDL-off image gate missing" || return
   fi
   grep -q "rev=$RN4PT_TE_COMMIT" "$RN4PT_VERL/uv.lock" || rn4pt_die "uv.lock lacks the audited TE commit" || return
