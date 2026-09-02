@@ -43,6 +43,7 @@ case "${DEVICE}" in
         export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
         n_devices_per_node=16
         fsdp_size=16
+        EP_SIZE=16
         ep_dispatcher=fused
         ;;
     *)
@@ -88,8 +89,8 @@ DATA=(
     data.train_files="${TRAIN_FILE}"
     data.val_files="${TEST_FILE}"
     data.train_batch_size=16
-    data.max_prompt_length=1024
-    data.max_response_length=2048
+    data.max_prompt_length=2048
+    data.max_response_length=6144
     data.filter_overlong_prompts=True
     data.truncation='error'
     data.image_key=images
@@ -190,10 +191,10 @@ TRAINER=(
     trainer.nnodes=${NNODES}
     trainer.balance_batch=False
     trainer.resume_from_path=checkpoints/
-    trainer.val_before_train=False
+    trainer.val_before_train=True
     trainer.save_freq=-1
-    trainer.test_freq=-1
-    trainer.total_epochs=15
+    trainer.test_freq=10
+    trainer.total_epochs=100
 )
 
 case "${DEVICE}" in
@@ -202,6 +203,7 @@ case "${DEVICE}" in
     npu)
         ROLLOUT+=(
             +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
+            actor_rollout_ref.rollout.max_num_batched_tokens=2048
         )
         ;;
     *)
