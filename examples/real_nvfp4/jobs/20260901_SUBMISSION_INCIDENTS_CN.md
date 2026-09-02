@@ -273,6 +273,31 @@ v13 chunk 1（job 2695466）启动后，`.out` 和 `tee` 出来的 chunk log 在
    本次是 7 个节点全部约 141 GiB、GPU 0%、VLLM::Worker CPU 约 35–47%，属于正常运行态。
 
 **结论：不要用 `.out` 的 mtime 判断 chunk 是否存活。** 监控要挂在 W&B step 增长或 Ray 任务状态上。
+## 坑 15：提交之后、job 起来之前动 worktree，会把 job 毙掉
+
+BF16 对照第一次提交（2702808）在 23 秒内 FAILED，exit 2，日志只有一行
+`REAL_NVFP4_PERTOKEN_REFUSED: worktree must be clean so the runtime image and source
+commit cannot diverge`。
+
+原因不是代码问题：`submit.sh` 在提交时验一次 `rn4pt_validate_static`，**job 启动时还会再验一次**。
+我在这两个时刻之间写了一个新的 md 文档，worktree 变脏，第二次校验就把 job 拒了。
+
+这是门禁的正确行为（保证运行时源码与被审计的 commit 一致），不要为此放宽它。操作纪律是：
+
+- **只要队列里还有 pending 的本 bundle job，就不要留未提交改动。** 写文档就立刻提交，
+  或者写到 worktree 外面。
+- 写文件和 `git commit` 尽量放在同一条命令里，把"脏窗口"压到毫秒级。
+- 已经 RUNNING 且过了启动校验的 job 不受影响。
+
+## 坑 16：`sha256sum` 17 GiB 镜像会超过 2 分钟
+
+`rn4pt_require_runtime_image` 会对约 17 GiB 的 `.sqsh` 做一次 `sha256sum -c`。在 Lustre 上
+冷缓存时要几分钟，会撞上短超时——表现是 `submit.sh` 在真正 `sbatch` 之前就被杀，
+**看起来像提交成功了但队列里什么都没有**。
+
+判据：检查 `run_state/<version>/<phase>.jobid` 是不是还是旧的 job id。
+处理：给提交命令留足超时（>= 10 分钟）或放到后台跑，不要盲目重提。
+
 ## 关键路径
 
 - v10 日志：`ray_log/verl_real_nvfp4_r3_nativeonline_post026_20260901_v10/`
