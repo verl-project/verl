@@ -217,6 +217,8 @@ class _Gemma4BoundaryTokenizer(_TemplateTokenizer):
                 if not isinstance(content, str):
                     content = str(content)
                 rendered += f'<|tool_response>response:{name}{{value:<|"|>{content}<|"|>}}<tool_response|>'
+            elif role == "assistant":
+                rendered += f"<assistant>{message.get('content', '')}<turn|>\n"
             else:
                 rendered += f"<{role}>{message.get('content', '')}\n"
         if add_generation_prompt:
@@ -270,39 +272,6 @@ class _DeepSeekToolAppendTokenizer(_TemplateTokenizer):
             else:
                 rendered += f"<{role}>{message.get('content', '')}\n"
         if add_generation_prompt and not last_was_tool:
-            rendered += "<assistant>"
-        if tokenize:
-            return self.encode(rendered, add_special_tokens=False)
-        return rendered
-
-
-class _Gemma4ContinuationTokenizer(_Gemma4BoundaryTokenizer):
-    """Model the Gemma4 template's tool-response/assistant turn rewrite."""
-
-    _turn_end = "<turn_end>\n"
-
-    def apply_chat_template(
-        self,
-        messages,
-        tokenize=True,
-        add_generation_prompt=True,
-        tools=None,
-        return_dict=False,
-        **kwargs,
-    ):
-        del tools, return_dict, kwargs
-        rendered = ""
-        previous_role = None
-        for message in messages:
-            role = message["role"]
-            content = message.get("content", "")
-            if role == "assistant" and previous_role == "tool":
-                assert rendered.endswith(self._turn_end)
-                rendered = rendered[: -len(self._turn_end)] + content + self._turn_end
-            else:
-                rendered += f"<{role}>{content}{self._turn_end}"
-            previous_role = role
-        if add_generation_prompt:
             rendered += "<assistant>"
         if tokenize:
             return self.encode(rendered, add_special_tokens=False)
@@ -765,7 +734,14 @@ def test_glm47_builder_removes_ambiguous_boundary_token():
 def test_gemma4_builder_inserts_tool_response_boundary_for_appended_messages():
     tokenizer = _Gemma4BoundaryTokenizer()
     builder = create_continuous_token_builder(tokenizer, model_family="gemma4")
-    previous_messages = [{"role": "user", "content": "question"}]
+    previous_messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"type": "function", "function": {"name": "lookup", "arguments": {}}}],
+        },
+    ]
     updated_messages = previous_messages + [{"role": "tool", "content": "answer", "name": "lookup"}]
 
     result = builder.merge_context_tokens(previous_messages, updated_messages, [1, 2, 3])
@@ -780,7 +756,14 @@ def test_gemma4_builder_inserts_tool_response_boundary_for_appended_messages():
 def test_gemma4_builder_does_not_duplicate_existing_tool_response_boundary():
     tokenizer = _Gemma4BoundaryTokenizer()
     builder = create_continuous_token_builder(tokenizer, model_family=ContinuousTokenModelFamily.GEMMA4)
-    previous_messages = [{"role": "user", "content": "question"}]
+    previous_messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"type": "function", "function": {"name": "lookup", "arguments": {}}}],
+        },
+    ]
     updated_messages = previous_messages + [{"role": "tool", "content": "answer", "name": "lookup"}]
 
     result = builder.merge_context_tokens(previous_messages, updated_messages, [1, tokenizer.tool_response_id])
@@ -1337,23 +1320,55 @@ def test_context_incremental_messages_reject_final_assistant():
         builder.tokenize_context_incremental_messages(previous_messages, updated_messages)
 
 
-def test_gemma4_rewritten_assistant_context_rewrites_tool_turn_tail_exactly():
-    tokenizer = _Gemma4ContinuationTokenizer()
+def test_gemma4_first_assistant_context_continues_previous_model_tool_turn():
+    tokenizer = _Gemma4BoundaryTokenizer()
     builder = Gemma4ContinuousTokenBuilder(tokenizer)
     previous_messages = [
         {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": "calling lookup",
+            "tool_calls": [{"type": "function", "function": {"name": "lookup", "arguments": {}}}],
+        },
         {"role": "tool", "content": "tool result"},
     ]
-    updated_messages = previous_messages + [{"role": "assistant", "content": "rewritten"}]
-    runtime_ids = builder._render_tokens(previous_messages, add_generation_prompt=False)
-    expected_ids = builder._render_tokens(updated_messages, add_generation_prompt=True)
+    appended_messages = [{"role": "assistant", "content": "rewritten"}]
+    runtime_ids = [1, 2] + builder._turn_separator_ids
+    appended_ids = builder._model_turn_header_ids + [3, 4]
 
-    result = builder.merge_context_tokens(previous_messages, updated_messages, runtime_ids)
+    result = builder._merge_context_token_ids(
+        runtime_ids,
+        appended_ids,
+        previous_messages=previous_messages,
+        appended_messages=appended_messages,
+    )
 
-    assert result.token_ids == expected_ids
-    assert result.removed_prefix_token_count == len(tokenizer.encode(tokenizer._turn_end))
+    assert result.token_ids == [1, 2, 3, 4]
+    assert result.appended_token_count == 2
+    assert result.removed_prefix_token_count == len(builder._turn_separator_ids)
     assert result.inserted_token_ids == []
     assert result.kind == "context"
+
+
+def test_gemma4_first_assistant_context_starts_new_model_turn_after_user():
+    tokenizer = _Gemma4BoundaryTokenizer()
+    builder = Gemma4ContinuousTokenBuilder(tokenizer)
+    previous_messages = [{"role": "user", "content": "question"}]
+    appended_messages = [{"role": "assistant", "content": "answer"}]
+    runtime_ids = [1, 2] + builder._turn_separator_ids
+    appended_ids = builder._model_turn_header_ids + [3, 4]
+
+    result = builder._merge_context_token_ids(
+        runtime_ids,
+        appended_ids,
+        previous_messages=previous_messages,
+        appended_messages=appended_messages,
+    )
+
+    assert result.token_ids == runtime_ids + appended_ids
+    assert result.appended_token_count == len(appended_ids)
+    assert result.removed_prefix_token_count == 0
+    assert result.inserted_token_ids == []
 
 
 @pytest.mark.parametrize(

@@ -644,7 +644,7 @@ class GLMContinuousTokenBuilder(ContinuousTokenBuilder):
 
 
 class Gemma4ContinuousTokenBuilder(ContinuousTokenBuilder):
-    """Gemma4 tool-response boundary handling."""
+    """Gemma4 turn-continuation and tool-response boundary handling."""
 
     def __init__(self, tokenizer: Any, **kwargs: Any):
         super().__init__(tokenizer, **kwargs)
@@ -653,58 +653,33 @@ class Gemma4ContinuousTokenBuilder(ContinuousTokenBuilder):
         if not turn_separator_ids:
             raise ValueError("Expected Gemma4 '<turn|>\\n' turn separator to tokenize to at least one token")
         self._turn_separator_ids = turn_separator_ids
+        model_turn_header_ids = normalize_token_ids(tokenizer.encode("<|turn>model\n", add_special_tokens=False))
+        if not model_turn_header_ids:
+            raise ValueError("Expected Gemma4 '<|turn>model\\n' header to tokenize to at least one token")
+        self._model_turn_header_ids = model_turn_header_ids
 
-    def tokenize_context_incremental_messages(
+    def _merge_context_group(
         self,
-        previous_messages: list[dict[str, Any]],
-        updated_messages: list[dict[str, Any]],
+        incremental_ids: list[int],
+        group_token_ids: list[int],
         *,
+        group: list[dict[str, Any]],
+        processed_messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
-    ) -> list[int]:
-        self._assert_append_only(previous_messages, updated_messages)
-        appended_messages = updated_messages[len(previous_messages) :]
-        if not appended_messages:
-            return []
-        incremental_ids: list[int] = []
-        processed_messages = list(previous_messages)
-
-        groups = self._iter_append_groups(appended_messages)
-        for group_index, group in enumerate(groups):
-            role = group[0].get("role")
-            if role == "tool":
-                incremental_ids.extend(
-                    self._tokenize_tool_group(
-                        group,
-                        previous_messages=processed_messages,
-                        tools=tools,
-                    )
-                )
-            elif role in {"user", "system", "assistant"}:
-                if len(group) != 1:
-                    raise ValueError(
-                        f"Continuous Token expects one {role!r} message per append group, got {len(group)}"
-                    )
-                if role == "assistant" and group_index == len(groups) - 1:
-                    raise ValueError("Continuous Token context incremental messages cannot end with assistant")
-                if role == "user" and self._needs_user_turn_separator(
-                    incremental_ids,
-                    processed_messages=processed_messages,
-                    tools=tools,
-                ):
-                    incremental_ids.extend(self._turn_separator_ids)
-                incremental_ids.extend(
-                    self._tokenize_single_non_tool(
-                        group[0],
-                        add_generation_prompt=False,
-                        tools=tools,
-                    )
-                )
-            else:
-                raise ValueError(f"Unsupported Continuous Token append role: {role!r}")
-            processed_messages.extend(group)
-
-        incremental_ids.extend(self._tokenize_generation_prompt_delta(updated_messages, tools=tools))
-        return incremental_ids
+    ) -> None:
+        if group[0].get("role") == "user" and self._needs_user_turn_separator(
+            incremental_ids,
+            processed_messages=processed_messages,
+            tools=tools,
+        ):
+            incremental_ids.extend(self._turn_separator_ids)
+        super()._merge_context_group(
+            incremental_ids,
+            group_token_ids,
+            group=group,
+            processed_messages=processed_messages,
+            tools=tools,
+        )
 
     def _needs_user_turn_separator(
         self,
@@ -803,92 +778,66 @@ class Gemma4ContinuousTokenBuilder(ContinuousTokenBuilder):
             tools=tools,
         )
 
-    def merge_context_tokens(
+    def _merge_context_token_ids(
         self,
-        previous_messages: list[dict[str, Any]],
-        updated_messages: list[dict[str, Any]],
         runtime_token_ids: list[int],
-        *,
-        tools: list[dict[str, Any]] | None = None,
+        appended_token_ids: list[int],
+        **kwargs: Any,
     ) -> MergeResult:
-        appended_messages = updated_messages[len(previous_messages) :]
-
-        # Gemma4 renders an assistant message after a tool response as a
-        # continuation of the same model turn. Appending that assistant via the
-        # generic synthetic system/user context would incorrectly add a second
-        # model-turn header. Compute the exact tail edit from the real rolled-back
-        # message prefix instead. This is still a tail-only edit and is reported in
-        # MergeResult so response metadata is trimmed and masked consistently.
-        # TODO: this full-template tail edit currently follows Gemma4's historical
-        # assistant behavior and drops thinking from appended context assistant
-        # messages when later context turns exist. Find an encoding strategy that
-        # both preserves assistant thinking and keeps the assistant/tool/user
-        # boundary identical to applying the Gemma4 chat template to the full
-        # context.
-        if any(message.get("role") == "assistant" for message in appended_messages):
-            self._assert_append_only(previous_messages, updated_messages)
-            previous_rendered_ids = self._render_tokens(
-                previous_messages,
-                add_generation_prompt=False,
-                tools=tools,
-            )
-            updated_rendered_ids = self._render_tokens(
-                updated_messages,
-                add_generation_prompt=True,
-                tools=tools,
-            )
-            common_prefix_length = 0
-            for previous_id, updated_id in zip(previous_rendered_ids, updated_rendered_ids, strict=False):
-                if previous_id != updated_id:
-                    break
-                common_prefix_length += 1
-
-            removed_prefix_token_count = len(previous_rendered_ids) - common_prefix_length
-            removed_rendered_ids = previous_rendered_ids[common_prefix_length:]
-            if removed_prefix_token_count > len(runtime_token_ids):
-                raise ValueError("Gemma4 assistant context tail edit exceeds the runtime token prefix")
-            if removed_rendered_ids and runtime_token_ids[-removed_prefix_token_count:] != removed_rendered_ids:
-                raise ValueError("Gemma4 assistant context tail does not match the rolled-back runtime prefix")
-
-            retained_runtime_ids = (
-                runtime_token_ids[:-removed_prefix_token_count]
-                if removed_prefix_token_count
-                else list(runtime_token_ids)
-            )
-            appended_token_ids = updated_rendered_ids[common_prefix_length:]
-            return MergeResult(
-                token_ids=retained_runtime_ids + appended_token_ids,
-                appended_token_count=len(appended_token_ids),
-                kind="context",
-                removed_prefix_token_count=removed_prefix_token_count,
-            )
-
-        appended_token_ids = self.tokenize_context_incremental_messages(
-            previous_messages, updated_messages, tools=tools
-        )
-
+        previous_messages = kwargs.get("previous_messages", [])
+        appended_messages = kwargs.get("appended_messages", [])
         prefix = list(runtime_token_ids)
+        appended = list(appended_token_ids)
         inserted_token_ids: list[int] = []
+        removed_prefix_token_count = 0
+
+        # Gemma renders tool messages inside the preceding model turn. An
+        # appended assistant therefore continues that turn only when the latest
+        # non-tool message is also assistant; after user/system it must retain
+        # both the previous turn separator and its own model-turn header.
+        if (
+            appended_messages
+            and appended_messages[0].get("role") == "assistant"
+            and self._last_non_tool_role(previous_messages) == "assistant"
+        ):
+            separator_ids = self._turn_separator_ids
+            if prefix[-len(separator_ids) :] == separator_ids:
+                del prefix[-len(separator_ids) :]
+                removed_prefix_token_count = len(separator_ids)
+
+            header_ids = self._model_turn_header_ids
+            if appended[: len(header_ids)] == header_ids:
+                del appended[: len(header_ids)]
+
         # Gemma's tool block opens with <|tool_response>. The synthetic-prefix
         # suffix diff attributes that boundary token to the diffed-away assistant
-        # turn, so it is missing from ``appended_token_ids``; re-insert it at the
+        # turn, so it is missing from ``appended``; re-insert it at the
         # junction. Guard against double insertion in case the prefix already ends
         # with it or the diff happens to retain it.
         if (
             appended_messages
             and appended_messages[0].get("role") == "tool"
             and prefix[-1:] != [self._tool_response_id]
-            and appended_token_ids[:1] != [self._tool_response_id]
+            and appended[:1] != [self._tool_response_id]
         ):
             prefix.append(self._tool_response_id)
             inserted_token_ids.append(self._tool_response_id)
 
         return MergeResult(
-            token_ids=prefix + appended_token_ids,
-            appended_token_count=len(appended_token_ids),
+            token_ids=prefix + appended,
+            appended_token_count=len(appended),
             kind="context",
             inserted_token_ids=inserted_token_ids,
+            removed_prefix_token_count=removed_prefix_token_count,
         )
+
+    @staticmethod
+    def _last_non_tool_role(messages: list[dict[str, Any]]) -> str | None:
+        for message in reversed(messages):
+            role = message.get("role")
+            if role != "tool":
+                return role
+        return None
 
 
 def require_token_id(tokenizer: Any, token: str) -> int:
