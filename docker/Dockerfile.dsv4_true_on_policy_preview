@@ -1,0 +1,302 @@
+# syntax=docker/dockerfile:1.7
+
+# -----------------------------------------------------------------------------
+# Base image and release pins
+# -----------------------------------------------------------------------------
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.07-py3
+ARG BASE_IMAGE_DIGEST=sha256:2140e699b3beaf7f96a0081fd9c9406bc3832b435cdb60dfa2d261f7d2f34a1c
+ARG TARGETARCH=amd64
+
+# Among the three application repositories in this preview, only vLLM is
+# baked into the image. VERL and Megatron-LM are mounted at run time.
+ARG VLLM_REPO=https://github.com/ISEEKYAN/vllm.git
+ARG VLLM_REF=refs/heads/ds4-v9-rc1
+ARG VLLM_REVISION=1a6542cdebbaabbf9972c358de8d6baa54e46b0c
+ARG VLLM_TREE=df12131335d84e9848e188905449230902eaf7ca
+ARG VLLM_WHEEL_COMMIT=7aa248fcfef5ba7a6bfb0ce314e328ce63abb9f9
+ARG VLLM_WHEEL_VERSION=0.26.1rc1.dev682+g7aa248fcf
+ARG VLLM_WHEEL_URL_VERSION=0.26.1rc1.dev682%2Bg7aa248fcf
+ARG VLLM_WHEEL_SHA256_AMD64=3093b6b2c0c2eb07d82b046f9dfd02f959b1c74ac1e95dcdc5864ae61d1e9caf
+ARG VLLM_WHEEL_SHA256_ARM64=489205054640e00f956edcf85cd58ff2152876666898f24168144d159f1fcafe
+
+ARG DEEPGEMM_REPO=https://github.com/ISEEKYAN/DeepGEMM.git
+ARG DEEPGEMM_REVISION=dfad2230d33ac6bb853b00e56a1c94664f4fe195
+ARG DEEPEP_REPO=https://github.com/ISEEKYAN/DeepEP.git
+ARG DEEPEP_REVISION=2cd85412155cbc07452f552ac6e2f446a26f8869
+ARG HYBRIDEP_REPO=https://github.com/deepseek-ai/DeepEP.git
+ARG HYBRIDEP_REVISION=58397eac493b075b0baea5861ac6e9793d8d7a21
+ARG MAX_JOBS=64
+
+# -----------------------------------------------------------------------------
+# Builder
+# -----------------------------------------------------------------------------
+FROM ${BASE_IMAGE}@${BASE_IMAGE_DIGEST} AS builder
+ARG TARGETARCH
+ARG BASE_IMAGE
+ARG BASE_IMAGE_DIGEST
+ARG VLLM_REPO
+ARG VLLM_REF
+ARG VLLM_REVISION
+ARG VLLM_TREE
+ARG VLLM_WHEEL_COMMIT
+ARG VLLM_WHEEL_VERSION
+ARG VLLM_WHEEL_URL_VERSION
+ARG VLLM_WHEEL_SHA256_AMD64
+ARG VLLM_WHEEL_SHA256_ARM64
+ARG DEEPGEMM_REPO
+ARG DEEPGEMM_REVISION
+ARG DEEPEP_REPO
+ARG DEEPEP_REVISION
+ARG HYBRIDEP_REPO
+ARG HYBRIDEP_REVISION
+ARG MAX_JOBS
+
+ENV VIRTUAL_ENV=/opt/ds4-venv \
+    PATH=/opt/ds4-venv/bin:/usr/local/bin:/usr/local/cuda/bin:/usr/bin:/bin \
+    MAX_JOBS=${MAX_JOBS} CMAKE_BUILD_PARALLEL_LEVEL=${MAX_JOBS} \
+    PIP_NO_CACHE_DIR=1 PYTHONDONTWRITEBYTECODE=1 \
+    TORCH_EXTENSIONS_DIR=/src/build/torch-extensions
+WORKDIR /src
+
+# -----------------------------------------------------------------------------
+# Target architecture and source checkouts
+# x86_64: H100 (SM90), B200 (SM100), B300 (SM103)
+# arm64:  GB200 (SM100), GB300 (SM103)
+# -----------------------------------------------------------------------------
+RUN <<'EOF'
+set -eux
+case "${TARGETARCH}" in
+  amd64)
+    torch_archs='9.0a;10.0a;10.3a'
+    cuda_archs='90a;100a;103a'
+    ;;
+  arm64)
+    torch_archs='10.0a;10.3a'
+    cuda_archs='100a;103a'
+    ;;
+  *) exit 64 ;;
+esac
+printf "export TORCH_CUDA_ARCH_LIST='%s'\nexport CUDAARCHS='%s'\n" \
+  "${torch_archs}" "${cuda_archs}" >/tmp/ds4-arch.env
+
+clone_exact() {
+  git init "/src/$1"
+  git -C "/src/$1" remote add origin "$2"
+  git -C "/src/$1" fetch --depth 1 origin "$3"
+  git -C "/src/$1" checkout --detach "$3"
+  test "$(git -C "/src/$1" rev-parse HEAD)" = "$3"
+}
+
+git init /src/vllm
+git -C /src/vllm remote add origin "${VLLM_REPO}"
+git -C /src/vllm fetch --depth 256 origin "${VLLM_REF}"
+git -C /src/vllm checkout --detach "${VLLM_REVISION}"
+test "$(git -C /src/vllm rev-parse HEAD)" = "${VLLM_REVISION}"
+test "$(git -C /src/vllm rev-parse HEAD^{tree})" = "${VLLM_TREE}"
+git -C /src/vllm fetch --depth 1 origin "${VLLM_WHEEL_COMMIT}"
+test "$(git -C /src/vllm merge-base "${VLLM_REVISION}" "${VLLM_WHEEL_COMMIT}")" = \
+  "${VLLM_WHEEL_COMMIT}"
+
+clone_exact DeepGEMM "${DEEPGEMM_REPO}" "${DEEPGEMM_REVISION}"
+clone_exact DeepEP "${DEEPEP_REPO}" "${DEEPEP_REVISION}"
+git -C /src/DeepGEMM submodule update --init --depth 1
+
+python3 -m pip install uv==0.12.5
+uv venv --seed --system-site-packages --python "$(command -v python3)" "${VIRTUAL_ENV}"
+EOF
+
+# -----------------------------------------------------------------------------
+# Python runtime and verified vLLM wheel/source overlay
+# -----------------------------------------------------------------------------
+RUN --mount=type=cache,target=/root/.cache/uv <<'EOF'
+set -eux
+uv pip install PyYAML==6.0.3 pyarrow==25.0.1 datasets==5.0.1 \
+  jsonschema==4.26.0 wheel==0.48.0 ninja==1.13.0 cmake==4.4.2 \
+  packaging==25.0 setuptools==80.10.2 pytest==9.1.1 tblib==3.2.2 \
+  accelerate==1.14.0 codetiming==1.4.0 hydra-core==1.4.0.dev8 \
+  peft==0.20.0 pylatexenc==3.0b2 "ray[default]==2.57.0" tensordict==0.10.0 \
+  torchaudio==2.11.0 torchvision==0.28.0
+uv pip install -r /src/vllm/requirements/common.txt
+uv pip install --extra-index-url https://flashinfer.ai/whl/ \
+  flashinfer-python==0.6.16.post3 flashinfer-cubin==0.6.16.post3 \
+  numba==0.65.0 "torchcodec>=0.14" PyNvVideoCodec==2.0.4 \
+  apache-tvm-ffi==0.1.11 nvtx==0.2.15 "fastsafetensors>=0.3.3" \
+  tokenspeed-mla==0.1.8 "humming-kernels[cu13]==0.1.12" \
+  tilelang==0.1.12 nvidia-cudnn-frontend==1.27.0 \
+  "nvidia-cutlass-dsl[cu13]==4.6.2" quack-kernels==0.6.4
+
+case "${TARGETARCH}" in
+  amd64)
+    wheel_platform=x86_64
+    wheel_sha="${VLLM_WHEEL_SHA256_AMD64}"
+    ;;
+  arm64)
+    wheel_platform=aarch64
+    wheel_sha="${VLLM_WHEEL_SHA256_ARM64}"
+    ;;
+esac
+wheel="/tmp/vllm-${VLLM_WHEEL_VERSION}-cp38-abi3-manylinux_2_28_${wheel_platform}.whl"
+curl -fL --retry 3 -o "${wheel}" \
+  "https://wheels.vllm.ai/${VLLM_WHEEL_COMMIT}/vllm-${VLLM_WHEEL_URL_VERSION}-cp38-abi3-manylinux_2_28_${wheel_platform}.whl"
+printf '%s  %s\n' "${wheel_sha}" "${wheel}" | sha256sum -c -
+uv pip install --no-deps --only-binary :all: "${wheel}"
+
+site=/opt/ds4-venv/lib/python3.12/site-packages/vllm
+git -C /src/vllm diff --name-only --diff-filter=ACMRTUXB \
+  "${VLLM_WHEEL_COMMIT}" "${VLLM_REVISION}" -- vllm |
+while IFS= read -r path; do
+  target="${site}/${path#vllm/}"
+  mkdir -p "$(dirname "${target}")"
+  cp -a "/src/vllm/${path}" "${target}"
+done
+git -C /src/vllm diff --name-only --diff-filter=D \
+  "${VLLM_WHEEL_COMMIT}" "${VLLM_REVISION}" -- vllm |
+while IFS= read -r path; do rm -rf "${site}/${path#vllm/}"; done
+uv pip check || true
+rm -f "${wheel}"
+EOF
+
+# -----------------------------------------------------------------------------
+# DS4 batch-invariant CUDA kernels
+# -----------------------------------------------------------------------------
+RUN <<'EOF'
+set -eux
+. /tmp/ds4-arch.env
+case "${TARGETARCH}" in
+  amd64) gencode='-gencode=arch=compute_90a,code=sm_90a;-gencode=arch=compute_100a,code=sm_100a;-gencode=arch=compute_103a,code=sm_103a' ;;
+  arm64) gencode='-gencode=arch=compute_100a,code=sm_100a;-gencode=arch=compute_103a,code=sm_103a' ;;
+esac
+mkdir -p /tmp/ds4-kernels /opt/ds4/kernels
+cat >/tmp/ds4-kernels/CMakeLists.txt <<'CMAKE'
+cmake_minimum_required(VERSION 3.26)
+project(ds4_batch_invariant LANGUAGES CXX CUDA)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CUDA_STANDARD 20)
+set(CMAKE_CUDA_ARCHITECTURES OFF)
+find_package(Python3 3.12 EXACT COMPONENTS Development REQUIRED)
+find_package(Torch REQUIRED)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${TORCH_CXX_FLAGS}")
+
+add_library(_vllm_batch_invariant_C SHARED
+  /src/vllm/csrc/batch_invariant/fused_silu_mul_per_token_group_quant.cu
+  /src/vllm/csrc/batch_invariant/torch_bindings.cpp)
+target_include_directories(_vllm_batch_invariant_C PRIVATE /src/vllm/csrc)
+add_library(ds4_bi_topk SHARED /src/vllm/csrc/ds4_bi_topk_extension.cu)
+
+foreach(target _vllm_batch_invariant_C ds4_bi_topk)
+  target_link_libraries(${target} PRIVATE ${TORCH_LIBRARIES} Python3::Python)
+  target_compile_options(${target} PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-O3>
+    $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+    $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-extended-lambda>
+    $<$<COMPILE_LANGUAGE:CUDA>:-U__CUDA_NO_HALF_OPERATORS__>
+    $<$<COMPILE_LANGUAGE:CUDA>:-U__CUDA_NO_HALF_CONVERSIONS__>
+    $<$<COMPILE_LANGUAGE:CUDA>:-U__CUDA_NO_BFLOAT16_CONVERSIONS__>
+    $<$<COMPILE_LANGUAGE:CUDA>:-U__CUDA_NO_HALF2_OPERATORS__>)
+  foreach(flag IN LISTS DS4_CUDA_GENCODE)
+    target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${flag}>)
+  endforeach()
+  set_target_properties(${target} PROPERTIES PREFIX ""
+    LIBRARY_OUTPUT_DIRECTORY /opt/ds4/kernels)
+endforeach()
+CMAKE
+cmake -S /tmp/ds4-kernels -B /tmp/ds4-kernels/build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=/usr/local/lib/python3.12/dist-packages/torch/share/cmake \
+  -DDS4_CUDA_GENCODE="${gencode}"
+cmake --build /tmp/ds4-kernels/build --parallel "${MAX_JOBS}"
+EOF
+
+# -----------------------------------------------------------------------------
+# DeepGEMM and per-node DeepEP variants
+# -----------------------------------------------------------------------------
+RUN --mount=type=cache,target=/root/.cache/uv <<'EOF'
+set -eux
+. /tmp/ds4-arch.env
+mkdir -p /tmp/wheels/deepgemm /tmp/wheels/nvl4 /tmp/wheels/nvl8
+(cd /src/DeepGEMM && CPATH=/usr/local/cuda/include/cccl \
+  DISABLE_AGGRESSIVE_PTX_INSTRS=1 \
+  python3 -m pip wheel --no-deps --no-build-isolation -w /tmp/wheels/deepgemm .)
+uv pip install --no-deps /tmp/wheels/deepgemm/*.whl
+for peers in 4 8; do
+  rm -rf /src/DeepEP/build /src/DeepEP/*.egg-info
+  (cd /src/DeepEP && DEEPEP_NUM_MAX_NVL_PEERS="${peers}" \
+    CPATH=/usr/local/cuda/include/cccl \
+    python3 -m pip wheel --no-deps --no-build-isolation \
+      -w "/tmp/wheels/nvl${peers}" .)
+  python3 -m pip install --no-deps --no-compile \
+    --target "/opt/ds4/overlays/deepep-nvl${peers}/site-packages" \
+    "/tmp/wheels/nvl${peers}"/*.whl
+done
+EOF
+
+# -----------------------------------------------------------------------------
+# HybridEP multi-node support
+# -----------------------------------------------------------------------------
+ENV HYBRID_EP_MULTINODE=1 RDMA_CORE_HOME=/opt/rdma-core/build
+RUN <<'EOF'
+set -eux
+. /tmp/ds4-arch.env
+apt-get -o APT::Sandbox::User=root update
+apt-get -o APT::Sandbox::User=root install -y --no-install-recommends \
+  rdma-core libibverbs-dev libnvidia-ml-dev
+arch_lib="$(dpkg-architecture -qDEB_HOST_MULTIARCH)"
+mkdir -p "${RDMA_CORE_HOME}"
+ln -sfn /usr/include "${RDMA_CORE_HOME}/include"
+ln -sfn "/usr/lib/${arch_lib}" "${RDMA_CORE_HOME}/lib"
+git init /src/HybridEP
+git -C /src/HybridEP remote add origin "${HYBRIDEP_REPO}"
+git -C /src/HybridEP fetch --depth 1 origin "${HYBRIDEP_REVISION}"
+git -C /src/HybridEP checkout --detach "${HYBRIDEP_REVISION}"
+git -C /src/HybridEP submodule update --init --recursive --depth 1
+(cd /src/HybridEP && USE_NIXL=0 CPATH=/usr/local/cuda/include/cccl \
+  python3 setup.py build_ext --inplace)
+site=/opt/ds4-venv/lib/python3.12/site-packages
+install -m 0755 /src/HybridEP/hybrid_ep_cpp*.so "${site}/"
+for peers in 4 8; do
+  package="/opt/ds4/overlays/deepep-nvl${peers}/site-packages/deep_ep"
+  cp -a /src/HybridEP/deep_ep/backend/. "${package}/backend/"
+  install -m 0644 /src/HybridEP/deep_ep/hybrid_ep_buffer.py "${package}/"
+  printf '\nfrom .hybrid_ep_buffer import HybridEPBuffer\n' >>"${package}/__init__.py"
+done
+rm -rf /var/lib/apt/lists/*
+EOF
+
+# -----------------------------------------------------------------------------
+# Build smoke test and cleanup
+# -----------------------------------------------------------------------------
+RUN <<'EOF'
+set -eux
+for library in /opt/ds4/kernels/_vllm_batch_invariant_C.so \
+  /opt/ds4/kernels/ds4_bi_topk.so; do
+  test -s "${library}"
+  if ldd "${library}" | grep -Fq 'not found'; then exit 1; fi
+done
+rm -rf /src /tmp/wheels /tmp/ds4-kernels /tmp/ds4-arch.env /root/.cache
+EOF
+
+# -----------------------------------------------------------------------------
+# Minimal runtime image
+# -----------------------------------------------------------------------------
+FROM ${BASE_IMAGE}@${BASE_IMAGE_DIGEST} AS runtime
+ARG TARGETARCH
+ARG BASE_IMAGE_DIGEST
+ARG VLLM_REVISION
+ENV VIRTUAL_ENV=/opt/ds4-venv \
+    PATH=/opt/ds4-venv/bin:/usr/local/bin:/usr/local/cuda/bin:/usr/bin:/bin \
+    PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 \
+    VLLM_BATCH_INVARIANT_KERNEL_LIB=/opt/ds4/kernels/_vllm_batch_invariant_C.so \
+    DS4_BI_TOPK_LIB=/opt/ds4/kernels/ds4_bi_topk.so
+RUN apt-get -o APT::Sandbox::User=root update && \
+    apt-get -o APT::Sandbox::User=root install -y --no-install-recommends \
+      rdma-core libibverbs1 binutils pciutils procps && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=builder /opt/ds4-venv /opt/ds4-venv
+COPY --from=builder /opt/ds4 /opt/ds4
+LABEL ai.ds4.release="ds4-v9-rc1-preview" \
+      ai.ds4.arch="${TARGETARCH}" \
+      ai.ds4.base.digest="${BASE_IMAGE_DIGEST}" \
+      ai.ds4.vllm.revision="${VLLM_REVISION}"
+WORKDIR /workspace
