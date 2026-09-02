@@ -308,8 +308,17 @@ class SGLangHttpServer:
                     "sglang>=0.5.5 is required for FP8 quantization"
                 )
                 fp8_block_quant_kwargs = build_sglang_fp8_quant_config(self.model_config.hf_config)
+            elif quantization == "mxfp8":
+                from verl.utils.sglang.sglang_mxfp8_utils import get_mxfp8_quant_config
+
+                mxfp8_block_quant_kwargs = get_mxfp8_quant_config()
             else:
-                raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
+                raise ValueError(f"Currently only support fp8 and mxfp8 quantization, got: {quantization}")
+        quantization_config = None
+        if quantization == "fp8":
+            quantization_config = fp8_block_quant_kwargs
+        elif quantization == "mxfp8":
+            quantization_config = mxfp8_block_quant_kwargs
         infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
         args = {
             "model_path": self.model_config.local_path,
@@ -333,8 +342,8 @@ class SGLangHttpServer:
             "skip_tokenizer_init": self.config.skip_tokenizer_init,
             "skip_server_warmup": True,
             "quantization": quantization,
-            "json_model_override_args": json.dumps({"quantization_config": fp8_block_quant_kwargs})
-            if quantization == "fp8"
+            "json_model_override_args": json.dumps({"quantization_config": quantization_config})
+            if quantization_config is not None
             else json.dumps({}),
             "custom_weight_loader": custom_weight_loader or None,
             **engine_kwargs,
