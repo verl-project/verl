@@ -1051,6 +1051,11 @@ def test_deepseek_builder_uses_json_string_arguments_in_synthetic_assistant():
     assert synthetic_assistant["tool_calls"][0]["function"]["arguments"] == "{}"
 
 
+def test_deepseek_builder_inherits_context_orchestration():
+    assert "tokenize_context_incremental_messages" not in DeepSeekContinuousTokenBuilder.__dict__
+    assert "merge_context_tokens" not in DeepSeekContinuousTokenBuilder.__dict__
+
+
 def test_deepseek_builder_strips_tool_outputs_end_before_user_in_same_incremental():
     tokenizer = _DeepSeekToolOutputTokenizer()
     builder = DeepSeekContinuousTokenBuilder(tokenizer)

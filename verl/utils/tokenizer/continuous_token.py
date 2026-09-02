@@ -996,82 +996,23 @@ class DeepSeekContinuousTokenBuilder(ContinuousTokenBuilder):
             tool_call["function"]["arguments"] = "{}"
         return synthetic_assistant
 
-    def tokenize_context_incremental_messages(
+    def _merge_context_group(
         self,
-        previous_messages: list[dict[str, Any]],
-        updated_messages: list[dict[str, Any]],
+        incremental_ids: list[int],
+        group_token_ids: list[int],
         *,
+        group: list[dict[str, Any]],
+        processed_messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
-    ) -> list[int]:
-        self._assert_append_only(previous_messages, updated_messages)
-        appended_messages = updated_messages[len(previous_messages) :]
-        if not appended_messages:
-            return []
-        incremental_ids: list[int] = []
-        processed_messages = list(previous_messages)
-
-        groups = self._iter_append_groups(appended_messages)
-        fuse_generation_prompt = self._should_fuse_generation_prompt_with_last_group()
-
-        for index, group in enumerate(groups):
-            add_generation_prompt = fuse_generation_prompt and index == len(groups) - 1
-            role = group[0].get("role")
-            if role == "tool":
-                incremental_ids.extend(
-                    self._tokenize_tool_group(
-                        group,
-                        previous_messages=processed_messages,
-                        tools=tools,
-                        add_generation_prompt=add_generation_prompt,
-                    )
-                )
-            elif role in {"user", "system", "assistant"}:
-                if len(group) != 1:
-                    raise ValueError(
-                        f"Continuous Token expects one {role!r} message per append group, got {len(group)}"
-                    )
-                if role == "assistant" and index == len(groups) - 1:
-                    raise ValueError("Continuous Token context incremental messages cannot end with assistant")
-                if role == "user":
-                    self._strip_trailing_tool_outputs_end(incremental_ids)
-                incremental_ids.extend(
-                    self._tokenize_single_non_tool(
-                        group[0],
-                        add_generation_prompt=add_generation_prompt,
-                        tools=tools,
-                    )
-                )
-            else:
-                raise ValueError(f"Unsupported Continuous Token append role: {role!r}")
-            processed_messages.extend(group)
-
-        if not fuse_generation_prompt:
-            incremental_ids.extend(self._tokenize_generation_prompt_delta(updated_messages, tools=tools))
-        return incremental_ids
-
-    def merge_context_tokens(
-        self,
-        previous_messages: list[dict[str, Any]],
-        updated_messages: list[dict[str, Any]],
-        runtime_token_ids: list[int],
-        *,
-        tools: list[dict[str, Any]] | None = None,
-    ) -> MergeResult:
-        appended_token_ids = self.tokenize_context_incremental_messages(
-            previous_messages, updated_messages, tools=tools
-        )
-        appended_messages = updated_messages[len(previous_messages) :]
-
-        prefix = list(runtime_token_ids)
-        removed_prefix_token_count = 0
-        if appended_messages and appended_messages[0].get("role") == "user":
-            removed_prefix_token_count = self._strip_trailing_tool_outputs_end(prefix)
-
-        return MergeResult(
-            token_ids=prefix + appended_token_ids,
-            appended_token_count=len(appended_token_ids),
-            kind="context",
-            removed_prefix_token_count=removed_prefix_token_count,
+    ) -> None:
+        if group[0].get("role") == "user":
+            self._strip_trailing_tool_outputs_end(incremental_ids)
+        super()._merge_context_group(
+            incremental_ids,
+            group_token_ids,
+            group=group,
+            processed_messages=processed_messages,
+            tools=tools,
         )
 
     def _merge_context_token_ids(
@@ -1080,12 +1021,17 @@ class DeepSeekContinuousTokenBuilder(ContinuousTokenBuilder):
         appended_token_ids: list[int],
         **kwargs: Any,
     ) -> MergeResult:
-        # Direct concatenation — DeepSeek template has no inter-turn separator.
-        merged_token_ids = list(runtime_token_ids) + list(appended_token_ids)
+        appended_messages = kwargs.get("appended_messages", [])
+        prefix = list(runtime_token_ids)
+        removed_prefix_token_count = 0
+        if appended_messages and appended_messages[0].get("role") == "user":
+            removed_prefix_token_count = self._strip_trailing_tool_outputs_end(prefix)
+
         return MergeResult(
-            token_ids=merged_token_ids,
+            token_ids=prefix + list(appended_token_ids),
             appended_token_count=len(appended_token_ids),
             kind="context",
+            removed_prefix_token_count=removed_prefix_token_count,
         )
 
     def _strip_trailing_tool_outputs_end(self, token_ids: list[int]) -> int:
