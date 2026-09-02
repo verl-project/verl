@@ -64,6 +64,13 @@ class FakeFailingTool(FakeTool):
         raise RuntimeError("database connection failed")
 
 
+class FakeRejectingTool(FakeTool):
+    """A fake tool that classifies a valid call as invalid."""
+
+    async def execute(self, instance_id, parameters, **kwargs):
+        return ToolResponse(text="invalid coordinates"), 0.0, {"invalid_tool_call": True, "source": "tool"}
+
+
 class FakeLongResponseTool(FakeTool):
     """A fake tool that returns a long response."""
 
@@ -106,27 +113,30 @@ class TestCallToolErrorHandling(unittest.IsolatedAsyncioTestCase):
     async def test_valid_tool_call(self):
         """Valid tool call should succeed."""
         tool_call = FakeFunctionCall(name="calculator", arguments='{"a": 3, "b": 5}')
-        response, reward, _ = await self.loop._call_tool(tool_call, {}, self.agent_data)
+        response, reward, metadata = await self.loop._call_tool(tool_call, {}, self.agent_data)
         assert reward == 1.0
         assert "OK" in response.text
+        assert metadata["invalid_tool_call"] is False
 
     async def test_unknown_function_name(self):
         """Unknown function name should list available tools."""
         tool_call = FakeFunctionCall(name="calculater", arguments='{"a": 3}')
-        response, reward, _ = await self.loop._call_tool(tool_call, {}, self.agent_data)
+        response, reward, metadata = await self.loop._call_tool(tool_call, {}, self.agent_data)
         assert reward == 0.0
         assert "Unknown function" in response.text
         assert "calculater" in response.text
         assert "calculator" in response.text
         assert "search" in response.text
+        assert metadata["invalid_tool_call"] is True
 
     async def test_invalid_json_arguments(self):
         """Invalid JSON arguments should report parse error."""
         tool_call = FakeFunctionCall(name="calculator", arguments="{a: 3}")
-        response, reward, _ = await self.loop._call_tool(tool_call, {}, self.agent_data)
+        response, reward, metadata = await self.loop._call_tool(tool_call, {}, self.agent_data)
         assert reward == 0.0
         assert "Invalid JSON" in response.text
         assert "calculator" in response.text
+        assert metadata["invalid_tool_call"] is True
 
     async def test_empty_arguments(self):
         """Empty string arguments should report parse error."""
@@ -142,15 +152,24 @@ class TestCallToolErrorHandling(unittest.IsolatedAsyncioTestCase):
         assert reward == 0.0
         assert "Invalid JSON" in response.text
 
-    async def test_tool_execution_error(self):
-        """Tool execution failure should include tool name in error."""
+    async def test_tool_execution_error_is_not_misclassified_as_invalid(self):
+        """Tool execution failure should remain unclassified."""
         tools = {"failing_tool": FakeFailingTool("failing_tool")}
         loop = _make_tool_agent_loop(tools)
         tool_call = FakeFunctionCall(name="failing_tool", arguments='{"query": "test"}')
-        response, reward, _ = await loop._call_tool(tool_call, {}, self.agent_data)
+        response, reward, metadata = await loop._call_tool(tool_call, {}, self.agent_data)
         assert reward == 0.0
-        assert "failing_tool" in response.text
         assert "database connection failed" in response.text
+        assert "invalid_tool_call" not in metadata
+
+    async def test_tool_declared_invalid_call_is_preserved(self):
+        """A tool's explicit invalid classification and metadata must survive."""
+        loop = _make_tool_agent_loop({"move": FakeRejectingTool("move")})
+        tool_call = FakeFunctionCall(name="move", arguments='{"x": 100}')
+
+        _, _, metadata = await loop._call_tool(tool_call, {}, self.agent_data)
+
+        assert metadata == {"invalid_tool_call": True, "source": "tool"}
 
     async def test_left_truncation_keeps_response_tail(self):
         """Left truncation should drop the left side and preserve the response tail."""
