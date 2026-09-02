@@ -31,6 +31,7 @@ from verl.checkpoint_engine.base import (
     CheckpointEngine,
     CheckpointEngineRegistry,
     TensorMeta,
+    align_bucket_offset,
     merge_weight_chunks,
     split_weight_chunks,
 )
@@ -348,6 +349,8 @@ class NCCLCheckpointEngine(CheckpointEngine):
         bucket_meta: dict[str, TensorMeta] = {}
         offset = 0
         async for tensor_meta, chunk in split_weight_chunks(weights, self.bucket_size):
+            # start each tensor at an offset its dtype can be viewed at (mixed-dtype streams)
+            offset = align_bucket_offset(offset, tensor_meta.dtype)
             # fill the tensor bucket
             if offset + tensor_meta.chunk_size > self.bucket_size:
                 torch.cuda.synchronize()
