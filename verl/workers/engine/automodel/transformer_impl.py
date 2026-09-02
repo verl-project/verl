@@ -132,7 +132,6 @@ class AutomodelEngine(BaseEngine):
 
         self._is_offload_param = self.engine_config.param_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
-        self._is_offload_grad = getattr(self.engine_config, "grad_offload", self._is_offload_param)
 
         _offload_policy = getattr(getattr(self.distributed_setup, "strategy_config", None), "offload_policy", None)
         self._fsdp_native_offload = _offload_policy is not None
@@ -181,7 +180,7 @@ class AutomodelEngine(BaseEngine):
             device="cpu",
             model=self._is_offload_param,
             optimizer=self._is_offload_optimizer,
-            grad=self._is_offload_grad,
+            grad=self._is_offload_param,
         )
 
         log_gpu_memory_usage("After offload model/optimizer/grad during init", logger=logger)
