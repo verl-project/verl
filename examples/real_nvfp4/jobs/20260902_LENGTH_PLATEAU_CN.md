@@ -78,8 +78,8 @@ prompt 管线也一致（`prompt_length/mean` 150.1 vs 152.2，max 909 vs 901）
 
 ## 4. 判别实验（进行中）
 
-`jobs/bf16_control_20260902_v14/`，job **2702808**，8 节点 100 步，
-exp `verl_30b_bf16_control_8n_20260902_v14`。**相对 W4A4 arm 只改一个变量：
+`jobs/bf16_control_20260902_v14/`，job **2702860**，8 节点 100 步（首次提交 2702808 被坑 15 毙掉），
+exp `verl_30b_bf16_control_8n_20260902_v14_j2702860`。**相对 W4A4 arm 只改一个变量：
 `PRECISION_MODE=bf16`。** 同一个 v12 镜像、同一份数据 adapter、同样
 `filter_groups.enable=False`、`gen_batch_size=32`、同样 clip/lr/TIS/R3。
 
