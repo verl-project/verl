@@ -2,7 +2,7 @@
 
 Last updated: 07/02/2026.
 
-如需查看 NPU 相关特性，请访问：[NPU 高级特性指南](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/zh/feature_support/npu_advance_features.md) 。
+如需查看 NPU 相关特性，请访问：[NPU 高级特性指南](../../feature_support/npu_advance_features.md) 。
 
 verl 通过层级化的 YAML 配置文件管理所有参数，涉及到的所有配置文件均在 `verl/trainer/config` 目录下。
 
