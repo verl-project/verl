@@ -126,6 +126,48 @@ def monkey_patch_compute_logits(model, vocab_size: int, banned_token_ids: Option
     model.compute_logits = MethodType(compute_logits, model)
 
 
+def is_3d_moe_vllm_model(hf_config) -> bool:
+    """Whether the vLLM rollout target treats this model as a 3D-MoE LoRA model.
+
+    vLLM classifies a model as 3D-MoE when the model class sets
+    ``is_3d_moe_weight = True`` (a ``ClassVar`` on the vLLM model class, *not* an HF
+    config field) and ``enable_mixed_moe_lora_format`` is off — see
+    ``vllm/lora/model_manager.py``'s ``_is_3d_moe_model``. The flag is set on the class
+    definition (e.g. ``Qwen3_5MoeForConditionalGeneration``,
+    ``Qwen3VLMoeForConditionalGeneration``, ``GptOssForCausalLM``,
+    ``InternS1ProForConditionalGeneration``); pure-text MoE classes such as
+    ``Qwen3_5MoeForCausalLM`` do *not* set it.
+
+    The training/export side only has the HF config (no live vLLM model), so this
+    resolves the vLLM model class from the HF ``architectures`` field via vLLM's
+    registry and reads the static class attribute — no model instantiation. Returns
+    ``False`` for unknown architectures, non-vLLM setups, or any import failure.
+    """
+    architectures = getattr(hf_config, "architectures", None) or []
+    if not architectures:
+        return False
+    try:
+        import importlib
+
+        from vllm.model_executor.models.registry import _VLLM_MODELS
+    except Exception:
+        return False
+
+    for arch in architectures:
+        entry = _VLLM_MODELS.get(arch)
+        if entry is None:
+            continue
+        module_path, class_name = entry
+        try:
+            mod = importlib.import_module(f"vllm.model_executor.models.{module_path}")
+            cls = getattr(mod, class_name, None)
+        except Exception:
+            continue
+        if cls is not None and bool(getattr(cls, "is_3d_moe_weight", False)):
+            return True
+    return False
+
+
 class vLLMColocateWorkerExtension:
     """
     The class for vLLM's worker to inherit from, in the colocate setting.

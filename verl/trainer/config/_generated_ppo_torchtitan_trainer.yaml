@@ -447,6 +447,7 @@ actor_rollout_ref:
       freeze_vision_model: true
       freeze_vision_projection: true
       freeze_language_model: true
+      enable_tower_connector_lora: true
   hybrid_engine: true
   nccl_timeout: 600
 data:
@@ -659,6 +660,7 @@ critic:
       freeze_vision_model: true
       freeze_vision_projection: true
       freeze_language_model: true
+      enable_tower_connector_lora: true
 custom_reward_function:
   path: null
   name: null

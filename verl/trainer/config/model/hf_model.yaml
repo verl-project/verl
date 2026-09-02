@@ -161,3 +161,8 @@ lora:
   freeze_vision_model: True
   freeze_vision_projection: True
   freeze_language_model: True
+
+  # Enable LoRA on multimodal vision tower/connector in the vLLM rollout.
+  # On by default to match the actor side. vLLM ignores this for models that
+  # do not opt in, so it is safe for text-only models. Set False to opt out.
+  enable_tower_connector_lora: True
