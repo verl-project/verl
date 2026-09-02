@@ -292,6 +292,9 @@ class SGLangHttpServer:
             flexkv_store_events = self.config.get("flexkv_store_events")
             if flexkv_store_events is not None:
                 engine_kwargs["flexkv_store_events"] = list(flexkv_store_events)
+            engine_kwargs["flexkv_store_timeout"] = float(
+                self.config.abort_kv_reuse["timeout_s"]
+            )
         attention_backend = engine_kwargs.pop("attention_backend", None)
         mm_attention_backend = engine_kwargs.pop("mm_attention_backend", None)
         # Delta checkpoint engines apply sparse weight updates in place through SGLang's
