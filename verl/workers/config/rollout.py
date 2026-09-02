@@ -222,6 +222,7 @@ class RolloutConfig(BaseConfig):
     abort_kv_reuse: AbortKVReuseConfig = field(default_factory=AbortKVReuseConfig)
     flexkv_service: FlexKVServiceConfig = field(default_factory=FlexKVServiceConfig)
     kv_backend: Optional[str] = None
+    flexkv_store_events: Optional[list[str]] = None
     data_parallel_size: int = 1
     expert_parallel_size: int = 1
     tensor_model_parallel_size: int = 2

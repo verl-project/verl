@@ -289,6 +289,9 @@ class SGLangHttpServer:
             engine_kwargs["enable_flexkv"] = True
             engine_kwargs["flexkv_config_file"] = os.environ.get("FLEXKV_CONFIG_PATH")
             engine_kwargs.setdefault("page_size", int(self.config.flexkv_service["tokens_per_block"]))
+            flexkv_store_events = self.config.get("flexkv_store_events")
+            if flexkv_store_events is not None:
+                engine_kwargs["flexkv_store_events"] = list(flexkv_store_events)
         attention_backend = engine_kwargs.pop("attention_backend", None)
         mm_attention_backend = engine_kwargs.pop("mm_attention_backend", None)
         # Delta checkpoint engines apply sparse weight updates in place through SGLang's

@@ -69,6 +69,10 @@ abort_kv_reuse:
 # External KV backend used by abort_kv_reuse.
 kv_backend: null
 
+# Request lifecycle events whose KV may be stored by FlexKV. Null preserves the
+# backend default. Dynamic-resource RL typically uses [checkpoint_abort, retract].
+flexkv_store_events: null
+
 # Optional Ray-managed FlexKV services. When enabled, VERL starts two Redis
 # metadata services and one external FlexKV server per rollout node.
 flexkv_service:
