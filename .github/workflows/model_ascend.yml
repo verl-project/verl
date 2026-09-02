@@ -63,15 +63,16 @@ permissions:
 jobs:
   model_rmpad_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a2b3-8
+    runs-on: linux-aarch64-a3-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -112,15 +113,16 @@ jobs:
   # NOTE: List as an independent job to make rerun easier.
   model_rmpad_fsdp2_unstable_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a2b3-8
+    runs-on: linux-aarch64-a3-8
     timeout-minutes: 60
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:

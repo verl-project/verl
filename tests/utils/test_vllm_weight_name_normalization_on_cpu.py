@@ -29,6 +29,7 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
 import torch
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -104,8 +105,12 @@ def _load_vllm_rollout_utils():
     fake_vllm_quant.is_fp8_model = lambda config: False
     fake_vllm_quant.load_quanted_weights = lambda *a, **k: []
 
-    fake_platform = types.ModuleType("verl.plugin.platform")
-    fake_platform.get_platform = lambda: None
+    # NOTE: deliberately do NOT stub verl.plugin.platform. It is lightweight and
+    # imports fine on CPU. verl.utils.device binds `get_platform` at import time, so
+    # a `lambda: None` stub gets baked into verl.utils.device during this window;
+    # because only the keys in `fakes` below are restored, that fake would leak
+    # process-wide and later tests would crash in get_device_name() with
+    # "'NoneType' object has no attribute 'device_name'".
 
     # Minimal stubs for the heavyweight vllm.lora.* imports pulled in by
     # ``verl/utils/vllm/utils.py`` (which also defines ``resolve_weight_name``).
@@ -136,7 +141,6 @@ def _load_vllm_rollout_utils():
         "verl.utils.vllm": fake_vllm_utils,
         "verl.utils.vllm.patch": fake_vllm_patch,
         "verl.utils.vllm.vllm_quant_utils": fake_vllm_quant,
-        "verl.plugin.platform": fake_platform,
         "verl.workers.rollout.vllm_rollout.weight_update_utils": _weight_update_utils,
     }
 
@@ -269,6 +273,76 @@ def test_vision_merger_base_layer_is_stripped():
 
     assert _resolve(worker, model, "merger.linear_fc1.base_layer.weight") == "merger.linear_fc1.weight"
     assert _resolve(worker, model, "merger.linear_fc1.base_layer.bias") == "merger.linear_fc1.bias"
+
+
+# ---------------------------------------------------------------------------
+# Mixed LoRA model: language layers are LoRA-wrapped (have .base_layer), but
+# the vision merger is a plain linear (no base_layer child). On vLLM 0.26.0
+# the suffix must be stripped ONLY for the merger, not kept model-wide.
+# ---------------------------------------------------------------------------
+
+
+def test_mixed_model_vision_merger_strips_on_released_vllm():
+    """vLLM 0.26.0 (_HAS_LORA_LOAD_WEIGHTS=False) with a mixed model: the
+    vision merger's ``.base_layer.`` is stripped (no real base_layer child),
+    while a coexisting LoRA-wrapped language leaf keeps the suffix."""
+    # _HAS_LORA_LOAD_WEIGHTS defaults to False here (stub base layer), matching
+    # vLLM 0.26.0.
+    model = _FakeModel(
+        {
+            "merger.linear_fc1.weight": torch.empty(0),
+            "merger.linear_fc1.bias": torch.empty(0),
+            "language_model.model.layers.0.self_attn.q_proj.base_layer.weight": torch.empty(0),
+        }
+    )
+    worker = _make_worker(model)
+
+    assert _resolve(worker, model, "merger.linear_fc1.base_layer.weight") == "merger.linear_fc1.weight"
+    assert _resolve(worker, model, "merger.linear_fc1.base_layer.bias") == "merger.linear_fc1.bias"
+    # The language leaf keeps .base_layer on vLLM 0.26.0.
+    name = "language_model.model.layers.0.self_attn.q_proj.base_layer.weight"
+    assert _resolve(worker, model, name) == name
+
+
+def test_mixed_model_with_prefix_rewriting_mapper():
+    """The Qwen3.5-VL regression: the Bridge exports language params under
+    ``model.language_model.`` and the merger under ``model.visual.``, while the
+    live vLLM namespace is ``language_model.model.`` / ``visual.``. vLLM's
+    ``hf_to_vllm_mapper`` rewrites the prefixes (``orig_to_new_prefix``).
+
+    The parent-has-base-layer check must consult the *mapper-rewritten* name --
+    otherwise the LoRA-wrapped language leaf's real ``base_layer`` is invisible
+    under the Bridge prefix and gets wrongly stripped, crashing
+    ``AutoWeightsLoader`` (it then can't find ``layers.0.mlp.gate.weight``
+    inside ``Qwen3_5Model``)."""
+    mapper = _FakeMapper(
+        {
+            # substring replacements approximating WeightsMapper orig_to_new_prefix
+            "model.visual.": "visual.",
+            "model.language_model.": "language_model.model.",
+        }
+    )
+    model = _FakeModel(
+        {
+            "language_model.model.layers.0.mlp.gate.base_layer.weight": torch.empty(0),
+            "visual.merger.linear_fc1.weight": torch.empty(0),
+            "visual.merger.linear_fc1.bias": torch.empty(0),
+        },
+        mapper=mapper,
+    )
+    worker = _make_worker(model)
+
+    # Language leaf: incoming Bridge prefix differs from vLLM's; the real
+    # base_layer child exists under the rewritten prefix -> KEEP the suffix.
+    name = "model.language_model.layers.0.mlp.gate.base_layer.weight"
+    assert _resolve(worker, model, name) == name
+    # Merger: no base_layer child under either prefix -> STRIP.
+    assert _resolve(worker, model, "model.visual.merger.linear_fc1.base_layer.weight") == (
+        "model.visual.merger.linear_fc1.weight"
+    )
+    assert _resolve(worker, model, "model.visual.merger.linear_fc1.base_layer.bias") == (
+        "model.visual.merger.linear_fc1.bias"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -575,6 +649,11 @@ class _FakeBucketReceiver:
 
 def test_update_weights_from_ipc_accumulates_lora_across_buckets(monkeypatch):
     """A LoRA adapter split across two buckets yields one add_lora with all tensors."""
+    # Unlike the resolver tests above (which fully stub sys.modules), this drives the
+    # real update_weights_from_ipc path and imports the actual bucketed_weight_transfer
+    # module, whose package __init__ hard-requires vllm. vllm isn't in the `cpu` extra,
+    # so this is skipped under cpu_unit_tests and run in vllm.yml (the vllm venv).
+    pytest.importorskip("vllm")
     import verl.workers.rollout.vllm_rollout.bucketed_weight_transfer as bwt
 
     monkeypatch.setattr(
@@ -616,6 +695,9 @@ def test_update_weights_from_ipc_accumulates_lora_across_buckets(monkeypatch):
 
 def test_update_weights_from_ipc_standard_loads_per_bucket(monkeypatch):
     """Standard (non-LoRA) base sync loads every bucket immediately (no accumulation)."""
+    # See the note above: needs the real bucketed_weight_transfer (vllm-backed), which
+    # the `cpu` extra can't provide, so it is skipped here and run in vllm.yml.
+    pytest.importorskip("vllm")
     import verl.workers.rollout.vllm_rollout.bucketed_weight_transfer as bwt
 
     monkeypatch.setattr(

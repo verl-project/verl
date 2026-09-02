@@ -36,11 +36,9 @@ from megatron.core.transformer import MLATransformerConfig, TransformerConfig
 from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
 from megatron.core.utils import get_attr_wrapped_model
-from tensordict import TensorDict
 from transformers import PretrainedConfig
 
 import verl.utils.megatron.tensor_parallel as tp_utils
-from verl.utils import tensordict_utils as tu
 from verl.utils.device import get_device_id, get_device_name, get_torch_device
 from verl.utils.fs import local_mkdir_safe
 from verl.utils.model import normalize_model_name
@@ -338,9 +336,6 @@ def make_megatron_module(
         if override_model_config.get("moe_config", {}).get("freeze_moe_router", False):
             post_model_creation_callbacks.append(freeze_moe_router)
         if provider is not None:
-            from megatron.bridge.peft.utils import create_peft_hook, load_peft_adapter_checkpoint
-            from megatron.bridge.training.utils.config_utils import create_ddp_config
-
             # When using PEFT with Megatron-Bridge, we must apply PEFT transformation
             # BEFORE wrapping the model in DDP. This is required because:
             # 1. PEFT freezes base model parameters (requires_grad=False)
@@ -351,6 +346,8 @@ def make_megatron_module(
             # Register PEFT transformation as pre-wrap hook if peft_cls is specified
             # This must happen BEFORE DDP wrapping to avoid KeyError with frozen parameters
             if peft_cls is not None:
+                from megatron.bridge.peft.utils import create_peft_hook, load_peft_adapter_checkpoint
+
                 from verl.utils.megatron_peft_utils import print_adapter_info
 
                 provider.register_pre_wrap_hook(create_peft_hook(peft_cls, training=True))
@@ -391,12 +388,36 @@ def make_megatron_module(
                 _assert_muon_layer_wise_ddp_supported()
 
             # Create DDP config if needed
-            ddp_config = create_ddp_config(
-                wrap_with_ddp=wrap_config.wrap_with_ddp and not layer_wise_ddp,
-                use_distributed_optimizer=wrap_config.use_distributed_optimizer,
-                use_megatron_fsdp=wrap_config.use_megatron_fsdp,
-                overrides=override_ddp_config,
-            )
+
+            # Megatron-Bridge >= v0.5.0 provides apply_overrides_and_finalize.
+            # Megatron-Bridge <  v0.5.0 does not, so we fall back to manual setattr + finalize.
+            try:
+                from megatron.bridge.training.utils.config_utils import create_ddp_config
+
+                ddp_config = create_ddp_config(
+                    wrap_with_ddp=wrap_config.wrap_with_ddp and not layer_wise_ddp,
+                    use_distributed_optimizer=wrap_config.use_distributed_optimizer,
+                    use_megatron_fsdp=wrap_config.use_megatron_fsdp,
+                    overrides=override_ddp_config,
+                )
+            except ImportError:
+                ddp_config = None
+                if wrap_config.wrap_with_ddp and not layer_wise_ddp:
+                    from megatron.bridge.training.config import DistributedDataParallelConfig
+
+                    ddp_config_dict = {
+                        "use_distributed_optimizer": wrap_config.use_distributed_optimizer,
+                    }
+                    if wrap_config.use_megatron_fsdp:
+                        ddp_config_dict["use_distributed_optimizer"] = True
+                        ddp_config_dict.setdefault("check_for_nan_in_grad", True)
+                        ddp_config_dict.setdefault("use_megatron_fsdp", True)
+                        ddp_config_dict.setdefault("data_parallel_sharding_strategy", "optim_grads_params")
+                        ddp_config_dict.setdefault("overlap_grad_reduce", True)
+                    if override_ddp_config is not None:
+                        ddp_config_dict.update(override_ddp_config)
+                    ddp_config = DistributedDataParallelConfig(**ddp_config_dict)
+                    ddp_config.finalize()
 
             # Now call provide_distributed_model with all hooks registered
             # Hooks will be applied automatically before DDP wrapping
@@ -1702,8 +1723,12 @@ def mapping_string_to_attn_backend(args: dict) -> dict:
 
 
 def get_megatron_mtp_loss(n_micro_batch):
-    # Calculate MTP loss scale similar to Megatron-LM implementation
-    mtp_loss_scale = 1.0 / n_micro_batch
+    # Newer MCore tracks raw loss sums and token counts across all microbatches,
+    # then computes the weighted mean in track_mtp_metrics. Older versions
+    # accumulate one normalized loss per microbatch and still need averaging.
+    tracker = MTPLossLoggingHelper.tracker
+    uses_global_token_mean = "loss_sums" in tracker and tracker.get("calculate_per_token_loss", True)
+    mtp_loss_scale = 1.0 if uses_global_token_mean else 1.0 / n_micro_batch
 
     # Create a dummy total_loss_dict to collect MTP metrics
     total_loss_dict = {}
@@ -1747,84 +1772,6 @@ def get_megatron_module_device(models: list[Any]) -> str:
         return "cpu"
     else:
         return get_device_name()
-
-
-def dynamic_cp_split_batch(
-    batch: TensorDict, engine_config: McoreEngineConfig, dp_size: int, dp_rank: int
-) -> TensorDict:
-    """
-    Split the batch into sub-batches for dynamic context parallel.
-
-    we can spilt a microbatch into several sub-batches with different local_cp_size, but for simplicity now,
-    we only split the batch into a fixed local_cp_size.
-
-    """
-    input_ids = batch["input_ids"]
-    assert input_ids.is_nested, "input_ids must be a nested tensor"
-    seq_len_effective: torch.Tensor = input_ids.offsets().diff()
-    max_seq_len = max(seq_len_effective)
-    # if num of sequences is less than dp_size, we don't need to split the batch
-    local_cp_size = None
-    if len(seq_len_effective) < dp_size:
-        local_cp_size = dp_size
-        return batch
-    else:
-        # decide the local_cp_size based on the max_seq_len and dp_size
-        max_seqlen_per_dp_cp_rank = engine_config.max_seqlen_per_dp_cp_rank
-        import math
-
-        local_cp_size = math.ceil(max_seq_len / max_seqlen_per_dp_cp_rank)
-        # round up to the nearest power of 2, for [1,2,3,4,5,6,7,8] -> [1,2,4,4,8,8,8,8]
-        local_cp_size = 1 << (local_cp_size - 1).bit_length()
-
-        assert local_cp_size <= dp_size, (
-            "local_cp_size must be less than or equal to dp_size, try to increase max_seqlen_per_dp_cp_rank"
-        )
-        if local_cp_size < dp_size:
-            # split the batch into local_cp_size sub-batches
-            local_dp_rank = dp_rank // local_cp_size
-            local_dp_size = dp_size // local_cp_size
-            indices = list(range(len(seq_len_effective)))
-            num_seq_per_local_cp = math.ceil(len(seq_len_effective) / local_dp_size)
-            start_idx = local_dp_rank * num_seq_per_local_cp
-            end_idx = min(start_idx + num_seq_per_local_cp, len(seq_len_effective))
-            selected_indices = indices[start_idx:end_idx]
-            batch = tu.index_select_tensor_dict(batch, selected_indices)
-
-    # print(f"rank={torch.distributed.get_rank()}, local_cp_size={local_cp_size} max_seq_len={max_seq_len}")
-    tu.assign_non_tensor_data(batch, "local_cp_size", local_cp_size)
-    return batch
-
-
-def dynamic_cp_merge_output(
-    outputs: dict[str, torch.Tensor],
-    dp_size: int,
-    dp_rank: int,
-    local_cp_size: int,
-) -> TensorDict:
-    """
-    Merge the outputs from different sub-batches for dynamic context parallel.
-    """
-    if local_cp_size == dp_size:
-        return outputs
-
-    merged_output = {}
-    for k in outputs:
-        data_local = outputs[k]
-        object_list = [None for _ in range(dp_size)]
-        torch.distributed.all_gather_object(
-            object_list=object_list, obj=data_local, group=mpu.get_data_parallel_group()
-        )
-
-        to_merge = object_list[(dp_rank % local_cp_size) :: local_cp_size]
-        merged = torch.nested.nested_tensor(
-            sum([list(x.to(data_local.device).unbind()) for x in to_merge], []), layout=torch.jagged
-        )
-        merged_output[k] = merged
-        # print(f'local_cp_size={local_cp_size}, dp_rank={dp_rank}, key={k},
-        # data_local shape={data_local.shape}, merged shape={merged_output[k].shape} ')
-
-    return merged_output
 
 
 def _get_mtp_num_layers(hf_config):

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import ctypes
+import dataclasses
+import functools
 import json
 import logging
 import os
@@ -157,6 +159,13 @@ class vLLMColocateWorkerExtension:
         # 1. patch for Lora
         VLLMHijack.hijack()
         vllm_config = kwargs.get("vllm_config")
+        weight_transfer_config = getattr(vllm_config, "weight_transfer_config", None)
+        if getattr(weight_transfer_config, "backend", None) == "verl_delta_ipc":
+            from verl.workers.rollout.vllm_rollout.delta_weight_transfer import (
+                register_verl_delta_weight_transfer_engine,
+            )
+
+            register_verl_delta_weight_transfer_engine()
         # 2. patch online fp8 quant. Some models, including DeepSeek-V4, get
         # fp8 from the HF config rather than an explicit rollout quantization arg.
         if os.environ.get("VERL_VLLM_FP8_QUANT_ENABLED", "0") == "1" or is_fp8_model(vllm_config):
@@ -414,6 +423,12 @@ class vLLMColocateWorkerExtension:
         trainer_rank = int(trainer_rank_base) + local_rank if trainer_rank_base is not None else local_rank
         return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{trainer_rank}.sock"
 
+    def update_verl_delta_weights(self, update_info: dict) -> None:
+        """Add this worker's IPC endpoint and forward the delta update to vLLM."""
+        worker_update_info = dict(update_info)
+        worker_update_info["zmq_handle"] = self._get_zmq_handle()
+        self.update_weights(worker_update_info)
+
 
 class SuppressSignalInThread:
     def __enter__(self):
@@ -432,6 +447,20 @@ class SuppressSignalInThread:
         signal.signal = self.original_signal
 
 
+@functools.lru_cache(maxsize=1)
+def _optional_bool_vllm_args() -> set[str]:
+    """Return the names of vLLM `AsyncEngineArgs` fields typed exactly `bool | None`.
+
+    For such fields an omitted flag leaves the None default, which vLLM can
+    resolve to True at engine-config time (e.g. `enable_prefix_caching`), so
+    an explicit False must be serialized as `--no-<flag>` instead of being
+    dropped.
+    """
+    from vllm.engine.arg_utils import AsyncEngineArgs
+
+    return {f.name for f in dataclasses.fields(AsyncEngineArgs) if set(get_args(f.type)) == {bool, type(None)}}
+
+
 def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     """
     Convert a config dictionary to CLI arguments for vLLM server.
@@ -439,7 +468,8 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     Handles different value types appropriately:
     - None: skipped
     - bool True: adds '--key'
-    - bool False: skipped
+    - bool False: adds '--no-key' for Optional[bool] engine args (whose None
+      default resolves to True), otherwise skipped
     - list: expands to '--key item1 item2 ...'
     - empty list: skipped (vLLM uses nargs="+" which requires at least one value)
     - dict: JSON serialized
@@ -458,6 +488,9 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
         if isinstance(v, bool):
             if v:
                 cli_args.append(f"--{k}")
+            elif k.replace("-", "_") in _optional_bool_vllm_args():
+                # Absent flag resolves to True at engine-config time.
+                cli_args.append(f"--no-{k}")
         elif isinstance(v, list):
             if not v:
                 # Skip empty lists - vLLM uses nargs="+" which requires at least one value

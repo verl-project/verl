@@ -23,7 +23,29 @@ Usage:
 import asyncio
 import os
 import time
+from types import SimpleNamespace
 from uuid import uuid4
+
+import pytest
+
+
+def test_abort_all_requests_propagates_pause_failure():
+    from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
+
+    async def fail_pause_generation(**_kwargs):
+        raise RuntimeError("pause failed")
+
+    server = vLLMHttpServer.__new__(vLLMHttpServer)
+    server.engine = SimpleNamespace(
+        output_processor=SimpleNamespace(request_states={}),
+        pause_generation=fail_pause_generation,
+    )
+    server._submission_paused = False
+    server._admitting = 0
+    server._resume_event = asyncio.Event()
+    server._resume_event.set()
+    with pytest.raises(RuntimeError, match="pause failed"):
+        asyncio.run(server.abort_all_requests())
 
 
 def test_vllm_abort():
@@ -80,6 +102,8 @@ def test_vllm_abort():
         config.actor_rollout_ref.rollout.tensor_model_parallel_size = TP_SIZE
         config.actor_rollout_ref.rollout.prompt_length = 512
         config.actor_rollout_ref.rollout.response_length = 512  # Longer for abort test
+        # No trainer to sync weights from, so the server must load them from disk.
+        config.actor_rollout_ref.rollout.load_format = "auto"
 
         # ==================== Create Rollout Server ====================
         print("\n[3] Creating rollout server (this may take a while)...")

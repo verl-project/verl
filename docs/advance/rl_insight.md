@@ -154,3 +154,8 @@ The dashboards should include training metrics, rollout metrics, TransferQueue m
 - If `server install` fails to download packages, use the offline `--local-archive` path above.
 
 For more RL-Insight server installation details, see the [RL-Insight server installation guide](https://github.com/verl-project/rl-insight/blob/main/docs/monitor/server_installation.md) and [quick start](https://github.com/verl-project/rl-insight/blob/main/docs/monitor/quick_start.md).
+
+## Related documentation
+
+- [Agent Loop protocol](https://github.com/verl-project/rl-insight/blob/main/docs/monitor/agent_loop_protocol.md)
+- [Uni-Agent RL-Insight instrumentation guide](https://github.com/verl-project/uni-agent/blob/main/docs/source/concepts/rl-insight-integration.md)

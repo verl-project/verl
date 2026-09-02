@@ -185,6 +185,12 @@ trainer:
   # Path to resume training from (only used when resume_mode is "resume_path")
   resume_from_path: null
 
+  # Fully qualified class name of a user-defined checkpoint callback,
+  # e.g. "my_pkg.callbacks.MyCheckpointCallback". Instantiated on the driver with the
+  # full trainer config; its on_save hook is called after each checkpoint save,
+  # similar to the on_save event of the transformers TrainerCallback. No callback is used if null.
+  checkpoint_callback_class: null
+
   # Whether to run validation before training begins
   val_before_train: True
 
@@ -245,6 +251,33 @@ trainer:
       # Frequency of parameter synchronization between trainer and rollout
       parameter_sync_step: 4
 
+      # Lend idle hybrid trainer GPUs to rollout
+      hybrid_rollout:
+
+        # Target dataclass for this configuration
+        _target_: verl.trainer.config.HybridRolloutSwitchConfig
+
+        # Global toggle to allow the trainer to switch to rollout mode to reduce idle.
+        enable_switch: false
+
+        # Fraction of train_batch_size that must be sampleable before the rollout replicas are reclaimed.
+        switch_threshold_ratio: 0.4
+
+        # Automatically adapt the threshold to reduce trainer starvation when enable_switch is True.
+        adaptive_switch_threshold: true
+
+        # Fraction added to switch_threshold_ratio after sustained trainer idle.
+        switch_threshold_step_up: 0.05
+
+        # Fraction subtracted from switch_threshold_ratio after a sustained calm period.
+        switch_threshold_step_down: 0.03
+
+        # Consecutive idle/calm steps required before ratio adjusts in that direction.
+        switch_threshold_release_steps: 2
+
+        # Window size for calculating average switch cost.
+        switch_cost_window_size: 3
+
     # Replay buffer sampling strategy
     sampler:
 
@@ -290,6 +323,30 @@ global_profiler:
 
   # Path to save profiling contents
   save_path: "outputs/profile"
+
+  # When profiling finishes, move backend artifacts written to a framework-fixed location into
+  # save_path: nsys reports (Ray hardcodes /tmp/ray/session_latest/logs/nsight) and rollout engine
+  # traces (the engines only accept a directory, so each replica writes into a sub-directory).
+  # Turn this on to get every trace of a step in save_path itself, which is what post-processing
+  # that does not walk sub-directories needs. Inherited by every role's profiler.
+  relocate_results: False
+
+  # Shell command executed on the selected ranks ONCE, after the last profiled step (relocate_results
+  # still runs every profiled step, so traces accumulate in save_path). Inherited by every role's
+  # profiler, so setting it here covers actor/rollout/ref/critic at once. Meant to ship the traces
+  # off the node in one shot, e.g. 'mlx asset upload "$VERL_PROFILE_SAVE_PATH"'; running once means
+  # uploading the whole save_path sends each trace exactly once. Env vars available:
+  # VERL_PROFILE_SAVE_PATH, VERL_PROFILE_TOOL, VERL_PROFILE_RANK, VERL_PROFILE_PID, VERL_PROFILE_ROLE,
+  # VERL_PROFILE_RAY_NSIGHT_DIR (nsys only). null disables it.
+  finish_hook_cmd: null
+
+  # Run finish_hook_cmd on all ranks. Inherited by every role's profiler.
+  finish_hook_all_ranks: False
+
+  # Ranks that run finish_hook_cmd. [] or [0,1,...]. Falls back to the profiled ranks when unset.
+  # save_path is usually node-local, so pick one rank per node to upload that node's directory once.
+  # Inherited by every role's profiler.
+  finish_hook_ranks: []
 
   # Specific tool configs, can use +profiler.tool_config.[tool].xxx to config
   global_tool_config:
@@ -440,6 +497,17 @@ ray_kwargs:
 
     # Number of CPUs for Ray. Use a fixed number instead of null when using SLURM.
     num_cpus: null
+
+    # Ray runtime_env, merged on top of verl's defaults and passed to ray.init.
+    runtime_env:
+
+      # Interpreter used to launch Ray workers (Ray's runtime_env py_executable plugin). Either a command
+      # prefix that ends in an interpreter, e.g. "uv run --frozen --all-packages --extra vllm --extra
+      # megatron" as the examples/ scripts set it, or a direct interpreter path, e.g.
+      # /abs/path/verl/.venv/bin/python3, which is what you want when the launcher relocates the working dir
+      # before starting Ray so the worker cwd has no resolvable uv/venv (uv is not required at that path).
+      # Inherited by the TaskRunner and every worker actor. null -> Ray's default.
+      py_executable: null
 
   # Path to save Ray timeline JSON for performance profiling
   timeline_json_file: null

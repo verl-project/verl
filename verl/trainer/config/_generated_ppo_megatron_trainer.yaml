@@ -45,7 +45,6 @@ actor_rollout_ref:
     megatron:
       _target_: verl.workers.config.McoreEngineConfig
       param_offload: false
-      grad_offload: false
       optimizer_offload: false
       tensor_model_parallel_size: 1
       expert_model_parallel_size: 1
@@ -78,6 +77,8 @@ actor_rollout_ref:
       vanilla_mbridge: false
       use_remove_padding: true
       pad_bshd_to_minibatch_max: true
+      pad_to_length: false
+      pad_to_length_bucket: 512
       use_megatron_fsdp: false
       forward_only: false
       dtype: bfloat16
@@ -151,6 +152,10 @@ actor_rollout_ref:
       all_ranks: false
       ranks: []
       save_path: ${oc.select:global_profiler.save_path,null}
+      relocate_results: ${oc.select:global_profiler.relocate_results,false}
+      finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+      finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+      finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
       tool_config:
         nsys:
           _target_: verl.utils.profiler.config.NsightToolConfig
@@ -182,11 +187,6 @@ actor_rollout_ref:
           steps: null
           stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
           strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
-    router_replay:
-      _target_: verl.workers.config.RouterReplayConfig
-      mode: disabled
-      record_file: null
-      replay_file: null
     qat:
       enable: false
       mode: w4a16
@@ -214,6 +214,10 @@ actor_rollout_ref:
       all_ranks: false
       ranks: []
       save_path: ${oc.select:global_profiler.save_path,null}
+      relocate_results: ${oc.select:global_profiler.relocate_results,false}
+      finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+      finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+      finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
       tool_config:
         nsys:
           _target_: verl.utils.profiler.config.NsightToolConfig
@@ -245,15 +249,9 @@ actor_rollout_ref:
           steps: null
           stages: ${oc.select:global_profiler.global_tool_config.precision_debugger.stages,null}
           strict: ${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}
-    router_replay:
-      _target_: verl.workers.config.RouterReplayConfig
-      mode: disabled
-      record_file: null
-      replay_file: null
     megatron:
       _target_: verl.workers.config.McoreEngineConfig
       param_offload: ${oc.select:actor_rollout_ref.actor.megatron.param_offload,False}
-      grad_offload: false
       optimizer_offload: false
       tensor_model_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.tensor_model_parallel_size,1}
       expert_model_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.expert_model_parallel_size,1}
@@ -265,8 +263,8 @@ actor_rollout_ref:
       use_distributed_optimizer: true
       use_dist_checkpointing: false
       dist_checkpointing_path: null
-      dynamic_context_parallel: false
-      max_seqlen_per_dp_cp_rank: null
+      dynamic_context_parallel: ${oc.select:actor_rollout_ref.actor.megatron.dynamic_context_parallel,False}
+      max_seqlen_per_dp_cp_rank: ${oc.select:actor_rollout_ref.actor.megatron.max_seqlen_per_dp_cp_rank,null}
       dist_checkpointing_prefix: ''
       dist_ckpt_optim_fully_reshardable: false
       distrib_optim_fully_reshardable_mem_efficient: false
@@ -280,6 +278,8 @@ actor_rollout_ref:
       vanilla_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.vanilla_mbridge,False}
       use_remove_padding: ${oc.select:actor_rollout_ref.actor.megatron.use_remove_padding,True}
       pad_bshd_to_minibatch_max: true
+      pad_to_length: ${oc.select:actor_rollout_ref.actor.megatron.pad_to_length,False}
+      pad_to_length_bucket: ${oc.select:actor_rollout_ref.actor.megatron.pad_to_length_bucket,512}
       use_megatron_fsdp: false
       forward_only: true
       dtype: bfloat16
@@ -353,6 +353,7 @@ actor_rollout_ref:
       temperature: 0
       'n': 1
       do_sample: false
+    router_config_path: null
     multi_turn:
       _target_: verl.workers.config.MultiTurnConfig
       enable: false
@@ -400,6 +401,10 @@ actor_rollout_ref:
       all_ranks: ${oc.select:actor_rollout_ref.actor.profiler.all_ranks,false}
       ranks: ${oc.select:actor_rollout_ref.actor.profiler.ranks,[]}
       save_path: ${oc.select:global_profiler.save_path,null}
+      relocate_results: ${oc.select:actor_rollout_ref.actor.profiler.relocate_results,false}
+      finish_hook_cmd: ${oc.select:actor_rollout_ref.actor.profiler.finish_hook_cmd,null}
+      finish_hook_all_ranks: ${oc.select:actor_rollout_ref.actor.profiler.finish_hook_all_ranks,false}
+      finish_hook_ranks: ${oc.select:actor_rollout_ref.actor.profiler.finish_hook_ranks,[]}
       tool_config:
         npu:
           _target_: verl.utils.profiler.config.NPUToolConfig
@@ -538,9 +543,6 @@ data:
     name: null
   return_multi_modal_inputs: true
   apply_chat_template_kwargs: {}
-  continuous_token:
-    enable: false
-    model_family: auto
   mm_processor_kwargs: {}
 critic:
   optim:
@@ -583,7 +585,6 @@ critic:
   megatron:
     _target_: verl.workers.config.McoreEngineConfig
     param_offload: false
-    grad_offload: false
     optimizer_offload: false
     tensor_model_parallel_size: 1
     expert_model_parallel_size: 1
@@ -616,6 +617,8 @@ critic:
     vanilla_mbridge: false
     use_remove_padding: true
     pad_bshd_to_minibatch_max: true
+    pad_to_length: false
+    pad_to_length_bucket: 512
     use_megatron_fsdp: false
     forward_only: false
     dtype: bfloat16
@@ -666,6 +669,10 @@ critic:
     all_ranks: false
     ranks: []
     save_path: ${oc.select:global_profiler.save_path,null}
+    relocate_results: ${oc.select:global_profiler.relocate_results,false}
+    finish_hook_cmd: ${oc.select:global_profiler.finish_hook_cmd,null}
+    finish_hook_all_ranks: ${oc.select:global_profiler.finish_hook_all_ranks,false}
+    finish_hook_ranks: ${oc.select:global_profiler.finish_hook_ranks,[]}
     tool_config:
       nsys:
         _target_: verl.utils.profiler.config.NsightToolConfig
@@ -990,6 +997,7 @@ trainer:
   esi_redundant_time: 0
   resume_mode: auto
   resume_from_path: null
+  checkpoint_callback_class: null
   val_before_train: true
   val_only: false
   test_freq: -1
@@ -1010,6 +1018,15 @@ trainer:
     separate_async:
       num_warmup_batches: 1
       parameter_sync_step: 4
+      hybrid_rollout:
+        _target_: verl.trainer.config.HybridRolloutSwitchConfig
+        enable_switch: false
+        switch_threshold_ratio: 0.4
+        adaptive_switch_threshold: true
+        switch_threshold_step_up: 0.05
+        switch_threshold_step_down: 0.03
+        switch_threshold_release_steps: 2
+        switch_cost_window_size: 3
     sampler:
       max_off_policy_threshold: 8
       max_off_policy_strategy: drop
@@ -1024,6 +1041,10 @@ global_profiler:
   steps: null
   profile_continuous_steps: false
   save_path: outputs/profile
+  relocate_results: false
+  finish_hook_cmd: null
+  finish_hook_all_ranks: false
+  finish_hook_ranks: []
   global_tool_config:
     nsys:
       _target_: verl.utils.profiler.config.NsightToolConfig
@@ -1071,4 +1092,6 @@ skip:
 ray_kwargs:
   ray_init:
     num_cpus: null
+    runtime_env:
+      py_executable: null
   timeline_json_file: null

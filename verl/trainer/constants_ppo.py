@@ -13,12 +13,15 @@
 # limitations under the License.
 
 import json
+import logging
 import os
 
 import torch
 from ray._private.runtime_env.constants import RAY_JOB_CONFIG_JSON_ENV_VAR
 
 from verl.utils.device import get_device_capability
+
+logger = logging.getLogger(__name__)
 
 _major, _ = get_device_capability()
 # Opt-in GB200 NCCL WAR: set TLLM_DISABLE_NVLS_MNNVL=1 in the launch shell to disable
@@ -58,16 +61,25 @@ def _uses_megatron(config) -> bool:
     return False
 
 
-def _uses_mindspeed(config) -> bool:
-    """Return True if any trainable engine in the config uses the mindspeed strategy."""
+def _uses_torch_profiler(config) -> bool:
+    """Return True if the run collects traces with the torch profiler."""
     if config is None:
         return False
     from omegaconf import OmegaConf
 
-    for key in ("actor_rollout_ref.actor.strategy", "critic.strategy"):
-        if OmegaConf.select(config, key, default=None) == "mindspeed":
-            return True
-    return False
+    return OmegaConf.select(config, "global_profiler.tool", default=None) == "torch"
+
+
+# CUPTI only accepts one subscriber per process. Some CUDA images install a startup hook that
+# points this variable at libcupti.so, which makes the first NVTX range in a process load libcupti
+# as the NVTX handler and claim that slot. Kineto then fails to subscribe with
+# CUPTI_ERROR_MULTIPLE_SUBSCRIBERS_NOT_SUPPORTED and silently drops every CUDA activity, so torch
+# traces come out with CPU ops only and no GPU kernels. verl emits NVTX ranges itself (see
+# marked_timer), so disabling NCCL's NVTX ranges alone does not avoid it.
+NVTX_INJECTION_ENV = "NVTX_INJECTION64_PATH"
+# Deliberately non-empty and unloadable: NVTX injection stays a no-op, and startup hooks that only
+# fill the variable in when it is unset will not put libcupti back.
+_NVTX_INJECTION_DISABLED = "/nonexistent/verl-disabled-nvtx-injection.so"
 
 
 PPO_RAY_RUNTIME_ENV = {
@@ -110,12 +122,33 @@ def get_ppo_ray_runtime_env(config=None):
     # Only Megatron on Hopper/Ampere needs CUDA_DEVICE_MAX_CONNECTIONS=1.
     if _is_hopper_or_ampere and _uses_megatron(config):
         runtime_env["env_vars"]["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
-    if _uses_mindspeed(config):
-        runtime_env["env_vars"]["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     for key in list(runtime_env["env_vars"].keys()):
         if os.environ.get(key) is not None:
             runtime_env["env_vars"].pop(key, None)
+    # Set after the loop above on purpose: the point is to override an inherited value, so it must
+    # survive the "already set in the launching shell" filter.
+    if _uses_torch_profiler(config) and os.environ.get("VERL_KEEP_NVTX_INJECTION", "0") != "1":
+        runtime_env["env_vars"][NVTX_INJECTION_ENV] = _NVTX_INJECTION_DISABLED
+        logger.warning(
+            "global_profiler.tool=torch: setting %s=%s for all workers so Kineto can subscribe to "
+            "CUPTI and record GPU kernels. Set VERL_KEEP_NVTX_INJECTION=1 to keep the inherited "
+            "value (%s), at the cost of traces without CUDA activity.",
+            NVTX_INJECTION_ENV,
+            _NVTX_INJECTION_DISABLED,
+            os.environ.get(NVTX_INJECTION_ENV) or "unset",
+        )
     # Always forward these at call-time, not import-time.
-    for key in ("PYTHONHASHSEED", "VERL_FULL_DETERMINISM", "VLLM_BATCH_INVARIANT", "VERL_RL_INSIGHT_ENABLE"):
+    for key in ("VERL_FULL_DETERMINISM", "VLLM_BATCH_INVARIANT", "VERL_RL_INSIGHT_ENABLE"):
         runtime_env["env_vars"][key] = os.environ.get(key, "0")
+    # Forward only when set: empty string breaks vLLM ParallelConfig int parsing.
+    for key in (
+        "PYTHONHASHSEED",
+        "CUBLAS_WORKSPACE_CONFIG",
+        "FLASH_ATTENTION_DETERMINISTIC",
+        "NCCL_DETERMINISTIC",
+        "NCCL_ALGO",
+    ):
+        val = os.environ.get(key)
+        if val is not None:
+            runtime_env["env_vars"][key] = val
     return runtime_env

@@ -79,6 +79,8 @@ class VLLMHijack:
                 hf_to_vllm_mapper = None
                 if hasattr(model, "hf_to_vllm_mapper") and model.hf_to_vllm_mapper is not None:
                     hf_to_vllm_mapper = model.hf_to_vllm_mapper
+                    if is_version_ge(minver="0.25.0"):
+                        hf_to_vllm_mapper = hf_to_vllm_mapper.get_unstacked_mapper()
 
                 lora_request_kwargs = {
                     "peft_helper": peft_helper,
@@ -194,20 +196,20 @@ def resolve_weight_name(model, name: str, model_weight_names: set[str]) -> str:
                             return True
         return False
 
-    # Strip ``.base_layer.``:
-    # - On models with NO ``.base_layer.`` params at all (auxiliary models like
-    #   the MTP drafter, or non-LoRA-wrapped modules such as the Qwen3.5-VL vision
-    #   merger): strip unconditionally -- there is no ``base_layer`` child to
-    #   recurse into on any vLLM version, so the inner name is the only one that
-    #   could match.
-    # - On LoRA-wrapped models (which DO have ``.base_layer.`` params): strip only
-    #   on newer vLLM, where ``BaseLayerWithLoRA.load_weights`` delegates to
-    #   ``AutoWeightsLoader(base_layer)`` expecting inner names. On released vLLM
-    #   keep the suffix (the loader recurses into ``base_layer`` and matches it)
-    #   and fall through to the leaf-add path below.
+    # Strip ``.base_layer.``: the check is *per-name*, not model-wide. A mixed
+    # model (e.g. Qwen3.5-VL with LoRA) has ``.base_layer.`` params on the
+    # LoRA-wrapped language layers but NOT on the vision merger. The suffix
+    # must be stripped when this name's ``base_layer`` isn't a real child, and
+    # kept on released vLLM when it is (the loader recurses into ``base_layer``);
+    # ``_exists`` consults the mapper's prefix rewrites so a Bridge-exported
+    # prefix (``model.language_model.``) is reconciled against the live vLLM
+    # namespace (``language_model.model.``) before checking.
     if ".base_layer." in name:
-        model_has_base_layer = any(".base_layer." in n for n in model_weight_names)
-        if not model_has_base_layer or _HAS_LORA_LOAD_WEIGHTS:
+        parent, _, _ = name.partition(".base_layer.")
+        parent_has_base_layer = _exists(parent + ".base_layer.weight") or any(
+            n.startswith(parent + ".base_layer.") for n in model_weight_names
+        )
+        if not parent_has_base_layer or _HAS_LORA_LOAD_WEIGHTS:
             return name.replace(".base_layer.", ".", 1)
 
     if _exists(name):

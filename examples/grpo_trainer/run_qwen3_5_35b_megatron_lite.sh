@@ -144,7 +144,6 @@ ACTOR=(
     actor_rollout_ref.actor.engine.etp=${ETP}
     actor_rollout_ref.actor.engine.param_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.engine.optimizer_offload=${ALL_OFFLOAD}
-    actor_rollout_ref.actor.engine.grad_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.engine.attention_backend_override=flash
     actor_rollout_ref.actor.engine.impl_cfg.use_thd=True
     +actor_rollout_ref.actor.engine.impl_cfg.optimizer=${OPTIMIZER}
