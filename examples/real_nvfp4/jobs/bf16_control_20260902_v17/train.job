@@ -74,12 +74,9 @@ read -r -d '' DRIVER <<DRIVER_EOF || true
 set -euo pipefail
 $COMMON_ENV
 export WORKING_DIR=$RN4PT_VERL
-export RUNTIME_ENV=$RN4PT_ROOT/runtime_env.yaml
+export RUNTIME_ENV=$RN4PT_BUNDLE/runtime_env_native_reload.yaml
 export NNODES=$EXPECTED_NODES N_GPUS_PER_NODE=4
 export PRECISION_MODE=bf16 RUN_PROFILE=$RUN_PROFILE
-# vLLM 0.26's RoutedExperts refactor broke verl's legacy model.load_weights
-# MoE sync; use the native reload API that real NVFP4 already relies on.
-export VERL_VLLM_NATIVE_RELOAD=1
 export PROJECT_NAME=$RN4PT_PROJECT EXP_NAME=$EXP_NAME
 export WANDB_ENTITY=shawnzzz WANDB_PROJECT=$RN4PT_PROJECT
 export WANDB_RUN_ID=$EXP_NAME WANDB_RESUME=never
