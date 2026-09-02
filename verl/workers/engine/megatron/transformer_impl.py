@@ -1032,7 +1032,16 @@ class MegatronEngine(BaseEngine):
         if self.vanilla_bridge:
             per_tensor_param = self.bridge.export_weights(self.module)
         elif adapter_only:
-            per_tensor_param = self.bridge.export_adapter_weights(self.module)
+            # 3D-MoE (Qwen3.5/3.6 VLM): stack_3d_moe for FusedMoE3DWithLoRA.
+            # 2D-MoE text: expand_shared_outer for vLLM pack_moe.
+            from verl.workers.rollout.vllm_rollout.utils import is_3d_moe_vllm_model
+
+            export_kwargs = {}
+            if is_3d_moe_vllm_model(self.model_config.hf_config):
+                export_kwargs["stack_3d_moe"] = True
+            elif self.model_config.lora.get("experts_shared_outer_loras", False):
+                export_kwargs["expand_shared_outer"] = True
+            per_tensor_param = self.bridge.export_adapter_weights(self.module, **export_kwargs)
         else:
             conversion_tasks = self._mbridge_export_tasks()
             per_tensor_param = (
