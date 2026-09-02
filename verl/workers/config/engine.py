@@ -85,8 +85,8 @@ class EngineConfig(BaseConfig):
         "forward_only",
         "param_offload",
     }
-    # whether to offload param (None means use strategy-specific default)
-    param_offload: Optional[bool] = None
+    # whether to offload param
+    param_offload: bool = False
     # whether to offload optimizer
     optimizer_offload: bool = False
     # whether the engine is forward only (e.g., ref policy)
@@ -243,7 +243,9 @@ class FSDPEngineConfig(EngineConfig):
 
     Args:
         wrap_policy (Dict[str, Any]): Configuration for FSDP wrap policy.
-        param_offload (bool): Whether to offload parameters to CPU, default False
+        param_offload (Optional[bool]): Whether to offload parameters to CPU. For forward-only
+            reference/reward models, None defaults to True to preserve existing behavior; for
+            actor models, None defaults to False.
         optimizer_offload (bool): Whether to offload optimizer states to CPU, default False
         offload_policy (bool): Whether to offload policy model parameters, default False
         reshard_after_forward (bool): Whether to reshard parameters after forward pass, default True
@@ -281,6 +283,7 @@ class FSDPEngineConfig(EngineConfig):
 
     # fsdp specific flags
     wrap_policy: dict[str, Any] = field(default_factory=dict)
+    param_offload: Optional[bool] = None
     offload_policy: bool = False
     reshard_after_forward: bool = True
     fsdp_size: int = -1
@@ -310,7 +313,7 @@ class FSDPEngineConfig(EngineConfig):
                 self.param_offload = True  # Default: offload for ref/reward models (backward compat)
             else:
                 self.param_offload = False  # Default: no offload for actor models
-        assert self.strategy in ["fsdp", "fsdp2","fsdp_turbo"], f"strategy {self.strategy} not supported"
+        assert self.strategy in ["fsdp", "fsdp2", "fsdp_turbo"], f"strategy {self.strategy} not supported"
 
 
 @dataclass

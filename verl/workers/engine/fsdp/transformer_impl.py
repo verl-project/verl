@@ -421,7 +421,8 @@ class FSDPEngine(BaseEngine):
             # - critic: None
             # - ref: CPUOffload(offload_params=True)
 
-            # We force reference policy to use CPUOffload to save memory.
+            # Reference policy uses CPUOffload by default to save memory; param_offload=False
+            # keeps its parameters resident on the GPU when sufficient memory is available.
             # We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation
             cpu_offload = None
             if self.engine_config.forward_only and self.engine_config.param_offload:
