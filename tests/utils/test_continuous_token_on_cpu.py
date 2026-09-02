@@ -1144,6 +1144,43 @@ def test_default_builder_merges_append_only_context_messages():
     assert aligned_logprobs == [0.1, 0.2, 0.3] + [0.0] * len(expected_incremental)
 
 
+def test_default_builder_merges_every_encoded_context_group_through_hook():
+    class RecordingGroupMergeBuilder(ContinuousTokenBuilder):
+        def __init__(self, tokenizer):
+            super().__init__(tokenizer)
+            self.merged_roles = []
+
+        def _merge_context_group(
+            self,
+            incremental_ids,
+            group_token_ids,
+            *,
+            group,
+            processed_messages,
+            tools=None,
+        ):
+            self.merged_roles.append(group[0]["role"])
+            super()._merge_context_group(
+                incremental_ids,
+                group_token_ids,
+                group=group,
+                processed_messages=processed_messages,
+                tools=tools,
+            )
+
+    builder = RecordingGroupMergeBuilder(_TemplateTokenizer())
+    old_messages = [{"role": "assistant", "content": "tool call"}]
+    new_messages = old_messages + [
+        {"role": "tool", "content": "answer", "name": "lookup"},
+        {"role": "user", "content": "continue"},
+    ]
+
+    incremental = builder.tokenize_context_incremental_messages(old_messages, new_messages)
+
+    assert builder.merged_roles == ["tool", "user"]
+    assert incremental == [ord(char) for char in "<tool>answer\n<user>continue\n<assistant>"]
+
+
 def test_default_builder_tokenizes_system_and_user_appends_with_generation_prompt():
     builder = ContinuousTokenBuilder(_TemplateTokenizer())
     old_messages = [{"role": "user", "content": "question"}]
@@ -1524,8 +1561,11 @@ def test_default_builder_rejects_non_prefix_stable_template_deltas():
 
 
 def test_subclass_only_overrides_token_level_merge_hook():
+    received_context = {}
+
     class BoundaryBuilder(ContinuousTokenBuilder):
-        def _merge_context_token_ids(self, runtime_token_ids, appended_token_ids):
+        def _merge_context_token_ids(self, runtime_token_ids, appended_token_ids, **kwargs):
+            received_context.update(kwargs)
             return MergeResult(
                 token_ids=list(runtime_token_ids) + [99] + list(appended_token_ids),
                 appended_token_count=len(appended_token_ids),
@@ -1544,6 +1584,10 @@ def test_subclass_only_overrides_token_level_merge_hook():
     assert result.appended_token_count == len(incremental)
     assert result.inserted_token_ids == [99]
     assert result.kind == "context"
+    assert received_context == {
+        "previous_messages": old_messages,
+        "appended_messages": new_messages[len(old_messages) :],
+    }
 
 
 def test_context_alignment_handles_boundary_inserts_and_trims():

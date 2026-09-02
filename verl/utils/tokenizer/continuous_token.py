@@ -69,6 +69,7 @@ class ContinuousTokenBuilder:
         Model-specific builders should subclass this class and keep the runtime
         API contracts above stable. Chat template specific behavior belongs in hooks
         such as ``_tokenize_tool_group``, ``_tokenize_single_non_tool``,
+        ``_merge_context_group``,
         ``_should_fuse_generation_prompt_with_last_group``,
         ``_tokenize_generation_prompt_delta``, and ``_merge_context_token_ids``.
         ``render_delta_token_id`` is the shared suffix-diff helper those hooks can reuse.
@@ -128,13 +129,11 @@ class ContinuousTokenBuilder:
             add_generation_prompt = fuse_generation_prompt and index == len(groups) - 1
             role = group[0].get("role")
             if role == "tool":
-                incremental_ids.extend(
-                    self._tokenize_tool_group(
-                        group,
-                        previous_messages=processed_messages,
-                        tools=tools,
-                        add_generation_prompt=add_generation_prompt,
-                    )
+                group_token_ids = self._tokenize_tool_group(
+                    group,
+                    previous_messages=processed_messages,
+                    tools=tools,
+                    add_generation_prompt=add_generation_prompt,
                 )
             elif role in {"user", "system", "assistant"}:
                 # System appends can represent retry/control messages; unsupported templates will fail in suffix diff.
@@ -144,20 +143,37 @@ class ContinuousTokenBuilder:
                     )
                 if role == "assistant" and index == len(groups) - 1:
                     raise ValueError("Continuous Token context incremental messages cannot end with assistant")
-                incremental_ids.extend(
-                    self._tokenize_single_non_tool(
-                        group[0],
-                        tools=tools,
-                        add_generation_prompt=add_generation_prompt,
-                    )
+                group_token_ids = self._tokenize_single_non_tool(
+                    group[0],
+                    tools=tools,
+                    add_generation_prompt=add_generation_prompt,
                 )
             else:
                 raise ValueError(f"Unsupported Continuous Token append role: {role!r}")
+            self._merge_context_group(
+                incremental_ids,
+                group_token_ids,
+                group=group,
+                processed_messages=processed_messages,
+                tools=tools,
+            )
             processed_messages.extend(group)
 
         if not fuse_generation_prompt:
             incremental_ids.extend(self._tokenize_generation_prompt_delta(updated_messages, tools=tools))
         return incremental_ids
+
+    def _merge_context_group(
+        self,
+        incremental_ids: list[int],
+        group_token_ids: list[int],
+        *,
+        group: list[dict[str, Any]],
+        processed_messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Merge one encoded context group into the incremental token stream."""
+        incremental_ids.extend(group_token_ids)
 
     def merge_context_tokens(
         self,
@@ -167,8 +183,14 @@ class ContinuousTokenBuilder:
         *,
         tools: list[dict[str, Any]] | None = None,
     ) -> MergeResult:
+        appended_messages = updated_messages[len(previous_messages) :]
         appended_ids = self.tokenize_context_incremental_messages(previous_messages, updated_messages, tools=tools)
-        return self._merge_context_token_ids(runtime_token_ids, appended_ids)
+        return self._merge_context_token_ids(
+            runtime_token_ids,
+            appended_ids,
+            previous_messages=previous_messages,
+            appended_messages=appended_messages,
+        )
 
     def merge_assistant_tokens(self, runtime_token_ids: list[int], assistant_token_ids: list[int]) -> MergeResult:
         """Merge model-generated assistant tokens into the runtime token stream."""
@@ -179,11 +201,18 @@ class ContinuousTokenBuilder:
             kind="assistant",
         )
 
-    def _merge_context_token_ids(self, runtime_token_ids: list[int], appended_token_ids: list[int]) -> MergeResult:
+    def _merge_context_token_ids(
+        self,
+        runtime_token_ids: list[int],
+        appended_token_ids: list[int],
+        **kwargs: Any,
+    ) -> MergeResult:
         """Merge runtime prefix tokens and appended context tokens.
 
         Model-specific builders usually override this hook for boundary handling,
         such as inserting or trimming tokens at the prefix/appended-token junction.
+        ``merge_context_tokens`` also supplies message-level boundary context as
+        keyword arguments for builders whose token edits depend on message roles.
         """
         merged_token_ids = list(runtime_token_ids) + list(appended_token_ids)
         return MergeResult(
@@ -527,7 +556,12 @@ class QwenContinuousTokenBuilder(ContinuousTokenBuilder):
         self._newline_id = int(newline_ids[0])
         self._im_end_id = require_token_id(tokenizer, "<|im_end|>")
 
-    def _merge_context_token_ids(self, runtime_token_ids: list[int], appended_token_ids: list[int]) -> MergeResult:
+    def _merge_context_token_ids(
+        self,
+        runtime_token_ids: list[int],
+        appended_token_ids: list[int],
+        **kwargs: Any,
+    ) -> MergeResult:
         prefix = list(runtime_token_ids)
         inserted_token_ids: list[int] = []
         if prefix and prefix[-1] == self._im_end_id:
@@ -557,7 +591,12 @@ class MiniMaxContinuousTokenBuilder(ContinuousTokenBuilder):
         self._newline_id = int(newline_ids[0])
         self._eos_id = require_token_id(tokenizer, "[e~[")
 
-    def _merge_context_token_ids(self, runtime_token_ids: list[int], appended_token_ids: list[int]) -> MergeResult:
+    def _merge_context_token_ids(
+        self,
+        runtime_token_ids: list[int],
+        appended_token_ids: list[int],
+        **kwargs: Any,
+    ) -> MergeResult:
         prefix = list(runtime_token_ids)
         inserted_token_ids: list[int] = []
         if prefix and prefix[-1] == self._eos_id:
@@ -585,7 +624,12 @@ class GLMContinuousTokenBuilder(ContinuousTokenBuilder):
         self._user_id = require_token_id(tokenizer, "<|user|>")
         self._ambiguous_boundary_ids = {self._observation_id, self._user_id}
 
-    def _merge_context_token_ids(self, runtime_token_ids: list[int], appended_token_ids: list[int]) -> MergeResult:
+    def _merge_context_token_ids(
+        self,
+        runtime_token_ids: list[int],
+        appended_token_ids: list[int],
+        **kwargs: Any,
+    ) -> MergeResult:
         prefix = list(runtime_token_ids)
         removed_prefix_token_count = 0
         if prefix and prefix[-1] in self._ambiguous_boundary_ids:
@@ -1081,7 +1125,12 @@ class DeepSeekContinuousTokenBuilder(ContinuousTokenBuilder):
             removed_prefix_token_count=removed_prefix_token_count,
         )
 
-    def _merge_context_token_ids(self, runtime_token_ids: list[int], appended_token_ids: list[int]) -> MergeResult:
+    def _merge_context_token_ids(
+        self,
+        runtime_token_ids: list[int],
+        appended_token_ids: list[int],
+        **kwargs: Any,
+    ) -> MergeResult:
         # Direct concatenation — DeepSeek template has no inter-turn separator.
         merged_token_ids = list(runtime_token_ids) + list(appended_token_ids)
         return MergeResult(

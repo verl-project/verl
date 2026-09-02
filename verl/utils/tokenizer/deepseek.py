@@ -354,7 +354,12 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
                 "committed prefix. Pass tools, or set drop_thinking=False in chat_template_kwargs."
             )
 
-    def _merge_context_token_ids(self, runtime_token_ids: list[int], appended_token_ids: list[int]) -> MergeResult:
+    def _merge_context_token_ids(
+        self,
+        runtime_token_ids: list[int],
+        appended_token_ids: list[int],
+        **kwargs: Any,
+    ) -> MergeResult:
         prefix = list(runtime_token_ids)
         inserted_token_ids: list[int] = []
         if appended_token_ids and prefix[-1:] != [self._eos_id]:
