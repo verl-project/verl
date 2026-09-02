@@ -92,7 +92,7 @@ vllm = [
     "torchaudio==2.11.0",
     # PyPI's 0.24.0 wheel is already a cu130 / torch-2.11 abi3 build, so it needs
     # no wheelhouse routing and no source build.
-    "vllm==0.24.0",
+    "vllm==0.28.0",
     # flashinfer is a transitive dep vllm 0.24 hard-pins to ==0.6.12 (pure-python
     # from PyPI); the wheelhouse's 0.6.13 doesn't match, so it isn't routed.
     "mbridge",
