@@ -53,6 +53,7 @@ class MultiTurnConfig(BaseConfig):
     tool_config_path: Optional[str] = None
     function_tool_path: Optional[str] = None
     max_user_turns: Optional[int] = None
+    max_consecutive_invalid_tool_calls: Optional[int] = None
     max_parallel_calls: int = 1
     max_tool_response_length: int = 256
     tool_response_truncate_side: str = "middle"
@@ -60,6 +61,11 @@ class MultiTurnConfig(BaseConfig):
     tokenization_sanity_check_mode: str = "strict"
     format: str = "hermes"
     num_repeat_rollouts: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        limit = self.max_consecutive_invalid_tool_calls
+        if limit is not None and (type(limit) is not int or limit <= 0):
+            raise ValueError("max_consecutive_invalid_tool_calls must be a positive integer or null")
 
 
 @dataclass
