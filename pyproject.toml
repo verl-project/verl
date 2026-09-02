@@ -144,7 +144,7 @@ fsdp = [
     "torchvision==0.26.0",
     "torchaudio==2.11.0",
     "liger-kernel>=0.8.2",
-    "trl==0.27.0",
+    "trl==1.12.0",
     "flash-linear-attention==0.5.2",
     # transformers NOT pinned here: verl-core carries it and the project-wide
     # override below settles the version (5.9.0). See override-dependencies.
@@ -164,7 +164,7 @@ megatron = [
     "apex",
     "transformer-engine",
     "onnxscript",
-    "trl==0.27.0",
+    "trl==1.12.0",
     "matplotlib",
     "liger-kernel>=0.8.2",
     # Two Megatron<->HF connectors: mbridge (legacy) and megatron-bridge (NVIDIA,
