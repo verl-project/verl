@@ -21,8 +21,7 @@ readonly RN4PT_CHECKPOINTS=$RN4PT_WORKSPACE/checkpoints/DAPO-NVFP4-QAT/$RN4PT_VE
 # FlashInfer TRTLLM NVFP4 MoE call sites pass enable_pdl=False.  The v10
 # post-0.26 online-NVFP4 backports are deliberately NOT applied here; see
 # ../20260901_SUBMISSION_INCIDENTS_CN.md.
-readonly RN4PT_BASE_IMAGE=${RN4PT_BASE_IMAGE_OVERRIDE:-$RN4PT_BASE_IMAGE_V15}
-readonly RN4PT_BASE_IMAGE_V15=/lustre/fsw/general_sa/shuazhang/images/verl.vllm026.mcore018.te218e7.realnvfp4.nativeonline.pdl-off.v8base.20260901.v12.sqsh
+readonly RN4PT_BASE_IMAGE=${RN4PT_BASE_IMAGE_OVERRIDE:-/lustre/fsw/general_sa/shuazhang/images/verl.vllm026.mcore018.te218e7.realnvfp4.nativeonline.pdl-off.v8base.20260901.v12.sqsh}
 readonly RN4PT_RUNTIME_IMAGE=${RN4PT_RUNTIME_IMAGE_OVERRIDE:-/lustre/fsw/general_sa/shuazhang/images/verl.vllm026.mcore018.te218e7.realnvfp4.bf16ctl.recvdrain.20260902.v15.sqsh}
 readonly RN4PT_IMAGE_ENV=/opt/verl-rn4pt-20260831-v5
 readonly RN4PT_IMAGE_PYTHON=$RN4PT_IMAGE_ENV/.venv/bin/python
