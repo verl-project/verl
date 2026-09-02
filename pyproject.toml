@@ -191,7 +191,7 @@ megatron = [
 # by hand for that reason — do not "fix" that by moving it in here.
 ci = [
     "hf-transfer",           # HF_HUB_ENABLE_HF_TRANSFER=1 in the GPU test jobs
-    "sglang-router==0.2.2",  # router coverage in reward_model_sglang
+    "sglang-router==0.3.2",  # router coverage in reward_model_sglang
 ]
 
 # veomni drives the SFT engine tests. Installed deps-free (empty requires-dist
