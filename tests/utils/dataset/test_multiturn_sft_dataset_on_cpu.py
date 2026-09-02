@@ -28,6 +28,8 @@ from torch.utils.data import DistributedSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers.utils import get_json_schema
 
+import verl.utils.dataset.multiturn_sft_dataset as multiturn_sft_dataset_module
+import verl.utils.tokenizer.continuous_token as continuous_token_module
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.dataset.dataset_utils import DatasetPadMode, SFTTensorCollator
 from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
@@ -767,7 +769,7 @@ def test_multiturn_sft_vlm_dataset_on_cpu(model_path, vlm_data_file):
 
 
 @pytest.mark.parametrize("model_path", [str(qwen3_vl_model_path)])
-def test_multiturn_sft_vlm_structured_image_url_on_cpu(model_path: str, tmp_path: Path):
+def test_multiturn_sft_vlm_structured_image_url_on_cpu(model_path: str, tmp_path: Path, monkeypatch):
     image_path = tmp_path / "structured-image.png"
     Image.new("RGB", (64, 64), color="blue").save(image_path)
 
@@ -804,6 +806,25 @@ def test_multiturn_sft_vlm_structured_image_url_on_cpu(model_path: str, tmp_path
 
     tokenizer = hf_tokenizer(model_path)
     processor = hf_processor(model_path)
+
+    # Structured image_url media must reach the multimodal processor in the same
+    # preprocessed form as media supplied through the ``images`` column. Passing the
+    # raw string reference straight through would silently skip process_image(), so
+    # image_patch_size and the per-image resize options would not apply.
+    processor_media_types: list[type] = []
+
+    def _record_media(module):
+        original = module.build_multimodal_processor_inputs
+
+        def _wrapped(processor_arg, *, text, images=None, **kwargs):
+            processor_media_types.extend(type(image) for image in images or [])
+            return original(processor_arg, text=text, images=images, **kwargs)
+
+        monkeypatch.setattr(module, "build_multimodal_processor_inputs", _wrapped)
+
+    _record_media(multiturn_sft_dataset_module)
+    _record_media(continuous_token_module)
+
     dataset = MultiTurnSFTDataset(
         parquet_files=str(test_file),
         tokenizer=tokenizer,
@@ -843,6 +864,12 @@ def test_multiturn_sft_vlm_structured_image_url_on_cpu(model_path: str, tmp_path
         assistant_text = tokenizer.decode(input_ids[loss_mask == 1], skip_special_tokens=True)
         for expected_text in expected_texts:
             assert expected_text in assistant_text
+
+    assert processor_media_types, "no media reached the multimodal processor"
+    assert all(issubclass(media_type, Image.Image) for media_type in processor_media_types), (
+        "structured image_url media must be preprocessed by process_image() before reaching the "
+        f"processor, got {sorted({t.__name__ for t in processor_media_types})}"
+    )
 
 
 @pytest.mark.parametrize(

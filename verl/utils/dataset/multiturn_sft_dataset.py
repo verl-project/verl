@@ -349,6 +349,52 @@ class MultiTurnSFTDataset(Dataset):
             )
         return multi_modal_inputs
 
+    # Per-image options that ``qwen_vl_utils.fetch_image`` honors when they sit at the
+    # top level of an image descriptor.
+    _IMAGE_FETCH_OPTION_KEYS = ("min_pixels", "max_pixels", "resized_height", "resized_width")
+
+    def _normalize_structured_image_blocks(self, content: list[Any]) -> None:
+        """Convert OpenAI ``image_url`` blocks into preprocessed ``image`` blocks.
+
+        Media supplied through the ``images`` column is preprocessed by
+        :func:`process_image`, but a structured ``image_url`` block used to reach the
+        multimodal processor as its raw string reference. That skipped
+        ``image_patch_size`` and the per-image resize options entirely, so the same
+        picture produced a different pixel budget depending on which input form the
+        dataset used.
+
+        Normalizing here, before Continuous Token assembly, makes both input forms
+        converge on one representation. It has to happen on the messages themselves
+        rather than in :meth:`_collect_media`, because the VL builder re-extracts media
+        from the messages when it renders a later turn as a token delta; normalizing
+        only the dataset-side collection would leave that path on the raw reference.
+        """
+        if self.processor is None:
+            return
+
+        fetch_kwargs = {} if self.image_patch_size is None else {"image_patch_size": self.image_patch_size}
+        for index, block in enumerate(content):
+            if not isinstance(block, dict) or block.get("type") != "image_url":
+                continue
+
+            image_url = block.get("image_url")
+            if isinstance(image_url, dict):
+                reference = image_url.get("url")
+            elif isinstance(image_url, str):
+                reference = image_url
+            else:
+                reference = None
+            if reference is None:
+                continue
+
+            # Build a fresh descriptor instead of mutating the caller's block, and keep
+            # any top-level resize options the block already carries.
+            descriptor: dict[str, Any] = {
+                key: block[key] for key in self._IMAGE_FETCH_OPTION_KEYS if block.get(key) is not None
+            }
+            descriptor["image"] = reference
+            content[index] = {"type": "image", "image": process_image(descriptor, **fetch_kwargs)}
+
     def _build_messages(self, example: dict):
         """Replace <image> and <video> placeholder in messages with corresponding image and video
         which is required by processor.apply_chat_template.
@@ -371,6 +417,8 @@ class MultiTurnSFTDataset(Dataset):
         for message in messages:
             content = message["content"]
             if not isinstance(content, str):
+                if isinstance(content, list):
+                    self._normalize_structured_image_blocks(content)
                 continue
 
             if self.image_key not in example and self.video_key not in example:
