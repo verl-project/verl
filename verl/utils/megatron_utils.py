@@ -506,13 +506,28 @@ def make_megatron_module(
     return model, tf_config
 
 
-try:
-    from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel as _MegatronFSDP
-    from megatron.core.distributed.fsdp.src.megatron_fsdp.megatron_fsdp import MegatronFSDP
+def _megatron_fsdp_wrapper_types():
+    """Type-check Megatron-FSDP wrappers. ``FullyShardedDataParallel`` is a factory, not a class."""
+    types = []
+    try:
+        from megatron.core.distributed.fsdp.src.megatron_fsdp.megatron_fsdp import MegatronFSDP
 
-    ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module, _MegatronFSDP, MegatronFSDP)
-except ImportError:
-    ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
+        types.append(MegatronFSDP)
+    except ImportError:
+        pass
+    try:
+        from megatron.core.distributed.fsdp.mcore_fsdp_adapter import (
+            FullyShardedDataParallelV1,
+            FullyShardedDataParallelV2,
+        )
+
+        types.extend((FullyShardedDataParallelV1, FullyShardedDataParallelV2))
+    except ImportError:
+        pass
+    return tuple(types)
+
+
+ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module) + _megatron_fsdp_wrapper_types()
 
 
 def unwrap_model(model, module_instances=ALL_MODULE_WRAPPER_CLASSNAMES):
@@ -621,17 +636,88 @@ def _can_safely_resize_storage(tensor: torch.Tensor) -> bool:
     of a DDP flat buffer).  This function returns True only when the tensor
     exclusively owns its entire storage, making ``resize_(0)`` safe.
     """
-    return (
-        # Storage holds exactly the elements of this tensor – no room for
-        # other tensors sharing the same storage.
-        tensor.storage().size() == tensor.numel()
-        # Tensor starts at the beginning of the storage – not a slice/view
-        # offset into a larger buffer.
-        and tensor.storage_offset() == 0
-        # Tensor is contiguous in memory – rules out transposed or
-        # non-contiguous views that only occupy part of the storage layout.
-        and tensor.is_contiguous()
-    )
+    try:
+        return (
+            tensor.untyped_storage().size() == tensor.numel() * tensor.element_size()
+            and tensor.storage_offset() == 0
+            and tensor.is_contiguous()
+        )
+    except RuntimeError:
+        # DTensor / Megatron-FSDP shards expose a dummy Python storage.
+        return False
+
+
+
+def _mfsdp_param_and_grad_buffer(model_chunk):
+    pagb = getattr(model_chunk, "param_and_grad_buffer", None)
+    if pagb is not None:
+        return pagb
+    inner = getattr(model_chunk, "module", None)
+    return getattr(inner, "param_and_grad_buffer", None) if inner is not None else None
+
+
+def _iter_mfsdp_persistent_buffers(pagb):
+    for group in getattr(pagb, "parameter_groups", None) or []:
+        for attr in ("model_weight_buffer", "main_weight_buffer", "grad_buffer"):
+            buf = getattr(group, attr, None)
+            if buf is not None and getattr(buf, "data", None) is not None:
+                yield buf
+
+
+def _offload_mfsdp_model_to_cpu(model_chunk) -> bool:
+    """CPU-offload Megatron-FSDP persistent buffers (DDP-buffer analog)."""
+    pagb = _mfsdp_param_and_grad_buffer(model_chunk)
+    if pagb is None:
+        return False
+    try:
+        from megatron.core.distributed.fsdp.src.megatron_fsdp.param_and_grad_buffer import _free_storage
+    except ImportError:
+        return False
+    for buf in _iter_mfsdp_persistent_buffers(pagb):
+        data = buf.data
+        if data.device.type == "cpu":
+            continue
+        try:
+            if data._typed_storage()._size() == 0:
+                continue
+        except RuntimeError:
+            continue
+        if getattr(buf, "cpu_data", None) is None:
+            buf.cpu_data = torch.empty(data.shape, dtype=data.dtype, device="cpu", pin_memory=True)
+            buf.data_shape = torch.Size(data.shape)
+        else:
+            assert buf.cpu_data.shape == data.shape, (buf.cpu_data.shape, data.shape)
+            assert buf.cpu_data.dtype == data.dtype, (buf.cpu_data.dtype, data.dtype)
+        buf.cpu_data.copy_(data, non_blocking=False)
+        _free_storage(data)
+    _clear_te_fp8_weight_workspaces(model_chunk)
+    return True
+
+
+def _load_mfsdp_model_to_gpu(model_chunk, load_grad: bool = True) -> bool:
+    pagb = _mfsdp_param_and_grad_buffer(model_chunk)
+    if pagb is None:
+        return False
+    try:
+        from megatron.core.distributed.fsdp.src.megatron_fsdp.param_and_grad_buffer import _alloc_storage
+    except ImportError:
+        return False
+    for buf in _iter_mfsdp_persistent_buffers(pagb):
+        data = buf.data
+        cpu = getattr(buf, "cpu_data", None)
+        if cpu is None:
+            continue
+        is_grad_buf = getattr(buf, "is_data_distributed", None) is not None and "grad" in type(buf).__name__.lower()
+        if not load_grad and is_grad_buf:
+            continue
+        try:
+            storage_size = data._typed_storage()._size()
+        except RuntimeError:
+            continue
+        if storage_size == 0:
+            _alloc_storage(data, getattr(buf, "data_shape", cpu.shape))
+            data.copy_(cpu, non_blocking=True)
+    return True
 
 
 def _clear_te_fp8_weight_workspaces(model_chunk):
@@ -668,7 +754,11 @@ def offload_megatron_model_to_cpu(models):
     - fp32 main_parameter chunked in model and dp group
     - fp32 optimizer state chunked in model and dp group
     """
+    fsdp_types = _megatron_fsdp_wrapper_types()
     for model_chunk in models:
+        if fsdp_types and isinstance(model_chunk, fsdp_types):
+            if _offload_mfsdp_model_to_cpu(model_chunk):
+                continue
         if isinstance(model_chunk, DDP):
             model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
             for buffers in model_chunk_all_buffers:
@@ -758,7 +848,11 @@ def load_megatron_model_to_gpu(models, load_grad=True, load_frozen_params=True):
         load_grad: Whether to load gradients.
         load_frozen_params: Whether to load frozen parameters.
     """
+    fsdp_types = _megatron_fsdp_wrapper_types()
     for model_chunk in models:
+        if fsdp_types and isinstance(model_chunk, fsdp_types):
+            if _load_mfsdp_model_to_gpu(model_chunk, load_grad=load_grad):
+                continue
         if isinstance(model_chunk, DDP):
             model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
             for buffers in model_chunk_all_buffers:
@@ -1680,10 +1774,7 @@ def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
     from megatron.core.distributed import finalize_model_grads
     from megatron.core.utils import get_model_config
 
-    try:
-        from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel as megatron_FSDP
-    except ImportError:
-        megatron_FSDP = DDP
+    megatron_fsdp_types = _megatron_fsdp_wrapper_types() + (DDP,)
 
     # register some callbacks for megatron training, following https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.0rc7/megatron/training/training.py#L2039-L2057
     for one_model in model:
@@ -1696,7 +1787,7 @@ def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
         align_grad_reduce = True  # default to True, seldom to be false
         align_param_gather = getattr(one_model.ddp_config, "align_param_gather", False)
 
-        if isinstance(model[0], megatron_FSDP | DDP) and overlap_grad_reduce:
+        if isinstance(model[0], megatron_fsdp_types) and overlap_grad_reduce:
             assert config.no_sync_func is None, (
                 "When overlap_grad_reduce is True, config.no_sync_func must be None; "
                 "a custom no_sync_func is not supported when overlapping grad-reduce"
