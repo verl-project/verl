@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
+
 import pytest
 from omegaconf import OmegaConf
 from omegaconf.errors import ValidationError
@@ -22,6 +24,13 @@ from verl.workers.config.rollout import MultiTurnConfig
 
 def test_invalid_tool_call_limit_defaults_to_disabled() -> None:
     assert MultiTurnConfig().max_consecutive_invalid_tool_calls is None
+
+
+def test_invalid_tool_call_limit_config_is_immutable() -> None:
+    config = MultiTurnConfig(max_consecutive_invalid_tool_calls=5)
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        config.max_consecutive_invalid_tool_calls = 6
 
 
 @pytest.mark.parametrize("value", [0, -1, True, False, 1.5, "5"])
