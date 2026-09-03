@@ -31,6 +31,7 @@ from tests.utils.test_continuous_token_on_cpu import (
     _MockMiniMaxVLAssistantProcessor,
     _MockQwenVLTokenizer,
     _QwenBoundaryTokenizer,
+    _RecordingTemplateProcessor,
     _RecordingTemplateTokenizer,
     _TemplateTokenizer,
 )
@@ -192,6 +193,20 @@ def test_vl_reconstructor_does_not_mutate_caller_messages():
     reconstructor._render_text(messages, add_generation_prompt=True, tools=None)
 
     assert messages == expected
+
+
+def test_base_reconstructor_preserves_empty_tools_semantics_for_text_and_vl():
+    messages = [{"role": "user", "content": "question"}]
+
+    text_tokenizer = _RecordingTemplateTokenizer()
+    text_builder = ContinuousTokenBuilder(text_tokenizer)
+    _resolve_reconstructor(text_builder)(text_builder)._render_text(messages, add_generation_prompt=True, tools=[])
+    assert text_tokenizer.calls[-1]["tools"] == []
+
+    vl_processor = _RecordingTemplateProcessor()
+    vl_builder = VLContinuousTokenBuilder(_MockQwenVLTokenizer(), vl_processor)
+    _resolve_reconstructor(vl_builder)(vl_builder)._render_text(messages, add_generation_prompt=True, tools=[])
+    assert vl_processor.template_kwargs[-1]["tools"] is None
 
 
 def test_default_builder_encodes_prepared_assistant_continuation_once():

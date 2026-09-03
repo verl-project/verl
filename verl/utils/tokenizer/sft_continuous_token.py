@@ -113,7 +113,8 @@ class _AssistantReconstructor:
             self.builder.processor if isinstance(self.builder, VLContinuousTokenMixin) else self.builder.tokenizer
         )
         template_kwargs = dict(self.builder.chat_template_kwargs)
-        if tools:
+        # Text CT always forwarded ``tools``, including ``[]``; VL CT only forwarded non-empty tools.
+        if tools or not isinstance(self.builder, VLContinuousTokenMixin):
             template_kwargs["tools"] = tools
         rendered = apply_chat_template(
             template_owner,

@@ -2473,7 +2473,7 @@ class _RecordingTemplateProcessor(_MockQwenVLProcessor):
     def apply_chat_template(
         self, messages, tokenize=False, add_generation_prompt=False, tools=None, return_dict=False, **kwargs
     ):
-        self.template_kwargs.append(dict(kwargs))
+        self.template_kwargs.append({"tools": tools, **kwargs})
         return super().apply_chat_template(
             messages,
             tokenize=tokenize,
