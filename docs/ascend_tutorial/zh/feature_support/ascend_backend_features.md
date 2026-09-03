@@ -305,7 +305,9 @@ VeOmni 是一个统一的强化学习训练后端，专为大规模模型的高�
 | `actor_rollout_ref.actor.veomni.enable_reentrant` | 是否使用可重入的梯度检查点，默认值为false|
 | `actor_rollout_ref.actor.veomni.ckpt_manager` | 检查点管理器，默认值为dcp|
 | `actor_rollout_ref.actor.veomni.init_device` | 模型权重初始化设备，支持cpu、cuda、meta、npu，默认值为meta|
-| `actor_rollout_ref.actor.veomni.activation_gpu_limit` | 激活卸载时GPU上允许保留的激活显存限制（GB），默认值为0.0|
+| `actor_rollout_ref.actor.veomni.enable_async_activation_offload` | 是否启用基于独立流的异步激活卸载，默认值为false；VeOmni后端仅支持该模式，设置`actor_rollout_ref.model.enable_activation_offload`会直接报错|
+| `actor_rollout_ref.actor.veomni.activation_offload_modules` | 异步激活卸载的模块名匹配模式，默认值为[]（从模型的`_no_split_modules`自动发现）|
+| `actor_rollout_ref.actor.veomni.activation_offload_host_cache_limit_gb` | 异步激活卸载在步与步之间保留的空闲锁页主机缓冲上限（GB），默认值为4.0|
 | `actor_rollout_ref.rollout.moe_load_balance_metrics_interval` | Rollout侧MoE专家负载指标上报间隔，默认值为0（禁用）；需要同时开启`actor_rollout_ref.rollout.enable_rollout_routing_replay`以记录路由决策|
 
 #### Router Replay 支持

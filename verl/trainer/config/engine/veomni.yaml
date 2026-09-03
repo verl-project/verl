@@ -80,7 +80,19 @@ qat_implementation: none
 
 force_use_huggingface: false
 
-activation_gpu_limit: 0.0
+# Offload activations to CPU with VeOmni's stream-based D2H/H2D transfers. This is the only
+# activation offload mode this engine supports; model.enable_activation_offload (the synchronous
+# saved_tensors_hooks path) is rejected.
+enable_async_activation_offload: false
+
+# Module name patterns whose activations are offloaded when enable_async_activation_offload=true.
+# Supports segment-aware globs (`model.layers.*` matches direct children only) and `{*}` for
+# sequential groups (`model.layers.{*}`). Empty means auto-discovery from model._no_split_modules.
+activation_offload_modules: []
+
+# Upper bound in GB on the free pinned-host buffers async activation offload keeps for reuse
+# between steps. In-flight offloads may exceed it; 0 disables buffer reuse.
+activation_offload_host_cache_limit_gb: 4.0
 
 # List of basic modules to use
 basic_modules: []

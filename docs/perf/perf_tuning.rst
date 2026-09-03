@@ -123,6 +123,16 @@ Therefore, users may need to tune the ``*micro_batch_size_per_gpu`` to accelerat
    Set ``actor_rollout_ref.model.enable_activation_offload=True`` and ``critic.model.enable_activation_offload=True``.
    This often works together with gradient checkpointing to get larger micro-batch sizes and it's only available in FSDP backend now.
 
+   The VeOmni backend does not support this synchronous mode and rejects the flag; use
+   ``actor_rollout_ref.actor.veomni.enable_async_activation_offload=True`` instead, which overlaps
+   the device-to-host and host-to-device copies with compute rather than blocking on them.
+   By default the offloaded modules are discovered from the model's
+   ``_no_split_modules``; override that with
+   ``actor_rollout_ref.actor.veomni.activation_offload_modules=[model.layers.{*}]`` when the model
+   does not declare them or when only part of the stack should be offloaded. Free pinned-host
+   buffers are capped by ``actor_rollout_ref.actor.veomni.activation_offload_host_cache_limit_gb``
+   (default 4.0 GB).
+
 Tuning for Dynamic Batch Size
 -----------------------------
 

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import math
 import os
 import warnings
 from dataclasses import dataclass, field
@@ -356,8 +357,18 @@ class VeOmniEngineConfig(EngineConfig):
         load_balancing_loss_implementation (str): MoE load-balancing loss kernel.
             ``"eager"`` (default) or ``"triton"``.
         force_use_huggingface (bool): Force loading model from huggingface, default False
-        activation_gpu_limit (float): When enabling activation offload, `activation_gpu_limit` GB
-            activations are allowed to reserve on GPU, default 0.0
+        enable_async_activation_offload (bool): Offload activations to CPU with VeOmni's
+            stream-based D2H/H2D transfers. This is the only activation offload mode the VeOmni
+            engine supports; ``model.enable_activation_offload`` (the synchronous
+            ``saved_tensors_hooks`` path) is rejected. default False
+        activation_offload_modules (list[str]): Module name patterns whose activations are
+            offloaded when ``enable_async_activation_offload=True``. Supports segment-aware globs
+            (``model.layers.*`` matches direct children only) and ``{*}`` for sequential groups
+            (``model.layers.{*}``). Empty means auto-discovery from ``model._no_split_modules``,
+            which fails loudly when the model does not declare them. default []
+        activation_offload_host_cache_limit_gb (float): Upper bound in GB on the free pinned-host
+            buffers that async activation offload keeps around for reuse between steps. In-flight
+            offloads may exceed it; 0 disables buffer reuse. default 4.0
         basic_modules (list[str]): List of basic modules to use, default None
         forward_prefetch (bool): Whether to prefetch parameters for next forward pass, default False
         model_dtype (str): Model data type used to initialize the transformers model. default "fp32"
@@ -439,7 +450,9 @@ class VeOmniEngineConfig(EngineConfig):
     mhc_implementation: str = "eager"
     qat_implementation: str = "none"
     force_use_huggingface: bool = False
-    activation_gpu_limit: float = 0.0
+    enable_async_activation_offload: bool = False
+    activation_offload_modules: list[str] = field(default_factory=list)
+    activation_offload_host_cache_limit_gb: float = 4.0
     basic_modules: Optional[list[str]] = field(default_factory=list)
     pad_to_length: bool = False
     pad_to_length_bucket: int = 1024
@@ -447,6 +460,14 @@ class VeOmniEngineConfig(EngineConfig):
     def __post_init__(self):
         super().__post_init__()
         assert self.strategy in ["veomni"], f"strategy {self.strategy} not supported"
+
+        if not math.isfinite(self.activation_offload_host_cache_limit_gb) or (
+            self.activation_offload_host_cache_limit_gb < 0
+        ):
+            raise ValueError(
+                "activation_offload_host_cache_limit_gb must be a finite non-negative value, got "
+                f"{self.activation_offload_host_cache_limit_gb}."
+            )
 
         replacements = {
             "flash_attention_2": "veomni_flash_attention_2_with_sp",

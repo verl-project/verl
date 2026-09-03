@@ -59,7 +59,9 @@ actor_rollout_ref:
       mhc_implementation: eager
       qat_implementation: none
       force_use_huggingface: false
-      activation_gpu_limit: 0.0
+      enable_async_activation_offload: false
+      activation_offload_modules: []
+      activation_offload_host_cache_limit_gb: 4.0
       basic_modules: []
       pad_to_length: ${oc.select:actor_rollout_ref.actor.pad_to_length,False}
       pad_to_length_bucket: 1024
@@ -254,7 +256,9 @@ actor_rollout_ref:
       mhc_implementation: eager
       qat_implementation: none
       force_use_huggingface: false
-      activation_gpu_limit: 0.0
+      enable_async_activation_offload: false
+      activation_offload_modules: []
+      activation_offload_host_cache_limit_gb: 4.0
       basic_modules: []
       pad_to_length: ${oc.select:actor_rollout_ref.ref.pad_to_length,False}
       pad_to_length_bucket: ${oc.select:actor_rollout_ref.actor.veomni.pad_to_length_bucket,1024}
@@ -561,7 +565,9 @@ critic:
     mhc_implementation: eager
     qat_implementation: none
     force_use_huggingface: false
-    activation_gpu_limit: 0.0
+    enable_async_activation_offload: false
+    activation_offload_modules: []
+    activation_offload_host_cache_limit_gb: 4.0
     basic_modules: []
     pad_to_length: false
     pad_to_length_bucket: 1024
