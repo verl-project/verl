@@ -6,7 +6,7 @@
 # NODE_RANK in [0, 3], for example:
 #   MASTER_ADDR=<node-0-hostname> NODE_RANK=0 bash examples/sft/gsm8k/run_nemotron_3_super_megatron.sh
 #
-# Dependency snapshot verified against recent upstream main (2026-07-29):
+# Pinned dependency snapshot:
 #   Base container: nvcr.io/nvidia/pytorch:26.06-py3 (CUDA 13.3, Python 3.12)
 #   Megatron-Bridge: 1f12931e2f34ec26f578a4cffe15adc06f71a5a2
 #   Megatron Core: 0.19.0 at cd4afffa648426a959dc7cb1e24b5ce7d0c3ff54
@@ -16,8 +16,8 @@
 # Keep Megatron Core at the commit vendored by Megatron-Bridge rather than
 # installing an unrelated MCore main commit. Build Transformer Engine,
 # mamba-ssm, and causal-conv1d against the container's installed Torch/CUDA
-# (without build isolation). The current stable verl image's Transformers 5.3
-# is too old for this Megatron-Bridge snapshot and must be upgraded.
+# (without build isolation). verl images with Transformers 5.3 are too old for
+# this Megatron-Bridge snapshot and must be upgraded.
 #
 # Reproducible image setup:
 #   git clone --recurse-submodules https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
@@ -47,9 +47,13 @@ PYTHON_BIN=${PYTHON_BIN:-python}
 # ============================================================
 # Data and model
 # ============================================================
-DATASET_DIR=${DATASET_DIR:-${HOME}/data/gsm8k}
+# Prepare the message-formatted SFT dataset with:
+#   python examples/data_preprocess/gsm8k_multiturn_sft.py \
+#     --revision 740312add88f781978c0658806c59bc2815b9866 \
+#     --local_save_dir "$HOME/data/gsm8k_sft"
+DATASET_DIR=${DATASET_DIR:-${HOME}/data/gsm8k_sft}
 TRAIN_FILES=${TRAIN_FILES:-${DATASET_DIR}/train.parquet}
-VAL_FILES=${VAL_FILES:-${DATASET_DIR}/eval.parquet}
+VAL_FILES=${VAL_FILES:-${DATASET_DIR}/test.parquet}
 
 MODEL_PATH=${MODEL_PATH:-nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16}
 TOKENIZER_PATH=${TOKENIZER_PATH:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}

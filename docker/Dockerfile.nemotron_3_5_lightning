@@ -11,10 +11,13 @@ ARG VERL_COMMIT=unknown
 ARG TRANSFORMER_ENGINE_COMMIT=e7c550c5f80636cf841a8204b1d6f85a5f3f28b7
 ARG MEGATRON_BRIDGE_COMMIT=c93251151adeeadbae3ff2a2bf5ee7a1c34cff01
 ARG MCORE_COMMIT=cd4afffa648426a959dc7cb1e24b5ce7d0c3ff54
+# Exact commit tagged as v0.27.1; keep the SHA for immutable rebuilds.
 ARG VLLM_COMMIT=6e448d0ea9bf3d88d898b65449ca6dc2aec170ac
 ARG TRANSFORMERS_VERSION=5.10.4
 ARG RAY_VERSION=2.57.0
 ARG WANDB_VERSION=0.27.2
+ARG OPENTELEMETRY_VERSION=1.43.0
+ARG OPENTELEMETRY_SEMCONV_VERSION=0.64b0
 ARG TRANSFER_QUEUE_VERSION=0.1.8
 ARG TENSORDICT_VERSION=0.10.0
 ARG CAUSAL_CONV1D_VERSION=1.6.2.post1
@@ -51,8 +54,8 @@ RUN apt-get update && \
         ninja-build && \
     rm -rf /var/lib/apt/lists/*
 
-# Fail closed if the public base tag moves to a different PyTorch build.
-RUN python -c 'import torch; assert torch.__version__ == "2.13.0a0+8145d630e8.nv26.06", torch.__version__'
+# Fail closed if the public base tag moves to a different Python/PyTorch build.
+RUN python -c 'import sys, torch; assert sys.version_info[:2] == (3, 12), sys.version; assert torch.__version__ == "2.13.0a0+8145d630e8.nv26.06", torch.__version__'
 
 RUN python -m pip uninstall -y \
         transformer-engine \
@@ -108,12 +111,16 @@ RUN python -m pip install \
         "TransferQueue==${TRANSFER_QUEUE_VERSION}" \
         "transformers==${TRANSFORMERS_VERSION}" \
         "wandb==${WANDB_VERSION}" \
+        "opentelemetry-api==${OPENTELEMETRY_VERSION}" \
+        "opentelemetry-sdk==${OPENTELEMETRY_VERSION}" \
+        "opentelemetry-semantic-conventions==${OPENTELEMETRY_SEMCONV_VERSION}" \
+        "opentelemetry-exporter-otlp==${OPENTELEMETRY_VERSION}" \
         /workspace/verl && \
     python -m pip install --no-deps -e /workspace/verl && \
     python -m pip check
 
-ENV PYTHONPATH=/workspace/verl:/opt/Megatron-Bridge/src:/opt/Megatron-Bridge/3rdparty/Megatron-LM:${PYTHONPATH}
+ENV PYTHONPATH=/workspace/verl:/opt/Megatron-Bridge/src:/opt/Megatron-Bridge/3rdparty/Megatron-LM
 
-RUN python -c 'import causal_conv1d, codetiming, mamba_ssm, megatron.bridge, megatron.core, ray, tensordict, torch, transfer_queue, transformer_engine, transformers, verl, vllm, wandb; from megatron.core.ssm import mamba_mixer as mm; assert torch.__version__ == "2.13.0a0+8145d630e8.nv26.06"; assert transformer_engine.__version__ == "2.18.0"; assert transformers.__version__ == "5.10.4"; assert ray.__version__ == "2.57.0"; assert tensordict.__version__ == "0.10.0"; assert wandb.__version__ == "0.27.2"; assert vllm.__version__.startswith("0.27.2.dev0+g6e448d0ea"); assert mm.HAVE_MAMBA_SSM; assert mm.causal_conv1d_fn is not None; print({"torch": torch.__version__, "transformer_engine": transformer_engine.__version__, "transformers": transformers.__version__, "vllm": vllm.__version__, "ray": ray.__version__, "wandb": wandb.__version__})'
+RUN python -c 'import causal_conv1d, codetiming, importlib.metadata, mamba_ssm, megatron.bridge, megatron.core, ray, tensordict, torch, transfer_queue, transformer_engine, transformers, verl, vllm, wandb; from megatron.core.ssm import mamba_mixer as mm; from packaging.version import Version; assert torch.__version__ == "2.13.0a0+8145d630e8.nv26.06"; assert transformer_engine.__version__ == "2.18.0"; assert transformers.__version__ == "5.10.4"; assert ray.__version__ == "2.57.0"; assert tensordict.__version__ == "0.10.0"; assert wandb.__version__ == "0.27.2"; assert importlib.metadata.version("opentelemetry-api") == "1.43.0"; assert importlib.metadata.version("opentelemetry-sdk") == "1.43.0"; assert Version(vllm.__version__).base_version == "0.27.1"; assert mm.HAVE_MAMBA_SSM; assert mm.causal_conv1d_fn is not None; print({"torch": torch.__version__, "transformer_engine": transformer_engine.__version__, "transformers": transformers.__version__, "vllm": vllm.__version__, "ray": ray.__version__, "wandb": wandb.__version__, "opentelemetry": importlib.metadata.version("opentelemetry-api")})'
 
 CMD ["bash"]

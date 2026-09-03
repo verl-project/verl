@@ -36,11 +36,19 @@ PYTHON_BIN=${PYTHON_BIN:-python3}
 # Data and model
 # ============================================================
 # Prepare the message-formatted SFT dataset with:
-#   python examples/data_preprocess/gsm8k_multiturn_sft.py
+#   python examples/data_preprocess/gsm8k_multiturn_sft.py \
+#     --revision 740312add88f781978c0658806c59bc2815b9866 \
+#     --local_save_dir "$HOME/data/gsm8k_sft"
 DATASET_DIR=${DATASET_DIR:-${HOME}/data/gsm8k_sft}
 TRAIN_FILES=${TRAIN_FILES:-${DATASET_DIR}/train.parquet}
 VAL_FILES=${VAL_FILES:-${DATASET_DIR}/test.parquet}
 
+# For exact reproduction, download the validated model snapshot first:
+#   hf download nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16 \
+#     --revision d468880b6ad3c6e0d21377ce7242adaea4cc884d \
+#     --local-dir "$HOME/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"
+# Then point MODEL_PATH at that directory. Current main does not yet expose a
+# model revision override through HFModelConfig.
 MODEL_PATH=${MODEL_PATH:-nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16}
 TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_PATH}}
 
@@ -54,7 +62,7 @@ CP_SIZE=${CP_SIZE:-1}
 EP_SIZE=${EP_SIZE:-8}
 ETP_SIZE=${ETP_SIZE:-1}
 
-TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-128}
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-8}
 MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-1}
 MAX_LENGTH=${MAX_LENGTH:-4096}
 MAX_TOKEN_LEN_PER_GPU=${MAX_TOKEN_LEN_PER_GPU:-${MAX_LENGTH}}

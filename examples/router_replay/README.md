@@ -86,3 +86,7 @@ capture path only produces a correctly-sized buffer starting from **vLLM `>= 0.2
 an actionable error when `enable_rollout_routing_replay=True`, instead of crashing
 later inside vLLM.
 
+Combining R3 with MTP speculative rollout additionally requires **vLLM `>= 0.26.0`**.
+Earlier releases can include draft-model router decisions in the captured target
+routes. verl fails fast when both `actor_rollout_ref.model.mtp.enable_rollout=True`
+and rollout routing replay are enabled on an older vLLM version.
