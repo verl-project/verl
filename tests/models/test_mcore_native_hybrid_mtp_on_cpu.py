@@ -327,6 +327,70 @@ def test_gpt_provider_with_hybrid_pattern_is_not_misclassified(monkeypatch):
     assert overrides == {}
 
 
+def test_disabled_mtp_clears_generic_and_hybrid_provider_overrides(monkeypatch):
+    megatron_utils = _load_megatron_utils_with_stubs(monkeypatch)
+    hf_config = SimpleNamespace(num_nextn_predict_layers=1)
+    model_config = SimpleNamespace(
+        hf_config=hf_config,
+        mtp=SimpleNamespace(enable=False, mtp_loss_scaling_factor=0.3),
+    )
+    engine_config = SimpleNamespace(
+        override_transformer_config={
+            "mtp_num_layers": 2,
+            "mtp_hybrid_override_pattern": "*E",
+            "mtp_use_repeated_layer": True,
+            "keep_mtp_spec_in_bf16": True,
+            "mtp_loss_scaling_factor": 0.3,
+        }
+    )
+
+    megatron_utils.check_mtp_config(model_config, engine_config)
+
+    assert hf_config.num_nextn_predict_layers == 0
+    assert engine_config.override_transformer_config == {"mtp_num_layers": None}
+
+    mtp_support = _load_module(
+        "mtp_support_disabled_test",
+        "verl/models/mcore/mtp_support.py",
+    )
+
+    class HybridModelProvider:
+        pass
+
+    overrides = dict(engine_config.override_transformer_config)
+    configured = mtp_support.configure_native_hybrid_mtp(
+        HybridModelProvider(),
+        SimpleNamespace(enable=False),
+        overrides,
+    )
+
+    assert configured is False
+    assert overrides == {
+        "mtp_num_layers": None,
+        "mtp_hybrid_override_pattern": None,
+        "mtp_use_repeated_layer": False,
+        "keep_mtp_spec_in_bf16": False,
+    }
+
+    strict_gpt_overrides = {"mtp_num_layers": None}
+    configured = mtp_support.configure_native_hybrid_mtp(
+        object(),
+        SimpleNamespace(enable=False),
+        strict_gpt_overrides,
+    )
+
+    assert configured is False
+    assert strict_gpt_overrides == {"mtp_num_layers": None}
+
+
+def test_convert_to_nested_tensor_rejects_short_labels(monkeypatch):
+    model_forward = _load_model_forward_with_stubs(monkeypatch)
+    labels = torch.tensor([[10, 11, 12]])
+
+    with pytest.raises(ValueError, match="label length 3 is shorter than input length 4"):
+        model_forward._convert_to_nested_tensor(labels, [4])
+
+
 def test_native_hybrid_mtp_uses_input_ids_targets_and_raw_loss_mask(monkeypatch):
     model_forward = _load_model_forward_with_stubs(monkeypatch)
     packed_seq_params = SimpleNamespace()
@@ -490,7 +554,7 @@ def test_legacy_gpt_mtp_keeps_shifted_labels_and_loss_mask(monkeypatch):
     preprocess_calls = []
 
     def preprocess_thd(value, *, need_roll=False, **kwargs):
-        preprocess_calls.append(need_roll)
+        preprocess_calls.append((need_roll, kwargs.get("pad_to_length_bucket")))
         values = value.values() if value.is_nested else value.reshape(-1)
         if need_roll:
             values = torch.roll(values, shifts=-1, dims=0)
@@ -545,6 +609,7 @@ def test_legacy_gpt_mtp_keeps_shifted_labels_and_loss_mask(monkeypatch):
         },
         data_format="thd",
         mtp_enable_train=True,
+        pad_to_length_bucket=8,
     )
 
     torch.testing.assert_close(
@@ -562,7 +627,7 @@ def test_legacy_gpt_mtp_keeps_shifted_labels_and_loss_mask(monkeypatch):
     assert "loss_mask" not in processor_args
     # MTP labels, the auxiliary loss mask, and the normal logits label each
     # take the legacy shifted path. Input IDs and temperature remain unshifted.
-    assert preprocess_calls == [False, True, True, True, False]
+    assert preprocess_calls == [(False, 8), (True, 8), (True, 8), (True, 8), (False, 8)]
 
 
 def test_patch_engine_mtp_skips_all_legacy_patches_for_native_hybrid_model(monkeypatch):

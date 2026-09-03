@@ -1823,6 +1823,15 @@ def check_mtp_config(model_config: HFModelConfig, engine_config: McoreEngineConf
         # Force the provider override so MTP remains disabled after that reload.
         engine_config.override_transformer_config["mtp_num_layers"] = None
         engine_config.override_transformer_config.pop("mtp_loss_scaling_factor", None)
+        # Provider type is not known yet. Remove stale HybridProvider-only
+        # settings here; configure_native_hybrid_mtp will add explicit disabled
+        # values later if the resolved provider is actually hybrid.
+        for hybrid_key in (
+            "mtp_hybrid_override_pattern",
+            "mtp_use_repeated_layer",
+            "keep_mtp_spec_in_bf16",
+        ):
+            engine_config.override_transformer_config.pop(hybrid_key, None)
         return
 
     elif enable_mtp and not has_mtp:

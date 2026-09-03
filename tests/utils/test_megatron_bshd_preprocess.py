@@ -81,6 +81,11 @@ def _load_mcore_util_with_stubbed_megatron(
     spec = importlib.util.spec_from_file_location("mcore_util_regression", util_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    # transformers normally installs ``logging.Logger.warning_once`` during a
+    # full verl import. This isolated source loader intentionally stubs that
+    # dependency, so provide the equivalent logger surface for padding tests.
+    if not hasattr(module.logger, "warning_once"):
+        module.logger.warning_once = module.logger.warning
     return module
 
 

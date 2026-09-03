@@ -180,7 +180,7 @@ def model_forward_gen(vision_model: bool = False):
 
 
 def _convert_to_nested_tensor(v, input_ids_lengths):
-    """Convert regular tensor to NestedTensor, slicing according to input_ids_lengths.
+    """Align labels to jagged full-input lengths, trimming dense right-padding.
 
     Args:
         v: Tensor to convert, shape [batch, seq_len]
@@ -204,7 +204,10 @@ def _convert_to_nested_tensor(v, input_ids_lengths):
         if vi.shape[0] > target_len:
             vi = vi[:target_len]
         elif vi.shape[0] < target_len:
-            vi = torch.cat([vi, torch.ones(target_len - vi.shape[0], dtype=vi.dtype, device=vi.device)])
+            raise ValueError(
+                f"sample {i}: label length {vi.shape[0]} is shorter than input length {target_len}; "
+                "missing labels cannot be inferred"
+            )
         v_split_list.append(vi)
 
     v = torch.nested.nested_tensor(v_split_list, layout=torch.jagged)
@@ -353,6 +356,7 @@ def gptmodel_forward_model_engine(
                         need_roll=True,
                         use_fp8_padding=use_fp8_padding,
                         local_cp_size=local_cp_size,
+                        pad_to_length_bucket=pad_to_length_bucket,
                         cp_layout=cp_layout,
                     )[0]
                 model_kwargs["labels"] = args["label"].contiguous()

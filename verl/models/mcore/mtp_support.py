@@ -36,7 +36,19 @@ def configure_native_hybrid_mtp(provider, mtp_config, transformer_overrides: dic
     is_hybrid_provider = bool(getattr(provider, "is_hybrid_model", False)) or any(
         provider_type.__name__ == "HybridModelProvider" for provider_type in type(provider).__mro__
     )
-    if not mtp_config.enable or not is_hybrid_provider:
+    if not is_hybrid_provider:
+        return False
+    if not mtp_config.enable:
+        # A HybridProvider can infer a repeated MTP block from its retained
+        # hybrid pattern even when mtp_num_layers is None. Override those
+        # provider-specific defaults only after confirming the provider type.
+        transformer_overrides.update(
+            {
+                "mtp_hybrid_override_pattern": None,
+                "mtp_use_repeated_layer": False,
+                "keep_mtp_spec_in_bf16": False,
+            }
+        )
         return False
 
     if not mtp_config.enable_train:

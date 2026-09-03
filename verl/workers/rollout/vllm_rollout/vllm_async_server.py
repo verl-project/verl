@@ -440,6 +440,21 @@ class vLLMHttpServer:
             # releases either lack the feature or under-size the routed-experts host
             # buffer and crash with an IndexError. Fail fast with an actionable message
             # instead of surfacing an opaque runtime error deep inside vLLM.
+            speculative_config = args.get("speculative_config")
+            if isinstance(speculative_config, str):
+                try:
+                    speculative_config = json.loads(speculative_config)
+                except json.JSONDecodeError:
+                    speculative_config = None
+            uses_mtp_speculation = isinstance(speculative_config, Mapping) and (
+                str(speculative_config.get("method", "")).lower() == "mtp"
+            )
+            if uses_mtp_speculation and _VLLM_VERSION < version.parse("0.26.0"):
+                raise RuntimeError(
+                    "MTP speculative rollout with router replay requires vLLM >= 0.26.0 "
+                    f"(installed: {vllm.__version__}) so routed-expert capture excludes draft routers. "
+                    "Upgrade vLLM, disable MTP rollout speculation, or disable router replay."
+                )
             if _VLLM_VERSION < version.parse("0.22.0"):
                 raise RuntimeError(
                     "rollout.enable_rollout_routing_replay=True requires vLLM >= 0.22.0 "
