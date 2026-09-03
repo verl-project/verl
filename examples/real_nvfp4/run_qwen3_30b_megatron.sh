@@ -52,6 +52,14 @@ readonly TRAIN_FILE=${TRAIN_FILE:-/lustre/fsw/general_sa/shuazhang/python_space/
 readonly TEST_FILE=${TEST_FILE:-/lustre/fsw/general_sa/shuazhang/python_space/infix.AI/data/aime-2024/aime-2024-canonical-v1.jsonl}
 readonly CKPTS_DIR=${CKPTS_DIR:-$RAY_DATA_HOME/checkpoints/$PROJECT_NAME/$EXP_NAME}
 readonly TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-20}
+# Truncated importance sampling. verl weights every token's loss by
+# w = clamp(exp(old_logp - rollout_logp), max=2.0). Under BF16 the train/rollout
+# mismatch is tiny (KL ~0.0012) so w ~ 1 and TIS is inert, but under real W4A4 the
+# mismatch is larger and tail-dominated (rollout_is_std 0.089 vs 0.037), so TIS can
+# systematically tilt the gradient. NeMo RL's W4A4 arms carry no IS correction at
+# all and do grow response length, so this needs to be a single-variable knob.
+readonly ROLLOUT_IS=${ROLLOUT_IS:-token}
+case "$ROLLOUT_IS" in token|sequence|null) ;; *) echo "ROLLOUT_IS must be token|sequence|null" >&2; exit 2 ;; esac
 readonly RESUME_MODE=${RESUME_MODE:-disable}
 readonly RESUME_FROM_PATH=${RESUME_FROM_PATH:-}
 readonly VERL_WANDB_RUN_ID=${VERL_WANDB_RUN_ID:-}
@@ -109,7 +117,7 @@ ALGORITHM=(
   algorithm.kl_ctrl.kl_coef=0.0
   algorithm.filter_groups.enable=False
   algorithm.filter_groups.max_num_gen_batches=0
-  algorithm.rollout_correction.rollout_is=token
+  algorithm.rollout_correction.rollout_is="$ROLLOUT_IS"
   algorithm.rollout_correction.rollout_is_threshold=2.0
   algorithm.rollout_correction.rollout_is_batch_normalize=False
   algorithm.rollout_correction.rollout_rs=null
@@ -252,7 +260,7 @@ if [[ "$PRECISION_MODE" = real_nvfp4 ]]; then
   )
 fi
 
-echo "VERL_REAL_NVFP4_CONTRACT profile=$RUN_PROFILE precision=$PRECISION_MODE scope=all_mlp attention=bf16 rollout_activation=per_token transport=bf16 reload=native r3=1 losses=0of3 token_mean=1 tis=1 nodes=${NNODES}x${N_GPUS_PER_NODE} tp=1 pp=1 cp=1 ep=4 batch=${TRAIN_PROMPT_BSZ}x${N_RESP_PER_PROMPT} max_num_seqs=$MAX_NUM_SEQS full_adam=1 resume=$RESUME_MODE"
+echo "VERL_REAL_NVFP4_CONTRACT profile=$RUN_PROFILE precision=$PRECISION_MODE scope=all_mlp attention=bf16 rollout_activation=per_token transport=bf16 reload=native r3=1 losses=0of3 token_mean=1 tis=$ROLLOUT_IS nodes=${NNODES}x${N_GPUS_PER_NODE} tp=1 pp=1 cp=1 ep=4 batch=${TRAIN_PROMPT_BSZ}x${N_RESP_PER_PROMPT} max_num_seqs=$MAX_NUM_SEQS full_adam=1 resume=$RESUME_MODE"
 
 HYDRA_ARGS=(
   --config-path="$WORKING_DIR/recipe/dapo/config" \
