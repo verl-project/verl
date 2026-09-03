@@ -13,6 +13,7 @@
 # limitations under the License.
 # Adapted from https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/hendrycks_math/utils.py
 
+import os
 import re
 from typing import Optional
 
@@ -236,8 +237,16 @@ def verify(
         return correct == 1, pred
 
     # Prefer Minerva (`Answer: ...`); fall back to `\boxed{}` when it fails.
+    #
+    # VERL_MATH_DAPO_STRICT_MINERVA=1 restores the pre-2026-06 behaviour, which
+    # NeMo RL's dapo_math_verifier and verl's own June tree still use: Minerva
+    # only, no boxed fallback. The DAPO prompt demands `Answer: \boxed{...}`,
+    # and a base model emits bare `\boxed{}` instead - 44/44 sampled generations
+    # in run v13 took the fallback. Crediting that removes all pressure to learn
+    # the required format, and with it the long-CoT growth that pressure drives.
+    strict_minerva = os.environ.get("VERL_MATH_DAPO_STRICT_MINERVA") == "1"
     correct, pred = is_correct_minerva(solution_str, answer)
-    if pred != "[INVALID]":
+    if strict_minerva or pred != "[INVALID]":
         return correct, pred
 
     box_correct, box_pred = is_correct_strict_box(solution_str, answer, pause_tokens_index)
