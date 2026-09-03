@@ -58,6 +58,17 @@ readonly TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-20}
 # mismatch is larger and tail-dominated (rollout_is_std 0.089 vs 0.037), so TIS can
 # systematically tilt the gradient. NeMo RL's W4A4 arms carry no IS correction at
 # all and do grow response length, so this needs to be a single-variable knob.
+# DAPO dynamic sampling. NeMo RL runs `use_dynamic_sampling=True` with
+# batch_multiplier=3 and max_gen_batches=20, which resamples until the batch has
+# no all-wrong / all-correct prompt groups: its reported all-wrong rate is 0.00%
+# early on despite only ~6% per-sample accuracy, where the naive rate would be
+# ~37%. Strict scoring drops accuracy to that regime, so without resampling
+# roughly half the groups carry zero advantage and the gradient is gutted.
+# The two knobs belong together.
+readonly GEN_PROMPT_BSZ_MULT=${GEN_PROMPT_BSZ_MULT:-1}
+readonly FILTER_GROUPS=${FILTER_GROUPS:-False}
+readonly MAX_GEN_BATCHES=${MAX_GEN_BATCHES:-0}
+readonly GEN_PROMPT_BSZ=$((TRAIN_PROMPT_BSZ * GEN_PROMPT_BSZ_MULT))
 readonly ROLLOUT_IS=${ROLLOUT_IS:-token}
 case "$ROLLOUT_IS" in token|sequence|null) ;; *) echo "ROLLOUT_IS must be token|sequence|null" >&2; exit 2 ;; esac
 readonly RESUME_MODE=${RESUME_MODE:-disable}
@@ -108,15 +119,16 @@ DATA=(
   data.max_prompt_length=1024
   data.max_response_length="$MAX_RESPONSE_LENGTH"
   data.train_batch_size="$TRAIN_PROMPT_BSZ"
-  data.gen_batch_size="$TRAIN_PROMPT_BSZ"
+  data.gen_batch_size="$GEN_PROMPT_BSZ"
 )
 
 ALGORITHM=(
   algorithm.adv_estimator=grpo
   algorithm.use_kl_in_reward=False
   algorithm.kl_ctrl.kl_coef=0.0
-  algorithm.filter_groups.enable=False
-  algorithm.filter_groups.max_num_gen_batches=0
+  algorithm.filter_groups.enable="$FILTER_GROUPS"
+  algorithm.filter_groups.metric=acc
+  algorithm.filter_groups.max_num_gen_batches="$MAX_GEN_BATCHES"
   algorithm.rollout_correction.rollout_is="$ROLLOUT_IS"
   algorithm.rollout_correction.rollout_is_threshold=2.0
   algorithm.rollout_correction.rollout_is_batch_normalize=False
