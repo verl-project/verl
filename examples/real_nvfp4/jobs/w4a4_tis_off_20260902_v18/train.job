@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+#SBATCH --account=general_sa
+#SBATCH --partition=36x2-a01r,tcpo,batch
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=8
+#SBATCH --job-name=verl-rn4pt-tisoff
+
+set -euo pipefail
+export RN4PT_SKIP_UV_LOCK_CHECK=1
+source "${RN4PT_MANIFEST_OVERRIDE:-/lustre/fsw/general_sa/shuazhang/python_space/verl_for_nvfp4_20251031/verl_nvfp4_e2e_r3_20260831_v3/examples/real_nvfp4/jobs/w4a4_tis_off_20260902_v18/manifest.sh}"
+rn4pt_validate_static
+[[ -s "$RN4PT_PREFLIGHT_PASS" ]] || rn4pt_die "preflight has not passed"
+rn4pt_require_runtime_image
+
+readonly ARM=${ARM:?ARM must be smoke or short}
+case "$ARM" in
+  smoke)
+    readonly EXPECTED_NODES=1
+    readonly RUN_PROFILE=smoke
+    readonly EXP_NAME=${RN4PT_SMOKE_EXP}_j${SLURM_JOB_ID:?}
+    # Verl starts the trainer loop at global_step=1, so total_training_steps=3
+    # executes and logs two real optimizer updates (steps 1 and 2).
+    readonly TOTAL_STEPS=3
+    ;;
+  short)
+    readonly EXPECTED_NODES=8
+    readonly RUN_PROFILE=formal
+    readonly EXP_NAME=${RN4PT_SHORT_EXP}_j${SLURM_JOB_ID:?}
+    readonly TOTAL_STEPS=${TOTAL_STEPS:-20}
+    ;;
+  *) rn4pt_die "invalid ARM=$ARM" ;;
+esac
+readonly FINAL_METRIC_STEP=$TOTAL_STEPS
+[[ "${SLURM_JOB_NUM_NODES:?}" = "$EXPECTED_NODES" ]]
+
+readonly CKPT_DIR=$RN4PT_CHECKPOINTS/$EXP_NAME
+[[ ! -e "$CKPT_DIR" ]] || rn4pt_die "fresh checkpoint collision: $CKPT_DIR"
+mkdir -p "$RN4PT_STATE" "$RN4PT_LOGS"
+readonly JOB_LOG=$RN4PT_LOGS/${EXP_NAME}_${SLURM_JOB_ID:?}.log
+
+nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
+readarray -t nodes_array <<<"$nodes"
+readonly head_node=${nodes_array[0]}
+readonly head_port=$((19000 + SLURM_JOB_ID % 10000))
+readonly dashboard_port=$((29000 + SLURM_JOB_ID % 10000))
+readonly ip_head=$head_node:$head_port
+readonly COMMON_ENV="export PATH=$RN4PT_IMAGE_ENV/.venv/bin:\$PATH; export PYTHONPATH=$RN4PT_VERL:\${PYTHONPATH:-}; export RAY_RUNTIME_ENV_TEMPORARY_REFERENCE_EXPIRATION_S=3600"
+
+ray_pids=()
+cleanup_ray_steps() {
+  local pid
+  for pid in "${ray_pids[@]}"; do
+    kill "$pid" 2>/dev/null || true
+  done
+}
+trap cleanup_ray_steps EXIT
+
+srun --overlap --nodes=1 --ntasks=1 -w "$head_node" \
+  --container-image="$RN4PT_RUNTIME_IMAGE" --container-mounts="$RN4PT_MOUNTS" \
+  bash -lc "$COMMON_ENV; ray start --head --node-ip-address=$head_node --port=$head_port --dashboard-port=$dashboard_port --dashboard-host=0.0.0.0 --block" &
+ray_pids+=("$!")
+
+for ((index=1; index<EXPECTED_NODES; index++)); do
+  node=${nodes_array[$index]}
+  srun --overlap --nodes=1 --ntasks=1 -w "$node" \
+    --container-image="$RN4PT_RUNTIME_IMAGE" --container-mounts="$RN4PT_MOUNTS" \
+    bash -lc "$COMMON_ENV; ray start --address=$ip_head --block" &
+  ray_pids+=("$!")
+done
+
+sleep 15
+
+read -r -d '' DRIVER <<DRIVER_EOF || true
+set -euo pipefail
+$COMMON_ENV
+export WORKING_DIR=$RN4PT_VERL
+export RUNTIME_ENV=$RN4PT_ROOT/runtime_env.yaml
+export NNODES=$EXPECTED_NODES N_GPUS_PER_NODE=4
+export PRECISION_MODE=real_nvfp4 RUN_PROFILE=$RUN_PROFILE
+# Single variable vs the v13 long run: truncated importance sampling off.
+export ROLLOUT_IS=null
+export PROJECT_NAME=$RN4PT_PROJECT EXP_NAME=$EXP_NAME
+export WANDB_ENTITY=shawnzzz WANDB_PROJECT=$RN4PT_PROJECT
+export WANDB_RUN_ID=$EXP_NAME WANDB_RESUME=never
+export VERL_WANDB_RUN_ID=$EXP_NAME VERL_WANDB_RESUME=never
+export CKPTS_DIR=$CKPT_DIR TOTAL_TRAINING_STEPS=$TOTAL_STEPS RESUME_MODE=disable
+cd $RN4PT_VERL
+[[ -f /root/.netrc && ! -L /root/.netrc ]]
+ray start --address=$ip_head --num-cpus=0 --num-gpus=0
+RAY_ADDRESS=$ip_head ray status
+export RAY_ADDRESS=http://127.0.0.1:$dashboard_port
+echo "REAL_NVFP4_PERTOKEN_TRAIN_BEGIN arm=$ARM nodes=$EXPECTED_NODES steps=$TOTAL_STEPS exp=$EXP_NAME"
+stdbuf -oL -eL bash examples/real_nvfp4/run_qwen3_30b_megatron.sh 2>&1 | tee -a $JOB_LOG
+DRIVER_EOF
+
+# Once `ray job submit` has reported success, Slurm can still return a nonzero
+# status while it kills Ray/DataLoader descendants left in this driver step.
+# Preserve that status, but run all semantic and checkpoint gates below before
+# deciding whether the training itself succeeded.
+set +e
+srun --overlap --nodes=1 --ntasks=1 -w "$head_node" \
+  --container-image="$RN4PT_RUNTIME_IMAGE" --container-mounts="$RN4PT_MOUNTS" \
+  bash -lc "$DRIVER"
+readonly DRIVER_STEP_STATUS=$?
+set -e
+
+grep -q 'VERL_REAL_NVFP4_PRECISION_RECIPE PASS scope=all_mlp attention=bf16' "$JOB_LOG"
+grep -q 'VERL_REAL_NVFP4_CONTRACT .*tis=null ' "$JOB_LOG"
+grep -q 'VERL_REAL_NVFP4_ATTESTATION PASS.*scope=all_mlp attention=bf16.*te_version=2.18.0+e7c550c5.*mlp_fc1_nvfp4=48 mlp_fc2_nvfp4=48' "$JOB_LOG"
+grep -q '"cudagraph_mode": "FULL_DECODE_ONLY"' "$JOB_LOG"
+grep -q "'flashinfer_trtllm'" "$JOB_LOG"
+grep -q 'Capturing CUDA graphs (decode, FULL): 100%' "$JOB_LOG"
+grep -q "'max_num_seqs': 128" "$JOB_LOG"
+grep -q 'VERL_REAL_NVFP4_ROLLOUT_ATTESTATION PASS dense_layers=0 moe_layers=48 expected=48' "$JOB_LOG"
+# Receiver-side iteration is fail-closed over the complete actor stream: it
+# rejects packed/scale tensors and requires all 18,432 BF16 expert weights.
+grep -q 'VERL_REAL_NVFP4_EXPORT PASS location=vllm_receive.*expert_weights=18432 expected=18432' "$JOB_LOG"
+grep -q 'VERL_REAL_NVFP4_NATIVE_REFIT PASS refit=0 changed=1' "$JOB_LOG"
+# A GRPO micro-batch can have zero advantage for every response, in which case
+# the optimizer correctly makes no change. Initial refit=0 above still proves
+# native reload changed the dummy rollout model; refit=1 must complete either way.
+grep -Eq 'VERL_REAL_NVFP4_NATIVE_REFIT PASS refit=1 changed=[01]' "$JOB_LOG"
+grep -q 'VERL_REAL_NVFP4_SYNC PASS transport=bf16 quantization=vllm_native_online reload=native' "$JOB_LOG"
+grep -q 'VERL_R3_MONOLITHIC_CAPTURE_PATCH PASS' "$JOB_LOG"
+grep -q 'routing replay layers: 48' "$JOB_LOG"
+grep -q 'Training Progress: 100%' "$JOB_LOG"
+grep -q 'Final validation metrics:' "$JOB_LOG"
+
+grep -Eq "step:$FINAL_METRIC_STEP([^0-9]|$).*actor/loss:" "$JOB_LOG" || \
+  rn4pt_die "final post-update training metric is missing"
+if grep -E 'step:[0-9]+.*actor/loss:' "$JOB_LOG" | \
+  grep -Eiq 'actor/(loss|pg_loss|grad_norm):[[:space:]]*(nan|[-+]?inf)|rollout_corr/rollout_log_ppl:[[:space:]]*(nan|[-+]?inf)|training/rollout_probs_diff_(mean|max):[[:space:]]*(nan|[-+]?inf)'; then
+  rn4pt_die "non-finite rollout/training metric"
+fi
+
+readonly FINAL_CHECKPOINT=$CKPT_DIR/global_step_$TOTAL_STEPS/actor
+readonly CHECKPOINT_MANIFEST=$FINAL_CHECKPOINT/ckpt_contents.json
+readonly OPTIMIZER_CHECKPOINT=$FINAL_CHECKPOINT/optimizer/dist_ckpt
+[[ -s "$CHECKPOINT_MANIFEST" ]] || rn4pt_die "completed checkpoint manifest is missing"
+grep -q '"optimizer"' "$CHECKPOINT_MANIFEST" || rn4pt_die "checkpoint manifest lacks full optimizer state"
+[[ -d "$OPTIMIZER_CHECKPOINT" ]] || rn4pt_die "full-Adam optimizer checkpoint directory is missing"
+find "$OPTIMIZER_CHECKPOINT" -type f -print -quit | grep -q . || rn4pt_die "full-Adam optimizer checkpoint is empty"
+echo "REAL_NVFP4_FULL_ADAM_CHECKPOINT_PASS path=$FINAL_CHECKPOINT"
+
+if (( DRIVER_STEP_STATUS != 0 )); then
+  echo "REAL_NVFP4_DRIVER_CLEANUP_SIGNAL_ACCEPTED status=$DRIVER_STEP_STATUS reason=all_training_and_checkpoint_gates_passed"
+fi
+
+if [[ "$ARM" = smoke ]]; then
+  printf 'job_id=%s\nlog=%s\nexp=%s\n' \
+    "$SLURM_JOB_ID" "$JOB_LOG" "$EXP_NAME" >"$RN4PT_SMOKE_PASS"
+fi
+echo "REAL_NVFP4_PERTOKEN_TRAIN_PASS arm=$ARM steps=$TOTAL_STEPS exp=$EXP_NAME log=$JOB_LOG"
