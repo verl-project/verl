@@ -94,6 +94,66 @@ exp `verl_30b_bf16_control_8n_20260902_v14_j2702860`。**相对 W4A4 arm 只改�
 因此 vLLM 也走 BF16。`train.job` 额外断言两个 attestation **都不出现**、且没有选中
 `nvfp4_per_token`——slime 那次"bf16 baseline 偷偷跑 W4A4 rollout"的坑不能再踩。
 
+## 4b. 跑通 BF16 对照踩到的三个 bug（2026-09-02）
+
+`PRECISION_MODE=bf16` 在此之前从未被执行过，一跑就连挂。按发现顺序：
+
+### bug 1：receiver 异常会把 sender 永久挂死（已修）
+
+`receive_weights` 在 consumer 抛异常时既不 ACK 也不 drain，直接 `_cleanup()` 关 socket。
+sender 正阻塞在 `socket.recv()` 等这个 bucket 的 ACK，而 verl 是先跑完
+`sender.async_send_weights()` 再 `await` receiver 的 future——所以 **receiver 的异常永远没机会抛出来**，
+表现为静默挂死。8 节点那次因此烧满 5 小时、0 步、无任何报错。
+
+`_iter_weights`（real NVFP4 用的迭代器路径）本来就有 `_drain_remaining_buckets_after_failure()`，
+legacy 路径没有。**就是这个不对称让 W4A4 一路正常、BF16 一碰即死。**
+修法：ACK 放进 `finally`、drain 剩余 bucket、再 re-raise。修完故障从「5 小时静默」变成「5 分 23 秒带 traceback」。
+
+py-spy 证据（从镜像抽出 aarch64 二进制、宿主侧 attach）：4 个 sender 全部冻在
+`bucketed_weight_transfer.py:138`、同一个 tensor `model.layers.0.mlp.experts.77.gate_proj.weight`，
+4 次采样 offset 一字不变；4 个 receiver 全部已返回 `worker_busy_loop`。
+
+### bug 2：老 MoE loader 补丁在现代 vLLM 上有害（已修，但不是本次病根）
+
+`patch_vllm_moe_model_weight_loader` 是给 vLLM **0.8.2** 打的（当时 w13/w2 param 没有 weight_loader），
+它会把 param 上的 loader 覆盖成模块级的 `experts.weight_loader`。vLLM ≥ 0.11 在 `create_weights`
+里已经装了正确的 loader，覆盖它有害无益。补丁自己的注释就写着「not need anymore for newer vllm version」。
+已改为：只要 vLLM 暴露 `RoutedExperts` 就跳过。
+
+**但这不是本次的病根**——完整 traceback 显示实际被调用的是 vLLM **自己的**
+`RoutedExperts.weight_loader`（routed_experts.py:858）。我一开始判错了方向。
+
+### bug 3（真病根）：verl legacy MoE 权重同步不兼容 vLLM 0.26
+
+```
+routed_experts.py:914  param.weight_loader(...)
+routed_experts.py:858  weight_loader -> _load_model_weight_or_group_weight_scale
+routed_experts.py:356  -> _load_w13
+routed_experts.py:490  hidden_dim = self._get_hidden_dim(shard_dim, expert_data.ndim)
+routed_experts.py:409  ValueError: shard_dim=0 is not a valid data dimension for a 3D tensor
+```
+
+vLLM 0.26 把 MoE 加载重构成 `RoutedExperts`，其 `weight_loader` 要的是逐 expert 的 **2D** 视图，
+而 verl 的 legacy `model.load_weights` 递过去的是堆叠的 **3D** expert param。
+**verl 主线还 pin 在 vLLM 0.24，所以这条路径在 0.26 上根本没人跑过**——是上游空档，不是本分支弄坏的。
+real NVFP4 完全看不到它，因为那条路径压根不调 `model.load_weights`。
+
+处理：`VERL_VLLM_NATIVE_RELOAD=1` 让非量化路径改走
+`model_runner.reload_weights(..., is_checkpoint_format=True)`，即 real NVFP4 在同一个 vLLM 上
+已经跑通的那个 API。默认行为不变，只有对照 opt-in；`train.job` 断言 marker，防止悄悄回落到坏路径
+还冒充对照。把 legacy loader 移植到 RoutedExperts API 是更完整的修法，但那是相对当前问题的绕路。
+
+**注意**：worker 进程只认 Ray `runtime_env` 注入的环境变量，driver shell 里 `export` 传不到——
+第一次就是这么白跑一轮的（`VERL_VLLM_NATIVE_RELOAD PASS` 计数为 0 即是证据）。
+控制组专用的 `runtime_env_native_reload.yaml` 放在 bundle 目录内（provenance 排除范围），不必重建镜像。
+
+### 结果
+
+1 节点 smoke：step 1/2/3 全部完成、final validation 通过、`shard_dim` 错误归零、
+`VERL_VLLM_NATIVE_RELOAD PASS` × 9。唯一失败是收尾 checkpoint 被 SIGKILL（宿主 OOM）——
+BF16 rollout 每卡常驻约 61GB 权重（NVFP4 约 15GB），1 节点存 30B full-Adam 时宿主内存不够。
+8 节点上 checkpoint 分片到 32 rank，W4A4 已证明可存 399GB，因此不阻塞对照。
+
 ## 5. 下一个候选（对照结果出来后再查）
 
 若对照涨，优先查 verl 特有、且与精度耦合的项：
