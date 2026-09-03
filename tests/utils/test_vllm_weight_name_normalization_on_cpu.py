@@ -465,12 +465,15 @@ def test_expert_alias_base_layer_gets_stripped():
     assert _resolve(worker, model, name) == "language_model.model.layers.0.mlp.experts.gate_up_proj"
 
 
-def test_packed_routed_expert_alias_routed_through_base_layer():
+def test_packed_routed_expert_alias_not_routed_with_lora():
     """Qwen3.5 routed experts: Bridge exports packed ``experts.gate_up_proj``
-    (non-leaf). vLLM's LoRA-wrapped MoE (``FusedMoE3DWithLoRA``) has no
-    ``load_weights``, so AutoWeightsLoader can't dispatch it — route it under
-    ``experts.base_layer.gate_up_proj`` so the loader recurses into ``base_layer``
-    (MoERunner.load_weights -> routed_experts.load_weights)."""
+    (non-leaf). On vLLM with ``BaseLayerWithLoRA.load_weights`` (``_HAS_LORA_LOAD_WEIGHTS``),
+    ``FusedMoEWithLoRA.load_weights`` delegates to ``MoERunner.load_weights`` which
+    handles the packed alias directly — injecting ``.base_layer.`` would make the
+    name ``experts.base_layer.gate_up_proj``, which ``MoERunner`` can't match (it
+    expects bare ``gate_up_proj``), silently dropping every expert. The ``isdigit``
+    guard keeps the packed alias unchanged even when ``base_layer.routed_experts``
+    is live in the namespace."""
     model = _FakeModel(
         {
             "language_model.model.layers.0.mlp.experts.base_layer.routed_experts.w13_weight": torch.empty(0),
@@ -480,9 +483,9 @@ def test_packed_routed_expert_alias_routed_through_base_layer():
     worker = _make_worker(model)
 
     incoming = "language_model.model.layers.0.mlp.experts.gate_up_proj"
-    assert _resolve(worker, model, incoming) == ("language_model.model.layers.0.mlp.experts.base_layer.gate_up_proj")
+    assert _resolve(worker, model, incoming) == incoming
     assert _resolve(worker, model, "language_model.model.layers.0.mlp.experts.down_proj") == (
-        "language_model.model.layers.0.mlp.experts.base_layer.down_proj"
+        "language_model.model.layers.0.mlp.experts.down_proj"
     )
 
 

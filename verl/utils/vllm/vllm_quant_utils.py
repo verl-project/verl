@@ -166,6 +166,12 @@ def get_module_from_param_name(model, name: str):
     # The module path is all but the last part (the parameter's own name)
     path_parts = name.split(".")
     module_path = path_parts[:-1]
+    # merge=False LoRA base sync: strip trailing ``.base_layer`` so the shard
+    # name (e.g. ``q_a_proj``) becomes the last path segment for fusion lookup.
+    had_base_layer = False
+    if len(module_path) >= 2 and module_path[-1] == "base_layer":
+        had_base_layer = True
+        module_path = module_path[:-1]
     # Replace with the fused model name
     packed_modules_mapping = model.packed_modules_mapping
     reversed_mapping = {
@@ -173,8 +179,17 @@ def get_module_from_param_name(model, name: str):
         for fused_name, original_names_list in packed_modules_mapping.items()
         for original_name in original_names_list
     }
+    # DSA indexer.wk/weights_proj are fused into wk_weights_proj inside
+    # load_weights (load-local stacked mapping, not in packed_modules_mapping).
+    # Surface it here so is_fp8_weight resolves and verl re-quantizes BF16->FP8.
+    _INDEXER_WK_FUSED = {"wk": "wk_weights_proj", "weights_proj": "wk_weights_proj"}
+    if module_path[-1] in _INDEXER_WK_FUSED and module_path[-1] not in reversed_mapping:
+        reversed_mapping[module_path[-1]] = _INDEXER_WK_FUSED[module_path[-1]]
     if module_path[-1] in reversed_mapping.keys():
         module_path[-1] = reversed_mapping[module_path[-1]]
+    if had_base_layer:
+        # Re-insert base_layer so traversal lands on the FP8 weight, not the LoRA root.
+        module_path.append("base_layer")
 
     current_module = model
     try:
