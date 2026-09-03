@@ -43,6 +43,10 @@ dist_checkpointing_path: null
 # Whether to use dynamic context parallel scheduling
 dynamic_context_parallel: False
 
+# Project the LM head only for next-token-aligned positions selected by loss_mask.
+# Scalar log-probability and entropy outputs retain the regular sequence layout.
+response_only_lm_head: False
+
 # Maximum packed sequence length per DPxCP rank. A positive integer is required
 # when dynamic_context_parallel=True.
 max_seqlen_per_dp_cp_rank: null

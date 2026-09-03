@@ -1,7 +1,7 @@
 Performance Tuning Guide
 ==============================
 
-Last updated: 07/17/2025.
+Last updated: 08/19/2026.
 
 Author: `Guangming Sheng <https://github.com/PeterSH6>`_, `Jiali Zheng <https://github.com/CurryRice233>`_
 
@@ -248,3 +248,24 @@ This processes the tensor in chunks of shape ``[chunk_size, voc]`` (e.g., 2048) 
 Additionally, during training, standard gradient checkpointing (``enable_gradient_checkpointing=True``) does not apply to entropy calculations. To reduce memory peaks in this context, set:
 ``actor_rollout_ref.actor.entropy_checkpointing = True``
 This enables entropy recomputation specifically for the entropy calculation, lowering memory usage during training.
+
+Project only loss-bearing rows in the Megatron LM head
+-------------------------------------------------------
+
+Agent trajectories can contain long prompts and environment or tool-output
+spans that do not contribute to the policy loss. The unfused Megatron path can
+skip the vocabulary projection for those rows by enabling::
+
+    actor_rollout_ref.actor.megatron.response_only_lm_head = True
+    actor_rollout_ref.ref.megatron.response_only_lm_head = True
+
+The optimization applies the causal shift to ``loss_mask``, selects the
+corresponding hidden-state rows before the LM head, and restores token-level
+log-probability and entropy outputs to their original layout with zeros at
+unselected positions. It supports THD and BSHD inputs together with tensor,
+sequence, context, and pipeline parallelism.
+
+The expected LM-head logits reduction is proportional to the active-row ratio
+``loss_mask.sum() / input_tokens``. This option uses the unfused forward path
+and currently does not support MTP training or top-k distillation. It is most
+useful when the active-row ratio is low and the vocabulary is large.

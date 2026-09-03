@@ -164,6 +164,8 @@ class McoreEngineConfig(EngineConfig):
             for interleaved scheduling.
         context_parallel_size (int): Context parallel size for long sequences.
         dynamic_context_parallel (bool): Whether to enable dynamic context parallel scheduling.
+        response_only_lm_head (bool): Project LM-head logits only for response tokens selected by
+            the policy loss mask, then restore the original scalar-output layout.
         max_seqlen_per_dp_cp_rank (Optional[int]): Maximum sequence length per DPxCP rank.
         sequence_parallel (bool): Whether to enable sequence parallelism.
         use_distributed_optimizer (bool): Whether to use distributed optimizer.
@@ -192,6 +194,7 @@ class McoreEngineConfig(EngineConfig):
     virtual_pipeline_model_parallel_size: Optional[int] = None
     context_parallel_size: int = 1
     dynamic_context_parallel: bool = False
+    response_only_lm_head: bool = False
     entropy_from_logits_with_chunking: bool = False
     entropy_from_logits_chunk_size: int = 2048
     max_seqlen_per_dp_cp_rank: Optional[int] = None

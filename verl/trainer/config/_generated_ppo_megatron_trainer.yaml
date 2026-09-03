@@ -58,6 +58,7 @@ actor_rollout_ref:
       use_dist_checkpointing: false
       dist_checkpointing_path: null
       dynamic_context_parallel: false
+      response_only_lm_head: false
       max_seqlen_per_dp_cp_rank: null
       dist_checkpointing_prefix: ''
       dist_ckpt_optim_fully_reshardable: false
@@ -268,6 +269,7 @@ actor_rollout_ref:
       use_dist_checkpointing: false
       dist_checkpointing_path: null
       dynamic_context_parallel: ${oc.select:actor_rollout_ref.actor.megatron.dynamic_context_parallel,False}
+      response_only_lm_head: false
       max_seqlen_per_dp_cp_rank: ${oc.select:actor_rollout_ref.actor.megatron.max_seqlen_per_dp_cp_rank,null}
       dist_checkpointing_prefix: ''
       dist_ckpt_optim_fully_reshardable: false
@@ -600,6 +602,7 @@ critic:
     use_dist_checkpointing: false
     dist_checkpointing_path: null
     dynamic_context_parallel: false
+    response_only_lm_head: false
     max_seqlen_per_dp_cp_rank: null
     dist_checkpointing_prefix: ''
     dist_ckpt_optim_fully_reshardable: false
