@@ -32,7 +32,8 @@ Notes:
 - as_torch_index: canonicalizes arbitrary group labels to a contiguous 1-D torch.long
   tensor in range [0..G-1]. Robust to torch/numpy/list/tuple, ints/floats/bools,
   numeric strings, UUIDs, mixed object arrays. Near-integer floats (|x-round(x)|<=1e-6)
-  are rounded; otherwise factorization is applied.
+  are rounded first; every recognized label set is then factorized, so sparse or
+  negative labels still yield dense ids usable as positional group indices.
 - group_mean_std: pure-PyTorch per-group mean/std with Bessel correction for variance
   (denominator max(count-1, 1)). Singleton groups fallback to mean=0, std=1 for
   compatibility with common “native” conventions.
@@ -88,9 +89,25 @@ def _to_1d_numpy_object_array(x: Any) -> np.ndarray:
     return arr
 
 
+def _densify(labels: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """Map integer labels onto contiguous ids in [0, G-1], preserving label equality.
+
+    The integer fast paths of :func:`as_torch_index` recognize a label set without
+    renumbering it, so their raw values (sparse, or negative) cannot be used as
+    positional group indices. Factorizing here keeps every path compliant with the
+    documented ``[0..G-1]`` contract that :func:`group_mean_std` indexes against.
+    """
+    _, inverse = torch.unique(labels, sorted=True, return_inverse=True)
+    return inverse.reshape(-1).to(device=device, dtype=torch.long)
+
+
 def as_torch_index(index: Any, device: torch.device | str | None = None) -> torch.Tensor:
     """
     Convert arbitrary group labels to a contiguous 1-D torch.long tensor (0..G-1).
+
+    Labels only carry group identity: the returned ids are renumbered to
+    ``0..G-1`` in sorted label order, so equal labels stay equal but the original
+    label values are not preserved.
 
     Args:
         index: Any iterable of labels or tensor/ndarray.
@@ -112,13 +129,13 @@ def as_torch_index(index: Any, device: torch.device | str | None = None) -> torc
             getattr(torch, "uint8", torch.uint8),
             torch.bool,
         ):
-            return t.to(device=target, dtype=torch.long)
+            return _densify(t.to(dtype=torch.long), target)
 
         if t.dtype in (torch.float16, torch.float32, torch.float64, torch.bfloat16):
             t64 = t.to(dtype=torch.float64)
             rounded = torch.round(t64)
             if torch.allclose(t64, rounded, rtol=0.0, atol=1e-6):
-                return rounded.to(device=target, dtype=torch.long)
+                return _densify(rounded.to(dtype=torch.long), target)
             arr = np.array([str(x.item()) for x in t], dtype=object)
         else:
             arr = np.array([str(x.item()) if hasattr(x, "item") else str(x) for x in t], dtype=object)
@@ -129,20 +146,20 @@ def as_torch_index(index: Any, device: torch.device | str | None = None) -> torc
 
         # Pure integers (incl. bool)
         if arr.dtype != object and np.issubdtype(arr.dtype, np.integer):
-            return torch.from_numpy(arr.astype(np.int64, copy=False)).to(device=target)
+            return _densify(torch.from_numpy(arr.astype(np.int64, copy=False)), target)
 
         # Floats nearly equal to integers
         if arr.dtype != object and np.issubdtype(arr.dtype, np.floating):
             arr64 = arr.astype(np.float64, copy=False)
             rounded = np.rint(arr64)
             if np.allclose(arr64, rounded, rtol=0.0, atol=1e-6):
-                return torch.from_numpy(rounded.astype(np.int64)).to(device=target)
+                return _densify(torch.from_numpy(rounded.astype(np.int64)), target)
             # fall through
 
         # Try numeric string coercion
         try:
             coerced = arr.astype(np.int64)
-            return torch.from_numpy(coerced).to(device=target)
+            return _densify(torch.from_numpy(coerced), target)
         except Exception:
             pass
 
@@ -194,11 +211,18 @@ def group_mean_std(
     if scores.numel() != gidx.numel():
         raise ValueError(f"scores and gidx length mismatch: {scores.numel()} vs {gidx.numel()}")
 
-    G = int(torch.max(gidx).item()) + 1 if gidx.numel() > 0 else 0
-    if G == 0:
+    if gidx.numel() == 0:
         # Return empty tensors on the selected device
         empty = torch.empty(0, device=target, dtype=torch.float32)
         return empty, empty, empty
+
+    lo, hi = torch.aminmax(gidx)
+    if int(lo.item()) < 0:
+        raise ValueError(
+            "gidx must be contiguous non-negative group indices in [0, G-1], but the minimum is "
+            f"{int(lo.item())}. Canonicalize raw group labels with as_torch_index() first."
+        )
+    G = int(hi.item()) + 1
 
     ones = torch.ones_like(scores, dtype=torch.float32)
 
