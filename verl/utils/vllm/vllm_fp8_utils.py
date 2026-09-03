@@ -230,6 +230,11 @@ def _layer_needs_fp8_staging(layer, pristine) -> bool:
         # that the live buffer is no longer in checkpoint layout.
         if getattr(param, "is_shuffled", False) or name in repacked:
             return True
+    # FP8 MoE: _setup_kernel shuffles weights and caches a kernel referencing
+    # them. DeepGEMM doesn't set is_shuffled (only AITER does), so force
+    # staging so the refit re-runs _setup_kernel instead of reading a stale shuffle.
+    if hasattr(layer, "w13_weight") and hasattr(layer, "w2_weight"):
+        return True
     return False
 
 
@@ -292,6 +297,24 @@ def stage_fp8_params_for_loading(model):
     return staged_layers
 
 
+def _resolve_fp8_moe_quant_method(module):
+    """Return the Fp8MoEMethod backing ``module``, unwrapping the LoRA shell.
+
+    merge=False swaps quant_method to FusedMoEModularMethod (no
+    process_weights_after_loading). Unwrap to call the real repack so
+    staging buffers become inference layout instead of being folded verbatim.
+    """
+    from vllm.model_executor.layers.quantization.fp8 import Fp8MoEMethod
+
+    qm = getattr(module, "quant_method", None)
+    if isinstance(qm, Fp8MoEMethod):
+        return qm
+    inner = getattr(qm, "old_quant_method", None)
+    if isinstance(inner, Fp8MoEMethod):
+        return inner
+    return None
+
+
 def process_fp8_weights_after_loading(layers):
     """Re-derive the inference layout in place and reinstate the live params."""
     for layer in layers:
@@ -300,7 +323,19 @@ def process_fp8_weights_after_loading(layers):
         quant_method = getattr(layer, "quant_method", None)
         process = getattr(quant_method, "process_weights_after_loading", None)
         if process is not None:
-            process(layer)
+            # Patch replace_parameter so the repack folds into the live storage
+            # the CUDA graph captured, not a fresh Parameter (which leaves the
+            # captured storage zero).
+            from vllm.model_executor.layers.quantization import fp8 as _vllm_fp8
+
+            with patch.object(_vllm_fp8, "replace_parameter", replace_parameter_preserve_subclass):
+                process(layer)
+        else:
+            # merge=False no-op wrapper: unwrap to Fp8MoEMethod and repack.
+            resolved = _resolve_fp8_moe_quant_method(layer)
+            if resolved is not None:
+                with patch.object(_vllm_fp8, "replace_parameter", replace_parameter_preserve_subclass):
+                    resolved.process_weights_after_loading(layer)
 
         # Anything routed through the patched ``replace_parameter`` has already
         # been folded and dropped from ``live``; what remains was rewritten by a
@@ -337,10 +372,7 @@ def process_weights_after_loading_for_vllm14(self, layer) -> None:
         maybe_post_process_fp8_weight_block,
         process_fp8_weight_block_strategy,
     )
-    from vllm.model_executor.parameter import (
-        BlockQuantScaleParameter,
-        ModelWeightParameter,
-    )
+    from vllm.model_executor.parameter import BlockQuantScaleParameter, ModelWeightParameter
 
     assert self.block_quant and self.quant_config.is_checkpoint_fp8_serialized
     assert self.quant_config.activation_scheme == "dynamic"
@@ -380,10 +412,7 @@ def process_weights_after_loading_for_vllm14(self, layer) -> None:
 
 def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
     # removed the reentrancy guard here for refit
-    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-        convert_to_fp8_moe_kernel_format,
-        make_fp8_moe_kernel,
-    )
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import convert_to_fp8_moe_kernel_format, make_fp8_moe_kernel
 
     # Allow for accessing weights and scales in standard way.
     w13 = layer.w13_weight
@@ -459,10 +488,7 @@ def build_fp8_method_patchers(vllm_version):
     # maybe_post_process_fp8_weight_block. Keep its native transformation logic,
     # but preserve parameter subclass metadata for RL weight reloads.
     if vllm_version >= version.parse("0.20.0"):
-        from vllm.model_executor.layers.quantization.fp8 import (
-            Fp8LinearMethod,
-            Fp8MoEMethod,
-        )
+        from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod, Fp8MoEMethod
 
         wrap = _make_process_weights_after_loading_for_vllm20
         return [
