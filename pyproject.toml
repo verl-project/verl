@@ -84,17 +84,23 @@ flash-attn-cu130torch211 = ["flash-attn==2.8.3"]
 # fails to import and the backend never reaches CheckpointEngineRegistry.
 cupy-cu130 = ["cupy-cuda13x==14.0.1"]
 
+# DeepSeek kernels, all three prebuilt from the wheelhouse (routed in
+# [tool.uv.sources] below, like flash-attn) — nothing here is built at sync
+# time. Internal — pulled by the GPU backends, not installed alone.
+deepep-cu130 = ["deep-ep==1.2.1"]     # MoE all-to-all: megatron / vllm / sglang
+flashmla-cu130 = ["flash-mla==1.0.0"] # MLA decode: megatron / sglang (vllm vendors its own)
+fasthadamard-cu130 = ["fast-hadamard-transform==1.1.0"]  # megatron DSA only (verl shims a torch fallback)
+
 # ---- inference backends ----------------------------------------------------
 vllm = [
     "verl[verl-core]",
     "torch==2.11.0",
     "torchvision==0.26.0",
     "torchaudio==2.11.0",
-    # PyPI's 0.24.0 wheel is already a cu130 / torch-2.11 abi3 build, so it needs
-    # no wheelhouse routing and no source build.
+    # PyPI's 0.24.0 wheel is already a cu130 / torch-2.11 build — no wheelhouse.
     "vllm==0.24.0",
-    # flashinfer is a transitive dep vllm 0.24 hard-pins to ==0.6.12 (pure-python
-    # from PyPI); the wheelhouse's 0.6.13 doesn't match, so it isn't routed.
+    # DeepEP for fused-MoE all2all; FlashMLA is vendored by vllm (not external).
+    "verl[deepep-cu130]",
     "mbridge",
     # vllm 0.24 needs transformers>=5.5.3; 5.9.0 is the project-wide pin
     # (enforced in override-dependencies below).
@@ -106,15 +112,15 @@ sglang = [
     "torch==2.11.0",
     "torchvision==0.26.0",
     "torchaudio==2.11.0",
-    # sglang + sglang-kernel come from PyPI; upstream's 0.5.12 wheels are cu130 /
-    # torch-2.11 builds already (sglang-kernel links libcudart.so.13).
+    # PyPI 0.5.12 wheels are already cu130 / torch-2.11 builds.
     "sglang==0.5.12",
-    # sglang pins the kernel itself (==0.4.2.post2); kept explicit so the backend
-    # still installs it if a future sglang loosens that pin.
-    "sglang-kernel",
-    # sglang hard-deps flash-attn-4 but we EXCLUDE it (it collides with the
-    # flash-attn 2.8.3 the training extras pin — see override-dependencies); it is
-    # imported lazily (fa4 backend only), so the default backends work.
+    "sglang-kernel",  # sglang pins ==0.4.2.post2; kept explicit in case it loosens
+    # DeepEP MoE dispatcher; FlashMLA for the DeepSeek-V4 sparse-MLA backend.
+    "verl[deepep-cu130]",
+    "verl[flashmla-cu130]",
+    # flash-attn-4 (sglang hard-dep) is excluded by override-dependencies — it
+    # collides with the training extras' flash-attn 2.8.3; only the lazy fa4
+    # backend needs it.
     "mbridge",
     # sglang 0.5.12 hard-pins transformers==5.6.0; the project-wide override below
     # replaces that pin with 5.9.0 (5.6.0 is excluded repo-wide, see setup.py).
@@ -157,6 +163,10 @@ megatron = [
     "verl[verl-core]",
     "verl[flash-attn-cu130torch211]",
     "verl[cupy-cu130]",
+    # DeepSeek stack: DeepEP all-to-all + FlashMLA MLA + fast-hadamard (DSA).
+    "verl[deepep-cu130]",
+    "verl[flashmla-cu130]",
+    "verl[fasthadamard-cu130]",
     "torch==2.11.0",
     "torchvision==0.26.0",
     "torchaudio==2.11.0",
@@ -426,11 +436,41 @@ name = "veomni"
 version = "0.1.11"
 requires-dist = []
 
+# deep-ep comes prebuilt from the wheelhouse, but its wheel metadata declares
+# `pynvml`, which ships the same top-level `pynvml` module as the nvidia-ml-py
+# that vllm / sglang already pull in — install both and whichever landed last
+# wins. Declared EMPTY here to drop it, same trick as megatron-bridge above.
+# flash-mla needs no entry at all: its setup.py declares no dependencies, so the
+# wheel's own metadata is already what we want.
+[[tool.uv.dependency-metadata]]
+name = "deep-ep"
+version = "1.2.1"
+requires-dist = []
+
 # Heavy native packages come prebuilt from the verl wheelhouse (cu130 / torch 2.11
 # / cp312, built for x86_64 AND aarch64) — no source build here. megatron-bridge
 # rides along (pure-python wheel off the same wheelhouse, so no git clone / build
 # either), and being py3-none-any it is the one wheelhouse component with a single
 # arch-independent build.
+#
+# The version pinned in the extras above is the wheelhouse build's version, and
+# the git ref it was built from lives in that repo's versions.yaml (mirrored in
+# its release tag: e.g. deep-ep-3f601f7ac1c0...). Bumping a ref therefore means
+# rebuilding there FIRST, then pinning the new version here — unlike the git
+# sources below, a rev change here would resolve to nothing.
+#
+# deep-ep's wheel additionally carries `-Wl,-rpath,$NVSHMEM_DIR/lib` baked in at
+# build time, so it resolves libnvshmem_host.so only where NVSHMEM sits at the
+# path the wheelhouse built against: /usr/local/lib/python3.12/dist-packages/
+# nvidia/nvshmem, which is exactly where docker/Dockerfile.uv.cu130 pip-installs
+# it as a system package. Keep those two in step (path AND NVSHMEM_VERSION).
+#
+# fast-hadamard-transform is the newest arrival, and the one whose cost was
+# easiest to misread: its setup.py picks gencode flags off the *toolkit* version
+# and never reads TORCH_CUDA_ARCH_LIST, so the CUDA 13 build emits nine of them
+# (sm_75 .. sm_121) no matter what the Dockerfile's arch list says. That is the
+# per-image compile the wheelhouse now absorbs — and, as a side effect, its
+# wheel is the one component here that covers more than "9.0;10.0".
 #
 # The inference engines are deliberately NOT routed: upstream publishes cu130 /
 # torch-2.11 wheels for the pinned vllm / sglang / sglang-kernel versions on PyPI,
@@ -439,16 +479,19 @@ requires-dist = []
 # for the same reason — vllm/sglang pin their own and the wheelhouse's 0.6.13
 # matches neither.
 [tool.uv.sources]
-apex                 = { index = "verl-wheelhouse" }
-flash-attn           = { index = "verl-wheelhouse" }
-transformer-engine   = { index = "verl-wheelhouse" }
-megatron-bridge      = { index = "verl-wheelhouse" }
+apex                    = { index = "verl-wheelhouse" }
+flash-attn              = { index = "verl-wheelhouse" }
+transformer-engine      = { index = "verl-wheelhouse" }
+megatron-bridge         = { index = "verl-wheelhouse" }
+deep-ep                 = { index = "verl-wheelhouse" }
+flash-mla               = { index = "verl-wheelhouse" }
+fast-hadamard-transform = { index = "verl-wheelhouse" }
 
 # megatron-core / mbridge aren't in the wheelhouse; git-sourced (built at sync
 # time). The wheelhouse megatron-bridge 0.5.2 (r0.5.0 branch) pairs with
 # megatron-core core_v0.18.0 — bump the two together.
-mbridge            = { git = "https://github.com/ISEEKYAN/mbridge.git",            rev = "641a5a0" }
-megatron-core      = { git = "https://github.com/NVIDIA/Megatron-LM.git",          tag = "core_v0.18.0" }
+mbridge                 = { git = "https://github.com/ISEEKYAN/mbridge.git",   rev = "641a5a0" }
+megatron-core           = { git = "https://github.com/NVIDIA/Megatron-LM.git", tag = "core_v0.18.0" }
 
 # Per-extra routing to the matching pytorch wheel index.
 torch = [

@@ -41,6 +41,9 @@ on:
     paths:
       - "**/*.py"
       - .github/workflows/gpu_unit_tests.yml
+      # Dependency set: the `uv run --frozen` below installs from these
+      - "pyproject.toml"
+      - "uv.lock"
   pull_request:
     branches:
       - main
@@ -60,6 +63,9 @@ on:
       - "tests/**test_*.py"
       # Ignore CPU tests
       - "!tests/*_on_cpu.py"
+      # Dependency set: the `uv run --frozen` below installs from these
+      - "pyproject.toml"
+      - "uv.lock"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -71,7 +77,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130.dev3"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:

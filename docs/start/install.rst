@@ -60,7 +60,8 @@ shell, a Docker cache bake); see `Managing environments explicitly`_.
 .. note::
 
    uv never compiles a native package from source. ``apex``,
-   ``transformer-engine`` and ``flash-attn`` — plus the pure-python
+   ``transformer-engine``, ``flash-attn`` and the DeepSeek kernels ``deep-ep`` /
+   ``flash-mla`` / ``fast-hadamard-transform`` — plus the pure-python
    ``megatron-bridge`` — are pulled **prebuilt** from the verl wheelhouse index
    (`verl-project.github.io/verl-wheelhouse
    <https://verl-project.github.io/verl-wheelhouse/simple/>`_, wired in
@@ -70,10 +71,21 @@ shell, a Docker cache bake); see `Managing environments explicitly`_.
    ``TORCH_CUDA_ARCH_LIST`` ``9.0;10.0``, the only CUDA parts an arm64 host
    has). The inference engines
    (``vllm``, ``sglang``, ``sglang-kernel``) come straight from PyPI, whose
-   wheels for the pinned versions are already cu130 / torch-2.11 builds. Only the
-   git-sourced ``megatron-core`` (``core_v0.18.0``, paired with
-   ``megatron-bridge`` 0.5.2) and ``mbridge`` are built when the environment is
-   first materialized.
+   wheels for the pinned versions are already cu130 / torch-2.11 builds. The
+   packages built **from source** when an environment is first materialized are
+   all git-sourced: ``megatron-core`` (``core_v0.18.0``, paired with
+   ``megatron-bridge`` 0.5.2) and ``mbridge``. Neither compiles CUDA:
+   ``fast-hadamard-transform`` (DeepSeek sparse attention) was the last that
+   did, and it moved to the wheelhouse because its ``setup.py`` picks gencode
+   flags off the CUDA toolkit version and ignores ``TORCH_CUDA_ARCH_LIST`` —
+   so on CUDA 13 every image build compiled nine of them.
+   Separately, the prebuilt ``deep-ep`` wheel resolves NVSHMEM through an rpath
+   baked in at build time, so it needs ``nvidia-nvshmem-cu13`` installed at the
+   path the wheelhouse built against
+   (``/usr/local/lib/python3.12/dist-packages/nvidia/nvshmem``). The uv Docker
+   image sets all of that up (see ``docker/Dockerfile.uv.cu130``); reproduce it
+   on a bare-metal ``uv sync``, or the source builds fail and ``import deep_ep``
+   dies on a missing ``libnvshmem_host.so.3``.
 
 Run a job or a test
 :::::::::::::::::::::
@@ -349,7 +361,9 @@ uv troubleshooting
 - **A run reinstalls torch every time** — two commands in the same job asked for
   different extras. Keep one combination per job.
 - **``No solution found`` for ``apex`` / ``transformer-engine`` /
-  ``flash-attn``** — these are pulled prebuilt from the verl wheelhouse (see the
+  ``flash-attn`` / ``deep-ep`` / ``flash-mla`` /
+  ``fast-hadamard-transform``** — these are pulled prebuilt
+  from the verl wheelhouse (see the
   note under *Install with uv*). It means the resolver found no matching wheel
   for your platform or the wheelhouse was unreachable; the uv flow supports only
   cu130 / torch 2.11 / CPython 3.12 on Linux x86_64 or aarch64.
@@ -363,9 +377,14 @@ uv troubleshooting
 - **Start over** — ``python manage_envs.py clean``, then run again.
 
 Some system-level pieces are not handled by uv at all (the Dockerfiles set them
-up): system apt packages, GDRCopy + DeepEP for MoE all-to-all, Mooncake for
-SGLang KV-cache transfer, the flashinfer JIT cache, and sgl-router. See
-``docker/Dockerfile.stable.{vllm,sglang}`` for reference.
+up): system apt packages, GDRCopy, the CCCL headers and
+``TORCH_CUDA_ARCH_LIST`` any runtime JIT compile needs, and the system NVSHMEM
+the prebuilt DeepEP wheel loads at run time (the packages themselves come from
+``uv.lock`` now — see the note under *Install with uv*), plus the stable-image
+extras Mooncake for SGLang
+KV-cache transfer, the flashinfer JIT cache, and sgl-router. The uv image bakes
+these in ``docker/Dockerfile.uv.cu130``; for the pip stable images see
+``docker/Dockerfile.stable.{vllm,sglang}``.
 
 
 Install from docker image

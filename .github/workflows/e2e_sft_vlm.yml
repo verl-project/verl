@@ -58,6 +58,9 @@ on:
       - "tests/special_e2e/sft"
       - "verl/trainer/fsdp_sft_trainer.py"
       - "verl/trainer/config/sft_trainer.yaml"
+      # Dependency set: the `uv run --frozen` below installs from these
+      - "pyproject.toml"
+      - "uv.lock"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -69,7 +72,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130.dev3"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
