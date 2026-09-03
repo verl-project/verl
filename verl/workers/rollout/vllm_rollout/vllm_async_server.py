@@ -1201,17 +1201,24 @@ class vLLMHttpServer:
                 raise ValueError(f"Currently only support {_SUPPORTED_QUANTIZATION} quantization, got: {quantization}")
 
             if quantization == "fp8":
-                # Ignore MoE router layers for FP8 quantization
-                all_mlp_gate_layers = []
+                # Ignore MoE router layers for FP8 quantization.
+                ignored_layers = []
                 for layer in range(self.model_config.hf_config.num_hidden_layers):
-                    all_mlp_gate_layers.append(f"model.layers.{layer}.mlp.gate")
+                    ignored_layers.append(f"model.layers.{layer}.mlp.gate")
+
+                # GLM5.2 DSA: the actor reads kv_b_proj as raw BF16 (bypassing
+                # TE FP8), so keep rollout kv_b_proj BF16 to avoid quant roundtrip noise.
+                model_type = getattr(self.model_config.hf_config, "model_type", "")
+                if model_type == "glm_moe_dsa":
+                    for layer in range(self.model_config.hf_config.num_hidden_layers):
+                        ignored_layers.append(f"model.layers.{layer}.self_attn.kv_b_proj")
 
                 FP8_BLOCK_QUANT_KWARGS = {
                     "activation_scheme": "dynamic",
                     "fmt": "e4m3",
                     "quant_method": "fp8",
                     "weight_block_size": [128, 128],
-                    "ignored_layers": all_mlp_gate_layers,
+                    "ignored_layers": ignored_layers,
                 }
                 hf_overrides["quantization_config"] = dict(FP8_BLOCK_QUANT_KWARGS)
                 # Will remove the patch after vllm support on-the-fly quant for rollout natively.
