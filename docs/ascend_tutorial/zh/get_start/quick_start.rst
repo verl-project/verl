@@ -144,7 +144,7 @@ vLLM 后端脚本转换为 SGLang
 
    # 可选
    # 使能推理 EP，详细使用方法见：
-   # https://github.com/sgl-project/sgl-kernel-npu/blob/main/python/deep_ep/README_CN.md
+   # https://github.com/sgl-project/sgl-kernel-npu/blob/main/python/deep_ep/README.md
    ++actor_rollout_ref.rollout.engine_kwargs.sglang.deepep_mode="auto" \
    ++actor_rollout_ref.rollout.engine_kwargs.sglang.moe_a2a_backend="deepep" \
 

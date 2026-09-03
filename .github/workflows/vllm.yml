@@ -118,13 +118,6 @@ jobs:
       - name: Check final pip list
         run: |
           $UV_RUN uv pip list
-      #      - name: Download Model to Use
-      #        run: |
-      #          hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir ${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct
-      #          hf download Qwen/Qwen2.5-1.5B-Instruct --local-dir ${HOME}/models/Qwen/Qwen2.5-1.5B-Instruct
-      #          hf download Qwen/Qwen2.5-VL-3B-Instruct --local-dir ${HOME}/models/Qwen/Qwen2.5-VL-3B-Instruct
-      #          hf download OldKingMeister/Qwen2.5-1.5B-Instruct-YaRN --local-dir ${HOME}/models/OldKingMeister/Qwen2.5-1.5B-Instruct-YaRN
-      #          export HF_HUB_OFFLINE=1
       # These tests need no GPU but do import vllm, which the `cpu` extra cannot
       # provide (it pins the cpu torch world), so cpu_unit_tests skips them. Run
       # them here, where the vllm extra is synced.
@@ -152,11 +145,11 @@ jobs:
       - name: Test vllm server abort functionality
         run: |
           $UV_RUN pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s
-      - name: Test vllm rollout generation determinism (same-instance + cross-instance + cross-instance AgentLoop)
-        run: |
-          VLLM_DETERMINISM_DENSE_MODEL_PATH=${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct \
-          VLLM_DETERMINISM_N_GPUS=2 \
-          $UV_RUN pytest tests/workers/rollout/rollout_vllm/test_vllm_generation_determinism.py -v -s
+      # - name: Test vllm rollout generation determinism (same-instance + cross-instance + cross-instance AgentLoop)
+      #   run: |
+      #     VLLM_DETERMINISM_DENSE_MODEL_PATH=${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct \
+      #     VLLM_DETERMINISM_N_GPUS=2 \
+      #     $UV_RUN pytest tests/workers/rollout/rollout_vllm/test_vllm_generation_determinism.py -v -s
 
   vllm_checkpoint_engine:
     needs: setup

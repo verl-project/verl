@@ -60,7 +60,7 @@ Below are key factors for tuning vLLM-based rollout. Before tuning, we recommend
   Must to set ``enforce_eager=False`` to use ``cudagraph_capture_sizes``.
 
 More tuning details such as dealing with Preemption and Chunked-prefill
-can be found in `vLLM official tuning guide <https://docs.vllm.ai/en/latest/performance/optimization.html>`_ 
+can be found in `vLLM official tuning guide <https://docs.vllm.ai/en/latest/configuration/optimization/>`_ 
 
 For optimal performance, we recommend using vLLM v0.8.3 or later. See https://github.com/verl-project/verl/blob/main/docs/README_vllm0.8.md for details.
 
@@ -181,9 +181,9 @@ LigerKernel provides fused Triton kernels (RMSNorm, SwiGLU, RoPE) that can impro
       model:
         use_liger: True  # Enable LigerKernel
 
-2. The default value is ``False``. When enabled, verl applies Liger's fused RMSNorm, SwiGLU, and RoPE kernels to the model. The model-level ``fused_linear_cross_entropy`` patch remains disabled because verl computes log-probabilities through its output-head path. With ``use_fused_kernels`` and the ``torch`` backend, that path uses Liger's fused scaled linear cross entropy from v0.8.2 or newer and falls back to verl's existing chunked ``FusedLinearForPPOFunction`` when Liger is not installed.
+2. The default value is ``False``. When enabled, verl applies Liger's fused RMSNorm, SwiGLU, and RoPE kernels to the model. The model-level ``fused_linear_cross_entropy`` patch remains disabled because verl computes log-probabilities through its output-head path.
 
-3. ``use_liger`` is compatible with ``use_fused_kernels``. The former controls model-internal kernels, while the latter controls the output head and can use Liger's scaled cross entropy independently when ``liger-kernel>=0.8.2`` is installed.
+3. ``use_liger`` is compatible with ``use_fused_kernels``. The former controls model-internal kernels, while the latter controls the output head. Set ``fused_kernel_options.impl_backend`` to ``liger`` to use Liger's fused scaled cross entropy, or keep the default ``torch`` backend to use verl's native chunked ``FusedLinearForPPOFunction``. The ``liger`` backend falls back to the native implementation when Liger is not installed.
 
 Forward prefetch in FSDP training backend
 ----------------------
@@ -198,10 +198,9 @@ Reduce FSDP gradient synchronization during gradient accumulation
 
 When a PPO mini-batch is split into multiple micro-batches, the optimizer only
 steps after the final micro-batch, so gradients only need to be synchronized
-once per mini-batch. The FSDP engine automatically defers gradient
-synchronization on the non-final micro-batches and synchronizes only before the
-final backward. This applies to both the actor and the critic, and requires no
-configuration.
+once per mini-batch. By default, the FSDP engine defers gradient synchronization
+on the non-final micro-batches and synchronizes only before the final backward.
+This applies to both the actor and the critic.
 
 With :math:`M` micro-batches per mini-batch, this reduces gradient
 synchronization from :math:`M` rounds to one round. It does not remove parameter
@@ -211,9 +210,12 @@ numerically identical to synchronizing every micro-batch.
 
 .. note::
     Deferring synchronization retains unsharded gradients until the final
-    micro-batch, which slightly increases peak device memory during gradient
-    accumulation. Forward-only passes are unaffected and always keep the default
-    behavior.
+    micro-batch, which can substantially increase peak device memory during
+    gradient accumulation for large models or long packed sequences. Set
+    ``actor_rollout_ref.actor.fsdp_config.use_no_sync_for_gradient_accumulation=False``
+    (or the corresponding critic FSDP setting) to synchronize and reshard after
+    every micro-batch when memory headroom is limited. Forward-only passes are
+    unaffected.
 
 Migrating to FSDP2
 ----------------------

@@ -96,8 +96,9 @@ vllm = [
     # flashinfer is a transitive dep vllm 0.24 hard-pins to ==0.6.12 (pure-python
     # from PyPI); the wheelhouse's 0.6.13 doesn't match, so it isn't routed.
     "mbridge",
-    # vllm 0.24 needs transformers 5.5.3 (enforced in override-dependencies below).
-    "transformers==5.5.3",
+    # vllm 0.24 needs transformers>=5.5.3; 5.9.0 is the project-wide pin
+    # (enforced in override-dependencies below).
+    "transformers==5.9.0",
 ]
 
 sglang = [
@@ -115,7 +116,9 @@ sglang = [
     # flash-attn 2.8.3 the training extras pin — see override-dependencies); it is
     # imported lazily (fa4 backend only), so the default backends work.
     "mbridge",
-    "transformers==5.3.0",
+    # sglang 0.5.12 hard-pins transformers==5.6.0; the project-wide override below
+    # replaces that pin with 5.9.0 (5.6.0 is excluded repo-wide, see setup.py).
+    "transformers==5.9.0",
 ]
 
 # DEFERRED — trtllm is a CUDA-13 backend (torch 2.10.0+cu130, conflict-gated).
@@ -127,7 +130,7 @@ sglang = [
 #     "torch==2.10.0",   # route to pytorch-cu130 (CUDA 13), see [tool.uv.sources]
 #     "tensorrt-llm==1.3.0rc14 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
 #     "mbridge",
-#     "transformers==5.3.0",
+#     "transformers==5.9.0",
 #     "numpy>=2.0.0,<2.4",
 #     "ray[default]==2.54.1",
 # ]
@@ -142,8 +145,9 @@ fsdp = [
     "torchaudio==2.11.0",
     "liger-kernel>=0.8.2",
     "trl==0.27.0",
-    # transformers NOT pinned here: trainers inherit the synced engine's version
-    # (vllm 5.5.3 / sglang 5.3.0). See override-dependencies below.
+    "flash-linear-attention==0.5.2",
+    # transformers NOT pinned here: verl-core carries it and the project-wide
+    # override below settles the version (5.9.0). See override-dependencies.
 ]
 
 # apex / TE / flash-attn / megatron-bridge come prebuilt from the wheelhouse;
@@ -173,7 +177,7 @@ megatron = [
     # megatron-bridge hard-imports modelopt but is installed deps-free (below), so
     # megatron needs it explicitly. 0.44.0: PyPI stable of bridge r0.5.0's 0.44.x.
     "nvidia-modelopt==0.44.0",
-    # transformers NOT pinned here (see fsdp note): inherited via override-deps below.
+    # transformers NOT pinned here (see fsdp note): settled via override-deps below.
 ]
 
 # ---- CI-only extras --------------------------------------------------------
@@ -202,7 +206,7 @@ cpu = [
     "torch==2.11.0",
     "torchvision==0.26.0",
     "torchaudio==2.11.0",
-    "transformers==5.3.0",
+    "transformers==5.9.0",
     # Plain source package (torch / numpy / packaging + one pybind11 C++ ext, no
     # CUDA toolchain), and it imports without TE / apex — both are optional there
     # with pure-torch fallbacks. It is what lets the `*_on_cpu.py` tests that
@@ -295,9 +299,42 @@ verl = [
 # One universal uv.lock: `uv lock` resolves every extra; conflicting extras
 # coexist in the lock but never in one venv. See docs/start/install.rst.
 [tool.uv]
-# x86_64 Linux + Python 3.12 only (keeps the lock single-variant).
+# Linux + Python 3.12 on both CPU arches verl ships CUDA images for: x86_64 and
+# aarch64 (GH200 / GB200 superchips).
+#
+# Arch is a RESOLUTION dimension, NOT an extra dimension. Every backend extra
+# above is spelled exactly once, and `uv sync --extra megatron` installs the
+# right wheels on either host: uv forks the lock per marker and then matches
+# each wheel's own platform tag. Extra names, conflict sets, manage_envs.py
+# combos and every CI invocation are identical on the two arches.
+#
+# That works because everything the cu130 backends need is published for both:
+# torch / torchvision / torchaudio cu130 (download.pytorch.org ships
+# manylinux_2_28_aarch64), vllm / sglang / sglang-kernel / cupy-cuda13x /
+# sglang-router (PyPI), and the three native wheelhouse builds apex /
+# flash-attn / transformer-engine (the wheelhouse builds those on
+# ubuntu-24.04-arm with TORCH_CUDA_ARCH_LIST "9.0;10.0" — the only CUDA parts an
+# arm64 wheel can land on). megatron-bridge is py3-none-any; megatron-core /
+# mbridge build from git. The second entry costs one extra package (sglang's
+# aarch64-only decord2) and leaves every pinned version unchanged.
+#
+# If a package ever IS arch-specific, do NOT fork the backend into
+# `megatron-x86_64` / `megatron-aarch64` extras — that doubles the conflict
+# matrix and every call site. Split it INSIDE the extra with a marker, either on
+# the requirement itself:
+#
+#     "some-x86-only-pkg ; platform_machine == 'x86_64'",
+#
+# or, for more than one package, as a marker-gated sub-extra (the same
+# convention flash-attn-cu130torch211 / cupy-cu130 use to share a pin):
+#
+#     megatron-x86_64 = ["pkg-a", "pkg-b"]                      # in the extras
+#     "verl[megatron-x86_64] ; platform_machine == 'x86_64'",   # inside megatron
+#
+# Either way `--extra megatron` stays the one thing anybody types.
 environments = [
     "python_full_version >= '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "python_full_version >= '3.12' and sys_platform == 'linux' and platform_machine == 'aarch64'",
 ]
 
 # Mutually exclusive extras — at most one per set per `uv sync`. Distinct torch
@@ -312,16 +349,21 @@ conflicts = [
 ]
 
 # Global override pins:
-#   * transformers tracks the inference engine (overrides are absolute): vllm ->
-#     5.5.3, sglang/cpu -> 5.3.0. An `extra` marker matches only a requirement
-#     verl declares under that extra, never a transitive one, and an override
-#     that matches nothing drops the requirement — so verl-core carries the
-#     baseline. Its entry is a range, not a pin, so it intersects with the
-#     engine pins above instead of clashing; keep it spanning both.
+#   * transformers==5.9.0 project-wide — one version for every backend, so a
+#     venv's transformers no longer depends on which engine it was synced with.
+#     Unmarked on purpose: overrides are absolute and replace EVERY requirement
+#     on the package, so this also settles the engines' own pins (vllm 0.24 asks
+#     >=5.5.3, sglang 0.5.12 hard-pins ==5.6.0 — a release excluded repo-wide,
+#     see setup.py). Keep it inside setup.py / requirements.txt's supported
+#     window (>=5.5.3,!=5.6.0,<5.11) and bump all of them together. Do NOT add
+#     an `extra` marker back unless a backend truly needs to diverge: such a
+#     marker matches only a requirement verl declares under that extra, never a
+#     transitive one, and a fork no override matches drops transformers outright.
 #   * numpy>=2.0.0 floor.
-#   * kernels>=0.10.2,<0.11 — sglang deps `kernels` unbounded; >=0.15 breaks
-#     transformers 5.3.0's hub_kernels.py (huggingface/transformers#46291), so
-#     pin to transformers 5.3.0's own window (satisfies sglang too).
+#   * kernels>=0.12.0,<0.13 — sglang deps `kernels` unbounded; later releases
+#     broke transformers' hub_kernels.py before (huggingface/transformers#46291),
+#     so pin to transformers 5.9.0's own window (satisfies sglang too) and move
+#     it whenever the transformers pin moves.
 #   * flash-attn-4 (sglang's hard dep) is DROPPED — its marker is false in every
 #     declared environment, which removes the requirement outright. It ships the
 #     same `flash_attn/cute/` files as flash-attn 2.8.3 (the fsdp / megatron pin),
@@ -334,13 +376,21 @@ conflicts = [
 #     `pip uninstall -y flash-attn-4`; sglang itself only imports fa4 for its
 #     non-default "fa4" attention backend.
 override-dependencies = [
-    "transformers==5.5.3 ; extra == 'vllm'",
-    "transformers==5.3.0 ; extra == 'sglang'",
-    "transformers==5.3.0 ; extra == 'cpu'",
-    "transformers>=5.3.0,<=5.5.3 ; extra == 'verl-core'",
+    "transformers==5.9.0",
     "numpy>=2.0.0",
-    "kernels>=0.10.2,<0.11",
+    "kernels>=0.12.0,<0.13",
     "flash-attn-4 ; platform_machine == 'flash-attn-4-excluded'",
+    # aarch64 only: nvidia-cusparselt-cu13 0.8.0/0.8.1 ship an internal WHEEL tag
+    # of `manylinux2014_sbsa` while the filename says `aarch64`. uv rejects the
+    # mismatch and reinstalls the package on EVERY `uv run`; 100+ concurrent Ray
+    # workers then race deleting libcusparseLt.so.0 and crash torch import
+    # (astral-sh/uv#17711). 0.9.1 fixed the internal tag to `manylinux2014_aarch64`
+    # and moves the lib to nvidia/cu13/lib/, which torch 2.11's _preload_cuda_deps
+    # already searches ("nvidia/cuXX/lib since CUDA 13.0"). SONAME stays .so.0.
+    # x86_64 keeps 0.8.0 (its tag is correct; no reinstall) to avoid churning a
+    # working config.
+    "nvidia-cusparselt-cu13==0.8.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "nvidia-cusparselt-cu13==0.9.1 ; platform_machine == 'aarch64' and sys_platform == 'linux'",
 ]
 
 # Skip lock-time metadata builds for git-source packages with no [project] /
@@ -377,8 +427,10 @@ version = "0.1.11"
 requires-dist = []
 
 # Heavy native packages come prebuilt from the verl wheelhouse (cu130 / torch 2.11
-# / cp312) — no source build here. megatron-bridge rides along (pure-python wheel
-# off the same wheelhouse, so no git clone / build either).
+# / cp312, built for x86_64 AND aarch64) — no source build here. megatron-bridge
+# rides along (pure-python wheel off the same wheelhouse, so no git clone / build
+# either), and being py3-none-any it is the one wheelhouse component with a single
+# arch-independent build.
 #
 # The inference engines are deliberately NOT routed: upstream publishes cu130 /
 # torch-2.11 wheels for the pinned vllm / sglang / sglang-kernel versions on PyPI,
@@ -433,8 +485,10 @@ name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
-# verl wheelhouse: prebuilt cu130 / torch-2.11 / cp312 native wheels. Only the
-# packages routed above are pulled here (explicit = true); the rest stay on PyPI.
+# verl wheelhouse: prebuilt cu130 / torch-2.11 / cp312 native wheels, published
+# side by side for linux_x86_64 and linux_aarch64 (uv picks by platform tag).
+# Only the packages routed above are pulled here (explicit = true); the rest stay
+# on PyPI.
 [[tool.uv.index]]
 name = "verl-wheelhouse"
 url = "https://verl-project.github.io/verl-wheelhouse/simple/"

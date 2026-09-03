@@ -27,7 +27,7 @@ from verl.protocol import DataProto
 from verl.tools.base_tool import BaseTool, OpenAIFunctionToolSchema
 from verl.tools.schemas import ToolResponse
 from verl.utils import hf_tokenizer
-from verl.workers.rollout.llm_server import GlobalRequestLoadBalancer
+from verl.workers.rollout.router import GlobalRequestLoadBalancer
 
 
 @pytest.fixture
@@ -432,15 +432,18 @@ class TestLoadBalancerRouting:
 
     def test_new_requests_route_to_least_loaded(self, ray_for_lb):
         lb = ray.remote(GlobalRequestLoadBalancer).remote(servers={"s0": None, "s1": None, "s2": None})
-        # Load s0 with 3 inflight requests
-        ray.get(lb.acquire_server.remote(request_id="a"))[0]  # -> s0
-        ray.get(lb.acquire_server.remote(request_id="a"))[0]  # sticky -> s0
-        ray.get(lb.acquire_server.remote(request_id="a"))[0]  # sticky -> s0
-        # Load s1 with 1 inflight request
-        ray.get(lb.acquire_server.remote(request_id="b"))[0]  # -> s1
-        # s2 has 0 inflight, so next new request must go to s2
+        # Load one server with 3 inflight requests (sticky). The first acquire
+        # may land on any replica because equally-least-loaded ties are random.
+        s_heavy = ray.get(lb.acquire_server.remote(request_id="a"))[0]
+        ray.get(lb.acquire_server.remote(request_id="a"))[0]
+        ray.get(lb.acquire_server.remote(request_id="a"))[0]
+        # Load a second server with 1 inflight request
+        s_mid = ray.get(lb.acquire_server.remote(request_id="b"))[0]
+        assert s_mid != s_heavy
+        # The remaining server has 0 inflight, so the next new request must go there
+        idle = ({"s0", "s1", "s2"} - {s_heavy, s_mid}).pop()
         s_new = ray.get(lb.acquire_server.remote(request_id="d"))[0]
-        assert s_new == "s2"
+        assert s_new == idle
 
     def test_release_rebalances(self, ray_for_lb):
         lb = ray.remote(GlobalRequestLoadBalancer).remote(servers={"s0": None, "s1": None})
@@ -501,17 +504,17 @@ class TestLoadBalancerHybrid:
     def test_removed_server_invalidates_sticky_session(self, ray_for_lb):
         """When a sticky session points to a removed server, cache is invalidated."""
         lb = ray.remote(GlobalRequestLoadBalancer).remote(servers={"s0": None, "s1": None})
-        # Occupy s0 so that the sticky request is assigned to s1
-        ray.get(lb.acquire_server.remote(request_id="occupy-s0"))[0]  # -> s0
-        # Pin request to s1 (least-loaded now)
-        s1 = ray.get(lb.acquire_server.remote(request_id="sticky-req"))[0]
-        assert s1 == "s1"
-        ray.get(lb.release_server.remote(server_id=s1))
-        # Remove s1
-        ray.get(lb.remove_servers.remote(server_ids=["s1"]))
-        # Sticky session should be invalidated and reroute to s0
+        # Occupy one replica so the sticky request is assigned to the other.
+        # Tie-break among equal inflight counts is random, so do not hardcode ids.
+        occupied = ray.get(lb.acquire_server.remote(request_id="occupy"))[0]
+        sticky_server = ray.get(lb.acquire_server.remote(request_id="sticky-req"))[0]
+        assert sticky_server != occupied
+        ray.get(lb.release_server.remote(server_id=sticky_server))
+        # Remove the sticky replica
+        ray.get(lb.remove_servers.remote(server_ids=[sticky_server]))
+        # Sticky session should be invalidated and reroute to the remaining replica
         s_new = ray.get(lb.acquire_server.remote(request_id="sticky-req"))[0]
-        assert s_new == "s0"
+        assert s_new == occupied
 
     def test_remove_server_also_purges_registry(self, ray_for_lb):
         """remove_servers atomically purges from both LB pool and handle registry."""
@@ -551,8 +554,10 @@ class TestLoadBalancerHybrid:
     def test_get_inflight_count(self, ray_for_lb):
         lb = ray.remote(GlobalRequestLoadBalancer).remote(servers={"s0": None, "s1": None})
         assert ray.get(lb.get_inflight_count.remote(server_id="s0")) == 0
-        ray.get(lb.acquire_server.remote(request_id="r1"))[0]  # -> s0 (least loaded)
-        assert ray.get(lb.get_inflight_count.remote(server_id="s0")) == 1
+        assigned = ray.get(lb.acquire_server.remote(request_id="r1"))[0]
+        assert ray.get(lb.get_inflight_count.remote(server_id=assigned)) == 1
+        other = "s1" if assigned == "s0" else "s0"
+        assert ray.get(lb.get_inflight_count.remote(server_id=other)) == 0
 
     def test_get_status_reports_active_correctly(self, ray_for_lb):
         lb = ray.remote(GlobalRequestLoadBalancer).remote(servers={"s0": None, "s1": None, "s2": None})

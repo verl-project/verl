@@ -169,6 +169,10 @@ val_kwargs:
   # Whether to sample during training rollout. False uses greedy sampling.
   do_sample: False
 
+# Null uses the built-in router; set a plugin YAML path to use an external router.
+# Relative paths resolve against the working directory, then the verl package root.
+router_config_path: null
+
 # Multi-turn tool config.
 multi_turn:
 

@@ -266,6 +266,9 @@ class TestBucketedWeightTransferIPC:
 
     def test_mixed_dtypes(self):
         specs = [
+            ("__delta_spec__", (5,), torch.uint8),
+            ("__positions__", (8,), torch.uint8),
+            ("__values__", (2,), torch.bfloat16),
             ("fp32_param", (64, 64), torch.float32),
             ("bf16_param", (64, 64), torch.bfloat16),
             ("fp16_param", (32, 32), torch.float16),

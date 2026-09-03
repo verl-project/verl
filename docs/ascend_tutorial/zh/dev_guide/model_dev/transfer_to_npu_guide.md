@@ -29,7 +29,7 @@ VeRL 框架采用推理引擎、训练引擎与权重同步桥接（Checkpoint E
 
 VeRL 推理引擎采用分层架构设计，通过抽象接口与工厂模式，实现 vllm、sglang 等多种主流推理后端的灵活支持。在完成 GPU 向 NPU 的迁移适配过程中，推理引擎适配推荐按以下流程操作：
 
-在 NPU 上跑通 VeRL 整网链路前，建议参考 [vllm-ascend](https://github.com/vllm-project/vllm-ascend/tree/main/docs/source/tutorials/models)、[sglang](https://github.com/sgl-project/sglang/blob/main/docs_new/docs/basic_usage) 官方模型部署教程，优先调通**单实例推理链路**，完整验证模型加载与初始化、Tokenizer 加载正常、单轮 / 批量生成、停止词终止、长上下文推理等**基础推理功能**，前置底层推理引擎稳定可用后，再接入 VeRL 训练流程。
+在 NPU 上跑通 VeRL 整网链路前，建议参考 [vllm-ascend](https://github.com/vllm-project/vllm-ascend/tree/main/docs/source/tutorials/models)、[sglang](https://github.com/sgl-project/sglang/tree/main/docs/docs/basic_usage) 官方模型部署教程，优先调通**单实例推理链路**，完整验证模型加载与初始化、Tokenizer 加载正常、单轮 / 批量生成、停止词终止、长上下文推理等**基础推理功能**，前置底层推理引擎稳定可用后，再接入 VeRL 训练流程。
 
 ### 2.2 训练引擎选择与适配
 

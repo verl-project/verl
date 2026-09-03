@@ -579,7 +579,7 @@ slurm_script.sh
     ### Project
     CONTAINER_NAME="multinode_verl_training"
     IMG="verl.rocm"
-    DOCKERFILE="docker/Dockerfile.rocm"
+    DOCKERFILE="docker/rocm/Dockerfile.rocm"
     # echo $PWD
     verl_workdir="${HOME}/projects/verl_upstream"
     export TRANSFORMERS_CACHE="${HOME}/.cache/huggingface"

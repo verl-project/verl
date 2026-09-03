@@ -69,7 +69,7 @@ on:
       - "!verl/model_merger/fsdp_model_merger.py"
       # Entrypoints
       - "verl/worksers/rollout/sglang_rollout/*"
-      - ".github/workflows/e2e_ppo_trainer_megatron_sglang.yml"
+      - ".github/workflows/e2e_ppo_trainer_megatron_sglang_2.yml"
       - "examples/data_preprocess/gsm8k.py"
       - "examples/data_preprocess/geo3k.py"
       - "tests/special_e2e/run_ppo_trainer_megatron.sh"
@@ -138,7 +138,7 @@ jobs:
           $UV_RUN ray stop --force
           ENGINE=sglang bash tests/special_e2e/ppo_trainer/run_function_reward.sh
 
-  e2e_ppo_trainer_fsdp-qwen2_5vl-3b:
+  e2e_ppo_trainer_fsdp-qwen3_5-2b:
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 60 # Increase this timeout value as needed
@@ -172,29 +172,29 @@ jobs:
           $UV_RUN ray stop --force
           TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
-            MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
-            ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True ENABLE_CHUNKED_PREFILL=False \
+            MODEL_ID=Qwen/Qwen3.5-2B \
+            ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True \
             ENGINE=sglang ROLLOUT_MODE=async GPU_MEMORY_UTILIZATION=0.6 ACTOR_FSDP_PARAM_OFFLOAD=True \
             ACTOR_FSDP_OPTIMIZER_OFFLOAD=True REF_FSDP_PARAM_OFFLOAD=True \
             bash tests/special_e2e/ppo_trainer/run_function_reward.sh
-      - name: Running GEO3K VLM E2E with rmpad using torch fused kernel (Qwen2.5-VL)
+      - name: Running GEO3K VLM E2E with rmpad using torch fused kernel (Qwen3.5)
         run: |
           $UV_RUN ray stop --force
           FUSED_KERNELS=True TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
-            MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
-            ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True ENABLE_CHUNKED_PREFILL=False \
+            MODEL_ID=Qwen/Qwen3.5-2B \
+            ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True \
             ENGINE=sglang ROLLOUT_MODE=async GPU_MEMORY_UTILIZATION=0.6 ACTOR_FSDP_PARAM_OFFLOAD=True \
             ACTOR_FSDP_OPTIMIZER_OFFLOAD=True REF_FSDP_PARAM_OFFLOAD=True \
             bash tests/special_e2e/ppo_trainer/run_function_reward.sh
-      - name: Running GEO3K VLM E2E with rmpad using triton fused kernel (Qwen2.5-VL)
+      - name: Running GEO3K VLM E2E with rmpad using triton fused kernel (Qwen3.5)
         run: |
           $UV_RUN ray stop --force
           FUSED_KERNELS=True FUSED_KERNEL_BACKEND=triton \
             TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
-            MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct \
-            ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True ENABLE_CHUNKED_PREFILL=False \
+            MODEL_ID=Qwen/Qwen3.5-2B \
+            ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True \
             ENGINE=sglang ROLLOUT_MODE=async GPU_MEMORY_UTILIZATION=0.6 ACTOR_FSDP_PARAM_OFFLOAD=True \
             ACTOR_FSDP_OPTIMIZER_OFFLOAD=True REF_FSDP_PARAM_OFFLOAD=True \
             bash tests/special_e2e/ppo_trainer/run_function_reward.sh
@@ -202,7 +202,7 @@ jobs:
   cleanup:
     runs-on: ubuntu-latest
     needs:
-      [setup, e2e_ppo_trainer_fsdp-qwen2_5vl-3b, e2e_ppo_trainer_fsdp_sglang]
+      [setup, e2e_ppo_trainer_fsdp-qwen3_5-2b, e2e_ppo_trainer_fsdp_sglang]
     if: always()
     steps:
       - id: destroy-runner

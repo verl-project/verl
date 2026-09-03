@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from contextlib import contextmanager
-
 import torch
 
 from verl.utils.fsdp_utils import fsdp2_load_full_state_dict
@@ -103,11 +101,6 @@ class FSDPTurboEngineWithLMHead(FSDPEngineWithLMHead):
         else:
             is_collect = True
         return is_collect
-
-    @contextmanager
-    def _gradient_sync_context(self, *, is_last_micro_batch: bool):
-        # To avoid OOM for fsdp_turbo backend
-        yield
 
     def optimizer_step(self):
         """

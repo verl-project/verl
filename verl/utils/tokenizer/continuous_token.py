@@ -68,9 +68,9 @@ class ContinuousTokenBuilder:
         Model-specific builders should subclass this class and keep the runtime
         API contracts above stable. Chat template specific behavior belongs in hooks
         such as ``_tokenize_tool_group``, ``_tokenize_single_non_tool``,
+        ``_should_fuse_generation_prompt_with_last_group``,
         ``_tokenize_generation_prompt_delta``, and ``_merge_non_assistant_token_ids``.
-        ``render_delta_token_id`` is the shared suffix-diff helper those hooks can
-        reuse.
+        ``render_delta_token_id`` is the shared suffix-diff helper those hooks can reuse.
     """
 
     allowed_append_roles: frozenset[str] = _SUPPORTED_APPEND_ROLES
@@ -119,7 +119,11 @@ class ContinuousTokenBuilder:
             return []
         incremental_ids: list[int] = []
 
-        for group in self._iter_append_groups(appended_messages):
+        groups = self._iter_append_groups(appended_messages)
+        fuse_generation_prompt = self._should_fuse_generation_prompt_with_last_group()
+
+        for index, group in enumerate(groups):
+            add_generation_prompt = fuse_generation_prompt and index == len(groups) - 1
             role = group[0].get("role")
             if role == "tool":
                 incremental_ids.extend(
@@ -127,6 +131,7 @@ class ContinuousTokenBuilder:
                         group,
                         previous_messages=previous_messages,
                         tools=tools,
+                        add_generation_prompt=add_generation_prompt,
                     )
                 )
             elif role in {"user", "system"}:
@@ -135,11 +140,18 @@ class ContinuousTokenBuilder:
                     raise ValueError(
                         f"Continuous Token expects one {role!r} message per append group, got {len(group)}"
                     )
-                incremental_ids.extend(self._tokenize_single_non_tool(group[0], tools=tools))
+                incremental_ids.extend(
+                    self._tokenize_single_non_tool(
+                        group[0],
+                        tools=tools,
+                        add_generation_prompt=add_generation_prompt,
+                    )
+                )
             else:
                 raise ValueError(f"Unsupported Continuous Token append role: {role!r}")
 
-        incremental_ids.extend(self._tokenize_generation_prompt_delta(updated_messages, tools=tools))
+        if not fuse_generation_prompt:
+            incremental_ids.extend(self._tokenize_generation_prompt_delta(updated_messages, tools=tools))
         return incremental_ids
 
     def merge_non_assistant_tokens(
@@ -222,11 +234,13 @@ class ContinuousTokenBuilder:
         *,
         previous_messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        add_generation_prompt: bool = False,
     ) -> list[int]:
         synthetic_assistant = self._synthetic_assistant_for_tools(tool_messages)
         return self.render_delta_token_id(
             [_SYNTHETIC_SYSTEM_MESSAGE, _SYNTHETIC_USER_MESSAGE, synthetic_assistant],
             tool_messages,
+            add_generation_prompt=add_generation_prompt,
             tools=tools,
         )
 
@@ -235,12 +249,23 @@ class ContinuousTokenBuilder:
         message: dict[str, Any],
         *,
         tools: list[dict[str, Any]] | None = None,
+        add_generation_prompt: bool = False,
     ) -> list[int]:
         return self.render_delta_token_id(
             [_SYNTHETIC_SYSTEM_MESSAGE, _SYNTHETIC_USER_MESSAGE],
             [message],
+            add_generation_prompt=add_generation_prompt,
             tools=tools,
         )
+
+    def _should_fuse_generation_prompt_with_last_group(self) -> bool:
+        """Whether the last append-group render should also add the generation prompt.
+
+        Builders whose chat template derives the generation scaffold from more than
+        the appended group may return ``False`` and implement
+        :meth:`_tokenize_generation_prompt_delta` using the required history.
+        """
+        return True
 
     def _tokenize_generation_prompt_delta(
         self,
@@ -408,14 +433,20 @@ class ContinuousTokenBuilder:
 class GptOssContinuousTokenBuilder(ContinuousTokenBuilder):
     """GPT-OSS tool-response formatting."""
 
+    def _should_fuse_generation_prompt_with_last_group(self) -> bool:
+        # Tool responses are encoded directly rather than through a chat-template
+        # suffix diff, so keep generation-prompt derivation as a separate step.
+        return False
+
     def _tokenize_tool_group(
         self,
         tool_messages: list[dict[str, Any]],
         *,
         previous_messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        add_generation_prompt: bool = False,
     ) -> list[int]:
-        del tools
+        del tools, add_generation_prompt
         response_text = "".join(
             self._format_tool_response(
                 tool_message,
@@ -537,13 +568,20 @@ class Gemma4ContinuousTokenBuilder(ContinuousTokenBuilder):
         super().__init__(tokenizer, **kwargs)
         self._tool_response_id = require_token_id(tokenizer, "<|tool_response>")
 
+    def _should_fuse_generation_prompt_with_last_group(self) -> bool:
+        # Gemma4's generation scaffold depends on the preceding message type and
+        # is handled by the model-specific hook below.
+        return False
+
     def _tokenize_tool_group(
         self,
         tool_messages: list[dict[str, Any]],
         *,
         previous_messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        add_generation_prompt: bool = False,
     ) -> list[int]:
+        del add_generation_prompt
         tool_calls = []
         rendered_tool_messages = []
         for index, tool_message in enumerate(tool_messages):
@@ -770,6 +808,19 @@ class DeepSeekContinuousTokenBuilder(ContinuousTokenBuilder):
         if token_id is None or token_id == unk:
             return None
         return int(token_id)
+
+    def _synthetic_assistant_for_tools(
+        self,
+        tool_messages: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        # The R1 / V3.1 / V3.2 templates splice ``tool['function']['arguments']`` into
+        # the prompt by string concatenation, so a mapping raises TypeError there. The
+        # synthetic tool call only exists to be diffed away; carry its arguments as the
+        # JSON string those templates expect.
+        synthetic_assistant = super()._synthetic_assistant_for_tools(tool_messages)
+        for tool_call in synthetic_assistant["tool_calls"]:
+            tool_call["function"]["arguments"] = "{}"
+        return synthetic_assistant
 
     def _merge_non_assistant_token_ids(
         self, runtime_token_ids: list[int], appended_token_ids: list[int]

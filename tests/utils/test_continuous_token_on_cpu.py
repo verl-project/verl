@@ -226,6 +226,56 @@ class _Gemma4BoundaryTokenizer(_TemplateTokenizer):
         return rendered
 
 
+class _DeepSeekBoundaryTokenizer(_TemplateTokenizer):
+    name_or_path = "deepseek-ai/DeepSeek-V3.1"
+    unk_token_id = 0
+
+    def __init__(self):
+        self.eos_id = 1
+
+    def convert_tokens_to_ids(self, token):
+        if token == "<｜end▁of▁sentence｜>":
+            return self.eos_id
+        return self.unk_token_id
+
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        tools=None,
+        return_dict=False,
+        **kwargs,
+    ):
+        """Minimal DeepSeek-style renderer: tool calls are spliced in by string
+        concatenation like the real R1 / V3.1 / V3.2 templates (a mapping raises
+        TypeError there), and no generation prompt follows a tool message.
+        """
+        rendered = ""
+        last_was_tool = False
+        for message in messages:
+            role = message.get("role")
+            if role == "tool":
+                rendered += f"<tool_output_begin>{message.get('content', '')}<tool_output_end>"
+                last_was_tool = True
+                continue
+            last_was_tool = False
+            if role == "assistant" and message.get("tool_calls"):
+                calls = ""
+                for tool_call in message["tool_calls"]:
+                    function = tool_call["function"]
+                    calls += "<tool_call_begin>" + function["name"] + "<tool_sep>" + function["arguments"]
+                    calls += "<tool_call_end>"
+                rendered += "<assistant>" + message.get("content", "") + calls + "<eos>"
+            else:
+                rendered += f"<{role}>{message.get('content', '')}\n"
+        if add_generation_prompt and not last_was_tool:
+            rendered += "<assistant>"
+        if tokenize:
+            return self.encode(rendered, add_special_tokens=False)
+        return rendered
+
+
 class _MissingSpecialTokenTokenizer(_TemplateTokenizer):
     def convert_tokens_to_ids(self, token):
         return None
@@ -576,6 +626,47 @@ def test_gemma4_builder_formats_tool_response_by_position_with_warning(caplog):
     assert "resolving a tool response name by position" in caplog.text
 
 
+def test_deepseek_builder_renders_tool_appends_through_string_concatenating_template():
+    tokenizer = _DeepSeekBoundaryTokenizer()
+    builder = create_continuous_token_builder(tokenizer, model_family="deepseek")
+    previous_messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "call_0", "type": "function", "function": {"name": "lookup", "arguments": {"q": "x"}}}
+            ],
+        },
+    ]
+    updated_messages = previous_messages + [{"role": "tool", "content": "answer", "tool_call_id": "call_0"}]
+
+    # The base synthetic tool call carries a mapping, which this template family cannot splice in.
+    with pytest.raises(TypeError):
+        ContinuousTokenBuilder(tokenizer).tokenize_non_assistant_incremental_messages(
+            previous_messages, updated_messages
+        )
+
+    assert isinstance(builder, DeepSeekContinuousTokenBuilder)
+    incremental = builder.tokenize_non_assistant_incremental_messages(previous_messages, updated_messages)
+
+    # Only the tool output: DeepSeek templates add no generation prompt after a tool message.
+    assert incremental == [ord(char) for char in "<tool_output_begin>answer<tool_output_end>"]
+
+
+def test_deepseek_builder_synthetic_tool_call_arguments_are_a_json_string():
+    builder = DeepSeekContinuousTokenBuilder(_DeepSeekBoundaryTokenizer())
+    tool_messages = [
+        {"role": "tool", "content": "first", "tool_call_id": "call_0"},
+        {"role": "tool", "content": "second", "tool_call_id": "call_1"},
+    ]
+
+    synthetic_assistant = builder._synthetic_assistant_for_tools(tool_messages)
+
+    assert [tool_call["id"] for tool_call in synthetic_assistant["tool_calls"]] == ["call_0", "call_1"]
+    assert all(tool_call["function"]["arguments"] == "{}" for tool_call in synthetic_assistant["tool_calls"])
+
+
 def test_gpt_oss_builder_formats_tool_responses_with_resolved_tool_name():
     builder = create_continuous_token_builder(_TemplateTokenizer(), model_family="gptoss")
     previous_messages = [
@@ -782,6 +873,65 @@ def test_default_builder_tokenizes_system_and_user_appends_with_generation_promp
 
     expected = "<system>policy\n<user>retry\n<assistant>"
     assert incremental == [ord(char) for char in expected]
+
+
+def test_default_builder_fuses_generation_prompt_into_last_append_group():
+    tokenizer = _RecordingTemplateTokenizer()
+    builder = ContinuousTokenBuilder(tokenizer, chat_template_kwargs={"enable_thinking": False})
+    tools = [{"type": "function", "function": {"name": "lookup"}}]
+    old_messages = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "second question"},
+    ]
+    new_messages = old_messages + [
+        {"role": "tool", "content": "first result", "name": "lookup"},
+        {"role": "tool", "content": "second result", "name": "lookup"},
+    ]
+
+    builder.tokenize_non_assistant_incremental_messages(old_messages, new_messages, tools=tools)
+
+    assert len(tokenizer.calls) == 2
+    assert [len(call["messages"]) for call in tokenizer.calls] == [3, 5]
+    assert [call["add_generation_prompt"] for call in tokenizer.calls] == [False, True]
+    assert all(call["tools"] is tools for call in tokenizer.calls)
+    assert all(call["kwargs"] == {"enable_thinking": False} for call in tokenizer.calls)
+
+
+def test_default_builder_only_fuses_generation_prompt_into_final_append_group():
+    tokenizer = _RecordingTemplateTokenizer()
+    builder = ContinuousTokenBuilder(tokenizer)
+    old_messages = [{"role": "user", "content": "question"}]
+    new_messages = old_messages + [
+        {"role": "system", "content": "policy"},
+        {"role": "user", "content": "retry"},
+    ]
+
+    builder.tokenize_non_assistant_incremental_messages(old_messages, new_messages)
+
+    assert len(tokenizer.calls) == 4
+    assert [call["add_generation_prompt"] for call in tokenizer.calls] == [False, False, False, True]
+
+
+def test_special_builder_can_keep_separate_full_history_generation_prompt():
+    class FullHistoryGenerationPromptBuilder(ContinuousTokenBuilder):
+        def _should_fuse_generation_prompt_with_last_group(self):
+            return False
+
+    tokenizer = _RecordingTemplateTokenizer()
+    builder = FullHistoryGenerationPromptBuilder(tokenizer)
+    old_messages = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "second question"},
+    ]
+    new_messages = old_messages + [{"role": "user", "content": "retry"}]
+
+    builder.tokenize_non_assistant_incremental_messages(old_messages, new_messages)
+
+    assert len(tokenizer.calls) == 4
+    assert [len(call["messages"]) for call in tokenizer.calls] == [2, 3, len(new_messages), len(new_messages)]
+    assert [call["add_generation_prompt"] for call in tokenizer.calls] == [False, False, False, True]
 
 
 def test_default_builder_rejects_multi_message_user_or_system_groups():

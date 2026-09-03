@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# dependency: GPU vllm==0.18.0, transformers@<cc7ab9be>, fsdp_turbo
-# FSDP-Turbo e2e smoke test for Qwen3.5-0.8B (dense) on GPU.
+# dependency: NPU vllm==0.18.0, vllm-ascend@<54879467>, transformers@<cc7ab9be>, fsdp_turbo
+# FSDP-Turbo e2e smoke test for Qwen3.5-2B (dense) on Ascend NPU.
 
 set -xeuo pipefail
 
 INFER_BACKEND=${INFER_BACKEND:-vllm}
-MODEL_ID=${MODEL_ID:-Qwen/Qwen3.5-0.8B}
-MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
-TRAIN_FILE=${TRAIN_FILE:-${HOME}/data/geo3k/train.parquet}
-TEST_FILE=${TEST_FILE:-${HOME}/data/geo3k/test.parquet}
+MODEL_ID=${MODEL_ID:-Qwen/Qwen3.5-2B}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
+TRAIN_FILE=${TRAIN_FILE:-$HOME/data/geo3k/train.parquet}
+TEST_FILE=${TEST_FILE:-$HOME/data/geo3k/test.parquet}
 
 GEN_TP=${GEN_TP:-2}
-SP_SIZE=${SP_SIZE:-1}
-FSDP_SIZE=${FSDP_SIZE:-8}
+SP_SIZE=${SP_SIZE:-2}
+FSDP_SIZE=${FSDP_SIZE:-4}
 ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.4}
 ROLLOUT_N=${ROLLOUT_N:-2}
 
@@ -29,6 +29,10 @@ LOG_DIR=${LOG_DIR:-/tmp/verl_logs/$SCRIPT_NAME}
 mkdir -p $LOG_DIR
 rm -rf $LOG_DIR/$SCRIPT_NAME.log
 
+export HCCL_CONNECT_TIMEOUT=1500
+export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
+export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
+export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 n_devices_per_node=8
 
 ########################### shared turbo config values ###########################
@@ -44,6 +48,17 @@ FSDP_APPLY_MODULES='{model.visual.blocks.\{*\}:{},'\
 
 HOOK_MODULES="['model.language_model.layers.{*}']"
 RECOMPUTE_PLAN="['model.language_model.layers.{*}','model.visual.blocks.{*}']"
+
+ULYSSES_FUNCTION_PATCHES="[{target_functions:['transformers.models.qwen3_5.modeling_qwen3_5.eager_attention_forward'],"\
+"type:full_attention},"\
+"{target_functions:['transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5GatedDeltaNet.forward'],"\
+"type:gated_delta_net}]"
+
+LOSS_FUNCTION_PATCHES="[{target_functions:['transformers.loss.loss_utils.ForCausalLMLoss'],"\
+"type:causal_lm_loss}]"
+
+MODULE_PATCHES="[{target:transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5Model.forward,"\
+"replacement:fsdp_turbo.models.qwen.qwen3_5.qwen3_5_model_forward}]"
 
 ########################### parameter arrays ###########################
 
@@ -109,6 +124,20 @@ REF=(
     actor_rollout_ref.ref.fsdp_config.param_offload=True
 )
 
+########################### conditional cp_plan & module_patches ###########################
+if [ "${SP_SIZE}" -gt 1 ]; then
+    ACTOR+=(
+        "+${ACTOR_TURBO}.distributed.cp_plan.ulysses_function_patches=${ULYSSES_FUNCTION_PATCHES}"
+        "+${ACTOR_TURBO}.distributed.cp_plan.loss_function_patches=${LOSS_FUNCTION_PATCHES}"
+        "+${ACTOR_TURBO}.module_patches=${MODULE_PATCHES}"
+    )
+    REF+=(
+        "+${REF_TURBO}.distributed.cp_plan.ulysses_function_patches=${ULYSSES_FUNCTION_PATCHES}"
+        "+${REF_TURBO}.distributed.cp_plan.loss_function_patches=${LOSS_FUNCTION_PATCHES}"
+        "+${REF_TURBO}.module_patches=${MODULE_PATCHES}"
+    )
+fi
+
 ROLLOUT=(
     actor_rollout_ref.rollout.name=${INFER_BACKEND}
     actor_rollout_ref.rollout.ignore_eos=False
@@ -124,6 +153,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=6144
     +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY"
     +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_capture_sizes="[4,8,12,16,24,32,48,56,64]"
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
 )
 
 TRAINER=(
