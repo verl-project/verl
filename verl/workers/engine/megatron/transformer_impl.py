@@ -1417,6 +1417,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 self.tf_config,
                 vp_rank,
                 local_cp_size=local_cp_size,
+                model=unwrapped_model,
             )
 
         # Router replay: switch to backward replay mode for next backward pass
