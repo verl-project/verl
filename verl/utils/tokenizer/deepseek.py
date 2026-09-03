@@ -316,13 +316,12 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
         *,
         tools: list[dict[str, Any]] | None,
         add_bos_token: bool,
-        add_generation_prompt: bool = True,
         drop_thinking: bool | None = None,
     ) -> list[int]:
         text = encode_messages(
             messages,
             tools=tools,
-            add_generation_prompt=add_generation_prompt,
+            add_generation_prompt=True,
             add_bos_token=add_bos_token,
             enable_thinking=self._enable_thinking,
             drop_thinking=self._drop_thinking if drop_thinking is None else drop_thinking,
