@@ -158,7 +158,7 @@ BF16 rollout 每卡常驻约 61GB 权重（NVFP4 约 15GB），1 节点存 30B f
 
 若对照涨，优先查 verl 特有、且与精度耦合的项：
 
-- ~~**TIS**~~ **已量化，基本排除。** verl 用 `rollout_is=token` + `threshold=2.0`，
+- **TIS —— 我用错了统计量，这条结论已推翻，现为首要假设（见第 6 节）。** verl 用 `rollout_is=token` + `threshold=2.0`，
   即单边上截断 `w = min(exp(old_logp - rollout_logp), 2.0)`；NeMo 的
   `grpo.seq_logprob_error_threshold=None` 没有等价物。W&B 里的绑定比例：
 
@@ -173,3 +173,48 @@ BF16 rollout 每卡常驻约 61GB 权重（NVFP4 约 15GB），1 节点存 30B f
   （`algorithm.rollout_correction.rollout_is=null`）做 TIS-off 臂来彻底证伪，成本很低。
 - NeMo 开了 `reward_shaping`（overlong buffer 512 / penalty 1），verl 这条关着。
   当前长度离 20480 很远，该项应当是惰性的，属于低优先级。
+
+
+## 6. 配方逐项比对（零机时）与 TIS 假设（2026-09-02）
+
+BF16 对照三次失败后停下来重估，把 verl 与 NeMo 的 RL 配方全部比完：
+
+| 项 | verl | NeMo | |
+| --- | --- | --- | --- |
+| adv estimator | grpo | grpo | 同 |
+| ratio clip | 0.2 / 0.28 / c=10 | `ratio_clip_min/max/c` 0.2 / 0.28 / 10 | **同** |
+| loss 归一化 | `token-mean` = `sum(loss*mask)/global_tokens * dp_size` | token-level `masked_mean(..., global_normalization_factor=global_valid_toks)` = `sum(loss*mask)/global_valid_toks` | **同**（verl 的 `*dp_size` 只是抵消 DDP 梯度平均） |
+| lr / batch / temp / 数据 / 0-3 loss | 1e-6 / 512 / 1.0 / DAPO-Math-17k / 0of3 | 同 | 同 |
+| **TIS** | `rollout_is=token`, `threshold=2.0` | `loss_fn` **无任何 IS 修正** | **不同** |
+
+其余差异（dynamic sampling、reward shaping overlong buffer、lr warmup 10、
+`max_input_seq_length` 2048 vs 1024）单项都太小，且 prompt 长度实测一致（150.1 vs 152.2）。
+
+### 为什么之前把 TIS 排掉是错的
+
+我用的判据是「触界比例只有 0.4%」。**这个统计量不对**：TIS 是给**每个** token 的 loss 乘
+`w = clamp(exp(old_logp - rollout_logp), max=2.0)`，触界与否不重要，重要的是 `w` 的分布。
+
+| arm | `rollout_is_std` | `rollout_corr/kl` | 长度 |
+| --- | --- | --- | --- |
+| verl BF16 0603 | 0.037 | 0.0012 | 涨（≤265 步 +34.6/step） |
+| **verl W4A4 v13** | **0.089** | **0.0044** | **平（260 步 +0.88）** |
+| NeMo W4A4（无 IS 修正） | — | — | 涨（+16.9/step） |
+
+W4A4 的 mismatch 是尾部集中的（本工作线既有结论：按 `rollout_logp` 排序的 bottom 20%
+贡献约 74% 的 |delta|）。若 mismatch 随 token 位置累积，TIS 就会系统性压低靠后的 token
+——正好压住「长度」这个量。
+
+**一个机制同时解释四条曲线**：NeMo 无 TIS → 涨；verl BF16 有 TIS 但 mismatch 小 4 倍、
+`w≈1` 失效 → 涨；verl W4A4 TIS 生效 → 平。
+
+### 验证臂
+
+`jobs/w4a4_tis_off_20260902_v18/`，job **2707772**，8 节点 120 步，
+exp `verl_30b_w4a4_tisoff_8n_20260902_v18_j2707772`。相对 v13 只改一个变量：
+`ROLLOUT_IS=null`。判读：**起飞 → TIS 是 real W4A4 的长度抑制源，修法是精度感知的 IS 策略，
+不是长度/entropy 旋钮；仍平 → TIS 洗清，锁定 verl 的 W4A4 数值路径**，届时再把 BF16 sync
+移植到 RoutedExperts API 拿干净对照。
+
+另：拉了 v13 step 259 的实际生成，模型输出是结构完整、评分 1.0 的数学推理——策略健康，
+只是学不会写更长，不是退化。
