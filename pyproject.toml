@@ -98,7 +98,7 @@ vllm = [
     "mbridge",
     # vllm 0.24 needs transformers>=5.5.3; 5.9.0 is the project-wide pin
     # (enforced in override-dependencies below).
-    "transformers==5.9.0",
+    "transformers==5.16.1",
 ]
 
 sglang = [
@@ -118,7 +118,7 @@ sglang = [
     "mbridge",
     # sglang 0.5.12 hard-pins transformers==5.6.0; the project-wide override below
     # replaces that pin with 5.9.0 (5.6.0 is excluded repo-wide, see setup.py).
-    "transformers==5.9.0",
+    "transformers==5.16.1",
 ]
 
 # DEFERRED — trtllm is a CUDA-13 backend (torch 2.10.0+cu130, conflict-gated).
@@ -130,7 +130,7 @@ sglang = [
 #     "torch==2.10.0",   # route to pytorch-cu130 (CUDA 13), see [tool.uv.sources]
 #     "tensorrt-llm==1.3.0rc14 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
 #     "mbridge",
-#     "transformers==5.9.0",
+#     "transformers==5.16.1",
 #     "numpy>=2.0.0,<2.4",
 #     "ray[default]==2.54.1",
 # ]
@@ -206,7 +206,7 @@ cpu = [
     "torch==2.11.0",
     "torchvision==0.26.0",
     "torchaudio==2.11.0",
-    "transformers==5.9.0",
+    "transformers==5.16.1",
     # Plain source package (torch / numpy / packaging + one pybind11 C++ ext, no
     # CUDA toolchain), and it imports without TE / apex — both are optional there
     # with pure-torch fallbacks. It is what lets the `*_on_cpu.py` tests that
@@ -349,7 +349,7 @@ conflicts = [
 ]
 
 # Global override pins:
-#   * transformers==5.9.0 project-wide — one version for every backend, so a
+#   * transformers==5.16.1 project-wide — one version for every backend, so a
 #     venv's transformers no longer depends on which engine it was synced with.
 #     Unmarked on purpose: overrides are absolute and replace EVERY requirement
 #     on the package, so this also settles the engines' own pins (vllm 0.24 asks
@@ -376,7 +376,7 @@ conflicts = [
 #     `pip uninstall -y flash-attn-4`; sglang itself only imports fa4 for its
 #     non-default "fa4" attention backend.
 override-dependencies = [
-    "transformers==5.9.0",
+    "transformers==5.16.1",
     "numpy>=2.0.0",
     "kernels>=0.12.0,<0.13",
     "flash-attn-4 ; platform_machine == 'flash-attn-4-excluded'",
