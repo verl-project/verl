@@ -39,6 +39,7 @@ from verl.utils.py_functional import convert_nested_value_to_list_recursive
 from verl.utils.tokenizer import build_multimodal_processor_inputs, get_processor_token_id
 from verl.utils.tokenizer.continuous_token import ContinuousTokenBuilder, extract_image_references
 from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
+from verl.utils.tokenizer.sft_continuous_token import reconstruct_assistant_tokens
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -267,7 +268,8 @@ class MultiTurnSFTDataset(Dataset):
                     f"got role={assistant_message.get('role')!r} at index {index}"
                 )
 
-            assistant_token_ids = builder.tokenize_assistant_message(
+            assistant_token_ids = reconstruct_assistant_tokens(
+                builder,
                 assistant_message,
                 tools=tools,
                 previous_messages=runtime_messages,

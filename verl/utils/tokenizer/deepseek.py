@@ -287,53 +287,6 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
     ) -> list[int]:
         return self._encode(messages, tools=tools, add_bos_token=True)
 
-    def _render_text(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        add_generation_prompt: bool,
-        tools: list[dict[str, Any]] | None = None,
-    ) -> str:
-        """Render SFT assistant probes through the native V4 encoder."""
-        return encode_messages(
-            messages,
-            tools=tools,
-            add_generation_prompt=add_generation_prompt,
-            add_bos_token=True,
-            enable_thinking=self._enable_thinking,
-            drop_thinking=self._drop_thinking,
-            reasoning_effort=self._reasoning_effort,
-        )
-
-    def _assistant_terminator_ids(self, message: dict[str, Any]) -> set[int]:
-        del message
-        return {self._eos_id}
-
-    def _prepare_assistant_message_for_render(self, message: dict[str, Any]) -> dict[str, Any]:
-        """Split a serialized outer think block without losing nested literals."""
-        if isinstance(message.get("reasoning_content"), str) or isinstance(message.get("reasoning"), str):
-            return message
-
-        content = message.get("content")
-        if isinstance(content, list):
-            if not all(isinstance(part, dict) and part.get("type") == "text" for part in content):
-                return message
-            content_text = "".join(str(part.get("text", "")) for part in content)
-            content_is_text_blocks = True
-        elif isinstance(content, str):
-            content_text = content
-            content_is_text_blocks = False
-        else:
-            return message
-        if not content_text.startswith(THINK_START_TOKEN) or THINK_END_TOKEN not in content_text:
-            return message
-
-        reasoning, answer = content_text[len(THINK_START_TOKEN) :].split(THINK_END_TOKEN, 1)
-        rendered_message = dict(message)
-        rendered_message["reasoning_content"] = reasoning if self._enable_thinking else ""
-        rendered_message["content"] = [{"type": "text", "text": answer}] if content_is_text_blocks else answer
-        return rendered_message
-
     def tokenize_non_assistant_incremental_messages(
         self,
         previous_messages: list[dict[str, Any]],
