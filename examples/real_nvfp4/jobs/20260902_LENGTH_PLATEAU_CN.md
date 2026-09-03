@@ -218,3 +218,79 @@ exp `verl_30b_w4a4_tisoff_8n_20260902_v18_j2707772`。相对 v13 只改一个变
 
 另：拉了 v13 step 259 的实际生成，模型输出是结构完整、评分 1.0 的数学推理——策略健康，
 只是学不会写更长，不是退化。
+
+## 7. 根因：verl 上游改了 math 判分器（2026-09-02）
+
+**长度不涨与 W4A4 无关。** 它来自 verl 上游在 6 月之后给
+`verl/utils/reward_score/math_dapo.py::verify()` 加的一个 `\boxed{}` 回退。
+
+```python
+# 当前 verl（含 upstream base b356f430）
+correct, pred = is_correct_minerva(solution_str, answer)   # 需要 "Answer: ..."
+if pred != "[INVALID]": return correct, pred
+box_correct, box_pred = is_correct_strict_box(...)          # ← 后加的回退
+if box_pred is not None: return box_correct == 1, box_pred
+
+# verl June 树（verl_megatron_qat_v020，跑出 BF16 0603 基线的那棵）
+correct, pred = is_correct_minerva(solution_str, answer)
+return correct, pred                                        # ← 到此为止
+
+# NeMo RL nemo_rl/environments/dapo_math_verifier.py —— 与 June 树相同
+```
+
+两个文件逐行 diff 只差 29 行，其中实质差异就是这一段（其余为格式与 docstring）。
+
+### 实测触发率
+
+DAPO 的 prompt 要求 `Answer: \boxed{$Answer}`；基座 Qwen3-30B-A3B-Base 原生只吐 `\boxed{}`。
+统计 v13 在 W&B 上记录的 validation 生成：
+
+| step | n | 含 `Answer:` | 仅 `\boxed{}`（靠回退得分） |
+| --- | --- | --- | --- |
+| 9 | 2 | 0 | 2 |
+| 49 | 10 | 0 | 10 |
+| 129 | 10 | 0 | 10 |
+| 209 | 12 | 0 | 12 |
+| 259 | 10 | 0 | 10 |
+| **合计** | **44** | **0（0%）** | **44（100%）** |
+
+**这个 run 的全部 reward 都来自宽松回退**，同样的输出在 NeMo / June verl 下**全部判错**。
+
+### 机制与四条曲线
+
+严格判分下基座模型原生输出得 0 分 → 必须先学会 `Answer: \boxed{}` 格式 →
+而产出格式完整的解答伴随着更长的结构化推理 → 长度与准确率同时暴涨。
+宽松判分下它从第 1 步就拿满分 → **没有改变行为的压力** → 长度静止。
+
+| arm | 判分器 | val acc | 长度 |
+| --- | --- | --- | --- |
+| verl BF16 0603（June 树） | 严格 | — | 涨 759 → 6606 |
+| NeMo W4A4 R3-off | 严格 | 0.012 → **0.508** | 涨 → 4027 |
+| **verl W4A4 v13（当前树）** | **宽松回退** | **0.133，无趋势（0.067–0.333 震荡）** | **平 1015 → 1124** |
+
+同时解释了：起点准确率 8 倍差（0.133 vs 0.012）、NeMo 爬 40 倍而 verl 无趋势、
+以及 verl 早期 train reward 更高（−0.637 vs −0.772）。
+
+### 对交付的影响
+
+1. **v13 的 260 步曲线不能与 NeMo/slime 直接比较** —— reward 不在同一把尺子上。
+   之前「NeMo reward 领先」的说法可信度要打折。
+2. **正式 recipe 必须钉死严格判分**，否则复现不出 slime/NeMo 的基线行为；
+   应写入 README 与 manifest 断言。
+3. **W4A4 实现本身一直是对的**：KL 0.0044、ESS 0.9930、18432 权重全到、
+   `changed=1` 98/101、step 259 生成是评分正确的完整数学推理。此前所有
+   「长度不涨 ⇒ W4A4 有问题」的推断，都建立在被判分改动掩盖的现象上。
+
+### 确认臂（进行中）
+
+`jobs/w4a4_strict_verify_20260902_v19/`，job **2708202**，8 节点 120 步，
+仅改 `VERL_MATH_DAPO_STRICT_MINERVA=1`（判分器在 Ray worker 内运行，
+因此经 `runtime_env_strict.yaml` 注入，不能用 driver 侧 export —— 该坑今日已踩过一次）。
+
+判据：前 3 步 `critic/score/mean` 必须显著低于 v13 的 −0.637（否则说明开关没生效）；
+step 80+ 长度是否起飞。**起飞 → 确认；仍平 → 判分器非充分条件，回到 W4A4 数值路径。**
+
+### 附带结论
+
+TIS 臂（job 2707772）在 step 28 被取消（前提被本节结论取代）。取消前 slope +2.10，
+v13 同窗口 +3.14 —— 未见分化，与「TIS 不是主因」一致，但因未跑到 step 80 不算定论。
