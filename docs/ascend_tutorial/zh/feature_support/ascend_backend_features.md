@@ -83,7 +83,7 @@ verl中通过rollout config管理推理后端参数使能，包含通用参数�
 
 ### 1. FSDP
 
-昇腾通过torch_npu提供FSDP相关支持能力，当前pytorch api支持度参照[版本说明](https://www.hiascend.com/document/detail/zh/Pytorch/730/apiref/PyTorchNativeapi/docs/zh/native_apis/pytorch_2-7-1/torch-distributed-fsdp.md)。
+昇腾通过torch_npu提供FSDP相关支持能力，当前pytorch api支持度参照[版本说明](https://www.hiascend.com/document/detail/zh/Pytorch/2610/apiref/nativeapi/docs/zh/native_apis/pytorch_2-12-0/torch-distributed-fsdp.md)。
 
 #### FSDP1
 ##### 参数特性支持

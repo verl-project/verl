@@ -120,9 +120,9 @@ Quick Start 当前提供四种常用训推后端组合。用户可根据训练�
      - SGLang
      - bash tests/special_npu/quick_start/run_qwen3_0_6b_megatron_sglang_ascend.sh
 
-脚本内具体参数说明详见 `训练配置参数与指标说明 <https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/zh/dev_guide/model_dev/parameter_and_metrics.md>`_
+脚本内具体参数说明详见 `训练配置参数与指标说明 <../dev_guide/model_dev/parameter_and_metrics.md>`_
 
-多节点任务拉起详见 `多机任务拉起操作指南 <https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/zh/model_support/examples/multi-machine_task_startup_practice.rst>`_
+多节点任务拉起详见 `多机任务拉起操作指南 <../model_support/examples/multi-machine_task_startup_practice.rst>`_
 
 SGLang 后端使能说明
 -------------------------------------------

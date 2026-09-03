@@ -29,7 +29,7 @@ MC2 是 CANN 中一系列计算通信融合算子的统称，这些算子将原�
 
 在前向计算的 ``RowParallelLinear`` 中使能 ``torch_npu.npu_mm_all_reduce_base`` ，将分离的 ``matmul`` 和 ``allreduce`` 合并为一个融合算子。
 
-`RotaryMul&RotaryMulGrad <https://www.hiascend.com/document/detail/zh/Pytorch/730/ptmoddevg/trainingmigrguide/performance_tuning_0030.html>`_
+`RotaryMul&RotaryMulGrad <https://www.hiascend.com/document/detail/zh/Pytorch/2610/apiref/customapi/docs/zh/custom_APIs/torch_npu/torch_npu-npu_rotary_mul.md>`_
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 torch_npu 接口:  ``torch_npu.npu_rotary_mul(x, r1, r2)``
@@ -42,7 +42,7 @@ torch_npu 接口:  ``torch_npu.npu_rotary_mul(x, r1, r2)``
 
 - r2: sin 值，shape要求输入为4维，一般为 ``[1, 1, S, D]`` 或 ``[1, S, 1, D]`` 或 ``[S, 1, 1, D]`` 。
 
-`RmsNorm&RmsNormGrad <https://www.hiascend.com/document/detail/zh/Pytorch/730/ptmoddevg/trainingmigrguide/performance_tuning_0031.html>`_
+`RmsNorm&RmsNormGrad <https://www.hiascend.com/document/detail/zh/Pytorch/2610/apiref/customapi/docs/zh/custom_APIs/torch_npu/%EF%BC%88beta%EF%BC%89torch_npu-npu_rms_norm.md>`_
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 torch_npu 接口:  ``torch_npu.npu_rms_norm(self, gamma, epsilon=1e-06) -> (Tensor, Tensor)`` 
@@ -60,7 +60,7 @@ torch_npu 接口:  ``torch_npu.npu_rms_norm(self, gamma, epsilon=1e-06) -> (Tens
 
 - 第 2 个输出为 Tensor， rms_norm 的中间结果 rstd ，用于反向计算。
 
-`Swiglu <https://www.hiascend.com/document/detail/zh/Pytorch/730/ptmoddevg/trainingmigrguide/performance_tuning_0035.html>`_
+`Swiglu <https://www.hiascend.com/document/detail/zh/Pytorch/2610/apiref/customapi/docs/zh/custom_APIs/torch_npu/%EF%BC%88beta%EF%BC%89torch_npu-npu_swiglu.md>`_
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 torch_npu 接口：  ``torch_npu.npu_swiglu(Tensor self, int dim=-1) -> (Tensor)`` 
@@ -75,7 +75,7 @@ torch_npu 接口：  ``torch_npu.npu_swiglu(Tensor self, int dim=-1) -> (Tensor)
 
 - 输出为 Tensor，计算公式的最终输出 y。
 
-`GroupMatMul <https://www.hiascend.com/document/detail/zh/Pytorch/730/apiref/torchnpuCustomsapi/docs/context/torch_npu-npu_grouped_matmul.md>`_
+`GroupMatMul <https://www.hiascend.com/document/detail/zh/Pytorch/2610/apiref/customapi/docs/zh/custom_APIs/torch_npu/torch_npu-npu_grouped_matmul.md>`_
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 函数原型：
@@ -154,7 +154,7 @@ Megatron 的融合算子集成在 MindSpeed 中，需要添加特定参数开启
 昇腾通用配置
 --------------------------
 
-`算子下发 <https://www.hiascend.com/document/detail/zh/Pytorch/730/comref/Envvariables/docs/zh/environment_variable_reference/TASK_QUEUE_ENABLE.md>`_
+`算子下发 <https://www.hiascend.com/document/detail/zh/Pytorch/2610/apiref/ENV/docs/zh/environment_variable_reference/TASK_QUEUE_ENABLE.md>`_
 ************************************************************************************************************************************************************************************************************
 
 通过 ``TASK_QUEUE_ENABLE`` 可配置 task_queue 算子下发队列优化等级，默认为 Level 1 优化。该配置可以减少host下发时间，可用于缓解由下发导致的整体free过大问题。

@@ -46,7 +46,7 @@ Last updated: 02/24/2026.
 
 - **操作**：结合MSTT的rl_analysis功能，生成集群Timeline缩略图，观察各阶段整体耗时
 - **价值**：宏观掌握集群性能瓶颈
-- **操作指南**：[rl_analysis使用文档](https://gitcode.com/Ascend/mstt/raw/pre-research/profiler/msprof_analyze/docs/features/rl_analysis.md)
+- **操作指南**：[rl_analysis使用文档](https://gitcode.com/Ascend/mstt/blob/pre-research/profiler/msprof_analyze/docs/features/rl_analysis.md)
 - **效果展示**：
 
 ![Cluster%20Performance%20Analysis](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/Cluster%20Performance%20Analysis.png)
@@ -73,7 +73,7 @@ Last updated: 02/24/2026.
 
 ##### **使用 msleaks 工具进行深层次内存分析**
 
-- **操作步骤**：参考 [msleaks 工具使用指南](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/83RC1alpha003/devaids/msleaks/atlas_msleaks_0001.html)。
+- **操作步骤**：参考 [msleaks 工具使用指南](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/920beta1/devaids/msMemScope/docs/zh/user_guide/memory_analysis.md)。
 - **价值**：可以查看框架内存申请总量折线图/内存块图，并直接对应调用栈，可深层次分析框架内存使用情况。
 - **效果展示**：
 

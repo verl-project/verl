@@ -326,7 +326,7 @@ TASK_QUEUE_ENABLE，下发优化，图模式设置为1（即开启图模式的�
 
 **使用方式：**`export CPU_AFFINITY_CONF=1`
 
-详细设置原理可看：https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0059.html
+详细设置原理可看：https://www.hiascend.com/document/detail/zh/Pytorch/2610/apiref/ENV/docs/zh/environment_variable_reference/CPU_AFFINITY_CONF.md
 
 ### 其他
 
@@ -344,7 +344,7 @@ TASK_QUEUE_ENABLE，下发优化，图模式设置为1（即开启图模式的�
 
 使能方式：`export MULTI_STREAM_MEMORY_REUSE=1`
 
-原理介绍：https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0040.html
+原理介绍：https://www.hiascend.com/document/detail/zh/Pytorch/2610/devguide/fwfeatures/docs/zh/framework_feature_guide_pytorch/multistream_memory_reuse.md
 
 #### VLLM_ASCEND_ENABLE_FLASHCOMM
 
@@ -409,6 +409,6 @@ actor_rollout_ref.rollout.enforce_eager=False \
 
 ## NPU调优参考文章
 
-环境变量相关：[环境变量列表-Ascend Extension for PyTorch6.0.0-昇腾社区](https://www.hiascend.com/document/detail/zh/Pytorch/600/apiref/Envvariables/Envir_001.html)
+环境变量相关：[环境变量列表-TorchNPU 26.1.0-昇腾社区](https://www.hiascend.com/document/detail/zh/Pytorch/2610/apiref/ENV/docs/zh/environment_variable_reference/env_variable_list.md)
 
-社区性能调优教程：[性能调优流程-Ascend Extension for PyTorch6.0.0-昇腾社区](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0001.html)
+社区性能调优教程：[模型性能调优-TorchNPU-昇腾社区](https://www.hiascend.com/document/detail/zh/ModelZoo/traditional_model_train/PyTorch/docs/zh/performance_tuning/performance_overview.md)
