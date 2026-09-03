@@ -18,7 +18,7 @@ We need two types of scripts: one is the configuration that can run with the **m
 resources(min)**, and the other is the configuration that runs with **recommended resources(recommended)**. For the former, 
 it can be understood as a script that can run after applying all memory optimization techniques 
 (e.g., offload, gradient checkpointing). For the latter, it can be understood as a script that 
-can run while avoiding operations that incur additional time overhead as much as possible (targetting best throughput).
+can run while avoiding operations that incur additional time overhead as much as possible (targeting best throughput).
 
 When defining script names, please follow this format: 
 ``[model]_[task]_[gpunums]_[device]_[train]_[infer].sh``. This will effectively improve 

@@ -71,7 +71,7 @@ Image and video should be processed before returning. For example, if you are us
         # link: https://github.com/vllm-project/vllm/blob/3c545c0c3b98ee642373a308197d750d0e449403/vllm/multimodal/parse.py#L205
         return ToolResponse(image=[img1, ...], video=[video1, ...], text="..."), 0, {}
 
-remeber to set ``return_multi_modal_inputs: False`` in your dataset config in order to process the multi-modal inputs in the rollout correctly.
+remember to set ``return_multi_modal_inputs: False`` in your dataset config in order to process the multi-modal inputs in the rollout correctly.
 Refer to the `Handling Multi-Modal Inputs in Datasets`_ section for more details.
 
 Function Tool Configuration
