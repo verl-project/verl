@@ -84,6 +84,20 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 device_name = get_device_name()
 
 
+def _is_scalar_unit_temperature(temperature) -> bool:
+    """Return whether a host scalar temperature makes scaling a no-op."""
+
+    return not isinstance(temperature, torch.Tensor) and float(temperature) == 1.0
+
+
+def _scale_logits_by_temperature(logits, temperature, *, is_unit_temperature: bool):
+    """Scale logits without copying the full vocabulary tensor for temperature 1."""
+
+    if is_unit_temperature:
+        return logits
+    return logits / temperature.clamp(min=1e-8).to(logits.dtype)
+
+
 class FSDPEngine(BaseEngine):
     """
     Concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP).
@@ -1130,6 +1144,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
         temperature = micro_batch["temperature"]
         temperature_item = temperature
+        temperature_is_one = _is_scalar_unit_temperature(temperature)
         if use_fused_kernels:
             assert not isinstance(temperature, torch.Tensor), (
                 "use_fused_kernels does not support per sample temperature yet"
@@ -1148,7 +1163,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
         assert temperature.shape[0] == input_ids.shape[0]
 
         # args used to get outputs
-        output_args = {}
+        output_args = {"temperature_is_one": temperature_is_one}
 
         if use_remove_padding:
             # support per sample temperature
@@ -1319,6 +1334,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         model_output = {}
 
+        # Some internal callers construct output_args directly instead of going
+        # through prepare_model_inputs. Without the optimization metadata, fall
+        # back to the original out-of-place scaling path.
+        temperature_is_one = output_args.get("temperature_is_one", False)
+
         input_ids = micro_batch["input_ids"]
 
         if use_remove_padding:
@@ -1349,7 +1369,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 # With TP, logits are DTensors sharded on vocab dim; gather for log_softmax.
                 if isinstance(logits_rmpad, DTensor):
                     logits_rmpad = logits_rmpad.full_tensor()
-                logits_rmpad = logits_rmpad / temperature_rmpad.clamp(min=1e-8).unsqueeze(-1).to(logits_rmpad.dtype)
+                logits_rmpad = _scale_logits_by_temperature(
+                    logits_rmpad,
+                    temperature_rmpad.unsqueeze(-1),
+                    is_unit_temperature=temperature_is_one,
+                )
 
                 log_probs = None
 
@@ -1442,7 +1466,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 # With TP, logits are DTensors sharded on vocab dim; gather for log_softmax.
                 if isinstance(logits, DTensor):
                     logits = logits.full_tensor()
-                logits = logits / temperature.clamp(min=1e-8).to(logits.dtype)
+                logits = _scale_logits_by_temperature(
+                    logits,
+                    temperature,
+                    is_unit_temperature=temperature_is_one,
+                )
 
                 if calculate_entropy:
                     if not self.engine_config.entropy_checkpointing:
