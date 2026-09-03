@@ -23,6 +23,7 @@ from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
 from veomni.arguments import MixedPrecisionConfig, OpsImplementationConfig
 from veomni.distributed import parallel_state
+from veomni.distributed.async_offload import apply_async_activation_offload
 from veomni.distributed.offloading import build_activation_offloading_context
 from veomni.distributed.torch_parallelize import build_parallelize_model
 from veomni.models.auto import build_foundation_model
@@ -324,6 +325,9 @@ class VeOmniEngine(FSDPEngine):
             init_device=self.engine_config.init_device,
         )
         log_gpu_memory_usage("After load base model", logger=logger)
+
+        if self.engine_config.enable_async_activation_offload:
+            apply_async_activation_offload(module, self.engine_config.activation_offload_modules)
 
         # Applies parallel strategies to the model.
         log_gpu_memory_usage("Before parallelize model", logger=logger)

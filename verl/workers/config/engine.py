@@ -443,6 +443,8 @@ class VeOmniEngineConfig(EngineConfig):
     basic_modules: Optional[list[str]] = field(default_factory=list)
     pad_to_length: bool = False
     pad_to_length_bucket: int = 1024
+    enable_async_activation_offload: bool = False
+    activation_offload_modules: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         super().__post_init__()

@@ -51,6 +51,14 @@ forward_only: false
 
 enable_fsdp_offload: false
 
+# Whether to offload model activation to CPU
+enable_async_activation_offload: false
+
+# List of modules to offload to CPU
+activation_offload_modules:
+  - model.visual.blocks.{*}
+  - model.language_model.layers.{*}
+
 enable_reentrant: false
 
 # support eager, sdpa, flash_attention_2, flash_attention_3, veomni_flash_attention_2_with_sp,
