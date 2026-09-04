@@ -166,6 +166,12 @@ def get_module_from_param_name(model, name: str):
     # The module path is all but the last part (the parameter's own name)
     path_parts = name.split(".")
     module_path = path_parts[:-1]
+    # merge=False LoRA base sync: strip trailing ``.base_layer`` so the shard
+    # name (e.g. ``q_a_proj``) becomes the last path segment for fusion lookup.
+    had_base_layer = False
+    if len(module_path) >= 2 and module_path[-1] == "base_layer":
+        had_base_layer = True
+        module_path = module_path[:-1]
     # Replace with the fused model name
     packed_modules_mapping = model.packed_modules_mapping
     reversed_mapping = {
@@ -173,8 +179,17 @@ def get_module_from_param_name(model, name: str):
         for fused_name, original_names_list in packed_modules_mapping.items()
         for original_name in original_names_list
     }
+    # DSA indexer.wk/weights_proj are fused into wk_weights_proj inside
+    # load_weights (load-local stacked mapping, not in packed_modules_mapping).
+    # Surface it here so is_fp8_weight resolves and verl re-quantizes BF16->FP8.
+    _INDEXER_WK_FUSED = {"wk": "wk_weights_proj", "weights_proj": "wk_weights_proj"}
+    if module_path[-1] in _INDEXER_WK_FUSED and module_path[-1] not in reversed_mapping:
+        reversed_mapping[module_path[-1]] = _INDEXER_WK_FUSED[module_path[-1]]
     if module_path[-1] in reversed_mapping.keys():
         module_path[-1] = reversed_mapping[module_path[-1]]
+    if had_base_layer:
+        # Re-insert base_layer so traversal lands on the FP8 weight, not the LoRA root.
+        module_path.append("base_layer")
 
     current_module = model
     try:
@@ -393,7 +408,7 @@ def process_quanted_weights_after_loading(model, reload_state):
     refresh_rocm_attention_weight_caches(model)
 
 
-def load_quanted_weights(weights, model_runner, is_drafter=False):
+def load_quanted_weights(weights, model_runner, is_drafter=False, peft_config=None):
     if is_drafter:
         drafter = getattr(model_runner, "drafter", None)
         model = drafter.model if drafter is not None and hasattr(drafter, "model") else None
@@ -408,6 +423,16 @@ def load_quanted_weights(weights, model_runner, is_drafter=False):
 
     weights = list(weights)
     weights_quantized = quant_weights(weights, model, quant_config, dtype=vllm_dtype)
+    # Reconcile LoRA ``.base_layer.`` names on the FP8/mxfp4 path too, so a
+    # merge=False base sync doesn't orphan the suffix on an unwrappable fused
+    # target (e.g. DSV4 ``compressor.fused_wkv_wgate``). Scoped to LoRA via
+    # ``peft_config``: only a LoRA base sync exports ``.base_layer.`` names.
+    if peft_config is not None:
+        from verl.utils.vllm.utils import resolve_weight_name
+
+        live_names = {n for n, _ in model.named_parameters(remove_duplicate=False)}
+        live_names.update(n for n, _ in model.named_buffers())
+        weights_quantized = [(resolve_weight_name(model, n, live_names), t) for n, t in weights_quantized]
 
     # Monkey patch the param class to their subclass, as certain models
     # will check the param type to call the proper weightloader
