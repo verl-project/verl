@@ -42,7 +42,7 @@ After preparing the training data, for training Qwen2.5-7B on a single node, tak
 ```
 cd verl
 conda activate your_env
-bash recipe/dapo/7b_kl_cov.sh
+bash recipe/entropy/7b_kl_cov.sh
 ```
 
 While for training Qwen2.5-32B on multi nodes, you can run the following commands:
@@ -50,7 +50,7 @@ While for training Qwen2.5-32B on multi nodes, you can run the following command
 ```
 cd verl
 conda activate your_env
-bash recipe/dapo/32b_kl_cov.sh
+bash recipe/entropy/32b_kl_cov.sh
 ```
 
 ## 📖Introduction
@@ -112,4 +112,3 @@ For questions, discussion, or collaboration opportunities, feel free to contact:
 - Yuchen Zhang: yuchen.zhang2003@gmail.com
 - Jiacheng Chen: jackchan9345@gmail.com
 - Ning Ding: ningding.cs@gmail.com
-
