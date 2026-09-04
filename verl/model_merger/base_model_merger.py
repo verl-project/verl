@@ -68,6 +68,11 @@ def parse_args():
     merge_parser.add_argument(
         "--private", action="store_true", help="Whether to upload the model to a private Hugging Face repository"
     )
+    merge_parser.add_argument(
+        "--lora-only",
+        action="store_true",
+        help="Export only a PEFT adapter from an FSDP LoRA-only checkpoint",
+    )
 
     test_parser = subparsers.add_parser(
         "test", parents=[base_op_parser], help="Test merged model against a reference Hugging Face model"
@@ -100,6 +105,7 @@ class ModelMergerConfig:
         hf_model_config_path (Optional[str]): Path to HuggingFace model configuration files. Defaults to None.
         hf_upload (bool): Whether to upload to HuggingFace (computed automatically). Not for initialization.
         use_cpu_initialization (bool): Whether to use CPU initialization for large models. Defaults to False.
+        lora_only (bool): Whether to export only a PEFT adapter. Defaults to False.
     """
 
     operation: str  # 'merge' or 'test'
@@ -115,6 +121,7 @@ class ModelMergerConfig:
     hf_model_config_path: Optional[str] = None
     hf_upload: bool = field(init=False)
     use_cpu_initialization: bool = False
+    lora_only: bool = False
 
     def __post_init__(self):
         self.hf_upload = self.operation == "merge" and bool(self.hf_upload_path)
@@ -152,12 +159,17 @@ def generate_config_from_args(args: argparse.Namespace) -> ModelMergerConfig:
     }
 
     if args.operation == "merge":
+        if args.lora_only and args.backend != "fsdp":
+            raise ValueError("--lora-only is only supported by the FSDP backend")
+        if args.lora_only and args.hf_upload_path:
+            raise ValueError("--lora-only cannot be combined with --hf_upload_path")
         config = ModelMergerConfig(
             **common_config_args,
             target_dir=args.target_dir,
             hf_upload_path=args.hf_upload_path,
             private=args.private,
             test_hf_dir=None,
+            lora_only=args.lora_only,
         )
         os.makedirs(config.target_dir, exist_ok=True)
     elif args.operation == "test":

@@ -271,6 +271,7 @@ actor_rollout_ref:
     _target_: verl.workers.config.RolloutConfig
     name: ???
     mode: async
+    model_path: null
     nnodes: 0
     n_gpus_per_node: ${oc.select:trainer.n_gpus_per_node,8}
     temperature: 1.0

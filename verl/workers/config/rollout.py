@@ -157,6 +157,7 @@ class RolloutConfig(BaseConfig):
 
     name: Optional[str] = MISSING
     mode: str = "async"
+    model_path: Optional[str] = None
     nnodes: int = 0
     n_gpus_per_node: int = 8
 
@@ -277,6 +278,9 @@ class RolloutConfig(BaseConfig):
 
     def __post_init__(self):
         """Validate the rollout config"""
+        if self.model_path is not None and self.name != "vllm":
+            raise ValueError("rollout.model_path is only supported by the vLLM backend")
+
         # Deprecation warning for mode field - only async mode is supported
         if self.mode == "sync":
             raise ValueError(

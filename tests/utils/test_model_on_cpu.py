@@ -16,6 +16,7 @@ from types import SimpleNamespace  # Or use a mock object library
 
 import pytest
 
+from verl.utils import model as model_utils
 from verl.utils.model import update_model_config
 
 
@@ -50,3 +51,17 @@ def test_update_model_config(override_kwargs):
         assert mock_config.nested_params.sub_param_x == "original_x", "Nested sub_param_x should be unchanged"
         assert mock_config.nested_params.sub_param_y == 100, "Nested sub_param_y should be unchanged"
         assert not hasattr(mock_config.nested_params, "sub_param_z"), "Nested sub_param_z should not exist"
+
+
+def test_qwen4_exp_text_model_takes_precedence_over_vlm_config_mapping(monkeypatch):
+    config = SimpleNamespace(
+        architectures=["Qwen4ExpForCausalLM"],
+        model_type="qwen4_exp",
+    )
+    monkeypatch.setattr(
+        model_utils,
+        "AutoModelForImageTextToText",
+        SimpleNamespace(_model_mapping={type(config): object()}),
+    )
+
+    assert model_utils.get_hf_auto_model_class(config) is model_utils.AutoModelForCausalLM

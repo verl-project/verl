@@ -7,6 +7,11 @@ name: ???
 # sync: LLM, async: AsyncLLM
 mode: async
 
+# Optional vLLM-only checkpoint used to initialize the same model architecture.
+# Different weight layouts require adapter-only LoRA sync, non-dummy loading,
+# and checkpoint_engine.backend=naive.
+model_path: null
+
 # Number of nodes for standalone rollout server, must be > 0 in one-step-off/fully async training.
 nnodes: 0
 

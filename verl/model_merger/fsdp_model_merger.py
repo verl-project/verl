@@ -238,6 +238,17 @@ class FSDPModelMerger(BaseModelMerger):
                 raise ValueError("test_hf_dir must be provided for test operation")
             self._validate_state_dict(merged_state_dict)
         elif self.config.operation == "merge":
+            if self.config.lora_only:
+                non_lora_keys = sorted(key for key in merged_state_dict if "lora_" not in key)
+                if non_lora_keys:
+                    raise ValueError(
+                        f"--lora-only requires an adapter-only checkpoint; found non-LoRA keys: {non_lora_keys[:5]}"
+                    )
+                lora_path = self.save_lora_adapter(merged_state_dict)
+                if lora_path is None:
+                    raise ValueError("--lora-only checkpoint contains no LoRA parameters")
+                print(f"Saved LoRA adapter to {lora_path}")
+                return
             self.save_hf_model_and_tokenizer(merged_state_dict)
             if self.config.hf_upload:
                 self.upload_to_huggingface()

@@ -21,11 +21,67 @@ import pytest
 # cpu_unit_tests skips this module; vllm.yml runs it in the vllm venv.
 pytest.importorskip("vllm")
 
+from verl.workers.config import RolloutConfig
 from verl.workers.rollout.vllm_rollout.utils import (
     _resolve_vllm_weight_sync_local_rank,
     build_cli_args_from_config,
     vLLMColocateWorkerExtension,
 )
+from verl.workers.rollout.vllm_rollout.vllm_async_server import (
+    _resolve_rollout_model_path,
+    _validate_rollout_model_path,
+)
+
+
+def test_rollout_model_path_defaults_to_actor_checkpoint():
+    config = SimpleNamespace(model_path=None)
+    model_config = SimpleNamespace(local_path="actor-checkpoint")
+
+    assert _resolve_rollout_model_path(config, model_config) == "actor-checkpoint"
+
+
+def test_rollout_model_path_can_override_actor_checkpoint():
+    config = SimpleNamespace(model_path="rollout-checkpoint")
+    model_config = SimpleNamespace(local_path="actor-checkpoint")
+
+    assert _resolve_rollout_model_path(config, model_config) == "rollout-checkpoint"
+
+
+def test_rollout_model_path_rejects_other_backends():
+    with pytest.raises(ValueError, match="only supported by the vLLM backend"):
+        RolloutConfig(name="sglang", model_path="rollout-checkpoint")
+
+
+@pytest.mark.parametrize(
+    ("lora_rank", "merge", "load_format", "backend", "message"),
+    [
+        (0, False, "safetensors", "naive", "adapter-only LoRA"),
+        (8, True, "safetensors", "naive", "adapter-only LoRA"),
+        (8, False, "dummy", "naive", "non-dummy"),
+        (8, False, "safetensors", "nccl", "backend=naive"),
+    ],
+)
+def test_rollout_model_path_rejects_unsafe_weight_sync(lora_rank, merge, load_format, backend, message):
+    config = SimpleNamespace(
+        model_path="rollout-checkpoint",
+        load_format=load_format,
+        checkpoint_engine=SimpleNamespace(backend=backend),
+    )
+    model_config = SimpleNamespace(lora={"rank": lora_rank, "merge": merge}, lora_rank=0)
+
+    with pytest.raises(ValueError, match=message):
+        _validate_rollout_model_path(config, model_config)
+
+
+def test_rollout_model_path_allows_adapter_only_sync():
+    config = SimpleNamespace(
+        model_path="rollout-checkpoint",
+        load_format="safetensors",
+        checkpoint_engine=SimpleNamespace(backend="naive"),
+    )
+    model_config = SimpleNamespace(lora={"rank": 8, "merge": False}, lora_rank=0)
+
+    _validate_rollout_model_path(config, model_config)
 
 
 class TestBuildCliArgsFromConfig:

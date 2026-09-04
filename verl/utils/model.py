@@ -707,8 +707,14 @@ def get_hf_auto_model_class(hf_config):
                 actor_module_class = AutoModel
     else:
         actor_module_class = AutoModel
-        # For VLM models, we use type to check instead of architecture
-        if type(hf_config) in AutoModelForImageTextToText._model_mapping.keys():
+        # This text-only architecture is also registered in the VLM mapping.
+        if (
+            type(hf_config) in AutoModelForImageTextToText._model_mapping.keys()
+            and getattr(hf_config, "model_type", None) == "qwen4_exp"
+            and hf_config.architectures[0].endswith("ForCausalLM")
+        ):
+            actor_module_class = AutoModelForCausalLM
+        elif type(hf_config) in AutoModelForImageTextToText._model_mapping.keys():
             actor_module_class = AutoModelForImageTextToText
         else:
             for key, cls in _architecture_to_auto_class.items():
