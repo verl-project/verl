@@ -285,9 +285,10 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
         videos: list[Any] | None = None,
         audios: list[Any] | None = None,
     ) -> list[int]:
+        del images, videos, audios
         return self._encode(messages, tools=tools, add_bos_token=True)
 
-    def tokenize_non_assistant_incremental_messages(
+    def tokenize_context_incremental_messages(
         self,
         previous_messages: list[dict[str, Any]],
         updated_messages: list[dict[str, Any]],
@@ -298,9 +299,16 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
         appended_messages = updated_messages[len(previous_messages) :]
         if not appended_messages:
             return []
+        if appended_messages[-1].get("role") == "assistant":
+            raise ValueError("Continuous Token context incremental messages cannot end with assistant")
         self._assert_prefix_is_stable(previous_messages, tools=tools)
         # ``tools`` is omitted: the tool preamble already sits in the prompt prefix.
-        return self._encode(appended_messages, tools=None, add_bos_token=False)
+        return self._encode(
+            appended_messages,
+            tools=None,
+            add_bos_token=False,
+            drop_thinking=False,
+        )
 
     def _encode(
         self,
@@ -308,6 +316,7 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
         *,
         tools: list[dict[str, Any]] | None,
         add_bos_token: bool,
+        drop_thinking: bool | None = None,
     ) -> list[int]:
         text = encode_messages(
             messages,
@@ -315,7 +324,7 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
             add_generation_prompt=True,
             add_bos_token=add_bos_token,
             enable_thinking=self._enable_thinking,
-            drop_thinking=self._drop_thinking,
+            drop_thinking=self._drop_thinking if drop_thinking is None else drop_thinking,
             reasoning_effort=self._reasoning_effort,
         )
         return normalize_token_ids(self.tokenizer.encode(text, add_special_tokens=False))
@@ -344,8 +353,11 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
                 "committed prefix. Pass tools, or set drop_thinking=False in chat_template_kwargs."
             )
 
-    def _merge_non_assistant_token_ids(
-        self, runtime_token_ids: list[int], appended_token_ids: list[int]
+    def _merge_context_token_ids(
+        self,
+        runtime_token_ids: list[int],
+        appended_token_ids: list[int],
+        **kwargs: Any,
     ) -> MergeResult:
         prefix = list(runtime_token_ids)
         inserted_token_ids: list[int] = []
@@ -355,6 +367,6 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
         return MergeResult(
             token_ids=prefix + list(appended_token_ids),
             appended_token_count=len(appended_token_ids),
-            kind="non_assistant",
+            kind="context",
             inserted_token_ids=inserted_token_ids,
         )
