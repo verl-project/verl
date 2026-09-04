@@ -48,6 +48,7 @@ on:
       # Entrypoints
       - ".github/workflows/model.yml"
       - "tests/special_distributed/test_fsdp_ckpt.py"
+      - "tests/special_distributed/test_packed_qkv_ulysses.py"
       - "tests/special_distributed/test_tensor_dict.py"
       - "tests/models/**"
       - "tests/special_distributed/run_all.sh"
@@ -117,6 +118,10 @@ jobs:
       - name: Running transformers ulysses tests on 8 L20 GPUs + latest transformers
         run: |
           $UV_RUN torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
+      - name: Running packed QKV Ulysses tests on 2 L20 GPUs
+        run: |
+          $UV_RUN torchrun --standalone --nproc-per-node=2 -m pytest -q \
+            tests/special_distributed/test_packed_qkv_ulysses.py
       # `--with` layers 4.54.1 over the synced env for this step alone, so the
       # downgrade no longer leaks into the steps below and needs no restore after.
       - name: Running transformers ulysses tests on 8 L20 GPUs + transformers 4.54.1
