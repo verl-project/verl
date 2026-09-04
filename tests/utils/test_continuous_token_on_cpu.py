@@ -973,9 +973,14 @@ def test_gemma4_builder_keeps_serialized_tool_response_boundary_for_appended_mes
 
     assert isinstance(builder, Gemma4ContinuousTokenBuilder)
     assert result.token_ids[:4] == [1, 2, 3, tokenizer.tool_response_id]
-    assert result.inserted_token_ids == []
-    assert result.appended_token_count == len(result.token_ids) - 3
     assert result.kind == "non_assistant"
+    aligned_mask, aligned_logprobs = builder.align_response_metadata(
+        result,
+        [1, 1, 1],
+        [-0.1, -0.2, -0.3],
+    )
+    assert aligned_mask == [1, 1, 1] + [0] * (len(result.token_ids) - 3)
+    assert aligned_logprobs == [-0.1, -0.2, -0.3] + [0.0] * (len(result.token_ids) - 3)
 
 
 def test_gemma4_builder_does_not_duplicate_existing_tool_response_boundary():

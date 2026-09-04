@@ -753,20 +753,43 @@ class Gemma4ContinuousTokenBuilder(ContinuousTokenBuilder):
         tools: list[dict[str, Any]] | None = None,
         add_generation_prompt: bool = False,
     ) -> list[int]:
-        del tools, add_generation_prompt
-        response_parts = []
+        del add_generation_prompt
+        tool_calls = []
+        rendered_tool_messages = []
         for index, tool_message in enumerate(tool_messages):
+            call_id = _tool_call_id_or_dummy(tool_message, index)
             resolved_name = _resolve_required_tool_name(
                 tool_message,
                 index,
                 tool_messages,
                 previous_messages,
             )
-            content = _stringify_tool_content(tool_message.get("content", ""))
-            response_parts.append(
-                f'<|tool_response>response:{resolved_name}{{value:<|"|>{content}<|"|>}}<tool_response|>'
+            tool_calls.append(
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": resolved_name,
+                        "arguments": {},
+                    },
+                }
             )
-        return normalize_token_ids(self.tokenizer.encode("".join(response_parts), add_special_tokens=False))
+            rendered_message = dict(tool_message)
+            rendered_message["tool_call_id"] = call_id
+            if not rendered_message.get("name"):
+                rendered_message["name"] = resolved_name
+            rendered_tool_messages.append(rendered_message)
+        synthetic_assistant = {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": _ASSISTANT_REASONING_CONTENT,
+            "tool_calls": tool_calls,
+        }
+        return self.render_delta_token_id(
+            [_SYNTHETIC_SYSTEM_MESSAGE, _SYNTHETIC_USER_MESSAGE, synthetic_assistant],
+            rendered_tool_messages,
+            tools=tools,
+        )
 
     def _tokenize_generation_prompt_delta(
         self,
@@ -777,7 +800,12 @@ class Gemma4ContinuousTokenBuilder(ContinuousTokenBuilder):
         last_message = updated_messages[-1]
         if last_message.get("role") not in {"user", "system"}:
             return []
-        return super()._tokenize_generation_prompt_delta(updated_messages, tools=tools)
+        return self.render_delta_token_id(
+            [_SYNTHETIC_SYSTEM_MESSAGE, _SYNTHETIC_USER_MESSAGE, last_message],
+            [],
+            add_generation_prompt=True,
+            tools=tools,
+        )
 
     def merge_non_assistant_tokens(
         self,
@@ -793,19 +821,20 @@ class Gemma4ContinuousTokenBuilder(ContinuousTokenBuilder):
         appended_messages = updated_messages[len(previous_messages) :]
 
         prefix = list(runtime_token_ids)
-        appended_token_ids = list(appended_token_ids)
         inserted_token_ids: list[int] = []
         # Gemma's tool block opens with <|tool_response>. The synthetic-prefix
         # suffix diff attributes that boundary token to the diffed-away assistant
         # turn, so it is missing from ``appended_token_ids``; re-insert it at the
         # junction. Guard against double insertion in case the prefix already ends
         # with it or the diff happens to retain it.
-        if appended_messages and appended_messages[0].get("role") == "tool":
-            if prefix[-1:] == [self._tool_response_id] and appended_token_ids[:1] == [self._tool_response_id]:
-                appended_token_ids = appended_token_ids[1:]
-            elif prefix[-1:] != [self._tool_response_id] and appended_token_ids[:1] != [self._tool_response_id]:
-                prefix.append(self._tool_response_id)
-                inserted_token_ids.append(self._tool_response_id)
+        if (
+            appended_messages
+            and appended_messages[0].get("role") == "tool"
+            and prefix[-1:] != [self._tool_response_id]
+            and appended_token_ids[:1] != [self._tool_response_id]
+        ):
+            prefix.append(self._tool_response_id)
+            inserted_token_ids.append(self._tool_response_id)
 
         return MergeResult(
             token_ids=prefix + appended_token_ids,
