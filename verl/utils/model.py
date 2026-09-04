@@ -85,13 +85,17 @@ def update_model_config(module_config, override_config_kwargs):
             setattr(module_config, key, val)
 
 
-def get_huggingface_actor_config(model_name: str, override_config_kwargs=None, trust_remote_code=False) -> dict:
+def get_huggingface_actor_config(
+    model_name: str, override_config_kwargs=None, trust_remote_code=False, **from_pretrained_kwargs
+) -> dict:
     if override_config_kwargs is None:
         override_config_kwargs = {}
     assert isinstance(override_config_kwargs, dict), (
         f"override_config_kwargs must be a dict, got {type(override_config_kwargs)}"
     )
-    module_config = AutoConfig.from_pretrained(model_name, trust_remote_code=trust_remote_code)
+    module_config = AutoConfig.from_pretrained(
+        model_name, trust_remote_code=trust_remote_code, **from_pretrained_kwargs
+    )
     update_model_config(module_config, override_config_kwargs)
 
     return module_config
@@ -100,17 +104,19 @@ def get_huggingface_actor_config(model_name: str, override_config_kwargs=None, t
 def get_generation_config(
     model: str,
     trust_remote_code: bool = False,
+    **from_pretrained_kwargs,
 ) -> Optional[GenerationConfig]:
     try:
-        return GenerationConfig.from_pretrained(model)
+        return GenerationConfig.from_pretrained(model, **from_pretrained_kwargs)
     except OSError:  # Not found
         try:
             config = get_huggingface_actor_config(
                 model,
                 trust_remote_code=trust_remote_code,
+                **from_pretrained_kwargs,
             )
             return GenerationConfig.from_model_config(config)
-        except OSError:  # Not found
+        except (OSError, ValueError):  # Not found / Hub id without a usable config
             return None
 
 

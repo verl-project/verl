@@ -268,11 +268,15 @@ class FSDPEngine(BaseEngine):
             if self.model_config.model_type == "language_model":
                 auto_class = get_hf_auto_model_class(hf_config=self.model_config.hf_config)
 
+                rev_kw = {}
+                if hasattr(self.model_config, "hub_revision_kwargs"):
+                    rev_kw = self.model_config.hub_revision_kwargs(self.model_config.local_path)
                 module = auto_class.from_pretrained(
                     pretrained_model_name_or_path=self.model_config.local_path,
                     torch_dtype=torch_dtype,
                     config=self.model_config.hf_config,
                     trust_remote_code=self.model_config.trust_remote_code,
+                    **rev_kw,
                 )
 
                 # Strip sub-modules listed in _verl_strip_modules (e.g.

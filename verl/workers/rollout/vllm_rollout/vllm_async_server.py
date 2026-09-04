@@ -284,6 +284,16 @@ class vLLMHttpServer:
         # 1. setup vllm serve cli args
         engine_kwargs = self.config.get("engine_kwargs", {}).get(self._get_engine_kwargs_key(), {}) or {}
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
+        mc = getattr(self, "model_config", None)
+        if mc is not None:
+            rev = getattr(mc, "revision", None)
+            if not rev and hasattr(mc, "get"):
+                rev = mc.get("revision")
+            path = getattr(mc, "path", None)
+            if path is None and hasattr(mc, "get"):
+                path = mc.get("path")
+            if rev and path and not str(path).startswith("/"):
+                engine_kwargs.setdefault("revision", rev)
         if self.config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": self.config.get("limit_images")}
 
