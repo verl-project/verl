@@ -518,7 +518,7 @@ def merged_dense_lora_weight(module):
     math when it raises (DoRA / quantized / delegated — not hit on TE backends).
     """
     try:
-        return module.materialize_effective_weight().detach()
+        return _full(module.materialize_effective_weight()).detach()
     except NotImplementedError:
         w = _full(module.weight)
         a = _full(module.lora_A.weight)

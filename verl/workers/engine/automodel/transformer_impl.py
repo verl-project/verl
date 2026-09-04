@@ -506,8 +506,13 @@ class AutomodelEngine(BaseEngine):
         ) = collect_automodel_lora_param_maps(self.module)
 
         if merge_lora:
+            _sd_adapter = getattr(self.module, "state_dict_adapter", None)
             return self._merged_lora_param_generator(
-                params, moe_lora_modules, dense_lora_modules, packed_expert_prefixes
+                params,
+                moe_lora_modules,
+                dense_lora_modules,
+                packed_expert_prefixes,
+                _sd_adapter,
             ), None
 
         def param_generator():
@@ -592,7 +597,9 @@ class AutomodelEngine(BaseEngine):
         peft_config_dict = to_vllm_peft_dict(self.peft_config) if self.peft_config is not None else None
         return param_generator(), peft_config_dict
 
-    def _merged_lora_param_generator(self, params, moe_lora_modules, dense_lora_modules, packed_expert_prefixes):
+    def _merged_lora_param_generator(
+        self, params, moe_lora_modules, dense_lora_modules, packed_expert_prefixes, sd_adapter=None
+    ):
         """Stream full HF-keyed base params with LoRA adapters folded in
         (``model.lora.merge=true``). Returns ``peft_config=None`` — the rollout
         has ``enable_lora`` disabled and expects a standard weight update."""
@@ -603,6 +610,14 @@ class AutomodelEngine(BaseEngine):
             "down_projs": (("down_proj",),),
         }
 
+        _has_ckpt_rename = sd_adapter is not None and hasattr(sd_adapter, "convert_single_tensor_to_hf")
+
+        def _to_hf(internal_name, tensor):
+            if _has_ckpt_rename:
+                yield from sd_adapter.convert_single_tensor_to_hf(internal_name, tensor)
+            else:
+                yield internal_name, tensor
+
         for name, param in params.items():
             if "lora_" in name:
                 continue  # adapters folded into the base below; skip standalone.
@@ -610,28 +625,35 @@ class AutomodelEngine(BaseEngine):
             base_leaf = name.rsplit(".", 1)[-1]
             prefix = name[: -len(base_leaf) - 1] if "." in name else ""
             if base_leaf == "weight" and prefix in dense_lora_modules:
-                yield name, merged_dense_lora_weight(dense_lora_modules[prefix])
+                merged = merged_dense_lora_weight(dense_lora_modules[prefix])
+                yield from _to_hf(name, merged)
                 continue
             # Packed MoE expert base (LoRA experts detected via moe_lora_modules).
             if base_leaf in _MERGE_SPLITS and prefix in moe_lora_modules:
                 module = moe_lora_modules[prefix]
                 merged = merged_packed_expert_base(module, base_leaf)
+                if _has_ckpt_rename:
+                    yield from _to_hf(name, merged)
+                    continue
                 spec = _PackedExpertSpec(prefix=prefix, packed_attr=base_leaf, splits=_MERGE_SPLITS[base_leaf])
                 for expert_id in range(merged.size(0)):
                     for sub_name, sub_tensor in split_packed_expert(spec, merged, expert_id):
-                        yield f"{prefix}.{expert_id}.{sub_name}", sub_tensor
+                        yield from _to_hf(f"{prefix}.{expert_id}.{sub_name}", sub_tensor)
                 continue
             # Non-LoRA base param (embeddings, lm_head, router, shared experts,
             # norms); plain non-LoRA GroupedExperts still go through packed_expert_prefixes.
             spec = packed_expert_prefixes.get(name)
             if spec is not None:
                 unsharded = param.full_tensor() if isinstance(param, DTensor) else param
+                if _has_ckpt_rename:
+                    yield from _to_hf(name, unsharded)
+                    continue
                 for expert_id in range(unsharded.size(0)):
                     for sub_name, sub_tensor in split_packed_expert(spec, unsharded, expert_id):
-                        yield f"{spec.prefix}.{expert_id}.{sub_name}", sub_tensor
+                        yield from _to_hf(f"{spec.prefix}.{expert_id}.{sub_name}", sub_tensor)
                 continue
             unsharded = param.full_tensor() if isinstance(param, DTensor) else param
-            yield name, unsharded
+            yield from _to_hf(name, unsharded)
 
 
 class AutomodelEvalModeCtx(BaseEngineCtx):
