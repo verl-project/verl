@@ -47,20 +47,44 @@ def _packed_seq_params_supports(field_name: str) -> bool:
     return field_name in getattr(PackedSeqParams, "__dataclass_fields__", {})
 
 
-def _compute_fp8_thd_align_size(align_size: int) -> tuple[int, int]:
+def get_fp8_padding_options(config) -> tuple[bool, str | None]:
+    """Return (use_fp8_padding, fp8_recipe) for THD preprocessing from a TransformerConfig.
+
+    TE fp8 training needs the packed sequences padded to recipe-dependent block
+    boundaries; fp8_recipe is only forwarded when fp8 padding is active.
+    """
+    use_fp8_padding = getattr(config, "fp8", None) in ("e4m3", "hybrid")
+    fp8_recipe = getattr(config, "fp8_recipe", None) if use_fp8_padding else None
+    return use_fp8_padding, fp8_recipe
+
+
+def _compute_fp8_thd_align_size(align_size: int, fp8_recipe: str | None = None) -> tuple[int, int]:
     """Compute FP8 alignment sizes for thd-format sequences.
 
     For FP8 block quantization, each sequence must be padded to a multiple of
     lcm(16, align_size), and the total padded length must be divisible by
     (align_size * 128) for TransformerEngine compatibility.
 
+    The mxfp8 recipe scales in 32-element blocks and TransformerEngine requires
+    32-aligned dims when quantizing, so each sequence is padded to a multiple of
+    lcm(32, align_size) instead.
+
     Returns (per_seq_align_size, total_align_size).
     """
-    return math.lcm(16, align_size), align_size * 128
+    # Same recipe->alignment mapping megatron applies to its MoE fp8 padding
+    # (experts.py / token_dispatcher.py), so new recipes stay in sync.
+    from megatron.core.fp8_utils import get_fp8_align_size
+
+    per_seq_base = get_fp8_align_size(fp8_recipe)
+    return math.lcm(per_seq_base, align_size), align_size * 128
 
 
 def preprocess_packed_seqs(
-    input_ids: torch.Tensor, attention_mask: torch.Tensor, pre_process: bool = True, use_fp8_padding: bool = False
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    pre_process: bool = True,
+    use_fp8_padding: bool = False,
+    fp8_recipe: str | None = None,
 ) -> tuple[torch.Tensor, PackedSeqParams]:
     """
     Preprocess packed sequences
@@ -76,7 +100,7 @@ def preprocess_packed_seqs(
     cp_rank = mpu.get_context_parallel_rank()
     align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
     if use_fp8_padding:
-        per_seq_align, total_align = _compute_fp8_thd_align_size(align_size)
+        per_seq_align, total_align = _compute_fp8_thd_align_size(align_size, fp8_recipe)
         align_size = per_seq_align
 
     pad_size = (align_size - seqlens_in_batch % align_size) % align_size
@@ -337,6 +361,7 @@ def preprocess_thd_engine(
     pre_process: bool = True,
     need_roll: bool = False,
     use_fp8_padding: bool = False,
+    fp8_recipe: str | None = None,
     local_cp_size: int | None = None,
     min_local_rows: int | None = None,
     pad_to_length_bucket: int | None = None,
@@ -374,7 +399,7 @@ def preprocess_thd_engine(
     seqlens_in_batch = input_ids.offsets().diff()
 
     if use_fp8_padding:
-        per_seq_align, total_align = _compute_fp8_thd_align_size(align_size)
+        per_seq_align, total_align = _compute_fp8_thd_align_size(align_size, fp8_recipe)
         align_size = per_seq_align
 
     pad_size = (align_size - seqlens_in_batch % align_size) % align_size

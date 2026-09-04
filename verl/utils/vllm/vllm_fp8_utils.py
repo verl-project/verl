@@ -444,10 +444,40 @@ def build_fp8_method_patchers(vllm_version):
         )
 
         wrap = _make_process_weights_after_loading_for_vllm20
-        return [
+        patchers = [
             patch(linear_path, wrap(Fp8LinearMethod.process_weights_after_loading)),
             patch(moe_path, wrap(Fp8MoEMethod.process_weights_after_loading)),
         ]
+
+        # ModelOpt MXFP8 (CUDA): kernel post-processing swizzles weight_scale
+        # (or dequantizes the weight to bf16 on the emulation backend), so a
+        # refit needs the same pristine-layout record/stage/reprocess cycle.
+        # The params it rewrites (weight / weight_scale, w13_* / w2_*) are
+        # already covered by _FP8_REFIT_PARAM_NAMES.
+        modelopt_prefix = "vllm.model_executor.layers.quantization.modelopt"
+        try:
+            from vllm.model_executor.layers.quantization.modelopt import (
+                ModelOptMxFp8FusedMoE,
+                ModelOptMxFp8LinearMethod,
+            )
+
+            patchers.append(
+                patch(
+                    f"{modelopt_prefix}.ModelOptMxFp8LinearMethod.process_weights_after_loading",
+                    wrap(ModelOptMxFp8LinearMethod.process_weights_after_loading),
+                )
+            )
+            patchers.append(
+                patch(
+                    f"{modelopt_prefix}.ModelOptMxFp8FusedMoE.process_weights_after_loading",
+                    wrap(ModelOptMxFp8FusedMoE.process_weights_after_loading),
+                )
+            )
+        except ImportError:
+            # Older vLLM without MXFP8 support; the fp8 patchers alone suffice.
+            pass
+
+        return patchers
 
     return [
         patch(linear_path, process_weights_after_loading_for_vllm14),

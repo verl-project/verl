@@ -1,6 +1,6 @@
 # FP8 RL in verl
 
-Last updated: 03/05/2026
+Last updated: 08/22/2026
 
 verl supports two FP8 modes for accelerating RL training:
 
@@ -212,6 +212,83 @@ actor_rollout_ref.rollout:
 Results and observations:
 - FP8 E2E achieves comparable accuracy to the BF16 baseline, with the two curves closely aligned throughout training.
 - The training/inference precision mismatch (measured by KL divergence) follows the ordering: FP8 rollout-only > FP8 E2E > BF16 E2E. This is expected, as FP8 E2E maintains consistent precision across both training and inference, resulting in lower distribution mismatch than the FP8 rollout-only setting where training remains in BF16.
+
+---
+
+## MXFP8 Training (Blackwell)
+
+MXFP8 is the OCP microscaling FP8 format: E4M3 elements with one shared E8M0 scale per
+32-element block, natively accelerated by Blackwell tensor cores. Compared to the
+`blockwise` recipe above (1x128 activation / 128x128 weight scaling, designed for Hopper),
+MXFP8 uses hardware-decoded block scales and needs no `NVTE_FP8_BLOCK_SCALING_FP32_SCALES`
+workaround.
+
+### Requirements
+
+- **Blackwell GPUs** (SM100+). On Hopper, use `fp8_recipe: "blockwise"` as described in
+  the FP8 End-to-End section instead — Hopper tensor cores cannot consume MXFP8 block scales.
+- **Megatron-Core >= 0.13** and **Transformer Engine >= 2.1**
+
+### Key Configuration
+
+```yaml
+# MXFP8 training via Transformer Engine
+actor_rollout_ref.actor.megatron.override_transformer_config:
+  fp8: "e4m3"                # element format; "hybrid" (e4m3 fwd + e5m2 bwd) also supported
+  fp8_recipe: "mxfp8"        # 32-element block scaling
+
+# MXFP8 rollout inference (SGLang)
+actor_rollout_ref.rollout:
+  name: sglang
+  quantization: mxfp8
+```
+
+Notes:
+
+- Training requires the Megatron-Bridge model path (`actor_rollout_ref.actor.megatron.use_mbridge=True`,
+  the default). The legacy model-building path does not support FP8 recipes and fails loudly.
+- Model weights stay in bf16 (`fp8_param` is not supported); only GEMM inputs are cast to
+  MXFP8 on the fly, so checkpointing is unchanged.
+- verl pads packed sequences to the 32-token block boundaries MXFP8 quantization requires;
+  this is automatic once `fp8_recipe: "mxfp8"` is set.
+
+### MXFP8 Rollout and Train-Inference Consistency
+
+With `quantization: mxfp8`, the rollout engine (SGLang or vLLM) is launched in MXFP8 mode
+against the bf16 checkpoint (via a `quantization_config` override, no offline conversion
+needed), and weight sync quantizes the bf16 actor weights to MXFP8 on the fly.
+
+For vLLM, the config maps to `ModelOptMxFp8Config` (weight `fp8_e4m3fn` + `uint8` UE8M0
+`weight_scale`), refits reuse the same pristine-layout staging cycle as the blockwise FP8
+path, and vLLM's Marlin/emulation fallbacks allow serving MXFP8 weights on pre-Blackwell
+GPUs (SM80+) — the served weight grid is still produced by TE's quantizer, so
+train-inference weight consistency is preserved regardless of the serving kernel.
+The vLLM MoE (`ModelOptMxFp8FusedMoE`) path is wired but not yet validated end-to-end.
+
+The weight-sync quantization deliberately uses **TransformerEngine's `MXFP8Quantizer`** —
+the same quantizer the trainer's FP8 GEMMs apply to weights — so the rollout engine serves
+exactly the weight grid the training forward pass saw. An independent quantization kernel
+can round E8M0 scales differently at block boundaries and reintroduce train-inference
+mismatch. Residual mismatch (activation quantization kernels and GEMM implementations still
+differ between TE and SGLang) is small; pairing with token-level TIS is recommended,
+as with the blockwise FP8 E2E recipe.
+
+Layer skipping follows the same rules as FP8 rollout (`ignored_layers`,
+`modules_to_not_convert`, or the `SGLANG_FP8_IGNORED_LAYERS` env var). Layers whose
+last weight dim is not a multiple of 32 cannot be MXFP8-quantized and must be excluded
+this way — e.g. vision towers of VLMs (`SGLANG_FP8_IGNORED_LAYERS=visual`); weight sync
+fails with an actionable error if such a layer is selected. If you enable
+`first_last_layers_bf16` on the training side, keep the two sides consistent by excluding
+the same layers from rollout quantization, e.g. for a 36-layer model with the first and
+last layer in bf16:
+
+```json
+{
+  "quantization_config": {
+    "ignored_layers": ["re:model\\.layers\\.(0|35)\\..*"]
+  }
+}
+```
 
 ---
 
