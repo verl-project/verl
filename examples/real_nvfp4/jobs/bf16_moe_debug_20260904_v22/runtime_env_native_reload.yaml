@@ -1,0 +1,20 @@
+working_dir: ./
+excludes: ["/.git/"]
+env_vars:
+  TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+  CUDA_DEVICE_MAX_CONNECTIONS: "1"
+  NVTE_BACKWARD_OVERRIDE: "dequantized"
+  NVTE_NVFP4_ROW_SCALED_ACTIVATION: "1"
+  NVTE_NVFP4_DISABLE_RHT: "1"
+  NVTE_NVFP4_DISABLE_STOCHASTIC_ROUNDING: "1"
+  NVTE_NVFP4_DISABLE_2D_QUANTIZATION: "1"
+  NVTE_NVFP4_4OVER6: "none"
+  NVTE_NVFP4_4OVER6_E4M3_USE_256: "all"
+  NVTE_NVFP4_4OVER6_ERR_MODE: "MAE"
+  FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH: "1"
+  TRTLLM_DISABLE_FP4_QUANT_FAST_MATH: "1"
+  # vLLM 0.26 RoutedExperts broke verl legacy model.load_weights MoE sync;
+  # this control uses the native reload API instead. Worker processes only
+  # see env through Ray runtime_env, not the driver shell.
+  VERL_VLLM_NATIVE_RELOAD: "1"
+  VERL_DEBUG_MOE_RELOAD: "1"
