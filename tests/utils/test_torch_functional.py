@@ -24,6 +24,8 @@ from verl.utils.torch_functional import (
     calculate_sum_pi_squared_from_logits,
     distributed_masked_mean,
     distributed_mean_max_min_std,
+    entropy_from_logits,
+    entropy_from_logits_with_chunking,
     expand_as_nested,
     masked_mean,
 )
@@ -148,6 +150,43 @@ def test_calculate_sum_pi_squared_from_logits_extreme_values():
     expected = torch.softmax(logits, dim=-1).pow(2).sum(dim=-1)
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
+
+
+@pytest.mark.parametrize("shape", [(8, 17), (3, 5, 32), (1, 1024), (5000, 16)])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64, torch.bfloat16])
+def test_entropy_from_logits_with_chunking_matches_unchunked(shape, dtype):
+    """entropy_from_logits_with_chunking is selected by a config flag as a lower-memory
+    stand-in for entropy_from_logits, so it has to accept the same (..., vocab_size)
+    inputs and return the same shape and dtype."""
+    torch.manual_seed(0)
+    logits = (torch.randn(*shape) * 5.0).to(dtype)
+
+    expected = entropy_from_logits(logits)
+    actual = entropy_from_logits_with_chunking(logits, chunk_size=64)
+
+    assert actual.shape == expected.shape
+    assert actual.dtype == expected.dtype
+
+    if dtype is torch.bfloat16:
+        # entropy_from_logits runs the whole reduction in bfloat16 while the chunked
+        # path accumulates in float32, so the two cannot agree to bfloat16 resolution
+        # here -- the unchunked result is the noisier of the pair. Hold the chunked
+        # path to the float32 value instead.
+        reference = entropy_from_logits(logits.float())
+        torch.testing.assert_close(actual.float(), reference, atol=1e-2, rtol=1e-2)
+    else:
+        torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+
+
+def test_entropy_from_logits_with_chunking_spans_chunk_boundaries():
+    """Chunk size must not change the result."""
+    torch.manual_seed(0)
+    logits = torch.randn(300, 24) * 5.0
+    reference = entropy_from_logits(logits)
+    for chunk_size in (1, 7, 299, 300, 301, 4096):
+        torch.testing.assert_close(
+            entropy_from_logits_with_chunking(logits, chunk_size=chunk_size), reference, atol=1e-5, rtol=1e-5
+        )
 
 
 def test_expand_as_nested():
