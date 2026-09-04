@@ -226,7 +226,7 @@ Instead, we have switched to AgentLoop mode, which also supports multi-turn tool
 ### FSDP2 Configuration Example
 
 ```shell
-python3 -m verl.experimental.one_step_off_policy.async_main_ppo \
+python3 -m verl.experimental.one_step_off_policy.main_ppo \
     --config-path=config \
     --config-name='one_step_off_ppo_trainer.yaml' \
     actor_rollout_ref.actor.strategy=fsdp2 \
@@ -242,7 +242,7 @@ python3 -m verl.experimental.one_step_off_policy.async_main_ppo \
 ### Megatron Configuration Example
 
 ```shell
-python3 -m verl.experimental.one_step_off_policy.async_main_ppo \
+python3 -m verl.experimental.one_step_off_policy.main_ppo \
     --config-path=config \
     --config-name='one_step_off_ppo_megatron_trainer.yaml' \
     actor_rollout_ref.actor.strategy=megatron \
