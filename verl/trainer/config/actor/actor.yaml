@@ -143,6 +143,9 @@ checkpoint:
 
   # Whether to perform strict validation during weight export
   strict: True
+  
+  # Whether to save only LoRA adapter weights when the model has LoRA adapters
+  save_lora_only: False
 
 # optimizer configs
 optim:
