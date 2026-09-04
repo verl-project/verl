@@ -1823,6 +1823,15 @@ def check_mtp_config(model_config: HFModelConfig, engine_config: McoreEngineConf
         # Force the provider override so MTP remains disabled after that reload.
         engine_config.override_transformer_config["mtp_num_layers"] = None
         engine_config.override_transformer_config.pop("mtp_loss_scaling_factor", None)
+        # Provider type is not known yet. Remove stale HybridProvider-only
+        # settings here; configure_native_hybrid_mtp will add explicit disabled
+        # values later if the resolved provider is actually hybrid.
+        for hybrid_key in (
+            "mtp_hybrid_override_pattern",
+            "mtp_use_repeated_layer",
+            "keep_mtp_spec_in_bf16",
+        ):
+            engine_config.override_transformer_config.pop(hybrid_key, None)
         return
 
     elif enable_mtp and not has_mtp:
@@ -1843,17 +1852,26 @@ def patch_engine_mtp(module, model_config):
         module: The model module to patch. Can be a single module or a list of modules.
         model_config: The model configuration containing MTP settings.
     """
-    logger.warning("Applying mtp patch...")
-    from verl.models.mcore.mtp_patch import (
-        patch_mtp_layer_checkpointed_forward,
-        patch_mtp_layer_get_embeddings,
-        patch_postprocess,
-    )
-
-    print(module)
+    from verl.models.mcore.mtp_support import is_native_hybrid_model
 
     modules = module if isinstance(module, list) else [module]
     for m in modules:
+        if is_native_hybrid_model(unwrap_model(m)):
+            if not model_config.mtp.enable_train:
+                raise ValueError(
+                    "HybridModel does not support model.mtp.enable=True with model.mtp.enable_train=False "
+                    "in this Megatron-Core version."
+                )
+            logger.info("Using Megatron-Core native HybridModel MTP; legacy GPT MTP patches are disabled.")
+            continue
+
+        from verl.models.mcore.mtp_patch import (
+            patch_mtp_layer_checkpointed_forward,
+            patch_mtp_layer_get_embeddings,
+            patch_postprocess,
+        )
+
+        logger.warning("Applying legacy GPT MTP patches.")
         patch_postprocess(m)
         patch_mtp_layer_checkpointed_forward(m)
         if model_config.mtp.detach_encoder:

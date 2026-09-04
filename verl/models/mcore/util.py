@@ -341,6 +341,7 @@ def preprocess_thd_engine(
     min_local_rows: int | None = None,
     pad_to_length_bucket: int | None = None,
     cp_layout: ContextParallelLayout = "zigzag",
+    include_total_tokens: bool = False,
 ) -> tuple[torch.Tensor, PackedSeqParams, torch.Tensor | None]:
     """Pack nested THD sequences and shard their rows across CP ranks.
 
@@ -349,6 +350,9 @@ def preprocess_thd_engine(
     one consecutive interval of the *global padded THD buffer*. The latter is
     required by attention variants whose CP kernels address rows through one
     rank-local ``global_start``.
+
+    Set ``include_total_tokens`` for Hybrid/Mamba models so MCore builds
+    ``PackedSeqParams.seq_idx`` and resets recurrent state at sequence boundaries.
     """
     if cp_layout not in ("zigzag", "contiguous"):
         raise ValueError(f"Unsupported context parallel layout: {cp_layout}")
@@ -421,8 +425,9 @@ def preprocess_thd_engine(
     # Pure Python int calculation to avoid further synchronization
     max_seqlen_in_batch = max(seqlens_in_batch_padded_cpu)
 
+    total_tokens = sum(seqlens_in_batch_padded_cpu)
     shape = list(input_ids.shape[1:])
-    shape[0] = sum(seqlens_in_batch_padded_cpu) // cp_size
+    shape[0] = total_tokens // cp_size
     if pre_process:
         input_ids_rmpad = torch.zeros(shape, dtype=input_ids.dtype, device=input_ids.device)
         position_ids_rmpad = torch.zeros(shape[0], dtype=torch.long, device=input_ids.device)
@@ -547,6 +552,9 @@ def preprocess_thd_engine(
             f"cp_layout='{cp_layout}' requires PackedSeqParams.cp_partition_mode, which this "
             "Megatron-core version does not provide. Upgrade Megatron-core or use the zigzag layout."
         )
+
+    if include_total_tokens:
+        extra_packed_args["total_tokens"] = total_tokens
 
     packed_seq_params = PackedSeqParams(
         qkv_format="thd",
