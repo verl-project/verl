@@ -127,6 +127,7 @@ jobs:
             tests/workers/rollout/test_vllm_cli_args_on_cpu.py \
             tests/workers/rollout/test_vision_placeholder_tokens_on_cpu.py \
             tests/workers/rollout/test_vllm_pd_disaggregation_on_cpu.py \
+            tests/workers/rollout/rollout_vllm/test_vllm_control_concurrency_on_cpu.py \
             tests/utils/test_vllm_weight_name_normalization_on_cpu.py::test_update_weights_from_ipc_accumulates_lora_across_buckets \
             tests/utils/test_vllm_weight_name_normalization_on_cpu.py::test_update_weights_from_ipc_standard_loads_per_bucket
       - name: Prepare gsm8k dataset

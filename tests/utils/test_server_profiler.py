@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
 import os
 import tempfile
@@ -508,6 +509,7 @@ class TestServerProfilerFunctionality(unittest.IsolatedAsyncioTestCase):
 
         # Mock self object
         mock_self = MagicMock()
+        mock_self._default_asyncio_loop = asyncio.get_running_loop()
         mock_self.node_rank = 0
         mock_self.replica_rank = 3
         mock_self.profiler_controller = mock_profiler
@@ -549,6 +551,7 @@ class TestServerProfilerFunctionality(unittest.IsolatedAsyncioTestCase):
         mock_engine = AsyncMock()
 
         mock_self = MagicMock()
+        mock_self._default_asyncio_loop = asyncio.get_running_loop()
         mock_self.node_rank = 0
         mock_self.profiler_controller = mock_profiler
         mock_self.engine = mock_engine
@@ -574,6 +577,7 @@ class TestServerProfilerFunctionality(unittest.IsolatedAsyncioTestCase):
         mock_engine = AsyncMock()
 
         mock_self = MagicMock()
+        mock_self._default_asyncio_loop = asyncio.get_running_loop()
         mock_self.node_rank = 1  # non-master node, should skip
         mock_self.profiler_controller = mock_profiler
         mock_self.engine = mock_engine
@@ -604,6 +608,7 @@ class TestServerProfilerFunctionality(unittest.IsolatedAsyncioTestCase):
         mock_tokenizer_manager = AsyncMock()
 
         mock_self = MagicMock()
+        mock_self._default_asyncio_loop = asyncio.get_running_loop()
         mock_self.profiler_controller = mock_profiler
         mock_self.tokenizer_manager = mock_tokenizer_manager
         mock_self.replica_rank = 0
