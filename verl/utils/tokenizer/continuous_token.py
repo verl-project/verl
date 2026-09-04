@@ -93,11 +93,12 @@ class ContinuousTokenBuilder:
 
     This class exposes two API layers:
 
-    AgentLoop-facing runtime APIs:
+    Public token-building APIs:
         ``build_initial_tokens`` renders the first prompt, ``merge_non_assistant_tokens``
         merges append-only tool/user/system messages, ``merge_assistant_tokens``
-        appends model-generated assistant tokens, and ``align_response_metadata``
-        applies the recorded token edits to masks/logprobs.
+        appends model-generated assistant tokens, ``merge_assistant_with_tokenization``
+        reconstructs and merges a structured gold assistant message for SFT, and
+        ``align_response_metadata`` applies the recorded token edits to masks/logprobs.
 
     Developer extension APIs:
         Model-specific builders should subclass this class and keep the runtime
@@ -211,6 +212,27 @@ class ContinuousTokenBuilder:
             appended_token_count=len(assistant_token_ids),
             kind="assistant",
         )
+
+    def merge_assistant_with_tokenization(
+        self,
+        runtime_token_ids: list[int],
+        message: dict[str, Any],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        previous_messages: list[dict[str, Any]] | None = None,
+    ) -> MergeResult:
+        """Reconstruct and merge one structured gold assistant message for SFT."""
+        # Local import avoids an import-time cycle: SFT reconstruction dispatches
+        # on the concrete builder subclasses defined in this module.
+        from .sft_continuous_token import reconstruct_assistant_tokens
+
+        assistant_token_ids = reconstruct_assistant_tokens(
+            self,
+            message,
+            tools=tools,
+            previous_messages=previous_messages,
+        )
+        return self.merge_assistant_tokens(runtime_token_ids, assistant_token_ids)
 
     def _merge_non_assistant_token_ids(
         self, runtime_token_ids: list[int], appended_token_ids: list[int]

@@ -16,9 +16,11 @@
 Continuous Token runtime builders operate on token IDs produced by rollout.
 Multi-turn SFT instead starts from structured gold assistant messages.  This
 module is the package-local adapter between those two representations; it does
-not add an assistant-message API to the shared runtime builders.  It
-intentionally reuses package-private protocol helpers that are shared by SFT
-and rollout rather than defining a second copy of those rules.
+not change the rollout-facing token-ID merge path.  The public builder entry
+point imports this adapter lazily so the model-family dispatch remains SFT-only
+without creating an import-time cycle.  The adapter intentionally reuses
+package-private protocol helpers shared by SFT and rollout rather than defining
+a second copy of those rules.
 """
 
 from __future__ import annotations

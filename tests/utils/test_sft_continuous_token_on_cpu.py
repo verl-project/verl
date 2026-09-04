@@ -222,6 +222,21 @@ def test_default_builder_encodes_prepared_assistant_continuation_once():
     assert tokenizer.calls[1]["messages"][-1] is message
 
 
+def test_builder_public_api_reconstructs_and_merges_gold_assistant_message():
+    tokenizer = _RecordingTemplateTokenizer()
+    builder = ContinuousTokenBuilder(tokenizer)
+
+    result = builder.merge_assistant_with_tokenization(
+        [10, 20],
+        {"role": "assistant", "content": "gold"},
+    )
+
+    assistant_ids = tokenizer.encode("gold\n", add_special_tokens=False)
+    assert result.token_ids == [10, 20, *assistant_ids]
+    assert result.appended_token_count == len(assistant_ids)
+    assert result.kind == "assistant"
+
+
 def test_default_builder_trims_at_first_generated_terminator():
     tokenizer = _TemplateTokenizer()
     tokenizer.eos_token_id = 99
