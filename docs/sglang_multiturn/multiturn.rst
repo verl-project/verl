@@ -17,6 +17,24 @@ To enable multi-turn rollout, make sure to configure the following fields in you
 
 These configuration activates the sglang engine for multi-turn interaction during rollout.
 
+Invalid Tool Call Limit
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Multi-turn rollouts can optionally stop a trajectory after repeated invalid tool calls:
+
+.. code-block:: yaml
+
+    actor_rollout_ref:
+      rollout:
+        multi_turn:
+          max_consecutive_invalid_tool_calls: 5
+
+The default value is ``null``, which disables this guard and preserves existing behavior. Set ``max_consecutive_invalid_tool_calls`` to a positive integer to terminate a trajectory when the final consecutive-invalid streak reaches that value. The limit is global to the rollout configuration; there is no per-sample override.
+
+Unknown tool names, malformed JSON arguments, and tool results whose metadata contains ``invalid_tool_call=True`` are counted as invalid tool calls. A successful tool call resets the streak, while execution exceptions are neutral and leave the current streak unchanged. Parallel tool results are evaluated in the order declared by the model after the full batch completes, and the tool response that reaches the limit remains in the rollout before termination.
+
+When this guard is enabled, trajectories expose ``max_consecutive_invalid_tool_calls_observed`` and ``invalid_tool_call_limit_reached`` in ``extra_fields``. Trajectories that reach the limit also expose ``termination_reason="invalid_tool_call_limit"``.
+
 Custom Tool Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 

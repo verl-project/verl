@@ -346,6 +346,7 @@ actor_rollout_ref:
       tool_config_path: null
       function_tool_path: null
       max_user_turns: null
+      max_consecutive_invalid_tool_calls: null
       max_parallel_calls: 1
       max_tool_response_length: 256
       tool_response_truncate_side: middle

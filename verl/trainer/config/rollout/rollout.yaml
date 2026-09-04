@@ -202,6 +202,10 @@ multi_turn:
   # null for no limit (default max_length // 3)
   max_user_turns: null
 
+  # Stop a trajectory after this many consecutive invalid tool calls.
+  # null disables the limit and preserves existing behavior.
+  max_consecutive_invalid_tool_calls: null
+
   # max parallel call for tools in single turn
   max_parallel_calls: 1
 

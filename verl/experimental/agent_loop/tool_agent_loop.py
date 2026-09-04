@@ -85,6 +85,9 @@ class AgentData:
         self.tool_rewards: list[float] = []
         self.user_turns = 0
         self.assistant_turns = 0
+        self.consecutive_invalid_tool_calls = 0
+        self.max_consecutive_invalid_tool_calls_observed = 0
+        self.invalid_tool_call_limit_reached = False
 
         # Temporary state for tool calls
         self.tool_calls: list[FunctionCall] = []
@@ -108,6 +111,7 @@ class ToolAgentLoop(AgentLoopBase):
         self.max_user_turns = self.rollout_config.multi_turn.max_user_turns
         self.max_assistant_turns = self.rollout_config.multi_turn.max_assistant_turns
         self.max_parallel_calls = self.rollout_config.multi_turn.max_parallel_calls
+        self.max_consecutive_invalid_tool_calls = self.rollout_config.multi_turn.max_consecutive_invalid_tool_calls
         self.max_tool_response_length = self.rollout_config.multi_turn.max_tool_response_length
         self.tool_response_truncate_side = self.rollout_config.multi_turn.tool_response_truncate_side
 
@@ -177,6 +181,7 @@ class ToolAgentLoop(AgentLoopBase):
                 state = AgentState.TERMINATED
 
         # Finalize output
+        self._write_invalid_tool_call_diagnostics(agent_data)
         response_ids = agent_data.prompt_ids[-len(agent_data.response_mask) :]
         prompt_ids = agent_data.prompt_ids[: len(agent_data.prompt_ids) - len(agent_data.response_mask)]
         multi_modal_data = {}
@@ -311,6 +316,7 @@ class ToolAgentLoop(AgentLoopBase):
 
         with simple_timer("tool_calls", agent_data.metrics):
             responses = await asyncio.gather(*tasks)
+        ToolAgentLoop._update_invalid_tool_call_tracking(self, agent_data, responses)
 
         # Process tool responses and update multi_modal_data
         # Removed: agent_data.new_images_this_turn = []
@@ -383,7 +389,9 @@ class ToolAgentLoop(AgentLoopBase):
             agent_data.response_logprobs if agent_data.response_logprobs else None,
             tools=schemas,
         )
-        if len(response_mask) >= self.response_length:
+        if len(response_mask) >= self.response_length and not getattr(
+            agent_data, "invalid_tool_call_limit_reached", False
+        ):
             return AgentState.TERMINATED
         agent_data.prompt_ids = merge_result.token_ids
         agent_data.response_mask = response_mask
@@ -400,7 +408,44 @@ class ToolAgentLoop(AgentLoopBase):
                 agent_data.image_data.append(img)
 
         agent_data.user_turns += 1
+        if getattr(agent_data, "invalid_tool_call_limit_reached", False):
+            return AgentState.TERMINATED
         return AgentState.GENERATING
+
+    def _update_invalid_tool_call_tracking(
+        self,
+        agent_data: AgentData,
+        responses: list[tuple[ToolResponse, float, dict]],
+    ) -> None:
+        limit = getattr(self, "max_consecutive_invalid_tool_calls", None)
+        if limit is None:
+            return
+
+        for _, _, result_metadata in responses:
+            invalid_tool_call = result_metadata.get("invalid_tool_call")
+            if invalid_tool_call is True:
+                agent_data.consecutive_invalid_tool_calls += 1
+                agent_data.max_consecutive_invalid_tool_calls_observed = max(
+                    agent_data.max_consecutive_invalid_tool_calls_observed,
+                    agent_data.consecutive_invalid_tool_calls,
+                )
+            elif invalid_tool_call is False:
+                agent_data.consecutive_invalid_tool_calls = 0
+
+        agent_data.invalid_tool_call_limit_reached = agent_data.consecutive_invalid_tool_calls >= limit
+
+    def _write_invalid_tool_call_diagnostics(self, agent_data: AgentData) -> None:
+        if self.max_consecutive_invalid_tool_calls is None:
+            return
+
+        agent_data.extra_fields.update(
+            {
+                "max_consecutive_invalid_tool_calls_observed": (agent_data.max_consecutive_invalid_tool_calls_observed),
+                "invalid_tool_call_limit_reached": agent_data.invalid_tool_call_limit_reached,
+            }
+        )
+        if agent_data.invalid_tool_call_limit_reached:
+            agent_data.extra_fields["termination_reason"] = "invalid_tool_call_limit"
 
     def _build_assistant_message(self, content: str, agent_data: AgentData) -> dict[str, Any]:
         message: dict[str, Any] = {"role": "assistant", "content": content or ""}
@@ -450,7 +495,7 @@ class ToolAgentLoop(AgentLoopBase):
             available = list(active_tools.keys())
             msg = f"Unknown function '{tool_name}'. Available tools: {available}"
             logger.warning(msg)
-            return ToolResponse(text=msg), 0.0, {}
+            return ToolResponse(text=msg), 0.0, {"invalid_tool_call": True}
 
         # Validate tool arguments
         try:
@@ -458,7 +503,7 @@ class ToolAgentLoop(AgentLoopBase):
         except (json.JSONDecodeError, TypeError) as e:
             msg = f"Invalid JSON in arguments for '{tool_name}': {e}"
             logger.warning(msg)
-            return ToolResponse(text=msg), 0.0, {}
+            return ToolResponse(text=msg), 0.0, {"invalid_tool_call": True}
 
         # Execute tool
         tool, instance_id = None, None
@@ -507,4 +552,6 @@ class ToolAgentLoop(AgentLoopBase):
                 if attr_value is not None:
                     tool_response_kwargs[attr_name] = attr_value
 
-        return ToolResponse(**tool_response_kwargs), tool_reward, res
+        result_metadata = dict(res)
+        result_metadata.setdefault("invalid_tool_call", False)
+        return ToolResponse(**tool_response_kwargs), tool_reward, result_metadata
