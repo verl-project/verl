@@ -529,7 +529,7 @@ specifying `multi_turn` configurations in the config file.
      staleness_threshold: 0.5
      # Other async parameters
    ```
-4. **Example**: See `recipe/fully_async_policy/shell/dapo_7b_async_retool.sh`.
+4. **Example**: See `verl/experimental/fully_async_policy/shell/dapo_7b_async_retool.sh`.
 
 ### Experimental Results
 
