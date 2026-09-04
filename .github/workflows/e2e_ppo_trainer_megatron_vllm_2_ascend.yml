@@ -94,7 +94,7 @@ env:
 jobs:
   e2e_ppo_trainer_fsdp_vllm_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a2b3-8
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 90 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
@@ -178,7 +178,7 @@ jobs:
 
   e2e_ppo_trainer_fsdp-qwen3_5-2b_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a2b3-8
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
