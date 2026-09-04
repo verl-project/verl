@@ -71,4 +71,4 @@ Using TensorRT-LLM rollout in fully async with GRPO
 .. code-block:: bash
 
     # Fully async policy with Megatron-Core training engine
-    bash verl/experimental/fully_async_policy/shell/grpo_30b_a3b_base_math_megatron_4_4_mis_trtllm.sh
+    bash verl/experimental/fully_async_policy/shell/grpo_30b_a3b_base_math_megatron_8_8_mis_trtllm.sh
