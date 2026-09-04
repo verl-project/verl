@@ -119,7 +119,6 @@ under `recipe/` instead.
 | `otb_trainer/`                     | OTB                            | `adv_estimator=optimal_token_baseline`              |
 | `mtp_trainer/`                     | DAPO + MTP (MiMo-7B)           | `adv_estimator=grpo`, MTP flags                     |
 | `on_policy_distillation_trainer/`  | on-policy distillation         | GRPO + distillation loss                            |
-| `flowgrpo_trainer/`                | Flow-GRPO (diffusion)          | image-gen specific                                  |
 
 ### Feature / infra
 
@@ -129,7 +128,6 @@ under `recipe/` instead.
 | `profile/`           | NPU profiler / torch-memory profiler runs.                                               |
 | `sft/`               | Supervised fine-tuning examples.                                                         |
 | `generation/`        | Rollout-only inference launches.                                                         |
-| `vllm_omni/`         | vLLM omni backend examples.                                                              |
 | `data_preprocess/`   | Scripts that produce the `$HOME/data/<dataset>/*.parquet` layout the run scripts expect. |
 | `prefix_grouper/`    | Prefix-grouped rollout examples.                                                         |
 | `rollout_correction/`| Rollout correction examples.                                                             |
