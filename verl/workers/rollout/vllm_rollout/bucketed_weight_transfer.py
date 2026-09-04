@@ -25,6 +25,7 @@ from typing import Callable, TypedDict
 
 import torch
 import zmq
+from torch.distributed.tensor import DTensor
 from torch.multiprocessing.reductions import reduce_tensor
 
 from verl.utils.device import get_device_id, get_device_name, get_torch_device, is_support_ipc
@@ -118,6 +119,8 @@ class BucketedWeightSender:
             bucket_meta: dict[str, TensorMetadata] = {}
             # dtype = PrecisionType.to_dtype(self.config.dtype)
             async for name, weight in ensure_async_iterator(weights):
+                if isinstance(weight, DTensor):
+                    weight = weight.full_tensor()
                 # model parameters are in fp32 full precision
                 # (vermouth1992) we should not force cast weight here because some parameters
                 # (such as moe gate) have to keep fp32 precision. If a weight is bf16 in the rollout side,
