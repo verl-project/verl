@@ -10,7 +10,7 @@ Requirements
 verl supports various backends. Currently, the following configurations are available:
 
 - **FSDP** and **Megatron-LM** (optional) for training.
-- **SGLang**, **vLLM** and **TGI** for rollout generation.
+- **vLLM**, **SGLang**, **TensorRT-LLM** and **HF** for rollout generation.
 
 Choices of Backend Engines
 ----------------------------
@@ -26,7 +26,7 @@ For inference, vllm 0.18.0 and later versions are supported; older releases are 
 
 For SGLang, refer to the :doc:`SGLang Backend<../workers/sglang_worker>` for detailed installation and usage instructions. SGLang rollout is under extensive development and offers many advanced features and optimizations. We encourage users to report any issues or provide feedback via the `SGLang Issue Tracker <https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/issues/106>`_.
 
-For huggingface TGI integration, it is usually used for debugging and single GPU exploration.
+For HuggingFace (``hf``) rollout, it is usually used for debugging and single GPU exploration.
 
 Install with uv
 ---------------------------------------------------------
