@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2034
+
+# Two matched long runs, both R3 on / TIS on / dynamic sampling on, default
+# (lenient) verifier:
+#   ARM=w4a4  real NVFP4 on the routed experts only, first 2 and last 4 layers
+#             left in BF16 -- the same carve-out NeMo-RL's R3-on arm uses.
+#   ARM=bf16  the matched BF16 control.
+# See README.md for why this bundle reuses v23's image instead of building one.
+
+readonly RN4PT_VERSION=${RN4PT_VERSION_OVERRIDE:-verl_real_nvfp4_long_ds_20260904_v25}
+readonly RN4PT_WORKSPACE=/lustre/fsw/general_sa/shuazhang/python_space/verl_for_nvfp4_20251031
+readonly RN4PT_VERL=$RN4PT_WORKSPACE/verl_nvfp4_e2e_r3_20260831_v3
+readonly RN4PT_ROOT=$RN4PT_VERL/examples/real_nvfp4
+readonly RN4PT_BUNDLE=${RN4PT_BUNDLE_OVERRIDE:-$RN4PT_ROOT/jobs/long_ds_20260904_v25}
+readonly RN4PT_JOB_IMPL=$RN4PT_ROOT/jobs/long_ds_20260904_v25
+readonly RN4PT_BUILD_JOB_IMPL=$RN4PT_ROOT/jobs/r3_nativeonline_20260901_v8
+readonly RN4PT_STATE=$RN4PT_WORKSPACE/run_state/$RN4PT_VERSION
+readonly RN4PT_LOGS=$RN4PT_WORKSPACE/ray_log/$RN4PT_VERSION
+readonly RN4PT_CHECKPOINTS=$RN4PT_WORKSPACE/checkpoints/DAPO-NVFP4-QAT/$RN4PT_VERSION
+
+readonly RN4PT_BASE_IMAGE=${RN4PT_BASE_IMAGE_OVERRIDE:-/lustre/fsw/general_sa/shuazhang/images/verl.vllm026.mcore018.te218e7.realnvfp4.nativeonline.pdl-off.v8base.20260901.v12.sqsh}
+# v23's image was built from this exact source commit and passed preflight, and
+# nothing outside examples/real_nvfp4/jobs/** has changed since. Rebuilding an
+# identical runtime would only burn an hour, so this bundle inherits v23's
+# build and preflight evidence; rn4pt_require_runtime_image still re-verifies
+# the checksum and re-diffs the source against what was actually built.
+readonly RN4PT_IMAGE_EVIDENCE=$RN4PT_WORKSPACE/run_state/verl_real_nvfp4_bf16_moe_debug_20260904_v23
+readonly RN4PT_RUNTIME_IMAGE=${RN4PT_RUNTIME_IMAGE_OVERRIDE:-/lustre/fsw/general_sa/shuazhang/images/verl.vllm026.mcore018.te218e7.realnvfp4.bf16ctl.moedbg.20260904.v23.sqsh}
+readonly RN4PT_IMAGE_ENV=/opt/verl-rn4pt-20260831-v5
+readonly RN4PT_IMAGE_PYTHON=$RN4PT_IMAGE_ENV/.venv/bin/python
+readonly RN4PT_NETRC=/home/shuazhang/.netrc
+readonly RN4PT_MOUNTS=/lustre/fsw/general_sa/shuazhang:/lustre/fsw/general_sa/shuazhang,/home/shuazhang/.netrc:/root/.netrc
+
+readonly RN4PT_ACCOUNT=general_sa
+readonly RN4PT_PARTITIONS=36x2-a01r,tcpo,batch
+
+readonly RN4PT_PROJECT=DAPO-NVFP4-QAT
+readonly RN4PT_VERL_BASE_COMMIT=b356f4301e67c9896c9f1690785e096242c08705
+readonly RN4PT_RECIPE_COMMIT=e7f889574b8301cc0f0fc1d57c6d67f31ffeb689
+readonly RN4PT_TE_COMMIT=e7c550c5f80636cf841a8204b1d6f85a5f3f28b7
+readonly RN4PT_TE_VERSION=2.18.0+e7c550c5
+readonly RN4PT_VLLM_DISABLE_TRTLLM_MOE_PDL=1
+RN4PT_SOURCE_COMMIT=$(git -C "$RN4PT_VERL" rev-parse HEAD)
+readonly RN4PT_SOURCE_COMMIT
+RN4PT_LOCK_SHA256=$(sha256sum "$RN4PT_VERL/uv.lock" | awk '{print $1}')
+readonly RN4PT_LOCK_SHA256
+readonly RN4PT_PROBE_PASS=$RN4PT_IMAGE_EVIDENCE/probe.pass
+readonly RN4PT_BUILD_PASS=$RN4PT_IMAGE_EVIDENCE/build.pass
+readonly RN4PT_PREFLIGHT_PASS=$RN4PT_IMAGE_EVIDENCE/preflight.pass
+
+# ---------------------------------------------------------------- arm settings
+# Both arms: R3 on, token-level TIS on, dynamic sampling on, default verifier.
+readonly LONG_FILTER_GROUPS=True
+readonly LONG_MAX_GEN_BATCHES=20
+readonly LONG_GEN_PROMPT_BSZ_MULT=3
+readonly LONG_ROLLOUT_IS=token
+# NeMo-RL's R3-on arm quantizes the routed experts only, leaving the first 2 and
+# last 4 decoder layers in BF16, so 42 of 48 MoE layers carry NVFP4 MLP GEMMs.
+readonly LONG_BF16_LAYERS_AT_START=2
+readonly LONG_BF16_LAYERS_AT_END=4
+readonly LONG_NVFP4_MLP_LAYERS=42
+
+# Dynamic sampling generates up to LONG_GEN_PROMPT_BSZ_MULT x the prompts per
+# step, and response length grows over the run, so chunks stay well inside the
+# 5h partition cap. Every target is a save_freq (10) multiple.
+readonly -a LONG_TARGET_STEPS=(40 80 120 160 200 240 260)
+
+rn4pt_die() { echo "REAL_NVFP4_PERTOKEN_REFUSED: $*" >&2; return 2; }
+
+rn4pt_arm_settings() {
+  # Sets the per-arm variables for "$1" (w4a4|bf16). Callers use `readonly`
+  # copies afterwards; keep this the single place that knows the difference.
+  case "$1" in
+    w4a4)
+      LONG_PRECISION_MODE=real_nvfp4
+      LONG_FIRST_LAST_BF16=True
+      LONG_EXP=verl_30b_w4a4_carveout_r3_tis_ds_8n_20260904_v25
+      LONG_SMOKE_EXP=verl_30b_w4a4_carveout_smoke_20260904_v25
+      LONG_RUNTIME_ENV=$RN4PT_BUNDLE/runtime_env_w4a4.yaml
+      LONG_JOB_TAG=w4a4
+      ;;
+    bf16)
+      LONG_PRECISION_MODE=bf16
+      # The carve-out is meaningless without quantization, and leaving it on
+      # would silently change the BF16 control's transformer config.
+      LONG_FIRST_LAST_BF16=False
+      LONG_EXP=verl_30b_bf16_r3_tis_ds_8n_20260904_v25
+      LONG_SMOKE_EXP=verl_30b_bf16_smoke_20260904_v25
+      LONG_RUNTIME_ENV=$RN4PT_BUNDLE/runtime_env_bf16.yaml
+      LONG_JOB_TAG=bf16
+      ;;
+    *) rn4pt_die "unknown arm: $1" || return ;;
+  esac
+}
+
+rn4pt_validate_static() {
+  local path scan_status
+  [[ -d "$RN4PT_VERL/.git" || -f "$RN4PT_VERL/.git" ]] || rn4pt_die "worktree missing" || return
+  [[ -z "$(git -C "$RN4PT_VERL" status --porcelain --untracked-files=normal)" ]] || \
+    rn4pt_die "worktree must be clean so the runtime image and source commit cannot diverge" || return
+  [[ ! -e "$RN4PT_VERL/.venv" && ! -L "$RN4PT_VERL/.venv" ]] || \
+    rn4pt_die "worktree .venv would leak a host environment into the runtime image" || return
+  git -C "$RN4PT_VERL" merge-base --is-ancestor "$RN4PT_VERL_BASE_COMMIT" HEAD || \
+    rn4pt_die "worktree is not based on the audited latest Verl commit" || return
+  [[ -s "$RN4PT_BASE_IMAGE" ]] || rn4pt_die "base image missing" || return
+  [[ -f "$RN4PT_NETRC" && ! -L "$RN4PT_NETRC" ]] || rn4pt_die "updated W&B netrc missing" || return
+  [[ "$(git -C "$RN4PT_VERL/recipe" rev-parse HEAD)" = "$RN4PT_RECIPE_COMMIT" ]] || \
+    rn4pt_die "recipe submodule is missing or drifted" || return
+  for path in \
+    "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" \
+    "$RN4PT_ROOT/config/attn_bf16_mlp_nvfp4.yaml" \
+    "$RN4PT_ROOT/runtime_backports/disable_vllm_trtllm_nvfp4_moe_pdl.py" \
+    "$RN4PT_VERL/verl/utils/real_nvfp4/bf16_transport.py" \
+    "$RN4PT_VERL/verl/utils/real_nvfp4/r3_monolithic_capture.py" \
+    "$RN4PT_VERL/verl/utils/real_nvfp4/vllm_runtime.py" \
+    "$RN4PT_BUNDLE/runtime_env_w4a4.yaml" \
+    "$RN4PT_BUNDLE/runtime_env_bf16.yaml"; do
+    [[ -f "$path" && ! -L "$path" && -s "$path" ]] || rn4pt_die "missing input: $path" || return
+  done
+  bash -n "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" "$RN4PT_BUNDLE"/*.sh "$RN4PT_JOB_IMPL"/*.job || return
+  grep -q "platform_machine == 'aarch64'" "$RN4PT_VERL/uv.lock" || rn4pt_die "uv.lock lacks aarch64" || return
+  grep -q 'vllm-0.26.0-cp38-abi3-manylinux_2_28_aarch64.whl' "$RN4PT_VERL/uv.lock" || \
+    rn4pt_die "uv.lock lacks the aarch64 vLLM 0.26 wheel" || return
+  grep -q "rev=$RN4PT_TE_COMMIT" "$RN4PT_VERL/uv.lock" || rn4pt_die "uv.lock lacks the audited TE commit" || return
+  grep -q "version = \"$RN4PT_TE_VERSION\"" "$RN4PT_VERL/uv.lock" || rn4pt_die "uv.lock has the wrong TE version" || return
+  grep -q 'router_replay.mode=R3' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || rn4pt_die "R3 is not enabled" || return
+  grep -q 'enable_rollout_routing_replay=True' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || \
+    rn4pt_die "rollout routing replay missing" || return
+  grep -q 'NVTE_NVFP4_ROW_SCALED_ACTIVATION=1' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || \
+    rn4pt_die "row-scaled activation missing" || return
+  grep -q 'NVTE_NVFP4_4OVER6=none' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || rn4pt_die "4-over-6 must stay off" || return
+  grep -q 'readonly MAX_NUM_SEQS=128' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || rn4pt_die "max_num_seqs must be 128" || return
+  grep -q 'actor_rollout_ref.rollout.enforce_eager=False' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || \
+    rn4pt_die "CUDA graph must remain enabled" || return
+  # The knobs this bundle drives must still default to the pre-existing
+  # behaviour, so an unset variable can never silently change another arm.
+  grep -q 'readonly FIRST_LAST_BF16=${FIRST_LAST_BF16:-False}' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || \
+    rn4pt_die "first/last carve-out no longer defaults to off" || return
+  grep -q 'readonly FILTER_GROUPS=${FILTER_GROUPS:-False}' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || \
+    rn4pt_die "dynamic sampling no longer defaults to off" || return
+  grep -q 'readonly GEN_PROMPT_BSZ_MULT=${GEN_PROMPT_BSZ_MULT:-1}' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || \
+    rn4pt_die "gen batch multiplier no longer defaults to 1" || return
+  grep -q 'readonly ROLLOUT_IS=${ROLLOUT_IS:-token}' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || \
+    rn4pt_die "token-level TIS is no longer the default" || return
+  # The user asked for the default verifier: no arm may pin strict Minerva.
+  if grep -rq 'VERL_MATH_DAPO_STRICT_MINERVA' "$RN4PT_BUNDLE"; then
+    rn4pt_die "this bundle must leave the verifier at its default" || return
+  fi
+  grep -q 'NVFP4_PER_TOKEN_METHOD = "nvfp4_per_token"' "$RN4PT_VERL/verl/utils/real_nvfp4/vllm_runtime.py" || \
+    rn4pt_die "native vLLM online method missing" || return
+  grep -q 'reload_weights(' "$RN4PT_VERL/verl/workers/rollout/vllm_rollout/utils.py" || \
+    rn4pt_die "native reload missing" || return
+  grep -q 'defer_last_ack=True' "$RN4PT_VERL/verl/workers/rollout/vllm_rollout/utils.py" || \
+    rn4pt_die "post-finalize ACK missing" || return
+  if git -C "$RN4PT_VERL" grep -Eq \
+    'three_stability|adv_length_norm_enable|seg_gate_enable|alignment_loss_enable|GP95_|custom[-_]loss' -- \
+    verl examples/real_nvfp4/run_qwen3_30b_megatron.sh examples/real_nvfp4/main_dapo_compat.py; then
+    rn4pt_die "three-loss implementation leaked into branch" || return
+  else
+    scan_status=$?
+    [[ $scan_status -eq 1 ]] || rn4pt_die "three-loss source scan failed" || return
+  fi
+  git -C "$RN4PT_VERL" diff --check || return
+  git -C "$RN4PT_VERL" diff --cached --check || return
+}
+
+rn4pt_require_runtime_image() {
+  local built_source
+  [[ -s "$RN4PT_BUILD_PASS" ]] || rn4pt_die "runtime build state missing" || return
+  built_source=$(sed -n 's/^source_commit=//p' "$RN4PT_BUILD_PASS")
+  [[ -n "$built_source" ]] || rn4pt_die "runtime image source commit is missing" || return
+  grep -Fxq "image=$RN4PT_RUNTIME_IMAGE" "$RN4PT_BUILD_PASS" || \
+    rn4pt_die "inherited build evidence describes a different image" || return
+  [[ -s "$RN4PT_PREFLIGHT_PASS" ]] || rn4pt_die "runtime preflight state missing" || return
+  grep -Fxq "image=$RN4PT_RUNTIME_IMAGE" "$RN4PT_PREFLIGHT_PASS" || \
+    rn4pt_die "inherited preflight evidence describes a different image" || return
+  if [[ "$built_source" != "$RN4PT_SOURCE_COMMIT" ]]; then
+    git -C "$RN4PT_VERL" cat-file -e "$built_source^{commit}" || \
+      rn4pt_die "runtime image source commit is unavailable" || return
+    git -C "$RN4PT_VERL" diff --quiet "$built_source" "$RN4PT_SOURCE_COMMIT" -- \
+      . ":(exclude,glob)examples/real_nvfp4/jobs/**" || \
+      rn4pt_die "runtime payload changed after the image build" || return
+    echo "REAL_NVFP4_PERTOKEN_HARNESS_ONLY source_commit=$RN4PT_SOURCE_COMMIT image_source_commit=$built_source"
+  fi
+  grep -Fxq "lock_sha256=$RN4PT_LOCK_SHA256" "$RN4PT_BUILD_PASS" || \
+    rn4pt_die "runtime image was built from a different uv.lock" || return
+  [[ -s "$RN4PT_RUNTIME_IMAGE" && -s "$RN4PT_RUNTIME_IMAGE.sha256" ]] || \
+    rn4pt_die "runtime image or checksum missing" || return
+  sha256sum -c "$RN4PT_RUNTIME_IMAGE.sha256" || rn4pt_die "runtime image checksum mismatch" || return
+}
+
+if [[ "${BASH_SOURCE[0]}" = "$0" ]]; then
+  rn4pt_validate_static || exit $?
+  echo "REAL_NVFP4_PERTOKEN_STATIC_PASS version=$RN4PT_VERSION targets=${LONG_TARGET_STEPS[*]}"
+fi
