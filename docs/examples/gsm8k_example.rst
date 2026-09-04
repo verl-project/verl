@@ -109,7 +109,7 @@ Step 4: Perform PPO training with your model on GSM8K Dataset
 -------------------------------------------------------------
 
 - Prepare your own run.sh script. Here's an example for GSM8k dataset
-  and deepseek-llm-7b-chat model.
+  and Qwen3-8B model.
 - Users could replace the ``data.train_files`` ,\ ``data.val_files``,
   ``actor_rollout_ref.model.path`` and ``critic.model.path`` based on
   their environment.
@@ -125,56 +125,28 @@ answer, 0.1 to incorrect answer and 0 to no answer.
 
 **Training Script**
 
-The training script example for FSDP and Megatron-LM backend are stored in examples/ppo_trainer directory.
+The training script examples for FSDP and Megatron-LM backends are stored in the ``examples/ppo_trainer`` directory.
 
 .. code:: bash
 
    cd ../ppo_trainer
-   bash run_deepseek_llm_7b_fsdp.sh
+   bash run_qwen3_8b_fsdp.sh
 
-The script of run_deepseek_llm_7b_fsdp.sh
+``run_qwen3_8b_fsdp.sh`` defaults to ``Qwen/Qwen3-8B`` with FSDP + vLLM
+on GSM8K + MATH (override ``MODEL_PATH`` / data paths as needed).
+Megatron-LM backend: ``run_qwen3_8b_megatron.sh``.
+
+Key defaults inside ``run_qwen3_8b_fsdp.sh``:
 
 .. code:: bash
 
-   set -x
-
-   python3 -m verl.trainer.main_ppo \
-      data.train_files=$HOME/data/gsm8k/train.parquet \
-      data.val_files=$HOME/data/gsm8k/test.parquet \
-      data.train_batch_size=1024 \
-      data.max_prompt_length=512 \
-      data.max_response_length=512 \
-      actor_rollout_ref.model.path=deepseek-ai/deepseek-llm-7b-chat \
-      actor_rollout_ref.actor.optim.lr=1e-6 \
-      actor_rollout_ref.model.use_remove_padding=True \
-      actor_rollout_ref.actor.ppo_mini_batch_size=256 \
-      actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=16 \
-      actor_rollout_ref.actor.fsdp_config.param_offload=False \
-      actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-      actor_rollout_ref.model.enable_gradient_checkpointing=True \
-      actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
-      actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
-      actor_rollout_ref.rollout.name=vllm \
-      actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
-      actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
-      actor_rollout_ref.ref.fsdp_config.param_offload=True \
-      critic.optim.lr=1e-5 \
-      critic.model.use_remove_padding=True \
-      critic.model.path=deepseek-ai/deepseek-llm-7b-chat \
-      critic.model.enable_gradient_checkpointing=True \
-      critic.ppo_micro_batch_size_per_gpu=32 \
-      critic.fsdp.param_offload=False \
-      critic.fsdp.optimizer_offload=False \
-      algorithm.kl_ctrl.kl_coef=0.001 \
-      trainer.critic_warmup=0 \
-      trainer.logger='["console","wandb"]' \
-      trainer.project_name='verl_example_gsm8k' \
-      trainer.experiment_name='deepseek_llm_7b_function_rm' \
-      trainer.n_gpus_per_node=8 \
-      trainer.nnodes=1 \
-      trainer.save_freq=-1 \
-      trainer.test_freq=1 \
-      trainer.total_epochs=15 $@
+   MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-8B}
+   CRITIC_MODEL_PATH=${CRITIC_MODEL_PATH:-$MODEL_PATH}
+   INFER_BACKEND=${INFER_BACKEND:-vllm}
+   GSM8K_TRAIN_FILE=${GSM8K_TRAIN_FILE:-$HOME/data/gsm8k/train.parquet}
+   GSM8K_TEST_FILE=${GSM8K_TEST_FILE:-$HOME/data/gsm8k/test.parquet}
+   MATH_TRAIN_FILE=${MATH_TRAIN_FILE:-$HOME/data/math/train.parquet}
+   MATH_TEST_FILE=${MATH_TEST_FILE:-$HOME/data/math/test.parquet}
 
 
 If you use AMD GPUs (ROCm kernel), you need to add the following environment variables into the run script:
