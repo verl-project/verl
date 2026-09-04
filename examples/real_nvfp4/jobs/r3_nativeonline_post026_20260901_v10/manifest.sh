@@ -100,7 +100,7 @@ rn4pt_validate_static() {
   grep -q 'NVTE_NVFP4_ROW_SCALED_ACTIVATION=1' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || rn4pt_die "row-scaled activation missing" || return
   grep -q 'NVTE_NVFP4_4OVER6=none' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || rn4pt_die "4-over-6 must stay off" || return
   grep -q 'readonly MAX_NUM_SEQS=128' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || rn4pt_die "max_num_seqs must be 128" || return
-  grep -q 'override_transformer_config.first_last_layers_bf16=False' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || \
+  grep -q 'readonly FIRST_LAST_BF16=${FIRST_LAST_BF16:-False}' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || \
     rn4pt_die "all-MLP first/last carve-out is not disabled" || return
   grep -q 'actor_rollout_ref.rollout.enforce_eager=False' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || \
     rn4pt_die "CUDA graph must remain enabled" || return

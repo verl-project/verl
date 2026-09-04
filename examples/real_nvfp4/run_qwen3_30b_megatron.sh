@@ -65,6 +65,12 @@ readonly TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-20}
 # ~37%. Strict scoring drops accuracy to that regime, so without resampling
 # roughly half the groups carry zero advantage and the gradient is gutted.
 # The two knobs belong together.
+# Training-side BF16 carve-out for the first/last decoder layers. NeMo RL's
+# R3-on arm uses first_last_layers_bf16=True with 2 at the start and 4 at the
+# end (its R3-off arm uses none), and exempts nothing on the rollout side.
+readonly FIRST_LAST_BF16=${FIRST_LAST_BF16:-False}
+readonly BF16_LAYERS_AT_START=${BF16_LAYERS_AT_START:-0}
+readonly BF16_LAYERS_AT_END=${BF16_LAYERS_AT_END:-0}
 readonly GEN_PROMPT_BSZ_MULT=${GEN_PROMPT_BSZ_MULT:-1}
 readonly FILTER_GROUPS=${FILTER_GROUPS:-False}
 readonly MAX_GEN_BATCHES=${MAX_GEN_BATCHES:-0}
@@ -175,9 +181,9 @@ ACTOR=(
   +actor_rollout_ref.actor.megatron.override_transformer_config.apply_rope_fusion=True
   +actor_rollout_ref.actor.megatron.override_transformer_config.attention_dropout=0.0
   +actor_rollout_ref.actor.megatron.override_transformer_config.hidden_dropout=0.0
-  +actor_rollout_ref.actor.megatron.override_transformer_config.first_last_layers_bf16=False
-  +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_at_start_in_bf16=0
-  +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_at_end_in_bf16=0
+  +actor_rollout_ref.actor.megatron.override_transformer_config.first_last_layers_bf16="$FIRST_LAST_BF16"
+  +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_at_start_in_bf16="$BF16_LAYERS_AT_START"
+  +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_at_end_in_bf16="$BF16_LAYERS_AT_END"
   +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32
   +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=alltoall
   +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
@@ -272,7 +278,7 @@ if [[ "$PRECISION_MODE" = real_nvfp4 ]]; then
   )
 fi
 
-echo "VERL_REAL_NVFP4_CONTRACT profile=$RUN_PROFILE precision=$PRECISION_MODE scope=all_mlp attention=bf16 rollout_activation=per_token transport=bf16 reload=native r3=1 losses=0of3 token_mean=1 tis=$ROLLOUT_IS nodes=${NNODES}x${N_GPUS_PER_NODE} tp=1 pp=1 cp=1 ep=4 batch=${TRAIN_PROMPT_BSZ}x${N_RESP_PER_PROMPT} max_num_seqs=$MAX_NUM_SEQS full_adam=1 resume=$RESUME_MODE"
+echo "VERL_REAL_NVFP4_CONTRACT profile=$RUN_PROFILE precision=$PRECISION_MODE scope=all_mlp attention=bf16 rollout_activation=per_token transport=bf16 reload=native r3=1 losses=0of3 bf16_layers=${BF16_LAYERS_AT_START}/${BF16_LAYERS_AT_END} token_mean=1 tis=$ROLLOUT_IS nodes=${NNODES}x${N_GPUS_PER_NODE} tp=1 pp=1 cp=1 ep=4 batch=${TRAIN_PROMPT_BSZ}x${N_RESP_PER_PROMPT} max_num_seqs=$MAX_NUM_SEQS full_adam=1 resume=$RESUME_MODE"
 
 HYDRA_ARGS=(
   --config-path="$WORKING_DIR/recipe/dapo/config" \
