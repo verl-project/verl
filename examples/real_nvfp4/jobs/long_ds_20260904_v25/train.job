@@ -140,8 +140,12 @@ grep -q 'VERL_R3_MONOLITHIC_CAPTURE_PATCH PASS' "$JOB_LOG"
 grep -q 'routing replay layers: 48' "$JOB_LOG"
 # Dynamic sampling and TIS have to be visible in the resolved config, not just
 # in the launcher's environment.
-grep -q "'filter_groups': {'enable': True" "$JOB_LOG" || \
-  grep -q "'enable': True, 'metric': 'acc'" "$JOB_LOG" || rn4pt_die "dynamic sampling is not enabled in the resolved config"
+# The resolved config is pretty-printed, so filter_groups' fields land on the
+# lines after its header rather than beside it.
+grep -A5 "'filter_groups': {'_target_'" "$JOB_LOG" | grep -q "'enable': True" || \
+  rn4pt_die "dynamic sampling is not enabled in the resolved config"
+grep -A5 "'filter_groups': {'_target_'" "$JOB_LOG" | grep -q "'max_num_gen_batches': $LONG_MAX_GEN_BATCHES" || \
+  rn4pt_die "dynamic sampling max_num_gen_batches is not $LONG_MAX_GEN_BATCHES in the resolved config"
 grep -q "'rollout_is': 'token'" "$JOB_LOG" || rn4pt_die "token-level TIS is not enabled in the resolved config"
 
 if [[ "$ARM" = w4a4 ]]; then
