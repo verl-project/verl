@@ -86,6 +86,7 @@ from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.skip import SkipManager
 from verl.utils.tracking import DapoFilteredRewardTableLogger, Tracking, ValidationGenerationsLogger
+from verl.utils.trajectory import LOSS_WEIGHT_KEY, validate_loss_weights
 from verl.workers.config import CriticConfig, DistillationConfig, HFModelConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
 from verl.workers.rollout.llm_server import LLMServerClient, LLMServerManager
@@ -1494,7 +1495,13 @@ class PPOTrainer(ABC):
         return (positions < lengths.unsqueeze(1)).to(torch.int64)
 
     def _get_required_batch_multiple(self, dp_size: int) -> int:
-        """Return the global batch multiple required by downstream train steps(e.g. critics, actors)."""
+        """Return the global row multiple required by downstream train steps.
+
+        V1 treats ``ppo_mini_batch_size`` as a stored-row count. Agent-loop
+        segments are intentionally separate rows and are controlled by their
+        explicit ``loss_weight``; their variable expansion factor cannot be
+        used as a static divisibility constraint here.
+        """
         required_multiple = dp_size
 
         # If enabled with critic training, the batch should align with critic PPO mini-batches.
@@ -1649,11 +1656,62 @@ class PPOTrainer(ABC):
 
     def _compute_advantage(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the advantage of the batch."""
-        fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob", "values"]
+        fields = [
+            "uid",
+            "response_mask",
+            "rm_scores",
+            "rollout_log_probs",
+            "old_log_probs",
+            "ref_log_prob",
+            "values",
+            LOSS_WEIGHT_KEY,
+        ]
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
 
         response_mask = data["response_mask"]
         data = DataProto(batch=data.to_padded_tensor())
+        if LOSS_WEIGHT_KEY not in data.batch:
+            # Keep rows written by older workers backward compatible. New workers always
+            # persist this field, but a restored TransferQueue may still contain a
+            # trajectory produced before loss weights became part of the agent-loop
+            # contract. NOTE: TransferQueue only returns a field when *every* requested
+            # row carries it, so a single legacy row makes the whole batch fall back to
+            # neutral weights and discards the real weights on the new rows. Warn so that
+            # this shows up during a rolling upgrade instead of silently flattening them.
+            logger.warning(
+                "%s missing for batch of %d rows; falling back to neutral weight 1.0 for all of them. "
+                "This is expected only while draining trajectories generated before loss weights existed.",
+                LOSS_WEIGHT_KEY,
+                data.batch["response_mask"].shape[0],
+            )
+            data.batch[LOSS_WEIGHT_KEY] = torch.ones(
+                data.batch["response_mask"].shape[0], dtype=torch.float32, device=data.batch["response_mask"].device
+            )
+        valid_row_mask = data.batch["response_mask"].any(dim=1)
+        data.batch[LOSS_WEIGHT_KEY] = validate_loss_weights(data.batch[LOSS_WEIGHT_KEY], valid_mask=valid_row_mask)
+        valid_loss_weights = data.batch[LOSS_WEIGHT_KEY][valid_row_mask]
+        if valid_loss_weights.numel() > 0:
+            metrics.update(
+                {
+                    "training/trajectory/loss_weight/mean": valid_loss_weights.mean().item(),
+                    "training/trajectory/loss_weight/min": valid_loss_weights.min().item(),
+                    "training/trajectory/loss_weight/max": valid_loss_weights.max().item(),
+                }
+            )
+
+        real_keys = [key for key, tag in zip(batch.keys, batch.tags, strict=True) if not tag.get("is_padding", False)]
+        session_keys = set()
+        for key in real_keys:
+            key_parts = key.rsplit("_", 2)
+            session_keys.add("_".join(key_parts[:2]) if len(key_parts) == 3 else key)
+        if session_keys:
+            metrics.update(
+                {
+                    "training/trajectory/expanded_rows": len(real_keys),
+                    "training/trajectory/logical_sessions": len(session_keys),
+                    "training/trajectory/segments_per_session/mean": len(real_keys) / len(session_keys),
+                }
+            )
         data.batch["token_level_scores"] = data.batch["rm_scores"]
         data.non_tensor_batch["uid"] = np.array(data.batch.pop("uid").tolist(), dtype=object)
 
@@ -1691,7 +1749,7 @@ class PPOTrainer(ABC):
         )
 
         # 4. write nested advantages and returns back to TransferQueue
-        fields = ["advantages", "returns"]
+        fields = ["advantages", "returns", LOSS_WEIGHT_KEY]
         if self.config.algorithm.use_kl_in_reward:
             fields.append("token_level_rewards")
         if rollout_correction:
@@ -1701,7 +1759,10 @@ class PPOTrainer(ABC):
 
         output = {}
         for field in fields:
-            output[field] = response_to_nested(data.batch[field], response_mask)
+            if field == LOSS_WEIGHT_KEY:
+                output[field] = data.batch[field]
+            else:
+                output[field] = response_to_nested(data.batch[field], response_mask)
         output = TensorDict(output, batch_size=len(batch))
 
         batch = tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=output)
@@ -1762,6 +1823,15 @@ class PPOTrainer(ABC):
             "dataloader_kwargs": {"shuffle": self.config.actor_rollout_ref.actor.shuffle},
             "temperature": self.config.actor_rollout_ref.rollout.temperature,
         }
+        metrics.update(
+            {
+                "training/trajectory/stored_rows": len(batch),
+                "training/actor/mini_batches_per_epoch": len(batch) / ppo_mini_batch_size,
+                "training/actor/optimizer_updates": len(batch)
+                / ppo_mini_batch_size
+                * self.config.actor_rollout_ref.actor.ppo_epochs,
+            }
+        )
         batch.extra_info.update(extra_info)
 
         output: TensorDict = self.actor_rollout_wg.update_actor(batch)
