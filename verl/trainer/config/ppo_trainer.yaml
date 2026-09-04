@@ -135,6 +135,9 @@ trainer:
 
   # Whether to balance batch sizes across distributed workers
   balance_batch: True
+  # When True with balance_batch, decouple DP balancing from mini-batching (keep_minibatch):
+  # balance each minibatch's samples across DP ranks independently (no cross-minibatch).
+  balance_keep_minibatch: False
 
   # Number of epochs in training
   total_epochs: 30

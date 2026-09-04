@@ -82,6 +82,7 @@ from verl.utils.debug import marked_timer
 from verl.utils.debug.metrics import calculate_debug_metrics
 from verl.utils.import_utils import load_extern_type
 from verl.utils.metric import reduce_metrics
+from verl.utils.prefix_tree.trainer import build_global_trie
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.skip import SkipManager
@@ -557,6 +558,7 @@ class PPOTrainer(ABC):
                 batch = self._compute_reward_colocate(batch, metrics=metrics)
 
         # 3. balance batch across data parallel groups
+        # (prefix-tree: builds the global trie inside and balances whole trees)
         batch = self._balance_batch(batch, metrics=metrics)
 
         # 4. compute old_log_prob
@@ -1526,6 +1528,10 @@ class PPOTrainer(ABC):
         # Upsampling the batch with padding sequences
         batch_multiple = self._get_required_batch_multiple(dp_size)
         batch = upsample_batch_to_divisible_size(batch, batch_multiple, self.tokenizer.eos_token_id)
+
+        if self.config.actor_rollout_ref.model.get("use_prefix_tree", False):
+            return self._balance_batch_with_prefix_tree(batch, metrics, dp_size, logging_prefix)
+
         global_seqlen_lst = torch.tensor([tag["seq_len"] for tag in batch.tags], dtype=torch.int64)
         workload_lst = calculate_workload(global_seqlen_lst)
 
@@ -1536,6 +1542,51 @@ class PPOTrainer(ABC):
             seqlen_list=global_seqlen_lst.tolist(), partitions=global_partition_lst, prefix=logging_prefix
         )
         metrics.update(global_balance_stats)
+        return batch
+
+    def _balance_batch_with_prefix_tree(self, batch: KVBatchMeta, metrics, dp_size: int, logging_prefix: str):
+        batch = self._build_and_attach_global_trie(batch, metrics)
+        trie = batch.extra_info.get("prefix_tree", None)
+        if trie is None:
+            return batch
+
+        from verl.utils.prefix_tree.dynamic import balance_prefix_tree_v1
+
+        return balance_prefix_tree_v1(batch, trie, metrics, dp_size, logging_prefix)
+
+    def _build_and_attach_global_trie(self, batch: KVBatchMeta, metrics: dict, timing_raw=None) -> KVBatchMeta:
+        """Build the global prefix trie once on the driver and attach to the batch.
+
+        trie (Python object, not a tensor) -> extra_info + self cache (re-injected per
+        RPC via _inject_prefix_tree, since extra_info is wiped by kv_batch_put). leaf_idx
+        (tensor) -> TQ field (persists, sliced per micro-batch).
+        """
+        data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=["input_ids"])
+        input_ids = data["input_ids"]
+        attn = data.get("attention_mask", None) if hasattr(data, "get") else None
+        if timing_raw is not None:
+            with marked_timer("build_global_trie", timing_raw, color="magenta"):
+                trie, leaf_idx, _ = build_global_trie(input_ids, attn, metrics=metrics)
+        else:
+            trie, leaf_idx, _ = build_global_trie(input_ids, attn, metrics=metrics)
+        if trie is None or leaf_idx is None:
+            raise RuntimeError("_build_and_attach_global_trie: build_global_trie returned None (no sharing).")
+        batch.extra_info["prefix_tree"] = trie
+        self._global_prefix_tree = trie
+        from verl.utils import tensordict_utils as tu
+
+        leaf_td = tu.get_tensordict({"leaf_idx": leaf_idx})
+        tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=leaf_td)
+        return batch
+
+    def _inject_prefix_tree(self, batch: KVBatchMeta) -> KVBatchMeta:
+        """Re-attach the cached global trie to extra_info before a worker RPC.
+
+        extra_info is wiped by kv_batch_put (fresh KVBatchMeta), so old_log_prob
+        and update_actor re-inject; leaf_idx lives in TQ (persists)."""
+        trie = getattr(self, "_global_prefix_tree", None)
+        if trie is not None:
+            batch.extra_info["prefix_tree"] = trie
         return batch
 
     def _compute_old_log_prob(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
@@ -1562,6 +1613,7 @@ class PPOTrainer(ABC):
                 "temperature": self.config.actor_rollout_ref.rollout.temperature,
             }
         )
+        self._inject_prefix_tree(batch)
         output: KVBatchMeta = self.actor_rollout_wg.compute_log_prob(batch)
         assert len(output) == len(batch)
 
@@ -1763,6 +1815,7 @@ class PPOTrainer(ABC):
             "temperature": self.config.actor_rollout_ref.rollout.temperature,
         }
         batch.extra_info.update(extra_info)
+        self._inject_prefix_tree(batch)
 
         output: TensorDict = self.actor_rollout_wg.update_actor(batch)
         output = rename_dict(output["metrics"], "actor/")
