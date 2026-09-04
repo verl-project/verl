@@ -1538,7 +1538,11 @@ class RayPPOTrainer:
                     if reward_extra_infos_dict:
                         for key, values in reward_extra_infos_dict.items():
                             if key != "score" and len(values) > 0:
-                                metrics[f"critic/rewards/{key}"] = np.mean(values)
+                                try:
+                                    metrics[f"training/reward/{key}"] = np.mean(values)
+                                except (TypeError, ValueError):
+                                    # reward_extra_info may carry non-numeric fields; skip those.
+                                    pass
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
