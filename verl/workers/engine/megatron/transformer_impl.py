@@ -338,11 +338,21 @@ class MegatronEngine(BaseEngine):
             if self.is_value_model and hasattr(tf_config, "share_embeddings_and_output_weights"):
                 tf_config.share_embeddings_and_output_weights = False
         else:
+            from huggingface_hub import snapshot_download
             from verl.models.mcore.bridge import AutoBridge
 
-            # Use Megatron-Bridge to convert HF config to Megatron config
+            # Megatron-Bridge looks for safetensors on the filesystem. Hub ids are
+            # not directories; pin revision via snapshot_download (HF cache hit).
+            hf_src = self.model_config.local_path
+            rev = getattr(self.model_config, "revision", None)
+            snap_kw = {}
+            if rev and not str(hf_src).startswith("/"):
+                snap_kw["revision"] = rev
+            if not str(hf_src).startswith("/"):
+                hf_src = snapshot_download(hf_src, **snap_kw)
+            self._megatron_hf_src = hf_src
             bridge = AutoBridge.from_hf_pretrained(
-                self.model_config.local_path, trust_remote_code=self.model_config.trust_remote_code
+                hf_src, trust_remote_code=self.model_config.trust_remote_code
             )
             # Get Megatron provider and configure it
             provider = bridge.to_megatron_provider(load_weights=False)
@@ -508,7 +518,9 @@ class MegatronEngine(BaseEngine):
                 if self.is_value_model:
                     allowed_mismatched_params = ["output_layer.weight"]
                 self.bridge.load_hf_weights(
-                    module, self.model_config.local_path, allowed_mismatched_params=allowed_mismatched_params
+                    module,
+                    getattr(self, "_megatron_hf_src", self.model_config.local_path),
+                    allowed_mismatched_params=allowed_mismatched_params,
                 )
 
         if torch.distributed.get_rank() == 0:
