@@ -188,12 +188,12 @@ Actor/Rollout/Reference Policy
       dtype: bfloat16 # should align with FSDP
       gpu_memory_utilization: 0.5
       ignore_eos: False
-      enforce_eager: True
+      enforce_eager: False
       free_cache_engine: True
-      load_format: dummy_dtensor
+      load_format: dummy
       tensor_model_parallel_size: 2
       max_num_batched_tokens: 8192
-      max_num_seqs: 1024
+      max_num_seqs: 256
       log_prob_micro_batch_size: null # will be deprecated, use log_prob_micro_batch_size_per_gpu
       log_prob_micro_batch_size_per_gpu: 16
       log_prob_use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
@@ -205,7 +205,7 @@ Actor/Rollout/Reference Policy
         sglang: {}
 
       n: 1 # for each prompt, sample n responses (i.e. num sample times). set it to values > 1 for grpo, rloo
-      calculate_log_probs: False # set to True for computing log probs via rollouts
+      calculate_log_probs: True # required for computing log probs via rollouts
       val_kwargs:
         # sampling parameters for validation
         top_k: -1 # 0 for hf rollout, -1 for vllm rollout
@@ -422,7 +422,7 @@ Reference model will be enabled when ``actor.use_kl_loss`` or/and ``algorithm.us
   (set ``enforce_eager`` to True.)
 
 - ``actor_rollout_ref.rollout.enforce_eager``: Whether to use CUDAGraph
-  in vLLM generation. Default set to True to disable CUDAGraph.
+  in vLLM generation. Default set to False to enable CUDAGraph.
 
 - ``actor_rollout_ref.rollout.load_format``: Which weight loader to use
   to load the actor model weights to the rollout model.
