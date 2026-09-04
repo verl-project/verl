@@ -1,0 +1,522 @@
+Skipping merge. Using: /ocean/projects/med230010p/yji3/BrowseCamp/verl/merged_models/model_14_gpt_checker_format_penalty_BEST_s200
+
+============================================================
+STEP 2/4  EVAL
+  model:    /ocean/projects/med230010p/yji3/BrowseCamp/verl/merged_models/model_14_gpt_checker_format_penalty_BEST_s200
+  data:     /ocean/projects/med230010p/yji3/BrowseCamp/verl/searchr1_data/extra_eval/bioasq_test.parquet
+  output:   eval_model_14_gpt_checker_format_penalty_BEST_s200_bioasq.json
+  template: default (Qwen)
+============================================================
+/ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+Loading test data from /ocean/projects/med230010p/yji3/BrowseCamp/verl/searchr1_data/extra_eval/bioasq_test.parquet
+Total samples: 200
+Loading model from /ocean/projects/med230010p/yji3/BrowseCamp/verl/merged_models/model_14_gpt_checker_format_penalty_BEST_s200
+Evaluation mode: agent_loop
+Tool config: /ocean/projects/med230010p/yji3/BrowseCamp/verl/examples/sglang_multiturn/config/tool_config/medical_search_checker_tool_config.yaml
+Multi-turn format: search_r1_with_checker
+Triage enabled: False
+{
+  "type": "function",
+  "function": {
+    "name": "search",
+    "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query_list": {
+          "type": "array",
+          "description": "A list of semantic search queries."
+        }
+      },
+      "required": [
+        "query_list"
+      ]
+    }
+  }
+}
+2026-04-06 13:11:09,276	INFO worker.py:1942 -- Started a local Ray instance. View the dashboard at [1m[32m127.0.0.1:8265 [39m[22m
+/ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/omegaconf/grammar_visitor.py:253: UserWarning: In the sequence `CHECKER_NODE_IP,` some elements are missing: please replace them with empty quoted strings. See https://github.com/omry/omegaconf/issues/572 for details.
+  warnings.warn(
+{
+  "type": "function",
+  "function": {
+    "name": "check",
+    "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "answer": {
+          "type": "string",
+          "description": "The answer to verify."
+        },
+        "evidence": {
+          "type": "string",
+          "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."
+        }
+      },
+      "required": [
+        "answer"
+      ]
+    }
+  }
+}
+[2026-04-06 13:11:10,547 E 40343 41280] core_worker.cc:2269: Failed to register actor. Error message: SchedulingCancelled: Actor creation cancelled. actor_id=f97989fd08e38767e42dd93801000000
+[36m(pid=47562)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(pid=47562)[0m   import pynvml  # type: ignore[import]
+[36m(pid=47562)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(pid=47562)[0m   warnings.warn(
+[36m(CheckpointEngineWorker pid=47562)[0m [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[36m(pid=47823)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(pid=47823)[0m   import pynvml  # type: ignore[import]
+[36m(pid=47823)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(pid=47823)[0m   warnings.warn(
+[36m(SGLangHttpServer pid=47823)[0m SGLang http server: rollout_mode=<RolloutMode.STANDALONE: 'standalone'>, replica_rank=0, node_rank=0, nnodes=1, cuda_visible_devices='3'
+[36m(SGLangHttpServer pid=47823)[0m WARNING:2026-04-06 13:11:32,470:agent loop only support torch and npu profiler, got None
+[36m(SGLangHttpServer pid=47823)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(SGLangHttpServer pid=47823)[0m   import pynvml  # type: ignore[import]
+[36m(SGLangHttpServer pid=47823)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(SGLangHttpServer pid=47823)[0m   import pynvml  # type: ignore[import]
+[36m(SGLangHttpServer pid=47823)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(SGLangHttpServer pid=47823)[0m   warnings.warn(
+[36m(SGLangHttpServer pid=47823)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(SGLangHttpServer pid=47823)[0m   warnings.warn(
+[36m(SGLangHttpServer pid=47823)[0m [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[36m(SGLangHttpServer pid=47823)[0m [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[36m(SGLangHttpServer pid=47823)[0m [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[36m(SGLangHttpServer pid=47823)[0m [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[36m(SGLangHttpServer pid=47823)[0m [W406 13:11:40.738923929 ProcessGroupNCCL.cpp:924] Warning: TORCH_NCCL_AVOID_RECORD_STREAMS is the default now, this environment variable is thus deprecated. (function operator())
+[36m(SGLangHttpServer pid=47823)[0m Loading safetensors checkpoint shards:   0% Completed | 0/4 [00:00<?, ?it/s]
+[36m(SGLangHttpServer pid=47823)[0m Loading safetensors checkpoint shards:  25% Completed | 1/4 [00:01<00:05,  1.98s/it]
+[36m(SGLangHttpServer pid=47823)[0m Loading safetensors checkpoint shards:  50% Completed | 2/4 [00:02<00:01,  1.02it/s]
+[36m(SGLangHttpServer pid=47823)[0m Loading safetensors checkpoint shards:  75% Completed | 3/4 [00:04<00:01,  1.44s/it]
+[36m(SGLangHttpServer pid=47823)[0m Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:06<00:00,  1.71s/it]
+[36m(SGLangHttpServer pid=47823)[0m Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:06<00:00,  1.59s/it]
+[36m(SGLangHttpServer pid=47823)[0m 
+[36m(SGLangHttpServer pid=47823)[0m   0%|                                                                     | 0/36 [00:00<?, ?it/s]Capturing batches (bs=256 avail_mem=46.67 GB):   0%|                      | 0/36 [00:00<?, ?it/s]
+[36m(SGLangHttpServer pid=47823)[0m Capturing batches (bs=256 avail_mem=46.67 GB):   3%|▍             | 1/36 [00:00<00:27,  1.27it/s]Capturing batches (bs=248 avail_mem=46.50 GB):   3%|▍             | 1/36 [00:00<00:27,  1.27it/s]Capturing batches (bs=240 avail_mem=46.50 GB):   3%|▍             | 1/36 [00:00<00:27,  1.27it/s]Capturing batches (bs=232 avail_mem=46.49 GB):   3%|▍             | 1/36 [00:00<00:27,  1.27it/s]
+[36m(SGLangHttpServer pid=47823)[0m Capturing batches (bs=232 avail_mem=46.49 GB):  11%|█▌            | 4/36 [00:00<00:05,  5.46it/s]Capturing batches (bs=224 avail_mem=46.48 GB):  11%|█▌            | 4/36 [00:00<00:05,  5.46it/s]Capturing batches (bs=216 avail_mem=46.47 GB):  11%|█▌            | 4/36 [00:00<00:05,  5.46it/s]
+[36m(SGLangHttpServer pid=47823)[0m Capturing batches (bs=208 avail_mem=46.46 GB):  11%|█▌            | 4/36 [00:01<00:05,  5.46it/s]Capturing batches (bs=208 avail_mem=46.46 GB):  19%|██▋           | 7/36 [00:01<00:03,  9.20it/s]Capturing batches (bs=200 avail_mem=46.45 GB):  19%|██▋           | 7/36 [00:01<00:03,  9.20it/s]Capturing batches (bs=192 avail_mem=46.45 GB):  19%|██▋           | 7/36 [00:01<00:03,  9.20it/s]
+[36m(SGLangHttpServer pid=47823)[0m Capturing batches (bs=184 avail_mem=46.44 GB):  19%|██▋           | 7/36 [00:01<00:03,  9.20it/s]Capturing batches (bs=184 avail_mem=46.44 GB):  28%|███▌         | 10/36 [00:01<00:02, 12.55it/s]Capturing batches (bs=176 avail_mem=46.44 GB):  28%|███▌         | 10/36 [00:01<00:02, 12.55it/s]
+[36m(SGLangHttpServer pid=47823)[0m Capturing batches (bs=168 avail_mem=46.43 GB):  28%|███▌         | 10/36 [00:01<00:02, 12.55it/s]Capturing batches (bs=160 avail_mem=46.42 GB):  28%|███▌         | 10/36 [00:01<00:02, 12.55it/s]
+[36m(SGLangHttpServer pid=47823)[0m Capturing batches (bs=160 avail_mem=46.42 GB):  36%|████▋        | 13/36 [00:01<00:02, 11.04it/s]
+[36m(SGLangHttpServer pid=47823)[0m Capturing batches (bs=152 avail_mem=46.42 GB):  36%|████▋        | 13/36 [00:01<00:02, 11.04it/s]
+[36m(SGLangHttpServer pid=47823)[0m Capturing batches (bs=144 avail_mem=46.42 GB):  36%|████▋        | 13/36 [00:01<00:02, 11.04it/s]
+[36m(SGLangHttpServer pid=47823)[0m Capturing batches (bs=144 avail_mem=46.42 GB):  42%|█████▍       | 15/36 [00:01<00:02, 10.20it/s]Capturing batches (bs=136 avail_mem=46.41 GB):  42%|█████▍       | 15/36 [00:01<00:02, 10.20it/s]Capturing batches (bs=128 avail_mem=46.40 GB):  42%|█████▍       | 15/36 [00:01<00:02, 10.20it/s]
+[36m(SGLangHttpServer pid=47823)[0m Capturing batches (bs=120 avail_mem=46.40 GB):  42%|█████▍       | 15/36 [00:01<00:02, 10.20it/s]Capturing batches (bs=120 avail_mem=46.40 GB):  50%|██████▌      | 18/36 [00:01<00:01, 12.85it/s]Capturing batches (bs=112 avail_mem=46.39 GB):  50%|██████▌      | 18/36 [00:01<00:01, 12.85it/s]Capturing batches (bs=104 avail_mem=46.39 GB):  50%|██████▌      | 18/36 [00:01<00:01, 12.85it/s]
+[36m(SGLangHttpServer pid=47823)[0m Capturing batches (bs=96 avail_mem=46.38 GB):  50%|███████       | 18/36 [00:01<00:01, 12.85it/s]Capturing batches (bs=96 avail_mem=46.38 GB):  58%|████████▏     | 21/36 [00:01<00:00, 15.07it/s]Capturing batches (bs=88 avail_mem=46.38 GB):  58%|████████▏     | 21/36 [00:01<00:00, 15.07it/s]
+[36m(SGLangHttpServer pid=47823)[0m Capturing batches (bs=80 avail_mem=46.37 GB):  58%|████████▏     | 21/36 [00:02<00:00, 15.07it/s]Capturing batches (bs=72 avail_mem=46.37 GB):  58%|████████▏     | 21/36 [00:02<00:00, 15.07it/s]
+[36m(SGLangHttpServer pid=47823)[0m Capturing batches (bs=72 avail_mem=46.37 GB):  67%|█████████▎    | 24/36 [00:02<00:00, 16.84it/s]Capturing batches (bs=64 avail_mem=46.36 GB):  67%|█████████▎    | 24/36 [00:02<00:00, 16.84it/s]
+[36m(SGLangHttpServer pid=47823)[0m Capturing batches (bs=56 avail_mem=46.36 GB):  67%|█████████▎    | 24/36 [00:02<00:00, 16.84it/s]Capturing batches (bs=48 avail_mem=46.35 GB):  67%|█████████▎    | 24/36 [00:02<00:00, 16.84it/s]
+[36m(SGLangHttpServer pid=47823)[0m Capturing batches (bs=48 avail_mem=46.35 GB):  75%|██████████▌   | 27/36 [00:02<00:00, 18.52it/s]Capturing batches (bs=40 avail_mem=46.34 GB):  75%|██████████▌   | 27/36 [00:02<00:00, 18.52it/s]Capturing batches (bs=32 avail_mem=46.34 GB):  75%|██████████▌   | 27/36 [00:02<00:00, 18.52it/s]
+[36m(SGLangHttpServer pid=47823)[0m Capturing batches (bs=24 avail_mem=46.33 GB):  75%|██████████▌   | 27/36 [00:02<00:00, 18.52it/s]
+[36m(SGLangHttpServer pid=47823)[0m Capturing batches (bs=24 avail_mem=46.33 GB):  83%|███████████▋  | 30/36 [00:02<00:00, 19.93it/s]Capturing batches (bs=16 avail_mem=46.33 GB):  83%|███████████▋  | 30/36 [00:02<00:00, 19.93it/s]
+[36m(SGLangHttpServer pid=47823)[0m Capturing batches (bs=12 avail_mem=46.33 GB):  83%|███████████▋  | 30/36 [00:02<00:00, 19.93it/s]Capturing batches (bs=8 avail_mem=46.32 GB):  83%|████████████▌  | 30/36 [00:02<00:00, 19.93it/s]Capturing batches (bs=8 avail_mem=46.32 GB):  92%|█████████████▊ | 33/36 [00:02<00:00, 20.36it/s]Capturing batches (bs=4 avail_mem=46.32 GB):  92%|█████████████▊ | 33/36 [00:02<00:00, 20.36it/s]
+[36m(SGLangHttpServer pid=47823)[0m Capturing batches (bs=2 avail_mem=46.31 GB):  92%|█████████████▊ | 33/36 [00:02<00:00, 20.36it/s]Capturing batches (bs=1 avail_mem=46.31 GB):  92%|█████████████▊ | 33/36 [00:02<00:00, 20.36it/s]Capturing batches (bs=1 avail_mem=46.31 GB): 100%|███████████████| 36/36 [00:02<00:00, 13.78it/s]
+AgentLoopManager: ['10.8.11.96:33179']
+Evaluating:   0%|                                                         | 0/25 [00:00<?, ?it/s][36m(pid=41282)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(pid=41282)[0m   import pynvml  # type: ignore[import]
+[36m(pid=41301)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(pid=41301)[0m   warnings.warn(
+[36m(AgentLoopWorker pid=41301)[0m W0406 13:12:17.246000 41301 site-packages/torch/utils/cpp_extension.py:117] No CUDA runtime is found, using CUDA_HOME='/opt/packages/cuda/v12.6.1'
+[36m(pid=41301)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.[32m [repeated 3x across cluster] (Ray deduplicates logs by default. Set RAY_DEDUP_LOGS=0 to disable log deduplication, or see https://docs.ray.io/en/master/ray-observability/user-guides/configure-logging.html#log-deduplication for more options.)[0m
+[36m(pid=41301)[0m   import pynvml  # type: ignore[import][32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/sglang/srt/layers/quantization/awq.py:69: UserWarning: Only CUDA, HIP and XPU support AWQ currently.
+[36m(AgentLoopWorker pid=41301)[0m   warnings.warn(f"Only CUDA, HIP and XPU support AWQ currently.")
+[36m(AgentLoopWorker pid=41301)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/sglang/srt/layers/quantization/gguf.py:46: UserWarning: Only CUDA support GGUF quantization currently.
+[36m(AgentLoopWorker pid=41301)[0m   warnings.warn(f"Only CUDA support GGUF quantization currently.")
+[36m(pid=41282)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.[32m [repeated 3x across cluster][0m
+[36m(pid=41282)[0m   warnings.warn([32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m Using dataset class: RLHFDataset
+[36m(AgentLoopWorker pid=41301)[0m {
+[36m(AgentLoopWorker pid=41301)[0m   "type": "function",
+[36m(AgentLoopWorker pid=41301)[0m   "function": {
+[36m(AgentLoopWorker pid=41301)[0m     "name": "search",
+[36m(AgentLoopWorker pid=41301)[0m     "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",
+[36m(AgentLoopWorker pid=41301)[0m     "parameters": {
+[36m(AgentLoopWorker pid=41301)[0m       "type": "object",
+[36m(AgentLoopWorker pid=41301)[0m       "properties": {
+[36m(AgentLoopWorker pid=41301)[0m         "query_list": {
+[36m(AgentLoopWorker pid=41301)[0m           "type": "array",
+[36m(AgentLoopWorker pid=41301)[0m           "description": "A list of semantic search queries."
+[36m(AgentLoopWorker pid=41301)[0m         }
+[36m(AgentLoopWorker pid=41301)[0m       },
+[36m(AgentLoopWorker pid=41301)[0m       "required": [
+[36m(AgentLoopWorker pid=41301)[0m         "query_list"
+[36m(AgentLoopWorker pid=41301)[0m       ]
+[36m(AgentLoopWorker pid=41301)[0m     }
+[36m(AgentLoopWorker pid=41301)[0m   }
+[36m(AgentLoopWorker pid=41301)[0m }
+[36m(AgentLoopWorker pid=41301)[0m {
+[36m(AgentLoopWorker pid=41301)[0m   "type": "function",
+[36m(AgentLoopWorker pid=41301)[0m   "function": {
+[36m(AgentLoopWorker pid=41301)[0m     "name": "check",
+[36m(AgentLoopWorker pid=41301)[0m     "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",
+[36m(AgentLoopWorker pid=41301)[0m     "parameters": {
+[36m(AgentLoopWorker pid=41301)[0m       "type": "object",
+[36m(AgentLoopWorker pid=41301)[0m       "properties": {
+[36m(AgentLoopWorker pid=41301)[0m         "answer": {
+[36m(AgentLoopWorker pid=41301)[0m           "type": "string",
+[36m(AgentLoopWorker pid=41301)[0m           "description": "The answer to verify."
+[36m(AgentLoopWorker pid=41301)[0m         },
+[36m(AgentLoopWorker pid=41301)[0m         "evidence": {
+[36m(AgentLoopWorker pid=41301)[0m           "type": "string",
+[36m(AgentLoopWorker pid=41301)[0m           "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."
+[36m(AgentLoopWorker pid=41301)[0m         }
+[36m(AgentLoopWorker pid=41301)[0m       },
+[36m(AgentLoopWorker pid=41301)[0m       "required": [
+[36m(AgentLoopWorker pid=41301)[0m         "answer"
+[36m(AgentLoopWorker pid=41301)[0m       ]
+[36m(AgentLoopWorker pid=41301)[0m     }
+[36m(AgentLoopWorker pid=41301)[0m   }
+[36m(AgentLoopWorker pid=41301)[0m }
+[36m(AgentLoopWorker pid=41301)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/omegaconf/grammar_visitor.py:253: UserWarning: In the sequence `CHECKER_NODE_IP,` some elements are missing: please replace them with empty quoted strings. See https://github.com/omry/omegaconf/issues/572 for details.
+[36m(AgentLoopWorker pid=41282)[0m W0406 13:12:17.556000 41282 site-packages/torch/utils/cpp_extension.py:117] No CUDA runtime is found, using CUDA_HOME='/opt/packages/cuda/v12.6.1'[32m [repeated 3x across cluster][0m
+[36m(pid=41327)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.[32m [repeated 8x across cluster][0m
+[36m(pid=41327)[0m   import pynvml  # type: ignore[import][32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m You're using a Qwen2TokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
+[36m(AgentLoopWorker pid=41294)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/sglang/srt/layers/quantization/awq.py:69: UserWarning: Only CUDA, HIP and XPU support AWQ currently.[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=41294)[0m   warnings.warn(f"Only CUDA, HIP and XPU support AWQ currently.")[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=41294)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/sglang/srt/layers/quantization/gguf.py:46: UserWarning: Only CUDA support GGUF quantization currently.[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=41294)[0m   warnings.warn(f"Only CUDA support GGUF quantization currently.")[32m [repeated 3x across cluster][0m
+[36m(pid=41327)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.[32m [repeated 8x across cluster][0m
+[36m(pid=41327)[0m   warnings.warn([32m [repeated 12x across cluster][0m
+
+============================================================
+Debug First Sample
+============================================================
+validate_mode: False
+raw_prompt:
+[{'role': 'system', 'content': 'Answer the given medical question. You may use tools before the final answer. Use <search> query </search> when the question requires factual medical evidence. After search, if your draft answer involves diagnosis, treatment, prognosis, medication safety, interactions, contraindications, dosing, or if evidence may be incomplete or conflicting, you should verify the draft answer with <check> draft answer </check> before the final answer. Do not check the search query itself; check a candidate answer. Provide the final answer inside <answer> and </answer>.'}, {'role': 'user', 'content': 'Is Hirschsprung disease a mendelian or a multifactorial disorder?'}]
+
+full_response:
+<answer>Hirschsprung disease is a multifactorial disorder.</answer>
+
+assistant_response:
+<answer>Hirschsprung disease is a multifactorial disorder.</answer>
+============================================================
+
+Evaluating:   4%|█▉                                               | 1/25 [00:13<05:28, 13.68s/it][36m(AgentLoopWorker pid=41303)[0m WARNING:2026-04-06 13:12:25,319:[search_r1_with_checker] search query: metformin thyroxine absorption interference
+[36m(AgentLoopWorker pid=41294)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/omegaconf/grammar_visitor.py:253: UserWarning: In the sequence `CHECKER_NODE_IP,` some elements are missing: please replace them with empty quoted strings. See https://github.com/omry/omegaconf/issues/572 for details.[32m [repeated 3x across cluster][0m
+[36m(pid=41313)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.[32m [repeated 8x across cluster][0m
+[36m(pid=41313)[0m   import pynvml  # type: ignore[import][32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41303)[0m WARNING:2026-04-06 13:12:29,375:[search_r1_with_checker] checker_input_answer: metformin interfere thyroxine absorption
+[36m(AgentLoopWorker pid=41303)[0m WARNING:2026-04-06 13:12:31,174:[CHECKER] answer=metformin interfere thyroxine absorption supports=1 contradictions=0 neutrals=1 num_claims=2 avg_confidence=0.700 reward=0.450
+[36m(AgentLoopWorker pid=41303)[0m You're using a Qwen2TokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.[32m [repeated 3x across cluster][0m
+[36m(pid=41284)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.[32m [repeated 8x across cluster][0m
+[36m(pid=41284)[0m   warnings.warn([32m [repeated 8x across cluster][0m
+Evaluating:   8%|███▉                                             | 2/25 [00:19<03:33,  9.28s/it][36m(AgentLoopWorker pid=41294)[0m Using dataset class: RLHFDataset[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m {[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m   "type": "function",[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m   "function": {[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "name": "search",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "parameters": {[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       "type": "object",[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       "properties": {[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "query_list": {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "type": "array",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "description": "A list of semantic search queries."[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m }[32m [repeated 64x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       },[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       "required": [[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "query_list"[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       ][32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "name": "check",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "answer": {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "type": "string",[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "description": "The answer to verify."[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "evidence": {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "answer"[32m [repeated 8x across cluster][0m
+Evaluating:  12%|█████▉                                           | 3/25 [00:20<01:55,  5.24s/it]Evaluating:  16%|███████▊                                         | 4/25 [00:20<01:10,  3.34s/it]Evaluating:  20%|█████████▊                                       | 5/25 [00:21<00:44,  2.25s/it]Evaluating:  24%|███████████▊                                     | 6/25 [00:21<00:30,  1.59s/it]Evaluating:  28%|█████████████▋                                   | 7/25 [00:21<00:21,  1.22s/it][36m(AgentLoopWorker pid=41282)[0m WARNING:2026-04-06 13:12:33,468:[search_r1_with_checker] search query: Arthrobacter complete genome availability
+[36m(pid=41362)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(pid=41362)[0m   import pynvml  # type: ignore[import]
+[36m(pid=41362)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.[32m [repeated 2x across cluster][0m
+[36m(pid=41362)[0m   warnings.warn([32m [repeated 2x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m WARNING:2026-04-06 13:12:37,331:[AUTO_CHECK] request=0d198a67551946b8a24f04c9f64a1c06 injected checker call after search with answer=Yes, the complete genome of the bacteria of the genus Arthrobacter, specifically Arthrobacter agilis, is available.
+[36m(AgentLoopWorker pid=41282)[0m WARNING:2026-04-06 13:12:39,451:[CHECKER] answer=Yes, the complete genome of the bacteria of the genus Arthrobacter, specifically Arthrobacter agilis, is available. supports=2 contradictions=0 neutrals=0 num_claims=2 avg_confidence=1.000 reward=1.000
+[36m(pid=41433)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.[32m [repeated 7x across cluster][0m
+[36m(pid=41433)[0m   import pynvml  # type: ignore[import][32m [repeated 7x across cluster][0m
+Evaluating:  32%|███████████████▋                                 | 8/25 [00:28<00:48,  2.87s/it][36m(AgentLoopWorker pid=41282)[0m {[32m [repeated 48x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m   "type": "function",[32m [repeated 48x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m   "function": {[32m [repeated 48x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "name": "search",[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "parameters": {[32m [repeated 48x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       "type": "object",[32m [repeated 48x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       "properties": {[32m [repeated 48x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "query_list": {[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "type": "array",[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "description": "A list of semantic search queries."[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m }[32m [repeated 192x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       },[32m [repeated 72x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       "required": [[32m [repeated 48x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "query_list"[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       ][32m [repeated 48x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "name": "check",[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "answer": {[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "type": "string",[32m [repeated 48x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "description": "The answer to verify."[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "evidence": {[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "answer"[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=41294)[0m WARNING:2026-04-06 13:12:39,844:[search_r1_with_checker] search query: AKT1 mutations meningiomas
+[36m(pid=41349)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.[32m [repeated 7x across cluster][0m
+[36m(pid=41349)[0m   warnings.warn([32m [repeated 7x across cluster][0m
+Evaluating:  36%|█████████████████▋                               | 9/25 [00:32<00:52,  3.26s/it]Evaluating:  40%|███████████████████▏                            | 10/25 [00:32<00:35,  2.36s/it]Evaluating:  44%|█████████████████████                           | 11/25 [00:33<00:24,  1.74s/it]Evaluating:  48%|███████████████████████                         | 12/25 [00:33<00:16,  1.30s/it][36m(AgentLoopWorker pid=41282)[0m {[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m   "type": "function",[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m   "function": {[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "name": "search",[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "parameters": {[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       "type": "object",[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       "properties": {[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "query_list": {[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "type": "array",[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "description": "A list of semantic search queries."[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m }[32m [repeated 128x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       },[32m [repeated 48x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       "required": [[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "query_list"[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       ][32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "name": "check",[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "answer": {[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "type": "string",[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "description": "The answer to verify."[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "evidence": {[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "answer"[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41303)[0m WARNING:2026-04-06 13:12:44,941:[search_r1_with_checker] search query: ultraconserved elements transcription frequency
+[36m(pid=41325)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.[32m [repeated 8x across cluster][0m
+[36m(pid=41325)[0m   import pynvml  # type: ignore[import][32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m WARNING:2026-04-06 13:12:44,966:[search_r1_with_checker] search query: peripheral neuroepithelioma Ewing sarcoma relation
+[36m(pid=52240)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.[32m [repeated 15x across cluster][0m
+[36m(pid=52240)[0m   warnings.warn([32m [repeated 15x across cluster][0m
+[36m(AgentLoopWorker pid=41303)[0m WARNING:2026-04-06 13:12:48,251:[AUTO_CHECK] request=02deb7a819a847518c4a19066d38d8a4 injected checker call after search with answer=Ultraconserved elements (UCEs) are not often transcribed based on the available evidence.
+[36m(AgentLoopWorker pid=41301)[0m WARNING:2026-04-06 13:12:48,689:[AUTO_CHECK] request=fef9bb1700ad411499904059f2337544 injected checker call after search with answer=Peripheral neuroepithelioma is related to Ewing sarcoma, as they are now thought to be virtually identical tumors with a similar neural phenotype and sharing an identical chromosome translocation.
+[36m(AgentLoopWorker pid=41303)[0m WARNING:2026-04-06 13:12:50,326:[CHECKER] answer=Ultraconserved elements (UCEs) are not often transcribed based on the available evidence. supports=2 contradictions=0 neutrals=0 num_claims=2 avg_confidence=0.850 reward=0.850
+[36m(pid=52303)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.[32m [repeated 8x across cluster][0m
+[36m(pid=52303)[0m   import pynvml  # type: ignore[import][32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m WARNING:2026-04-06 13:12:50,529:[CHECKER] answer=Peripheral neuroepithelioma is related to Ewing sarcoma, as they are now thought to be virtually identical tumors with a similar neural phenotype and sharing an supports=2 contradictions=0 neutrals=0 num_claims=2 avg_confidence=1.000 reward=1.000
+Evaluating:  52%|████████████████████████▉                       | 13/25 [00:39<00:32,  2.73s/it][36m(AgentLoopWorker pid=41282)[0m {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m   "type": "function",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m   "function": {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "name": "search",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "parameters": {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       "type": "object",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       "properties": {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "query_list": {[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "type": "array",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "description": "A list of semantic search queries."[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m }[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       },[32m [repeated 12x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       "required": [[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "query_list"[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       ][32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "name": "check",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "answer": {[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "type": "string",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "description": "The answer to verify."[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "evidence": {[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "answer"[32m [repeated 4x across cluster][0m
+Evaluating:  56%|██████████████████████████▉                     | 14/25 [00:39<00:21,  1.98s/it]Evaluating:  60%|████████████████████████████▊                   | 15/25 [00:39<00:15,  1.50s/it]Evaluating:  64%|██████████████████████████████▋                 | 16/25 [00:40<00:10,  1.15s/it]Evaluating:  68%|████████████████████████████████▋               | 17/25 [00:40<00:07,  1.09it/s]Evaluating:  72%|██████████████████████████████████▌             | 18/25 [00:40<00:05,  1.36it/s]Evaluating:  76%|████████████████████████████████████▍           | 19/25 [00:41<00:04,  1.48it/s]Evaluating:  80%|██████████████████████████████████████▍         | 20/25 [00:41<00:02,  1.70it/s][36m(AgentLoopWorker pid=41294)[0m WARNING:2026-04-06 13:12:53,720:[search_r1_with_checker] search query: IFAP syndrome symptoms
+[36m(pid=55801)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(pid=55801)[0m   warnings.warn(
+[36m(pid=55805)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.[32m [repeated 8x across cluster][0m
+[36m(pid=55805)[0m   import pynvml  # type: ignore[import][32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41294)[0m WARNING:2026-04-06 13:12:57,383:[search_r1_with_checker] checker_input_answer: IFAP syndrome symptoms
+[36m(AgentLoopWorker pid=41294)[0m WARNING:2026-04-06 13:12:58,862:[CHECKER] answer=IFAP syndrome symptoms supports=2 contradictions=0 neutrals=0 num_claims=2 avg_confidence=1.000 reward=1.000
+Evaluating:  84%|████████████████████████████████████████▎       | 21/25 [00:47<00:08,  2.20s/it][36m(AgentLoopWorker pid=41282)[0m {[32m [repeated 64x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m   "type": "function",[32m [repeated 64x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m   "function": {[32m [repeated 64x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "name": "search",[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "parameters": {[32m [repeated 64x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       "type": "object",[32m [repeated 64x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       "properties": {[32m [repeated 64x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "query_list": {[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "type": "array",[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "description": "A list of semantic search queries."[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m }[32m [repeated 256x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       },[32m [repeated 96x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       "required": [[32m [repeated 64x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "query_list"[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       ][32m [repeated 64x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "name": "check",[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "answer": {[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "type": "string",[32m [repeated 64x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "description": "The answer to verify."[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "evidence": {[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "answer"[32m [repeated 32x across cluster][0m
+Evaluating:  88%|██████████████████████████████████████████▏     | 22/25 [00:48<00:04,  1.62s/it][36m(AgentLoopWorker pid=41294)[0m WARNING:2026-04-06 13:12:59,778:[search_r1_with_checker] search query: cell types driving Rheumatoid Arthritis
+[36m(pid=56835)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.[32m [repeated 8x across cluster][0m
+[36m(pid=56835)[0m   warnings.warn([32m [repeated 8x across cluster][0m
+[36m(pid=56836)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.[32m [repeated 8x across cluster][0m
+[36m(pid=56836)[0m   import pynvml  # type: ignore[import][32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41294)[0m WARNING:2026-04-06 13:13:04,149:[AUTO_CHECK] request=93d2b3cc41b844bcb7b290db5daad9f7 injected checker call after search with answer=Th17 cells and T cells, specifically Th17 cells, are known to be driving Rheumatoid Arthritis (RA). Th17 cells are present in higher quantities at the site of bone destruction in joints and produce in
+[36m(AgentLoopWorker pid=41294)[0m WARNING:2026-04-06 13:13:05,913:[CHECKER] answer=Th17 cells and T cells, specifically Th17 cells, are known to be driving Rheumatoid Arthritis (RA). Th17 cells are present in higher quantities at the site of b supports=2 contradictions=0 neutrals=0 num_claims=2 avg_confidence=1.000 reward=1.000
+Evaluating:  92%|████████████████████████████████████████████▏   | 23/25 [00:55<00:06,  3.20s/it][36m(AgentLoopWorker pid=41282)[0m {[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m   "type": "function",[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m   "function": {[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "name": "search",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "parameters": {[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       "type": "object",[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       "properties": {[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "query_list": {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "type": "array",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "description": "A list of semantic search queries."[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m }[32m [repeated 64x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       },[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       "required": [[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "query_list"[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m       ][32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "name": "check",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m     "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "answer": {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "type": "string",[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "description": "The answer to verify."[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "evidence": {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m           "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=41282)[0m         "answer"[32m [repeated 8x across cluster][0m
+Evaluating:  96%|██████████████████████████████████████████████  | 24/25 [00:55<00:02,  2.34s/it]Evaluating: 100%|████████████████████████████████████████████████| 25/25 [00:55<00:00,  1.77s/it]Evaluating: 100%|████████████████████████████████████████████████| 25/25 [00:55<00:00,  2.23s/it]
+[36m(AgentLoopWorker pid=41301)[0m {[32m [repeated 14x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m   "type": "function",[32m [repeated 14x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m   "function": {[32m [repeated 14x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m     "name": "search",[32m [repeated 7x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m     "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",[32m [repeated 7x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m     "parameters": {[32m [repeated 14x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m       "type": "object",[32m [repeated 14x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m       "properties": {[32m [repeated 14x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m         "query_list": {[32m [repeated 7x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m           "type": "array",[32m [repeated 7x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m           "description": "A list of semantic search queries."[32m [repeated 7x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m }[32m [repeated 56x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m       },[32m [repeated 21x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m       "required": [[32m [repeated 14x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m         "query_list"[32m [repeated 7x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m       ][32m [repeated 14x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m     "name": "check",[32m [repeated 7x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m     "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",[32m [repeated 7x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m         "answer": {[32m [repeated 7x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m           "type": "string",[32m [repeated 14x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m           "description": "The answer to verify."[32m [repeated 7x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m         "evidence": {[32m [repeated 7x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m           "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."[32m [repeated 7x across cluster][0m
+[36m(AgentLoopWorker pid=41301)[0m         "answer"[32m [repeated 7x across cluster][0m
+[36m(pid=56836)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.[32m [repeated 7x across cluster][0m
+[36m(pid=56836)[0m   warnings.warn([32m [repeated 7x across cluster][0m
+
+============================================================
+Evaluation Results
+============================================================
+num_samples: 100
+candidate_samples: 100
+filtered_samples: 0
+f1_mean: 0.2893
+em_mean: 0.0000
+fuzzy_accuracy: 0.0000
+avg_searches: 0.0700
+avg_checks: 0.0600
+avg_explicit_checks: 0.0200
+avg_auto_checks: 0.0400
+avg_tools: 0.1300
+avg_thinks: 0.0000
+avg_turns: 2.2600
+avg_checker_calls_parsed: 0.0600
+avg_checker_total_claims: 0.2400
+avg_checker_supports: 0.1100
+avg_checker_contradictions: 0.0000
+avg_checker_neutrals: 0.0100
+avg_checker_support_rate: 0.9167
+avg_checker_contradiction_rate: 0.0000
+avg_checker_avg_confidence: 0.0000
+avg_search_budget_utilization: 0.0000
+avg_check_budget_utilization: 0.0000
+avg_turn_budget_utilization: 0.0000
+search_budget_saturation_rate: 0.0000
+check_budget_saturation_rate: 0.0000
+turn_budget_saturation_rate: 0.0000
+has_answer_tag_rate: 1.0000
+samples_with_search: 0.0700
+samples_with_check: 0.0600
+samples_with_explicit_check: 0.0200
+samples_with_tool: 0.0700
+checker_parsed_coverage: 0.0600
+samples_with_checker_support_signal: 0.0600
+samples_with_checker_contradiction_signal: 0.0000
+samples_with_checker_only_neutral: 0.0000
+tool_count_mode: both
+tag_style: auto
+eval_mode: agent_loop
+
+Results saved to eval_model_14_gpt_checker_format_penalty_BEST_s200_bioasq.json
+
+============================================================
+Sample Results
+============================================================
+
+--- Sample 1 ---
+Q: Is Hirschsprung disease a mendelian or a multifactorial disorder?...
+Golden: ["Coding sequence mutations in RET, GDNF, EDNRB, EDN3, and SOX10 are involved in the development of Hirschsprung disease. The majority of these genes was shown to be related to Mendelian syndromic forms of Hirschsprung's disease, whereas the non-Mendelian inheritance of sporadic non-syndromic Hirschsprung disease proved to be complex; involvement of multiple loci was demonstrated in a multiplicative model."]
+Model: Hirschsprung disease is a multifactorial disorder....
+Searches: 0, Checks: 0, Tools(both): 0, Turns: 2, F1: 0.118, EM: 0.0
+
+--- Sample 2 ---
+Q: List signaling molecules (ligands) that interact with the receptor EGFR?...
+Golden: ['The 7 known EGFR ligands  are: epidermal growth factor (EGF), betacellulin (BTC), epiregulin (EPR), heparin-binding EGF (HB-EGF), transforming growth factor-α [TGF-α], amphiregulin (AREG) and epigen (EPG).']
+Model: Signaling molecules (ligands) that interact with the EGFR receptor include epidermal growth factor (EGF), transforming growth factor-alpha (TGF-α), heregulin, b...
+Searches: 0, Checks: 0, Tools(both): 0, Turns: 2, F1: 0.348, EM: 0.0
+
+--- Sample 3 ---
+Q: Is the protein Papilin secreted?...
+Golden: ['Yes,  papilin is a secreted protein']
+Model: Yes, Papilin is secreted protein....
+Searches: 0, Checks: 0, Tools(both): 0, Turns: 2, F1: 0.727, EM: 0.0
+
+============================================================
+STEP 3/4  ROUGE + BERTScore
+============================================================
+ROUGE-1: 0.3380  ROUGE-2: 0.1574  ROUGE-L: 0.2816
+Computing BERTScore (~3 min)...
+/ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+BERTScore: 0.6777
+
+============================================================
+STEP 4/4  RAGChecker Faithfulness Metrics
+============================================================
+
+============================================================
+FINAL SUMMARY
+============================================================
+Experiment:       model_14_gpt_checker_format_penalty_BEST_s200
+Dataset:          bioasq_test.parquet
+N samples:        100
+--- Answer Quality ---
+Token F1:         0.2893   ✓
+ROUGE-L:          0.2816
+BERTScore:        0.6777   ✓
+--- RAGChecker ---
+Faithfulness:     1.000
+Claim precision:  0.917
+Grounded rate:    0.000
+--- Behavior ---
+Answer tag rate:  100.0%   ✓
+Support rate:     91.7%   ✓
+Avg searches:     0.070
+
+Saved: eval_model_14_gpt_checker_format_penalty_BEST_s200_bioasq.json

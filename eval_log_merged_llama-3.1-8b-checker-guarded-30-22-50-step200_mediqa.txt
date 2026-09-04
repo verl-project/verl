@@ -1,0 +1,614 @@
+Detected Llama model: using inference chat template
+Skipping merge. Using: /ocean/projects/med230010p/yji3/BrowseCamp/verl/merged_models/merged_llama-3.1-8b-checker-guarded-30-22-50-step200
+
+============================================================
+STEP 2/4  EVAL
+  model:    /ocean/projects/med230010p/yji3/BrowseCamp/verl/merged_models/merged_llama-3.1-8b-checker-guarded-30-22-50-step200
+  data:     /ocean/projects/med230010p/yji3/BrowseCamp/verl/searchr1_data/extra_eval/mediqa_test.parquet
+  output:   eval_merged_llama-3.1-8b-checker-guarded-30-22-50-step200_mediqa.json
+  template: --use_inference_chat_template
+============================================================
+/ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+Loading test data from /ocean/projects/med230010p/yji3/BrowseCamp/verl/searchr1_data/extra_eval/mediqa_test.parquet
+Total samples: 200
+Loading model from /ocean/projects/med230010p/yji3/BrowseCamp/verl/merged_models/merged_llama-3.1-8b-checker-guarded-30-22-50-step200
+Evaluation mode: agent_loop
+Tool config: /ocean/projects/med230010p/yji3/BrowseCamp/verl/examples/sglang_multiturn/config/tool_config/medical_search_checker_tool_config.yaml
+Multi-turn format: search_r1_with_checker
+Triage enabled: False
+{
+  "type": "function",
+  "function": {
+    "name": "search",
+    "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query_list": {
+          "type": "array",
+          "description": "A list of semantic search queries."
+        }
+      },
+      "required": [
+        "query_list"
+      ]
+    }
+  }
+}
+2026-04-06 14:41:10,952	INFO worker.py:1942 -- Started a local Ray instance. View the dashboard at [1m[32m127.0.0.1:8265 [39m[22m
+/ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/omegaconf/grammar_visitor.py:253: UserWarning: In the sequence `CHECKER_NODE_IP,` some elements are missing: please replace them with empty quoted strings. See https://github.com/omry/omegaconf/issues/572 for details.
+  warnings.warn(
+{
+  "type": "function",
+  "function": {
+    "name": "check",
+    "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "answer": {
+          "type": "string",
+          "description": "The answer to verify."
+        },
+        "evidence": {
+          "type": "string",
+          "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."
+        }
+      },
+      "required": [
+        "answer"
+      ]
+    }
+  }
+}
+[2026-04-06 14:41:12,337 E 34510 35607] core_worker.cc:2269: Failed to register actor. Error message: SchedulingCancelled: Actor creation cancelled. actor_id=afabd31d70efe724d7b25a3401000000
+[36m(pid=41870)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(pid=41870)[0m   import pynvml  # type: ignore[import]
+[36m(pid=41870)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(pid=41870)[0m   warnings.warn(
+[36m(CheckpointEngineWorker pid=41870)[0m [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[36m(pid=45700)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(pid=45700)[0m   import pynvml  # type: ignore[import]
+[36m(pid=45700)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(pid=45700)[0m   warnings.warn(
+[36m(SGLangHttpServer pid=45700)[0m SGLang http server: rollout_mode=<RolloutMode.STANDALONE: 'standalone'>, replica_rank=0, node_rank=0, nnodes=1, cuda_visible_devices='3'
+[36m(SGLangHttpServer pid=45700)[0m WARNING:2026-04-06 14:41:34,877:agent loop only support torch and npu profiler, got None
+[36m(SGLangHttpServer pid=45700)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(SGLangHttpServer pid=45700)[0m   import pynvml  # type: ignore[import]
+[36m(SGLangHttpServer pid=45700)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(SGLangHttpServer pid=45700)[0m   import pynvml  # type: ignore[import]
+[36m(SGLangHttpServer pid=45700)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(SGLangHttpServer pid=45700)[0m   warnings.warn(
+[36m(SGLangHttpServer pid=45700)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(SGLangHttpServer pid=45700)[0m   warnings.warn(
+[36m(SGLangHttpServer pid=45700)[0m [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[36m(SGLangHttpServer pid=45700)[0m [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[36m(SGLangHttpServer pid=45700)[0m [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[36m(SGLangHttpServer pid=45700)[0m [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[36m(SGLangHttpServer pid=45700)[0m [W406 14:41:43.829411030 ProcessGroupNCCL.cpp:924] Warning: TORCH_NCCL_AVOID_RECORD_STREAMS is the default now, this environment variable is thus deprecated. (function operator())
+[36m(SGLangHttpServer pid=45700)[0m Loading safetensors checkpoint shards:   0% Completed | 0/4 [00:00<?, ?it/s]
+[36m(SGLangHttpServer pid=45700)[0m Loading safetensors checkpoint shards:  25% Completed | 1/4 [00:02<00:06,  2.03s/it]
+[36m(SGLangHttpServer pid=45700)[0m Loading safetensors checkpoint shards:  50% Completed | 2/4 [00:02<00:02,  1.32s/it]
+[36m(SGLangHttpServer pid=45700)[0m Loading safetensors checkpoint shards:  75% Completed | 3/4 [00:04<00:01,  1.55s/it]
+[36m(SGLangHttpServer pid=45700)[0m Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:06<00:00,  1.77s/it]
+[36m(SGLangHttpServer pid=45700)[0m Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:06<00:00,  1.69s/it]
+[36m(SGLangHttpServer pid=45700)[0m 
+[36m(SGLangHttpServer pid=45700)[0m   0%|                                                                     | 0/36 [00:00<?, ?it/s]Capturing batches (bs=256 avail_mem=50.08 GB):   0%|                      | 0/36 [00:00<?, ?it/s]
+[36m(SGLangHttpServer pid=45700)[0m Capturing batches (bs=256 avail_mem=50.08 GB):   3%|▍             | 1/36 [00:00<00:16,  2.11it/s]Capturing batches (bs=248 avail_mem=49.84 GB):   3%|▍             | 1/36 [00:00<00:16,  2.11it/s]Capturing batches (bs=240 avail_mem=49.84 GB):   3%|▍             | 1/36 [00:00<00:16,  2.11it/s]
+[36m(SGLangHttpServer pid=45700)[0m Capturing batches (bs=240 avail_mem=49.84 GB):   8%|█▏            | 3/36 [00:00<00:05,  6.15it/s]Capturing batches (bs=232 avail_mem=49.83 GB):   8%|█▏            | 3/36 [00:00<00:05,  6.15it/s]
+[36m(SGLangHttpServer pid=45700)[0m Capturing batches (bs=224 avail_mem=49.83 GB):   8%|█▏            | 3/36 [00:00<00:05,  6.15it/s]
+[36m(SGLangHttpServer pid=45700)[0m Capturing batches (bs=224 avail_mem=49.83 GB):  14%|█▉            | 5/36 [00:00<00:05,  5.47it/s]Capturing batches (bs=216 avail_mem=49.82 GB):  14%|█▉            | 5/36 [00:00<00:05,  5.47it/s]Capturing batches (bs=208 avail_mem=49.82 GB):  14%|█▉            | 5/36 [00:01<00:05,  5.47it/s]
+[36m(SGLangHttpServer pid=45700)[0m Capturing batches (bs=200 avail_mem=49.81 GB):  14%|█▉            | 5/36 [00:01<00:05,  5.47it/s]
+[36m(SGLangHttpServer pid=45700)[0m Capturing batches (bs=200 avail_mem=49.81 GB):  22%|███           | 8/36 [00:01<00:03,  8.40it/s]Capturing batches (bs=192 avail_mem=49.81 GB):  22%|███           | 8/36 [00:01<00:03,  8.40it/s]
+[36m(SGLangHttpServer pid=45700)[0m Capturing batches (bs=184 avail_mem=49.80 GB):  22%|███           | 8/36 [00:01<00:03,  8.40it/s]Capturing batches (bs=184 avail_mem=49.80 GB):  28%|███▌         | 10/36 [00:01<00:03,  7.21it/s]Capturing batches (bs=176 avail_mem=49.80 GB):  28%|███▌         | 10/36 [00:01<00:03,  7.21it/s]
+[36m(SGLangHttpServer pid=45700)[0m Capturing batches (bs=168 avail_mem=49.79 GB):  28%|███▌         | 10/36 [00:01<00:03,  7.21it/s]Capturing batches (bs=160 avail_mem=49.79 GB):  28%|███▌         | 10/36 [00:01<00:03,  7.21it/s]Capturing batches (bs=160 avail_mem=49.79 GB):  36%|████▋        | 13/36 [00:01<00:02, 10.08it/s]Capturing batches (bs=152 avail_mem=49.78 GB):  36%|████▋        | 13/36 [00:01<00:02, 10.08it/s]
+[36m(SGLangHttpServer pid=45700)[0m Capturing batches (bs=144 avail_mem=49.78 GB):  36%|████▋        | 13/36 [00:01<00:02, 10.08it/s]Capturing batches (bs=136 avail_mem=49.77 GB):  36%|████▋        | 13/36 [00:01<00:02, 10.08it/s]
+[36m(SGLangHttpServer pid=45700)[0m Capturing batches (bs=136 avail_mem=49.77 GB):  44%|█████▊       | 16/36 [00:01<00:01, 12.77it/s]Capturing batches (bs=128 avail_mem=49.77 GB):  44%|█████▊       | 16/36 [00:01<00:01, 12.77it/s]Capturing batches (bs=120 avail_mem=49.76 GB):  44%|█████▊       | 16/36 [00:01<00:01, 12.77it/s]Capturing batches (bs=112 avail_mem=49.75 GB):  44%|█████▊       | 16/36 [00:01<00:01, 12.77it/s]
+[36m(SGLangHttpServer pid=45700)[0m Capturing batches (bs=112 avail_mem=49.75 GB):  53%|██████▊      | 19/36 [00:01<00:01, 14.96it/s]Capturing batches (bs=104 avail_mem=49.75 GB):  53%|██████▊      | 19/36 [00:01<00:01, 14.96it/s]Capturing batches (bs=96 avail_mem=49.75 GB):  53%|███████▍      | 19/36 [00:01<00:01, 14.96it/s]
+[36m(SGLangHttpServer pid=45700)[0m Capturing batches (bs=88 avail_mem=49.74 GB):  53%|███████▍      | 19/36 [00:02<00:01, 14.96it/s]
+[36m(SGLangHttpServer pid=45700)[0m Capturing batches (bs=88 avail_mem=49.74 GB):  61%|████████▌     | 22/36 [00:02<00:00, 15.34it/s]Capturing batches (bs=80 avail_mem=49.73 GB):  61%|████████▌     | 22/36 [00:02<00:00, 15.34it/s]
+[36m(SGLangHttpServer pid=45700)[0m Capturing batches (bs=72 avail_mem=49.73 GB):  61%|████████▌     | 22/36 [00:02<00:00, 15.34it/s]Capturing batches (bs=72 avail_mem=49.73 GB):  67%|█████████▎    | 24/36 [00:02<00:01, 10.71it/s]Capturing batches (bs=64 avail_mem=49.72 GB):  67%|█████████▎    | 24/36 [00:02<00:01, 10.71it/s]
+[36m(SGLangHttpServer pid=45700)[0m Capturing batches (bs=56 avail_mem=49.72 GB):  67%|█████████▎    | 24/36 [00:02<00:01, 10.71it/s]
+[36m(SGLangHttpServer pid=45700)[0m Capturing batches (bs=56 avail_mem=49.72 GB):  72%|██████████    | 26/36 [00:02<00:01,  9.57it/s]Capturing batches (bs=48 avail_mem=49.71 GB):  72%|██████████    | 26/36 [00:02<00:01,  9.57it/s]
+[36m(SGLangHttpServer pid=45700)[0m Capturing batches (bs=40 avail_mem=49.71 GB):  72%|██████████    | 26/36 [00:02<00:01,  9.57it/s]Capturing batches (bs=40 avail_mem=49.71 GB):  78%|██████████▉   | 28/36 [00:02<00:00,  9.43it/s]Capturing batches (bs=32 avail_mem=49.70 GB):  78%|██████████▉   | 28/36 [00:02<00:00,  9.43it/s]
+[36m(SGLangHttpServer pid=45700)[0m Capturing batches (bs=24 avail_mem=49.70 GB):  78%|██████████▉   | 28/36 [00:03<00:00,  9.43it/s]
+[36m(SGLangHttpServer pid=45700)[0m Capturing batches (bs=16 avail_mem=49.69 GB):  78%|██████████▉   | 28/36 [00:03<00:00,  9.43it/s]
+[36m(SGLangHttpServer pid=45700)[0m Capturing batches (bs=16 avail_mem=49.69 GB):  86%|████████████  | 31/36 [00:03<00:00, 11.50it/s]Capturing batches (bs=12 avail_mem=49.69 GB):  86%|████████████  | 31/36 [00:03<00:00, 11.50it/s]Capturing batches (bs=8 avail_mem=49.68 GB):  86%|████████████▉  | 31/36 [00:03<00:00, 11.50it/s]Capturing batches (bs=4 avail_mem=49.67 GB):  86%|████████████▉  | 31/36 [00:03<00:00, 11.50it/s]
+[36m(SGLangHttpServer pid=45700)[0m Capturing batches (bs=4 avail_mem=49.67 GB):  94%|██████████████▏| 34/36 [00:03<00:00, 14.31it/s]Capturing batches (bs=2 avail_mem=49.67 GB):  94%|██████████████▏| 34/36 [00:03<00:00, 14.31it/s]Capturing batches (bs=1 avail_mem=49.67 GB):  94%|██████████████▏| 34/36 [00:03<00:00, 14.31it/s]Capturing batches (bs=1 avail_mem=49.67 GB): 100%|███████████████| 36/36 [00:03<00:00, 10.90it/s]
+AgentLoopManager: ['10.8.11.96:38795']
+Filtered prompts longer than 3072 tokens: 15 of 100
+Evaluating:   0%|                                                         | 0/22 [00:00<?, ?it/s][36m(pid=35609)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(pid=35609)[0m   import pynvml  # type: ignore[import]
+[36m(pid=35614)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(pid=35614)[0m   warnings.warn(
+[36m(AgentLoopWorker pid=35614)[0m W0406 14:42:22.729000 35614 site-packages/torch/utils/cpp_extension.py:117] No CUDA runtime is found, using CUDA_HOME='/opt/packages/cuda/v12.6.1'
+[36m(pid=35617)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.[32m [repeated 3x across cluster] (Ray deduplicates logs by default. Set RAY_DEDUP_LOGS=0 to disable log deduplication, or see https://docs.ray.io/en/master/ray-observability/user-guides/configure-logging.html#log-deduplication for more options.)[0m
+[36m(pid=35617)[0m   import pynvml  # type: ignore[import][32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=35614)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/sglang/srt/layers/quantization/awq.py:69: UserWarning: Only CUDA, HIP and XPU support AWQ currently.
+[36m(AgentLoopWorker pid=35614)[0m   warnings.warn(f"Only CUDA, HIP and XPU support AWQ currently.")
+[36m(AgentLoopWorker pid=35614)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/sglang/srt/layers/quantization/gguf.py:46: UserWarning: Only CUDA support GGUF quantization currently.
+[36m(AgentLoopWorker pid=35614)[0m   warnings.warn(f"Only CUDA support GGUF quantization currently.")
+[36m(pid=35617)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.[32m [repeated 3x across cluster][0m
+[36m(pid=35617)[0m   warnings.warn([32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=35614)[0m Using dataset class: RLHFDataset
+[36m(AgentLoopWorker pid=35614)[0m {
+[36m(AgentLoopWorker pid=35614)[0m   "type": "function",
+[36m(AgentLoopWorker pid=35614)[0m   "function": {
+[36m(AgentLoopWorker pid=35614)[0m     "name": "search",
+[36m(AgentLoopWorker pid=35614)[0m     "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",
+[36m(AgentLoopWorker pid=35614)[0m     "parameters": {
+[36m(AgentLoopWorker pid=35614)[0m       "type": "object",
+[36m(AgentLoopWorker pid=35614)[0m       "properties": {
+[36m(AgentLoopWorker pid=35614)[0m         "query_list": {
+[36m(AgentLoopWorker pid=35614)[0m           "type": "array",
+[36m(AgentLoopWorker pid=35614)[0m           "description": "A list of semantic search queries."
+[36m(AgentLoopWorker pid=35614)[0m         }
+[36m(AgentLoopWorker pid=35614)[0m       },
+[36m(AgentLoopWorker pid=35614)[0m       "required": [
+[36m(AgentLoopWorker pid=35614)[0m         "query_list"
+[36m(AgentLoopWorker pid=35614)[0m       ]
+[36m(AgentLoopWorker pid=35614)[0m     }
+[36m(AgentLoopWorker pid=35614)[0m   }
+[36m(AgentLoopWorker pid=35614)[0m }
+[36m(AgentLoopWorker pid=35614)[0m {
+[36m(AgentLoopWorker pid=35614)[0m   "type": "function",
+[36m(AgentLoopWorker pid=35614)[0m   "function": {
+[36m(AgentLoopWorker pid=35614)[0m     "name": "check",
+[36m(AgentLoopWorker pid=35614)[0m     "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",
+[36m(AgentLoopWorker pid=35614)[0m     "parameters": {
+[36m(AgentLoopWorker pid=35614)[0m       "type": "object",
+[36m(AgentLoopWorker pid=35614)[0m       "properties": {
+[36m(AgentLoopWorker pid=35614)[0m         "answer": {
+[36m(AgentLoopWorker pid=35614)[0m           "type": "string",
+[36m(AgentLoopWorker pid=35614)[0m           "description": "The answer to verify."
+[36m(AgentLoopWorker pid=35614)[0m         },
+[36m(AgentLoopWorker pid=35614)[0m         "evidence": {
+[36m(AgentLoopWorker pid=35614)[0m           "type": "string",
+[36m(AgentLoopWorker pid=35614)[0m           "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."
+[36m(AgentLoopWorker pid=35614)[0m         }
+[36m(AgentLoopWorker pid=35614)[0m       },
+[36m(AgentLoopWorker pid=35614)[0m       "required": [
+[36m(AgentLoopWorker pid=35614)[0m         "answer"
+[36m(AgentLoopWorker pid=35614)[0m       ]
+[36m(AgentLoopWorker pid=35614)[0m     }
+[36m(AgentLoopWorker pid=35614)[0m   }
+[36m(AgentLoopWorker pid=35614)[0m }
+[36m(AgentLoopWorker pid=35614)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/omegaconf/grammar_visitor.py:253: UserWarning: In the sequence `CHECKER_NODE_IP,` some elements are missing: please replace them with empty quoted strings. See https://github.com/omry/omegaconf/issues/572 for details.
+[36m(AgentLoopWorker pid=35617)[0m W0406 14:42:22.883000 35617 site-packages/torch/utils/cpp_extension.py:117] No CUDA runtime is found, using CUDA_HOME='/opt/packages/cuda/v12.6.1'[32m [repeated 3x across cluster][0m
+[36m(pid=35618)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.[32m [repeated 8x across cluster][0m
+[36m(pid=35618)[0m   import pynvml  # type: ignore[import][32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35617)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/sglang/srt/layers/quantization/awq.py:69: UserWarning: Only CUDA, HIP and XPU support AWQ currently.[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=35617)[0m   warnings.warn(f"Only CUDA, HIP and XPU support AWQ currently.")[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=35617)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/sglang/srt/layers/quantization/gguf.py:46: UserWarning: Only CUDA support GGUF quantization currently.[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=35617)[0m   warnings.warn(f"Only CUDA support GGUF quantization currently.")[32m [repeated 3x across cluster][0m
+[36m(pid=35627)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.[32m [repeated 3x across cluster][0m
+[36m(pid=35627)[0m   warnings.warn([32m [repeated 7x across cluster][0m
+[36m(AgentLoopWorker pid=35614)[0m You're using a PreTrainedTokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
+[36m(AgentLoopWorker pid=35617)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/omegaconf/grammar_visitor.py:253: UserWarning: In the sequence `CHECKER_NODE_IP,` some elements are missing: please replace them with empty quoted strings. See https://github.com/omry/omegaconf/issues/572 for details.[32m [repeated 3x across cluster][0m
+
+============================================================
+Debug First Sample
+============================================================
+validate_mode: False
+raw_prompt:
+[{'role': 'system', 'content': 'Answer the given medical question. You may use tools before the final answer. Use <search> query </search> when the question requires factual medical evidence. After search, if your draft answer involves diagnosis, treatment, prognosis, medication safety, interactions, contraindications, dosing, or if evidence may be incomplete or conflicting, you should verify the draft answer with <check> draft answer </check> before the final answer. Do not check the search query itself; check a candidate answer. Provide the final answer inside <answer> and </answer>.'}, {'role': 'user', 'content': 'What is Epilepsy?: Epilepsy is a brain disorder that causes people to have recurring seizures. The seizures happen when clusters of nerve cells, or neurons, in the brain send out the wrong signals. People may have strange sensations and emotions or behave strangely. They may have violent muscle spasms or lose consciousness.    Epilepsy has many possible causes, including illness, brain injury, and abnormal brain development. In many cases, the cause is unknown.    Doctors use brain scans and other tests to diagnose epilepsy. It is important to start treatment right away. There is no cure for epilepsy, but medicines can control seizures for most people. When medicines are not working well, surgery or implanted devices such as vagus nerve stimulators may help. Special diets can help some children with epilepsy.    NIH: National Institute of Neurological Disorders and Stroke'}]
+
+full_response:
+<answer>The underlying cause of epilepsy is unknown in about 60% of cases, but it is believed to be related to abnormal brain activity, genetic factors, and environmental factors such as head trauma, infection, and exposure to toxins.</answer>
+
+assistant_response:
+<answer>The underlying cause of epilepsy is unknown in about 60% of cases, but it is believed to be related to abnormal brain activity, genetic factors, and environmental factors such as head trauma, infection, and exposure to toxins.</answer>
+============================================================
+
+Evaluating:   5%|██▏                                              | 1/22 [00:15<05:32, 15.83s/it][36m(AgentLoopWorker pid=35617)[0m Using dataset class: RLHFDataset[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m   "type": "function",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m   "function": {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "name": "search",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "parameters": {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "type": "object",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "properties": {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "query_list": {[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "type": "array",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "A list of semantic search queries."[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m }[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       },[32m [repeated 12x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "required": [[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "query_list"[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       ][32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "name": "check",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "answer": {[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "type": "string",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "The answer to verify."[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "evidence": {[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "answer"[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:42:33,571:[search_r1_with_checker] search query: [18] chromosomal analysis
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:42:33,571:[search_r1_with_checker] search query: [18] chromosomal analysis
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:42:33,571:[search_r1_with_checker] search query: echocardiogram
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:42:33,571:[search_r1_with_checker] search query: renal ultrasound
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:42:33,571:[search_r1_with_checker] search query: abdominal ultrasound
+[36m(AgentLoopWorker pid=35617)[0m ERROR:2026-04-06 14:42:34,052:[search_r1_with_checker] Failed to parse tool_call JSON: Expecting ',' delimiter: line 1 column 316 (char 315)
+[36m(pid=35637)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.[32m [repeated 8x across cluster][0m
+[36m(pid=35637)[0m   import pynvml  # type: ignore[import][32m [repeated 8x across cluster][0m
+[36m(pid=35623)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.[32m [repeated 6x across cluster][0m
+[36m(pid=35623)[0m   warnings.warn([32m [repeated 6x across cluster][0m
+[36m(AgentLoopWorker pid=35610)[0m You're using a PreTrainedTokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.[32m [repeated 3x across cluster][0m
+[36m(SearchExecutionWorker pid=35637)[0m WARNING:2026-04-06 14:42:36,782:[Search Request ID: c9f37ef1-cbd8-4ddd-b603-84c36c757490] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14a4147c6170>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35637)[0m WARNING:2026-04-06 14:42:37,786:[Search Request ID: c9f37ef1-cbd8-4ddd-b603-84c36c757490] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14a4147c6800>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35637)[0m WARNING:2026-04-06 14:42:39,798:[Search Request ID: c9f37ef1-cbd8-4ddd-b603-84c36c757490] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14a4147c7070>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35637)[0m WARNING:2026-04-06 14:42:42,806:[Search Request ID: c9f37ef1-cbd8-4ddd-b603-84c36c757490] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14a4147c5f60>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(pid=35637)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.[32m [repeated 7x across cluster][0m
+[36m(pid=35637)[0m   warnings.warn([32m [repeated 7x across cluster][0m
+[36m(SearchExecutionWorker pid=35637)[0m WARNING:2026-04-06 14:42:46,827:[Search Request ID: c9f37ef1-cbd8-4ddd-b603-84c36c757490] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14a4147c5d80>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35637)[0m WARNING:2026-04-06 14:42:51,853:[Search Request ID: c9f37ef1-cbd8-4ddd-b603-84c36c757490] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14a4147c78e0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35637)[0m WARNING:2026-04-06 14:42:57,883:[Search Request ID: c9f37ef1-cbd8-4ddd-b603-84c36c757490] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14a3cc0f4220>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35637)[0m WARNING:2026-04-06 14:43:04,920:[Search Request ID: c9f37ef1-cbd8-4ddd-b603-84c36c757490] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14a4147c7df0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35637)[0m WARNING:2026-04-06 14:43:12,962:[Search Request ID: c9f37ef1-cbd8-4ddd-b603-84c36c757490] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14a4147c7760>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35637)[0m WARNING:2026-04-06 14:43:22,007:[Search Request ID: c9f37ef1-cbd8-4ddd-b603-84c36c757490] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14a4147c5600>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35637)[0m ERROR:2026-04-06 14:43:22,007:[Search Request ID: c9f37ef1-cbd8-4ddd-b603-84c36c757490] Search API call failed. Last error: [Search Request ID: c9f37ef1-cbd8-4ddd-b603-84c36c757490] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14a4147c5600>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35637)[0m ERROR:2026-04-06 14:43:22,007:Batch search: API error occurred: API Call Failed: Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14a4147c5600>: Failed to establish a new connection: [Errno 111] Connection refused'))
+Evaluating:   9%|████▍                                            | 2/22 [01:05<11:50, 35.51s/it][36m(AgentLoopWorker pid=35609)[0m {[32m [repeated 7x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m   "type": "function",[32m [repeated 7x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m   "function": {[32m [repeated 7x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "name": "search",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "parameters": {[32m [repeated 7x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "type": "object",[32m [repeated 7x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "properties": {[32m [repeated 7x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "query_list": {[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "type": "array",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "A list of semantic search queries."[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m }[32m [repeated 28x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       },[32m [repeated 10x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "required": [[32m [repeated 7x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "query_list"[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       ][32m [repeated 7x across cluster][0m
+[36m(AgentLoopWorker pid=35617)[0m     "name": "check",[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=35617)[0m     "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=35617)[0m         "answer": {[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=35617)[0m           "type": "string",[32m [repeated 6x across cluster][0m
+[36m(AgentLoopWorker pid=35617)[0m           "description": "The answer to verify."[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=35617)[0m         "evidence": {[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=35617)[0m           "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=35617)[0m         "answer"[32m [repeated 3x across cluster][0m
+[36m(pid=35626)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(pid=35626)[0m   import pynvml  # type: ignore[import]
+Evaluating:  14%|██████▋                                          | 3/22 [01:06<06:15, 19.75s/it][36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:43:24,111:[search_r1_with_checker] search query: [18F]fluorodeoxyglucose positron emission tomography (FDG-PET) scan
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:43:24,111:[search_r1_with_checker] search query: [18F]fluorodeoxyglucose positron emission tomography (FDG-PET) scan
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:43:24,111:[search_r1_with_checker] search query: Serum tissue transglutaminase antibodies
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:43:24,111:[search_r1_with_checker] search query: Small bowel biopsy
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:43:24,111:[search_r1_with_checker] search query: Genetic testing
+[36m(pid=35633)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(pid=35633)[0m   warnings.warn(
+[36m(SearchExecutionWorker pid=35630)[0m WARNING:2026-04-06 14:43:27,599:[Search Request ID: 7e4a34c1-339d-44a1-8130-920df42d8266] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x150d65645720>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35630)[0m WARNING:2026-04-06 14:43:28,606:[Search Request ID: 7e4a34c1-339d-44a1-8130-920df42d8266] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x150d65645db0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(pid=35650)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.[32m [repeated 15x across cluster][0m
+[36m(pid=35650)[0m   import pynvml  # type: ignore[import][32m [repeated 15x across cluster][0m
+[36m(SearchExecutionWorker pid=35630)[0m WARNING:2026-04-06 14:43:30,617:[Search Request ID: 7e4a34c1-339d-44a1-8130-920df42d8266] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x150d65646620>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35630)[0m WARNING:2026-04-06 14:43:33,627:[Search Request ID: 7e4a34c1-339d-44a1-8130-920df42d8266] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x150d65646110>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(pid=35667)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.[32m [repeated 7x across cluster][0m
+[36m(pid=35667)[0m   warnings.warn([32m [repeated 7x across cluster][0m
+[36m(SearchExecutionWorker pid=35630)[0m WARNING:2026-04-06 14:43:37,647:[Search Request ID: 7e4a34c1-339d-44a1-8130-920df42d8266] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x150d65645300>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35630)[0m WARNING:2026-04-06 14:43:42,671:[Search Request ID: 7e4a34c1-339d-44a1-8130-920df42d8266] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x150d65644b20>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35630)[0m WARNING:2026-04-06 14:43:48,702:[Search Request ID: 7e4a34c1-339d-44a1-8130-920df42d8266] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x150d65646e90>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35630)[0m WARNING:2026-04-06 14:43:55,720:[Search Request ID: 7e4a34c1-339d-44a1-8130-920df42d8266] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x150d65647790>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35630)[0m WARNING:2026-04-06 14:44:03,762:[Search Request ID: 7e4a34c1-339d-44a1-8130-920df42d8266] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x150d656477f0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35630)[0m WARNING:2026-04-06 14:44:12,795:[Search Request ID: 7e4a34c1-339d-44a1-8130-920df42d8266] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x150d65646ef0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35630)[0m ERROR:2026-04-06 14:44:12,795:[Search Request ID: 7e4a34c1-339d-44a1-8130-920df42d8266] Search API call failed. Last error: [Search Request ID: 7e4a34c1-339d-44a1-8130-920df42d8266] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x150d65646ef0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35630)[0m ERROR:2026-04-06 14:44:12,796:Batch search: API error occurred: API Call Failed: Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x150d65646ef0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:44:13,031:[AUTO_CHECK] request=bc7d4773c31244ffa681d83395d09934 injected checker call after search with answer=The diagnosis of celiac disease is confirmed by a combination of clinical evaluation, laboratory tests, and histological examination of the small intestine.
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:44:15,880:[CHECKER] answer=The diagnosis of celiac disease is confirmed by a combination of clinical evaluation, laboratory tests, and histological examination of the small intestine. supports=0 contradictions=0 neutrals=2 num_claims=2 avg_confidence=0.500 reward=0.000
+Evaluating:  18%|████████▉                                        | 4/22 [01:59<09:51, 32.87s/it][36m(AgentLoopWorker pid=35609)[0m {[32m [repeated 17x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m   "type": "function",[32m [repeated 17x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m   "function": {[32m [repeated 17x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "name": "search",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "parameters": {[32m [repeated 17x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "type": "object",[32m [repeated 17x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "properties": {[32m [repeated 17x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "query_list": {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "type": "array",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "A list of semantic search queries."[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m }[32m [repeated 68x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       },[32m [repeated 26x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "required": [[32m [repeated 17x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "query_list"[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       ][32m [repeated 17x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "name": "check",[32m [repeated 9x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",[32m [repeated 9x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "answer": {[32m [repeated 9x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "type": "string",[32m [repeated 18x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "The answer to verify."[32m [repeated 9x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "evidence": {[32m [repeated 9x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."[32m [repeated 9x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "answer"[32m [repeated 9x across cluster][0m
+[36m(pid=35657)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(pid=35657)[0m   import pynvml  # type: ignore[import]
+Evaluating:  23%|███████████▏                                     | 5/22 [02:01<06:10, 21.77s/it]Evaluating:  27%|█████████████▎                                   | 6/22 [02:03<04:01, 15.09s/it]Evaluating:  32%|███████████████▌                                 | 7/22 [02:04<02:37, 10.51s/it][36m(AgentLoopWorker pid=35609)[0m {[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m   "type": "function",[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m   "function": {[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "name": "search",[32m [repeated 12x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",[32m [repeated 12x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "parameters": {[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "type": "object",[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "properties": {[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "query_list": {[32m [repeated 12x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "type": "array",[32m [repeated 12x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "A list of semantic search queries."[32m [repeated 12x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m }[32m [repeated 96x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       },[32m [repeated 36x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "required": [[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "query_list"[32m [repeated 12x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       ][32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "name": "check",[32m [repeated 12x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",[32m [repeated 12x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "answer": {[32m [repeated 12x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "type": "string",[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "The answer to verify."[32m [repeated 12x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "evidence": {[32m [repeated 12x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."[32m [repeated 12x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "answer"[32m [repeated 12x across cluster][0m
+[36m(pid=35660)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.[32m [repeated 24x across cluster][0m
+[36m(pid=35660)[0m   import pynvml  # type: ignore[import][32m [repeated 24x across cluster][0m
+Evaluating:  36%|█████████████████▊                               | 8/22 [02:05<01:45,  7.52s/it]Evaluating:  41%|████████████████████                             | 9/22 [02:06<01:11,  5.46s/it]Evaluating:  45%|█████████████████████▊                          | 10/22 [02:08<00:54,  4.50s/it]Evaluating:  50%|████████████████████████                        | 11/22 [02:09<00:37,  3.43s/it][36m(AgentLoopWorker pid=35609)[0m {[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m   "type": "function",[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m   "function": {[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "name": "search",[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "parameters": {[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "type": "object",[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "properties": {[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "query_list": {[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "type": "array",[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "A list of semantic search queries."[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m }[32m [repeated 128x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       },[32m [repeated 48x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "required": [[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "query_list"[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       ][32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "name": "check",[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "answer": {[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "type": "string",[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "The answer to verify."[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "evidence": {[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "answer"[32m [repeated 16x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m ERROR:2026-04-06 14:44:26,802:[search_r1_with_checker] Failed to parse tool_call JSON: Expecting ',' delimiter: line 1 column 231 (char 230)
+[36m(pid=35786)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.[32m [repeated 32x across cluster][0m
+[36m(pid=35786)[0m   import pynvml  # type: ignore[import][32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=35610)[0m WARNING:2026-04-06 14:44:28,743:[search_r1_with_checker] search query: [18-F]FGU is a glucose-like substance that is used to assess the function of the pancreatic beta cells in the body.
+[36m(AgentLoopWorker pid=35610)[0m WARNING:2026-04-06 14:44:28,743:[search_r1_with_checker] search query: The patient is asked to fast for 2-3 hours before the test.
+[36m(AgentLoopWorker pid=35610)[0m WARNING:2026-04-06 14:44:28,743:[search_r1_with_checker] search query: The patient is then injected with a small amount of [18-F]FGU.
+[36m(AgentLoopWorker pid=35610)[0m WARNING:2026-04-06 14:44:28,743:[search_r1_with_checker] search query: The patient is then asked to rest for 1-2 hours to allow the substance to be absorbed and processed by the body.
+[36m(AgentLoopWorker pid=35610)[0m WARNING:2026-04-06 14:44:28,743:[search_r1_with_checker] search query: The patient is then asked to drink a sugar-rich beverage to stimulate the pancreas to produce insulin.
+[36m(AgentLoopWorker pid=35610)[0m WARNING:2026-04-06 14:44:28,743:[search_r1_with_checker] search query: The patient is then asked to rest for another 1-2 hours to allow the insulin to take effect.
+[36m(AgentLoopWorker pid=35610)[0m WARNING:2026-04-06 14:44:28,743:[search_r1_with_checker] search query: The patient is then asked to eat a meal to stimulate the pancreas to produce more insulin.
+[36m(AgentLoopWorker pid=35610)[0m WARNING:2026-04-06 14:44:28,743:[search_r1_with_checker] search query: The patient is then asked to rest for another 1-2 hours to allow the insulin to take effect.
+[36m(pid=35786)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(pid=35786)[0m   warnings.warn(
+[36m(SearchExecutionWorker pid=35780)[0m WARNING:2026-04-06 14:44:30,143:[Search Request ID: 10db6c97-c4c2-4447-888a-d1c25ab3d042] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14b6aafb60b0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35780)[0m WARNING:2026-04-06 14:44:31,148:[Search Request ID: 10db6c97-c4c2-4447-888a-d1c25ab3d042] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14b6aafb6740>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35780)[0m WARNING:2026-04-06 14:44:33,159:[Search Request ID: 10db6c97-c4c2-4447-888a-d1c25ab3d042] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14b6aafb6fb0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(pid=49045)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.[32m [repeated 7x across cluster][0m
+[36m(pid=49045)[0m   import pynvml  # type: ignore[import][32m [repeated 7x across cluster][0m
+[36m(SearchExecutionWorker pid=35780)[0m WARNING:2026-04-06 14:44:36,172:[Search Request ID: 10db6c97-c4c2-4447-888a-d1c25ab3d042] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14b6aafb5ea0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(pid=49046)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.[32m [repeated 7x across cluster][0m
+[36m(pid=49046)[0m   warnings.warn([32m [repeated 7x across cluster][0m
+[36m(SearchExecutionWorker pid=35780)[0m WARNING:2026-04-06 14:44:40,183:[Search Request ID: 10db6c97-c4c2-4447-888a-d1c25ab3d042] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14b6aafb5cc0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35780)[0m WARNING:2026-04-06 14:44:45,209:[Search Request ID: 10db6c97-c4c2-4447-888a-d1c25ab3d042] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14b6aafb7820>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35780)[0m WARNING:2026-04-06 14:44:51,235:[Search Request ID: 10db6c97-c4c2-4447-888a-d1c25ab3d042] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14b6aaff8160>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35780)[0m WARNING:2026-04-06 14:44:58,271:[Search Request ID: 10db6c97-c4c2-4447-888a-d1c25ab3d042] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14b6aafb7d30>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35780)[0m WARNING:2026-04-06 14:45:06,312:[Search Request ID: 10db6c97-c4c2-4447-888a-d1c25ab3d042] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14b6aafb75e0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35780)[0m WARNING:2026-04-06 14:45:15,332:[Search Request ID: 10db6c97-c4c2-4447-888a-d1c25ab3d042] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14b6aafb58a0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35780)[0m ERROR:2026-04-06 14:45:15,332:[Search Request ID: 10db6c97-c4c2-4447-888a-d1c25ab3d042] Search API call failed. Last error: [Search Request ID: 10db6c97-c4c2-4447-888a-d1c25ab3d042] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14b6aafb58a0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=35780)[0m ERROR:2026-04-06 14:45:15,332:Batch search: API error occurred: API Call Failed: Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14b6aafb58a0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(AgentLoopWorker pid=35610)[0m WARNING:2026-04-06 14:45:15,861:[AUTO_CHECK] request=05c5fb0f57a34deb8bf48fb35711d093 injected checker call after search with answer=The pancreatic islet transplantation is a surgical procedure to treat type 1 diabetes. The procedure involves the transfer of islet cells from a donor pancreas to the patient’s liver or under the skin
+[36m(AgentLoopWorker pid=35610)[0m WARNING:2026-04-06 14:45:17,832:[CHECKER] answer=The pancreatic islet transplantation is a surgical procedure to treat type 1 diabetes. The procedure involves the transfer of islet cells from a donor pancreas  supports=0 contradictions=0 neutrals=2 num_claims=2 avg_confidence=0.500 reward=0.000
+Evaluating:  55%|██████████████████████████▏                     | 12/22 [03:00<02:59, 17.96s/it][36m(AgentLoopWorker pid=35609)[0m {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m   "type": "function",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m   "function": {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "name": "search",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "parameters": {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "type": "object",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "properties": {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "query_list": {[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "type": "array",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "A list of semantic search queries."[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m }[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       },[32m [repeated 12x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "required": [[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "query_list"[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       ][32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "name": "check",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "answer": {[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "type": "string",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "The answer to verify."[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "evidence": {[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "answer"[32m [repeated 4x across cluster][0m
+[36m(pid=50003)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(pid=50003)[0m   import pynvml  # type: ignore[import]
+Evaluating:  59%|████████████████████████████▎                   | 13/22 [03:02<01:55, 12.88s/it]Evaluating:  64%|██████████████████████████████▌                 | 14/22 [03:04<01:16,  9.58s/it]Evaluating:  68%|████████████████████████████████▋               | 15/22 [03:06<00:51,  7.43s/it][36m(AgentLoopWorker pid=35609)[0m {[32m [repeated 23x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m   "type": "function",[32m [repeated 23x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m   "function": {[32m [repeated 23x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "name": "search",[32m [repeated 12x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",[32m [repeated 12x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "parameters": {[32m [repeated 23x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "type": "object",[32m [repeated 23x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "properties": {[32m [repeated 23x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "query_list": {[32m [repeated 12x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "type": "array",[32m [repeated 12x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "A list of semantic search queries."[32m [repeated 12x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m }[32m [repeated 92x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       },[32m [repeated 34x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "required": [[32m [repeated 23x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "query_list"[32m [repeated 12x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       ][32m [repeated 23x across cluster][0m
+[36m(AgentLoopWorker pid=35617)[0m     "name": "check",[32m [repeated 11x across cluster][0m
+[36m(AgentLoopWorker pid=35617)[0m     "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",[32m [repeated 11x across cluster][0m
+[36m(AgentLoopWorker pid=35617)[0m         "answer": {[32m [repeated 11x across cluster][0m
+[36m(AgentLoopWorker pid=35617)[0m           "type": "string",[32m [repeated 22x across cluster][0m
+[36m(AgentLoopWorker pid=35617)[0m           "description": "The answer to verify."[32m [repeated 11x across cluster][0m
+[36m(AgentLoopWorker pid=35617)[0m         "evidence": {[32m [repeated 11x across cluster][0m
+[36m(AgentLoopWorker pid=35617)[0m           "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."[32m [repeated 11x across cluster][0m
+[36m(AgentLoopWorker pid=35617)[0m         "answer"[32m [repeated 11x across cluster][0m
+[36m(pid=51419)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.[32m [repeated 24x across cluster][0m
+[36m(pid=51419)[0m   import pynvml  # type: ignore[import][32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:45:25,960:[search_r1_with_checker] search query: [18F]fluorodeoxyglucose positron emission tomography (FDG-PET) is a type of imaging test that uses a radioactive glucose (sugar) molecule to detect and visualize areas of high metabolic activity in the body.
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:45:25,960:[search_r1_with_checker] search query: Pulmonary hypertension is a type of high blood pressure that affects the arteries in the lungs and the right side of the heart.
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:45:25,960:[search_r1_with_checker] search query: The symptoms of pulmonary hypertension can vary widely from person to person, but common symptoms include:
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:45:25,961:[search_r1_with_checker] search query: shortness of breath (dyspnea)
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:45:25,961:[search_r1_with_checker] search query: chest pain (angina)
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:45:25,961:[search_r1_with_checker] search query: fatigue
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:45:25,961:[search_r1_with_checker] search query: dizziness or lightheadedness
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:45:25,961:[search_r1_with_checker] search query: swelling in the legs and feet
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:45:25,961:[search_r1_with_checker] search query: blue discoloration of the skin and mucous membranes (cyanosis)
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:45:25,961:[search_r1_with_checker] search query: The causes of pulmonary hypertension can be divided into two main categories:.
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:45:25,961:[search_r1_with_checker] search query: Primary pulmonary hypertension: This is a rare condition that is caused by a combination of genetic and environmental factors.
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:45:25,961:[search_r1_with_checker] search query: Secondary pulmonary hypertension: This is a more common condition that is caused by a underlying condition, such as:
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:45:25,961:[search_r1_with_checker] search query: lung disease
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:45:25,961:[search_r1_with_checker] search query: heart disease
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:45:25,961:[search_r1_with_checker] search query: sleep apnea
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:45:25,961:[search_r1_with_checker] search query: medications
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:45:25,961:[search_r1_with_checker] search query: The diagnosis of pulmonary hypertension is based on a combination of clinical, laboratory, and imaging tests.
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:45:25,961:[search_r1_with_checker] search query: The treatment of pulmonary hypertension depends on the underlying cause and the severity of the symptoms.
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:45:25,961:[search_r1_with_checker] search query: The goals of treatment are to relieve symptoms, improve quality of life, and slow the progression of the disease.
+[36m(pid=51422)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(pid=51422)[0m   warnings.warn(
+[36m(SearchExecutionWorker pid=51419)[0m WARNING:2026-04-06 14:45:27,960:[Search Request ID: 9423d54d-bfd8-4a01-8019-ee71a68572e5] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1510ae5a2170>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=51419)[0m WARNING:2026-04-06 14:45:28,966:[Search Request ID: 9423d54d-bfd8-4a01-8019-ee71a68572e5] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1510ae5a2800>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=51419)[0m WARNING:2026-04-06 14:45:30,979:[Search Request ID: 9423d54d-bfd8-4a01-8019-ee71a68572e5] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1510ae5a3070>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(pid=51418)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.[32m [repeated 7x across cluster][0m
+[36m(pid=51418)[0m   import pynvml  # type: ignore[import][32m [repeated 7x across cluster][0m
+[36m(SearchExecutionWorker pid=51419)[0m WARNING:2026-04-06 14:45:33,995:[Search Request ID: 9423d54d-bfd8-4a01-8019-ee71a68572e5] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1510ae5a1f60>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(pid=51420)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.[32m [repeated 7x across cluster][0m
+[36m(pid=51420)[0m   warnings.warn([32m [repeated 7x across cluster][0m
+[36m(SearchExecutionWorker pid=51419)[0m WARNING:2026-04-06 14:45:38,002:[Search Request ID: 9423d54d-bfd8-4a01-8019-ee71a68572e5] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1510ae5a1d80>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=51419)[0m WARNING:2026-04-06 14:45:43,029:[Search Request ID: 9423d54d-bfd8-4a01-8019-ee71a68572e5] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1510ae5a38e0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=51419)[0m WARNING:2026-04-06 14:45:49,057:[Search Request ID: 9423d54d-bfd8-4a01-8019-ee71a68572e5] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1510ae5e8220>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=51419)[0m WARNING:2026-04-06 14:45:56,092:[Search Request ID: 9423d54d-bfd8-4a01-8019-ee71a68572e5] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1510ae5a3df0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=51419)[0m WARNING:2026-04-06 14:46:04,129:[Search Request ID: 9423d54d-bfd8-4a01-8019-ee71a68572e5] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1510ae5a3760>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=51419)[0m WARNING:2026-04-06 14:46:13,175:[Search Request ID: 9423d54d-bfd8-4a01-8019-ee71a68572e5] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1510ae5a1600>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=51419)[0m ERROR:2026-04-06 14:46:13,175:[Search Request ID: 9423d54d-bfd8-4a01-8019-ee71a68572e5] Search API call failed. Last error: [Search Request ID: 9423d54d-bfd8-4a01-8019-ee71a68572e5] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1510ae5a1600>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=51419)[0m ERROR:2026-04-06 14:46:13,175:Batch search: API error occurred: API Call Failed: Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1510ae5a1600>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:46:13,426:[AUTO_CHECK] request=64f46259f5104a24b6ab1876e5fc2913 injected checker call after search with answer=The cause of pulmonary hypertension is a combination of genetic and environmental factors, and the treatment depends on the underlying cause and the severity of the symptoms.
+[36m(AgentLoopWorker pid=35614)[0m WARNING:2026-04-06 14:46:15,308:[CHECKER] answer=The cause of pulmonary hypertension is a combination of genetic and environmental factors, and the treatment depends on the underlying cause and the severity of supports=0 contradictions=0 neutrals=2 num_claims=2 avg_confidence=0.500 reward=0.000
+Evaluating:  73%|██████████████████████████████████▉             | 16/22 [03:58<02:05, 20.84s/it][36m(AgentLoopWorker pid=35609)[0m {[32m [repeated 9x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m   "type": "function",[32m [repeated 9x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m   "function": {[32m [repeated 9x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "name": "search",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "parameters": {[32m [repeated 9x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "type": "object",[32m [repeated 9x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "properties": {[32m [repeated 9x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "query_list": {[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "type": "array",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "A list of semantic search queries."[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m }[32m [repeated 36x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       },[32m [repeated 14x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "required": [[32m [repeated 9x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "query_list"[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       ][32m [repeated 9x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "name": "check",[32m [repeated 5x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",[32m [repeated 5x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "answer": {[32m [repeated 5x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "type": "string",[32m [repeated 10x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "The answer to verify."[32m [repeated 5x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "evidence": {[32m [repeated 5x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."[32m [repeated 5x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "answer"[32m [repeated 5x across cluster][0m
+[36m(pid=52693)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(pid=52693)[0m   import pynvml  # type: ignore[import]
+[36m(AgentLoopWorker pid=35617)[0m WARNING:2026-04-06 14:46:17,288:[search_r1_with_checker] search query: [18F]FDG PET/CT is a useful tool for the diagnosis and management of atherosclerosis.
+[36m(AgentLoopWorker pid=35617)[0m WARNING:2026-04-06 14:46:17,288:[search_r1_with_checker] search query: The patient is a 42-year-old man who was admitted due to symptoms of chest pain.
+[36m(AgentLoopWorker pid=35617)[0m WARNING:2026-04-06 14:46:17,288:[search_r1_with_checker] search query: Physical examination showed a blood pressure of 140/90 mmHg.
+[36m(AgentLoopWorker pid=35617)[0m WARNING:2026-04-06 14:46:17,288:[search_r1_with_checker] search query: Laboratory data showed a fasting glucose level of 5.5 mmol/L.
+[36m(AgentLoopWorker pid=35617)[0m WARNING:2026-04-06 14:46:17,288:[search_r1_with_checker] search query: Echocardiography showed a ejection fraction of 50%.
+[36m(AgentLoopWorker pid=35617)[0m WARNING:2026-04-06 14:46:17,288:[search_r1_with_checker] search query: A [18F]FDG PET/CT scan was performed, and the results showed a high uptake of [18F]FDG in the aortic root and the proximal portion of the left anterior descending coronary artery.
+[36m(AgentLoopWorker pid=35617)[0m WARNING:2026-04-06 14:46:17,288:[search_r1_with_checker] search query: The patient was diagnosed with atherosclerosis.
+[36m(AgentLoopWorker pid=35617)[0m WARNING:2026-04-06 14:46:17,288:[search_r1_with_checker] search query: The patient was treated with statins, aspirin, and lifestyle modifications.
+[36m(AgentLoopWorker pid=35617)[0m WARNING:2026-04-06 14:46:17,288:[search_r1_with_checker] search query: The patient was followed up for 2 years, and the symptoms improved significantly.
+[36m(AgentLoopWorker pid=35610)[0m ERROR:2026-04-06 14:46:18,413:[search_r1_with_checker] Failed to parse tool_call JSON: Invalid control character at: line 1 column 161 (char 160)
+[36m(pid=52693)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(pid=52693)[0m   warnings.warn(
+[36m(SearchExecutionWorker pid=52690)[0m WARNING:2026-04-06 14:46:19,869:[Search Request ID: b63b31bc-0755-4ecc-a2ac-07023d76b6fe] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14e406f9a110>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=52690)[0m WARNING:2026-04-06 14:46:20,875:[Search Request ID: b63b31bc-0755-4ecc-a2ac-07023d76b6fe] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14e406f9a7a0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=52690)[0m WARNING:2026-04-06 14:46:22,888:[Search Request ID: b63b31bc-0755-4ecc-a2ac-07023d76b6fe] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14e406f9b010>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(pid=52687)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.[32m [repeated 6x across cluster][0m
+[36m(pid=52687)[0m   import pynvml  # type: ignore[import][32m [repeated 6x across cluster][0m
+[36m(SearchExecutionWorker pid=52690)[0m WARNING:2026-04-06 14:46:25,904:[Search Request ID: b63b31bc-0755-4ecc-a2ac-07023d76b6fe] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14e406f99f00>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(pid=52694)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.[32m [repeated 6x across cluster][0m
+[36m(pid=52694)[0m   warnings.warn([32m [repeated 6x across cluster][0m
+[36m(SearchExecutionWorker pid=52690)[0m WARNING:2026-04-06 14:46:29,925:[Search Request ID: b63b31bc-0755-4ecc-a2ac-07023d76b6fe] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14e406f99d20>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(pid=52691)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(pid=52691)[0m   import pynvml  # type: ignore[import]
+[36m(SearchExecutionWorker pid=52690)[0m WARNING:2026-04-06 14:46:34,952:[Search Request ID: b63b31bc-0755-4ecc-a2ac-07023d76b6fe] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14e406f9b880>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(pid=52691)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(pid=52691)[0m   warnings.warn(
+[36m(SearchExecutionWorker pid=52690)[0m WARNING:2026-04-06 14:46:40,982:[Search Request ID: b63b31bc-0755-4ecc-a2ac-07023d76b6fe] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14e4041041c0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=52690)[0m WARNING:2026-04-06 14:46:48,017:[Search Request ID: b63b31bc-0755-4ecc-a2ac-07023d76b6fe] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14e406f9bd90>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=52690)[0m WARNING:2026-04-06 14:46:56,054:[Search Request ID: b63b31bc-0755-4ecc-a2ac-07023d76b6fe] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14e406f9b790>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=52690)[0m WARNING:2026-04-06 14:47:05,099:[Search Request ID: b63b31bc-0755-4ecc-a2ac-07023d76b6fe] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14e406f99d50>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=52690)[0m ERROR:2026-04-06 14:47:05,099:[Search Request ID: b63b31bc-0755-4ecc-a2ac-07023d76b6fe] Search API call failed. Last error: [Search Request ID: b63b31bc-0755-4ecc-a2ac-07023d76b6fe] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14e406f99d50>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=52690)[0m ERROR:2026-04-06 14:47:05,099:Batch search: API error occurred: API Call Failed: Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14e406f99d50>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(AgentLoopWorker pid=35617)[0m WARNING:2026-04-06 14:47:05,480:[AUTO_CHECK] request=14109264052f4297ac4a14f0cd5ae403 injected checker call after search with answer=The treatment for atherosclerosis is a combination of lifestyle modifications, medications, and medical procedures or surgery, such as percutaneous coronary intervention (PCI), coronary artery bypass 
+[36m(AgentLoopWorker pid=35617)[0m WARNING:2026-04-06 14:47:07,559:[CHECKER] answer=The treatment for atherosclerosis is a combination of lifestyle modifications, medications, and medical procedures or surgery, such as percutaneous coronary int supports=0 contradictions=0 neutrals=2 num_claims=2 avg_confidence=0.500 reward=0.000
+Evaluating:  77%|█████████████████████████████████████           | 17/22 [04:50<02:31, 30.33s/it][36m(AgentLoopWorker pid=35609)[0m {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m   "type": "function",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m   "function": {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "name": "search",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "parameters": {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "type": "object",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "properties": {[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "query_list": {[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "type": "array",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "A list of semantic search queries."[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m }[32m [repeated 32x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       },[32m [repeated 12x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       "required": [[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "query_list"[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m       ][32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "name": "check",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m     "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "answer": {[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "type": "string",[32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "The answer to verify."[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "evidence": {[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m           "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."[32m [repeated 4x across cluster][0m
+[36m(AgentLoopWorker pid=35609)[0m         "answer"[32m [repeated 4x across cluster][0m
+[36m(pid=53951)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(pid=53951)[0m   import pynvml  # type: ignore[import]
+Evaluating:  82%|███████████████████████████████████████▎        | 18/22 [04:52<01:26, 21.66s/it][36m(AgentLoopWorker pid=35614)[0m ERROR:2026-04-06 14:47:09,429:[search_r1_with_checker] Failed to parse tool_call JSON: Expecting ',' delimiter: line 1 column 711 (char 710)
+[36m(AgentLoopWorker pid=35609)[0m WARNING:2026-04-06 14:47:10,488:[search_r1_with_checker] search query: [18F]FDG PET/CT for diagnosing and managing diverticulitis
+[36m(AgentLoopWorker pid=35609)[0m WARNING:2026-04-06 14:47:10,488:[search_r1_with_checker] search query: [18F]FDG PET/CT for evaluating the severity of diverticulitis
+[36m(AgentLoopWorker pid=35609)[0m WARNING:2026-04-06 14:47:10,488:[search_r1_with_checker] search query: Clinical features and diagnosis of diverticulitis
+[36m(AgentLoopWorker pid=35609)[0m WARNING:2026-04-06 14:47:10,488:[search_r1_with_checker] search query: Imaging studies for diverticulitis
+[36m(AgentLoopWorker pid=35609)[0m WARNING:2026-04-06 14:47:10,488:[search_r1_with_checker] search query: Treatment and management of diverticulitis
+[36m(pid=54424)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(pid=54424)[0m   warnings.warn(
+[36m(SearchExecutionWorker pid=54424)[0m WARNING:2026-04-06 14:47:13,679:[Search Request ID: 61fc05eb-0fed-463c-a0b5-be46547864a6] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1462555fa170>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=54424)[0m WARNING:2026-04-06 14:47:14,685:[Search Request ID: 61fc05eb-0fed-463c-a0b5-be46547864a6] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1462555fa800>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(pid=54428)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.[32m [repeated 13x across cluster][0m
+[36m(pid=54428)[0m   import pynvml  # type: ignore[import][32m [repeated 13x across cluster][0m
+[36m(SearchExecutionWorker pid=54424)[0m WARNING:2026-04-06 14:47:16,694:[Search Request ID: 61fc05eb-0fed-463c-a0b5-be46547864a6] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1462555fb070>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=54424)[0m WARNING:2026-04-06 14:47:19,710:[Search Request ID: 61fc05eb-0fed-463c-a0b5-be46547864a6] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1462555f9f60>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(pid=54427)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.[32m [repeated 7x across cluster][0m
+[36m(pid=54427)[0m   warnings.warn([32m [repeated 7x across cluster][0m
+[36m(SearchExecutionWorker pid=54424)[0m WARNING:2026-04-06 14:47:23,729:[Search Request ID: 61fc05eb-0fed-463c-a0b5-be46547864a6] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1462555f9d80>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=54424)[0m WARNING:2026-04-06 14:47:28,755:[Search Request ID: 61fc05eb-0fed-463c-a0b5-be46547864a6] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1462555fb8e0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=54424)[0m WARNING:2026-04-06 14:47:34,781:[Search Request ID: 61fc05eb-0fed-463c-a0b5-be46547864a6] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1461f472c220>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=54424)[0m WARNING:2026-04-06 14:47:41,816:[Search Request ID: 61fc05eb-0fed-463c-a0b5-be46547864a6] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1462555fbdf0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=54424)[0m WARNING:2026-04-06 14:47:49,856:[Search Request ID: 61fc05eb-0fed-463c-a0b5-be46547864a6] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1462555fb760>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=54424)[0m WARNING:2026-04-06 14:47:58,903:[Search Request ID: 61fc05eb-0fed-463c-a0b5-be46547864a6] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1462555f9600>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=54424)[0m ERROR:2026-04-06 14:47:58,903:[Search Request ID: 61fc05eb-0fed-463c-a0b5-be46547864a6] Search API call failed. Last error: [Search Request ID: 61fc05eb-0fed-463c-a0b5-be46547864a6] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1462555f9600>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(SearchExecutionWorker pid=54424)[0m ERROR:2026-04-06 14:47:58,903:Batch search: API error occurred: API Call Failed: Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1462555f9600>: Failed to establish a new connection: [Errno 111] Connection refused'))

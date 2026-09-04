@@ -1,0 +1,24 @@
+tools:
+  - class_name: verl.tools.search_tool.SearchTool
+    config:
+      retrieval_service_url: http://127.0.0.1:8003/retrieve
+      num_workers: 50
+      rate_limit: 50
+      timeout: 15
+      topk: 3
+      type: native
+    tool_schema:
+      type: function
+      function:
+        name: search
+        description: Searches for relevant information based on the given query.
+        parameters:
+          type: object
+          properties:
+            query_list:
+              type: array
+              items:
+                type: string
+              description: A list of semantic search queries.
+          required:
+            - query_list

@@ -1,0 +1,186 @@
+Detected Llama model: using inference chat template
+Skipping merge. Using: /ocean/projects/med230010p/yji3/BrowseCamp/verl/merged_models/merged_llama-3.1-8b-checker-guarded-30-22-50-step200
+
+============================================================
+STEP 2/4  EVAL
+  model:    /ocean/projects/med230010p/yji3/BrowseCamp/verl/merged_models/merged_llama-3.1-8b-checker-guarded-30-22-50-step200
+  data:     /ocean/projects/med230010p/yji3/BrowseCamp/verl/searchr1_data/extra_eval/bioasq_test.parquet
+  output:   eval_merged_llama-3.1-8b-checker-guarded-30-22-50-step200_bioasq.json
+  template: --use_inference_chat_template
+============================================================
+/ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+Loading test data from /ocean/projects/med230010p/yji3/BrowseCamp/verl/searchr1_data/extra_eval/bioasq_test.parquet
+Total samples: 200
+Loading model from /ocean/projects/med230010p/yji3/BrowseCamp/verl/merged_models/merged_llama-3.1-8b-checker-guarded-30-22-50-step200
+Evaluation mode: agent_loop
+Tool config: /ocean/projects/med230010p/yji3/BrowseCamp/verl/examples/sglang_multiturn/config/tool_config/medical_search_checker_tool_config.yaml
+Multi-turn format: search_r1_with_checker
+Triage enabled: False
+{
+  "type": "function",
+  "function": {
+    "name": "search",
+    "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query_list": {
+          "type": "array",
+          "description": "A list of semantic search queries."
+        }
+      },
+      "required": [
+        "query_list"
+      ]
+    }
+  }
+}
+2026-04-06 14:38:16,283	INFO worker.py:1942 -- Started a local Ray instance. View the dashboard at [1m[32m127.0.0.1:8265 [39m[22m
+/ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/omegaconf/grammar_visitor.py:253: UserWarning: In the sequence `CHECKER_NODE_IP,` some elements are missing: please replace them with empty quoted strings. See https://github.com/omry/omegaconf/issues/572 for details.
+  warnings.warn(
+{
+  "type": "function",
+  "function": {
+    "name": "check",
+    "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "answer": {
+          "type": "string",
+          "description": "The answer to verify."
+        },
+        "evidence": {
+          "type": "string",
+          "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."
+        }
+      },
+      "required": [
+        "answer"
+      ]
+    }
+  }
+}
+[2026-04-06 14:38:18,083 E 11047 12118] core_worker.cc:2269: Failed to register actor. Error message: SchedulingCancelled: Actor creation cancelled. actor_id=1468890b37f37ab5b7eff17e01000000
+[36m(pid=18958)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(pid=18958)[0m   import pynvml  # type: ignore[import]
+[36m(pid=18958)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(pid=18958)[0m   warnings.warn(
+[33m(raylet)[0m Raylet is terminated. Termination is unexpected. Possible reasons include: (1) SIGKILL by the user or system OOM killer, (2) Invalid memory access from Raylet causing SIGSEGV or SIGBUS, (3) Other termination signals. Last 20 lines of the Raylet logs:
+    [2026-04-06 14:38:16,620 I 11993 11993] (raylet) worker_pool.cc:533: Started worker process with pid 12374, the token is 94
+    [2026-04-06 14:38:16,624 I 11993 11993] (raylet) worker_pool.cc:533: Started worker process with pid 12375, the token is 95
+    [2026-04-06 14:38:16,627 I 11993 11993] (raylet) worker_pool.cc:533: Started worker process with pid 12376, the token is 96
+    [2026-04-06 14:38:16,630 I 11993 11993] (raylet) worker_pool.cc:533: Started worker process with pid 12377, the token is 97
+    [2026-04-06 14:38:16,632 I 11993 11993] (raylet) worker_pool.cc:533: Started worker process with pid 12378, the token is 98
+    [2026-04-06 14:38:16,635 I 11993 11993] (raylet) worker_pool.cc:533: Started worker process with pid 12380, the token is 99
+    [2026-04-06 14:38:16,638 I 11993 11993] (raylet) worker_pool.cc:533: Started worker process with pid 12381, the token is 100
+    [2026-04-06 14:38:16,641 I 11993 11993] (raylet) worker_pool.cc:533: Started worker process with pid 12382, the token is 101
+    [2026-04-06 14:38:16,645 I 11993 11993] (raylet) worker_pool.cc:533: Started worker process with pid 12383, the token is 102
+    [2026-04-06 14:38:16,648 I 11993 11993] (raylet) worker_pool.cc:533: Started worker process with pid 12384, the token is 103
+    [2026-04-06 14:38:16,866 I 11993 12026] (raylet) object_store.cc:37: Object store current usage 8e-09 / 200 GB.
+    [2026-04-06 14:38:18,041 I 11993 11993] (raylet) worker_pool.cc:732: Job 01000000 already started in worker pool.
+    [2026-04-06 14:38:18,103 I 11993 11993] (raylet) node_manager.cc:1330: Disconnecting client, graceful=true, disconnect_type=1, has_creation_task_exception=false worker_id=987a264837acc4fd507d66780003a343c1eda5c2a0e33dcd47d9e09a
+    [2026-04-06 14:38:18,108 W 11993 12026] (raylet) store.cc:363: Disconnecting client due to connection error with code 2: End of file
+    [2026-04-06 14:38:23,877 I 11993 11993] (raylet) node_manager.cc:1330: Disconnecting client, graceful=true, disconnect_type=1, has_creation_task_exception=false worker_id=11c7f4d02684efd1639388ac002dc6c7f3403bca0c5d97226b085b47
+    [2026-04-06 14:38:23,879 W 11993 12026] (raylet) store.cc:363: Disconnecting client due to connection error with code 2: End of file
+    [2026-04-06 14:38:23,951 I 11993 11993] (raylet) runtime_env_agent_client.cc:384: Create runtime env for job 01000000
+    [2026-04-06 14:38:23,955 I 11993 11993] (raylet) worker_pool.cc:533: Started worker process with pid 18958, the token is 104
+    [2026-04-06 14:38:25,076 I 11993 11993] (raylet) node_manager.cc:1330: Disconnecting client, graceful=true, disconnect_type=1, has_creation_task_exception=false worker_id=c34456c73d7864c276c31e5f6ad01800105741ab76497850862fc438
+    [2026-04-06 14:38:25,078 W 11993 12026] (raylet) store.cc:363: Disconnecting client due to connection error with code 2: End of file
+
+[36m(CheckpointEngineWorker pid=18958)[0m [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[36m(CheckpointEngineWorker pid=18958)[0m [2026-04-06 14:38:33,674 C 18958 18958] task_receiver.cc:151:  An unexpected system state has occurred. You have likely discovered a bug in Ray. Please report this issue at https://github.com/ray-project/ray/issues and we'll work with you to fix it. Check failed: actor_creation_task_done_() Status not OK: IOError: Broken pipe 
+[36m(CheckpointEngineWorker pid=18958)[0m *** StackTrace Information ***
+[36m(CheckpointEngineWorker pid=18958)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/ray/_raylet.so(+0x150e11a) [0x14f1c806e11a] ray::operator<<()
+[36m(CheckpointEngineWorker pid=18958)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/ray/_raylet.so(_ZN3ray6RayLogD1Ev+0x481) [0x14f1c8070501] ray::RayLog::~RayLog()
+[36m(CheckpointEngineWorker pid=18958)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/ray/_raylet.so(+0xa03207) [0x14f1c7563207] ray::core::TaskReceiver::HandleTask()::{lambda()#1}::operator()()
+[36m(CheckpointEngineWorker pid=18958)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/ray/_raylet.so(+0xa1f3a2) [0x14f1c757f3a2] ray::core::InboundRequest::Accept()
+[36m(CheckpointEngineWorker pid=18958)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/ray/_raylet.so(+0xa10d3c) [0x14f1c7570d3c] ray::core::NormalSchedulingQueue::ScheduleRequests()
+[36m(CheckpointEngineWorker pid=18958)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/ray/_raylet.so(+0xe1d198) [0x14f1c797d198] EventTracker::RecordExecution()
+[36m(CheckpointEngineWorker pid=18958)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/ray/_raylet.so(+0xdfbe07) [0x14f1c795be07] std::_Function_handler<>::_M_invoke()
+[36m(CheckpointEngineWorker pid=18958)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/ray/_raylet.so(+0xa22a1b) [0x14f1c7582a1b] boost::asio::detail::executor_op<>::do_complete()
+[36m(CheckpointEngineWorker pid=18958)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/ray/_raylet.so(+0x14eac2b) [0x14f1c804ac2b] boost::asio::detail::scheduler::do_run_one()
+[36m(CheckpointEngineWorker pid=18958)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/ray/_raylet.so(+0x14ec5a9) [0x14f1c804c5a9] boost::asio::detail::scheduler::run()
+[36m(CheckpointEngineWorker pid=18958)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/ray/_raylet.so(+0x14eccb2) [0x14f1c804ccb2] boost::asio::io_context::run()
+[36m(CheckpointEngineWorker pid=18958)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/ray/_raylet.so(_ZN3ray4core10CoreWorker20RunTaskExecutionLoopEv+0x113) [0x14f1c7473443] ray::core::CoreWorker::RunTaskExecutionLoop()
+[36m(CheckpointEngineWorker pid=18958)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/ray/_raylet.so(_ZN3ray4core21CoreWorkerProcessImpl26RunWorkerTaskExecutionLoopEv+0x41) [0x14f1c74d69d1] ray::core::CoreWorkerProcessImpl::RunWorkerTaskExecutionLoop()
+[36m(CheckpointEngineWorker pid=18958)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/ray/_raylet.so(_ZN3ray4core17CoreWorkerProcess20RunTaskExecutionLoopEv+0x1d) [0x14f1c74d784d] ray::core::CoreWorkerProcess::RunTaskExecutionLoop()
+[36m(CheckpointEngineWorker pid=18958)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/ray/_raylet.so(+0x7a5fa1) [0x14f1c7305fa1] __pyx_pw_3ray_7_raylet_10CoreWorker_5run_task_loop()
+[36m(CheckpointEngineWorker pid=18958)[0m ray::CheckpointEngineWorker(_PyEval_EvalFrameDefault+0x72e) [0x4ee5be] _PyEval_EvalFrameDefault
+[36m(CheckpointEngineWorker pid=18958)[0m ray::CheckpointEngineWorker(_PyFunction_Vectorcall+0x6f) [0x4fd96f] _PyFunction_Vectorcall
+[36m(CheckpointEngineWorker pid=18958)[0m ray::CheckpointEngineWorker(_PyEval_EvalFrameDefault+0x72e) [0x4ee5be] _PyEval_EvalFrameDefault
+[36m(CheckpointEngineWorker pid=18958)[0m ray::CheckpointEngineWorker() [0x594312] _PyEval_Vector
+[36m(CheckpointEngineWorker pid=18958)[0m ray::CheckpointEngineWorker(PyEval_EvalCode+0x87) [0x594257] PyEval_EvalCode
+[36m(CheckpointEngineWorker pid=18958)[0m ray::CheckpointEngineWorker() [0x5c50f7] run_eval_code_obj
+[36m(CheckpointEngineWorker pid=18958)[0m ray::CheckpointEngineWorker() [0x5c0220] run_mod
+[36m(CheckpointEngineWorker pid=18958)[0m ray::CheckpointEngineWorker() [0x459eff] pyrun_file.cold
+[36m(CheckpointEngineWorker pid=18958)[0m ray::CheckpointEngineWorker(_PyRun_SimpleFileObject+0x19f) [0x5ba7af] _PyRun_SimpleFileObject
+[36m(CheckpointEngineWorker pid=18958)[0m ray::CheckpointEngineWorker(_PyRun_AnyFileObject+0x43) [0x5ba513] _PyRun_AnyFileObject
+[36m(CheckpointEngineWorker pid=18958)[0m ray::CheckpointEngineWorker(Py_RunMain+0x38d) [0x5b72cd] Py_RunMain
+[36m(CheckpointEngineWorker pid=18958)[0m ray::CheckpointEngineWorker(Py_BytesMain+0x39) [0x5873d9] Py_BytesMain
+[36m(CheckpointEngineWorker pid=18958)[0m /lib64/libc.so.6(__libc_start_main+0xe5) [0x14f1d5a5a7e5] __libc_start_main
+[36m(CheckpointEngineWorker pid=18958)[0m ray::CheckpointEngineWorker() [0x58728e]
+[36m(CheckpointEngineWorker pid=18958)[0m 
+[33m(raylet)[0m The node with node id: 7600090b4c03de27342d00cdf5a8eadc00c5f00c96ecd140347c1ebe and address: 10.8.11.96 and node name: 10.8.11.96 has been marked dead because the detector has missed too many heartbeats from it. This can happen when a 	(1) raylet crashes unexpectedly (OOM, etc.) 
+	(2) raylet has lagging heartbeats due to slow network or busy workload.
+[33m(raylet)[0m Raylet is terminated. Termination is unexpected. Possible reasons include: (1) SIGKILL by the user or system OOM killer, (2) Invalid memory access from Raylet causing SIGSEGV or SIGBUS, (3) Other termination signals. Last 20 lines of the Raylet logs:
+    [2026-04-06 14:38:16,620 I 11993 11993] (raylet) worker_pool.cc:533: Started worker process with pid 12374, the token is 94
+    [2026-04-06 14:38:16,624 I 11993 11993] (raylet) worker_pool.cc:533: Started worker process with pid 12375, the token is 95
+    [2026-04-06 14:38:16,627 I 11993 11993] (raylet) worker_pool.cc:533: Started worker process with pid 12376, the token is 96
+    [2026-04-06 14:38:16,630 I 11993 11993] (raylet) worker_pool.cc:533: Started worker process with pid 12377, the token is 97
+    [2026-04-06 14:38:16,632 I 11993 11993] (raylet) worker_pool.cc:533: Started worker process with pid 12378, the token is 98
+    [2026-04-06 14:38:16,635 I 11993 11993] (raylet) worker_pool.cc:533: Started worker process with pid 12380, the token is 99
+    [2026-04-06 14:38:16,638 I 11993 11993] (raylet) worker_pool.cc:533: Started worker process with pid 12381, the token is 100
+    [2026-04-06 14:38:16,641 I 11993 11993] (raylet) worker_pool.cc:533: Started worker process with pid 12382, the token is 101
+    [2026-04-06 14:38:16,645 I 11993 11993] (raylet) worker_pool.cc:533: Started worker process with pid 12383, the token is 102
+    [2026-04-06 14:38:16,648 I 11993 11993] (raylet) worker_pool.cc:533: Started worker process with pid 12384, the token is 103
+    [2026-04-06 14:38:16,866 I 11993 12026] (raylet) object_store.cc:37: Object store current usage 8e-09 / 200 GB.
+    [2026-04-06 14:38:18,041 I 11993 11993] (raylet) worker_pool.cc:732: Job 01000000 already started in worker pool.
+    [2026-04-06 14:38:18,103 I 11993 11993] (raylet) node_manager.cc:1330: Disconnecting client, graceful=true, disconnect_type=1, has_creation_task_exception=false worker_id=987a264837acc4fd507d66780003a343c1eda5c2a0e33dcd47d9e09a
+    [2026-04-06 14:38:18,108 W 11993 12026] (raylet) store.cc:363: Disconnecting client due to connection error with code 2: End of file
+    [2026-04-06 14:38:23,877 I 11993 11993] (raylet) node_manager.cc:1330: Disconnecting client, graceful=true, disconnect_type=1, has_creation_task_exception=false worker_id=11c7f4d02684efd1639388ac002dc6c7f3403bca0c5d97226b085b47
+    [2026-04-06 14:38:23,879 W 11993 12026] (raylet) store.cc:363: Disconnecting client due to connection error with code 2: End of file
+    [2026-04-06 14:38:23,951 I 11993 11993] (raylet) runtime_env_agent_client.cc:384: Create runtime env for job 01000000
+    [2026-04-06 14:38:23,955 I 11993 11993] (raylet) worker_pool.cc:533: Started worker process with pid 18958, the token is 104
+    [2026-04-06 14:38:25,076 I 11993 11993] (raylet) node_manager.cc:1330: Disconnecting client, graceful=true, disconnect_type=1, has_creation_task_exception=false worker_id=c34456c73d7864c276c31e5f6ad01800105741ab76497850862fc438
+    [2026-04-06 14:38:25,078 W 11993 12026] (raylet) store.cc:363: Disconnecting client due to connection error with code 2: End of file
+
+Traceback (most recent call last):
+  File "/ocean/projects/med230010p/yji3/BrowseCamp/verl/evaluate/evaluate_search_r1.py", line 1334, in <module>
+    main()
+  File "/ocean/projects/med230010p/yji3/BrowseCamp/verl/evaluate/evaluate_search_r1.py", line 1292, in main
+    results = evaluator.evaluate_dataset(test_data, max_samples=args.max_samples)
+  File "/ocean/projects/med230010p/yji3/BrowseCamp/verl/evaluate/evaluate_search_r1.py", line 1035, in evaluate_dataset
+    manager = self._ensure_agent_loop_manager()
+  File "/ocean/projects/med230010p/yji3/BrowseCamp/verl/evaluate/evaluate_search_r1.py", line 936, in _ensure_agent_loop_manager
+    self.agent_loop_manager = self._create_agent_loop_manager_compat()
+  File "/ocean/projects/med230010p/yji3/BrowseCamp/verl/evaluate/evaluate_search_r1.py", line 923, in _create_agent_loop_manager_compat
+    return AgentLoopManager.create(config=self.config)
+  File "/ocean/projects/med230010p/yji3/BrowseCamp/verl/verl/utils/ray_utils.py", line 123, in wrapper
+    return asyncio.run(coro)
+  File "/ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/asyncio/runners.py", line 44, in run
+    return loop.run_until_complete(main)
+  File "/ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/asyncio/base_events.py", line 649, in run_until_complete
+    return future.result()
+  File "/ocean/projects/med230010p/yji3/BrowseCamp/verl/verl/experimental/agent_loop/agent_loop.py", line 971, in create
+    await instance._initialize_llm_servers()
+  File "/ocean/projects/med230010p/yji3/BrowseCamp/verl/verl/experimental/agent_loop/agent_loop.py", line 1010, in _initialize_llm_servers
+    await asyncio.gather(*[server.init_standalone() for server in self.rollout_replicas])
+  File "/ocean/projects/med230010p/yji3/BrowseCamp/verl/verl/workers/rollout/replica.py", line 209, in init_standalone
+    await self.launch_servers()
+  File "/ocean/projects/med230010p/yji3/BrowseCamp/verl/verl/workers/rollout/sglang_rollout/async_sglang_server.py", line 474, in launch_servers
+    worker_infos = await asyncio.gather(
+  File "/ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/asyncio/tasks.py", line 650, in _wrap_awaitable
+    return (yield from awaitable.__await__())
+ray.exceptions.ActorDiedError: The actor died unexpectedly before finishing this task.
+	class_name: CheckpointEngineWorker
+	actor_id: d0b515f22a667752473faaa201000000
+	pid: 18958
+	name: rollout_standalone_0CheckpointEngineWorker_0:0
+	namespace: 6fe96275-2ce9-458d-86a9-c50ebba1cd41
+	ip: 10.8.11.96
+The actor is dead because its owner has died. Owner Id: 01000000ffffffffffffffffffffffffffffffffffffffffffffffff Owner Ip address: 10.8.11.96 Owner worker exit type: SYSTEM_ERROR Worker exit detail: Owner's node has crashed.
+The actor never ran - it was cancelled before it started running.

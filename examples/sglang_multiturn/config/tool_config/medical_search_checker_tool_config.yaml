@@ -1,0 +1,61 @@
+tools:
+  - class_name: verl.tools.search_tool.SearchTool
+    config:
+      retrieval_service_url: http://127.0.0.1:8003/retrieve
+      num_workers: 50
+      rate_limit: 50
+      timeout: 15
+      topk: 3
+      type: native
+    tool_schema:
+      type: function
+      function:
+        name: search
+        description: Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.
+        parameters:
+          type: object
+          properties:
+            query_list:
+              type: array
+              items:
+                type: string
+              description: A list of semantic search queries.
+          required:
+            - query_list
+
+  - class_name: verl.tools.checker_tool.MedRAGCheckerTool
+    config:
+      checker_url: ${oc.env:CHECKER_URL,http://127.0.0.1:8004/check}
+      num_workers: 8
+      timeout: 300
+      max_retries: 0
+      circuit_timeout_threshold: 5
+      circuit_cooldown_s: 30.0
+      checker_node_ip: ${oc.env:CHECKER_NODE_IP,}
+      local_fallback: false
+      checker_model_path: ""
+      call_bonus: 0.0
+      contradiction_weight: 1.5
+      entailment_weight: 1.0
+      neutral_weight: 0.0
+      min_reward_confidence: 0.65
+      invalid_penalty: -0.10
+      reward_min: -1.0
+      reward_max: 1.0
+      type: native
+    tool_schema:
+      type: function
+      function:
+        name: check
+        description: Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.
+        parameters:
+          type: object
+          properties:
+            answer:
+              type: string
+              description: The answer to verify.
+            evidence:
+              type: string
+              description: Optional explicit evidence. If omitted, use latest retrieved tool output.
+          required:
+            - answer

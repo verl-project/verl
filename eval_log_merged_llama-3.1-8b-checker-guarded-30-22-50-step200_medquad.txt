@@ -1,0 +1,263 @@
+Detected Llama model: using inference chat template
+Skipping merge. Using: /ocean/projects/med230010p/yji3/BrowseCamp/verl/merged_models/merged_llama-3.1-8b-checker-guarded-30-22-50-step200
+
+============================================================
+STEP 2/4  EVAL
+  model:    /ocean/projects/med230010p/yji3/BrowseCamp/verl/merged_models/merged_llama-3.1-8b-checker-guarded-30-22-50-step200
+  data:     /ocean/projects/med230010p/yji3/BrowseCamp/verl/searchr1_data/extra_eval/medquad_full_test.parquet
+  output:   eval_merged_llama-3.1-8b-checker-guarded-30-22-50-step200_medquad.json
+  template: --use_inference_chat_template
+============================================================
+/ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+Loading test data from /ocean/projects/med230010p/yji3/BrowseCamp/verl/searchr1_data/extra_eval/medquad_full_test.parquet
+Total samples: 200
+Loading model from /ocean/projects/med230010p/yji3/BrowseCamp/verl/merged_models/merged_llama-3.1-8b-checker-guarded-30-22-50-step200
+Evaluation mode: agent_loop
+Tool config: /ocean/projects/med230010p/yji3/BrowseCamp/verl/examples/sglang_multiturn/config/tool_config/medical_search_checker_tool_config.yaml
+Multi-turn format: search_r1_with_checker
+Triage enabled: False
+{
+  "type": "function",
+  "function": {
+    "name": "search",
+    "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query_list": {
+          "type": "array",
+          "description": "A list of semantic search queries."
+        }
+      },
+      "required": [
+        "query_list"
+      ]
+    }
+  }
+}
+2026-04-06 14:38:55,606	INFO worker.py:1942 -- Started a local Ray instance. View the dashboard at [1m[32m127.0.0.1:8265 [39m[22m
+/ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/omegaconf/grammar_visitor.py:253: UserWarning: In the sequence `CHECKER_NODE_IP,` some elements are missing: please replace them with empty quoted strings. See https://github.com/omry/omegaconf/issues/572 for details.
+  warnings.warn(
+{
+  "type": "function",
+  "function": {
+    "name": "check",
+    "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "answer": {
+          "type": "string",
+          "description": "The answer to verify."
+        },
+        "evidence": {
+          "type": "string",
+          "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."
+        }
+      },
+      "required": [
+        "answer"
+      ]
+    }
+  }
+}
+[2026-04-06 14:38:56,872 E 22384 23341] core_worker.cc:2269: Failed to register actor. Error message: SchedulingCancelled: Actor creation cancelled. actor_id=fe5ce7af66587ed32b36a70c01000000
+[36m(pid=29622)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(pid=29622)[0m   import pynvml  # type: ignore[import]
+[36m(pid=29622)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(pid=29622)[0m   warnings.warn(
+[36m(CheckpointEngineWorker pid=29622)[0m [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[36m(pid=29926)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(pid=29926)[0m   import pynvml  # type: ignore[import]
+[36m(pid=29926)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(pid=29926)[0m   warnings.warn(
+[36m(SGLangHttpServer pid=29926)[0m SGLang http server: rollout_mode=<RolloutMode.STANDALONE: 'standalone'>, replica_rank=0, node_rank=0, nnodes=1, cuda_visible_devices='3'
+[36m(SGLangHttpServer pid=29926)[0m WARNING:2026-04-06 14:39:19,469:agent loop only support torch and npu profiler, got None
+[36m(SGLangHttpServer pid=29926)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(SGLangHttpServer pid=29926)[0m   import pynvml  # type: ignore[import]
+[36m(SGLangHttpServer pid=29926)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(SGLangHttpServer pid=29926)[0m   import pynvml  # type: ignore[import]
+[36m(SGLangHttpServer pid=29926)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(SGLangHttpServer pid=29926)[0m   warnings.warn(
+[36m(SGLangHttpServer pid=29926)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(SGLangHttpServer pid=29926)[0m   warnings.warn(
+[36m(SGLangHttpServer pid=29926)[0m [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[36m(SGLangHttpServer pid=29926)[0m [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[36m(SGLangHttpServer pid=29926)[0m [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[36m(SGLangHttpServer pid=29926)[0m [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[36m(SGLangHttpServer pid=29926)[0m [W406 14:39:27.195935514 ProcessGroupNCCL.cpp:924] Warning: TORCH_NCCL_AVOID_RECORD_STREAMS is the default now, this environment variable is thus deprecated. (function operator())
+[36m(SGLangHttpServer pid=29926)[0m Loading safetensors checkpoint shards:   0% Completed | 0/4 [00:00<?, ?it/s]
+[36m(SGLangHttpServer pid=29926)[0m Loading safetensors checkpoint shards:  25% Completed | 1/4 [00:02<00:06,  2.03s/it]
+[36m(SGLangHttpServer pid=29926)[0m Loading safetensors checkpoint shards:  50% Completed | 2/4 [00:02<00:02,  1.32s/it]
+[36m(SGLangHttpServer pid=29926)[0m Loading safetensors checkpoint shards:  75% Completed | 3/4 [00:04<00:01,  1.56s/it]
+[36m(SGLangHttpServer pid=29926)[0m Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:06<00:00,  1.78s/it]
+[36m(SGLangHttpServer pid=29926)[0m Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:06<00:00,  1.71s/it]
+[36m(SGLangHttpServer pid=29926)[0m 
+[36m(SGLangHttpServer pid=29926)[0m   0%|                                                                     | 0/36 [00:00<?, ?it/s]Capturing batches (bs=256 avail_mem=50.08 GB):   0%|                      | 0/36 [00:00<?, ?it/s]
+[36m(SGLangHttpServer pid=29926)[0m Capturing batches (bs=256 avail_mem=50.08 GB):   3%|▍             | 1/36 [00:00<00:15,  2.30it/s]Capturing batches (bs=248 avail_mem=49.84 GB):   3%|▍             | 1/36 [00:00<00:15,  2.30it/s]Capturing batches (bs=240 avail_mem=49.84 GB):   3%|▍             | 1/36 [00:00<00:15,  2.30it/s]
+[36m(SGLangHttpServer pid=29926)[0m Capturing batches (bs=240 avail_mem=49.84 GB):   8%|█▏            | 3/36 [00:00<00:05,  6.07it/s]Capturing batches (bs=232 avail_mem=49.83 GB):   8%|█▏            | 3/36 [00:00<00:05,  6.07it/s]
+[36m(SGLangHttpServer pid=29926)[0m Capturing batches (bs=232 avail_mem=49.83 GB):  11%|█▌            | 4/36 [00:00<00:07,  4.50it/s]Capturing batches (bs=224 avail_mem=49.83 GB):  11%|█▌            | 4/36 [00:00<00:07,  4.50it/s]
+[36m(SGLangHttpServer pid=29926)[0m Capturing batches (bs=216 avail_mem=49.82 GB):  11%|█▌            | 4/36 [00:00<00:07,  4.50it/s]Capturing batches (bs=208 avail_mem=49.82 GB):  11%|█▌            | 4/36 [00:01<00:07,  4.50it/s]
+[36m(SGLangHttpServer pid=29926)[0m Capturing batches (bs=208 avail_mem=49.82 GB):  19%|██▋           | 7/36 [00:01<00:03,  8.53it/s]Capturing batches (bs=200 avail_mem=49.81 GB):  19%|██▋           | 7/36 [00:01<00:03,  8.53it/s]Capturing batches (bs=192 avail_mem=49.81 GB):  19%|██▋           | 7/36 [00:01<00:03,  8.53it/s]Capturing batches (bs=184 avail_mem=49.80 GB):  19%|██▋           | 7/36 [00:01<00:03,  8.53it/s]
+[36m(SGLangHttpServer pid=29926)[0m Capturing batches (bs=184 avail_mem=49.80 GB):  28%|███▌         | 10/36 [00:01<00:02, 11.96it/s]Capturing batches (bs=176 avail_mem=49.80 GB):  28%|███▌         | 10/36 [00:01<00:02, 11.96it/s]Capturing batches (bs=168 avail_mem=49.79 GB):  28%|███▌         | 10/36 [00:01<00:02, 11.96it/s]
+[36m(SGLangHttpServer pid=29926)[0m Capturing batches (bs=160 avail_mem=49.79 GB):  28%|███▌         | 10/36 [00:01<00:02, 11.96it/s]Capturing batches (bs=160 avail_mem=49.79 GB):  36%|████▋        | 13/36 [00:01<00:01, 14.68it/s]Capturing batches (bs=152 avail_mem=49.78 GB):  36%|████▋        | 13/36 [00:01<00:01, 14.68it/s]
+[36m(SGLangHttpServer pid=29926)[0m Capturing batches (bs=144 avail_mem=49.78 GB):  36%|████▋        | 13/36 [00:01<00:01, 14.68it/s]Capturing batches (bs=144 avail_mem=49.78 GB):  42%|█████▍       | 15/36 [00:01<00:01, 14.96it/s]Capturing batches (bs=136 avail_mem=49.77 GB):  42%|█████▍       | 15/36 [00:01<00:01, 14.96it/s]
+[36m(SGLangHttpServer pid=29926)[0m Capturing batches (bs=128 avail_mem=49.77 GB):  42%|█████▍       | 15/36 [00:01<00:01, 14.96it/s]Capturing batches (bs=128 avail_mem=49.77 GB):  47%|██████▏      | 17/36 [00:01<00:01,  9.88it/s]Capturing batches (bs=120 avail_mem=49.76 GB):  47%|██████▏      | 17/36 [00:01<00:01,  9.88it/s]Capturing batches (bs=112 avail_mem=49.75 GB):  47%|██████▏      | 17/36 [00:01<00:01,  9.88it/s]
+[36m(SGLangHttpServer pid=29926)[0m Capturing batches (bs=104 avail_mem=49.75 GB):  47%|██████▏      | 17/36 [00:01<00:01,  9.88it/s]Capturing batches (bs=104 avail_mem=49.75 GB):  56%|███████▏     | 20/36 [00:01<00:01, 12.46it/s]Capturing batches (bs=96 avail_mem=49.75 GB):  56%|███████▊      | 20/36 [00:01<00:01, 12.46it/s]
+[36m(SGLangHttpServer pid=29926)[0m Capturing batches (bs=88 avail_mem=49.74 GB):  56%|███████▊      | 20/36 [00:02<00:01, 12.46it/s]
+[36m(SGLangHttpServer pid=29926)[0m Capturing batches (bs=88 avail_mem=49.74 GB):  61%|████████▌     | 22/36 [00:02<00:01,  9.07it/s]Capturing batches (bs=80 avail_mem=49.73 GB):  61%|████████▌     | 22/36 [00:02<00:01,  9.07it/s]
+[36m(SGLangHttpServer pid=29926)[0m Capturing batches (bs=72 avail_mem=49.73 GB):  61%|████████▌     | 22/36 [00:02<00:01,  9.07it/s]Capturing batches (bs=64 avail_mem=49.72 GB):  61%|████████▌     | 22/36 [00:02<00:01,  9.07it/s]Capturing batches (bs=64 avail_mem=49.72 GB):  69%|█████████▋    | 25/36 [00:02<00:00, 11.51it/s]Capturing batches (bs=56 avail_mem=49.72 GB):  69%|█████████▋    | 25/36 [00:02<00:00, 11.51it/s]
+[36m(SGLangHttpServer pid=29926)[0m Capturing batches (bs=48 avail_mem=49.71 GB):  69%|█████████▋    | 25/36 [00:02<00:00, 11.51it/s]Capturing batches (bs=40 avail_mem=49.71 GB):  69%|█████████▋    | 25/36 [00:02<00:00, 11.51it/s]
+[36m(SGLangHttpServer pid=29926)[0m Capturing batches (bs=40 avail_mem=49.71 GB):  78%|██████████▉   | 28/36 [00:02<00:00, 13.87it/s]Capturing batches (bs=32 avail_mem=49.70 GB):  78%|██████████▉   | 28/36 [00:02<00:00, 13.87it/s]Capturing batches (bs=24 avail_mem=49.70 GB):  78%|██████████▉   | 28/36 [00:02<00:00, 13.87it/s]
+[36m(SGLangHttpServer pid=29926)[0m Capturing batches (bs=16 avail_mem=49.69 GB):  78%|██████████▉   | 28/36 [00:02<00:00, 13.87it/s]Capturing batches (bs=16 avail_mem=49.69 GB):  86%|████████████  | 31/36 [00:02<00:00, 14.79it/s]Capturing batches (bs=12 avail_mem=49.69 GB):  86%|████████████  | 31/36 [00:02<00:00, 14.79it/s]
+[36m(SGLangHttpServer pid=29926)[0m Capturing batches (bs=8 avail_mem=49.68 GB):  86%|████████████▉  | 31/36 [00:02<00:00, 14.79it/s]
+[36m(SGLangHttpServer pid=29926)[0m Capturing batches (bs=8 avail_mem=49.68 GB):  92%|█████████████▊ | 33/36 [00:03<00:00, 10.24it/s]Capturing batches (bs=4 avail_mem=49.67 GB):  92%|█████████████▊ | 33/36 [00:03<00:00, 10.24it/s]
+[36m(SGLangHttpServer pid=29926)[0m Capturing batches (bs=2 avail_mem=49.67 GB):  92%|█████████████▊ | 33/36 [00:03<00:00, 10.24it/s]
+[36m(SGLangHttpServer pid=29926)[0m Capturing batches (bs=1 avail_mem=49.67 GB):  92%|█████████████▊ | 33/36 [00:03<00:00, 10.24it/s]Capturing batches (bs=1 avail_mem=49.67 GB): 100%|███████████████| 36/36 [00:03<00:00, 13.10it/s]Capturing batches (bs=1 avail_mem=49.67 GB): 100%|███████████████| 36/36 [00:03<00:00, 10.99it/s]
+AgentLoopManager: ['10.8.11.96:37163']
+Evaluating:   0%|                                                         | 0/25 [00:00<?, ?it/s][36m(pid=23357)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+[36m(pid=23357)[0m   import pynvml  # type: ignore[import]
+[36m(pid=23349)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+[36m(pid=23349)[0m   warnings.warn(
+[36m(AgentLoopWorker pid=23349)[0m W0406 14:40:06.819000 23349 site-packages/torch/utils/cpp_extension.py:117] No CUDA runtime is found, using CUDA_HOME='/opt/packages/cuda/v12.6.1'
+[36m(pid=23346)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.[32m [repeated 3x across cluster] (Ray deduplicates logs by default. Set RAY_DEDUP_LOGS=0 to disable log deduplication, or see https://docs.ray.io/en/master/ray-observability/user-guides/configure-logging.html#log-deduplication for more options.)[0m
+[36m(pid=23346)[0m   import pynvml  # type: ignore[import][32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=23349)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/sglang/srt/layers/quantization/awq.py:69: UserWarning: Only CUDA, HIP and XPU support AWQ currently.
+[36m(AgentLoopWorker pid=23349)[0m   warnings.warn(f"Only CUDA, HIP and XPU support AWQ currently.")
+[36m(AgentLoopWorker pid=23349)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/sglang/srt/layers/quantization/gguf.py:46: UserWarning: Only CUDA support GGUF quantization currently.
+[36m(AgentLoopWorker pid=23349)[0m   warnings.warn(f"Only CUDA support GGUF quantization currently.")
+[36m(pid=23346)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.[32m [repeated 3x across cluster][0m
+[36m(pid=23346)[0m   warnings.warn([32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=23349)[0m Using dataset class: RLHFDataset
+[36m(AgentLoopWorker pid=23349)[0m {
+[36m(AgentLoopWorker pid=23349)[0m   "type": "function",
+[36m(AgentLoopWorker pid=23349)[0m   "function": {
+[36m(AgentLoopWorker pid=23349)[0m     "name": "search",
+[36m(AgentLoopWorker pid=23349)[0m     "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",
+[36m(AgentLoopWorker pid=23349)[0m     "parameters": {
+[36m(AgentLoopWorker pid=23349)[0m       "type": "object",
+[36m(AgentLoopWorker pid=23349)[0m       "properties": {
+[36m(AgentLoopWorker pid=23349)[0m         "query_list": {
+[36m(AgentLoopWorker pid=23349)[0m           "type": "array",
+[36m(AgentLoopWorker pid=23349)[0m           "description": "A list of semantic search queries."
+[36m(AgentLoopWorker pid=23349)[0m         }
+[36m(AgentLoopWorker pid=23349)[0m       },
+[36m(AgentLoopWorker pid=23349)[0m       "required": [
+[36m(AgentLoopWorker pid=23349)[0m         "query_list"
+[36m(AgentLoopWorker pid=23349)[0m       ]
+[36m(AgentLoopWorker pid=23349)[0m     }
+[36m(AgentLoopWorker pid=23349)[0m   }
+[36m(AgentLoopWorker pid=23349)[0m }
+[36m(AgentLoopWorker pid=23349)[0m {
+[36m(AgentLoopWorker pid=23349)[0m   "type": "function",
+[36m(AgentLoopWorker pid=23349)[0m   "function": {
+[36m(AgentLoopWorker pid=23349)[0m     "name": "check",
+[36m(AgentLoopWorker pid=23349)[0m     "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",
+[36m(AgentLoopWorker pid=23349)[0m     "parameters": {
+[36m(AgentLoopWorker pid=23349)[0m       "type": "object",
+[36m(AgentLoopWorker pid=23349)[0m       "properties": {
+[36m(AgentLoopWorker pid=23349)[0m         "answer": {
+[36m(AgentLoopWorker pid=23349)[0m           "type": "string",
+[36m(AgentLoopWorker pid=23349)[0m           "description": "The answer to verify."
+[36m(AgentLoopWorker pid=23349)[0m         },
+[36m(AgentLoopWorker pid=23349)[0m         "evidence": {
+[36m(AgentLoopWorker pid=23349)[0m           "type": "string",
+[36m(AgentLoopWorker pid=23349)[0m           "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."
+[36m(AgentLoopWorker pid=23349)[0m         }
+[36m(AgentLoopWorker pid=23349)[0m       },
+[36m(AgentLoopWorker pid=23349)[0m       "required": [
+[36m(AgentLoopWorker pid=23349)[0m         "answer"
+[36m(AgentLoopWorker pid=23349)[0m       ]
+[36m(AgentLoopWorker pid=23349)[0m     }
+[36m(AgentLoopWorker pid=23349)[0m   }
+[36m(AgentLoopWorker pid=23349)[0m }
+[36m(AgentLoopWorker pid=23349)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/omegaconf/grammar_visitor.py:253: UserWarning: In the sequence `CHECKER_NODE_IP,` some elements are missing: please replace them with empty quoted strings. See https://github.com/omry/omegaconf/issues/572 for details.
+[36m(AgentLoopWorker pid=23346)[0m W0406 14:40:07.232000 23346 site-packages/torch/utils/cpp_extension.py:117] No CUDA runtime is found, using CUDA_HOME='/opt/packages/cuda/v12.6.1'[32m [repeated 3x across cluster][0m
+[36m(pid=23367)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.[32m [repeated 8x across cluster][0m
+[36m(pid=23367)[0m   import pynvml  # type: ignore[import][32m [repeated 8x across cluster][0m
+[36m(AgentLoopWorker pid=23342)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/sglang/srt/layers/quantization/awq.py:69: UserWarning: Only CUDA, HIP and XPU support AWQ currently.[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=23342)[0m   warnings.warn(f"Only CUDA, HIP and XPU support AWQ currently.")[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=23342)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/sglang/srt/layers/quantization/gguf.py:46: UserWarning: Only CUDA support GGUF quantization currently.[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=23342)[0m   warnings.warn(f"Only CUDA support GGUF quantization currently.")[32m [repeated 3x across cluster][0m
+[36m(pid=23360)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.[32m [repeated 3x across cluster][0m
+[36m(pid=23360)[0m   warnings.warn([32m [repeated 7x across cluster][0m
+[36m(AgentLoopWorker pid=23342)[0m WARNING:2026-04-06 14:40:16,493:[search_r1_with_checker] search query: [18] A DNA sample was obtained from the proband and her family members.
+[36m(AgentLoopWorker pid=23342)[0m WARNING:2026-04-06 14:40:16,493:[search_r1_with_checker] search query: [19] The DNA sample was analyzed using a next-generation sequencing (NGS) platform.
+[36m(AgentLoopWorker pid=23342)[0m WARNING:2026-04-06 14:40:16,493:[search_r1_with_checker] search query: [20] The NGS data were analyzed using a bioinformatics tool.
+[36m(AgentLoopWorker pid=23342)[0m WARNING:2026-04-06 14:40:16,493:[search_r1_with_checker] search query: [21] The analysis revealed a novel mutation in the APOA1 gene.
+[36m(AgentLoopWorker pid=23342)[0m WARNING:2026-04-06 14:40:16,493:[search_r1_with_checker] search query: [22] The mutation was confirmed by Sanger sequencing.
+[36m(AgentLoopWorker pid=23342)[0m WARNING:2026-04-06 14:40:16,493:[search_r1_with_checker] search query: [23] The APOA1 gene was sequenced in the proband and her family members.
+[36m(AgentLoopWorker pid=23342)[0m WARNING:2026-04-06 14:40:16,494:[search_r1_with_checker] search query: [24] The sequencing data were analyzed using a bioinformatics tool.
+[36m(AgentLoopWorker pid=23342)[0m WARNING:2026-04-06 14:40:16,494:[search_r1_with_checker] search query: [25] The analysis revealed a novel mutation in the APOA1 gene.
+[36m(AgentLoopWorker pid=23342)[0m WARNING:2026-04-06 14:40:16,494:[search_r1_with_checker] search query: [26] The mutation was confirmed by Sanger sequencing.
+[36m(AgentLoopWorker pid=23346)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/omegaconf/grammar_visitor.py:253: UserWarning: In the sequence `CHECKER_NODE_IP,` some elements are missing: please replace them with empty quoted strings. See https://github.com/omry/omegaconf/issues/572 for details.[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=23349)[0m WARNING:2026-04-06 14:40:16,542:[search_r1_with_checker] search query: [18] histology of the kidney showing a medullary cyst
+[36m(AgentLoopWorker pid=23349)[0m WARNING:2026-04-06 14:40:16,542:[search_r1_with_checker] search query: [19] immunohistochemistry of the kidney showing a medullary cyst
+[36m(AgentLoopWorker pid=23349)[0m WARNING:2026-04-06 14:40:16,542:[search_r1_with_checker] search query: [20] electron microscopy of the kidney showing a medullary cyst
+[36m(AgentLoopWorker pid=23349)[0m WARNING:2026-04-06 14:40:16,542:[search_r1_with_checker] search query: [21] genetic analysis of the kidney showing a medullary cyst
+[36m(AgentLoopWorker pid=23349)[0m WARNING:2026-04-06 14:40:16,542:[search_r1_with_checker] search query: [22] clinical features of the kidney showing a medullary cyst
+[36m(SearchExecutionWorker pid=23364)[0m WARNING:2026-04-06 14:40:16,557:[Search Request ID: b0afdbc7-a62c-484f-b44b-598848db88b7] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14bad03ed630>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[36m(AgentLoopWorker pid=23357)[0m WARNING:2026-04-06 14:40:16,929:[search_r1_with_checker] search query: [Case] History and characteristics of the oil spill
+[36m(AgentLoopWorker pid=23357)[0m WARNING:2026-04-06 14:40:16,929:[search_r1_with_checker] search query: [Case] Environmental and health impacts of the oil spill
+[36m(AgentLoopWorker pid=23357)[0m WARNING:2026-04-06 14:40:16,929:[search_r1_with_checker] search query: [Case] Response and cleanup efforts for the oil spill
+[36m(AgentLoopWorker pid=23357)[0m WARNING:2026-04-06 14:40:16,929:[search_r1_with_checker] search query: [Case] Economic and social impacts of the oil spill
+[36m(AgentLoopWorker pid=23357)[0m WARNING:2026-04-06 14:40:16,929:[search_r1_with_checker] search query: [Case] Lessons learned and best practices for oil spill prevention and response
+[36m(AgentLoopWorker pid=23346)[0m ERROR:2026-04-06 14:40:17,160:[search_r1_with_checker] Failed to parse tool_call JSON: Invalid control character at: line 1 column 105 (char 104)
+[36m(AgentLoopWorker pid=23346)[0m You're using a PreTrainedTokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
+[36m(pid=23355)[0m /ocean/projects/med230010p/yji3/anaconda3/envs/sglang_srv/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.[32m [repeated 5x across cluster][0m
+[36m(pid=23355)[0m   warnings.warn([32m [repeated 5x across cluster][0m
+[36m(SearchExecutionWorker pid=23364)[0m WARNING:2026-04-06 14:40:22,588:[Search Request ID: b0afdbc7-a62c-484f-b44b-598848db88b7] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x14bad03ee020>: Failed to establish a new connection: [Errno 111] Connection refused'))[32m [repeated 9x across cluster][0m
+[36m(SearchExecutionWorker pid=23348)[0m WARNING:2026-04-06 14:40:31,576:[Search Request ID: 3b2c327f-c142-460a-8bff-653487843267] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1450ec9078b0>: Failed to establish a new connection: [Errno 111] Connection refused'))[32m [repeated 6x across cluster][0m
+[36m(SearchExecutionWorker pid=23348)[0m WARNING:2026-04-06 14:40:37,606:[Search Request ID: 3b2c327f-c142-460a-8bff-653487843267] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1450ec9501f0>: Failed to establish a new connection: [Errno 111] Connection refused'))[32m [repeated 3x across cluster][0m
+[36m(SearchExecutionWorker pid=23348)[0m WARNING:2026-04-06 14:40:44,642:[Search Request ID: 3b2c327f-c142-460a-8bff-653487843267] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1450ec907dc0>: Failed to establish a new connection: [Errno 111] Connection refused'))[32m [repeated 3x across cluster][0m
+[33m(raylet)[0m Raylet is terminated. Termination is unexpected. Possible reasons include: (1) SIGKILL by the user or system OOM killer, (2) Invalid memory access from Raylet causing SIGSEGV or SIGBUS, (3) Other termination signals. Last 20 lines of the Raylet logs:
+    [state-dump] 	NodeManager.GcsCheckAlive - 1 total (1 active), Execution time: mean = 0.000 s, total = 0.000 s, Queueing time: mean = 0.000 s, max = -0.000 s, min = 9223372036.855 s, total = 0.000 s
+    [state-dump] 	ray::rpc::NodeInfoGcsService.grpc_client.CheckAlive.OnReplyReceived - 1 total (0 active), Execution time: mean = 14.545 us, total = 14.545 us, Queueing time: mean = 11.587 us, max = 11.587 us, min = 11.587 us, total = 11.587 us
+    [state-dump] 	ray::rpc::JobInfoGcsService.grpc_client.AddJob.OnReplyReceived - 1 total (0 active), Execution time: mean = 26.730 us, total = 26.730 us, Queueing time: mean = 9.700 us, max = 9.700 us, min = 9.700 us, total = 9.700 us
+    [state-dump] 	ray::rpc::JobInfoGcsService.grpc_client.GetAllJobInfo - 1 total (0 active), Execution time: mean = 252.729 us, total = 252.729 us, Queueing time: mean = 0.000 s, max = -0.000 s, min = 9223372036.855 s, total = 0.000 s
+    [state-dump] 	ray::rpc::NodeInfoGcsService.grpc_client.RegisterNode.OnReplyReceived - 1 total (0 active), Execution time: mean = 315.609 us, total = 315.609 us, Queueing time: mean = 9.205 us, max = 9.205 us, min = 9.205 us, total = 9.205 us
+    [state-dump] 	NodeManagerService.grpc_server.PrepareBundleResources - 1 total (0 active), Execution time: mean = 202.266 us, total = 202.266 us, Queueing time: mean = 0.000 s, max = -0.000 s, min = 9223372036.855 s, total = 0.000 s
+    [state-dump] 	ray::rpc::NodeInfoGcsService.grpc_client.GetAllNodeInfo - 1 total (0 active), Execution time: mean = 340.231 us, total = 340.231 us, Queueing time: mean = 0.000 s, max = -0.000 s, min = 9223372036.855 s, total = 0.000 s
+    [state-dump] 	ray::rpc::InternalKVGcsService.grpc_client.GetInternalConfig - 1 total (0 active), Execution time: mean = 616.570 us, total = 616.570 us, Queueing time: mean = 0.000 s, max = -0.000 s, min = 9223372036.855 s, total = 0.000 s
+    [state-dump] 	NodeManagerService.grpc_server.PrepareBundleResources.HandleRequestImpl - 1 total (0 active), Execution time: mean = 121.642 us, total = 121.642 us, Queueing time: mean = 7.829 us, max = 7.829 us, min = 7.829 us, total = 7.829 us
+    [state-dump] 	ray::rpc::InternalKVGcsService.grpc_client.GetInternalConfig.OnReplyReceived - 1 total (0 active), Execution time: mean = 27.399 ms, total = 27.399 ms, Queueing time: mean = 17.004 us, max = 17.004 us, min = 17.004 us, total = 17.004 us
+    [state-dump] 	NodeManager.deadline_timer.print_event_loop_stats - 1 total (1 active, 1 running), Execution time: mean = 0.000 s, total = 0.000 s, Queueing time: mean = 0.000 s, max = -0.000 s, min = 9223372036.855 s, total = 0.000 s
+    [state-dump] 	NodeManager.GCTaskFailureReason - 1 total (1 active), Execution time: mean = 0.000 s, total = 0.000 s, Queueing time: mean = 0.000 s, max = -0.000 s, min = 9223372036.855 s, total = 0.000 s
+    [state-dump] 	Subscriber.HandlePublishedMessage_GCS_JOB_CHANNEL - 1 total (0 active), Execution time: mean = 27.083 us, total = 27.083 us, Queueing time: mean = 64.040 us, max = 64.040 us, min = 64.040 us, total = 64.040 us
+    [state-dump] 	ray::rpc::NodeInfoGcsService.grpc_client.GetAllNodeInfo.OnReplyReceived - 1 total (0 active), Execution time: mean = 89.454 us, total = 89.454 us, Queueing time: mean = 7.023 us, max = 7.023 us, min = 7.023 us, total = 7.023 us
+    [state-dump] 	NodeManagerService.grpc_server.CommitBundleResources.HandleRequestImpl - 1 total (0 active), Execution time: mean = 90.550 us, total = 90.550 us, Queueing time: mean = 6.433 us, max = 6.433 us, min = 6.433 us, total = 6.433 us
+    [state-dump] 	ray::rpc::JobInfoGcsService.grpc_client.AddJob - 1 total (0 active), Execution time: mean = 455.255 us, total = 455.255 us, Queueing time: mean = 0.000 s, max = -0.000 s, min = 9223372036.855 s, total = 0.000 s
+    [state-dump] 	NodeManagerService.grpc_server.CommitBundleResources - 1 total (0 active), Execution time: mean = 160.099 us, total = 160.099 us, Queueing time: mean = 0.000 s, max = -0.000 s, min = 9223372036.855 s, total = 0.000 s
+    [state-dump] DebugString() time ms: 0
+    [state-dump] 
+    [state-dump] 
+
+[36m(AgentLoopWorker pid=23346)[0m Using dataset class: RLHFDataset[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m {[32m [repeated 6x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m   "type": "function",[32m [repeated 6x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m   "function": {[32m [repeated 6x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m     "name": "search",[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m     "description": "Search for external medical evidence when the question involves factual uncertainty, diagnosis, treatment, prognosis, medication effects, safety, dosing, or other evidence-dependent claims.",[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m     "parameters": {[32m [repeated 6x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m       "type": "object",[32m [repeated 6x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m       "properties": {[32m [repeated 6x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m         "query_list": {[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m           "type": "array",[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m           "description": "A list of semantic search queries."[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m }[32m [repeated 24x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m       },[32m [repeated 9x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m       "required": [[32m [repeated 6x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m         "query_list"[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m       ][32m [repeated 6x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m     "name": "check",[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m     "description": "Verify a draft medical answer against retrieved evidence. Use this after search when the answer is high-risk, evidence may be incomplete or conflicting, or the response includes diagnosis, treatment, prognosis, medication safety, contraindications, interactions, or dosing claims.",[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m         "answer": {[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m           "type": "string",[32m [repeated 6x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m           "description": "The answer to verify."[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m         "evidence": {[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m           "description": "Optional explicit evidence. If omitted, use latest retrieved tool output."[32m [repeated 3x across cluster][0m
+[36m(AgentLoopWorker pid=23346)[0m         "answer"[32m [repeated 3x across cluster][0m
+[36m(SearchExecutionWorker pid=23348)[0m WARNING:2026-04-06 14:40:52,683:[Search Request ID: 3b2c327f-c142-460a-8bff-653487843267] Connection Error: HTTPConnectionPool(host='127.0.0.1', port=8003): Max retries exceeded with url: /retrieve (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x1450ec907760>: Failed to establish a new connection: [Errno 111] Connection refused'))[32m [repeated 3x across cluster][0m

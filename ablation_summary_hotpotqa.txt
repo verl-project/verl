@@ -1,0 +1,4 @@
+Config | F1 | Tag% | Search | Check | Support% | Coverage
+-------|-----|------|--------|-------|----------|----------
+model_06_student_explicit_no_triage_s188 | 0.0704 | 68.0% | 0.020 | 0.020 | 0.0% | 0.010
+model_07_student_explicit_triage_s188 | 0.0713 | 100.0% | 0.020 | 0.020 | 100.0% | 0.020

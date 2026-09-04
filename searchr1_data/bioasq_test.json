@@ -1,0 +1,1202 @@
+[
+  {
+    "question": "Is the monoclonal antibody Trastuzumab (Herceptin) of potential use in the treatment of prostate cancer?",
+    "golden_answers": [
+      "Although is still controversial, Trastuzumab (Herceptin) can be of potential use in the treatment of prostate cancer overexpressing HER2, either alone or in combination with other drugs."
+    ]
+  },
+  {
+    "question": "Describe MSstatsTMT",
+    "golden_answers": [
+      "MSstatsTMT is a general statistical approach for relative protein quantification in MS- based experiments with TMT labeling."
+    ]
+  },
+  {
+    "question": "Are multipotent adult progenitor cells effective for treatment of stroke?",
+    "golden_answers": [
+      "No. There was no difference between the multipotent adult progenitor cell group and placebo groups in global stroke recovery at day 90. Further clinical trials evaluating the efficacy of the intervention in an earlier time window after stroke (<36 h) are planned."
+    ]
+  },
+  {
+    "question": "Is the 22-item sino-nasal outcome test (SNOT-22) a widely used measure for Health-Related Quality-of-Life (HRQOL) associated with chronic rhinosinusitis (CRS)?",
+    "golden_answers": [
+      "Conclusion. The German-SNOT-22 validated here matches the original SNOT-22. It is a reliable, valid and responsive questionnaire to assess symptoms, HRQOL and treatment-response in CRS-patients."
+    ]
+  },
+  {
+    "question": "What are some of the effects of Zika Virus in infected individuals?",
+    "golden_answers": [
+      "While most of the symptoms of zika virus are relatively mild, zika virus in pregnant mothers can cause microcephaly and other congenital defects in the fetus."
+    ]
+  },
+  {
+    "question": "What is the function of STAR elements in yeast telomeres?",
+    "golden_answers": [
+      "Subtelomeres also contain Sub-Telomeric Anti-silencing Regions (STARs). We also show that the deletion of Histone-Acetyltransferase genes reduce the silencing activity of an ACS proto-silencer, but also reduce the anti-silencing activity of a STAR.  The telomere-proximal portion of either X or Y' dampened silencing when located between the telomere and the reporter gene. These elements were named STARs, for subtelomeric anti-silencing regions. STARs can also counteract silencer-driven repression at the mating-type HML locus. When two STARs bracket a reporter gene, its expression is no longer influenced by surrounding silencing elements, although these are still active on a second reporter gene."
+    ]
+  },
+  {
+    "question": "List clinical features of EEM syndrome.",
+    "golden_answers": [
+      "EEM syndrome is characterized by ectodermal dysplasia, ectrodactyly and macular dystrophy."
+    ]
+  },
+  {
+    "question": "What is a Aquaporin channel?",
+    "golden_answers": [
+      "Aquaporins are membrane channels expressed in almost every organism and involved in the bidirectional transfer of water and small solutes across cell membranes. Aquaporins have important biological roles and have been implicated in several pathophysiological conditions suggesting a great translational potential in aquaporin-based diagnostics and therapeutics."
+    ]
+  },
+  {
+    "question": "List inhibtors targeting the mitochondrial permeability transition pore.",
+    "golden_answers": [
+      "Cyclosporine A\nAtractyloside\nN-metyl-4-isoleucine-cyclosporine\nSanglifehrin A \nTRO-19622"
+    ]
+  },
+  {
+    "question": "List ribosomal biogenesis proteins.",
+    "golden_answers": [
+      "FGF13\np53\nTGF\u03b2/Activin\nPTEN\nNucleostemin\nHEATR1"
+    ]
+  },
+  {
+    "question": "Describe the GenomeAsia 100K Project",
+    "golden_answers": [
+      "The GenomeAsia 100K Project (GenomeAsia100K Project) aims to identify and catalogue genetic variation, population structure, disease associations and founder effects in populations across Asia and worldwide. It includes a whole-genome sequencing reference dataset from 1,739 individuals of 219 population groups and 64 countries across Asia, as well as a population-wide association dataset."
+    ]
+  },
+  {
+    "question": "What is the proteoform?",
+    "golden_answers": [
+      "Although proteomics has rapidly developed in the past decade, researchers are still in the early stage of exploring the world of complex proteoforms, which are protein products with various primary structure alterations resulting from gene mutations, alternative splicing, post-translational modifications, and other biological processes"
+    ]
+  },
+  {
+    "question": "What are the classic signs of a basilar skull fracture?",
+    "golden_answers": [
+      "Basilar skull fractures are fractures of the lower part of the skull. The four classic signs are:\n1. Periorbital ecchymosis (\u201craccoon eyes\u201d).\n2. Postauricular ecchymosis (Battle sign).\n3. CSF otorrhea or rhinorrhea (leakage of CSF, which is clear in appearance, from the ears or nose).\n4. Hemotympanum (blood behind the eardrum)."
+    ]
+  },
+  {
+    "question": "What is a potential alternate uses(repositioning) for Primaquine",
+    "golden_answers": [
+      "Primaquine Diphosphate, a Known Antimalarial Drug, Blocks Vascular Leakage Acting Through Junction Stabilization.  PD could be used as a novel drug for vascular leakage by maintaining endothelial integrity"
+    ]
+  },
+  {
+    "question": "Dasatinib and Blinatumomab are used for treatment of which disease?",
+    "golden_answers": [
+      "Dasatinib and Blinatumomab produces molecular responses in patients with Philadelphia chromosome-positive acute lymphoblastic leukemia."
+    ]
+  },
+  {
+    "question": "A herd immunity of what percentage of the population is required to prevent sporadic outbreaks?",
+    "golden_answers": [
+      "A herd immunity of 95% of the population is required to prevent sporadic outbreaks."
+    ]
+  },
+  {
+    "question": "List 3 indications for rituximab.",
+    "golden_answers": [
+      "Rituximab  is used to treat rheumatoid arthritis as well as poly- and dermatomyositis, chronic lymphocytic leukemia, juvenile idiopathic arthritis, and Pemphigus foliaceus (PF)."
+    ]
+  },
+  {
+    "question": "Which diagnostic test is approved for coronavirus infection screening?",
+    "golden_answers": [
+      "Real-time reverse transcription-PCR (rRT-PCR) is mostly used as the lab test for screening coronaviral infection."
+    ]
+  },
+  {
+    "question": "What is clinical presentation of the Gardner-Diamond syndrome?",
+    "golden_answers": [
+      "Psychogenic purpura, also known as Gardner-Diamond syndrome, is a rare, distinctive, localized cutaneous reaction pattern mostly affecting psychologically disturbed adult women. Repeated crops of tender, ill-defined ecchymotic lesions on the extremities and external bleeding from other sites characterize the condition."
+    ]
+  },
+  {
+    "question": "Which molecules are inhibited by Gilteritinib?",
+    "golden_answers": [
+      "Gilteritinib is a novel, dual FLT3/AXL inhibitor with promising early phase trial data for acute myeloid leukemia."
+    ]
+  },
+  {
+    "question": "Can radiotherapy cause radiation induced osteosarcoma?",
+    "golden_answers": [
+      "Yes, Radiation-induced osteosarcomas are a recognized complication of radiation therapy."
+    ]
+  },
+  {
+    "question": "Are nucleosomes positioned at DNA replication origins?",
+    "golden_answers": [
+      "No, origins of replication occur in nucleosome-free regions in both budding yeast and Drosophila. Open chromatin domains, characterized by nucleosome depletion, are preferentially permissive for replication."
+    ]
+  },
+  {
+    "question": "How many groups of viruses exist  in the Baltimore Classification?",
+    "golden_answers": [
+      "There are seven \"Baltimore classes\" (BCs) that define the major features of virus reproduction."
+    ]
+  },
+  {
+    "question": "What is the effect of the direct interaction of Ikaros and Foxp1 in B-lymphocytes?",
+    "golden_answers": [
+      "Direct interaction of Ikaros and Foxp1 modulates expression of the G protein-coupled receptor G2A in B-lymphocytes and acute lymphoblastic leukemia."
+    ]
+  },
+  {
+    "question": "Which yeast genes encode for condensin?",
+    "golden_answers": [
+      "Smc2-Smc4 forms the core of the Saccharomyces cerevisiae condensin, which promotes metaphase chromosome compaction . Both SMC2 and SMC4 are essential for chromosome transmission in anaphase . Smc 2-8 suppresses catenanes accumulation, mitotic arrest and growth defects induced by histone depletion at semi-permissive temperature ."
+    ]
+  },
+  {
+    "question": "How many doses of vaxchora are required?",
+    "golden_answers": [
+      "Vaxchora is a single-dose vaccine."
+    ]
+  },
+  {
+    "question": "Is RUNX1T1 associate with obesity?",
+    "golden_answers": [
+      "Yes, the rs34269950 SNP of the RUNX1T1 gene was significantly associated with obesity risk and metabolic abnormalities. Specifically, compared to AA genotype, rs34269950 del/del genotype was associated with a 1.47 [95% confidence interval (CI): 1.01-2.14, P\u2009=\u20090.042] fold higher rate of obesity risk."
+    ]
+  },
+  {
+    "question": "Which is the genetic cause for the development of Fanconi anemia complementation group D1?",
+    "golden_answers": [
+      "Fanconi anemia complementation group D1 (FANCD1) was shown to be induced by biallelic mutations in the BRCA2 breast-cancer-susceptibility gene."
+    ]
+  },
+  {
+    "question": "List side effects of SGLT2 inhibitors?",
+    "golden_answers": [
+      "SGLT2 inhibitors can be associated with urogenital infections related to the enhanced glycosuria, and low blood pressure."
+    ]
+  },
+  {
+    "question": "How does FTO suppress pancreatic tumorigenesis?",
+    "golden_answers": [
+      "Reduced expression of the m6A demethylase, fat mass and obesity-associated protein (FTO), was responsible for the high levels of m6A RNA modification in pancreatic cancer. Moreover, FTO demethylated the m6A modification of praja ring finger ubiquitin ligase 2 (PJA2), thereby reducing its mRNA decay, suppressing Wnt signaling, and ultimately restraining the proliferation, invasion, and metastasis of pancreatic cancer cells."
+    ]
+  },
+  {
+    "question": "Is Phospholemman a membrane protein?",
+    "golden_answers": [
+      "Yes, FXYD1 (encoding phospholemman) is a transmembrane protein."
+    ]
+  },
+  {
+    "question": "What promotes amyloid-peptide beta 42 (A\u03b242) accumulation in neuroblastoma cells?",
+    "golden_answers": [
+      "The apolipoprotein (apo) E4 isoform is the strongest risk factor for late-onset Alzheimer's disease (AD). ApoE4 is more susceptible to proteolysis than apoE2 and apoE3 isoforms and carboxyl-terminal truncated apoE4 forms have been found in AD patients' brain. A specific apoE4 fragment, apoE4-165, promotes amyloid-peptide beta 42 (A\u03b242) accumulation in human neuroblastoma SK-N-SH cells and increased intracellular reactive oxygen species formation, two events considered to occur early in AD pathogenesis."
+    ]
+  },
+  {
+    "question": "Can Panitumumab cause trichomegaly?",
+    "golden_answers": [
+      "Yes.  Panitumumab is EGFR inhibitor that is associated with eyelash trichomegaly."
+    ]
+  },
+  {
+    "question": "Which protein is the Mitochondrial carrier homolog 2 (MTCH2) receptor for?",
+    "golden_answers": [
+      "Mitochondrial Carrier Homolog 2 (MTCH2) acts as a receptor for the BH3 interacting-domain death agonist (BID) in the mitochondrial outer membrane."
+    ]
+  },
+  {
+    "question": "How does exercise affect thyroid hormone receptors expression in the heart?",
+    "golden_answers": [
+      "Exercise has been shown to increase  TR\u03b21 receptor expression in young rats.  Exercise has been shown to increase both TR\u03b11 and  TR\u03b21 receptor expression in aged rats."
+    ]
+  },
+  {
+    "question": "What is protein palmitoylation?",
+    "golden_answers": [
+      "Protein S-palmitoylation, the covalent lipid modification of the side chain of Cys residues with the 16\u2011carbon fatty acid palmitate, is the most common acylation, and it enhances the membrane stability of ion channels. This post-translational modification (PTM) determines a functional mechanism of ion channel life cycle from maturation and membrane trafficking to localization."
+    ]
+  },
+  {
+    "question": "Han Wistar and Sprague Dawley are breeds of what laboratory animal?",
+    "golden_answers": [
+      "Han-Wistar and Sprague-Dawley rats"
+    ]
+  },
+  {
+    "question": "What is the genetic basis of the Delayed Sleep-Phase Syndrome (DSPS)?",
+    "golden_answers": [
+      "Circadian gene mutations are also associated with circadian rhythm disorders such as familial advanced sleep phase syndrome, delayed sleep phase syndrome, and non-24-hour sleep-wake syndrome.  Possible association of human leucocyte antigen DR1 with delayed sleep phase syndrome. The study investigated the human leucocyte antigen (HLA), types A, B and DR, of 42 patients with delayed sleep phase syndrome (DSPS) and compared the frequencies of the antigens with those in 117 healthy controls. The comparison revealed that the gene frequencies and positivities of HLA-A, -B and -DR, except for DR1, had no significant differences between the patients and controls. The frequency of HLA-DR1 was increased in the DSPS patients as compared with that in the healthy controls (P = 0.0069 in positivity). In human leukocyte antigen (HLA) typing, the incidence of DR1 positivity alone was significantly higher in DSPS patients than in healthy subjects. "
+    ]
+  },
+  {
+    "question": "What is known about saponins in crops and human consumption?",
+    "golden_answers": [
+      "Saponins are considered antinutrients for humans and have a bitter taste. They should be removed from the crops before consumption."
+    ]
+  },
+  {
+    "question": "Which are the main functions of the human HuR (ELAVL1) protein in fibroblasts?",
+    "golden_answers": [
+      "HuR is an RNA-binding protein that can stabilize labile mRNAs containing AU-rich elements in their 3' untranslated regions and has been shown to shuttle between the nucleus and cytoplasm. HuR function was previously shown to be implicated in the maintenance of a \"young cell\" phenotype in models of replicative cellular senescence. Loss of HuR is linked to reduced expression of proliferative genes during replicative senescence. Importantly, overexpression of HuR in senescent cells restored a \"younger\" phenotype, while a reduction in HuR expression accentuated the senescent phenotype. HuR associated with the 3' untranslated region of the mRNA encoding the longevity and stress-response protein SIRT1, stabilized the SIRT1 mRNA, and increased SIRT1 expression levels. In mesenchymal cells HuR plays a dominant role in lung development and as a key post-transcriptional regulator of networks guiding tissue remodeling during branching morphogenesis. In fibroblasts knockdown of HuR decreased the endogenous expression of TGF\u03b21 under exogenous TGF\u03b21 treatment, simultaneously with the decrease of Col1a, Col3a and fibronectin expression.  HuR (human antigen R), represses ARF mRNA translation, thereby maintaining the replicative life span of mouse embryonic fibroblasts (MEFs). HuR is considered a global regulator of cell-cycle progression and tumorigenesis. Through its post-transcriptional influence on specific target mRNAs, HuR can alter the cellular response to proliferative, stress, apoptotic, differentiation, senescence, inflammatory and immune stimuli."
+    ]
+  },
+  {
+    "question": "What are the indications for hydrochlorothiazide?",
+    "golden_answers": [
+      "Hydrochlorothiazide is a diuretic, often used in combination with others. Hydrochlorothiazide are used to treat hypertension. Hydrochlorothiazide has been shown to decrease diastolic blood pressure."
+    ]
+  },
+  {
+    "question": "Is tirabrutinib effective for lymphoma?",
+    "golden_answers": [
+      "Yes, tirabrutinib appears to be effective for lymphoma. It was approved in Japan for the treatment of recurrent or refractory primary central nervous system lymphoma."
+    ]
+  },
+  {
+    "question": "What is the function of penicillinase, also known as beta lactamase?",
+    "golden_answers": [
+      "Beta-lactamases are a family of serine enzymes that hydrolyse beta-lactam antibiotics following an acylation-deacylation mechanism."
+    ]
+  },
+  {
+    "question": "What gene is mutated in Sickle Cell Anemia?",
+    "golden_answers": [
+      "Sickle cell anemia (SCA) is an autosomal recessive disease caused by by the HBB:c.20A>T mutation that leads to hemoglobin S synthesis."
+    ]
+  },
+  {
+    "question": "For how long do Drosophila embryos use maternal genome mRNA?",
+    "golden_answers": [
+      "mitoses before interphase 14 run on maternal products and occur in metasynchronous waves"
+    ]
+  },
+  {
+    "question": "Please list the 3 findings in HELLP syndrome.",
+    "golden_answers": [
+      "hemolysis, elevated liver enzymes and low platelets constitute the hellp syndrome."
+    ]
+  },
+  {
+    "question": "Which proteins are the different members of the NF-kappaB family of transcription factors?",
+    "golden_answers": [
+      "Nuclear factor kappa B (NF\u03baB) is a dimeric transcription factor comprised of five family members RelA (p65), RelB, c-Rel, NF-kB1/p50 and NF-kB2/p52."
+    ]
+  },
+  {
+    "question": "What is the function of the Indian hedgehog protein in chondrocytes?",
+    "golden_answers": [
+      "Indian hedgehog is a protein that regulates endochondral differentiation and ossification in both a parathyroid hormone-related protein (PTHrP)-dependent and -independent manner by activating transcriptional mediator Gli2 and is an essential factor for proper skeletal development."
+    ]
+  },
+  {
+    "question": "How is yellow fever virus transmitted?",
+    "golden_answers": [
+      "Yellow fever virus is transmitted by mosquitoes and is restricted to Africa, Central and South America and the Caribbean. \nYellow fever virus is a flavivirus, and there is only one antigenic type. It was taken to the Americas by the early slave traders, and nowadays reported in Africa, America, Asia and Europe. Yellow fever virus is transmitted by two different cycles: \n-from human to human by the mosquito Aedes aegypti; which is well-adapted to breeding around human habitations; the infection can be maintained in this way as \u2018urban\u2019 yellow fever.\n-from infected monkeys to humans by mosquitoes such as Haemagogus. This is \u2018jungle\u2019 yellow fever and is seen in Africa and South America.\n\nYellow fever is not transmitted directly from human to human by day-to-day contact, but transmission from ill patients to healthcare workers has been reported, notably after needlestick injury."
+    ]
+  },
+  {
+    "question": "What is the correlation between SPARC expression and growth inhibition in human cancer?",
+    "golden_answers": [
+      "Secreted protein acidic and rich in cysteine (SPARC) is a multi-faceted protein-modulating cell-cell and cell-matrix interactions. SPARC seems to act as a tumour suppressor, as it has been found that loss of SPARC accelerates the development of certain types of cancer, whereas its expression impairs tumor growth. However it has also been associated with a aggressive phenotypes of some tumours. The role of SPARC may depend on its subcellular localization."
+    ]
+  },
+  {
+    "question": "Which methyl-CpG-binding protein when mutant becomes the hallmark for Rett syndrome?",
+    "golden_answers": [
+      "Rett syndrome (RTT) was shown to be caused by mutations in the methyl-CpG-binding protein 2 (MECP2) gene, with molecular studies identifying MECP2 mutations in up to 80% of classic RTT patients. MECP2 protein was found to assist in the transcriptional silencing process via DNA methylation. We therefore hypothesize that disruption of this gene alters the normal developmental expression of various other genes, some of which must account for the peculiar neurologic phenotype of RTT."
+    ]
+  },
+  {
+    "question": "What is known as Calcium Induced Calcium Release (CICR) and its role in cardiomyocyte contractility?",
+    "golden_answers": [
+      "the cicr mechanism has been understood mainly based on binding of cytosolic ca(2+) with ryanodine receptors (ryrs) and inducing ca(2+) release from the sarcoplasmic reticulum (sr). l-type ca(2+) channels activate ryrs to produce cicr in smooth muscle cells in the form of ca(2+) sparks and propagated ca(2+) waves. in heart cells, a tight coupling between the gating of single l-type ca(2+) channels and ryanodine receptors (ryrs) underlies calcium release. the importance of ca-induced ca release in excitation-contraction coupling in the heart. waves of calcium-induced calcium release occur in a variety of cell types and have been implicated in the origin of cardiac arrhythmias. in mammals, ca(2+) influx as l-type ca(2+) current (ica) triggers the release of ca(2+) from sarcoplasmic reticulum (sr) and ca(2+)-induced ca(2+) release (cicr) is critical for excitation-contraction coupling. "
+    ]
+  },
+  {
+    "question": "What is the function of PAPOLA/PAP?",
+    "golden_answers": [
+      "Poly(A)polymerase-alpha (PAPOLA) has been the most extensively investigated mammalian polyadenylating enzyme, mainly in regard to its multifaceted post-translational regulation. PolyA polymerase (PAP) adds a polyA tail onto the 3'-end of RNAs without a nucleic acid template, using adenosine-5'-triphosphate (ATP) as a substrate."
+    ]
+  },
+  {
+    "question": "Is there any association between Jarid2 and miR-155 in Th17 cells?",
+    "golden_answers": [
+      "Yes. Activation-induced miR-155 targets the chromatin protein Jarid2 to regulate proinflammatory cytokine production in T helper 17 cells."
+    ]
+  },
+  {
+    "question": "Which human genes are more commonly related to craniosynostosis?",
+    "golden_answers": [
+      "The genes that are most commonly linked to craniosynostoses are the members of the Fibroblast Growth Factor Receptor family FGFR3 and to a lesser extent FGFR1 and FGFR2. Some variants of the disease have been associated with the triplication of the MSX2 gene and mutations in NELL-1. NELL-1 is being regulated bu RUNX2, which has also been associated to cases of craniosynostosis. Other genes reported to have a role in the development of the disease are RECQL4, TWIST, SOX6 and GNAS."
+    ]
+  },
+  {
+    "question": "What is the effect of NFIA on astrocyte differentiation?",
+    "golden_answers": [
+      "NFIA promotes astrocyte differentiation from neural precursor cells."
+    ]
+  },
+  {
+    "question": "Which recombinant antibody therapeutics were granted marketing approval in 2014?",
+    "golden_answers": [
+      "Six recombinant antibody therapeutics (vedolizumab, siltuximab, ramucirumab, pembrolizumab, nivolumab, blinatumomab) were granted their first marketing approvals in 2014."
+    ]
+  },
+  {
+    "question": "What is the effect of grapefruit juice on CYP3A4?",
+    "golden_answers": [
+      "Grapefruit juice inhibits CYP3A4 activity."
+    ]
+  },
+  {
+    "question": "Do thyroid hormone receptors change after brain injury?",
+    "golden_answers": [
+      "thyroid hormone receptors increase after brain injury"
+    ]
+  },
+  {
+    "question": "List diseases associated with the  Dopamine Receptor D4 (DRD4).",
+    "golden_answers": [
+      "The 5-repeat allele of a common length polymorphism in the gene that encodes the dopamine D4 receptor (DRD4) is robustly associated with the risk of attention deficit hyperactivity disorder (ADHD)."
+    ]
+  },
+  {
+    "question": "What is predicted using SURFY?",
+    "golden_answers": [
+      "surfaceome predictor SURFY, based on machine learning."
+    ]
+  },
+  {
+    "question": "What is the function of the protein encoded by the gene NKCC2?",
+    "golden_answers": [
+      "The protein function as an Na-K-Cl cotransporter."
+    ]
+  },
+  {
+    "question": "Is fatigue prevalent in patients receiving treatment for glioblastoma?",
+    "golden_answers": [
+      "Yes, fatigue is a common complication of glioblastoma patients receiving chemotherapy or radiotherapy."
+    ]
+  },
+  {
+    "question": "Which molecule is targeted by Caplacizumab?",
+    "golden_answers": [
+      "Caplacizumab is anti-von Willebrand factor (VWF) antibody that blocks the interaction between VWF and platelets. It is used for treatment of acquired thrombotic thrombocytopenic purpura (aTTP)."
+    ]
+  },
+  {
+    "question": "Which population has a high frequency of the HLA-B*1502 allele?",
+    "golden_answers": [
+      "HLA-B*1502 has a high frequency in Han Chinese and other Asian populations, except Japanese. (There is a strong association between human leucocyte antigen (HLA)-B*1502 and carbamazepine-induced Stevens-Johnson syndrome (SJS))."
+    ]
+  },
+  {
+    "question": "What is the mechanism of action of eprotirome?",
+    "golden_answers": [
+      "Eprotirome belongs to thyromimetics and has selective TR\u03b21 activity. It has shown to be effective in dyslipidemia by the lipid-lowering action of TH in the liver and also in obesity."
+    ]
+  },
+  {
+    "question": "List mouse models for autism spectrum disorder (ASD).",
+    "golden_answers": [
+      "Numerous mouse models exists for autism spectrum disorder, such as: BTBR T+tf/J (BTBR), maternal immune, activation (MIA) mouse model of gestational poly(IC) exposure, C58/J and ProSAP1/Shank2."
+    ]
+  },
+  {
+    "question": "Treprostinil is an analogue for which prostaglandin?",
+    "golden_answers": [
+      "Treprostinil is a prostaglandin I(2) (PGI(2)) analog."
+    ]
+  },
+  {
+    "question": "Is Tcf3 associated with the Wnt pathway?",
+    "golden_answers": [
+      "Tcf3 is a component of the Wnt/\u03b2-catenin and Notch signaling pathways."
+    ]
+  },
+  {
+    "question": "Does a comet assay measure radiation induced mutations?",
+    "golden_answers": [
+      "Yes. The comet assay is frequently used to measure DNA damage in individual cells."
+    ]
+  },
+  {
+    "question": "Between which probes does the recurrent translocation breakpoint on chromosome 22 of neuroepithelioma lie?",
+    "golden_answers": [
+      "The recurrent translocation breakpoint on chromosome 22 of neuroepithelioma has been localized between two probes, D22S1 and D22S15, by both in situ hybridization and somatic cell hybrids"
+    ]
+  },
+  {
+    "question": "What are the main indications of lacosamide?",
+    "golden_answers": [
+      "Lacosamide is an anti-epileptic drug, licensed for refractory partial-onset seizures. In addition to this, it has demonstrated analgesic activity in various animal models. Apart from this, LCM has demonstrated potent effects in animal models for a variety of CNS disorders like schizophrenia and stress induced anxiety."
+    ]
+  },
+  {
+    "question": "Does the use of bDMARDs during pregnancy impact neonatal development?",
+    "golden_answers": [
+      "Exposure to bDMARDs during pregnancy does not seem to interfere with post-natal development up to infancy."
+    ]
+  },
+  {
+    "question": "Which type of analysis does DeSeq2 perform?",
+    "golden_answers": [
+      "DeSeq2 is a software for differential gene expression analysis of RNA sequencing data."
+    ]
+  },
+  {
+    "question": "Losigamone can be used for treatment of which disease?",
+    "golden_answers": [
+      "Losigamone is sometimes used as an add-on therapy for epilepsy."
+    ]
+  },
+  {
+    "question": "What is the catalytic mechanism of DNA (cytosine-5) methyltransferases? ",
+    "golden_answers": [
+      "The catalytic mechanism of the DNA (Cytosine-5-)-methyltransferase involves nucleophilic attack of the C6 of the substrate cytosine by the single conserved cysteine of the enzyme, followed by C5 nucleophilic replacement of the methyl group of the cofactor S-adenosyl-L-methionine (AdoMet) to produce 5-methyl-6-Cys-81-S-5,6-dihydrocytosine. It has been also demonstrated that Phe and Glu, which are found in the catalytic motifs I and II of the enzyme are important for AdoMet binding and catalysis."
+    ]
+  },
+  {
+    "question": "Which disease is treated with lucinactant?",
+    "golden_answers": [
+      "Lucinactant us used for the prevention of respiratory distress syndrome in premature infants."
+    ]
+  },
+  {
+    "question": "Has ORMD-0801 been tested in patients?",
+    "golden_answers": [
+      "Yes, ORMD-0801 has been tested in patients."
+    ]
+  },
+  {
+    "question": "Does daily atemoya juice intake change the pharmacokinetics of CYP1A2 substrates?",
+    "golden_answers": [
+      "No, atemoya juice does not change the pharmacokinetics of CYP1A2 substrates."
+    ]
+  },
+  {
+    "question": "Which virus type causes Molluscum contagiosum?",
+    "golden_answers": [
+      "Molluscum contagiosum virus (MCV) is a human poxvirus that causes tumor-like skin lesions."
+    ]
+  },
+  {
+    "question": "Can mitochondria transfer from cell to cell?",
+    "golden_answers": [
+      "Yes,\nthe recently discovered phenomenon of mitochondrial transfer between mammalian cells has gained momentum since it was first described in cell culture systems more than a decade ago."
+    ]
+  },
+  {
+    "question": "Is SUMOylation a post-translational modification in eukaryotes?",
+    "golden_answers": [
+      "Yes, SUMOylation that is the conjugation of target proteins with SUMO (small ubiquitin-related modifier), is a type of post-translational modification in eukaryotes."
+    ]
+  },
+  {
+    "question": "What is Idiopathic toe walking?",
+    "golden_answers": [
+      "Idiopathic toe walking is a pathological gait pattern in which children older than 3 years walk on their tip toes with no contact between the heels and the ground."
+    ]
+  },
+  {
+    "question": "Which R packages have been developed for the discovery of mutational signatures in cancer?",
+    "golden_answers": [
+      "signeR: an empirical Bayesian approach to mutational signature discovery. Mutational signatures can be used to understand cancer origins and provide a unique opportunity to group tumor types that share the same origins and result from similar processes. These signatures have been identified from high throughput sequencing data generated from cancer genomes by using non-negative matrix factorisation (NMF) techniques. The extraction of mutational signatures from high-throughput data still remains a daunting task.RESULTS: Here we present a new method for the statistical estimation of mutational signatures based on an empirical Bayesian treatment of the NMF model."
+    ]
+  },
+  {
+    "question": "Describe swirl sign in intracerebral hemorrhage.",
+    "golden_answers": [
+      "Swirl sign is described as areas of low attenuation, radiolucency or irregular density. It was previously described in epidural hematomas. In intracerebral hemorrhage swirl sign is associated with greater hematoma volume, unfavorable outcomes and greater mortality risk."
+    ]
+  },
+  {
+    "question": "What is  the clinical value of naltrexone in Parkinson's disease patients?",
+    "golden_answers": [
+      "Naltrexone does not improve clinical features, including motor function, in Parkinson's disease patients. Naltrexone was shown to be effective for treatment of pathological gambling in Parkinson's disease patients."
+    ]
+  },
+  {
+    "question": "What is the pyroptotic pathway?",
+    "golden_answers": [
+      "Pyroptosis is an inflammasome-mediated programmed cell death pathway."
+    ]
+  },
+  {
+    "question": "What is sQTLseekeR?",
+    "golden_answers": [
+      "sQTLseekeR is an R package for the identification of genetic variants associated with alternative splicing. It is based on a statistical framework that uses a distance-based approach to compute the variability of splicing ratios across observations, and a non-parametric analogue to multivariate analysis of variance."
+    ]
+  },
+  {
+    "question": "Are there currently applications of deep learning in genomics?",
+    "golden_answers": [
+      "Yes. Deep learning has been used so far in genomics for predicting splicing patterns in individual tissues and differences in splicing patterns across tissues. The deep architecture surpasses the performance of the previous Bayesian method for predicting alternative splicing (AS) patterns."
+    ]
+  },
+  {
+    "question": "Are PDXK mutations linked to polyneuropathy?",
+    "golden_answers": [
+      "Yes, PDXK mutations are linked to polyneuropathy."
+    ]
+  },
+  {
+    "question": "Why does cranberry juice help combat urinary tract infections?",
+    "golden_answers": [
+      "Cranberry products affect the surface properties, such as fimbriae and lipopolysaccharides, and adhesion of fimbriated and nonfimbriated E. coli."
+    ]
+  },
+  {
+    "question": "List the ERM proteins.",
+    "golden_answers": [
+      "ezrin\nradixin\nmoesin"
+    ]
+  },
+  {
+    "question": "Is there an RNAi drug being developed to treat amyloidosis?",
+    "golden_answers": [
+      "Yes, patisiran is an investigational RNA interference (RNAi) therapeutic in development for the treatment of hereditary ATTR (hATTR) amyloidosis."
+    ]
+  },
+  {
+    "question": "List types of avoided words in bacterial genomes",
+    "golden_answers": [
+      "Short palindromic sequences (4, 5 and 6 bp palindromes) are avoided at a statistically significant level in the genomes of several bacteria, including the completely sequenced Haemophilus influenzae and Synechocystis sp. genomes and in the complete genome of the archaeon Methanococcus jannaschii. Palindromes corresponding to sites for restriction enzymes from other species are also avoided, albeit less significantly, suggesting that in the course of evolution bacterial DNA has been exposed to a wide spectrum of restriction enzymes, probably as the result of lateral transfer mediated by mobile genetic elements, such as plasmids and prophages. Palindromic words appear to accumulate in DNA once it becomes isolated from restriction-modification systems, as demonstrated by the case of organellar genomes."
+    ]
+  },
+  {
+    "question": "Can leuprorelin acetate be used as androgen deprivation therapy?",
+    "golden_answers": [
+      "Yes, leuprorelin acetate is being used as androgen deprivation therapy."
+    ]
+  },
+  {
+    "question": "What was the purpose of the FANTOM4 project?",
+    "golden_answers": [
+      "The international Functional Annotation Of the Mammalian Genomes 4 (FANTOM4) research collaboration set out to better understand the transcriptional network that regulates macrophage differentiation and to uncover novel components of the transcriptome employing a series of high-throughput experiments."
+    ]
+  },
+  {
+    "question": "Which hormone abnormalities are characteristic to Pendred syndrome?",
+    "golden_answers": [
+      "Thyroid hormone abnormalities are characteristic to Pendred syndrome. Hypothyroidism is the most common thyroid hormone abnormality in Pendred syndrome. Pendred syndrome  is an autosomal recessive disorder characterized by sensorineural deafness, goiter and a partial defect in iodide organification."
+    ]
+  },
+  {
+    "question": "What is the mechanism of action of cariprazine?",
+    "golden_answers": [
+      "Cariprazine is a dopamine D3/D2 partial agonist atypical antipsychotic with preferential binding to D3 receptors. Cariprazine shows also has affinity for 5-HT2B, and 5-HT1A receptors. It also shows moderate affinity toward \u03c31, 5-HT2A, and histamine H1 receptors. It is approved for the treatment of schizophrenia and manic or mixed episodes associated with bipolar I disorder"
+    ]
+  },
+  {
+    "question": "What is the trade name of sildenafil?",
+    "golden_answers": [
+      "The trade name of sildenafil is Viagra."
+    ]
+  },
+  {
+    "question": "What is TFBSshape?",
+    "golden_answers": [
+      "To utilize DNA shape information when analysing the DNA binding specificities of TFs, the TFBSshape database was developed for calculating DNA structural features from nucleotide sequences provided by motif databases. The TFBSshape database can be used to generate heat maps and quantitative data for DNA structural features (i.e., minor groove width, roll, propeller twist and helix twist) for 739 TF datasets from 23 different species derived from the motif databases JASPAR and UniPROBE. As demonstrated for the basic helix-loop-helix and homeodomain TF families, TFBSshape database can be used to compare, qualitatively and quantitatively, the DNA binding specificities of closely related TFs and, thus, uncover differential DNA binding specificities that are not apparent from nucleotide sequence alone."
+    ]
+  },
+  {
+    "question": "Which drugs are included in PolyIran?",
+    "golden_answers": [
+      "PolyIran polypill is composed of acetylsalicylic acid, hydrochlorothiazide, enalapril, and atorvastatin, whose efficacy in the treatment and prevention of cardiovascular disease has been documented in clinical trials."
+    ]
+  },
+  {
+    "question": "How does trimetazidine affect intracellular kinase signaling in the heart?",
+    "golden_answers": [
+      "Trimetazidine activates AMPK in diabetic myocardium. Trimetazidine  when administered before reperfusion results in activation of p38 mitogen-activated protein kinase and Akt signaling. Trimetazidine  when administered during reperfusion does not affect p38MAPK and JNK activation."
+    ]
+  },
+  {
+    "question": "What is the cause of Phthiriasis Palpebrarum?",
+    "golden_answers": [
+      "Phthiriasis palpebrarum is a rare eyelid infestation caused by phthirus pubis."
+    ]
+  },
+  {
+    "question": "Please list symptoms of measles.",
+    "golden_answers": [
+      "The leading symptoms of the disease are high fever that presents after an incubation period of 9-10 days and the red rash that begins several days after the fever starts. Beyond specific generalized symptoms, measles may have ocular symptoms. The most commonly occuring satellite symptoms are conjunctivitis, coryza and cough."
+    ]
+  },
+  {
+    "question": "Is autosomal dominant inheritanced form of Osteogenesis imperfecta caused by mutations in the genes associated with collagen production?",
+    "golden_answers": [
+      "Osteogenesis imperfecta (OI), also known as brittle bone disease, is a group of genetic disorders that mainly affect the bones. The autosomal dominant form of the disease is cause by a mutation in the COL1A1 or COL1A2 genes which produce type I collagen."
+    ]
+  },
+  {
+    "question": "What is the indication for KYMRIAH?",
+    "golden_answers": [
+      "Kymriah\u2122 has been approved for the treatment of pediatric patients and young adults with refractory or relapse (R/R) B cell precursor acute lymphoblastic leukemia."
+    ]
+  },
+  {
+    "question": "Is there a relationship between B cells and Multiple Sclerosis?",
+    "golden_answers": [
+      "MS patients with high neurodegeneration have changes in B cells characterized by down-regulation of B-cell-specific genes and increased activation status"
+    ]
+  },
+  {
+    "question": "Please list 3 small molecule CGRP-Receptor antagonists for migraine",
+    "golden_answers": [
+      "Rimegepant and ubrogepant have been developed for acute migraine treatment, while atogepant is studied for migraine prophylaxis."
+    ]
+  },
+  {
+    "question": "Which MAP kinase phosphorylates the transcription factor c-jun?",
+    "golden_answers": [
+      "c-Jun is phosphorylated by c-Jun NH2-terminal kinase (JNK)."
+    ]
+  },
+  {
+    "question": "RTS S AS01 vaccine was developed to prevent which disease?",
+    "golden_answers": [
+      "RTS,S/AS01 vaccine was developed for prevention of malaria."
+    ]
+  },
+  {
+    "question": "What is \"cell competition\"?",
+    "golden_answers": [
+      "Cell competition is a social cellular phenomenon in which unfit cells are selectively eliminated to maintain tissue homeostasis.\nAt the initial stage of carcinogenesis, cell competition often occurs between newly emerging transformed cells and the neighboring normal cells, leading to the elimination of transformed cells from the epithelial layer."
+    ]
+  },
+  {
+    "question": "Does promoter shape vary across populations?",
+    "golden_answers": [
+      "Yes. Promoter shape varies across populations and affects promoter evolution and expression noise. This is accompanied by differences in the expression levels of different genes, which may reflect differences in their regulatory mechanisms."
+    ]
+  },
+  {
+    "question": "What is the molecular function of the Chd1 protein?",
+    "golden_answers": [
+      "The ATP-dependent chromatin-remodelling enzyme Chd1 is a 168-kDa protein consisting of a double chromodomain, Snf2-related ATPase domain, and a C-terminal DNA-binding domain. One of the two chromodomains of Chd1 specifically interacts with the methylated lysine 4 mark on histone H3 that is associated with transcriptional activity. Human CHD1 is an ATP-dependent chromatin remodeling protein, as a factor that directly and selectively recognizes histone H3 methylated on lysine 4."
+    ]
+  },
+  {
+    "question": "What is Target Explorer?",
+    "golden_answers": [
+      "Target Explorer is an automated tool for the identification of new target genes for a specified set of transcription factors. It was specifically designed for the well-annotated Drosophila melanogaster genome, but most options can be used for sequences from other genomes as well. Target Explorer is available at http://trantor.bioc.columbia.edu/Target_Explorer/"
+    ]
+  },
+  {
+    "question": "What is the drug forxiga used for?",
+    "golden_answers": [
+      "Dapagliflozin (Forxiga\u00ae) is the first in a novel class of glucose-lowering agents known as sodium-glucose co-transporter-2 (SGLT2) inhibitors and is used in the treatment of patients with type 2 diabetes."
+    ]
+  },
+  {
+    "question": "Which antibody is implicated in the Bickerstaff's brainstem encephalitis?",
+    "golden_answers": [
+      "The syndrome defined by Bickerstaff of progressive, external ophthalmoplegia and ataxia, with disturbance of consciousness or hyperreflexia, has subsequently been associated with antiganglioside antibody, anti-GQ1b"
+    ]
+  },
+  {
+    "question": "What methods are used to diagnose bowel endometriosis?",
+    "golden_answers": [
+      "Double-contrast barium enema (DCBE), transrectal endoscopic ultrasonography (REU), multidetector computerized tomography enema (MDCT-e), and computed tomography colonoscopy (CTC) have been successfully used for the diagnosis of bowel endometriosis."
+    ]
+  },
+  {
+    "question": "what is the effect of Bisphenol A in the body?",
+    "golden_answers": [
+      "Bisphenol A (BPA) is an endocrine-disruptor compound that exhibits estrogenic activit"
+    ]
+  },
+  {
+    "question": "Can parasite infections by Schistosoma japonicum prevent or improve asthma?",
+    "golden_answers": [
+      "A peptide named as SJMHE1 from Schistosoma japonicum can suppress asthma in mice."
+    ]
+  },
+  {
+    "question": "Is resistance training usually associated with increasing muscle hypertrophy?",
+    "golden_answers": [
+      "Traditional resistance exercises have been widely used to promote muscle strength and hypertrophy."
+    ]
+  },
+  {
+    "question": "Is muscle regeneration possible in mdx mice with the use of induced mesenchymal stem cells?",
+    "golden_answers": [
+      "Purified induced mesenchymal stem cells (iMSCs) display fibroblast-like morphology, form three-dimensional spheroid structures, express characteristic mesenchymal stem cell surface markers such as CD29, CD33, CD73, CD90, and CD105, and are capable of differentiating into adipogenic, osteogenic, and chondrogenic lineages. Transplantation of iMSC cells to tibialis anterior skeletal muscle tissue in mdx mice lowers oxidative damage, and restores the expression levels of normal dystrophin, leading to skeletal muscle regeneration."
+    ]
+  },
+  {
+    "question": "Was ALVAC-HIV effective for HIV prevention in the HVTN 702 trial?",
+    "golden_answers": [
+      "No. The ALVAC-gp120 regimen did not prevent HIV-1 infection among participants in South Africa despite previous evidence of immunogenicity"
+    ]
+  },
+  {
+    "question": "What is known about food intolerance and gluten ?",
+    "golden_answers": [
+      "Celiac disease, with a prevalence around 1% of the general population, is the most common genetically-induced food intolerance in the world. Triggered by the ingestion of gluten in genetically predisposed individuals.\nEmerging research into a syndrome known as nonceliac gluten sensitivity suggests a heterogeneous condition with some features of celiac disease but often categorized as FGIDs, including IBS."
+    ]
+  },
+  {
+    "question": "Which cancers can be treated with Selpercatinib?",
+    "golden_answers": [
+      "Selpercatinib was recently approved by the US FDA for the treatment of RET fusion-positive non-small-cell lung cancer, RET fusion-positive thyroid cancer and RET-mutant medullary thyroid cancer."
+    ]
+  },
+  {
+    "question": "What is dystopia canthorum?",
+    "golden_answers": [
+      "Dystopia canthorum is defined as a prominent broad nasal root with increased intercanthal distance."
+    ]
+  },
+  {
+    "question": "Which test is used for the definition of colour-blindness?",
+    "golden_answers": [
+      "Color-blindness problems are detected by the Ishihara Test."
+    ]
+  },
+  {
+    "question": "What is known about the PYHIN proteins?",
+    "golden_answers": [
+      "The human PYHIN proteins, AIM2, IFI16, IFIX, and MNDA, are critical regulators of immune response, transcription, apoptosis, and cell cycle.\nAbsent in melanoma 2 (AIM2) is a member of the PYHIN (pyrin and HIN domain-containing protein) family with important roles in sensing double-stranded DNA (dsDNA) and assembling the AIM2 inflammasome, which has wide-ranging, pro-inflammatory and pro-pyroptotic properties."
+    ]
+  },
+  {
+    "question": "List 4 drugs used to treat opioid addiction or overdose",
+    "golden_answers": [
+      "Suboxone (buprenorphine/naloxone) and  methadone are used to assist in opioid withdrawal and Naloxone is used to treat overdoses"
+    ]
+  },
+  {
+    "question": "Can a given genotype exhibit opposite fitness effects (beneficial and detrimental) within the same environment?",
+    "golden_answers": [
+      "A given genotype can be either beneficial or detrimental, even deleterious, depending on the environment in which an organism lives. This is known as antagonistic pleiotropy. Antagonistic pleiotropy can operate even within the same environment. For example, in Escherichia coli, certain mutations can exhibit beneficial, deleterious or neutral fitness effects at different growth rates. Also, antagonistic pleiotropy is involved in the evolution of ageing, since a certain genotype may affect late- and early-life fitness in opposite directions."
+    ]
+  },
+  {
+    "question": "Which microRNAs are involved in targeting CYLD in triple negative breast cancer?",
+    "golden_answers": [
+      "Mir-182 and miR-301b are involved in targeting CYLD in triple negative breast cancer."
+    ]
+  },
+  {
+    "question": "Is LPS a microbial product?",
+    "golden_answers": [
+      "Yes, the lipopolysaccharide (LPS) is a component of the bacterial cell wall."
+    ]
+  },
+  {
+    "question": "Which syndromes are caused by LAMA1 mutations?",
+    "golden_answers": [
+      "Poretti-Boltshauser and Joubert syndromes"
+    ]
+  },
+  {
+    "question": "What is ATAC-seq?",
+    "golden_answers": [
+      "The assay for transposase-accessible chromatin using sequencing (ATAC-seq) was recently established as a method to profile open chromatin, which overcomes the sample size limitations of the alternative methods DNase/MNase-seq."
+    ]
+  },
+  {
+    "question": "Which proteins induce inhibition of LINE-1 and Alu retrotransposition?",
+    "golden_answers": [
+      "It was demonstrated that antiretroviral restriction factors, human APOBEC3 proteins A to H, differentially inhibit LINE-1 and Alu retrotransposition. The same effect was shown to be induced by the Aicardi-Gouti\u00e8res syndrome gene product SAMHD1."
+    ]
+  },
+  {
+    "question": "Which gene is involved in CADASIL?",
+    "golden_answers": [
+      "Cerebral autosomal dominant arteriopathy with subcortical infarcts and leukoencephalopathy (CADASIL), the most common form of familial vascular dementia, is caused by mutations of the NOTCH3 gene."
+    ]
+  },
+  {
+    "question": "Which is the definition of pyknons in DNA?",
+    "golden_answers": [
+      "Pyknons are non-random sequence patterns significantly repeated throughout non-coding genomic DNA, which have additional nonoverlapping instances in the untranslated and protein-coding regions. They are found more frequently in the 3' untranslated regions of genes than in other regions of the human genome."
+    ]
+  },
+  {
+    "question": "How is ZP-PTH delivered to patients?",
+    "golden_answers": [
+      "ZP-PTH uses a  transdermal drug-coated microneedle patch system."
+    ]
+  },
+  {
+    "question": "Which company produces Glybera?",
+    "golden_answers": [
+      "Glybera is a product of Chiesi Pharma."
+    ]
+  },
+  {
+    "question": "List the cancers that are associated with SBLA syndrome.",
+    "golden_answers": [
+      "Li-Fraumeni syndrome is an autosomal dominant inherited disorder also known as the SBLA cancer syndrome (sarcoma, breast, leukemia, and adrenal). Li-Fraumeni syndrome (LFS) is characterized by a pleth"
+    ]
+  },
+  {
+    "question": "Is Vitamin D deficiency in pregnant women associated with gestational diabetes?",
+    "golden_answers": [
+      "Yes, there are multiple studies reporting an association between low VitD in pregnancy and impaired glucose tolerance, but it is not entirely clear if this translates directly to the increased risk of Gestational diabetes or via maternal obesity and/or genetic polymorphisms."
+    ]
+  },
+  {
+    "question": "Is NSD-1015 an inhibitor of Aromatic L-Amino Acid Decarboxylase?",
+    "golden_answers": [
+      "Yes, NSD-1015 is an ihnibitor of Aromatic L-Amino Decarboxylase."
+    ]
+  },
+  {
+    "question": "Are recessive coding variants responsible for the majority of undiagnosed nonconsanguineous individuals?",
+    "golden_answers": [
+      "No. It is suggested that recessive coding variants account for a small fraction of currently undiagnosed nonconsanguineous individuals, and that the role of noncoding variants, incomplete penetrance, and polygenic mechanisms need further exploration."
+    ]
+  },
+  {
+    "question": "Name synonym of Acrokeratosis paraneoplastica.",
+    "golden_answers": [
+      "Acrokeratosis paraneoplastic (Bazex syndrome) is a rare, but distinctive paraneoplastic dermatosis characterized by erythematosquamous lesions located at the acral sites and is most commonly associated with carcinomas of the upper aerodigestive tract."
+    ]
+  },
+  {
+    "question": "Describe symptoms of the Visual snow syndrome.",
+    "golden_answers": [
+      "Visual snow (VS) is a constant visual disturbance described as flickering dots occupying the entire visual field. Recently, it was characterized as the defining feature of a VS syndrome (VSS), which includes palinopsia, photophobia, photopsias, entoptic phenomena, nyctalopia, and tinnitus."
+    ]
+  },
+  {
+    "question": "What is Invaplex 50?",
+    "golden_answers": [
+      "The Shigella flexneri Invaplex 50 is a macromolecular complex containing IpaB, IpaC, and LPS, formulated from an aqueous extract of virulent Shigella delivered via nasal administration. It is used against shigellosis, a leading cause of diarrhea worldwide. The Invaplex 50 nasal vaccine was safe with encouraging mucosal immune responses."
+    ]
+  },
+  {
+    "question": "What is the function of the protein encoded by PUMILIO1?",
+    "golden_answers": [
+      "Pumilio1 (Pum1) has been shown to play key roles in translational regulation of target mRNAs in many systems of diverse organisms."
+    ]
+  },
+  {
+    "question": "What is the mode of inheritance of Marchesani syndrome?",
+    "golden_answers": [
+      "Marchesani syndrome is transmitted either by an autosomal dominant (mutations in FBN1) or an autosomal recessive (mutations in ADAMTS10) mode of inheritance"
+    ]
+  },
+  {
+    "question": "What is Uhl's anomaly?",
+    "golden_answers": [
+      "uhl's anomaly is an extremely rare cardiac defect characterized by absence of the myocardium of the right ventricle."
+    ]
+  },
+  {
+    "question": "What is anophthalmia?",
+    "golden_answers": [
+      "Microphthalmia, anophthalmia are the malformations of the eye, referring to a congenital absence, and a reduced size of the eyeball."
+    ]
+  },
+  {
+    "question": "What is the applicability of the No Promoter Left Behind method?",
+    "golden_answers": [
+      "No Promoter Left Behind (NPLB) is an efficient, organism-independent method for characterizing promoter architectures directly from experimentally identified genome-wide TSSs, without relying on known promoter elements."
+    ]
+  },
+  {
+    "question": "What are the signatures of aggressive periodontitis?",
+    "golden_answers": [
+      "Aggressive periodontitis does not differ from chronic periodontitis from a microbial profile point of view but there are distinctive immunological signatures, including a higher expression in IgG against most periodontal pathogens and a more intense regulatory mechanism of metabolic processes."
+    ]
+  },
+  {
+    "question": "What is Hemophilic Pseudotumor?",
+    "golden_answers": [
+      "Hemophilic Pseudotumor is a rare complication of hemophilia. It  is an encapsulated haematoma in patients with haemophilia  which has a tendency to progress and produce clinical symptoms related to its anatomical location. The lesion most frequently occurs in the long bones, pelvis, small bones of the hands and feet, or rarely in the maxillofacial region."
+    ]
+  },
+  {
+    "question": "What is Genomicus?",
+    "golden_answers": [
+      "Genomicus had been developed as a database and a browser to study gene synteny in modern and ancestral genomes. It allows easy comparative genomic visualization in >150 eukaryote genomes and in four different phyla (Vertebrate, Fungi, Metazoan and Plants). It provides a way to explore spatial information related to gene organization within and between genomes and temporal relationships related to gene and genome evolution. For the specific vertebrate phylum, it also provides access to ancestral gene order reconstructions and conserved non-coding elements information. The graphical modules of Genomicus show how it is capable of revealing differential gene loss and gain, segmental or genome duplications and facilitate the study of the evolution of a locus through homology relationships. The Genomicus server provides access to ancestral gene orders, as well as computationally predicted regulatory interactions, thanks to the representation of conserved non-coding elements with their putative gene targets."
+    ]
+  },
+  {
+    "question": "What is Progeria?",
+    "golden_answers": [
+      "Hutchinson-Gilford progeria syndrome is a segmental premature aging disease causing patient death by early teenage years from cardiovascular dysfunction."
+    ]
+  },
+  {
+    "question": "What is the route of administration of eptinezumab?",
+    "golden_answers": [
+      "Eptinezumab is administered intravenously."
+    ]
+  },
+  {
+    "question": "What is known about the effect of acupuncture in smoking cessation ?",
+    "golden_answers": [
+      "Ear acupressure (EAP) and ear acupuncture have been used for smoking cessation, and some positive results have been reported.\nAuricular (ear) acupressure has been purported to be beneficial in achieving smoking cessation in some studies, while in others has been deemed insignificant.\nThe combined acupuncture-education group showing the greatest effect from treatment."
+    ]
+  },
+  {
+    "question": "Which enzyme is inhibited by a drug fostamatinib?",
+    "golden_answers": [
+      "Fostamatinib (R788) acts by inhibiting spleen tyrosine kinase. Fostamatinib (R788) is a prodrug rapidly converted to its active metabolite on oral administration. This (known as R406) is a potent inhibitor of spleen tyrosine kinase that is required for the expression of a number of proinflammatory cytokines. Fostamatinib has been shown to be effective in patients with rheumatoid arthritis, leukemia, lymphoma, bronchial asthma and thrombocytopenic purpura."
+    ]
+  },
+  {
+    "question": "Which hormone deficiency is implicated in the Costello syndrome ?",
+    "golden_answers": [
+      "Growth hormone deficiency is implicated in Costello syndrome. Growth hormone therapy should be administered with caution due to possible severe side effects. Cortisol and sex hormone deficiencies were also implicated in Costello syndrome."
+    ]
+  },
+  {
+    "question": "Can epigenetic modifications be heritable?",
+    "golden_answers": [
+      "Epigenetic alterations (epimutations) could thus contribute to heritable variation within populations and be subject to evolutionary processes such as natural selection and drift."
+    ]
+  },
+  {
+    "question": "What is Morton's Neuroma?",
+    "golden_answers": [
+      "Morton's neuroma (MN) is a neuralgia involving the common plantar digital nerves of the metatarsal region."
+    ]
+  },
+  {
+    "question": "Is apremilast effective for psoriasis?",
+    "golden_answers": [
+      "Yes, apremilast is effective for treatment of psoriasis."
+    ]
+  },
+  {
+    "question": "What is the biological role of SERCA2 SUMOylation in cardiac physiology and pathophysiology, such as in heart failure?",
+    "golden_answers": [
+      "Recently, the impact of small ubiquitin-related modifier 1 (SUMO-1) on the regulation and preservation of sarcoplasmic reticulum calcium adenosine triphosphatase (SERCA2a) function was discovered. The small ubiquitin-related modifier (SUMO) can be conjugated to lysine residues of target proteins, and is involved in many cellular processes. SERCA2a is SUMOylated at lysines 480 and 585 and this SUMOylation is essential for preserving SERCA2a ATPase activity and stability in mouse and human cells. The levels of SUMO1 and the SUMOylation of SERCA2a itself were greatly reduced in failing hearts. SUMO-1 gene transfer improved cardiac function supporting the critical role of SUMO-1 in SERCA2a function and underlining the therapeutic potential of SUMO-1 for HF patients."
+    ]
+  },
+  {
+    "question": "What is the function of the Mis18 protein?",
+    "golden_answers": [
+      "Kinetochores assemble on a specialized chromosomal locus termed the centromere, which is characterized by the replacement of histone H3 in centromeric nucleosomes with the essential histone H3 variant CENP-A (centromere protein A). The Mis18 complex has been identified as a critical factor for the centromeric localization of a histone H3 variant, centromeric protein A (CENP-A), which is responsible for the specification of centromere identity in the chromosome. Further, we demonstrate Mis18\u00ce\u00b1's crucial role for epigenetic regulation of centromeric chromatin by reinforcing centromeric localization of DNMT3A/3B. Mis18\u00ce\u00b1 interacts with DNMT3A/3B, and this interaction is critical for maintaining DNA methylation and hence regulating epigenetic states of centromeric chromatin. Together, our findings uncover the functional mechanism of Mis18\u00ce\u00b1 and its pivotal role in mammalian cell cycle. The Mis18 complex is a critical player in determining when and where centromeres are built."
+    ]
+  },
+  {
+    "question": "Summarize Fanconi's anemia",
+    "golden_answers": [
+      "Fanconi anemia (FA) is a rare autosomal or X-linked genetic disorder characterized by chromosomal breakages, congenital abnormalities, bone marrow failure (BMF), and cancer."
+    ]
+  },
+  {
+    "question": "What is the nucleotide composition of the Lamin Associated Domains (LADs)?",
+    "golden_answers": [
+      "Instead, cLADs are universally characterized by long stretches of DNA of high A/T content. This suggests that the A/T rule represents a default positioning mechanism that is locally overruled during lineage commitment."
+    ]
+  },
+  {
+    "question": "Which are the supplemental antioxidant in athletes?",
+    "golden_answers": [
+      "There are several antioxidant supplements belonging to different families, i.e. Vitamins, Polyphenols, alpha-lipoic acid, ubiquinones, n-3- polyunsaturated acids (PUFAs), minerals and others. Nonetheless the widespread use of these supplements, it is still debated their true usefulness, and it is not unanimously advised their use in athletes."
+    ]
+  },
+  {
+    "question": "Which disease is Dasatinib used to treat?",
+    "golden_answers": [
+      "Patients with chronic myeloid leukemia"
+    ]
+  },
+  {
+    "question": "Is there an association between TERT promoter mutation and survival of glioblastoma patients?",
+    "golden_answers": [
+      "Telomerase reverse transcriptase (TERT) promoter are associated with shorter survival of glioblastoma patients. Prognostic value of TERT mutations for poor survival is largely due to their inverse correlation with IDH1 mutations."
+    ]
+  },
+  {
+    "question": "Are gut microbiota profiles altered by irradiation?",
+    "golden_answers": [
+      "Yes, \tIrradiation profoundly impacted gut microbiota profiles"
+    ]
+  },
+  {
+    "question": "What is the drug chloroquine or hydroxychloroquine used for?",
+    "golden_answers": [
+      "Chloroquine (CQ) has been used for decades as the primary chemotherapeutic drug for the treatment of malaria.\nHydroxychloroquine (HCQ), a 4-aminoquinolone antimalarial, is regarded as the oral therapy of choice for cutaneous and systemic lupus erythematosus (SLE). It is also licensed for rheumatoid arthritis (RA).\nChloroquine is a potent inhibitor of SARS coronavirus infection and spread."
+    ]
+  },
+  {
+    "question": "Which enzymes are inhibited by Duvelisib?",
+    "golden_answers": [
+      "Duvelisib is an oral dual inhibitor of phosphoinositide 3-kinase-\u03b4 (PI3K-\u03b4) and PI3K-\u03b3 in late-stage clinical development for hematologic malignancy treatment."
+    ]
+  },
+  {
+    "question": "What is the normal function p53?",
+    "golden_answers": [
+      "Wild-type p53 can suppress tumour development by multiple pathways."
+    ]
+  },
+  {
+    "question": "Which human tissue synthesize CRP?",
+    "golden_answers": [
+      "CRP is predominantly produced in the liver in a native pentameric form (nCRP)."
+    ]
+  },
+  {
+    "question": "Which models are used for predicting disease progression in Duchenne Muscular Dystrophy?",
+    "golden_answers": [
+      "Longitudinal changes in biomarkers were modeled with a cumulative distribution function using a nonlinear mixed-effects approach."
+    ]
+  },
+  {
+    "question": "What is bb21217?",
+    "golden_answers": [
+      "BB21217 is a chimeric antigen receptor (CAR)-modified T-cell therapy used to target B-cell maturation antigen (BCMA) in the treatment of multiple myeloma."
+    ]
+  },
+  {
+    "question": "Are there any R packages that help with visualizing data on spirals?",
+    "golden_answers": [
+      "Yes. Spiralize is an R package for visualizing data on spirals."
+    ]
+  },
+  {
+    "question": "What is chemokinesis?",
+    "golden_answers": [
+      "Chemokinesis is chemically prompted kinesis, a motile response of unicellular prokaryotic or eukaryotic organisms to chemicals that cause the cell to make some kind of change in their migratory/swimming behaviour."
+    ]
+  },
+  {
+    "question": "List search engines used in proteomics.",
+    "golden_answers": [
+      "Mascot\nX!Tandem\nMS-GF\nMS Amanda \nMyriMatch\nComet\nTide\nAndromeda\nOMSSA"
+    ]
+  },
+  {
+    "question": "Which company sells the drug Afrezza since 2015?",
+    "golden_answers": [
+      "Afrezza has been marketed by Sanofi since February 2015."
+    ]
+  },
+  {
+    "question": "List the endoscopic diagnoses that have been reported in children with autism",
+    "golden_answers": [
+      "Endoscopic examinations in autistic children have been reported to show : I or II reflux esophagitis,  Achalasia, chronic gastritis and chronic duodenitis,  mild acute and chronic inflammation of the small bowel and colorectum and Ileo-colonic lymphoid nodular hyperplasia (LNH).  \nThe number of Paneth's cells in the duodenal crypts was found to be significantly elevated in autistic children compared with non-autistic control subjects. Low intestinal carbohydrate digestive enzyme activity was reported although there was no abnormality found in pancreatic function. Autistic children have ben reported to have an increased pancreatico-biliary fluid output after intravenous secretin administration."
+    ]
+  },
+  {
+    "question": "How are triple negative gliomas characterized?",
+    "golden_answers": [
+      "of these markers - 1p/19q deletions , mgmt methylation status , and mutations in the idh1 gene - are so potent that a new brain tumor subtype , the \"triple negative\" glioma (1p/19q intact , mgmt unmethylated , idh1 non-mutated) has entered common parlance . "
+    ]
+  },
+  {
+    "question": "What is known about diseases associated with mutations in the CHCHD10 gene?",
+    "golden_answers": [
+      "Mutation c.197G>T p.G66V in CHCHD10 is the cause of the lower motor neuron syndrome LOSMoN/SMAJ. \nMutations in the CHCHD10 gene have been identified in a large family with a complex phenotype variably associating frontotemporal dementia (FTD) with amyotrophic lateral sclerosis (ALS), cerebellar ataxia, myopathy, and hearing impairment.\nOther findings links CHCHD10 mutations to mitochondrial myopathy."
+    ]
+  },
+  {
+    "question": "What protein is recruited by Crumbs to regulate tracheal development?",
+    "golden_answers": [
+      "In Drosophila, stellate-shaped tracheal terminal cells make seamless tubes, Early endocytosis maintains normal steady-state levels of Crumbs, which recruits apical phosphorylated (active) Moesin (Moe), which in turn regulates seamless tube shape in the development of the trachea."
+    ]
+  },
+  {
+    "question": "Which proteins are involved in actin bundling and filopodia formation and function?",
+    "golden_answers": [
+      "A number of proteins have been found to regulate F-actin bundling and enhance filopodia formation and motility. Among these are Cysteine-rich protein 1 (CRP1), Fascin, Macrophage actin-associated tyrosine phosphorylated protein (MAYP/PSTPIP2), Insulin receptor tyrosine kinase substrate p53 (IRSp53), Missing in metastasis protein (MIM), Eps8, Diaphanous-related formin (dDia2) and Vasodilator-stimulated phosphoprotein (VASP)."
+    ]
+  },
+  {
+    "question": "Which is the major phytoalexin in alfalfa (Medicago sativa L.)?",
+    "golden_answers": [
+      "The major phytoalexin in alfalfa (Medicago sativa L.) is the isoflavonoid (-)-medicarpin (or 6aR, 11aR)-medicarpin. Medicarpin is synthesized via the isoflavonoid branch of phenylpropanoid metabolism."
+    ]
+  },
+  {
+    "question": "Symptoms of which disorder are evaluated with the Davidson Trauma Scale?",
+    "golden_answers": [
+      "Davidson Trauma Scale is used for evaluation of post-traumatic stress disorder."
+    ]
+  },
+  {
+    "question": "What are the functions of sorting nexin 27?",
+    "golden_answers": [
+      "Sorting nexin 27 (SNX27) regulates endocytic sorting/recycling and intracellular trafficking of ion channels and receptors."
+    ]
+  },
+  {
+    "question": "Are ultraconserved elements depleted among copy number variants (CNVs)?",
+    "golden_answers": [
+      "Yes. Interestingly, human ultraconserved elements (UCEs) have been reported to be strongly depleted among segmental duplications and benign copy number variants (CNVs). These elements may be interpreted as hallmarks for dose-sensitive genes, particularly for those genes whose gain or loss may be directly implied in neurodevelopmental disorders. Therefore, their presence in genomic imbalances of unknown effect might be suggestive of a clinically relevant condition"
+    ]
+  },
+  {
+    "question": "Which are the main G1/S transcription factors in yeast?",
+    "golden_answers": [
+      "MBF/SBF is the major transcriptional repressor of G1/S genes in Saccharomyces cerevisiae."
+    ]
+  },
+  {
+    "question": "Which maternal CYP2D6 related phenotype may expose their infants to risk of adverse events when taking codeine while breastfeeding?",
+    "golden_answers": [
+      "Mothers with a CYP2D6 ultrarapid metabolizer phenotype may expose their infants to risk of adverse events when taking codeine while breastfeeding, by producing more of the active metabolite, morphine."
+    ]
+  },
+  {
+    "question": "Which gene is responsible for proper speech development?",
+    "golden_answers": [
+      "Transcription factor forkhead box protein P2 (FOXP2) plays an essential role in the development of language and speech."
+    ]
+  },
+  {
+    "question": "Is tretinoin effective for photoaging?",
+    "golden_answers": [
+      "Yes, Tretinoin is commonly used topically in the treatment of photoaging."
+    ]
+  },
+  {
+    "question": "How does long-range epigenetic silencing (LRES) occur?",
+    "golden_answers": [
+      "Long Range Epigenetic Silencing (LRES) is a mechanism of gene inactivation that affects multiple contiguous CpG islands and has been described in different human cancer types."
+    ]
+  },
+  {
+    "question": "Does clinical trial data support the use of minocycline for amyotrophic lateral sclerosis?",
+    "golden_answers": [
+      "No. Available clinical trial data suggest that minocycline does not improve prognosis and functional status, and has a harmful effect on patients with amyotrophic lateral sclerosis."
+    ]
+  },
+  {
+    "question": "Is there any role of the 'Greek islands' in olfactory receptor choice?",
+    "golden_answers": [
+      "Yes. 'Greek islands' first contribute to the formation of olfactory receptor compartments and then form a multi-chromosomal super-enhancer that associates with the single active olfactory receptor gene. The Greek-island-bound transcription factor LHX2 and adaptor protein LDB1 regulate the assembly and maintenance of olfactory receptor compartments, Greek island hubs and olfactory receptor transcription, providing mechanistic insights into and functional support for the role of trans interactions in gene expression."
+    ]
+  },
+  {
+    "question": "Which type of myeloma is ixazomib being evaluated for?",
+    "golden_answers": [
+      "The disease focus for the  irreversible epoxyketone proteasome inhibitor ixazomib is multiple myeloma."
+    ]
+  },
+  {
+    "question": "Are there web based self management strategies for chronic pain ?",
+    "golden_answers": [
+      "Results suggest the potential value of self-management for chronic pain patients and the potential acceptability of web-based delivery of intervention content.  "
+    ]
+  },
+  {
+    "question": "Which receptor is targeted by Erenumab?",
+    "golden_answers": [
+      "Erenumab is a human monoclonal antibody that inhibits the calcitonin gene-related peptide receptor, is being evaluated for migraine prevention."
+    ]
+  },
+  {
+    "question": "What does bDMARD stand for?",
+    "golden_answers": [
+      "bDMARDs are biologic disease-modifying antirheumatic drugs."
+    ]
+  },
+  {
+    "question": "How does adrenergic signaling affect thyroid hormone receptors?",
+    "golden_answers": [
+      "alpha1- adrenergic signalling  increases  TRalpha1 expression in nucleus and  decreases  TRalpha1 expression in cytosol."
+    ]
+  }
+]

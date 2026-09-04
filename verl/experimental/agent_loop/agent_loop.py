@@ -590,10 +590,33 @@ class AgentLoopWorker:
         # - position_ids: sequential positions for tokens, starting at 0
         #   e.g., [0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,0,0,0,0]
 
+        prompt_ids = list(output.prompt_ids)
+        if len(prompt_ids) > self.rollout_config.prompt_length:
+            logger.warning(
+                "Prompt exceeded prompt_length and was truncated from %s to %s tokens",
+                len(prompt_ids),
+                self.rollout_config.prompt_length,
+            )
+            # Keep the most recent prompt context for tool-augmented multi-turn runs.
+            prompt_ids = prompt_ids[-self.rollout_config.prompt_length :]
+
+        response_ids = list(output.response_ids)
+        if len(response_ids) > self.rollout_config.response_length:
+            logger.warning(
+                "Response exceeded response_length and was truncated from %s to %s tokens",
+                len(response_ids),
+                self.rollout_config.response_length,
+            )
+            response_ids = response_ids[: self.rollout_config.response_length]
+
+        response_mask_ids = list(output.response_mask)
+        if len(response_mask_ids) > self.rollout_config.response_length:
+            response_mask_ids = response_mask_ids[: self.rollout_config.response_length]
+
         # TODO(wuxibin): remove padding and use tensordict.
         self.tokenizer.padding_side = "left"
         prompt_output = self.tokenizer.pad(
-            {"input_ids": output.prompt_ids},
+            {"input_ids": prompt_ids},
             padding="max_length",
             max_length=self.rollout_config.prompt_length,
             return_tensors="pt",
@@ -605,7 +628,7 @@ class AgentLoopWorker:
 
         self.tokenizer.padding_side = "right"
         response_output = self.tokenizer.pad(
-            {"input_ids": output.response_ids},
+            {"input_ids": response_ids},
             padding="max_length",
             max_length=self.rollout_config.response_length,
             return_tensors="pt",
@@ -616,7 +639,7 @@ class AgentLoopWorker:
             response_output["attention_mask"] = response_output["attention_mask"].unsqueeze(0)
 
         response_mask_output = self.tokenizer.pad(
-            {"input_ids": output.response_mask},
+            {"input_ids": response_mask_ids},
             padding="max_length",
             max_length=self.rollout_config.response_length,
             return_tensors="pt",
@@ -627,8 +650,9 @@ class AgentLoopWorker:
 
         response_logprobs = None
         if output.response_logprobs is not None:
-            pad_size = self.rollout_config.response_length - len(output.response_logprobs)
-            response_logprobs = torch.tensor(output.response_logprobs + [0.0] * pad_size).unsqueeze(0)
+            response_logprobs_list = list(output.response_logprobs)[: self.rollout_config.response_length]
+            pad_size = self.rollout_config.response_length - len(response_logprobs_list)
+            response_logprobs = torch.tensor(response_logprobs_list + [0.0] * pad_size).unsqueeze(0)
 
         response_mask = response_mask_output["input_ids"] * response_output["attention_mask"]
         attention_mask = torch.cat([prompt_output["attention_mask"], response_output["attention_mask"]], dim=1)

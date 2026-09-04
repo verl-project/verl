@@ -1,0 +1,56 @@
+{
+  "Student-checker+triage (s93)": {
+    "f1_mean": 0.2192642106263256,
+    "bert_agg": 0.593,
+    "rouge_agg": 0.1499,
+    "n": 87
+  },
+  "Student-explicit+triage (s188)": {
+    "f1_mean": 0.20520299140093215,
+    "bert_agg": 0.602,
+    "rouge_agg": 0.143,
+    "n": 87
+  },
+  "GPT-checker (guarded, s200)": {
+    "f1_mean": 0.20327160993471546,
+    "bert_agg": 0.6007,
+    "rouge_agg": 0.1413,
+    "n": 87
+  },
+  "Llama-checker (guarded, s200)": {
+    "f1_mean": 0.2181638488381395,
+    "bert_agg": 0.6002,
+    "rouge_agg": 0.1491,
+    "n": 87
+  },
+  "Student-checker (no triage,s93)": {
+    "f1_mean": 0.20999223118383825,
+    "bert_agg": 0.5946,
+    "rouge_agg": 0.1357,
+    "n": 87
+  },
+  "Hybrid+triage (s188)": {
+    "f1_mean": 0.20415296243457626,
+    "bert_agg": 0.5999,
+    "rouge_agg": 0.1389,
+    "n": 87
+  },
+  "GPT-checker (s377)": {
+    "f1_mean": 0.1676228209924494,
+    "bert_agg": 0.5314,
+    "rouge_agg": 0.1145,
+    "n": 87
+  },
+  "Search-only (no triage)": {
+    "f1_mean": 0.1903181211137842,
+    "bert_agg": 0.5366,
+    "rouge_agg": 0.1218,
+    "n": 87
+  },
+  "No-checker format-penalty (s200)": {
+    "f1_mean": 0.1740608527517279,
+    "bert_agg": 0.5041,
+    "rouge_agg": 0.1067,
+    "n": 87
+  }
+}
