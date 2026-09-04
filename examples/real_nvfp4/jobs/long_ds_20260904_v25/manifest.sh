@@ -144,7 +144,11 @@ rn4pt_validate_static() {
   grep -q 'readonly ROLLOUT_IS=${ROLLOUT_IS:-token}' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || \
     rn4pt_die "token-level TIS is no longer the default" || return
   # The user asked for the default verifier: no arm may pin strict Minerva.
-  if grep -rq 'VERL_MATH_DAPO_STRICT_MINERVA' "$RN4PT_BUNDLE"; then
+  # Scan only the files that can actually inject it -- scanning the whole bundle
+  # would match this check's own pattern.
+  if grep -q 'STRICT_MINERVA' \
+    "$RN4PT_BUNDLE/runtime_env_w4a4.yaml" "$RN4PT_BUNDLE/runtime_env_bf16.yaml" \
+    "$RN4PT_JOB_IMPL/train.job"; then
     rn4pt_die "this bundle must leave the verifier at its default" || return
   fi
   grep -q 'NVFP4_PER_TOKEN_METHOD = "nvfp4_per_token"' "$RN4PT_VERL/verl/utils/real_nvfp4/vllm_runtime.py" || \
