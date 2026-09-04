@@ -28,7 +28,7 @@ In this section, we will discuss how to tune the performance of all the stages i
 Rollout Generation Tuning
 --------------------------
 
-verl currently supports two rollout backends: vLLM and TGI (with SGLang support coming soon). 
+verl currently supports four rollout backends: vLLM, SGLang, TensorRT-LLM, and HF (``actor_rollout_ref.rollout.name``: ``vllm`` / ``sglang`` / ``trtllm`` / ``hf``). 
 
 Below are key factors for tuning vLLM-based rollout. Before tuning, we recommend setting ``actor_rollout_ref.rollout.disable_log_stats=False`` so that rollout statistics are logged.
 
