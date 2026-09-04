@@ -428,7 +428,8 @@ class _Gemma4Reconstructor(_AssistantReconstructor):
             if completed_body.startswith(thought_open):
                 assistant_text = completed_body
             elif reasoning or self.builder.chat_template_kwargs.get("enable_thinking", False):
-                assistant_text = thought_open + reasoning + thought_close + completed_body
+                reasoning_suffix = f"{reasoning}\n" if reasoning else ""
+                assistant_text = thought_open + reasoning_suffix + thought_close + completed_body
             else:
                 assistant_text = completed_body
         else:

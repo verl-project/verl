@@ -396,7 +396,7 @@ def test_glm_builder_preserves_nested_literal_think_tags():
         (
             True,
             {"role": "assistant", "thinking": "reason", "content": "done"},
-            "<|channel>thought\nreason<channel|>done<turn|>",
+            "<|channel>thought\nreason\n<channel|>done<turn|>",
         ),
         (
             True,
@@ -406,7 +406,7 @@ def test_glm_builder_preserves_nested_literal_think_tags():
                 "content": "",
                 "tool_calls": [{"type": "function", "function": {"name": "lookup", "arguments": {}}}],
             },
-            "<|channel>thought\ncall reason<channel|><|tool_call>call:lookup{}<tool_call|>",
+            "<|channel>thought\ncall reason\n<channel|><|tool_call>call:lookup{}<tool_call|>",
         ),
     ],
 )
@@ -417,6 +417,44 @@ def test_gemma4_builder_reconstructs_generation_scaffold(enable_thinking, messag
     assistant_ids = reconstruct_assistant_tokens(builder, message)
 
     assert assistant_ids == tokenizer.encode(expected_text, add_special_tokens=False)
+
+
+@pytest.mark.parametrize("with_tool_call", [False, True])
+def test_gemma4_builder_keeps_reasoning_aliases_equivalent(with_tool_call):
+    tokenizer = _Gemma4AssistantTokenizer()
+    builder = Gemma4ContinuousTokenBuilder(tokenizer, chat_template_kwargs={"enable_thinking": True})
+    outputs = {}
+    for field in ("thinking", "reasoning_content", "reasoning"):
+        message = {"role": "assistant", field: "call reason", "content": "" if with_tool_call else "done"}
+        if with_tool_call:
+            message["tool_calls"] = [{"type": "function", "function": {"name": "lookup", "arguments": {}}}]
+        outputs[field] = reconstruct_assistant_tokens(builder, message)
+
+    # With a tool call the template renders ``reasoning``/``reasoning_content``
+    # itself while the verl-only ``thinking`` alias falls back to the manual
+    # scaffold branch, so this pins the two branches against each other. Without
+    # a tool call the official history template omits reasoning entirely, so all
+    # three aliases share the manual branch and this only pins alias consistency.
+    assert outputs["reasoning_content"] == outputs["thinking"]
+    assert outputs["reasoning"] == outputs["thinking"]
+
+
+def test_gemma4_builder_does_not_add_trailing_newline_to_empty_reasoning():
+    tokenizer = _Gemma4AssistantTokenizer()
+    builder = Gemma4ContinuousTokenBuilder(tokenizer, chat_template_kwargs={"enable_thinking": True})
+    message = {
+        "role": "assistant",
+        "thinking": "",
+        "content": "",
+        "tool_calls": [{"type": "function", "function": {"name": "lookup", "arguments": {}}}],
+    }
+
+    assistant_ids = reconstruct_assistant_tokens(builder, message)
+
+    assert assistant_ids == tokenizer.encode(
+        "<|channel>thought\n<channel|><|tool_call>call:lookup{}<tool_call|>",
+        add_special_tokens=False,
+    )
 
 
 def test_gemma4_e4b_builder_uses_template_reasoning_without_duplicate_scaffold():

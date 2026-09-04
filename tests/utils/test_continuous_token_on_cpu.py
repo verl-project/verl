@@ -496,6 +496,13 @@ class _Gemma4AssistantTokenizer(_SpecialTokenTemplateTokenizer):
         for message in messages:
             role = "model" if message["role"] == "assistant" else message["role"]
             rendered += f"<|turn>{role}\n"
+            # Gemma4's published template reads ``reasoning``/``reasoning_content``
+            # (never ``thinking``) and only re-serializes them for tool calls, so a
+            # builder alias that the template ignores must fall back to the manual
+            # scaffold branch instead of this render.
+            reasoning = message.get("reasoning") or message.get("reasoning_content") or ""
+            if message.get("tool_calls") and reasoning:
+                rendered += f"<|channel>thought\n{reasoning}\n<channel|>"
             if message.get("tool_calls"):
                 rendered += "<|tool_call>call:lookup{}<tool_call|>"
             rendered += str(message.get("content") or "")
