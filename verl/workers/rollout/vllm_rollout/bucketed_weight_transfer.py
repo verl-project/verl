@@ -249,6 +249,14 @@ class BucketedWeightReceiver:
         zmq_handle: ZMQ IPC socket path (must match sender)
         device: Target device for received tensors
         use_shm: Use shared memory instead of CUDA IPC
+        overlap_bucket_processing: If True, ack each bucket as soon as the
+            shared transfer buffer is no longer referenced — before the bucket
+            is processed (e.g. online quantization + load_weights) — so the
+            sender can start filling the next bucket while the current one is
+            being processed. On the IPC path this stages one private copy of
+            the bucket (one extra bucket of device memory). Buckets that carry
+            raw IPC handles (oversized weights) always use the late ack,
+            because the sender may free the source tensor once acked.
     """
 
     def __init__(
@@ -256,10 +264,12 @@ class BucketedWeightReceiver:
         zmq_handle: str,
         device: torch.device,
         use_shm: bool = False,
+        overlap_bucket_processing: bool = False,
     ):
         self.zmq_handle = zmq_handle
         self.device = device
         self.use_shm = use_shm
+        self.overlap_bucket_processing = overlap_bucket_processing
 
         self.zmq_context = zmq.Context.instance()
         self.socket = None
@@ -270,6 +280,14 @@ class BucketedWeightReceiver:
         """
         Receive weights from sender and process each bucket via callback.
 
+        The ack sent back to the sender after each bucket means "the shared
+        transfer buffer may be overwritten": the sender waits for it before
+        filling the next bucket. With ``overlap_bucket_processing`` enabled,
+        the ack is sent as soon as every tensor of the bucket has been
+        materialized into private memory (independent device copies on the
+        shm path, a staged buffer copy on the IPC path), letting the sender
+        fill bucket i+1 while the callback is still processing bucket i.
+
         Args:
             on_bucket_received: Callback function(weights: list[(name, tensor)],
             is_last: bool) called per bucket. ``is_last`` marks the final bucket
@@ -277,33 +295,79 @@ class BucketedWeightReceiver:
             (e.g. vLLM ``add_lora``, which takes one adapter dict per call) can
             defer their finalization until the whole adapter has arrived.
         """
+        # Keep these names bound for the whole call so the finally block can
+        # always release them (see below).
+        staging = None
+        weights: list[tuple[str, torch.Tensor]] = []
+        tensor = None
+        src = None
         try:
             self._init_socket()
             self._init_buffer()
+            if self.overlap_bucket_processing and not self.use_shm:
+                # IPC path: received tensors are views into the sender's device
+                # buffer, so stage a private copy before releasing the buffer.
+                staging = torch.empty_like(self.buffer)
+                logger.info("BucketedWeightReceiver: overlap_bucket_processing enabled (early ack + staged bucket)")
 
             # receive bucket and update weights
             while True:
                 metadata = self.socket.recv_pyobj()
+                bucket_meta = metadata["bucket_meta"]
+                # Buckets that carry raw IPC handles (oversized weights) always
+                # use the late ack: the sender may free the source tensor once acked.
+                early_ack = self.overlap_bucket_processing and all(
+                    meta["handle"] is None for meta in bucket_meta.values()
+                )
                 weights, tensor = [], None
-                for name, meta in metadata["bucket_meta"].items():
+                src = self.buffer
+                acked = False
+                if early_ack and not self.use_shm:
+                    staging.copy_(self.buffer, non_blocking=True)
+                    # Wait for the copy to finish before acking: the sender starts
+                    # overwriting the shared buffer right after it gets the ack.
+                    get_torch_device().synchronize()
+                    self.socket.send(b"")
+                    acked = True
+                    src = staging
+                for name, meta in bucket_meta.items():
                     shape, dtype, offset, handle = meta["shape"], meta["dtype"], meta["offset"], meta["handle"]
                     if handle is not None:
                         tensor = rebuild_ipc(handle, self.device.index)
                         weights.append((name, tensor))
                         continue
                     size = dtype.itemsize * shape.numel()
-                    tensor = self.buffer[offset : offset + size].view(dtype=dtype).view(shape)
+                    tensor = src[offset : offset + size].view(dtype=dtype).view(shape)
                     if self.use_shm:
                         tensor = tensor.to(self.device)
                     weights.append((name, tensor))
+                if early_ack and self.use_shm:
+                    # All tensors above are independent device copies; the shm
+                    # buffer is no longer referenced once the copies complete.
+                    get_torch_device().synchronize()
+                    self.socket.send(b"")
+                    acked = True
                 is_last = metadata["is_last"]
                 on_bucket_received(weights, is_last)
                 get_torch_device().synchronize()
-                self.socket.send(b"")
-                del weights, tensor
+                if not acked:
+                    self.socket.send(b"")
+                # Release this bucket's references promptly: the next recv may
+                # block while the sender refills the shared buffer. Rebinding
+                # (rather than `del`) keeps the names bound for the finally.
+                weights, tensor = [], None
+                src = None
                 if is_last:
                     break
+            del staging
         finally:
+            # Drop every local reference to the shared buffer *before* cleanup:
+            # a lingering view keeps the shm memoryview exported, and
+            # _cleanup's shm.close() then raises BufferError — on the exception
+            # path that would mask the original exception (and skip unlink).
+            # (staging is a private device tensor, it never exports the shm
+            # buffer, so it does not need to be released here.)
+            del weights, tensor, src
             self._cleanup()
 
     def _init_socket(self):

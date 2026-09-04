@@ -238,7 +238,13 @@ class vLLMColocateWorkerExtension:
             # patch weight loader to support MoE model
             patch_vllm_moe_model_weight_loader(model)
 
-    def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
+    def update_weights_from_ipc(
+        self,
+        peft_config: dict = None,
+        base_sync_done=False,
+        use_shm: bool = False,
+        overlap_bucket_processing: bool = False,
+    ):
         """Update the weights of the rollout model."""
         from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
 
@@ -291,6 +297,7 @@ class vLLMColocateWorkerExtension:
             zmq_handle=self._get_zmq_handle(),
             device=self.device,
             use_shm=use_shm,
+            overlap_bucket_processing=overlap_bucket_processing,
         )
         # LoRA adapters need a single complete tensor dict per ``add_lora``, but
         # the bucketed transport may split one across buckets. Accumulate and

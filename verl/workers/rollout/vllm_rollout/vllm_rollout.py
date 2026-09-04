@@ -229,7 +229,11 @@ class ServerAdapter(BaseRollout):
         future = await self._execute_method(
             "update_weights_from_ipc",
             non_block=True,
-            kwargs={**kwargs, "use_shm": self.use_shm},
+            kwargs={
+                **kwargs,
+                "use_shm": self.use_shm,
+                "overlap_bucket_processing": self.config.checkpoint_engine.overlap_bucket_processing,
+            },
         )
 
         bucket_size_mb = self.config.checkpoint_engine.update_weights_bucket_megabytes
