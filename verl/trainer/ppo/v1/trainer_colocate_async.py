@@ -57,3 +57,5 @@ class PPOTrainerColocateAsync(PPOTrainer):
         self.checkpoint_manager.abort_replicas()
         # sleep all replicas to discard weights and kv cache
         self.checkpoint_manager.sleep_replicas()
+        if self.curr_step_profile:
+            self._stop_rollout_profiling()

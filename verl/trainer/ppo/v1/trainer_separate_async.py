@@ -295,6 +295,9 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         )
 
     def on_step_end(self):
+        if self.prev_step_profile:
+            self._stop_rollout_profiling()
+
         config = self.hybrid_rollout_config
         should_switch = False
         prepare_seconds = 0.0
