@@ -90,8 +90,20 @@ Usage Example
     # This will download and preprocess the GSM8K dataset into ~/data/gsm8k/ and add the "agent_name" field.
     python examples/data_preprocess/gsm8k_tool_agent_loop.py
 
-    # Start training with tool calls and enabled mlflow based trace helping to debug the rollout details
-    bash examples/sglang_multiturn/run_qwen2_5_3b_gsm8k_tool_agent_mlflow_fsdp.sh
+Prepare a tool YAML (see the Multi-turn doc above), then launch a current GRPO example with tool calling and MLflow tracing. For example:
+
+.. code-block:: bash
+
+    INFER_BACKEND=sglang bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh \
+        data.train_files=$HOME/data/gsm8k/train.parquet \
+        data.val_files=$HOME/data/gsm8k/test.parquet \
+        data.return_raw_chat=True \
+        actor_rollout_ref.rollout.multi_turn.enable=True \
+        actor_rollout_ref.rollout.multi_turn.tool_config_path=<path_to_your_tool_yaml> \
+        actor_rollout_ref.rollout.agent.default_agent_loop=tool_agent \
+        actor_rollout_ref.rollout.trace.backend=mlflow \
+        actor_rollout_ref.rollout.trace.token2text=True \
+        trainer.logger='["console","mlflow"]'
 
     # When training is done, start a mlflow server to view trace
     mlflow ui -h 0.0.0.0 -p 5000 --backend-store-uri sqlite:////tmp/mlruns.db
