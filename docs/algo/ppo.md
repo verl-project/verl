@@ -29,7 +29,7 @@ Most critic configs are similar to those of actors. Note that the critic model i
 
 ![image](https://github.com/user-attachments/assets/16aebad1-0da6-4eb3-806d-54a74e712c2d)
 
-- `data.train_batch_size`: The global batch size of prompts used to generate a set of sampled trajectories/rollouts. The number of responses/trajectories is `data.train_batch_size * actor_rollout.ref.rollout.n`
+- `data.train_batch_size`: The global batch size of prompts used to generate a set of sampled trajectories/rollouts. The number of responses/trajectories is `data.train_batch_size * actor_rollout_ref.rollout.n`
 
 - `actor_rollout_ref.actor.ppo_mini_batch_size`: The set of sampled trajectories is split into multiple mini-batches with batch_size=ppo_mini_batch_size for PPO actor updates. The ppo_mini_batch_size is a global size across all workers
 
@@ -41,7 +41,7 @@ Most critic configs are similar to those of actors. Note that the critic model i
 
 - `critic.ppo_epochs`: Number of epochs for PPO updates on one set of sampled trajectories for critic. Defaults to `actor_rollout_ref.actor.ppo_epochs`
 
-- `algorithm.gemma`: discount factor
+- `algorithm.gamma`: discount factor
 
 - `algorithm.lam`: The lambda term that trades off between bias and variance in the GAE estimator
 
