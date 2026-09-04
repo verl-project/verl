@@ -26,7 +26,10 @@ from megatron.core.config_logger import has_config_logger_enabled, log_config_to
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.packed_seq_params import PackedSeqParams
-from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
+from megatron.core.tensor_parallel.mappings import (
+    gather_from_sequence_parallel_region,
+    gather_from_tensor_model_parallel_region,
+)
 from megatron.core.utils import deprecate_inference_params
 from packaging import version
 from torch import Tensor
@@ -464,6 +467,28 @@ def _fused_GPTModel_forward(
     else:
         # When embeddings are tied, use the embedding weight
         output_weight = model.embedding.word_embeddings.weight
+
+    if labels is None:
+        # No labels means the caller just wants logits (e.g. a plain forward pass that
+        # doesn't go through the verl PPO log-prob/entropy code paths, such as MTP being
+        # disabled while other call sites still invoke the patched `forward` directly).
+        # `linear_cross_entropy` requires labels, so fall back to a plain logits
+        # projection instead of crashing on `labels.shape` inside the fused kernel.
+        # This mirrors the un-patched `GPTModel._postprocess` no-labels branch.
+        logits = torch.matmul(hidden_states, output_weight.t())
+
+        if runtime_gather_output is not None:
+            gather_output = runtime_gather_output
+        else:
+            gather_output = getattr(getattr(model, "output_layer", None), "gather_output", True)
+        if gather_output:
+            logits = gather_from_tensor_model_parallel_region(
+                logits, group=parallel_state.get_tensor_model_parallel_group()
+            )
+
+        # [s, b, v] => [b, s, v]
+        output.logits = logits.transpose(0, 1).contiguous()
+        return output
 
     logprobs, entropy = linear_cross_entropy(
         hidden_states,

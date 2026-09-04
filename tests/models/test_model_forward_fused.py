@@ -285,6 +285,107 @@ def test_output_processor_preserves_config_logger_payload(monkeypatch):
     assert logged["prefix"] == "input_and_logits"
 
 
+class _LegacyDecoder(torch.nn.Module):
+    def forward(self, *, hidden_states, **_kwargs):
+        return hidden_states
+
+
+def _new_legacy_fused_model(hidden_states, output_layer_weight, gather_output=True, sequence_parallel=False):
+    """Build a minimal object satisfying what `_fused_GPTModel_forward` touches."""
+    model = _new_uninitialized_model()
+    model.config = SimpleNamespace(sequence_parallel=sequence_parallel)
+    model.post_process = True
+    model.output_layer = _OutputLayer()
+    model.output_layer.weight = torch.nn.Parameter(output_layer_weight)
+    model.output_layer.gather_output = gather_output
+    model.decoder = _LegacyDecoder()
+
+    def preprocess(_self, **_kwargs):
+        return (hidden_states, None, None, None, None)
+
+    model._preprocess = MethodType(preprocess, model)
+    return model
+
+
+def test_fused_forward_without_labels_returns_logits_instead_of_crashing(monkeypatch):
+    """Regression test for https://github.com/verl-project/verl/issues/5273.
+
+    Previously, `_fused_GPTModel_forward` unconditionally called `linear_cross_entropy`
+    with `labels`, so a `labels=None` call (e.g. anything invoking the monkey-patched
+    `model.forward` directly, outside of `fused_forward_model`/`fused_forward_model_engine`)
+    crashed with `AttributeError: 'NoneType' object has no attribute 'shape'` inside
+    `verl/utils/kernel/linear_cross_entropy.py`. It must instead fall back to a plain
+    logits projection, mirroring the un-patched `GPTModel._postprocess` no-labels branch.
+    """
+    hidden_states = torch.arange(2 * 1 * 3, dtype=torch.float32).reshape(2, 1, 3)  # [s, b, h]
+    output_layer_weight = torch.eye(4, 3)  # [vocab, hidden]
+    model = _new_legacy_fused_model(hidden_states, output_layer_weight, gather_output=True)
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("linear_cross_entropy must not be called when labels is None")
+
+    gathered = {}
+
+    def fake_gather_tp(logits, group=None):
+        gathered["logits"] = logits
+        gathered["group"] = group
+        return logits
+
+    monkeypatch.setattr(mff, "linear_cross_entropy", fail_if_called)
+    monkeypatch.setattr(mff, "gather_from_tensor_model_parallel_region", fake_gather_tp)
+    monkeypatch.setattr(mff.parallel_state, "get_tensor_model_parallel_group", lambda: None)
+
+    output = mff._fused_GPTModel_forward(
+        model,
+        input_ids=torch.tensor([[1, 2]]),
+        position_ids=torch.tensor([[0, 1]]),
+        attention_mask=None,
+        labels=None,
+    )
+
+    expected_logits = torch.matmul(hidden_states, output_layer_weight.t()).transpose(0, 1).contiguous()
+    assert "logits" in gathered  # gather_output=True must trigger the TP all-gather
+    assert torch.equal(output.logits, expected_logits)
+    assert output.log_probs is None
+    assert output.entropy is None
+
+
+def test_fused_forward_with_labels_still_uses_kernel(monkeypatch):
+    """The labels-provided path must remain untouched by the labels=None guard."""
+    hidden_states = torch.arange(2 * 1 * 3, dtype=torch.float32).reshape(2, 1, 3)
+    output_layer_weight = torch.eye(4, 3)
+    model = _new_legacy_fused_model(hidden_states, output_layer_weight)
+    labels = torch.tensor([1, 2])
+
+    seen = {}
+
+    def fake_linear_cross_entropy(hidden, weight, labels_arg, temperature, reduction, group):
+        seen.update(hidden=hidden, weight=weight, labels=labels_arg, temperature=temperature)
+        return torch.zeros(hidden.shape[0]), torch.zeros(hidden.shape[0])
+
+    def fail_if_gathered(*_args, **_kwargs):
+        raise AssertionError("gather_from_tensor_model_parallel_region must not run on the labels path")
+
+    monkeypatch.setattr(mff, "linear_cross_entropy", fake_linear_cross_entropy)
+    monkeypatch.setattr(mff, "gather_from_tensor_model_parallel_region", fail_if_gathered)
+    monkeypatch.setattr(mff.parallel_state, "get_tensor_model_parallel_group", lambda: None)
+
+    output = mff._fused_GPTModel_forward(
+        model,
+        input_ids=torch.tensor([[1, 2]]),
+        position_ids=torch.tensor([[0, 1]]),
+        attention_mask=None,
+        labels=labels,
+        temperature=0.7,
+    )
+
+    assert seen["labels"] is labels
+    assert seen["temperature"] == pytest.approx(0.7)
+    assert output.log_probs is not None
+    assert output.entropy is not None
+    assert output.logits is None
+
+
 @pytest.mark.parametrize(
     ("sequence_parallel", "use_tied_weight"),
     [(True, True), (False, False)],
