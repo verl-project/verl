@@ -156,10 +156,10 @@ There are 3 arguments can be set for vllm backend `--tp-size`, `--n-logprobs` an
 
 We also provide a toy multi-node teacher server. You can start the main node using `start_server.sh` and start the slave nodes using `join_server.sh`. Still remember to set args in `join_server.sh`, especially the `$PROXY_IP` and `$PROXY_BACKEND_PORT` of main node.
 
-When training, student will automatically use the teacher's topk (n-logprobs) to set its own topk argument at line 83 of `recipe/gkd/megatron_kl_loss.py`, so you don't need to set student's topk argument.
+When training, student will automatically use the teacher's topk (n-logprobs) to set its own topk argument at line 83 of `recipe/gkd/megatron/megatron_kl_loss.py`, so you don't need to set student's topk argument.
 
 ```bash
-cd recipe/gkd/teacher
+cd recipe/gkd/megatron/teacher
 bash start_server.sh
 # Exports ports and launches proxy + worker (default vLLM backend)
 ```
@@ -173,8 +173,8 @@ telnet localhost 15555
 ### 7.2 Minimal Local (Megatron + vLLM) Run
 
 ```bash
-python3 -m recipe.gkd.main_gkd \
-  --config-path=recipe/gkd/config \
+python3 -m recipe.gkd.megatron.main_gkd \
+  --config-path=recipe/gkd/megatron/config \
   --config-name=on_policy_distill_trainer \
   actor_rollout_ref.model.path=/path/to/MODEL \
   data.train_files=/path/to/train.parquet \
@@ -199,7 +199,7 @@ See `run_moonlight_dsv3_training.sh` for a full script including:
 Submit (after adjusting paths):
 
 ```bash
-bash recipe/gkd/run_moonlight_dsv3_training.sh
+bash recipe/gkd/megatron/run_moonlight_dsv3_training.sh
 ```
 
 ## 8. Metrics & Monitoring
