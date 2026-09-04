@@ -234,7 +234,13 @@ def _context_parallel_layout(tf_config) -> str:
 
 
 def merge_router_topk_indices(
-    attention_mask, input_ids, mini_layer_topk_idx_list, tf_config, vp_rank=None, local_cp_size=None
+    attention_mask,
+    input_ids,
+    mini_layer_topk_idx_list,
+    tf_config,
+    vp_rank=None,
+    local_cp_size=None,
+    model=None,
 ):
     """
     Merge recorded router top-k indices across sequence-parallel ranks for all router instances,
@@ -250,13 +256,34 @@ def merge_router_topk_indices(
             the current micro-batch.
         vp_rank (Optional[int]): Virtual pipeline stage rank override. If None, the current VP rank from
             Megatron parallel state will be used.
+        model: The forwarded model chunk. When given, routes are collected from its own routers instead
+            of inferring their location in the process-global router registry.
 
     Returns:
         None: The function has side effects only; it appends a tensor of shape
         [1, dynamic_bs_all, layer_num, topk] to mini_layer_topk_idx_list.
     """
     with torch.no_grad():
-        router_instances_list = RouterReplayHelper.get_micro_batch_router_list(tf_config, vp_rank)
+        vp_rank = 0 if vp_rank is None else vp_rank
+        if model is not None:
+            router_instances_list = [router for _, router in iter_model_routers(model)]
+        else:
+            router_instances_list = RouterReplayHelper.get_micro_batch_router_list(tf_config, vp_rank)
+
+        recorded_local_positions = [
+            idx for idx, router in enumerate(router_instances_list) if router.recorded_topk_idx is not None
+        ]
+        missing = [idx for idx, router in enumerate(router_instances_list) if router.recorded_topk_idx is None]
+        if missing:
+            local_rank_info = get_current_rank_layer_info(tf_config, vp_rank)
+            raise RuntimeError(
+                "router replay RECORD did not capture all local routers: "
+                f"missing_local_positions={missing}, selected={len(router_instances_list)}, "
+                f"registry={len(RouterReplay.router_instances)}, "
+                f"recorded_local_positions={recorded_local_positions}, local_layer_range={local_rank_info}, "
+                f"pp_rank={mpu.get_pipeline_model_parallel_rank()}, vp_rank={vp_rank}"
+            )
+
         layers_topk_idx = []
         for router in router_instances_list:
             layers_topk_idx.append(router.recorded_topk_idx.to(torch.int16))  # dynamic_bs, topk
@@ -403,7 +430,11 @@ def set_router_replay_data(
     Returns:
         None: The function updates internal RouterReplay instances in-place.
     """
+    if layers_topk_idx is None:
+        raise RuntimeError("router_replay REPLAY requires routed_experts from the preceding RECORD forward.")
+
     with torch.no_grad():
+        vp_rank = 0 if vp_rank is None else vp_rank
         fp8 = tf_config.fp8
         use_fp8_padding = fp8 in ["e4m3", "hybrid"]
         cp_layout = _context_parallel_layout(tf_config)
@@ -680,9 +711,8 @@ class RouterReplayHelper:
         Return the list of RouterReplay instances corresponding to the current micro-batch and local
         (pp_rank, vp_stage) layer range.
 
-        When virtual pipeline (VPP) is enabled, the local range for the PP rank is expanded to include
-        all VP stages by multiplying the per-VP count by vp_size. The returned slice is taken from the
-        global RouterReplay.router_instances list.
+        The process-global registry may contain either every model router or only the current PP rank's
+        VP chunks. Use a global layer offset for the former and a cumulative local VP offset for the latter.
 
         Args:
             tf_config: Configuration object used to compute layer assignments.
@@ -691,19 +721,41 @@ class RouterReplayHelper:
         Returns:
             list: A contiguous sublist of RouterReplay.router_instances for the local layer range.
         """
-        vp_size = tf_config.virtual_pipeline_model_parallel_size
-        if vp_size is not None:
-            vp_rank = 0 if vp_rank is None else vp_rank
-            offset = 0
-            for pre_vp_stage in range(vp_size):
-                if pre_vp_stage == vp_rank:
-                    break
-                offset += get_moe_num_layers_to_build(tf_config, pre_vp_stage)
-        else:
-            offset = 0
+        vp_rank = 0 if vp_rank is None else vp_rank
+        local_rank_info = get_current_rank_layer_info(tf_config, vp_rank)
+        start, end = local_rank_info["start"], local_rank_info["end"]
+        global_offset = sum(1 for layer_idx in range(start) if is_moe_layer(tf_config, layer_idx))
+        num_layers_to_build = sum(1 for layer_idx in range(start, end) if is_moe_layer(tf_config, layer_idx))
 
-        num_layers_to_build = get_moe_num_layers_to_build(tf_config, vp_rank)
+        vp_size = tf_config.virtual_pipeline_model_parallel_size
+        if vp_size is None:
+            local_offset = 0
+            local_router_count = num_layers_to_build
+        else:
+            local_offset = sum(get_moe_num_layers_to_build(tf_config, stage) for stage in range(vp_rank))
+            local_router_count = sum(get_moe_num_layers_to_build(tf_config, stage) for stage in range(vp_size))
+
+        registry_size = len(RouterReplay.router_instances)
+        global_router_count = sum(1 for layer_idx in range(tf_config.num_layers) if is_moe_layer(tf_config, layer_idx))
+        if registry_size == local_router_count:
+            offset = local_offset
+        elif registry_size >= global_router_count:
+            offset = global_offset
+        else:
+            raise RuntimeError(
+                "cannot map router replay registry to the current PP/VPP stage: "
+                f"registry={registry_size}, local_pp_routers={local_router_count}, "
+                f"global_routers={global_router_count}, pp_rank={mpu.get_pipeline_model_parallel_rank()}, "
+                f"vp_rank={vp_rank}"
+            )
+
         router_instances_list = RouterReplay.router_instances[offset : offset + num_layers_to_build]
+        if len(router_instances_list) != num_layers_to_build:
+            raise RuntimeError(
+                "router replay registry does not contain the current PP/VPP stage: "
+                f"offset={offset}, expected={num_layers_to_build}, registry={registry_size}, "
+                f"pp_rank={mpu.get_pipeline_model_parallel_rank()}, vp_rank={vp_rank}"
+            )
         return router_instances_list
 
     @staticmethod
