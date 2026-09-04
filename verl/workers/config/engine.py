@@ -156,6 +156,7 @@ class McoreEngineConfig(EngineConfig):
         param_offload (bool): Whether to offload parameters to CPU.
         grad_offload (bool): Whether to offload gradients to CPU.
         optimizer_offload (bool): Whether to offload optimizer states to CPU.
+        deduplicate_param_offload (bool): Keep one host copy per dense/expert replica group.
         tensor_model_parallel_size (int): Tensor model parallel size.
         expert_model_parallel_size (int): Expert model parallel size for MoE models.
         expert_tensor_parallel_size (Optional[int]): Expert tensor parallel size for MoE models.
@@ -185,6 +186,7 @@ class McoreEngineConfig(EngineConfig):
     # sequence_parallel is not listed as a frozen field for auto-correction purpose
     _mutable_fields = EngineConfig._mutable_fields | {"sequence_parallel"}
     # mcore parallelism
+    deduplicate_param_offload: bool = False
     tensor_model_parallel_size: int = 1
     expert_model_parallel_size: int = 1
     expert_tensor_parallel_size: Optional[int] = None
@@ -219,6 +221,10 @@ class McoreEngineConfig(EngineConfig):
         """config validation logics go here"""
         assert self.strategy == "megatron"
         assert self.dtype in ["bfloat16", "float16"], f"dtype {self.dtype} not supported"
+        if self.deduplicate_param_offload and not self.param_offload:
+            raise ValueError("deduplicate_param_offload requires param_offload=True")
+        if self.deduplicate_param_offload and self.use_megatron_fsdp:
+            raise ValueError("deduplicate_param_offload is not supported with use_megatron_fsdp=True")
         if self.vanilla_mbridge:
             warnings.warn(
                 "The legacy mbridge backend selected by `vanilla_mbridge=True` is deprecated and will be removed "
