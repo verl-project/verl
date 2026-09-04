@@ -127,6 +127,53 @@ def test_gather_slot_entries_sub_rounds_world1():
             dist.destroy_process_group()
 
 
+def test_exact_length_gather_posts_only_matching_nonempty_peers(monkeypatch):
+    """The P2P plan must use the shared count matrix verbatim on both sides."""
+    import torch.distributed as dist
+
+    from verl.checkpoint_engine.delta_sync.sparse_gather import _gather_p2p
+
+    posted = []
+    waited = []
+
+    class Work:
+        def wait(self):
+            waited.append(True)
+
+    def fake_op(fn, tensor, peer, group):
+        op = (fn, tensor.numel(), peer, group)
+        posted.append(op)
+        return op
+
+    monkeypatch.setattr(dist, "P2POp", fake_op)
+    monkeypatch.setattr(dist, "irecv", object())
+    monkeypatch.setattr(dist, "isend", object())
+    monkeypatch.setattr(dist, "get_global_rank", lambda _group, rank: rank + 10)
+    monkeypatch.setattr(dist, "batch_isend_irecv", lambda ops: [Work() for _ in ops])
+
+    group = object()
+    idx = torch.tensor([3, 8], dtype=torch.int32)
+    val = torch.tensor([1.0, 2.0])
+    totals = [2, 0, 3]
+
+    idx_list, val_list = _gather_p2p(idx, val, totals, 3, 0, 10, group, idx.device)
+    assert [x.numel() for x in idx_list] == totals
+    assert [x.numel() for x in val_list] == totals
+    assert [(n, peer) for _fn, n, peer, _group in posted] == [(3, 12), (3, 12)]
+    assert len(waited) == 2
+
+    posted.clear()
+    waited.clear()
+    assert _gather_p2p(idx, val, totals, 3, 1, 10, group, idx.device) == (None, None)
+    assert posted == [] and waited == []
+
+    sender_idx = torch.tensor([3, 8, 13], dtype=torch.int32)
+    sender_val = torch.tensor([1.0, 2.0, 3.0])
+    assert _gather_p2p(sender_idx, sender_val, totals, 3, 2, 10, group, idx.device) == (None, None)
+    assert [(n, peer) for _fn, n, peer, _group in posted] == [(3, 10), (3, 10)]
+    assert len(waited) == 2
+
+
 def test_prime_then_hf_delta_export_roundtrip():
     """The backend-side default delta strategy: prime_delta_snapshots pins the
     shards; a later pass through hf_delta_export yields a final-HF-coordinate

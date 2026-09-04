@@ -432,3 +432,201 @@ def mcore_hf_delta_entry(rec: McoreParamExport, _place, lidx: torch.Tensor, lval
         hf_idx = torch.empty(0, dtype=torch.int32, device=lval.device)
         hf_val = torch.empty(0, dtype=lval.dtype, device=lval.device)
     return slots, dtype_str, counts, hf_idx, hf_val
+
+
+def quant_shard_stream(engine, quant_spec):
+    """Quant-domain shard exporter with the SAME contract as
+    ``get_per_tensor_param_shard``: yields ``(name, local_flat, ShardSpec)``
+    triples that the GENERIC ``hf_delta_export`` / ``prime_delta_snapshots``
+    machinery consumes -- the quant path and the bf16 path share one diff
+    implementation by construction.
+
+    Per export-index record: run the comm-stubbed probe on the FULL local
+    shard, batch every quantizable slot's partial absmax grid into ONE
+    all_reduce over the record's merge group, quantize locally, and yield up
+    to three dtype-homogeneous groups (concatenated across the record's union
+    slots, zero-length segments for rows other ranks own -- lockstep by
+    construction):
+
+        ``{megatron_name}::c``  fp8 codes        (contributes: always)
+        ``{megatron_name}::s``  fp32 scale grids (contributes: group rank 0)
+        ``{megatron_name}::b``  bf16 passthrough (contributes: always)
+
+    Slot metadata for the entry builder is registered on
+    ``engine._quant_group_meta[name]`` as ``(slots, sizes)``.
+    """
+    import torch.distributed as dist
+
+    from megatron.core import parallel_state as mpu
+    from verl.utils.fp8_sharded import (
+        _ABSMAX_EPS,
+        local_blockwise_absmax,
+        quantize_shard_with_descale,
+        sticky_ue8m0_descale,
+    )
+    from verl.utils.kernel.fp8_kernel import FP8_DTYPE, FP8_MAX, ceil_div
+
+    helper_should_quantize = quant_spec.should_quantize
+    # Seed and steady MUST agree on the dialect AND the ckpt-scale preference:
+    # they write the same tensors on alternating syncs, and the delta only
+    # resends changed positions, so any split leaves the other rule's stale
+    # scales in place forever.
+    scale_fmt = getattr(quant_spec, "scale_fmt", None)
+    ckpt_scales = getattr(quant_spec, "ckpt_scales", None)
+    fp32_pred = getattr(quant_spec, "fp32_predicate", None)
+    block = list(quant_spec.weight_block_size)
+    bm, bn = int(block[0]), int(block[1])
+    index = engine._mcore_export_index()
+    slot_cache = engine._delta_slot_cache
+    meta = engine._quant_group_meta = getattr(engine, "_quant_group_meta", {})
+
+    for rec in index:
+        if rec.probe is None:
+            outs = {}
+            dev = torch.device(torch.cuda.current_device()) if torch.cuda.is_available() else torch.device("cpu")
+        else:
+            # DSv4's fp32 special parameters must retain their mantissa through
+            # the HF mapping transform. Quantized and bf16 parameters are cast
+            # at their own group sites below.
+            src = rec.param.data
+            if src.dtype != torch.float32:
+                src = src.to(torch.bfloat16)
+            outs = rec.probe.megatron_to_hf(src, rec.module)
+            dev = rec.param.device
+        pg = rec.spec.gather_group
+        group_rank = dist.get_rank(pg) if pg is not None else dist.get_rank()
+        slots = rec.slots if rec.slots is not None else slot_cache.get(rec.megatron_name)
+        if slots is None:
+            slots = [(n, tuple(int(x) for x in t.shape)) for n, t in outs.items()]
+            slot_cache[rec.megatron_name] = slots
+
+        quantizable = [
+            (sname, sshape)
+            for sname, sshape in slots
+            if len(sshape) == 2 and helper_should_quantize(sname)
+        ]
+        # one absmax all_reduce per record: concatenated partial grids stay
+        # aligned because every rank walks the same union order; absent rows
+        # contribute zero partials without materializing shards.
+        grids = []
+        for sname, sshape in quantizable:
+            t = outs.get(sname)
+            if t is None:
+                g = torch.zeros(
+                    ceil_div(int(sshape[0]), bm), ceil_div(int(sshape[1]), bn), dtype=torch.float32, device=dev
+                )
+            else:
+                g = local_blockwise_absmax(t.to(torch.bfloat16), block, 0, tuple(sshape))
+            grids.append(g)
+        if grids and pg is not None:
+            flatg = torch.cat([g.reshape(-1) for g in grids])
+            dist.all_reduce(flatg, op=dist.ReduceOp.MAX, group=pg)
+            off = 0
+            for i2, g in enumerate(grids):
+                n2 = g.numel()
+                grids[i2] = flatg[off : off + n2].view_as(g)
+                off += n2
+
+        # Deduplicate replicated parameters before transfer using the same
+        # ownership rule as the bf16 path. Scale grids are emitted by group
+        # rank zero; codes and passthrough values follow model ownership.
+        _tp_world = torch.distributed.get_world_size(group=mpu.get_tensor_model_parallel_group())
+        _ep_size = mpu.get_expert_model_parallel_world_size()
+        _is_expert = ".experts." in rec.megatron_name and (_ep_size > 1 or _tp_world > 1)
+        _is_tp_sharded = (
+            rec.param is not None
+            and getattr(rec.param, "tensor_model_parallel", False)
+            and _tp_world > 1
+        )
+        if _is_expert:
+            owns_replica = mpu.get_expert_data_parallel_rank() == 0
+        elif _is_tp_sharded:
+            owns_replica = mpu.get_data_parallel_rank(with_context_parallel=True) == 0
+        else:
+            owns_replica = (
+                mpu.get_tensor_model_parallel_rank() == 0
+                and mpu.get_data_parallel_rank(with_context_parallel=True) == 0
+            )
+        groups = {
+            "c": {"slots": [], "pieces": [], "dtype": FP8_DTYPE, "contributes": owns_replica},
+            "s": {"slots": [], "pieces": [], "dtype": torch.float32, "contributes": group_rank == 0},
+            "b": {"slots": [], "pieces": [], "dtype": torch.bfloat16, "contributes": owns_replica},
+            "f": {"slots": [], "pieces": [], "dtype": torch.float32, "contributes": owns_replica},
+        }
+        qi = 0
+        for sname, sshape in slots:
+            t = outs.get(sname)
+            if len(sshape) == 2 and helper_should_quantize(sname):
+                if scale_fmt == "ue8m0":
+                    descale = sticky_ue8m0_descale(grids[qi], ckpt_scales.get(sname) if ckpt_scales else None)
+                else:
+                    descale = grids[qi].clamp(min=_ABSMAX_EPS) / FP8_MAX
+                qi += 1
+                if t is not None:
+                    codes = quantize_shard_with_descale(t.to(torch.bfloat16), descale, block, 0)
+                else:
+                    codes = torch.empty(0, dtype=FP8_DTYPE, device=dev)
+                groups["c"]["slots"].append((sname, tuple(sshape)))
+                groups["c"]["pieces"].append(codes.reshape(-1))
+                groups["s"]["slots"].append((sname + "_scale_inv", tuple(descale.shape)))
+                groups["s"]["pieces"].append(descale.reshape(-1))
+            elif fp32_pred is not None and fp32_pred(sname):
+                # fp32 passthrough group: same fidelity rule as the seed wire --
+                # DSv4's special params are fp32 on disk and in the serving
+                # engine; folding them to bf16 costs 16 mantissa bits every
+                # time they change. Routed by the CHECKPOINT-derived predicate,
+                # never by the local tensor's presence or dtype: group slot
+                # layouts must be identical on every rank, and non-owner ranks
+                # see t is None here.
+                flat = (
+                    t.to(torch.float32).reshape(-1)
+                    if t is not None
+                    else torch.empty(0, dtype=torch.float32, device=dev)
+                )
+                groups["f"]["slots"].append((sname, tuple(sshape)))
+                groups["f"]["pieces"].append(flat)
+            else:
+                flat = (
+                    t.to(torch.bfloat16).reshape(-1)
+                    if t is not None
+                    else torch.empty(0, dtype=torch.bfloat16, device=dev)
+                )
+                groups["b"]["slots"].append((sname, tuple(sshape)))
+                groups["b"]["pieces"].append(flat)
+
+        for kind, g in groups.items():
+            if not g["slots"]:
+                continue
+            name = f"{rec.megatron_name}::{kind}"
+            sizes = [int(pc.numel()) for pc in g["pieces"]]
+            meta[name] = (g["slots"], sizes, str(g["dtype"]).replace("torch.", ""))
+            flat = (
+                torch.cat(g["pieces"])
+                if g["pieces"]
+                else torch.empty(0, dtype=g["dtype"], device=dev)
+            )
+            spec = ShardSpec(
+                full_shape=(int(flat.numel()),),
+                place=0,
+                contributes=g["contributes"],
+                gather_group=pg,
+            )
+            yield name, flat, spec
+
+
+def quant_delta_entry(engine):
+    """Entry builder for the quant shard stream, closed over the engine's group
+    metadata: splits the concatenated group's delta positions back into
+    per-slot counts and slot-local indices -- the exact wire entry shape the
+    bf16 path produces."""
+
+    def _entry(name, spec, place, lidx, lval):
+        slots, sizes, dtype_str = engine._quant_group_meta[name]
+        bounds = torch.tensor(sizes, device=lidx.device).cumsum(0)
+        seg = torch.searchsorted(bounds, lidx, right=True)
+        counts = torch.bincount(seg, minlength=len(sizes)).to("cpu")
+        offsets = torch.cat([torch.zeros(1, dtype=bounds.dtype, device=lidx.device), bounds[:-1]])
+        local_idx = (lidx - offsets[seg]).to(torch.int32)
+        return (slots, dtype_str, counts, local_idx, lval)
+
+    return _entry

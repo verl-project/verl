@@ -357,7 +357,25 @@ class ServerAdapter(BaseRollout):
                 await self._engine.load_lora_adapter_from_tensor(req)
         else:
             update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
-            if self.config.get("quantization", None) == "fp8":
+            # Serialized DSv4 FP8 checkpoints need their native ue8m0
+            # conversion even when rollout.quantization is not set.
+            from verl.utils.sglang.sglang_fp8_utils import named_tensors_quant_mode
+
+            quant_mode = named_tensors_quant_mode(
+                self.config.get("quantization", None), self.model_config.hf_config
+            )
+            if quant_mode == "dsv4":
+                # DSv4 ships a serialized fp8(ue8m0) ckpt with native naming;
+                # quantize by the ckpt's own manifest instead of name rules.
+                from verl.utils.sglang.sglang_fp8_utils import DeepseekV4FP8QuantizerHelper
+
+                logger.info("Convert bf16 weights to DSv4-native fp8(ue8m0) before loading")
+                fp8_quantizer_helper = DeepseekV4FP8QuantizerHelper(
+                    self.model_config.hf_config.quantization_config,
+                    self.model_config.local_path,
+                )
+                weights = fp8_quantizer_helper.quant_weights_by_name(weights)
+            elif quant_mode == "generic":
                 from verl.utils.sglang.sglang_fp8_utils import SGLangFP8QuantizerHelper
 
                 logger.info("Convert bf16 weights to fp8 format before loading")
@@ -366,9 +384,6 @@ class ServerAdapter(BaseRollout):
                     weights,
                     dtype=self.model_config.hf_config.dtype,
                 )
-            else:
-                weights = weights
-
             fusion_groups = (
                 DEEPSEEK_V4_FUSION_GROUPS
                 if getattr(self.model_config.hf_config, "model_type", None) == "deepseek_v4"
