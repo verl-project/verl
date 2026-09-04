@@ -7,13 +7,13 @@ Last updated: 07/17/2025.
    [status: alpha]
 
 .. warning::
-   Agent Loop is ready for use, but the API may change in future releaes.
+   Agent Loop is ready for use, but the API may change in future releases.
 
 Agent Loop is designed as general interface for multi-turn rollout and agentic reinforcement learning.
 
 **Design goal**:
 
-- Plugable user defined agent loop
+- Pluggable user defined agent loop
 - Provide standard request generate api with different inference frameworks
 - Provide request level load balance between multiple inference servers
 

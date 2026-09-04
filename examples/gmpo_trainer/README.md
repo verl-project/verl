@@ -3,7 +3,7 @@
 # Geometric-Mean Policy Optimization
 </div>
 
-This is the official implementaion of paper [***Geometric-Mean Policy Optimization***](https://arxiv.org/abs/2507.20673).
+This is the official implementation of paper [***Geometric-Mean Policy Optimization***](https://arxiv.org/abs/2507.20673).
 
 <div align=center>
 <img width="3092" height="864" alt="image" src="https://github.com/user-attachments/assets/20b04c4e-7ee8-4775-9af8-33c0158336e2" />

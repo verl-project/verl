@@ -7,7 +7,7 @@
 #         2. self build a verl docker image with vllm from source code with qwen3.5 support (main branch 20260225 is OK)
 #     I succeeded in running this script with the main branch of vllm on 20260225, yet there are still some minor issues
 #     the vllm qwen3.5 during initialization, need to be fixed. Also, the cuda_graph is somehow not working, need to be 
-#     fixed, either by verl team with supoorts to vllm0.16, or by vllm team.
+#     fixed, either by verl team with supports to vllm0.16, or by vllm team.
 # Requirements:
 #   - 8 GPUs (80GB each, e.g. 1x8 H100/H200)
 #   - Additional packages on top of the base image:

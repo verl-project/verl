@@ -33,4 +33,4 @@ New added profiling tool shall reuse the current APIs as much as possible.
 3. The tool config should be implemented in `verl/utils/profiler/config.py`, inherit the `BaseConfig` class.
 4. Implement profiling tool initialization logic using configurations in `global_profiler.global_tool_config.[new tool]` and the results saving logics (can also save in role-level profile)
 5. For role function-level profiling, please follow the nsys profiler way in `nvtx_profiler.py`, implement a profiler class inherit `DistProfiler` and import new profiler in `verl/utils/profiler/__init__.py`
-6. Add unit test and examples for others to use in convinience.
+6. Add unit test and examples for others to use in convenience.

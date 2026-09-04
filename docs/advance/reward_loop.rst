@@ -33,7 +33,7 @@ Under the single_controller setup, actor rollout and reward computation can be a
 
 .. code:: python
 
-   # initalize rollout manager and async reward loop manager
+   # initialize rollout manager and async reward loop manager
    async_rollout_manager = AgentLoopManager(config)
    async_reward_manager = RewardLoopManager(config)
    # actor rollout using `async_rollout_manager`
@@ -126,7 +126,7 @@ The rewards can be categorized as follows:
             else:
                return await self.reward_manager.run_single(data)
 
-Each ``RewardLoopWorker`` will initalize one ``RewardManager``, splits the batch into individual data items and processes them in parallel using asynchronous tasks.
+Each ``RewardLoopWorker`` will initialize one ``RewardManager``, splits the batch into individual data items and processes them in parallel using asynchronous tasks.
 
 Reward Manager
 ~~~~~~~~~~~~~~

@@ -177,7 +177,7 @@ Comparing to using global https_proxy env variable, this approach won't mess up 
 
   +trainer.wandb_proxy=http://<your proxy and port>
 
-Missmatch between inference and training sequence (high actor/grad_norm)
+Mismatch between inference and training sequence (high actor/grad_norm)
 ------------------------------------------------------------------------------------------
 
 If you encounter the issue of actor/grad_norm metric continuously increasing during training, it might be caused by a significant precision mismatching between the inference engine and training. You can use the following parameter to confirm this:
