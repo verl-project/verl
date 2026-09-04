@@ -70,9 +70,8 @@ Install verl Upstream
    git clone https://github.com/verl-project/verl.git
    cd verl
 
-   # Install verl
-   python3 -m uv pip install .
-   python3 -m uv pip install -r ./requirements_sglang.txt
+   # Install verl with the sglang extra (pyproject.toml; requirements_sglang.txt removed)
+   python3 -m uv pip install ".[sglang]"
 
    # Manually install flash-attn
    python3 -m uv pip install wheel
