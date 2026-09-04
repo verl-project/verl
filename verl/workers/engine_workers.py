@@ -28,6 +28,7 @@ from tensordict import NonTensorData, TensorDict
 from torch.distributed.device_mesh import init_device_mesh
 
 from verl.checkpoint_engine import CheckpointEngineRegistry
+from verl.plugin.platform.platform_tpu_workarounds import convert_tensors_to_scalars
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
 from verl.trainer.distillation import distillation_ppo_loss, is_distillation_enabled
@@ -191,11 +192,20 @@ class TrainingWorker(Worker, DistProfilerExtension):
         # perform all gather in dp group to ensure that it's correct.
         # Here each metric in metrics can be a list (micro-batch metrics) or a singleton
         # we should always sum the loss of each micro-batch as we scale by global_bsz/global_token
-        loss = torch.sum(torch.tensor(output.pop("loss"), device=self.device_name))
         dp_group = self.engine.get_data_parallel_group()
-        if dp_group is not None:
-            torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG, group=dp_group)
-        loss = loss.item()
+
+        if self.device_name == "tpu":
+            # Avoid eager distributed TPU/Gloo collectives outside JIT execution graphs.
+            # Convert all metrics to CPU scalars and return them directly;
+            # the driver (sft_trainer_ray.py) collects and averages metrics across ranks on CPU.
+            loss = torch.sum(torch.tensor(output.pop("loss"), device="cpu")).item()
+            target_group = None
+        else:
+            loss = torch.sum(torch.tensor(output.pop("loss"), device=self.device_name))
+            if dp_group is not None:
+                torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG, group=dp_group)
+            loss = loss.item()
+            target_group = dp_group
 
         # For grad_norm, we do not perform all reduce because it is already been done when clipping grad
         grad_norm = metrics.pop("grad_norm", None)
@@ -204,8 +214,14 @@ class TrainingWorker(Worker, DistProfilerExtension):
         lr = metrics.pop("lr", None)
 
         # For other metrics, we perform all gather in dp group (only if DP > 1)
-        if dp_group is not None:
-            final_metrics = allgather_dict_into_dict(data=metrics, group=dp_group)
+        if self.device_name == "tpu":
+            # Convert device-bound TPU tensors in the metrics dict to standard Python scalars.
+            metrics = convert_tensors_to_scalars(metrics)
+
+        if self.device_name == "tpu":
+            final_metrics = metrics
+        elif target_group is not None:
+            final_metrics = allgather_dict_into_dict(data=metrics, group=target_group)
         else:
             final_metrics = metrics
         final_metrics["loss"] = loss
@@ -232,6 +248,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
             final_metrics["mfu"] = estimated_flops / promised_flops / torch.distributed.get_world_size()
             if forward_only:
                 final_metrics["mfu"] /= 3.0
+        if self.device_name == "tpu":
+            # Convert any tensors in final_metrics to scalars/cpu before moving to cpu inside TensorDict
+            final_metrics = convert_tensors_to_scalars(final_metrics)
         # model outputs
         model_output = output.pop("model_output", {})
         # We only return final_metrics
@@ -325,13 +344,16 @@ class TrainingWorker(Worker, DistProfilerExtension):
                     for key, val in output.items():
                         # flattn dp and micro batch
                         if isinstance(val, list):
-                            output[key] = (
-                                Metric.aggregate_dp(val)
-                                if isinstance(val[0], Metric)
-                                else list(chain.from_iterable(val))
-                            )
+                            if isinstance(val[0], Metric):
+                                output[key] = Metric.aggregate_dp(val)
+                            elif isinstance(val[0], list | tuple):
+                                output[key] = list(chain.from_iterable(val))
+                            else:
+                                output[key] = sum(val) / len(val) if isinstance(val[0], int | float) else val[0]
                     append_to_dict(metrics, output)
 
+                if self.device_name == "tpu":
+                    metrics = convert_tensors_to_scalars(metrics)
                 output = tu.get_tensordict(tensor_dict={}, non_tensor_dict={"metrics": metrics}).cpu()
             else:
                 output = None
