@@ -633,7 +633,11 @@ class AutomodelEngineConfig(EngineConfig):
 
     Mixed precision policy (FSDP2):
         mp_param_dtype (str): Parameter dtype for FSDP2 mixed precision policy.
-        mp_reduce_dtype (str): Reduce dtype for FSDP2 mixed precision policy.
+        mp_reduce_dtype (str): Reduce dtype for FSDP2 mixed precision policy. When this differs
+            from mp_param_dtype, FSDP2 upcasts each gradient and holds it unsharded for the whole
+            gradient-accumulation window, which costs about 4 bytes per parameter per rank for
+            the fp32 default and does not shrink with world size. Matching mp_param_dtype trades
+            reduction precision for that memory.
         mp_output_dtype (str): Output dtype for FSDP2 mixed precision policy.
 
     Entropy computation:

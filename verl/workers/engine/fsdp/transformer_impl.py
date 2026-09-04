@@ -81,6 +81,47 @@ from .utils import create_device_mesh, get_sharding_strategy, unfuse_moe_params
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+_warned_reduce_dtype_grad_memory = False
+
+
+def _warn_if_reduce_dtype_retains_unsharded_grads(param_dtype, reduce_dtype):
+    """Say once that a reduce dtype different from the parameter dtype keeps unsharded grads.
+
+    FSDP2's ``FSDPParam.to_accumulated_grad_if_needed`` returns early only when the gradient is
+    already in ``reduce_dtype``::
+
+        if (self.reduce_dtype is None
+                or self._unsharded_param.grad is None
+                or self._unsharded_param.grad.dtype == self.reduce_dtype):
+            return
+        self.unsharded_accumulated_grad = unsharded_grad.to(self.reduce_dtype)
+
+    With bf16 parameters and an fp32 reduce dtype that early return never fires, so every
+    parameter keeps a whole-model fp32 ``unsharded_accumulated_grad`` for the length of a
+    gradient-accumulation window. That term is proportional to parameter count and does not
+    shrink with world size, which is what makes it easy to misread as an activation problem:
+    cutting the per-GPU token budget does not move it.
+
+    Not changed here, because an fp32 reduction is the more accurate default. The point is that
+    the cost should be visible when it is paid.
+    """
+    global _warned_reduce_dtype_grad_memory
+    if _warned_reduce_dtype_grad_memory or reduce_dtype is None or reduce_dtype == param_dtype:
+        return
+
+    _warned_reduce_dtype_grad_memory = True
+    logger.warning(
+        "FSDP2 mixed precision has reduce_dtype=%s with param_dtype=%s. Gradients are upcast to "
+        "%s and held unsharded for the whole gradient-accumulation window, costing roughly "
+        "4 bytes per parameter per rank on top of activations, independent of world size. Set "
+        "reduce_dtype to %s to trade reduction precision for that memory.",
+        reduce_dtype,
+        param_dtype,
+        reduce_dtype,
+        param_dtype,
+    )
+
+
 device_name = get_device_name()
 
 
@@ -447,6 +488,7 @@ class FSDPEngine(BaseEngine):
             # - critic: offload_policy
             # - ref: CPUOffloadPolicy(pin_memory=True)
             assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
+            _warn_if_reduce_dtype_retains_unsharded_grads(param_dtype, reduce_dtype)
             mp_policy = MixedPrecisionPolicy(
                 param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=True
             )
