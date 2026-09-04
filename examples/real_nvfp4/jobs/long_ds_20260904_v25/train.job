@@ -145,11 +145,11 @@ grep -q "'filter_groups': {'enable': True" "$JOB_LOG" || \
 grep -q "'rollout_is': 'token'" "$JOB_LOG" || rn4pt_die "token-level TIS is not enabled in the resolved config"
 
 if [[ "$ARM" = w4a4 ]]; then
-  grep -q 'VERL_REAL_NVFP4_PRECISION_RECIPE PASS scope=all_mlp attention=bf16' "$JOB_LOG"
+  grep -q "VERL_REAL_NVFP4_PRECISION_RECIPE PASS scope=$LONG_NVFP4_SCOPE attention=bf16" "$JOB_LOG"
   # The whole point of this arm: 6 of 48 decoder layers stay BF16, so only 42
   # MoE layers carry NVFP4 MLP GEMMs. This is the independent confirmation that
   # the carve-out actually reached Megatron.
-  grep -q "VERL_REAL_NVFP4_ATTESTATION PASS.*te_version=$RN4PT_TE_VERSION.*mlp_fc1_nvfp4=$LONG_NVFP4_MLP_LAYERS mlp_fc2_nvfp4=$LONG_NVFP4_MLP_LAYERS" "$JOB_LOG"
+  grep -q "VERL_REAL_NVFP4_ATTESTATION PASS.*scope=$LONG_NVFP4_SCOPE .*te_version=$RN4PT_TE_VERSION.*mlp_fc1_nvfp4=$LONG_NVFP4_MLP_LAYERS mlp_fc2_nvfp4=$LONG_NVFP4_MLP_LAYERS mlp_fc1_bf16=$LONG_NVFP4_BF16_MLP_LAYERS mlp_fc2_bf16=$LONG_NVFP4_BF16_MLP_LAYERS" "$JOB_LOG"
   grep -q 'VERL_REAL_NVFP4_ROLLOUT_ATTESTATION PASS dense_layers=0 moe_layers=48 expected=48' "$JOB_LOG"
   grep -q 'VERL_REAL_NVFP4_EXPORT PASS location=vllm_receive.*expert_weights=18432 expected=18432' "$JOB_LOG"
   grep -q 'VERL_REAL_NVFP4_NATIVE_REFIT PASS refit=0 changed=1' "$JOB_LOG"

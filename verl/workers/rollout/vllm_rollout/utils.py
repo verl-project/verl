@@ -201,6 +201,20 @@ class vLLMColocateWorkerExtension:
             apply_modelopt_nvfp4_patches()
             logger.info("Applied legacy ModelOpt QAT W4A16 patches in vLLM worker subprocess")
 
+        # R3 routing replay is precision-agnostic: the trainer replays the
+        # rollout's expert routing for every MoE layer whatever the rollout's
+        # precision is. Installing the capture hook only on the real-NVFP4
+        # branch above left a BF16 rollout replaying routing that was never
+        # captured -- coherent generations, but the actor scored them with the
+        # wrong experts (entropy 6.0 and rollout KL 13.8 versus 0.9 and 0.006).
+        # The patch is idempotent, so the NVFP4 branch may already have run it.
+        if getattr(getattr(vllm_config, "model_config", None), "enable_return_routed_experts", False):
+            from verl.utils.real_nvfp4.r3_monolithic_capture import (
+                patch_vllm_monolithic_moe_r3_capture,
+            )
+
+            patch_vllm_monolithic_moe_r3_capture()
+
         # TODO: For ascend NPU, when the corresponding vllm-ascend version is upgraded to v0.13.0,
         # please remove the VLLM_ASCEND_REQUIRED_ENV_VARS variable replacement action.
         # This is only a fix for vllm version < v0.13.0.
@@ -574,7 +588,6 @@ class vLLMColocateWorkerExtension:
         self.update_weights(worker_update_info)
 
 
-
 def _install_moe_reload_debug() -> None:
     """One-shot instrumentation for vLLM 0.26 RoutedExperts weight matching.
 
@@ -616,12 +629,15 @@ def _install_moe_reload_debug() -> None:
             RoutedExperts._verl_reload_logged_out = True
             logger.warning(
                 "VERL_MOE_RELOAD_DEBUG loaded=%d of received=%d loaded_head=%s",
-                len(loaded), len(received), loaded[:4],
+                len(loaded),
+                len(received),
+                loaded[:4],
             )
         return loaded
 
     RoutedExperts.load_weights = _debug_load_weights
     RoutedExperts._verl_reload_debug = True
+
 
 class SuppressSignalInThread:
     def __enter__(self):

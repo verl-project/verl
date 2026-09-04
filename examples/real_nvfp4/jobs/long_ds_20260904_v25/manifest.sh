@@ -20,13 +20,10 @@ readonly RN4PT_LOGS=$RN4PT_WORKSPACE/ray_log/$RN4PT_VERSION
 readonly RN4PT_CHECKPOINTS=$RN4PT_WORKSPACE/checkpoints/DAPO-NVFP4-QAT/$RN4PT_VERSION
 
 readonly RN4PT_BASE_IMAGE=${RN4PT_BASE_IMAGE_OVERRIDE:-/lustre/fsw/general_sa/shuazhang/images/verl.vllm026.mcore018.te218e7.realnvfp4.nativeonline.pdl-off.v8base.20260901.v12.sqsh}
-# v23's image was built from this exact source commit and passed preflight, and
-# nothing outside examples/real_nvfp4/jobs/** has changed since. Rebuilding an
-# identical runtime would only burn an hour, so this bundle inherits v23's
-# build and preflight evidence; rn4pt_require_runtime_image still re-verifies
-# the checksum and re-diffs the source against what was actually built.
-readonly RN4PT_IMAGE_EVIDENCE=$RN4PT_WORKSPACE/run_state/verl_real_nvfp4_bf16_moe_debug_20260904_v23
-readonly RN4PT_RUNTIME_IMAGE=${RN4PT_RUNTIME_IMAGE_OVERRIDE:-/lustre/fsw/general_sa/shuazhang/images/verl.vllm026.mcore018.te218e7.realnvfp4.bf16ctl.moedbg.20260904.v23.sqsh}
+# This bundle carries a runtime payload change (the R3 capture hook is now
+# installed for any rollout that returns routed experts, not just the NVFP4
+# one), so it builds its own image rather than inheriting v23's evidence.
+readonly RN4PT_RUNTIME_IMAGE=${RN4PT_RUNTIME_IMAGE_OVERRIDE:-/lustre/fsw/general_sa/shuazhang/images/verl.vllm026.mcore018.te218e7.realnvfp4.longds.20260904.v25.sqsh}
 readonly RN4PT_IMAGE_ENV=/opt/verl-rn4pt-20260831-v5
 readonly RN4PT_IMAGE_PYTHON=$RN4PT_IMAGE_ENV/.venv/bin/python
 readonly RN4PT_NETRC=/home/shuazhang/.netrc
@@ -45,9 +42,10 @@ RN4PT_SOURCE_COMMIT=$(git -C "$RN4PT_VERL" rev-parse HEAD)
 readonly RN4PT_SOURCE_COMMIT
 RN4PT_LOCK_SHA256=$(sha256sum "$RN4PT_VERL/uv.lock" | awk '{print $1}')
 readonly RN4PT_LOCK_SHA256
-readonly RN4PT_PROBE_PASS=$RN4PT_IMAGE_EVIDENCE/probe.pass
-readonly RN4PT_BUILD_PASS=$RN4PT_IMAGE_EVIDENCE/build.pass
-readonly RN4PT_PREFLIGHT_PASS=$RN4PT_IMAGE_EVIDENCE/preflight.pass
+readonly RN4PT_PROBE_PASS=$RN4PT_STATE/probe.pass
+readonly RN4PT_BUILD_PASS=$RN4PT_STATE/build.pass
+readonly RN4PT_PREFLIGHT_PASS=$RN4PT_STATE/preflight.pass
+readonly RN4PT_SMOKE_PASS=$RN4PT_STATE/smoke.pass
 
 # ---------------------------------------------------------------- arm settings
 # Both arms: R3 on, token-level TIS on, dynamic sampling on, default verifier.
@@ -60,6 +58,8 @@ readonly LONG_ROLLOUT_IS=token
 readonly LONG_BF16_LAYERS_AT_START=2
 readonly LONG_BF16_LAYERS_AT_END=4
 readonly LONG_NVFP4_MLP_LAYERS=42
+readonly LONG_NVFP4_BF16_MLP_LAYERS=6
+readonly LONG_NVFP4_SCOPE=routed_expert_mlp_first${LONG_BF16_LAYERS_AT_START}_last${LONG_BF16_LAYERS_AT_END}
 
 # Dynamic sampling generates up to LONG_GEN_PROMPT_BSZ_MULT x the prompts per
 # step, and response length grows over the run, so chunks stay well inside the
@@ -110,6 +110,7 @@ rn4pt_validate_static() {
   for path in \
     "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" \
     "$RN4PT_ROOT/config/attn_bf16_mlp_nvfp4.yaml" \
+    "$RN4PT_ROOT/config/attn_bf16_mlp_nvfp4_first${LONG_BF16_LAYERS_AT_START}_last${LONG_BF16_LAYERS_AT_END}.yaml" \
     "$RN4PT_ROOT/runtime_backports/disable_vllm_trtllm_nvfp4_moe_pdl.py" \
     "$RN4PT_VERL/verl/utils/real_nvfp4/bf16_transport.py" \
     "$RN4PT_VERL/verl/utils/real_nvfp4/r3_monolithic_capture.py" \
@@ -157,6 +158,10 @@ rn4pt_validate_static() {
     rn4pt_die "native reload missing" || return
   grep -q 'defer_last_ack=True' "$RN4PT_VERL/verl/workers/rollout/vllm_rollout/utils.py" || \
     rn4pt_die "post-finalize ACK missing" || return
+  # The BF16 arm is only meaningful if the rollout actually captures the routing
+  # the trainer replays; gating that hook on NVFP4 is what broke it before.
+  grep -q 'enable_return_routed_experts", False)' "$RN4PT_VERL/verl/workers/rollout/vllm_rollout/utils.py" || \
+    rn4pt_die "R3 capture hook is still gated on the NVFP4 rollout" || return
   if git -C "$RN4PT_VERL" grep -Eq \
     'three_stability|adv_length_norm_enable|seg_gate_enable|alignment_loss_enable|GP95_|custom[-_]loss' -- \
     verl examples/real_nvfp4/run_qwen3_30b_megatron.sh examples/real_nvfp4/main_dapo_compat.py; then
@@ -174,11 +179,6 @@ rn4pt_require_runtime_image() {
   [[ -s "$RN4PT_BUILD_PASS" ]] || rn4pt_die "runtime build state missing" || return
   built_source=$(sed -n 's/^source_commit=//p' "$RN4PT_BUILD_PASS")
   [[ -n "$built_source" ]] || rn4pt_die "runtime image source commit is missing" || return
-  grep -Fxq "image=$RN4PT_RUNTIME_IMAGE" "$RN4PT_BUILD_PASS" || \
-    rn4pt_die "inherited build evidence describes a different image" || return
-  [[ -s "$RN4PT_PREFLIGHT_PASS" ]] || rn4pt_die "runtime preflight state missing" || return
-  grep -Fxq "image=$RN4PT_RUNTIME_IMAGE" "$RN4PT_PREFLIGHT_PASS" || \
-    rn4pt_die "inherited preflight evidence describes a different image" || return
   if [[ "$built_source" != "$RN4PT_SOURCE_COMMIT" ]]; then
     git -C "$RN4PT_VERL" cat-file -e "$built_source^{commit}" || \
       rn4pt_die "runtime image source commit is unavailable" || return

@@ -24,16 +24,21 @@ NeMo's `use_dynamic_sampling=True` / `batch_multiplier=3` /
 and keeps the informative groups, so step time is roughly 2-3x the v13 run's.
 That is why the chain uses 40-step chunks rather than v13's 80-step first chunk.
 
-## Why this bundle does not build an image
+## Image
 
-`rn4pt_require_runtime_image` exists to prove the runtime matches the source.
-v23's image was built from this exact source commit and passed preflight, and
-nothing outside `examples/real_nvfp4/jobs/**` has changed since — which the
-manifest re-verifies with a `git diff` against the recorded build commit, plus
-the image checksum and the recorded `uv.lock` hash. Building a byte-identical
-runtime would only cost an hour, so this bundle inherits that evidence instead.
-If any runtime payload changes, the diff check fails closed and a rebuild is
-required.
+This bundle changes a runtime payload -- the R3 capture hook is now installed
+for any rollout that returns routed experts, not only the NVFP4 one -- so it
+builds its own image:
+
+```bash
+bash submit.sh probe && bash submit.sh build && bash submit.sh preflight
+```
+
+Gating that hook on NVFP4 is exactly what broke the BF16 arm: the trainer
+replayed expert routing for all 48 MoE layers while the rollout had never
+captured any, so the rollout produced sensible text that the actor then scored
+with the wrong experts (entropy 6.0 and rollout KL 13.8, against 0.9 and 0.006
+for W4A4 on the same 1-node smoke).
 
 ## Usage
 

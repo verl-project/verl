@@ -81,7 +81,16 @@ readonly RESUME_MODE=${RESUME_MODE:-disable}
 readonly RESUME_FROM_PATH=${RESUME_FROM_PATH:-}
 readonly VERL_WANDB_RUN_ID=${VERL_WANDB_RUN_ID:-}
 readonly VERL_WANDB_RESUME=${VERL_WANDB_RESUME:-}
-readonly TE_PRECISION_CONFIG=${TE_PRECISION_CONFIG:-$WORKING_DIR/examples/real_nvfp4/config/attn_bf16_mlp_nvfp4.yaml}
+# The carve-out lives in the per-module MCore recipe as well as in Megatron's
+# first_last_layers_bf16 flag: the flag skips the FP4 autocast for those layers
+# and the recipe gives their MLP the BF16 config, and verl refuses to build if
+# the two disagree.
+if [[ "$FIRST_LAST_BF16" = True ]]; then
+  readonly DEFAULT_TE_PRECISION_CONFIG=$WORKING_DIR/examples/real_nvfp4/config/attn_bf16_mlp_nvfp4_first${BF16_LAYERS_AT_START}_last${BF16_LAYERS_AT_END}.yaml
+else
+  readonly DEFAULT_TE_PRECISION_CONFIG=$WORKING_DIR/examples/real_nvfp4/config/attn_bf16_mlp_nvfp4.yaml
+fi
+readonly TE_PRECISION_CONFIG=${TE_PRECISION_CONFIG:-$DEFAULT_TE_PRECISION_CONFIG}
 
 [[ -f "$MODEL_PATH/config.json" ]]
 [[ -f "$TRAIN_FILE" && -f "$TEST_FILE" && -f "$RUNTIME_ENV" ]]

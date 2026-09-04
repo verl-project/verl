@@ -222,6 +222,9 @@ class MegatronEngine(BaseEngine):
         self._real_nvfp4_enabled = self._real_nvfp4_config is not None and getattr(
             self._real_nvfp4_config, "enable", False
         )
+        # (enabled, num_layers_at_start, num_layers_at_end); resolved in
+        # _build_tf_config and read back when the built model is attested.
+        self._real_nvfp4_bf16_layers: tuple[bool, int, int] = (False, 0, 0)
         if self._real_nvfp4_enabled:
             logger.info(
                 "Real NVFP4 enabled in MegatronEngine: format=%s recipe=%s backward=%s",
@@ -310,13 +313,23 @@ class MegatronEngine(BaseEngine):
             from verl.utils.real_nvfp4 import validate_real_nvfp4_model_contract
 
             validate_real_nvfp4_model_contract(self.model_config.hf_config)
+            # NeMo-RL's R3 arm leaves the first N and last M decoder layers in
+            # BF16 and quantizes only the routed experts in between, so the
+            # scope is a knob rather than a fixed "every MLP" contract. The
+            # carve-out is expressed twice on purpose: MCore's
+            # first_last_layers_bf16 skips the FP4 autocast for those layers,
+            # and the per-module quant recipe gives them the BF16 config, so a
+            # disagreement between the two is caught instead of silently
+            # quantizing a layer the operator asked to keep in BF16.
+            self._real_nvfp4_bf16_layers = self._resolve_real_nvfp4_bf16_layers(override_transformer_config)
+            carve_enabled, carve_start, carve_end = self._real_nvfp4_bf16_layers
             required_overrides = {
                 "fp4": self._real_nvfp4_config.fp4_format,
                 "fp4_recipe": self._real_nvfp4_config.fp4_recipe,
                 "fp4_param": self._real_nvfp4_config.fp4_param,
-                "first_last_layers_bf16": False,
-                "num_layers_at_start_in_bf16": 0,
-                "num_layers_at_end_in_bf16": 0,
+                "first_last_layers_bf16": carve_enabled,
+                "num_layers_at_start_in_bf16": carve_start,
+                "num_layers_at_end_in_bf16": carve_end,
             }
             if override_transformer_config.get("fp8") not in (None, False):
                 raise ValueError("real_nvfp4 cannot be combined with an FP8 transformer recipe")
@@ -474,29 +487,68 @@ class MegatronEngine(BaseEngine):
             model_config=self.model_config, bridge=self.bridge, provider=self.provider, dtype=self.param_dtype
         )
 
+    def _resolve_real_nvfp4_bf16_layers(self, override_transformer_config) -> tuple[bool, int, int]:
+        """Resolve and validate the first/last BF16 layer carve-out.
+
+        Returns ``(enabled, num_layers_at_start, num_layers_at_end)``.
+        """
+
+        start = int(override_transformer_config.get("num_layers_at_start_in_bf16") or 0)
+        end = int(override_transformer_config.get("num_layers_at_end_in_bf16") or 0)
+        enabled = bool(override_transformer_config.get("first_last_layers_bf16") or False)
+        if start < 0 or end < 0:
+            raise ValueError(f"real_nvfp4 BF16 layer carve-out must be non-negative, got {start}/{end}")
+        if enabled != (start + end > 0):
+            raise ValueError(
+                "real_nvfp4 requires first_last_layers_bf16 to agree with the carve-out counts, "
+                f"got first_last_layers_bf16={enabled!r} with {start}/{end}"
+            )
+        num_layers = int(self.model_config.hf_config.num_hidden_layers)
+        if start + end >= num_layers:
+            raise ValueError(f"real_nvfp4 BF16 layer carve-out {start}/{end} leaves no quantized layer of {num_layers}")
+        if enabled:
+            # The recipe matches on the layer index in the module path, which is
+            # the global index only when the model is not split across pipeline
+            # stages.
+            pipeline_size = int(getattr(self.engine_config, "pipeline_model_parallel_size", 1) or 1)
+            virtual_pipeline_size = getattr(self.engine_config, "virtual_pipeline_model_parallel_size", None)
+            if pipeline_size != 1 or (virtual_pipeline_size or 1) != 1:
+                raise ValueError(
+                    "real_nvfp4 BF16 layer carve-out needs pipeline_model_parallel_size=1 so the "
+                    f"recipe's layer indices are global, got pp={pipeline_size} vpp={virtual_pipeline_size}"
+                )
+        return enabled, start, end
+
     def _load_real_nvfp4_precision_recipe(self):
-        """Load and audit the attention-BF16 / all-MLP-NVFP4 MCore recipe."""
+        """Load and audit the attention-BF16 / routed-expert-NVFP4 MCore recipe."""
 
         path = self._real_nvfp4_config.te_precision_config_file
         if not os.path.isfile(path):
             raise FileNotFoundError(f"real_nvfp4 TE precision recipe does not exist: {path}")
 
         raw = OmegaConf.to_container(OmegaConf.load(path), resolve=True)
-        expected_matchers = {
-            "attn_qkv_bf16": ("bf16", "*.linear_qkv"),
-            "attn_proj_bf16": ("bf16", "*.linear_proj"),
-            "mlp_fc1_nvfp4": ("nvfp4", "*.linear_fc1"),
-            "mlp_fc2_nvfp4": ("nvfp4", "*.linear_fc2"),
-        }
+        _, carve_start, carve_end = self._real_nvfp4_bf16_layers
+        num_layers = int(self.model_config.hf_config.num_hidden_layers)
+        bf16_layer_indices = list(range(carve_start)) + list(range(num_layers - carve_end, num_layers))
+        # MCore takes the first matching matcher, so the carved-out layers have
+        # to precede the general MLP patterns. Compare ordered lists, not dicts,
+        # because that precedence is what makes the carve-out work at all.
+        expected_matchers = [(f"layer_{index}_bf16", "bf16", f"*.layers.{index}.*") for index in bf16_layer_indices] + [
+            ("attn_qkv_bf16", "bf16", "*.linear_qkv"),
+            ("attn_proj_bf16", "bf16", "*.linear_proj"),
+            ("mlp_fc1_nvfp4", "nvfp4", "*.linear_fc1"),
+            ("mlp_fc2_nvfp4", "nvfp4", "*.linear_fc2"),
+        ]
         matchers = raw.get("matchers", {}) if isinstance(raw, dict) else {}
-        actual_matchers = {
-            name: (payload.get("config"), payload.get("pattern"))
+        actual_matchers = [
+            (name, payload.get("config"), payload.get("pattern"))
             for name, payload in matchers.items()
             if payload.get("enabled", False) and payload.get("type") == "glob"
-        }
+        ]
         if actual_matchers != expected_matchers:
             raise ValueError(
-                "real_nvfp4 TE precision recipe must keep attention BF16 and quantize all MLP fc1/fc2; "
+                "real_nvfp4 TE precision recipe must keep attention BF16, keep the carved-out layers "
+                "BF16 ahead of the general patterns, and quantize the remaining MLP fc1/fc2; "
                 f"expected={expected_matchers}, got={actual_matchers}"
             )
         configs = raw.get("configs", {})
@@ -509,8 +561,11 @@ class MegatronEngine(BaseEngine):
         from megatron.core.quantization.utils import load_quantization_recipe
 
         recipe = load_quantization_recipe(path)
+        scope = "all_mlp" if not bf16_layer_indices else f"routed_expert_mlp_first{carve_start}_last{carve_end}"
         logger.warning(
-            "VERL_REAL_NVFP4_PRECISION_RECIPE PASS scope=all_mlp attention=bf16 path=%s",
+            "VERL_REAL_NVFP4_PRECISION_RECIPE PASS scope=%s attention=bf16 bf16_layers=%s path=%s",
+            scope,
+            ",".join(str(index) for index in bf16_layer_indices) or "none",
             path,
         )
         return recipe
@@ -566,10 +621,11 @@ class MegatronEngine(BaseEngine):
         )
         if getattr(self.tf_config, "quant_recipe", None) is None:
             raise RuntimeError("real_nvfp4 finalized without the per-module MCore quant_recipe")
+        carve_enabled, carve_start, carve_end = self._real_nvfp4_bf16_layers
         layer_precision_contract = {
-            "first_last_layers_bf16": False,
-            "num_layers_at_start_in_bf16": 0,
-            "num_layers_at_end_in_bf16": 0,
+            "first_last_layers_bf16": carve_enabled,
+            "num_layers_at_start_in_bf16": carve_start,
+            "num_layers_at_end_in_bf16": carve_end,
         }
         mismatched_layer_precision = {
             name: getattr(self.tf_config, name, None)
@@ -577,14 +633,18 @@ class MegatronEngine(BaseEngine):
             if getattr(self.tf_config, name, None) != expected
         }
         if mismatched_layer_precision:
-            raise RuntimeError(f"real_nvfp4 all-MLP layer precision contract drifted: {mismatched_layer_precision}")
+            raise RuntimeError(f"real_nvfp4 layer precision contract drifted: {mismatched_layer_precision}")
 
         expected_layers = int(self.model_config.hf_config.num_hidden_layers)
+        expected_mlp_nvfp4 = expected_layers - carve_start - carve_end
+        expected_mlp_bf16 = carve_start + carve_end
         precision_counts = {
             "attn_qkv_bf16": 0,
             "attn_proj_bf16": 0,
             "mlp_fc1_nvfp4": 0,
             "mlp_fc2_nvfp4": 0,
+            "mlp_fc1_bf16": 0,
+            "mlp_fc2_bf16": 0,
         }
 
         def _module_recipe(module):
@@ -628,35 +688,55 @@ class MegatronEngine(BaseEngine):
                 if getattr(submodule, "te_quant_params", None) is None:
                     raise RuntimeError(f"real_nvfp4 per-module recipe did not match {name}")
                 fp4_name, fp8_name = _module_recipe(submodule)
-                expect_nvfp4 = precision_key.startswith("mlp_")
-                if expect_nvfp4 and (fp4_name != "nvfp4" or fp8_name is not None):
-                    raise RuntimeError(
-                        f"real_nvfp4 module recipe mismatch for {name}: fp4={fp4_name!r}, fp8={fp8_name!r}"
-                    )
-                if not expect_nvfp4 and (fp4_name is not None or fp8_name is not None):
-                    raise RuntimeError(
-                        f"real_nvfp4 attention module was not forced to BF16 for {name}: "
-                        f"fp4={fp4_name!r}, fp8={fp8_name!r}"
-                    )
+                if fp8_name is not None:
+                    raise RuntimeError(f"real_nvfp4 module {name} carries an FP8 recipe: fp8={fp8_name!r}")
+                if precision_key.startswith("attn_"):
+                    if fp4_name is not None:
+                        raise RuntimeError(
+                            f"real_nvfp4 attention module was not forced to BF16 for {name}: fp4={fp4_name!r}"
+                        )
+                elif fp4_name == "nvfp4":
+                    pass
+                elif fp4_name is None:
+                    # A carved-out layer: the recipe gave it the BF16 config. The
+                    # counts below decide whether that was asked for.
+                    precision_key = precision_key.replace("_nvfp4", "_bf16")
+                else:
+                    raise RuntimeError(f"real_nvfp4 module recipe mismatch for {name}: fp4={fp4_name!r}")
                 precision_counts[precision_key] += 1
 
         if te_module_count == 0:
             raise RuntimeError("real_nvfp4 built no Transformer Engine modules")
-        mismatched_counts = {name: count for name, count in precision_counts.items() if count != expected_layers}
+        expected_counts = {
+            "attn_qkv_bf16": expected_layers,
+            "attn_proj_bf16": expected_layers,
+            "mlp_fc1_nvfp4": expected_mlp_nvfp4,
+            "mlp_fc2_nvfp4": expected_mlp_nvfp4,
+            "mlp_fc1_bf16": expected_mlp_bf16,
+            "mlp_fc2_bf16": expected_mlp_bf16,
+        }
+        mismatched_counts = {
+            name: (count, expected_counts[name])
+            for name, count in precision_counts.items()
+            if count != expected_counts[name]
+        }
         if mismatched_counts:
             raise RuntimeError(
-                "real_nvfp4 did not apply the exact per-module recipe to every "
-                f"Qwen3 layer: expected_each={expected_layers}, actual={mismatched_counts}"
+                "real_nvfp4 did not apply the per-module recipe to the expected layers "
+                f"(actual, expected): {mismatched_counts}"
             )
 
         import transformer_engine
 
+        scope = "all_mlp" if not carve_enabled else f"routed_expert_mlp_first{carve_start}_last{carve_end}"
         logger.warning(
-            "VERL_REAL_NVFP4_ATTESTATION PASS fp4=%s recipe=%s scope=all_mlp attention=bf16 "
+            "VERL_REAL_NVFP4_ATTESTATION PASS fp4=%s recipe=%s scope=%s attention=bf16 "
             "backward=%s fp4_param=%s te_version=%s te_modules=%d "
-            "attn_qkv_bf16=%d attn_proj_bf16=%d mlp_fc1_nvfp4=%d mlp_fc2_nvfp4=%d",
+            "attn_qkv_bf16=%d attn_proj_bf16=%d mlp_fc1_nvfp4=%d mlp_fc2_nvfp4=%d "
+            "mlp_fc1_bf16=%d mlp_fc2_bf16=%d",
             fp4,
             recipe_type,
+            scope,
             self._real_nvfp4_config.backward_override,
             getattr(self.tf_config, "fp4_param", None),
             getattr(transformer_engine, "__version__", "unknown"),
@@ -665,6 +745,8 @@ class MegatronEngine(BaseEngine):
             precision_counts["attn_proj_bf16"],
             precision_counts["mlp_fc1_nvfp4"],
             precision_counts["mlp_fc2_nvfp4"],
+            precision_counts["mlp_fc1_bf16"],
+            precision_counts["mlp_fc2_bf16"],
         )
 
     def _resolve_override_ddp_config(self):
