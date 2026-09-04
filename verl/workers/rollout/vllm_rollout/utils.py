@@ -378,6 +378,8 @@ class vLLMColocateWorkerExtension:
         if os.environ.get("VERL_VLLM_NATIVE_RELOAD") == "1":
             if peft_config is not None:
                 raise NotImplementedError("native reload weight sync does not support LoRA")
+            if os.environ.get("VERL_DEBUG_MOE_RELOAD") == "1":
+                _install_moe_reload_debug()
             receiver = BucketedWeightReceiver(
                 zmq_handle=self._get_zmq_handle(),
                 device=self.device,
@@ -571,6 +573,55 @@ class vLLMColocateWorkerExtension:
         worker_update_info["zmq_handle"] = self._get_zmq_handle()
         self.update_weights(worker_update_info)
 
+
+
+def _install_moe_reload_debug() -> None:
+    """One-shot instrumentation for vLLM 0.26 RoutedExperts weight matching.
+
+    BF16 rollout sync silently leaves every ``*.experts.routed_experts.w13_weight``
+    / ``w2_weight`` unloaded, so the model keeps dummy weights. Log the names the
+    layer actually receives, its layer_name, and the first mapping entries, so the
+    mismatch can be read off instead of inferred.
+    """
+    try:
+        from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    except ImportError:
+        logger.warning("VERL_MOE_RELOAD_DEBUG: RoutedExperts unavailable")
+        return
+    if getattr(RoutedExperts, "_verl_reload_debug", False):
+        return
+    original = RoutedExperts.load_weights
+
+    def _debug_load_weights(self, weights):
+        received = list(weights)
+        if not getattr(RoutedExperts, "_verl_reload_logged", False):
+            RoutedExperts._verl_reload_logged = True
+            try:
+                mapping = self.get_expert_mapping(include_fused=True)
+            except Exception as exc:  # noqa: BLE001
+                mapping = f"<get_expert_mapping failed: {exc!r}>"
+            logger.warning(
+                "VERL_MOE_RELOAD_DEBUG layer_name=%r n_received=%d received_names=%s",
+                getattr(self, "layer_name", None),
+                len(received),
+                [name for name, _ in received[:4]],
+            )
+            logger.warning(
+                "VERL_MOE_RELOAD_DEBUG received_shapes=%s",
+                [tuple(t.shape) for _, t in received[:4]],
+            )
+            logger.warning("VERL_MOE_RELOAD_DEBUG mapping_head=%s", mapping[:6])
+        loaded = list(original(self, iter(received)))
+        if not getattr(RoutedExperts, "_verl_reload_logged_out", False):
+            RoutedExperts._verl_reload_logged_out = True
+            logger.warning(
+                "VERL_MOE_RELOAD_DEBUG loaded=%d of received=%d loaded_head=%s",
+                len(loaded), len(received), loaded[:4],
+            )
+        return loaded
+
+    RoutedExperts.load_weights = _debug_load_weights
+    RoutedExperts._verl_reload_debug = True
 
 class SuppressSignalInThread:
     def __enter__(self):
