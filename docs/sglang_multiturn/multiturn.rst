@@ -10,12 +10,13 @@ To enable multi-turn rollout, make sure to configure the following fields in you
 
 .. code-block:: yaml
 
-    actor_rollout_ref: 
-        rollout: 
-            multi_turn: True
+    actor_rollout_ref:
+        rollout:
             name: "sglang"
+            multi_turn:
+                enable: True
 
-These configuration activates the sglang engine for multi-turn interaction during rollout.
+This configuration activates the sglang engine for multi-turn interaction during rollout.
 
 Custom Tool Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -32,14 +33,14 @@ For custom environment interaction tools, you can implement your own tools based
 
 For stateless tools that don't need ``BaseTool``'s ``create``/``release`` lifecycle, see the `Function Tool Configuration`_ section below for the simpler ``@function_tool`` API.
 
-Finally, set the ``tools_config_file`` in your rollout config:
+Finally, set the ``tool_config_path`` under ``multi_turn`` in your rollout config:
 
 .. code-block:: yaml
 
     actor_rollout_ref:
         rollout:
-            tool_kwargs:
-                tools_config_file: <path_to_tool_yaml_file>
+            multi_turn:
+                tool_config_path: <path_to_tool_yaml_file>
 
 This allows integration of customized tool behaviors during actor rollout steps.
 
