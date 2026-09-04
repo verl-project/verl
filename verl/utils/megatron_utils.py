@@ -1685,33 +1685,34 @@ def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
     except ImportError:
         megatron_FSDP = DDP
 
-    # register some callbacks for megatron training, following https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.0rc7/megatron/training/training.py#L2039-L2057
-    for one_model in model:
-        config = get_model_config(one_model)
-        config.grad_scale_func = optimizer.scale_loss
-        config.finalize_model_grads_func = finalize_model_grads
+    # Register callbacks once on the config shared by all virtual-pipeline
+    # chunks, matching Megatron's training loop. Registering once per chunk
+    # sets the shared no_sync_func on the first chunk and fails on the next.
+    config = get_model_config(model[0])
+    config.grad_scale_func = optimizer.scale_loss
+    config.finalize_model_grads_func = finalize_model_grads
 
-        overlap_param_gather = getattr(optimizer.config, "overlap_param_gather", False)
-        overlap_grad_reduce = getattr(one_model.ddp_config, "overlap_grad_reduce", False)
-        align_grad_reduce = True  # default to True, seldom to be false
-        align_param_gather = getattr(one_model.ddp_config, "align_param_gather", False)
+    overlap_param_gather = getattr(optimizer.config, "overlap_param_gather", False)
+    overlap_grad_reduce = getattr(model[0].ddp_config, "overlap_grad_reduce", False)
+    align_grad_reduce = True  # default to True, seldom to be false
+    align_param_gather = getattr(model[0].ddp_config, "align_param_gather", False)
 
-        if isinstance(model[0], megatron_FSDP | DDP) and overlap_grad_reduce:
-            assert config.no_sync_func is None, (
-                "When overlap_grad_reduce is True, config.no_sync_func must be None; "
-                "a custom no_sync_func is not supported when overlapping grad-reduce"
-            )
-            config.no_sync_func = [model_chunk.no_sync for model_chunk in model]
+    if isinstance(model[0], megatron_FSDP | DDP) and overlap_grad_reduce:
+        assert config.no_sync_func is None, (
+            "When overlap_grad_reduce is True, config.no_sync_func must be None; "
+            "a custom no_sync_func is not supported when overlapping grad-reduce"
+        )
+        config.no_sync_func = [model_chunk.no_sync for model_chunk in model]
+        if len(model) == 1:
+            config.no_sync_func = config.no_sync_func[0]
+        if align_grad_reduce:
+            config.grad_sync_func = [model_chunk.start_grad_sync for model_chunk in model]
             if len(model) == 1:
-                config.no_sync_func = config.no_sync_func[0]
-            if align_grad_reduce:
-                config.grad_sync_func = [model_chunk.start_grad_sync for model_chunk in model]
-                if len(model) == 1:
-                    config.grad_sync_func = config.grad_sync_func[0]
-        if overlap_param_gather and align_param_gather:
-            config.param_sync_func = [model_chunk.start_param_sync for model_chunk in model]
-            if len(model) == 1:
-                config.param_sync_func = config.param_sync_func[0]
+                config.grad_sync_func = config.grad_sync_func[0]
+    if overlap_param_gather and align_param_gather:
+        config.param_sync_func = [model_chunk.start_param_sync for model_chunk in model]
+        if len(model) == 1:
+            config.param_sync_func = config.param_sync_func[0]
 
 
 def mapping_string_to_attn_backend(args: dict) -> dict:
