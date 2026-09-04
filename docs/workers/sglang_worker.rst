@@ -1,7 +1,7 @@
 SGLang Backend
 ==============
 
-Last updated: 05/31/2025.
+Last updated: 09/02/2026.
 
 **Authored By SGLang RL Team and listed alphabetically by last name**
 
@@ -19,23 +19,23 @@ In addition, the SGLang team is actively working on supporting features such as 
 
 Installation
 ------------
-Please always follow the following command to install SGLang with verl. 
+Prefer the uv workflow in :doc:`Installation <../start/install>` when possible.
+The ``sglang`` extra pin currently lives in ``pyproject.toml`` (``sglang==0.5.12``).
+You can also install with:
 
 .. code-block:: bash
     
     pip install --upgrade pip
-    # Currently 0.4.8, subject to updates at any time, please refer to the latest version specified in `setup.py`
     pip install -e ".[sglang]"
 
 You can check the following dependencies are in your environment:
 
 .. note::
 
-    - **PyTorch**: 2.6.0+cu124
-    - **CUDA**: 12.4
-    - **flashinfer-python**: 0.2.5+cu124torch2.6
-    - **SGLang**: 0.4.6.post5
-    - **sgl-kernel**: 0.1.4
+    - **PyTorch**: 2.11.0 (cu130)
+    - **CUDA**: 13.0
+    - **SGLang**: 0.5.12
+    - **sglang-kernel**: as pinned by the ``sglang`` extra in ``pyproject.toml``
 
 Using SGLang as the Inference Backend for PPO Training on a Single Machine
 -------------------------------------------------------------------------
