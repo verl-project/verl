@@ -64,11 +64,7 @@ Register at server launch (verl config)::
 
 from __future__ import annotations
 
-import logging
-
 import torch
-
-logger = logging.getLogger(__name__)
 
 LOADER_FQN = "verl.workers.rollout.sglang_rollout.mxfp4_loader.load_mxfp4"
 
@@ -92,6 +88,12 @@ _LIVE_ATTR = "_verl_mxfp4_live"
 # presence is the most direct evidence that a layer went through the MXFP4
 # post-processing this module has to undo and redo.
 _BACKEND_ATTR = "_dsv4_mxfp4_backend"
+
+# Expert tensors seen so far in the current sync, reset when the sentinel arrives.
+# A list rather than a module-level int so the counter can be mutated from the
+# function without a global statement; one loader runs per worker process, and the
+# buckets of a sync arrive in sequence, so no locking is needed.
+_EXPERT_ARRIVALS = [0]
 
 
 def _element_size(dtype: torch.dtype) -> int:
@@ -208,11 +210,30 @@ def load_mxfp4(model, named_tensors) -> None:
     for layer in unstaged:
         _stage(layer)
     if unstaged:
-        logger.info("mxfp4 refit: staged %d MoE layers for in-place reload", len(unstaged))
+        # print rather than logger: this runs in an SGLang scheduler subprocess
+        # whose logging Ray does not forward, so anything sent through the logger
+        # is invisible in the run log.
+        print(f"[MXFP4] staged {len(unstaged)} MoE layers for in-place reload", flush=True)
 
     model.load_weights(tensors)
+    _EXPERT_ARRIVALS[0] += sum(1 for name, _ in tensors if ".experts." in name)
 
     if is_last:
         for layer in layers:
             _fold_back(layer)
-        logger.info("mxfp4 refit: replayed the SM90 interleave on %d MoE layers", len(layers))
+        # ``load_weights`` skips names it does not recognise without complaining, so
+        # a rename upstream would leave the engine serving stale experts and show up
+        # only as a slow drift in the policy-divergence metrics. Counting what
+        # arrived turns that into something visible at the first sync.
+        arrived = _EXPERT_ARRIVALS[0]
+        _EXPERT_ARRIVALS[0] = 0
+        if arrived == 0:
+            raise RuntimeError(
+                f"mxfp4 refit: the sync carried no '.experts.' tensors, but {len(layers)} MXFP4 MoE "
+                "layers are staged; the engine would keep serving stale expert weights."
+            )
+        print(
+            f"[MXFP4] replayed the SM90 interleave on {len(layers)} MoE layers, "
+            f"{arrived} expert tensors landed",
+            flush=True,
+        )
