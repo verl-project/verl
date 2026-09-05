@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -557,120 +556,6 @@ class QwenContinuousTokenBuilder(ContinuousTokenBuilder):
         )
 
 
-class MiniMaxText01ContinuousTokenBuilder(ContinuousTokenBuilder):
-    """MiniMax-Text-01 ``<beginning_of_sentence>`` protocol."""
-
-    def __init__(self, tokenizer: Any, **kwargs: Any):
-        super().__init__(tokenizer, **kwargs)
-        newline_ids = tokenizer.encode("\n", add_special_tokens=False)
-        if len(newline_ids) != 1:
-            raise ValueError(f"Expected MiniMax-Text-01 newline to tokenize to one token, got {newline_ids!r}")
-        self._newline_id = int(newline_ids[0])
-        self._eos_id = require_token_id(tokenizer, "<end_of_sentence>")
-        self._generation_scaffold_text = "<beginning_of_sentence>ai name=assistant\n"
-        self._generation_scaffold_ids = normalize_token_ids(
-            tokenizer.encode(self._generation_scaffold_text, add_special_tokens=False)
-        )
-
-    @staticmethod
-    def _prepare_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return _prepare_minimax_legacy_messages(messages)
-
-    def _render_tokens(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        add_generation_prompt: bool,
-        tools: list[dict[str, Any]] | None = None,
-    ) -> list[int]:
-        # Encode the normalized text ourselves so Text-01 template revisions
-        # that differ only in whether they honor ``add_generation_prompt`` have
-        # identical Continuous Token boundaries.
-        rendered = self._render_text(
-            messages,
-            add_generation_prompt=add_generation_prompt,
-            tools=tools,
-        )
-        return normalize_token_ids(self.tokenizer.encode(rendered, add_special_tokens=False))
-
-    def _render_text(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        add_generation_prompt: bool,
-        tools: list[dict[str, Any]] | None = None,
-    ) -> str:
-        rendered = apply_chat_template(
-            self.tokenizer,
-            self._prepare_messages(messages),
-            tokenize=False,
-            add_generation_prompt=add_generation_prompt,
-            tools=[tool.get("function", tool) for tool in tools] if tools else None,
-            **self.chat_template_kwargs,
-        )
-        if not isinstance(rendered, str):
-            raise TypeError(f"Expected chat template to render str, got {type(rendered).__name__}")
-        # Some published Text-01 templates unconditionally append the next
-        # assistant header. Normalize those revisions to the same contract as
-        # templates that honor ``add_generation_prompt``.
-        if not add_generation_prompt and rendered.endswith(self._generation_scaffold_text):
-            rendered = rendered[: -len(self._generation_scaffold_text)]
-        return rendered
-
-    def _should_fuse_generation_prompt_with_last_group(self) -> bool:
-        # Text-01 append hooks encode role payloads directly, while the next
-        # assistant header is a fixed scaffold appended by the hook below.
-        return False
-
-    def _merge_non_assistant_token_ids(
-        self, runtime_token_ids: list[int], appended_token_ids: list[int]
-    ) -> MergeResult:
-        prefix = list(runtime_token_ids)
-        inserted_token_ids: list[int] = []
-        if prefix and prefix[-1] == self._eos_id:
-            prefix.append(self._newline_id)
-            inserted_token_ids.append(self._newline_id)
-        return MergeResult(
-            token_ids=prefix + list(appended_token_ids),
-            appended_token_count=len(appended_token_ids),
-            kind="non_assistant",
-            inserted_token_ids=inserted_token_ids,
-        )
-
-    def _tokenize_tool_group(
-        self,
-        tool_messages: list[dict[str, Any]],
-        *,
-        previous_messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-        add_generation_prompt: bool = False,
-    ) -> list[int]:
-        del tools, add_generation_prompt
-        response_text = _format_minimax_legacy_tool_responses(tool_messages, previous_messages)
-        return normalize_token_ids(self.tokenizer.encode(response_text, add_special_tokens=False))
-
-    def _tokenize_single_non_tool(
-        self,
-        message: dict[str, Any],
-        *,
-        tools: list[dict[str, Any]] | None = None,
-        add_generation_prompt: bool = False,
-    ) -> list[int]:
-        del tools, add_generation_prompt
-        return self._render_tokens([message], add_generation_prompt=False, tools=None)
-
-    def _tokenize_generation_prompt_delta(
-        self,
-        updated_messages: list[dict[str, Any]],
-        *,
-        tools: list[dict[str, Any]] | None = None,
-    ) -> list[int]:
-        del tools
-        if not updated_messages:
-            raise ValueError("Continuous Token requires messages before a generation prompt")
-        return list(self._generation_scaffold_ids)
-
-
 class MiniMaxContinuousTokenBuilder(ContinuousTokenBuilder):
     """MiniMax boundary handling.
 
@@ -867,76 +752,6 @@ def _stringify_tool_content(content: Any) -> str:
             item.get("text", "") for item in content if isinstance(item, dict) and item.get("type") == "text"
         )
     return str(content)
-
-
-def _prepare_minimax_legacy_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Convert OpenAI text/tool messages to MiniMax-01's legacy block schema."""
-    prepared_messages = []
-    for message_index, message in enumerate(messages):
-        prepared_message = (
-            _prepare_minimax_legacy_assistant_message(message) if message.get("role") == "assistant" else dict(message)
-        )
-        if message.get("role") == "tool":
-            tool_group_start = message_index
-            while tool_group_start > 0 and messages[tool_group_start - 1].get("role") == "tool":
-                tool_group_start -= 1
-            tool_group_end = message_index + 1
-            while tool_group_end < len(messages) and messages[tool_group_end].get("role") == "tool":
-                tool_group_end += 1
-            tool_group = messages[tool_group_start:tool_group_end]
-            prepared_message["role"] = "function"
-            prepared_message["name"] = _resolve_required_tool_name(
-                message,
-                message_index - tool_group_start,
-                tool_group,
-                messages[:tool_group_start],
-            )
-        content = prepared_message.get("content")
-        if isinstance(content, str):
-            prepared_message["content"] = [{"type": "text", "text": content}]
-        elif content is None:
-            prepared_message["content"] = []
-        prepared_messages.append(prepared_message)
-    return prepared_messages
-
-
-def _prepare_minimax_legacy_assistant_message(message: dict[str, Any]) -> dict[str, Any]:
-    """Reconstruct MiniMax-01's textual function-call continuation."""
-    if not message.get("tool_calls") or _stringify_tool_content(message.get("content", "")):
-        return message
-
-    call_parts = []
-    for tool_call in message["tool_calls"]:
-        function = tool_call.get("function", tool_call)
-        name = function.get("name")
-        arguments = function.get("arguments", {})
-        if not isinstance(arguments, str):
-            arguments = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
-        call_parts.append(f"<function_call>```typescript\nfunctions.{name}({arguments})\n```")
-    rendered_message = dict(message)
-    rendered_message["content"] = "".join(call_parts)
-    return rendered_message
-
-
-def _format_minimax_legacy_tool_responses(
-    tool_messages: list[dict[str, Any]],
-    previous_messages: list[dict[str, Any]],
-) -> str:
-    response_parts = []
-    for index, tool_message in enumerate(tool_messages):
-        resolved_name = _resolve_required_tool_name(
-            tool_message,
-            index,
-            tool_messages,
-            previous_messages,
-        )
-        content = _stringify_tool_content(tool_message.get("content", ""))
-        response_parts.append(
-            "<beginning_of_sentence>system function_response=functions\n"
-            f'{{"name": "{resolved_name}", "response": {content}}}'
-            "<end_of_sentence>\n"
-        )
-    return "".join(response_parts)
 
 
 def _tool_message_name_or_dummy(tool_message: dict[str, Any]) -> str:
@@ -1247,10 +1062,10 @@ class QwenVLContinuousTokenBuilder(VLContinuousTokenMixin, QwenContinuousTokenBu
     """
 
 
-class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxText01ContinuousTokenBuilder):
-    """MiniMax-VL-01 legacy sentence protocol + VL processor logic.
+class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxContinuousTokenBuilder):
+    """MiniMax-VL (e.g. MiniMax-VL-01): MiniMax ``[e~[`` newline patch + VL processor logic.
 
-    MiniMax-VL-01's *processor* chat template ignores ``add_generation_prompt`` and
+    MiniMax-VL-01's original *processor* chat template ignores ``add_generation_prompt`` and
     unconditionally appends an assistant scaffold ``<beginning_of_sentence>ai
     name=assistant\\n`` after every render. That breaks Continuous Token's
     append-only / suffix-diff invariant (``render(prefix)`` is no longer a token
@@ -1261,40 +1076,35 @@ class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxText01Conti
 
     def __init__(self, tokenizer: Any, processor: Any, **kwargs: Any):
         super().__init__(tokenizer, processor, **kwargs)
+        # MiniMax-VL-01 uses ``<end_of_sentence>`` as its turn terminator, not the
+        # MiniMax-M2 ``[e~[`` token the base builder resolves. Repoint the EOS
+        # so the boundary-newline reinsertion in ``_merge_non_assistant_token_ids``
+        # fires for VL turns.
+        self._eos_id = require_token_id(tokenizer, "<end_of_sentence>")
         self._vl_scaffold_ids = self._compute_generation_scaffold_ids()
 
     def _compute_generation_scaffold_ids(self) -> list[int]:
-        """Extract the assistant scaffold across published template revisions."""
-        prepared_messages = self._prepare_vl_messages([_SYNTHETIC_SYSTEM_MESSAGE, _SYNTHETIC_USER_MESSAGE])
-        without_prompt_ids = VLContinuousTokenMixin.render_tokens_with_mm(
-            self,
-            prepared_messages,
-            [],
-            add_generation_prompt=False,
-        )
-        with_prompt_ids = VLContinuousTokenMixin.render_tokens_with_mm(
-            self,
-            prepared_messages,
-            [],
+        """Extract the trailing assistant scaffold with generation enabled.
+
+        Rendered via the processor chat template (bypassing this class's override),
+        the scaffold is the final ``<beginning_of_sentence>...`` block, i.e. every
+        token from the last ``<beginning_of_sentence>`` to the end.
+        """
+        text = apply_chat_template(
+            self.processor,
+            [_SYNTHETIC_SYSTEM_MESSAGE, _SYNTHETIC_USER_MESSAGE],
+            tokenize=False,
             add_generation_prompt=True,
+            **self.chat_template_kwargs,
         )
-
-        # Revised templates may honor ``add_generation_prompt``. In that case
-        # the generation scaffold is the ordinary suffix delta.
-        if with_prompt_ids[: len(without_prompt_ids)] == without_prompt_ids and len(with_prompt_ids) > len(
-            without_prompt_ids
-        ):
-            return with_prompt_ids[len(without_prompt_ids) :]
-
-        # The original published template ignores the flag and appends the same
-        # scaffold to both renders. Find that unconditional final sentence.
-        if with_prompt_ids != without_prompt_ids:
-            raise ValueError("MiniMax-VL generation-prompt renders have an unsupported boundary")
+        ids = normalize_token_ids(
+            build_multimodal_processor_inputs(self.processor, text=[text], images=None)["input_ids"]
+        )
         bos_id = require_token_id(self.tokenizer, "<beginning_of_sentence>")
-        bos_positions = [i for i, token_id in enumerate(with_prompt_ids) if token_id == bos_id]
+        bos_positions = [i for i, t in enumerate(ids) if t == bos_id]
         if not bos_positions:
             raise ValueError("MiniMax-VL scaffold detection failed: no <beginning_of_sentence> token")
-        scaffold = with_prompt_ids[bos_positions[-1] :]
+        scaffold = ids[bos_positions[-1] :]
         if not scaffold:
             raise ValueError("MiniMax-VL scaffold detection produced an empty scaffold")
         return scaffold
@@ -1309,10 +1119,9 @@ class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxText01Conti
         add_generation_prompt: bool = True,
         tools: list[dict[str, Any]] | None = None,
     ) -> list[int]:
-        # Strip an unconditional scaffold when no generation prompt was
-        # requested; templates that honor the flag have no matching tail here.
+        # Strip a trailing scaffold from templates that append it unconditionally.
         token_ids = super().render_tokens_with_mm(
-            self._prepare_vl_messages(messages),
+            messages,
             images,
             videos=videos,
             audios=audios,
@@ -1324,11 +1133,6 @@ class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxText01Conti
             token_ids = token_ids[: -len(scaffold)]
         return token_ids
 
-    @staticmethod
-    def _prepare_vl_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Adapt OpenAI text/tool messages to MiniMax-VL's block schema."""
-        return _prepare_minimax_legacy_messages(messages)
-
     def _tokenize_tool_group(
         self,
         tool_messages: list[dict[str, Any]],
@@ -1337,9 +1141,20 @@ class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxText01Conti
         tools: list[dict[str, Any]] | None = None,
         add_generation_prompt: bool = False,
     ) -> list[int]:
-        del tools, add_generation_prompt
-        response_text = _format_minimax_legacy_tool_responses(tool_messages, previous_messages)
-        return normalize_token_ids(self.tokenizer.encode(response_text, add_special_tokens=False))
+        del tools
+        response_parts = []
+        for index, message in enumerate(tool_messages):
+            name = _resolve_required_tool_name(message, index, tool_messages, previous_messages)
+            content = _stringify_tool_content(message.get("content", ""))
+            response_parts.append(
+                "<beginning_of_sentence>system function_response=functions\n"
+                f'{{"name": "{name}", "response": {content}}}'
+                "<end_of_sentence>\n"
+            )
+        token_ids = normalize_token_ids(self.tokenizer.encode("".join(response_parts), add_special_tokens=False))
+        if add_generation_prompt:
+            token_ids.extend(self._vl_scaffold_ids)
+        return token_ids
 
     def _tokenize_single_non_tool(
         self,
@@ -1348,22 +1163,8 @@ class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxText01Conti
         tools: list[dict[str, Any]] | None = None,
         add_generation_prompt: bool = False,
     ) -> list[int]:
-        # MiniMax-VL places tool declarations after conversation messages, so
-        # probing with them would move already-committed declarations. A single
-        # user/system turn is independently serializable through the processor.
-        del tools, add_generation_prompt
-        return self._render_tokens([message], add_generation_prompt=False, tools=None)
-
-    def _tokenize_generation_prompt_delta(
-        self,
-        updated_messages: list[dict[str, Any]],
-        *,
-        tools: list[dict[str, Any]] | None = None,
-    ) -> list[int]:
-        del tools
-        if not updated_messages:
-            raise ValueError("Continuous Token requires messages before a generation prompt")
-        return list(self._vl_scaffold_ids)
+        # Tool declarations belong to the initial prompt, not an appended user/system turn.
+        return super()._tokenize_single_non_tool(message, tools=None, add_generation_prompt=add_generation_prompt)
 
 
 class Gemma4VLContinuousTokenBuilder(VLContinuousTokenMixin, Gemma4ContinuousTokenBuilder):

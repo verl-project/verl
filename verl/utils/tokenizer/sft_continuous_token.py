@@ -25,6 +25,7 @@ a second copy of those rules.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .chat_template import apply_chat_template
@@ -40,12 +41,10 @@ from .continuous_token import (
     GptOssContinuousTokenBuilder,
     KimiVLContinuousTokenBuilder,
     MiniMaxContinuousTokenBuilder,
-    MiniMaxText01ContinuousTokenBuilder,
     MiniMaxVLContinuousTokenBuilder,
     QwenContinuousTokenBuilder,
     VLContinuousTokenMixin,
     _copy_messages_for_template,
-    _prepare_minimax_legacy_assistant_message,
     _stringify_tool_content,
     require_token_id,
 )
@@ -217,39 +216,6 @@ class _QwenReconstructor(_AssistantReconstructor):
             [{"type": "text", "text": answer_content}] if content_is_text_blocks else answer_content
         )
         return rendered_message
-
-
-class _MiniMaxText01Reconstructor(_AssistantReconstructor):
-    def reconstruct(
-        self,
-        message: dict[str, Any],
-        *,
-        tools: list[dict[str, Any]] | None,
-        previous_messages: list[dict[str, Any]] | None,
-    ) -> list[int]:
-        del tools
-        return super().reconstruct(
-            _prepare_minimax_legacy_assistant_message(message),
-            tools=None,
-            previous_messages=previous_messages,
-        )
-
-    def _render_text(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        add_generation_prompt: bool,
-        tools: list[dict[str, Any]] | None,
-    ) -> str:
-        return self.builder._render_text(
-            messages,
-            add_generation_prompt=add_generation_prompt,
-            tools=tools,
-        )
-
-    def _terminator_ids(self, message: dict[str, Any]) -> set[int]:
-        del message
-        return {self.builder._eos_id}
 
 
 class _MiniMaxReconstructor(_AssistantReconstructor):
@@ -608,7 +574,25 @@ class _DeepSeekV4Reconstructor(_AssistantReconstructor):
         return {self.builder._eos_id}
 
 
-class _MiniMaxVLReconstructor(_MiniMaxText01Reconstructor):
+def _prepare_minimax_legacy_assistant_message(message: dict[str, Any]) -> dict[str, Any]:
+    """Reconstruct MiniMax-01's textual function-call continuation."""
+    if not message.get("tool_calls") or _stringify_tool_content(message.get("content", "")):
+        return message
+
+    call_parts = []
+    for tool_call in message["tool_calls"]:
+        function = tool_call.get("function", tool_call)
+        name = function.get("name")
+        arguments = function.get("arguments", {})
+        if not isinstance(arguments, str):
+            arguments = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+        call_parts.append(f"<function_call>```typescript\nfunctions.{name}({arguments})\n```")
+    rendered_message = dict(message)
+    rendered_message["content"] = "".join(call_parts)
+    return rendered_message
+
+
+class _MiniMaxVLReconstructor(_AssistantReconstructor):
     def reconstruct(
         self,
         message: dict[str, Any],
@@ -616,28 +600,33 @@ class _MiniMaxVLReconstructor(_MiniMaxText01Reconstructor):
         tools: list[dict[str, Any]] | None,
         previous_messages: list[dict[str, Any]] | None,
     ) -> list[int]:
-        del tools, previous_messages
-        self._require_assistant(message)
-        rendered_message = _prepare_minimax_legacy_assistant_message(message)
-        synthetic_prompt = [_SYNTHETIC_SYSTEM_MESSAGE, _SYNTHETIC_USER_MESSAGE]
-        context_ids = self.builder._render_tokens(synthetic_prompt, add_generation_prompt=False, tools=None)
-        prompt_ids = self.builder._render_tokens(synthetic_prompt, add_generation_prompt=True, tools=None)
-        completed_ids = self.builder._render_tokens(
-            [*synthetic_prompt, rendered_message],
-            add_generation_prompt=False,
+        del tools
+        return super().reconstruct(
+            _prepare_minimax_legacy_assistant_message(message),
             tools=None,
+            previous_messages=previous_messages,
         )
-        if prompt_ids[: len(context_ids)] != context_ids or completed_ids[: len(context_ids)] != context_ids:
-            raise ValueError("Continuous Token MiniMax-VL assistant renders do not preserve the fixed context")
-        if prompt_ids[len(context_ids) :] != self.builder._vl_scaffold_ids:
-            raise ValueError("Continuous Token MiniMax-VL generation prompt has an unsupported scaffold")
-        completed_delta = completed_ids[len(context_ids) :]
-        if completed_delta[: len(self.builder._vl_scaffold_ids)] != self.builder._vl_scaffold_ids:
-            raise ValueError("Continuous Token MiniMax-VL completed turn does not start with its assistant scaffold")
-        assistant_token_ids = completed_delta[len(self.builder._vl_scaffold_ids) :]
-        if not assistant_token_ids:
-            raise ValueError("Continuous Token assistant encoding produced an empty token-id suffix")
-        return self._normalize_ids(assistant_token_ids, message)
+
+    def _render_text(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        add_generation_prompt: bool,
+        tools: list[dict[str, Any]] | None,
+    ) -> str:
+        prepared = []
+        for message in messages:
+            message = dict(message)
+            if isinstance(message.get("content"), str):
+                message["content"] = [{"type": "text", "text": message["content"]}]
+            elif message.get("content") is None:
+                message["content"] = []
+            prepared.append(message)
+        return super()._render_text(prepared, add_generation_prompt=add_generation_prompt, tools=tools)
+
+    def _terminator_ids(self, message: dict[str, Any]) -> set[int]:
+        del message
+        return {self.builder._eos_id}
 
 
 class _KimiVLReconstructor(_AssistantReconstructor):
@@ -709,7 +698,6 @@ _RECONSTRUCTORS: dict[type[ContinuousTokenBuilder], type[_AssistantReconstructor
     ContinuousTokenBuilder: _AssistantReconstructor,
     GptOssContinuousTokenBuilder: _GptOssReconstructor,
     QwenContinuousTokenBuilder: _QwenReconstructor,
-    MiniMaxText01ContinuousTokenBuilder: _MiniMaxText01Reconstructor,
     MiniMaxContinuousTokenBuilder: _MiniMaxReconstructor,
     GLMContinuousTokenBuilder: _GLMReconstructor,
     Gemma4ContinuousTokenBuilder: _Gemma4Reconstructor,

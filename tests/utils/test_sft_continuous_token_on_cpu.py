@@ -24,8 +24,6 @@ from tests.utils.test_continuous_token_on_cpu import (
     _Gemma4E4BAssistantTokenizer,
     _GLMAssistantTokenizer,
     _MiniMaxAssistantTokenizer,
-    _MiniMaxText01AssistantTokenizer,
-    _MiniMaxText01UnconditionalScaffoldTokenizer,
     _MiniMaxVLAssistantTokenizer,
     _MockDeepSeekVL2Processor,
     _MockMiniMaxVLAssistantProcessor,
@@ -46,7 +44,6 @@ from verl.utils.tokenizer.continuous_token import (
     GptOssContinuousTokenBuilder,
     KimiVLContinuousTokenBuilder,
     MiniMaxContinuousTokenBuilder,
-    MiniMaxText01ContinuousTokenBuilder,
     MiniMaxVLContinuousTokenBuilder,
     QwenContinuousTokenBuilder,
     QwenVLContinuousTokenBuilder,
@@ -63,7 +60,6 @@ from verl.utils.tokenizer.sft_continuous_token import (
     _GptOssReconstructor,
     _KimiVLReconstructor,
     _MiniMaxReconstructor,
-    _MiniMaxText01Reconstructor,
     _MiniMaxVLReconstructor,
     _QwenReconstructor,
     _resolve_reconstructor,
@@ -79,7 +75,6 @@ from verl.utils.tokenizer.sft_continuous_token import (
         (GptOssContinuousTokenBuilder, _GptOssReconstructor),
         (QwenContinuousTokenBuilder, _QwenReconstructor),
         (QwenVLContinuousTokenBuilder, _QwenReconstructor),
-        (MiniMaxText01ContinuousTokenBuilder, _MiniMaxText01Reconstructor),
         (MiniMaxContinuousTokenBuilder, _MiniMaxReconstructor),
         (MiniMaxVLContinuousTokenBuilder, _MiniMaxVLReconstructor),
         (GLMContinuousTokenBuilder, _GLMReconstructor),
@@ -105,15 +100,6 @@ def test_unregistered_builder_subclass_falls_back_to_base_reconstructor():
     builder = object.__new__(CustomContinuousTokenBuilder)
 
     assert _resolve_reconstructor(builder) is _AssistantReconstructor
-
-
-def test_minimax_text01_builder_normalizes_unconditional_generation_scaffold():
-    tokenizer = _MiniMaxText01UnconditionalScaffoldTokenizer()
-    builder = MiniMaxText01ContinuousTokenBuilder(tokenizer)
-
-    assistant_ids = reconstruct_assistant_tokens(builder, {"role": "assistant", "content": "gold"})
-
-    assert assistant_ids == tokenizer.encode("gold<end_of_sentence>", add_special_tokens=False)
 
 
 def test_deepseek_v4_builder_keeps_committed_reasoning_when_drop_thinking_is_enabled():
@@ -286,32 +272,6 @@ def test_gpt_oss_builder_normalizes_nullable_assistant_fields_for_harmony():
     )
 
     assert rendered_message == {"role": "assistant", "content": ""}
-
-
-def test_minimax_text01_builder_encodes_plain_and_structured_tool_call_continuations():
-    tokenizer = _MiniMaxText01AssistantTokenizer()
-    builder = MiniMaxText01ContinuousTokenBuilder(tokenizer)
-
-    plain_ids = reconstruct_assistant_tokens(builder, {"role": "assistant", "content": "gold"})
-    tool_call_ids = reconstruct_assistant_tokens(
-        builder,
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "type": "function",
-                    "function": {"name": "lookup", "arguments": {"q": "x"}},
-                }
-            ],
-        },
-    )
-
-    assert plain_ids == tokenizer.encode("gold<end_of_sentence>", add_special_tokens=False)
-    assert tool_call_ids == tokenizer.encode(
-        '<function_call>```typescript\nfunctions.lookup({"q":"x"})\n```<end_of_sentence>',
-        add_special_tokens=False,
-    )
 
 
 def test_minimax_builder_reconstructs_empty_and_nonempty_reasoning_continuations():

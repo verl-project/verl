@@ -30,7 +30,6 @@ from verl.utils.tokenizer.continuous_token import (
     KimiVLContinuousTokenBuilder,
     MergeResult,
     MiniMaxContinuousTokenBuilder,
-    MiniMaxText01ContinuousTokenBuilder,
     MiniMaxVLContinuousTokenBuilder,
     QwenContinuousTokenBuilder,
     QwenVLContinuousTokenBuilder,
@@ -375,73 +374,6 @@ class _MiniMaxAssistantTokenizer(_SpecialTokenTemplateTokenizer):
         return self.encode(rendered, add_special_tokens=False) if tokenize else rendered
 
 
-class _MiniMaxText01AssistantTokenizer(_SpecialTokenTemplateTokenizer):
-    special_token_ids = {
-        "<beginning_of_sentence>": 200100,
-        "<end_of_sentence>": 200101,
-        "<function_call>": 200102,
-    }
-    eos_token_id = 200101
-
-    def apply_chat_template(
-        self,
-        messages,
-        tokenize=True,
-        add_generation_prompt=True,
-        tools=None,
-        return_dict=False,
-        **kwargs,
-    ):
-        del tools, return_dict, kwargs
-        rendered = ""
-        for message in messages:
-            role = message["role"]
-            content = message.get("content", [])
-            content_text = "".join(
-                str(block.get("text", ""))
-                for block in content
-                if isinstance(block, dict) and block.get("type") == "text"
-            )
-            if role == "system":
-                rendered += f"<beginning_of_sentence>system ai_setting=assistant\n{content_text}<end_of_sentence>\n"
-            elif role == "user":
-                rendered += f"<beginning_of_sentence>user name=user\n{content_text}<end_of_sentence>\n"
-            elif role == "assistant":
-                rendered += f"<beginning_of_sentence>ai name=assistant\n{content_text}<end_of_sentence>\n"
-            elif role == "function":
-                rendered += (
-                    "<beginning_of_sentence>system function_response=functions\n"
-                    f'{{"name": "{message["name"]}", "response": {content_text}}}'
-                    "<end_of_sentence>\n"
-                )
-        if add_generation_prompt:
-            rendered += "<beginning_of_sentence>ai name=assistant\n"
-        return self.encode(rendered, add_special_tokens=False) if tokenize else rendered
-
-
-class _MiniMaxText01UnconditionalScaffoldTokenizer(_MiniMaxText01AssistantTokenizer):
-    def apply_chat_template(
-        self,
-        messages,
-        tokenize=True,
-        add_generation_prompt=True,
-        tools=None,
-        return_dict=False,
-        **kwargs,
-    ):
-        rendered = super().apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=add_generation_prompt,
-            tools=tools,
-            return_dict=return_dict,
-            **kwargs,
-        )
-        if not add_generation_prompt:
-            rendered += "<beginning_of_sentence>ai name=assistant\n"
-        return self.encode(rendered, add_special_tokens=False) if tokenize else rendered
-
-
 class _GLMAssistantTokenizer(_SpecialTokenTemplateTokenizer):
     special_token_ids = {"<|observation|>": 151333, "<|user|>": 151336}
 
@@ -731,7 +663,7 @@ def test_builtin_family_surface():
         (ContinuousTokenModelFamily.QWEN25, QwenContinuousTokenBuilder),
         (ContinuousTokenModelFamily.QWEN3, QwenContinuousTokenBuilder),
         (ContinuousTokenModelFamily.QWEN35, QwenContinuousTokenBuilder),
-        (ContinuousTokenModelFamily.MINIMAX, MiniMaxText01ContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.MINIMAX, MiniMaxContinuousTokenBuilder),
         (ContinuousTokenModelFamily.MINIMAX_M2, MiniMaxContinuousTokenBuilder),
         (ContinuousTokenModelFamily.MINIMAX_M25, MiniMaxContinuousTokenBuilder),
         (ContinuousTokenModelFamily.MINIMAX_M27, MiniMaxContinuousTokenBuilder),
@@ -1377,81 +1309,6 @@ def test_default_builder_appends_assistant_tokens_to_runtime_stream():
     assert aligned_logprobs == [0.0, -0.1, -0.2, -0.3]
 
 
-def test_minimax_text01_builder_merges_openai_tool_response():
-    tokenizer = _MiniMaxText01AssistantTokenizer()
-    builder = MiniMaxText01ContinuousTokenBuilder(tokenizer)
-    previous_messages = [
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call_0",
-                    "type": "function",
-                    "function": {"name": "lookup", "arguments": {"q": "x"}},
-                }
-            ],
-        }
-    ]
-    updated_messages = [
-        *previous_messages,
-        {"role": "tool", "tool_call_id": "call_0", "content": '{"value": 1}'},
-    ]
-    runtime_ids = [7, tokenizer.eos_token_id]
-
-    result = builder.merge_non_assistant_tokens(previous_messages, updated_messages, runtime_ids)
-
-    expected_response = tokenizer.encode(
-        "<beginning_of_sentence>system function_response=functions\n"
-        '{"name": "lookup", "response": {"value": 1}}<end_of_sentence>\n',
-        add_special_tokens=False,
-    )
-    assert result.token_ids == runtime_ids + [ord("\n")] + expected_response + builder._generation_scaffold_ids
-
-
-def test_minimax_text01_builder_prepares_structured_tool_history():
-    tokenizer = _MiniMaxText01AssistantTokenizer()
-    builder = MiniMaxText01ContinuousTokenBuilder(tokenizer)
-    messages = [
-        {"role": "user", "content": "question"},
-        {
-            "role": "assistant",
-            "content": None,
-            "tool_calls": [
-                {
-                    "id": "call_0",
-                    "type": "function",
-                    "function": {"name": "lookup", "arguments": {"q": "x"}},
-                }
-            ],
-        },
-        {"role": "tool", "tool_call_id": "call_0", "content": '{"value": 1}'},
-    ]
-
-    rendered = builder._render_text(messages, add_generation_prompt=True)
-
-    assert '<function_call>```typescript\nfunctions.lookup({"q":"x"})\n```' in rendered
-    assert 'function_response=functions\n{"name": "lookup", "response": {"value": 1}}' in rendered
-
-
-def test_minimax_text01_builder_normalizes_unconditional_runtime_scaffold():
-    tokenizer = _MiniMaxText01UnconditionalScaffoldTokenizer()
-    builder = MiniMaxText01ContinuousTokenBuilder(tokenizer)
-    previous_messages = [{"role": "assistant", "content": "gold"}]
-    updated_messages = [*previous_messages, {"role": "user", "content": "retry"}]
-    runtime_ids = [7, tokenizer.eos_token_id]
-
-    user_ids = builder._tokenize_single_non_tool({"role": "user", "content": "retry"}, add_generation_prompt=True)
-    result = builder.merge_non_assistant_tokens(previous_messages, updated_messages, runtime_ids)
-
-    assert builder._should_fuse_generation_prompt_with_last_group() is False
-    assert user_ids == tokenizer.encode(
-        "<beginning_of_sentence>user name=user\nretry<end_of_sentence>\n",
-        add_special_tokens=False,
-    )
-    assert result.token_ids == runtime_ids + [ord("\n")] + user_ids + builder._generation_scaffold_ids
-
-
 def test_deepseek_v4_builder_keeps_committed_prefix_when_drop_thinking_is_enabled():
     tokenizer = _DeepSeekAssistantTokenizer()
     builder = DeepSeekV4ContinuousTokenBuilder(
@@ -1546,19 +1403,64 @@ def test_deepseek_vl2_builder_rejects_processor_output_that_rewrites_runtime_pre
         )
 
 
-def test_minimax_vl_builder_keeps_generation_scaffold_separate_for_user_append():
+@pytest.mark.parametrize("always_append_scaffold", [False, True])
+def test_minimax_vl_builder_preserves_user_append_tokens_and_metadata(always_append_scaffold):
     tokenizer = _MiniMaxVLAssistantTokenizer()
-    processor = _MockMiniMaxVLAssistantProcessor(tokenizer)
-    builder = MiniMaxVLContinuousTokenBuilder(tokenizer, processor)
+
+    class Processor(_MockMiniMaxVLAssistantProcessor):
+        def apply_chat_template(self, messages, *, add_generation_prompt=False, **kwargs):
+            rendered = super().apply_chat_template(messages, add_generation_prompt=add_generation_prompt, **kwargs)
+            if not always_append_scaffold and not add_generation_prompt:
+                rendered = rendered.removesuffix("<beginning_of_sentence>ai\n")
+            return rendered
+
+    builder = MiniMaxVLContinuousTokenBuilder(tokenizer, Processor(tokenizer))
     previous_messages = [{"role": "assistant", "content": "gold"}]
-    updated_messages = [*previous_messages, {"role": "user", "content": "retry"}]
+    updated_messages = [*previous_messages, {"role": "user", "content": [{"type": "text", "text": "retry"}]}]
     runtime_ids = [7, tokenizer.eos_token_id]
-
-    user_ids = builder._tokenize_single_non_tool({"role": "user", "content": "retry"}, add_generation_prompt=True)
     result = builder.merge_non_assistant_tokens(previous_messages, updated_messages, runtime_ids)
+    expected = tokenizer.encode(
+        "\n<beginning_of_sentence>user\nretry<end_of_sentence>\n<beginning_of_sentence>ai\n",
+        add_special_tokens=False,
+    )
+    assert result.token_ids == runtime_ids + expected
+    mask, logprobs = builder.align_response_metadata(result, [1, 1], [0.1, 0.2])
+    assert mask == [1, 1] + [0] * len(expected)
+    assert logprobs == [0.1, 0.2] + [0.0] * len(expected)
 
-    assert builder._should_fuse_generation_prompt_with_last_group() is False
-    assert result.token_ids == runtime_ids + [ord("\n")] + user_ids + builder._vl_scaffold_ids
+
+def test_minimax_vl_builder_keeps_tool_declarations_in_initial_prompt():
+    tokenizer = _MiniMaxVLAssistantTokenizer()
+
+    class Processor(_MockMiniMaxVLAssistantProcessor):
+        def apply_chat_template(self, messages, *, tools=None, add_generation_prompt=False, **kwargs):
+            rendered = super().apply_chat_template(messages, **kwargs).removesuffix("<beginning_of_sentence>ai\n")
+            for tool in tools or []:
+                rendered += f"<tool>{tool['name']}</tool>"
+            if add_generation_prompt:
+                rendered += "<beginning_of_sentence>ai\n"
+            return rendered
+
+    builder = MiniMaxVLContinuousTokenBuilder(tokenizer, Processor(tokenizer))
+    tools = [{"type": "function", "function": {"name": "lookup"}}]
+    first = [{"role": "user", "content": [{"type": "text", "text": "question"}]}]
+    initial = builder.build_initial_tokens(first, tools=tools)
+    assert initial == tokenizer.encode(
+        "<beginning_of_sentence>user\nquestion<end_of_sentence>\n<tool>lookup</tool><beginning_of_sentence>ai\n",
+        add_special_tokens=False,
+    )
+    previous = [*first, {"role": "assistant", "content": "gold"}]
+    runtime_ids = initial + tokenizer.encode("gold<end_of_sentence>", add_special_tokens=False)
+    result = builder.merge_non_assistant_tokens(
+        previous,
+        [*previous, {"role": "user", "content": [{"type": "text", "text": "retry"}]}],
+        runtime_ids,
+        tools=tools,
+    )
+    assert result.token_ids == runtime_ids + tokenizer.encode(
+        "\n<beginning_of_sentence>user\nretry<end_of_sentence>\n<beginning_of_sentence>ai\n",
+        add_special_tokens=False,
+    )
 
 
 def test_minimax_vl_builder_formats_openai_tool_response_as_function_message():
@@ -1793,9 +1695,6 @@ def test_model_specific_builders_validate_required_special_tokens():
 
     with pytest.raises(ValueError, match="required token '\\[e~\\['"):
         MiniMaxContinuousTokenBuilder(_MissingSpecialTokenTokenizer())
-
-    with pytest.raises(ValueError, match="required token '<end_of_sentence>'"):
-        MiniMaxText01ContinuousTokenBuilder(_MissingSpecialTokenTokenizer())
 
     with pytest.raises(ValueError, match="required token '<\\|observation\\|>'"):
         GLMContinuousTokenBuilder(_MissingSpecialTokenTokenizer())

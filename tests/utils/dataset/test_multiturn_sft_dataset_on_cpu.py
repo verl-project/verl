@@ -47,6 +47,34 @@ qwen3_vl_model_path = Path(
 ).expanduser()
 
 
+@pytest.mark.parametrize(
+    ("model_family", "hf_model_type"),
+    [("auto", "minimax"), ("auto", "minimax_text_01"), ("minimax", None), (" Mini-Max ", None)],
+)
+@pytest.mark.parametrize("block_content", [False, True])
+def test_multiturn_sft_rejects_text01_before_builder_creation(
+    tmp_path, monkeypatch, model_family, hf_model_type, block_content
+):
+    messages = [{"role": "user", "content": "question"}, {"role": "assistant", "content": "answer"}]
+    if block_content:
+        messages = [{**message, "content": [{"type": "text", "text": message["content"]}]} for message in messages]
+    data_file = tmp_path / "text01.parquet"
+    pd.DataFrame({"messages": [messages]}).to_parquet(data_file)
+
+    def unexpected_builder(*args, **kwargs):
+        pytest.fail("Unsupported SFT family reached builder construction")
+
+    monkeypatch.setattr(multiturn_sft_dataset_module, "create_continuous_token_builder", unexpected_builder)
+    dataset = MultiTurnSFTDataset(
+        str(data_file),
+        tokenizer=object(),
+        config={"continuous_token_model_family": model_family},
+        hf_model_type=hf_model_type,
+    )
+    with pytest.raises(ValueError, match="MultiTurnSFTDataset does not support MiniMax-Text-01"):
+        dataset[0]
+
+
 def test_multiturn_sft_drops_arrow_null_message_fields():
     messages = [
         {"role": "assistant", "content": "done", "tool_calls": None},

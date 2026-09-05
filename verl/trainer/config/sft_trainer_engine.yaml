@@ -42,6 +42,7 @@ data:
   # MultiTurnSFTDataset uses append-only Continuous Token assembly, matching RL TITO.
   # Historical tokens are never re-rendered even if the chat template would rewrite them.
   # Auto resolves the builder family from the model config's model_type.
+  # The legacy 'minimax' (MiniMax-Text-01) family is not supported by MultiTurnSFTDataset.
   continuous_token_model_family: auto
 
   # Extra arguments forwarded to multimodal processors during Continuous Token assembly.

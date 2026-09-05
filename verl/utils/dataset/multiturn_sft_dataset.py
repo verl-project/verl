@@ -38,7 +38,11 @@ from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.py_functional import convert_nested_value_to_list_recursive
 from verl.utils.tokenizer import build_multimodal_processor_inputs, get_processor_token_id
 from verl.utils.tokenizer.continuous_token import ContinuousTokenBuilder, extract_image_references
-from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
+from verl.utils.tokenizer.continuous_token_wiring import (
+    ContinuousTokenModelFamily,
+    create_continuous_token_builder,
+    resolve_continuous_token_model_family,
+)
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -201,12 +205,22 @@ class MultiTurnSFTDataset(Dataset):
     def _get_continuous_token_builder(self, enable_thinking: Optional[bool]) -> ContinuousTokenBuilder:
         """Return a CT builder whose template kwargs match one sample."""
         if enable_thinking not in self._continuous_token_builders:
+            model_family = resolve_continuous_token_model_family(
+                self.continuous_token_model_family,
+                hf_model_type=self.hf_model_type,
+                has_multimodal_processor=getattr(self.processor, "image_processor", None) is not None,
+            )
+            if model_family == ContinuousTokenModelFamily.MINIMAX:
+                raise ValueError(
+                    "MultiTurnSFTDataset does not support MiniMax-Text-01 (Continuous Token family 'minimax'). "
+                    "Use a supported model family or a custom SFT dataset for this model."
+                )
             apply_chat_template_kwargs = dict(self.apply_chat_template_kwargs)
             if enable_thinking is not None:
                 apply_chat_template_kwargs["enable_thinking"] = enable_thinking
             self._continuous_token_builders[enable_thinking] = create_continuous_token_builder(
                 self.tokenizer,
-                model_family=self.continuous_token_model_family,
+                model_family=model_family,
                 hf_model_type=self.hf_model_type,
                 chat_template_kwargs=apply_chat_template_kwargs,
                 mm_processor_kwargs=self.mm_processor_kwargs,
