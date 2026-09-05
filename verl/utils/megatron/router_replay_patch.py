@@ -31,6 +31,7 @@ except ImportError:
     MoEAlltoAllTokenDispatcher = None
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.transformer.transformer_block import TransformerBlock
 
 # https://github.com/THUDM/slime/blob/main/slime/utils/routing_replay.py
 
