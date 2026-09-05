@@ -1,0 +1,25 @@
+# English translations for verl ascend_tutorial docs.
+# Copyright (c) 2025 Huawei Technologies Co., Ltd.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: verl-docs\n"
+
+"X-Source-Commit: 4f0bea4bca0935a4f8c3ccec0423f8e8f23aafc2\n"
+
+"X-Skill-Version: 2.2.0\n"
+
+"Last-Translator: Auto Translation (DeepSeek)\n"
+"Language-Team: English\n"
+"Language: en\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgid ""
+"# NPU 模型与算法支持情况\n"
+""
+msgstr ""
+"# NPU Model and Algorithm Support\n"
+""
