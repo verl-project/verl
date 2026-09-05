@@ -32,6 +32,7 @@ from torch.utils.data import DistributedSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
+from verl.trainer.sft_val_utils import reduce_sft_val_loss, resolve_sft_val_batch_size, sft_val_num_samples
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint import CheckpointHandler, OrchestrationMode
 from verl.utils.dataset.dataset_utils import SFTTensorCollator
@@ -201,19 +202,21 @@ class SFTTrainer:
         )
 
         if self.val_dataset:
+            val_batch_size = resolve_sft_val_batch_size(config.data, len(self.val_dataset))
             self.val_sampler = DistributedSampler(
-                self.val_dataset, shuffle=False, num_replicas=dp_size, rank=dp_rank, drop_last=True
+                self.val_dataset, shuffle=False, num_replicas=dp_size, rank=dp_rank, drop_last=False
             )
             self.val_dataloader = StatefulDataLoader(
                 dataset=self.val_dataset,
-                batch_size=self.train_batch_size_per_dp,
+                batch_size=val_batch_size,
                 sampler=self.val_sampler,
                 collate_fn=self.collate_fn,
                 num_workers=8,
                 pin_memory=False,
-                drop_last=True,
+                drop_last=False,
                 pin_memory_device=device_name,
             )
+            assert len(self.val_dataloader) >= 1, "Validation dataloader is empty!"
         else:
             self.val_dataloader = None
 
@@ -356,19 +359,28 @@ class SFTTrainer:
                 # early exit or validation step
                 if is_last_step and self.val_dataloader is not None or (self.test_freq > 0 and is_valid_step):
                     # Perform validation
-                    val_losses = []
+                    val_losses_and_counts = []
                     for val_data in self.val_dataloader:
                         val_data = tu.get_tensordict(tensor_dict=val_data, non_tensor_dict=meta_info)
+                        n_samples = sft_val_num_samples(val_data)
                         output = self.training_client.infer_batch(val_data)
                         output = output.get()
                         metrics = tu.get(output, "metrics")
-                        val_losses.append(metrics["loss"])
+                        val_losses_and_counts.append((metrics["loss"], n_samples))
 
-                    val_loss = torch.mean(torch.tensor(val_losses, device=self.device_name))
-
-                    metric = {"val/loss": val_loss.detach().item()}
-                    tracking.log(data=metric, step=global_step)
-                    last_valid_metric = metric
+                    val_loss = reduce_sft_val_loss(val_losses_and_counts)
+                    if val_loss is None:
+                        log_with_rank(
+                            "Validation produced no batches; skip val/loss rather than logging NaN.",
+                            logger=logger,
+                            rank=0,
+                            level=logging.WARNING,
+                            log_only_rank_0=True,
+                        )
+                    else:
+                        metric = {"val/loss": val_loss}
+                        tracking.log(data=metric, step=global_step)
+                        last_valid_metric = metric
 
                 if is_last_step or (self.save_freq > 0 and is_save_step):
                     self.ckpt_handler.save_checkpoint(step=global_step)
