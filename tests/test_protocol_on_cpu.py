@@ -1256,3 +1256,23 @@ def test_serialize_dataproto_with_empty_tensordict():
     deserialized_data = pickle.loads(serialized_data)
     assert len(deserialized_data.batch.keys()) == 0
     assert deserialized_data.batch.batch_size == torch.Size([10])
+
+
+def test_index_select_tensor_dict_with_3d_jagged_position_ids():
+    samples = [torch.zeros(4, 17), torch.ones(4, 17)]
+    position_ids = torch.nested.as_nested_tensor(samples, layout=torch.jagged)
+    batch = TensorDict({"position_ids": position_ids}, batch_size=[2])
+
+    tu.maybe_fix_3d_position_ids(batch)
+    selected = tu.index_select_tensor_dict(batch, [1, 0])
+
+    actual = selected["position_ids"]
+    assert actual._ragged_idx == 2
+    expected_values = torch.cat([samples[1], samples[0]], dim=1)
+    torch.testing.assert_close(actual.values(), expected_values)
+    expected_offsets = torch.tensor(
+        [0, 17, 34],
+        dtype=actual.offsets().dtype,
+        device=actual.offsets().device,
+    )
+    torch.testing.assert_close(actual.offsets(), expected_offsets)
