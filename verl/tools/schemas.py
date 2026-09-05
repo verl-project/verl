@@ -15,11 +15,19 @@
 import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class OpenAIFunctionPropertySchema(BaseModel):
     """The schema of a parameter in OpenAI format."""
+
+    # JSON Schema keywords this model does not name -- ``minimum``, ``maximum``,
+    # ``items``, ``pattern``, a nested object's own ``properties`` -- are part of the
+    # contract the caller wrote and the model is meant to see. Pydantic drops unknown
+    # keys by default, so without this they were silently gone by the time
+    # ``model_dump`` fed the chat template. Extras count as set, so they also survive
+    # the ``exclude_unset=True`` dumps on the rollout path.
+    model_config = ConfigDict(extra="allow")
 
     # Union's type is list[str], e.g. ["integer", "number"] for int | float unions.
     type: str | list[str]
@@ -31,6 +39,10 @@ class OpenAIFunctionPropertySchema(BaseModel):
 
 class OpenAIFunctionParametersSchema(BaseModel):
     """The schema of parameters in OpenAI format."""
+
+    # Same reason as above: keeps root-level keywords such as
+    # ``additionalProperties`` and ``$defs``.
+    model_config = ConfigDict(extra="allow")
 
     type: str
     properties: dict[str, OpenAIFunctionPropertySchema]
