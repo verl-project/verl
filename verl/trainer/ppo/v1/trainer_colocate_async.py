@@ -11,15 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import logging
-import os
-
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, register_trainer
 from verl.utils.debug import marked_timer
 from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient
-
-logger = logging.getLogger(__name__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 @register_trainer("colocate_async")
@@ -38,12 +32,7 @@ class PPOTrainerColocateAsync(PPOTrainer):
         self.checkpoint_manager.update_weights(self.global_steps)
 
     def on_train_begin(self):
-        if self.config.skip.rollout_tq.enable:
-            return
-        num_warmup_batches = self.config.trainer.v1.colocate_async.num_warmup_batches
-        for _ in range(num_warmup_batches):
-            self._add_batch_to_generate()
-        logger.info(f"Added {num_warmup_batches} warmup batches to the agent loop manager")
+        self._add_async_warmup_batches(self.config.trainer.v1.colocate_async.num_warmup_batches)
 
     def on_step_end(self):
         with marked_timer("update_weights", self.timing_raw, color="red"):

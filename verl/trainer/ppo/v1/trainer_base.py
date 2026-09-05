@@ -431,7 +431,7 @@ class PPOTrainer(ABC):
         self.global_steps += 1
         # SkipManager skips warmup batches in async trainers, so it doesn't conflict with reissue.
         SkipManager.set_step(self.global_steps)
-        self._reissue_inflight_prompts()
+        self._resumed_inflight_prompts = self._reissue_inflight_prompts()
         self.prev_step_profile = False
         self.curr_step_profile = (
             self.global_steps in self.config.global_profiler.steps
@@ -598,6 +598,28 @@ class PPOTrainer(ABC):
     def on_train_begin(self):
         """Called before the training loop starts."""
         return
+
+    def _add_async_warmup_batches(self, num_warmup_batches: int) -> None:
+        """Submit warmup batches for async trainers, unless resume already refilled the pipeline.
+
+        After checkpoint resume, ``_reissue_inflight_prompts`` re-submits pending/running
+        prompts from the restored TransferQueue. Extra warmup would consume new dataloader
+        rows and overfill the in-flight window relative to the checkpoint. Fresh starts
+        (reissue count 0) and runs without TQ checkpoint support still warm up as before.
+        ``skip.rollout_tq.enable`` continues to skip warmup entirely.
+        """
+        if self.config.skip.rollout_tq.enable:
+            return
+        resumed = getattr(self, "_resumed_inflight_prompts", 0)
+        if resumed > 0:
+            logger.info(
+                "Skipping async warmup: re-issued %s in-flight prompts from checkpoint",
+                resumed,
+            )
+            return
+        for _ in range(num_warmup_batches):
+            self._add_batch_to_generate()
+        logger.info("Added %s warmup batches to the agent loop manager", num_warmup_batches)
 
     def on_train_end(self):
         """Called after the training loop ends."""
