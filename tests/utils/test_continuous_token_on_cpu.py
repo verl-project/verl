@@ -567,6 +567,23 @@ class _MiniMaxVLAssistantTokenizer(_SpecialTokenTemplateTokenizer):
     }
     eos_token_id = 200101
 
+    def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True, **kwargs):
+        if not all(message["role"] == "function" for message in messages):
+            return super().apply_chat_template(
+                messages, tokenize=tokenize, add_generation_prompt=add_generation_prompt, **kwargs
+            )
+        rendered = "".join(
+            '<beginning_of_sentence>system function_response=functions\n{"name": "'
+            + message["name"]
+            + '", "response": '
+            + message["content"][0]["text"]
+            + "}<end_of_sentence>\n"
+            for message in messages
+        )
+        if add_generation_prompt:
+            rendered += "<beginning_of_sentence>ai name=assistant\n"
+        return self.encode(rendered, add_special_tokens=False) if tokenize else rendered
+
 
 class _MockMiniMaxVLAssistantProcessor:
     def __init__(self, tokenizer):
@@ -1507,7 +1524,8 @@ def test_minimax_vl_builder_formats_openai_tool_response_as_function_message(too
     assert response == '{"name": "' + tool_name + '", "response": ' + (content or "") + "}"
 
 
-def test_minimax_vl_builder_merges_tool_result_and_fixed_generation_scaffold():
+@pytest.mark.parametrize("response_count", [1, 2])
+def test_minimax_vl_builder_merges_tool_result_and_fixed_generation_scaffold(response_count):
     tokenizer = _MiniMaxVLAssistantTokenizer()
     processor = _MockMiniMaxVLAssistantProcessor(tokenizer)
     builder = MiniMaxVLContinuousTokenBuilder(tokenizer, processor)
@@ -1527,7 +1545,7 @@ def test_minimax_vl_builder_merges_tool_result_and_fixed_generation_scaffold():
     ]
     updated_messages = [
         *previous_messages,
-        {"role": "tool", "tool_call_id": "call_0", "content": '{"value": 1}'},
+        *[{"role": "tool", "tool_call_id": "call_0", "content": '{"value": 1}'} for _ in range(response_count)],
     ]
     runtime_ids = [7, tokenizer.eos_token_id]
 
@@ -1543,9 +1561,31 @@ def test_minimax_vl_builder_merges_tool_result_and_fixed_generation_scaffold():
         '{"name": "lookup", "response": {"value": 1}}<end_of_sentence>\n',
         add_special_tokens=False,
     )
-    assert result.token_ids == runtime_ids + [ord("\n")] + expected_response + builder._vl_scaffold_ids
+    expected_append = expected_response * response_count + builder._vl_scaffold_ids
+    assert result.token_ids == runtime_ids + [ord("\n")] + expected_append
     assert result.inserted_token_ids == [ord("\n")]
-    assert result.appended_token_count == len(expected_response) + len(builder._vl_scaffold_ids)
+    assert result.appended_token_count == len(expected_append)
+
+
+def test_minimax_vl_tool_responses_follow_tokenizer_template(monkeypatch):
+    tokenizer = _MiniMaxVLAssistantTokenizer()
+    builder = MiniMaxVLContinuousTokenBuilder(tokenizer, _MockMiniMaxVLAssistantProcessor(tokenizer))
+
+    def custom_template(messages, *, tokenize, add_generation_prompt, **kwargs):
+        assert tokenize and not add_generation_prompt
+        assert all(message["role"] == "function" for message in messages)
+        rendered = "".join(f"{message['name']}:{message['content'][0]['text']}!" for message in messages)
+        return tokenizer.encode(rendered, add_special_tokens=False)
+
+    monkeypatch.setattr(tokenizer, "apply_chat_template", custom_template)
+    messages = [
+        {"role": "tool", "name": "first", "content": [{"type": "text", "text": "sunny"}]},
+        {"role": "tool", "name": "second", "content": None},
+    ]
+    original = copy.deepcopy(messages)
+    result = builder._tokenize_tool_group(messages, previous_messages=[], add_generation_prompt=True)
+    assert result == tokenizer.encode("first:sunny!second:!", add_special_tokens=False) + builder._vl_scaffold_ids
+    assert messages == original
 
 
 def test_kimi_vl_builder_rejects_unsupported_runtime_tools():

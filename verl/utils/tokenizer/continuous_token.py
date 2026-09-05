@@ -1144,18 +1144,22 @@ class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxContinuousT
         add_generation_prompt: bool = False,
     ) -> list[int]:
         del tools
-        response_parts = []
+        function_messages = []
         for index, message in enumerate(tool_messages):
             name = _resolve_required_tool_name(message, index, tool_messages, previous_messages)
             content = _stringify_tool_content(message.get("content", ""))
-            # Match the checkpoint's native `function` template: both fields
-            # are inserted verbatim. This protocol text is not a JSON document.
-            response_parts.append(
-                "<beginning_of_sentence>system function_response=functions\n"
-                f'{{"name": "{name}", "response": {content}}}'
-                "<end_of_sentence>\n"
+            function_messages.append({"role": "function", "name": name, "content": [{"type": "text", "text": content}]})
+        # The tokenizer template supports native function responses; the legacy
+        # processor template does not. Keep the processor's generation scaffold.
+        token_ids = normalize_token_ids(
+            apply_chat_template(
+                self.tokenizer,
+                function_messages,
+                tokenize=True,
+                add_generation_prompt=False,
+                **self.chat_template_kwargs,
             )
-        token_ids = normalize_token_ids(self.tokenizer.encode("".join(response_parts), add_special_tokens=False))
+        )
         if add_generation_prompt:
             token_ids.extend(self._vl_scaffold_ids)
         return token_ids
