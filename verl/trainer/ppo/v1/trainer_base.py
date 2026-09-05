@@ -1523,9 +1523,14 @@ class PPOTrainer(ABC):
             dp_rank_mapping = worker_group._dispatch_info[role]
         dp_size = max(dp_rank_mapping) + 1
 
-        # Upsampling the batch with padding sequences
+        # Upsampling the batch with padding sequences. This stays on even when
+        # trainer.balance_batch is false: V1 mini-batch / DP LCM still requires
+        # a divisible batch size. The optional seqlen reorder below is the
+        # documented load-balance switch.
         batch_multiple = self._get_required_batch_multiple(dp_size)
         batch = upsample_batch_to_divisible_size(batch, batch_multiple, self.tokenizer.eos_token_id)
+        if not self.config.trainer.get("balance_batch", True):
+            return batch
         global_seqlen_lst = torch.tensor([tag["seq_len"] for tag in batch.tags], dtype=torch.int64)
         workload_lst = calculate_workload(global_seqlen_lst)
 
