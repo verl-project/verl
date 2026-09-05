@@ -37,7 +37,7 @@ from verl.utils.dataset.vision_utils import process_image, process_video
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.py_functional import convert_nested_value_to_list_recursive
 from verl.utils.tokenizer import build_multimodal_processor_inputs, get_processor_token_id
-from verl.utils.tokenizer.continuous_token import ContinuousTokenBuilder, extract_image_references
+from verl.utils.tokenizer.continuous_token import ContinuousTokenBuilder
 from verl.utils.tokenizer.continuous_token_wiring import (
     ContinuousTokenModelFamily,
     create_continuous_token_builder,
@@ -231,7 +231,7 @@ class MultiTurnSFTDataset(Dataset):
 
     @staticmethod
     def _collect_media(messages: list[dict[str, Any]]) -> tuple[list[Any], list[Any]]:
-        images = extract_image_references(messages)
+        images: list[Any] = []
         videos: list[Any] = []
         for message in messages:
             content = message.get("content")
@@ -240,6 +240,18 @@ class MultiTurnSFTDataset(Dataset):
             for block in content:
                 if not isinstance(block, dict):
                     continue
+                if block.get("type") in ("image", "image_url"):
+                    image_ref = block.get("image")
+                    # _build_messages normalizes standard image_url blocks;
+                    # retain fallback for direct calls and mixed image/image_url blocks.
+                    if image_ref is None or (isinstance(image_ref, str) and not image_ref):
+                        image_url = block.get("image_url")
+                        if isinstance(image_url, dict):
+                            image_ref = image_url.get("url")
+                        elif isinstance(image_url, str):
+                            image_ref = image_url
+                    if image_ref is not None:
+                        images.append(image_ref)
                 if block.get("type") == "video" and block.get("video") is not None:
                     videos.append(block["video"])
         return images, videos

@@ -34,7 +34,6 @@ from verl.utils.tokenizer.continuous_token import (
     QwenContinuousTokenBuilder,
     QwenVLContinuousTokenBuilder,
     VLContinuousTokenBuilder,
-    extract_image_references,
 )
 from verl.utils.tokenizer.continuous_token_wiring import (
     CONTINUOUS_TOKEN_BUILDER_FAMILIES,
@@ -90,8 +89,20 @@ _IMAGE_REFERENCE = _ImageReferenceWithAmbiguousTruthValue()
         ),
     ],
 )
-def test_extract_image_references(block, expected):
-    assert extract_image_references([{"role": "user", "content": [block]}]) == [expected]
+@pytest.mark.parametrize("family", ["qwenvl", "deepseekvl2", "dataset"])
+def test_builder_extracts_image_references(family, block, expected):
+    if family == "dataset":
+        from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
+
+        images, _ = MultiTurnSFTDataset._collect_media([{"role": "user", "content": [block]}])
+        assert images == [expected]
+        return
+    if family == "qwenvl":
+        builder = QwenVLContinuousTokenBuilder(_MockQwenVLTokenizer(), _MockQwenVLProcessor())
+    else:
+        tokenizer = _DeepSeekAssistantTokenizer()
+        builder = DeepSeekVL2ContinuousTokenBuilder(tokenizer, _MockDeepSeekVL2Processor(tokenizer))
+    assert builder._extract_images_from_messages([{"role": "user", "content": [block]}]) == [expected]
 
 
 class _TemplateTokenizer:
@@ -2455,7 +2466,7 @@ class _BlockReplacingTemplateProcessor(_MockQwenVLProcessor):
     This mirrors what a real Qwen3-VL processor does to an OpenAI-style
     ``image_url`` block: it replaces the block with an internal
     ``{"type": "image", "url": ...}`` form. That rewrite drops the ``image_url``
-    key, and :func:`extract_image_references` reads ``image`` / ``image_url``
+    key, and the builder's image extraction reads ``image`` / ``image_url``
     rather than a processor-internal bare ``url``, so a leaked rewrite makes the
     image disappear from the caller's messages entirely.
     """
@@ -2505,10 +2516,10 @@ def test_vl_builder_does_not_mutate_caller_messages():
     ]
     expected = copy.deepcopy(messages)
 
-    builder.build_initial_tokens(messages, images=extract_image_references(messages))
+    builder.build_initial_tokens(messages, images=builder._extract_images_from_messages(messages))
 
     assert messages == expected
-    assert extract_image_references(messages) == ["/tmp/a.png"]
+    assert builder._extract_images_from_messages(messages) == ["/tmp/a.png"]
 
 
 def test_vl_builder_creation_forwards_chat_template_and_mm_processor_kwargs():

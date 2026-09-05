@@ -33,30 +33,6 @@ MergeKind = Literal["assistant", "non_assistant"]
 logger = logging.getLogger(__name__)
 
 
-def extract_image_references(messages: list[dict[str, Any]]) -> list[Any]:
-    """Extract image references from OpenAI-style content blocks."""
-    images: list[Any] = []
-    for message in messages:
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if not isinstance(block, dict) or block.get("type") not in {"image", "image_url"}:
-                continue
-            image_ref = block.get("image")
-            # Empty path strings fall back to image_url. Non-string payloads
-            # remain opaque: truth-testing an ndarray can raise or lose media.
-            if image_ref is None or (isinstance(image_ref, str) and not image_ref):
-                image_url = block.get("image_url")
-                if isinstance(image_url, dict):
-                    image_ref = image_url.get("url")
-                elif isinstance(image_url, str):
-                    image_ref = image_url
-            if image_ref is not None:
-                images.append(image_ref)
-    return images
-
-
 def _copy_messages_for_template(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Copy message containers without duplicating image, video, or audio payloads."""
     copied_messages = []
@@ -936,7 +912,22 @@ class VLContinuousTokenMixin:
 
     def _extract_images_from_messages(self, messages: list[dict[str, Any]]) -> list[Any]:
         """Extract image references from OpenAI-style content blocks."""
-        return extract_image_references(messages)
+        images: list[Any] = []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") in ("image", "image_url"):
+                        image_ref = block.get("image")
+                        if image_ref is None or (isinstance(image_ref, str) and not image_ref):
+                            image_url = block.get("image_url")
+                            if isinstance(image_url, dict):
+                                image_ref = image_url.get("url")
+                            elif isinstance(image_url, str):
+                                image_ref = image_url
+                        if image_ref is not None:
+                            images.append(image_ref)
+        return images
 
     def _extract_videos_from_messages(self, messages: list[dict[str, Any]]) -> list[Any]:
         """Extract video references from OpenAI-style content blocks."""
@@ -1285,7 +1276,22 @@ class DeepSeekVL2ContinuousTokenBuilder(DeepSeekContinuousTokenBuilder):
 
     def _extract_images_from_messages(self, messages: list[dict[str, Any]]) -> list[Any]:
         """Extract image references from content blocks."""
-        return extract_image_references(messages)
+        images: list[Any] = []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") in ("image", "image_url"):
+                        image_ref = block.get("image")
+                        if image_ref is None or (isinstance(image_ref, str) and not image_ref):
+                            image_url = block.get("image_url")
+                            if isinstance(image_url, dict):
+                                image_ref = image_url.get("url")
+                            elif isinstance(image_url, str):
+                                image_ref = image_url
+                        if image_ref is not None:
+                            images.append(image_ref)
+        return images
 
     def _to_vl2_conversation(
         self,
