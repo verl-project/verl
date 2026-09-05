@@ -15,7 +15,7 @@ Last updated: 06/19/2025.
 1. Prepare the datasets **on the Ray cluster**:
 
 ```bash
-bash prepare_dapo_data.sh # This downloads the datasets to ${HOME}/verl/data by default
+bash recipe/dapo/prepare_dapo_data.sh # This downloads the datasets to ${HOME}/verl/data by default
 ```
 
 2. Submit the job to the Ray cluster **from any machine**:

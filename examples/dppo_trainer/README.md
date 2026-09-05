@@ -17,7 +17,7 @@
 1. Prepare the datasets by running [prepare_dapo_data.sh](https://github.com/verl-project/verl-recipe/blob/3490a22a0a3adeb7e4787fe70b1060b642efbae4/dapo/prepare_dapo_data.sh):
 
 ```bash
-bash prepare_dapo_data.sh # This downloads the datasets to ${HOME}/verl/data by default
+bash recipe/dapo/prepare_dapo_data.sh # This downloads the datasets to ${HOME}/verl/data by default
 ```
 
 2. Prepare the model:
