@@ -245,6 +245,17 @@ class SFTTrainer:
         return batch_seqlens
 
     def fit(self):
+        global_step = self.resume_global_step
+        if global_step >= self.total_training_steps:
+            log_with_rank(
+                f"Checkpoint step {global_step} already reached total_training_steps={self.total_training_steps}; "
+                "no additional SFT updates are needed",
+                logger=logger,
+                rank=0,
+                log_only_rank_0=True,
+            )
+            return
+
         tracking = Tracking(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
@@ -252,7 +263,6 @@ class SFTTrainer:
             config=OmegaConf.to_container(self.config, resolve=True),
         )
 
-        global_step = self.resume_global_step  # Start from resumed step
         last_valid_metric = None
 
         log_with_rank(
