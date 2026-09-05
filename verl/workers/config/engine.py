@@ -129,7 +129,12 @@ class QATEngineConfig(BaseConfig):
 
     Args:
         enable (bool): Whether to enable QAT, default False
-        mode (str): Quantization mode, "w4a16" or "w4a4", default "w4a16"
+        mode (str): Quantization mode. "w4a16" or "w4a4" insert ModelOpt's NVFP4
+            fake-quant modules. "mxfp4_experts" instead round-trips the routed
+            experts through the checkpoint's own MXFP4 format on every forward, so
+            a DSv4 actor trains against the values its rollout engine serves; it is
+            Megatron-only, needs a grouped-GEMM MoE model, and cannot be combined
+            with the ModelOpt modes.
         group_size (int): Group size for blockwise quantization, default 16
         ignore_patterns (list[str]): Module name patterns to exclude from quantization
         activation_observer (str): Observer strategy for activation global_scale (W4A4 only)
