@@ -68,7 +68,7 @@ env:
 jobs:
   e2e_v1_separate_async_fsdp2_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a3-8
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 60
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -121,7 +121,7 @@ jobs:
   e2e_v1_separate_async_megatron_ascend:
     if: github.repository_owner == 'verl-project'
     needs: e2e_v1_separate_async_fsdp2_ascend
-    runs-on: linux-aarch64-a3-8
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 60
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
