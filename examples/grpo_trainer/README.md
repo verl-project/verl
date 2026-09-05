@@ -42,19 +42,21 @@ algorithm.norm_adv_by_std_in_grpo=False
 All scripts in this directory follow the naming convention:
 
 ```
-run_<model>_<train-backend>[_<platform-or-variant>].sh
+run_<model>_<train-backend>.sh
 ```
 
 Where:
 - `<model>` is the canonical size for a model family
   (`qwen3_8b` for dense text, `qwen3_30b_a3b` for MoE, `qwen2_5_vl_7b` / `qwen3_vl_8b` for vision,
   `qwen3_235b_a22b` / `deepseek_v3_671b` / `deepseek_v4_flash` for scale demos).
-- `<train-backend>` ∈ {`fsdp`, `megatron`, `mindspeed`}.
-- `<platform-or-variant>` is used only for hardware-specific variants such as `gb200`, `fp8`, `veomni`,
-  or MindSpeed NPU scripts.
-- `INFER_BACKEND` selects rollout backend inside scripts that support multiple choices
-  (`vllm`, `sglang`, or `trtllm`).
-- `DEVICE` selects GPU/NPU paths inside scripts that support both platforms.
+- `<train-backend>` ∈ {`fsdp`, `fsdp2`, `megatron`, `megatron_lite`, `mindspeed`, `veomni`} and is the
+  **final** suffix before `.sh` (enforced by `tests/special_sanity/check_example_naming.py`).
+- Inference backend, platform, machine type, and quantization are env-var toggles inside the script,
+  not filename suffixes:
+  - `INFER_BACKEND` selects rollout backend (`vllm`, `sglang`, or `trtllm`).
+  - `DEVICE` selects GPU/NPU paths (`gpu` or `npu`).
+  - `MACHINE` selects hardware tweaks (e.g. `gb200` for Blackwell SM100); do not embed `_gb200` in the filename.
+  - Quantization and similar knobs stay as env vars (e.g. do not add `_fp8` to the filename).
 
 Every script exposes the commonly tuned knobs as environment variables at the top, so you can run:
 
@@ -63,6 +65,12 @@ MODEL_PATH=Qwen/Qwen3-14B \
 NNODES=2 NGPUS_PER_NODE=8 \
 INFER_BACKEND=sglang ROLLOUT_N=8 TRAIN_BATCH_SIZE=2048 \
 bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
+```
+
+For GB200 / Blackwell nodes, reuse the same canonical script:
+
+```bash
+MACHINE=gb200 bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
 ```
 
 ### Defaults
@@ -75,7 +83,7 @@ bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
 
 | Model family          | `vllm` | `sglang` | `trtllm` | Train backend   | Platforms |
 | --------------------- | :----: | :------: | :------: | --------------- | --------- |
-| Qwen3-8B (dense)      | ✓      | ✓        | ✓        | FSDP, Megatron  | nvidia, npu (FSDP + MindSpeed), `_gb200` variant |
+| Qwen3-8B (dense)      | ✓      | ✓        | ✓        | FSDP, Megatron  | nvidia, npu (FSDP + MindSpeed); `MACHINE=gb200` |
 | Qwen2.5-VL-7B         | ✓      | ✓        | ✓        | FSDP, Megatron  | nvidia    |
 | Qwen3-VL-8B           | ✓      |          |          | FSDP, Megatron  | nvidia, npu (FSDP) |
 | Qwen3-VL-30B-A3B      | ✓      |          |          | FSDP, Megatron  | nvidia, npu (FSDP, VeOmni) |
@@ -98,7 +106,7 @@ bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
 | Mistral-Nemo-12B (RM demo) | ✓ |          |          | FSDP            | nvidia    |
 
 LoRA variants live in `examples/tuning/lora/`, profiling variants in `examples/profile/`.
-Scale / hardware-specific demos (e.g. `run_qwen3_8b_fsdp_gb200.sh`, FP8 variants, VeOmni) keep a trailing suffix to stay discoverable.
+Train-backend variants such as VeOmni keep a dedicated `_*_veomni.sh` script (allowed final suffix). Machine type (`MACHINE=gb200`) and quantization stay as env-var toggles inside the canonical scripts — do not add `_gb200` / `_fp8` filename suffixes.
 
 ## Reference
 
