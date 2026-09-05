@@ -213,6 +213,7 @@ class MultiTurnSFTDataset(Dataset):
             if model_family == ContinuousTokenModelFamily.MINIMAX:
                 raise ValueError(
                     "MultiTurnSFTDataset does not support MiniMax-Text-01 (Continuous Token family 'minimax'). "
+                    "For a MiniMax-M2 checkpoint, select family 'minimaxm2'. "
                     "Use a supported model family or a custom SFT dataset for this model."
                 )
             apply_chat_template_kwargs = dict(self.apply_chat_template_kwargs)

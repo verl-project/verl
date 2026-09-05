@@ -600,6 +600,8 @@ class _MiniMaxVLReconstructor(_AssistantReconstructor):
         tools: list[dict[str, Any]] | None,
         previous_messages: list[dict[str, Any]] | None,
     ) -> list[int]:
+        # Tool declarations were rendered in the initial prompt; assistant-only
+        # reconstruction must not append the template's tool preamble again.
         del tools
         return super().reconstruct(
             _prepare_minimax_legacy_assistant_message(message),

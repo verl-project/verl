@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import copy
-import json
 import logging
 from types import SimpleNamespace
 
@@ -1475,7 +1474,8 @@ def test_minimax_vl_builder_keeps_tool_declarations_in_initial_prompt():
 
 
 @pytest.mark.parametrize("tool_name", ["lookup", 'look"up', "look\\up", "lookup\nnext", "查询"])
-def test_minimax_vl_builder_formats_openai_tool_response_as_function_message(tool_name):
+@pytest.mark.parametrize("content", [None, "", "sunny", '{"value": 1}'])
+def test_minimax_vl_builder_formats_openai_tool_response_as_function_message(tool_name, content):
     tokenizer = _MiniMaxVLAssistantTokenizer()
     processor = _MockMiniMaxVLAssistantProcessor(tokenizer)
     builder = MiniMaxVLContinuousTokenBuilder(tokenizer, processor)
@@ -1494,7 +1494,7 @@ def test_minimax_vl_builder_formats_openai_tool_response_as_function_message(too
     ]
 
     token_ids = builder._tokenize_tool_group(
-        [{"role": "tool", "tool_call_id": "call_0", "content": '{"value": 1}'}],
+        [{"role": "tool", "tool_call_id": "call_0", "content": content}],
         previous_messages=previous_messages,
     )
 
@@ -1502,7 +1502,9 @@ def test_minimax_vl_builder_formats_openai_tool_response_as_function_message(too
     suffix = tokenizer.encode("<end_of_sentence>\n", add_special_tokens=False)
     assert token_ids[: len(prefix)] == prefix and token_ids[-len(suffix) :] == suffix
     response = "".join(chr(token) for token in token_ids[len(prefix) : -len(suffix)])
-    assert json.loads(response) == {"name": tool_name, "response": {"value": 1}}
+    # The official function template concatenates these fields verbatim, even
+    # for non-JSON text; escaping only the name changes its token protocol.
+    assert response == '{"name": "' + tool_name + '", "response": ' + (content or "") + "}"
 
 
 def test_minimax_vl_builder_merges_tool_result_and_fixed_generation_scaffold():

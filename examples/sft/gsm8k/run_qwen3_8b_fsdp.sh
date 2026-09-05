@@ -50,7 +50,6 @@ torchrun --standalone --nnodes=1 --nproc_per_node=${nproc_per_node} \
     data.val_files=$HOME/data/gsm8k/test.parquet \
     data.micro_batch_size_per_gpu=${MICRO_BATCH_SIZE_PER_GPU} \
     data.messages_key=messages \
-    data.ignore_input_ids_mismatch=True \
     optim.lr=${LR} \
     engine=fsdp \
     engine.ulysses_sequence_parallel_size=${SP_SIZE} \

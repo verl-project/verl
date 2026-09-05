@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -45,6 +44,8 @@ def extract_image_references(messages: list[dict[str, Any]]) -> list[Any]:
             if not isinstance(block, dict) or block.get("type") not in {"image", "image_url"}:
                 continue
             image_ref = block.get("image")
+            # Empty path strings fall back to image_url. Non-string payloads
+            # remain opaque: truth-testing an ndarray can raise or lose media.
             if image_ref is None or (isinstance(image_ref, str) and not image_ref):
                 image_url = block.get("image_url")
                 if isinstance(image_url, dict):
@@ -1147,9 +1148,11 @@ class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxContinuousT
         for index, message in enumerate(tool_messages):
             name = _resolve_required_tool_name(message, index, tool_messages, previous_messages)
             content = _stringify_tool_content(message.get("content", ""))
+            # Match the checkpoint's native `function` template: both fields
+            # are inserted verbatim. This protocol text is not a JSON document.
             response_parts.append(
                 "<beginning_of_sentence>system function_response=functions\n"
-                f'{{"name": {json.dumps(name, ensure_ascii=False)}, "response": {content}}}'
+                f'{{"name": "{name}", "response": {content}}}'
                 "<end_of_sentence>\n"
             )
         token_ids = normalize_token_ids(self.tokenizer.encode("".join(response_parts), add_special_tokens=False))

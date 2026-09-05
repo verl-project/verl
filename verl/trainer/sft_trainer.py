@@ -488,7 +488,7 @@ def create_sft_dataset(data_paths, data_config, tokenizer, processor, max_sample
         "processor": processor,
         "max_samples": max_samples,
     }
-    if dataset_cls is MultiTurnSFTDataset:
+    if issubclass(dataset_cls, MultiTurnSFTDataset):
         dataset_kwargs["hf_model_type"] = hf_model_type
     dataset = dataset_cls(**dataset_kwargs)
     return dataset

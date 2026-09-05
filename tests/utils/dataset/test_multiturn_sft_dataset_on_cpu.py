@@ -12,9 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Test the MultiTurnSFTDataset implementation
+Test the MultiTurnSFTDataset implementation.
+
+Local tokenizer/processor directories can be set with VERL_TEST_QWEN25_MODEL,
+VERL_TEST_QWEN3_MODEL, VERL_TEST_QWEN35_MODEL, VERL_TEST_GPT_OSS_MODEL, and
+VERL_TEST_QWEN3_VL_MODEL. No model weights are loaded. Missing directories skip
+integration cases by default; VERL_REQUIRE_LOCAL_MODELS=1 makes them fail in CI.
 """
 
+import ast
 import os
 from io import BytesIO
 from pathlib import Path
@@ -22,6 +28,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 import torch
+from omegaconf import OmegaConf
 from PIL import Image
 from tensordict import TensorDict
 from torch.utils.data import DistributedSampler
@@ -53,7 +60,10 @@ def require_local_model_artifacts(request):
     if "model_path" in request.fixturenames:
         model_path = Path(request.getfixturevalue("model_path"))
         if not model_path.is_dir():
-            pytest.skip(f"Local tokenizer/processor artifacts are unavailable: {model_path}")
+            reason = f"Local tokenizer/processor artifacts are unavailable: {model_path}"
+            if os.environ.get("VERL_REQUIRE_LOCAL_MODELS") == "1":
+                pytest.fail(reason, pytrace=False)
+            pytest.skip(reason)
 
 
 @pytest.mark.parametrize(
@@ -82,6 +92,55 @@ def test_multiturn_sft_rejects_text01_before_builder_creation(
     )
     with pytest.raises(ValueError, match="MultiTurnSFTDataset does not support MiniMax-Text-01"):
         dataset[0]
+
+
+@pytest.mark.parametrize("trainer_name", ["sft_trainer", "sft_trainer_ray"])
+@pytest.mark.parametrize("dataset_kind", ["default", "subclass", "unrelated"])
+def test_trainer_dataset_factory_preserves_family_for_subclasses(trainer_name, dataset_kind, tmp_path, monkeypatch):
+    import verl.utils.import_utils as import_utils
+
+    class CustomDataset(MultiTurnSFTDataset):
+        pass
+
+    class UnrelatedDataset:
+        def __init__(self, parquet_files, tokenizer, config, processor, max_samples):
+            pass
+
+    # Execute the actual factory without importing GPU trainer dependencies.
+    # The dataset class, family resolver, and rejection path are production code.
+    source_path = Path(__file__).resolve().parents[3] / "verl" / "trainer" / f"{trainer_name}.py"
+    tree = ast.parse(source_path.read_text())
+    factory = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "create_sft_dataset"
+    )
+    namespace = {"MultiTurnSFTDataset": MultiTurnSFTDataset}
+    exec(compile(ast.Module(body=[factory], type_ignores=[]), str(source_path), "exec"), namespace)
+
+    custom_cls = CustomDataset if dataset_kind == "subclass" else UnrelatedDataset
+    monkeypatch.setattr(import_utils, "load_extern_object", lambda *args: custom_cls)
+    monkeypatch.setattr(import_utils, "load_extern_type", lambda *args: custom_cls)
+    config = OmegaConf.create(
+        {
+            "custom_cls": {"path": None if dataset_kind == "default" else "custom.py", "name": "CustomDataset"},
+            "continuous_token_model_family": "auto",
+        }
+    )
+    data_file = tmp_path / "text01.parquet"
+    pd.DataFrame({"messages": [[{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]]}).to_parquet(
+        data_file
+    )
+
+    def unexpected_builder(*args, **kwargs):
+        pytest.fail("Text-01 bypassed the SFT refusal through a dataset subclass")
+
+    monkeypatch.setattr(multiturn_sft_dataset_module, "create_continuous_token_builder", unexpected_builder)
+    dataset = namespace["create_sft_dataset"](str(data_file), config, object(), None, hf_model_type="minimax")
+    if dataset_kind == "unrelated":
+        assert isinstance(dataset, UnrelatedDataset)
+    else:
+        assert dataset.hf_model_type == "minimax"
+        with pytest.raises(ValueError, match="MultiTurnSFTDataset does not support MiniMax-Text-01"):
+            dataset[0]
 
 
 def test_multiturn_sft_drops_arrow_null_message_fields():
