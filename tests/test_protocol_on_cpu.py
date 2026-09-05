@@ -1284,3 +1284,18 @@ def test_index_select_tensor_dict_with_3d_jagged_position_ids():
 
     torch.testing.assert_close(selected_samples[0], samples[1])
     torch.testing.assert_close(selected_samples[1], samples[0])
+
+
+def test_maybe_fix_3d_position_ids_preserves_valid_layout():
+    samples = [
+        torch.arange(4 * 17).reshape(4, 17),
+        torch.arange(4 * 11).reshape(4, 11),
+    ]
+    position_ids = tu.nested_tensor_from_tensor_list(samples, ragged_idx=2)
+    batch = TensorDict({"position_ids": position_ids}, batch_size=[2])
+
+    tu.maybe_fix_3d_position_ids(batch)
+
+    fixed_samples = batch["position_ids"].unbind(dim=0)
+    torch.testing.assert_close(fixed_samples[0], samples[0])
+    torch.testing.assert_close(fixed_samples[1], samples[1])

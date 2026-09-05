@@ -908,15 +908,14 @@ def contiguous(data: TensorDict) -> TensorDict:
 
 
 def maybe_fix_3d_position_ids(data: TensorDict):
-    """Rebuild 3D nested position_ids with the sequence dimension as ragged."""
+    """Repair 3D nested position_ids after TensorDict serialization."""
 
+    # TensorDict consolidation and pickle/unpickle may leave 3D VLM
+    # position_ids with an incorrect ragged dimension. Rebuild the
+    # NestedTensor so its values, offsets, and _ragged_idx remain consistent.
     if "position_ids" in data and data["position_ids"].dim() == 3 and data["position_ids"].is_nested:
         position_ids = data["position_ids"]
 
-        # Equal-length mRoPE position_ids may be constructed with the
-        # head dimension as ragged. Rebuild the NestedTensor instead of
-        # only modifying _ragged_idx, which would leave its values and
-        # offsets inconsistent.
         if getattr(position_ids, "_ragged_idx", None) != 2:
             samples = list(position_ids.unbind(dim=0))
             data["position_ids"] = nested_tensor_from_tensor_list(
