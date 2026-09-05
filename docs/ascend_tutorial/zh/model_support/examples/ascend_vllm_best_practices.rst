@@ -91,7 +91,7 @@ vLLM 是当前主流的高性能开源推理引擎, 昇腾已经全面原生支�
     #保存频率，-1默认不保存，如需评测请修改此参数
     trainer.save_freq=-1
 
-对于单机任务 `Qwen3-30B`_ , 可以直接bash执行verl仓上示例脚本，如:
+对于单机任务 `Qwen3-30B`_ , 可在 ``release/v0.7.1`` 分支直接 bash 执行该示例脚本（见上方链接；该路径不在当前 main）。在已 ``git checkout release/v0.7.1`` 的仓库中可运行:
 
 .. code-block:: bash 
 
