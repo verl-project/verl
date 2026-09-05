@@ -24,6 +24,7 @@ from pathlib import Path
 
 # directory or file path must contain keyword ".cuda" or "cuda"
 CUDA_KEYWORD_CHECK_WHITELIST = [
+    "verl/utils/communication_network.py",  # explicit NCCL-only rail/QoS executor
     "verl/utils/device.py",
     "verl/utils/torch_functional.py",  # import flash_attn only on cuda
     "verl/plugin/platform/platform_base.py",  # docstring mentions torch.cuda
