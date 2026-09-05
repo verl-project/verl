@@ -1256,3 +1256,46 @@ def test_serialize_dataproto_with_empty_tensordict():
     deserialized_data = pickle.loads(serialized_data)
     assert len(deserialized_data.batch.keys()) == 0
     assert deserialized_data.batch.batch_size == torch.Size([10])
+
+
+def test_index_select_tensor_dict_with_3d_jagged_position_ids():
+    samples = [
+        torch.arange(4 * 17).reshape(4, 17),
+        torch.arange(4 * 17, 8 * 17).reshape(4, 17),
+    ]
+    position_ids = torch.nested.as_nested_tensor(samples, layout=torch.jagged)
+    batch = TensorDict({"position_ids": position_ids}, batch_size=[2])
+
+    tu.maybe_fix_3d_position_ids(batch)
+
+    fixed_position_ids = batch["position_ids"]
+    assert fixed_position_ids._ragged_idx == 2
+    assert fixed_position_ids.values().shape == (4, 34)
+    assert fixed_position_ids.offsets().tolist() == [0, 17, 34]
+
+    # The rebuilt tensor itself must support unbind.
+    rebuilt_samples = fixed_position_ids.unbind(dim=0)
+    torch.testing.assert_close(rebuilt_samples[0], samples[0])
+    torch.testing.assert_close(rebuilt_samples[1], samples[1])
+
+    # Batch reordering must also work.
+    selected = tu.index_select_tensor_dict(batch, [1, 0])
+    selected_samples = selected["position_ids"].unbind(dim=0)
+
+    torch.testing.assert_close(selected_samples[0], samples[1])
+    torch.testing.assert_close(selected_samples[1], samples[0])
+
+
+def test_maybe_fix_3d_position_ids_preserves_valid_layout():
+    samples = [
+        torch.arange(4 * 17).reshape(4, 17),
+        torch.arange(4 * 11).reshape(4, 11),
+    ]
+    position_ids = tu.nested_tensor_from_tensor_list(samples, ragged_idx=2)
+    batch = TensorDict({"position_ids": position_ids}, batch_size=[2])
+
+    tu.maybe_fix_3d_position_ids(batch)
+
+    fixed_samples = batch["position_ids"].unbind(dim=0)
+    torch.testing.assert_close(fixed_samples[0], samples[0])
+    torch.testing.assert_close(fixed_samples[1], samples[1])
