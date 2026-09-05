@@ -49,7 +49,8 @@ class DistillationLossConfig(BaseConfig):
         Whether to incorporate distillation loss as a reward, as done
         by https://thinkingmachines.ai/blog/on-policy-distillation/. Recommended to use loss_mode=k1.
         Otherwise, distillation loss is directly backpropagated as a supervised loss,
-        as in https://arxiv.org/abs/2306.13649. Recommended to use loss_mode=k3 or forward_kl_topk.
+        as in https://arxiv.org/abs/2306.13649. Recommended to use loss_mode=k3, forward_kl_topk, or
+        reverse_kl_topk.
     policy_loss_mode (str):
         Name of the policy loss to use when use_policy_gradient is true.
     clip_ratio (float):
@@ -70,7 +71,7 @@ class DistillationLossConfig(BaseConfig):
     log_prob_min_clamp: Optional[float] = -10.0
 
     # Chunked top-K log-probs (opt-in, avoids [B, T, V] log_softmax buffer
-    # at long context). Only consumed by ``loss_mode='forward_kl_topk'``.
+    # at long context). Consumed by top-k distributional losses.
     # Default ``False`` to preserve short-context performance (chunked path
     # has ~6x time overhead at N=14K, V=152K). Set ``True`` when hitting OOM
     # at long context (>=64K tokens, V=152K) where the baseline path OOMs.
@@ -116,6 +117,12 @@ class DistillationLossConfig(BaseConfig):
                 " token's logprob ∇logπ(a), so the top-k distributional signal (how non-sampled logits "
                 "should move) is largely unused."
             )
+        if self.use_policy_gradient and self.loss_mode == "reverse_kl_topk":
+            raise ValueError(
+                "reverse_kl_topk is a distributional top-k loss and should be used with use_policy_gradient=False."
+            )
+        if self.loss_mode == "reverse_kl_topk" and (self.topk is None or self.topk <= 0):
+            raise ValueError("reverse_kl_topk requires distillation_loss.topk to be a positive integer.")
 
         if not self.use_policy_gradient and self.loss_mode == "k1":
             raise ValueError(
@@ -142,12 +149,13 @@ class DistillationTeacherModelConfig(BaseConfig):
         `num_replicas * per_replica_world_size`.
     """
 
-    _mutable_fields = BaseConfig._mutable_fields | {"num_replicas", "key"}
+    _mutable_fields = BaseConfig._mutable_fields | {"num_replicas", "key", "_vocab_size"}
 
     key: Optional[str] = None
     model_path: Optional[str] = None
     inference: RolloutConfig = field(default_factory=RolloutConfig)
     num_replicas: Optional[int] = 0
+    _vocab_size: Optional[int] = field(default=None, init=False, repr=False)
 
     @property
     def per_replica_world_size(self) -> int:
@@ -168,6 +176,18 @@ class DistillationTeacherModelConfig(BaseConfig):
             raise ValueError("key must be specified for distillation teacher model config.")
         if self.num_replicas is None:
             raise ValueError("num_replicas must be specified for distillation teacher model config.")
+
+    def get_vocab_size(self) -> int:
+        from transformers import AutoConfig
+
+        if self._vocab_size is not None:
+            return self._vocab_size
+        hf_config = AutoConfig.from_pretrained(self.model_path)
+        vocab_size = getattr(hf_config, "vocab_size", None)
+        if vocab_size is None:
+            raise ValueError(f"Teacher model config at {self.model_path!r} does not define vocab_size.")
+        self._vocab_size = int(vocab_size)
+        return self._vocab_size
 
     def validate_and_prepare_for_distillation(self, use_topk: bool, topk: Optional[int]) -> None:
         # Prompt + Response from student are fed into teacher as context
@@ -202,7 +222,7 @@ class DistillationTeacherModelConfig(BaseConfig):
                     max_logprobs = topk
                 if max_logprobs < topk:
                     raise ValueError(
-                        f"VLLM max_logprobs ({max_logprobs}) must be >= distillation_loss topk "
+                        f"VLLM max_logprobs ({max_logprobs}) must be >= requested teacher logprob top-k "
                         f"({topk}) to enable distillation loss computation."
                     )
                 engine_kwargs["vllm"] = vllm_engine_kwargs
@@ -273,9 +293,14 @@ class DistillationConfig(BaseConfig):
         self.teacher_models = self._resolve_teacher_models()
         teacher_world_size_sum = 0
         for teacher_model in self.teacher_models.values():
+            teacher_logprob_topk = (
+                teacher_model.get_vocab_size()
+                if self.distillation_loss.loss_mode == "reverse_kl_topk"
+                else self.distillation_loss.topk
+            )
             teacher_model.validate_and_prepare_for_distillation(
                 use_topk=self.distillation_loss.loss_settings.use_topk,
-                topk=self.distillation_loss.topk,
+                topk=teacher_logprob_topk,
             )
             teacher_world_size_sum += teacher_model.world_size
         total_pool_size = self.n_gpus_per_node * self.nnodes
