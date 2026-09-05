@@ -15,7 +15,7 @@
 import logging
 import sys
 import unittest
-from unittest.mock import Mock, MagicMock, mock_open, patch
+from unittest.mock import MagicMock, Mock, mock_open, patch
 
 from verl.utils.device import AscendHardwareVersion, check_ipc_version_support, get_npu_versions
 
