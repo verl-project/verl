@@ -150,7 +150,26 @@ class FSDPModelMerger(BaseModelMerger):
     def _merge_by_placement(self, tensors: list[torch.Tensor], placement: Placement) -> torch.Tensor:
         """Merges a list of tensors based on their DTensor placement"""
         if placement.is_replicate():
-            return tensors[0]
+            # NOTE: tensors[0] is the raw ``_local_tensor`` loaded straight from the rank-0
+            # checkpoint file. For parameters that FSDP could not evenly shard further (e.g.
+            # a dimension too small relative to the shard/world size -- more likely to occur
+            # the larger the FSDP world size is), it is left "replicated" rather than sharded,
+            # and its local tensor can still be a *view* sharing storage with some other
+            # buffer from the source checkpoint (e.g. another parameter's tensor, if the
+            # checkpoint writer packed multiple tensors into one contiguous allocation, see
+            # https://github.com/verl-project/verl/issues/6259). Returning it unmodified
+            # propagates that storage aliasing into the merged state_dict, so two *unrelated*
+            # keys can end up sharing one underlying storage. `transformers.save_pretrained`
+            # treats two keys that are non-overlapping views of the same storage as safe (it
+            # clones them apart before writing), and treats two keys that are the *exact* same
+            # tensor object as an unintentional tie and raises -- but relying on that behavior
+            # to paper over the aliasing is version-dependent and keeps the whole shared source
+            # buffer alive for the rest of the merge in the meantime. Clone here so the
+            # merged state_dict never depends on that behavior at all: every key owns
+            # independent storage, and the (potentially large) shared buffer this replica was
+            # sliced from can be freed once merging is done. Legitimate weight tying is handled
+            # explicitly and separately via `drop_tied_target_keys`, not by aliased storage.
+            return tensors[0].clone()
         elif placement.is_partial():
             raise NotImplementedError("Partial placement is not supported yet")
         elif placement.is_shard():
