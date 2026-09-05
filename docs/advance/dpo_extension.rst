@@ -68,7 +68,7 @@ Here, ``SampleGenerator`` can be viewed as a multi-process pulled up by
 the control flow to call. The implementation details inside can use any
 inference engine including vllm, sglang and huggingface. Users can
 largely reuse the code in
-verl/verl/workers/rollout/vllm_rollout/vllm_rollout.py and we won't
+verl/workers/rollout/vllm_rollout/vllm_rollout.py and we won't
 go into details here.
 
 **ReferencePolicy inference**
@@ -123,7 +123,7 @@ API: Update actor model parameters
 
 Users can reuse most of the distribtued computation logics implemented
 in PPO algorithm, including FSDP and Megatron-LM backend in
-verl/verl/trainer/ppo.
+verl/trainer/ppo.
 
 Step 2: Based on different distributed scenarios, implement single-process control of multi-process data interaction
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
