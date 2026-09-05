@@ -25,10 +25,19 @@ from torch import Tensor
 from torch.distributed import ProcessGroup
 from torch.distributed.device_mesh import DeviceMesh
 
+from verl.utils.collective import AsyncCollectiveHandle, next_collective_sequence_id, resolve_process_group_id
+
 if TYPE_CHECKING:
     from verl import DataProto
 
 _ULYSSES_SEQUENCE_PARALLEL_GROUP = None
+
+
+def _record_collective_event(event: Any, name: str) -> None:
+    record = getattr(event, "record", None)
+    if not callable(record):
+        raise TypeError(f"{name} must provide a callable record() method")
+    record()
 
 
 def set_ulysses_sequence_parallel_group(group: dist.ProcessGroup):
@@ -142,18 +151,45 @@ def all_to_all_tensor(
     async_op: bool = False,
 ):
     group = get_ulysses_sequence_parallel_group() if group is None else group
+    if async_op:
+        return launch_all_to_all_tensor(local_input, scatter_dim, gather_dim, group).wait
     seq_world_size = dist.get_world_size(group)
     input_list = [t.contiguous() for t in torch.tensor_split(local_input, seq_world_size, scatter_dim)]
     output_list = [torch.empty_like(input_list[0]) for _ in range(seq_world_size)]
-    comm = dist.all_to_all(output_list, input_list, group=group, async_op=async_op)
-    if async_op:
-
-        def wait():
-            comm.wait()
-            return torch.cat(output_list, dim=gather_dim).contiguous()
-
-        return wait
+    dist.all_to_all(output_list, input_list, group=group, async_op=False)
     return torch.cat(output_list, dim=gather_dim).contiguous()
+
+
+def launch_all_to_all_tensor(
+    local_input: Tensor,
+    scatter_dim: int,
+    gather_dim: int,
+    group: Optional[dist.ProcessGroup] = None,
+    *,
+    launch_event: Any | None = None,
+    complete_event: Any | None = None,
+) -> AsyncCollectiveHandle[Tensor]:
+    """Launch Ulysses all-to-all and return a structured async handle."""
+
+    group = get_ulysses_sequence_parallel_group() if group is None else group
+    seq_world_size = dist.get_world_size(group)
+    input_list = [t.contiguous() for t in torch.tensor_split(local_input, seq_world_size, scatter_dim)]
+    output_list = [torch.empty_like(input_list[0]) for _ in range(seq_world_size)]
+    if launch_event is not None:
+        _record_collective_event(launch_event, "launch_event")
+    work = dist.all_to_all(output_list, input_list, group=group, async_op=True)
+    process_group_id = resolve_process_group_id(group)
+    return AsyncCollectiveHandle(
+        work=work,
+        finalize=lambda: torch.cat(output_list, dim=gather_dim).contiguous(),
+        comm_kind="ulysses_all_to_all",
+        process_group_id=process_group_id,
+        sequence_id=next_collective_sequence_id(group, process_group_id),
+        launch_event=launch_event,
+        complete_event=complete_event,
+        consumer_device=local_input.device,
+        owned_resources=(local_input, *input_list, *output_list),
+    )
 
 
 def all_gather_tensor(local_tensor: Tensor, group: Optional[dist.ProcessGroup] = None, async_op: bool = False):
@@ -164,6 +200,37 @@ def all_gather_tensor(local_tensor: Tensor, group: Optional[dist.ProcessGroup] =
     output = torch.empty(output_shape, dtype=local_tensor.dtype, device=local_tensor.device)
     dist.all_gather_into_tensor(output, local_tensor, group=group, async_op=async_op)
     return output
+
+
+def launch_all_gather_tensor(
+    local_tensor: Tensor,
+    group: Optional[dist.ProcessGroup] = None,
+    *,
+    launch_event: Any | None = None,
+    complete_event: Any | None = None,
+) -> AsyncCollectiveHandle[Tensor]:
+    """Launch Ulysses all-gather and return a structured async handle."""
+
+    group = get_ulysses_sequence_parallel_group() if group is None else group
+    sp_world_size = dist.get_world_size(group=group)
+    output_shape = list(local_tensor.shape)
+    output_shape[0] = output_shape[0] * sp_world_size
+    output = torch.empty(output_shape, dtype=local_tensor.dtype, device=local_tensor.device)
+    if launch_event is not None:
+        _record_collective_event(launch_event, "launch_event")
+    work = dist.all_gather_into_tensor(output, local_tensor, group=group, async_op=True)
+    process_group_id = resolve_process_group_id(group)
+    return AsyncCollectiveHandle(
+        work=work,
+        finalize=lambda: output,
+        comm_kind="ulysses_all_gather",
+        process_group_id=process_group_id,
+        sequence_id=next_collective_sequence_id(group, process_group_id),
+        launch_event=launch_event,
+        complete_event=complete_event,
+        consumer_device=local_tensor.device,
+        owned_resources=(local_tensor, output),
+    )
 
 
 class SeqAllToAll(torch.autograd.Function):
