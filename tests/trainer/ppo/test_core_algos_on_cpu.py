@@ -260,6 +260,65 @@ def test_rloo_and_vectorized_equivalence(batch_size: int, seq_len: int, num_grou
     assert torch.allclose(ret1, ret2, rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.parametrize(
+    "group_sizes",
+    [
+        [1],  # rollout.n == 1
+        [1, 1, 1, 1],  # every prompt sampled once
+        [3, 1, 2],  # one group left with a single surviving sample
+        [4, 4],  # sizes the generator above already covers, kept as a regression
+    ],
+)
+def test_rloo_and_vectorized_equivalence_with_singleton_groups(group_sizes: list[int]):
+    """_make_group_index gives every group >= 2 samples, so the equivalence test above
+    never sees a group of one -- the only size where a leave-one-out baseline does not
+    exist and the two implementations can disagree."""
+    torch.manual_seed(0)
+    index = np.asarray([gid for gid, c in enumerate(group_sizes) for _ in range(c)], dtype=np.int64)
+    batch_size, seq_len = len(index), 4
+    response_mask = torch.ones(batch_size, seq_len)
+    token_level_rewards = torch.randn(batch_size, seq_len) * response_mask
+
+    adv1, ret1 = compute_rloo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+    )
+    adv2, ret2 = compute_rloo_vectorized_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+    )
+    assert torch.allclose(adv1, adv2, rtol=1e-5, atol=1e-6)
+    assert torch.allclose(ret1, ret2, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("group_sizes", [[1], [1, 1, 1, 1], [3, 1, 2]])
+def test_grpo_and_vectorized_equivalence_with_singleton_groups(group_sizes: list[int]):
+    """Same coverage gap for the GRPO pair, which already agrees on groups of one."""
+    torch.manual_seed(0)
+    index = np.asarray([gid for gid, c in enumerate(group_sizes) for _ in range(c)], dtype=np.int64)
+    batch_size, seq_len = len(index), 4
+    response_mask = torch.ones(batch_size, seq_len)
+    token_level_rewards = torch.randn(batch_size, seq_len) * response_mask
+
+    for norm_adv_by_std_in_grpo in (True, False):
+        adv1, ret1 = compute_grpo_outcome_advantage(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            index=index,
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        )
+        adv2, ret2 = compute_grpo_vectorized_outcome_advantage(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            index=index,
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        )
+        assert torch.allclose(adv1, adv2, rtol=1e-5, atol=1e-6)
+        assert torch.allclose(ret1, ret2, rtol=1e-5, atol=1e-6)
+
+
 def test_grpo_vectorized_matches_original_for_low_variance_rewards():
     token_level_rewards = torch.tensor([[1.0], [1.00001], [2.0], [2.00001]], dtype=torch.float32)
     response_mask = torch.ones_like(token_level_rewards)
