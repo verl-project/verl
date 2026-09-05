@@ -61,10 +61,23 @@ readonly LONG_NVFP4_MLP_LAYERS=42
 readonly LONG_NVFP4_BF16_MLP_LAYERS=6
 readonly LONG_NVFP4_SCOPE=routed_expert_mlp_first${LONG_BF16_LAYERS_AT_START}_last${LONG_BF16_LAYERS_AT_END}
 
-# Dynamic sampling generates up to LONG_GEN_PROMPT_BSZ_MULT x the prompts per
-# step, and response length grows over the run, so chunks stay well inside the
-# 5h partition cap. Every target is a save_freq (10) multiple.
-readonly -a LONG_TARGET_STEPS=(40 80 120 160 200 240 260)
+# Chunk boundaries are per-arm and shrink as response length grows, because step
+# time is roughly `0.42 + 0.00102*len` min/step for BF16 and `1.25 + 0.00058*len`
+# for W4A4 (fitted from the measured 40-step chunk durations of steps 1-260),
+# and the partition cap is a hard 5h. Every target is a save_freq (10) multiple.
+# The first seven entries are the original 260-step run; the rest extend it to
+# 1000. Entries past the wave actually submitted are a plan, not a commitment --
+# re-fit from real timings before releasing the next wave.
+readonly -a LONG_TARGET_STEPS_BF16=(
+  40 80 120 160 200 240 260
+  300 340 380 420 460 490 520 550 570 590 610 630 650 670 690 710 730 750 770
+  780 790 800 810 820 830 840 850 860 870 880 890 900 910 920 930 940 950 960
+  970 980 990 1000
+)
+readonly -a LONG_TARGET_STEPS_W4A4=(
+  40 80 120 160 200 240 260
+  300 340 380 420 460 500 540 580 620 660 700 740 780 820 860 900 940 980 1000
+)
 
 rn4pt_die() { echo "REAL_NVFP4_PERTOKEN_REFUSED: $*" >&2; return 2; }
 
@@ -79,6 +92,7 @@ rn4pt_arm_settings() {
       LONG_SMOKE_EXP=verl_30b_w4a4_carveout_smoke_20260904_v25
       LONG_RUNTIME_ENV=$RN4PT_BUNDLE/runtime_env_w4a4.yaml
       LONG_JOB_TAG=w4a4
+      LONG_TARGET_STEPS=("${LONG_TARGET_STEPS_W4A4[@]}")
       ;;
     bf16)
       LONG_PRECISION_MODE=bf16
@@ -89,6 +103,7 @@ rn4pt_arm_settings() {
       LONG_SMOKE_EXP=verl_30b_bf16_smoke_20260904_v25
       LONG_RUNTIME_ENV=$RN4PT_BUNDLE/runtime_env_bf16.yaml
       LONG_JOB_TAG=bf16
+      LONG_TARGET_STEPS=("${LONG_TARGET_STEPS_BF16[@]}")
       ;;
     *) rn4pt_die "unknown arm: $1" || return ;;
   esac
@@ -196,5 +211,5 @@ rn4pt_require_runtime_image() {
 
 if [[ "${BASH_SOURCE[0]}" = "$0" ]]; then
   rn4pt_validate_static || exit $?
-  echo "REAL_NVFP4_PERTOKEN_STATIC_PASS version=$RN4PT_VERSION targets=${LONG_TARGET_STEPS[*]}"
+  echo "REAL_NVFP4_PERTOKEN_STATIC_PASS version=$RN4PT_VERSION"
 fi
