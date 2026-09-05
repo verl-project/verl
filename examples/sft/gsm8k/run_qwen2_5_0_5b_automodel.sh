@@ -24,7 +24,6 @@ torchrun --standalone --nnodes=1 --nproc_per_node=$nproc_per_node \
     data.use_dynamic_bsz=True \
     data.max_token_len_per_gpu=2048 \
     data.messages_key=messages \
-    data.ignore_input_ids_mismatch=True \
     model=hf_model \
     model.path=Qwen/Qwen2.5-0.5B-Instruct \
     model.use_remove_padding=True \

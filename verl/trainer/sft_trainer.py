@@ -201,12 +201,14 @@ class SFTTrainer:
         config = self.config
         tokenizer = self.model_config.tokenizer
         processor = self.model_config.processor
+        hf_model_type = getattr(self.model_config.hf_config, "model_type", None)
         train_dataset = create_sft_dataset(
             config.data.train_files,
             config.data,
             tokenizer,
             processor,
             max_samples=config.data.get("train_max_samples", -1),
+            hf_model_type=hf_model_type,
         )
         if config.data.val_files:
             val_dataset = create_sft_dataset(
@@ -215,6 +217,7 @@ class SFTTrainer:
                 tokenizer,
                 processor,
                 max_samples=config.data.get("val_max_samples", -1),
+                hf_model_type=hf_model_type,
             )
         else:
             val_dataset = None
@@ -465,7 +468,7 @@ def main(config):
     run_sft(config)
 
 
-def create_sft_dataset(data_paths, data_config, tokenizer, processor, max_samples=-1):
+def create_sft_dataset(data_paths, data_config, tokenizer, processor, max_samples=-1, hf_model_type=None):
     """Create a dataset."""
     # build dataset
     # First check if a custom dataset class is specified
@@ -478,9 +481,16 @@ def create_sft_dataset(data_paths, data_config, tokenizer, processor, max_sample
         dataset_cls = MultiTurnSFTDataset
 
     # Create datasets based on the selected class
-    dataset = dataset_cls(
-        parquet_files=data_paths, tokenizer=tokenizer, config=data_config, processor=processor, max_samples=max_samples
-    )
+    dataset_kwargs = {
+        "parquet_files": data_paths,
+        "tokenizer": tokenizer,
+        "config": data_config,
+        "processor": processor,
+        "max_samples": max_samples,
+    }
+    if issubclass(dataset_cls, MultiTurnSFTDataset):
+        dataset_kwargs["hf_model_type"] = hf_model_type
+    dataset = dataset_cls(**dataset_kwargs)
     return dataset
 
 

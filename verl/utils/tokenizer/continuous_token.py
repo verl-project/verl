@@ -33,6 +33,18 @@ MergeKind = Literal["assistant", "non_assistant"]
 logger = logging.getLogger(__name__)
 
 
+def _copy_messages_for_template(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Copy message containers without duplicating image, video, or audio payloads."""
+    copied_messages = []
+    for message in messages:
+        copied_message = dict(message)
+        content = message.get("content")
+        if isinstance(content, list):
+            copied_message["content"] = [dict(block) if isinstance(block, dict) else block for block in content]
+        copied_messages.append(copied_message)
+    return copied_messages
+
+
 @dataclass(frozen=True)
 class MergeResult:
     """Merged runtime tokens plus the edits callers need to align metadata.
@@ -58,19 +70,21 @@ class ContinuousTokenBuilder:
 
     This class exposes two API layers:
 
-    AgentLoop-facing runtime APIs:
+    Public token-building APIs:
         ``build_initial_tokens`` renders the first prompt, ``merge_non_assistant_tokens``
         merges append-only tool/user/system messages, ``merge_assistant_tokens``
-        appends model-generated assistant tokens, and ``align_response_metadata``
-        applies the recorded token edits to masks/logprobs.
+        appends model-generated assistant tokens, ``merge_assistant_with_tokenization``
+        reconstructs and merges a structured gold assistant message for SFT, and
+        ``align_response_metadata`` applies the recorded token edits to masks/logprobs.
 
     Developer extension APIs:
         Model-specific builders should subclass this class and keep the runtime
         API contracts above stable. Chat template specific behavior belongs in hooks
         such as ``_tokenize_tool_group``, ``_tokenize_single_non_tool``,
         ``_should_fuse_generation_prompt_with_last_group``,
-        ``_tokenize_generation_prompt_delta``, and ``_merge_non_assistant_token_ids``.
-        ``render_delta_token_id`` is the shared suffix-diff helper those hooks can reuse.
+        ``_tokenize_generation_prompt_delta`` and ``_merge_non_assistant_token_ids``.
+        ``render_delta_token_id`` is the shared
+        suffix-diff helper those hooks can reuse.
     """
 
     allowed_append_roles: frozenset[str] = _SUPPORTED_APPEND_ROLES
@@ -175,6 +189,27 @@ class ContinuousTokenBuilder:
             appended_token_count=len(assistant_token_ids),
             kind="assistant",
         )
+
+    def merge_assistant_with_tokenization(
+        self,
+        runtime_token_ids: list[int],
+        message: dict[str, Any],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        previous_messages: list[dict[str, Any]] | None = None,
+    ) -> MergeResult:
+        """Reconstruct and merge one structured gold assistant message for SFT."""
+        # Local import avoids an import-time cycle: SFT reconstruction dispatches
+        # on the concrete builder subclasses defined in this module.
+        from .sft_continuous_token import reconstruct_assistant_tokens
+
+        assistant_token_ids = reconstruct_assistant_tokens(
+            self,
+            message,
+            tools=tools,
+            previous_messages=previous_messages,
+        )
+        return self.merge_assistant_tokens(runtime_token_ids, assistant_token_ids)
 
     def _merge_non_assistant_token_ids(
         self, runtime_token_ids: list[int], appended_token_ids: list[int]
@@ -884,7 +919,7 @@ class VLContinuousTokenMixin:
                 for block in content:
                     if isinstance(block, dict) and block.get("type") in ("image", "image_url"):
                         image_ref = block.get("image")
-                        if not image_ref:
+                        if image_ref is None or (isinstance(image_ref, str) and not image_ref):
                             image_url = block.get("image_url")
                             if isinstance(image_url, dict):
                                 image_ref = image_url.get("url")
@@ -943,7 +978,7 @@ class VLContinuousTokenMixin:
         # necessary to use the processor chat template for VL models.
         text = apply_chat_template(
             self.processor,
-            messages,
+            _copy_messages_for_template(messages),
             tokenize=False,
             add_generation_prompt=add_generation_prompt,
             **template_kwargs,
@@ -1021,9 +1056,9 @@ class QwenVLContinuousTokenBuilder(VLContinuousTokenMixin, QwenContinuousTokenBu
 
 
 class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxContinuousTokenBuilder):
-    """MiniMax-VL (e.g. MiniMax-VL-01): MiniMax ``[e~[`` newline patch + VL processor logic.
+    """MiniMax-VL-01: legacy turn boundaries with VL processor rendering.
 
-    MiniMax-VL-01's *processor* chat template ignores ``add_generation_prompt`` and
+    MiniMax-VL-01's original *processor* chat template ignores ``add_generation_prompt`` and
     unconditionally appends an assistant scaffold ``<beginning_of_sentence>ai
     name=assistant\\n`` after every render. That breaks Continuous Token's
     append-only / suffix-diff invariant (``render(prefix)`` is no longer a token
@@ -1035,14 +1070,14 @@ class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxContinuousT
     def __init__(self, tokenizer: Any, processor: Any, **kwargs: Any):
         super().__init__(tokenizer, processor, **kwargs)
         # MiniMax-VL-01 uses ``<end_of_sentence>`` as its turn terminator, not the
-        # MiniMax-Text-01 ``[e~[`` token the base builder resolves. Repoint the EOS
+        # MiniMax-M2 ``[e~[`` token the base builder resolves. Repoint the EOS
         # so the boundary-newline reinsertion in ``_merge_non_assistant_token_ids``
         # fires for VL turns.
         self._eos_id = require_token_id(tokenizer, "<end_of_sentence>")
         self._vl_scaffold_ids = self._compute_generation_scaffold_ids()
 
     def _compute_generation_scaffold_ids(self) -> list[int]:
-        """Extract the unconditional trailing assistant scaffold token ids.
+        """Extract the trailing assistant scaffold with generation enabled.
 
         Rendered via the processor chat template (bypassing this class's override),
         the scaffold is the final ``<beginning_of_sentence>...`` block, i.e. every
@@ -1052,7 +1087,7 @@ class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxContinuousT
             self.processor,
             [_SYNTHETIC_SYSTEM_MESSAGE, _SYNTHETIC_USER_MESSAGE],
             tokenize=False,
-            add_generation_prompt=False,
+            add_generation_prompt=True,
             **self.chat_template_kwargs,
         )
         ids = normalize_token_ids(
@@ -1077,20 +1112,58 @@ class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxContinuousT
         add_generation_prompt: bool = True,
         tools: list[dict[str, Any]] | None = None,
     ) -> list[int]:
-        # The processor template always appends the scaffold; strip it unless a
-        # generation prompt was requested, restoring append-only rendering.
+        # Strip a trailing scaffold from templates that append it unconditionally.
         token_ids = super().render_tokens_with_mm(
             messages,
             images,
             videos=videos,
             audios=audios,
             add_generation_prompt=add_generation_prompt,
-            tools=tools,
+            tools=[tool.get("function", tool) for tool in tools] if tools else None,
         )
         scaffold = self._vl_scaffold_ids
         if token_ids[-len(scaffold) :] == scaffold and not add_generation_prompt:
             token_ids = token_ids[: -len(scaffold)]
         return token_ids
+
+    def _tokenize_tool_group(
+        self,
+        tool_messages: list[dict[str, Any]],
+        *,
+        previous_messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        add_generation_prompt: bool = False,
+    ) -> list[int]:
+        del tools
+        function_messages = []
+        for index, message in enumerate(tool_messages):
+            name = _resolve_required_tool_name(message, index, tool_messages, previous_messages)
+            content = _stringify_tool_content(message.get("content", ""))
+            function_messages.append({"role": "function", "name": name, "content": [{"type": "text", "text": content}]})
+        # The tokenizer template supports native function responses; the legacy
+        # processor template does not. Keep the processor's generation scaffold.
+        token_ids = normalize_token_ids(
+            apply_chat_template(
+                self.tokenizer,
+                function_messages,
+                tokenize=True,
+                add_generation_prompt=False,
+                **self.chat_template_kwargs,
+            )
+        )
+        if add_generation_prompt:
+            token_ids.extend(self._vl_scaffold_ids)
+        return token_ids
+
+    def _tokenize_single_non_tool(
+        self,
+        message: dict[str, Any],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        add_generation_prompt: bool = False,
+    ) -> list[int]:
+        # Tool declarations belong to the initial prompt, not an appended user/system turn.
+        return super()._tokenize_single_non_tool(message, tools=None, add_generation_prompt=add_generation_prompt)
 
 
 class Gemma4VLContinuousTokenBuilder(VLContinuousTokenMixin, Gemma4ContinuousTokenBuilder):
@@ -1110,6 +1183,65 @@ class GLM46VContinuousTokenBuilder(VLContinuousTokenMixin, GLMContinuousTokenBui
 
 class KimiVLContinuousTokenBuilder(VLContinuousTokenMixin, ContinuousTokenBuilder):
     """Kimi-VL (MoonViT): direct concatenation + VL processor logic."""
+
+    @staticmethod
+    def _reject_tools(tools: list[dict[str, Any]] | None) -> None:
+        if tools:
+            raise ValueError("Kimi-VL Continuous Token does not support structured tool schemas")
+
+    @staticmethod
+    def _reject_structured_messages(messages: list[dict[str, Any]]) -> None:
+        if any(message.get("role") == "tool" for message in messages):
+            raise ValueError("Kimi-VL Continuous Token does not support structured tool response messages")
+        if any(message.get("role") == "assistant" and message.get("tool_calls") for message in messages):
+            raise ValueError("Kimi-VL Continuous Token does not support structured assistant tool calls")
+
+    def build_initial_tokens(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        images: list[Any] | None = None,
+        videos: list[Any] | None = None,
+        audios: list[Any] | None = None,
+    ) -> list[int]:
+        self._reject_tools(tools)
+        self._reject_structured_messages(messages)
+        return super().build_initial_tokens(
+            messages,
+            tools=None,
+            images=images,
+            videos=videos,
+            audios=audios,
+        )
+
+    def tokenize_non_assistant_incremental_messages(
+        self,
+        previous_messages: list[dict[str, Any]],
+        updated_messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> list[int]:
+        self._reject_tools(tools)
+        # Public callers may supply history that never passed build_initial_tokens.
+        self._reject_structured_messages(updated_messages)
+        return super().tokenize_non_assistant_incremental_messages(
+            previous_messages,
+            updated_messages,
+            tools=None,
+        )
+
+    def _tokenize_tool_group(
+        self,
+        tool_messages: list[dict[str, Any]],
+        *,
+        previous_messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        add_generation_prompt: bool = False,
+    ) -> list[int]:
+        # Preserve explicit refusal for callers of the developer extension hook.
+        del tool_messages, previous_messages, tools, add_generation_prompt
+        raise ValueError("Kimi-VL Continuous Token does not support structured tool responses")
 
 
 class DeepSeekVL2ContinuousTokenBuilder(DeepSeekContinuousTokenBuilder):
@@ -1151,7 +1283,7 @@ class DeepSeekVL2ContinuousTokenBuilder(DeepSeekContinuousTokenBuilder):
                 for block in content:
                     if isinstance(block, dict) and block.get("type") in ("image", "image_url"):
                         image_ref = block.get("image")
-                        if not image_ref:
+                        if image_ref is None or (isinstance(image_ref, str) and not image_ref):
                             image_url = block.get("image_url")
                             if isinstance(image_url, dict):
                                 image_ref = image_url.get("url")
@@ -1194,7 +1326,9 @@ class DeepSeekVL2ContinuousTokenBuilder(DeepSeekContinuousTokenBuilder):
             elif role == "assistant":
                 conv.append({"role": "<|Assistant|>", "content": content})
             elif role == "system":
-                conv.append({"role": "<|User|>", "content": content, "images": []})
+                conv.append({"role": "system", "content": content})
+            else:
+                raise ValueError(f"DeepSeek-VL2 Continuous Token does not support message role {role!r}")
 
         if add_generation_prompt:
             if not conv or conv[-1].get("role") != "<|Assistant|>" or conv[-1].get("content"):
@@ -1205,11 +1339,15 @@ class DeepSeekVL2ContinuousTokenBuilder(DeepSeekContinuousTokenBuilder):
         self,
         messages: list[dict[str, Any]],
         images: list[Any],
-        add_generation_prompt: bool = True,
     ) -> list[int]:
         """Render messages through DeepseekVLV2Processor."""
-        conv, all_images = self._to_vl2_conversation(messages, images, add_generation_prompt)
-        out = self.processor.__call__(conversations=conv, images=all_images, force_batchify=True)
+        conv, all_images = self._to_vl2_conversation(messages, images, add_generation_prompt=True)
+        out = self.processor.__call__(
+            conversations=conv,
+            images=all_images,
+            force_batchify=True,
+            inference_mode=True,
+        )
         return normalize_token_ids(out.input_ids[0].tolist())
 
     def build_initial_tokens(
@@ -1223,9 +1361,9 @@ class DeepSeekVL2ContinuousTokenBuilder(DeepSeekContinuousTokenBuilder):
     ) -> list[int]:
         if images is None:
             images = self._extract_images_from_messages(messages)
-        if not images:
-            return self._render_tokens(messages, add_generation_prompt=True, tools=tools)
-        return self._render_via_processor(messages, images, add_generation_prompt=True)
+        if tools:
+            raise ValueError("DeepSeek-VL2 Continuous Token does not support tool schemas")
+        return self._render_via_processor(messages, images)
 
     def merge_non_assistant_tokens(
         self,
@@ -1241,11 +1379,17 @@ class DeepSeekVL2ContinuousTokenBuilder(DeepSeekContinuousTokenBuilder):
         the processor. Prefix stability is guaranteed by the processor.
         """
         self._assert_append_only(previous_messages, updated_messages)
+        if tools:
+            raise ValueError("DeepSeek-VL2 Continuous Token does not support tool schemas")
+        if any(message.get("role") == "tool" for message in updated_messages[len(previous_messages) :]):
+            raise ValueError("DeepSeek-VL2 Continuous Token does not support tool response messages")
 
         # Always use full render + prefix diff (VL2 has no apply_chat_template)
         all_images = self._extract_images_from_messages(updated_messages)
-        full_token_ids = self._render_via_processor(updated_messages, all_images, add_generation_prompt=True)
+        full_token_ids = self._render_via_processor(updated_messages, all_images)
 
         prefix_len = len(runtime_token_ids)
+        if full_token_ids[:prefix_len] != list(runtime_token_ids):
+            raise ValueError("DeepSeek-VL2 Continuous Token processor output does not preserve the runtime prefix")
         appended_token_ids = full_token_ids[prefix_len:]
         return self._merge_non_assistant_token_ids(runtime_token_ids, appended_token_ids)

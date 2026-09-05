@@ -298,7 +298,10 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
         appended_messages = updated_messages[len(previous_messages) :]
         if not appended_messages:
             return []
-        self._assert_prefix_is_stable(previous_messages, tools=tools)
+        # The committed prefix is intentionally immutable. In particular,
+        # ``drop_thinking`` may make a canonical full-history render discard
+        # earlier reasoning after a new user turn, but CT appends only the new
+        # segment and never adopts that retroactive rewrite.
         # ``tools`` is omitted: the tool preamble already sits in the prompt prefix.
         return self._encode(appended_messages, tools=None, add_bos_token=False)
 
@@ -319,30 +322,6 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
             reasoning_effort=self._reasoning_effort,
         )
         return normalize_token_ids(self.tokenizer.encode(text, add_special_tokens=False))
-
-    def _assert_prefix_is_stable(
-        self,
-        previous_messages: list[dict[str, Any]],
-        *,
-        tools: list[dict[str, Any]] | None,
-    ) -> None:
-        """Reject appends whose prefix a full re-render would not reproduce.
-
-        ``drop_thinking`` keeps reasoning only for assistant turns after the last user turn, so
-        appending a user turn retroactively strips reasoning from turns already committed to the
-        runtime sequence. The encoder disables dropping whenever tools are present, which is the
-        case for tool-calling rollouts; thinking mode otherwise requires ``drop_thinking=False``.
-        """
-        if not (self._enable_thinking and self._drop_thinking):
-            return
-        if tools or any(message.get("tools") for message in previous_messages):
-            return
-        if any(message.get("role") == "assistant" for message in previous_messages):
-            raise ValueError(
-                "DeepSeek-V4 Continuous Token cannot append after an assistant turn when thinking is "
-                "enabled and drop_thinking is on, because dropping reasoning would rewrite the "
-                "committed prefix. Pass tools, or set drop_thinking=False in chat_template_kwargs."
-            )
 
     def _merge_non_assistant_token_ids(
         self, runtime_token_ids: list[int], appended_token_ids: list[int]

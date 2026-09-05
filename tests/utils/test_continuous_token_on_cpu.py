@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import logging
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,14 +23,17 @@ from verl.utils.tokenizer.continuous_token import (
     DeepSeekContinuousTokenBuilder,
     DeepSeekVL2ContinuousTokenBuilder,
     Gemma4ContinuousTokenBuilder,
+    Gemma4VLContinuousTokenBuilder,
     GLM46VContinuousTokenBuilder,
     GLMContinuousTokenBuilder,
     GptOssContinuousTokenBuilder,
     KimiVLContinuousTokenBuilder,
     MergeResult,
     MiniMaxContinuousTokenBuilder,
+    MiniMaxVLContinuousTokenBuilder,
     QwenContinuousTokenBuilder,
     QwenVLContinuousTokenBuilder,
+    VLContinuousTokenBuilder,
 )
 from verl.utils.tokenizer.continuous_token_wiring import (
     CONTINUOUS_TOKEN_BUILDER_FAMILIES,
@@ -44,6 +49,60 @@ from verl.utils.tokenizer.deepseek import DeepSeekV4ContinuousTokenBuilder
 
 class _DummyTokenizer:
     name_or_path = "Qwen/Qwen3-8B"
+
+
+class _ImageReferenceWithAmbiguousTruthValue:
+    def __bool__(self):
+        raise AssertionError("image references must not be coerced to bool")
+
+
+_IMAGE_REFERENCE = _ImageReferenceWithAmbiguousTruthValue()
+
+
+@pytest.mark.parametrize(
+    ("block", "expected"),
+    [
+        pytest.param(
+            {"type": "image", "image": _IMAGE_REFERENCE},
+            _IMAGE_REFERENCE,
+            id="image-object",
+        ),
+        pytest.param(
+            {"type": "image_url", "image_url": "/tmp/a.png"},
+            "/tmp/a.png",
+            id="image-url-string",
+        ),
+        pytest.param(
+            {"type": "image_url", "image_url": {"url": "/tmp/a.png"}},
+            "/tmp/a.png",
+            id="image-url-dict",
+        ),
+        pytest.param(
+            {"type": "image", "image": "", "image_url": "/tmp/fallback.png"},
+            "/tmp/fallback.png",
+            id="empty-image-falls-back-to-url",
+        ),
+        pytest.param(
+            {"type": "image", "image": "", "image_url": {"url": "/tmp/fallback.png"}},
+            "/tmp/fallback.png",
+            id="empty-image-falls-back-to-url-dict",
+        ),
+    ],
+)
+@pytest.mark.parametrize("family", ["qwenvl", "deepseekvl2", "dataset"])
+def test_builder_extracts_image_references(family, block, expected):
+    if family == "dataset":
+        from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
+
+        images, _ = MultiTurnSFTDataset._collect_media([{"role": "user", "content": [block]}])
+        assert images == [expected]
+        return
+    if family == "qwenvl":
+        builder = QwenVLContinuousTokenBuilder(_MockQwenVLTokenizer(), _MockQwenVLProcessor())
+    else:
+        tokenizer = _DeepSeekAssistantTokenizer()
+        builder = DeepSeekVL2ContinuousTokenBuilder(tokenizer, _MockDeepSeekVL2Processor(tokenizer))
+    assert builder._extract_images_from_messages([{"role": "user", "content": [block]}]) == [expected]
 
 
 class _TemplateTokenizer:
@@ -181,10 +240,16 @@ class _Gemma4BoundaryTokenizer(_TemplateTokenizer):
 
     def __init__(self):
         self.tool_response_id = 262144
+        self.turn_id = 106
+        self.tool_call_id = 49
 
     def convert_tokens_to_ids(self, token):
         if token == "<|tool_response>":
             return self.tool_response_id
+        if token == "<turn|>":
+            return self.turn_id
+        if token == "<tool_call|>":
+            return self.tool_call_id
         return 0
 
     def apply_chat_template(
@@ -276,6 +341,295 @@ class _DeepSeekBoundaryTokenizer(_TemplateTokenizer):
         return rendered
 
 
+class _SpecialTokenTemplateTokenizer(_TemplateTokenizer):
+    special_token_ids: dict[str, int] = {}
+
+    def encode(self, text, add_special_tokens=False):
+        del add_special_tokens
+        token_ids = []
+        special_tokens = sorted(self.special_token_ids, key=len, reverse=True)
+        while text:
+            matched = next((token for token in special_tokens if text.startswith(token)), None)
+            if matched is None:
+                token_ids.append(ord(text[0]))
+                text = text[1:]
+            else:
+                token_ids.append(self.special_token_ids[matched])
+                text = text[len(matched) :]
+        return token_ids
+
+    def convert_tokens_to_ids(self, token):
+        return self.special_token_ids.get(token, 0)
+
+
+class _MiniMaxAssistantTokenizer(_SpecialTokenTemplateTokenizer):
+    special_token_ids = {"[e~[": 200020}
+    eos_token_id = 200020
+
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        tools=None,
+        return_dict=False,
+        **kwargs,
+    ):
+        del tools, return_dict, kwargs
+        rendered = ""
+        for message in messages:
+            role = message["role"]
+            if role == "assistant":
+                rendered += "]~b]ai\n"
+                reasoning = message.get("reasoning_content") or ""
+                if reasoning:
+                    rendered += f"<think>\n{reasoning}\n</think>\n\n"
+                rendered += str(message.get("content") or "")
+                if message.get("tool_calls"):
+                    rendered += "\n<minimax:tool_call>\ncall\n</minimax:tool_call>"
+                rendered += "[e~[\n"
+            else:
+                rendered += f"]~b]{role}\n{message.get('content', '')}[e~[\n"
+        if add_generation_prompt:
+            rendered += "]~b]ai\n<think>\n"
+        return self.encode(rendered, add_special_tokens=False) if tokenize else rendered
+
+
+class _GLMAssistantTokenizer(_SpecialTokenTemplateTokenizer):
+    special_token_ids = {"<|observation|>": 151333, "<|user|>": 151336}
+
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        tools=None,
+        return_dict=False,
+        **kwargs,
+    ):
+        del tools, return_dict
+        rendered = ""
+        for message in messages:
+            role = message["role"]
+            if role == "assistant":
+                rendered += "<|assistant|>"
+                reasoning = message.get("reasoning_content") or ""
+                rendered += f"<think>{reasoning}</think>" if reasoning else "</think>"
+                rendered += str(message.get("content") or "")
+                if message.get("tool_calls"):
+                    rendered += "<tool_call>lookup</tool_call>"
+            else:
+                rendered += f"<|{role}|>{message.get('content', '')}"
+        if add_generation_prompt:
+            rendered += "<|assistant|>" + ("</think>" if kwargs.get("enable_thinking") is False else "<think>")
+        return self.encode(rendered, add_special_tokens=False) if tokenize else rendered
+
+
+class _Gemma4AssistantTokenizer(_SpecialTokenTemplateTokenizer):
+    tool_response_id = 48
+    tool_call_id = 49
+    turn_id = 106
+    special_token_ids = {
+        "<|tool_response>": tool_response_id,
+        "<tool_call|>": tool_call_id,
+        "<turn|>": turn_id,
+    }
+
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        tools=None,
+        return_dict=False,
+        **kwargs,
+    ):
+        del tools, return_dict
+        rendered = "<bos>"
+        for message in messages:
+            role = "model" if message["role"] == "assistant" else message["role"]
+            rendered += f"<|turn>{role}\n"
+            # Gemma4's published template reads ``reasoning``/``reasoning_content``
+            # (never ``thinking``) and only re-serializes them for tool calls, so a
+            # builder alias that the template ignores must fall back to the manual
+            # scaffold branch instead of this render.
+            reasoning = message.get("reasoning") or message.get("reasoning_content") or ""
+            if message.get("tool_calls") and reasoning:
+                rendered += f"<|channel>thought\n{reasoning}\n<channel|>"
+            if message.get("tool_calls"):
+                rendered += "<|tool_call>call:lookup{}<tool_call|>"
+            rendered += str(message.get("content") or "")
+            rendered += "<turn|>\n"
+        if add_generation_prompt:
+            rendered += "<|turn>model\n"
+            if not kwargs.get("enable_thinking", False):
+                rendered += "<|channel>thought\n<channel|>"
+        return self.encode(rendered, add_special_tokens=False) if tokenize else rendered
+
+
+class _Gemma4E4BAssistantTokenizer(_Gemma4AssistantTokenizer):
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        tools=None,
+        return_dict=False,
+        **kwargs,
+    ):
+        del tools, return_dict, kwargs
+        rendered = "<bos>"
+        for message in messages:
+            role = "model" if message["role"] == "assistant" else message["role"]
+            rendered += f"<|turn>{role}\n"
+            reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+            if message.get("tool_calls") and reasoning:
+                rendered += f"<|channel>thought\n{reasoning}\n<channel|>"
+            if message.get("tool_calls"):
+                rendered += "<|tool_call>call:lookup{}<tool_call|><|tool_response>"
+            rendered += str(message.get("content") or "")
+            if not message.get("tool_calls"):
+                rendered += "<turn|>\n"
+        if add_generation_prompt:
+            rendered += "<|turn>model\n"
+        return self.encode(rendered, add_special_tokens=False) if tokenize else rendered
+
+
+class _DeepSeekAssistantTokenizer(_SpecialTokenTemplateTokenizer):
+    name_or_path = "deepseek-ai/DeepSeek-V4-Flash"
+    special_token_ids = {
+        "<｜begin▁of▁sentence｜>": 0,
+        "<｜end▁of▁sentence｜>": 1,
+        "<｜User｜>": 2,
+        "<｜Assistant｜>": 3,
+    }
+    eos_token_id = 1
+    unk_token_id = -1
+
+
+class _DeepSeekV31AssistantTokenizer(_SpecialTokenTemplateTokenizer):
+    special_token_ids = {"<｜end▁of▁sentence｜>": 100001}
+    eos_token_id = 100001
+    unk_token_id = -1
+
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        tools=None,
+        return_dict=False,
+        **kwargs,
+    ):
+        del tools, return_dict
+        rendered = "<｜begin▁of▁sentence｜>"
+        last_role = None
+        for message in messages:
+            role = message["role"]
+            if role == "system":
+                rendered += str(message.get("content") or "")
+            elif role == "user":
+                rendered += "<｜User｜>" + str(message.get("content") or "")
+            elif role == "assistant":
+                if last_role == "user":
+                    rendered += "<｜Assistant｜></think>"
+                content = str(message.get("content") or "")
+                if last_role != "tool" and "</think>" in content:
+                    content = content.split("</think>", 1)[1]
+                rendered += content + "<｜end▁of▁sentence｜>"
+            elif role == "tool":
+                rendered += "<tool>" + str(message.get("content") or "") + "</tool>"
+            last_role = role
+        if add_generation_prompt and last_role == "user":
+            rendered += "<｜Assistant｜>" + ("<think>" if kwargs.get("thinking") else "</think>")
+        return self.encode(rendered, add_special_tokens=False) if tokenize else rendered
+
+
+class _MockDeepSeekVL2Processor:
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+        self.calls = []
+
+    def __call__(self, *, conversations, images, force_batchify, inference_mode):
+        self.calls.append((conversations, images, force_batchify, inference_mode))
+        token_ids = []
+        for message in conversations:
+            role = message["role"]
+            content = message.get("content", "")
+            token_ids.extend(ord(char) for char in role)
+            token_ids.extend(ord(char) for char in content)
+            if role == "<|Assistant|>" and content:
+                token_ids.append(self.tokenizer.eos_token_id)
+        if inference_mode and token_ids[-1:] == [self.tokenizer.eos_token_id]:
+            token_ids = token_ids[:-1]
+
+        class _TokenRow(list):
+            def tolist(self):
+                return list(self)
+
+        return SimpleNamespace(input_ids=[_TokenRow(token_ids)])
+
+
+class _MiniMaxVLAssistantTokenizer(_SpecialTokenTemplateTokenizer):
+    special_token_ids = {
+        "<beginning_of_sentence>": 200100,
+        "<end_of_sentence>": 200101,
+        "[e~[": 200102,
+    }
+    eos_token_id = 200101
+
+    def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True, **kwargs):
+        if not all(message["role"] == "function" for message in messages):
+            return super().apply_chat_template(
+                messages, tokenize=tokenize, add_generation_prompt=add_generation_prompt, **kwargs
+            )
+        rendered = "".join(
+            '<beginning_of_sentence>system function_response=functions\n{"name": "'
+            + message["name"]
+            + '", "response": '
+            + message["content"][0]["text"]
+            + "}<end_of_sentence>\n"
+            for message in messages
+        )
+        if add_generation_prompt:
+            rendered += "<beginning_of_sentence>ai name=assistant\n"
+        return self.encode(rendered, add_special_tokens=False) if tokenize else rendered
+
+
+class _MockMiniMaxVLAssistantProcessor:
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize=False,
+        add_generation_prompt=False,
+        tools=None,
+        return_dict=False,
+        **kwargs,
+    ):
+        del tokenize, add_generation_prompt, tools, return_dict, kwargs
+        rendered = ""
+        for message in messages:
+            role = "ai" if message["role"] == "assistant" else message["role"]
+            content = message.get("content", "")
+            if isinstance(content, list):
+                content = "".join(
+                    str(block.get("text", ""))
+                    for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+            rendered += f"<beginning_of_sentence>{role}\n{content}<end_of_sentence>\n"
+        # MiniMax-VL-01 appends this even when add_generation_prompt=False.
+        return rendered + "<beginning_of_sentence>ai\n"
+
+    def __call__(self, *, text=None, images=None, return_tensors=None, **kwargs):
+        del images, return_tensors, kwargs
+        rendered = text[0] if isinstance(text, list | tuple) else text
+        return {"input_ids": [self.tokenizer.encode(rendered, add_special_tokens=False)]}
+
+
 class _MissingSpecialTokenTokenizer(_TemplateTokenizer):
     def convert_tokens_to_ids(self, token):
         return None
@@ -356,9 +710,12 @@ def test_builtin_family_surface():
         (ContinuousTokenModelFamily.GEMMA4, Gemma4ContinuousTokenBuilder),
         (ContinuousTokenModelFamily.GPTOSS, GptOssContinuousTokenBuilder),
         (ContinuousTokenModelFamily.DEEPSEEK, DeepSeekContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.VL_DEFAULT, VLContinuousTokenBuilder),
         (ContinuousTokenModelFamily.QWEN_VL, QwenVLContinuousTokenBuilder),
         (ContinuousTokenModelFamily.QWEN25_VL, QwenVLContinuousTokenBuilder),
         (ContinuousTokenModelFamily.QWEN3_VL, QwenVLContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.MINIMAX_VL, MiniMaxVLContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.GEMMA4_VL, Gemma4VLContinuousTokenBuilder),
         (ContinuousTokenModelFamily.KIMI_VL, KimiVLContinuousTokenBuilder),
         (ContinuousTokenModelFamily.GLM4V, GLM46VContinuousTokenBuilder),
         (ContinuousTokenModelFamily.DEEPSEEK_VL2, DeepSeekVL2ContinuousTokenBuilder),
@@ -576,8 +933,8 @@ def test_glm47_builder_removes_ambiguous_boundary_token():
     assert aligned_logprobs == [-0.1, 0.0, 0.0]
 
 
-def test_gemma4_builder_inserts_tool_response_boundary_for_appended_messages():
-    tokenizer = _Gemma4BoundaryTokenizer()
+def test_gemma4_builder_keeps_serialized_tool_response_boundary_for_appended_messages():
+    tokenizer = _Gemma4AssistantTokenizer()
     builder = create_continuous_token_builder(tokenizer, model_family="gemma4")
     previous_messages = [{"role": "user", "content": "question"}]
     updated_messages = previous_messages + [{"role": "tool", "content": "answer", "name": "lookup"}]
@@ -586,20 +943,25 @@ def test_gemma4_builder_inserts_tool_response_boundary_for_appended_messages():
 
     assert isinstance(builder, Gemma4ContinuousTokenBuilder)
     assert result.token_ids[:4] == [1, 2, 3, tokenizer.tool_response_id]
-    assert result.inserted_token_ids == [tokenizer.tool_response_id]
-    assert result.appended_token_count == len(result.token_ids) - 4
     assert result.kind == "non_assistant"
+    aligned_mask, aligned_logprobs = builder.align_response_metadata(
+        result,
+        [1, 1, 1],
+        [-0.1, -0.2, -0.3],
+    )
+    assert aligned_mask == [1, 1, 1] + [0] * (len(result.token_ids) - 3)
+    assert aligned_logprobs == [-0.1, -0.2, -0.3] + [0.0] * (len(result.token_ids) - 3)
 
 
 def test_gemma4_builder_does_not_duplicate_existing_tool_response_boundary():
-    tokenizer = _Gemma4BoundaryTokenizer()
+    tokenizer = _Gemma4AssistantTokenizer()
     builder = create_continuous_token_builder(tokenizer, model_family=ContinuousTokenModelFamily.GEMMA4)
     previous_messages = [{"role": "user", "content": "question"}]
     updated_messages = previous_messages + [{"role": "tool", "content": "answer", "name": "lookup"}]
 
     result = builder.merge_non_assistant_tokens(previous_messages, updated_messages, [1, tokenizer.tool_response_id])
 
-    assert result.token_ids[:2] == [1, tokenizer.tool_response_id]
+    assert result.token_ids.count(tokenizer.tool_response_id) == 1
     assert result.inserted_token_ids == []
     assert result.kind == "non_assistant"
 
@@ -934,6 +1296,23 @@ def test_special_builder_can_keep_separate_full_history_generation_prompt():
     assert [call["add_generation_prompt"] for call in tokenizer.calls] == [False, False, False, True]
 
 
+def test_default_builder_does_not_reencode_existing_trajectory_for_generation_prompt():
+    tokenizer = _RecordingTemplateTokenizer()
+    builder = ContinuousTokenBuilder(tokenizer)
+    old_messages = [
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "already encoded assistant"},
+    ]
+    new_messages = [*old_messages, {"role": "user", "content": "retry"}]
+
+    builder.tokenize_non_assistant_incremental_messages(old_messages, new_messages)
+
+    rendered_messages = [message for call in tokenizer.calls for message in call["messages"]]
+    assert old_messages[0] not in rendered_messages
+    assert old_messages[1] not in rendered_messages
+    assert new_messages[-1] in rendered_messages
+
+
 def test_default_builder_rejects_multi_message_user_or_system_groups():
     class BadGroupingBuilder(ContinuousTokenBuilder):
         def _iter_append_groups(self, appended_messages):
@@ -966,6 +1345,322 @@ def test_default_builder_appends_assistant_tokens_to_runtime_stream():
     )
     assert aligned_mask == [0, 1, 1, 1]
     assert aligned_logprobs == [0.0, -0.1, -0.2, -0.3]
+
+
+def test_deepseek_v4_builder_keeps_committed_prefix_when_drop_thinking_is_enabled():
+    tokenizer = _DeepSeekAssistantTokenizer()
+    builder = DeepSeekV4ContinuousTokenBuilder(
+        tokenizer,
+        chat_template_kwargs={"enable_thinking": True, "drop_thinking": True},
+    )
+    previous_messages = [{"role": "user", "content": "q1"}]
+    runtime_ids = builder.build_initial_tokens(previous_messages)
+    assistant_ids = tokenizer.encode(
+        "reason A</think>answer A<｜end▁of▁sentence｜>",
+        add_special_tokens=False,
+    )
+    runtime_ids = builder.merge_assistant_tokens(runtime_ids, assistant_ids).token_ids
+    previous_messages = [
+        *previous_messages,
+        {"role": "assistant", "reasoning_content": "reason A", "content": "answer A"},
+    ]
+
+    result = builder.merge_non_assistant_tokens(
+        previous_messages,
+        [*previous_messages, {"role": "user", "content": "q2"}],
+        runtime_ids,
+    )
+
+    expected_append = tokenizer.encode("<｜User｜>q2<｜Assistant｜><think>", add_special_tokens=False)
+    assert result.token_ids == runtime_ids + expected_append
+    assert result.appended_token_count == len(expected_append)
+    previous_mask = [1] * len(runtime_ids)
+    mask, _ = builder.align_response_metadata(result, previous_mask)
+    assert mask == previous_mask + [0] * len(expected_append)
+
+
+def test_deepseek_vl2_builder_uses_processor_for_text_prompt():
+    tokenizer = _DeepSeekAssistantTokenizer()
+    processor = _MockDeepSeekVL2Processor(tokenizer)
+    builder = DeepSeekVL2ContinuousTokenBuilder(tokenizer, processor)
+
+    initial_ids = builder.build_initial_tokens([{"role": "user", "content": "question"}])
+    assert initial_ids
+    assert len(processor.calls) == 1
+    assert all(force_batchify for _, _, force_batchify, _ in processor.calls)
+    assert [inference_mode for _, _, _, inference_mode in processor.calls] == [True]
+
+
+def test_deepseek_vl2_builder_preserves_native_system_role():
+    tokenizer = _DeepSeekAssistantTokenizer()
+    processor = _MockDeepSeekVL2Processor(tokenizer)
+    builder = DeepSeekVL2ContinuousTokenBuilder(tokenizer, processor)
+
+    builder.build_initial_tokens(
+        [
+            {"role": "system", "content": "policy"},
+            {"role": "user", "content": "question"},
+        ]
+    )
+
+    conversation = processor.calls[0][0]
+    assert conversation[0] == {"role": "system", "content": "policy"}
+    assert conversation[1]["role"] == "<|User|>"
+
+
+def test_deepseek_vl2_builder_rejects_unsupported_tool_responses():
+    tokenizer = _DeepSeekAssistantTokenizer()
+    processor = _MockDeepSeekVL2Processor(tokenizer)
+    builder = DeepSeekVL2ContinuousTokenBuilder(tokenizer, processor)
+
+    previous_messages = [{"role": "user", "content": "question"}]
+    with pytest.raises(ValueError, match="does not support tool response messages"):
+        builder.merge_non_assistant_tokens(
+            previous_messages,
+            [*previous_messages, {"role": "tool", "content": "value"}],
+            [1, 2, 3],
+        )
+
+
+def test_deepseek_vl2_builder_rejects_processor_output_that_rewrites_runtime_prefix():
+    tokenizer = _DeepSeekAssistantTokenizer()
+    processor = _MockDeepSeekVL2Processor(tokenizer)
+    builder = DeepSeekVL2ContinuousTokenBuilder(tokenizer, processor)
+    previous_messages = [{"role": "user", "content": "question"}]
+
+    with pytest.raises(ValueError, match="does not preserve the runtime prefix"):
+        builder.merge_non_assistant_tokens(
+            previous_messages,
+            [*previous_messages, {"role": "user", "content": "retry"}],
+            [999],
+        )
+
+
+@pytest.mark.parametrize("always_append_scaffold", [False, True])
+def test_minimax_vl_builder_preserves_user_append_tokens_and_metadata(always_append_scaffold):
+    tokenizer = _MiniMaxVLAssistantTokenizer()
+
+    class Processor(_MockMiniMaxVLAssistantProcessor):
+        def apply_chat_template(self, messages, *, add_generation_prompt=False, **kwargs):
+            rendered = super().apply_chat_template(messages, add_generation_prompt=add_generation_prompt, **kwargs)
+            if not always_append_scaffold and not add_generation_prompt:
+                rendered = rendered.removesuffix("<beginning_of_sentence>ai\n")
+            return rendered
+
+    builder = MiniMaxVLContinuousTokenBuilder(tokenizer, Processor(tokenizer))
+    previous_messages = [{"role": "assistant", "content": "gold"}]
+    updated_messages = [*previous_messages, {"role": "user", "content": [{"type": "text", "text": "retry"}]}]
+    runtime_ids = [7, tokenizer.eos_token_id]
+    result = builder.merge_non_assistant_tokens(previous_messages, updated_messages, runtime_ids)
+    expected = tokenizer.encode(
+        "\n<beginning_of_sentence>user\nretry<end_of_sentence>\n<beginning_of_sentence>ai\n",
+        add_special_tokens=False,
+    )
+    assert result.token_ids == runtime_ids + expected
+    mask, logprobs = builder.align_response_metadata(result, [1, 1], [0.1, 0.2])
+    assert mask == [1, 1] + [0] * len(expected)
+    assert logprobs == [0.1, 0.2] + [0.0] * len(expected)
+
+
+def test_minimax_vl_builder_keeps_tool_declarations_in_initial_prompt():
+    tokenizer = _MiniMaxVLAssistantTokenizer()
+
+    class Processor(_MockMiniMaxVLAssistantProcessor):
+        def apply_chat_template(self, messages, *, tools=None, add_generation_prompt=False, **kwargs):
+            rendered = super().apply_chat_template(messages, **kwargs).removesuffix("<beginning_of_sentence>ai\n")
+            for tool in tools or []:
+                rendered += f"<tool>{tool['name']}</tool>"
+            if add_generation_prompt:
+                rendered += "<beginning_of_sentence>ai\n"
+            return rendered
+
+    builder = MiniMaxVLContinuousTokenBuilder(tokenizer, Processor(tokenizer))
+    tools = [{"type": "function", "function": {"name": "lookup"}}]
+    first = [{"role": "user", "content": [{"type": "text", "text": "question"}]}]
+    initial = builder.build_initial_tokens(first, tools=tools)
+    assert initial == tokenizer.encode(
+        "<beginning_of_sentence>user\nquestion<end_of_sentence>\n<tool>lookup</tool><beginning_of_sentence>ai\n",
+        add_special_tokens=False,
+    )
+    previous = [*first, {"role": "assistant", "content": "gold"}]
+    runtime_ids = initial + tokenizer.encode("gold<end_of_sentence>", add_special_tokens=False)
+    result = builder.merge_non_assistant_tokens(
+        previous,
+        [*previous, {"role": "user", "content": [{"type": "text", "text": "retry"}]}],
+        runtime_ids,
+        tools=tools,
+    )
+    assert result.token_ids == runtime_ids + tokenizer.encode(
+        "\n<beginning_of_sentence>user\nretry<end_of_sentence>\n<beginning_of_sentence>ai\n",
+        add_special_tokens=False,
+    )
+
+
+@pytest.mark.parametrize("tool_name", ["lookup", 'look"up', "look\\up", "lookup\nnext", "查询"])
+@pytest.mark.parametrize("content", [None, "", "sunny", '{"value": 1}'])
+def test_minimax_vl_builder_formats_openai_tool_response_as_function_message(tool_name, content):
+    tokenizer = _MiniMaxVLAssistantTokenizer()
+    processor = _MockMiniMaxVLAssistantProcessor(tokenizer)
+    builder = MiniMaxVLContinuousTokenBuilder(tokenizer, processor)
+    previous_messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {"name": tool_name, "arguments": "{}"},
+                }
+            ],
+        }
+    ]
+
+    token_ids = builder._tokenize_tool_group(
+        [{"role": "tool", "tool_call_id": "call_0", "content": content}],
+        previous_messages=previous_messages,
+    )
+
+    prefix = tokenizer.encode("<beginning_of_sentence>system function_response=functions\n", add_special_tokens=False)
+    suffix = tokenizer.encode("<end_of_sentence>\n", add_special_tokens=False)
+    assert token_ids[: len(prefix)] == prefix and token_ids[-len(suffix) :] == suffix
+    response = "".join(chr(token) for token in token_ids[len(prefix) : -len(suffix)])
+    # The official function template concatenates these fields verbatim, even
+    # for non-JSON text; escaping only the name changes its token protocol.
+    assert response == '{"name": "' + tool_name + '", "response": ' + (content or "") + "}"
+
+
+@pytest.mark.parametrize("response_count", [1, 2])
+def test_minimax_vl_builder_merges_tool_result_and_fixed_generation_scaffold(response_count):
+    tokenizer = _MiniMaxVLAssistantTokenizer()
+    processor = _MockMiniMaxVLAssistantProcessor(tokenizer)
+    builder = MiniMaxVLContinuousTokenBuilder(tokenizer, processor)
+    previous_messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": {"q": "x"}},
+                }
+            ],
+        },
+    ]
+    updated_messages = [
+        *previous_messages,
+        *[{"role": "tool", "tool_call_id": "call_0", "content": '{"value": 1}'} for _ in range(response_count)],
+    ]
+    runtime_ids = [7, tokenizer.eos_token_id]
+
+    result = builder.merge_non_assistant_tokens(
+        previous_messages,
+        updated_messages,
+        runtime_ids,
+        tools=[{"type": "function", "function": {"name": "lookup"}}],
+    )
+
+    expected_response = tokenizer.encode(
+        "<beginning_of_sentence>system function_response=functions\n"
+        '{"name": "lookup", "response": {"value": 1}}<end_of_sentence>\n',
+        add_special_tokens=False,
+    )
+    expected_append = expected_response * response_count + builder._vl_scaffold_ids
+    assert result.token_ids == runtime_ids + [ord("\n")] + expected_append
+    assert result.inserted_token_ids == [ord("\n")]
+    assert result.appended_token_count == len(expected_append)
+
+
+def test_minimax_vl_tool_responses_follow_tokenizer_template(monkeypatch):
+    tokenizer = _MiniMaxVLAssistantTokenizer()
+    builder = MiniMaxVLContinuousTokenBuilder(tokenizer, _MockMiniMaxVLAssistantProcessor(tokenizer))
+
+    def custom_template(messages, *, tokenize, add_generation_prompt, **kwargs):
+        assert tokenize and not add_generation_prompt
+        assert all(message["role"] == "function" for message in messages)
+        rendered = "".join(f"{message['name']}:{message['content'][0]['text']}!" for message in messages)
+        return tokenizer.encode(rendered, add_special_tokens=False)
+
+    monkeypatch.setattr(tokenizer, "apply_chat_template", custom_template)
+    messages = [
+        {"role": "tool", "name": "first", "content": [{"type": "text", "text": "sunny"}]},
+        {"role": "tool", "name": "second", "content": None},
+    ]
+    original = copy.deepcopy(messages)
+    result = builder._tokenize_tool_group(messages, previous_messages=[], add_generation_prompt=True)
+    assert result == tokenizer.encode("first:sunny!second:!", add_special_tokens=False) + builder._vl_scaffold_ids
+    assert messages == original
+
+
+def test_kimi_vl_builder_rejects_unsupported_runtime_tools():
+    builder = KimiVLContinuousTokenBuilder(_QwenBoundaryTokenizer(), object())
+
+    with pytest.raises(ValueError, match="does not support structured tool schemas"):
+        builder.build_initial_tokens(
+            [{"role": "user", "content": "question"}],
+            tools=[{"type": "function", "function": {"name": "lookup"}}],
+        )
+
+    with pytest.raises(ValueError, match="does not support structured tool response messages"):
+        builder.build_initial_tokens(
+            [
+                {"role": "user", "content": "question"},
+                {"role": "tool", "content": "value"},
+            ]
+        )
+
+    with pytest.raises(ValueError, match="does not support structured tool responses"):
+        builder._tokenize_tool_group(
+            [{"role": "tool", "name": "lookup", "content": "value"}],
+            previous_messages=[],
+            add_generation_prompt=True,
+        )
+
+
+@pytest.mark.parametrize("operation", ["incremental", "merge"])
+@pytest.mark.parametrize("fuse_generation_prompt", [False, True])
+@pytest.mark.parametrize("unsupported", ["schema", "tool_response", "historical_tool_call"])
+def test_kimi_vl_incremental_entries_reject_before_rendering(
+    operation, fuse_generation_prompt, unsupported, monkeypatch
+):
+    processor = _MockQwenVLProcessor()
+    builder = KimiVLContinuousTokenBuilder(_MockQwenVLTokenizer(), processor)
+    monkeypatch.setattr(builder, "_should_fuse_generation_prompt_with_last_group", lambda: fuse_generation_prompt)
+    previous = [{"role": "user", "content": "question"}]
+    appended = {"role": "user", "content": "retry"}
+    tools = None
+    if unsupported == "schema":
+        tools = [{"type": "function", "function": {"name": "lookup"}}]
+    elif unsupported == "tool_response":
+        appended = {"role": "tool", "content": "value"}
+    else:
+        previous.append({"role": "assistant", "tool_calls": [{"function": {"name": "lookup"}}]})
+
+    def unexpected_render(*args, **kwargs):
+        pytest.fail("Unsupported Kimi-VL tools reached the processor template")
+
+    monkeypatch.setattr(processor, "apply_chat_template", unexpected_render)
+    with pytest.raises(ValueError, match="Kimi-VL Continuous Token does not support structured"):
+        if operation == "incremental":
+            builder.tokenize_non_assistant_incremental_messages(previous, [*previous, appended], tools=tools)
+        else:
+            builder.merge_non_assistant_tokens(previous, [*previous, appended], [1, 2], tools=tools)
+
+
+@pytest.mark.parametrize("fuse_generation_prompt", [False, True])
+def test_kimi_vl_incremental_entries_preserve_plain_turns(fuse_generation_prompt, monkeypatch):
+    builder = KimiVLContinuousTokenBuilder(_MockQwenVLTokenizer(), _MockQwenVLProcessor())
+    monkeypatch.setattr(builder, "_should_fuse_generation_prompt_with_last_group", lambda: fuse_generation_prompt)
+    previous = [{"role": "user", "content": "question"}]
+    updated = [*previous, {"role": "user", "content": "retry"}]
+    # This mock processor emits character IDs directly, independently of its tokenizer.
+    expected = [ord(char) for char in "<user>retry\n<assistant>"]
+    assert builder.tokenize_non_assistant_incremental_messages(previous, updated, tools=[]) == expected
+    result = builder.merge_non_assistant_tokens(previous, updated, [1, 2], tools=[])
+    assert result.token_ids == [1, 2, *expected]
+    assert result.appended_token_count == len(expected)
 
 
 def test_assistant_alignment_validates_logprobs():
@@ -1793,7 +2488,7 @@ class _RecordingTemplateProcessor(_MockQwenVLProcessor):
     def apply_chat_template(
         self, messages, tokenize=False, add_generation_prompt=False, tools=None, return_dict=False, **kwargs
     ):
-        self.template_kwargs.append(dict(kwargs))
+        self.template_kwargs.append({"tools": tools, **kwargs})
         return super().apply_chat_template(
             messages,
             tokenize=tokenize,
@@ -1802,6 +2497,68 @@ class _RecordingTemplateProcessor(_MockQwenVLProcessor):
             return_dict=return_dict,
             **kwargs,
         )
+
+
+class _BlockReplacingTemplateProcessor(_MockQwenVLProcessor):
+    """VL processor that rewrites structured image blocks in place.
+
+    This mirrors what a real Qwen3-VL processor does to an OpenAI-style
+    ``image_url`` block: it replaces the block with an internal
+    ``{"type": "image", "url": ...}`` form. That rewrite drops the ``image_url``
+    key, and the builder's image extraction reads ``image`` / ``image_url``
+    rather than a processor-internal bare ``url``, so a leaked rewrite makes the
+    image disappear from the caller's messages entirely.
+    """
+
+    def apply_chat_template(
+        self, messages, tokenize=False, add_generation_prompt=False, tools=None, return_dict=False, **kwargs
+    ):
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for index, block in enumerate(content):
+                if not isinstance(block, dict) or block.get("type") != "image_url":
+                    continue
+                image_url = block.get("image_url")
+                url = image_url.get("url") if isinstance(image_url, dict) else image_url
+                content[index] = {"type": "image", "url": url}
+        return super().apply_chat_template(
+            messages,
+            tokenize=tokenize,
+            add_generation_prompt=add_generation_prompt,
+            tools=tools,
+            return_dict=return_dict,
+            **kwargs,
+        )
+
+
+def test_vl_builder_does_not_mutate_caller_messages():
+    """Rendering must not rewrite the caller's messages.
+
+    VL builders accept structured ``image_url`` content blocks, and callers keep
+    using the same message list after Continuous Token assembly (the SFT dataset
+    rebuilds its multimodal tensors from it). A processor that rewrites message
+    containers in place would therefore strip the media references out from under
+    the caller, so the render has to work on copied containers.
+    """
+
+    builder = QwenVLContinuousTokenBuilder(_MockQwenVLTokenizer(), _BlockReplacingTemplateProcessor())
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "/tmp/a.png"}},
+                {"type": "text", "text": "Describe this image."},
+            ],
+        }
+    ]
+    expected = copy.deepcopy(messages)
+
+    builder.build_initial_tokens(messages, images=builder._extract_images_from_messages(messages))
+
+    assert messages == expected
+    assert builder._extract_images_from_messages(messages) == ["/tmp/a.png"]
 
 
 def test_vl_builder_creation_forwards_chat_template_and_mm_processor_kwargs():
