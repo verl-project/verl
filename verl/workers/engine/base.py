@@ -284,6 +284,14 @@ class BaseEngine:
         """
         raise NotImplementedError
 
+    def prepare_checkpoint_retention(self, loaded_path: str) -> None:
+        """Record a loaded checkpoint whose retention is finalized by the orchestration layer."""
+        return None
+
+    def finalize_checkpoint_retention(self, new_path: str, max_ckpt_to_keep: Optional[int] = None) -> None:
+        """Finalize retention of a restart-loaded checkpoint after its replacement is committed."""
+        return None
+
     def is_mp_src_rank_with_outputs(self):
         """
         Whether the current rank is the first rank in model parallel group that contains model outputs
