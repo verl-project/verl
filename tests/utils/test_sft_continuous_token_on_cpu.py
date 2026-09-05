@@ -195,32 +195,34 @@ def test_base_reconstructor_preserves_empty_tools_semantics_for_text_and_vl():
     assert vl_processor.template_kwargs[-1]["tools"] is None
 
 
-def test_default_builder_encodes_prepared_assistant_continuation_once():
+@pytest.mark.parametrize("operation", ["reconstruct", "merge"])
+def test_default_assistant_encoding_and_public_merge(operation, monkeypatch):
     tokenizer = _RecordingTemplateTokenizer()
     builder = ContinuousTokenBuilder(tokenizer)
     message = {"role": "assistant", "content": "gold"}
+    original_message = copy.deepcopy(message)
+    expected_ids = tokenizer.encode("gold\n", add_special_tokens=False)
+    encode = tokenizer.encode
+    encoded_texts = []
 
-    assistant_ids = reconstruct_assistant_tokens(builder, message)
+    def record_encode(text, **kwargs):
+        encoded_texts.append(text)
+        return encode(text, **kwargs)
 
-    assert assistant_ids == tokenizer.encode("gold\n", add_special_tokens=False)
+    monkeypatch.setattr(tokenizer, "encode", record_encode)
+    if operation == "reconstruct":
+        assert reconstruct_assistant_tokens(builder, message) == expected_ids
+    else:
+        result = builder.merge_assistant_with_tokenization([10, 20], message)
+        assert result.token_ids == [10, 20, *expected_ids]
+        assert result.appended_token_count == len(expected_ids)
+        assert result.kind == "assistant"
+
+    assert encoded_texts == ["gold\n"]
     assert len(tokenizer.calls) == 2
-    assert all(message not in call["messages"] for call in tokenizer.calls[:1])
-    assert tokenizer.calls[1]["messages"][-1] is message
-
-
-def test_builder_public_api_reconstructs_and_merges_gold_assistant_message():
-    tokenizer = _RecordingTemplateTokenizer()
-    builder = ContinuousTokenBuilder(tokenizer)
-
-    result = builder.merge_assistant_with_tokenization(
-        [10, 20],
-        {"role": "assistant", "content": "gold"},
-    )
-
-    assistant_ids = tokenizer.encode("gold\n", add_special_tokens=False)
-    assert result.token_ids == [10, 20, *assistant_ids]
-    assert result.appended_token_count == len(assistant_ids)
-    assert result.kind == "assistant"
+    assert message not in tokenizer.calls[0]["messages"]
+    assert tokenizer.calls[1]["messages"][-1] == message
+    assert message == original_message
 
 
 def test_default_builder_trims_at_first_generated_terminator():

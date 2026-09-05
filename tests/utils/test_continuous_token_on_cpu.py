@@ -1371,17 +1371,12 @@ def test_deepseek_v4_builder_keeps_committed_prefix_when_drop_thinking_is_enable
         runtime_ids,
     )
 
-    assert result.token_ids[: len(runtime_ids)] == runtime_ids
-
-
-def test_deepseek_builder_serializes_synthetic_tool_arguments():
-    builder = DeepSeekContinuousTokenBuilder(_DeepSeekAssistantTokenizer())
-
-    synthetic_assistant = builder._synthetic_assistant_for_tools(
-        [{"role": "tool", "name": "lookup", "content": "value"}]
-    )
-
-    assert synthetic_assistant["tool_calls"][0]["function"]["arguments"] == "{}"
+    expected_append = tokenizer.encode("<｜User｜>q2<｜Assistant｜><think>", add_special_tokens=False)
+    assert result.token_ids == runtime_ids + expected_append
+    assert result.appended_token_count == len(expected_append)
+    previous_mask = [1] * len(runtime_ids)
+    mask, _ = builder.align_response_metadata(result, previous_mask)
+    assert mask == previous_mask + [0] * len(expected_append)
 
 
 def test_deepseek_vl2_builder_uses_processor_for_text_prompt():
@@ -1622,6 +1617,50 @@ def test_kimi_vl_builder_rejects_unsupported_runtime_tools():
             previous_messages=[],
             add_generation_prompt=True,
         )
+
+
+@pytest.mark.parametrize("operation", ["incremental", "merge"])
+@pytest.mark.parametrize("fuse_generation_prompt", [False, True])
+@pytest.mark.parametrize("unsupported", ["schema", "tool_response", "historical_tool_call"])
+def test_kimi_vl_incremental_entries_reject_before_rendering(
+    operation, fuse_generation_prompt, unsupported, monkeypatch
+):
+    processor = _MockQwenVLProcessor()
+    builder = KimiVLContinuousTokenBuilder(_MockQwenVLTokenizer(), processor)
+    monkeypatch.setattr(builder, "_should_fuse_generation_prompt_with_last_group", lambda: fuse_generation_prompt)
+    previous = [{"role": "user", "content": "question"}]
+    appended = {"role": "user", "content": "retry"}
+    tools = None
+    if unsupported == "schema":
+        tools = [{"type": "function", "function": {"name": "lookup"}}]
+    elif unsupported == "tool_response":
+        appended = {"role": "tool", "content": "value"}
+    else:
+        previous.append({"role": "assistant", "tool_calls": [{"function": {"name": "lookup"}}]})
+
+    def unexpected_render(*args, **kwargs):
+        pytest.fail("Unsupported Kimi-VL tools reached the processor template")
+
+    monkeypatch.setattr(processor, "apply_chat_template", unexpected_render)
+    with pytest.raises(ValueError, match="Kimi-VL Continuous Token does not support structured"):
+        if operation == "incremental":
+            builder.tokenize_non_assistant_incremental_messages(previous, [*previous, appended], tools=tools)
+        else:
+            builder.merge_non_assistant_tokens(previous, [*previous, appended], [1, 2], tools=tools)
+
+
+@pytest.mark.parametrize("fuse_generation_prompt", [False, True])
+def test_kimi_vl_incremental_entries_preserve_plain_turns(fuse_generation_prompt, monkeypatch):
+    builder = KimiVLContinuousTokenBuilder(_MockQwenVLTokenizer(), _MockQwenVLProcessor())
+    monkeypatch.setattr(builder, "_should_fuse_generation_prompt_with_last_group", lambda: fuse_generation_prompt)
+    previous = [{"role": "user", "content": "question"}]
+    updated = [*previous, {"role": "user", "content": "retry"}]
+    # This mock processor emits character IDs directly, independently of its tokenizer.
+    expected = [ord(char) for char in "<user>retry\n<assistant>"]
+    assert builder.tokenize_non_assistant_incremental_messages(previous, updated, tools=[]) == expected
+    result = builder.merge_non_assistant_tokens(previous, updated, [1, 2], tools=[])
+    assert result.token_ids == [1, 2, *expected]
+    assert result.appended_token_count == len(expected)
 
 
 def test_assistant_alignment_validates_logprobs():

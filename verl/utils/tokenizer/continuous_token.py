@@ -1215,20 +1215,19 @@ class KimiVLContinuousTokenBuilder(VLContinuousTokenMixin, ContinuousTokenBuilde
             audios=audios,
         )
 
-    def merge_non_assistant_tokens(
+    def tokenize_non_assistant_incremental_messages(
         self,
         previous_messages: list[dict[str, Any]],
         updated_messages: list[dict[str, Any]],
-        runtime_token_ids: list[int],
         *,
         tools: list[dict[str, Any]] | None = None,
-    ) -> MergeResult:
+    ) -> list[int]:
         self._reject_tools(tools)
+        # Public callers may supply history that never passed build_initial_tokens.
         self._reject_structured_messages(updated_messages)
-        return super().merge_non_assistant_tokens(
+        return super().tokenize_non_assistant_incremental_messages(
             previous_messages,
             updated_messages,
-            runtime_token_ids,
             tools=None,
         )
 
@@ -1240,6 +1239,7 @@ class KimiVLContinuousTokenBuilder(VLContinuousTokenMixin, ContinuousTokenBuilde
         tools: list[dict[str, Any]] | None = None,
         add_generation_prompt: bool = False,
     ) -> list[int]:
+        # Preserve explicit refusal for callers of the developer extension hook.
         del tool_messages, previous_messages, tools, add_generation_prompt
         raise ValueError("Kimi-VL Continuous Token does not support structured tool responses")
 

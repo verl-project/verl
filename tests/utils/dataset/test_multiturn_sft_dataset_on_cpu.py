@@ -177,8 +177,31 @@ def test_multiturn_sft_drops_arrow_null_message_fields():
     ]
 
 
+@pytest.fixture
+def qwen35_dataset_factory(model_path, tmp_path):
+    tokenizer = hf_tokenizer(model_path)
+
+    def build(conversations, enable_thinking, **template_kwargs):
+        test_file = tmp_path / "qwen35_continuous_tokens.parquet"
+        pd.DataFrame({"messages": conversations, "enable_thinking": enable_thinking}).to_parquet(test_file)
+        return MultiTurnSFTDataset(
+            parquet_files=str(test_file),
+            tokenizer=tokenizer,
+            config={
+                "max_length": 512,
+                "truncation": "error",
+                "pad_mode": "no_padding",
+                "continuous_token_model_family": "qwen35",
+                "apply_chat_template_kwargs": template_kwargs,
+            },
+        )
+
+    return tokenizer, build
+
+
 @pytest.mark.parametrize("model_path", [str(qwen35_model_path)])
-def test_multiturn_sft_qwen35_uses_append_only_continuous_tokens(model_path: str, tmp_path: Path):
+def test_multiturn_sft_qwen35_uses_append_only_continuous_tokens(qwen35_dataset_factory):
+    tokenizer, build_dataset = qwen35_dataset_factory
     first_turn = [
         {"role": "user", "content": "q"},
         {
@@ -207,20 +230,7 @@ def test_multiturn_sft_qwen35_uses_append_only_continuous_tokens(model_path: str
         ],
     ]
     enable_thinking = [True, True, False, True]
-    test_file = tmp_path / "qwen35_continuous_tokens.parquet"
-    pd.DataFrame({"messages": conversations, "enable_thinking": enable_thinking}).to_parquet(test_file)
-
-    tokenizer = hf_tokenizer(model_path)
-    dataset = MultiTurnSFTDataset(
-        parquet_files=str(test_file),
-        tokenizer=tokenizer,
-        config={
-            "max_length": 512,
-            "truncation": "error",
-            "pad_mode": "no_padding",
-            "continuous_token_model_family": "qwen35",
-        },
-    )
+    dataset = build_dataset(conversations, enable_thinking)
     short_item, thinking_item, non_thinking_item, unclosed_item = (dataset[index] for index in range(4))
 
     # Appending a user/retry turn never rebuilds or replaces the already-tokenized
@@ -279,8 +289,8 @@ def test_multiturn_sft_qwen35_uses_append_only_continuous_tokens(model_path: str
 
 
 @pytest.mark.parametrize("model_path", [str(qwen35_model_path)])
-def test_multiturn_sft_qwen36_preserve_thinking_does_not_rewrite_history(model_path: str, tmp_path: Path):
-    tokenizer = hf_tokenizer(model_path)
+def test_multiturn_sft_preserve_thinking_template_variant(qwen35_dataset_factory, monkeypatch):
+    tokenizer, build_dataset = qwen35_dataset_factory
     qwen35_condition = "{%- if loop.index0 > ns.last_query_index %}"
     qwen36_condition = (
         "{%- if (preserve_thinking is defined and preserve_thinking is true) or (loop.index0 > ns.last_query_index) %}"
@@ -315,26 +325,39 @@ def test_multiturn_sft_qwen36_preserve_thinking_does_not_rewrite_history(model_p
         ],
     ]
     enable_thinking = [True, True, False, True]
-    test_file = tmp_path / "qwen36_continuous_tokens.parquet"
-    pd.DataFrame({"messages": conversations, "enable_thinking": enable_thinking}).to_parquet(test_file)
-
-    def build_dataset(preserve_thinking: bool):
-        return MultiTurnSFTDataset(
-            parquet_files=str(test_file),
-            tokenizer=tokenizer,
-            config={
-                "max_length": 512,
-                "truncation": "error",
-                "pad_mode": "no_padding",
-                "continuous_token_model_family": "qwen35",
-                "apply_chat_template_kwargs": {"preserve_thinking": preserve_thinking},
-            },
+    # Prove the template switch changes a full-history render before checking
+    # that incremental CT preserves the committed history under either setting.
+    canonical_texts = {
+        preserve: tokenizer.apply_chat_template(
+            conversations[0],
+            tokenize=False,
+            add_generation_prompt=False,
+            enable_thinking=True,
+            preserve_thinking=preserve,
         )
+        for preserve in (False, True)
+    }
+    assert "reason A" not in canonical_texts[False]
+    assert "reason A" in canonical_texts[True]
+    original_template = tokenizer.apply_chat_template
+    template_options = []
 
-    preserve_dataset = build_dataset(True)
-    drop_dataset = build_dataset(False)
-    preserve_items = [preserve_dataset[index] for index in range(len(conversations))]
-    drop_items = [drop_dataset[index] for index in range(len(conversations))]
+    def record_template(*args, **kwargs):
+        template_options.append(kwargs.get("preserve_thinking"))
+        return original_template(*args, **kwargs)
+
+    monkeypatch.setattr(tokenizer, "apply_chat_template", record_template)
+    preserve_dataset = build_dataset(conversations, enable_thinking, preserve_thinking=True)
+    drop_dataset = build_dataset(conversations, enable_thinking, preserve_thinking=False)
+
+    def read_items(dataset, expected_option):
+        template_options.clear()
+        items = [dataset[index] for index in range(len(conversations))]
+        assert template_options and all(option is expected_option for option in template_options)
+        return items
+
+    preserve_items = read_items(preserve_dataset, True)
+    drop_items = read_items(drop_dataset, False)
 
     # preserve_thinking only controls whole-history re-rendering. CT never
     # re-renders that history, so both settings produce the same TITO stream.
