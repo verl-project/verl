@@ -47,6 +47,15 @@ qwen3_vl_model_path = Path(
 ).expanduser()
 
 
+@pytest.fixture(autouse=True)
+def require_local_model_artifacts(request):
+    """Integration cases need local tokenizer/processor files, but no model weights."""
+    if "model_path" in request.fixturenames:
+        model_path = Path(request.getfixturevalue("model_path"))
+        if not model_path.is_dir():
+            pytest.skip(f"Local tokenizer/processor artifacts are unavailable: {model_path}")
+
+
 @pytest.mark.parametrize(
     ("model_family", "hf_model_type"),
     [("auto", "minimax"), ("auto", "minimax_text_01"), ("minimax", None), (" Mini-Max ", None)],
@@ -294,9 +303,9 @@ def test_multiturn_sft_qwen36_preserve_thinking_does_not_rewrite_history(model_p
 @pytest.mark.parametrize(
     "model_path, continuous_token_model_family",
     [
-        (f"{custom_model_prefix}/Qwen/Qwen2.5-0.5B", "qwen25"),
-        (f"{custom_model_prefix}/Qwen/Qwen3-0.6B", "qwen3"),
-        (f"{custom_model_prefix}/Qwen/Qwen3.5-0.8B", "qwen35"),
+        (os.environ.get("VERL_TEST_QWEN25_MODEL", f"{custom_model_prefix}/Qwen/Qwen2.5-0.5B"), "qwen25"),
+        (os.environ.get("VERL_TEST_QWEN3_MODEL", f"{custom_model_prefix}/Qwen/Qwen3-0.6B"), "qwen3"),
+        (str(qwen35_model_path), "qwen35"),
     ],
 )
 def test_multiturn_sft_dataset(model_path: str, continuous_token_model_family: str):

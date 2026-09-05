@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -44,7 +45,7 @@ def extract_image_references(messages: list[dict[str, Any]]) -> list[Any]:
             if not isinstance(block, dict) or block.get("type") not in {"image", "image_url"}:
                 continue
             image_ref = block.get("image")
-            if image_ref is None:
+            if image_ref is None or (isinstance(image_ref, str) and not image_ref):
                 image_url = block.get("image_url")
                 if isinstance(image_url, dict):
                     image_ref = image_url.get("url")
@@ -1063,7 +1064,7 @@ class QwenVLContinuousTokenBuilder(VLContinuousTokenMixin, QwenContinuousTokenBu
 
 
 class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxContinuousTokenBuilder):
-    """MiniMax-VL (e.g. MiniMax-VL-01): MiniMax ``[e~[`` newline patch + VL processor logic.
+    """MiniMax-VL-01: legacy turn boundaries with VL processor rendering.
 
     MiniMax-VL-01's original *processor* chat template ignores ``add_generation_prompt`` and
     unconditionally appends an assistant scaffold ``<beginning_of_sentence>ai
@@ -1148,7 +1149,7 @@ class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxContinuousT
             content = _stringify_tool_content(message.get("content", ""))
             response_parts.append(
                 "<beginning_of_sentence>system function_response=functions\n"
-                f'{{"name": "{name}", "response": {content}}}'
+                f'{{"name": {json.dumps(name, ensure_ascii=False)}, "response": {content}}}'
                 "<end_of_sentence>\n"
             )
         token_ids = normalize_token_ids(self.tokenizer.encode("".join(response_parts), add_special_tokens=False))

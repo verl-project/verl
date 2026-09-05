@@ -710,6 +710,9 @@ _RECONSTRUCTORS: dict[type[ContinuousTokenBuilder], type[_AssistantReconstructor
 
 
 def _resolve_reconstructor(builder: ContinuousTokenBuilder) -> type[_AssistantReconstructor]:
+    # QwenVL, GLM46V, and Gemma4VL intentionally inherit their text family's
+    # assistant protocol; _render_text still uses their multimodal processor.
+    # A subclass with a different assistant protocol needs its own registration.
     for cls in type(builder).__mro__:
         handler = _RECONSTRUCTORS.get(cls)
         if handler is not None:

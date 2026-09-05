@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import copy
+import json
 import logging
 from types import SimpleNamespace
 
@@ -77,6 +78,16 @@ _IMAGE_REFERENCE = _ImageReferenceWithAmbiguousTruthValue()
             {"type": "image_url", "image_url": {"url": "/tmp/a.png"}},
             "/tmp/a.png",
             id="image-url-dict",
+        ),
+        pytest.param(
+            {"type": "image", "image": "", "image_url": "/tmp/fallback.png"},
+            "/tmp/fallback.png",
+            id="empty-image-falls-back-to-url",
+        ),
+        pytest.param(
+            {"type": "image", "image": "", "image_url": {"url": "/tmp/fallback.png"}},
+            "/tmp/fallback.png",
+            id="empty-image-falls-back-to-url-dict",
         ),
     ],
 )
@@ -1463,7 +1474,8 @@ def test_minimax_vl_builder_keeps_tool_declarations_in_initial_prompt():
     )
 
 
-def test_minimax_vl_builder_formats_openai_tool_response_as_function_message():
+@pytest.mark.parametrize("tool_name", ["lookup", 'look"up', "look\\up", "lookup\nnext", "查询"])
+def test_minimax_vl_builder_formats_openai_tool_response_as_function_message(tool_name):
     tokenizer = _MiniMaxVLAssistantTokenizer()
     processor = _MockMiniMaxVLAssistantProcessor(tokenizer)
     builder = MiniMaxVLContinuousTokenBuilder(tokenizer, processor)
@@ -1475,7 +1487,7 @@ def test_minimax_vl_builder_formats_openai_tool_response_as_function_message():
                 {
                     "id": "call_0",
                     "type": "function",
-                    "function": {"name": "lookup", "arguments": "{}"},
+                    "function": {"name": tool_name, "arguments": "{}"},
                 }
             ],
         }
@@ -1486,11 +1498,11 @@ def test_minimax_vl_builder_formats_openai_tool_response_as_function_message():
         previous_messages=previous_messages,
     )
 
-    assert token_ids == tokenizer.encode(
-        "<beginning_of_sentence>system function_response=functions\n"
-        '{"name": "lookup", "response": {"value": 1}}<end_of_sentence>\n',
-        add_special_tokens=False,
-    )
+    prefix = tokenizer.encode("<beginning_of_sentence>system function_response=functions\n", add_special_tokens=False)
+    suffix = tokenizer.encode("<end_of_sentence>\n", add_special_tokens=False)
+    assert token_ids[: len(prefix)] == prefix and token_ids[-len(suffix) :] == suffix
+    response = "".join(chr(token) for token in token_ids[len(prefix) : -len(suffix)])
+    assert json.loads(response) == {"name": tool_name, "response": {"value": 1}}
 
 
 def test_minimax_vl_builder_merges_tool_result_and_fixed_generation_scaffold():
