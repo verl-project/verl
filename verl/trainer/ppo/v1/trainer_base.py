@@ -250,8 +250,7 @@ class PPOTrainer(ABC):
         # 2. define critic class
         if self.use_critic:
             critic_cfg: CriticConfig = omega_conf_to_dataclass(self.config.critic)
-            critic_cfg.engine.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
-            critic_cfg.engine.max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
+            critic_cfg.apply_engine_batching(critic_cfg.engine)
 
             # Wire the critic profiler config via the hydra path (real dataclass tool_config), so the
             # standalone critic TrainingWorker gets a working DistProfiler instead of a silent no-op.
