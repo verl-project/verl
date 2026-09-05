@@ -218,7 +218,10 @@ Unit Tests
 
 e2e Tests
 ----------
-we provide e2e test scripts in `tests/special_e2e` folder, named `tests/special_e2e/run_gsm8k_fsdp_sgl_multiturn_sf_tool.sh`
+The former SandboxFusion e2e script under ``tests/special_e2e/``
+(``run_gsm8k_fsdp_sgl_multiturn_sf_tool.sh``) was removed together with the
+in-tree ``SandboxFusionTool``. Unit tests above still cover the multiturn tool
+rollout pattern. For general PPO e2e scripts see ``tests/special_e2e/``.
 
 by setting 'trainer.rollout_data_dir' you can dump the rollout data to local disk. here is an sample taken from the rollout data:
 
