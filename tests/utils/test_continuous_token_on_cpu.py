@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import logging
 
 import pytest
@@ -269,6 +270,54 @@ class _DeepSeekBoundaryTokenizer(_TemplateTokenizer):
                 rendered += "<assistant>" + message.get("content", "") + calls + "<eos>"
             else:
                 rendered += f"<{role}>{message.get('content', '')}\n"
+        if add_generation_prompt and not last_was_tool:
+            rendered += "<assistant>"
+        if tokenize:
+            return self.encode(rendered, add_special_tokens=False)
+        return rendered
+
+
+class _DeepSeekOutputsBlockTokenizer(_DeepSeekBoundaryTokenizer):
+    name_or_path = "deepseek-ai/DeepSeek-V3"
+
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        tools=None,
+        return_dict=False,
+        **kwargs,
+    ):
+        """DeepSeek-V3 / R1 style tool outputs: one ``is_output_first`` flag for the whole
+        conversation, so only the first tool output opens an outputs block and later ones
+        start with a newline; a trailing tool message closes the block.
+        """
+        rendered = ""
+        last_was_tool = False
+        output_first = True
+        for message in messages:
+            role = message.get("role")
+            if role == "tool":
+                opener = "<tool_outputs_begin>" if output_first else "\n"
+                output_first = False
+                rendered += f"{opener}<tool_output_begin>{message.get('content', '')}<tool_output_end>"
+                last_was_tool = True
+                continue
+            if last_was_tool:
+                rendered += "<tool_outputs_end>"
+            last_was_tool = False
+            if role == "assistant" and message.get("tool_calls"):
+                calls = ""
+                for tool_call in message["tool_calls"]:
+                    function = tool_call["function"]
+                    calls += "<tool_call_begin>" + function["name"] + "<tool_sep>" + function["arguments"]
+                    calls += "<tool_call_end>"
+                rendered += "<assistant>" + message.get("content", "") + calls + "<eos>"
+            else:
+                rendered += f"<{role}>{message.get('content', '')}\n"
+        if last_was_tool:
+            rendered += "<tool_outputs_end>"
         if add_generation_prompt and not last_was_tool:
             rendered += "<assistant>"
         if tokenize:
@@ -665,6 +714,70 @@ def test_deepseek_builder_synthetic_tool_call_arguments_are_a_json_string():
 
     assert [tool_call["id"] for tool_call in synthetic_assistant["tool_calls"]] == ["call_0", "call_1"]
     assert all(tool_call["function"]["arguments"] == "{}" for tool_call in synthetic_assistant["tool_calls"])
+
+
+def _deepseek_tool_call_turn(call_id: str, arguments) -> dict:
+    return {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"id": call_id, "type": "function", "function": {"name": "lookup", "arguments": arguments}}],
+    }
+
+
+def test_deepseek_builder_opens_the_outputs_block_on_the_first_tool_turn():
+    builder = create_continuous_token_builder(_DeepSeekOutputsBlockTokenizer(), model_family="deepseek")
+    previous_messages = [{"role": "user", "content": "question"}, _deepseek_tool_call_turn("call_0", {"q": "x"})]
+    updated_messages = previous_messages + [{"role": "tool", "content": "first", "tool_call_id": "call_0"}]
+
+    incremental = builder.tokenize_non_assistant_incremental_messages(previous_messages, updated_messages)
+
+    expected = "<tool_outputs_begin><tool_output_begin>first<tool_output_end><tool_outputs_end>"
+    assert incremental == [ord(char) for char in expected]
+
+
+def test_deepseek_builder_renders_later_tool_turns_like_the_full_conversation():
+    tokenizer = _DeepSeekOutputsBlockTokenizer()
+    builder = create_continuous_token_builder(tokenizer, model_family="deepseek")
+    previous_messages = [
+        {"role": "user", "content": "question"},
+        _deepseek_tool_call_turn("call_0", {"q": "x"}),
+        {"role": "tool", "content": "first", "tool_call_id": "call_0"},
+        _deepseek_tool_call_turn("call_1", {"q": "y"}),
+    ]
+    tool_messages = [
+        {"role": "tool", "content": "second", "tool_call_id": "call_1"},
+        {"role": "tool", "content": "third", "tool_call_id": "call_1"},
+    ]
+
+    incremental = builder.tokenize_non_assistant_incremental_messages(
+        previous_messages, previous_messages + tool_messages
+    )
+
+    # The conversation already holds a tool output, so the template is past its first
+    # outputs block: no <tool_outputs_begin>, a newline before each output instead.
+    expected = (
+        "\n<tool_output_begin>second<tool_output_end>\n<tool_output_begin>third<tool_output_end><tool_outputs_end>"
+    )
+    assert incremental == [ord(char) for char in expected]
+
+    # Same tokens the template produces for the whole conversation (rendered with the
+    # JSON-string arguments this template family can splice in).
+    def with_string_arguments(messages):
+        rendered = []
+        for message in messages:
+            message = dict(message)
+            if message.get("tool_calls"):
+                message["tool_calls"] = [
+                    {**call, "function": {**call["function"], "arguments": json.dumps(call["function"]["arguments"])}}
+                    for call in message["tool_calls"]
+                ]
+            rendered.append(message)
+        return rendered
+
+    full = tokenizer.apply_chat_template(with_string_arguments(previous_messages + tool_messages))
+    prefix = tokenizer.apply_chat_template(with_string_arguments(previous_messages), add_generation_prompt=False)
+    assert full[: len(prefix)] == prefix
+    assert incremental == full[len(prefix) :]
 
 
 def test_gpt_oss_builder_formats_tool_responses_with_resolved_tool_name():

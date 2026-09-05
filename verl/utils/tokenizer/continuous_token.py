@@ -25,6 +25,7 @@ from .tokenizer import build_multimodal_processor_inputs, normalize_token_ids
 _SUPPORTED_APPEND_ROLES = frozenset({"tool", "user", "system"})
 _SYNTHETIC_SYSTEM_MESSAGE: dict[str, Any] = {"role": "system", "content": "continuous token synthetic system"}
 _SYNTHETIC_USER_MESSAGE: dict[str, Any] = {"role": "user", "content": "continuous token synthetic user"}
+_SYNTHETIC_TOOL_OUTPUT: str = "continuous token synthetic tool output"
 _ASSISTANT_REASONING_CONTENT: str = "reasoning"
 _DUMMY_TOOL_NAME = "continuous_token_tool"
 MergeKind = Literal["assistant", "non_assistant"]
@@ -821,6 +822,41 @@ class DeepSeekContinuousTokenBuilder(ContinuousTokenBuilder):
         for tool_call in synthetic_assistant["tool_calls"]:
             tool_call["function"]["arguments"] = "{}"
         return synthetic_assistant
+
+    def _tokenize_tool_group(
+        self,
+        tool_messages: list[dict[str, Any]],
+        *,
+        previous_messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        add_generation_prompt: bool = False,
+    ) -> list[int]:
+        if not any(message.get("role") == "tool" for message in previous_messages):
+            return super()._tokenize_tool_group(
+                tool_messages,
+                previous_messages=previous_messages,
+                tools=tools,
+                add_generation_prompt=add_generation_prompt,
+            )
+        # The V3 / R1 templates keep one ``is_output_first`` flag for the whole
+        # conversation: the first tool output opens with <｜tool▁outputs▁begin｜>,
+        # every later one starts with a newline instead. Once the conversation has
+        # seen a tool output, render behind a prefix that already contains one tool
+        # exchange so the template is in the later-turn state for the appended group.
+        earlier_tool_message = {"role": "tool", "content": _SYNTHETIC_TOOL_OUTPUT}
+        synthetic_prefix = [
+            _SYNTHETIC_SYSTEM_MESSAGE,
+            _SYNTHETIC_USER_MESSAGE,
+            self._synthetic_assistant_for_tools([earlier_tool_message]),
+            earlier_tool_message,
+            self._synthetic_assistant_for_tools(tool_messages),
+        ]
+        return self.render_delta_token_id(
+            synthetic_prefix,
+            tool_messages,
+            add_generation_prompt=add_generation_prompt,
+            tools=tools,
+        )
 
     def _merge_non_assistant_token_ids(
         self, runtime_token_ids: list[int], appended_token_ids: list[int]
