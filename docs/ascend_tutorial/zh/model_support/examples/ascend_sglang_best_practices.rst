@@ -1,7 +1,7 @@
 昇腾 SGLang 最佳实践
 ===================================
 
-Last updated: 06/02/2026.
+Last updated: 09/05/2026.
 
 .. _Qwen3-30B: https://github.com/verl-project/verl/blob/main/examples/ascend_extras/grpo_trainer/run_qwen3_30b_a3b_megatron.sh
 .. _doclink: https://github.com/verl-project/verl/blob/c98cb8cc/docs/ascend_tutorial/examples/ascend_sglang_best_practices.rst
@@ -94,7 +94,7 @@ SGLang 是当前主流的高性能开源推理引擎, 昇腾已经全面原生�
 
 .. code-block:: bash 
 
-  bash examples/grpo_trainer/run_qwen3moe-30b_sglang_megatron_npu.sh
+  bash examples/ascend_extras/grpo_trainer/run_qwen3_30b_a3b_megatron.sh
 如果您想扩展至多节点，我们推荐使用以下脚本进行大规模多节点训练拉起
 
 .. code-block:: bash

@@ -290,7 +290,7 @@ Convert FSDP and Megatron Checkpoints to HuggingFace Format Model
 -----------------------------------------------------------------
 
 We provide a tool to convert the FSDP and Megatron checkpoints to HuggingFace format model.
-The tool is located in ``verl/model_merger``. For older versions of verl that don't include fsdp_config.json in checkpoints, you can use the legacy model merger located at ``verl/scripts/legacy_model_merger.py``.
+The tool is located in ``verl/model_merger``. For older versions of verl that don't include fsdp_config.json in checkpoints, you can use the legacy model merger located at ``scripts/legacy_model_merger.py``.
 
 The script supports two main sub-commands: `merge` (to convert and save checkpoints) and `test` (to validate merged checkpoints against a reference model).
 The arguments for the `merge` sub-command are as follows:
