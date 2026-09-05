@@ -87,6 +87,54 @@ def gather_seq_scatter_heads(
     return x
 
 
+def gather_qkv_seq_scatter_heads(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    seq_dim: int,
+    head_dim: int,
+    unpadded_dim_size: int = 0,
+    group: ProcessGroup = None,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Gather sequence and scatter heads for Q/K/V with one all-to-all when possible.
+
+    Equal-layout Q/K/V tensors are concatenated along batch dimension, which is
+    not partitioned by the Ulysses collective. Incompatible layouts retain the
+    existing three-call behavior.
+    """
+    group = get_ulysses_sequence_parallel_group() if group is None else group
+    if group is None:
+        return query, key, value
+
+    ndim = query.ndim
+    seq_dim %= ndim
+    head_dim %= ndim
+    equal_layout = (
+        query.shape == key.shape == value.shape
+        and query.dtype == key.dtype == value.dtype
+        and query.device == key.device == value.device
+        and seq_dim != 0
+        and head_dim != 0
+    )
+    if equal_layout:
+        batch_sizes = (query.size(0), key.size(0), value.size(0))
+        packed_qkv = torch.cat((query, key, value), dim=0)
+        packed_qkv = gather_seq_scatter_heads(
+            packed_qkv,
+            seq_dim=seq_dim,
+            head_dim=head_dim,
+            unpadded_dim_size=unpadded_dim_size,
+            group=group,
+        )
+        return packed_qkv.split(batch_sizes, dim=0)
+
+    return (
+        gather_seq_scatter_heads(query, seq_dim, head_dim, unpadded_dim_size, group),
+        gather_seq_scatter_heads(key, seq_dim, head_dim, unpadded_dim_size, group),
+        gather_seq_scatter_heads(value, seq_dim, head_dim, unpadded_dim_size, group),
+    )
+
+
 def gather_heads_scatter_seq(x: Tensor, head_dim: int, seq_dim: int, group: ProcessGroup = None) -> Tensor:
     """
     A func to sync attention result with alltoall in sequence parallel
