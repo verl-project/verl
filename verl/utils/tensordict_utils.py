@@ -492,13 +492,7 @@ def index_select_tensor_dict(batch: TensorDict, indices: torch.Tensor | list[int
             if isinstance(tensor, torch.Tensor) and not tensor.is_nested:
                 data_dict[key] = tensor[indices]
             elif isinstance(tensor, torch.Tensor) and tensor.is_nested:
-                try:
-                    tensor_lst = tensor.unbind()  # fast path
-                except RuntimeError:
-                    if tensor.dim() != 3 or getattr(tensor, "_ragged_idx", None) != 2:
-                        raise
-                    lengths = tensor.offsets().diff().tolist()
-                    tensor_lst = torch.split(tensor.values(), lengths, dim=0)
+                tensor_lst = tensor.unbind()  # for performance
                 selected_tensors = [tensor_lst[idx] for idx in indices]
                 data_dict[key] = nested_tensor_from_tensor_list(
                     selected_tensors, ragged_idx=getattr(tensor, "_ragged_idx", tensor.dim() - 1)
@@ -914,11 +908,21 @@ def contiguous(data: TensorDict) -> TensorDict:
 
 
 def maybe_fix_3d_position_ids(data: TensorDict):
-    # note for tensordict with pickle/unpickle. nested tensor in tensordict after consolidate and pickle/unpickle
-    # will incur indexing error for ragged tensor. This only happens when using 3D position ids in VLMs.
-    # This is likely a bug in tensordict. As a workaround, we manually set _ragged_index.
-    if "position_ids" in data.keys() and data["position_ids"].dim() == 3 and data["position_ids"].is_nested:
-        data["position_ids"]._ragged_idx = 2
+    """Rebuild 3D nested position_ids with the sequence dimension as ragged."""
+
+    if "position_ids" in data and data["position_ids"].dim() == 3 and data["position_ids"].is_nested:
+        position_ids = data["position_ids"]
+
+        # Equal-length mRoPE position_ids may be constructed with the
+        # head dimension as ragged. Rebuild the NestedTensor instead of
+        # only modifying _ragged_idx, which would leave its values and
+        # offsets inconsistent.
+        if getattr(position_ids, "_ragged_idx", None) != 2:
+            samples = list(position_ids.unbind(dim=0))
+            data["position_ids"] = nested_tensor_from_tensor_list(
+                samples,
+                ragged_idx=2,
+            )
 
 
 def list_of_dict_to_tensordict(list_of_dicts: list[dict[str, Any]]) -> TensorDict:
