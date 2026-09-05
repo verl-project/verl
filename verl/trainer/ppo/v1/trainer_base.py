@@ -75,7 +75,7 @@ from verl.trainer.ppo.utils import (
 from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY, ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.utils import MetricsAggregator, compute_advantage_for_multi_trajectories
 from verl.utils import tensordict_utils as tu
-from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
+from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.debug import marked_timer
@@ -429,6 +429,7 @@ class PPOTrainer(ABC):
 
         # we start from step 1
         self.global_steps += 1
+        self.max_steps_duration = 0
         # SkipManager skips warmup batches in async trainers, so it doesn't conflict with reissue.
         SkipManager.set_step(self.global_steps)
         self._reissue_inflight_prompts()
@@ -455,15 +456,14 @@ class PPOTrainer(ABC):
                 batch = self.step(metrics, self.timing_raw)
                 self._stop_profiling()
 
-                # 2. save checkpoint
-                if self.config.trainer.save_freq > 0 and (
-                    is_last_step or self.global_steps % self.config.trainer.save_freq == 0
-                ):
-                    with marked_timer("save_checkpoint", self.timing_raw, color="green"):
-                        self._save_checkpoint()
+                # 2. save checkpoint (save_freq, last step, or ESI close to expiration)
+                self._maybe_save_checkpoint(is_last_step)
 
                 self.on_step_end()
                 metrics.update(self._consume_sync_metrics())
+
+            steps_duration = self.timing_raw.get("step", 0)
+            self.max_steps_duration = max(self.max_steps_duration, steps_duration)
 
             # 4. validate
             if self.config.trainer.test_freq > 0 and (
@@ -885,6 +885,30 @@ class PPOTrainer(ABC):
             f"cleared {len(old_trajectory_keys)} old trajectories from partition {partition_id}"
         )
         return len(inflight_uids)
+
+    def _maybe_save_checkpoint(self, is_last_step: bool) -> bool:
+        """Save on last step, save_freq, or when an ESI capacity block is about to expire.
+
+        Matches V0 / experimental trainers. ``trainer.esi_redundant_time`` is the extra
+        buffer passed to :func:`should_save_ckpt_esi`. ``save_freq <= 0`` disables all
+        checkpointing, including ESI force-save.
+
+        Returns:
+            True if a checkpoint was written.
+        """
+        esi_close_to_expiration = should_save_ckpt_esi(
+            max_steps_duration=getattr(self, "max_steps_duration", 0),
+            redundant_time=self.config.trainer.get("esi_redundant_time", 0),
+        )
+        if self.config.trainer.save_freq > 0 and (
+            is_last_step or self.global_steps % self.config.trainer.save_freq == 0 or esi_close_to_expiration
+        ):
+            if esi_close_to_expiration:
+                logger.info("Force saving checkpoint: ESI instance expiration approaching.")
+            with marked_timer("save_checkpoint", self.timing_raw, color="green"):
+                self._save_checkpoint()
+            return True
+        return False
 
     def _save_checkpoint(self):
         """Save actor, critic, and dataloader checkpoints to local (and optionally remote) storage."""
