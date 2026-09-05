@@ -135,3 +135,17 @@ When profiling is enabled, verl will generate Nsight Systems profiles for the sp
 - NVTX markers for key operations
 
 Nsight Systems supports multi-report view, to open multiple databases together. In this mode, different processes and steps can be aligned in one time line for better analysis.
+
+## Semantic communication ranges
+
+Set `VERL_COMM_TRACE=1` before starting workers to add opt-in ranges for
+Ulysses all-to-all/all-gather operations and NCCL checkpoint weight transfer.
+The labels begin with `verl.comm/` and include available step, microbatch,
+direction, byte count, process-group identity, and logical sequence metadata.
+The FSDP engine propagates `global_steps` and its microbatch index into nested
+Ulysses ranges; checkpoint transfer propagates its supplied global step.
+
+The switch is disabled by default. It does not create a second profiler or
+change collective ordering. NVTX identifies the semantic API call so Nsight
+Systems can correlate it with NCCL kernels; the NVTX range boundary itself is
+not an exact kernel start/end timestamp.

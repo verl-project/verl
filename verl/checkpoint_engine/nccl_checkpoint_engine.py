@@ -34,6 +34,7 @@ from verl.checkpoint_engine.base import (
     merge_weight_chunks,
     split_weight_chunks,
 )
+from verl.utils.comm_trace import communication_nvtx_range
 from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,7 @@ class BroadcastOperation:
         metadata: dict[str, TensorMeta],
         socket: zmq.Socket,
         topic: str,
+        step: int | None = None,
     ) -> None:
         self.rank = rank
         self.group_name = group_name
@@ -88,6 +90,7 @@ class BroadcastOperation:
         self.metadata = metadata
         self.socket = socket
         self.topic = topic
+        self.step = step
 
         loop = asyncio.get_running_loop()
         self._task = loop.run_in_executor(None, self._run)
@@ -103,7 +106,15 @@ class BroadcastOperation:
             self.bucket = self.bucket[: self.metadata["length"]]
 
         # broadcast tensor via NCCL
-        collective.broadcast(self.bucket, src_rank=0, group_name=self.group_name)
+        direction = "send" if self.rank == 0 else "receive"
+        with communication_nvtx_range(
+            "weight_sync",
+            step=self.step,
+            direction=direction,
+            message_bytes=int(self.bucket.nbytes),
+            process_group_id=self.group_name,
+        ):
+            collective.broadcast(self.bucket, src_rank=0, group_name=self.group_name)
 
     async def wait_for_complete(self) -> dict[str, TensorMeta]:
         """Wait for the broadcast operation to complete.
@@ -332,7 +343,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
             return
 
         if self.rank > 0:
-            await self._relay_weights(weights)
+            await self._relay_weights(weights, global_steps=global_steps)
             return
 
         send_buf, recv_buf = self.send_buf, self.recv_buf
@@ -363,6 +374,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
                     metadata={"bucket_meta": bucket_meta, "is_last": False, "length": offset},
                     socket=self.socket,
                     topic=self.topic,
+                    step=global_steps,
                 )
 
                 # swap send_buf and recv_buf
@@ -394,6 +406,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
             metadata={"bucket_meta": bucket_meta, "is_last": True, "length": offset},
             socket=self.socket,
             topic=self.topic,
+            step=global_steps,
         )
         await broadcast_op.wait_for_complete()
 
@@ -404,7 +417,9 @@ class NCCLCheckpointEngine(CheckpointEngine):
 
         logger.info(f"Rank {self.rank} send weights done, time cost: {time.time() - start_time:.2f}s")
 
-    async def _relay_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None]):
+    async def _relay_weights(
+        self, weights: Generator[tuple[str, torch.Tensor], None, None], global_steps: int | None = None
+    ):
         """Join every broadcast as an NVLink-local relay for rank 0, dropping the payload.
 
         A relay holds nothing the rollout needs, so it only has to match the root bucket for
@@ -420,13 +435,27 @@ class NCCLCheckpointEngine(CheckpointEngine):
         # a single buffer suffices: nothing reads the bucket, so successive broadcasts can share it
         async for tensor_meta, _ in split_weight_chunks(weights, self.bucket_size, meta_only=True):
             if offset + tensor_meta.chunk_size > self.bucket_size:
-                collective.broadcast(self.recv_buf[:offset], src_rank=0, group_name=self.group_name)
+                with communication_nvtx_range(
+                    "weight_sync",
+                    step=global_steps,
+                    direction="relay",
+                    message_bytes=int(self.recv_buf[:offset].nbytes),
+                    process_group_id=self.group_name,
+                ):
+                    collective.broadcast(self.recv_buf[:offset], src_rank=0, group_name=self.group_name)
                 offset = 0
 
             offset += tensor_meta.chunk_size
 
         # relay last bucket
-        collective.broadcast(self.recv_buf[:offset], src_rank=0, group_name=self.group_name)
+        with communication_nvtx_range(
+            "weight_sync",
+            step=global_steps,
+            direction="relay",
+            message_bytes=int(self.recv_buf[:offset].nbytes),
+            process_group_id=self.group_name,
+        ):
+            collective.broadcast(self.recv_buf[:offset], src_rank=0, group_name=self.group_name)
 
         # wait for the enqueued NCCL kernels, so finalize() cannot free the buffer under them
         torch.cuda.synchronize()
@@ -443,10 +472,14 @@ class NCCLCheckpointEngine(CheckpointEngine):
         Yields:
             A tuple of the name of the weight tensor and the tensor itself.
         """
-        async for name, weight in merge_weight_chunks(self._receive_weight_chunks(), self.bucket_size):
+        async for name, weight in merge_weight_chunks(
+            self._receive_weight_chunks(global_steps=global_steps), self.bucket_size
+        ):
             yield name, weight
 
-    async def _receive_weight_chunks(self) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
+    async def _receive_weight_chunks(
+        self, global_steps: int | None = None
+    ) -> AsyncGenerator[tuple[str, torch.Tensor], None]:
         """Receive the weight chunks of the model.
 
         Yields:
@@ -465,6 +498,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
             metadata=None,
             socket=self.socket,
             topic=self.topic,
+            step=global_steps,
         )
         metadata = await broadcast_op.wait_for_complete()
         total_bytes += metadata["length"]
@@ -486,6 +520,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
                 metadata=None,
                 socket=self.socket,
                 topic=self.topic,
+                step=global_steps,
             )
 
             # 2. yield tensor from send_buf

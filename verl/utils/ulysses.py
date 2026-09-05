@@ -25,6 +25,8 @@ from torch import Tensor
 from torch.distributed import ProcessGroup
 from torch.distributed.device_mesh import DeviceMesh
 
+from verl.utils.comm_trace import communication_nvtx_range
+
 if TYPE_CHECKING:
     from verl import DataProto
 
@@ -145,7 +147,9 @@ def all_to_all_tensor(
     seq_world_size = dist.get_world_size(group)
     input_list = [t.contiguous() for t in torch.tensor_split(local_input, seq_world_size, scatter_dim)]
     output_list = [torch.empty_like(input_list[0]) for _ in range(seq_world_size)]
-    comm = dist.all_to_all(output_list, input_list, group=group, async_op=async_op)
+    direction = f"scatter_dim={scatter_dim},gather_dim={gather_dim}"
+    with communication_nvtx_range("ulysses_a2a", tensor=local_input, group=group, direction=direction):
+        comm = dist.all_to_all(output_list, input_list, group=group, async_op=async_op)
     if async_op:
 
         def wait():
@@ -162,7 +166,8 @@ def all_gather_tensor(local_tensor: Tensor, group: Optional[dist.ProcessGroup] =
     output_shape = list(local_tensor.shape)
     output_shape[0] = output_shape[0] * sp_world_size
     output = torch.empty(output_shape, dtype=local_tensor.dtype, device=local_tensor.device)
-    dist.all_gather_into_tensor(output, local_tensor, group=group, async_op=async_op)
+    with communication_nvtx_range("ulysses_all_gather", tensor=local_tensor, group=group):
+        dist.all_gather_into_tensor(output, local_tensor, group=group, async_op=async_op)
     return output
 
 
