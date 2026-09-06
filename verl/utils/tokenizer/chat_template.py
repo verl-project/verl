@@ -1,4 +1,5 @@
 # Copyright 2025 Bytedance Ltd. and/or its affiliates
+import json
 import logging
 import os
 
@@ -8,6 +9,61 @@ from .tokenizer import normalize_token_ids
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def tool_call_arguments_as_json(messages: list[dict]) -> tuple[list[dict], bool]:
+    """Copy ``messages`` with mapping-valued tool-call ``arguments`` serialized as JSON strings.
+
+    verl keeps ``arguments`` as a mapping through the whole message history, which is
+    the shape ``OpenAIFunctionCallSchema`` produces and the one templates render with
+    ``| tojson``. The DeepSeek-R1, V3 and V3.1 templates concatenate the value into
+    the prompt instead, so anything but a string raises ``TypeError`` there. The JSON
+    string is the form those models emit and the DeepSeek API returns for the same
+    call, so rendering it is not a change in prompt semantics.
+
+    Returns the converted copy and whether anything was converted. The input is never
+    mutated; messages without a mapping argument are returned as the same objects.
+    """
+    converted = []
+    changed = False
+    for message in messages:
+        tool_calls = message.get("tool_calls") if isinstance(message, dict) else None
+        if not tool_calls:
+            converted.append(message)
+            continue
+        new_tool_calls = []
+        message_changed = False
+        for tool_call in tool_calls:
+            function = tool_call.get("function") if isinstance(tool_call, dict) else None
+            arguments = function.get("arguments") if isinstance(function, dict) else None
+            if isinstance(arguments, dict | list):
+                function = {**function, "arguments": json.dumps(arguments, ensure_ascii=False)}
+                tool_call = {**tool_call, "function": function}
+                message_changed = True
+            new_tool_calls.append(tool_call)
+        if message_changed:
+            converted.append({**message, "tool_calls": new_tool_calls})
+            changed = True
+        else:
+            converted.append(message)
+    return converted, changed
+
+
+def _apply_chat_template_with_json_arguments(processor, messages: list[dict], **kwargs):
+    """``processor.apply_chat_template`` that retries with JSON-string tool-call arguments.
+
+    Templates that render mappings themselves never raise, so they always see the
+    original messages. A ``TypeError`` from a concatenating template is retried once
+    with the arguments serialized; if the retry fails too, its error propagates with
+    the original one attached as context.
+    """
+    try:
+        return processor.apply_chat_template(messages, **kwargs)
+    except TypeError:
+        converted, changed = tool_call_arguments_as_json(messages)
+        if not changed:
+            raise
+        return processor.apply_chat_template(converted, **kwargs)
 
 
 def initialize_system_prompt(tokenizer, **apply_chat_template_kwargs) -> list[int]:
@@ -149,7 +205,8 @@ def apply_chat_template(
     **kwargs,
 ) -> list[int] | str:
     """apply_chat_template to messages with special attention to template requiring
-    at least one user message, e.g. Qwen3.5.
+    at least one user message, e.g. Qwen3.5, and to templates that concatenate
+    tool-call arguments as strings, e.g. DeepSeek-R1 / V3 / V3.1.
 
     Args:
         processor: tokenizer or processor.
@@ -164,7 +221,8 @@ def apply_chat_template(
         list[int] | str: tokenized ids or text string.
     """
     try:
-        return processor.apply_chat_template(
+        return _apply_chat_template_with_json_arguments(
+            processor,
             messages,
             tokenize=tokenize,
             add_generation_prompt=add_generation_prompt,

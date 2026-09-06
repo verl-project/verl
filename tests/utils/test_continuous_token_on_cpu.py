@@ -641,17 +641,50 @@ def test_deepseek_builder_renders_tool_appends_through_string_concatenating_temp
     ]
     updated_messages = previous_messages + [{"role": "tool", "content": "answer", "tool_call_id": "call_0"}]
 
-    # The base synthetic tool call carries a mapping, which this template family cannot splice in.
-    with pytest.raises(TypeError):
-        ContinuousTokenBuilder(tokenizer).tokenize_non_assistant_incremental_messages(
-            previous_messages, updated_messages
-        )
-
     assert isinstance(builder, DeepSeekContinuousTokenBuilder)
     incremental = builder.tokenize_non_assistant_incremental_messages(previous_messages, updated_messages)
 
     # Only the tool output: DeepSeek templates add no generation prompt after a tool message.
     assert incremental == [ord(char) for char in "<tool_output_begin>answer<tool_output_end>"]
+
+    # The base synthetic tool call carries a mapping. apply_chat_template serializes it
+    # for this template family, so the default builder renders the same append.
+    base_incremental = ContinuousTokenBuilder(tokenizer).tokenize_non_assistant_incremental_messages(
+        previous_messages, updated_messages
+    )
+    assert base_incremental == incremental
+
+
+def test_deepseek_builder_renders_history_with_mapping_tool_call_arguments():
+    tokenizer = _DeepSeekBoundaryTokenizer()
+    builder = create_continuous_token_builder(tokenizer, model_family="deepseek")
+    messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "call_0", "type": "function", "function": {"name": "lookup", "arguments": {"q": "x"}}}
+            ],
+        },
+        {"role": "tool", "content": "answer", "tool_call_id": "call_0"},
+        {"role": "assistant", "content": "done"},
+        {"role": "user", "content": "next"},
+    ]
+
+    initial = builder.build_initial_tokens(messages)
+
+    expected = (
+        "<user>question\n"
+        '<assistant><tool_call_begin>lookup<tool_sep>{"q": "x"}<tool_call_end><eos>'
+        "<tool_output_begin>answer<tool_output_end>"
+        "<assistant>done\n"
+        "<user>next\n"
+        "<assistant>"
+    )
+    assert initial == [ord(char) for char in expected]
+    # The history itself is left as verl stores it.
+    assert messages[1]["tool_calls"][0]["function"]["arguments"] == {"q": "x"}
 
 
 def test_deepseek_builder_synthetic_tool_call_arguments_are_a_json_string():
