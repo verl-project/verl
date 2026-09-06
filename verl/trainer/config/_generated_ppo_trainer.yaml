@@ -156,6 +156,7 @@ actor_rollout_ref:
           _target_: verl.utils.profiler.config.TorchMemoryToolConfig
           trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
           stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+          memory_snapshot_num_steps: ${oc.select:global_profiler.global_tool_config.torch_memory.memory_snapshot_num_steps,1}
         precision_debugger:
           _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
           config_path: ${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}
@@ -223,6 +224,7 @@ actor_rollout_ref:
           _target_: verl.utils.profiler.config.TorchMemoryToolConfig
           trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
           stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+          memory_snapshot_num_steps: ${oc.select:global_profiler.global_tool_config.torch_memory.memory_snapshot_num_steps,1}
         precision_debugger:
           _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
           config_path: ${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}
@@ -655,6 +657,7 @@ critic:
         _target_: verl.utils.profiler.config.TorchMemoryToolConfig
         trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
         stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+        memory_snapshot_num_steps: ${oc.select:global_profiler.global_tool_config.torch_memory.memory_snapshot_num_steps,1}
       precision_debugger:
         _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
         config_path: ${oc.select:global_profiler.global_tool_config.precision_debugger.config_path,null}
@@ -1023,6 +1026,7 @@ global_profiler:
     torch_memory:
       trace_alloc_max_entries: 100000
       stack_depth: 32
+      memory_snapshot_num_steps: 1
       context: all
       stacks: all
       kw_args: {}

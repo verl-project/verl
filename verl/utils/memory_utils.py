@@ -266,7 +266,9 @@ class MemorySnapshotSampler:
         self.out_dir = out_dir
         self.tag = tag
 
-    def dump_memory_snapshot(self, out_dir: str = "./mem_snapshots", tag: str = "snapshot", sub_dir: str = None):
+    def dump_memory_snapshot(
+        self, out_dir: str = "./mem_snapshots", tag: str = "snapshot", sub_dir: str = None, synchronize: bool = True
+    ) -> Path | None:
         """
         Generates a memory snapshot and saves it as a pickle file in a specified directory.
         The files are organized by timestamp in subdirectories, with all ranks' files
@@ -277,6 +279,8 @@ class MemorySnapshotSampler:
                 The directory is created if it does not exist.
             tag (str): A string tag to prepend to the filename for easier identification.
             sub_dir (str): A subdirectory to place the snapshot file in.
+            synchronize (bool): Whether to synchronize the device before dumping. Disable this
+                for an OOM observer because the CUDA stream may already be in an error state.
         """
         if sub_dir is None:
             timestamp = datetime.now().strftime("%Y%m%d-%H%M")
@@ -295,11 +299,14 @@ class MemorySnapshotSampler:
         device = get_torch_device()
         if not device.is_available():
             logger.warning("[memory_visualize] is only available on CUDA devices.")
-            return
+            return None
         try:
-            device.synchronize()
+            if synchronize:
+                device.synchronize()
             # Memory snapshot is CUDA-specific functionality
             device.memory._dump_snapshot(str(path))
             logger.info(f"[memory_visualize] dumped: {path}")
+            return path
         except Exception as e:
             logger.info(f"[memory_visualize][warn] dump failed: {e}")
+            return None
