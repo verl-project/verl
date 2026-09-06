@@ -90,7 +90,7 @@ def _run_case(shape, placements, mesh, dev, rank, si):
     return ok
 
 
-def main():
+def main() -> int:
     dist.init_process_group("nccl")
     rank, world = dist.get_rank(), dist.get_world_size()
     torch.cuda.set_device(rank)
@@ -151,7 +151,8 @@ def main():
         print("=" * 50)
     dist.barrier()
     dist.destroy_process_group()
+    return 0 if all_ok else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
