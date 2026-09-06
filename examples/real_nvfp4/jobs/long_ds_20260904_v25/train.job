@@ -195,13 +195,22 @@ def metric(name, default=None):
 
 kl = metric("rollout_corr/kl")
 entropy = metric("actor/entropy")
-# A healthy rollout on this recipe sits at kl ~0.004-0.01 and entropy ~0.9.
-# A desynced one sits at kl ~14 and entropy ~6, so these bounds are loose.
+ess = metric("rollout_corr/rollout_is_eff_sample_size", 1.0)
+# What this gate is for is a rollout that no longer matches the actor -- the R3
+# capture regression showed up as kl 13.98 with ess collapsed. kl and ess are the
+# signals that separate that from a healthy run (kl 0.0004-0.023, ess >0.95).
+#
+# Entropy is NOT such a signal on its own. An earlier `entropy > 3.0` bound was
+# read off the same incident and it refused a perfectly good W4A4 chunk at step
+# 420 -- entropy 3.96 but kl 0.0229, ess 0.957 and response length climbing
+# 33 tok/step, i.e. exploration widening as the policy learns to write longer.
+# Keep it as a printed observation, not a kill switch.
 if kl > 0.5:
     raise SystemExit(f"REAL_NVFP4_PERTOKEN_REFUSED: rollout_corr/kl={kl} indicates a desynced rollout")
-if entropy > 3.0:
-    raise SystemExit(f"REAL_NVFP4_PERTOKEN_REFUSED: actor/entropy={entropy} indicates a desynced rollout")
-print(f"REAL_NVFP4_V25_NUMERIC_PASS rollout_corr/kl={kl} actor/entropy={entropy}")
+if ess < 0.80:
+    raise SystemExit(f"REAL_NVFP4_PERTOKEN_REFUSED: rollout ess={ess} indicates a desynced rollout")
+note = " entropy_high=1" if entropy > 4.5 else ""
+print(f"REAL_NVFP4_V25_NUMERIC_PASS rollout_corr/kl={kl} actor/entropy={entropy} ess={ess}{note}")
 PYEOF
 
 if [[ "$PHASE" = long ]]; then
