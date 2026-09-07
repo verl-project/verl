@@ -24,6 +24,9 @@ conflicts = [[
 [manifest]
 overrides = [
     { name = "flash-attn-4", marker = "platform_machine == 'flash-attn-4-excluded'" },
+    { name = "flashinfer-cubin", marker = "extra == 'vllm'", specifier = "==0.6.16.post3", index = "https://flashinfer.ai/whl" },
+    { name = "flashinfer-jit-cache", marker = "extra == 'vllm'", specifier = "==0.6.16.post3", index = "https://flashinfer.ai/whl/cu130" },
+    { name = "flashinfer-python", marker = "extra == 'vllm'", specifier = "==0.6.16.post3" },
     { name = "kernels", specifier = ">=0.10.2,<0.11" },
     { name = "numpy", specifier = ">=2.0.0" },
     { name = "nvidia-cublas", marker = "sys_platform == 'linux'", specifier = "==13.5.1.27" },
@@ -1031,79 +1034,32 @@ wheels = [
 
 [[package]]
 name = "flashinfer-cubin"
-version = "0.6.11.post1"
+version = "0.6.16.post3"
 source = { registry = "https://flashinfer.ai/whl" }
-resolution-markers = [
-    "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-]
 wheels = [
-    { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.11.post1/flashinfer_cubin-0.6.11.post1-py3-none-any.whl", hash = "sha256:1eb801fc80b5576760d356e31eb452d05ab240f44185f539331bd5f2236e504a" },
-]
-
-[[package]]
-name = "flashinfer-cubin"
-version = "0.6.14"
-source = { registry = "https://flashinfer.ai/whl" }
-resolution-markers = [
-    "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-]
-wheels = [
-    { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.14/flashinfer_cubin-0.6.14-py3-none-any.whl", hash = "sha256:7bbed9f3851b59f3f6f6cb344810775bbce8a1c012ecf9a502bebd91cfb6433e" },
+    { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.16.post3/flashinfer_cubin-0.6.16.post3-py3-none-any.whl", hash = "sha256:c79fba990aee2a7c7ef64208bb65900e45fe23c3a223f3dfc21eef225f43cba2" },
 ]
 
 [[package]]
 name = "flashinfer-jit-cache"
-version = "0.6.14+cu130"
+version = "0.6.16.post3+cu130"
 source = { registry = "https://flashinfer.ai/whl/cu130" }
 wheels = [
-    { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.14/flashinfer_jit_cache-0.6.14+cu130-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:c54c356db35107354deb05b6f40cc2b0c830034f6035efcb267dcfcd090249fd" },
-    { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.14/flashinfer_jit_cache-0.6.14+cu130-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:22b666dffe4cca7de0ea67668c16c0be819e8a67cdb34c404cf89abeb3d2b510" },
+    { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.16.post3/flashinfer_jit_cache-0.6.16.post3+cu130-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:9bd5529b1b2c774206bde78a65d84aff29583a51ce2804226cb45d6261af43ad" },
+    { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.16.post3/flashinfer_jit_cache-0.6.16.post3+cu130-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:abcca93faa2fbbc9a98394ccc44ab657627b91e49da2624efd26a6ff669264ab" },
 ]
 
 [[package]]
 name = "flashinfer-python"
-version = "0.6.11.post1"
+version = "0.6.16.post3"
 source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-]
-dependencies = [
-    { name = "apache-tvm-ffi", version = "0.1.9", source = { registry = "https://pypi.org/simple" } },
-    { name = "click" },
-    { name = "cuda-tile" },
-    { name = "einops" },
-    { name = "ninja" },
-    { name = "numpy" },
-    { name = "nvidia-cudnn-frontend" },
-    { name = "nvidia-cutlass-dsl", version = "4.5.0", source = { registry = "https://pypi.org/simple" } },
-    { name = "nvidia-ml-py" },
-    { name = "packaging" },
-    { name = "requests" },
-    { name = "tabulate" },
-    { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
-    { name = "tqdm" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/f1/4b/d32491a43d21de0a7a780fb6ce00749d259cd685ddbc1bee7932d8a3a513/flashinfer_python-0.6.11.post1.tar.gz", hash = "sha256:b16ac9a4f229a6a0d875a2fd76dfd935d5c62e4a99ea7b128fe4b457530a5aed", size = 9215625, upload-time = "2026-05-13T01:31:31.613Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/bf/7d/56d27ca2bcfee8fd28d8eb635cdc453c88e5044c264f091e2f7afc755863/flashinfer_python-0.6.11.post1-py3-none-any.whl", hash = "sha256:52c6dbd1262ff0d46dce0253996108e0c55e86faa7c25a1bed7072b31d23551a", size = 13708974, upload-time = "2026-05-13T01:31:28.985Z" },
-]
-
-[[package]]
-name = "flashinfer-python"
-version = "0.6.14"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-]
 dependencies = [
     { name = "apache-tvm-ffi", version = "0.1.10", source = { registry = "https://pypi.org/simple" } },
     { name = "click" },
+    { name = "cuda-python" },
     { name = "cuda-tile" },
     { name = "einops" },
+    { name = "nccl4py" },
     { name = "ninja" },
     { name = "numpy" },
     { name = "nvidia-cudnn-frontend" },
@@ -1115,9 +1071,9 @@ dependencies = [
     { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8f/11/ce2271271bee6990d34ed2d01288e9e92a0ea8ee45fb28de8e746c7da761/flashinfer_python-0.6.14.tar.gz", hash = "sha256:f4da8b5e005601784e85e0dcaa3389f908ee2d32c2560142d67124ab10e4a070", size = 9944949, upload-time = "2026-07-02T00:22:50.879Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c2/46/17045cb47b7b93fcb4e5303e398e6b129b86239930ac0875942a83d8b962/flashinfer_python-0.6.16.post3.tar.gz", hash = "sha256:9b146cfcc1454c80f3f99444db48013b3eadaeb32f2a399bd76c9471ecb72f04", size = 11076656, upload-time = "2026-08-08T01:14:16.408Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f2/8f/b101913cb2b3687654f56681cfe9836d447526be663c149966470ef70531/flashinfer_python-0.6.14-py3-none-any.whl", hash = "sha256:d124369346a3d48eac67e31c42f7a3c813bcc0abc10e2e36db413b7b3dfd97df", size = 14574383, upload-time = "2026-07-02T00:22:48.413Z" },
+    { url = "https://files.pythonhosted.org/packages/9d/dc/5367cb601fc9190cc75b4c141f5f7e9a224d1c26a1e983151823e02a25b3/flashinfer_python-0.6.16.post3-py3-none-any.whl", hash = "sha256:caf686b9b079abe1c9d65ab505698bd325e8072de40afd822f2c74f2ac3bc601", size = 15836034, upload-time = "2026-08-08T01:14:13.709Z" },
 ]
 
 [[package]]
@@ -2134,6 +2090,25 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/86/c2/dec9722dc3474c164a0b6bcd9a7ed7da542c98af8cabce05374abab35edd/multiprocess-0.70.19-py311-none-any.whl", hash = "sha256:928851ae7973aea4ce0eaf330bbdafb2e01398a91518d5c8818802845564f45c", size = 144457, upload-time = "2026-01-19T06:47:33.711Z" },
     { url = "https://files.pythonhosted.org/packages/71/70/38998b950a97ea279e6bd657575d22d1a2047256caf707d9a10fbce4f065/multiprocess-0.70.19-py312-none-any.whl", hash = "sha256:3a56c0e85dd5025161bac5ce138dcac1e49174c7d8e74596537e729fd5c53c28", size = 150281, upload-time = "2026-01-19T06:47:35.037Z" },
     { url = "https://files.pythonhosted.org/packages/7e/82/69e539c4c2027f1e1697e09aaa2449243085a0edf81ae2c6341e84d769b6/multiprocess-0.70.19-py39-none-any.whl", hash = "sha256:0d4b4397ed669d371c81dcd1ef33fd384a44d6c3de1bd0ca7ac06d837720d3c5", size = 133477, upload-time = "2026-01-19T06:47:38.619Z" },
+]
+
+[[package]]
+name = "nccl4py"
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cuda-core" },
+    { name = "cuda-pathfinder" },
+    { name = "numpy" },
+    { name = "packaging" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5d/92/43637bd91680b22a6e1df8a39891d524c01633ddfbd824e81c3e5c4f9235/nccl4py-0.5.0-cp310-cp310-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:2c5c79cd484cdecb98ea2d6d3ab01e19fc5f6290d5d7d513f849f64b2bb3ee18", size = 3411780, upload-time = "2026-09-01T17:33:18.484Z" },
+    { url = "https://files.pythonhosted.org/packages/8c/e6/bfde32e96ac30a8147df79cf38e98d85b7e0b5d7d1a7d8ac951d6ae38de2/nccl4py-0.5.0-cp310-cp310-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:cf67b2cc7e3ed87c46f90874b44195285e9b943e9ddd81e49a41ebc14385670a", size = 3421112, upload-time = "2026-09-01T17:33:41.121Z" },
+    { url = "https://files.pythonhosted.org/packages/ab/62/102a1bee1c03f8c4243ce2632cc29f8323333548d67ea6babf1492aad507/nccl4py-0.5.0-cp311-cp311-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:16cd40be0f49161c8e206bd13961a54e86deb3ffa51387bc44b2e01000e8c929", size = 3573159, upload-time = "2026-09-01T17:34:09.781Z" },
+    { url = "https://files.pythonhosted.org/packages/1c/a8/d0fa237c9b6e9fae0980f46968e7e16560b89ab75806e473a7837b2fccf5/nccl4py-0.5.0-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:92c4ca09876964a7beec7d933e6963c1678c9d494270ae4a77873cffb6507569", size = 3576419, upload-time = "2026-09-01T17:34:27.967Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/0f/b96a70cb2e8b6a8e62e323a6a828bb7d567ab61bde25f5a754fd5bf3b732/nccl4py-0.5.0-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:c746674a3ec0a46492efd98ffcb641f48b42313ca6347c8e4944eb0030dedd5a", size = 3508497, upload-time = "2026-09-01T17:34:51.839Z" },
+    { url = "https://files.pythonhosted.org/packages/4f/d8/4f259f648702739d5b041c8b6b97438acadb461690bbfcc6681e0ff90cdc/nccl4py-0.5.0-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:51156cbc35eb9122b870aa7ba1244d0c4781266442036c2bb3e1abb7e88d9376", size = 3572033, upload-time = "2026-09-01T17:35:14.125Z" },
 ]
 
 [[package]]
@@ -4099,8 +4074,6 @@ dependencies = [
     { name = "einops" },
     { name = "fastapi", version = "0.136.3", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'x86_64' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "fastapi", version = "0.137.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm')" },
-    { name = "flashinfer-cubin", version = "0.6.11.post1", source = { registry = "https://flashinfer.ai/whl" } },
-    { name = "flashinfer-python", version = "0.6.11.post1", source = { registry = "https://pypi.org/simple" } },
     { name = "gguf" },
     { name = "interegular" },
     { name = "ipython" },
@@ -5269,9 +5242,9 @@ vllm = [
     { name = "datasets" },
     { name = "dill" },
     { name = "fastapi", version = "0.136.3", source = { registry = "https://pypi.org/simple" } },
-    { name = "flashinfer-cubin", version = "0.6.14", source = { registry = "https://flashinfer.ai/whl" } },
+    { name = "flashinfer-cubin" },
     { name = "flashinfer-jit-cache" },
-    { name = "flashinfer-python", version = "0.6.14", source = { registry = "https://pypi.org/simple" } },
+    { name = "flashinfer-python" },
     { name = "hydra-core" },
     { name = "mathruler" },
     { name = "mbridge" },
@@ -5320,9 +5293,9 @@ requires-dist = [
     { name = "dill", marker = "extra == 'verl-core'" },
     { name = "fastapi", marker = "extra == 'verl-core'" },
     { name = "flash-attn", marker = "extra == 'flash-attn-cu130torch211'", specifier = "==2.8.3", index = "https://verl-project.github.io/verl-wheelhouse/simple/" },
-    { name = "flashinfer-cubin", marker = "extra == 'vllm'", specifier = "==0.6.14", index = "https://flashinfer.ai/whl" },
-    { name = "flashinfer-jit-cache", marker = "extra == 'vllm'", specifier = "==0.6.14", index = "https://flashinfer.ai/whl/cu130" },
-    { name = "flashinfer-python", marker = "extra == 'vllm'", specifier = "==0.6.14" },
+    { name = "flashinfer-cubin", marker = "extra == 'vllm'", specifier = "==0.6.16.post3", index = "https://flashinfer.ai/whl" },
+    { name = "flashinfer-jit-cache", marker = "extra == 'vllm'", specifier = "==0.6.16.post3", index = "https://flashinfer.ai/whl/cu130" },
+    { name = "flashinfer-python", marker = "extra == 'vllm'", specifier = "==0.6.16.post3" },
     { name = "hf-transfer", marker = "extra == 'ci'" },
     { name = "hydra-core" },
     { name = "hydra-core", marker = "extra == 'verl-core'" },
@@ -5466,7 +5439,6 @@ dependencies = [
     { name = "fastapi", version = "0.136.3", source = { registry = "https://pypi.org/simple" }, extra = ["standard"], marker = "(platform_machine != 'x86_64' and extra == 'extra-4-verl-vllm') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "fastsafetensors", marker = "platform_machine != 'x86_64'" },
     { name = "filelock", marker = "platform_machine != 'x86_64'" },
-    { name = "flashinfer-python", version = "0.6.14", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64'" },
     { name = "humming-kernels", extra = ["cu13"], marker = "(platform_machine != 'x86_64' and extra == 'extra-4-verl-vllm') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "ijson", marker = "platform_machine != 'x86_64'" },
     { name = "jsonschema", marker = "platform_machine != 'x86_64'" },
@@ -5653,7 +5625,6 @@ dependencies = [
     { name = "fastapi", version = "0.136.3", source = { registry = "https://pypi.org/simple" }, extra = ["standard"], marker = "(platform_machine == 'x86_64' and extra == 'extra-4-verl-vllm') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm')" },
     { name = "fastsafetensors", marker = "platform_machine == 'x86_64'" },
     { name = "filelock", marker = "platform_machine == 'x86_64'" },
-    { name = "flashinfer-python", version = "0.6.14", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64'" },
     { name = "humming-kernels", extra = ["cu13"], marker = "(platform_machine == 'x86_64' and extra == 'extra-4-verl-vllm') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm')" },
     { name = "ijson", marker = "platform_machine == 'x86_64'" },
     { name = "jsonschema", marker = "platform_machine == 'x86_64'" },

@@ -92,12 +92,17 @@ vllm = [
     "torchaudio==2.11.0",
     # Per-token NVFP4 routed experts require vLLM's per_token_activation kernel
     # argument and native graph-stable reload lifecycle, released in 0.26.0.
+    #
     "vllm @ https://github.com/vllm-project/vllm/releases/download/v0.26.0/vllm-0.26.0-cp38-abi3-manylinux_2_28_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'",
     "vllm @ https://github.com/vllm-project/vllm/releases/download/v0.26.0/vllm-0.26.0-cp38-abi3-manylinux_2_28_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "vllm==0.26.0 ; sys_platform != 'linux' or (platform_machine != 'aarch64' and platform_machine != 'x86_64')",
-    "flashinfer-python==0.6.14",
-    "flashinfer-cubin==0.6.14",
-    "flashinfer-jit-cache==0.6.14",
+    # FlashInfer moves ahead of the version vLLM 0.26.0 pins; see
+    # override-dependencies for why. vLLM 0.27 would bring this for free but only
+    # via torch 2.13, which would mean rebuilding the prebuilt
+    # apex / flash-attn / megatron-bridge wheelhouse.
+    "flashinfer-python==0.6.16.post3",
+    "flashinfer-cubin==0.6.16.post3",
+    "flashinfer-jit-cache==0.6.16.post3",
     "nvidia-cutlass-dsl[cu13]==4.6.0",
     "quack-kernels==0.6.1",
     "mbridge",
@@ -382,6 +387,22 @@ override-dependencies = [
     "numpy>=2.0.0",
     "kernels>=0.10.2,<0.11",
     "flash-attn-4 ; platform_machine == 'flash-attn-4-excluded'",
+    # vLLM 0.26.0 pins flashinfer-python==0.6.14 exactly, but 0.6.14 (2026-07-02)
+    # predates flashinfer#3973 (merged 2026-07-15, first released in v0.6.15),
+    # the cubin update that fixes flashinfer#3279: a probabilistic *silent* hang
+    # in the SM100 FP4 MoE GEMM's 2-CTA TMA-multicast path, no Xid. It cost us
+    # 1-2 of 32 vLLM servers on startup and is the only reason this recipe
+    # carried an enable_pdl=False patch. vLLM itself moved to 0.6.16.post3 in
+    # 0.27, so this override tracks upstream rather than diverging from it.
+    #
+    # Safe to override rather than upgrade vLLM: the three MoE entry points vLLM
+    # calls (trtllm_bf16_moe, trtllm_fp4_block_scale_moe,
+    # trtllm_fp4_block_scale_routed_moe) take identical parameter sets in 0.6.14,
+    # 0.6.15 and 0.6.16.post3, and vLLM's own 0.26->0.27 changes to those call
+    # sites were structural, not API adaptations.
+    "flashinfer-python==0.6.16.post3 ; extra == 'vllm'",
+    "flashinfer-cubin==0.6.16.post3 ; extra == 'vllm'",
+    "flashinfer-jit-cache==0.6.16.post3 ; extra == 'vllm'",
     # Match the current NeMo RL PR #3566 runtime used to validate TE
     # 2.18.0+e7c550c5 with vLLM 0.26 on GB200. Torch 2.11 declares older exact
     # CUDA library pins, so these must be overrides rather than ordinary direct

@@ -76,6 +76,17 @@ readonly FILTER_GROUPS=${FILTER_GROUPS:-False}
 readonly MAX_GEN_BATCHES=${MAX_GEN_BATCHES:-0}
 readonly GEN_PROMPT_BSZ=$((TRAIN_PROMPT_BSZ * GEN_PROMPT_BSZ_MULT))
 readonly ROLLOUT_IS=${ROLLOUT_IS:-token}
+# DAPO's soft overlong punishment. NeMo-RL's matching arm runs 512 / 1.0; this
+# recipe shipped it disabled, which left nothing pushing back on running to
+# max_response_length. W4A4 then clipped 12.8% of responses at 20480 against
+# BF16's 0.7%, and since a batch's wall clock is set by its slowest sequence
+# that turned a per-token 1.26x rollout win into a per-batch 9% loss.
+readonly OVERLONG_PENALTY=${OVERLONG_PENALTY:-False}
+readonly OVERLONG_BUFFER_LEN=${OVERLONG_BUFFER_LEN:-0}
+readonly OVERLONG_PENALTY_FACTOR=${OVERLONG_PENALTY_FACTOR:-0.0}
+if [[ "$OVERLONG_PENALTY" = True && ( "$OVERLONG_BUFFER_LEN" -le 0 ) ]]; then
+  echo "OVERLONG_PENALTY=True requires OVERLONG_BUFFER_LEN>0" >&2; exit 2
+fi
 case "$ROLLOUT_IS" in token|sequence|null) ;; *) echo "ROLLOUT_IS must be token|sequence|null" >&2; exit 2 ;; esac
 readonly RESUME_MODE=${RESUME_MODE:-disable}
 readonly RESUME_FROM_PATH=${RESUME_FROM_PATH:-}
@@ -239,10 +250,10 @@ FORWARD_ONLY=(
 
 REWARD=(
   reward_model.reward_manager=dapo
-  +reward_model.reward_kwargs.overlong_buffer_cfg.enable=False
-  +reward_model.reward_kwargs.overlong_buffer_cfg.len=0
-  +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=0.0
-  +reward_model.reward_kwargs.overlong_buffer_cfg.log=False
+  +reward_model.reward_kwargs.overlong_buffer_cfg.enable="$OVERLONG_PENALTY"
+  +reward_model.reward_kwargs.overlong_buffer_cfg.len="$OVERLONG_BUFFER_LEN"
+  +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor="$OVERLONG_PENALTY_FACTOR"
+  +reward_model.reward_kwargs.overlong_buffer_cfg.log=True
   +reward_model.reward_kwargs.max_resp_len="$MAX_RESPONSE_LENGTH"
 )
 
@@ -287,7 +298,7 @@ if [[ "$PRECISION_MODE" = real_nvfp4 ]]; then
   )
 fi
 
-echo "VERL_REAL_NVFP4_CONTRACT profile=$RUN_PROFILE precision=$PRECISION_MODE scope=all_mlp attention=bf16 rollout_activation=per_token transport=bf16 reload=native r3=1 losses=0of3 bf16_layers=${BF16_LAYERS_AT_START}/${BF16_LAYERS_AT_END} token_mean=1 tis=$ROLLOUT_IS nodes=${NNODES}x${N_GPUS_PER_NODE} tp=1 pp=1 cp=1 ep=4 batch=${TRAIN_PROMPT_BSZ}x${N_RESP_PER_PROMPT} max_num_seqs=$MAX_NUM_SEQS full_adam=1 resume=$RESUME_MODE"
+echo "VERL_REAL_NVFP4_CONTRACT profile=$RUN_PROFILE precision=$PRECISION_MODE scope=all_mlp attention=bf16 rollout_activation=per_token transport=bf16 reload=native r3=1 losses=0of3 bf16_layers=${BF16_LAYERS_AT_START}/${BF16_LAYERS_AT_END} token_mean=1 tis=$ROLLOUT_IS overlong=${OVERLONG_PENALTY}:${OVERLONG_BUFFER_LEN}:${OVERLONG_PENALTY_FACTOR} nodes=${NNODES}x${N_GPUS_PER_NODE} tp=1 pp=1 cp=1 ep=4 batch=${TRAIN_PROMPT_BSZ}x${N_RESP_PER_PROMPT} max_num_seqs=$MAX_NUM_SEQS full_adam=1 resume=$RESUME_MODE"
 
 HYDRA_ARGS=(
   --config-path="$WORKING_DIR/recipe/dapo/config" \

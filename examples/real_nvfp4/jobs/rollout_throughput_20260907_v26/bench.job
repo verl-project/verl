@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+#SBATCH --account=general_sa
+#SBATCH --partition=36x2-a01r,tcpo,batch
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=8
+#SBATCH --time=01:30:00
+#SBATCH --job-name=verl-rn4pt-bench
+
+# One variant per process on a single GPU, matching the production rollout's
+# TP=1 / EP=1 topology. See bench.py for what is being isolated and why.
+set -uo pipefail
+
+readonly WS=/lustre/fsw/general_sa/shuazhang/python_space/verl_for_nvfp4_20251031
+readonly VERL=$WS/verl_nvfp4_e2e_r3_20260831_v3
+readonly IMAGE=/lustre/fsw/general_sa/shuazhang/images/verl.vllm026.mcore018.te218e7.realnvfp4.longds.20260904.v25.sqsh
+readonly IMAGE_ENV=/opt/verl-rn4pt-20260831-v5
+readonly MOUNTS=/lustre/fsw/general_sa/shuazhang:/lustre/fsw/general_sa/shuazhang
+readonly MODEL_PATH=${MODEL_PATH:-/lustre/fsw/general_sa/shuazhang/models/Qwen/Qwen3-30B-A3B-Base}
+readonly LOGS=$WS/ray_log/verl_rollout_throughput_20260907_v26
+readonly BENCH=$VERL/examples/real_nvfp4/jobs/rollout_throughput_20260907_v26/bench.py
+readonly VARIANTS=${BENCH_VARIANTS:?BENCH_VARIANTS is required}
+
+[[ -s "$IMAGE" ]] || { echo "image missing: $IMAGE" >&2; exit 1; }
+mkdir -p "$LOGS"
+
+srun --nodes=1 --ntasks=1 \
+  --container-image="$IMAGE" --container-mounts="$MOUNTS" \
+  bash -lc "
+    set -uo pipefail
+    export PATH=$IMAGE_ENV/.venv/bin:\$PATH
+    export PYTHONPATH=$VERL:\${PYTHONPATH:-}
+    export MODEL_PATH=$MODEL_PATH
+    export VLLM_ENABLE_V1_MULTIPROCESSING=0
+    export CUDA_VISIBLE_DEVICES=0
+    for v in $VARIANTS; do
+      echo \"########## BENCH_BEGIN \$v ##########\"
+      # The FP4 fast-math switches are read when the kernels are first built, so
+      # they have to be set before the process starts, not inside bench.py.
+      case \"\$v\" in
+        *_fm*|*fastmath*)
+          unset FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH TRTLLM_DISABLE_FP4_QUANT_FAST_MATH ;;
+        *)
+          export FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH=1 TRTLLM_DISABLE_FP4_QUANT_FAST_MATH=1 ;;
+      esac
+      BENCH_VARIANT=\$v python3 -u $BENCH
+      echo \"########## BENCH_END \$v exit=\$? ##########\"
+    done
+  " 2>&1 | tee "$LOGS/bench_${SLURM_JOB_ID}.log"
+
+echo "BENCH_JOB_DONE"
