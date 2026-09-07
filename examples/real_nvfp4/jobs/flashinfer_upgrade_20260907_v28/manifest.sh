@@ -93,7 +93,10 @@ rn4pt_validate_static() {
   grep -q 'FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH=1' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || rn4pt_die "FlashInfer exact FP4 math contract missing" || return
   grep -q 'TRTLLM_DISABLE_FP4_QUANT_FAST_MATH=1' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || rn4pt_die "TRT-LLM exact FP4 math contract missing" || return
   grep -q 'readonly MAX_NUM_SEQS=128' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || rn4pt_die "formal max_num_seqs must be 128" || return
-  grep -q 'override_transformer_config.first_last_layers_bf16=False' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || rn4pt_die "all-MLP first/last carve-out is not disabled" || return
+  # The carve-out became a knob after v3; assert the default is still off so an
+  # unset variable cannot silently change the scope.
+  grep -q 'readonly FIRST_LAST_BF16=${FIRST_LAST_BF16:-False}' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || \
+    rn4pt_die "first/last carve-out no longer defaults to off" || return
   grep -q 'NVFP4_PER_TOKEN_METHOD = "nvfp4_per_token"' "$RN4PT_VERL/verl/utils/real_nvfp4/vllm_runtime.py" || rn4pt_die "native vLLM online method missing" || return
   grep -q 'quantization = NVFP4_PER_TOKEN_METHOD' "$RN4PT_VERL/verl/workers/rollout/vllm_rollout/vllm_async_server.py" || rn4pt_die "native vLLM online method is not selected" || return
   grep -q 'engine_kwargs\["moe_backend"\] = REAL_NVFP4_MOE_BACKEND' "$RN4PT_VERL/verl/workers/rollout/vllm_rollout/vllm_async_server.py" || rn4pt_die "FlashInfer TRT-LLM backend is not selected explicitly" || return
