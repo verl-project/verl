@@ -75,18 +75,14 @@ readonly LONG_NVFP4_SCOPE=routed_expert_mlp_first${LONG_BF16_LAYERS_AT_START}_la
 # The first seven entries are the original 260-step run; the rest extend it to
 # 1000. Entries past the wave actually submitted are a plan, not a commitment --
 # re-fit from real timings before releasing the next wave.
-readonly -a LONG_TARGET_STEPS_BF16=(
-  40 80 120 160 200 240 260
-  300 340 380 420 460 490
-  530 570 610 650 690 730 770 810
-  850 890 930 970 1000
-)
-readonly -a LONG_TARGET_STEPS_W4A4=(
-  40 80 120 160 200 240 260
-  300 340 380 420
-  460 500 530 560 590 610 630 650
-  670 690 710 730 750 770 790 810 830 850 870 890 910 930 950 970 990 1000
-)
+# Uniform 40-step chunks. Fitted step time is 1.50 + 0.00064*len min for W4A4,
+# so 40 steps stays inside the 5h partition cap up to about 7k tokens; past that
+# these entries are a plan to re-fit from real timings, not a commitment. The
+# overlong penalty should also keep the length tail much shorter than v25's,
+# where 12.8%% of responses ran to the 20480 cap and set the batch wall clock.
+# Only the first wave is submitted at a time.
+readonly -a LONG_TARGET_STEPS_BF16=(40 80 120 160 200 240 280 320 360 400 440 480 520 560 600 640 680 720 760 800 840 880 920 960 1000)
+readonly -a LONG_TARGET_STEPS_W4A4=(40 80 120 160 200 240 280 320 360 400 440 480 520 560 600 640 680 720 760 800 840 880 920 960 1000)
 
 rn4pt_die() { echo "REAL_NVFP4_PERTOKEN_REFUSED: $*" >&2; return 2; }
 
