@@ -636,8 +636,17 @@ class MegatronEngine(BaseEngine):
             raise RuntimeError(f"real_nvfp4 layer precision contract drifted: {mismatched_layer_precision}")
 
         expected_layers = int(self.model_config.hf_config.num_hidden_layers)
-        expected_mlp_nvfp4 = expected_layers - carve_start - carve_end
-        expected_mlp_bf16 = carve_start + carve_end
+        # Attention exists on every decoder layer, but experts do not: a model
+        # with decoder_sparse_step > 1 or mlp_only_layers has dense layers that
+        # contribute no MLP modules to these counts at all. Carving out a dense
+        # layer is a no-op, so intersect the carve-out with the sparse layers
+        # rather than subtracting raw layer counts.
+        from verl.utils.real_nvfp4 import real_nvfp4_moe_layer_indices
+
+        moe_layers = set(real_nvfp4_moe_layer_indices(self.model_config.hf_config))
+        carved = set(range(carve_start)) | set(range(expected_layers - carve_end, expected_layers))
+        expected_mlp_nvfp4 = len(moe_layers - carved)
+        expected_mlp_bf16 = len(moe_layers & carved)
         precision_counts = {
             "attn_qkv_bf16": 0,
             "attn_proj_bf16": 0,
