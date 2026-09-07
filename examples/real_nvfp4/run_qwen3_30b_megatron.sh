@@ -81,25 +81,22 @@ readonly ROLLOUT_IS=${ROLLOUT_IS:-token}
 # max_response_length. W4A4 then clipped 12.8% of responses at 20480 against
 # BF16's 0.7%, and since a batch's wall clock is set by its slowest sequence
 # that turned a per-token 1.26x rollout win into a per-batch 9% loss.
-# FlashInfer autotune, set explicitly per precision instead of inheriting
-# whatever vLLM defaults to, because the two arms want opposite answers and the
-# default is a gamble either way.
-#   bf16      off. vLLM's oracle picks FLASHINFER_TRTLLM for unquantized MoE on
-#             CUDA and only demotes FlashInfer on SM90, so the BF16 baseline
-#             lands on trtllm_bf16_moe -- whose autotune sweep dies with an
-#             illegal memory access at the 1-token profile (flashinfer#4157,
-#             open; also #4919, #3466). Reproduced twice here. Steady state is
-#             fine, which is why 540 production steps never hit it, but leaving
-#             it to the default means gambling at every engine start.
-#             Measured: TRTLLM 12163 tok/s beats TRITON 11116 and
-#             FLASHINFER_CUTLASS 11575, so keep the kernel and drop the sweep.
-#   real_nvfp4 on. The FP4 path has none of those bugs and autotune is worth
-#             +5.7% (15243 -> 16107 tok/s).
-if [[ "$PRECISION_MODE" = real_nvfp4 ]]; then
-  readonly FLASHINFER_AUTOTUNE=${FLASHINFER_AUTOTUNE:-True}
-else
-  readonly FLASHINFER_AUTOTUNE=${FLASHINFER_AUTOTUNE:-False}
-fi
+# FlashInfer autotune off for both arms, pinned rather than inherited from
+# whatever vLLM defaults to.
+#   bf16       its autotune sweep dies with an illegal memory access at the
+#              1-token profile (flashinfer#4157, open; also #4919 and #3466 on
+#              the same kernel). Reproduced on both 0.6.14 and 0.6.16.post3, so
+#              it is unrelated to the 2-CTA hang #3973 fixed. verl only sets
+#              moe_backend on the real-NVFP4 and delta-sharded paths, so BF16
+#              inherits vLLM's oracle pick -- FLASHINFER_TRTLLM first on CUDA,
+#              demoted only on SM90 -- which puts the baseline on a far less
+#              exercised kernel than W4A4 uses. Switching backend costs more
+#              than it saves (TRTLLM 12163 vs TRITON 11116, CUTLASS 11575), so
+#              keep the kernel and skip the sweep.
+#   real_nvfp4 measured slower with it: 16832 vs 16136 tok/s over three runs
+#              each, spread under 0.4%. An earlier +5.7% reading came from the
+#              pre-#3973 cubins and no longer holds.
+readonly FLASHINFER_AUTOTUNE=${FLASHINFER_AUTOTUNE:-False}
 readonly OVERLONG_PENALTY=${OVERLONG_PENALTY:-False}
 readonly OVERLONG_BUFFER_LEN=${OVERLONG_BUFFER_LEN:-0}
 readonly OVERLONG_PENALTY_FACTOR=${OVERLONG_PENALTY_FACTOR:-0.0}

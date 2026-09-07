@@ -13,8 +13,8 @@ set -uo pipefail
 
 readonly WS=/lustre/fsw/general_sa/shuazhang/python_space/verl_for_nvfp4_20251031
 readonly VERL=$WS/verl_nvfp4_e2e_r3_20260831_v3
-readonly IMAGE=/lustre/fsw/general_sa/shuazhang/images/verl.vllm026.mcore018.te218e7.realnvfp4.noPDLtrick.overlong.20260907.v27.sqsh
-readonly IMAGE_ENV=/opt/verl-rn4pt-20260831-v5
+readonly IMAGE=/lustre/fsw/general_sa/shuazhang/images/verl.vllm026.mcore018.te218e7.realnvfp4.fi0616.20260907.v28.sqsh
+readonly IMAGE_ENV=/opt/verl-rn4pt-20260907-v28
 readonly MOUNTS=/lustre/fsw/general_sa/shuazhang:/lustre/fsw/general_sa/shuazhang
 readonly MODEL_PATH=${MODEL_PATH:-/lustre/fsw/general_sa/shuazhang/models/Qwen/Qwen3-30B-A3B-Base}
 readonly LOGS=$WS/ray_log/verl_rollout_throughput_20260907_v26
