@@ -279,11 +279,16 @@ class vLLMColocateWorkerExtension:
             if getattr(self, "_is_real_nvfp4", False):
                 from verl.utils.real_nvfp4 import (
                     attest_vllm_native_nvfp4_runtime,
+                    real_nvfp4_moe_layer_indices,
                     require_vllm_native_reload_contract,
                     vllm_native_nvfp4_fingerprint,
                 )
 
-                expected_moe_layers = int(self.model_runner.vllm_config.model_config.hf_config.num_hidden_layers)
+                # Not num_hidden_layers: a model with decoder_sparse_step > 1 or
+                # mlp_only_layers has dense layers that carry no experts.
+                expected_moe_layers = len(
+                    real_nvfp4_moe_layer_indices(self.model_runner.vllm_config.model_config.hf_config)
+                )
                 attest_vllm_native_nvfp4_runtime(
                     model,
                     expected_moe_layers=expected_moe_layers,
@@ -347,10 +352,15 @@ class vLLMColocateWorkerExtension:
 
                 from verl.utils.real_nvfp4 import (
                     attest_vllm_native_nvfp4_runtime,
+                    real_nvfp4_moe_layer_indices,
                     vllm_native_nvfp4_fingerprint,
                 )
 
-                expected_moe_layers = int(self.model_runner.vllm_config.model_config.hf_config.num_hidden_layers)
+                # Not num_hidden_layers: a model with decoder_sparse_step > 1 or
+                # mlp_only_layers has dense layers that carry no experts.
+                expected_moe_layers = len(
+                    real_nvfp4_moe_layer_indices(self.model_runner.vllm_config.model_config.hf_config)
+                )
                 attest_vllm_native_nvfp4_runtime(
                     self._get_main_model(),
                     expected_moe_layers=expected_moe_layers,

@@ -21,47 +21,83 @@ REAL_NVFP4_TE_COMMIT = "e7c550c5f80636cf841a8204b1d6f85a5f3f28b7"
 REAL_NVFP4_TE_VERSION = "2.18.0+e7c550c5"
 
 
+def _hf_get(hf_config: Any, name: str, default: Any = None) -> Any:
+    if isinstance(hf_config, dict):
+        return hf_config.get(name, default)
+    return getattr(hf_config, name, default)
+
+
+def real_nvfp4_moe_layer_indices(hf_config: Any) -> list[int]:
+    """Indices of the decoder layers that carry routed experts.
+
+    Derived from the config rather than from the architecture name, following
+    the HF placement rule shared by the Qwen MoE family: layer ``i`` is sparse
+    when it is not listed in ``mlp_only_layers`` and ``(i + 1)`` is a multiple
+    of ``decoder_sparse_step``. Models that omit those keys are all-MoE, which
+    is the case this recipe was first validated on.
+    """
+
+    num_layers = int(_hf_get(hf_config, "num_hidden_layers") or 0)
+    sparse_step = int(_hf_get(hf_config, "decoder_sparse_step") or 1)
+    dense_layers = set(_hf_get(hf_config, "mlp_only_layers") or [])
+    if sparse_step <= 0:
+        raise ValueError(f"real_nvfp4 needs a positive decoder_sparse_step, got {sparse_step}")
+    return [i for i in range(num_layers) if i not in dense_layers and (i + 1) % sparse_step == 0]
+
+
 def validate_real_nvfp4_model_contract(hf_config: Any) -> None:
-    """Limit real W4A4 to the Qwen3 all-MoE layout validated end to end."""
+    """Fail closed on layouts whose refit counts this recipe cannot predict.
 
-    architectures = getattr(hf_config, "architectures", None)
-    if architectures is None and isinstance(hf_config, dict):
-        architectures = hf_config.get("architectures")
-    architectures = architectures or []
+    This used to be an allowlist of one architecture name
+    (``Qwen3MoeForCausalLM`` with ``decoder_sparse_step=1`` and no
+    ``mlp_only_layers``), which rejected every other MoE model even when the
+    layout was one it handles perfectly well. The properties that actually
+    matter are structural, so check those instead:
 
-    def _get(name: str):
-        if isinstance(hf_config, dict):
-            return hf_config.get(name)
-        return getattr(hf_config, name, None)
+    * routed experts exist and their count is known, since the refit
+      attestation is an exact expert-weight count;
+    * at least one layer is sparse under the placement rule above;
+    * there are no shared experts, because those add per-layer weights the
+      expert-count arithmetic below does not model.
 
-    if (
-        "Qwen3MoeForCausalLM" not in architectures
-        or _get("decoder_sparse_step") != 1
-        or (_get("mlp_only_layers") or [])
-    ):
+    Anything else is still refused rather than quietly mis-counted.
+    """
+
+    num_experts = int(_hf_get(hf_config, "num_experts") or _hf_get(hf_config, "n_routed_experts") or 0)
+    if num_experts <= 0:
         raise ValueError(
-            "real_nvfp4 currently supports only the validated Qwen3 all-MoE "
-            "layout (Qwen3MoeForCausalLM, decoder_sparse_step=1, no "
-            "mlp_only_layers)"
+            "real_nvfp4 requires a routed-expert MoE model; this config declares no experts "
+            "(looked for num_experts / n_routed_experts)"
         )
+    if not real_nvfp4_moe_layer_indices(hf_config):
+        raise ValueError(
+            "real_nvfp4 found no sparse decoder layer under decoder_sparse_step="
+            f"{_hf_get(hf_config, 'decoder_sparse_step') or 1} with mlp_only_layers="
+            f"{_hf_get(hf_config, 'mlp_only_layers') or []}"
+        )
+    # Shared experts would be extra per-layer weights on the refit stream, so the
+    # expert-weight attestation would be wrong rather than merely conservative.
+    for key in ("n_shared_experts", "shared_expert_intermediate_size", "num_shared_experts"):
+        if int(_hf_get(hf_config, key) or 0) > 0:
+            raise ValueError(
+                f"real_nvfp4 does not model shared experts yet ({key}="
+                f"{_hf_get(hf_config, key)}); the refit expert-weight count would not match"
+            )
 
 
 def real_nvfp4_expected_counts(hf_config: Any) -> tuple[int, int]:
-    """Return exact ``(expert_weights, quantized_groups)`` for all-MLP refit."""
+    """Return exact ``(expert_weights, quantized_groups)`` for the refit."""
 
     validate_real_nvfp4_model_contract(hf_config)
 
-    def _get(name: str):
-        if isinstance(hf_config, dict):
-            return hf_config.get(name)
-        return getattr(hf_config, name, None)
-
-    num_layers = int(_get("num_hidden_layers") or 0)
-    num_experts = int(_get("num_experts") or 0)
-    if num_layers <= 0 or num_experts <= 0:
-        raise ValueError("real_nvfp4 model config requires positive num_hidden_layers and num_experts")
-    expert_weights = num_layers * num_experts * 3
-    quantized_groups = num_layers * num_experts * 2
+    num_experts = int(_hf_get(hf_config, "num_experts") or _hf_get(hf_config, "n_routed_experts") or 0)
+    moe_layers = len(real_nvfp4_moe_layer_indices(hf_config))
+    if moe_layers <= 0 or num_experts <= 0:
+        raise ValueError("real_nvfp4 model config requires positive MoE layer and expert counts")
+    # Three projections per expert on the wire (gate/up/down); two quantized
+    # groups per expert once gate/up are fused into w13.
+    expert_weights = moe_layers * num_experts * 3
+    quantized_groups = moe_layers * num_experts * 2
     return expert_weights, quantized_groups
 
 
