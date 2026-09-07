@@ -218,10 +218,13 @@ class FusedLinearForPPOFunction(torch.autograd.Function):
 
 
 class FusedLinearForPPO(torch.nn.Module):
-    def __init__(self, chunk_size: int = 512):
+    def __init__(self, chunk_size: int = 512, impl_backend: str = "torch"):
         super().__init__()
 
+        if impl_backend not in ("torch", "liger"):
+            raise ValueError(f"Unsupported FusedLinearForPPO backend: {impl_backend}. Choose 'torch' or 'liger'.")
         self.chunk_size = chunk_size
+        self.impl_backend = impl_backend
 
     def forward(
         self,
@@ -231,7 +234,7 @@ class FusedLinearForPPO(torch.nn.Module):
         temperature: float = 1.0,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
         input_ids = input_ids.to(torch.int64)
-        if _LIGER_FUSED_LINEAR_SCALED_CROSS_ENTROPY is None:
+        if self.impl_backend == "torch" or _LIGER_FUSED_LINEAR_SCALED_CROSS_ENTROPY is None:
             return FusedLinearForPPOFunction.apply(
                 hidden_states,
                 vocab_weights,

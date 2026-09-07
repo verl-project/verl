@@ -109,6 +109,8 @@ jobs:
         --shm-size 2048g
         --ulimit memlock=-1
         --ulimit stack=67108864
+        --cpuset-cpus 0-31
+        --cpuset-mems 0
         -v /data/models:/root/models
         -v /data/data:/root/data
     env:
@@ -200,6 +202,8 @@ jobs:
         --shm-size 2048g
         --ulimit memlock=-1
         --ulimit stack=67108864
+        --cpuset-cpus 0-31
+        --cpuset-mems 0
         -v /data/models:/root/models
         -v /data/data:/root/data
     env:

@@ -20,23 +20,32 @@ cd ..
 git clone -b releases/v0.23.0 https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 git submodule update --init --recursive
-pip install -v -e . --no-build-isolation --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
+pip install -r requirements.txt
+COMPILE_CUSTOM_KERNELS=1 pip install --no-build-isolation --no-deps -v -e . --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple/ --trusted-host triton-ascend.osinfra.cn
 cd ..
 
 
 if [ $USE_MEGATRON -eq 1 ]; then
     echo "3. install Megatron & MindSpeed"
-    # 下载 MindSpeed，切换到指定 commit-id，并下载 Megatron-LM
+    # 下载 MindSpeed，切换到指定 commit-id，并下载 Megatron 相关依赖
     git clone https://gitcode.com/Ascend/MindSpeed.git
-    cd MindSpeed && git checkout core_r0.16.0 && cd ..
-    git clone --depth 1 --branch core_r0.16.0 https://github.com/NVIDIA/Megatron-LM.git
+    cd MindSpeed && git checkout core_r0.18.0 && cd ..
+    git clone --depth 1 --branch core_r0.18.0 https://github.com/NVIDIA/Megatron-LM.git
+    git clone --depth 1 --branch core_r0.18.0 https://gitcode.com/ascend/MegatronAdaptor.git
+    git clone --depth 1 https://gitcode.com/ascend/TransformerEngineNPU.git
+    git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Ops.git
+    git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Bridge.git
+    git clone --depth 1 --branch v0.5.0 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
 
-    # 安装 Megatron & MindSpeed
+    # 安装 Megatron 及 Ascend 适配组件
     pip install -e Megatron-LM
     pip install -e MindSpeed
-
-    # 安装 mbridge
-    pip install mbridge
+    pip install -e MegatronAdaptor
+    pip install -e TransformerEngineNPU --no-build-isolation
+    pip install -e MindSpeed-Ops --no-build-isolation --no-deps
+    pip install -r MindSpeed-Bridge/requirements.txt
+    pip install -e MindSpeed-Bridge --no-deps
+    pip install -e Megatron-Bridge --no-build-isolation --no-deps
 fi
 
 echo "4. install verl"

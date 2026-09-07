@@ -53,6 +53,7 @@ def _get_teacher_sampling_params(
         "max_tokens": 1,
         "temperature": 1.0,
         "prompt_logprobs": num_logprobs,
+        "detokenize": False,
     }
 
 

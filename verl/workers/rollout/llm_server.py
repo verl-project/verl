@@ -15,7 +15,6 @@
 Utility classes for manage and request LLM servers:
 - LLMServerManager: manage life-cycle of LLM servers, including launch, tear-down replicas.
 - LLMServerClient: proxy client to request LLM servers, used by AgentLoopWorker.
-- GlobalRequestLoadBalancer: global load balancer for LLMServerClient.
 """
 
 import asyncio
@@ -26,7 +25,6 @@ from uuid import uuid4
 
 import numpy as np
 import ray
-from cachetools import LRUCache
 from omegaconf import DictConfig
 
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
@@ -35,163 +33,11 @@ from verl.utils.ray_utils import auto_await
 from verl.utils.rollout_trace import rollout_trace_op
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.rollout.replica import RolloutReplica, TokenOutput, get_rollout_replica_class
+from verl.workers.rollout.router import GlobalRequestLoadBalancer  # noqa: F401
 from verl.workers.rollout.utils import update_prometheus_config
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
-
-DEFAULT_ROUTING_CACHE_SIZE = 10000
-
-
-class GlobalRequestLoadBalancer:
-    """Global sticky-session + in-flight load balancer shared by all AgentLoopWorkers.
-
-    When a sticky session points to a removed server, the cache entry is
-    automatically invalidated and a new server is selected.
-
-    This is a plain Python class (not a Ray actor). It is wrapped with
-    ``ray.remote(...)`` at instantiation time so callers can subclass it and
-    override :meth:`acquire_server` before registering the subclass as an actor.
-
-    Key features:
-    - **Atomic acquire**: ``acquire_server()`` returns ``(server_id, handle)``
-    - **Sticky Session**: Uses LRUCache to map request_id → server_id, ensuring
-      multi-turn conversations route to the same server.
-    - **Least-loaded Selection**: When no sticky session exists, selects the
-      server with the fewest in-flight requests.
-    - **Deterministic Routing**: When ``full_determinism=True``, routes every
-      request by ``hash(request_id) % len(servers)`` over the full pool so the
-      same request always routes to the same replica across runs.
-    - **Dynamic Server Management**: Supports add/remove servers at runtime
-      for hybrid scaling.
-    """
-
-    def __init__(
-        self,
-        servers: dict[str, ray.actor.ActorHandle],
-        max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE,
-        full_determinism: bool = False,
-    ):
-        # Allow empty initial servers: in dynamic-resource-scheduling mode all
-        # replicas are hybrid and will be registered later via add_servers().
-
-        self._servers: dict[str, ray.actor.ActorHandle] = dict(servers)
-        self._inflight_requests: dict[str, int] = {sid: 0 for sid in servers}
-        self._request_id_to_server: LRUCache = LRUCache(maxsize=max_cache_size)
-        self._full_determinism = full_determinism
-
-    def acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
-        """Acquire a server for the given request (sticky + least-loaded).
-
-        Returns:
-            A tuple of ``(server_id, actor_handle)`` in a single atomic call.
-        """
-        # Try sticky session first
-        if request_id in self._request_id_to_server:
-            server_id = self._request_id_to_server[request_id]
-            # Check if server is still in the active pool
-            if server_id in self._inflight_requests:
-                self._inflight_requests[server_id] += 1
-                return server_id, self._servers[server_id]
-            # Server was removed, clear stale cache entry and re-select
-            del self._request_id_to_server[request_id]
-
-        # Select new server (least-loaded among available)
-        if not self._inflight_requests:
-            raise RuntimeError("No available servers in load balancer")
-
-        if self._full_determinism:
-            # Full-hash routing: same request_id always lands on the same replica
-            # across runs. Least-loaded selection depends on async arrival timing,
-            # which varies run-to-run, so it is bypassed entirely here.
-            server_id = list(self._servers)[hash(request_id) % len(self._servers)]
-        else:
-            min_count = min(self._inflight_requests.values())
-            candidates = [sid for sid, count in self._inflight_requests.items() if count == min_count]
-            server_id = candidates[0]
-        self._request_id_to_server[request_id] = server_id
-        self._inflight_requests[server_id] += 1
-        return server_id, self._servers[server_id]
-
-    def release_server(self, server_id: str) -> None:
-        """Release a server after a request completes."""
-        if server_id not in self._inflight_requests:
-            return
-        if self._inflight_requests[server_id] > 0:
-            self._inflight_requests[server_id] -= 1
-
-    def add_servers(self, servers: dict[str, ray.actor.ActorHandle]) -> None:
-        """Atomically add multiple servers to the load balancer pool.
-
-        This is more efficient than calling :meth:`add_server` in a loop
-        because it performs a single bulk update on the internal state.
-
-        Args:
-            servers: Dict mapping server_id → actor_handle for all servers
-                to register.
-        """
-        for sid, handle in servers.items():
-            self._inflight_requests[sid] = 0
-            self._servers[sid] = handle
-        logger.info(f"[GlobalLoadBalancer] added {len(servers)} servers")
-
-    def remove_servers(self, server_ids: list[str]) -> None:
-        """Atomically remove multiple servers from the load balancer pool.
-
-        More efficient than calling :meth:`remove_server` in a loop.
-
-        Args:
-            server_ids: List of server identifiers to remove.
-        """
-        for sid in server_ids:
-            self._inflight_requests.pop(sid, None)
-            self._servers.pop(sid, None)
-        logger.info(f"[GlobalLoadBalancer] removed {len(server_ids)} servers")
-
-    def get_inflight_count(self, server_id: str) -> int:
-        """Get number of in-flight requests for a server."""
-        return self._inflight_requests.get(server_id, 0)
-
-    def get_all_servers(self) -> list[str]:
-        """Get list of all active server IDs."""
-        return list(self._inflight_requests.keys())
-
-    def clear_sticky_cache(self) -> dict:
-        """Clear the sticky-session cache to force request redistribution.
-
-        After clearing, all subsequent ``acquire_server()`` calls will select
-        the least-loaded server (based on ``_inflight_requests``), which
-        naturally balances load across all active replicas — including newly
-        added ones with zero in-flight requests.
-
-        Returns:
-            A dict with ``cleared_entries`` (number of cache entries dropped)
-            and ``server_loads`` (current per-server inflight counts for
-            diagnostics).
-        """
-        cleared = len(self._request_id_to_server)
-        self._request_id_to_server.clear()
-        logger.info(
-            f"[GlobalLoadBalancer] Sticky cache cleared: {cleared} entries dropped. "
-            f"Server loads: {dict(self._inflight_requests)}"
-        )
-        return {
-            "cleared_entries": cleared,
-            "server_loads": dict(self._inflight_requests),
-        }
-
-    def get_status(self) -> dict:
-        """Return current load balancer state for debugging."""
-        return {
-            "servers": dict(self._inflight_requests),
-            "total_inflight": sum(self._inflight_requests.values()),
-            "active_servers": len(self._inflight_requests),
-            "registered_handles": list(self._servers.keys()),
-        }
-
-    def get_total_inflight(self) -> int:
-        """Return the sum of in-flight requests across all currently registered servers."""
-        return sum(self._inflight_requests.values())
 
 
 class LLMServerClient:
@@ -217,16 +63,29 @@ class LLMServerClient:
         """
         self.config = config
         self._load_balancer = load_balancer_handle
+        # Balancer field declarations, queried lazily once.
+        self._lb_require_acquire_fields: list[str] | None = None
+        self._lb_require_release_fields: list[str] | None = None
 
-    async def _acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
+    async def _acquire_server(self, request_id: str, **extra) -> tuple[str, ray.actor.ActorHandle]:
         # Atomic acquire: returns (server_id, handle) in one Ray RPC.
-        server_id, handle = await self._load_balancer.acquire_server.remote(request_id=request_id)
-        return server_id, handle
+        # Only the declared fields are serialized.
+        if self._lb_require_acquire_fields is None:
+            acquire_fields, release_fields = await asyncio.gather(
+                self._load_balancer.require_acquire_fields.remote(),
+                self._load_balancer.require_release_fields.remote(),
+            )
+            self._lb_require_acquire_fields = list(acquire_fields)
+            self._lb_require_release_fields = list(release_fields)
+        fields = {name: extra[name] for name in self._lb_require_acquire_fields if name in extra}
+        return await self._load_balancer.acquire_server.remote(request_id=request_id, **fields)
 
-    def _release_server(self, server_id: str) -> None:
+    def _release_server(self, server_id: str, request_id: str | None = None) -> None:
         # Fire-and-forget: release is just a counter decrement, no need to await.
         # Awaiting here risks blocking the finally clause if the LB actor is unresponsive.
-        self._load_balancer.release_server.remote(server_id=server_id)
+        pool = {"request_id": request_id}
+        fields = {name: pool[name] for name in self._lb_require_release_fields if name in pool}
+        self._load_balancer.release_server.remote(server_id=server_id, **fields)
 
     def _vllm_request_id(self, request_id: str) -> str:
         # request_id passed to vLLM. Default: a fresh uuid per turn so each turn
@@ -259,7 +118,16 @@ class LLMServerClient:
         Returns:
             TokenOutput | DiffusionOutput: token or diffusion output
         """
-        server_id, server = await self._acquire_server(request_id)
+        server_id, server = await self._acquire_server(
+            request_id,
+            prompt_ids=prompt_ids,
+            sampling_params=sampling_params,
+            image_data=image_data,
+            video_data=video_data,
+            audio_data=audio_data,
+            mm_processor_kwargs=mm_processor_kwargs,
+            **kwargs,
+        )
         try:
             multimodal_kwargs = {}
             if audio_data is not None:
@@ -286,7 +154,10 @@ class LLMServerClient:
             output.extra_fields.setdefault("max_global_steps", global_steps)
             return output
         finally:
-            self._release_server(server_id)
+            self._release_server(
+                server_id,
+                request_id=request_id,
+            )
 
 
 class FullyAsyncLLMServerClient(LLMServerClient):
@@ -315,7 +186,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         super().__init__(config=config, load_balancer_handle=load_balancer_handle, **kwargs)
         self._only_hybrid = only_hybrid
 
-    async def _acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
+    async def _acquire_server(self, request_id: str, **extra) -> tuple[str, ray.actor.ActorHandle]:
         # Atomic acquire: returns (server_id, handle) in one Ray RPC.
         # When only_hybrid is True, hybrid replicas are the sole rollout resource and
         # the LB may be temporarily empty during weight sync / scaling transitions.
@@ -323,7 +194,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         # Otherwise raise immediately so callers see the error right away.
         while True:
             try:
-                return await super()._acquire_server(request_id)
+                return await super()._acquire_server(request_id, **extra)
             except RuntimeError as e:
                 if "No available servers in load balancer" in str(e) and self._only_hybrid:
                     await asyncio.sleep(1)
@@ -400,6 +271,12 @@ class FullyAsyncLLMServerClient(LLMServerClient):
             num_preempted=0,
         )
         min_global_steps, max_global_steps = None, None
+        # Prefix-cache hits are reported per prefill. The base client returns the
+        # server's TokenOutput directly (so sync mode surfaces num_cached_tokens),
+        # but here we rebuild a fresh TokenOutput across resume iterations, so we
+        # must carry it forward explicitly or the consumer sees 0. Take the first
+        # (initial-prompt) prefill's hit count, matching single-prefill semantics.
+        num_cached_tokens = None
 
         while True:
             # 1. generate tokens
@@ -431,6 +308,10 @@ class FullyAsyncLLMServerClient(LLMServerClient):
                 final_output.num_preempted += output.num_preempted
             final_output.stop_reason = output.stop_reason
 
+            # carry the initial prefill's prefix-cache hit count forward
+            if num_cached_tokens is None:
+                num_cached_tokens = output.extra_fields.get("num_cached_tokens")
+
             # update model weights version
             global_steps = output.extra_fields.get("global_steps", None)
             if min_global_steps is None:
@@ -458,6 +339,7 @@ class FullyAsyncLLMServerClient(LLMServerClient):
         final_output.extra_fields["global_steps"] = global_steps
         final_output.extra_fields["min_global_steps"] = min_global_steps
         final_output.extra_fields["max_global_steps"] = max_global_steps
+        final_output.extra_fields["num_cached_tokens"] = num_cached_tokens
         return final_output
 
 
@@ -473,12 +355,11 @@ class LLMServerManager:
             else init standalone server with a new resource pool.
         rollout_resource_pool (RayResourcePool): Resource pool for the server replicas, only needed for TensorRT-LLM.
         start_rank (int): First ``replica_rank`` to assign.  Defaults to 0.
-        load_balancer_cls: Optional subclass of
-            :class:`GlobalRequestLoadBalancer` to use as the routing actor
-            (wrapped with ``ray.remote`` at instantiation). Defaults to
-            :class:`GlobalRequestLoadBalancer`, whose routing honors the
-            ``full_determinism`` flag. Pass a subclass that overrides
-            :meth:`acquire_server` to take full control of routing.
+        load_balancer_cls: Optional subclass of the default router strategy's
+            load balancer to use as the routing actor (wrapped with
+            ``ray.remote`` at instantiation). When given, it takes precedence
+            over ``rollout.router_config_path``. Pass a subclass that
+            overrides :meth:`acquire_server` to take full control of routing.
     """
 
     def __init__(
@@ -495,7 +376,7 @@ class LLMServerManager:
         self.worker_group = worker_group
         self.rollout_resource_pool = rollout_resource_pool
         self.start_rank = start_rank
-        self._load_balancer_cls = load_balancer_cls or GlobalRequestLoadBalancer
+        self._load_balancer_cls = load_balancer_cls
 
         assert worker_group is not None or self.rollout_config.nnodes > 0, "nnodes must be > 0 in standalone mode"
 
@@ -598,17 +479,14 @@ class LLMServerManager:
                 )
 
     async def _init_global_load_balancer(self) -> None:
-        load_balancer_cls = self._load_balancer_cls
-        kwargs = dict(
+        from verl.workers.rollout.router import get_router_handle
+
+        self.global_load_balancer = get_router_handle(
             servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
-            max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
+            router_config_path=getattr(self.rollout_config, "router_config_path", None),
+            full_determinism=getattr(self.rollout_config, "full_determinism", False),
+            load_balancer_cls=self._load_balancer_cls,
         )
-        # The default GlobalRequestLoadBalancer honors the full_determinism flag
-        # in acquire_server. A custom subclass overrides acquire_server and takes
-        # full control of routing, so the flag is not forwarded to it.
-        if load_balancer_cls is GlobalRequestLoadBalancer:
-            kwargs["full_determinism"] = getattr(self.rollout_config, "full_determinism", False)
-        self.global_load_balancer = ray.remote(load_balancer_cls).remote(**kwargs)
 
     def get_client(self, client_cls: type[LLMServerClient] | None = None, **kwargs) -> LLMServerClient:
         """Get the LLMServerClient to request LLM server replicas.

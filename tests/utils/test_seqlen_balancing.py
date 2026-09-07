@@ -47,6 +47,17 @@ def test_seqlen_balancing():
     torch.testing.assert_close(new_batch, dataproto.batch)
 
 
+def test_micro_batches_respect_max_token_len():
+    input_ids = torch.zeros((8, 7), dtype=torch.long)
+    attention_mask = torch.ones_like(input_ids)
+    dataproto = DataProto.from_single_dict({"input_ids": input_ids, "attention_mask": attention_mask})
+
+    micro_batches, _ = rearrange_micro_batches(dataproto.batch, max_token_len=8)
+
+    assert len(micro_batches) == 8
+    assert all(micro_batch["attention_mask"].sum().item() <= 8 for micro_batch in micro_batches)
+
+
 def test_dynamic_batch():
     input_ids = torch.randint(low=0, high=10, size=(20, 100))
 
@@ -93,24 +104,21 @@ def _worker(rank, world_size, init_method, max_token_len, use_same_dp, min_mb):
         min_num_micro_batch=min_mb,
     )
 
-    # 4) check the enforced counts
+    # 4) check the enforced counts and token limit
     seq_len_effective: torch.Tensor = batch["attention_mask"].sum(dim=1)
     total_seqlen = seq_len_effective.sum().item()
-    local = min(len(seq_len_effective), ceildiv(total_seqlen, max_token_len))
-
+    minimum = min(len(seq_len_effective), ceildiv(total_seqlen, max_token_len))
     if min_mb is not None:
-        expected = max(local, min_mb)
-        assert len(micros) == expected
+        minimum = max(minimum, min_mb)
+    assert len(micros) >= minimum
+    assert all(micro["attention_mask"].sum().item() <= max_token_len for micro in micros)
+
     if use_same_dp:
-        # gather all local_counts
+        # All ranks must use the same final count, including any upward search.
         counts = [torch.zeros(1, device=f"{get_device_name()}:{rank}") for _ in range(world_size)]
-        counts[rank].fill_(local)
+        counts[rank].fill_(len(micros))
         dist.all_gather(counts, counts[rank])
-        expected = max(int(c.item()) for c in counts)
-        assert len(micros) == expected
-    else:
-        # if neither, we get the local natural count
-        assert len(micros) == local
+        assert len({int(count.item()) for count in counts}) == 1
 
     # 5) reconstruction sanity: concat→reverse_idx→orig
     flat = torch.cat(micros, dim=0)
@@ -122,6 +130,46 @@ def _worker(rank, world_size, init_method, max_token_len, use_same_dp, min_mb):
     reconstructed = flat[inv]
     torch.testing.assert_close(reconstructed, batch)
 
+    dist.destroy_process_group()
+
+
+def _constraint_error_worker(rank, world_size, init_method, scenario):
+    import verl.utils.seqlen_balancing as seqlen_balancing
+
+    dist.init_process_group(backend="gloo", init_method=init_method, world_size=world_size, rank=rank)
+    seqlen_balancing.get_device_name = lambda: "cpu"
+
+    if scenario == "oversized_group":
+        seq_lens = [6, 6, 1, 1] if rank == 0 else [4, 4, 1, 1]
+        force_group_size = 2
+        expected_error = "forced group exceeds max_token_len"
+    else:
+        seq_lens = [1, 1] if rank == 0 else [6, 6, 6]
+        force_group_size = 1
+        expected_error = "same micro-batch count across DP ranks"
+
+    max_seq_len = max(seq_lens)
+    attention_mask = torch.zeros((len(seq_lens), max_seq_len), dtype=torch.long)
+    for i, seq_len in enumerate(seq_lens):
+        attention_mask[i, :seq_len] = 1
+    batch = DataProto.from_single_dict(
+        {"input_ids": torch.zeros_like(attention_mask), "attention_mask": attention_mask}
+    ).batch
+
+    try:
+        seqlen_balancing.rearrange_micro_batches(
+            batch,
+            max_token_len=10,
+            dp_group=dist.group.WORLD,
+            same_micro_num_in_dp=True,
+            force_group_size=force_group_size,
+        )
+    except ValueError as error:
+        assert expected_error in str(error)
+    else:
+        raise AssertionError("Expected a synchronized ValueError")
+
+    dist.barrier()
     dist.destroy_process_group()
 
 
@@ -200,6 +248,19 @@ def test_seqlen_balancing_distributed_params(tmp_path):
         nprocs=world_size,
         join=True,
     )
+
+
+def test_seqlen_balancing_distributed_constraint_errors(tmp_path):
+    world_size = 2
+    for scenario in ("oversized_group", "insufficient_groups"):
+        init_file = tmp_path / f"dist_init_{scenario}"
+        init_file.write_text("")
+        mp.spawn(
+            _constraint_error_worker,
+            args=(world_size, f"file://{init_file}", scenario),
+            nprocs=world_size,
+            join=True,
+        )
 
 
 def test_group_balanced_partitions():

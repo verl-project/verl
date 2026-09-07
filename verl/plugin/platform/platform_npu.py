@@ -164,15 +164,18 @@ class PlatformNPU(PlatformBase):
     def is_ipc_supported(self) -> bool:
         import subprocess
 
-        from verl.utils.device import check_ipc_version_support, get_npu_versions
+        from verl.utils.device import AscendHardwareVersion, check_ipc_version_support, get_npu_versions
 
         try:
-            software_version, cann_version = get_npu_versions()
-            return check_ipc_version_support(software_version, cann_version)
+            hardware_version, software_version, cann_version = get_npu_versions()
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Failed to execute npu-smi command: {e}") from e
         except Exception as e:
             raise RuntimeError(f"Error checking IPC support: {e}") from e
+
+        if hardware_version == AscendHardwareVersion.A5:
+            return True
+        return check_ipc_version_support(software_version, cann_version)
 
     # ------------------------------------------------------------------
     # Profiling helpers

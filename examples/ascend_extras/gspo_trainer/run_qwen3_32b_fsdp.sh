@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # GSPO | Qwen3-32B | DAPO-Math-17k | vLLM rollout | FSDP2 training | Ascend NPU
-# Reference: verl/docs/ascend_tutorial/model_support/examples/gspo_optimization_practice.md
+# Reference: verl/docs/ascend_tutorial/zh/model_support/examples/gspo_optimization_practice.md
 
 set -xeuo pipefail
 

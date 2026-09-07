@@ -114,7 +114,6 @@ ROLLOUT_CONFIG="
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
     actor_rollout_ref.rollout.enforce_eager=${enforce_eager} \
-    +actor_rollout_ref.rollout.enable_sleep_mode=False \
     actor_rollout_ref.rollout.temperature=${temperature} \
     actor_rollout_ref.rollout.top_p=${top_p} \
     actor_rollout_ref.rollout.top_k=${top_k} \

@@ -129,7 +129,8 @@ class CheckpointEngine(ABC):
 
     # How receive_weights yields weights to the server adapter:
     #   "named_tensors" -- (name, tensor) pairs, bucketed into full-tensor loads.
-    #   "delta_flush"   -- per-flush sparse payloads applied via a custom loader.
+    #   "delta_flush"   -- (named_tensors, is_last) flushes; the seed may be dense,
+    #                       while steady updates carry sparse patches.
     wire_format = "named_tensors"
 
     @abstractmethod
@@ -323,12 +324,10 @@ class CheckpointEngineWorker(Worker):
 
         self.server_adapter: BaseRollout = server_adapter
         backend = self.rollout_config.checkpoint_engine.backend
-        if backend == "delta_sharded" and self.rollout_config.name != "sglang":
+        if backend == "delta_sharded" and self.rollout_config.name not in {"sglang", "vllm"}:
             raise NotImplementedError(
-                f"checkpoint_engine.backend={backend!r} currently supports only the sglang rollout "
-                f"(got rollout.name={self.rollout_config.name!r}): the sparse apply is dispatched "
-                "through sglang's custom-weight-loader hook. Other backends need a per-backend "
-                "apply interface, planned as a follow-up."
+                f"checkpoint_engine.backend={backend!r} has no delta weight consumer for "
+                f"rollout.name={self.rollout_config.name!r}; use sglang or vllm"
             )
         bucket_size = self.rollout_config.checkpoint_engine.update_weights_bucket_megabytes << 20
         engine_kwargs = self.rollout_config.checkpoint_engine.engine_kwargs.get(backend, {})

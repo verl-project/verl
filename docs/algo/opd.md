@@ -752,7 +752,8 @@ The returned scalar loss is what `engine.train_batch` backpropagates.
 - `verl/workers/engine/{fsdp,megatron}/transformer_impl.py` — training-engine forward steps; invoke `distillation_ppo_loss` first as a logits processor (top-$k$ modes) and again as the final loss
 - `verl/trainer/main_ppo.py` — `is_distillation_enabled` gate; allocates the dedicated `teacher_pool` resource pool
 - `verl/trainer/ppo/ray_trainer.py` — constructs `MultiTeacherModelManager` and hands its `get_client()` dict to `AgentLoopWorker(... teacher_client=...)`
-- `verl/workers/rollout/llm_server.py` — `LLMServerClient` and `GlobalRequestLoadBalancer` used for both student rollout and teacher logprob computation
+- `verl/workers/rollout/llm_server.py` — `LLMServerClient` used for both student rollout and teacher logprob computation
+- `verl/workers/rollout/router.py` — pluggable router (`GlobalRequestLoadBalancer`, `get_router_handle`) selecting the backing server
 
 ### **Configuration Files**
 

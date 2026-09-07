@@ -107,7 +107,6 @@ EXTRA=(
     actor_rollout_ref.actor.strategy=fsdp2
     actor_rollout_ref.model.use_fused_kernels=True
     actor_rollout_ref.rollout.multi_stage_wake_up=True
-    actor_rollout_ref.rollout.enable_chunked_prefill=False
     actor_rollout_ref.rollout.enforce_eager=False
     actor_rollout_ref.rollout.free_cache_engine=True
 )

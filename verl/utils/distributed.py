@@ -60,8 +60,9 @@ def set_numa_affinity():
 
 
 def initialize_global_process_group(timeout_second=36000):
+    backend = f"cpu:gloo,{get_device_name()}:{get_nccl_backend()}"
     torch.distributed.init_process_group(
-        get_nccl_backend(),
+        backend=backend,
         timeout=timedelta(seconds=timeout_second),
         init_method=os.environ.get("DIST_INIT_METHOD", None),
     )

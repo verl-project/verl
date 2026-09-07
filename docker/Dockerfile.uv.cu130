@@ -18,13 +18,18 @@
 # At build time we BAKE the full uv cache — every backend combination's wheels
 # & built artifacts, resolved from the committed uv.lock — into the image (the
 # `prefetch` stage). The image does NOT bake a fixed .venv. At container start
-# you materialize the combination you want with `manage_envs.py sync` — it
-# `uv sync`s the requested extras from that baked cache (fast / offline) into a
-# single project venv at /workspace/verl/.venv (already on PATH). There is no
-# per-backend venv and no Ray py_executable switching — every role runs from
-# that one .venv. The uv flow is x86_64 Linux + Python 3.12 only — Ascend NPU
-# (vllm-ascend / sglang-ascend / mindspeed) and aarch64 GPU variants (e.g.
-# Grace-Blackwell) are out of scope; for Ascend see
+# there is no install step: `uv run --extra <engine> --extra <trainer>` (what the
+# examples/ scripts do) materializes the requested extras from that baked cache
+# (fast / offline) into the single project venv /workspace/verl/.venv, already on
+# PATH; `manage_envs.py sync` does the same up front if you want it before
+# launching. There is no per-backend venv — every role runs from that one .venv,
+# which Ray workers reach via runtime_env.py_executable.
+#
+# The uv flow is Linux + Python 3.12 on x86_64 AND aarch64
+# (GH200 / GB200) — this one Dockerfile builds both, since every layer below
+# resolves its arch at build time and pyproject.toml's [tool.uv].environments
+# declares both, so the committed uv.lock carries both arches' wheels. Ascend NPU
+# (vllm-ascend / sglang-ascend / mindspeed) remains out of scope; see
 # `docker/ascend/Dockerfile.ascend_8.5.0_a2` and friends instead.
 #
 # The base layer is a superset of the "basic" stages of the upstream
@@ -42,14 +47,42 @@
 #
 #     docker build -f docker/Dockerfile.uv.cu130 -t verl:uv-cu130 .
 #
+# nvidia/cuda:13.0.2-devel-ubuntu24.04 is a multi-arch manifest, so the same
+# command produces an x86_64 image on an x86_64 host and an aarch64 one on an
+# arm64 host:
+#
+#     docker build --platform linux/arm64 -f docker/Dockerfile.uv.cu130 \
+#         -t verl:uv-cu130-arm64 .
+#
+# Prefer running that on arm64 hardware. Nothing here blocks cross-building it
+# from x86_64 (buildx + binfmt: `docker run --privileged --rm tonistiigi/binfmt
+# --install arm64`, then a docker-container builder), but every expensive layer
+# is compute-bound and would run under QEMU: the ~60-package apt install, the
+# GDRCopy source build, megatron-core's pybind11 extension and mbridge in
+# `prefetch`, all at emulation speed. If the only arm64 machine you have is
+# remote, attach it as a NATIVE buildx node and drive the build from x86_64 —
+# same command, no emulation. `user@arm-host` below is a PLACEHOLDER: substitute
+# a resolvable arm64 host with Docker 18.09+ and key-based SSH, and check it
+# with `ssh <host> docker version` first.
+#
+#     docker buildx create --name verl-arm --driver docker-container \
+#         --platform linux/arm64 ssh://user@arm-host --use
+#     docker buildx build --platform linux/arm64 -f docker/Dockerfile.uv.cu130 \
+#         -t verl:uv-cu130-arm64 --load .
+#
+# See docker/README.md ("GB200 / aarch64") for the QEMU-only fallback when there
+# is no arm64 machine at all.
+#
 # The image carries the cache for EVERY backend; you pick the combination at
-# RUN time (not build time) by syncing it yourself. It must be conflict-free
-# (see [tool.uv].conflicts):
+# RUN time (not build time), and it must be conflict-free (see
+# [tool.uv].conflicts):
 #
 #     docker run --rm -it --gpus all verl:uv-cu130 bash
 #     # then, inside the container:
-#     python3 manage_envs.py sync sglang megatron -- --frozen
-#     python3 -m verl.trainer.main_ppo ...
+#     bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
+#     # ... or spell the command out:
+#     uv run --frozen --all-packages --extra sglang --extra megatron \
+#         python3 -m verl.trainer.main_ppo ...
 #
 # Optional named stages:
 #   * --target=prefetch : just the baked uv cache (every backend), no source.
@@ -60,17 +93,36 @@
 # Useful build args:
 #
 #     --build-arg CUDA_VERSION=13.0.2            # alternative CUDA dev base
+#     --build-arg CUDA_BASE_IMAGE=nvidia/cuda    # mirror of that base's repo
 #     --build-arg UBUNTU_MIRROR=...              # apt mirror (sglang-style)
 #     --build-arg PIP_DEFAULT_INDEX=...          # pip global index URL
 #     --build-arg GITHUB_ARTIFACTORY=github.com  # github mirror
 #
+# Behind an egress proxy, those mirrors cover the RUN steps but NOT the base
+# image pull: BuildKit resolves `FROM` itself, before any build arg is in play,
+# so `--build-arg https_proxy=...` has no effect on it. Give the builder the
+# proxy instead, and keep the build args for the RUN steps:
+#
+#     docker buildx create --name verl-proxy --driver docker-container --use \
+#         --driver-opt env.http_proxy=http://proxy:8118 \
+#         --driver-opt env.https_proxy=http://proxy:8118 \
+#         --driver-opt env.no_proxy=localhost,127.0.0.1
+#
 # Build with BuildKit. The `prefetch` stage bakes the uv cache into the image
-# (deliberately no cache mount), so the runtime `uv sync` is offline; the
+# (deliberately no cache mount), so the runtime sync is offline; the
 # `lock` and apt steps still use BuildKit cache mounts for faster rebuilds.
-# See the "Install from the uv image" section in docs/start/install.rst.
+# See the "Run from the uv Docker image" section in docs/start/install.rst.
 
 ARG CUDA_VERSION=13.0.2
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS base
+# Repository of the CUDA base image, so a site whose docker.io access is slow or
+# blocked can point at an internal Docker Hub mirror without editing this file
+# (--build-arg CUDA_BASE_IMAGE=<mirror>/nvidia/cuda). Note that resolving this
+# image is done by the BuildKit daemon, NOT by a build step, so `--build-arg
+# https_proxy=...` does not apply to it — a proxy for it has to be set on the
+# builder itself (`buildx create --driver-opt env.https_proxy=...`). A mirror
+# used for an arm64 build must carry the arm64 manifest.
+ARG CUDA_BASE_IMAGE=nvidia/cuda
+FROM ${CUDA_BASE_IMAGE}:${CUDA_VERSION}-devel-ubuntu24.04 AS base
 
 ARG CUDA_VERSION
 ARG TARGETARCH
@@ -236,9 +288,9 @@ RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linu
 
 # ---------------------------------------------------------------------------
 # uv — single static binary. We bake the full uv cache from the committed
-# uv.lock via manage_envs.py (the `prefetch` stage); at run time you sync the
-# combination you want into .venv from it with `manage_envs.py sync`. Put uv on
-# PATH and copy across the uv tunables that vllm sets.
+# uv.lock via manage_envs.py (the `prefetch` stage); at run time `uv run` (or an
+# explicit `manage_envs.py sync`) materializes the combination you want into
+# .venv from it. Put uv on PATH and copy across the uv tunables that vllm sets.
 # ---------------------------------------------------------------------------
 COPY --from=ghcr.io/astral-sh/uv:0.11.16 /uv /uvx /bin/
 
@@ -250,6 +302,13 @@ ENV UV_HTTP_TIMEOUT=500 \
     UV_INDEX_STRATEGY="unsafe-best-match" \
     UV_LINK_MODE=copy \
     UV_CACHE_DIR=/root/.cache/uv
+
+# megatron-core's package_info.py appends `git rev-parse --short HEAD` to
+# __version__ unless NO_VCS_VERSION=1, producing 0.18.0+<hash>. uv then sees a
+# mismatch with the locked 0.18.0 and reinstalls it on every `uv run` — racing
+# across 100+ Ray workers. Set it here so the prefetch-baked wheel AND every
+# runtime `uv run` build the clean 0.18.0.
+ENV NO_VCS_VERSION=1
 
 # Enable CUDA forward compatibility by setting '-e VLLM_ENABLE_CUDA_COMPATIBILITY=1'.
 # Only needed for datacenter/professional GPUs with older drivers.
@@ -293,7 +352,7 @@ RUN printf 'verl\n' > README.md
 # layer is independent of the verl source tree. NOTE: unlike every other uv
 # step there is deliberately NO `--mount=type=cache` here, so the warmed cache
 # is committed as an image layer and ships *inside* the image; the runtime
-# `uv sync` then resolves from it offline.
+# `uv run` / `uv sync` then resolves from it offline.
 # ---------------------------------------------------------------------------
 FROM deps AS prefetch
 RUN python3 manage_envs.py prefetch cu130 dev -- --frozen
@@ -318,18 +377,20 @@ RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
 # ---------------------------------------------------------------------------
 # final: the runtime image. Inherits the full baked uv cache from `prefetch`,
 # adds the verl source, and bakes NO fixed .venv. The container starts in a
-# shell; materialize the combination you want with `manage_envs.py sync` — it
-# `uv sync`s the requested extras into /workspace/verl/.venv from the baked
-# cache (fast / offline, no network). That venv's bin is already on PATH, so it
+# shell and needs no install step: `uv run --extra ...` installs the requested
+# extras into /workspace/verl/.venv from the baked cache (fast / offline, no
+# network) and runs from it, and that venv's bin is already on PATH so it
 # activates in place. The combination must be conflict-free (see
 # [tool.uv].conflicts), e.g.:
 #
 #     docker run --rm -it --gpus all verl:uv-cu130 bash
 #     # then, inside the container:
-#     python3 manage_envs.py sync sglang megatron -- --frozen
-#     python3 -m verl.trainer.main_ppo ...
+#     bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh
+#     # ... or spell the command out:
+#     uv run --frozen --all-packages --extra sglang --extra megatron \
+#         python3 -m verl.trainer.main_ppo ...
 #
-# The cuDNN / NCCL pip wheels installed by that sync (nvidia-cudnn-cu13 /
+# The cuDNN / NCCL pip wheels this installs (nvidia-cudnn-cu13 /
 # nvidia-nccl-cu13, from torch's transitive pins) must match the apt debs above.
 # ---------------------------------------------------------------------------
 FROM prefetch AS final
@@ -366,10 +427,13 @@ CMD ["bash"]
 # runtime-env plugin, so the binary has to be on PATH; the CUDA base's own
 # /usr/local/cuda/bin/nsys is older and shadows the deb's /usr/local/bin/nsys,
 # so replace it. The symlink targets are the paths the deb's postinst registers
-# with update-alternatives (target-linux-x64/nsys, host-linux-x64/nsys-ui) —
-# `ln -s` happily creates dangling links, so the trailing `nsys --version`
-# fails the build loudly if that layout ever moves. apt resolves the deb's own
-# Qt / X11 dependencies (libxcb-cursor0 and friends) from the archive.
+# with update-alternatives; their directory carries the arch in its name
+# (target-linux-x64 / host-linux-x64 on amd64, target-linux-sbsa-armv8 /
+# host-linux-armv8 on arm64), so they are globbed rather than hardcoded — each
+# arch's deb ships exactly one match. `test -x` plus the trailing `nsys
+# --version` fail the build loudly if that layout ever moves (`ln -s` would
+# otherwise happily create a dangling link). apt resolves the deb's own Qt / X11
+# dependencies (libxcb-cursor0 and friends) from the archive.
 # ---------------------------------------------------------------------------
 ARG NSIGHT_VERSION=2025.6.1
 ARG NSIGHT_BUILD=2025.6.1.190-1
@@ -381,6 +445,10 @@ RUN NSIGHT_ARCH=$(if [ "$(uname -m)" = "aarch64" ]; then echo arm64; else echo a
     && apt-get update && apt-get install -y /tmp/${NSIGHT_DEB} \
     && rm -f /tmp/${NSIGHT_DEB} \
     && rm -rf /var/lib/apt/lists/* \
-    && ln -sf /opt/nvidia/nsight-systems/${NSIGHT_VERSION}/target-linux-x64/nsys /usr/local/cuda/bin/nsys \
-    && ln -sf /opt/nvidia/nsight-systems/${NSIGHT_VERSION}/host-linux-x64/nsys-ui /usr/local/cuda/bin/nsys-ui \
+    && NSIGHT_ROOT=/opt/nvidia/nsight-systems/${NSIGHT_VERSION} \
+    && NSYS_BIN="$(ls -1 ${NSIGHT_ROOT}/target-linux-*/nsys | head -n1)" \
+    && NSYS_UI="$(ls -1 ${NSIGHT_ROOT}/host-linux-*/nsys-ui | head -n1)" \
+    && test -x "${NSYS_BIN}" && test -x "${NSYS_UI}" \
+    && ln -sf "${NSYS_BIN}" /usr/local/cuda/bin/nsys \
+    && ln -sf "${NSYS_UI}" /usr/local/cuda/bin/nsys-ui \
     && nsys --version

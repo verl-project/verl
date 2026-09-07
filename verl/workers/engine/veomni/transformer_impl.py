@@ -14,6 +14,7 @@
 
 
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass, field, fields
 from typing import Any, Callable, Optional, Sequence
 
@@ -23,7 +24,6 @@ from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
 from veomni.arguments import MixedPrecisionConfig, OpsImplementationConfig
 from veomni.distributed import parallel_state
-from veomni.distributed.offloading import build_activation_offloading_context
 from veomni.distributed.torch_parallelize import build_parallelize_model
 from veomni.models.auto import build_foundation_model
 from veomni.models.checkpoint_tensor_loading import get_checkpoint_tensor_converter
@@ -306,6 +306,28 @@ class VeOmniEngine(FSDPEngine):
         """
         return self.model_config.local_hf_config_path
 
+    def _maybe_apply_async_activation_offload(self, module):
+        """Attach VeOmni's stream-based activation offload to the decoder layers.
+
+        Must run on the unparallelized module: the offload wraps each selected layer's
+        ``__call__`` so that ``saved_tensors_hooks`` sits *outside* the gradient-checkpoint
+        boundary and the FSDP2 sharding that ``build_parallelize_model`` installs. Applying it
+        afterwards would put the hooks inside the checkpoint region, where the packed
+        activations are recomputed rather than saved, so nothing would be offloaded.
+        """
+        if not self.engine_config.enable_async_activation_offload:
+            return
+
+        # Imported lazily so a VeOmni predating stream-based offload only fails when asked for it.
+        from veomni.distributed.async_offload import apply_async_activation_offload
+
+        apply_async_activation_offload(
+            module,
+            list(self.engine_config.activation_offload_modules),
+            host_cache_limit_bytes=int(self.engine_config.activation_offload_host_cache_limit_gb * 1024**3),
+        )
+        log_gpu_memory_usage("After apply async activation offload", logger=logger)
+
     def _build_model_optimizer(self):
         # build_foundation_model runs apply_ops_config(ops_implementation)
         # before constructing the model, so per-model device_patch files see
@@ -324,6 +346,8 @@ class VeOmniEngine(FSDPEngine):
             init_device=self.engine_config.init_device,
         )
         log_gpu_memory_usage("After load base model", logger=logger)
+
+        self._maybe_apply_async_activation_offload(module)
 
         # Applies parallel strategies to the model.
         log_gpu_memory_usage("Before parallelize model", logger=logger)
@@ -357,11 +381,6 @@ class VeOmniEngine(FSDPEngine):
         self.module = module
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
-        self.model_fwd_context, self.model_bwd_context = build_activation_offloading_context(
-            self.model_config.enable_activation_offload,
-            self.model_config.enable_gradient_checkpointing,
-            self.engine_config.activation_gpu_limit,
-        )
 
     def optimizer_step(self):
         """
@@ -420,6 +439,8 @@ class VeOmniEngine(FSDPEngine):
             else:
                 self._router_replay.begin_replay()
 
+        ctx = torch.no_grad() if forward_only else nullcontext()
+
         # Wrap the per-step body in try/finally so the controller is always
         # reset to DISABLED even if forward / backward / postprocess raises.
         # Without this, an exception leaves _recorded / _targets pinned
@@ -430,13 +451,12 @@ class VeOmniEngine(FSDPEngine):
             output_lst = []
 
             for micro_batch in micro_batches:
-                with self.model_fwd_context:
+                with ctx:
                     loss, meta_info = self.forward_step(
                         micro_batch, loss_function=loss_function, forward_only=forward_only
                     )
                 if not forward_only:
-                    with self.model_bwd_context:
-                        loss.backward()
+                    loss.backward()
 
                 output_lst.append(meta_info)
 

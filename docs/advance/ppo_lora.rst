@@ -197,7 +197,7 @@ Best Practices and Notes
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
-    actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
+    actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=1 \
 
 Example Scripts
 -------------------

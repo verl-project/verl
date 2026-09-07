@@ -370,7 +370,7 @@ def forward_with_torch_backend(
     if isinstance(vocab_weights, DTensor):
         vocab_weights = vocab_weights.full_tensor().to(hidden_states.device)
 
-    fused_linear_for_ppo = FusedLinearForPPO()
+    fused_linear_for_ppo = FusedLinearForPPO(impl_backend=getattr(self, "_verl_fused_kernels_backend", "torch"))
     log_probs, entropy = fused_linear_for_ppo.forward(
         hidden_states=hidden_states,
         vocab_weights=vocab_weights,
