@@ -56,6 +56,10 @@ use_torch_compile: true
 # Whether to use entropy checkpointing in fsdp.
 entropy_checkpointing: false
 
+# Whether to defer gradient synchronization until the final micro-batch. Disable this when the extra peak memory
+# from retaining unsharded gradients outweighs the communication savings.
+use_no_sync_for_gradient_accumulation: false
+
 # Round every packed micro-batch up to a multiple of `pad_to_length_bucket` tokens, so the packed
 # shape only takes a few distinct values instead of a new one per micro-batch (avoids kernel
 # recompilation / re-autotuning). Requires use_remove_padding=True. Pad tokens are stripped before

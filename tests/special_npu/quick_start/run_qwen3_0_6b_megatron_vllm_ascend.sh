@@ -55,7 +55,7 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=2
     actor_rollout_ref.actor.megatron.expert_model_parallel_size=1
     actor_rollout_ref.actor.megatron.use_mbridge=True
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=True
+    actor_rollout_ref.actor.megatron.vanilla_mbridge=False
     actor_rollout_ref.actor.use_kl_loss=True
     actor_rollout_ref.actor.kl_loss_coef=0.001
     actor_rollout_ref.actor.kl_loss_type=low_var_kl
@@ -64,7 +64,6 @@ ACTOR=(
 
 ROLLOUT=(
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
-    actor_rollout_ref.rollout.enable_chunked_prefill=False
     actor_rollout_ref.rollout.tensor_model_parallel_size=2
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6

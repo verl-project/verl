@@ -138,7 +138,6 @@ ENGINE=(
     engine.etp=1
     engine.param_offload=${ALL_OFFLOAD}
     engine.optimizer_offload=${ALL_OFFLOAD}
-    engine.grad_offload=${ALL_OFFLOAD}
     engine.attention_backend_override=flash
     engine.impl_cfg.use_thd=True
     +engine.impl_cfg.optimizer=${OPTIMIZER}

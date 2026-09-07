@@ -23,13 +23,14 @@ case "${DEVICE}" in
         export TASK_QUEUE_ENABLE=1
         export HCCL_OP_EXPANSION_MODE="AIV"
         export VLLM_USE_V1=1
-        export VLLM_VERSION=0.13.0
+        export VLLM_VERSION=0.23.0
         export VLLM_ASCEND_ENABLE_NZ=0
         export HCCL_BUFFSIZE=610
         export CKPT_DIR="./ckpt30b"
         export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:1024
         export CUDA_DEVICE_MAX_CONNECTIONS=1
         n_devices_per_node=16
+        ep_size=${ep_size:-8}
         ;;
     *)
         echo "Unsupported DEVICE=${DEVICE}. Expected 'gpu' or 'npu'." >&2
@@ -67,7 +68,7 @@ ACTOR=(
     actor_rollout_ref.actor.entropy_coeff=0
     actor_rollout_ref.actor.use_torch_compile=False
     actor_rollout_ref.actor.veomni.fsdp_size=-1
-    actor_rollout_ref.actor.veomni.expert_parallel_size=1
+    actor_rollout_ref.actor.veomni.expert_parallel_size=${ep_size}
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${actor_ppo_max_token_len}
 )
 

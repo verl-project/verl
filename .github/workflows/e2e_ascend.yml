@@ -175,3 +175,10 @@ jobs:
           ray stop --force
           SAVE_FREQ=-1 TOTAL_TRAINING_STEPS=1 bash tests/special_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.sh
           rm -rf $HOME/ckpts
+      - name: Running geo3k e2e training tests with GRPO on ASCEND NPU (FSDP-Turbo backend)
+        run: |
+          rm -rf /FSDPTurbo
+          git clone https://gitcode.com/Ascend/FSDPTurbo.git /FSDPTurbo
+          export PYTHONPATH=/FSDPTurbo:$PYTHONPATH
+          ray stop --force
+          bash tests/special_npu/run_qwen3_5_2b_fsdp_turbo.sh

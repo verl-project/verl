@@ -15,7 +15,6 @@ export PARAMETER_SYNC_STEP=${PARAMETER_SYNC_STEP:-4}
 export PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-16}
 export TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-2}
 export ROLLOUT_TP=${ROLLOUT_TP:-2}
-export VANILLA_MBRIDGE=${VANILLA_MBRIDGE:-True}
 
 params=(
     data.filter_overlong_prompts=False
@@ -63,7 +62,6 @@ elif [[ "${ACTOR_STRATEGY}" == "megatron" ]]; then
         actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
         actor_rollout_ref.actor.megatron.param_offload=True
         actor_rollout_ref.actor.megatron.optimizer_offload=True
-        actor_rollout_ref.actor.megatron.grad_offload=True
     )
 else
     echo "Unknown ACTOR_STRATEGY=${ACTOR_STRATEGY}; expected fsdp2 or megatron"

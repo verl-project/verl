@@ -88,7 +88,6 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.expert_model_parallel_size=${actor_ep}
     actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${actor_etp}
     actor_rollout_ref.actor.megatron.param_offload=True
-    actor_rollout_ref.actor.megatron.grad_offload=True
     actor_rollout_ref.actor.megatron.optimizer_offload=True
     actor_rollout_ref.actor.megatron.use_mbridge=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32

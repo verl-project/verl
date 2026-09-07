@@ -505,7 +505,11 @@ class RLHFDataset(Dataset):
         image_patch_size,
         config: DictConfig,
     ) -> tuple[list[Image.Image], list[Any], list[Any]]:
-        return cls._process_multi_modal_info(messages, image_patch_size=image_patch_size, config=config)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: cls._process_multi_modal_info(messages, image_patch_size=image_patch_size, config=config),
+        )
 
     def split(self, num_splits: int):
         """

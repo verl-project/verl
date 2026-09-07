@@ -131,7 +131,6 @@ params=(
     actor_rollout_ref.actor.megatron.vanilla_mbridge=False
     actor_rollout_ref.actor.megatron.param_offload=False
     actor_rollout_ref.actor.megatron.optimizer_offload=False
-    actor_rollout_ref.actor.megatron.grad_offload=False
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TRAIN_TP}
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${TRAIN_PP}
     actor_rollout_ref.rollout.name=vllm

@@ -210,6 +210,8 @@ class Tracking:
             loggers["tensorboard"].finish()
         if "clearml" in loggers:
             loggers["clearml"].finish()
+        if "mlflow" in loggers:
+            loggers["mlflow"].finish()
         if "trackio" in loggers:
             loggers["trackio"].finish()
         if "file" in loggers:
@@ -615,6 +617,12 @@ class _MlflowLoggingAdapter:
                     self.logger.info(msg, *args)
                 else:
                     self.logger.warning(msg, *args)
+
+    def finish(self):
+        import mlflow
+
+        if mlflow.active_run() is not None:
+            mlflow.end_run()
 
 
 def _compute_mlflow_params_from_objects(params) -> dict[str, Any]:

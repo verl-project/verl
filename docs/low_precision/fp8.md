@@ -10,7 +10,7 @@ verl supports two FP8 modes for accelerating RL training:
 | **FP8 End-to-End** | FP8 (Megatron) | FP8 (vLLM) |
 
 > [!TIP]
-> For ready-to-run scripts, see the [low-precision recipe directory](https://github.com/verl-project/verl-recipe/low_precision).
+> For ready-to-run scripts, see the [low-precision recipe directory](https://github.com/verl-project/verl-recipe/tree/main/low_precision).
 
 ---
 

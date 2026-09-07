@@ -131,7 +131,6 @@ jobs:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0"
       ACTOR_STRATEGY: "megatron"
-      VANILLA_MBRIDGE: "True"
       device_name: "npu"
       UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
       UV_INDEX_STRATEGY: unsafe-best-match

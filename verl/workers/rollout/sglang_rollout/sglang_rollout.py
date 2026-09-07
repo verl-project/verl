@@ -41,6 +41,7 @@ from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
 from verl.workers.rollout.sglang_rollout.http_server_engine import AsyncHttpServerAdapter
 from verl.workers.rollout.sglang_rollout.utils import (
+    DEEPSEEK_V4_FUSION_GROUPS,
     SGLANG_LORA_NAME,
     get_named_tensor_buckets,
     lora_served_as_adapter,
@@ -368,7 +369,14 @@ class ServerAdapter(BaseRollout):
             else:
                 weights = weights
 
-            async for params_batch in get_named_tensor_buckets(weights, update_weights_bucket_bytes):
+            fusion_groups = (
+                DEEPSEEK_V4_FUSION_GROUPS
+                if getattr(self.model_config.hf_config, "model_type", None) == "deepseek_v4"
+                else ()
+            )
+            async for params_batch in get_named_tensor_buckets(
+                weights, update_weights_bucket_bytes, fusion_groups=fusion_groups
+            ):
                 await sgl_update_weights(
                     engine=self._engine,
                     params_batch=[(_strip_lora_base_layer(name), _to_ipc_device(t)) for name, t in params_batch],

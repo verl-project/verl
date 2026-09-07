@@ -106,7 +106,6 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${actor_etp}
     actor_rollout_ref.actor.megatron.param_offload=${offload}
     actor_rollout_ref.actor.megatron.optimizer_offload=${offload}
-    actor_rollout_ref.actor.megatron.grad_offload=${offload}
     actor_rollout_ref.actor.megatron.use_mbridge=True
     actor_rollout_ref.actor.megatron.router_replay.mode=${ROUTING_REPLAY_MODE}
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_enable_deepep=True

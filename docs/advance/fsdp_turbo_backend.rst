@@ -1,7 +1,7 @@
 FSDP-Turbo backend
 ==================
 
-Last updated: 08/15/2026.
+Last updated: 08/31/2026.
 
 FSDP-Turbo (``fsdp_turbo``) is a high-performance FSDP training backend built
 on top of the `fsdp-turbo <https://gitcode.com/Ascend/FSDPTurbo.git>`_ library.
@@ -198,22 +198,20 @@ they default to ``fully_shard_parallel_size=16`` and (for the MoE script)
 respectively.  The CP patches described above are appended only when
 ``SP_SIZE > 1``.
 
-For CI, two minimal smoke-test scripts are available:
+For CI, the following smoke-test scripts are available:
 
 .. code-block:: bash
 
-   # GPU e2e smoke test for Qwen3.5-0.8B (dense)
-   bash tests/special_e2e/run_ppo_trainer_fsdp_turbo.sh
+   # NPU CI smoke test for Qwen3.5-2B (dense)
+   bash tests/special_npu/run_qwen3_5_2b_fsdp_turbo.sh
 
    # NPU nightly CI smoke test for Qwen3.5-2B (dense)
    bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_5_2b_fsdp_turbo_npu.sh
 
-The GPU smoke test targets Qwen3.5-0.8B (``FSDP_SIZE=8``, ``SP_SIZE=1``) on a
-single 8-GPU node; the GPU CI workflow overrides ``TOTAL_TRAINING_STEPS=2``
-(script default 1).  The NPU smoke test targets Qwen3.5-2B (``FSDP_SIZE=4``,
-``SP_SIZE=2``) on a single 8-NPU node with context parallelism enabled by
-default, and runs for 5 training steps.  Both hardcode the Turbo plan rather
-than auto-detecting the device.
+Both scripts target Qwen3.5-2B (``FSDP_SIZE=4``, ``SP_SIZE=2``) on a single
+8-NPU node with context parallelism enabled by default.  The CI smoke test
+runs for 1 training step; the nightly script runs for 5.  Both hardcode the
+Turbo plan rather than auto-detecting the device.
 
 Source of truth
 ---------------
@@ -227,10 +225,11 @@ Source of truth
   ``apply_clip_grad_norm_patch`` — mixed-mesh gradient clipping.
 * ``verl/trainer/config/engine/fsdp.yaml``: default Turbo config schema.
 * ``examples/grpo_trainer/run_qwen3_5_*_fsdp_turbo.sh``: runnable examples.
-* ``tests/special_e2e/run_ppo_trainer_fsdp_turbo.sh``: GPU e2e smoke test.
+* ``tests/special_npu/run_qwen3_5_2b_fsdp_turbo.sh``: NPU e2e CI smoke test.
 * ``tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_5_2b_fsdp_turbo_npu.sh``:
   NPU nightly CI smoke test.
-* ``.github/workflows/e2e_ppo_trainer_fsdp_turbo_vllm.yml``: GPU e2e CI workflow
-  (8x L20, clones FSDPTurbo to ``/FSDPTurbo`` and exports ``PYTHONPATH``).
+* ``.github/workflows/e2e_ascend.yml``: NPU e2e CI workflow (turbo steps under
+  ``vlm_rl_job``, 8x Ascend 910B, clones FSDPTurbo to ``/FSDPTurbo`` and
+  exports ``PYTHONPATH``).
 * ``.github/workflows/nightly_ascend.yml``: NPU nightly CI workflow (turbo job
   ``nightlyCI_grpo_qwen3_5_2b_fsdp_turbo_vllm_ascend``, scheduled daily).

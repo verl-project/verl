@@ -140,7 +140,6 @@ ACTOR=(
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz}
     actor_rollout_ref.actor.megatron.param_offload=${offload}
     actor_rollout_ref.actor.megatron.optimizer_offload=${offload}
-    actor_rollout_ref.actor.megatron.grad_offload=${offload}
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${train_pp}
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${train_tp}
     actor_rollout_ref.actor.megatron.expert_model_parallel_size=$EP

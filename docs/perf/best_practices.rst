@@ -225,8 +225,9 @@ Optimizer settings
     Companion switches for hybrid optimizers. Turn them on alongside CPU offload.
 
 Megatron-related parameters
-  - ``actor_rollout_ref.actor.megatron.param_offload`` / ``optimizer_offload`` / ``grad_offload``:
-    Offload parameters, optimizer states, and gradients to CPU when GPU memory is insufficient.
+  - ``actor_rollout_ref.actor.megatron.param_offload`` / ``optimizer_offload``:
+    Offload parameters and optimizer states to CPU when GPU memory is insufficient. Parameter offload also releases
+    gradient buffers while the actor is inactive.
   - ``+actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method`` / ``recompute_granularity`` / ``recompute_num_layers``:
     Gradient checkpointing controls. Enable (e.g., ``uniform``, ``full``, ``1``) to trade computation for memory.
   - ``+actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype`` / ``moe_shared_expert_overlap`` / ``moe_permute_fusion`` / ``moe_enable_deepep`` / ``moe_token_dispatcher_type``:

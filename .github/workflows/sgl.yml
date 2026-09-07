@@ -62,6 +62,7 @@ on:
       # Entrypoints
       - ".github/workflows/sgl.yml"
       - "tests/rollout/*sglang*"
+      - "tests/experimental/agent_loop"
       - "tests/rollout/async_rollout_utils.py"
 
 # Cancel jobs on the same ref if a new one is triggered
