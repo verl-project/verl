@@ -18,6 +18,7 @@ from typing import Optional
 from omegaconf import MISSING, DictConfig, OmegaConf
 
 from verl.base_config import BaseConfig
+from verl.utils.memory_utils import GCSetting, validate_gc_setting
 from verl.utils.profiler import ProfilerConfig
 from verl.workers.config.disaggregation import DisaggregationConfig
 from verl.workers.config.model import MtpConfig
@@ -133,12 +134,21 @@ class CheckpointEngineConfig(BaseConfig):
     backend: Optional[str] = "naive"
     # Bucket size in MB to transfer multiple weights at one time
     update_weights_bucket_megabytes: int = 2048
+    # Python GC after weight-transfer sender cleanup: True for a full collection,
+    # False to disable, or a generation integer.
+    gc_on_weight_transfer_cleanup: GCSetting = True
     # Additional keyword arguments for checkpoint engine
     engine_kwargs: dict = field(default_factory=dict)
     # If set, this Python module is imported on every worker process before the
     # backend is instantiated, allowing custom backends to register themselves
     # in CheckpointEngineRegistry.
     custom_backend_module: Optional[str] = None
+
+    def __post_init__(self):
+        validate_gc_setting(
+            self.gc_on_weight_transfer_cleanup,
+            name="gc_on_weight_transfer_cleanup",
+        )
 
 
 @dataclass

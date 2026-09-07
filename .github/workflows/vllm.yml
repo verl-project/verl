@@ -59,6 +59,9 @@ on:
       - ".github/workflows/vllm.yml"
       - "tests/special_e2e/generation"
       - "tests/experimental/reward_loop/run_determinism_e2e_with_rm.py"
+      - "tests/utils/test_bucketed_weight_transfer_on_cpu.py"
+      - "tests/workers/test_engine_workers_lora_sync_on_cpu.py"
+      - "tests/workers/rollout/test_vllm_weight_sender_config_on_cpu.py"
       - "tests/workers/rollout"
       - "verl/trainer/main_generation.py"
       - "verl/trainer/config/generation.yaml"
@@ -134,6 +137,9 @@ jobs:
             tests/workers/rollout/test_vllm_cli_args_on_cpu.py \
             tests/workers/rollout/test_vision_placeholder_tokens_on_cpu.py \
             tests/workers/rollout/test_vllm_pd_disaggregation_on_cpu.py \
+            tests/workers/rollout/test_vllm_weight_sender_config_on_cpu.py \
+            tests/workers/test_engine_workers_lora_sync_on_cpu.py \
+            tests/utils/test_bucketed_weight_transfer_on_cpu.py \
             tests/utils/test_vllm_weight_name_normalization_on_cpu.py::test_update_weights_from_ipc_accumulates_lora_across_buckets \
             tests/utils/test_vllm_weight_name_normalization_on_cpu.py::test_update_weights_from_ipc_standard_loads_per_bucket
       - name: Prepare gsm8k dataset

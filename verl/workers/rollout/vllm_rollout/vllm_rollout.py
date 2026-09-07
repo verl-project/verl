@@ -140,14 +140,18 @@ class ServerAdapter(BaseRollout):
         job_id = ray.get_runtime_context().get_job_id()
         self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{self.replica_rank}-rank-{local_rank}.sock"
 
-        self.use_shm = not is_support_ipc()
+        force_shm = os.getenv("VERL_FORCE_SHM_WEIGHT_TRANSFER", "0") == "1"
+        self.use_shm = force_shm or not is_support_ipc()
         if self.use_shm:
-            logger.warning(
-                "IPC is not supported on your devices. Falling back to shared memory for weight transfer, "
-                "which may cause performance degradation. If you are using Ascend NPUs, please ensure that "
-                "your software and CANN toolkit versions meet the requirements for IPC support. (Ascend HDK version "
-                ">= 25.3.rc1 and CANN toolkit version >= 8.3.RC1)"
-            )
+            if force_shm:
+                logger.warning("Shared-memory weight transfer was explicitly requested.")
+            else:
+                logger.warning(
+                    "IPC is not supported on your devices. Falling back to shared memory for weight transfer, "
+                    "which may cause performance degradation. If you are using Ascend NPUs, please ensure that "
+                    "your software and CANN toolkit versions meet the requirements for IPC support. "
+                    "(Ascend HDK version >= 25.3.rc1 and CANN toolkit version >= 8.3.RC1)"
+                )
 
     def _ensure_server_handle(self) -> bool:
         """Lazy-init server handle. Returns False if this rank should not proceed."""
@@ -211,6 +215,7 @@ class ServerAdapter(BaseRollout):
         weights: Generator[tuple[str, torch.Tensor], None, None],
         global_steps: int = None,
         wire_format: str = "named_tensors",
+        gc_diagnostics: bool = False,
         **kwargs,
     ):
         """Update model weights via CUDA IPC (fallback to shared memory if IPC not supported) to inference workers."""
@@ -230,6 +235,8 @@ class ServerAdapter(BaseRollout):
             zmq_handle=self.zmq_handle,
             bucket_size_mb=bucket_size_mb,
             use_shm=self.use_shm,
+            gc_on_cleanup=self.config.checkpoint_engine.gc_on_weight_transfer_cleanup,
+            gc_diagnostics=gc_diagnostics,
         )
         await sender.async_send_weights(weights)
 
