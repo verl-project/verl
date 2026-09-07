@@ -291,6 +291,22 @@ class RolloutConfig(BaseConfig):
                 stacklevel=2,
             )
 
+        if self.name == "sglang":
+            sglang_kwargs = self.engine_kwargs.get("sglang", {})
+            if "tp_size" in sglang_kwargs or "dp_size" in sglang_kwargs:
+                raise ValueError(
+                    "SGLang `tp_size` and `dp_size` are managed by verl; use "
+                    "`tensor_model_parallel_size` and `data_parallel_size` instead of overriding them in "
+                    "`engine_kwargs.sglang`."
+                )
+            if self.data_parallel_size > 1 and sglang_kwargs.get("enable_dp_attention") is not True:
+                raise ValueError(
+                    "SGLang rollout with `data_parallel_size > 1` requires "
+                    "`engine_kwargs.sglang.enable_dp_attention=True`: verl passes "
+                    "`tensor_model_parallel_size * data_parallel_size` as SGLang `tp_size`, and SGLang weight "
+                    "updates require `dp_size == 1` or DP attention."
+                )
+
         if self.name != "trtllm" and self.expert_parallel_size > 1:
             assert self.expert_parallel_size == (self.tensor_model_parallel_size * self.data_parallel_size), (
                 "expert_parallel_size must be equal to tensor_model_parallel_size * data_parallel_size"

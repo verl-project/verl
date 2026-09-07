@@ -387,8 +387,11 @@ Reference model will be enabled when ``actor.use_kl_loss`` or/and ``algorithm.us
   - For vLLM v0.7.0 and later: The fraction of **total** GPU memory to be used for the vLLM instance.
   - For SGLang: Corresponding to ``mem_fraction_static``, the fraction of the free GPU memory used for **static** memory like model weights and KV cache. 
 
-- ``actor_rollout_ref.rollout.tensor_model_parallel_size``: TP size for rollout. Only effective
-  for vllm.
+- ``actor_rollout_ref.rollout.tensor_model_parallel_size``: TP size for rollout. For SGLang,
+  verl passes ``tensor_model_parallel_size * data_parallel_size`` as SGLang's global ``tp_size``;
+  SGLang divides it by ``dp_size`` to obtain the per-DP attention TP size. SGLang configurations
+  with ``data_parallel_size > 1`` must also set
+  ``actor_rollout_ref.rollout.engine_kwargs.sglang.enable_dp_attention=True``.
 
 - ``actor_rollout_ref.rollout.log_prob_micro_batch_size``: [Will be deprecate, use log_prob_micro_batch_size_per_gpu]
   The batch size for one forward pass in the computation of ``log_prob``. The value represent the global num.

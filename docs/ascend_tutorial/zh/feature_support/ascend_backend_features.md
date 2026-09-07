@@ -62,8 +62,8 @@ verl中通过rollout config管理推理后端参数使能，包含通用参数�
 | enable_memory_saver| 无，verl中默认设置为True | 允许使用 release_memory_occupation 和 resume_memory_occupation 来节省内存
 | base_gpu_id| 无，根据实际实例和卡数自动计算  |用于分配每个实例上计算卡资源时的初始ID
 | gpu_id_step| 无，默认设置为1| 使用的连续计算卡ID 之间的差值
-| tp_size|  actor_rollout_ref.rollout.tensor_model_parallel_size * data_parallel_size|TP并行度|
-| dp_size| actor_rollout_ref.rollout.data_parallel_size|DP并行度|
+| tp_size|  actor_rollout_ref.rollout.tensor_model_parallel_size * data_parallel_size|SGLang 的全局 TP world size；开启 DP attention 后，每个 DP rank 的 attention TP 并行度为 actor_rollout_ref.rollout.tensor_model_parallel_size|
+| dp_size| actor_rollout_ref.rollout.data_parallel_size|DP 并行度；大于 1 时必须设置 actor_rollout_ref.rollout.engine_kwargs.sglang.enable_dp_attention=True|
 | ep_size| actor_rollout_ref.rollout.expert_parallel_size|EP并行度|
 | node_rank| 无，根据实际实例和卡数自动计算 |实例中的节点排序|
 | load_format|  actor_rollout_ref.rollout.load_format|要加载的模型权重格式|

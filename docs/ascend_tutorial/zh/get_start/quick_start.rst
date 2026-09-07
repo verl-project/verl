@@ -149,8 +149,7 @@ vLLM 后端脚本转换为 SGLang
    ++actor_rollout_ref.rollout.engine_kwargs.sglang.moe_a2a_backend="deepep" \
 
    # MoE 模型多 DP 时必须设置为 True
-   +actor_rollout_ref.rollout.engine_kwargs.sglang.enable_dp_attention=False \
+   +actor_rollout_ref.rollout.engine_kwargs.sglang.enable_dp_attention=True \
 
    # chunked_prefill 默认关闭
    +actor_rollout_ref.rollout.engine_kwargs.sglang.chunked_prefill_size=-1
-
