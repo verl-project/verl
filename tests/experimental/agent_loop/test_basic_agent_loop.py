@@ -18,7 +18,7 @@ from typing import Any
 import numpy as np
 import pytest
 import ray
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from transformers.utils import get_json_schema
 
 from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager
@@ -223,6 +223,8 @@ def test_tool_agent(init_config):
     init_config.actor_rollout_ref.rollout.multi_turn.tool_config_path = tool_config_path
     init_config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 2
     init_config.actor_rollout_ref.rollout.calculate_log_probs = True
+    if rollout_config := os.getenv("AGENT_LOOP_TOOL_AGENT_ROLLOUT_CONFIG"):
+        init_config.actor_rollout_ref.rollout.merge_with(OmegaConf.create(rollout_config))
     agent_loop_manager = init_agent_loop_manager(init_config)
 
     # =========================== 2. Generate sequences  ===========================

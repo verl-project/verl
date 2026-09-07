@@ -122,6 +122,49 @@ class _FakeTokenizer:
         return "<decoded>"
 
 
+def _make_agent_loop_output() -> AgentLoopOutput:
+    return AgentLoopOutput(
+        prompt_ids=[101, 102],
+        response_ids=[11, 12],
+        response_mask=[1, 1],
+        metrics=AgentLoopMetrics(),
+    )
+
+
+def test_agent_loop_output_as_dict_handles_default_extra_fields():
+    fields = _make_agent_loop_output().as_dict()
+
+    assert fields["extra_fields"] == {}
+
+
+def test_agent_loop_output_as_dict_preserves_mutated_default_extra_fields():
+    output = _make_agent_loop_output()
+    output.extra_fields["raw_prompt"] = [{"role": "user", "content": "hello"}]
+
+    fields = output.as_dict()
+
+    assert fields["extra_fields"] == {"raw_prompt": [{"role": "user", "content": "hello"}]}
+
+
+def test_agent_loop_output_as_dict_promotes_teacher_fields_without_mutating_model():
+    output = _make_agent_loop_output()
+    output.extra_fields.update(
+        {
+            "raw_prompt": [{"role": "user", "content": "hello"}],
+            "teacher_ids": [201, 202],
+            "teacher_logprobs": [-0.1, -0.2],
+        }
+    )
+
+    fields = output.as_dict()
+
+    assert fields["teacher_ids"] == [201, 202]
+    assert fields["teacher_logprobs"] == [-0.1, -0.2]
+    assert fields["extra_fields"] == {"raw_prompt": [{"role": "user", "content": "hello"}]}
+    assert output.extra_fields["teacher_ids"] == [201, 202]
+    assert output.extra_fields["teacher_logprobs"] == [-0.1, -0.2]
+
+
 @pytest.mark.asyncio
 async def test_agent_loop_worker_passes_only_hf_model_type_through_hydra(monkeypatch):
     captured_kwargs: dict[str, Any] = {}

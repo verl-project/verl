@@ -307,11 +307,16 @@ class TrainingWorker(Worker, DistProfilerExtension):
                     update_lr_scheduler=batch_idx == total_num_iterations - 1,
                     disable_auto_offload=True,
                 )
-                actor_output = self.train_batch(mini_batch_td)
-                output_lst.append(actor_output)
-                # Advance the profiler schedule once per mini-batch. No-op unless a
-                # torch profiler schedule (wait/warmup/active/repeat) is active.
+                # Name the mini-batch in the trace so each iteration of this otherwise identical
+                # loop is distinguishable when the whole step is recorded (continuous mode).
+                with torch.profiler.record_function(f"mini_batch{batch_idx}"):
+                    actor_output = self.train_batch(mini_batch_td)
+                # Advance the profiler once per mini-batch. This drives any
+                # torch.profiler.schedule (the schedule's unit is one update mini-batch) and,
+                # with no schedule, only labels torch's ProfilerStep#<n> boundary. start()/stop()
+                # happen on the outer worker, but the profiler is process-global so this reaches it.
                 self.profiler.step()
+                output_lst.append(actor_output)
 
             if self.engine.is_mp_src_rank_with_outputs():
                 actor_output = [tu.get(output, "metrics") for output in output_lst]
@@ -502,9 +507,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.enable_routing_replay = rr_mode != "disabled"
 
         # Keep the raw (un-dataclassed) role profiler config so the inner actor
-        # TrainingWorker can build a matching DistProfiler in init_model. This lets
-        # train_mini_batch drive the (process-global) torch profiler schedule via
-        # profiler.step(), even though start/stop happen on this outer worker.
+        # TrainingWorker can build a matching DistProfiler in init_model. Its stages then
+        # annotate themselves in the (process-global) torch profiler even though start/stop
+        # happen on this outer worker.
         # NOTE: we must rebuild via the hydra path (omega_conf_to_dataclass without
         # dataclass_type) so that tool_config entries are real dataclasses with
         # attribute access; the dataclass_type=ProfilerConfig variant above yields a
@@ -596,7 +601,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # Build the inner actor profiler config via the hydra path (same as SFT), so
             # its tool_config entries are real dataclass instances the torch profiler can
             # read. This gives the inner TrainingWorker a DistProfiler that shares the
-            # process-global torch profiler, so per-mini-batch profiler.step() works.
+            # process-global torch profiler, so its stages annotate the same trace.
             actor_profiler_config = (
                 omega_conf_to_dataclass(self._omega_profiler_config) if self._omega_profiler_config else None
             )
@@ -703,7 +708,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
-    @DistProfiler.annotate(color="red", role="actor_update")
+    # scheduled=True: this stage iterates over update mini-batches, so in discrete mode its trace
+    # is the one a torch.profiler.schedule sub-samples (other stages stay full).
+    @DistProfiler.annotate(color="red", role="actor_update", scheduled=True)
     @_with_routing_replay_flag(enabled=True)
     def update_actor(self, data: TensorDict) -> TensorDict:
         output = self.actor.train_mini_batch(data=data)

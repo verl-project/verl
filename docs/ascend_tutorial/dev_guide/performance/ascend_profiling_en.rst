@@ -119,7 +119,7 @@ Separation of Training and Inference Phases
             profiler:
                enable: True  # Set to True to collect the inference phase
                all_ranks: False
-               ranks: [0]  # In Agent Loop mode, this refers to the Replica Rank of the inference instance (e.g., the 0th instance)
+               ranks: [0]  # Global GPU rank(s); each is mapped to the replica that owns it
                tool_config:
                   npu:
                      discrete: True  # Discrete mode must be enabled in Agent Loop mode
@@ -184,7 +184,7 @@ Lightweight Collection of Inference Data
 
 In `Agent Loop <../advance/agent_loop.rst>`_ mode, performance data for the Rollout phase **must be collected using discrete mode**. In this case, the Profiler is triggered by the inference engine backend.
 
-1. Rank Definition: ranks in the Rollout configuration refers to the Replica Rank (inference instance index), not the Global Rank.
+1. Rank Definition: ranks in the Rollout configuration are global GPU ranks (the same as the training roles). Because a rollout replica spans ``world_size = tensor_model_parallel_size * data_parallel_size * pipeline_model_parallel_size`` GPUs, each listed rank is mapped to the replica that owns it (``replica = rank // world_size``) and that whole replica is profiled; e.g. with ``tp=8``, ``ranks: [0, 8]`` profiles the replicas holding global ranks 0 and 8 (replicas 0 and 1).
 
 2. Inference Engine Support: Currently, vLLM and SGLang engines are supported without additional settings. Specific details are as follows:
 

@@ -405,7 +405,7 @@ Find the docker for AMD ROCm: `docker/Dockerfile.rocm <https://github.com/verl-p
         datasets \
         dill \
         hydra-core \
-        liger-kernel \
+        "liger-kernel>=0.8.2" \
         numpy \
         pandas \
         datasets \

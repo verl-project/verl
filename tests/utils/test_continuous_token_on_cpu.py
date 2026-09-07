@@ -1280,6 +1280,37 @@ class TestWiringVLFactory:
         assert isinstance(builder, Gemma4VLContinuousTokenBuilder)
         assert builder.supports_multimodal() is True
 
+    def test_qwen35_unified_with_processor_upgrades_to_vl(self):
+        """Qwen3.5 (unified checkpoint, no vl marker) + processor -> Qwen VL builder."""
+        from verl.utils.tokenizer.continuous_token import QwenVLContinuousTokenBuilder
+        from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
+
+        class MockTokenizer:
+            name_or_path = "Qwen/Qwen3.5-35B-A3B"
+
+            def encode(self, text, add_special_tokens=False):
+                return [198] if text == "\n" else [1, 2, 3]
+
+            def convert_tokens_to_ids(self, token):
+                mapping = {
+                    "<|im_end|>": 151645,
+                    "<|vision_start|>": 151652,
+                    "<|vision_end|>": 151653,
+                    "<|image_pad|>": 151655,
+                }
+                return mapping.get(token, 0)
+
+        class MockProcessor:
+            image_processor = type("IP", (), {"merge_size": 2})()
+
+        builder = create_continuous_token_builder(
+            MockTokenizer(),
+            hf_model_type="qwen3_5_moe",
+            processor=MockProcessor(),
+        )
+        assert isinstance(builder, QwenVLContinuousTokenBuilder)
+        assert builder.supports_multimodal() is True
+
     def test_text_specific_family_with_processor_raises(self):
         """A recognized text-only family paired with a multimodal processor is a misconfiguration."""
         from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder

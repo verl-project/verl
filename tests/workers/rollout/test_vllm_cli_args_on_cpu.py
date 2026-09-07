@@ -56,8 +56,32 @@ class TestBuildCliArgsFromConfig:
         assert result == ["--enable-prefix-caching"]
 
     def test_bool_false(self):
-        """Bool False is skipped entirely."""
+        """Optional[bool] args emit '--no-key' for an explicit False."""
         config = {"enable-prefix-caching": False}
+        result = build_cli_args_from_config(config)
+        assert result == ["--no-enable-prefix-caching"]
+
+    def test_bool_false_plain_bool_omitted(self):
+        """Bool False on a plain-bool arg is skipped (parser default is False)."""
+        config = {"enforce_eager": False}
+        result = build_cli_args_from_config(config)
+        assert result == []
+
+    def test_bool_false_union_str_arg_omitted(self):
+        """Bool False on a `bool | str | None` arg is skipped (string flag, no --no- form)."""
+        config = {"hf_token": False}
+        result = build_cli_args_from_config(config)
+        assert result == []
+
+    def test_bool_false_underscore_key(self):
+        """Underscore keys emit the negative flag in the key's own spelling."""
+        config = {"enable_prefix_caching": False}
+        result = build_cli_args_from_config(config)
+        assert result == ["--no-enable_prefix_caching"]
+
+    def test_bool_false_non_engine_arg_omitted(self):
+        """Bool False on args unknown to AsyncEngineArgs is omitted."""
+        config = {"disable-log-requests": False}
         result = build_cli_args_from_config(config)
         assert result == []
 
@@ -136,6 +160,44 @@ class TestBuildCliArgsFromConfig:
         config = {"sizes": [42]}
         result = build_cli_args_from_config(config)
         assert result == ["--sizes", "42"]
+
+
+class TestCliArgsVllmParserRoundTrip:
+    """Serialized args must round-trip through vLLM's serve CLI parser."""
+
+    @staticmethod
+    def _build_parser():
+        import vllm.entrypoints.cli.serve as serve_mod
+        from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+        parser = FlexibleArgumentParser(description="test")
+        subparsers = parser.add_subparsers(required=False, dest="subparser")
+        for cmd in serve_mod.cmd_init():
+            cmd.subparser_init(subparsers).set_defaults(dispatch_function=cmd.cmd)
+        return parser
+
+    def test_explicit_false_survives_parsing(self):
+        """Explicit False survives parse_args and AsyncEngineArgs.from_cli_args."""
+        from vllm.engine.arg_utils import AsyncEngineArgs
+
+        parser = self._build_parser()
+        config = {
+            "skip_tokenizer_init": False,
+            "enable_chunked_prefill": True,
+            "enable_prefix_caching": False,
+            "enable_sleep_mode": True,
+            "enforce_eager": False,
+            "disable_log_stats": False,
+        }
+        argv = ["serve", "dummy-model"] + build_cli_args_from_config(config)
+        namespace = parser.parse_args(args=argv)
+        engine_args = AsyncEngineArgs.from_cli_args(namespace)
+        assert engine_args.enable_prefix_caching is False
+        assert engine_args.enable_chunked_prefill is True
+        assert engine_args.enable_sleep_mode is True
+        assert engine_args.skip_tokenizer_init is False
+        assert engine_args.enforce_eager is False
+        assert engine_args.disable_log_stats is False
 
 
 class TestVllmColocateZmqHandle:

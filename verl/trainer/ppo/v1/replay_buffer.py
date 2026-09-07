@@ -538,9 +538,17 @@ class ReplayBufferAsync(ReplayBuffer):
 
         return len(sampleable_keys) >= batch_size
 
-    @SkipManager.annotate_tq(role="rollout_tq", phase="sample")
-    def sample(self, global_steps: int, partition_id: str, batch_size: int) -> tuple[KVBatchMeta, dict]:
-        """Sample a batch while evicting and replacing stale, DAPO-filtered, or failed groups."""
+    def get_sampleable_count(self, global_steps: int, partition_id: str) -> int:
+        """Return the current number of terminal groups eligible for sampling."""
+        self._sync_metadata_from_transfer_queue()
+        eviction_reasons = self._terminal_eviction_reasons(global_steps, partition_id)
+        return len(self._sampleable_terminal_keys(partition_id, eviction_reasons))
+
+    def wait_for_sampleable(self, global_steps: int, partition_id: str, target_count: int) -> tuple[set[str], dict]:
+        """Poll until ``target_count`` groups are sampleable, evicting and refilling meanwhile.
+
+        Returns the sampleable uids and the eviction metrics accrued while waiting.
+        """
         last_debug_time = time.time()
         eviction_metrics: dict = {}
 
@@ -559,13 +567,18 @@ class ReplayBufferAsync(ReplayBuffer):
                 continue
 
             sampleable_keys = self._sampleable_terminal_keys(partition_id, eviction_reasons)
-            if self._has_enough_samples(global_steps, partition_id, batch_size, sampleable_keys):
-                selected_prompt_uids, partition_snapshot, prompt_global_steps_snapshot = self._select_prompt_uids(
-                    partition_id, sampleable_keys, batch_size
-                )
-                break
+            if self._has_enough_samples(global_steps, partition_id, target_count, sampleable_keys):
+                return sampleable_keys, eviction_metrics
 
             last_debug_time = self._wait_for_next_poll(partition_id, last_debug_time)
+
+    @SkipManager.annotate_tq(role="rollout_tq", phase="sample")
+    def sample(self, global_steps: int, partition_id: str, batch_size: int) -> tuple[KVBatchMeta, dict]:
+        """Sample a batch while evicting and replacing stale, DAPO-filtered, or failed groups."""
+        sampleable_keys, eviction_metrics = self.wait_for_sampleable(global_steps, partition_id, batch_size)
+        selected_prompt_uids, partition_snapshot, prompt_global_steps_snapshot = self._select_prompt_uids(
+            partition_id, sampleable_keys, batch_size
+        )
 
         if partition_id != "val" and self.max_off_policy_strategy == "drop":
             selected_spans = [

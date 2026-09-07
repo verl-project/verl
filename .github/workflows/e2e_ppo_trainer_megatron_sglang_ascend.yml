@@ -135,19 +135,10 @@ jobs:
       - name: Install the current repository 
         run: |
           uv pip install pytest pytest-asyncio
-          uv pip install git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@0a21da4 --no-deps --no-build-isolation
-          uv pip install git+https://github.com/ISEEKYAN/mbridge.git@main --no-deps --no-build-isolation
           uv pip install --no-deps --no-build-isolation -e .
       - name: Check final pip list
         run: |
           uv pip list
-      - name: Configure related dependencies
-        run: |
-          rm -rf /Megatron-LM
-          git clone --depth 1 --branch core_r0.18.0 https://github.com/NVIDIA/Megatron-LM.git /Megatron-LM
-          rm -rf /MindSpeed
-          git clone --depth 1 --branch core_r0.18.0 https://gitcode.com/ascend/MindSpeed.git /MindSpeed
-          export PYTHONPATH=$PYTHONPATH:/Megatron-LM:/MindSpeed
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
@@ -228,13 +219,6 @@ jobs:
       - name: Check final pip list
         run: |
           uv pip list
-      - name: Configure related dependencies
-        run: |
-          rm -rf /Megatron-LM
-          git clone --depth 1 --branch core_r0.18.0 https://github.com/NVIDIA/Megatron-LM.git /Megatron-LM
-          rm -rf /MindSpeed
-          git clone --depth 1 --branch core_r0.18.0 https://gitcode.com/ascend/MindSpeed.git /MindSpeed
-          export PYTHONPATH=$PYTHONPATH:/Megatron-LM:/MindSpeed
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models

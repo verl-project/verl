@@ -414,9 +414,13 @@ class ServerAdapter(BaseRollout):
         """
         import torch.distributed as dist
         from sglang.srt.managers.io_struct import UpdateWeightsFromTensorReqInput
-        from sglang.srt.model_executor.model_runner import LocalSerializedTensor
         from sglang.srt.utils import MultiprocessingSerializer
         from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
+
+        try:
+            from sglang.srt.model_executor.model_runner import LocalSerializedTensor
+        except ImportError:  # moved out of model_runner in sglang 0.5.16
+            from sglang.srt.model_executor.model_runner_components.weight_updater import LocalSerializedTensor
 
         from verl.workers.rollout.sglang_rollout.delta_loader import LOADER_FQN
 

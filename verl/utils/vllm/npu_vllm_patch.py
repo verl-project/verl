@@ -80,7 +80,7 @@ def apply_npu_vllm_patches() -> None:
         return
 
     # Disable flash_attn in RotaryEmbedding (NPU)
-    from vllm.model_executor.layers.fused_moe import FusedMoE
+    from vllm.model_executor.layers import fused_moe
 
     patch_vllm013_rotary_emb()
-    _patch_legacy_fused_moe_weight_loader(FusedMoE)
+    _patch_legacy_fused_moe_weight_loader(getattr(fused_moe, "FusedMoE", None))

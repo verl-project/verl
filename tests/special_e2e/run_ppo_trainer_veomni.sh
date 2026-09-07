@@ -10,6 +10,22 @@ PROFILE_RANKS_ALL=False
 PROFILE_RANKS=[0]
 DISCRETE=True
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FINISH_HOOK="$SCRIPT_DIR/profiler_finish_hook_marker.sh"
+
+# The finish hook is dispatched by every profiled worker when profiling stops, so a run with
+# profiling enabled must leave at least one marker behind. Markers live under finish_hook_markers/
+# (not $SAVE_PATH directly) so their role-derived names are not mistaken for profiler stage
+# deliverables by test_check_profiler_output.py (see profiler_finish_hook_marker.sh).
+assert_finish_hook_ran() {
+    if ! compgen -G "$SAVE_PATH/finish_hook_markers/finish_hook_ran_*" > /dev/null; then
+        echo "global_profiler.finish_hook_cmd never ran: no marker file under $SAVE_PATH/finish_hook_markers"
+        ls -la "$SAVE_PATH" || true
+        exit 1
+    fi
+    ls "$SAVE_PATH"/finish_hook_markers/finish_hook_ran_*
+}
+
 # Download model if not exists
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/${MODEL_ID}}
@@ -89,6 +105,7 @@ common_params=(
     actor_rollout_ref.ref.profiler.ranks=$PROFILE_RANKS \
     global_profiler.steps=$PROFILE_STEPS \
     global_profiler.save_path="$SAVE_PATH" \
+    global_profiler.finish_hook_cmd="$FINISH_HOOK" \
 )
 
 if [ -n "$device_name" ] && [ "$device_name" == "cuda" ]; then
@@ -101,6 +118,7 @@ if [ -n "$device_name" ] && [ "$device_name" == "cuda" ]; then
         actor_rollout_ref.ref.profiler.tool_config.torch.contents=$CONTENTS \
         global_profiler.tool=torch $@
 
+    assert_finish_hook_ran
     python3 "tests/utils/test_check_profiler_output.py" --profiler_dir="$SAVE_PATH" --device="gpu"
     
 elif [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
@@ -112,7 +130,8 @@ elif [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
         actor_rollout_ref.ref.profiler.tool_config.npu.discrete=$DISCRETE \
         actor_rollout_ref.ref.profiler.tool_config.npu.contents=$CONTENTS \
         global_profiler.tool=npu $@
-    
+
+    assert_finish_hook_ran
     python3 "tests/utils/test_check_profiler_output.py" --profiler_dir="$SAVE_PATH" --device="npu"
 else
     echo "Unknown device: $device_name"

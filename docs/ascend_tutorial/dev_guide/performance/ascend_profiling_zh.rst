@@ -115,7 +115,7 @@ Last updated: 07/13/2026.
             profiler:
                enable: True  # 设置为 True 以采集推理阶段
                all_ranks: False
-               ranks: [0]  # 在 Agent Loop 模式下，此处指推理实例的 Replica Rank (例如第 0 个实例)
+               ranks: [0]  # 全局 GPU rank；会被映射到拥有该 rank 的推理实例（replica）
                tool_config:
                   npu:
                      discrete: True  # Agent Loop 模式下必须开启离散模式
@@ -180,7 +180,7 @@ Last updated: 07/13/2026.
 
 在 `Agent Loop <../advance/agent_loop.rst>`_ 模式下，Rollout 阶段的性能数据 **必须使用离散模式** 采集，此时 Profiler 由推理引擎后端触发。
 
-1. Rank 定义：Rollout 配置中的 ranks 指代 Replica Rank（推理实例索引），而非全局 Rank。
+1. Rank 定义：Rollout 配置中的 ranks 为全局 GPU rank（与训练角色一致）。由于每个 rollout 实例（replica）跨越 ``world_size = tensor_model_parallel_size * data_parallel_size * pipeline_model_parallel_size`` 个 GPU，每个指定的 rank 会被映射到拥有它的实例（``replica = rank // world_size``），并对整个实例进行采集；例如 ``tp=8`` 时，``ranks: [0, 8]`` 会采集持有全局 rank 0 和 8 的实例（即 replica 0 和 replica 1）。
 
 2. 推理引擎支持：当前支持vLLM和SGLang引擎，无需额外设置。具体说明如下：
 

@@ -194,11 +194,20 @@ def get_module_from_param_name(model, name: str):
     return _resolve_expert_weight_module(current_module)
 
 
+# Fast-path allowlist: leaf names that can possibly be fp8 weights.
+# Dense linear and per-expert-layout weights end in "weight".
+# Fused-MoE expert params (all experts in one tensor, no per-expert index)
+# use projection names without a ".weight" suffix, e.g. "gate_up_proj" /
+# "down_proj". Any other leaf (bias, embedding, norm, ...) is skipped before
+# the more expensive module resolution.
+_FP8_CANDIDATE_LEAVES: frozenset = frozenset({"weight", "gate_up_proj", "down_proj"})
+
+
 def is_fp8_weight(name, model):
     if name not in fp8_state.seen_params:
         fp8_state.seen_params.add(name)
-        # Filter out bias params
-        if name.endswith("weight"):
+        leaf = name.rsplit(".", 1)[-1]
+        if leaf in _FP8_CANDIDATE_LEAVES:
             module = get_module_from_param_name(model, name)
             # We currently only quantize linear and fused-MoE expert layers.
             is_fp8_linear = isinstance(module, LinearBase) and module.weight.dtype == torch.float8_e4m3fn
@@ -260,22 +269,42 @@ def apply_mxfp8_transformation_after_loading(model):
                 module.quant_method.process_weights_after_loading(module)
 
 
-def clear_rocm_attention_weight_caches(model):
-    """Drop the bf16 ``wo_a`` copy vLLM derives from the loaded weight.
+def refresh_rocm_attention_weight_caches(model):
+    """Rebuild the bf16 ``wo_a`` copy vLLM derives from the loaded weight.
 
     ``rocm_aiter_mla_sparse._get_cached_wo_a_bf16`` caches a dequantized ``wo_a``
     on the module, assuming the weight is static. A refit updates the weight but
-    not the cache, so attention would keep using the previous step's copy. The
-    rebuild is lazy, so dropping the cache here is enough.
+    not the cache, so attention would keep using the previous step's copy.
+
+    Dropping the cache and letting the lazy rebuild handle it is only correct in
+    eager mode. ``_o_proj`` runs during graph capture, so a captured graph holds
+    the buffer's address and replays the einsum without re-entering the builder:
+    a fresh allocation would leave it reading freed memory. Rebuild into the
+    original storage instead.
+
+    Must run after the live FP8 parameters have been reinstated, otherwise the
+    dequantization reads the staging buffers.
 
     Only ROCm DeepSeek-V4 builds this cache, hence the guard below.
     """
     if torch.version.hip is None or not is_deepseek_v4_model(model):
         return
 
-    for module in model.modules():
-        if hasattr(module, "_dsv4_wo_a_bf16"):
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _get_cached_wo_a_bf16
+
+    # The cache was built inside the forward pass, so it is an inference tensor
+    # and PyTorch refuses to mutate it outside InferenceMode.
+    with torch.inference_mode():
+        for module in model.modules():
+            live = getattr(module, "_dsv4_wo_a_bf16", None)
+            if live is None:
+                continue
+            n_local_groups, o_lora_rank, hidden_dim = live.shape
             del module._dsv4_wo_a_bf16
+            rebuilt = _get_cached_wo_a_bf16(module, n_local_groups, o_lora_rank, hidden_dim)
+            if rebuilt.data_ptr() != live.data_ptr():
+                live.copy_(rebuilt)
+            module._dsv4_wo_a_bf16 = live
 
 
 def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
@@ -355,11 +384,13 @@ def prepare_quanted_weights_for_loading(model):
 
 def process_quanted_weights_after_loading(model, reload_state):
     """Re-apply the inference layout undone by ``prepare_quanted_weights_for_loading``."""
-    clear_rocm_attention_weight_caches(model)
     apply_mxfp8_transformation_after_loading(model)
     reload_state = reload_state or {}
     process_fp8_weights_after_loading(reload_state.get("fp8_layers") or [])
     process_mxfp4_moe_weights_after_loading(reload_state.get("mxfp4_moe_modules") or [])
+    # Last: the rebuild reads ``wo_a``, which is only back in its inference
+    # layout once the staged FP8 params above have been reinstated.
+    refresh_rocm_attention_weight_caches(model)
 
 
 def load_quanted_weights(weights, model_runner, is_drafter=False):
