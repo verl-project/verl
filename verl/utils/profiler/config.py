@@ -144,7 +144,7 @@ class TorchProfilerToolConfig(BaseConfig):
 
 @dataclass
 class TorchMemoryToolConfig(BaseConfig):
-    """Torch memory profiler tool config. CUDA OOM snapshots are enabled automatically.
+    """Torch memory profiler tool config. CUDA/NPU OOM snapshots are enabled automatically.
 
     Args:
         trace_alloc_max_entries (int): Maximum number of memory allocation entries to track.

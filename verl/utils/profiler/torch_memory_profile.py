@@ -19,7 +19,7 @@ from typing import Optional
 
 import torch
 
-from ..device import is_cuda_available
+from ..device import get_device_name, get_torch_device
 from ..memory_utils import MemorySnapshotSampler, clear_memory_history, enable_memory_visualize, get_memory_info
 from .config import ProfilerConfig, TorchMemoryToolConfig
 
@@ -27,10 +27,10 @@ logger = logging.getLogger(__name__)
 
 
 class TorchMemoryProfiler:
-    """Profiler that dumps CUDA memory snapshots at step boundaries.
+    """Profiler that dumps CUDA/NPU memory snapshots at step boundaries.
 
     Behavior:
-    - On first construction (per process), enable memory history recording if CUDA is available
+    - On first construction (per process), enable memory history recording if an accelerator is available
     - Automatically register an OOM snapshot callback on selected ranks when supported
     - On start(step=X), begin or extend a configured memory-history window
     - On stop(), dump a memory snapshot once the window reaches its configured number of steps
@@ -49,6 +49,7 @@ class TorchMemoryProfiler:
             config = ProfilerConfig(ranks=[])
         self.config = config
         self.rank = rank
+        self._device_name = get_device_name()
         self.this_step = False
         self._window_start_step = None
         self._window_end_step = None
@@ -80,34 +81,50 @@ class TorchMemoryProfiler:
             self._attach_oom_observer()
 
     def _attach_oom_observer(self) -> None:
-        """Register one process-local callback that writes a snapshot at CUDA OOM time."""
+        """Register one process-local callback that writes a snapshot at allocator OOM time."""
         if TorchMemoryProfiler._oom_observer_attached:
             return
 
-        if not is_cuda_available:
-            logger.warning("[torch_memory] automatic OOM snapshots are only available on CUDA devices")
-            return
-
-        attach_observer = getattr(torch._C, "_cuda_attach_out_of_memory_observer", None)
-        if attach_observer is None:
-            logger.warning("[torch_memory] this PyTorch build does not support CUDA OOM observers")
+        if self._device_name not in ("cuda", "npu"):
+            logger.warning("[torch_memory] automatic OOM snapshots are only available on CUDA/NPU devices")
             return
 
         try:
+            if not get_torch_device().is_available():
+                logger.warning("[torch_memory] automatic OOM snapshots require an available accelerator")
+                return
+
+            if self._device_name == "npu":
+                import torch_npu
+
+                backend = torch_npu._C
+            else:
+                backend = torch._C
+            attach_observer = getattr(backend, f"_{self._device_name}_attach_out_of_memory_observer", None)
+            if attach_observer is None:
+                logger.warning("[torch_memory] this build does not support %s OOM observers", self._device_name.upper())
+                return
+
             attach_observer(self._on_out_of_memory)
             TorchMemoryProfiler._oom_observer_attached = True
-            logger.info("[torch_memory] CUDA OOM snapshot observer attached")
+            logger.info("[torch_memory] %s OOM snapshot observer attached", self._device_name.upper())
         except Exception as exc:
-            logger.warning(f"[torch_memory] failed to attach CUDA OOM snapshot observer: {exc}")
+            logger.warning(
+                "[torch_memory] failed to attach %s OOM snapshot observer: %s", self._device_name.upper(), exc
+            )
 
     def _on_out_of_memory(self, device: int, alloc: int, device_total: int, device_free: int) -> None:
-        """Best-effort snapshot callback invoked by PyTorch's CUDA allocator."""
+        """Best-effort snapshot callback invoked by the CUDA/NPU allocator."""
         out_dir = self.config.save_path or "outputs/profile"
         sub_dir = f"oom_{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}"
+        # NPU reports the configured process memory limit, or device total if no limit is set.
+        total_label = "total_or_limit" if self._device_name == "npu" else "total"
         logger.error(
-            "[torch_memory] CUDA OOM on device %s: requested=%s total=%s free=%s; dumping allocator snapshot",
+            "[torch_memory] %s OOM on device %s: requested=%s %s=%s free=%s; dumping allocator snapshot",
+            self._device_name.upper(),
             device,
             alloc,
+            total_label,
             device_total,
             device_free,
         )
@@ -117,12 +134,12 @@ class TorchMemoryProfiler:
         except Exception as exc:
             logger.warning(f"[torch_memory] failed to collect allocator memory at OOM: {exc}")
         try:
-            # Do not synchronize here: an OOM may have left the CUDA stream in an error state.
+            # Do not synchronize here: an OOM may have left the device stream in an error state.
             self.sampler.dump_memory_snapshot(
                 out_dir=out_dir, tag="torch_memory_oom", sub_dir=sub_dir, synchronize=False
             )
         except Exception as exc:
-            logger.warning(f"[torch_memory] failed to dump CUDA OOM snapshot: {exc}")
+            logger.warning("[torch_memory] failed to dump %s OOM snapshot: %s", self._device_name.upper(), exc)
 
     def start(self, **kwargs):
         if not self.enable:

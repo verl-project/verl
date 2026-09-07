@@ -400,7 +400,7 @@ global_profiler:
         # Send signal to the target application's process group. We let the program to exit by itself.
         kill: none
 
-    # Enable memory visualization and automatic CUDA OOM snapshots for debugging memory usage.
+    # Enable memory visualization and automatic CUDA/NPU OOM snapshots for debugging memory usage.
     torch_memory:
 
       #  Maximum number of allocation entries to record
