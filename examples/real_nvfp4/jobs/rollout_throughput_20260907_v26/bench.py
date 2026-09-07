@@ -71,6 +71,17 @@ VARIANTS = {
     # megatron-bridge wheelhouse, so the saving has to be measured before it can
     # justify that. `w4a4_prod` is the same run without the wrapper.
     "w4a4_r3wrap": ("nvfp4_per_token", False, False, 0.55, "FULL_DECODE_ONLY", False, 128),
+    # Which unquantized MoE backend the BF16 arm should use. verl only sets
+    # moe_backend on the real-NVFP4 and delta-sharded paths, so BF16 inherits
+    # vLLM's oracle pick -- FLASHINFER_TRTLLM first on CUDA, and vLLM demotes
+    # FlashInfer only on SM90, not SM100. That puts the baseline on
+    # trtllm_bf16_moe, which has three open upstream bugs (flashinfer#4157, the
+    # IMA in the autotune sweep we hit, plus #4919 and #3466) while the FP4 path
+    # W4A4 uses has none.
+    "bf16_triton": (None, None, False, 0.55, "FULL_DECODE_ONLY", False, 128, "triton"),
+    "bf16_triton_at": (None, None, False, 0.55, "FULL_DECODE_ONLY", True, 128, "triton"),
+    "bf16_ficutlass": (None, None, False, 0.55, "FULL_DECODE_ONLY", False, 128, "flashinfer_cutlass"),
+    "bf16_ficutlass_at": (None, None, False, 0.55, "FULL_DECODE_ONLY", True, 128, "flashinfer_cutlass"),
 }
 
 
@@ -104,7 +115,9 @@ def main() -> int:
     variant = os.environ.get("BENCH_VARIANT", "")
     if variant not in VARIANTS:
         raise SystemExit(f"BENCH_VARIANT must be one of {sorted(VARIANTS)}, got {variant!r}")
-    quantization, pdl, fast_math, mem_util, cudagraph, autotune, n_seqs = VARIANTS[variant]
+    spec = VARIANTS[variant]
+    quantization, pdl, fast_math, mem_util, cudagraph, autotune, n_seqs = spec[:7]
+    moe_backend = spec[7] if len(spec) > 7 else None
 
     # These are read when the FP4 kernels are first built, so they must already
     # be set in the environment; the job script does that per variant. Report
@@ -116,7 +129,7 @@ def main() -> int:
     print(
         f"[bench] variant={variant} quantization={quantization} force_pdl={pdl} "
         f"fast_math_intended={fast_math} env={env_fast_math} mem={mem_util} cudagraph={cudagraph} "
-        f"autotune={autotune} n_seqs={n_seqs}",
+        f"autotune={autotune} n_seqs={n_seqs} moe_backend={moe_backend or 'auto'}",
         flush=True,
     )
 
@@ -153,6 +166,8 @@ def main() -> int:
     }
     if quantization is not None:
         engine["quantization"] = quantization
+    if moe_backend is not None:
+        engine["kernel_config"]["moe_backend"] = moe_backend
     llm = LLM(**engine)
 
     # Same token budget for every variant: ignore_eos removes any dependence on
@@ -201,6 +216,7 @@ def main() -> int:
         "fp4_fast_math_enabled": fast_math,
         "gpu_memory_utilization": mem_util,
         "cudagraph_mode": cudagraph,
+        "moe_backend": moe_backend or "auto",
         "autotune": autotune,
         "n_seqs": n_seqs,
         "out_tokens": out_tokens,

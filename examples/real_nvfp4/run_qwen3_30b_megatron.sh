@@ -81,6 +81,25 @@ readonly ROLLOUT_IS=${ROLLOUT_IS:-token}
 # max_response_length. W4A4 then clipped 12.8% of responses at 20480 against
 # BF16's 0.7%, and since a batch's wall clock is set by its slowest sequence
 # that turned a per-token 1.26x rollout win into a per-batch 9% loss.
+# FlashInfer autotune, set explicitly per precision instead of inheriting
+# whatever vLLM defaults to, because the two arms want opposite answers and the
+# default is a gamble either way.
+#   bf16      off. vLLM's oracle picks FLASHINFER_TRTLLM for unquantized MoE on
+#             CUDA and only demotes FlashInfer on SM90, so the BF16 baseline
+#             lands on trtllm_bf16_moe -- whose autotune sweep dies with an
+#             illegal memory access at the 1-token profile (flashinfer#4157,
+#             open; also #4919, #3466). Reproduced twice here. Steady state is
+#             fine, which is why 540 production steps never hit it, but leaving
+#             it to the default means gambling at every engine start.
+#             Measured: TRTLLM 12163 tok/s beats TRITON 11116 and
+#             FLASHINFER_CUTLASS 11575, so keep the kernel and drop the sweep.
+#   real_nvfp4 on. The FP4 path has none of those bugs and autotune is worth
+#             +5.7% (15243 -> 16107 tok/s).
+if [[ "$PRECISION_MODE" = real_nvfp4 ]]; then
+  readonly FLASHINFER_AUTOTUNE=${FLASHINFER_AUTOTUNE:-True}
+else
+  readonly FLASHINFER_AUTOTUNE=${FLASHINFER_AUTOTUNE:-False}
+fi
 readonly OVERLONG_PENALTY=${OVERLONG_PENALTY:-False}
 readonly OVERLONG_BUFFER_LEN=${OVERLONG_BUFFER_LEN:-0}
 readonly OVERLONG_PENALTY_FACTOR=${OVERLONG_PENALTY_FACTOR:-0.0}
@@ -237,6 +256,7 @@ ROLLOUT=(
   actor_rollout_ref.rollout.enable_rollout_routing_replay=True
   actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=512
   +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode=FULL_DECODE_ONLY
+  +actor_rollout_ref.rollout.engine_kwargs.vllm.enable_flashinfer_autotune="$FLASHINFER_AUTOTUNE"
 )
 
 FORWARD_ONLY=(
@@ -298,7 +318,7 @@ if [[ "$PRECISION_MODE" = real_nvfp4 ]]; then
   )
 fi
 
-echo "VERL_REAL_NVFP4_CONTRACT profile=$RUN_PROFILE precision=$PRECISION_MODE scope=all_mlp attention=bf16 rollout_activation=per_token transport=bf16 reload=native r3=1 losses=0of3 bf16_layers=${BF16_LAYERS_AT_START}/${BF16_LAYERS_AT_END} token_mean=1 tis=$ROLLOUT_IS overlong=${OVERLONG_PENALTY}:${OVERLONG_BUFFER_LEN}:${OVERLONG_PENALTY_FACTOR} nodes=${NNODES}x${N_GPUS_PER_NODE} tp=1 pp=1 cp=1 ep=4 batch=${TRAIN_PROMPT_BSZ}x${N_RESP_PER_PROMPT} max_num_seqs=$MAX_NUM_SEQS full_adam=1 resume=$RESUME_MODE"
+echo "VERL_REAL_NVFP4_CONTRACT profile=$RUN_PROFILE precision=$PRECISION_MODE scope=all_mlp attention=bf16 rollout_activation=per_token transport=bf16 reload=native r3=1 losses=0of3 bf16_layers=${BF16_LAYERS_AT_START}/${BF16_LAYERS_AT_END} token_mean=1 tis=$ROLLOUT_IS overlong=${OVERLONG_PENALTY}:${OVERLONG_BUFFER_LEN}:${OVERLONG_PENALTY_FACTOR} autotune=${FLASHINFER_AUTOTUNE} nodes=${NNODES}x${N_GPUS_PER_NODE} tp=1 pp=1 cp=1 ep=4 batch=${TRAIN_PROMPT_BSZ}x${N_RESP_PER_PROMPT} max_num_seqs=$MAX_NUM_SEQS full_adam=1 resume=$RESUME_MODE"
 
 HYDRA_ARGS=(
   --config-path="$WORKING_DIR/recipe/dapo/config" \

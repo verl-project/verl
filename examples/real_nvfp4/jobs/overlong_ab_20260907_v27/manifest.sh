@@ -157,6 +157,10 @@ rn4pt_validate_static() {
   grep -q 'readonly MAX_NUM_SEQS=128' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || rn4pt_die "max_num_seqs must be 128" || return
   grep -q 'actor_rollout_ref.rollout.enforce_eager=False' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || \
     rn4pt_die "CUDA graph must remain enabled" || return
+  # Autotune must be pinned per precision, never inherited from vLLM's default:
+  # the BF16 arm's trtllm_bf16_moe sweep dies with an IMA (flashinfer#4157).
+  grep -q 'engine_kwargs.vllm.enable_flashinfer_autotune=' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || \
+    rn4pt_die "FlashInfer autotune is not pinned explicitly" || return
   # The knobs this bundle drives must still default to the pre-existing
   # behaviour, so an unset variable can never silently change another arm.
   grep -q 'readonly FIRST_LAST_BF16=${FIRST_LAST_BF16:-False}' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || \
