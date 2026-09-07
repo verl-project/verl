@@ -149,12 +149,14 @@ class SFTTrainer:
         config = self.config
         tokenizer = self.model_config.tokenizer
         processor = self.model_config.processor
+        hf_model_type = getattr(self.model_config.hf_config, "model_type", None)
         train_dataset = create_sft_dataset(
             config.data.train_files,
             config.data,
             tokenizer,
             processor=processor,
             max_samples=config.data.get("train_max_samples", -1),
+            hf_model_type=hf_model_type,
         )
         if config.data.val_files:
             val_dataset = create_sft_dataset(
@@ -163,6 +165,7 @@ class SFTTrainer:
                 tokenizer,
                 processor=processor,
                 max_samples=config.data.get("val_max_samples", -1),
+                hf_model_type=hf_model_type,
             )
         else:
             val_dataset = None
@@ -392,8 +395,8 @@ def main(config):
     run_sft(config)
 
 
-def create_sft_dataset(data_paths, data_config, tokenizer, processor, max_samples=-1):
-    """Create a dataset."""
+def create_sft_dataset(data_paths, data_config, tokenizer, processor, max_samples=-1, hf_model_type=None):
+    """Create a dataset using an OmegaConf DictConfig for data_config."""
     # build dataset
     # First check if a custom dataset class is specified
     if data_config.custom_cls.get("path", None):
@@ -405,9 +408,31 @@ def create_sft_dataset(data_paths, data_config, tokenizer, processor, max_sample
         dataset_cls = MultiTurnSFTDataset
 
     # Create datasets based on the selected class
-    dataset = dataset_cls(
-        parquet_files=data_paths, tokenizer=tokenizer, config=data_config, processor=processor, max_samples=max_samples
-    )
+    dataset_kwargs = {
+        "parquet_files": data_paths,
+        "tokenizer": tokenizer,
+        "config": data_config,
+        "processor": processor,
+        "max_samples": max_samples,
+    }
+    if issubclass(dataset_cls, MultiTurnSFTDataset):
+        from copy import deepcopy
+
+        from omegaconf import open_dict, read_write
+
+        from verl.utils.tokenizer.continuous_token_wiring import resolve_continuous_token_model_family
+
+        model_family = resolve_continuous_token_model_family(
+            data_config.get("continuous_token_model_family", "auto"),
+            hf_model_type=hf_model_type,
+            has_multimodal_processor=getattr(processor, "image_processor", None) is not None,
+        )
+        # Resolve before construction without adding kwargs to existing custom Dataset constructors.
+        dataset_config = deepcopy(data_config)
+        with read_write(dataset_config), open_dict(dataset_config):
+            dataset_config.continuous_token_model_family = model_family.value
+        dataset_kwargs["config"] = dataset_config
+    dataset = dataset_cls(**dataset_kwargs)
     return dataset
 
 

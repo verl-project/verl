@@ -166,7 +166,6 @@ $COMMAND \
     data.max_token_len_per_gpu=2048 \
     data.messages_key=messages \
     model.use_remove_padding=${USE_REMOVE_PADDING} \
-    data.ignore_input_ids_mismatch=True \
     ${ENGINE_CONFIG} \
     trainer.test_freq=after_each_epoch \
     trainer.save_freq=-1 \

@@ -757,14 +757,14 @@ def _pad_last_dim_and_cat(values: list[torch.Tensor], key: str) -> torch.Tensor:
 
 
 def extract_multi_modal_inputs(
-    batch_data: list[dict[str, torch.Tensor]],
+    batch_data: list[dict[str, torch.Tensor | list[torch.Tensor]]],
     indices: Optional[list[int]] = None,
 ) -> dict[str, torch.Tensor | list[torch.Tensor]]:
     """
     Extract and process multi-modal inputs from a batch.
 
     Args:
-        batch_data (list[dict[str, torch.Tensor]]): The batch containing potential multi-modal inputs
+        batch_data (list[dict]): The batch containing potential multi-modal tensors or image-crop lists
         indices (Optional[list[int]]): If provided, only extract inputs at these indices
 
     Returns:
@@ -799,6 +799,11 @@ def extract_multi_modal_inputs(
             # some multi-modal keys with variable length are put in non-tensor batch,
             # so we need to pad them manually.
             multi_modal_inputs[key] = _pad_last_dim_and_cat(values, key)
+        elif key == "pixel_values" and all(
+            isinstance(value, list) and all(isinstance(crop, torch.Tensor) for crop in value) for value in values
+        ):
+            # MiniMax-VL consumes one [C, H, W] tensor per crop, in image order.
+            multi_modal_inputs[key] = [crop for value in values for crop in value]
         else:
             try:
                 multi_modal_inputs[key] = torch.cat(values, dim=0)

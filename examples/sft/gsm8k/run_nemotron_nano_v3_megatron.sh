@@ -81,7 +81,6 @@ torchrun --nnodes=1 --nproc_per_node=8 ${ENTRYPOINT} \
     data.use_dynamic_bsz=True \
     data.max_token_len_per_gpu=2048 \
     data.messages_key=messages \
-    data.ignore_input_ids_mismatch=True \
     model.path=$MODEL_PATH \
     model.use_remove_padding=${USE_REMOVE_PADDING} \
     model.trust_remote_code=True \

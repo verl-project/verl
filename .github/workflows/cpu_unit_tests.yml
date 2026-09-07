@@ -85,6 +85,9 @@ jobs:
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       TORCH_COMPILE_DISABLE: 1
       TORCHINDUCTOR_DISABLE: 1
+      # The runner provides tokenizer/processor artifacts under ${HOME}/models.
+      # Missing artifacts must not silently remove SFT integration coverage.
+      VERL_REQUIRE_LOCAL_MODELS: "1"
       # No install step: every command below runs through uv, which syncs .venv
       # from the committed uv.lock (offline, from the image's baked cache).
       # Keep these extras identical across the job so uv never re-syncs torch.
