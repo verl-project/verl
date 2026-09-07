@@ -140,9 +140,9 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
    conda create -n verl-vllm-npu python=3.12 -y
    conda activate verl-vllm-npu
    git clone --recursive https://github.com/verl-project/verl.git
-   bash verl/scripts/install_vllm_mcore_npu.sh
+   bash scripts/install_vllm_mcore_npu.sh
    # 如果您仅需要使用FSDP后端
-   # USE_MEGATRON=0 bash verl/scripts/install_vllm_mcore_npu.sh
+   # USE_MEGATRON=0 bash scripts/install_vllm_mcore_npu.sh
 
 日志过滤
 ^^^^^^^^^^^^^^^^^^^^^^^^
@@ -214,9 +214,9 @@ CANN是NPU上的异构计算架构，以下为arm平台A3安装指令，请参�
    conda create -n verl-sgl-npu python=3.11 -y
    conda activate verl-sgl-npu
    git clone --recursive https://github.com/verl-project/verl.git
-   bash verl/scripts/install_sglang_mcore_npu.sh
+   bash scripts/install_sglang_mcore_npu.sh
    # 如果您仅需要使用FSDP后端
-   # USE_MEGATRON=0 bash verl/scripts/install_sglang_mcore_npu.sh
+   # USE_MEGATRON=0 bash scripts/install_sglang_mcore_npu.sh
 
 SGLang 使用注意事项
 ^^^^^^^^^^^^^^^
