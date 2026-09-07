@@ -83,7 +83,7 @@ Checkpoint Saving Directory Structure
 -------------------------------------
 
 Commonly, we use the ``default_local_dir`` declared in ``ppo_trainer.yaml`` or ``ppo_megatron_trainer.yml``
-to work as preffix when saving checkpoints, which is ``checkpoints/${trainer.project_name}/${trainer.experiment_name}``.
+to work as prefix when saving checkpoints, which is ``checkpoints/${trainer.project_name}/${trainer.experiment_name}``.
 
 So the inner checkpoint structure of **FSDP** is like:
 

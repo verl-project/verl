@@ -99,7 +99,7 @@ def _async_gen_next_batch(self, continuous_iterator):
    except StopIteration:
       return None
    batch = DataProto.from_single_dict(batch_dict)
-   gen_batch = batch_pocess(batch)
+   gen_batch = batch_process(batch)
    # sync weights from actor to rollout
    self.sync_rollout_weights()
    # async generation

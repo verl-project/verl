@@ -45,7 +45,7 @@ Glossary
 --------
 
 +----------------+------------------------------------------------------------------------------------------------------+
-| Object         | Explaination                                                                                         |
+| Object         | Explanation                                                                                         |
 +================+======================================================================================================+
 | trajectory     | A complete multi-turn conversation includes:                                                         |
 |                | 1. LLM output at least once                                                                          |
@@ -56,7 +56,7 @@ Glossary
 | sample_index   | The identifier of the sample, defined in the extra_info.index of the dataset. It is usually a number,|
 |                | but may also be a uuid in some cases.                                                                |
 +----------------+------------------------------------------------------------------------------------------------------+
-| rollout_n      | In the GROP algorithm, each sample is rolled out n times. rollout_n represents the serial number of  |
+| rollout_n      | In the GRPO algorithm, each sample is rolled out n times. rollout_n represents the serial number of  |
 |                | the rollout.                                                                                         |
 +----------------+------------------------------------------------------------------------------------------------------+
 | validate       | Whether the test dataset is used for evaluation?                                                     |

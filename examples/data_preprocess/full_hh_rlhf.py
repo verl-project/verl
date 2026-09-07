@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-- Preprocess data and split the training set into 75% for training RM and 25% for validting RM.
+- Preprocess data and split the training set into 75% for training RM and 25% for validating RM.
 - All the training data is used to train SFT and RL.
 - Both chosen and rejected is used to train SFT
 """
