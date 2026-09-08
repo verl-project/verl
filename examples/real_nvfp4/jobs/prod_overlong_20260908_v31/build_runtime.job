@@ -1,0 +1,345 @@
+#!/usr/bin/env bash
+#SBATCH --account=general_sa
+#SBATCH --partition=36x2-a01r,tcpo,batch
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=8
+#SBATCH --time=03:00:00
+#SBATCH --job-name=verl-rn4pt-build
+
+set -euo pipefail
+export RN4PT_SKIP_UV_LOCK_CHECK=1
+# shellcheck disable=SC1091
+source /lustre/fsw/general_sa/shuazhang/python_space/verl_for_nvfp4_20251031/verl_nvfp4_e2e_r3_20260831_v3/examples/real_nvfp4/jobs/prod_overlong_20260908_v31/manifest.sh
+rn4pt_validate_static
+[[ -s "$RN4PT_PROBE_PASS" ]] || rn4pt_die "runtime probe has not passed"
+[[ ! -e "$RN4PT_RUNTIME_IMAGE" && ! -e "$RN4PT_RUNTIME_IMAGE.sha256" ]] || \
+  rn4pt_die "versioned runtime image already exists"
+
+mkdir -p "$RN4PT_STATE"
+readonly BUILD_LOG=$RN4PT_STATE/build_${SLURM_JOB_ID:?}.log
+readonly TMP_IMAGE=$RN4PT_RUNTIME_IMAGE.building.${SLURM_JOB_ID}
+[[ "$TMP_IMAGE" = "$RN4PT_RUNTIME_IMAGE.building.${SLURM_JOB_ID}" && ! -e "$TMP_IMAGE" ]]
+
+cleanup_failed_build() {
+  local rc=$?
+  if [[ $rc -ne 0 && -e "$TMP_IMAGE" ]]; then
+    rm -f -- "$TMP_IMAGE"
+  fi
+  return "$rc"
+}
+trap cleanup_failed_build EXIT
+
+read -r -d '' INNER <<INNER_EOF || true
+set -euo pipefail
+readonly SRC=$RN4PT_VERL
+readonly DST=$RN4PT_IMAGE_ENV
+[[ ! -e "\$DST" ]]
+mkdir -p "\$DST"
+git -C "\$SRC" archive "$RN4PT_SOURCE_COMMIT" | tar -x -C "\$DST"
+mkdir -p "\$DST/recipe"
+git -C "\$SRC/recipe" archive "$RN4PT_RECIPE_COMMIT" | tar -x -C "\$DST/recipe"
+cd "\$DST"
+test "\$(uname -m)" = aarch64
+UV_BIN=\$(command -v uv || true)
+if [[ -z "\$UV_BIN" && -x /opt/verl-real-nvfp4/.venv/bin/uv ]]; then
+  UV_BIN=/opt/verl-real-nvfp4/.venv/bin/uv
+fi
+if [[ -z "\$UV_BIN" ]]; then
+  /usr/bin/python3 -m pip install \
+    --break-system-packages \
+    --disable-pip-version-check \
+    --no-cache-dir \
+    'uv==0.11.26'
+  hash -r
+  UV_BIN=\$(command -v uv || true)
+fi
+[[ -n "\$UV_BIN" && -x "\$UV_BIN" ]]
+"\$UV_BIN" --version | grep -q '^uv 0\.11\.26 '
+export UV_PROJECT_ENVIRONMENT="\$DST/.venv"
+export UV_HTTP_TIMEOUT=600
+export UV_LINK_MODE=copy
+export UV_CONCURRENT_DOWNLOADS=4
+export UV_CONCURRENT_BUILDS=1
+export UV_CONCURRENT_INSTALLS=4
+export CUDA_HOME=/usr/local/cuda
+export NVTE_FRAMEWORK=pytorch
+export NVTE_CUDA_ARCHS=100a
+export NVTE_WITH_NCCL_EP=0
+export MAX_JOBS=8
+export CMAKE_BUILD_PARALLEL_LEVEL=8
+"\$UV_BIN" sync --frozen --extra megatron --extra vllm
+
+# --- site-packages backports -------------------------------------------------
+# "uv sync" installs megatron-core and vLLM from scratch, so every patch the
+# v5..v8 image lineage applied in place has to be reapplied here; an
+# incremental build inherited them for free. All three are load-bearing.
+
+# MCore 0.18 probes the optional FA4 implementation by importing
+# flash_attn.cute. This environment carries flash-attn 2.8.3 (FA2) but not the
+# flash-attn-4 distribution, and the incidental cute sources shipped inside the
+# FA2 wheel target CUTLASS DSL 4.1; against the 4.6 DSL that FlashInfer and vLLM
+# require they raise AttributeError ("module 'cutlass.cute.core' has no
+# attribute 'ThrMma'"), which MCore's except-ImportError guard does not catch, so
+# importing megatron.core dies outright. Gate the probe on FA4's distribution
+# metadata instead. FA2 and TE fused attention are unchanged, and MCore only
+# uses FA4 on its inference path, which Verl never takes.
+"\$DST/.venv/bin/python" - <<'PY'
+from importlib.metadata import distribution
+
+attention_path = distribution("megatron-core").locate_file(
+    "megatron/core/transformer/attention.py"
+)
+original = """try:
+    from flash_attn.cute import flash_attn_varlen_func as flash_attn4_varlen_func
+
+    HAVE_FA4 = True
+except ImportError:
+    HAVE_FA4 = False
+"""
+replacement = """# VERL_MCORE_FA4_DIST_GUARD: only import FA4 when its distribution is installed.
+try:
+    from importlib.metadata import PackageNotFoundError as _FA4PackageNotFoundError
+    from importlib.metadata import version as _get_fa4_dist_version
+
+    _get_fa4_dist_version("flash-attn-4")
+except _FA4PackageNotFoundError:
+    HAVE_FA4 = False
+else:
+    try:
+        from flash_attn.cute import flash_attn_varlen_func as flash_attn4_varlen_func
+
+        HAVE_FA4 = True
+    except ImportError:
+        HAVE_FA4 = False
+"""
+text = attention_path.read_text()
+assert text.count(original) == 1, attention_path
+attention_path.write_text(text.replace(original, replacement))
+print("REAL_NVFP4_MCORE_FA4_COMPAT_PATCH_PASS", attention_path, flush=True)
+PY
+
+# Exact backport of vLLM upstream b07ec92faa2d534ed97fe97f44ca71c816404849
+# (#49489, "Make shared NVFP4 MoE scales writable"). vLLM 0.26 expands a scalar
+# input scale to all experts with stride zero; native layerwise reload must copy
+# into that tensor to preserve CUDA-graph references, which PyTorch rejects.
+"\$DST/.venv/bin/python" - <<'PY'
+from importlib.metadata import distribution
+
+path = distribution("vllm").locate_file(
+    "vllm/model_executor/layers/quantization/utils/flashinfer_fp4_moe.py"
+)
+text = path.read_text()
+replacements = {
+    "a13_scale = a13_scale.max().to(torch.float32).expand(num_experts)":
+        "a13_scale = a13_scale.max().to(torch.float32).repeat(num_experts)",
+    "a2_scale = a2_scale.max().to(torch.float32).expand(num_experts)":
+        "a2_scale = a2_scale.max().to(torch.float32).repeat(num_experts)",
+}
+for old, new in replacements.items():
+    assert text.count(old) == 2, (path, old, text.count(old))
+    text = text.replace(old, new)
+path.write_text(text)
+assert all(text.count(new) == 2 for new in replacements.values())
+assert all(old not in text for old in replacements)
+print(
+    "REAL_NVFP4_VLLM_WRITABLE_SCALES_BACKPORT_PASS",
+    "upstream=b07ec92faa2d534ed97fe97f44ca71c816404849",
+    path,
+    flush=True,
+)
+PY
+
+# Exact backport of Megatron-LM upstream 7e6a045a2a99659ddd2919fc19013a164c508825
+# (#5997). TE 2.18 stateless quant recipes emit an empty extra-state tensor;
+# grouped checkpoint splitting must preserve one empty state per local expert.
+"\$DST/.venv/bin/python" - <<'PY'
+from importlib.metadata import distribution
+
+path = distribution("megatron-core").locate_file(
+    "megatron/core/extensions/transformer_engine.py"
+)
+text = path.read_text()
+old = """            state = self._decode_extra_state(state)
+            extra_states = []"""
+new = """            state = self._decode_extra_state(state)
+            if state is None:
+                return [torch.empty(0, dtype=torch.uint8)] * self.num_gemms
+            extra_states = []"""
+if new not in text:
+    assert text.count(old) == 1, (path, text.count(old))
+    text = text.replace(old, new)
+else:
+    assert old not in text
+path.write_text(text)
+assert text.count(new) == 1
+print(
+    "REAL_NVFP4_MCORE_STATELESS_EXTRA_STATE_BACKPORT_PASS",
+    "upstream=7e6a045a2a99659ddd2919fc19013a164c508825",
+    path,
+    flush=True,
+)
+PY
+
+# vLLM 0.26 launches the TRTLLM NVFP4 MoE with programmatic dependent launch on.
+# This recipe has always run it off. v29c removed the workaround on the strength
+# of a +10.7% isolated-throughput number, which turned out to be measured on the
+# broken batched-GEMM artifact and is void; v30 restored it while still on that
+# artifact and still went NaN, so PDL was never the cause either way. It stays
+# off because that is the configuration with 630 healthy production steps behind
+# it, and re-enabling it is a throughput experiment for another day -- one that
+# has to be judged on numbers, not on tok/s.
+if [[ "${RN4PT_VLLM_DISABLE_TRTLLM_MOE_PDL:-0}" = 1 ]]; then
+  "\$DST/.venv/bin/python" "$RN4PT_ROOT/runtime_backports/disable_vllm_trtllm_nvfp4_moe_pdl.py"
+fi
+"\$DST/.venv/bin/python" - <<'PY'
+import inspect
+import platform
+from importlib.metadata import version
+from pathlib import Path
+
+expected = {
+    "vllm": "0.26.0",
+    "megatron-core": "0.18.0+ba7b5ebce",
+    "megatron-bridge": "0.5.2",
+    "transformer-engine": "2.18.0+e7c550c5",
+    "nvidia-cublas": "13.5.1.27",
+    "nvidia-cudnn-cu13": "9.20.0.48",
+    "nvidia-cudnn-frontend": "1.25.0",
+    "nvidia-nccl-cu13": "2.30.7",
+    "nvidia-modelopt": "0.44.0",
+    "flashinfer-python": "0.6.15.post1",
+    "flashinfer-cubin": "0.6.15.post1",
+    "flashinfer-jit-cache": "0.6.15.post1+cu130",
+    "nvidia-cutlass-dsl": "4.6.0",
+    "quack-kernels": "0.6.1",
+    "transformers": "5.12.1",
+}
+actual = {name: version(name) for name in expected}
+assert actual == expected, (actual, expected)
+assert platform.machine() == "aarch64"
+
+# The three site-packages backports this build reapplies after the sync, plus
+# the one it must NOT reapply: FlashInfer 0.6.16.post3 carries the cubin fix for
+# flashinfer#3279, and the enable_pdl=False workaround this bundle restores.
+from importlib.metadata import distribution
+
+mcore_attention = Path(
+    distribution("megatron-core").locate_file("megatron/core/transformer/attention.py")
+)
+assert "VERL_MCORE_FA4_DIST_GUARD" in mcore_attention.read_text(), mcore_attention
+mcore_te_extension = Path(
+    distribution("megatron-core").locate_file("megatron/core/extensions/transformer_engine.py")
+)
+assert (
+    "return [torch.empty(0, dtype=torch.uint8)] * self.num_gemms"
+    in mcore_te_extension.read_text()
+), mcore_te_extension
+flashinfer_fp4_moe = Path(
+    distribution("vllm").locate_file(
+        "vllm/model_executor/layers/quantization/utils/flashinfer_fp4_moe.py"
+    )
+)
+flashinfer_fp4_moe_text = flashinfer_fp4_moe.read_text()
+assert flashinfer_fp4_moe_text.count("repeat(num_experts)") == 4, flashinfer_fp4_moe
+assert "expand(num_experts)" not in flashinfer_fp4_moe_text, flashinfer_fp4_moe
+trtllm_nvfp4_moe = Path(
+    distribution("vllm").locate_file(
+        "vllm/model_executor/layers/fused_moe/experts/trtllm_nvfp4_moe.py"
+    )
+)
+assert trtllm_nvfp4_moe.read_text().count("enable_pdl=False") == 2, trtllm_nvfp4_moe
+
+# The wheel version is only a proxy for what actually decides the kernel: the
+# TRTLLM_GEN batched-GEMM artifact it downloads. Every FlashInfer release after
+# 0.6.16rc4 regenerated it, and on SM100 the new one returns non-finite MoE
+# output on the tile-192 path that Qwen3-30B-A3B's moe_intermediate_size of 768
+# forces in online NVFP4 mode (sglang#34629, FlashInfer #4180 / #4252). Pin the
+# artifact itself so a future bump cannot reintroduce it quietly.
+from flashinfer.artifacts import ArtifactPath
+
+assert ArtifactPath.TRTLLM_GEN_BMM == (
+    "b368d003e8fdfe4b271bff7c788ac52ef789a81b/batched_gemm-da58956-b4ac80e/"
+), ArtifactPath.TRTLLM_GEN_BMM
+
+import transformer_engine
+
+te_root = Path(transformer_engine.__file__).resolve().parent
+packed_markers = {
+    te_root / "pytorch/module/grouped_linear.py": "wgrad_packed = torch.empty(",
+    te_root / "pytorch/ops/basic/grouped_linear.py": "grad_weights_packed = torch.empty(",
+}
+assert all(marker in path.read_text() for path, marker in packed_markers.items()), packed_markers
+dequantized_paths = [
+    te_root / "pytorch/module/grouped_linear.py",
+    te_root / "pytorch/module/linear.py",
+]
+for path in dequantized_paths:
+    lines = path.read_text().splitlines()
+    assert any(
+        'elif backward_override == "dequantized":' in line
+        and any("save_original_input = False" in following for following in lines[index + 1 : index + 4])
+        for index, line in enumerate(lines)
+    ), path
+
+from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import make_nvfp4_moe_kernel
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.model_executor.layers.quantization import get_quantization_config
+from vllm.model_executor.layers.quantization.online.nvfp4 import (
+    Nvfp4OnlineMoEMethod,
+    _quantize_moe_weight_to_nvfp4,
+)
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from megatron.core.transformer.transformer_config import TransformerConfig
+
+assert "per_token_activation" in inspect.signature(make_nvfp4_moe_kernel).parameters
+assert get_quantization_config("nvfp4_per_token").__name__ == "OnlineQuantizationConfig"
+assert Nvfp4OnlineMoEMethod.__name__ == "Nvfp4OnlineMoEMethod"
+assert tuple(inspect.signature(_quantize_moe_weight_to_nvfp4).parameters) == ("weight",)
+assert tuple(inspect.signature(MoERunner._apply_quant_method).parameters) == (
+    "self", "hidden_states", "router_logits", "shared_experts_input", "input_ids"
+)
+reload_signature = inspect.signature(GPUModelRunner.reload_weights)
+assert tuple(reload_signature.parameters) == (
+    "self", "weights_iterator", "weights_path", "is_checkpoint_format"
+)
+assert reload_signature.parameters["is_checkpoint_format"].default is True
+assert callable(getattr(GPUModelRunner, "get_model", None))
+assert {
+    "first_last_layers_bf16",
+    "num_layers_at_start_in_bf16",
+    "num_layers_at_end_in_bf16",
+} <= TransformerConfig.__dataclass_fields__.keys()
+
+# Import the actual Verl frontend/worker integration against 0.26, rather than
+# proving only isolated vLLM APIs.
+from verl.workers.rollout.vllm_rollout.utils import vLLMColocateWorkerExtension
+from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
+from verl.utils.real_nvfp4 import REAL_NVFP4_TE_COMMIT, REAL_NVFP4_TE_VERSION
+
+assert vLLMColocateWorkerExtension is not None and vLLMHttpServer is not None
+assert REAL_NVFP4_TE_COMMIT == "$RN4PT_TE_COMMIT"
+assert REAL_NVFP4_TE_VERSION == "$RN4PT_TE_VERSION"
+import megatron.core.transformer.attention as mcore_attention_module
+
+assert mcore_attention_module.HAVE_FA4 is False
+
+print("REAL_NVFP4_PERTOKEN_IMAGE_DEPS_PASS", actual, flush=True)
+PY
+INNER_EOF
+
+srun --container-image="$RN4PT_BASE_IMAGE" \
+  --container-name="verl-rn4pt-build-${SLURM_JOB_ID}" \
+  --container-mounts=/lustre/fsw/general_sa/shuazhang:/lustre/fsw/general_sa/shuazhang \
+  --container-save="$TMP_IMAGE" \
+  bash -lc "export CUDA_VISIBLE_DEVICES=0; $INNER" 2>&1 | tee "$BUILD_LOG"
+
+grep -q 'REAL_NVFP4_PERTOKEN_IMAGE_DEPS_PASS' "$BUILD_LOG"
+[[ -s "$TMP_IMAGE" ]]
+mv "$TMP_IMAGE" "$RN4PT_RUNTIME_IMAGE"
+sha256sum "$RN4PT_RUNTIME_IMAGE" >"$RN4PT_RUNTIME_IMAGE.sha256"
+printf 'job_id=%s\nlog=%s\nimage=%s\nsource_commit=%s\nlock_sha256=%s\n' \
+  "$SLURM_JOB_ID" "$BUILD_LOG" "$RN4PT_RUNTIME_IMAGE" \
+  "$RN4PT_SOURCE_COMMIT" "$RN4PT_LOCK_SHA256" >"$RN4PT_BUILD_PASS"
+trap - EXIT
+echo "REAL_NVFP4_PERTOKEN_BUILD_PASS job_id=$SLURM_JOB_ID image=$RN4PT_RUNTIME_IMAGE"

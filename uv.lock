@@ -24,9 +24,9 @@ conflicts = [[
 [manifest]
 overrides = [
     { name = "flash-attn-4", marker = "platform_machine == 'flash-attn-4-excluded'" },
-    { name = "flashinfer-cubin", marker = "extra == 'vllm'", specifier = "==0.6.16.post3", index = "https://flashinfer.ai/whl" },
-    { name = "flashinfer-jit-cache", marker = "extra == 'vllm'", specifier = "==0.6.16.post3", index = "https://flashinfer.ai/whl/cu130" },
-    { name = "flashinfer-python", marker = "extra == 'vllm'", specifier = "==0.6.16.post3" },
+    { name = "flashinfer-cubin", marker = "extra == 'vllm'", specifier = "==0.6.15.post1", index = "https://flashinfer.ai/whl" },
+    { name = "flashinfer-jit-cache", marker = "extra == 'vllm'", specifier = "==0.6.15.post1", index = "https://flashinfer.ai/whl/cu130" },
+    { name = "flashinfer-python", marker = "extra == 'vllm'", specifier = "==0.6.15.post1" },
     { name = "kernels", specifier = ">=0.10.2,<0.11" },
     { name = "numpy", specifier = ">=2.0.0" },
     { name = "nvidia-cublas", marker = "sys_platform == 'linux'", specifier = "==13.5.1.27" },
@@ -1034,24 +1034,24 @@ wheels = [
 
 [[package]]
 name = "flashinfer-cubin"
-version = "0.6.16.post3"
+version = "0.6.15.post1"
 source = { registry = "https://flashinfer.ai/whl" }
 wheels = [
-    { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.16.post3/flashinfer_cubin-0.6.16.post3-py3-none-any.whl", hash = "sha256:c79fba990aee2a7c7ef64208bb65900e45fe23c3a223f3dfc21eef225f43cba2" },
+    { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.15.post1/flashinfer_cubin-0.6.15.post1-py3-none-any.whl", hash = "sha256:25cfd305afa1f34baa2f419bca35db58c369c534ee1961662e83d9fe858ce021" },
 ]
 
 [[package]]
 name = "flashinfer-jit-cache"
-version = "0.6.16.post3+cu130"
+version = "0.6.15.post1+cu130"
 source = { registry = "https://flashinfer.ai/whl/cu130" }
 wheels = [
-    { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.16.post3/flashinfer_jit_cache-0.6.16.post3+cu130-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:9bd5529b1b2c774206bde78a65d84aff29583a51ce2804226cb45d6261af43ad" },
-    { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.16.post3/flashinfer_jit_cache-0.6.16.post3+cu130-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:abcca93faa2fbbc9a98394ccc44ab657627b91e49da2624efd26a6ff669264ab" },
+    { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.15.post1/flashinfer_jit_cache-0.6.15.post1+cu130-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:e5d82f82d63a9f2620eb019e4e80add60e4cfef5da94cad6beda147238048170" },
+    { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.15.post1/flashinfer_jit_cache-0.6.15.post1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:2473dbb78f65002267c221be4d75eb50dbcde51acd5242542f5aea7d1bff1b23" },
 ]
 
 [[package]]
 name = "flashinfer-python"
-version = "0.6.16.post3"
+version = "0.6.15.post1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "apache-tvm-ffi", version = "0.1.10", source = { registry = "https://pypi.org/simple" } },
@@ -1071,9 +1071,9 @@ dependencies = [
     { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c2/46/17045cb47b7b93fcb4e5303e398e6b129b86239930ac0875942a83d8b962/flashinfer_python-0.6.16.post3.tar.gz", hash = "sha256:9b146cfcc1454c80f3f99444db48013b3eadaeb32f2a399bd76c9471ecb72f04", size = 11076656, upload-time = "2026-08-08T01:14:16.408Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ff/35/4f098ea8d38a5f688fb253a8698348121a005449b95d96bd90e66d756e26/flashinfer_python-0.6.15.post1.tar.gz", hash = "sha256:066822703606ffb491e464e3c001364999ad265778454fde2304eb14eb15c7a2", size = 10296036, upload-time = "2026-07-21T02:04:37.952Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9d/dc/5367cb601fc9190cc75b4c141f5f7e9a224d1c26a1e983151823e02a25b3/flashinfer_python-0.6.16.post3-py3-none-any.whl", hash = "sha256:caf686b9b079abe1c9d65ab505698bd325e8072de40afd822f2c74f2ac3bc601", size = 15836034, upload-time = "2026-08-08T01:14:13.709Z" },
+    { url = "https://files.pythonhosted.org/packages/a7/7b/9b31a44c39022a655dccba2c8b47907a1c520258437a11db757c353a195c/flashinfer_python-0.6.15.post1-py3-none-any.whl", hash = "sha256:f2419fd2b77c2705816e8d0a31c784c6456b17f373f8494b5cfc3bdf434d5c44", size = 14952951, upload-time = "2026-07-21T02:04:35.38Z" },
 ]
 
 [[package]]
@@ -5293,9 +5293,9 @@ requires-dist = [
     { name = "dill", marker = "extra == 'verl-core'" },
     { name = "fastapi", marker = "extra == 'verl-core'" },
     { name = "flash-attn", marker = "extra == 'flash-attn-cu130torch211'", specifier = "==2.8.3", index = "https://verl-project.github.io/verl-wheelhouse/simple/" },
-    { name = "flashinfer-cubin", marker = "extra == 'vllm'", specifier = "==0.6.16.post3", index = "https://flashinfer.ai/whl" },
-    { name = "flashinfer-jit-cache", marker = "extra == 'vllm'", specifier = "==0.6.16.post3", index = "https://flashinfer.ai/whl/cu130" },
-    { name = "flashinfer-python", marker = "extra == 'vllm'", specifier = "==0.6.16.post3" },
+    { name = "flashinfer-cubin", marker = "extra == 'vllm'", specifier = "==0.6.15.post1", index = "https://flashinfer.ai/whl" },
+    { name = "flashinfer-jit-cache", marker = "extra == 'vllm'", specifier = "==0.6.15.post1", index = "https://flashinfer.ai/whl/cu130" },
+    { name = "flashinfer-python", marker = "extra == 'vllm'", specifier = "==0.6.15.post1" },
     { name = "hf-transfer", marker = "extra == 'ci'" },
     { name = "hydra-core" },
     { name = "hydra-core", marker = "extra == 'verl-core'" },

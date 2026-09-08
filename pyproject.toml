@@ -97,12 +97,12 @@ vllm = [
     "vllm @ https://github.com/vllm-project/vllm/releases/download/v0.26.0/vllm-0.26.0-cp38-abi3-manylinux_2_28_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "vllm==0.26.0 ; sys_platform != 'linux' or (platform_machine != 'aarch64' and platform_machine != 'x86_64')",
     # FlashInfer moves ahead of the version vLLM 0.26.0 pins; see
-    # override-dependencies for why. vLLM 0.27 would bring this for free but only
-    # via torch 2.13, which would mean rebuilding the prebuilt
-    # apex / flash-attn / megatron-bridge wheelhouse.
-    "flashinfer-python==0.6.16.post3",
-    "flashinfer-cubin==0.6.16.post3",
-    "flashinfer-jit-cache==0.6.16.post3",
+    # override-dependencies for why 0.6.15.post1 exactly. vLLM 0.27 would bring a
+    # newer FlashInfer for free but only via torch 2.13, which would mean
+    # rebuilding the prebuilt apex / flash-attn / megatron-bridge wheelhouse.
+    "flashinfer-python==0.6.15.post1",
+    "flashinfer-cubin==0.6.15.post1",
+    "flashinfer-jit-cache==0.6.15.post1",
     "nvidia-cutlass-dsl[cu13]==4.6.0",
     "quack-kernels==0.6.1",
     "mbridge",
@@ -400,9 +400,20 @@ override-dependencies = [
     # trtllm_fp4_block_scale_routed_moe) take identical parameter sets in 0.6.14,
     # 0.6.15 and 0.6.16.post3, and vLLM's own 0.26->0.27 changes to those call
     # sites were structural, not API adaptations.
-    "flashinfer-python==0.6.16.post3 ; extra == 'vllm'",
-    "flashinfer-cubin==0.6.16.post3 ; extra == 'vllm'",
-    "flashinfer-jit-cache==0.6.16.post3 ; extra == 'vllm'",
+    #
+    # 0.6.15.post1 and not something newer: every release after 0.6.16rc4
+    # regenerates the TRTLLM_GEN batched-GEMM artifact
+    # (b368d003.../batched_gemm-da58956-b4ac80e ->
+    # 5988e15c.../batched_gemm-3d40263-3e19f0a, FlashInfer #4180 / #4252), and on
+    # SM100 that artifact's tile-192 path returns non-finite MoE output in online
+    # NVFP4 mode -- sglang#34629. Qwen3-30B-A3B forces exactly that path: with
+    # moe_intermediate_size 768 the only valid tactics are [192,1] and [192,3].
+    # We reproduced it twice, at step 2 and step 4 of an 8-node run, with the PDL
+    # workaround both off and on. 0.6.15.post1 keeps the #3973 cubin fix and the
+    # last good batched-GEMM artifact.
+    "flashinfer-python==0.6.15.post1 ; extra == 'vllm'",
+    "flashinfer-cubin==0.6.15.post1 ; extra == 'vllm'",
+    "flashinfer-jit-cache==0.6.15.post1 ; extra == 'vllm'",
     # Match the current NeMo RL PR #3566 runtime used to validate TE
     # 2.18.0+e7c550c5 with vLLM 0.26 on GB200. Torch 2.11 declares older exact
     # CUDA library pins, so these must be overrides rather than ordinary direct
