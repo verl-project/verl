@@ -73,11 +73,17 @@ def get_device_flops(unit="T", device_name=None):
 
     # pass device_name is for testing purpose only
     if device_name is None:
+        from verl.plugin.platform.platform_manager import get_platform
+
         device = get_torch_device()
-        if device == torch.cpu:
+        # get_torch_device() falls back to the nvidia platform module even when no
+        # accelerator is present, so comparing against torch.cpu is not enough —
+        # without the availability check, get_device_name() would try to
+        # initialize CUDA on CPU-only builds/actors.
+        if device == torch.cpu or not get_platform().is_available():
             device_name = "CPU"
         else:
-            device_name = get_torch_device().get_device_name()
+            device_name = device.get_device_name()
 
     flops = float("inf")  # INF flops for unkown gpu type
 
