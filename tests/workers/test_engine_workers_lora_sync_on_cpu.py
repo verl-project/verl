@@ -30,10 +30,6 @@ import inspect
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
-import pytest
-
-pytest.importorskip("vllm")
-
 # ---------------------------------------------------------------------------
 # Helper: simulate engine_workers.update_weights() logic
 # ---------------------------------------------------------------------------

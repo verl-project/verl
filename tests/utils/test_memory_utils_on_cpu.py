@@ -52,7 +52,11 @@ def test_collect_garbage_honors_setting(monkeypatch, gc_setting, expected_result
     assert collect.call_args_list == expected_calls
 
 
-def test_collect_garbage_reports_diagnostics(monkeypatch, capsys):
+@pytest.mark.parametrize(
+    ("gc_setting", "expected_gc_call", "expected_generation"),
+    [(True, call(), "full"), (1, call(1), "1")],
+)
+def test_collect_garbage_reports_diagnostics(monkeypatch, capsys, gc_setting, expected_gc_call, expected_generation):
     gc_stats = iter(
         (
             [
@@ -73,7 +77,8 @@ def test_collect_garbage_reports_diagnostics(monkeypatch, capsys):
     print_spy = Mock(wraps=print)
     process.memory_info.side_effect = [SimpleNamespace(rss=next(rss)), SimpleNamespace(rss=next(rss))]
     monkeypatch.setattr(memory_utils.gc, "get_stats", lambda: next(gc_stats))
-    monkeypatch.setattr(memory_utils.gc, "collect", lambda: 7)
+    collect = Mock(return_value=7)
+    monkeypatch.setattr(memory_utils.gc, "collect", collect)
     monkeypatch.setattr(memory_utils.psutil, "Process", lambda: process)
     monkeypatch.setattr(memory_utils, "get_torch_device", lambda: device)
     monkeypatch.setattr(memory_utils.torch.distributed, "is_available", lambda: False)
@@ -82,10 +87,10 @@ def test_collect_garbage_reports_diagnostics(monkeypatch, capsys):
     monkeypatch.setattr(memory_utils.time, "thread_time", lambda: next(cpu_times))
     monkeypatch.setattr("builtins.print", print_spy)
 
-    assert memory_utils.collect_garbage(True, diagnostics_point="test_point") == 7
+    assert memory_utils.collect_garbage(gc_setting, diagnostics_point="test_point") == 7
 
     line = capsys.readouterr().out.strip()
-    assert line.startswith("[gc_diagnostics] point=test_point rank=3 generation=full")
+    assert line.startswith(f"[gc_diagnostics] point=test_point rank=3 generation={expected_generation}")
     assert "wall_ms=250.000 thread_cpu_ms=200.000 collected=7 uncollectable=1" in line
     assert "rss_delta_mib=-2.000" in line
     assert "cuda_allocated_delta_mib=-8.000" in line
@@ -93,24 +98,9 @@ def test_collect_garbage_reports_diagnostics(monkeypatch, capsys):
     assert "generation_1_collections=1" in line
     assert "generation_1_collected=7" in line
     assert "generation_1_uncollectable=1" in line
+    assert collect.call_args == expected_gc_call
     print_spy.assert_called_once()
     assert print_spy.call_args.kwargs == {"flush": True}
-
-
-def test_collect_garbage_diagnostics_forwards_generation(monkeypatch, capsys):
-    collect = Mock(return_value=0)
-    process = Mock()
-    process.memory_info.return_value = SimpleNamespace(rss=0)
-    monkeypatch.setattr(memory_utils.gc, "collect", collect)
-    monkeypatch.setattr(memory_utils.gc, "get_stats", lambda: [])
-    monkeypatch.setattr(memory_utils.psutil, "Process", lambda: process)
-    monkeypatch.setattr(memory_utils, "get_torch_device", lambda: Mock(is_available=lambda: False))
-    monkeypatch.setattr(memory_utils.torch.distributed, "is_available", lambda: False)
-
-    memory_utils.collect_garbage(1, diagnostics_point="test_point")
-
-    collect.assert_called_once_with(1)
-    assert "generation=1" in capsys.readouterr().out
 
 
 def test_collect_garbage_diagnostics_can_be_disabled(monkeypatch, capsys):

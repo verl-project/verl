@@ -22,14 +22,23 @@ class _FakeTorchDevice:
         pass
 
 
-def test_sender_cleanup_reports_gc_diagnostics_when_enabled(monkeypatch):
+@pytest.mark.parametrize(
+    ("sender_kwargs", "expected_setting", "expected_point"),
+    [
+        ({"gc_diagnostics": True}, True, "weight_transfer_cleanup"),
+        ({"gc_on_cleanup": False}, False, None),
+        ({"gc_on_cleanup": 0}, 0, None),
+        ({"gc_on_cleanup": 1}, 1, None),
+    ],
+)
+def test_sender_cleanup_forwards_gc_configuration(monkeypatch, sender_kwargs, expected_setting, expected_point):
     from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
 
     sender = bucketed_weight_transfer.BucketedWeightSender(
         zmq_handle="tcp://unused",
         bucket_size_mb=1,
         use_shm=True,
-        gc_diagnostics=True,
+        **sender_kwargs,
     )
     calls = []
     monkeypatch.setattr(
@@ -41,27 +50,4 @@ def test_sender_cleanup_reports_gc_diagnostics_when_enabled(monkeypatch):
 
     sender._cleanup()
 
-    assert calls == [(True, {"diagnostics_point": "weight_transfer_cleanup"})]
-
-
-@pytest.mark.parametrize("gc_setting", [False, 0, 1])
-def test_sender_cleanup_forwards_gc_setting(monkeypatch, gc_setting):
-    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
-
-    sender = bucketed_weight_transfer.BucketedWeightSender(
-        zmq_handle="tcp://unused",
-        bucket_size_mb=1,
-        use_shm=True,
-        gc_on_cleanup=gc_setting,
-    )
-    calls = []
-    monkeypatch.setattr(
-        bucketed_weight_transfer,
-        "collect_garbage",
-        lambda setting, **kwargs: calls.append((setting, kwargs)),
-    )
-    monkeypatch.setattr(bucketed_weight_transfer, "get_torch_device", lambda: _FakeTorchDevice())
-
-    sender._cleanup()
-
-    assert calls == [(gc_setting, {"diagnostics_point": None})]
+    assert calls == [(expected_setting, {"diagnostics_point": expected_point})]
