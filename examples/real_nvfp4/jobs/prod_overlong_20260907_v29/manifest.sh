@@ -23,8 +23,8 @@ readonly RN4PT_BASE_IMAGE=${RN4PT_BASE_IMAGE_OVERRIDE:-/lustre/fsw/general_sa/sh
 # This bundle carries a runtime payload change (the R3 capture hook is now
 # installed for any rollout that returns routed experts, not just the NVFP4
 # one), so it builds its own image rather than inheriting v23's evidence.
-readonly RN4PT_RUNTIME_IMAGE=${RN4PT_RUNTIME_IMAGE_OVERRIDE:-/lustre/fsw/general_sa/shuazhang/images/verl.vllm026.mcore018.te218e7.realnvfp4.fi0616.prod.20260907.v29b.sqsh}
-readonly RN4PT_IMAGE_ENV=/opt/verl-rn4pt-20260907-v29b
+readonly RN4PT_RUNTIME_IMAGE=${RN4PT_RUNTIME_IMAGE_OVERRIDE:-/lustre/fsw/general_sa/shuazhang/images/verl.vllm026.mcore018.te218e7.realnvfp4.fi0616.prod.20260907.v29c.sqsh}
+readonly RN4PT_IMAGE_ENV=/opt/verl-rn4pt-20260907-v29c
 readonly RN4PT_IMAGE_PYTHON=$RN4PT_IMAGE_ENV/.venv/bin/python
 readonly RN4PT_NETRC=/home/shuazhang/.netrc
 readonly RN4PT_MOUNTS=/lustre/fsw/general_sa/shuazhang:/lustre/fsw/general_sa/shuazhang,/home/shuazhang/.netrc:/root/.netrc
@@ -140,6 +140,19 @@ rn4pt_validate_static() {
     [[ -f "$path" && ! -L "$path" && -s "$path" ]] || rn4pt_die "missing input: $path" || return
   done
   bash -n "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" "$RN4PT_BUNDLE"/*.sh "$RN4PT_JOB_IMPL"/*.job || return
+  # Unlike v6..v27, this bundle reinstalls the environment, so the build job has
+  # to reapply every site-packages patch the v5..v8 images carried in place --
+  # dropping the FA4 guard alone makes importing megatron.core fail outright.
+  for marker in VERL_MCORE_FA4_DIST_GUARD 'repeat(num_experts)' \
+    'torch.empty(0, dtype=torch.uint8)] \* self.num_gemms'; do
+    grep -q "$marker" "$RN4PT_JOB_IMPL/build_runtime.job" || \
+      rn4pt_die "build job lost a site-packages backport: $marker" || return
+  done
+  # FlashInfer 0.6.16.post3 fixes flashinfer#3279, so the PDL workaround is gone
+  # and must not creep back in.
+  [[ "$RN4PT_VLLM_DISABLE_TRTLLM_MOE_PDL" = 0 ]] || rn4pt_die "PDL workaround is retired" || return
+  grep -q "enable_pdl=False. not in trtllm_nvfp4_moe.read_text()" "$RN4PT_JOB_IMPL/build_runtime.job" || \
+    rn4pt_die "build job no longer asserts the PDL workaround is absent" || return
   grep -q "platform_machine == 'aarch64'" "$RN4PT_VERL/uv.lock" || rn4pt_die "uv.lock lacks aarch64" || return
   grep -q 'vllm-0.26.0-cp38-abi3-manylinux_2_28_aarch64.whl' "$RN4PT_VERL/uv.lock" || \
     rn4pt_die "uv.lock lacks the aarch64 vLLM 0.26 wheel" || return

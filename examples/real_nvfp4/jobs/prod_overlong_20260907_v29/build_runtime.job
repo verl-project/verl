@@ -69,6 +69,117 @@ export NVTE_WITH_NCCL_EP=0
 export MAX_JOBS=8
 export CMAKE_BUILD_PARALLEL_LEVEL=8
 "\$UV_BIN" sync --frozen --extra megatron --extra vllm
+
+# --- site-packages backports -------------------------------------------------
+# "uv sync" installs megatron-core and vLLM from scratch, so every patch the
+# v5..v8 image lineage applied in place has to be reapplied here; an
+# incremental build inherited them for free. All three are load-bearing.
+
+# MCore 0.18 probes the optional FA4 implementation by importing
+# flash_attn.cute. This environment carries flash-attn 2.8.3 (FA2) but not the
+# flash-attn-4 distribution, and the incidental cute sources shipped inside the
+# FA2 wheel target CUTLASS DSL 4.1; against the 4.6 DSL that FlashInfer and vLLM
+# require they raise AttributeError ("module 'cutlass.cute.core' has no
+# attribute 'ThrMma'"), which MCore's except-ImportError guard does not catch, so
+# importing megatron.core dies outright. Gate the probe on FA4's distribution
+# metadata instead. FA2 and TE fused attention are unchanged, and MCore only
+# uses FA4 on its inference path, which Verl never takes.
+"\$DST/.venv/bin/python" - <<'PY'
+from importlib.metadata import distribution
+
+attention_path = distribution("megatron-core").locate_file(
+    "megatron/core/transformer/attention.py"
+)
+original = """try:
+    from flash_attn.cute import flash_attn_varlen_func as flash_attn4_varlen_func
+
+    HAVE_FA4 = True
+except ImportError:
+    HAVE_FA4 = False
+"""
+replacement = """# VERL_MCORE_FA4_DIST_GUARD: only import FA4 when its distribution is installed.
+try:
+    from importlib.metadata import PackageNotFoundError as _FA4PackageNotFoundError
+    from importlib.metadata import version as _get_fa4_dist_version
+
+    _get_fa4_dist_version("flash-attn-4")
+except _FA4PackageNotFoundError:
+    HAVE_FA4 = False
+else:
+    try:
+        from flash_attn.cute import flash_attn_varlen_func as flash_attn4_varlen_func
+
+        HAVE_FA4 = True
+    except ImportError:
+        HAVE_FA4 = False
+"""
+text = attention_path.read_text()
+assert text.count(original) == 1, attention_path
+attention_path.write_text(text.replace(original, replacement))
+print("REAL_NVFP4_MCORE_FA4_COMPAT_PATCH_PASS", attention_path, flush=True)
+PY
+
+# Exact backport of vLLM upstream b07ec92faa2d534ed97fe97f44ca71c816404849
+# (#49489, "Make shared NVFP4 MoE scales writable"). vLLM 0.26 expands a scalar
+# input scale to all experts with stride zero; native layerwise reload must copy
+# into that tensor to preserve CUDA-graph references, which PyTorch rejects.
+"\$DST/.venv/bin/python" - <<'PY'
+from importlib.metadata import distribution
+
+path = distribution("vllm").locate_file(
+    "vllm/model_executor/layers/quantization/utils/flashinfer_fp4_moe.py"
+)
+text = path.read_text()
+replacements = {
+    "a13_scale = a13_scale.max().to(torch.float32).expand(num_experts)":
+        "a13_scale = a13_scale.max().to(torch.float32).repeat(num_experts)",
+    "a2_scale = a2_scale.max().to(torch.float32).expand(num_experts)":
+        "a2_scale = a2_scale.max().to(torch.float32).repeat(num_experts)",
+}
+for old, new in replacements.items():
+    assert text.count(old) == 2, (path, old, text.count(old))
+    text = text.replace(old, new)
+path.write_text(text)
+assert all(text.count(new) == 2 for new in replacements.values())
+assert all(old not in text for old in replacements)
+print(
+    "REAL_NVFP4_VLLM_WRITABLE_SCALES_BACKPORT_PASS",
+    "upstream=b07ec92faa2d534ed97fe97f44ca71c816404849",
+    path,
+    flush=True,
+)
+PY
+
+# Exact backport of Megatron-LM upstream 7e6a045a2a99659ddd2919fc19013a164c508825
+# (#5997). TE 2.18 stateless quant recipes emit an empty extra-state tensor;
+# grouped checkpoint splitting must preserve one empty state per local expert.
+"\$DST/.venv/bin/python" - <<'PY'
+from importlib.metadata import distribution
+
+path = distribution("megatron-core").locate_file(
+    "megatron/core/extensions/transformer_engine.py"
+)
+text = path.read_text()
+old = """            state = self._decode_extra_state(state)
+            extra_states = []"""
+new = """            state = self._decode_extra_state(state)
+            if state is None:
+                return [torch.empty(0, dtype=torch.uint8)] * self.num_gemms
+            extra_states = []"""
+if new not in text:
+    assert text.count(old) == 1, (path, text.count(old))
+    text = text.replace(old, new)
+else:
+    assert old not in text
+path.write_text(text)
+assert text.count(new) == 1
+print(
+    "REAL_NVFP4_MCORE_STATELESS_EXTRA_STATE_BACKPORT_PASS",
+    "upstream=7e6a045a2a99659ddd2919fc19013a164c508825",
+    path,
+    flush=True,
+)
+PY
 "\$DST/.venv/bin/python" - <<'PY'
 import inspect
 import platform
@@ -95,6 +206,37 @@ expected = {
 actual = {name: version(name) for name in expected}
 assert actual == expected, (actual, expected)
 assert platform.machine() == "aarch64"
+
+# The three site-packages backports this build reapplies after the sync, plus
+# the one it must NOT reapply: FlashInfer 0.6.16.post3 carries the cubin fix for
+# flashinfer#3279, so the enable_pdl=False workaround stays retired.
+from importlib.metadata import distribution
+
+mcore_attention = Path(
+    distribution("megatron-core").locate_file("megatron/core/transformer/attention.py")
+)
+assert "VERL_MCORE_FA4_DIST_GUARD" in mcore_attention.read_text(), mcore_attention
+mcore_te_extension = Path(
+    distribution("megatron-core").locate_file("megatron/core/extensions/transformer_engine.py")
+)
+assert (
+    "return [torch.empty(0, dtype=torch.uint8)] * self.num_gemms"
+    in mcore_te_extension.read_text()
+), mcore_te_extension
+flashinfer_fp4_moe = Path(
+    distribution("vllm").locate_file(
+        "vllm/model_executor/layers/quantization/utils/flashinfer_fp4_moe.py"
+    )
+)
+flashinfer_fp4_moe_text = flashinfer_fp4_moe.read_text()
+assert flashinfer_fp4_moe_text.count("repeat(num_experts)") == 4, flashinfer_fp4_moe
+assert "expand(num_experts)" not in flashinfer_fp4_moe_text, flashinfer_fp4_moe
+trtllm_nvfp4_moe = Path(
+    distribution("vllm").locate_file(
+        "vllm/model_executor/layers/fused_moe/experts/trtllm_nvfp4_moe.py"
+    )
+)
+assert "enable_pdl=False" not in trtllm_nvfp4_moe.read_text(), trtllm_nvfp4_moe
 
 import transformer_engine
 
@@ -154,6 +296,10 @@ from verl.utils.real_nvfp4 import REAL_NVFP4_TE_COMMIT, REAL_NVFP4_TE_VERSION
 assert vLLMColocateWorkerExtension is not None and vLLMHttpServer is not None
 assert REAL_NVFP4_TE_COMMIT == "$RN4PT_TE_COMMIT"
 assert REAL_NVFP4_TE_VERSION == "$RN4PT_TE_VERSION"
+import megatron.core.transformer.attention as mcore_attention_module
+
+assert mcore_attention_module.HAVE_FA4 is False
+
 print("REAL_NVFP4_PERTOKEN_IMAGE_DEPS_PASS", actual, flush=True)
 PY
 INNER_EOF
