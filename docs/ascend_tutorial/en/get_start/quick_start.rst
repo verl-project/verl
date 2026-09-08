@@ -19,8 +19,8 @@ Contents
    - `Weight Preparation <#weight-preparation>`_
    - `Data Preparation <#data-preparation>`_
    - `Running Method <#running-method>`_
-- `SGLang Backend Enablement Guide <#sglang-backend-enablement-guide>`_
-   - `Converting vLLM Backend Scripts to SGLang <#converting-vllm-backend-scripts-to-sglang>`_
+- `SGLang Backend Enablement Guide <#sglang-backend-enablement-instructions>`_
+   - `Converting vLLM Backend Scripts to SGLang <#convert-vllm-backend-scripts-to-sglang>`_
 
 Hardware Support
 ----------------
