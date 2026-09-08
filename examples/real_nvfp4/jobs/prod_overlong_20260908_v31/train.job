@@ -209,12 +209,17 @@ fi
 readonly LAST_METRICS=$(grep -E 'step:[0-9]+.*rollout_corr/kl:' "$JOB_LOG" | tail -1)
 [[ -n "$LAST_METRICS" ]] || rn4pt_die "no rollout correlation metrics were logged"
 python3 - "$LAST_METRICS" <<'PYEOF'
+import math
 import re
 import sys
 
 line = sys.argv[1]
 def metric(name, default=None):
-    match = re.search(rf"{re.escape(name)}:(-?[0-9.eE+]+)", line)
+    # The old class was [0-9.eE+], which truncates a negative exponent: a
+    # BF16 kl printed as 2.6e-05 came back as "2.6e" and killed the gate.
+    match = re.search(
+        rf"{re.escape(name)}:(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?|nan|-?inf)", line
+    )
     if match is None:
         if default is not None:
             return default
@@ -233,6 +238,15 @@ ess = metric("rollout_corr/rollout_is_eff_sample_size", 1.0)
 # 420 -- entropy 3.96 but kl 0.0229, ess 0.957 and response length climbing
 # 33 tok/step, i.e. exploration widening as the policy learns to write longer.
 # Keep it as a printed observation, not a kill switch.
+# Check non-finite first: every comparison against NaN is False, so a bound like
+# `kl > 0.5` waves a NaN straight through. A broken FlashInfer MoE artifact made
+# the W4A4 rollout return NaN log-probs one step after a refit, token-level TIS
+# carried it into the gradient, and one update destroyed the policy -- this gate
+# was looking right at it and said nothing.
+for label, value in (("rollout_corr/kl", kl), ("actor/entropy", entropy),
+                     ("rollout_corr/rollout_is_eff_sample_size", ess)):
+    if not math.isfinite(value):
+        raise SystemExit(f"REAL_NVFP4_PERTOKEN_REFUSED: {label}={value} is not finite")
 if kl > 0.5:
     raise SystemExit(f"REAL_NVFP4_PERTOKEN_REFUSED: rollout_corr/kl={kl} indicates a desynced rollout")
 if ess < 0.80:
