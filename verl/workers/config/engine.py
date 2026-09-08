@@ -246,6 +246,8 @@ class FSDPEngineConfig(EngineConfig):
         wrap_policy (Dict[str, Any]): Configuration for FSDP wrap policy.
         param_offload (bool): Whether to offload parameters to CPU, default False
         optimizer_offload (bool): Whether to offload optimizer states to CPU, default False
+        optimizer_offload_step (bool): Load optimizer states only for each update inside automatic train mode.
+            Requires FSDP2 with manual optimizer offloading. default False
         offload_policy (bool): Whether to offload policy model parameters, default False
         reshard_after_forward (bool): Whether to reshard parameters after forward pass, default True
         fsdp_size (int): FSDP group size. -1 means use all available GPUs.
@@ -301,9 +303,16 @@ class FSDPEngineConfig(EngineConfig):
     qat: QATEngineConfig = field(default_factory=QATEngineConfig)
     turbo_config: dict[str, Any] = field(default_factory=dict)
 
+    # Load optimizer states only for parameter updates inside automatic train mode.
+    optimizer_offload_step: bool = False
+
     def __post_init__(self):
         super().__post_init__()
         assert self.strategy in ["fsdp", "fsdp2", "fsdp_turbo"], f"strategy {self.strategy} not supported"
+        if self.optimizer_offload_step and (
+            self.strategy != "fsdp2" or not self.optimizer_offload or self.offload_policy or self.forward_only
+        ):
+            raise ValueError("optimizer_offload_step requires training FSDP2 with manual optimizer_offload")
 
 
 @dataclass

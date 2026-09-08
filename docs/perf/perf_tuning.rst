@@ -1,7 +1,7 @@
 Performance Tuning Guide
 ==============================
 
-Last updated: 07/17/2025.
+Last updated: 09/07/2026.
 
 Author: `Guangming Sheng <https://github.com/PeterSH6>`_, `Jiali Zheng <https://github.com/CurryRice233>`_
 
@@ -24,6 +24,8 @@ In this section, we will discuss how to tune the performance of all the stages i
 8. Reduce FSDP gradient synchronization during gradient accumulation
 
 9. Memory optimization for entropy calculation from logits
+
+10. Offload FSDP2 optimizer states between updates
 
 Rollout Generation Tuning
 --------------------------
@@ -258,3 +260,32 @@ This processes the tensor in chunks of shape ``[chunk_size, voc]`` (e.g., 2048) 
 Additionally, during training, standard gradient checkpointing (``enable_gradient_checkpointing=True``) does not apply to entropy calculations. To reduce memory peaks in this context, set:
 ``actor_rollout_ref.actor.entropy_checkpointing = True``
 This enables entropy recomputation specifically for the entropy calculation, lowering memory usage during training.
+
+Offload FSDP2 optimizer states between updates
+---------------------------------------------
+
+When manual optimizer offloading is enabled, the FSDP engine normally loads
+optimizer states on entry to the training context and keeps them on the device
+until that context exits. To keep Adam states on the CPU during forward and
+backward computation, enable the following option::
+
+    actor_rollout_ref.actor.strategy=fsdp2
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload_step=True
+
+``optimizer_offload_step`` defaults to ``False``. When enabled, the engine loads
+optimizer states after gradient clipping, immediately before each finite-gradient
+update, and offloads them when that update returns or raises an exception.
+Non-finite gradients retain the existing skip-update behavior. This can reduce
+peak device memory when optimizer states would otherwise overlap with activations,
+but adds CPU/device transfers for every optimizer update. Measure both peak memory
+and training time for the intended batch size and number of updates.
+
+This option requires the FSDP2 training engine, ``optimizer_offload=True``, and
+``offload_policy=False``. It supports ordinary ``torch.optim.AdamW`` without a
+gradient scaler. Parameter offloading can be enabled or disabled independently.
+Other optimizer implementations and FP16 gradient scaling are not supported by
+this option. The default configuration and explicit manual transfers remain
+unchanged. A top-level ``train_mode(disable_auto_offload=True)`` leaves transfers to the
+caller. Nested contexts retain an outer automatic context's per-update policy,
+as required by the training worker's mini-batch loop.
