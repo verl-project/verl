@@ -86,8 +86,14 @@ readonly JOB_LOG=$RN4PT_LOGS/${EXP_NAME}_${PHASE}${CHUNK_INDEX}_${SLURM_JOB_ID:?
 nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
 readarray -t nodes_array <<<"$nodes"
 readonly head_node=${nodes_array[0]}
-readonly head_port=$((19000 + SLURM_JOB_ID % 10000))
-readonly dashboard_port=$((29000 + SLURM_JOB_ID % 10000))
+# Ray reserves 10002-19999 for worker ports and 10001 for its client server,
+# so a head port derived as 19000 + jobid %% 10000 lands inside that range
+# whenever the job id ends in less than 1000 -- "ray start" then dies with
+# "worker_ports is trying to use a port number that is used by other
+# components". Stay above the worker range and below the ephemeral base
+# (32768), with the two ports in disjoint windows.
+readonly head_port=$((20000 + SLURM_JOB_ID % 5000))
+readonly dashboard_port=$((25000 + SLURM_JOB_ID % 5000))
 readonly ip_head=$head_node:$head_port
 readonly COMMON_ENV="export PATH=$RN4PT_IMAGE_ENV/.venv/bin:\$PATH; export PYTHONPATH=$RN4PT_VERL:\${PYTHONPATH:-}; export RAY_RUNTIME_ENV_TEMPORARY_REFERENCE_EXPIRATION_S=3600"
 
