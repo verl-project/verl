@@ -23,8 +23,8 @@ readonly RN4PT_BASE_IMAGE=${RN4PT_BASE_IMAGE_OVERRIDE:-/lustre/fsw/general_sa/sh
 # This bundle carries a runtime payload change (the R3 capture hook is now
 # installed for any rollout that returns routed experts, not just the NVFP4
 # one), so it builds its own image rather than inheriting v23's evidence.
-readonly RN4PT_RUNTIME_IMAGE=${RN4PT_RUNTIME_IMAGE_OVERRIDE:-/lustre/fsw/general_sa/shuazhang/images/verl.vllm026.mcore018.te218e7.realnvfp4.fi0616.prod.20260907.v29.sqsh}
-readonly RN4PT_IMAGE_ENV=/opt/verl-rn4pt-20260907-v29
+readonly RN4PT_RUNTIME_IMAGE=${RN4PT_RUNTIME_IMAGE_OVERRIDE:-/lustre/fsw/general_sa/shuazhang/images/verl.vllm026.mcore018.te218e7.realnvfp4.fi0616.prod.20260907.v29b.sqsh}
+readonly RN4PT_IMAGE_ENV=/opt/verl-rn4pt-20260907-v29b
 readonly RN4PT_IMAGE_PYTHON=$RN4PT_IMAGE_ENV/.venv/bin/python
 readonly RN4PT_NETRC=/home/shuazhang/.netrc
 readonly RN4PT_MOUNTS=/lustre/fsw/general_sa/shuazhang:/lustre/fsw/general_sa/shuazhang,/home/shuazhang/.netrc:/root/.netrc
