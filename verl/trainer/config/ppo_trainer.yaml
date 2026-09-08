@@ -403,7 +403,7 @@ global_profiler:
         # Send signal to the target application's process group. We let the program to exit by itself.
         kill: none
 
-    # enable memory visualization for debugging memory usage
+    # Enable memory visualization and automatic CUDA/NPU OOM snapshots for debugging memory usage.
     torch_memory:
 
       #  Maximum number of allocation entries to record
@@ -411,6 +411,9 @@ global_profiler:
 
       # The depth of the call stack to capture for each allocation
       stack_depth: 32
+
+      # Number of profiled RL steps to retain before dumping a memory snapshot.
+      memory_snapshot_num_steps: 1
 
       # 'alloc': records only allocation events || 'state': records memory state changes || 'all': records both.
       context: "all"
