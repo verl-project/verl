@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
+
+import numpy as np
 import pytest
 
 from verl.utils.tokenizer.chat_template import apply_chat_template
@@ -20,7 +23,7 @@ from verl.utils.tokenizer.chat_template import apply_chat_template
 def _text_of(message):
     content = message["content"]
     if isinstance(content, list):
-        return "".join(part.get("text", "") for part in content)
+        return "".join(part["text"] if "text" in part else f"<{part.get('type', 'content')}>" for part in content)
     return content
 
 
@@ -48,7 +51,13 @@ class StrictTokenizer:
         return rendered
 
     def apply_chat_template(
-        self, messages, tokenize=True, add_generation_prompt=True, tools=None, return_dict=False, **kwargs
+        self,
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        tools=None,
+        return_dict=False,
+        **kwargs,
     ):
         if not any(m["role"] == "user" for m in messages):
             raise ValueError("chat template requires at least one user message")
@@ -58,6 +67,51 @@ class StrictTokenizer:
         if not tokenize:
             return text
         return [ord(c) for c in text]
+
+
+class StructuredTokenizer(StrictTokenizer):
+    """Strict tokenizer stub that exposes transformers' return shapes."""
+
+    def __init__(self, nested=False):
+        self.nested = nested
+
+    def apply_chat_template(
+        self, messages, tokenize=True, add_generation_prompt=True, tools=None, return_dict=False, **kwargs
+    ):
+        if not return_dict:
+            output = super().apply_chat_template(
+                messages,
+                tokenize=tokenize,
+                add_generation_prompt=add_generation_prompt,
+                tools=tools,
+                return_dict=False,
+                **kwargs,
+            )
+            if tokenize and self.nested:
+                return [output]
+            return output
+
+        ids = super().apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=add_generation_prompt,
+            tools=tools,
+            return_dict=False,
+            **kwargs,
+        )
+        return_tensors = kwargs.get("return_tensors")
+        values = {
+            "input_ids": [ids],
+            "attention_mask": [[1] * len(ids)],
+            "mm_token_type_ids": [[2] * len(ids)],
+            "pixel_values": ["preserved"],
+        }
+        if return_tensors == "np":
+            values.update({key: np.asarray(value) for key, value in values.items() if key != "pixel_values"})
+        elif return_tensors == "pt":
+            torch = pytest.importorskip("torch")
+            values.update({key: torch.tensor(value) for key, value in values.items() if key != "pixel_values"})
+        return values
 
 
 @pytest.fixture
@@ -150,3 +204,65 @@ def test_system_content_parts_are_merged(tokenizer):
         "<|system|>first\n\nsecond<|user|>question"
     )
 
+
+@pytest.mark.parametrize("return_tensors", [None, "np", "pt"])
+def test_leading_system_dictionary_output_preserves_backend(return_tensors):
+    tokenizer = StructuredTokenizer()
+    if return_tensors == "pt":
+        pytest.importorskip("torch")
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "assistant", "content": "answer", "reasoning_content": "think"},
+    ]
+    expected_text = tokenizer.render(messages, add_generation_prompt=False)
+    expected_ids = [ord(c) for c in expected_text]
+
+    got = apply_chat_template(
+        tokenizer,
+        messages,
+        tokenize=True,
+        add_generation_prompt=False,
+        return_dict=True,
+        return_tensors=return_tensors,
+    )
+
+    if return_tensors == "np":
+        np.testing.assert_array_equal(got["input_ids"], np.asarray([expected_ids]))
+        np.testing.assert_array_equal(got["attention_mask"], np.ones((1, len(expected_ids)), dtype=int))
+        np.testing.assert_array_equal(got["mm_token_type_ids"], np.full((1, len(expected_ids)), 2, dtype=int))
+    elif return_tensors == "pt":
+        torch = pytest.importorskip("torch")
+        assert torch.equal(got["input_ids"], torch.tensor([expected_ids]))
+        assert got["attention_mask"].shape == (1, len(expected_ids))
+        assert got["mm_token_type_ids"].shape == (1, len(expected_ids))
+    else:
+        assert got["input_ids"] == [expected_ids]
+        assert got["attention_mask"] == [[1] * len(expected_ids)]
+        assert got["mm_token_type_ids"] == [[2] * len(expected_ids)]
+    assert got["pixel_values"] == ["preserved"]
+
+
+def test_nested_token_output_is_unwrapped():
+    tokenizer = StructuredTokenizer(nested=True)
+    messages = [{"role": "system", "content": "sys"}]
+    expected = [ord(c) for c in tokenizer.render(messages, add_generation_prompt=False)]
+    assert apply_chat_template(tokenizer, messages, tokenize=True, add_generation_prompt=False) == expected
+
+
+def test_multimodal_content_is_preserved_during_normalization(tokenizer):
+    messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "system",
+            "content": [
+                {"type": "image", "image": "image-placeholder"},
+                {"type": "text", "text": "late instruction"},
+            ],
+        },
+    ]
+    original = copy.deepcopy(messages)
+
+    assert apply_chat_template(tokenizer, messages, tokenize=False, add_generation_prompt=False) == (
+        "<|system|><image>late instruction<|user|>question"
+    )
+    assert messages == original

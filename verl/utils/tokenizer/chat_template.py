@@ -162,6 +162,59 @@ def _normalize_system_messages(messages: list[dict]) -> list[dict]:
     return [first_system] + [message for message in messages if message.get("role") != "system"]
 
 
+def _sequence_length(value) -> int:
+    """Return the token-axis length for a tokenizer output value."""
+    shape = getattr(value, "shape", None)
+    if shape is not None:
+        if len(shape) == 1:
+            return int(shape[0])
+        return int(shape[-1])
+    if isinstance(value, list):
+        if value and isinstance(value[0], list):
+            return len(value[0])
+        return len(value)
+    raise TypeError(f"Unsupported token output type: {type(value)!r}")
+
+
+def _remove_sequence_span(value, start: int, length: int):
+    """Remove a token span while retaining the output array's backend and shape."""
+    stop = start + length
+    if isinstance(value, list):
+        if value and isinstance(value[0], list):
+            return [row[:start] + row[stop:] for row in value]
+        return value[:start] + value[stop:]
+
+    module = type(value).__module__.split(".", 1)[0]
+    head = value[..., :start]
+    tail = value[..., stop:]
+    if module == "torch":
+        import torch
+
+        return torch.cat((head, tail), dim=-1)
+    if module == "numpy":
+        import numpy as np
+
+        return np.concatenate((head, tail), axis=-1)
+    if module == "tensorflow":
+        import tensorflow as tf
+
+        return tf.concat((head, tail), axis=-1)
+    if module in ("jax", "jaxlib"):
+        import jax.numpy as jnp
+
+        return jnp.concatenate((head, tail), axis=-1)
+    raise TypeError(f"Unsupported token output backend: {type(value)!r}")
+
+
+def _unwrap_token_sequence(value):
+    """Unwrap the single batch returned by transformers 5 tokenization."""
+    if isinstance(value, list) and value and isinstance(value[0], list):
+        if len(value) != 1:
+            raise ValueError("apply_chat_template must return one tokenized sequence")
+        return value[0]
+    return value
+
+
 def apply_chat_template(
     processor: PreTrainedTokenizerBase | ProcessorMixin,
     messages: list[dict],
@@ -258,26 +311,22 @@ def apply_chat_template(
                 head_len = len(one_user) - user_len
                 return output[:head_len] + output[head_len + user_len :]
             elif not return_dict:  # tokenize=True and return_dict=False
-                if isinstance(output[0], list):  # transformers>=5
-                    assert len(output) == 1, "output must be a list[int] or list[list[int]]"
-                    one_user = one_user[0]
-                    two_users = two_users[0]
-                    output = output[0]
+                one_user = _unwrap_token_sequence(one_user)
+                two_users = _unwrap_token_sequence(two_users)
+                output = _unwrap_token_sequence(output)
                 user_len = len(two_users) - len(one_user)
                 head_len = len(one_user) - user_len
                 return output[:head_len] + output[head_len + user_len :]
-            else:  # tokenize=True and return_dict=True and return_tensors="pt"
-                import torch
-
+            else:  # tokenize=True and return_dict=True
                 one_user = dict(one_user)
                 two_users = dict(two_users)
                 output = dict(output)
-                user_len = two_users["input_ids"].shape[1] - one_user["input_ids"].shape[1]
-                head_len = one_user["input_ids"].shape[1] - user_len
+                user_len = _sequence_length(two_users["input_ids"]) - _sequence_length(one_user["input_ids"])
+                head_len = _sequence_length(one_user["input_ids"]) - user_len
                 for key in ("input_ids", "attention_mask", "mm_token_type_ids"):
                     if key not in output:
                         continue
-                    output[key] = torch.cat([output[key][:, :head_len], output[key][:, head_len + user_len :]], dim=1)
+                    output[key] = _remove_sequence_span(output[key], head_len, user_len)
                 return output
 
         dummy_user_prefix = processor.apply_chat_template(
@@ -300,18 +349,15 @@ def apply_chat_template(
         if not tokenize:  # tokenize=False
             return output[len(dummy_user_prefix) :]
         elif not return_dict:  # tokenize=True and return_dict=False
-            if isinstance(output[0], list):  # transformers>=5
-                assert len(output) == 1, "output must be a list[int] or list[list[int]]"
-                dummy_user_prefix = dummy_user_prefix[0]
-                output = output[0]
+            dummy_user_prefix = _unwrap_token_sequence(dummy_user_prefix)
+            output = _unwrap_token_sequence(output)
             return output[len(dummy_user_prefix) :]
-        else:  # tokenize=True and return_dict=True and return_tensors="pt"
+        else:  # tokenize=True and return_dict=True
             dummy_user_prefix = dict(dummy_user_prefix)
             output = dict(output)
-            prefix_len = dummy_user_prefix["input_ids"].shape[1]
-            output["input_ids"] = output["input_ids"][:, prefix_len:]
-            output["attention_mask"] = output["attention_mask"][:, prefix_len:]
-            if "mm_token_type_ids" in output:
-                output["mm_token_type_ids"] = output["mm_token_type_ids"][:, prefix_len:]
+            prefix_len = _sequence_length(dummy_user_prefix["input_ids"])
+            for key in ("input_ids", "attention_mask", "mm_token_type_ids"):
+                if key not in output:
+                    continue
+                output[key] = _remove_sequence_span(output[key], 0, prefix_len)
             return output
-
