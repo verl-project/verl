@@ -13,7 +13,11 @@ import pytest
 import torch
 
 from verl.utils.real_nvfp4.bf16_transport import attest_real_nvfp4_bf16_transport
-from verl.utils.real_nvfp4.config import validate_real_nvfp4_model_contract
+from verl.utils.real_nvfp4.config import (
+    real_nvfp4_expected_counts,
+    real_nvfp4_moe_layer_indices,
+    validate_real_nvfp4_model_contract,
+)
 from verl.utils.real_nvfp4.r3_monolithic_capture import (
     _patch_moe_runner_class,
     attest_r3_rollout_routes,
@@ -210,18 +214,75 @@ def test_r3_route_attestation_rejects_missed_capture():
     assert attest_r3_rollout_routes(routes) is routes
 
 
-def test_model_contract_accepts_only_qwen3_all_moe():
-    valid = SimpleNamespace(
+def test_model_contract_accepts_any_routed_expert_layout():
+    """The contract is structural, not an architecture allowlist.
+
+    It used to accept only ``Qwen3MoeForCausalLM`` with ``decoder_sparse_step=1``
+    and no ``mlp_only_layers``, which refused layouts it handles perfectly well.
+    What it must guarantee is that the refit expert-weight count is predictable,
+    so it checks for routed experts, at least one sparse layer, and the absence
+    of shared experts.
+    """
+
+    all_moe = SimpleNamespace(
         architectures=["Qwen3MoeForCausalLM"],
+        num_hidden_layers=48,
+        num_experts=128,
         decoder_sparse_step=1,
         mlp_only_layers=[],
     )
-    validate_real_nvfp4_model_contract(valid)
+    validate_real_nvfp4_model_contract(all_moe)
+    assert real_nvfp4_moe_layer_indices(all_moe) == list(range(48))
+    assert real_nvfp4_expected_counts(all_moe) == (48 * 128 * 3, 48 * 128 * 2)
 
-    invalid = SimpleNamespace(
-        architectures=["Qwen3MoeForCausalLM"],
+    # Interleaved MoE was rejected outright before; now it is counted correctly.
+    interleaved = SimpleNamespace(
+        architectures=["SomeOtherMoeForCausalLM"],
+        num_hidden_layers=48,
+        num_experts=64,
         decoder_sparse_step=2,
         mlp_only_layers=[],
     )
-    with pytest.raises(ValueError, match="Qwen3 all-MoE"):
-        validate_real_nvfp4_model_contract(invalid)
+    validate_real_nvfp4_model_contract(interleaved)
+    assert real_nvfp4_moe_layer_indices(interleaved) == [i for i in range(48) if (i + 1) % 2 == 0]
+    assert real_nvfp4_expected_counts(interleaved) == (24 * 64 * 3, 24 * 64 * 2)
+
+    # So are explicitly dense layers.
+    dense_prefix = SimpleNamespace(
+        architectures=["SomeOtherMoeForCausalLM"],
+        num_hidden_layers=48,
+        num_experts=128,
+        decoder_sparse_step=1,
+        mlp_only_layers=[0, 1],
+    )
+    assert real_nvfp4_moe_layer_indices(dense_prefix) == list(range(2, 48))
+
+
+def test_model_contract_still_refuses_layouts_it_cannot_count():
+    no_experts = SimpleNamespace(architectures=["LlamaForCausalLM"], num_hidden_layers=32, num_experts=0)
+    with pytest.raises(ValueError, match="routed-expert MoE model"):
+        validate_real_nvfp4_model_contract(no_experts)
+
+    # Shared experts add per-layer weights the expert-count arithmetic does not
+    # model, so the refit attestation would be wrong rather than conservative.
+    shared = SimpleNamespace(
+        architectures=["SomeMoeForCausalLM"],
+        num_hidden_layers=48,
+        num_experts=128,
+        decoder_sparse_step=1,
+        mlp_only_layers=[],
+        n_shared_experts=1,
+    )
+    with pytest.raises(ValueError, match="shared experts"):
+        validate_real_nvfp4_model_contract(shared)
+
+    # A sparse step past the depth leaves nothing to quantize.
+    no_sparse_layer = SimpleNamespace(
+        architectures=["SomeMoeForCausalLM"],
+        num_hidden_layers=4,
+        num_experts=8,
+        decoder_sparse_step=99,
+        mlp_only_layers=[],
+    )
+    with pytest.raises(ValueError, match="no sparse decoder layer"):
+        validate_real_nvfp4_model_contract(no_sparse_layer)
