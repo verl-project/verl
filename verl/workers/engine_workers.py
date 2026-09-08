@@ -194,7 +194,13 @@ class TrainingWorker(Worker, DistProfilerExtension):
         loss = torch.sum(torch.tensor(output.pop("loss"), device=self.device_name))
         dp_group = self.engine.get_data_parallel_group()
         if dp_group is not None:
-            torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG, group=dp_group)
+            # temporary workaround for XPU devices: use all_reduce with default op and then divide manually
+            # tracked internal, estimate end of 2026 will be able to resolve this issue
+            if loss.device.type == "xpu":
+                torch.distributed.all_reduce(loss, group=dp_group)
+                loss /= torch.distributed.get_world_size(group=dp_group)
+            else:
+                torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG, group=dp_group)
         loss = loss.item()
 
         # For grad_norm, we do not perform all reduce because it is already been done when clipping grad

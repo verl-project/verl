@@ -1,0 +1,179 @@
+# syntax=docker/dockerfile:1
+
+# verl on Intel GPU
+#
+# Design goals:
+# - Match vLLM's Intel GPU container workflow (DLE base + uv + oneCCL setup).
+# - Keep versions explicit and reproducible.
+# - Keep torch/vLLM alignment owned by vLLM requirements/xpu.txt.
+#
+# Build:
+#   docker build -t verl-intel-gpu:latest -f docker/intel_gpu/Dockerfile.intel_gpu .
+#
+# Behind a corporate proxy:
+#   docker build --build-arg http_proxy=... --build-arg https_proxy=... ...
+#
+# Run (mount GPU devices + render + video groups; by-path and ipc=host for oneCCL):
+#   RENDER_GID=$(getent group render | cut -d: -f3)
+#   VIDEO_GID=$(getent group video | cut -d: -f3)
+#   docker run -it --rm \
+#     --device /dev/dri \
+#     --group-add ${RENDER_GID} \
+#     --group-add ${VIDEO_GID} \
+#     -v /dev/dri/by-path:/dev/dri/by-path \
+#     --ipc=host \
+#     --shm-size 16g \
+#     -v $HOME/data:/root/data \
+#     verl-intel-gpu:latest
+#
+# Quick Intel GPU sanity check:
+#   docker run --rm --device /dev/dri --group-add ${RENDER_GID} --group-add ${VIDEO_GID} \
+#     -v /dev/dri/by-path:/dev/dri/by-path --ipc=host \
+#     verl-intel-gpu:latest \
+#     python3 -c "import torch; print(torch.__version__); print(torch.xpu.is_available()); print(torch.xpu.device_count())"
+
+# Base: DLE 2026.1.0 / ubuntu24.04. UBUNTU flavor is load-bearing — the 2026.1
+# ubuntu26.04 variant SIGSEGVs on torch init (glibc/SYCL ABI mismatch on that
+# beta distro). ubuntu24.04 is stable and ships python3.12-dev as an apt package,
+# which the vLLM CMake build requires.
+#
+# oneCCL: intentionally NOT installed separately. The 2026.1.0 DLE base already
+# ships a torch-2.13-compatible oneCCL (Gold-2022.1.0, linked against the base's
+# libsycl.so.9) at /opt/intel/oneapi/ccl/2022.1, and bakes CCL_ROOT,
+# LD_LIBRARY_PATH, and CMAKE_PREFIX_PATH (lib/cmake/oneCCL) into the image ENV
+# with no sourcing required. The torch 2.13.0+xpu wheel also bundles its own
+# oneCCL, but the base's 2022.1.0 takes precedence via LD_LIBRARY_PATH and is
+# the one torch-xpu-ops links against at wheel-build time — so they match.
+# The old Battlemage oneCCL 2021.15.7 offline bundle is removed: it was built
+# for an older SYCL ABI, torch never linked it anyway, and its /root/.bashrc
+# sourcing + ccl/latest symlink override actively shadowed the base's good env.
+FROM intel/deep-learning-essentials:2026.1.0-devel-ubuntu24.04
+
+LABEL org.opencontainers.image.title="verl-intel-gpu"
+LABEL org.opencontainers.image.description="verl development image for Intel GPU"
+LABEL org.opencontainers.image.vendor="verl"
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG PYTHON_VERSION=3.12
+
+# vLLM pinned to the v0.27.0 release tag — the first stable release that carries
+# the XPU torch==2.13.0 + vllm_xpu_kernels 0.1.12 pairing. requirements/xpu.txt at
+# v0.27.0 is byte-identical to the previously-pinned commit 5b29c958 (which is
+# v0.27.0rc1~173, i.e. an ancestor of this tag), so the torch/oneCCL/driver stack
+# below is unchanged — this just swaps the commit pin for the stable tag.
+ARG VLLM_VERSION=v0.27.0
+
+# torch version is intentionally not pinned here. vLLM's requirements/xpu.txt
+# owns the tested torch+xpu pairing for each vLLM commit.
+ARG PIP_INDEX_URL="https://download.pytorch.org/whl/xpu"
+ARG PIP_EXTRA_INDEX_URL="https://pypi.org/simple"
+
+# Intel userspace driver/component versions (explicit for reproducible builds).
+ARG IGC_VERSION=2.34.4
+ARG IGC_BUILD=21428
+ARG COMPUTE_RUNTIME_VERSION=26.18.38308.1
+ARG IGDGMM_VERSION=22.10.0
+ARG LEVEL_ZERO_VERSION=1.28.2+u24.04
+
+WORKDIR /workspace
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# --- System dependencies ---
+# python${PYTHON_VERSION}-dev is required: vLLM's XPU extension is compiled from
+# source (uv pip install --no-build-isolation .), and its CMake step needs the
+# CPython development headers (Python_INCLUDE_DIRS / Development.Module). The
+# ubuntu24.04 DLE base ships python3.12 + python3.12-dev as apt packages.
+RUN set -eux && \
+    apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        curl \
+        g++ \
+        gcc \
+        git \
+        libnuma-dev \
+        python${PYTHON_VERSION} \
+        python${PYTHON_VERSION}-dev \
+        python3-pip \
+        wget && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# --- uv: fast, deterministic resolver ---
+ENV PATH="/root/.local/bin:${PATH}"
+ENV VIRTUAL_ENV="/opt/venv"
+ENV UV_PYTHON_INSTALL_DIR="/opt/uv/python"
+RUN set -eux && \
+    curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    uv venv --python ${PYTHON_VERSION} --seed ${VIRTUAL_ENV}
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+# --- Intel GPU user-mode drivers (UMD) ---
+# Bumped to compute-runtime 26.18: fixes vllm's request_memory reading free=0 on
+# device xpu:0 with 26.09 (getMemoryInfo bug). 26.18 reports free memory correctly.
+RUN set -eux && \
+    tmp_dir="$(mktemp -d)" && \
+    cd "${tmp_dir}" && \
+    wget -q "https://github.com/intel/intel-graphics-compiler/releases/download/v${IGC_VERSION}/intel-igc-core-2_${IGC_VERSION}+${IGC_BUILD}_amd64.deb" && \
+    wget -q "https://github.com/intel/intel-graphics-compiler/releases/download/v${IGC_VERSION}/intel-igc-opencl-2_${IGC_VERSION}+${IGC_BUILD}_amd64.deb" && \
+    wget -q "https://github.com/intel/compute-runtime/releases/download/${COMPUTE_RUNTIME_VERSION}/intel-ocloc_${COMPUTE_RUNTIME_VERSION}-0_amd64.deb" && \
+    wget -q "https://github.com/intel/compute-runtime/releases/download/${COMPUTE_RUNTIME_VERSION}/intel-opencl-icd_${COMPUTE_RUNTIME_VERSION}-0_amd64.deb" && \
+    wget -q "https://github.com/intel/compute-runtime/releases/download/${COMPUTE_RUNTIME_VERSION}/libigdgmm12_${IGDGMM_VERSION}_amd64.deb" && \
+    wget -q "https://github.com/intel/compute-runtime/releases/download/${COMPUTE_RUNTIME_VERSION}/libze-intel-gpu1_${COMPUTE_RUNTIME_VERSION}-0_amd64.deb" && \
+    wget -q "https://github.com/oneapi-src/level-zero/releases/download/v${LEVEL_ZERO_VERSION%%+*}/level-zero_${LEVEL_ZERO_VERSION}_amd64.deb" && \
+    wget -q "https://github.com/oneapi-src/level-zero/releases/download/v${LEVEL_ZERO_VERSION%%+*}/level-zero-devel_${LEVEL_ZERO_VERSION}_amd64.deb" && \
+    dpkg -i --force-overwrite ./*.deb && \
+    cd / && \
+    rm -rf "${tmp_dir}"
+
+# No oneAPI/oneCCL sourcing needed: the 2026.1.0 base bakes CCL_ROOT,
+# LD_LIBRARY_PATH and CMAKE_PREFIX_PATH (ccl/2022.1/lib/cmake/oneCCL) into the
+# image ENV, so vLLM's XPU build finds oneCCL headers/cmake directly.
+
+ENV UV_HTTP_TIMEOUT=500
+# XPU index is primary, PyPI is extra. This avoids pulling CPU-only torch from PyPI.
+ENV UV_INDEX_URL="${PIP_INDEX_URL}"
+ENV UV_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL}"
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
+ENV UV_LINK_MODE="copy"
+ENV VLLM_TARGET_DEVICE="xpu"
+
+# --- Layer 1: vLLM + torch Intel GPU ---
+# vLLM is fetched at the pinned release tag (${VLLM_VERSION}), which carries:
+#   - torch==2.13.0 + vllm_xpu_kernels 0.1.12 in requirements/xpu.txt
+#   - XPU sleep-mode (device_allocator/xpumem.py + xpumem kernels wiring)
+# We fetch the tag with its history so setuptools-scm resolves the version from
+# the annotated tag directly (SETUPTOOLS_SCM_PRETEND_VERSION derives it from the
+# tag name as a backstop for the shallow --depth 1 fetch).
+RUN set -ex && \
+    git init /opt/vllm && \
+    cd /opt/vllm && \
+    git remote add origin https://github.com/vllm-project/vllm.git && \
+    git fetch --depth 1 origin tag "${VLLM_VERSION}" && \
+    git checkout "${VLLM_VERSION}" && \
+    SETUPTOOLS_SCM_PRETEND_VERSION="${VLLM_VERSION#v}" \
+    uv pip install --upgrade pip setuptools wheel && \
+    SETUPTOOLS_SCM_PRETEND_VERSION="${VLLM_VERSION#v}" \
+    uv pip install -r requirements/xpu.txt && \
+    SETUPTOOLS_SCM_PRETEND_VERSION="${VLLM_VERSION#v}" \
+    uv pip install --no-build-isolation .
+
+# --- Layer 2: verl Python dependencies ---
+COPY requirements-intel-gpu.txt /tmp/requirements-intel-gpu.txt
+RUN set -eux && uv pip install -r /tmp/requirements-intel-gpu.txt
+
+# --- Layer 3: verl source ---
+COPY . /workspace/verl
+WORKDIR /workspace/verl
+RUN set -eux && uv pip install --no-deps -e .
+
+# xgrammar (via vLLM's common.txt) pulls in plain triton as a transitive dep.
+# Plain triton is for NVIDIA only — replace with triton-xpu per official vLLM XPU docs.
+# See: https://docs.vllm.ai/en/latest/getting_started/xpu-installation.html
+RUN uv pip uninstall triton triton-xpu -y 2>/dev/null || true && \
+    uv pip install triton-xpu==3.7.1 --extra-index-url https://download.pytorch.org/whl/xpu
+
+CMD ["bash", "-c", "exec bash"]

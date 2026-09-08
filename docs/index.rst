@@ -169,7 +169,9 @@ verl is fast with:
 
    hardware/multi_chip_support
    amd_tutorial/index.rst
-   ascend_tutorial/index.rst 
+   intel_gpu_tutorial/intel_gpu_build_dockerfile_page.rst
+   intel_gpu_tutorial/intel_gpu_quick_start.rst
+   ascend_tutorial/index.rst
 
 .. toctree::
    :maxdepth: 1
