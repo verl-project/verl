@@ -87,6 +87,8 @@ ACTOR=(
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384
     actor_rollout_ref.actor.use_dynamic_bsz=True
+    actor_rollout_ref.actor.pad_to_length=True
+    actor_rollout_ref.actor.fsdp_config.pad_to_length_bucket=64
 )
 
 ROLLOUT=(
@@ -107,6 +109,8 @@ REF=(
     actor_rollout_ref.ref.fsdp_config.param_offload=True
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=16384
+    actor_rollout_ref.ref.pad_to_length=True
+    actor_rollout_ref.ref.fsdp_config.pad_to_length_bucket=64
 )
 
 TRAINER=(
