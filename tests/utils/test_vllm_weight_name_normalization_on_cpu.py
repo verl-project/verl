@@ -769,7 +769,7 @@ def test_real_nvfp4_update_uses_native_reload_weights(monkeypatch):
     monkeypatch.setattr(
         real_nvfp4,
         "attest_vllm_native_nvfp4_runtime",
-        lambda model, expected_moe_layers: attestations.append((model, expected_moe_layers)),
+        lambda model, **expected_partition: attestations.append((model, expected_partition)),
     )
     monkeypatch.setattr(real_nvfp4, "vllm_native_nvfp4_fingerprint", lambda model: 2)
     monkeypatch.setattr(
@@ -803,6 +803,14 @@ def test_real_nvfp4_update_uses_native_reload_weights(monkeypatch):
     assert receiver.completed_ack is True
     assert reload_calls[0][1] is True
     assert [name for name, _ in reload_calls[0][0]] == ["model.layers.0.mlp.experts.0.down_proj.weight"]
-    assert attestations == [(model, 1)]
+    assert attestations == [
+        (
+            model,
+            {
+                "expected_quantized_layer_indices": [0],
+                "expected_bf16_layer_indices": [],
+            },
+        )
+    ]
     assert worker._real_nvfp4_last_fingerprint == 2
     assert worker._real_nvfp4_refit_index == 1
