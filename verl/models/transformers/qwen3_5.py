@@ -155,51 +155,67 @@ def _packed_causal_conv1d_loop(
     return torch.cat(outputs, dim=-1)
 
 
+def _causal_dwconv_token_major(x: torch.Tensor, seq_idx: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor]):
+    """y[t] = silu(b + sum_j w[j] * x[t-(k-1)+j]) on a token-major (T, C) packed stream, taps that
+    reach before the start of t's own segment zeroed. fp32 accumulate, rounded once to x.dtype."""
+    kernel = weight.shape[1]
+    total = x.shape[0]
+    xf = x.float()
+    y = xf * weight[:, kernel - 1]
+    if kernel > 1:
+        xpad = F.pad(xf, (0, 0, kernel - 1, 0))
+        spad = F.pad(seq_idx, (kernel - 1, 0), value=-1)
+        zero = torch.zeros((), dtype=xf.dtype, device=xf.device)
+        for lag in range(1, kernel):
+            x_lag = xpad[kernel - 1 - lag : kernel - 1 - lag + total]
+            same = (spad[kernel - 1 - lag : kernel - 1 - lag + total] == seq_idx).unsqueeze(1)
+            y = y + torch.where(same, x_lag, zero) * weight[:, kernel - 1 - lag]
+    if bias is not None:
+        y = y + bias
+    return F.silu(y).to(x.dtype)
+
+
+_CAUSAL_DWCONV_FN = None
+
+
+def _get_causal_dwconv_fn():
+    """The token-major conv, torch.compile'd once per process (dynamic T) unless
+    VERL_QWEN3_5_CONV_COMPILE=0; the compiled version fuses the k taps, mask, bias, silu and
+    the dtype casts into one kernel each way."""
+    global _CAUSAL_DWCONV_FN
+    if _CAUSAL_DWCONV_FN is None:
+        if os.environ.get("VERL_QWEN3_5_CONV_COMPILE", "1") == "1":
+            _CAUSAL_DWCONV_FN = torch.compile(_causal_dwconv_token_major, dynamic=True)
+        else:
+            _CAUSAL_DWCONV_FN = _causal_dwconv_token_major
+    return _CAUSAL_DWCONV_FN
+
+
 def _packed_causal_conv1d_fallback(
     self,
     mixed_qkv: torch.Tensor,
     cu_seqlens: torch.LongTensor,
     cu_seqlens_cpu: Optional[torch.LongTensor] = None,
 ):
-    """Causal depthwise conv over a packed ``(1, C, T)`` stream without a Python loop.
+    """Causal depthwise conv over a packed stream as k shifted multiply-adds in token-major layout.
 
-    One cuDNN conv over the whole packed sequence gives the right answer everywhere except
-    the first ``k-1`` positions of every interior segment, which see the tail of the
-    previous segment through the causal window. Those positions are recomputed explicitly
-    (fp32 accumulate, inputs before the segment start zeroed) and written back, so the
-    result equals the per-segment loop up to the accumulation order of those few
-    positions. No host sync: the fix-up indices are built from ``cu_seqlens`` on device.
-    Set ``VERL_QWEN3_5_CONV_LOOP=1`` to fall back to the loop.
+    ``mixed_qkv`` arrives as a ``(1, C, T)`` transpose view of the contiguous ``(1, T, C)``
+    projection output. Instead of materialising the channel-major copy for cuDNN, running the
+    generic depthwise kernel and copying back, the conv is evaluated on the token-major tensor
+    (see :func:`_causal_dwconv_token_major`) and returned as a ``(1, C, T)`` view of a contiguous
+    ``(1, T, C)`` tensor, so the caller's ``transpose(1, 2)`` and the following reshapes are free.
+    Segment ids come from ``cu_seqlens`` on device; no host sync.
+    Set ``VERL_QWEN3_5_CONV_LOOP=1`` to fall back to the per-segment loop.
     """
     if os.environ.get("VERL_QWEN3_5_CONV_LOOP", "0") == "1" or mixed_qkv.shape[0] != 1:
         return _packed_causal_conv1d_loop(self, mixed_qkv, cu_seqlens, cu_seqlens_cpu)
-    total = mixed_qkv.shape[-1]
-    kernel = self.conv1d.kernel_size[0]
-    y = self.conv1d(mixed_qkv)[:, :, :total]
-    n_interior = cu_seqlens.shape[0] - 2  # segment starts other than 0
-    if n_interior > 0 and kernel > 1:
-        device = mixed_qkv.device
-        starts = cu_seqlens[1:-1]  # (S,)
-        ends = cu_seqlens[2:]  # (S,)
-        offs = torch.arange(kernel - 1, device=device)
-        pos = starts[:, None] + offs[None, :]  # (S, k-1)
-        # A position is fixed up by the segment it starts; windows of different segments never
-        # overlap, so valid positions are unique. Positions past a short segment's end are
-        # routed to a scratch column that is sliced off again (keeps index_copy duplicate-free,
-        # which its backward needs).
-        valid = pos < ends[:, None]
-        pos_eff = torch.where(valid, pos, torch.full_like(pos, total)).reshape(-1)  # (P,)
-        seg_start = starts[:, None].expand_as(pos).reshape(-1)  # (P,)
-        taps = pos.reshape(-1)[:, None] - (kernel - 1) + torch.arange(kernel, device=device)[None, :]  # (P, k)
-        in_seg = (taps >= seg_start[:, None]).to(torch.float32)
-        x = mixed_qkv[0][:, taps.clamp(min=0, max=total - 1)]  # (C, P, k)
-        weight = self.conv1d.weight.reshape(self.conv1d.weight.shape[0], -1)  # (C, k)
-        fix = (x.float() * in_seg[None] * weight.float()[:, None, :]).sum(-1)  # (C, P)
-        if self.conv1d.bias is not None:
-            fix = fix + self.conv1d.bias.float()[:, None]
-        y_ext = torch.cat([y, y.new_zeros(y.shape[0], y.shape[1], 1)], dim=2)
-        y = y_ext.index_copy(2, pos_eff, fix.to(y.dtype)[None])[:, :, :total]
-    return F.silu(y)
+    x = mixed_qkv[0].transpose(0, 1)  # (T, C)
+    channels, kernel = x.shape[1], self.conv1d.kernel_size[0]
+    weight = self.conv1d.weight.reshape(channels, kernel).float()  # tap j multiplies x[t-(k-1)+j]
+    bias = self.conv1d.bias.float() if self.conv1d.bias is not None else None
+    seq_idx = _prepare_packed_seq_idx(cu_seqlens, cu_seqlens_cpu)[0]  # (T,) int32
+    y = _get_causal_dwconv_fn()(x, seq_idx, weight, bias)  # (T, C) contiguous
+    return y.transpose(0, 1).unsqueeze(0)  # (1, C, T) view
 
 
 def _packed_chunk_gated_delta_rule(self, query, key, value, g, beta, cu_seqlens, cu_seqlens_cpu, cp_context=None):
