@@ -165,6 +165,18 @@ def _clear_partition(partition_id: str) -> None:
         tq.kv_clear(keys=keys, partition_id=partition_id)
 
 
+def test_count_tq_prompt_groups_includes_every_prompt_status(tq_init, partition_id):
+    uids = {status: _uid() for status in ("pending", "running", "finished", "failure")}
+    for status, uid in uids.items():
+        _submit_prompt(partition_id, uid, status, global_steps=2)
+    _add_trajectory(partition_id, uids["finished"], session_id=0, global_steps=2)
+
+    try:
+        assert trainer_base._count_tq_prompt_groups(partition_id) == 4
+    finally:
+        _clear_partition(partition_id)
+
+
 def test_async_submission_persists_reissuable_prompt_fields(monkeypatch):
     stub = type("Stub", (), {})()
     stub.trainer_mode = "separate_async"

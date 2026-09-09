@@ -116,6 +116,13 @@ def _tq_supports_checkpoint() -> bool:
     )
 
 
+def _count_tq_prompt_groups(partition_id: str = "train") -> int:
+    data = tq.kv_list(partition_id)
+    if not data:
+        return 0
+    return sum(tag.get("is_prompt", False) for tag in data.get(partition_id, {}).values())
+
+
 class PPOTrainer(ABC):
     """Base class for PPO trainer.
 
@@ -429,9 +436,8 @@ class PPOTrainer(ABC):
 
         # we start from step 1
         self.global_steps += 1
-        # SkipManager skips warmup batches in async trainers, so it doesn't conflict with reissue.
         SkipManager.set_step(self.global_steps)
-        self._resumed_inflight_prompts = self._reissue_inflight_prompts()
+        self._reissue_inflight_prompts()
         self.prev_step_profile = False
         self.curr_step_profile = (
             self.global_steps in self.config.global_profiler.steps
@@ -600,26 +606,29 @@ class PPOTrainer(ABC):
         return
 
     def _add_async_warmup_batches(self, num_warmup_batches: int) -> None:
-        """Submit warmup batches for async trainers, unless resume already refilled the pipeline.
-
-        After checkpoint resume, ``_reissue_inflight_prompts`` re-submits pending/running
-        prompts from the restored TransferQueue. Extra warmup would consume new dataloader
-        rows and overfill the in-flight window relative to the checkpoint. Fresh starts
-        (reissue count 0) and runs without TQ checkpoint support still warm up as before.
-        ``skip.rollout_tq.enable`` continues to skip warmup entirely.
-        """
+        """Fill the async prefetch window without duplicating checkpointed prompt groups."""
         if self.config.skip.rollout_tq.enable:
             return
-        resumed = getattr(self, "_resumed_inflight_prompts", 0)
-        if resumed > 0:
+
+        train_batch_size = self.config.data.train_batch_size
+        target_prompts = num_warmup_batches * train_batch_size
+        restored_prompts = getattr(self, "_restored_tq_prompt_count", 0)
+        missing_prompts = max(0, target_prompts - restored_prompts)
+        if missing_prompts == 0:
             logger.info(
-                "Skipping async warmup: re-issued %s in-flight prompts from checkpoint",
-                resumed,
+                "Skipping async warmup: restored %s prompt groups for a %s-prompt prefetch window",
+                restored_prompts,
+                target_prompts,
             )
             return
-        for _ in range(num_warmup_batches):
-            self._add_batch_to_generate()
-        logger.info("Added %s warmup batches to the agent loop manager", num_warmup_batches)
+
+        self._add_prompts_to_generate(missing_prompts)
+        logger.info(
+            "Added %s warmup prompts after restoring %s of %s target prompt groups",
+            missing_prompts,
+            restored_prompts,
+            target_prompts,
+        )
 
     def on_train_end(self):
         """Called after the training loop ends."""
@@ -814,6 +823,7 @@ class PPOTrainer(ABC):
 
     def _load_checkpoint(self):
         self.global_steps = 0
+        self._restored_tq_prompt_count = 0
 
         # 1. find latest checkpoint folder
         if self.config.trainer.resume_mode == "disable":
@@ -869,6 +879,8 @@ class PPOTrainer(ABC):
             if os.path.exists(tq_ckpt_path):
                 logger.info(f"Loading TransferQueue state from {tq_ckpt_path}")
                 tq.load_checkpoint(tq_ckpt_path)
+                self._restored_tq_prompt_count = _count_tq_prompt_groups()
+                logger.info("Restored %s training prompt groups from TransferQueue", self._restored_tq_prompt_count)
 
     def _reissue_inflight_prompts(self, partition_id: str = "train") -> int:
         """Restart checkpointed pending/running prompt groups from their persisted prompt data."""
