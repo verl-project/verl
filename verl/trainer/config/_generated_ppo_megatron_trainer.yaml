@@ -106,6 +106,8 @@ actor_rollout_ref:
         group_size: 16
         fp4_param: false
         te_precision_config_file: null
+        num_layers_at_start_in_bf16: 0
+        num_layers_at_end_in_bf16: 0
     _target_: verl.workers.config.McoreActorConfig
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: megatron
@@ -316,6 +318,8 @@ actor_rollout_ref:
         group_size: 16
         fp4_param: false
         te_precision_config_file: null
+        num_layers_at_start_in_bf16: 0
+        num_layers_at_end_in_bf16: 0
     _target_: verl.workers.config.McoreActorConfig
     entropy_from_logits_with_chunking: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_with_chunking,False}
     entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_chunk_size,2048}
@@ -664,6 +668,8 @@ critic:
       group_size: 16
       fp4_param: false
       te_precision_config_file: null
+      num_layers_at_start_in_bf16: 0
+      num_layers_at_end_in_bf16: 0
   _target_: verl.workers.config.McoreCriticConfig
   rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
   strategy: megatron

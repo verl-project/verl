@@ -45,6 +45,53 @@ def real_nvfp4_moe_layer_indices(hf_config: Any) -> list[int]:
     return [i for i in range(num_layers) if i not in dense_layers and (i + 1) % sparse_step == 0]
 
 
+def real_nvfp4_rollout_layer_partition(
+    hf_config: Any,
+    *,
+    num_layers_at_start_in_bf16: int = 0,
+    num_layers_at_end_in_bf16: int = 0,
+) -> tuple[list[int], list[int]]:
+    """Return routed-expert layer indices as ``(quantized, bf16)`` for rollout.
+
+    Training's first/last carve-out is defined over decoder layers, while only
+    sparse decoder layers own a vLLM ``RoutedExperts`` container. Intersect the
+    carve-out with the structural MoE layout so interleaved/dense-prefix models
+    are counted correctly too.
+    """
+
+    num_layers = int(_hf_get(hf_config, "num_hidden_layers") or 0)
+    start = int(num_layers_at_start_in_bf16)
+    end = int(num_layers_at_end_in_bf16)
+    if start < 0 or end < 0:
+        raise ValueError(f"real_nvfp4 BF16 layer carve-out must be non-negative, got {start}/{end}")
+    if start + end >= num_layers:
+        raise ValueError(f"real_nvfp4 BF16 layer carve-out {start}/{end} leaves no quantized layer of {num_layers}")
+
+    all_moe_layers = real_nvfp4_moe_layer_indices(hf_config)
+    carved_decoder_layers = set(range(start)) | set(range(num_layers - end, num_layers))
+    bf16_moe_layers = [index for index in all_moe_layers if index in carved_decoder_layers]
+    quantized_moe_layers = [index for index in all_moe_layers if index not in carved_decoder_layers]
+    if not quantized_moe_layers:
+        raise ValueError("real_nvfp4 rollout carve-out leaves no routed-expert layer quantized")
+    return quantized_moe_layers, bf16_moe_layers
+
+
+def real_nvfp4_vllm_ignore_layers(
+    hf_config: Any,
+    *,
+    num_layers_at_start_in_bf16: int = 0,
+    num_layers_at_end_in_bf16: int = 0,
+) -> list[str]:
+    """Exact vLLM 0.26 module names excluded from online NVFP4."""
+
+    _, bf16_moe_layers = real_nvfp4_rollout_layer_partition(
+        hf_config,
+        num_layers_at_start_in_bf16=num_layers_at_start_in_bf16,
+        num_layers_at_end_in_bf16=num_layers_at_end_in_bf16,
+    )
+    return [f"model.layers.{index}.mlp.experts" for index in bf16_moe_layers]
+
+
 def validate_real_nvfp4_model_contract(hf_config: Any) -> None:
     """Fail closed on layouts whose refit counts this recipe cannot predict.
 

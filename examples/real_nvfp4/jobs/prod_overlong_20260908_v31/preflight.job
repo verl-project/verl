@@ -158,6 +158,7 @@ print(
 PY
 
 pytest -q \
+  tests/trainer/ppo/test_legacy_dynamic_sampling_on_cpu.py \
   tests/utils/real_nvfp4/test_te_contract.py \
   tests/utils/real_nvfp4/test_vllm_native_online.py \
   tests/utils/test_bucketed_weight_transfer.py \
@@ -169,6 +170,8 @@ for precision in bf16 real_nvfp4; do
     bash examples/real_nvfp4/run_qwen3_30b_megatron.sh >/tmp/rn4pt-config-\$precision.yaml
 done
 CONFIG_ONLY=1 RUN_PROFILE=formal PRECISION_MODE=real_nvfp4 NNODES=8 N_GPUS_PER_NODE=4 \
+  FIRST_LAST_BF16=True BF16_LAYERS_AT_START=2 BF16_LAYERS_AT_END=4 \
+  FILTER_GROUPS=True GEN_PROMPT_BSZ_MULT=3 MAX_GEN_BATCHES=20 STRICT_MINERVA=1 \
   WORKING_DIR=$RN4PT_VERL EXP_NAME=config-only-real-nvfp4-formal TOTAL_TRAINING_STEPS=2 \
   bash examples/real_nvfp4/run_qwen3_30b_megatron.sh >/tmp/rn4pt-config-formal.yaml
 grep -q 'mode: R3' /tmp/rn4pt-config-formal.yaml
@@ -176,6 +179,9 @@ grep -q 'enable_rollout_routing_replay: true' /tmp/rn4pt-config-formal.yaml
 grep -q 'enforce_eager: false' /tmp/rn4pt-config-formal.yaml
 grep -q 'max_num_seqs: 128' /tmp/rn4pt-config-formal.yaml
 grep -q 'cudagraph_mode: FULL_DECODE_ONLY' /tmp/rn4pt-config-formal.yaml
+grep -q 'num_layers_at_start_in_bf16: 2' /tmp/rn4pt-config-formal.yaml
+grep -q 'num_layers_at_end_in_bf16: 4' /tmp/rn4pt-config-formal.yaml
+grep -q 'verifier_strict_minerva=1' /tmp/rn4pt-config-formal.yaml
 grep -q 'loss_agg_mode: token-mean' /tmp/rn4pt-config-formal.yaml
 grep -q 'rollout_is: token' /tmp/rn4pt-config-formal.yaml
 grep -q 'first_last_layers_bf16: false' /tmp/rn4pt-config-formal.yaml

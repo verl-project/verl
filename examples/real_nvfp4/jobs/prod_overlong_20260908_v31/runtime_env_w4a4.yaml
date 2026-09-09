@@ -13,3 +13,6 @@ env_vars:
   NVTE_NVFP4_4OVER6_ERR_MODE: "MAE"
   FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH: "1"
   TRTLLM_DISABLE_FP4_QUANT_FAST_MATH: "1"
+  # Match NeMo's Minerva-only DAPO verifier. Without this, VERL accepts bare
+  # boxed answers that NeMo scores wrong and changes the GRPO group variance.
+  VERL_MATH_DAPO_STRICT_MINERVA: "1"

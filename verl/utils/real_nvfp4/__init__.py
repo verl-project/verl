@@ -20,6 +20,8 @@ from .config import (
     REAL_NVFP4_TE_VERSION,
     real_nvfp4_expected_counts,
     real_nvfp4_moe_layer_indices,
+    real_nvfp4_rollout_layer_partition,
+    real_nvfp4_vllm_ignore_layers,
     validate_real_nvfp4_model_contract,
     validate_real_nvfp4_te_recipe,
 )
@@ -41,6 +43,8 @@ __all__ = [
     "attest_vllm_native_nvfp4_runtime",
     "real_nvfp4_expected_counts",
     "real_nvfp4_moe_layer_indices",
+    "real_nvfp4_rollout_layer_partition",
+    "real_nvfp4_vllm_ignore_layers",
     "require_vllm_native_nvfp4_per_token",
     "require_vllm_native_reload_contract",
     "validate_real_nvfp4_model_contract",

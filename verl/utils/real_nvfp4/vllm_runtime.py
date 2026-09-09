@@ -16,6 +16,8 @@
 
 import inspect
 import logging
+import re
+from collections.abc import Collection
 from importlib.metadata import version
 
 import torch
@@ -61,16 +63,31 @@ def require_vllm_native_reload_contract(model_runner) -> None:
 def attest_vllm_native_nvfp4_runtime(
     model: torch.nn.Module,
     *,
-    expected_moe_layers: int,
+    expected_moe_layers: int | None = None,
+    expected_quantized_layer_indices: Collection[int] | None = None,
+    expected_bf16_layer_indices: Collection[int] = (),
 ) -> dict[str, int]:
-    """Prove every routed-expert layer executes native per-token W4A4."""
+    """Prove the exact routed-expert layer partition used by vLLM rollout."""
 
     moe_count = 0
-    for module in model.modules():
+    quantized_layer_indices = set()
+    unquantized_layer_indices = set()
+    # vLLM 0.26's FusedMoE factory receives the quantization prefix ending in
+    # `.mlp.experts`, then returns an MoERunner whose actual RoutedExperts
+    # submodule is usually named `.mlp.experts.routed_experts`.
+    layer_pattern = re.compile(r"(?:^|\.)layers\.(\d+)\.mlp\.experts(?:\.routed_experts)?$")
+    for module_name, module in model.named_modules():
         quant_method = getattr(module, "quant_method", None)
+        layer_match = layer_pattern.search(module_name)
+        if layer_match and type(quant_method).__name__ == "UnquantizedFusedMoEMethod":
+            unquantized_layer_indices.add(int(layer_match.group(1)))
         if type(quant_method).__name__ != "Nvfp4OnlineMoEMethod":
             continue
         moe_count += 1
+        if expected_quantized_layer_indices is not None:
+            if layer_match is None:
+                raise RuntimeError(f"native NVFP4 MoE has an unrecognized module path: {module_name!r}")
+            quantized_layer_indices.add(int(layer_match.group(1)))
         if not getattr(module, "_already_called_process_weights_after_loading", False):
             raise RuntimeError("native NVFP4 MoE weights were not processed after loading")
         for name in ("w13_weight", "w2_weight"):
@@ -91,16 +108,36 @@ def attest_vllm_native_nvfp4_runtime(
         if not getattr(experts, "per_token_activation", False):
             raise RuntimeError("native NVFP4 MoE kernel is not executing per-token activation quantization")
 
+    if expected_quantized_layer_indices is not None:
+        expected_quantized = set(expected_quantized_layer_indices)
+        expected_bf16 = set(expected_bf16_layer_indices)
+        if expected_quantized & expected_bf16:
+            raise ValueError("expected quantized and BF16 MoE layer sets overlap")
+        if quantized_layer_indices != expected_quantized:
+            raise RuntimeError(
+                "native NVFP4 rollout quantized the wrong MoE layers: "
+                f"expected={sorted(expected_quantized)}, got={sorted(quantized_layer_indices)}"
+            )
+        missing_bf16 = expected_bf16 - unquantized_layer_indices
+        if missing_bf16:
+            raise RuntimeError(
+                "native NVFP4 rollout did not leave the requested MoE layers unquantized: "
+                f"missing_bf16={sorted(missing_bf16)}, observed_unquantized={sorted(unquantized_layer_indices)}"
+            )
+        expected_moe_layers = len(expected_quantized)
+    if expected_moe_layers is None:
+        raise ValueError("an expected MoE layer count or exact quantized layer set is required")
     if moe_count != expected_moe_layers:
         raise RuntimeError(
             f"native NVFP4 rollout MoE-layer count mismatch: expected {expected_moe_layers}, got {moe_count}"
         )
     logger.warning(
-        "VERL_REAL_NVFP4_ROLLOUT_ATTESTATION PASS dense_layers=0 moe_layers=%d expected=%d "
+        "VERL_REAL_NVFP4_ROLLOUT_ATTESTATION PASS dense_layers=0 moe_layers=%d expected=%d bf16_moe_layers=%s "
         "method=vllm_native_nvfp4_per_token backend=FLASHINFER_TRTLLM "
         "scope=routed_expert_mlp attention=bf16 activation=per_token",
         moe_count,
         expected_moe_layers,
+        sorted(expected_bf16_layer_indices),
     )
     return {"dense_layers": 0, "moe_layers": moe_count}
 

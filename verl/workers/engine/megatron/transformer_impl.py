@@ -496,6 +496,13 @@ class MegatronEngine(BaseEngine):
         start = int(override_transformer_config.get("num_layers_at_start_in_bf16") or 0)
         end = int(override_transformer_config.get("num_layers_at_end_in_bf16") or 0)
         enabled = bool(override_transformer_config.get("first_last_layers_bf16") or False)
+        config_start = int(self._real_nvfp4_config.num_layers_at_start_in_bf16)
+        config_end = int(self._real_nvfp4_config.num_layers_at_end_in_bf16)
+        if (start, end) != (config_start, config_end):
+            raise ValueError(
+                "real_nvfp4 trainer/rollout BF16 carve-out disagrees with override_transformer_config: "
+                f"real_nvfp4={config_start}/{config_end}, override={start}/{end}"
+            )
         if start < 0 or end < 0:
             raise ValueError(f"real_nvfp4 BF16 layer carve-out must be non-negative, got {start}/{end}")
         if enabled != (start + end > 0):

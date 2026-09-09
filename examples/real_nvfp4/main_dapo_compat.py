@@ -15,12 +15,11 @@
 """DAPO-configured entry point for the current VERL legacy worker runner.
 
 The DAPO recipe submodule still imports ``TaskRunner`` from
-``verl.trainer.main_ppo``.  Current VERL moved that implementation to
+``verl.trainer.main_ppo``. Current VERL moved that implementation to
 ``main_ppo_v0`` while reserving ``main_ppo.TaskRunnerV1`` for the transfer-
-queue trainer.  Its custom trainer also imports APIs removed from current
-VERL.  The current ``RayPPOTrainer`` natively implements GRPO and rollout
-correction, so this adapter composes that maintained trainer with the DAPO
-config and DAPO reward manager.
+queue trainer. The legacy ``RayPPOTrainer`` used here implements GRPO,
+rollout correction, and DAPO filter-groups sampling; this adapter composes
+that maintained path with the DAPO config and reward manager.
 """
 
 import os

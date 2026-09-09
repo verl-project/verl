@@ -9,8 +9,8 @@ if [[ "${1:-}" =~ ^(probe|build|preflight)$ ]]; then
   readonly IMAGE_PHASE=$1
   rn4pt_validate_static
   mkdir -p "$RN4PT_STATE" "$RN4PT_LOGS"
-  if squeue -h -u "$USER" -t RUNNING,PENDING -o '%j' | grep -q '^verl-rn4pt-v31'; then
-    rn4pt_die "a v31 job is already running or pending"
+  if squeue -h -u "$USER" -t RUNNING,PENDING -o '%j' | grep -q "^verl-rn4pt-$RN4PT_JOB_LABEL"; then
+    rn4pt_die "an $RN4PT_JOB_LABEL job is already running or pending"
   fi
   case "$IMAGE_PHASE" in
     probe)
@@ -23,7 +23,7 @@ if [[ "${1:-}" =~ ^(probe|build|preflight)$ ]]; then
       job_file=$RN4PT_BUILD_JOB_IMPL/preflight.job; nodes=1; time_limit=00:45:00 ;;
   esac
   job_id=$(sbatch --parsable --nodes="$nodes" --time="$time_limit" \
-    --job-name="verl-rn4pt-v31-$IMAGE_PHASE" \
+    --job-name="verl-rn4pt-$RN4PT_JOB_LABEL-$IMAGE_PHASE" \
     --output="$RN4PT_LOGS/%x_%j.out" \
     --export="ALL,RN4PT_MANIFEST_OVERRIDE=$RN4PT_BUNDLE/manifest.sh" "$job_file")
   printf '%s\n' "$job_id" >"$RN4PT_STATE/$IMAGE_PHASE.jobid"
@@ -49,14 +49,14 @@ if [[ "$ACTION" = audit ]]; then
   exit 0
 fi
 
-if squeue -h -u "$USER" -t RUNNING,PENDING -o '%j' | grep -q "^verl-rn4pt-v31-$ARM"; then
-  rn4pt_die "a v31 $ARM job is already running or pending"
+if squeue -h -u "$USER" -t RUNNING,PENDING -o '%j' | grep -q "^verl-rn4pt-$RN4PT_JOB_LABEL-$ARM"; then
+  rn4pt_die "an $RN4PT_JOB_LABEL $ARM job is already running or pending"
 fi
 mkdir -p "$RN4PT_STATE" "$RN4PT_LOGS"
 
 if [[ "$ACTION" = smoke ]]; then
   job_id=$(sbatch --parsable --nodes=1 --time=01:30:00 \
-    --job-name="verl-rn4pt-v31-$ARM-smoke" \
+    --job-name="verl-rn4pt-$RN4PT_JOB_LABEL-$ARM-smoke" \
     --output="$RN4PT_LOGS/%x_%j.out" \
     --export="ALL,ARM=$ARM,PHASE=smoke" \
     "$RN4PT_JOB_IMPL/train.job")
@@ -71,7 +71,7 @@ if [[ "$ACTION" = smoke8 ]]; then
   [[ -s "$RN4PT_STATE/${ARM}_chunk_0.pass" ]] || \
     rn4pt_die "run '$0 $ARM smoke' first: $RN4PT_STATE/${ARM}_chunk_0.pass is missing"
   job_id=$(sbatch --parsable --nodes=8 --time=01:30:00 \
-    --job-name="verl-rn4pt-v31-$ARM-smoke8" \
+    --job-name="verl-rn4pt-$RN4PT_JOB_LABEL-$ARM-smoke8" \
     --output="$RN4PT_LOGS/%x_%j.out" \
     --export="ALL,ARM=$ARM,PHASE=smoke8" \
     "$RN4PT_JOB_IMPL/train.job")
@@ -103,7 +103,7 @@ for index in "${!LONG_TARGET_STEPS[@]}"; do
     --parsable
     --nodes=8
     --time=05:00:00
-    --job-name="verl-rn4pt-v31-$ARM-c${chunk}"
+    --job-name="verl-rn4pt-$RN4PT_JOB_LABEL-$ARM-c${chunk}"
     --output="$RN4PT_LOGS/%x_%j.out"
     --export="ALL,ARM=$ARM,PHASE=long,LONG_CHUNK_INDEX=$chunk,LONG_TARGET_STEP=$target"
   )

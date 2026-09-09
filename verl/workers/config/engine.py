@@ -162,6 +162,8 @@ class RealNVFP4EngineConfig(BaseConfig):
     group_size: int = 16
     fp4_param: bool = False
     te_precision_config_file: Optional[str] = None
+    num_layers_at_start_in_bf16: int = 0
+    num_layers_at_end_in_bf16: int = 0
 
     def __post_init__(self) -> None:
         if self.fp4_format != "e2m1":
@@ -177,6 +179,11 @@ class RealNVFP4EngineConfig(BaseConfig):
             raise ValueError("NVFP4 requires real_nvfp4.group_size=16")
         if self.fp4_param:
             raise ValueError("real_nvfp4 requires fp4_param=False so Adam and refit retain BF16 master weights")
+        if self.num_layers_at_start_in_bf16 < 0 or self.num_layers_at_end_in_bf16 < 0:
+            raise ValueError(
+                "real_nvfp4 BF16 layer carve-out must be non-negative, got "
+                f"{self.num_layers_at_start_in_bf16}/{self.num_layers_at_end_in_bf16}"
+            )
         if self.enable and not self.te_precision_config_file:
             raise ValueError("real_nvfp4.te_precision_config_file is required for audited per-module precision")
 

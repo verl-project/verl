@@ -13,6 +13,7 @@ env_vars:
   NVTE_NVFP4_4OVER6_ERR_MODE: "MAE"
   FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH: "1"
   TRTLLM_DISABLE_FP4_QUANT_FAST_MATH: "1"
+  VERL_MATH_DAPO_STRICT_MINERVA: "1"
   # vLLM 0.26 reworked MoE loading into RoutedExperts, whose weight_loader wants
   # a per-expert 2D view; verl's legacy model.load_weights hands it the stacked
   # 3D expert parameter and dies. Native reload is the same API the real-NVFP4

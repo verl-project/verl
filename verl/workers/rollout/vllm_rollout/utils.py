@@ -279,19 +279,20 @@ class vLLMColocateWorkerExtension:
             if getattr(self, "_is_real_nvfp4", False):
                 from verl.utils.real_nvfp4 import (
                     attest_vllm_native_nvfp4_runtime,
-                    real_nvfp4_moe_layer_indices,
+                    real_nvfp4_rollout_layer_partition,
                     require_vllm_native_reload_contract,
                     vllm_native_nvfp4_fingerprint,
                 )
 
-                # Not num_hidden_layers: a model with decoder_sparse_step > 1 or
-                # mlp_only_layers has dense layers that carry no experts.
-                expected_moe_layers = len(
-                    real_nvfp4_moe_layer_indices(self.model_runner.vllm_config.model_config.hf_config)
+                quantized_moe_layers, bf16_moe_layers = real_nvfp4_rollout_layer_partition(
+                    self.model_runner.vllm_config.model_config.hf_config,
+                    num_layers_at_start_in_bf16=int(os.environ.get("VERL_REAL_NVFP4_BF16_LAYERS_AT_START", "0")),
+                    num_layers_at_end_in_bf16=int(os.environ.get("VERL_REAL_NVFP4_BF16_LAYERS_AT_END", "0")),
                 )
                 attest_vllm_native_nvfp4_runtime(
                     model,
-                    expected_moe_layers=expected_moe_layers,
+                    expected_quantized_layer_indices=quantized_moe_layers,
+                    expected_bf16_layer_indices=bf16_moe_layers,
                 )
                 require_vllm_native_reload_contract(self.model_runner)
                 self._real_nvfp4_last_fingerprint = vllm_native_nvfp4_fingerprint(model)
@@ -352,18 +353,19 @@ class vLLMColocateWorkerExtension:
 
                 from verl.utils.real_nvfp4 import (
                     attest_vllm_native_nvfp4_runtime,
-                    real_nvfp4_moe_layer_indices,
+                    real_nvfp4_rollout_layer_partition,
                     vllm_native_nvfp4_fingerprint,
                 )
 
-                # Not num_hidden_layers: a model with decoder_sparse_step > 1 or
-                # mlp_only_layers has dense layers that carry no experts.
-                expected_moe_layers = len(
-                    real_nvfp4_moe_layer_indices(self.model_runner.vllm_config.model_config.hf_config)
+                quantized_moe_layers, bf16_moe_layers = real_nvfp4_rollout_layer_partition(
+                    self.model_runner.vllm_config.model_config.hf_config,
+                    num_layers_at_start_in_bf16=int(os.environ.get("VERL_REAL_NVFP4_BF16_LAYERS_AT_START", "0")),
+                    num_layers_at_end_in_bf16=int(os.environ.get("VERL_REAL_NVFP4_BF16_LAYERS_AT_END", "0")),
                 )
                 attest_vllm_native_nvfp4_runtime(
                     self._get_main_model(),
-                    expected_moe_layers=expected_moe_layers,
+                    expected_quantized_layer_indices=quantized_moe_layers,
+                    expected_bf16_layer_indices=bf16_moe_layers,
                 )
                 fingerprint = vllm_native_nvfp4_fingerprint(self._get_main_model())
                 previous = self._real_nvfp4_last_fingerprint

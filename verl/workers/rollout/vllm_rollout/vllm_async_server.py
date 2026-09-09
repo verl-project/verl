@@ -1192,18 +1192,42 @@ class vLLMHttpServer:
             from verl.utils.real_nvfp4 import (
                 NVFP4_PER_TOKEN_METHOD,
                 REAL_NVFP4_MOE_BACKEND,
+                real_nvfp4_rollout_layer_partition,
+                real_nvfp4_vllm_ignore_layers,
                 validate_real_nvfp4_model_contract,
             )
 
             validate_real_nvfp4_model_contract(self.model_config.hf_config)
+            bf16_layers_at_start = int(real_nvfp4_config.get("num_layers_at_start_in_bf16", 0))
+            bf16_layers_at_end = int(real_nvfp4_config.get("num_layers_at_end_in_bf16", 0))
+            quantized_moe_layers, bf16_moe_layers = real_nvfp4_rollout_layer_partition(
+                self.model_config.hf_config,
+                num_layers_at_start_in_bf16=bf16_layers_at_start,
+                num_layers_at_end_in_bf16=bf16_layers_at_end,
+            )
+            ignored_layers = real_nvfp4_vllm_ignore_layers(
+                self.model_config.hf_config,
+                num_layers_at_start_in_bf16=bf16_layers_at_start,
+                num_layers_at_end_in_bf16=bf16_layers_at_end,
+            )
             os.environ["VERL_VLLM_REAL_NVFP4_ENABLED"] = "1"
+            os.environ["VERL_REAL_NVFP4_BF16_LAYERS_AT_START"] = str(bf16_layers_at_start)
+            os.environ["VERL_REAL_NVFP4_BF16_LAYERS_AT_END"] = str(bf16_layers_at_end)
             quantization = NVFP4_PER_TOKEN_METHOD
+            # vLLM 0.26 merges this with the nvfp4_per_token shorthand. Its
+            # online quantizer's field is singular `ignore`, and these are the
+            # exact RoutedExperts prefixes constructed by Qwen3Moe.
+            hf_overrides["quantization_config"] = {"ignore": ignored_layers}
             engine_kwargs["moe_backend"] = REAL_NVFP4_MOE_BACKEND
             logger.warning(
                 "VERL_REAL_NVFP4_ROLLOUT_ATTESTATION configured "
                 "method=vllm_native_nvfp4_per_token "
                 "backend=FLASHINFER_TRTLLM scope=routed_expert_mlp "
-                "attention=bf16 activation=per_token"
+                "attention=bf16 activation=per_token quantized_moe_layers=%s "
+                "bf16_moe_layers=%s ignore=%s",
+                quantized_moe_layers,
+                bf16_moe_layers,
+                ignored_layers,
             )
 
         # Handle QAT (Quantization-Aware Training) configuration

@@ -67,7 +67,8 @@ readonly TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-20}
 # The two knobs belong together.
 # Training-side BF16 carve-out for the first/last decoder layers. NeMo RL's
 # R3-on arm uses first_last_layers_bf16=True with 2 at the start and 4 at the
-# end (its R3-off arm uses none), and exempts nothing on the rollout side.
+# end (its R3-off arm uses none). The same counts are forwarded to rollout so
+# vLLM leaves those exact RoutedExperts containers in BF16 too.
 readonly FIRST_LAST_BF16=${FIRST_LAST_BF16:-False}
 readonly BF16_LAYERS_AT_START=${BF16_LAYERS_AT_START:-0}
 readonly BF16_LAYERS_AT_END=${BF16_LAYERS_AT_END:-0}
@@ -76,6 +77,7 @@ readonly FILTER_GROUPS=${FILTER_GROUPS:-False}
 readonly MAX_GEN_BATCHES=${MAX_GEN_BATCHES:-0}
 readonly GEN_PROMPT_BSZ=$((TRAIN_PROMPT_BSZ * GEN_PROMPT_BSZ_MULT))
 readonly ROLLOUT_IS=${ROLLOUT_IS:-token}
+readonly STRICT_MINERVA=${STRICT_MINERVA:-0}
 # DAPO's soft overlong punishment. NeMo-RL's matching arm runs 512 / 1.0; this
 # recipe shipped it disabled, which left nothing pushing back on running to
 # max_response_length. W4A4 then clipped 12.8% of responses at 20480 against
@@ -104,6 +106,7 @@ if [[ "$OVERLONG_PENALTY" = True && ( "$OVERLONG_BUFFER_LEN" -le 0 ) ]]; then
   echo "OVERLONG_PENALTY=True requires OVERLONG_BUFFER_LEN>0" >&2; exit 2
 fi
 case "$ROLLOUT_IS" in token|sequence|null) ;; *) echo "ROLLOUT_IS must be token|sequence|null" >&2; exit 2 ;; esac
+case "$STRICT_MINERVA" in 0|1) ;; *) echo "STRICT_MINERVA must be 0 or 1" >&2; exit 2 ;; esac
 readonly RESUME_MODE=${RESUME_MODE:-disable}
 readonly RESUME_FROM_PATH=${RESUME_FROM_PATH:-}
 readonly VERL_WANDB_RUN_ID=${VERL_WANDB_RUN_ID:-}
@@ -147,6 +150,7 @@ export NVTE_NVFP4_4OVER6_E4M3_USE_256=all
 export NVTE_NVFP4_4OVER6_ERR_MODE=MAE
 export FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH=1
 export TRTLLM_DISABLE_FP4_QUANT_FAST_MATH=1
+export VERL_MATH_DAPO_STRICT_MINERVA="$STRICT_MINERVA"
 
 DATA=(
   data.train_files="$TRAIN_FILE"
@@ -312,10 +316,12 @@ if [[ "$PRECISION_MODE" = real_nvfp4 ]]; then
     actor_rollout_ref.actor.megatron.real_nvfp4.group_size=16
     actor_rollout_ref.actor.megatron.real_nvfp4.fp4_param=False
     actor_rollout_ref.actor.megatron.real_nvfp4.te_precision_config_file="$TE_PRECISION_CONFIG"
+    actor_rollout_ref.actor.megatron.real_nvfp4.num_layers_at_start_in_bf16="$BF16_LAYERS_AT_START"
+    actor_rollout_ref.actor.megatron.real_nvfp4.num_layers_at_end_in_bf16="$BF16_LAYERS_AT_END"
   )
 fi
 
-echo "VERL_REAL_NVFP4_CONTRACT profile=$RUN_PROFILE precision=$PRECISION_MODE scope=all_mlp attention=bf16 rollout_activation=per_token transport=bf16 reload=native r3=1 losses=0of3 bf16_layers=${BF16_LAYERS_AT_START}/${BF16_LAYERS_AT_END} token_mean=1 tis=$ROLLOUT_IS overlong=${OVERLONG_PENALTY}:${OVERLONG_BUFFER_LEN}:${OVERLONG_PENALTY_FACTOR} autotune=${FLASHINFER_AUTOTUNE} nodes=${NNODES}x${N_GPUS_PER_NODE} tp=1 pp=1 cp=1 ep=4 batch=${TRAIN_PROMPT_BSZ}x${N_RESP_PER_PROMPT} max_num_seqs=$MAX_NUM_SEQS full_adam=1 resume=$RESUME_MODE"
+echo "VERL_REAL_NVFP4_CONTRACT profile=$RUN_PROFILE precision=$PRECISION_MODE scope=all_mlp attention=bf16 rollout_activation=per_token transport=bf16 reload=native r3=1 losses=0of3 bf16_layers=${BF16_LAYERS_AT_START}/${BF16_LAYERS_AT_END} token_mean=1 tis=$ROLLOUT_IS verifier_strict_minerva=$STRICT_MINERVA overlong=${OVERLONG_PENALTY}:${OVERLONG_BUFFER_LEN}:${OVERLONG_PENALTY_FACTOR} autotune=${FLASHINFER_AUTOTUNE} nodes=${NNODES}x${N_GPUS_PER_NODE} tp=1 pp=1 cp=1 ep=4 batch=${TRAIN_PROMPT_BSZ}x${N_RESP_PER_PROMPT} max_num_seqs=$MAX_NUM_SEQS full_adam=1 resume=$RESUME_MODE"
 
 HYDRA_ARGS=(
   --config-path="$WORKING_DIR/recipe/dapo/config" \

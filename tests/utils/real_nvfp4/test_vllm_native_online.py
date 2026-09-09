@@ -16,6 +16,8 @@ from verl.utils.real_nvfp4.bf16_transport import attest_real_nvfp4_bf16_transpor
 from verl.utils.real_nvfp4.config import (
     real_nvfp4_expected_counts,
     real_nvfp4_moe_layer_indices,
+    real_nvfp4_rollout_layer_partition,
+    real_nvfp4_vllm_ignore_layers,
     validate_real_nvfp4_model_contract,
 )
 from verl.utils.real_nvfp4.r3_monolithic_capture import (
@@ -61,6 +63,10 @@ class Nvfp4OnlineMoEMethod:
         self.moe_kernel = SimpleNamespace(fused_experts=SimpleNamespace(per_token_activation=per_token_activation))
 
 
+class UnquantizedFusedMoEMethod:
+    pass
+
+
 class _FakeNativeMoE(torch.nn.Module):
     def __init__(self, value: int = 1, per_token_activation: bool = True) -> None:
         super().__init__()
@@ -72,6 +78,12 @@ class _FakeNativeMoE(torch.nn.Module):
         self.w2_weight_scale = torch.ones((2, 2), dtype=torch.float8_e4m3fn)
         self.w13_weight_scale_2 = torch.ones(2, dtype=torch.float32)
         self.w2_weight_scale_2 = torch.ones(2, dtype=torch.float32)
+
+
+class _FakeUnquantizedMoE(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.quant_method = UnquantizedFusedMoEMethod()
 
 
 def test_native_vllm_runtime_attestation_and_fingerprint():
@@ -91,6 +103,31 @@ def test_native_vllm_runtime_attestation_and_fingerprint():
     bad = torch.nn.Sequential(_FakeNativeMoE(per_token_activation=False))
     with pytest.raises(RuntimeError, match="per-token activation"):
         attest_vllm_native_nvfp4_runtime(bad, expected_moe_layers=1)
+
+
+def test_native_vllm_runtime_attests_exact_carveout_layers():
+    root = torch.nn.Module()
+    root.model = torch.nn.Module()
+    root.model.layers = torch.nn.ModuleList()
+    for index in range(8):
+        layer = torch.nn.Module()
+        layer.mlp = torch.nn.Module()
+        layer.mlp.experts = torch.nn.Module()
+        layer.mlp.experts.routed_experts = _FakeNativeMoE() if 2 <= index < 6 else _FakeUnquantizedMoE()
+        root.model.layers.append(layer)
+
+    assert attest_vllm_native_nvfp4_runtime(
+        root,
+        expected_quantized_layer_indices=[2, 3, 4, 5],
+        expected_bf16_layer_indices=[0, 1, 6, 7],
+    ) == {"dense_layers": 0, "moe_layers": 4}
+
+    with pytest.raises(RuntimeError, match="wrong MoE layers"):
+        attest_vllm_native_nvfp4_runtime(
+            root,
+            expected_quantized_layer_indices=[1, 2, 3, 4],
+            expected_bf16_layer_indices=[0, 5, 6, 7],
+        )
 
 
 def test_native_vllm_reload_contract_is_exact():
@@ -234,6 +271,23 @@ def test_model_contract_accepts_any_routed_expert_layout():
     validate_real_nvfp4_model_contract(all_moe)
     assert real_nvfp4_moe_layer_indices(all_moe) == list(range(48))
     assert real_nvfp4_expected_counts(all_moe) == (48 * 128 * 3, 48 * 128 * 2)
+    assert real_nvfp4_rollout_layer_partition(
+        all_moe,
+        num_layers_at_start_in_bf16=2,
+        num_layers_at_end_in_bf16=4,
+    ) == (list(range(2, 44)), [0, 1, 44, 45, 46, 47])
+    assert real_nvfp4_vllm_ignore_layers(
+        all_moe,
+        num_layers_at_start_in_bf16=2,
+        num_layers_at_end_in_bf16=4,
+    ) == [
+        "model.layers.0.mlp.experts",
+        "model.layers.1.mlp.experts",
+        "model.layers.44.mlp.experts",
+        "model.layers.45.mlp.experts",
+        "model.layers.46.mlp.experts",
+        "model.layers.47.mlp.experts",
+    ]
 
     # Interleaved MoE was rejected outright before; now it is counted correctly.
     interleaved = SimpleNamespace(
@@ -256,6 +310,11 @@ def test_model_contract_accepts_any_routed_expert_layout():
         mlp_only_layers=[0, 1],
     )
     assert real_nvfp4_moe_layer_indices(dense_prefix) == list(range(2, 48))
+    assert real_nvfp4_rollout_layer_partition(
+        dense_prefix,
+        num_layers_at_start_in_bf16=2,
+        num_layers_at_end_in_bf16=4,
+    ) == (list(range(2, 44)), [44, 45, 46, 47])
 
 
 def test_model_contract_still_refuses_layouts_it_cannot_count():

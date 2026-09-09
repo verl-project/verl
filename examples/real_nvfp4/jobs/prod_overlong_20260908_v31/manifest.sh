@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034
 
-# Two matched long runs, both R3 on / TIS on / dynamic sampling on, default
-# (lenient) verifier:
+# Two matched long runs, both R3 on / TIS on / dynamic sampling on, strict
+# Minerva verifier:
 #   ARM=w4a4  real NVFP4 on the routed experts only, first 2 and last 4 layers
 #             left in BF16 -- the same carve-out NeMo-RL's R3-on arm uses.
 #   ARM=bf16  the matched BF16 control.
 # See README.md for why this bundle reuses v23's image instead of building one.
 
 readonly RN4PT_VERSION=${RN4PT_VERSION_OVERRIDE:-verl_real_nvfp4_prod_overlong_20260908_v31}
+readonly RN4PT_JOB_LABEL=${RN4PT_JOB_LABEL_OVERRIDE:-v31}
 readonly RN4PT_WORKSPACE=/lustre/fsw/general_sa/shuazhang/python_space/verl_for_nvfp4_20251031
 readonly RN4PT_VERL=$RN4PT_WORKSPACE/verl_nvfp4_e2e_r3_20260831_v3
 readonly RN4PT_ROOT=$RN4PT_VERL/examples/real_nvfp4
@@ -24,7 +25,7 @@ readonly RN4PT_BASE_IMAGE=${RN4PT_BASE_IMAGE_OVERRIDE:-/lustre/fsw/general_sa/sh
 # installed for any rollout that returns routed experts, not just the NVFP4
 # one), so it builds its own image rather than inheriting v23's evidence.
 readonly RN4PT_RUNTIME_IMAGE=${RN4PT_RUNTIME_IMAGE_OVERRIDE:-/lustre/fsw/general_sa/shuazhang/images/verl.vllm026.mcore018.te218e7.realnvfp4.fi0615p1.prod.20260908.v31.sqsh}
-readonly RN4PT_IMAGE_ENV=/opt/verl-rn4pt-20260908-v31
+readonly RN4PT_IMAGE_ENV=${RN4PT_IMAGE_ENV_OVERRIDE:-/opt/verl-rn4pt-20260908-v31}
 readonly RN4PT_IMAGE_PYTHON=$RN4PT_IMAGE_ENV/.venv/bin/python
 readonly RN4PT_NETRC=/home/shuazhang/.netrc
 readonly RN4PT_MOUNTS=/lustre/fsw/general_sa/shuazhang:/lustre/fsw/general_sa/shuazhang,/home/shuazhang/.netrc:/root/.netrc
@@ -48,11 +49,13 @@ readonly RN4PT_PREFLIGHT_PASS=$RN4PT_STATE/preflight.pass
 readonly RN4PT_SMOKE_PASS=$RN4PT_STATE/smoke.pass
 
 # ---------------------------------------------------------------- arm settings
-# Both arms: R3 on, token-level TIS on, dynamic sampling on, default verifier.
+# Both arms: R3 on, token-level TIS on, dynamic sampling on, strict verifier.
 readonly LONG_FILTER_GROUPS=True
 readonly LONG_MAX_GEN_BATCHES=20
 readonly LONG_GEN_PROMPT_BSZ_MULT=3
 readonly LONG_ROLLOUT_IS=token
+readonly LONG_STRICT_MINERVA=1
+readonly RN4PT_EXP_TAG=${RN4PT_EXP_TAG_OVERRIDE:-20260908_v31}
 # DAPO's soft overlong punishment, matching NeMo-RL's arm. Leaving it off is what
 # let 12.8% of W4A4 responses run to the 20480 cap against BF16's 0.7%, and since
 # a batch's wall clock is set by its slowest sequence that turned a per-token
@@ -93,8 +96,8 @@ rn4pt_arm_settings() {
     w4a4)
       LONG_PRECISION_MODE=real_nvfp4
       LONG_FIRST_LAST_BF16=True
-      LONG_EXP=verl_30b_w4a4_carveout_overlong_8n_20260908_v31
-      LONG_SMOKE_EXP=verl_30b_w4a4_overlong_smoke_20260908_v31
+      LONG_EXP=verl_30b_w4a4_carveout_overlong_8n_${RN4PT_EXP_TAG}
+      LONG_SMOKE_EXP=verl_30b_w4a4_overlong_smoke_${RN4PT_EXP_TAG}
       LONG_RUNTIME_ENV=$RN4PT_BUNDLE/runtime_env_w4a4.yaml
       LONG_JOB_TAG=w4a4
       LONG_TARGET_STEPS=("${LONG_TARGET_STEPS_W4A4[@]}")
@@ -104,8 +107,8 @@ rn4pt_arm_settings() {
       # The carve-out is meaningless without quantization, and leaving it on
       # would silently change the BF16 control's transformer config.
       LONG_FIRST_LAST_BF16=False
-      LONG_EXP=verl_30b_bf16_overlong_8n_20260908_v31
-      LONG_SMOKE_EXP=verl_30b_bf16_overlong_smoke_20260908_v31
+      LONG_EXP=verl_30b_bf16_overlong_8n_${RN4PT_EXP_TAG}
+      LONG_SMOKE_EXP=verl_30b_bf16_overlong_smoke_${RN4PT_EXP_TAG}
       LONG_RUNTIME_ENV=$RN4PT_BUNDLE/runtime_env_bf16.yaml
       LONG_JOB_TAG=bf16
       LONG_TARGET_STEPS=("${LONG_TARGET_STEPS_BF16[@]}")
@@ -119,8 +122,12 @@ rn4pt_validate_static() {
   [[ -d "$RN4PT_VERL/.git" || -f "$RN4PT_VERL/.git" ]] || rn4pt_die "worktree missing" || return
   [[ -z "$(git -C "$RN4PT_VERL" status --porcelain --untracked-files=normal)" ]] || \
     rn4pt_die "worktree must be clean so the runtime image and source commit cannot diverge" || return
-  [[ ! -e "$RN4PT_VERL/.venv" && ! -L "$RN4PT_VERL/.venv" ]] || \
-    rn4pt_die "worktree .venv would leak a host environment into the runtime image" || return
+  # The runtime build uses `git archive $RN4PT_SOURCE_COMMIT`, not the live
+  # directory as a container context. An ignored host .venv therefore cannot
+  # enter the image; only refuse one that somebody accidentally tracked.
+  if git -C "$RN4PT_VERL" ls-files --error-unmatch .venv >/dev/null 2>&1; then
+    rn4pt_die "tracked worktree .venv would enter the runtime image" || return
+  fi
   git -C "$RN4PT_VERL" merge-base --is-ancestor "$RN4PT_VERL_BASE_COMMIT" HEAD || \
     rn4pt_die "worktree is not based on the audited latest Verl commit" || return
   [[ -s "$RN4PT_BASE_IMAGE" ]] || rn4pt_die "base image missing" || return
@@ -194,14 +201,13 @@ rn4pt_validate_static() {
     rn4pt_die "gen batch multiplier no longer defaults to 1" || return
   grep -q 'readonly ROLLOUT_IS=${ROLLOUT_IS:-token}' "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || \
     rn4pt_die "token-level TIS is no longer the default" || return
-  # The user asked for the default verifier: no arm may pin strict Minerva.
-  # Scan only the files that can actually inject it -- scanning the whole bundle
-  # would match this check's own pattern.
-  if grep -q 'STRICT_MINERVA' \
-    "$RN4PT_BUNDLE/runtime_env_w4a4.yaml" "$RN4PT_BUNDLE/runtime_env_bf16.yaml" \
-    "$RN4PT_JOB_IMPL/train.job"; then
-    rn4pt_die "this bundle must leave the verifier at its default" || return
-  fi
+  grep -q 'VERL_MATH_DAPO_STRICT_MINERVA: "1"' "$RN4PT_BUNDLE/runtime_env_w4a4.yaml" || \
+    rn4pt_die "W4A4 runtime does not enforce the strict Minerva verifier" || return
+  grep -q 'VERL_MATH_DAPO_STRICT_MINERVA: "1"' "$RN4PT_BUNDLE/runtime_env_bf16.yaml" || \
+    rn4pt_die "BF16 runtime does not enforce the strict Minerva verifier" || return
+  grep -q 'export VERL_MATH_DAPO_STRICT_MINERVA="$STRICT_MINERVA"' \
+    "$RN4PT_ROOT/run_qwen3_30b_megatron.sh" || \
+    rn4pt_die "driver does not export the verifier contract" || return
   grep -q 'NVFP4_PER_TOKEN_METHOD = "nvfp4_per_token"' "$RN4PT_VERL/verl/utils/real_nvfp4/vllm_runtime.py" || \
     rn4pt_die "native vLLM online method missing" || return
   grep -q 'reload_weights(' "$RN4PT_VERL/verl/workers/rollout/vllm_rollout/utils.py" || \

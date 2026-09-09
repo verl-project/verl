@@ -1375,6 +1375,106 @@ class RayPPOTrainer:
 
         return actor_output
 
+    def _filter_dynamic_sampling_groups(
+        self,
+        new_batch: DataProto,
+        accumulated_batch: Optional[DataProto],
+    ) -> tuple[DataProto, int, int]:
+        """Keep complete prompt groups whose configured reward has non-zero variance.
+
+        The legacy trainer historically accepted ``algorithm.filter_groups`` in
+        its config but never executed it. In particular, setting
+        ``gen_batch_size = 3 * train_batch_size`` therefore sent all three
+        generated mini-batches through Adam. Keep this helper close to the
+        legacy training loop so the config cannot silently become decorative
+        again.
+
+        Returns the accumulated kept trajectories, the number of prompt groups
+        generated in ``new_batch``, and the number kept from ``new_batch``.
+        """
+
+        filter_config = self.config.algorithm.filter_groups
+        metric_name = filter_config.metric
+        if not metric_name:
+            raise ValueError("algorithm.filter_groups.metric is required when dynamic sampling is enabled")
+
+        if metric_name == "seq_final_reward":
+            metric_values = new_batch.batch["token_level_rewards"].sum(dim=-1)
+        elif metric_name == "seq_reward":
+            metric_values = new_batch.batch["token_level_scores"].sum(dim=-1)
+        elif metric_name in new_batch.non_tensor_batch:
+            metric_values = new_batch.non_tensor_batch[metric_name]
+        elif metric_name in new_batch.batch:
+            metric_values = new_batch.batch[metric_name]
+            if metric_values.ndim > 1:
+                metric_values = metric_values.sum(dim=-1)
+        else:
+            available = sorted(set(new_batch.non_tensor_batch) | set(new_batch.batch.keys()))
+            raise KeyError(
+                f"dynamic-sampling metric {metric_name!r} is absent from the rewarded batch; available={available}"
+            )
+
+        if isinstance(metric_values, torch.Tensor):
+            metric_values = metric_values.detach().cpu().numpy()
+        metric_values = np.asarray(metric_values)
+        if metric_values.ndim != 1 or len(metric_values) != len(new_batch):
+            raise ValueError(
+                f"dynamic-sampling metric {metric_name!r} must have one scalar per trajectory, "
+                f"got shape={metric_values.shape} trajectories={len(new_batch)}"
+            )
+
+        uids = new_batch.non_tensor_batch.get("uid")
+        if uids is None:
+            raise KeyError("dynamic sampling requires the prompt-group uid field")
+        prompt_uid2metric_vals = defaultdict(list)
+        for uid, metric_value in zip(uids, metric_values, strict=True):
+            prompt_uid2metric_vals[uid].append(float(metric_value))
+
+        rollout_n = int(self.config.actor_rollout_ref.rollout.n)
+        bad_group_sizes = {
+            uid: len(values) for uid, values in prompt_uid2metric_vals.items() if len(values) != rollout_n
+        }
+        if bad_group_sizes:
+            preview = list(bad_group_sizes.items())[:5]
+            raise ValueError(
+                "dynamic sampling requires complete prompt groups before filtering: "
+                f"rollout_n={rollout_n}, bad_groups={preview}"
+            )
+
+        kept_prompt_uids = {uid for uid, values in prompt_uid2metric_vals.items() if float(np.std(values)) > 0.0}
+        kept_traj_idxs = [idx for idx, uid in enumerate(uids) if uid in kept_prompt_uids]
+        kept_batch = new_batch[kept_traj_idxs]
+        if accumulated_batch is None:
+            accumulated_batch = kept_batch
+        elif len(kept_batch) > 0:
+            accumulated_batch = DataProto.concat([accumulated_batch, kept_batch])
+
+        return accumulated_batch, len(prompt_uid2metric_vals), len(kept_prompt_uids)
+
+    def _finalize_dynamic_sampling_batch(self, accumulated_batch: DataProto) -> tuple[DataProto, int]:
+        """Select exactly ``train_batch_size`` complete groups from an accumulator."""
+
+        required_groups = int(self.config.data.train_batch_size)
+        rollout_n = int(self.config.actor_rollout_ref.rollout.n)
+        ordered_uids = list(dict.fromkeys(accumulated_batch.non_tensor_batch["uid"]))
+        if len(ordered_uids) < required_groups:
+            raise ValueError(
+                f"dynamic sampling has only {len(ordered_uids)} kept groups; {required_groups} are required"
+            )
+
+        selected_uids = set(ordered_uids[:required_groups])
+        selected_indices = [
+            idx for idx, uid in enumerate(accumulated_batch.non_tensor_batch["uid"]) if uid in selected_uids
+        ]
+        selected_batch = accumulated_batch[selected_indices]
+        expected_trajectories = required_groups * rollout_n
+        if len(selected_batch) != expected_trajectories:
+            raise ValueError(
+                "dynamic sampling produced an incomplete update batch: "
+                f"expected={expected_trajectories}, got={len(selected_batch)}"
+            )
+        return selected_batch, len(ordered_uids) - required_groups
+
     def _update_critic(self, batch: DataProto) -> DataProto:
         batch_td = batch.to_tensordict()
         # step 2: convert from padding to no-padding
@@ -1468,19 +1568,40 @@ class RayPPOTrainer:
         )
         next_step_profile = False
 
+        filter_config = self.config.algorithm.get("filter_groups", None)
+        filter_groups_enabled = bool(filter_config and filter_config.get("enable", False))
+        accumulated_batch = None
+        accumulated_prompt_groups = 0
+        generated_prompt_groups = 0
+        num_gen_batches = 0
+        metrics = {}
+        timing_raw = {}
+        if filter_groups_enabled:
+            train_prompt_batch_size = int(self.config.data.train_batch_size)
+            actor_prompt_batch_size = int(self.config.actor_rollout_ref.actor.ppo_mini_batch_size)
+            ppo_epochs = int(self.config.actor_rollout_ref.actor.ppo_epochs)
+            if actor_prompt_batch_size != train_prompt_batch_size or ppo_epochs != 1:
+                raise ValueError(
+                    "dynamic sampling's one-update contract requires "
+                    "actor.ppo_mini_batch_size == data.train_batch_size and actor.ppo_epochs == 1; "
+                    f"got {actor_prompt_batch_size=}, {train_prompt_batch_size=}, {ppo_epochs=}"
+                )
+
         for epoch in range(current_epoch, self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                     self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
-                metrics = {}
-                timing_raw = {}
+                continuing_dynamic_sample = filter_groups_enabled and accumulated_batch is not None
+                if not continuing_dynamic_sample:
+                    metrics = {}
+                    timing_raw = {}
 
-                with marked_timer("start_profile", timing_raw):
-                    self._start_profiling(
-                        not prev_step_profile and curr_step_profile
-                        if self.config.global_profiler.profile_continuous_steps
-                        else curr_step_profile
-                    )
+                    with marked_timer("start_profile", timing_raw):
+                        self._start_profiling(
+                            not prev_step_profile and curr_step_profile
+                            if self.config.global_profiler.profile_continuous_steps
+                            else curr_step_profile
+                        )
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
                 batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
 
@@ -1517,7 +1638,6 @@ class RayPPOTrainer:
                         if curr_step_profile:
                             self.llm_server_manager.start_profile()
                         combined_gen_output = self.async_rollout_manager.generate_sequences(combined_gen_batch)
-                        self.checkpoint_manager.sleep_replicas()
                         if curr_step_profile:
                             self.llm_server_manager.stop_profile()
 
@@ -1546,24 +1666,6 @@ class RayPPOTrainer:
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
 
-                    if "response_mask" not in batch.batch.keys():
-                        batch.batch["response_mask"] = compute_response_mask(batch)
-                    # Balance the number of valid tokens across DP ranks.
-                    # NOTE: This usually changes the order of data in the `batch`,
-                    # which won't affect the advantage calculation (since it's based on uid),
-                    # but might affect the loss calculation (due to the change of mini-batching).
-                    if self.config.trainer.balance_batch:
-                        self._balance_batch(batch, metrics=metrics)
-
-                    # compute global_valid tokens
-                    batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
-                    # get images_seqlens
-                    images_seqlens_all = []
-                    for multi_modal_input in batch.non_tensor_batch["multi_modal_inputs"]:
-                        if "image_grid_thw" not in multi_modal_input.keys():
-                            continue
-                        images_seqlens_all.extend(multi_modal_input["images_seqlens"].tolist())
-                    batch.meta_info["images_seqlens"] = images_seqlens_all
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
@@ -1572,6 +1674,84 @@ class RayPPOTrainer:
 
                         # extract reward_tensor and reward_extra_infos_dict for training
                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)
+
+                    batch.batch["token_level_scores"] = reward_tensor
+                    if self.config.algorithm.use_kl_in_reward:
+                        # KL-in-reward needs old/reference log-probs and is not part of
+                        # DAPO's dynamic-sampling contract. Refuse instead of filtering
+                        # on a score different from the eventual reward.
+                        if filter_groups_enabled:
+                            raise ValueError("dynamic sampling with algorithm.use_kl_in_reward is unsupported")
+                    else:
+                        batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+
+                    if filter_groups_enabled:
+                        num_gen_batches += 1
+                        accumulated_batch, num_generated, num_kept = self._filter_dynamic_sampling_groups(
+                            batch, accumulated_batch
+                        )
+                        generated_prompt_groups += num_generated
+                        accumulated_prompt_groups += num_kept
+                        required_groups = int(self.config.data.train_batch_size)
+                        if accumulated_prompt_groups < required_groups:
+                            max_num_gen_batches = int(filter_config.get("max_num_gen_batches", 0))
+                            print(
+                                "VERL_DAPO_DYNAMIC_SAMPLING REFILL "
+                                f"generated_batches={num_gen_batches} generated_groups={generated_prompt_groups} "
+                                f"kept_groups={accumulated_prompt_groups} required_groups={required_groups}",
+                                flush=True,
+                            )
+                            if max_num_gen_batches > 0 and num_gen_batches >= max_num_gen_batches:
+                                raise ValueError(
+                                    f"dynamic sampling reached max_num_gen_batches={max_num_gen_batches} with "
+                                    f"only {accumulated_prompt_groups}/{required_groups} usable prompt groups"
+                                )
+                            continue
+
+                        batch, discarded_surplus_groups = self._finalize_dynamic_sampling_batch(accumulated_batch)
+                        reward_tensor = batch.batch["rm_scores"]
+                        reward_extra_infos_dict = {
+                            key: batch.non_tensor_batch[key] for key in batch.meta_info.get("reward_extra_keys", [])
+                        }
+                        expected_trajectories = required_groups * int(self.config.actor_rollout_ref.rollout.n)
+                        metrics.update(
+                            {
+                                "train/num_gen_batches": num_gen_batches,
+                                "train/dynamic_sampling_generated_groups": generated_prompt_groups,
+                                "train/dynamic_sampling_kept_groups": accumulated_prompt_groups,
+                                "train/dynamic_sampling_discarded_surplus_groups": discarded_surplus_groups,
+                                "train/dynamic_sampling_update_trajectories": len(batch),
+                                "train/actor_optimizer_steps": 1,
+                            }
+                        )
+                        print(
+                            "VERL_DAPO_DYNAMIC_SAMPLING PASS "
+                            f"generated_batches={num_gen_batches} generated_groups={generated_prompt_groups} "
+                            f"kept_groups={accumulated_prompt_groups} selected_groups={required_groups} "
+                            f"trajectories={len(batch)} expected_trajectories={expected_trajectories} "
+                            "actor_optimizer_steps=1",
+                            flush=True,
+                        )
+                    else:
+                        metrics["train/num_gen_batches"] = 1
+
+                    self.checkpoint_manager.sleep_replicas()
+
+                    if "response_mask" not in batch.batch.keys():
+                        batch.batch["response_mask"] = compute_response_mask(batch)
+                    # Balance only the final update batch. Balancing an oversized
+                    # generation batch before filtering can split prompt groups and
+                    # makes the selected 512 trajectories topology-dependent.
+                    if self.config.trainer.balance_batch:
+                        self._balance_batch(batch, metrics=metrics)
+
+                    batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
+                    images_seqlens_all = []
+                    for multi_modal_input in batch.non_tensor_batch["multi_modal_inputs"]:
+                        if "image_grid_thw" not in multi_modal_input.keys():
+                            continue
+                        images_seqlens_all.extend(multi_modal_input["images_seqlens"].tolist())
+                    batch.meta_info["images_seqlens"] = images_seqlens_all
 
                     # Operating Mode Selection:
                     # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
@@ -1806,6 +1986,11 @@ class RayPPOTrainer:
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
+
+                accumulated_batch = None
+                accumulated_prompt_groups = 0
+                generated_prompt_groups = 0
+                num_gen_batches = 0
 
                 progress_bar.update(1)
                 self.global_steps += 1

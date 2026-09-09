@@ -135,6 +135,7 @@ export FILTER_GROUPS=$LONG_FILTER_GROUPS
 export MAX_GEN_BATCHES=$LONG_MAX_GEN_BATCHES
 export GEN_PROMPT_BSZ_MULT=$LONG_GEN_PROMPT_BSZ_MULT
 export ROLLOUT_IS=$LONG_ROLLOUT_IS
+export STRICT_MINERVA=$LONG_STRICT_MINERVA
 export OVERLONG_PENALTY=$LONG_OVERLONG_PENALTY
 export OVERLONG_BUFFER_LEN=$LONG_OVERLONG_BUFFER_LEN
 export OVERLONG_PENALTY_FACTOR=$LONG_OVERLONG_PENALTY_FACTOR
@@ -161,7 +162,7 @@ set -e
 
 # ------------------------------------------------------------------- gates
 # Shared contract: both arms must be R3 on, token TIS, 0/3 losses, CUDA graph on.
-grep -q "VERL_REAL_NVFP4_CONTRACT profile=$RUN_PROFILE precision=$LONG_PRECISION_MODE .*reload=native r3=1 losses=0of3 bf16_layers=${LONG_BF16_LAYERS_AT_START}/${LONG_BF16_LAYERS_AT_END} token_mean=1 tis=$LONG_ROLLOUT_IS overlong=${LONG_OVERLONG_PENALTY}:${LONG_OVERLONG_BUFFER_LEN}:${LONG_OVERLONG_PENALTY_FACTOR} autotune=False " "$JOB_LOG"
+grep -q "VERL_REAL_NVFP4_CONTRACT profile=$RUN_PROFILE precision=$LONG_PRECISION_MODE .*reload=native r3=1 losses=0of3 bf16_layers=${LONG_BF16_LAYERS_AT_START}/${LONG_BF16_LAYERS_AT_END} token_mean=1 tis=$LONG_ROLLOUT_IS verifier_strict_minerva=$LONG_STRICT_MINERVA overlong=${LONG_OVERLONG_PENALTY}:${LONG_OVERLONG_BUFFER_LEN}:${LONG_OVERLONG_PENALTY_FACTOR} autotune=False " "$JOB_LOG"
 grep -q "'max_num_seqs': 128" "$JOB_LOG"
 grep -q '"cudagraph_mode": "FULL_DECODE_ONLY"' "$JOB_LOG"
 grep -q 'VERL_R3_MONOLITHIC_CAPTURE_PATCH PASS' "$JOB_LOG"
@@ -174,6 +175,8 @@ grep -A5 "'filter_groups': {'_target_'" "$JOB_LOG" | grep -q "'enable': True" ||
   rn4pt_die "dynamic sampling is not enabled in the resolved config"
 grep -A5 "'filter_groups': {'_target_'" "$JOB_LOG" | grep -q "'max_num_gen_batches': $LONG_MAX_GEN_BATCHES" || \
   rn4pt_die "dynamic sampling max_num_gen_batches is not $LONG_MAX_GEN_BATCHES in the resolved config"
+grep -q 'VERL_DAPO_DYNAMIC_SAMPLING PASS .*selected_groups=32 trajectories=512 expected_trajectories=512 actor_optimizer_steps=1' "$JOB_LOG" || \
+  rn4pt_die "dynamic sampling did not produce exactly one 32x16 Adam update"
 grep -q "'rollout_is': 'token'" "$JOB_LOG" || rn4pt_die "token-level TIS is not enabled in the resolved config"
 
 if [[ "$ARM" = w4a4 ]]; then
@@ -182,7 +185,7 @@ if [[ "$ARM" = w4a4 ]]; then
   # MoE layers carry NVFP4 MLP GEMMs. This is the independent confirmation that
   # the carve-out actually reached Megatron.
   grep -q "VERL_REAL_NVFP4_ATTESTATION PASS.*scope=$LONG_NVFP4_SCOPE .*te_version=$RN4PT_TE_VERSION.*mlp_fc1_nvfp4=$LONG_NVFP4_MLP_LAYERS mlp_fc2_nvfp4=$LONG_NVFP4_MLP_LAYERS mlp_fc1_bf16=$LONG_NVFP4_BF16_MLP_LAYERS mlp_fc2_bf16=$LONG_NVFP4_BF16_MLP_LAYERS" "$JOB_LOG"
-  grep -q 'VERL_REAL_NVFP4_ROLLOUT_ATTESTATION PASS dense_layers=0 moe_layers=48 expected=48' "$JOB_LOG"
+  grep -q "VERL_REAL_NVFP4_ROLLOUT_ATTESTATION PASS dense_layers=0 moe_layers=$LONG_NVFP4_MLP_LAYERS expected=$LONG_NVFP4_MLP_LAYERS bf16_moe_layers=\[0, 1, 44, 45, 46, 47\]" "$JOB_LOG"
   grep -q 'VERL_REAL_NVFP4_EXPORT PASS location=vllm_receive.*expert_weights=18432 expected=18432' "$JOB_LOG"
   grep -q 'VERL_REAL_NVFP4_NATIVE_REFIT PASS refit=0 changed=1' "$JOB_LOG"
   grep -q 'VERL_REAL_NVFP4_SYNC PASS transport=bf16 quantization=vllm_native_online reload=native' "$JOB_LOG"

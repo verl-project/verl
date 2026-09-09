@@ -172,3 +172,7 @@ real_nvfp4:
   fp4_param: false
   # Required MCore per-module recipe: attention BF16, MLP NVFP4.
   te_precision_config_file: null
+  # Shared trainer/rollout carve-out. vLLM consumes the same counts through
+  # rollout.real_nvfp4 and leaves those RoutedExperts containers in BF16.
+  num_layers_at_start_in_bf16: 0
+  num_layers_at_end_in_bf16: 0
