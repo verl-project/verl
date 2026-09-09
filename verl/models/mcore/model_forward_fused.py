@@ -39,6 +39,8 @@ from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 from verl.utils.megatron_utils import unwrap_model
 from verl.utils.model import CausalLMOutputForPPO
 
+from .model_forward import _build_full_loss_mask_nested
+from .response_only_lm_head import restore_response_only_outputs, select_response_only_hidden_states
 from .util import postprocess_thd_engine
 
 _FUSED_FORWARD_MODE_ATTR = "_verl_fused_forward_mode"
@@ -109,6 +111,35 @@ class FusedOutputProcessorContext:
     temperature: float
     impl_backend: str = "triton"
     topk_labels: Tensor | None = None
+    projection_mask: Tensor | None = None
+
+
+def _compute_fused_lm_head(hidden_states, weight, labels, temperature, impl_backend, projection_mask=None):
+    """Select gathered predictor rows, dispatch the fused head, and restore scalar outputs."""
+    if projection_mask is not None:
+        hidden_states = select_response_only_hidden_states(hidden_states, projection_mask)
+        labels = labels[projection_mask]
+        num_selected = labels.numel()
+        if not num_selected:
+            labels = labels.new_zeros(1)
+
+    log_probs, entropy = linear_cross_entropy(
+        hidden_states,
+        weight,
+        labels,
+        temperature,
+        "none",
+        parallel_state.get_tensor_model_parallel_group(),
+        impl_backend=impl_backend,
+    )
+    if projection_mask is not None:
+        outputs = restore_response_only_outputs(
+            {"log_probs": log_probs.reshape(1, -1), "entropy": entropy.reshape(1, -1)},
+            projection_mask,
+            num_selected,
+        )
+        log_probs, entropy = outputs["log_probs"], outputs["entropy"]
+    return log_probs, entropy
 
 
 def fused_output_processor(
@@ -154,14 +185,13 @@ def fused_output_processor(
         if kernel_topk_labels.shape[:-1] != kernel_policy_labels.shape:
             raise ValueError("topk_labels must have labels.shape as its leading dimensions")
         kernel_labels = torch.cat((kernel_policy_labels.unsqueeze(-1), kernel_topk_labels), dim=-1)
-    all_logprobs, entropy = linear_cross_entropy(
+    all_logprobs, entropy = _compute_fused_lm_head(
         hidden_states,
         weight,
         kernel_labels,
         temperature,
-        "none",
-        parallel_state.get_tensor_model_parallel_group(),
-        impl_backend=context.impl_backend,
+        context.impl_backend,
+        context.projection_mask,
     )
     if transpose_output:
         all_logprobs = all_logprobs.transpose(0, 1)
@@ -323,6 +353,8 @@ def fused_forward_model_engine(vision_model: bool = False):
         topk_labels: Tensor | None = None,
         auxiliary_logits_processor=None,
         distillation_only: bool = False,
+        loss_mask: Tensor | None = None,
+        response_attention_mask: Tensor | None = None,
     ):
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
@@ -374,6 +406,16 @@ def fused_forward_model_engine(vision_model: bool = False):
             local_cp_size=local_cp_size,
         )
         labels_rmpad = labels_rmpad.contiguous()
+        projection_mask = None
+        if loss_mask is not None and post_process:
+            if topk_labels is not None:
+                raise NotImplementedError("response_only_lm_head does not support top-k labels")
+            full_loss_mask = _build_full_loss_mask_nested(
+                loss_mask, input_ids.offsets().diff().tolist(), response_attention_mask
+            )
+            projection_mask = preprocess_thd_engine(
+                full_loss_mask, pre_process=True, need_roll=True, **thd_kwargs
+            )[0].to(torch.bool)
         topk_labels_rmpad = None
         if topk_labels is not None:
             topk_labels_rmpad, _, _ = preprocess_thd_engine(
@@ -404,6 +446,7 @@ def fused_forward_model_engine(vision_model: bool = False):
                     temperature=temperature,
                     impl_backend=impl_backend,
                     topk_labels=topk_labels_rmpad,
+                    projection_mask=projection_mask,
                 ),
             )
         else:
@@ -412,6 +455,7 @@ def fused_forward_model_engine(vision_model: bool = False):
                 temperature=temperature,
                 impl_backend=impl_backend,
                 topk_labels=topk_labels_rmpad,
+                projection_mask=projection_mask,
                 **forward_kwargs,
             )
 
@@ -464,6 +508,7 @@ def _fused_GPTModel_forward(
     impl_backend: str = "triton",
     topk_labels: Tensor | None = None,
     padding_mask: Tensor | None = None,
+    projection_mask: Tensor | None = None,
     **kwargs,
 ) -> CausalLMOutputForPPO:
     """
@@ -548,14 +593,13 @@ def _fused_GPTModel_forward(
         if kernel_topk_labels.shape[:-1] != kernel_policy_labels.shape:
             raise ValueError("topk_labels must have labels.shape as its leading dimensions")
         kernel_labels = torch.cat((kernel_policy_labels.unsqueeze(-1), kernel_topk_labels), dim=-1)
-    all_logprobs, entropy = linear_cross_entropy(
+    all_logprobs, entropy = _compute_fused_lm_head(
         hidden_states,
         output_weight,
         kernel_labels,
         temperature,
-        "none",
-        parallel_state.get_tensor_model_parallel_group(),
-        impl_backend=impl_backend,
+        impl_backend,
+        projection_mask,
     )
     if transpose_output:
         all_logprobs = all_logprobs.transpose(0, 1)
