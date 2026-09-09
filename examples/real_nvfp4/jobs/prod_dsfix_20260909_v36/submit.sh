@@ -11,13 +11,14 @@ export RN4PT_EXP_TAG_OVERRIDE=20260909_v36
 export RN4PT_JOB_LABEL_OVERRIDE=v36
 export RN4PT_SMOKE8_TARGET_STEP_OVERRIDE=2
 
-# Reuse v35's already-passed probe/build/preflight evidence. The shared
-# manifest independently verifies the image checksum, lock hash, and that all
-# commits since the image build changed only job harness files.
+# Reuse v35's already-passed probe/build/preflight and one-node smoke evidence.
+# The shared manifest independently verifies the image checksum, lock hash, and
+# that all commits since the image build changed only job harness files. v36
+# reruns the only changed boundary: the 8-node production-shape smoke.
 readonly SOURCE_STATE=/lustre/fsw/general_sa/shuazhang/python_space/verl_for_nvfp4_20251031/run_state/verl_real_nvfp4_prod_dsfix_20260909_v35
 readonly TARGET_STATE=/lustre/fsw/general_sa/shuazhang/python_space/verl_for_nvfp4_20251031/run_state/verl_real_nvfp4_prod_dsfix_20260909_v36
 mkdir -p "$TARGET_STATE"
-for artifact in probe.pass build.pass preflight.pass; do
+for artifact in probe.pass build.pass preflight.pass w4a4_chunk_0.pass bf16_chunk_0.pass; do
   [[ -s "$SOURCE_STATE/$artifact" ]] || {
     echo "REAL_NVFP4_PERTOKEN_REFUSED: v35 prerequisite is missing: $SOURCE_STATE/$artifact" >&2
     exit 2
