@@ -50,12 +50,18 @@ class SingleTurnAgentLoop(AgentLoopBase):
         # 2. build the initial prompt with Continuous Token (the only tokenization path).
         # Multimodal inputs require a VL builder + processor; fail loudly otherwise.
         self._assert_mm_supported(bool(multi_modal_data))
+        mm_inputs = {}
         prompt_ids = await self.ct_build_initial_tokens(
             messages,
             images=images,
             videos=videos,
             audios=audios,
+            mm_inputs_out=mm_inputs,
         )
+
+        # Capture the processor features so SGLang can be handed the video (see
+        # AgentLoopBase.build_sglang_video_payload); without this they are computed and dropped.
+        mm_processor_output = self.build_sglang_video_payload(videos, mm_inputs)
 
         # 3. generate sequences
         metrics = {}
@@ -68,6 +74,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
                 image_data=images,
                 audio_data=audios,
                 video_data=videos,
+                mm_processor_output=mm_processor_output,
                 mm_processor_kwargs=mm_processor_kwargs,
                 priority=priority,
             )

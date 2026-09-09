@@ -104,8 +104,10 @@ class ContinuousTokenBuilder:
         images: list[Any] | None = None,
         videos: list[Any] | None = None,
         audios: list[Any] | None = None,
+        mm_inputs_out: dict[str, Any] | None = None,
     ) -> list[int]:
         # Text-only builders ignore multimodal inputs; VL builders override this.
+        del mm_inputs_out
         return self._render_tokens(messages, add_generation_prompt=True, tools=tools)
 
     def tokenize_context_incremental_messages(
@@ -435,6 +437,7 @@ class ContinuousTokenBuilder:
         videos: list[Any] | None = None,
         audios: list[Any] | None = None,
         add_generation_prompt: bool = True,
+        mm_inputs_out: dict[str, Any] | None = None,
     ) -> list[int]:
         """Render messages with images through the processor.
 
@@ -1139,8 +1142,14 @@ class VLContinuousTokenMixin:
         audios: list[Any] | None = None,
         add_generation_prompt: bool = True,
         tools: list[dict[str, Any]] | None = None,
+        mm_inputs_out: dict[str, Any] | None = None,
     ) -> list[int]:
-        """Render messages through the processor (full render with all media)."""
+        """Render messages through the processor (full render with all media).
+
+        ``mm_inputs_out``, when given, receives the processor features other than ``input_ids``
+        (``pixel_values_videos``, ``video_grid_thw``, ...). SGLang needs them at request time
+        because its ``video_data`` cannot take raw frames; without this hook they are dropped.
+        """
         template_kwargs = dict(self.chat_template_kwargs)
         if tools:
             template_kwargs["tools"] = tools
@@ -1168,6 +1177,8 @@ class VLContinuousTokenMixin:
             audio=audios if audios else None,
             mm_processor_kwargs=proc_kwargs if proc_kwargs else None,
         )
+        if mm_inputs_out is not None:
+            mm_inputs_out.update({k: v for k, v in processor_output.items() if k != "input_ids"})
         return normalize_token_ids(processor_output["input_ids"])
 
     def _render_tokens(
@@ -1201,6 +1212,7 @@ class VLContinuousTokenMixin:
         images: list[Any] | None = None,
         videos: list[Any] | None = None,
         audios: list[Any] | None = None,
+        mm_inputs_out: dict[str, Any] | None = None,
     ) -> list[int]:
         return self.render_tokens_with_mm(
             messages,
@@ -1209,6 +1221,7 @@ class VLContinuousTokenMixin:
             audios=audios,
             add_generation_prompt=True,
             tools=tools,
+            mm_inputs_out=mm_inputs_out,
         )
 
 
@@ -1284,6 +1297,7 @@ class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxContinuousT
         audios: list[Any] | None = None,
         add_generation_prompt: bool = True,
         tools: list[dict[str, Any]] | None = None,
+        mm_inputs_out: dict[str, Any] | None = None,
     ) -> list[int]:
         # The processor template always appends the scaffold; strip it unless a
         # generation prompt was requested, restoring append-only rendering.
@@ -1294,6 +1308,7 @@ class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxContinuousT
             audios=audios,
             add_generation_prompt=add_generation_prompt,
             tools=tools,
+            mm_inputs_out=mm_inputs_out,
         )
         scaffold = self._vl_scaffold_ids
         if token_ids[-len(scaffold) :] == scaffold and not add_generation_prompt:
@@ -1428,7 +1443,10 @@ class DeepSeekVL2ContinuousTokenBuilder(DeepSeekContinuousTokenBuilder):
         images: list[Any] | None = None,
         videos: list[Any] | None = None,
         audios: list[Any] | None = None,
+        mm_inputs_out: dict[str, Any] | None = None,
     ) -> list[int]:
+        # DeepSeek-VL2 renders through its own processor and has no video path here.
+        del mm_inputs_out
         if images is None:
             images = self._extract_images_from_messages(messages)
         if not images:
