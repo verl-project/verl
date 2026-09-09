@@ -117,10 +117,11 @@ def _tq_supports_checkpoint() -> bool:
 
 
 def _count_tq_prompt_groups(partition_id: str = "train") -> int:
+    """Number of prompt groups currently registered in a TransferQueue partition."""
     data = tq.kv_list(partition_id)
     if not data:
         return 0
-    return sum(tag.get("is_prompt", False) for tag in data.get(partition_id, {}).values())
+    return sum(1 for tag in data.get(partition_id, {}).values() if tag.get("is_prompt", False))
 
 
 class PPOTrainer(ABC):
@@ -147,6 +148,7 @@ class PPOTrainer(ABC):
         )
         # track mini-batch index within a parameter_sync_step cycle for Decoupled PPO
         self.local_trigger_step = 0
+        self._restored_tq_prompt_count = 0
 
     def _build_replay_buffer(self) -> ReplayBuffer:
         """Instantiate the replay buffer (or a user-provided custom sampler).
@@ -607,27 +609,23 @@ class PPOTrainer(ABC):
 
     def _add_async_warmup_batches(self, num_warmup_batches: int) -> None:
         """Fill the async prefetch window without duplicating checkpointed prompt groups."""
-        if self.config.skip.rollout_tq.enable:
+        if self.config.skip.rollout_tq.enable or num_warmup_batches <= 0:
             return
 
-        train_batch_size = self.config.data.train_batch_size
-        target_prompts = num_warmup_batches * train_batch_size
-        restored_prompts = getattr(self, "_restored_tq_prompt_count", 0)
+        restored_prompts = self._restored_tq_prompt_count
+        target_prompts = num_warmup_batches * self.config.data.train_batch_size
         missing_prompts = max(0, target_prompts - restored_prompts)
         if missing_prompts == 0:
             logger.info(
-                "Skipping async warmup: restored %s prompt groups for a %s-prompt prefetch window",
-                restored_prompts,
-                target_prompts,
+                f"Skipping async warmup: {restored_prompts} restored prompt groups already fill the "
+                f"{target_prompts}-prompt prefetch window"
             )
             return
 
         self._add_prompts_to_generate(missing_prompts)
         logger.info(
-            "Added %s warmup prompts after restoring %s of %s target prompt groups",
-            missing_prompts,
-            restored_prompts,
-            target_prompts,
+            f"Added {missing_prompts} warmup prompts after restoring {restored_prompts} of "
+            f"{target_prompts} target prompt groups"
         )
 
     def on_train_end(self):
@@ -823,7 +821,6 @@ class PPOTrainer(ABC):
 
     def _load_checkpoint(self):
         self.global_steps = 0
-        self._restored_tq_prompt_count = 0
 
         # 1. find latest checkpoint folder
         if self.config.trainer.resume_mode == "disable":
@@ -880,7 +877,7 @@ class PPOTrainer(ABC):
                 logger.info(f"Loading TransferQueue state from {tq_ckpt_path}")
                 tq.load_checkpoint(tq_ckpt_path)
                 self._restored_tq_prompt_count = _count_tq_prompt_groups()
-                logger.info("Restored %s training prompt groups from TransferQueue", self._restored_tq_prompt_count)
+                logger.info(f"Restored {self._restored_tq_prompt_count} training prompt groups from TransferQueue")
 
     def _reissue_inflight_prompts(self, partition_id: str = "train") -> int:
         """Restart checkpointed pending/running prompt groups from their persisted prompt data."""
