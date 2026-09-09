@@ -1319,6 +1319,21 @@ class MegatronEngineWithLMHead(MegatronEngine):
         if use_fused_kernels:
             temperature_value = _resolve_fused_temperature(temperature)
 
+        teacher_topk_ids = teacher_topk_log_probs = None
+        log_prob_min_clamp = None
+        if use_fused_kernels and distillation_use_topk:
+            if "teacher_ids" not in batch.keys() or "teacher_logprobs" not in batch.keys():
+                raise ValueError(
+                    "Top-k distillation requires both teacher_ids and teacher_logprobs in the training batch"
+                )
+            teacher_topk_ids = batch["teacher_ids"]
+            teacher_topk_log_probs = batch["teacher_logprobs"]
+            loss_keywords = getattr(logits_processor_func, "keywords", {}) or {}
+            distillation_config = loss_keywords.get("distillation_config")
+            if distillation_config is None:
+                raise ValueError("Top-k distillation requires a loss function carrying distillation_config")
+            log_prob_min_clamp = distillation_config.distillation_loss.log_prob_min_clamp
+
         if use_fused_kernels:
             from verl.models.mcore import get_mcore_forward_fused_model_engine_fn
 
@@ -1335,6 +1350,10 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 local_cp_size=local_cp_size,
                 router_padding_mask=router_padding_mask,
                 pad_to_length_bucket=pad_to_length_bucket,
+                teacher_topk_ids=teacher_topk_ids,
+                teacher_topk_log_probs=teacher_topk_log_probs,
+                distillation_only=distillation_only,
+                log_prob_min_clamp=log_prob_min_clamp,
             )
         else:
             if not isinstance(temperature, torch.Tensor):

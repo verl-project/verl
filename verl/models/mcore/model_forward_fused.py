@@ -33,6 +33,7 @@ from torch import Tensor
 
 from verl.models.mcore.util import preprocess_packed_seqs, preprocess_thd_engine
 from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
+from verl.utils.kernel.linear_topk_log_probs import linear_topk_log_probs
 from verl.utils.megatron_utils import unwrap_model
 from verl.utils.model import CausalLMOutputForPPO
 
@@ -78,6 +79,38 @@ class FusedOutputProcessorContext:
     """Context passed through Megatron's native output-processor hook."""
 
     temperature: float
+    teacher_topk_ids: Optional[Tensor] = None
+    teacher_topk_log_probs: Optional[Tensor] = None
+    distillation_only: bool = False
+    calculate_entropy: bool = False
+    log_prob_min_clamp: Optional[float] = None
+
+
+def _compute_topk_distillation_outputs(
+    student_topk_log_probs: Tensor,
+    teacher_topk_log_probs: Tensor,
+    log_prob_min_clamp: Optional[float],
+) -> dict[str, Tensor]:
+    """Build the existing OPD output contract from selected student log-probs."""
+    student_topk_log_probs = student_topk_log_probs.float()
+    teacher_topk_log_probs = teacher_topk_log_probs.float()
+
+    # Keep the mass metrics consistent with the existing full-logits path: they
+    # describe the unclamped distributions.
+    student_mass = student_topk_log_probs.exp().sum(dim=-1)
+    teacher_mass = teacher_topk_log_probs.exp().sum(dim=-1)
+
+    if log_prob_min_clamp is not None:
+        student_topk_log_probs = student_topk_log_probs.clamp_min(log_prob_min_clamp)
+        teacher_topk_log_probs = teacher_topk_log_probs.clamp_min(log_prob_min_clamp)
+
+    teacher_topk_probs = teacher_topk_log_probs.exp()
+    distillation_losses = (teacher_topk_probs * (teacher_topk_log_probs - student_topk_log_probs)).sum(dim=-1)
+    return {
+        "distillation_losses": distillation_losses,
+        "student_mass": student_mass,
+        "teacher_mass": teacher_mass,
+    }
 
 
 def fused_output_processor(
@@ -107,14 +140,42 @@ def fused_output_processor(
     weight = output_weight if output_weight is not None else output_layer.weight
 
     temperature = context.temperature
-    logprobs, entropy = linear_cross_entropy(
-        hidden_states,
-        weight,
-        labels,
-        temperature,
-        "none",
-        parallel_state.get_tensor_model_parallel_group(),
-    )
+    tp_group = parallel_state.get_tensor_model_parallel_group()
+
+    if context.teacher_topk_ids is not None:
+        if context.teacher_topk_log_probs is None:
+            raise ValueError("teacher_topk_log_probs is required when teacher_topk_ids is provided")
+        if context.teacher_topk_ids.shape != context.teacher_topk_log_probs.shape:
+            raise ValueError(
+                "teacher_topk_ids and teacher_topk_log_probs must have the same shape, got "
+                f"{context.teacher_topk_ids.shape} and {context.teacher_topk_log_probs.shape}"
+            )
+        student_topk_log_probs = linear_topk_log_probs(
+            hidden_states,
+            weight,
+            context.teacher_topk_ids,
+            temperature,
+            tp_group,
+        )
+        for key, value in _compute_topk_distillation_outputs(
+            student_topk_log_probs,
+            context.teacher_topk_log_probs,
+            context.log_prob_min_clamp,
+        ).items():
+            setattr(output, key, value)
+
+    # Pure supervised top-k distillation does not consume sampled-token
+    # log-probs or entropy. Combined PPO/distillation modes still need them.
+    logprobs = entropy = None
+    if context.teacher_topk_ids is None or not context.distillation_only or context.calculate_entropy:
+        logprobs, entropy = linear_cross_entropy(
+            hidden_states,
+            weight,
+            labels,
+            temperature,
+            "none",
+            tp_group,
+        )
 
     if has_config_logger_enabled(config):
         payload = OrderedDict(
@@ -129,8 +190,10 @@ def fused_output_processor(
         )
         log_config_to_disk(config, payload, prefix="input_and_logits")
 
-    output.entropy = entropy
-    output.log_probs = logprobs
+    if entropy is not None:
+        output.entropy = entropy
+    if logprobs is not None:
+        output.log_probs = logprobs
     return output
 
 
@@ -269,6 +332,10 @@ def fused_forward_model_engine(vision_model: bool = False):
         local_cp_size: int | None = None,
         router_padding_mask: Tensor | None = None,
         pad_to_length_bucket: int | None = None,
+        teacher_topk_ids: Tensor | None = None,
+        teacher_topk_log_probs: Tensor | None = None,
+        distillation_only: bool = False,
+        log_prob_min_clamp: float | None = None,
     ):
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
@@ -323,6 +390,40 @@ def fused_forward_model_engine(vision_model: bool = False):
             local_cp_size=local_cp_size,
         )
         labels_rmpad = labels_rmpad.contiguous()
+
+        if (teacher_topk_ids is None) != (teacher_topk_log_probs is None):
+            raise ValueError("teacher_topk_ids and teacher_topk_log_probs must be provided together")
+        teacher_topk_ids_rmpad = teacher_topk_log_probs_rmpad = None
+        if teacher_topk_ids is not None:
+            teacher_topk_ids_rmpad, _, _ = preprocess_thd_engine(
+                teacher_topk_ids,
+                pre_process=True,
+                use_fp8_padding=use_fp8_padding,
+                min_local_rows=min_local_rows,
+                pad_to_length_bucket=pad_to_length_bucket,
+                cp_layout=cp_layout,
+                local_cp_size=local_cp_size,
+            )
+            teacher_topk_log_probs_rmpad, _, _ = preprocess_thd_engine(
+                teacher_topk_log_probs,
+                pre_process=True,
+                use_fp8_padding=use_fp8_padding,
+                min_local_rows=min_local_rows,
+                pad_to_length_bucket=pad_to_length_bucket,
+                cp_layout=cp_layout,
+                local_cp_size=local_cp_size,
+            )
+            teacher_topk_ids_rmpad = teacher_topk_ids_rmpad.contiguous()
+            teacher_topk_log_probs_rmpad = teacher_topk_log_probs_rmpad.contiguous()
+
+        output_processor_context = FusedOutputProcessorContext(
+            temperature=temperature,
+            teacher_topk_ids=teacher_topk_ids_rmpad,
+            teacher_topk_log_probs=teacher_topk_log_probs_rmpad,
+            distillation_only=distillation_only,
+            calculate_entropy=calculate_entropy,
+            log_prob_min_clamp=log_prob_min_clamp,
+        )
         forward_kwargs = dict(
             input_ids=input_ids_rmpad,
             attention_mask=attention_mask,
@@ -335,28 +436,52 @@ def fused_forward_model_engine(vision_model: bool = False):
             output_orig: CausalLMOutputForPPO = model(
                 **forward_kwargs,
                 output_processor=fused_output_processor,
-                output_processor_context=FusedOutputProcessorContext(temperature=temperature),
+                output_processor_context=output_processor_context,
             )
         else:
-            output_orig: CausalLMOutputForPPO = model(temperature=temperature, **forward_kwargs)
+            output_orig: CausalLMOutputForPPO = model(
+                temperature=temperature,
+                teacher_topk_ids=teacher_topk_ids_rmpad,
+                teacher_topk_log_probs=teacher_topk_log_probs_rmpad,
+                distillation_only=distillation_only,
+                calculate_entropy=calculate_entropy,
+                log_prob_min_clamp=log_prob_min_clamp,
+                **forward_kwargs,
+            )
 
         if not post_process:
             return output_orig
 
-        log_probs = output_orig.log_probs
-        if log_probs.dim() == 1:
-            log_probs = log_probs.unsqueeze(0)
-        log_probs = postprocess_thd_engine(
-            log_probs,
-            packed_seq_params,
-            input_ids,
-            input_ids.shape[0],
-            post_process=post_process,
-            cp_layout=cp_layout,
-            local_cp_size=local_cp_size,
-        )
+        output = {}
+        for key in ("distillation_losses", "student_mass", "teacher_mass"):
+            value = getattr(output_orig, key, None)
+            if value is None:
+                continue
+            if value.dim() == 1:
+                value = value.unsqueeze(0)
+            output[key] = postprocess_thd_engine(
+                value,
+                packed_seq_params,
+                input_ids,
+                input_ids.shape[0],
+                post_process=post_process,
+                cp_layout=cp_layout,
+                local_cp_size=local_cp_size,
+            )
 
-        output = {"log_probs": log_probs}
+        log_probs = getattr(output_orig, "log_probs", None)
+        if log_probs is not None:
+            if log_probs.dim() == 1:
+                log_probs = log_probs.unsqueeze(0)
+            output["log_probs"] = postprocess_thd_engine(
+                log_probs,
+                packed_seq_params,
+                input_ids,
+                input_ids.shape[0],
+                post_process=post_process,
+                cp_layout=cp_layout,
+                local_cp_size=local_cp_size,
+            )
 
         if calculate_entropy:
             entropy = output_orig.entropy
@@ -394,6 +519,11 @@ def _fused_GPTModel_forward(
     loss_mask: Optional[Tensor] = None,
     temperature: float = 1.0,
     padding_mask: Tensor | None = None,
+    teacher_topk_ids: Tensor | None = None,
+    teacher_topk_log_probs: Tensor | None = None,
+    distillation_only: bool = False,
+    calculate_entropy: bool = False,
+    log_prob_min_clamp: float | None = None,
     **kwargs,
 ) -> CausalLMOutputForPPO:
     """
@@ -447,17 +577,6 @@ def _fused_GPTModel_forward(
     if not model.post_process:
         return hidden_states
 
-    output = CausalLMOutputForPPO(
-        loss=None,
-        logits=None,
-        past_key_values=None,
-        hidden_states=hidden_states,
-        attentions=None,
-    )
-
-    if model.config.sequence_parallel:
-        hidden_states = gather_from_sequence_parallel_region(hidden_states)
-
     # Get the output weight - use embedding weight if output_layer is None or weight is shared
     if hasattr(model, "output_layer") and model.output_layer is not None and model.output_layer.weight is not None:
         output_weight = model.output_layer.weight
@@ -465,29 +584,22 @@ def _fused_GPTModel_forward(
         # When embeddings are tied, use the embedding weight
         output_weight = model.embedding.word_embeddings.weight
 
-    logprobs, entropy = linear_cross_entropy(
-        hidden_states,
-        output_weight,
-        labels,
-        temperature,
-        "none",
-        parallel_state.get_tensor_model_parallel_group(),
+    return fused_output_processor(
+        hidden_states=hidden_states,
+        output_layer=getattr(model, "output_layer", None),
+        output_weight=output_weight,
+        labels=labels,
+        context=FusedOutputProcessorContext(
+            temperature=temperature,
+            teacher_topk_ids=teacher_topk_ids,
+            teacher_topk_log_probs=teacher_topk_log_probs,
+            distillation_only=distillation_only,
+            calculate_entropy=calculate_entropy,
+            log_prob_min_clamp=log_prob_min_clamp,
+        ),
+        config=model.config,
+        input_ids=input_ids,
+        position_ids=position_ids,
+        attention_mask=attention_mask,
+        decoder_input=decoder_input,
     )
-
-    if has_config_logger_enabled(model.config):
-        payload = OrderedDict(
-            {
-                "input_ids": input_ids,
-                "position_ids": position_ids,
-                "attention_mask": attention_mask,
-                "decoder_input": decoder_input,
-                "logprobs": logprobs,
-                "entropy": entropy,
-            }
-        )
-        log_config_to_disk(model.config, payload, prefix="input_and_logits")
-
-    output.entropy = entropy
-    output.log_probs = logprobs
-
-    return output
