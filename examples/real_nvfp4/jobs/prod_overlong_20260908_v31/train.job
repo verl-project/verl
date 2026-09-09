@@ -73,6 +73,18 @@ case "$PHASE" in
 esac
 [[ "${SLURM_JOB_NUM_NODES:?}" = "$EXPECTED_NODES" ]] || rn4pt_die "phase $PHASE requires $EXPECTED_NODES nodes"
 
+case "$RUN_PROFILE" in
+  smoke)
+    readonly EXPECTED_DYNAMIC_GROUPS=2
+    readonly EXPECTED_DYNAMIC_TRAJECTORIES=4
+    ;;
+  formal)
+    readonly EXPECTED_DYNAMIC_GROUPS=32
+    readonly EXPECTED_DYNAMIC_TRAJECTORIES=512
+    ;;
+  *) rn4pt_die "unknown run profile: $RUN_PROFILE" ;;
+esac
+
 if [[ "$PHASE" = smoke8 ]]; then
   readonly CHUNK_PASS=$RN4PT_STATE/${LONG_JOB_TAG}_smoke8.pass
 else
@@ -175,8 +187,8 @@ grep -A5 "'filter_groups': {'_target_'" "$JOB_LOG" | grep -q "'enable': True" ||
   rn4pt_die "dynamic sampling is not enabled in the resolved config"
 grep -A5 "'filter_groups': {'_target_'" "$JOB_LOG" | grep -q "'max_num_gen_batches': $LONG_MAX_GEN_BATCHES" || \
   rn4pt_die "dynamic sampling max_num_gen_batches is not $LONG_MAX_GEN_BATCHES in the resolved config"
-grep -q 'VERL_DAPO_DYNAMIC_SAMPLING PASS .*selected_groups=32 trajectories=512 expected_trajectories=512 actor_optimizer_steps=1' "$JOB_LOG" || \
-  rn4pt_die "dynamic sampling did not produce exactly one 32x16 Adam update"
+grep -q "VERL_DAPO_DYNAMIC_SAMPLING PASS .*selected_groups=$EXPECTED_DYNAMIC_GROUPS trajectories=$EXPECTED_DYNAMIC_TRAJECTORIES expected_trajectories=$EXPECTED_DYNAMIC_TRAJECTORIES actor_optimizer_steps=1" "$JOB_LOG" || \
+  rn4pt_die "dynamic sampling did not produce exactly one ${EXPECTED_DYNAMIC_GROUPS}-group/${EXPECTED_DYNAMIC_TRAJECTORIES}-trajectory Adam update"
 grep -q "'rollout_is': 'token'" "$JOB_LOG" || rn4pt_die "token-level TIS is not enabled in the resolved config"
 
 if [[ "$ARM" = w4a4 ]]; then
