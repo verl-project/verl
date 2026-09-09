@@ -152,7 +152,12 @@ def test_native_vllm_reload_contract_is_exact():
         require_vllm_native_reload_contract(_DriftedRunner())
 
 
-def test_online_nvfp4_ignore_is_a_model_config_argument():
+def test_online_nvfp4_ignore_is_a_model_config_argument(monkeypatch):
+    # _apply_quantization intentionally exports these for vLLM worker
+    # subprocesses. Track their original state so this unit test cannot leak
+    # its 2/4 carve-out into tests that use a smaller fake model.
+    monkeypatch.setenv("VERL_REAL_NVFP4_BF16_LAYERS_AT_START", "0")
+    monkeypatch.setenv("VERL_REAL_NVFP4_BF16_LAYERS_AT_END", "0")
     server = object.__new__(vLLMHttpServer)
     server.config = SimpleNamespace(
         real_nvfp4={

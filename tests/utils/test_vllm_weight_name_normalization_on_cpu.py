@@ -759,6 +759,9 @@ def test_real_nvfp4_update_uses_native_reload_weights(monkeypatch):
     import verl.utils.real_nvfp4 as real_nvfp4
     import verl.workers.rollout.vllm_rollout.bucketed_weight_transfer as bwt
 
+    monkeypatch.setenv("VERL_REAL_NVFP4_BF16_LAYERS_AT_START", "0")
+    monkeypatch.setenv("VERL_REAL_NVFP4_BF16_LAYERS_AT_END", "0")
+
     receiver = _FakeNativeReloadReceiver(
         [("model.layers.0.mlp.experts.0.down_proj.weight", torch.ones(1, dtype=torch.bfloat16))]
     )
