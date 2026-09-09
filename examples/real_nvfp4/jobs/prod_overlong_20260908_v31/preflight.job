@@ -194,7 +194,7 @@ for pattern in \
   'verifier_strict_minerva=1' \
   'loss_agg_mode: token-mean' \
   'rollout_is: token' \
-  'first_last_layers_bf16: false' \
+  'first_last_layers_bf16: true' \
   'num_layers_at_start_in_bf16: 0' \
   'num_layers_at_end_in_bf16: 0'; do
   require_formal_config "\$pattern"
