@@ -20,6 +20,7 @@ Utility classes for manage and request LLM servers:
 import asyncio
 import logging
 import os
+import urllib.request
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -38,6 +39,36 @@ from verl.workers.rollout.utils import update_prometheus_config
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+_SPEC_COUNTER_NAMES = {
+    "num_verify_steps": "vllm:spec_decode_num_drafts",
+    "num_draft_tokens": "vllm:spec_decode_num_draft_tokens",
+    "num_accepted_tokens": "vllm:spec_decode_num_accepted_tokens",
+}
+
+
+def _parse_spec_decode_counters(text: str) -> dict[str, float] | None:
+    """Sum vLLM speculative-decoding counters across metric label sets."""
+    totals = {key: 0.0 for key in _SPEC_COUNTER_NAMES}
+    found = set()
+    metric_to_key = {metric: key for key, metric in _SPEC_COUNTER_NAMES.items()}
+    metric_to_key.update({f"{metric}_total": key for key, metric in _SPEC_COUNTER_NAMES.items()})
+
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        metric_with_labels, _, value_text = line.partition(" ")
+        metric_name = metric_with_labels.split("{", 1)[0]
+        key = metric_to_key.get(metric_name)
+        if key is None:
+            continue
+        try:
+            totals[key] += float(value_text.split()[0])
+        except (ValueError, IndexError):
+            continue
+        found.add(key)
+
+    return totals if found == set(totals) else None
 
 
 class LLMServerClient:
@@ -377,6 +408,7 @@ class LLMServerManager:
         self.rollout_resource_pool = rollout_resource_pool
         self.start_rank = start_rank
         self._load_balancer_cls = load_balancer_cls
+        self._warned_spec_metrics_scrape = False
 
         assert worker_group is not None or self.rollout_config.nnodes > 0, "nnodes must be > 0 in standalone mode"
 
@@ -513,6 +545,34 @@ class LLMServerManager:
     def get_replicas(self) -> list[RolloutReplica]:
         """Get the LLM server replicas."""
         return self.rollout_replicas
+
+    def snapshot_spec_decode_counters(self) -> dict[str, float] | None:
+        """Read and aggregate vLLM's process-level speculative-decoding counters."""
+        if self.rollout_config.name != "vllm":
+            return None
+
+        aggregate = {key: 0.0 for key in _SPEC_COUNTER_NAMES}
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            for address in self.server_addresses:
+                with opener.open(f"http://{address}/metrics", timeout=2) as response:
+                    counters = _parse_spec_decode_counters(response.read().decode("utf-8"))
+                if counters is None:
+                    if not self._warned_spec_metrics_scrape:
+                        logger.warning(
+                            "vLLM /metrics at %s does not expose all speculative-decoding counters.",
+                            address,
+                        )
+                        self._warned_spec_metrics_scrape = True
+                    return None
+                for key, value in counters.items():
+                    aggregate[key] += value
+        except (OSError, UnicodeError) as exc:
+            if not self._warned_spec_metrics_scrape:
+                logger.warning("Unable to scrape vLLM speculative-decoding counters: %s", exc)
+                self._warned_spec_metrics_scrape = True
+            return None
+        return aggregate
 
     @auto_await
     async def start_profile(self, **kwargs):

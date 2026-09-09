@@ -84,6 +84,65 @@ logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 
+def _supports_per_request_spec_decode_metrics() -> bool:
+    """Detect the upstream vLLM capability rather than relying on its version."""
+    try:
+        from vllm.config import ObservabilityConfig
+
+        annotations = getattr(ObservabilityConfig, "__annotations__", {})
+        model_fields = getattr(ObservabilityConfig, "model_fields", {})
+        if "per_request_spec_decode_metrics" in annotations or "per_request_spec_decode_metrics" in model_fields:
+            return True
+    except ImportError:
+        pass
+
+    fields = getattr(AsyncEngineArgs, "__dataclass_fields__", {})
+    return "per_request_spec_decode_metrics" in fields or (
+        "per_request_spec_decode_metrics" in inspect.signature(AsyncEngineArgs).parameters
+    )
+
+
+def _extract_spec_decode_stats(final_res: RequestOutput) -> tuple[dict[str, int] | None, str | None]:
+    """Normalize upstream and vendor vLLM request-level spec-decode stats."""
+    outputs = getattr(final_res, "outputs", None)
+    completion = outputs[0] if outputs else None
+    stats = getattr(completion, "spec_decode_metrics", None)
+    if stats is not None:
+        values = stats.to_dict() if hasattr(stats, "to_dict") else stats
+        if isinstance(values, dict):
+            draft_tokens = values.get("num_draft_tokens")
+            accepted_tokens = values.get("num_accepted_draft_tokens", values.get("num_accepted_tokens"))
+            verify_steps = values.get("num_spec_steps", values.get("num_verify_steps"))
+        else:
+            draft_tokens = getattr(values, "num_draft_tokens", None)
+            accepted_tokens = getattr(values, "num_accepted_draft_tokens", None)
+            verify_steps = getattr(values, "num_spec_steps", None)
+            histogram = getattr(values, "histogram", None)
+            if histogram is not None:
+                if accepted_tokens is None:
+                    accepted_tokens = sum(i * count for i, count in enumerate(histogram))
+                if verify_steps is None:
+                    verify_steps = sum(histogram)
+
+        if None not in (draft_tokens, accepted_tokens, verify_steps):
+            return {
+                "num_draft_tokens": int(draft_tokens),
+                "num_accepted_tokens": int(accepted_tokens),
+                "num_verify_steps": int(verify_steps),
+            }, "request_output"
+
+    metrics = getattr(final_res, "metrics", None)
+    stats = getattr(metrics, "request_spec_decode_stats", None)
+    if stats is not None:
+        return {
+            "num_draft_tokens": int(stats.num_draft_tokens),
+            "num_accepted_tokens": int(stats.num_accepted_tokens),
+            "num_verify_steps": int(stats.num_verify_steps),
+        }, "legacy_request_output"
+
+    return None, None
+
+
 class vLLMHttpServer:
     """vLLM http server in single node, this is equivalent to launch server with command line:
     ```
@@ -320,6 +379,8 @@ class vLLMHttpServer:
             compilation_config["cudagraph_capture_sizes"] = self.config.cudagraph_capture_sizes
 
         compilation_config = json.dumps(compilation_config)
+        mtp_rollout_enabled = self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout
+        supports_request_spec_stats = _supports_per_request_spec_decode_metrics()
         args = {
             "dtype": self.config.dtype,
             "load_format": self.config.load_format,
@@ -336,7 +397,7 @@ class vLLMHttpServer:
             "logprobs_mode": self.config.logprobs_mode,
             "enforce_eager": self.config.enforce_eager,
             "gpu_memory_utilization": self.config.gpu_memory_utilization,
-            "disable_log_stats": self.config.disable_log_stats,
+            "disable_log_stats": self.config.disable_log_stats and not mtp_rollout_enabled,
             "tensor_parallel_size": self.config.tensor_model_parallel_size,
             "seed": self.replica_rank + self.config.seed,
             "override_generation_config": json.dumps(override_generation_config),
@@ -346,6 +407,10 @@ class vLLMHttpServer:
             "compilation_config": compilation_config,
             **engine_kwargs,
         }
+        if mtp_rollout_enabled and supports_request_spec_stats:
+            args.setdefault("per_request_spec_decode_metrics", "summary")
+        if mtp_rollout_enabled:
+            args["disable_log_stats"] = False
 
         # update profiler args, only on the replica that will actually be profiled: configuring
         # the engine profiler everywhere makes every replica log that profiling is enabled while
@@ -737,7 +802,7 @@ class vLLMHttpServer:
 
         # Re-key backend spec-decoding stats to the rollout-common names.
         if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
-            spec_decode_stats = getattr(final_res.metrics, "request_spec_decode_stats", None)
+            spec_decode_stats, spec_decode_source = _extract_spec_decode_stats(final_res)
             if spec_decode_stats is None:
                 if not self._warned_missing_spec_decode_stats:
                     logger.warning(
@@ -746,9 +811,10 @@ class vLLMHttpServer:
                     )
                     self._warned_missing_spec_decode_stats = True
             else:
-                extra_fields["spec_num_draft_tokens"] = spec_decode_stats.num_draft_tokens
-                extra_fields["spec_num_accepted_tokens"] = spec_decode_stats.num_accepted_tokens
-                extra_fields["spec_num_verify_steps"] = spec_decode_stats.num_verify_steps
+                extra_fields["spec_num_draft_tokens"] = spec_decode_stats["num_draft_tokens"]
+                extra_fields["spec_num_accepted_tokens"] = spec_decode_stats["num_accepted_tokens"]
+                extra_fields["spec_num_verify_steps"] = spec_decode_stats["num_verify_steps"]
+                extra_fields["spec_decode_metrics_source"] = spec_decode_source
         return TokenOutput(
             token_ids=token_ids,
             log_probs=log_probs,
