@@ -399,6 +399,15 @@ class ServerAdapter(BaseRollout):
             else:
                 weights = weights
 
+            # MXFP8: route the update through verl's refit loader so SGLang re-derives the
+            # FlashInfer scale layouts (weight_scale_inv_swizzled) after the canonical
+            # scales are overwritten; a no-op on the default Triton backend.
+            load_format = None
+            if quantization == "mxfp8":
+                from verl.workers.rollout.sglang_rollout.mxfp8_refit_loader import LOADER_FQN as MXFP8_LOADER_FQN
+
+                load_format = MXFP8_LOADER_FQN
+
             fusion_groups = (
                 DEEPSEEK_V4_FUSION_GROUPS
                 if getattr(self.model_config.hf_config, "model_type", None) == "deepseek_v4"
@@ -412,6 +421,7 @@ class ServerAdapter(BaseRollout):
                     params_batch=[(_strip_lora_base_layer(name), _to_ipc_device(t)) for name, t in params_batch],
                     device_mesh_key="infer_tp",
                     device_mesh=self.device_mesh,
+                    load_format=load_format,
                 )
 
         if self._engine is not None and self._is_server_tp_leader():

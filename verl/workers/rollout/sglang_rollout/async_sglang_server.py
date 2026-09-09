@@ -317,6 +317,13 @@ class SGLangHttpServer:
 
                 check_sglang_mxfp8_support()
                 quant_config_kwargs = build_sglang_mxfp8_quant_config(self.model_config.hf_config)
+                # Weight syncs go through a custom loader that re-derives the FlashInfer
+                # MXFP8 scale layouts after each update (see mxfp8_refit_loader.py); it
+                # must be registered here so load_format resolves inside the TP workers.
+                from verl.workers.rollout.sglang_rollout.mxfp8_refit_loader import LOADER_FQN as MXFP8_LOADER_FQN
+
+                if MXFP8_LOADER_FQN not in custom_weight_loader:
+                    custom_weight_loader.append(MXFP8_LOADER_FQN)
             else:
                 raise ValueError(f"Currently only support fp8/mxfp8 quantization, got: {quantization}")
         infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
