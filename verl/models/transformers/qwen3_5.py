@@ -211,7 +211,7 @@ def qwen3_5_gated_delta_net_forward(
     if cu_seqlens is not None:
         if batch_size != 1:
             raise ValueError("Packed Qwen3.5 linear attention expects batch size 1.")
-        total_seq_len = int(cu_seqlens[-1].item())
+        total_seq_len = int((cu_seqlens_cpu if cu_seqlens_cpu is not None else cu_seqlens)[-1].item())
         ulysses_sp_size = get_ulysses_sequence_parallel_world_size()
         if total_seq_len != seq_len:
             if (
@@ -445,6 +445,21 @@ def fast_pos_embed_interpolate(self, grid_thw):
     return patch_pos_embeds
 
 
+def _dummy_visual_forward_required(model) -> bool:
+    """Whether a text-only micro-batch still has to run the (unused) vision tower.
+
+    The dummy 16-patch forward exists so that wrappers which insist on every parameter
+    taking part in forward/backward do not error on the untouched vision weights. FSDP
+    (both FSDP1 and fully_shard) tolerates units that never run forward: their flat
+    parameters keep ``grad=None`` and the optimizer skips them, which also means AdamW
+    weight decay is no longer applied to weights that never receive a gradient. Skipping
+    the dummy forward removes 27 vision-block all-gathers, reduce-scatters, flash-attention
+    calls and ~140 host syncs from every micro-batch. Set
+    ``VERL_QWEN3_5_FORCE_DUMMY_VISUAL=1`` to keep the old behaviour.
+    """
+    return os.environ.get("VERL_QWEN3_5_FORCE_DUMMY_VISUAL", "0") == "1"
+
+
 def _get_input_embeds(
     model: "Qwen3_5CausalLMOutputWithPast",
     input_ids: torch.LongTensor,
@@ -491,7 +506,7 @@ def _get_input_embeds(
         video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
         inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
 
-    if pixel_values is None and pixel_values_videos is None:
+    if pixel_values is None and pixel_values_videos is None and _dummy_visual_forward_required(model):
         config = model.config.vision_config
         patch_dim = config.in_channels * config.temporal_patch_size * config.patch_size**2
         pixel_values = torch.zeros((16, patch_dim), dtype=inputs_embeds.dtype, device=inputs_embeds.device)
