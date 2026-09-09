@@ -1,3 +1,17 @@
+# Copyright 2024 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import asyncio
 from types import SimpleNamespace
 
@@ -67,9 +81,7 @@ def test_loop_workers_stay_on_configured_nodes(multinode_ray_cluster, monkeypatc
     asyncio.run(agent_manager._init_agent_loop_workers())
 
     reward_manager = object.__new__(RewardLoopManager)
-    reward_manager.config = SimpleNamespace(
-        reward=SimpleNamespace(num_workers=3, num_cpus_per_worker=0.25)
-    )
+    reward_manager.config = SimpleNamespace(reward=SimpleNamespace(num_workers=3, num_cpus_per_worker=0.25))
     reward_manager.reward_loop_workers_class = _NodeProbe
     reward_manager.reward_router_address = None
     reward_manager._init_reward_loop_workers()
