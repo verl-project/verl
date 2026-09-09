@@ -925,6 +925,7 @@ distillation:
     distillation_loss_coef: 1.0
     loss_max_clamp: null
     log_prob_min_clamp: null
+    tail_mass_eps: 1.0e-06
     use_policy_gradient: false
     policy_loss_mode: vanilla
     clip_ratio: 0.2
