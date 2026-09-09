@@ -283,6 +283,49 @@ def compute_advantage(
 
 
 @deprecated("Legacy trainer is deprecated, and wil be removed in v0.9.0. Please use `trainer.use_v1=True` instead.")
+def _probe_step(batch, metrics: dict, step: int) -> None:
+    """Correctness checkpoints for the optimization campaign (contract.md).
+
+    Records a handful of per-step scalars with `probe` when PROBE=1 and is a no-op
+    otherwise. Driver side only; the batch is already on the CPU here, so nothing
+    below adds a device sync to the timed path.
+    """
+    try:
+        import probe
+    except ImportError:
+        return
+    if not probe.enabled():
+        return
+    p = f"step{step}/"
+    tb = batch.batch
+    for name in ("responses", "input_ids"):
+        if name in tb.keys():
+            for i, d in enumerate(tb[name].shape):
+                probe.record(f"{p}{name}.shape{i}", int(d))
+    mask = tb["response_mask"].float() if "response_mask" in tb.keys() else None
+    for name in ("old_log_probs", "ref_log_prob"):
+        if name in tb.keys() and mask is not None:
+            t = tb[name].float()
+            probe.record(f"{p}{name}.masked_mean", float((t * mask).sum() / mask.sum()))
+    if "advantages" in tb.keys():
+        a = tb["advantages"].float()
+        probe.record(f"{p}advantages.absmean", float(a.abs().mean()))
+        probe.record(f"{p}advantages.std", float(a.std()))
+    for key in (
+        "actor/pg_loss",
+        "actor/kl_loss",
+        "actor/entropy",
+        "actor/pg_clipfrac",
+        "actor/grad_norm",
+        "critic/score/mean",
+        "response_length/mean",
+        "global_seqlen/mean",
+    ):
+        if key in metrics:
+            probe.record(f"{p}{key}", float(metrics[key]))
+    probe.flush()
+
+
 class RayPPOTrainer:
     """Distributed PPO trainer using Ray for scalable reinforcement learning.
 
@@ -1797,6 +1840,8 @@ class RayPPOTrainer:
                         batch.non_tensor_batch.get("spec_num_verify_steps", None),
                     )
                 )
+
+                _probe_step(batch, metrics, self.global_steps)
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
