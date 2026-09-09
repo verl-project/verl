@@ -32,12 +32,15 @@ case "$PHASE" in
     # The 1-node smoke passes on shapes production never runs. v29c cleared it
     # and then produced NaN rollout log-probs at step 2 on 8 nodes, one step
     # after the first live refit. This phase is the same formal profile as the
-    # chain -- 8 nodes, max_num_seqs=128, dynamic sampling -- run just long
-    # enough to cover several refits before a chain is allowed to start.
+    # chain -- 8 nodes, max_num_seqs=128, dynamic sampling. Bundles may reduce
+    # the historical six-update default to two updates: that still covers the
+    # first live refit and the following update where the v29c failure appeared.
     readonly EXPECTED_NODES=8
     readonly RUN_PROFILE=formal
     readonly EXP_NAME=${LONG_SMOKE_EXP}_8n_j${SLURM_JOB_ID:?}
-    readonly TARGET_STEP=6
+    readonly TARGET_STEP=${RN4PT_SMOKE8_TARGET_STEP_OVERRIDE:-6}
+    [[ "$TARGET_STEP" =~ ^[0-9]+$ ]] && (( TARGET_STEP >= 2 )) || \
+      rn4pt_die "smoke8 target must be an integer >= 2"
     readonly RESUME_MODE=disable
     readonly CKPT_DIR=$RN4PT_CHECKPOINTS/$EXP_NAME
     readonly CHUNK_INDEX=0

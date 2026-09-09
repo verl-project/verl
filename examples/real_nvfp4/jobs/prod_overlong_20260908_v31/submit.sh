@@ -65,8 +65,8 @@ if [[ "$ACTION" = smoke ]]; then
   exit 0
 fi
 
-# Production-shape validation: same 8-node formal profile as a chain chunk, six
-# steps, so several live refits are exercised before any chain is released.
+# Production-shape validation: same 8-node formal profile as a chain chunk.
+# The manifest selects enough updates to exercise a live refit before release.
 if [[ "$ACTION" = smoke8 ]]; then
   [[ -s "$RN4PT_STATE/${ARM}_chunk_0.pass" ]] || \
     rn4pt_die "run '$0 $ARM smoke' first: $RN4PT_STATE/${ARM}_chunk_0.pass is missing"
