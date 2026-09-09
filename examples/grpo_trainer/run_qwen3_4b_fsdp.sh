@@ -85,7 +85,7 @@ ACTOR=(
     actor_rollout_ref.actor.entropy_coeff=${ENTROPY_COEFF}
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=3000
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384
     actor_rollout_ref.actor.use_dynamic_bsz=True
 )
 
@@ -97,7 +97,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.enforce_eager=False
     actor_rollout_ref.rollout.free_cache_engine=True
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
-    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=4096
+    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=16384
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096
     actor_rollout_ref.rollout.n=${ROLLOUT_N}
 )
@@ -106,7 +106,7 @@ REF=(
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU}
     actor_rollout_ref.ref.fsdp_config.param_offload=True
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True
-    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=8192
+    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=16384
 )
 
 TRAINER=(
