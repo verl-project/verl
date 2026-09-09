@@ -29,6 +29,7 @@ from verl.utils.real_nvfp4.vllm_runtime import (
     require_vllm_native_reload_contract,
     vllm_native_nvfp4_fingerprint,
 )
+from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 
 
 def _expert(projection: str, value: float):
@@ -149,6 +150,53 @@ def test_native_vllm_reload_contract_is_exact():
 
     with pytest.raises(RuntimeError, match="API drifted"):
         require_vllm_native_reload_contract(_DriftedRunner())
+
+
+def test_online_nvfp4_ignore_is_a_model_config_argument():
+    server = object.__new__(vLLMHttpServer)
+    server.config = SimpleNamespace(
+        real_nvfp4={
+            "enable": True,
+            "num_layers_at_start_in_bf16": 2,
+            "num_layers_at_end_in_bf16": 4,
+        },
+        qat={},
+        quantization=None,
+        quantization_config_file=None,
+        dtype="bfloat16",
+        load_format="dummy",
+        expert_parallel_size=1,
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=1,
+        enforce_eager=False,
+        enable_rollout_routing_replay=True,
+        mtp=None,
+        checkpoint_engine=SimpleNamespace(backend="naive"),
+    )
+    server.model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(
+            num_hidden_layers=48,
+            num_experts=128,
+            decoder_sparse_step=1,
+            mlp_only_layers=[],
+        )
+    )
+    engine_kwargs = {}
+
+    quantization, hf_overrides = server._apply_quantization(engine_kwargs)
+
+    assert quantization == "nvfp4_per_token"
+    assert hf_overrides == {}
+    assert engine_kwargs["quantization_config"] == {
+        "ignore": [
+            "model.layers.0.mlp.experts",
+            "model.layers.1.mlp.experts",
+            "model.layers.44.mlp.experts",
+            "model.layers.45.mlp.experts",
+            "model.layers.46.mlp.experts",
+            "model.layers.47.mlp.experts",
+        ]
+    }
 
 
 class _FakeRouter:

@@ -1217,7 +1217,11 @@ class vLLMHttpServer:
             # vLLM 0.26 merges this with the nvfp4_per_token shorthand. Its
             # online quantizer's field is singular `ignore`, and these are the
             # exact RoutedExperts prefixes constructed by Qwen3Moe.
-            hf_overrides["quantization_config"] = {"ignore": ignored_layers}
+            # This is a ModelConfig/AsyncEngineArgs field, not an HF config
+            # field. Injecting it through hf_overrides makes ModelConfig parse
+            # an incomplete checkpoint quantization config (no quant_method)
+            # before the online shorthand can be resolved.
+            engine_kwargs["quantization_config"] = {"ignore": ignored_layers}
             engine_kwargs["moe_backend"] = REAL_NVFP4_MOE_BACKEND
             logger.warning(
                 "VERL_REAL_NVFP4_ROLLOUT_ATTESTATION configured "
