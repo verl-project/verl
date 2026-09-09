@@ -276,7 +276,7 @@ Distillation divergence to use. Default: `"k3"`.
 
 Two registered families:
 
-- **Top-k** (`forward_kl_topk`): forward KL using the teacher's top-k logits.
+- **Top-k** (`forward_kl_topk`, `reverse_kl_topk`): distributional KL losses on a truncated support. `forward_kl_topk` uses the teacher's top-k support. `reverse_kl_topk` uses the rollout student's top-k support and vLLM fixed-token prefill scoring to request teacher logprobs only for that support.
 - **Single-sample KL estimators** (`kl`, `k1`, `abs`, `mse`, `k2`,
   `low_var_kl`, `k3`): per-token Monte Carlo estimators of reverse KL
   computed from the student's `log_probs` and the teacher's single
@@ -286,9 +286,10 @@ Two registered families:
 
 `k` for top-k distillation losses. Default: `32`.
 
-Only used when `loss_mode` requires top-$k$ (e.g. `forward_kl_topk`). Drives both
+Only used when `loss_mode` requires top-$k$. For `forward_kl_topk`, it drives both
 the teacher's `prompt_logprobs` request size and (for vLLM) the engine's
-`max_logprobs` cap.
+`max_logprobs` cap. For `reverse_kl_topk`, it is the rollout student support
+size. The teacher request uses the request-wise union of those token IDs.
 
 ### `distillation.distillation_loss.use_task_rewards` (bool)
 
@@ -665,8 +666,9 @@ rollouts on other samples.
    sampling params with `max_tokens=1` plus `prompt_logprobs=topk` (or `0`),
    so the teacher computes logprobs for the (prompt + response) sequence rather than
    generating new tokens. `topk` is set to `distillation.distillation_loss.topk`
-   when the loss mode requires top-$k$ (e.g. `forward_kl_topk`); otherwise `0`
-   (single-sample logprob only).
+   for `forward_kl_topk` and `0` otherwise (single-sample logprob only).
+   `reverse_kl_topk` instead sends the response-wise student top-k union through
+   vLLM's `prompt_logprob_token_ids`, starting at the last prompt causal row.
 
    **Temperature is always forced to `1.0`** regardless of the configured value.
    `prompt_logprobs` is computed via a forward pass over the existing (prompt + response)
@@ -677,15 +679,19 @@ rollouts on other samples.
    (e.g. 0.7). The manager ignores the configured value and always uses `temperature=1.0`,
    logging a warning if the configured value is not 1.0.
 
+   The sparse `reverse_kl_topk` path currently requires vLLM PR #54335,
+   single-turn text rollouts, and FSDP/VeOmni. SGLang, multi-turn, multimodal,
+   Megatron, and older vLLM versions are not implemented and fail explicitly.
+
 8. **Server-side load balancing.** The manager calls `client.generate(...)`,
    which acquires a backing server through the shared `GlobalRequestLoadBalancer`
    actor.
 
 9. **Backend execution.** With the vLLM backend the selected server is a
    `vLLMHttpServer` actor; its `generate` method runs the forward pass and
-   returns a `TokenOutput` containing `prompt_ids` and `prompt_logprobs` for
-   the full (prompt + response) sequence. The SGLang backend has an analogous
-   server class.
+   returns a `TokenOutput` containing either the regular prompt logprobs or the
+   compact fixed-token suffix matrix in `prompt_token_id_logprobs`. The SGLang
+   backend supports the regular path, but not fixed-token `reverse_kl_topk` yet.
 
 10. **Return path.** `compute_teacher_logprobs_single` packs the response into
     two tensors `teacher_ids` and `teacher_logprobs`, each of shape `(S, 1 or K)`
@@ -709,12 +715,12 @@ Using the `DataProto` produced by the Agent Loop (rollouts + teacher logprobs in
    (`distillation_use_topk=True`), invokes `distillation_ppo_loss` **as a
    logits processor** while the full logits tensor is still in memory; this is
    the `student_logits is not None` branch of `distillation_ppo_loss`. The
-   logits-processor branch dispatches to `compute_forward_kl_topk`, which has a
-   separate implementation per training engine (FSDP and Megatron). Per-token
-   `distillation_losses`, `student_mass`, `teacher_mass`, `overlap_count`, and
-   `overlap_token_advantage` tensors are written back into `model_output` so the
-   full logits can be freed before the final loss step. The overlap tensors are
-   used only for logging.
+   logits-processor branch dispatches to the selected top-$k$ loss, which has a
+   separate implementation per training engine. `reverse_kl_topk` is currently
+   implemented for FSDP/VeOmni only, using the student's top-$k$ support. Per-token
+   `distillation_losses`, `student_mass`, `teacher_mass`, and optional overlap
+   tensors are written back into `model_output` so the full logits can be freed
+   before the final loss step. The overlap tensors are used only for logging.
 
 3. **Final loss.** After the forward, the engine calls the loss function with
    `model_output` (full logits already freed); this is the
@@ -746,7 +752,7 @@ The returned scalar loss is what `engine.train_batch` backpropagates.
 - `verl/experimental/teacher_loop/teacher_model.py` — `MultiTeacherModelManager` and `TeacherModelManager`; spin up teacher inference replicas on the dedicated teacher resource pool and expose per-teacher `LLMServerClient` factories
 - `verl/experimental/teacher_loop/teacher_manager.py` — `AsyncTeacherLLMServerManager`; routes per-sample teacher calls (single- or multi-teacher) and builds teacher sampling params
 - `verl/experimental/agent_loop/agent_loop.py` — `AgentLoopWorker._compute_teacher_logprobs`; per-sample teacher dispatch from `_agent_loop_postprocess`, packs `teacher_logprobs` into the rollout output
-- `verl/trainer/distillation/fsdp/losses.py` — FSDP backend `compute_forward_kl_topk`
+- `verl/trainer/distillation/fsdp/losses.py` — FSDP backend `compute_forward_kl_topk` and `compute_reverse_kl_topk`
 - `verl/trainer/distillation/megatron/losses.py` — Megatron backend `compute_forward_kl_topk`
 - `verl/workers/engine_workers.py` — `ActorRolloutRefWorker.init_model`; binds `distillation_ppo_loss` as the actor's `loss_fn` when distillation is enabled
 - `verl/workers/engine/{fsdp,megatron}/transformer_impl.py` — training-engine forward steps; invoke `distillation_ppo_loss` first as a logits processor (top-$k$ modes) and again as the final loss

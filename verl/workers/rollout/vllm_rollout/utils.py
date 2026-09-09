@@ -545,3 +545,47 @@ def extract_prompt_logprobs(output: RequestOutput, num_prompt_logprobs: Optional
 
     result_dict["prompt_ids"] = prompt_ids_ls
     result_dict["prompt_logprobs"] = prompt_logprobs_ls
+
+
+def extract_sample_topk_ids(output: RequestOutput, num_logprobs: Optional[int], result_dict: dict[str, list]):
+    """Extract rank-ordered top-k token IDs for every sampled position."""
+    if num_logprobs is None or num_logprobs <= 0:
+        return
+
+    sample_logprobs = output.outputs[0].logprobs
+    if sample_logprobs is None:
+        raise RuntimeError("vLLM did not return sampled-token logprobs for a top-k request.")
+
+    sample_topk_ids = []
+    for position, logprobs_dict in enumerate(sample_logprobs):
+        topk_ids = [None] * num_logprobs
+        for token_id, token_logprob in logprobs_dict.items():
+            rank = token_logprob.rank
+            if rank is not None and 1 <= rank <= num_logprobs:
+                topk_ids[rank - 1] = int(token_id)
+        if any(token_id is None for token_id in topk_ids):
+            raise RuntimeError(f"vLLM returned an incomplete top-{num_logprobs} set at sampled position {position}.")
+        sample_topk_ids.append(topk_ids)
+
+    result_dict["sample_topk_ids"] = sample_topk_ids
+
+
+def extract_prompt_token_id_logprobs(
+    output: RequestOutput,
+    prompt_logprob_token_ids: Optional[list[int]],
+    result_dict: dict[str, Any],
+):
+    """Expose vLLM PR #54335 fixed-token prefill scores to rollout clients."""
+    if prompt_logprob_token_ids is None:
+        return
+
+    prompt_token_id_logprobs = getattr(output, "prompt_token_id_logprobs", None)
+    if prompt_token_id_logprobs is None:
+        raise NotImplementedError(
+            "Fixed-token prefill scoring requires the current vLLM PR #54335 API "
+            "(RequestOutput.prompt_token_id_logprobs)."
+        )
+    result_dict["prompt_token_id_logprobs"] = {
+        "token_ids": prompt_token_id_logprobs.token_ids,
+        "logprobs": prompt_token_id_logprobs.logprobs,
+    }

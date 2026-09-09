@@ -483,6 +483,7 @@ class AgentLoopWorker:
 
         # Online policy distillation
         self.distillation_enabled = is_distillation_enabled(config.distillation)
+        self.reverse_kl_topk_enabled = False
         if self.distillation_enabled:
             from verl.experimental.teacher_loop.teacher_manager import AsyncTeacherLLMServerManager
 
@@ -491,6 +492,13 @@ class AgentLoopWorker:
                 config=config,
                 teacher_client=teacher_client,
             )
+            self.reverse_kl_topk_enabled = config.distillation.distillation_loss.loss_mode == "reverse_kl_topk"
+            if self.reverse_kl_topk_enabled and self.rollout_config.name != "vllm":
+                raise NotImplementedError("reverse_kl_topk fixed-token scoring is currently implemented for vLLM only.")
+            if self.reverse_kl_topk_enabled and self.rollout_config.multi_turn.enable:
+                raise NotImplementedError(
+                    "reverse_kl_topk fixed-token scoring currently supports single-turn text rollouts only."
+                )
 
         # Load tools once per worker; each trajectory just reuses self.tools.
         tool_config_path = self.rollout_config.multi_turn.tool_config_path
@@ -524,6 +532,14 @@ class AgentLoopWorker:
             trace_config.get("token2text", False),
             trace_config.get("max_samples_per_step_per_worker", None),
         )
+
+    def _generation_logprobs(self, validate: bool) -> bool | int:
+        if self.reverse_kl_topk_enabled and not validate:
+            topk = self.config.distillation.distillation_loss.topk
+            if topk is None or topk <= 0:
+                raise ValueError("reverse_kl_topk requires distillation.distillation_loss.topk > 0.")
+            return int(topk)
+        return self.rollout_config.calculate_log_probs
 
     def _get_mm_processor_kwargs(self, audio_data: Optional[list[Any]] = None) -> dict[str, Any]:
         """Return multimodal processor kwargs with audio sampling-rate defaults."""
@@ -562,7 +578,7 @@ class AgentLoopWorker:
             top_p=config.top_p,
             top_k=config.top_k,
             repetition_penalty=1.0,
-            logprobs=config.calculate_log_probs,
+            logprobs=self._generation_logprobs(validate=validate),
         )
 
         def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
@@ -1014,8 +1030,28 @@ class AgentLoopWorker:
                 if routing_value is not None:
                     # Non-tensor batch values arrive as 0-d numpy objects / arrays; normalize to Python.
                     routing_key = routing_value.item() if hasattr(routing_value, "item") else routing_value
+            student_topk_ids = None
+            if self.reverse_kl_topk_enabled:
+                if output.num_turns != 2 or any(mask != 1 for mask in output.response_mask):
+                    raise NotImplementedError(
+                        "reverse_kl_topk fixed-token scoring currently supports single-turn text rollouts only."
+                    )
+                if output.multi_modal_data:
+                    raise NotImplementedError(
+                        "reverse_kl_topk fixed-token scoring currently supports single-turn text rollouts only."
+                    )
+                student_topk_ids = output.extra_fields.pop("sample_topk_ids", None)
+                if student_topk_ids is None or len(student_topk_ids) != len(response_ids):
+                    raise RuntimeError(
+                        "Missing response-aligned student top-k IDs from the vLLM rollout. "
+                        "Set actor_rollout_ref.rollout.engine_kwargs.vllm.max_logprobs >= "
+                        "distillation.distillation_loss.topk."
+                    )
+
             teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
                 sequence_ids=prompt_ids + response_ids,
+                prompt_length=len(prompt_ids),
+                student_topk_ids=student_topk_ids,
                 multi_modal_data=output.multi_modal_data,
                 mm_processor_kwargs=output.mm_processor_kwargs,
                 routing_key=routing_key,

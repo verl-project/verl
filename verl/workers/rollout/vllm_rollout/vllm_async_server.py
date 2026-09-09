@@ -66,6 +66,8 @@ from verl.workers.rollout.vllm_rollout.utils import (
     build_cli_args_from_config,
     build_mtp_speculative_config,
     extract_prompt_logprobs,
+    extract_prompt_token_id_logprobs,
+    extract_sample_topk_ids,
     get_vllm_max_lora_rank,
 )
 
@@ -596,7 +598,20 @@ class vLLMHttpServer:
         assert 1 <= max_tokens <= max_possible_tokens, (
             f"max_tokens {max_tokens} not in valid range [1, {max_possible_tokens}]"
         )
-        sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
+        requested_logprobs = sampling_params.pop("logprobs", False)
+        if isinstance(requested_logprobs, bool):
+            sampling_params["logprobs"] = 0 if requested_logprobs else None
+        else:
+            sampling_params["logprobs"] = requested_logprobs
+
+        if sampling_params.get("prompt_logprob_token_ids") is not None:
+            supports_fixed_token_input = hasattr(SamplingParams(), "prompt_logprob_token_ids")
+            supports_compact_output = "prompt_token_id_logprobs" in inspect.signature(RequestOutput.__init__).parameters
+            if not supports_fixed_token_input or not supports_compact_output:
+                raise NotImplementedError(
+                    "Fixed-token prefill scoring requires the current vLLM PR #54335 API "
+                    "(SamplingParams.prompt_logprob_token_ids and RequestOutput.prompt_token_id_logprobs)."
+                )
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params.setdefault("ignore_eos", self.config.get("ignore_eos", False))
         # Inject per-request seed for deterministic sampling when full_determinism is enabled.
@@ -670,6 +685,16 @@ class vLLMHttpServer:
         extract_prompt_logprobs(
             output=final_res,
             num_prompt_logprobs=sampling_params.prompt_logprobs,
+            result_dict=extra_fields,
+        )
+        extract_prompt_token_id_logprobs(
+            output=final_res,
+            prompt_logprob_token_ids=getattr(sampling_params, "prompt_logprob_token_ids", None),
+            result_dict=extra_fields,
+        )
+        extract_sample_topk_ids(
+            output=final_res,
+            num_logprobs=sampling_params.logprobs,
             result_dict=extra_fields,
         )
         token_ids = final_res.outputs[0].token_ids
