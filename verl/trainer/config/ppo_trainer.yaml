@@ -133,6 +133,9 @@ algorithm:
 # config for the trainer
 trainer:
 
+  # Environment variables applied only to training workers
+  worker_env: {}
+
   # Whether to balance batch sizes across distributed workers
   balance_batch: True
 
