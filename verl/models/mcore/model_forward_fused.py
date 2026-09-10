@@ -17,7 +17,7 @@
 import inspect
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import megatron.core as mcore
 import torch
@@ -78,6 +78,11 @@ class FusedOutputProcessorContext:
     """Context passed through Megatron's native output-processor hook."""
 
     temperature: float
+    # bshd carries labels here rather than through ``model(labels=...)``: that
+    # argument also drives the MTP patch's drafter branch, which must stay dormant
+    # when mtp.enable_train is False. Unused by the thd path, which has labels in
+    # scope at the call site.
+    labels: Any = None
 
 
 def fused_output_processor(
@@ -105,6 +110,12 @@ def fused_output_processor(
     # Megatron passes the shared embedding as output_weight for tied models. For
     # untied models the weight lives on output_layer.
     weight = output_weight if output_weight is not None else output_layer.weight
+
+    # bshd routes labels through the context instead of ``model(labels=...)``, which
+    # would also wake the MTP patch's drafter branch. Megatron's native _postprocess
+    # forwards its own (None) labels here, so fall back to the context copy.
+    if labels is None:
+        labels = getattr(context, "labels", None)
 
     temperature = context.temperature
     logprobs, entropy = linear_cross_entropy(

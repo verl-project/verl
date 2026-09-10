@@ -523,15 +523,33 @@ class MegatronEngine(BaseEngine):
         if not self.engine_config.use_fused_kernels:
             return
 
-        if not self.engine_config.use_remove_padding or self.is_value_model or self.model_config.mtp.enable:
-            logger.warning_once(
-                "Fused kernels require remove-padding and are not supported for value models or when MTP is enabled "
-                "in Megatron engine; disabling."
-            )
+        if self.is_value_model:
+            logger.warning_once("Fused kernels are not supported for value models in Megatron engine; disabling.")
             self.engine_config.use_fused_kernels = False
             return
 
-        from verl.models.mcore.model_forward_fused import patch_fused_forward
+        from verl.models.mcore.model_forward_fused import (
+            _get_patching_model,
+            _supports_output_processor_hook,
+            patch_fused_forward,
+        )
+
+        # Without sequence packing the thd-only `fused_forward_model_engine` entry
+        # point is unusable, but Megatron Core 0.18's output-processor hook is not:
+        # it hands the processor hidden states, which are layout-agnostic. Models
+        # whose attention has no THD kernel (Qwen3.5 GDN) are forced onto bshd and
+        # would otherwise be stuck materialising full logits.
+        if not self.engine_config.use_remove_padding:
+            # Resolve the inner GPTModel the same way the fused module does; the
+            # hook lives on it, not on the wrapper mbridge hands us.
+            inner = [_get_patching_model(model) for model in self.module]
+            if not all(m is not None and _supports_output_processor_hook(m) for m in inner):
+                logger.warning_once(
+                    "Fused kernels without remove-padding require Megatron Core >= 0.18 "
+                    "(output-processor hook); disabling."
+                )
+                self.engine_config.use_fused_kernels = False
+            return
 
         for model in self.module:
             patch_fused_forward(model)
@@ -1319,6 +1337,14 @@ class MegatronEngineWithLMHead(MegatronEngine):
         if use_fused_kernels:
             temperature_value = _resolve_fused_temperature(temperature)
 
+        # bshd has no packed fused entry point; it goes through the regular forward
+        # with the output-processor hook attached instead (see _maybe_enable_fused_kernels).
+        use_fused_bshd = use_fused_kernels and not self.engine_config.use_remove_padding
+        if use_fused_bshd:
+            from verl.models.mcore.model_forward_fused import FusedOutputProcessorContext
+
+            use_fused_kernels = False
+
         if use_fused_kernels:
             from verl.models.mcore import get_mcore_forward_fused_model_engine_fn
 
@@ -1396,6 +1422,9 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
                 pad_to_length_bucket=pad_to_length_bucket,
                 cp_layout=cp_layout,
+                fused_output_processor_context=(
+                    FusedOutputProcessorContext(temperature=temperature_value) if use_fused_bshd else None
+                ),
             )
 
         # Router replay: record routing decisions for R2 mode
