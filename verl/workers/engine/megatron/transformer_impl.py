@@ -545,7 +545,14 @@ class MegatronEngine(BaseEngine):
             fp16=self.param_dtype == torch.float16,
             bf16=self.param_dtype == torch.bfloat16,
         )
-        optimizer = get_megatron_optimizer(model=self.module, config=optim_config_megatron)
+        # LoRA+: lr_B = lora_plus_ratio * lr_A (read from the lora config dict).
+        lora_cfg = getattr(self.model_config, "lora", {})
+        lora_plus_ratio = float(lora_cfg.get("lora_plus_ratio", 1.0))
+        optimizer = get_megatron_optimizer(
+            model=self.module,
+            config=optim_config_megatron,
+            lora_plus_ratio=lora_plus_ratio,
+        )
         register_megatron_training_hooks(self.module, optimizer)
         return optimizer
 
@@ -1032,7 +1039,17 @@ class MegatronEngine(BaseEngine):
         if self.vanilla_bridge:
             per_tensor_param = self.bridge.export_weights(self.module)
         elif adapter_only:
-            per_tensor_param = self.bridge.export_adapter_weights(self.module)
+            # 3D-MoE (Qwen3.5/3.6 VLM): stack_3d_moe for FusedMoE3DWithLoRA.
+            # 2D-MoE text: expand_shared_outer for vLLM pack_moe.
+            from verl.workers.rollout.vllm_rollout.utils import is_3d_moe_vllm_model
+
+            export_kwargs = {}
+            if self.model_config.lora.get("experts_shared_outer_loras", False):
+                if is_3d_moe_vllm_model(self.model_config.hf_config):
+                    export_kwargs["stack_3d_moe"] = True
+                else:
+                    export_kwargs["expand_shared_outer"] = True
+            per_tensor_param = self.bridge.export_adapter_weights(self.module, **export_kwargs)
         else:
             conversion_tasks = self._mbridge_export_tasks()
             per_tensor_param = (
