@@ -235,6 +235,19 @@ class DistillationConfig(BaseConfig):
         the data proto, e.g., data_source.
     distillation_loss (DistillationLossConfig):
     Configuration for distillation loss settings.
+    share_gpu_group (bool):
+        Whether all teachers' replicas are placed on the SAME GPU bundles (multi-teacher
+        shared GPU group) instead of disjoint sub-pools. Requires every teacher's
+        `world_size` (= num_replicas * per_replica_world_size) to be equal and to match the
+        distillation resource pool size (`n_gpus_per_node * nnodes`), and every teacher's
+        `inference.free_cache_engine` and `inference.enable_sleep_mode` to be True. Teacher
+        engines start asleep (weights offloaded to CPU, KV cache freed) and are woken on
+        demand by the TeacherSleepController.
+    max_awake_teachers (int, optional):
+        Maximum number of simultaneously-awake teachers when `share_gpu_group` is True.
+        None means unlimited (all teachers may stay awake). When the limit is hit, the
+        least-recently-used unpinned teacher is put to sleep (vLLM sleep level 1) to make
+        room for the requested teacher.
 
     NOTE: The `teacher_model` entry is in the `teacher_models` dict by default.
     Since it is popped when other teacher entries are added, using `teacher_model` as
@@ -265,12 +278,18 @@ class DistillationConfig(BaseConfig):
     teacher_models: dict[str, DistillationTeacherModelConfig] = field(default_factory=dict)
     teacher_key: str = "data_source"
     distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
+    share_gpu_group: bool = False
+    max_awake_teachers: Optional[int] = None
 
     def __post_init__(self):
         if not self.enabled:
             return
 
         self.teacher_models = self._resolve_teacher_models()
+        if self.share_gpu_group:
+            self._validate_shared_gpu_group()
+            return
+
         teacher_world_size_sum = 0
         for teacher_model in self.teacher_models.values():
             teacher_model.validate_and_prepare_for_distillation(
@@ -284,6 +303,50 @@ class DistillationConfig(BaseConfig):
                 f"Sum of teacher (num_replicas * per_replica_world_size) ({teacher_world_size_sum}) must match "
                 f"the distillation resource pool size "
                 f"({self.n_gpus_per_node=} * {self.nnodes=} = {total_pool_size})."
+            )
+
+    def _validate_shared_gpu_group(self):
+        """Validate multi-teacher shared GPU group placement.
+
+        All teachers' replicas are placed on the same GPU bundles, so every teacher's
+        `world_size` must equal the distillation resource pool size, and every teacher
+        engine must support sleep/wake (`free_cache_engine` + `enable_sleep_mode`).
+        """
+        if self.max_awake_teachers is not None and self.max_awake_teachers < 1:
+            raise ValueError(
+                f"distillation.max_awake_teachers must be >= 1 when set, but got {self.max_awake_teachers}."
+            )
+
+        total_pool_size = self.n_gpus_per_node * self.nnodes
+        world_sizes = {}
+        for key, teacher_model in self.teacher_models.items():
+            teacher_model.validate_and_prepare_for_distillation(
+                use_topk=self.distillation_loss.loss_settings.use_topk,
+                topk=self.distillation_loss.topk,
+            )
+            world_sizes[key] = teacher_model.world_size
+            inference = teacher_model.inference
+            if not inference.free_cache_engine or not inference.enable_sleep_mode:
+                raise ValueError(
+                    f"share_gpu_group=True requires inference.free_cache_engine=True and "
+                    f"inference.enable_sleep_mode=True for every teacher (on-demand teacher "
+                    f"sleep/wake depends on both), but teacher {key!r} has "
+                    f"free_cache_engine={inference.free_cache_engine}, "
+                    f"enable_sleep_mode={inference.enable_sleep_mode}."
+                )
+
+        if len(set(world_sizes.values())) != 1:
+            raise ValueError(
+                f"share_gpu_group=True requires every teacher's world_size "
+                f"(num_replicas * per_replica_world_size) to be equal, but got {world_sizes}."
+            )
+        teacher_world_size = next(iter(world_sizes.values()))
+        if teacher_world_size != total_pool_size:
+            raise ValueError(
+                f"share_gpu_group=True requires each teacher's world_size ({teacher_world_size}) "
+                f"to equal the distillation resource pool size "
+                f"({self.n_gpus_per_node=} * {self.nnodes=} = {total_pool_size}), since all "
+                f"teachers are placed on the same GPU bundles."
             )
 
     def _resolve_teacher_models(self) -> dict[str, DistillationTeacherModelConfig]:
