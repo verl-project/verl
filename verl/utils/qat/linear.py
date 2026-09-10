@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""QAT FakeQuantized Linear module for NVFP4 (W4A4/W4A16) with FSDP compatibility.
+"""QAT FakeQuantized Linear module for NVFP4 (W4A4/W4A8/W4A16) with FSDP compatibility.
 
 Includes Triton kernels for high-performance FP4 quantization.
 """
@@ -24,7 +24,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-__all__ = ["QATLinear", "QATMode"]
+__all__ = ["QATLinear", "QATMode", "W4A8_ACTIVATION_BLOCK_SIZE", "fp8_e4m3_fake_quant"]
 
 
 import triton
@@ -37,6 +37,7 @@ _TORCH_TO_TL_DTYPE = {
 }
 FP4_E2M1_MAX: float = 6.0
 FP8_E4M3_MAX: float = 448.0
+W4A8_ACTIVATION_BLOCK_SIZE: tuple[int, int] = (1, 128)
 
 
 @triton.jit
@@ -185,10 +186,68 @@ class STEFP4QuantTriton(torch.autograd.Function):
         return grad_output, None, None
 
 
+def fp8_e4m3_fake_quant(
+    x: torch.Tensor,
+    block_size: tuple[int, int] = W4A8_ACTIVATION_BLOCK_SIZE,
+) -> torch.Tensor:
+    """Numerically simulate blockwise FP8 E4M3 activations in the input dtype.
+
+    The returned tensor contains FP8 quantize-dequantize noise but remains in
+    ``x.dtype`` so it can be consumed by the existing W4A16 kernels.
+    """
+    from verl.utils.kernel.fp8_kernel import scaled_fp8_blockwise
+
+    if x.ndim == 0:
+        raise ValueError("FP8 activation fake quantization requires at least one dimension")
+
+    block_m, block_n = block_size
+    if block_m <= 0 or block_n <= 0:
+        raise ValueError(f"FP8 block dimensions must be positive, got {block_size}")
+    if x.numel() == 0:
+        return x.clone()
+
+    original_shape = x.shape
+    x_2d = x.reshape(-1, x.shape[-1])
+    fp8_data, descale = scaled_fp8_blockwise(x_2d, block_size)
+
+    # The PyTorch fallback retains a trailing singleton dimension while the
+    # Triton path returns a 2D scale tensor. Normalize both representations.
+    if descale.ndim == 3 and descale.shape[-1] == 1:
+        descale = descale.squeeze(-1)
+    if descale.ndim != 2:
+        raise RuntimeError(f"Expected a 2D FP8 descale tensor, got shape {tuple(descale.shape)}")
+
+    rows, cols = x_2d.shape
+    expected_scale_shape = (
+        (rows + block_m - 1) // block_m,
+        (cols + block_n - 1) // block_n,
+    )
+    if tuple(descale.shape) != expected_scale_shape:
+        raise RuntimeError(f"Unexpected FP8 descale shape {tuple(descale.shape)}; expected {expected_scale_shape}")
+
+    descale_expanded = descale.repeat_interleave(block_m, dim=0).repeat_interleave(block_n, dim=1)
+    descale_expanded = descale_expanded[:rows, :cols]
+    dequantized = fp8_data.float() * descale_expanded.float()
+    return dequantized.to(x.dtype).reshape(original_shape)
+
+
+class STEFP8Quant(torch.autograd.Function):
+    """Straight-through estimator for blockwise FP8 E4M3 fake quantization."""
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, block_size: tuple[int, int]) -> torch.Tensor:
+        return fp8_e4m3_fake_quant(x, block_size)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> tuple:
+        return grad_output, None
+
+
 class QATMode(str, Enum):
     """QAT quantization mode."""
 
     W4A4 = "w4a4"  # Weight 4-bit, Activation 4-bit (dynamic)
+    W4A8 = "w4a8"  # Weight 4-bit, Activation 8-bit (numerical simulation)
     W4A16 = "w4a16"  # Weight 4-bit, Activation 16-bit (weight only)
 
 
@@ -229,6 +288,10 @@ class QATLinear(nn.Linear):
             )
 
             self._ema_decay: float = 0.01
+
+        # W4A8 uses dynamic per-token, 128-element FP8 activation blocks and
+        # therefore does not need a persistent activation scale.
+        self._w4a8_block_size = W4A8_ACTIVATION_BLOCK_SIZE
 
         self.fake_quant_enabled = True
 
@@ -363,6 +426,10 @@ class QATLinear(nn.Linear):
         result = STEFP4QuantTriton.apply(x_2d, global_amax, self.group_size)
         return result.view(original_shape)
 
+    def _fake_quantize_activation_fp8(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply dynamic FP8 E4M3 fake quantization for W4A8 simulation."""
+        return STEFP8Quant.apply(x, self._w4a8_block_size)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass with fake quantization."""
         if not self.fake_quant_enabled:
@@ -372,6 +439,8 @@ class QATLinear(nn.Linear):
 
         if self.mode == QATMode.W4A4:
             x_fq = self._fake_quantize_activation(x)
+        elif self.mode == QATMode.W4A8:
+            x_fq = self._fake_quantize_activation_fp8(x)
         else:
             x_fq = x
 

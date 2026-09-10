@@ -15,7 +15,8 @@
 """
 QAT (Quantization-Aware Training) module for verl.
 
-Supports NVFP4 (W4A4 and W4A16) quantization modes for FSDP training.
+Supports NVFP4 W4A4/W4A16 and experimental W4A8 simulation for FSDP training,
+including dense layers and the standard vLLM Marlin MoE path.
 
 Module Structure:
 - core.py: QATConfig, apply_qat, enable_qat_fuse (training setup)
@@ -39,6 +40,7 @@ from verl.utils.qat.core import (
 )
 from verl.utils.qat.vllm_patch import (
     apply_qat_patches,
+    configure_w4a8_simulation,
     manual_process_weights_after_loading,
     prepare_qat_for_load_weights,
 )
@@ -52,6 +54,7 @@ __all__ = [
     "invalidate_all_scales",
     # vLLM Patch
     "apply_qat_patches",
+    "configure_w4a8_simulation",
     "manual_process_weights_after_loading",
     "prepare_qat_for_load_weights",
 ]
