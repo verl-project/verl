@@ -17,7 +17,7 @@ jobs:
   ascend-rayjob-e2e:
     if: github.repository_owner == 'verl-project'
     name: E2E Ascend RayJob multinode PPO
-    runs-on: linux-aarch64-a3-8
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 240
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
