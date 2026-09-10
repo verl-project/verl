@@ -26,7 +26,8 @@ with open(os.path.join(version_folder, "verl/version/version")) as f:
 install_requires = [
     "accelerate",
     "codetiming",
-    "datasets",
+    # <2.18.0 subclasses `pa.PyExtensionType`, removed in pyarrow 23. See verl-project/verl#5073.
+    "datasets>=2.18.0",
     "dill",
     "hydra-core",
     "numpy>=2.0.0",
