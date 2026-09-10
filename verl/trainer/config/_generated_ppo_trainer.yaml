@@ -30,6 +30,7 @@ actor_rollout_ref:
         min_num_params: 0
       param_offload: false
       optimizer_offload: false
+      optimizer_offload_step: false
       offload_policy: false
       reshard_after_forward: true
       fsdp_size: -1
@@ -238,6 +239,7 @@ actor_rollout_ref:
         min_num_params: 0
       param_offload: false
       optimizer_offload: false
+      optimizer_offload_step: false
       offload_policy: false
       reshard_after_forward: true
       fsdp_size: -1
@@ -557,6 +559,7 @@ critic:
       min_num_params: 0
     param_offload: false
     optimizer_offload: false
+    optimizer_offload_step: false
     offload_policy: false
     reshard_after_forward: true
     fsdp_size: -1

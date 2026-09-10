@@ -818,6 +818,13 @@ class FSDPEngine(BaseEngine):
             if not torch.isfinite(grad_norm):
                 print(f"WARN: grad_norm is not finite: {grad_norm}")
                 self.optimizer.zero_grad()
+            elif getattr(self, "_optimizer_offload_step", False):
+                # Gradients are already clipped and finite; only the update needs Adam states.
+                try:
+                    self.to(device=get_device_name(), model=False, optimizer=True, grad=False)
+                    self.optimizer.step()
+                finally:
+                    self.to(device="cpu", model=False, optimizer=True, grad=False)
             else:
                 self.optimizer.step()
 
@@ -1118,22 +1125,43 @@ class EngineEvalModeCtx(BaseEngineCtx):
 
 
 class EngineTrainModeCtx(BaseEngineCtx):
+    def _context_switch(self, device):
+        if self.disable_auto_offload:
+            return
+        if device != "cpu" and getattr(self.engine.engine_config, "optimizer_offload_step", False):
+            # Preserve the normal parameter/gradient transfer without preloading optimizer states.
+            if self.engine.is_param_offload_enabled:
+                self.engine.to(device=device, model=True, optimizer=False, grad=True)
+            return
+        super()._context_switch(device)
+
     def __init__(self, engine: FSDPEngine, **kwargs):
         super().__init__(engine=engine, mode="train", **kwargs)
 
     def __enter__(self):
         assert isinstance(self.engine, FSDPEngine)
+        step_offload = getattr(self.engine.engine_config, "optimizer_offload_step", False)
+        if step_offload and not self.disable_auto_offload:
+            if type(self.engine.optimizer) is not torch.optim.AdamW or getattr(self.engine, "scaler", None) is not None:
+                raise ValueError("optimizer_offload_step supports ordinary AdamW without a gradient scaler")
+        self.prev_step_offload = getattr(self.engine, "_optimizer_offload_step", False)
         super().__enter__()
         self.prev_sp_group = get_ulysses_sequence_parallel_group()
         set_ulysses_sequence_parallel_group(self.engine.ulysses_parallel_group)
         self.engine.module.train()
+        # TrainingWorker nests a manual context inside its automatic mini-batch context.
+        # The inner context must retain the outer context's per-update policy.
+        self.engine._optimizer_offload_step = self.prev_step_offload or (step_offload and not self.disable_auto_offload)
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, FSDPEngine)
-        set_ulysses_sequence_parallel_group(self.prev_sp_group)
-        if self.zero_grad_on_exit or exc_type is not None:
-            self.engine.optimizer_zero_grad()
-        super().__exit__(exc_type, exc_value, traceback)
+        try:
+            set_ulysses_sequence_parallel_group(self.prev_sp_group)
+            if self.zero_grad_on_exit or exc_type is not None:
+                self.engine.optimizer_zero_grad()
+            super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.engine._optimizer_offload_step = self.prev_step_offload
 
 
 @EngineRegistry.register(model_type="language_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
