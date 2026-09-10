@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from omegaconf import OmegaConf
 
@@ -31,6 +31,156 @@ class _StubTrainer(PPOTrainer):
 class _CustomSampler:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
+
+
+def _epoch_exhaustion_trainer(**trainer_overrides) -> _StubTrainer:
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.config = OmegaConf.create(
+        {
+            "trainer": {
+                "total_epochs": 1,
+                "save_freq": 50,
+                **trainer_overrides,
+            }
+        }
+    )
+    trainer.global_steps = 1
+    return trainer
+
+
+def _fit_stub_trainer(
+    *,
+    global_steps: int,
+    steps_per_epoch: int,
+    total_epochs: int = 1,
+    total_training_steps: int = 1000,
+    save_freq: int = 50,
+) -> _StubTrainer:
+    trainer = _StubTrainer.__new__(_StubTrainer)
+    trainer.trainer_mode = "sync"
+    trainer.parameter_sync_step = 1
+    trainer.steps_per_epoch = steps_per_epoch
+    trainer.total_training_steps = total_training_steps
+    trainer.global_steps = global_steps
+    trainer.logger = MagicMock()
+    trainer.config = OmegaConf.create(
+        {
+            "trainer": {
+                "project_name": "test",
+                "experiment_name": "test",
+                "logger": [],
+                "val_before_train": False,
+                "total_epochs": total_epochs,
+                "save_freq": save_freq,
+                "test_freq": 0,
+            },
+            "global_profiler": {"steps": None},
+            "data": {"train_batch_size": 64},
+        }
+    )
+    return trainer
+
+
+def _run_fit(trainer: _StubTrainer, *, step_side_effect=None):
+    batch = MagicMock(keys=[], partition_id="train")
+
+    with (
+        patch("verl.trainer.ppo.v1.trainer_base.SkipManager") as skip_manager,
+        patch("verl.trainer.ppo.v1.trainer_base.Tracking"),
+        patch("verl.trainer.ppo.v1.trainer_base.ValidationGenerationsLogger"),
+        patch("verl.trainer.ppo.v1.trainer_base.DapoFilteredRewardTableLogger"),
+        patch("verl.trainer.ppo.v1.trainer_base.tqdm", return_value=MagicMock()),
+        patch("verl.trainer.ppo.v1.trainer_base.tq.kv_clear"),
+        patch.object(trainer, "_reissue_inflight_prompts"),
+        patch.object(trainer, "on_train_begin"),
+        patch.object(trainer, "on_step_begin"),
+        patch.object(trainer, "_start_profiling"),
+        patch.object(trainer, "_stop_profiling"),
+        patch.object(trainer, "_consume_sync_metrics", return_value={}),
+        patch.object(trainer, "_compute_metrics"),
+        patch.object(trainer, "step", side_effect=step_side_effect or (lambda metrics, timing_raw: batch)),
+        patch.object(trainer, "on_train_end") as on_train_end,
+        patch.object(trainer, "_shutdown_dump_executor") as shutdown_dump_executor,
+        patch.object(trainer, "_save_checkpoint") as save_checkpoint,
+    ):
+        trainer.fit(agent_loop_manager=MagicMock())
+        skip_manager.init.assert_called_once()
+        skip_manager.set_step.assert_called()
+
+    return save_checkpoint, on_train_end, shutdown_dump_executor
+
+
+def test_should_force_save_when_epochs_exhaust_with_completed_steps():
+    trainer = _epoch_exhaustion_trainer(save_freq=50)
+    trainer.global_steps = 238
+
+    assert trainer._should_force_save_epoch_exhaustion_checkpoint(
+        completed_training_steps=1,
+        current_epoch=1,
+    )
+
+
+def test_should_not_force_save_on_zero_iteration_resume():
+    trainer = _epoch_exhaustion_trainer(save_freq=50)
+    trainer.global_steps = 238
+
+    assert not trainer._should_force_save_epoch_exhaustion_checkpoint(
+        completed_training_steps=0,
+        current_epoch=1,
+    )
+
+
+def test_should_not_force_save_on_save_boundary():
+    trainer = _epoch_exhaustion_trainer(save_freq=50)
+    trainer.global_steps = 101
+
+    assert not trainer._should_force_save_epoch_exhaustion_checkpoint(
+        completed_training_steps=1,
+        current_epoch=1,
+    )
+
+
+def test_fit_zero_iteration_resume_does_not_save_or_crash():
+    trainer = _fit_stub_trainer(global_steps=237, steps_per_epoch=100, save_freq=50)
+
+    save_checkpoint, on_train_end, shutdown_dump_executor = _run_fit(trainer)
+
+    save_checkpoint.assert_not_called()
+    on_train_end.assert_called_once()
+    shutdown_dump_executor.assert_called_once()
+    assert trainer.global_steps == 238
+
+
+def test_fit_saves_once_when_epochs_exhaust_off_boundary():
+    trainer = _fit_stub_trainer(
+        global_steps=0,
+        steps_per_epoch=2,
+        total_training_steps=100,
+        save_freq=3,
+    )
+
+    save_checkpoint, on_train_end, shutdown_dump_executor = _run_fit(trainer)
+
+    save_checkpoint.assert_called_once()
+    on_train_end.assert_called_once()
+    shutdown_dump_executor.assert_called_once()
+    assert trainer.global_steps == 3
+
+
+def test_fit_does_not_duplicate_save_on_save_boundary():
+    trainer = _fit_stub_trainer(
+        global_steps=0,
+        steps_per_epoch=2,
+        total_training_steps=100,
+        save_freq=2,
+    )
+
+    save_checkpoint, on_train_end, shutdown_dump_executor = _run_fit(trainer)
+
+    assert save_checkpoint.call_count == 1
+    on_train_end.assert_called_once()
+    shutdown_dump_executor.assert_called_once()
+    assert trainer.global_steps == 3
 
 
 def _trainer_with_filter_groups(filter_groups: dict, trainer_mode: str = "sync") -> _StubTrainer:
