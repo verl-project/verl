@@ -79,10 +79,16 @@ class OneStepTaskRunner:
             config.data,
             tokenizer,
             processor,
+            is_train=True,
             max_samples=config.data.get("train_max_samples", -1),
         )
         val_dataset = create_rl_dataset(
-            config.data.val_files, config.data, tokenizer, processor, max_samples=config.data.get("val_max_samples", -1)
+            config.data.val_files,
+            config.data,
+            tokenizer,
+            processor,
+            is_train=False,
+            max_samples=config.data.get("val_max_samples", -1),
         )
         train_sampler = create_rl_sampler(config.data, train_dataset)
 

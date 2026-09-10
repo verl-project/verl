@@ -15,7 +15,7 @@
 import warnings
 from enum import Enum
 
-from omegaconf import DictConfig
+from omegaconf import DictConfig, open_dict
 
 from verl.single_controller.base import Worker
 from verl.trainer.distillation import is_distillation_enabled
@@ -115,12 +115,26 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=Tr
         data_config: The data config.
         tokenizer (Tokenizer): The tokenizer.
         processor (Processor): The processor.
+        is_train (bool): Whether the dataset is the train split.
+        max_samples (int): Subsample the dataset down to this many rows, -1 to keep all.
 
     Returns:
         dataset (Dataset): The dataset.
     """
 
     from verl.utils.dataset.rl_dataset import get_dataset_class
+
+    if not is_train:
+        # The dataset keys its `max_samples` subsampling off `shuffle`, which is the
+        # train-split flag. Hand the validation split a config view whose `shuffle`
+        # carries `validation_shuffle` instead.
+        validation_shuffle = data_config.get("validation_shuffle", True)
+        if isinstance(data_config, DictConfig):
+            data_config = data_config.copy()
+            with open_dict(data_config):
+                data_config.shuffle = validation_shuffle
+        else:
+            data_config = {**data_config, "shuffle": validation_shuffle}
 
     # Get the dataset class
     dataset_cls = get_dataset_class(data_config)
