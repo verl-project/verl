@@ -1,0 +1,87 @@
+name: docker-build-sglang
+
+on:
+  # Manual trigger, e.g. to rebuild or to bump the published image tag
+  # without changing the Dockerfile.
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Target image reference on Docker Hub (repo:tag)"
+        required: false
+        default: "verlai/verl:sgl0512.dev1"
+      force:
+        description: "Build even if the image already exists on the remote registries"
+        type: boolean
+        required: false
+        default: false
+  # Build on every push and MR (pull request) that touches the SGLang Dockerfile
+  # or this workflow file.
+  push:
+    paths:
+      - "docker/Dockerfile.stable.sglang"
+      - ".github/workflows/docker-build-sglang.yml"
+  pull_request:
+    paths:
+      - "docker/Dockerfile.stable.sglang"
+      - ".github/workflows/docker-build-sglang.yml"
+
+# A newer push/MR update on the same ref cancels a build that is still running.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DOCKERFILE: docker/Dockerfile.stable.sglang
+  DEFAULT_IMAGE: verlai/verl:sgl0512.dev1
+  # Volcengine registry prefix (the Docker Hub image is mirrored here).
+  VOLC_REGISTRY: verl-ci-cn-beijing.cr.volces.com
+  # Build script (lives in this repo under scripts/).
+  BUILD_SCRIPT: scripts/verl-build.sh
+  # Stream the full, uncollapsed docker build progress into the CI logs.
+  BUILDKIT_PROGRESS: plain
+
+jobs:
+  build-and-push:
+    # Self-hosted builder machine that has Docker, the byted proxy reachable, and
+    # is already logged in to both Docker Hub and the Volcengine registry.
+    runs-on: [docker-build-only]
+    timeout-minutes: 600
+    steps:
+      # The CI's judgment: if the target tag already exists on BOTH registries,
+      # skip the whole process (checkout + build + push). A manual run with
+      # force=true overrides this and rebuilds anyway.
+      - name: Check whether image already exists on remote
+        id: check
+        run: |
+          IMAGE="${{ github.event.inputs.image || env.DEFAULT_IMAGE }}"
+          VOLC_IMAGE="${VOLC_REGISTRY}/${IMAGE}"
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+            echo "force=true -> building regardless of remote state."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          elif docker buildx imagetools inspect "$IMAGE" >/dev/null 2>&1 \
+               && docker buildx imagetools inspect "$VOLC_IMAGE" >/dev/null 2>&1; then
+            echo "Image already exists on both Docker Hub and Volcengine; skipping."
+            echo "  - $IMAGE"
+            echo "  - $VOLC_IMAGE"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Image missing on at least one registry; proceeding with build."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Clone the repo into the runner working directory (the docker build context).
+      - name: Clone repo into working directory
+        if: steps.check.outputs.exists != 'true'
+        uses: actions/checkout@v4
+
+      # Call the build script with (dockerfile, target image). The proxy is passed
+      # from the BYTED_PROXY secret; the script pushes to Docker Hub + Volcengine.
+      - name: Build and push image
+        if: steps.check.outputs.exists != 'true'
+        env:
+          BYTED_PROXY: ${{ secrets.BYTED_PROXY }}
+        run: |
+          bash "${BUILD_SCRIPT}" "${DOCKERFILE}" "${{ github.event.inputs.image || env.DEFAULT_IMAGE }}"
