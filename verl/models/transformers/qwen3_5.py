@@ -155,7 +155,9 @@ def _packed_causal_conv1d_loop(
     return torch.cat(outputs, dim=-1)
 
 
-def _causal_dwconv_token_major(x: torch.Tensor, seq_idx: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor]):
+def _causal_dwconv_token_major(
+    x: torch.Tensor, seq_idx: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor]
+):
     """y[t] = silu(b + sum_j w[j] * x[t-(k-1)+j]) on a token-major (T, C) packed stream, taps that
     reach before the start of t's own segment zeroed. fp32 accumulate, rounded once to x.dtype."""
     kernel = weight.shape[1]
@@ -179,8 +181,8 @@ _CAUSAL_DWCONV_FN = None
 
 
 def _get_causal_dwconv_fn():
-    """The token-major conv, torch.compile'd once per process (dynamic T); the compiled version fuses the k taps, mask, bias, silu and
-    the dtype casts into one kernel each way."""
+    """The token-major conv, torch.compile'd once per process (dynamic T); the compiled version fuses the
+    k taps, mask, bias, silu and the dtype casts into one kernel each way."""
     global _CAUSAL_DWCONV_FN
     if _CAUSAL_DWCONV_FN is None:
         _CAUSAL_DWCONV_FN = torch.compile(_causal_dwconv_token_major, dynamic=True)
