@@ -31,10 +31,7 @@ from verl.utils.fsdp_utils import MixedPrecisionPolicy, apply_fsdp2, get_fsdp_wr
 
 
 def create_random_input_ids(batch_size, seq_len, vocab_size):
-    if get_device_name() == "cuda":
-        from flash_attn.bert_padding import unpad_input
-    elif get_device_name() == "npu":
-        from verl.utils.attention_utils import unpad_input
+    from verl.utils.attention_utils import unpad_input
     from verl.utils.model import compute_position_id_with_mask, create_random_mask
 
     input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device=get_device_name())
