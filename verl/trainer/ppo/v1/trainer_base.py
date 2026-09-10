@@ -149,6 +149,8 @@ class PPOTrainer(ABC):
         # track mini-batch index within a parameter_sync_step cycle for Decoupled PPO
         self.local_trigger_step = 0
         self._restored_tq_prompt_count = 0
+        # slowest training step seen so far, used to size the ESI force-save window
+        self.max_steps_duration = 0
 
     def _build_replay_buffer(self) -> ReplayBuffer:
         """Instantiate the replay buffer (or a user-provided custom sampler).
@@ -470,8 +472,7 @@ class PPOTrainer(ABC):
                 self.on_step_end()
                 metrics.update(self._consume_sync_metrics())
 
-            steps_duration = self.timing_raw.get("step", 0)
-            self.max_steps_duration = max(self.max_steps_duration, steps_duration)
+            self._record_step_duration()
 
             # 4. validate
             if self.config.trainer.test_freq > 0 and (
@@ -917,6 +918,16 @@ class PPOTrainer(ABC):
         )
         return len(inflight_uids)
 
+    def _record_step_duration(self) -> None:
+        """Track the slowest training step, which sizes the ESI force-save window.
+
+        ``should_save_ckpt_esi`` only force-saves once ``max_steps_duration > 0``, so
+        losing this bookkeeping silently disables ESI force-save (see #7757). Called once
+        per step from :meth:`fit`, after the ``step`` timer has closed.
+        """
+        steps_duration = self.timing_raw.get("step", 0)
+        self.max_steps_duration = max(self.max_steps_duration, steps_duration)
+
     def _maybe_save_checkpoint(self, is_last_step: bool) -> bool:
         """Save on last step, save_freq, or when an ESI capacity block is about to expire.
 
@@ -928,7 +939,7 @@ class PPOTrainer(ABC):
             True if a checkpoint was written.
         """
         esi_close_to_expiration = should_save_ckpt_esi(
-            max_steps_duration=getattr(self, "max_steps_duration", 0),
+            max_steps_duration=self.max_steps_duration,
             redundant_time=self.config.trainer.get("esi_redundant_time", 0),
         )
         if self.config.trainer.save_freq > 0 and (
