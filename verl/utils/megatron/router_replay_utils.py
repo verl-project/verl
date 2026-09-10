@@ -47,12 +47,6 @@ from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAc
 device_name = get_device_name()
 
 
-def _context_parallel_layout(tf_config) -> str:
-    if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid":
-        return "contiguous"
-    return "zigzag"
-
-
 # from megatron.core.transformer.transformer_block import get_num_layers_to_build
 def get_num_layers_to_build(config: TransformerConfig, vp_stage: int | None = None, pp_rank: int | None = None) -> int:
     """
@@ -280,8 +274,6 @@ def merge_router_topk_indices(
             else None
         )
 
-        cp_layout = _context_parallel_layout(tf_config)
-
         if input_ids.is_nested:
             batch_size = input_ids.shape[0]
             _, packed_seq_params, _ = preprocess_thd_engine(
@@ -413,8 +405,6 @@ def set_router_replay_data(
             else None
         )
 
-        cp_layout = _context_parallel_layout(tf_config)
-
         replay_mask_rmpad = None
         if layers_topk_idx.is_nested:
             layers_topk_idx_rmpad, _, _ = preprocess_thd_engine(
@@ -454,15 +444,35 @@ def set_router_replay_data(
         layers_topk_idx_reshape = layers_topk_idx_rmpad_split.permute(0, 2, 1, 3).squeeze(
             dim=0
         )  # layer_num, dynamic_bs_all, topk
-        # When dim-0 covers all layers (e.g. R3, or R2 with all-MoE models),
-        # index by absolute layer_idx; otherwise (R2 with mixed dense/MoE),
-        # dim-0 only contains MoE layers, index by MoE-layer ordinal.
-        index_by_layer = len(layers_topk_idx_reshape) == tf_config.num_layers
+        # vLLM retains dense HF blocks; hybrid Megatron models can expand each
+        # block into multiple modules. R2 instead records only MoE modules.
+        route_count = layers_topk_idx_reshape.shape[0]
+        moe_module_count = sum(1 for i in range(tf_config.num_layers) if is_moe_layer(tf_config, i))
+        if route_count == tf_config.num_layers:
+            route_index = "module"
+        elif route_count == moe_module_count:
+            route_index = "moe"
+        elif moe_module_count < route_count < tf_config.num_layers and tf_config.num_layers % route_count == 0:
+            route_index = "block"
+        else:
+            raise ValueError(
+                f"Cannot map {route_count} route layers to {tf_config.num_layers} modules "
+                f"with {moe_module_count} MoE layers"
+            )
+
+        def _route_idx(layer_idx: int) -> int:
+            """Map a Megatron module index to the captured route-tensor row."""
+            if route_index == "module":
+                return layer_idx
+            if route_index == "block":
+                return layer_idx // (tf_config.num_layers // route_count)
+            return sum(1 for i in range(layer_idx) if is_moe_layer(tf_config, i))
 
         if model is not None:
             for layer_number, router in iter_model_routers(model):
-                layer_idx = layer_number - 1
-                idx = layer_idx if index_by_layer else sum(1 for i in range(layer_idx) if is_moe_layer(tf_config, i))
+                idx = _route_idx(layer_number - 1)
+                if not is_moe_layer(tf_config, layer_number - 1):
+                    continue
                 if 0 <= idx < layers_topk_idx_reshape.shape[0]:
                     router.set_target_indices(
                         layers_topk_idx_reshape[idx].to(torch.int64),
@@ -474,21 +484,17 @@ def set_router_replay_data(
         offset, end = local_rank_info["start"], local_rank_info["end"]
         router_instances_list = RouterReplayHelper.get_micro_batch_router_list(tf_config, vp_rank)
 
-        # For R2: count MoE layers before `offset` as the starting position.
-        moe_idx = sum(1 for i in range(offset) if is_moe_layer(tf_config, i))
-
         router_offset = 0
         for layer_idx in range(offset, end):
             if not is_moe_layer(tf_config, layer_idx):
                 continue
             router = router_instances_list[router_offset]
-            idx = layer_idx if index_by_layer else moe_idx
+            idx = _route_idx(layer_idx)
             router.set_target_indices(
                 layers_topk_idx_reshape[idx].to(torch.int64),
                 replay_mask=replay_mask_rmpad_split,
             )
             router_offset += 1
-            moe_idx += 1
 
 
 def iter_model_routers(model):
@@ -500,6 +506,7 @@ def iter_model_routers(model):
     can address the wrong objects. Walking the forwarded model reaches each layer's own router.
     """
     for chunk in model if isinstance(model, list | tuple) else [model]:
+        chunk = getattr(chunk, "language_model", chunk)
         # Scope to the decoder: MTP layers restart layer numbering at 1, so they alias decoder
         # layers, and the replay tensor carries no MTP rows. ``mtp`` is a sibling of ``decoder``
         # on both GPTModel and HybridModel, the only two classes that build one.

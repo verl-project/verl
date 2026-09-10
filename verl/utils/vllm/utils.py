@@ -162,32 +162,66 @@ except (ImportError, AttributeError, ValueError):
     pass
 
 
-# Per-class cache: whether the inner transformer's load_weights is *strict*
-# (params_dict[name] lookup — DeepseekV2, keeps .base_layer.) vs *flat*
-# (AutoWeightsLoader recursion — Llama/Qwen3.5, strips .base_layer.).
+# Per-class cache: the live (vLLM-namespace) param prefix of the deepest
+# *strict* ``load_weights`` in the model stack. ``""`` = the top model is
+# strict (DeepseekV2); ``"language_model.model."`` = a VLM's flat wrappers
+# delegate to an inner strict *Model; ``None`` = no strict loader (all flat).
 _inner_load_weights_is_strict_cache: dict = {}
+_STRICT_PREFIX_MISS = object()
 
 
-def _inner_load_weights_is_strict(model) -> bool:
-    """Whether the inner transformer's ``load_weights`` resolves names strictly.
+def _inner_load_weights_is_strict(model) -> str | None:
+    """Live param prefix of the deepest strict ``load_weights`` in the stack.
 
-    A *strict* loader indexes ``params_dict[name]`` directly, so incoming names
-    must carry the live ``.base_layer.`` suffix; a *flat* loader delegates to
-    ``AutoWeightsLoader``, which wants it stripped. Probed from the loader's
-    bytecode (``co_names``) so it survives reformatting. Cached per class.
+    Descends ``.model`` / ``.language_model`` through flat ``AutoWeightsLoader``
+    wrappers until it reaches a strict loader (one whose ``load_weights`` does
+    not reference ``AutoWeightsLoader``), recording the attribute path from the
+    top model. Returns the path joined by ``"."`` plus a trailing dot, ``""``
+    when the top model is itself strict, or ``None`` when no strict loader is
+    found. Cached per class. Callers wanting a bool use ``... is not None``.
     """
     cls = type(model)
     cached = _inner_load_weights_is_strict_cache.get(cls)
     if cached is not None:
-        return cached
+        return None if cached is _STRICT_PREFIX_MISS else cached
 
-    inner = getattr(model, "model", None) or getattr(model, "language_model", None)
-    load_fn = getattr(inner, "load_weights", None) if inner is not None else None
-    code = getattr(getattr(load_fn, "__func__", load_fn), "__code__", None)
-    # Flat loaders reference ``AutoWeightsLoader``; strict loaders do not.
-    result = code is not None and "AutoWeightsLoader" not in code.co_names
-    _inner_load_weights_is_strict_cache[cls] = result
+    deeper = getattr(model, "model", None) or getattr(model, "language_model", None)
+    result: str | None = None
+    if deeper is not None and deeper is not model:
+        load_fn = getattr(deeper, "load_weights", None)
+        code = getattr(getattr(load_fn, "__func__", load_fn), "__code__", None)
+        if code is not None and "AutoWeightsLoader" not in code.co_names:
+            result = ""  # this level is strict, prefix is the path to here
+        else:
+            inner_prefix = _inner_load_weights_is_strict(deeper)
+            if inner_prefix is not None:
+                attr = "model" if getattr(model, "model", None) is deeper else "language_model"
+                result = attr + "." + inner_prefix
+    _inner_load_weights_is_strict_cache[cls] = result if result is not None else _STRICT_PREFIX_MISS
     return result
+
+
+def _name_reaches_strict_loader(model, name: str) -> bool:
+    """Whether ``name`` (HF namespace) resolves into the strict loader's scope.
+
+    Only names whose live (mapped) form falls under the strict loader's prefix
+    reach its ``params_dict`` lookup and need a ``.base_layer.`` suffix;
+    top-level modules (``lm_head``, ``visual.*``) short-circuit at a flat
+    ``AutoWeightsLoader`` / ``BaseLayerWithLoRA`` and want the suffix stripped.
+    Returns True when the top model itself is the strict loader (DSV4).
+    """
+    prefix = _inner_load_weights_is_strict(model)
+    if prefix is None:
+        return False
+    if prefix == "":
+        return True
+    mapper = getattr(model, "hf_to_vllm_mapper", None)
+    live = name
+    if mapper is not None:
+        mapped = mapper.apply_list([name])
+        if mapped:
+            live = mapped[0]
+    return live.startswith(prefix)
 
 
 def resolve_weight_name(model, name: str, model_weight_names: set[str]) -> str:
@@ -259,7 +293,7 @@ def resolve_weight_name(model, name: str, model_weight_names: set[str]) -> str:
             and any("mlp.experts.base_layer." in n for n in model_weight_names)
         )
         if is_per_expert_leaf:
-            if _inner_load_weights_is_strict(model):
+            if _inner_load_weights_is_strict(model) is not None:
                 if ".base_layer." not in tail:
                     head = name[: idx + len(marker)] + tail
                     prefix, lf = head.rsplit(".", 1)
@@ -297,10 +331,10 @@ def resolve_weight_name(model, name: str, model_weight_names: set[str]) -> str:
             n.startswith(parent + ".base_layer.") for n in model_weight_names
         )
         if parent_has_base_layer:
-            if _HAS_LORA_LOAD_WEIGHTS and not _inner_load_weights_is_strict(model):
+            if _HAS_LORA_LOAD_WEIGHTS and not _name_reaches_strict_loader(model, name):
                 return stripped
         else:
-            if not (_HAS_LORA_LOAD_WEIGHTS and _inner_load_weights_is_strict(model)) or _exists(stripped):
+            if not (_HAS_LORA_LOAD_WEIGHTS and _name_reaches_strict_loader(model, name)) or _exists(stripped):
                 return stripped
 
     if _exists(name):
@@ -327,7 +361,7 @@ def resolve_weight_name(model, name: str, model_weight_names: set[str]) -> str:
     # Re-add ``.base_layer.`` for non-LoRA params on a wrapped module (e.g. DSV4
     # ``gate.tid2eid``). Only strict loaders and released vLLM need it; the
     # ``_exists`` gate keeps it from firing when the live key isn't suffixed.
-    _needs_suffix = (not _HAS_LORA_LOAD_WEIGHTS) or _inner_load_weights_is_strict(model)
+    _needs_suffix = (not _HAS_LORA_LOAD_WEIGHTS) or _name_reaches_strict_loader(model, name)
     if _needs_suffix and ".base_layer." not in name:
         prefix, last = name.rsplit(".", 1)
         alt = f"{prefix}.base_layer.{last}"

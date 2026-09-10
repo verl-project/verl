@@ -17,13 +17,14 @@ Registry module for model architecture components.
 """
 
 from enum import Enum
+from functools import partial
 from typing import Callable
 
 import torch
 import torch.nn as nn
 
 from .model_forward import gptmodel_forward_model_engine, model_forward_gen
-from .model_forward_fused import fused_forward_model_gen, fused_forward_model_engine
+from .model_forward_fused import fused_forward_model_engine, fused_forward_model_gen
 
 
 class SupportedVLM(Enum):
@@ -32,6 +33,7 @@ class SupportedVLM(Enum):
     QWEN3_VL = "Qwen3VLForConditionalGeneration"
     QWEN3_5_MOE_VL = "Qwen3_5MoeForConditionalGeneration"
     QWEN3_5_VL = "Qwen3_5ForConditionalGeneration"
+    GLM5_3_VL = "Glm5NextForConditionalGeneration"
 
 
 supported_vlm = [member.value for member in SupportedVLM]
@@ -54,7 +56,10 @@ def get_mcore_engine_forward_fn(hf_config) -> Callable:
     Get the forward function for given model architecture.
     """
     assert len(hf_config.architectures) == 1, "Only one architecture is supported for now"
-    return gptmodel_forward_model_engine
+    return partial(
+        gptmodel_forward_model_engine,
+        vision_model=hf_config.architectures[0] in supported_vlm,
+    )
 
 
 def get_mcore_forward_fused_fn(hf_config) -> Callable:

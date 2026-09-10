@@ -219,6 +219,12 @@ class _FakeModel:
         yield self
         yield from self._routed_experts
 
+    def named_modules(self, memo: set | None = None, remove_duplicate: bool = False):
+        del memo, remove_duplicate
+        yield "", self
+        for i, expert in enumerate(self._routed_experts):
+            yield f"routed_experts.{i}", expert
+
     def named_parameters(self, remove_duplicate: bool = False):
         del remove_duplicate
         yield from self._params.items()
@@ -1040,14 +1046,16 @@ def test_strict_probe_is_cached_per_class():
     _vllm_utils_real._inner_load_weights_is_strict_cache.clear()
     model = _strict_outer({"q.base_layer.weight": torch.empty(0)})
     probe = _vllm_utils_real._inner_load_weights_is_strict
-    # First call introspects and caches.
+    # First call introspects and caches.  The probe returns the *prefix* of
+    # the strict loader (``""`` when the inner ``.model`` itself is strict,
+    # as with ``_FakeStrictInner``), or ``None`` when all loaders are flat.
     first = probe(model)
-    assert first is True
+    assert first == ""
     # The cache is populated keyed by the outer-model class.
     assert type(model) in _vllm_utils_real._inner_load_weights_is_strict_cache
     # Second call is a cache hit (no re-introspection).
     second = probe(model)
-    assert second is True
+    assert second == ""
 
 
 def test_strict_loader_vision_merger_still_strips(monkeypatch):

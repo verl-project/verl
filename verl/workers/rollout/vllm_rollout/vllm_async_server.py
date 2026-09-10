@@ -1203,15 +1203,29 @@ class vLLMHttpServer:
             if quantization == "fp8":
                 # Ignore MoE router layers for FP8 quantization.
                 ignored_layers = []
-                for layer in range(self.model_config.hf_config.num_hidden_layers):
-                    ignored_layers.append(f"model.layers.{layer}.mlp.gate")
+                hf_cfg = self.model_config.hf_config
+                text_cfg = hf_cfg.get_text_config()
+                num_layers = text_cfg.num_hidden_layers
+                model_type = getattr(hf_cfg, "model_type", "")
 
-                # GLM5.2 DSA: the actor reads kv_b_proj as raw BF16 (bypassing
-                # TE FP8), so keep rollout kv_b_proj BF16 to avoid quant roundtrip noise.
-                model_type = getattr(self.model_config.hf_config, "model_type", "")
-                if model_type == "glm_moe_dsa":
-                    for layer in range(self.model_config.hf_config.num_hidden_layers):
-                        ignored_layers.append(f"model.layers.{layer}.self_attn.kv_b_proj")
+                if model_type == "glm5_next":
+                    # Reuse the checkpoint's own modules_to_not_convert list so the
+                    # rollout FP8 scope matches native vLLM exactly.
+                    ckpt_quant = getattr(hf_cfg, "quantization_config", {}) or {}
+                    ignored_layers = list(ckpt_quant.get("modules_to_not_convert", []) or [])
+                    if not ignored_layers:
+                        raise ValueError(
+                            "glm5_next FP8 rollout needs modules_to_not_convert "
+                            "in the checkpoint quantization_config, but it is empty."
+                        )
+                else:
+                    layer_pfx = "language_model.model.layers" if model_type == "glm5_next" else "model.layers"
+                    for layer in range(num_layers):
+                        ignored_layers.append(f"{layer_pfx}.{layer}.mlp.gate")
+                    if model_type == "glm_moe_dsa":
+                        # GLM5.2 DSA: keep rollout kv_b_proj BF16.
+                        for layer in range(num_layers):
+                            ignored_layers.append(f"{layer_pfx}.{layer}.self_attn.kv_b_proj")
 
                 FP8_BLOCK_QUANT_KWARGS = {
                     "activation_scheme": "dynamic",

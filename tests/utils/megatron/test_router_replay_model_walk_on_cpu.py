@@ -115,6 +115,52 @@ def test_targets_are_written_to_the_forwarded_models_own_routers(orphans_then_mo
     assert all(orphan.target_topk_idx is None for orphan in orphans)
 
 
+def test_block_indexed_routes_match_moe_ordinal_for_hybrid_model(monkeypatch):
+    """R3 on a hybrid model (e.g. GLM-5.3) captures one vLLM route per HF *block*,
+    indexed by block id, while Megatron expands each block into an attention +
+    FFN *module* pair (``num_layers == 2 * num_hidden_layers``). Dense blocks
+    produce zero rows the routers never read. The replay must map each FFN
+    module to its owning block, not to its MoE-ordinal (which is shifted by the
+    dense prefix)."""
+    monkeypatch.setattr(router_replay_utils, "device_name", "cpu")
+    monkeypatch.setattr(router_replay_utils, "preprocess_packed_seqs", lambda x, mask, **kwargs: (x, None))
+    monkeypatch.setattr(router_replay_utils, "scatter_to_sequence_parallel_region", lambda x: x)
+    monkeypatch.setattr(router_replay_utils, "TopKRouter", FakeTopKRouter)
+    RouterReplay.router_instances.clear()
+
+    # 5 HF blocks -> 10 Megatron modules. First 2 blocks are dense (MLP), last 3
+    # are MoE. moe_layer_freq is per-module: [0,0, 0,0, 1,0, 1,0, 1,0].
+    num_blocks = 5
+    num_layers = num_blocks * 2
+    mlp_types = ["dense", "dense", "sparse", "sparse", "sparse"]
+    moe_layer_freq = []
+    for mt in mlp_types:
+        moe_layer_freq.append(0)  # attention module
+        moe_layer_freq.append(1 if mt == "sparse" else 0)  # FFN module
+    tf_config = SimpleNamespace(fp8=None, num_layers=num_layers, moe_layer_freq=moe_layer_freq)
+
+    # Only FFN modules of MoE blocks (modules 5,7,9 -> layer_numbers 6,8,10) own routers.
+    model = torch.nn.ModuleList([FakeTopKRouter(layer_number) for layer_number in (6, 8, 10)])
+
+    # vLLM route tensor: one row per BLOCK (5 rows), block-indexed. Dense blocks
+    # (0,1) are zero; MoE blocks (2,3,4) carry their block id as a sentinel.
+    route_count = num_blocks
+    layers_topk_idx = torch.zeros(1, NUM_TOKENS, route_count, TOPK, dtype=torch.int64)
+    for block in range(num_blocks):
+        layers_topk_idx[:, :, block, :] = block
+
+    router_replay_utils.set_router_replay_data(layers_topk_idx, None, tf_config, vp_rank=0, model=model)
+
+    # Each MoE module must receive its owning block's route row, not its
+    # MoE-ordinal (0,1,2) which would hit the zero rows of dense blocks 0,1.
+    for module, expected_block in zip(_routers(model), (2, 3, 4), strict=True):
+        assert torch.equal(
+            module.target_topk_idx,
+            torch.full((NUM_TOKENS, TOPK), expected_block, dtype=torch.int64),
+        ), f"module {module} expected block {expected_block} routes"
+    RouterReplay.router_instances.clear()
+
+
 def test_action_is_toggled_on_the_forwarded_models_own_routers(orphans_then_model):
     orphans, model = orphans_then_model
 
@@ -124,13 +170,28 @@ def test_action_is_toggled_on_the_forwarded_models_own_routers(orphans_then_mode
     assert all(orphan.router_replay_action is None for orphan in orphans)
 
 
-def test_mtp_routers_are_not_addressed(orphans_then_model):
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_mtp_routers_are_not_addressed(orphans_then_model, wrapped):
     """MTP layers restart layer numbering at 1, so they would alias decoder layer 1."""
     _, decoder = orphans_then_model
     model = torch.nn.Module()
     model.decoder, model.mtp = decoder, torch.nn.ModuleList([FakeTopKRouter(1)])
+    mtp_router = model.mtp[0].router_replay
+    if wrapped:
+        vlm = torch.nn.Module()
+        vlm.language_model = model
+        model = vlm
 
     router_replay_utils.set_model_router_replay_action(model, RouterReplayAction.REPLAY_BACKWARD)
 
     assert [ln for ln, _ in router_replay_utils.iter_model_routers(model)] == list(range(1, NUM_LAYERS + 1))
-    assert model.mtp[0].router_replay.router_replay_action is None
+    assert mtp_router.router_replay_action is None
+
+
+@pytest.mark.parametrize("route_count", [0, 3, 6])
+def test_invalid_route_layer_count_is_rejected(orphans_then_model, tf_config, route_count):
+    _, model = orphans_then_model
+    routes = torch.zeros(1, NUM_TOKENS, route_count, TOPK, dtype=torch.int64)
+
+    with pytest.raises(ValueError, match="route layers"):
+        router_replay_utils.set_router_replay_data(routes, None, tf_config, vp_rank=0, model=model)

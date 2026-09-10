@@ -31,7 +31,11 @@ from verl.utils.device import get_device_name, is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack, resolve_weight_name
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.utils.vllm.vllm_quant_utils import apply_vllm_quant_patches, is_fp8_model, load_quanted_weights
-from verl.workers.rollout.vllm_rollout.weight_update_utils import apply_buffer_updates, split_buffer_updates
+from verl.workers.rollout.vllm_rollout.weight_update_utils import (
+    apply_buffer_updates,
+    refresh_weight_caches,
+    split_buffer_updates,
+)
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -344,6 +348,12 @@ class vLLMColocateWorkerExtension:
 
             for model, model_config in self._iter_all_models_with_config():
                 process_weights_after_loading(model, model_config, self.device)
+
+        if not (peft_config and base_sync_done):
+            for model in self._iter_all_models():
+                refreshed = refresh_weight_caches(model)
+                if refreshed:
+                    logger.info("Refreshed %d weight caches", refreshed)
 
     def _apply_buffer_updates_all_models(self, buffer_updates, main_named_buffers):
         """Apply buffer updates to the main model and any synced MTP drafter.
