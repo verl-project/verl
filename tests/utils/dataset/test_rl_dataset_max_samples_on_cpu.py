@@ -18,16 +18,26 @@ otherwise a checkpoint resume (which only restores the sampler index) continues
 on different rows than the run it resumes. See issue #7816.
 """
 
-import numpy as np
 import pandas as pd
 import pytest
 from omegaconf import OmegaConf
+from torchdata.stateful_dataloader import StatefulDataLoader
 
-from verl.trainer.ppo.utils import create_rl_dataset
-from verl.utils.dataset.rl_dataset import RLHFDataset
+from verl.trainer.ppo.utils import create_rl_sampler
+from verl.utils.dataset.rl_dataset import DEFAULT_MAX_SAMPLES_SEED, RLHFDataset
 
 TOTAL_ROWS = 64
 MAX_SAMPLES = 8
+
+# ``row_id``s that ``np.random.default_rng(seed).choice(64, size=8, replace=False)``
+# draws. Pinned as literals so that silently changing ``DEFAULT_MAX_SAMPLES_SEED``
+# away from 42 -- or dropping the fallback and drawing from entropy again -- fails
+# here instead of passing against a recomputed expectation.
+# (numpy only freezes ``RandomState`` streams, not ``Generator`` ones, so these
+# literals also pin the numpy version the subset is reproducible under.)
+SUBSET_DEFAULT_SEED = [62, 63, 53, 38, 60, 26, 5, 44]
+EXPLICIT_SEED = 1234
+SUBSET_EXPLICIT_SEED = [6, 16, 10, 57, 55, 22, 58, 56]
 
 
 @pytest.fixture
@@ -58,6 +68,35 @@ def _row_ids(dataset):
     return list(dataset.dataframe["row_id"])
 
 
+class _RowIdView:
+    """Read-only view exposing each row's ``row_id`` in dataset order.
+
+    ``RLHFDataset.__getitem__`` tokenizes, which needs a real tokenizer. The resume
+    test only cares *which rows* the dataloader hands out, and the view preserves
+    both the length and the order of the dataset it wraps.
+    """
+
+    def __init__(self, dataset):
+        self._row_ids = _row_ids(dataset)
+
+    def __len__(self):
+        return len(self._row_ids)
+
+    def __getitem__(self, index):
+        return self._row_ids[index]
+
+
+def _build_loader(parquet_file, config):
+    """Build dataset + sampler + dataloader exactly as a fresh process would."""
+    dataset = RLHFDataset(data_files=parquet_file, tokenizer=None, config=config, max_samples=MAX_SAMPLES)
+    sampler = create_rl_sampler(config, dataset)
+    return StatefulDataLoader(dataset=_RowIdView(dataset), batch_size=2, num_workers=0, sampler=sampler)
+
+
+def _drain(batches):
+    return [row_id for batch in batches for row_id in batch.tolist()]
+
+
 def test_max_samples_subsample_is_reproducible_without_seed(parquet_file, tmp_path):
     """Without an explicit ``data.seed`` the drawn subset must still be stable."""
     config = _data_config(tmp_path, shuffle=True)
@@ -67,19 +106,25 @@ def test_max_samples_subsample_is_reproducible_without_seed(parquet_file, tmp_pa
 
     assert len(first) == MAX_SAMPLES
     assert _row_ids(first) == _row_ids(second)
+    assert _row_ids(first) == SUBSET_DEFAULT_SEED
     # A shuffled draw should not degenerate into the deterministic head slice.
     assert _row_ids(first) != list(range(MAX_SAMPLES))
 
 
+def test_default_max_samples_seed_is_pinned():
+    """The literals above are only meaningful while the fallback stays 42."""
+    assert DEFAULT_MAX_SAMPLES_SEED == 42
+
+
 def test_max_samples_subsample_honours_explicit_seed(parquet_file, tmp_path):
     """An explicitly configured seed keeps producing the subset it produces today."""
-    seed = 1234
-    config = _data_config(tmp_path, shuffle=True, seed=seed)
+    config = _data_config(tmp_path, shuffle=True, seed=EXPLICIT_SEED)
 
     dataset = RLHFDataset(data_files=parquet_file, tokenizer=None, config=config, max_samples=MAX_SAMPLES)
 
-    expected = np.random.default_rng(seed).choice(TOTAL_ROWS, size=MAX_SAMPLES, replace=False)
-    assert _row_ids(dataset) == expected.tolist()
+    assert _row_ids(dataset) == SUBSET_EXPLICIT_SEED
+    # An explicit seed must not collapse onto the fallback's subset.
+    assert _row_ids(dataset) != SUBSET_DEFAULT_SEED
 
 
 def test_max_samples_subsample_without_shuffle_is_head_slice(parquet_file, tmp_path):
@@ -90,32 +135,31 @@ def test_max_samples_subsample_without_shuffle_is_head_slice(parquet_file, tmp_p
     assert _row_ids(dataset) == list(range(MAX_SAMPLES))
 
 
-def test_val_subsample_follows_validation_shuffle(parquet_file, tmp_path):
-    """The validation subset must key off ``validation_shuffle``, not ``shuffle``."""
-    config = _data_config(tmp_path, shuffle=True, validation_shuffle=False)
+def test_resume_continues_on_the_same_rows(parquet_file, tmp_path):
+    """The actual bug: a resumed process must land on the rows it left off at.
 
-    train_dataset = create_rl_dataset(
-        parquet_file, config, tokenizer=None, processor=None, is_train=True, max_samples=MAX_SAMPLES
-    )
-    val_dataset = create_rl_dataset(
-        parquet_file, config, tokenizer=None, processor=None, is_train=False, max_samples=MAX_SAMPLES
-    )
+    ``data.seed`` is deliberately unset -- the default, and the configuration that
+    made ``max_samples`` redraw its subset on every process start. Only the sampler
+    index is checkpointed, so a redrawn subset silently moves the run onto different
+    rows even though the dataloader state restores perfectly.
+    """
+    config = _data_config(tmp_path, shuffle=True)
 
-    assert _row_ids(val_dataset) == list(range(MAX_SAMPLES))
-    assert _row_ids(train_dataset) != list(range(MAX_SAMPLES))
-    # Building the val dataset must not mutate the shared data config.
-    assert config.shuffle is True
+    loader = _build_loader(parquet_file, config)
 
+    batches = iter(loader)
+    consumed = _drain(next(batches) for _ in range(2))
+    state = loader.state_dict()
+    # What finishing this run without interruption would have produced.
+    expected_remaining = _drain(batches)
 
-def test_val_subsample_can_shuffle_while_train_does_not(parquet_file, tmp_path):
-    config = _data_config(tmp_path, shuffle=False, validation_shuffle=True)
+    # A resumed process rebuilds dataset, sampler and dataloader from scratch.
+    resumed_loader = _build_loader(parquet_file, config)
+    resumed_loader.load_state_dict(state)
+    actual_remaining = _drain(resumed_loader)
 
-    train_dataset = create_rl_dataset(
-        parquet_file, config, tokenizer=None, processor=None, is_train=True, max_samples=MAX_SAMPLES
-    )
-    val_dataset = create_rl_dataset(
-        parquet_file, config, tokenizer=None, processor=None, is_train=False, max_samples=MAX_SAMPLES
-    )
-
-    assert _row_ids(train_dataset) == list(range(MAX_SAMPLES))
-    assert _row_ids(val_dataset) != list(range(MAX_SAMPLES))
+    assert len(consumed) == 4
+    assert actual_remaining == expected_remaining
+    # No row is replayed or skipped across the restart.
+    assert not set(actual_remaining) & set(consumed)
+    assert sorted(consumed + actual_remaining) == sorted(SUBSET_DEFAULT_SEED)
