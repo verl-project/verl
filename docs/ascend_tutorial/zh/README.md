@@ -5,6 +5,19 @@
 
 Last updated: 05/14/2026.
 
+## Qwen3-VL Megatron OPD dependency
+
+Qwen3-VL Megatron OPD was validated with the `mbridge` revision containing the
+`qwen3_vl` bridge. Install it after starting the NPU image:
+
+```bash
+pip install --no-deps \
+  'git+https://github.com/ISEEKYAN/mbridge.git@a61943d7fcb34a190471cfeb0a0eb8bbda621ddf'
+```
+
+See the [Megatron + vLLM Ascend OPD guide](./model_support/examples/opd_megatron_vllm_ascend.md)
+for the validated dependency matrix and runtime checks.
+
 ## 目录结构
 
 ```
