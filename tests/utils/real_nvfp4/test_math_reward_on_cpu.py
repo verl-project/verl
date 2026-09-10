@@ -19,6 +19,7 @@ from omegaconf import OmegaConf
 
 from examples.real_nvfp4.math_reward import compute_score
 from examples.real_nvfp4.slime_math_dataset import SlimeMathDataset
+from verl.trainer.ppo.metric_utils import process_validation_metrics
 from verl.utils.dataset.rl_dataset import RLHFDataset
 
 
@@ -34,6 +35,16 @@ def test_training_still_requires_minerva_format(monkeypatch):
     monkeypatch.setenv("VERL_MATH_DAPO_STRICT_MINERVA", "1")
     assert not compute_score("math_dapo", r"Thus the result is \boxed{73}.", "73")["acc"]
     assert compute_score("math_dapo", r"Answer: \boxed{73}", "73")["acc"]
+
+
+@pytest.mark.parametrize("responses", [["No answer."], ["No answer.", r"\boxed{73}"]])
+def test_aime_missing_prediction_survives_validation_aggregation(responses):
+    results = [compute_score("aime_boxed", response, "73") for response in responses]
+    assert results[0] == {"score": -1.0, "acc": False, "pred": "[INVALID]"}
+    infos = {key: [result[key] for result in results] for key in results[0]}
+    metrics = process_validation_metrics(["aime_boxed"] * len(results), ["prompt"] * len(results), infos)
+    assert metrics["aime_boxed"]["acc"][f"mean@{len(results)}"] == sum(r["acc"] for r in results) / len(results)
+    assert "pred" not in metrics["aime_boxed"]
 
 
 def test_dataset_routes_explicit_files_and_preserves_prompts(tmp_path, monkeypatch):

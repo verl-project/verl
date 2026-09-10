@@ -20,7 +20,13 @@ from verl.utils.reward_score.math_dapo import compute_score as compute_math_scor
 
 def compute_score(data_source, solution_str, ground_truth, extra_info=None, **kwargs):
     if data_source == "aime_boxed":
-        return compute_math_score(solution_str, ground_truth, strict_box_verify=True)
+        result = compute_math_score(solution_str, ground_truth, strict_box_verify=True)
+        # Validation treats string predictions as labels, but attempts numeric
+        # aggregation for None. Use the same invalid label as Minerva without
+        # changing the incorrect answer's score or accuracy.
+        if result["pred"] is None:
+            result["pred"] = "[INVALID]"
+        return result
     return default_compute_score(
         data_source=data_source,
         solution_str=solution_str,
