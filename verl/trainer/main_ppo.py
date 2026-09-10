@@ -21,7 +21,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
-from verl.utils.config import validate_config
+from verl.utils.config import resolve_transfer_queue_config, validate_config
 from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.logging_utils import configure_verl_logging
@@ -141,6 +141,7 @@ class TaskRunnerV1:
         trainer_cls = get_trainer_cls(config.trainer.v1.trainer_mode)
 
         config.transfer_queue.enable = True
+        resolve_transfer_queue_config(config)
         pprint(OmegaConf.to_container(config, resolve=True))
         OmegaConf.resolve(config)
         self.config = config

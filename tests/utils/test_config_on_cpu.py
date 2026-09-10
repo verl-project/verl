@@ -19,6 +19,7 @@ from omegaconf import OmegaConf
 
 from verl.base_config import BaseConfig
 from verl.utils import omega_conf_to_dataclass
+from verl.utils.config import resolve_transfer_queue_config
 
 
 @dataclass
@@ -91,6 +92,34 @@ class TestPrintCfgCommand(unittest.TestCase):
         # Verify the output contains expected config information
         self.assertIn("critic", result.stdout)
         self.assertIn("profiler", result.stdout)
+
+
+class TestTransferQueueConfigOnCPU(unittest.TestCase):
+    @staticmethod
+    def _config(nnodes, num_data_storage_units=None):
+        return OmegaConf.create(
+            {
+                "trainer": {"nnodes": nnodes},
+                "transfer_queue": {"backend": {"SimpleStorage": {"num_data_storage_units": num_data_storage_units}}},
+            }
+        )
+
+    def test_storage_units_default_scales_with_nodes(self):
+        single_node_config = self._config(nnodes=1)
+        multi_node_config = self._config(nnodes=4)
+
+        resolve_transfer_queue_config(single_node_config)
+        resolve_transfer_queue_config(multi_node_config)
+
+        self.assertEqual(single_node_config.transfer_queue.backend.SimpleStorage.num_data_storage_units, 2)
+        self.assertEqual(multi_node_config.transfer_queue.backend.SimpleStorage.num_data_storage_units, 8)
+
+    def test_storage_units_explicit_override_is_preserved(self):
+        config = self._config(nnodes=4, num_data_storage_units=3)
+
+        resolve_transfer_queue_config(config)
+
+        self.assertEqual(config.transfer_queue.backend.SimpleStorage.num_data_storage_units, 3)
 
 
 if __name__ == "__main__":
