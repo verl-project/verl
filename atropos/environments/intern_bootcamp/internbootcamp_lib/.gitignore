@@ -1,0 +1,46 @@
+
+## outputs
+data_generator_outputs/
+bootcamp_generator_outputs/
+bootcamp_generation_outputs/
+examples/eval/output/
+
+## configs
+
+
+
+## venv
+venv/
+.venv/
+
+## vscode
+.vscode/
+
+## pycache
+**/__pycache__/*
+internbootcamp.egg-info/
+
+
+# unit test 
+whiteboard.py
+wbs/
+test.py
+unittest_logs
+autoverifier
+autoverifier/outputs
+test_bootcamp.py
+test_bootcamp_*.py
+fig.png
+
+test*.py
+
+
+# training
+examples/xpuyu_usage/ckpts
+examples/xpuyu_usage/bootcamp_rl/launch_configs
+examples/xpuyu_usage/bootcamp_rl/launch_scripts
+examples/xpuyu_usage/bootcamp_rl/configs
+examples/unittests/output/
+test.*
+test*
+wandb

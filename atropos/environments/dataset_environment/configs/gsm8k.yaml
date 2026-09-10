@@ -1,0 +1,73 @@
+tokenizer_name: "NousResearch/DeepHermes-3-Llama-3-3B-Preview"
+group_size: 8
+use_wandb: true
+max_num_workers: 256
+max_eval_workers: 16
+steps_per_eval: 100
+batch_size: 1024
+max_batches_offpolicy: 3
+total_steps: 1000
+rollout_server_url: "http://localhost:8000"
+
+use_local_agents: true
+
+dataset:
+  dataset_name: "gsm8k"
+  dataset_config: "main"
+  split: "train"
+
+  prompt_field: "question"
+  answer_field: "answer"
+
+  system_prompt: "You are a deep thinking AI, you may use extremely long chains of thought to deeply consider the problem and deliberate with yourself via systematic reasoning processes to help come to a correct solution prior to answering. You should enclose your thoughts and internal monologue inside <think> </think> tags, and then provide your solution or response to the problem."
+  shuffle_dataset: true
+  max_generations_per_prompt: 1
+  include_messages_in_scoring: false
+
+  # New configurable reward functions
+  reward_functions:
+    - type: "r1"
+      weight: 1.5
+      params:
+        format_weight: 0.5
+        accuracy_weight: 1.0
+    - type: "cosine_scaled"
+      weight: 0.8
+      params:
+        scale_factor: 1.2
+        min_reward: -1.0
+        max_reward: 1.0
+    - type: "accuracy"
+      weight: 2.0
+      params:
+        split_on_think_tag: true
+    - type: "format"
+      weight: 0.7
+      params:
+        preferred_tags: ["think", "reasoning"]
+        require_all_tags: false
+    - type: "reasoning_steps"
+      weight: 1.0
+      params:
+        min_steps: 3
+    - type: "repetition_penalty"
+      weight: 0.5
+      params:
+        threshold: 0.1
+
+  # Legacy format still supported for backward compatibility
+  # reward_funcs:
+  #   - "r1_reward"
+  #   - "cosine_scaled_reward"
+  #   - "accuracy_reward"
+  #   - "format_reward"
+  #   - "reasoning_steps_reward"
+  #   - "repetition_penalty_reward"
+
+  max_tokens: 16000
+  length_warmup_steps: 100
+  min_tokens: 2048
+
+  eval_dataset_name: "gsm8k"
+  eval_dataset_config: "main"
+  eval_split: "test"

@@ -1,0 +1,15 @@
+
+task:
+  - mnist
+  - classification_small
+  - tabular
+max_epochs: 1
+optimizer:
+  - name: my_sgd_optimizer
+engine:
+  seed: [42]
+  data_dir: examples/data
+  output_dir: outputs/experiment_my_sgd_optimizer
+  train: true
+  test: true
+  plot: false

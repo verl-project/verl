@@ -1,0 +1,21 @@
+# Environment configuration
+env:
+  group_size: 4
+  max_batches_offpolicy: 3
+  tokenizer_name: "Qwen/Qwen2.5-1.5B-Instruct"
+  use_wandb: true
+  rollout_server_url: "http://localhost:8000"
+  wandb_name: "example_env"
+  ensure_scores_are_not_same: true
+  data_path_to_save_groups: null
+  include_messages: true # if data_path_to_save_groups is set this will add the messages to the saved .jsonl
+
+# OpenAI server configurations
+openai:
+  - model_name: "Qwen/Qwen2.5-1.5B-Instruct"
+    base_url: "http://localhost:9001/v1"
+    api_key: "x"
+    weight: 1.0
+
+slurm: false
+testing: false

@@ -1,0 +1,30 @@
+# pretty names for the plot
+names:
+  # optimizer
+  adamw_baseline: AdamW
+  sgd_baseline: SGD
+  adamcpr: AdamCPR
+  adamcpr_fast: AdamCPR
+  sgd_stepwise: SGD (stepwise)
+  # metric
+  test_acc: Test Accuracy
+  test_loss: Test Loss
+  test_mIoU: Test mean Intersection over Union
+  test_mAcc: Test mean Accuracy
+  test_rmse: Test Root Mean Square Error (RMSE)
+  test_rocauc: Test ROC-AUC
+  # parameter
+  learning_rate: Learning Rate
+  weight_decay: Weight Decay
+  kappa_init_param: Kappa Init Param
+  # tasks
+  classification: classification
+  classification_small: classification_small
+  detection: detection
+  graph: graph
+  graph_tiny: graph_tiny
+  mnist: mnist
+  segmentation: segmentation
+  tabular: tabular
+  template: template
+  translation: translation

@@ -1,0 +1,3 @@
+[submodule "environments/intern_bootcamp/internbootcamp_lib"]
+	path = environments/intern_bootcamp/internbootcamp_lib
+	url = https://github.com/InternLM/InternBootcamp.git
