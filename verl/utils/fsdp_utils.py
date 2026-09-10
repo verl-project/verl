@@ -512,6 +512,14 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
     options = StateDictOptions(full_state_dict=True, cpu_offload=cpu_offload, broadcast_from_rank0=True)
     set_model_state_dict(model, full_state, options=options)
 
+    # `to_empty()` gives every parameter fresh storage, so a tied lm_head stops
+    # aliasing the input embedding. Left alone the model still trains and still
+    # converges -- it just silently trains untied, and the embedding only receives
+    # the input-side half of its gradient. Re-tie so the broadcast ranks match the
+    # rank-0 module they were built from.
+    if getattr(getattr(model, "config", None), "tie_word_embeddings", False) and hasattr(model, "tie_weights"):
+        model.tie_weights()
+
     # rotary_emb is not in state_dict, so we need to broadcast it manually
     # Sort by name to ensure deterministic order across ranks. FSDP2 can return
     # named_buffers() in different order on different ranks. Gemma4 has heterogeneous
