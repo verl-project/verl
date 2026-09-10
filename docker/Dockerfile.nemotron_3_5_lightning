@@ -1,0 +1,126 @@
+# Public reference reconstruction of the validation-critical dependency pins
+# for Nemotron 3.5 Lightning SFT and GRPO. See PR #7192 for the qualification
+# steps and differences from the hardware-tested image.
+
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.06-py3
+FROM ${BASE_IMAGE}
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ARG VERL_COMMIT=unknown
+ARG TRANSFORMER_ENGINE_COMMIT=e7c550c5f80636cf841a8204b1d6f85a5f3f28b7
+ARG MEGATRON_BRIDGE_COMMIT=c93251151adeeadbae3ff2a2bf5ee7a1c34cff01
+ARG MCORE_COMMIT=cd4afffa648426a959dc7cb1e24b5ce7d0c3ff54
+# Exact commit tagged as v0.27.1; keep the SHA for immutable rebuilds.
+ARG VLLM_COMMIT=6e448d0ea9bf3d88d898b65449ca6dc2aec170ac
+ARG TRANSFORMERS_VERSION=5.10.4
+ARG RAY_VERSION=2.57.0
+ARG WANDB_VERSION=0.27.2
+ARG OPENTELEMETRY_VERSION=1.43.0
+ARG OPENTELEMETRY_SEMCONV_VERSION=0.64b0
+ARG TRANSFER_QUEUE_VERSION=0.1.8
+ARG TENSORDICT_VERSION=0.10.0
+ARG CAUSAL_CONV1D_VERSION=1.6.2.post1
+ARG MAMBA_SSM_VERSION=2.3.2.post1
+ARG MAX_JOBS=16
+ARG TORCH_CUDA_ARCH_LIST=9.0
+
+LABEL org.opencontainers.image.source="https://github.com/verl-project/verl" \
+      org.opencontainers.image.revision="${VERL_COMMIT}" \
+      org.opencontainers.image.description="verl Nemotron 3.5 Lightning SFT and GRPO environment"
+
+# NGC images set /etc/pip/constraint.txt globally. This stack intentionally
+# replaces several base packages, so use an explicit empty constraint file and
+# pin the validation-critical versions below.
+RUN touch /opt/verl-empty-constraints.txt
+
+ENV MAX_JOBS=${MAX_JOBS} \
+    NVTE_CUDA_ARCHS=90 \
+    PIP_CONSTRAINT=/opt/verl-empty-constraints.txt \
+    PIP_NO_CACHE_DIR=1 \
+    TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
+    VLLM_TARGET_DEVICE=cuda
+
+RUN test "${VERL_COMMIT}" != unknown
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        git \
+        libibverbs-dev \
+        libnuma-dev \
+        librdmacm-dev \
+        ninja-build && \
+    rm -rf /var/lib/apt/lists/*
+
+# Fail closed if the public base tag moves to a different Python/PyTorch build.
+RUN python -c 'import sys, torch; assert sys.version_info[:2] == (3, 12), sys.version; assert torch.__version__ == "2.13.0a0+8145d630e8.nv26.06", torch.__version__'
+
+RUN python -m pip uninstall -y \
+        transformer-engine \
+        transformer-engine-cu13 \
+        transformer-engine-torch || true
+
+RUN git clone https://github.com/NVIDIA/TransformerEngine.git /opt/TransformerEngine && \
+    git -C /opt/TransformerEngine checkout --detach "${TRANSFORMER_ENGINE_COMMIT}" && \
+    git -C /opt/TransformerEngine submodule update --init --recursive && \
+    NVTE_FRAMEWORK=pytorch NVTE_NO_LOCAL_VERSION=1 NVTE_BUILD_THREADS_PER_JOB=4 \
+        python -m pip install --no-deps --no-build-isolation /opt/TransformerEngine
+
+RUN python -m pip uninstall -y megatron-bridge megatron-core vllm || true
+
+# Keep Bridge as an immutable source tree on PYTHONPATH. Installing the full
+# Bridge dependency set would pull unrelated multimodal and development extras.
+RUN git clone https://github.com/NVIDIA-NeMo/Megatron-Bridge.git /opt/Megatron-Bridge && \
+    git -C /opt/Megatron-Bridge checkout --detach "${MEGATRON_BRIDGE_COMMIT}" && \
+    git -C /opt/Megatron-Bridge submodule update --init --recursive && \
+    test "$(git -C /opt/Megatron-Bridge/3rdparty/Megatron-LM rev-parse HEAD)" = "${MCORE_COMMIT}" && \
+    python -m pip install --no-deps --no-build-isolation \
+        /opt/Megatron-Bridge/3rdparty/Megatron-LM
+
+# Build vLLM against the NVIDIA PyTorch/CUDA stack from the base image. The
+# helper removes vLLM's public-PyTorch pins while retaining its other runtime
+# and build requirements.
+RUN git clone https://github.com/vllm-project/vllm.git /opt/vllm && \
+    git -C /opt/vllm checkout --detach "${VLLM_COMMIT}" && \
+    cd /opt/vllm && \
+    python use_existing_torch.py && \
+    python -m pip install -r requirements/cuda.txt && \
+    python -m pip install -r requirements/build/cuda.txt && \
+    python -m pip install --no-build-isolation .
+
+RUN CAUSAL_CONV1D_FORCE_BUILD=TRUE \
+        python -m pip install --no-build-isolation \
+        "causal-conv1d==${CAUSAL_CONV1D_VERSION}" && \
+    MAMBA_FORCE_BUILD=TRUE \
+        python -m pip install --no-build-isolation \
+        "mamba-ssm==${MAMBA_SSM_VERSION}"
+
+WORKDIR /workspace/verl
+
+# Copy only public runtime inputs. In particular, do not copy .git, ignored
+# outputs, cluster logs, credentials, or other build-host state.
+COPY pyproject.toml setup.py README.md LICENSE Notice.txt ./
+COPY verl ./verl
+COPY examples ./examples
+
+RUN python -m pip install \
+        "ray[default]==${RAY_VERSION}" \
+        "tensordict==${TENSORDICT_VERSION}" \
+        "TransferQueue==${TRANSFER_QUEUE_VERSION}" \
+        "transformers==${TRANSFORMERS_VERSION}" \
+        "wandb==${WANDB_VERSION}" \
+        "opentelemetry-api==${OPENTELEMETRY_VERSION}" \
+        "opentelemetry-sdk==${OPENTELEMETRY_VERSION}" \
+        "opentelemetry-semantic-conventions==${OPENTELEMETRY_SEMCONV_VERSION}" \
+        "opentelemetry-exporter-otlp==${OPENTELEMETRY_VERSION}" \
+        /workspace/verl && \
+    python -m pip install --no-deps -e /workspace/verl && \
+    python -m pip check
+
+ENV PYTHONPATH=/workspace/verl:/opt/Megatron-Bridge/src:/opt/Megatron-Bridge/3rdparty/Megatron-LM
+
+RUN python -c 'import causal_conv1d, codetiming, importlib.metadata, mamba_ssm, megatron.bridge, megatron.core, ray, tensordict, torch, transfer_queue, transformer_engine, transformers, verl, vllm, wandb; from megatron.core.ssm import mamba_mixer as mm; from packaging.version import Version; assert torch.__version__ == "2.13.0a0+8145d630e8.nv26.06"; assert transformer_engine.__version__ == "2.18.0"; assert transformers.__version__ == "5.10.4"; assert ray.__version__ == "2.57.0"; assert tensordict.__version__ == "0.10.0"; assert wandb.__version__ == "0.27.2"; assert importlib.metadata.version("opentelemetry-api") == "1.43.0"; assert importlib.metadata.version("opentelemetry-sdk") == "1.43.0"; assert Version(vllm.__version__).base_version == "0.27.1"; assert mm.HAVE_MAMBA_SSM; assert mm.causal_conv1d_fn is not None; print({"torch": torch.__version__, "transformer_engine": transformer_engine.__version__, "transformers": transformers.__version__, "vllm": vllm.__version__, "ray": ray.__version__, "wandb": wandb.__version__, "opentelemetry": importlib.metadata.version("opentelemetry-api")})'
+
+CMD ["bash"]

@@ -21,14 +21,19 @@ from pathlib import Path
 import pytest
 import torch
 
-import verl.utils.device as device_module
 
-
-def _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size: int = 4, cp_size: int = 1, cp_rank: int = 0):
+def _load_mcore_util_with_stubbed_megatron(
+    monkeypatch,
+    tp_size: int = 4,
+    cp_size: int = 1,
+    cp_rank: int = 0,
+):
     megatron = types.ModuleType("megatron")
     core = types.ModuleType("megatron.core")
     parallel_state = types.ModuleType("megatron.core.parallel_state")
     packed_seq_params = types.ModuleType("megatron.core.packed_seq_params")
+    device_module = types.ModuleType("verl.utils.device")
+    model_module = types.ModuleType("verl.utils.model")
 
     parallel_state.get_context_parallel_world_size = lambda: cp_size
     parallel_state.get_context_parallel_rank = lambda: cp_rank
@@ -40,8 +45,28 @@ def _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size: int = 4, cp_siz
     class PackedSeqParams:
         def __init__(self, **kwargs):
             self.__dict__.update(kwargs)
+            self.seq_idx = None
+            cu_seqlens = kwargs.get("cu_seqlens_q_padded")
+            if cu_seqlens is None:
+                cu_seqlens = kwargs.get("cu_seqlens_q")
+            total_tokens = kwargs.get("total_tokens")
+            if isinstance(cu_seqlens, torch.Tensor) and total_tokens is not None:
+                cu_seqlens_with_total = torch.cat(
+                    [
+                        cu_seqlens,
+                        torch.tensor([total_tokens], dtype=cu_seqlens.dtype, device=cu_seqlens.device),
+                    ]
+                )
+                seq_lengths = (cu_seqlens_with_total[1:] - cu_seqlens_with_total[:-1]).clamp(min=0)
+                self.seq_idx = (
+                    torch.repeat_interleave(torch.arange(seq_lengths.numel(), device=cu_seqlens.device), seq_lengths)
+                    .to(torch.int32)
+                    .unsqueeze(0)
+                )
 
     packed_seq_params.PackedSeqParams = PackedSeqParams
+    device_module.is_npu_available = False
+    model_module.CausalLMOutputForPPO = object
 
     core.parallel_state = parallel_state
     megatron.core = core
@@ -49,12 +74,18 @@ def _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size: int = 4, cp_siz
     monkeypatch.setitem(sys.modules, "megatron.core", core)
     monkeypatch.setitem(sys.modules, "megatron.core.parallel_state", parallel_state)
     monkeypatch.setitem(sys.modules, "megatron.core.packed_seq_params", packed_seq_params)
-    monkeypatch.setattr(device_module, "is_npu_available", False)
+    monkeypatch.setitem(sys.modules, "verl.utils.device", device_module)
+    monkeypatch.setitem(sys.modules, "verl.utils.model", model_module)
 
     util_path = Path(__file__).parents[2] / "verl" / "models" / "mcore" / "util.py"
     spec = importlib.util.spec_from_file_location("mcore_util_regression", util_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    # transformers normally installs ``logging.Logger.warning_once`` during a
+    # full verl import. This isolated source loader intentionally stubs that
+    # dependency, so provide the equivalent logger surface for padding tests.
+    if not hasattr(module.logger, "warning_once"):
+        module.logger.warning_once = module.logger.warning
     return module
 
 
@@ -151,10 +182,12 @@ def test_preprocess_thd_engine_pads_to_minimum_rows(monkeypatch):
     local_ids, packed_seq_params, local_positions = mcore_util.preprocess_thd_engine(
         input_ids,
         min_local_rows=128,
+        include_total_tokens=True,
     )
 
     assert local_ids.shape == (1, 128)
     assert packed_seq_params.cu_seqlens_q_padded.tolist() == [0, 128]
+    assert packed_seq_params.total_tokens == 128
     torch.testing.assert_close(local_ids[0, :100], torch.arange(100, dtype=torch.long))
     torch.testing.assert_close(local_ids[0, 100:], torch.zeros(28, dtype=torch.long))
     torch.testing.assert_close(local_positions[0, :100], torch.arange(100, dtype=torch.long))
@@ -322,3 +355,61 @@ def test_preprocess_thd_engine_pads_short_topk_sequence_dimension(monkeypatch):
     torch.testing.assert_close(packed, torch.zeros_like(packed))
     torch.testing.assert_close(position_ids, torch.tensor([[1, 0]], dtype=torch.long))
     assert packed_seq_params.local_cp_size == 2
+
+
+def test_preprocess_thd_engine_builds_packed_sequence_indices(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1)
+    input_ids = _nested_tensor(
+        [
+            torch.tensor([11, 12, 13], dtype=torch.long),
+            torch.tensor([21, 22], dtype=torch.long),
+        ]
+    )
+
+    local_ids, packed_seq_params, _ = mcore_util.preprocess_thd_engine(
+        input_ids,
+        include_total_tokens=True,
+    )
+
+    assert local_ids.shape == (1, 5)
+    assert packed_seq_params.total_tokens == 5
+    torch.testing.assert_close(
+        packed_seq_params.seq_idx,
+        torch.tensor([[0, 0, 0, 1, 1]], dtype=torch.int32),
+    )
+
+
+def test_preprocess_thd_engine_builds_global_sequence_indices_with_context_parallelism(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1, cp_size=2)
+    input_ids = _nested_tensor(
+        [
+            torch.tensor([11, 12, 13, 14], dtype=torch.long),
+            torch.tensor([21, 22, 23, 24, 25, 26, 27, 28], dtype=torch.long),
+        ]
+    )
+
+    local_ids, packed_seq_params, _ = mcore_util.preprocess_thd_engine(
+        input_ids,
+        include_total_tokens=True,
+    )
+
+    assert local_ids.shape == (1, 6)
+    assert packed_seq_params.cu_seqlens_q_padded.tolist() == [0, 4, 12]
+    torch.testing.assert_close(
+        local_ids,
+        torch.tensor([[11, 14, 21, 22, 27, 28]], dtype=torch.long),
+    )
+    torch.testing.assert_close(
+        packed_seq_params.seq_idx,
+        torch.tensor([[0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1]], dtype=torch.int32),
+    )
+
+
+def test_preprocess_thd_engine_omits_mamba_metadata_by_default(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=1)
+    input_ids = _nested_tensor([torch.tensor([11, 12, 13], dtype=torch.long)])
+
+    _, packed_seq_params, _ = mcore_util.preprocess_thd_engine(input_ids)
+
+    assert getattr(packed_seq_params, "total_tokens", None) is None
+    assert packed_seq_params.seq_idx is None

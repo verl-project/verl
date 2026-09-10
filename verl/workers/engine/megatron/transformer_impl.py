@@ -374,6 +374,14 @@ class MegatronEngine(BaseEngine):
             # the provider here rather than via override_transformer_config.
             if self.is_value_model and hasattr(provider, "share_embeddings_and_output_weights"):
                 provider_overrides["share_embeddings_and_output_weights"] = False
+
+            from verl.models.mcore.mtp_support import configure_native_hybrid_mtp
+
+            configure_native_hybrid_mtp(
+                provider,
+                self.model_config.mtp,
+                provider_overrides,
+            )
             if (
                 self.model_config.hf_config.model_type == "deepseek_v4"
                 and not self.model_config.mtp.enable

@@ -21,6 +21,7 @@ from torch.nested._internal.nested_tensor import NestedTensor
 from verl.utils.megatron_utils import unwrap_model
 from verl.workers.config import MtpConfig
 
+from .mtp_support import is_native_hybrid_model
 from .util import (
     build_vlm_attn_mask_bshd,
     build_vlm_attn_mask_thd,
@@ -179,7 +180,7 @@ def model_forward_gen(vision_model: bool = False):
 
 
 def _convert_to_nested_tensor(v, input_ids_lengths):
-    """Convert regular tensor to NestedTensor, slicing according to input_ids_lengths.
+    """Align labels to jagged full-input lengths, trimming dense right-padding.
 
     Args:
         v: Tensor to convert, shape [batch, seq_len]
@@ -203,7 +204,10 @@ def _convert_to_nested_tensor(v, input_ids_lengths):
         if vi.shape[0] > target_len:
             vi = vi[:target_len]
         elif vi.shape[0] < target_len:
-            vi = torch.cat([vi, torch.ones(target_len - vi.shape[0], dtype=vi.dtype, device=vi.device)])
+            raise ValueError(
+                f"sample {i}: label length {vi.shape[0]} is shorter than input length {target_len}; "
+                "missing labels cannot be inferred"
+            )
         v_split_list.append(vi)
 
     v = torch.nested.nested_tensor(v_split_list, layout=torch.jagged)
@@ -284,6 +288,8 @@ def gptmodel_forward_model_engine(
     assert data_format in ["thd", "bshd"], "data_format must be 'thd' or 'bshd'"
     pre_process = unwrap_model(model).pre_process
     post_process = unwrap_model(model).post_process
+    native_hybrid_model = is_native_hybrid_model(unwrap_model(model))
+    native_hybrid_mtp = mtp_enable_train and native_hybrid_model
 
     fp8 = unwrap_model(model).config.fp8
     use_fp8_padding = fp8 in ["e4m3", "hybrid"]
@@ -307,6 +313,7 @@ def gptmodel_forward_model_engine(
             local_cp_size=local_cp_size,
             pad_to_length_bucket=pad_to_length_bucket,
             cp_layout=cp_layout,
+            include_total_tokens=native_hybrid_model,
         )
         if mtp_loss_normalization_factor is not None:
             packed_seq_params._verl_mtp_loss_normalization_factor = mtp_loss_normalization_factor
@@ -319,25 +326,41 @@ def gptmodel_forward_model_engine(
             input_ids_lengths = input_ids_offsets.diff().tolist()
             response_attention_mask = logits_processor_args.get("response_attention_mask", None)
 
-            for k in ["label", "loss_mask"]:
-                v = logits_processor_args[k]
-                if k == "loss_mask":
-                    v = _build_mtp_loss_mask_nested(v, input_ids_lengths, response_attention_mask)
-                else:
-                    v = _convert_to_nested_tensor(v, input_ids_lengths)
-                logits_processor_args[k] = v
-                args[k] = preprocess_thd_engine(
-                    v,
+            label = _convert_to_nested_tensor(logits_processor_args["label"], input_ids_lengths)
+            loss_mask = _build_mtp_loss_mask_nested(
+                logits_processor_args["loss_mask"],
+                input_ids_lengths,
+                response_attention_mask,
+            )
+            logits_processor_args["label"] = label
+            logits_processor_args["loss_mask"] = loss_mask
+
+            if native_hybrid_mtp:
+                # Native MCore derives MTP targets from input_ids, attaches the
+                # auxiliary loss, and still returns logits when labels is None.
+                model_kwargs["labels"] = None
+                model_kwargs["loss_mask"] = preprocess_thd_engine(
+                    loss_mask,
                     pre_process=True,
-                    need_roll=True,
+                    need_roll=False,
                     use_fp8_padding=use_fp8_padding,
                     local_cp_size=local_cp_size,
                     pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
-                )[0]
-
-            model_kwargs["labels"] = args["label"].contiguous()
-            model_kwargs["loss_mask"] = args["loss_mask"].contiguous()
+                )[0].contiguous()
+            else:
+                for k, v in (("label", label), ("loss_mask", loss_mask)):
+                    args[k] = preprocess_thd_engine(
+                        v,
+                        pre_process=True,
+                        need_roll=True,
+                        use_fp8_padding=use_fp8_padding,
+                        local_cp_size=local_cp_size,
+                        pad_to_length_bucket=pad_to_length_bucket,
+                        cp_layout=cp_layout,
+                    )[0]
+                model_kwargs["labels"] = args["label"].contiguous()
+                model_kwargs["loss_mask"] = args["loss_mask"].contiguous()
 
         if logits_processor_args and "loss_mask" in logits_processor_args:
             logits_processor_args.pop("loss_mask")
@@ -414,28 +437,41 @@ def gptmodel_forward_model_engine(
         )
 
         if mtp_enable_train and post_process:
-            args = {}
             # Use input_ids sequence length to ensure label and loss_mask alignment
             input_ids_offsets = input_ids.offsets()
             input_ids_lengths = input_ids_offsets.diff().tolist()
             response_attention_mask = logits_processor_args.get("response_attention_mask", None)
 
-            for k in ["label", "loss_mask"]:
-                v = logits_processor_args[k]
-                if k == "loss_mask":
-                    v = _build_mtp_loss_mask_nested(v, input_ids_lengths, response_attention_mask)
-                else:
-                    v = _convert_to_nested_tensor(v, input_ids_lengths)
-                logits_processor_args[k] = v
-                args[k] = preprocess_bshd_engine(
-                    v,
+            label = _convert_to_nested_tensor(logits_processor_args["label"], input_ids_lengths)
+            loss_mask = _build_mtp_loss_mask_nested(
+                logits_processor_args["loss_mask"],
+                input_ids_lengths,
+                response_attention_mask,
+            )
+            logits_processor_args["label"] = label
+            logits_processor_args["loss_mask"] = loss_mask
+
+            if native_hybrid_mtp:
+                model_kwargs["labels"] = None
+                model_kwargs["loss_mask"] = preprocess_bshd_engine(
+                    loss_mask,
                     pre_process=True,
-                    need_roll=True,
+                    need_roll=False,
                     use_fp8_padding=use_fp8_padding,
                     forced_max_seqlen=forced_max_seqlen,
-                )[0]
-            model_kwargs["labels"] = args["label"].contiguous()
-            model_kwargs["loss_mask"] = args["loss_mask"].contiguous()
+                )[0].contiguous()
+            else:
+                args = {}
+                for k, v in (("label", label), ("loss_mask", loss_mask)):
+                    args[k] = preprocess_bshd_engine(
+                        v,
+                        pre_process=True,
+                        need_roll=True,
+                        use_fp8_padding=use_fp8_padding,
+                        forced_max_seqlen=forced_max_seqlen,
+                    )[0]
+                model_kwargs["labels"] = args["label"].contiguous()
+                model_kwargs["loss_mask"] = args["loss_mask"].contiguous()
 
         if logits_processor_args and "loss_mask" in logits_processor_args:
             logits_processor_args.pop("loss_mask")
