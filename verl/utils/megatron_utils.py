@@ -1685,11 +1685,25 @@ def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
     except ImportError:
         megatron_FSDP = DDP
 
-    # register some callbacks for megatron training, following https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.0rc7/megatron/training/training.py#L2039-L2057
+    # Shared-expert LoRA weights are EP-replicated; Bridge's finalize wrapper
+    # does a coalesced EP all-reduce after the DP sync (no-op without such
+    # adapters) and removes the broken per-layer fallback hook.
+    finalize_fn = finalize_model_grads
+    try:
+        from megatron.bridge.peft.utils import (
+            enable_expert_parallel_grad_sync_in_finalize,
+            finalize_model_grads_with_expert_adapter_sync,
+        )
+
+        if enable_expert_parallel_grad_sync_in_finalize(model) > 0:
+            finalize_fn = finalize_model_grads_with_expert_adapter_sync
+    except ImportError:
+        pass
+
     for one_model in model:
         config = get_model_config(one_model)
         config.grad_scale_func = optimizer.scale_loss
-        config.finalize_model_grads_func = finalize_model_grads
+        config.finalize_model_grads_func = finalize_fn
 
         overlap_param_gather = getattr(optimizer.config, "overlap_param_gather", False)
         overlap_grad_reduce = getattr(one_model.ddp_config, "overlap_grad_reduce", False)
