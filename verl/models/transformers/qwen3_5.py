@@ -143,7 +143,7 @@ def _prepare_cp_conv_seq_idx(
     return torch.cat((prefix_idx, seq_idx), dim=1)
 
 
-def _packed_causal_conv1d_fallback(
+def _packed_causal_conv1d_loop(
     self,
     mixed_qkv: torch.Tensor,
     cu_seqlens: torch.LongTensor,
@@ -153,6 +153,66 @@ def _packed_causal_conv1d_fallback(
     for (segment,) in _split_packed_args(cu_seqlens, (mixed_qkv,), cu_seqlens_cpu=cu_seqlens_cpu, dim=2):
         outputs.append(F.silu(self.conv1d(segment)[:, :, : segment.shape[-1]]))
     return torch.cat(outputs, dim=-1)
+
+
+def _causal_dwconv_token_major(
+    x: torch.Tensor, seq_idx: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor]
+):
+    """y[t] = silu(b + sum_j w[j] * x[t-(k-1)+j]) on a token-major (T, C) packed stream, taps that
+    reach before the start of t's own segment zeroed. fp32 accumulate, rounded once to x.dtype."""
+    kernel = weight.shape[1]
+    total = x.shape[0]
+    xf = x.float()
+    y = xf * weight[:, kernel - 1]
+    if kernel > 1:
+        xpad = F.pad(xf, (0, 0, kernel - 1, 0))
+        spad = F.pad(seq_idx, (kernel - 1, 0), value=-1)
+        zero = torch.zeros((), dtype=xf.dtype, device=xf.device)
+        for lag in range(1, kernel):
+            x_lag = xpad[kernel - 1 - lag : kernel - 1 - lag + total]
+            same = (spad[kernel - 1 - lag : kernel - 1 - lag + total] == seq_idx).unsqueeze(1)
+            y = y + torch.where(same, x_lag, zero) * weight[:, kernel - 1 - lag]
+    if bias is not None:
+        y = y + bias
+    return F.silu(y).to(x.dtype)
+
+
+_CAUSAL_DWCONV_FN = None
+
+
+def _get_causal_dwconv_fn():
+    """The token-major conv, torch.compile'd once per process (dynamic T); the compiled version fuses the
+    k taps, mask, bias, silu and the dtype casts into one kernel each way."""
+    global _CAUSAL_DWCONV_FN
+    if _CAUSAL_DWCONV_FN is None:
+        _CAUSAL_DWCONV_FN = torch.compile(_causal_dwconv_token_major, dynamic=True)
+    return _CAUSAL_DWCONV_FN
+
+
+def _packed_causal_conv1d_fallback(
+    self,
+    mixed_qkv: torch.Tensor,
+    cu_seqlens: torch.LongTensor,
+    cu_seqlens_cpu: Optional[torch.LongTensor] = None,
+):
+    """Causal depthwise conv over a packed stream as k shifted multiply-adds in token-major layout.
+
+    ``mixed_qkv`` arrives as a ``(1, C, T)`` transpose view of the contiguous ``(1, T, C)``
+    projection output. Instead of materialising the channel-major copy for cuDNN, running the
+    generic depthwise kernel and copying back, the conv is evaluated on the token-major tensor
+    (see :func:`_causal_dwconv_token_major`) and returned as a ``(1, C, T)`` view of a contiguous
+    ``(1, T, C)`` tensor, so the caller's ``transpose(1, 2)`` and the following reshapes are free.
+    Segment ids come from ``cu_seqlens`` on device; no host sync.
+    """
+    if mixed_qkv.shape[0] != 1:
+        return _packed_causal_conv1d_loop(self, mixed_qkv, cu_seqlens, cu_seqlens_cpu)
+    x = mixed_qkv[0].transpose(0, 1)  # (T, C)
+    channels, kernel = x.shape[1], self.conv1d.kernel_size[0]
+    weight = self.conv1d.weight.reshape(channels, kernel).float()  # tap j multiplies x[t-(k-1)+j]
+    bias = self.conv1d.bias.float() if self.conv1d.bias is not None else None
+    seq_idx = _prepare_packed_seq_idx(cu_seqlens, cu_seqlens_cpu)[0]  # (T,) int32
+    y = _get_causal_dwconv_fn()(x, seq_idx, weight, bias)  # (T, C) contiguous
+    return y.transpose(0, 1).unsqueeze(0)  # (1, C, T) view
 
 
 def _packed_chunk_gated_delta_rule(self, query, key, value, g, beta, cu_seqlens, cu_seqlens_cpu, cp_context=None):
@@ -211,7 +271,7 @@ def qwen3_5_gated_delta_net_forward(
     if cu_seqlens is not None:
         if batch_size != 1:
             raise ValueError("Packed Qwen3.5 linear attention expects batch size 1.")
-        total_seq_len = int(cu_seqlens[-1].item())
+        total_seq_len = int((cu_seqlens_cpu if cu_seqlens_cpu is not None else cu_seqlens)[-1].item())
         ulysses_sp_size = get_ulysses_sequence_parallel_world_size()
         if total_seq_len != seq_len:
             if (
@@ -491,13 +551,8 @@ def _get_input_embeds(
         video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
         inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
 
-    if pixel_values is None and pixel_values_videos is None:
-        config = model.config.vision_config
-        patch_dim = config.in_channels * config.temporal_patch_size * config.patch_size**2
-        pixel_values = torch.zeros((16, patch_dim), dtype=inputs_embeds.dtype, device=inputs_embeds.device)
-        image_grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.long, device=inputs_embeds.device)
-        image_embeds = model.visual(pixel_values, grid_thw=image_grid_thw).pooler_output
-        inputs_embeds = inputs_embeds + 0.0 * image_embeds.mean()
+    # Text-only inputs skip the vision tower entirely; FSDP leaves its untouched units sharded
+    # (grad=None), which is cheaper than the former dummy 16-patch forward on every micro-batch.
 
     if attention_mask is not None:
         attention_mask = attention_mask.to(inputs_embeds.device)
