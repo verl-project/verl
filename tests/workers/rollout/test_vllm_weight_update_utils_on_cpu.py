@@ -34,6 +34,71 @@ def _load_weight_update_utils():
 _weight_update_utils = _load_weight_update_utils()
 apply_buffer_updates = _weight_update_utils.apply_buffer_updates
 split_buffer_updates = _weight_update_utils.split_buffer_updates
+refresh_weight_caches = _weight_update_utils.refresh_weight_caches
+
+
+class Glm5NextLinearAttention(torch.nn.Module):
+    def __init__(self, build_cache=True):
+        super().__init__()
+        for kind in "qkv":
+            setattr(self, f"{kind}_conv1d", torch.nn.Conv1d(4, 4, 4, groups=4, bias=False))
+        with torch.inference_mode():
+            self._merged_conv_weight = torch.zeros(12, 4) if build_cache else None
+
+
+def test_refresh_conv_cache_preserves_inference_storage():
+    layer = Glm5NextLinearAttention()
+    cached = layer._merged_conv_weight
+    original_pointer = cached.data_ptr()
+    for step in (1, 2):
+        with torch.no_grad():
+            for index, kind in enumerate("qkv"):
+                getattr(layer, f"{kind}_conv1d").weight.fill_(step * (index + 1))
+        assert refresh_weight_caches(layer) == 1
+        assert layer._merged_conv_weight is cached
+        assert cached.data_ptr() == original_pointer
+        expected = torch.cat([torch.full((4, 4), step * index) for index in (1, 2, 3)]).float()
+        torch.testing.assert_close(cached, expected)
+
+
+def test_refresh_conv_cache_keeps_lazy_initialization():
+    layer = Glm5NextLinearAttention(build_cache=False)
+    assert refresh_weight_caches(layer) == 0
+    assert layer._merged_conv_weight is None
+    assert refresh_weight_caches(torch.nn.Linear(4, 4)) == 0
+
+
+class Glm5NextMLAAttention(torch.nn.Module):
+    def __init__(self, build_cache=True):
+        super().__init__()
+        self.indexer = torch.nn.Module()
+        self.indexer.head_dim = 4
+        self.indexer.wk_weights_proj = torch.nn.Linear(8, 6, bias=False, dtype=torch.bfloat16)
+        with torch.inference_mode():
+            self.indexer._wp_fp32 = torch.zeros(8, 2) if build_cache else None
+
+
+def test_refresh_indexer_cache_preserves_fp32_inference_storage():
+    layer = Glm5NextMLAAttention()
+    cached = layer.indexer._wp_fp32
+    original_pointer = cached.data_ptr()
+    for step in (1, 2):
+        weight = torch.arange(48, dtype=torch.bfloat16).reshape(6, 8) * step
+        with torch.no_grad():
+            layer.indexer.wk_weights_proj.weight.copy_(weight)
+        assert refresh_weight_caches(layer) == 1
+        assert layer.indexer._wp_fp32 is cached
+        assert cached.data_ptr() == original_pointer
+        assert cached.dtype == torch.float32
+        torch.testing.assert_close(cached, torch.stack([weight[4], weight[5]], dim=1).float())
+
+
+def test_refresh_indexer_cache_keeps_lazy_initialization():
+    layer = Glm5NextMLAAttention(build_cache=False)
+    assert refresh_weight_caches(layer) == 0
+    assert layer.indexer._wp_fp32 is None
+    layer.indexer = None
+    assert refresh_weight_caches(layer) == 0
 
 
 def _load_vllm_rollout_utils():
@@ -116,6 +181,60 @@ def _load_vllm_rollout_utils():
 
 _vllm_rollout_utils = _load_vllm_rollout_utils()
 vLLMColocateWorkerExtension = _vllm_rollout_utils.vLLMColocateWorkerExtension
+
+
+def test_vllm_refreshes_derived_caches_after_all_weight_buckets(monkeypatch):
+    model = torch.nn.Sequential(Glm5NextLinearAttention(), Glm5NextMLAAttention())
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    worker.model_runner = _FakeModelRunner(model)
+    worker.model_runner.vllm_config.model_config = object()
+    worker.device = torch.device("cpu")
+    worker._is_qat_model = False
+    worker._is_modelopt_qat = False
+    worker._get_zmq_handle = lambda: None
+    cached_conv = model[0]._merged_conv_weight
+    cached_gate = model[1].indexer._wp_fp32
+
+    def load_weights(weights):
+        with torch.no_grad():
+            for name, source in weights:
+                model.get_parameter(name).copy_(source)
+
+    model.load_weights = load_weights
+
+    class Receiver:
+        def __init__(self, **kwargs):
+            pass
+
+        def receive_weights(self, on_bucket_received):
+            params = list(model.named_parameters())
+            for index, (name, parameter) in enumerate(params):
+                on_bucket_received([(name, torch.full_like(parameter, index + 1))], index == len(params) - 1)
+                assert torch.count_nonzero(cached_conv) == 0
+                assert torch.count_nonzero(cached_gate) == 0
+
+    post_load_calls = []
+
+    def post_load(inner_model, config, device):
+        post_load_calls.append(inner_model)
+        assert torch.count_nonzero(cached_conv) == 0
+        assert torch.count_nonzero(cached_gate) == 0
+
+    transfer = types.ModuleType("verl.workers.rollout.vllm_rollout.bucketed_weight_transfer")
+    transfer.BucketedWeightReceiver = Receiver
+    loader = types.ModuleType("vllm.model_executor.model_loader.utils")
+    loader.process_weights_after_loading = post_load
+    monkeypatch.setitem(sys.modules, transfer.__name__, transfer)
+    monkeypatch.setitem(sys.modules, loader.__name__, loader)
+
+    worker.update_weights_from_ipc(peft_config=None, base_sync_done=True)
+
+    assert post_load_calls == [model]
+    assert model[0]._merged_conv_weight is cached_conv
+    assert model[1].indexer._wp_fp32 is cached_gate
+    expected_conv = torch.repeat_interleave(torch.arange(1, 4).float(), 4)[:, None].expand(12, 4)
+    torch.testing.assert_close(cached_conv, expected_conv)
+    torch.testing.assert_close(cached_gate, torch.full((8, 2), 4.0))
 
 
 class _ToyBlock(torch.nn.Module):

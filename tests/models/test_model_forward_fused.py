@@ -22,6 +22,7 @@ from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.transformer.module import Float16Module
 
 from verl.models.mcore import model_forward_fused as mff
+from verl.models.mcore import registry
 
 
 def _new_uninitialized_model(model_cls=GPTModel):
@@ -35,8 +36,25 @@ def test_mcore_gpt_forward_has_native_output_processor_contract():
     assert {"output_processor", "output_processor_context"}.issubset(parameters)
 
 
-def test_native_hook_selection_preserves_forward_and_is_idempotent(monkeypatch):
-    model = _new_uninitialized_model()
+@pytest.mark.parametrize(
+    "architecture,vision_model",
+    [
+        ("Glm5NextForConditionalGeneration", True),
+        ("Qwen3VLForConditionalGeneration", True),
+        ("LlamaForCausalLM", False),
+    ],
+)
+def test_engine_registry_uses_supported_model_layout(monkeypatch, architecture, vision_model):
+    config = SimpleNamespace(architectures=[architecture], vision_config=object())
+    monkeypatch.setattr(registry, "gptmodel_forward_model_engine", lambda **kwargs: kwargs)
+    assert registry.get_mcore_engine_forward_fn(config)()["vision_model"] is vision_model
+
+
+@pytest.mark.parametrize("model_cls", [GPTModel, mff.HybridModel])
+def test_native_hook_selection_preserves_forward_and_is_idempotent(monkeypatch, model_cls):
+    if model_cls is None:
+        pytest.skip("Megatron does not provide HybridModel.")
+    model = _new_uninitialized_model(model_cls)
     original_forward = model.forward.__func__
     signature_calls = 0
     original_signature = inspect.signature
@@ -58,6 +76,16 @@ def test_native_hook_selection_preserves_forward_and_is_idempotent(monkeypatch):
     assert getattr(model, mff._FUSED_FORWARD_MODE_ATTR) == mff._HOOK_MODE
     assert model.forward.__func__ is original_forward
     assert not hasattr(model, "forward_backup")
+
+
+@pytest.mark.parametrize("model_cls", [GPTModel, mff.HybridModel])
+def test_vlm_patching_target_preserves_wrapper_hook(model_cls):
+    if model_cls is None:
+        pytest.skip("Megatron does not provide HybridModel.")
+    wrapper = torch.nn.Module()
+    wrapper.language_model = _new_uninitialized_model(model_cls)
+    expected = wrapper if model_cls is mff.HybridModel else wrapper.language_model
+    assert mff._get_patching_model(wrapper) is expected
 
 
 def test_legacy_fallback_patch_and_unpatch_are_idempotent():
@@ -167,6 +195,7 @@ def test_megatron_bridge_wrapper_chain_reaches_native_hook(monkeypatch):
     model = _new_uninitialized_model()
     model.config = SimpleNamespace(
         fine_grained_activation_offloading=False,
+        cuda_graph_impl="none",
         moe_paged_stash=False,
         mtp_num_layers=0,
         use_mup=False,

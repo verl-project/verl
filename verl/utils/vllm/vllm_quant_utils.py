@@ -30,6 +30,7 @@ dispatch below stays unconditional.
 
 import importlib.metadata
 import logging
+import re
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
@@ -161,7 +162,48 @@ def _resolve_expert_weight_module(module):
     return module
 
 
+def _get_hf_config(model):
+    """Return the HF config on ``model`` (descending ``.config``/``.model``)."""
+    seen: set[int] = set()
+    obj = model
+    while obj is not None and id(obj) not in seen:
+        seen.add(id(obj))
+        cfg = getattr(obj, "config", None)
+        if cfg is not None and hasattr(cfg, "num_hidden_layers"):
+            return cfg
+        obj = getattr(obj, "model", None)
+    return None
+
+
+def _is_mtp_layer_weight(name, model) -> bool:
+    """True when ``name`` belongs to a next-token-prediction (MTP) layer.
+
+    The actor exports MTP layers while the vLLM runtime omits them when MTP is
+    disabled, so such weights must be skipped during FP8 re-quantization.
+    Determined generically from the HF config: any ``layers.{i}.`` whose index
+    is ``>= num_hidden_layers`` is an MTP layer. No model-specific hardcoding.
+    """
+    cfg = _get_hf_config(model)
+    if cfg is None:
+        return False
+    num_hidden_layers = getattr(cfg, "num_hidden_layers", None)
+    if not num_hidden_layers:
+        return False
+    # ``layers.{i}.`` may appear at any depth (e.g. ``model.layers.45.`` /
+    # ``language_model.model.layers.45.``); match the first ``layers.N.`` token.
+    m = re.search(r"\blayers\.(\d+)\.", name)
+    if m is None:
+        return False
+    return int(m.group(1)) >= num_hidden_layers
+
+
 def get_module_from_param_name(model, name: str):
+    # Translate the checkpoint namespace to the live VLM module hierarchy.
+    mapper = getattr(model, "hf_to_vllm_mapper", None)
+    if mapper is not None:
+        mapped = mapper.apply_list([name])
+        if mapped:
+            name = mapped[0]
     # Split the name into parts (e.g., 'layers', '0', 'self_attn', 'q_proj', 'weight')
     # The module path is all but the last part (the parameter's own name)
     path_parts = name.split(".")
@@ -179,12 +221,6 @@ def get_module_from_param_name(model, name: str):
         for fused_name, original_names_list in packed_modules_mapping.items()
         for original_name in original_names_list
     }
-    # DSA indexer.wk/weights_proj are fused into wk_weights_proj inside
-    # load_weights (load-local stacked mapping, not in packed_modules_mapping).
-    # Surface it here so is_fp8_weight resolves and verl re-quantizes BF16->FP8.
-    _INDEXER_WK_FUSED = {"wk": "wk_weights_proj", "weights_proj": "wk_weights_proj"}
-    if module_path[-1] in _INDEXER_WK_FUSED and module_path[-1] not in reversed_mapping:
-        reversed_mapping[module_path[-1]] = _INDEXER_WK_FUSED[module_path[-1]]
     if module_path[-1] in reversed_mapping.keys():
         module_path[-1] = reversed_mapping[module_path[-1]]
     if had_base_layer:
@@ -219,6 +255,11 @@ _FP8_CANDIDATE_LEAVES: frozenset = frozenset({"weight", "gate_up_proj", "down_pr
 
 
 def is_fp8_weight(name, model):
+    # The actor exports the optional next-token-prediction (MTP) layer, while
+    # the vLLM runtime omits it when MTP is disabled. Skip those weights so
+    # verl does not re-quantize BF16->FP8 for a layer rollout never loads.
+    if _is_mtp_layer_weight(name, model):
+        return False
     if name not in fp8_state.seen_params:
         fp8_state.seen_params.add(name)
         leaf = name.rsplit(".", 1)[-1]
@@ -350,6 +391,12 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
             yield (k, v)
             continue
 
+        # Preserve already-FP8 weights (e.g. Megatron-Bridge exports) — requantizing
+        # already-quantized bytes corrupts the scale.
+        if v.dtype == torch.float8_e4m3fn:
+            yield (k, v)
+            continue
+
         # Cast the weight into fp8 and its scale factor
         if torch.distributed.get_rank() == 0:
             logger.debug(f"Quantizing to FP8 blockwise: {k}")
@@ -361,10 +408,20 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
             )
             param_scale = param_scale.flatten(-2, -1)
         else:
-            param_lp, param_scale = scaled_fp8_blockwise(
-                v.to(dtype),
-                weight_block_size=quant_config.weight_block_size,
-            )
+            try:
+                from vllm.model_executor.layers.quantization.utils.quant_utils import scaled_quantize
+
+                param_lp, param_scale = scaled_quantize(
+                    v.to(dtype),
+                    tuple(quant_config.weight_block_size),
+                    torch.float8_e4m3fn,
+                    compute_dtype=torch.float32,
+                )
+            except (ImportError, AttributeError):
+                param_lp, param_scale = scaled_fp8_blockwise(
+                    v.to(dtype),
+                    weight_block_size=quant_config.weight_block_size,
+                )
         param_scale = param_scale.squeeze(-1)
 
         # Yield the quantized weight
