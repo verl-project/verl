@@ -568,6 +568,47 @@ class TestProcessValidationMetrics(unittest.TestCase):
         # For bootstrap with n=2, the majority vote could be either A or B
         # depending on the random sampling, so we don't check the exact value
 
+    def test_process_validation_metrics_none_filled_sparse_key(self):
+        """Sparse reward_extra_info keys are null-filled for samples that omit
+        them; aggregation must drop the None values instead of crashing on
+        np.mean([..., None, ...]). See issue #6830."""
+        data_sources = ["source1", "source1", "source1"]
+        sample_inputs = ["prompt1", "prompt1", "prompt1"]  # one uid group of 3
+        infos_dict = {
+            "score": [0.8, 0.9, 0.7],
+            # emitted for only the first sample, null-filled for the rest
+            "sparse": [1.0, None, None],
+            # never emitted for this group
+            "all_none": [None, None, None],
+        }
+
+        result = process_validation_metrics(data_sources, sample_inputs, infos_dict, seed=42)
+
+        # Dense key aggregates over all 3.
+        self.assertAlmostEqual(result["source1"]["score"]["mean@3"], 0.8)
+        # Sparse key aggregates over the single present value.
+        self.assertAlmostEqual(result["source1"]["sparse"]["mean@1"], 1.0)
+        # All-None key is skipped entirely (no metrics emitted).
+        self.assertNotIn("all_none", result["source1"])
+
+    def test_process_validation_metrics_none_keeps_pred_aligned(self):
+        """A sparse numeric key with >1 present value and a None (not at the
+        end) must keep its predictions aligned so majority voting still zips
+        1:1 instead of raising. See issue #6830."""
+        data_sources = ["source1", "source1", "source1"]
+        sample_inputs = ["prompt1", "prompt1", "prompt1"]  # one uid group of 3
+        infos_dict = {
+            "score": [1.0, None, 2.0],  # None in the middle
+            "pred": ["A", "B", "A"],
+        }
+
+        result = process_validation_metrics(data_sources, sample_inputs, infos_dict, seed=42)
+
+        # Aggregates over the two present values (no crash, no misalignment).
+        self.assertAlmostEqual(result["source1"]["score"]["mean@2"], 1.5)
+        # Majority-vote metrics are still produced for the filtered pair set.
+        self.assertIn("maj@2/mean", result["source1"]["score"])
+
 
 if __name__ == "__main__":
     unittest.main()
