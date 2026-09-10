@@ -25,9 +25,11 @@ with open(os.path.join(version_folder, "verl/version/version")) as f:
 
 install_requires = [
     "accelerate",
+    "cachetools",
     "codetiming",
     "datasets",
     "dill",
+    "exceptiongroup; python_version < '3.11'",
     "hydra-core",
     "numpy>=2.0.0",
     "pandas",
@@ -61,7 +63,6 @@ SGLANG_REQUIRES = [
 TRL_REQUIRES = ["trl<=0.9.6"]
 # Keep the legacy mbridge dependency available during its deprecation window.
 MCORE_REQUIRES = ["megatron-bridge", "mbridge"]
-
 extras_require = {
     "test": TEST_REQUIRES,
     "prime": PRIME_REQUIRES,
