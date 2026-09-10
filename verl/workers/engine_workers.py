@@ -52,6 +52,7 @@ from verl.workers.config import (
     TrainingWorkerConfig,
 )
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
+from verl.workers.utils.kl_cov import prepare_kl_cov_batch
 from verl.workers.utils.losses import ppo_loss
 
 logger = logging.getLogger(__file__)
@@ -154,6 +155,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             self.flops_counter = None
 
         self.loss_fn = None
+        self.prepare_batch_fn = None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def to(self, device, model=True, optimizer=True, grad=True):
@@ -166,8 +168,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
         self.engine.to(device=device, model=model, optimizer=optimizer, grad=grad)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def set_loss_fn(self, loss_fn):
+    def set_loss_fn(self, loss_fn, prepare_batch_fn=None):
         self.loss_fn = loss_fn
+        self.prepare_batch_fn = prepare_batch_fn
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def reset(self):
@@ -364,6 +367,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
             self.engine.train_mode(disable_auto_offload=disable_auto_offload),
             Timer(name="train_batch", logger=None) as timer,
         ):
+            if getattr(self, "prepare_batch_fn", None) is not None:
+                self.prepare_batch_fn(self.engine, data)
             output = self.engine.train_batch(data, loss_function=self.loss_fn)
             # containing loss, model_output and metrics
             # for training, we only care about loss and metrics
@@ -642,7 +647,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.loss_fn = partial(ppo_loss, config=actor_config)
             self.actor = self.actor_worker_cls(config=actor_training_config)
             self.actor.reset()
-            self.actor.set_loss_fn(self.loss_fn)
+            prepare_batch_fn = None
+            if actor_config.policy_loss.loss_mode == "kl_cov" and actor_config.strategy in ("fsdp", "fsdp2"):
+                prepare_batch_fn = partial(prepare_kl_cov_batch, config=actor_config)
+            self.actor.set_loss_fn(self.loss_fn, prepare_batch_fn=prepare_batch_fn)
             self.set_dispatch_collect(mesh_name="actor", **self.actor.get_dispatch_collect())
 
         # 3. build rollout engine

@@ -1,6 +1,6 @@
 # Recipe: Entropy Mechanism
 
-Last updated: 06/27/2025.
+Last updated: 09/10/2026.
 
 
 <div align="center">
@@ -52,6 +52,22 @@ cd verl
 conda activate your_env
 bash recipe/dapo/32b_kl_cov.sh
 ```
+
+### KL-Cov selection with the FSDP actor engine
+
+The FSDP and FSDP2 actor engines select KL-Cov tokens once per PPO optimizer
+minibatch, across the data-parallel group. With `N` valid response tokens, the
+quota is `max(1, int(N * kl_cov_ratio))`; padding is excluded. Every training
+microbatch uses its slice of that selection, so splitting the minibatch does
+not independently round the quota or recompute covariance means.
+
+Selection uses current-policy log probabilities from an additional no-grad
+forward before each optimizer update. It uses the training microbatch settings
+and preserves RNG states. This adds a forward pass and exchanges valid-token
+advantages and log probabilities across the data-parallel group. Entropy loss,
+reference-policy KL loss, and rollout importance weights retain their existing
+behavior. Other engines and direct loss calls retain local selection unless
+they supply a precomputed `kl_cov_mask`.
 
 ## 📖Introduction
 
@@ -112,4 +128,3 @@ For questions, discussion, or collaboration opportunities, feel free to contact:
 - Yuchen Zhang: yuchen.zhang2003@gmail.com
 - Jiacheng Chen: jackchan9345@gmail.com
 - Ning Ding: ningding.cs@gmail.com
-
