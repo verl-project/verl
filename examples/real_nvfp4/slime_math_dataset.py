@@ -42,7 +42,8 @@ class SlimeMathDataset(RLHFDataset):
         tables directly from the JSONL records is both cheap and deterministic.
         """
         dataframes = []
-        for data_file in self.data_files:
+        boxed_answer_files = set(self.config.get("boxed_answer_files", []))
+        for original_file, data_file in zip(self.original_data_files, self.data_files, strict=True):
             if not data_file.endswith((".json", ".jsonl")):
                 raise ValueError(f"SlimeMathDataset requires JSON/JSONL input, got {data_file}")
             rows = []
@@ -53,6 +54,12 @@ class SlimeMathDataset(RLHFDataset):
                     row = json.loads(line)
                     if not isinstance(row, dict):
                         raise TypeError(f"{data_file}:{line_number} is not a JSON object")
+                    # The AIME prompt asks for a boxed answer, whereas the DAPO
+                    # training prompt requires an explicit Answer: prefix.
+                    # Route explicitly configured files without guessing from
+                    # filenames or changing the canonical prompt text.
+                    if original_file in boxed_answer_files:
+                        row["data_source"] = "aime_boxed"
                     rows.append(row)
             dataframes.append(datasets.Dataset.from_list(rows))
 
@@ -115,7 +122,7 @@ class SlimeMathDataset(RLHFDataset):
         if "label" not in row:
             raise KeyError("canonical Slime math sample is missing 'label'")
 
-        row["data_source"] = "math_dapo"
+        row["data_source"] = row.get("data_source") or "math_dapo"
         row["ability"] = "math"
         row["reward_model"] = {
             "style": "rule",

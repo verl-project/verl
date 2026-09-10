@@ -103,3 +103,18 @@ def test_forward_only_stage_is_not_a_profiler_step():
 
     assert TrainingWorker.infer_batch(worker, data) is None
     worker.profiler.step.assert_not_called()
+
+
+def test_optimizer_step_metric_counts_completed_batches(monkeypatch):
+    # Deliberately return two batches although the configured count is three:
+    # the metric must describe work actually completed by the worker.
+    mini_batches = [TensorDict({}, batch_size=[]) for _ in range(2)]
+    monkeypatch.setattr(tu, "make_iterator", lambda data, **kwargs: iter(mini_batches))
+    worker = _worker(_engine(is_mp_src_rank_with_outputs=lambda: True))
+    worker.train_batch = MagicMock(
+        side_effect=lambda _: tu.get_tensordict(tensor_dict={}, non_tensor_dict={"metrics": {}})
+    )
+    data = TensorDict({}, batch_size=[3])
+    tu.assign_non_tensor(data, num_mini_batch=3)
+    output = TrainingWorker.train_mini_batch(worker, data)
+    assert tu.get(output, "metrics")["optimizer_steps"] == worker.train_batch.call_count == 2

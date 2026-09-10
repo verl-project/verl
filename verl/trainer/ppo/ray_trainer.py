@@ -1368,6 +1368,14 @@ class RayPPOTrainer:
         )
         actor_output = self.actor_rollout_wg.update_actor(batch_td)
         actor_output = tu.get(actor_output, "metrics")
+        filter_config = self.config.algorithm.get("filter_groups", None)
+        if filter_config and filter_config.get("enable", False):
+            observed_steps = np.asarray(actor_output.get("optimizer_steps", []))
+            if observed_steps.size == 0 or not np.all(observed_steps == 1):
+                raise RuntimeError(
+                    "dynamic sampling requires one observed optimizer step on every actor rank; "
+                    f"got {observed_steps.tolist()}"
+                )
         actor_output = rename_dict(actor_output, "actor/")
         # modify key name
         actor_output["perf/mfu/actor"] = actor_output.pop("actor/mfu")
@@ -1721,15 +1729,14 @@ class RayPPOTrainer:
                                 "train/dynamic_sampling_kept_groups": accumulated_prompt_groups,
                                 "train/dynamic_sampling_discarded_surplus_groups": discarded_surplus_groups,
                                 "train/dynamic_sampling_update_trajectories": len(batch),
-                                "train/actor_optimizer_steps": 1,
                             }
                         )
                         print(
-                            "VERL_DAPO_DYNAMIC_SAMPLING PASS "
+                            "VERL_DAPO_DYNAMIC_SAMPLING SELECTED "
                             f"generated_batches={num_gen_batches} generated_groups={generated_prompt_groups} "
                             f"kept_groups={accumulated_prompt_groups} selected_groups={required_groups} "
                             f"trajectories={len(batch)} expected_trajectories={expected_trajectories} "
-                            "actor_optimizer_steps=1",
+                            "expected_optimizer_steps=1",
                             flush=True,
                         )
                     else:
@@ -1814,8 +1821,10 @@ class RayPPOTrainer:
                             batch = batch.union(values)
 
                     with marked_timer("adv", timing_raw, color="brown"):
-                        # we combine with rule-based rm
-                        reward_extra_infos_dict: dict[str, list]
+                        # Filtering and DP balancing replace/reorder the batch tensors.
+                        # Read rewards and metadata in the current trajectory order;
+                        # references retained from generation are no longer aligned.
+                        reward_tensor, reward_extra_infos_dict = extract_reward(batch)
                         batch.batch["token_level_scores"] = reward_tensor
 
                         if reward_extra_infos_dict:
@@ -1903,6 +1912,16 @@ class RayPPOTrainer:
 
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
+                        if filter_groups_enabled:
+                            metrics["train/actor_optimizer_steps"] = actor_output_metrics["actor/optimizer_steps"]
+                            print(
+                                "VERL_DAPO_DYNAMIC_SAMPLING PASS "
+                                f"generated_batches={num_gen_batches} generated_groups={generated_prompt_groups} "
+                                f"kept_groups={accumulated_prompt_groups} selected_groups={required_groups} "
+                                f"trajectories={len(batch)} expected_trajectories={expected_trajectories} "
+                                "actor_optimizer_steps=1",
+                                flush=True,
+                            )
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)

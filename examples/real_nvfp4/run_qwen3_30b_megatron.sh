@@ -155,6 +155,7 @@ export VERL_MATH_DAPO_STRICT_MINERVA="$STRICT_MINERVA"
 DATA=(
   data.train_files="$TRAIN_FILE"
   data.val_files="$TEST_FILE"
+  "+data.boxed_answer_files=['$TEST_FILE']"
   data.prompt_key=prompt
   data.return_raw_chat=True
   data.truncation=left
@@ -271,6 +272,8 @@ FORWARD_ONLY=(
 
 REWARD=(
   reward_model.reward_manager=dapo
+  reward.custom_reward_function.path="$WORKING_DIR/examples/real_nvfp4/math_reward.py"
+  reward.custom_reward_function.name=compute_score
   +reward_model.reward_kwargs.overlong_buffer_cfg.enable="$OVERLONG_PENALTY"
   +reward_model.reward_kwargs.overlong_buffer_cfg.len="$OVERLONG_BUFFER_LEN"
   +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor="$OVERLONG_PENALTY_FACTOR"
