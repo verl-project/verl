@@ -754,8 +754,11 @@ def compute_is_metrics(
     weights_for_ess: torch.Tensor = rollout_is_weights.clamp(min=0.0, max=rollout_is_threshold)
     mean_for_ess: torch.Tensor = verl_F.masked_mean(weights_for_ess, response_mask)
     is_weights_normalized: torch.Tensor = weights_for_ess / (mean_for_ess + 1e-8)  # Avoid division by zero
+    normalized_weight_square_mean = verl_F.masked_mean(is_weights_normalized.square(), response_mask).item()
+    # IcePop can legitimately filter every weight in a batch. In that case there are no
+    # effective samples, so report zero instead of raising a Python ZeroDivisionError.
     metrics["rollout_is_eff_sample_size"] = (
-        1.0 / verl_F.masked_mean(is_weights_normalized.square(), response_mask).item()
+        0.0 if normalized_weight_square_mean == 0.0 else 1.0 / normalized_weight_square_mean
     )
 
     # Add sequence-level metrics if weights have batch dimension
