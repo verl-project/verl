@@ -226,6 +226,10 @@ def hf_processor(name_or_path, **kwargs):
                 from transformers.models.glm46v import Glm46VModel
 
                 model_class = Glm46VModel
+            case "Glm5NextProcessor":
+                # GLM-5.3-Flash is NoPE (MLA qk_rope_head_dim=0, KDA has no RoPE),
+                # so there is no get_rope_index to bind — standard 1D positions only.
+                pass
             case "MllamaProcessor":
                 pass  # MllamaProcessor and MllamaModel doesn't have get_rope_index property
             case "Gemma4Processor":
