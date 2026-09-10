@@ -574,7 +574,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 optimizer_config=ref_config.optim,
                 checkpoint_config=ref_config.checkpoint,
                 profiler_config=ref_profiler_config,
-                nccl_timeout=self.config.get("nccl_timeout", 600),
+                nccl_timeout=self.config.get("nccl_timeout"),
             )
 
             # assign engine configs
@@ -612,7 +612,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 optimizer_config=actor_config.optim,
                 checkpoint_config=actor_config.checkpoint,
                 profiler_config=actor_profiler_config,
-                nccl_timeout=self.config.get("nccl_timeout", 600),
+                nccl_timeout=self.config.get("nccl_timeout"),
             )
 
             assert self.config.actor.use_dynamic_bsz == self.config.rollout.log_prob_use_dynamic_bsz

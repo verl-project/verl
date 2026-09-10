@@ -276,7 +276,7 @@ class PPOTrainer(ABC):
                 optimizer_config=critic_cfg.optim,
                 checkpoint_config=critic_cfg.checkpoint,
                 profiler_config=critic_profiler_config,
-                nccl_timeout=critic_cfg.get("nccl_timeout", 600),
+                nccl_timeout=critic_cfg.get("nccl_timeout"),
             )
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
             critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=worker_cfg)

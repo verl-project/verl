@@ -24,7 +24,12 @@ These tests drive the worker constructor with the process-group init mocked out,
 cluster and no real distributed init are needed.
 """
 
+import ast
+import inspect
+import textwrap
+from dataclasses import dataclass
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -32,7 +37,12 @@ import torch
 
 from verl.utils.distributed import initialize_global_process_group_ray
 from verl.workers import engine_workers
-from verl.workers.config import TrainingWorkerConfig
+from verl.workers.config import (
+    FSDPCriticConfig,
+    FSDPEngineConfig,
+    McoreCriticConfig,
+    TrainingWorkerConfig,
+)
 
 
 class _StopInit(Exception):
@@ -95,3 +105,171 @@ def test_initialize_global_process_group_ray_forwards_timeout(monkeypatch, timeo
 
     assert len(calls) == 1
     assert calls[0]["timeout"] == expected_timeout
+
+
+# ---------------------------------------------------------------------------
+# The trainer-side hop: config key -> TrainingWorkerConfig.nccl_timeout
+# ---------------------------------------------------------------------------
+
+# Every place that copies the key out of a user-facing config into a TrainingWorkerConfig.
+_CALL_SITES = [
+    ("verl.workers.engine_workers", "ActorRolloutRefWorker", "init_model", 2),
+    ("verl.trainer.ppo.ray_trainer", "RayPPOTrainer", "init_workers", 1),
+    ("verl.trainer.ppo.v1.trainer_base", "PPOTrainer", "_setup", 1),
+    ("verl.experimental.separation.ray_trainer", "SeparateRayPPOTrainer", "_create_critic_class", 1),
+]
+
+
+def _nccl_timeout_reads_in(module_name: str, class_name: str, method_name: str):
+    """Return one AST call node per ``nccl_timeout=`` keyword argument in a method's body."""
+    import importlib
+
+    method = getattr(getattr(importlib.import_module(module_name), class_name), method_name)
+    tree = ast.parse(textwrap.dedent(inspect.getsource(method)))
+
+    reads = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg == "nccl_timeout":
+                reads.append(keyword.value)
+    return reads
+
+
+@pytest.mark.parametrize(("module_name", "class_name", "method_name", "expected"), _CALL_SITES)
+def test_call_sites_fall_back_to_torch_default(module_name, class_name, method_name, expected):
+    """No call site may substitute a literal timeout when the config does not carry the key.
+
+    ``critic.nccl_timeout`` only exists on ``McoreCriticConfig``; on an FSDP critic the key is
+    absent and ``BaseConfig.get`` quietly hands back whatever default the caller supplied. A
+    literal default there is a timeout nobody can configure, and one that *shortens* the effective
+    process-group timeout relative to torch's own default - the opposite of what the knob is for.
+    So every read must be a plain ``.get("nccl_timeout")`` whose fallback is ``None``.
+    """
+    reads = _nccl_timeout_reads_in(module_name, class_name, method_name)
+
+    assert len(reads) == expected, f"expected {expected} nccl_timeout read(s) in {class_name}.{method_name}"
+    for read in reads:
+        rendered = ast.unparse(read)
+        assert isinstance(read, ast.Call), f"{rendered} should read the key off the config"
+        assert isinstance(read.func, ast.Attribute) and read.func.attr == "get", rendered
+        assert len(read.args) == 1 and not read.keywords, (
+            f"{rendered} passes a fallback timeout; the fallback must stay None so that an "
+            f"unconfigured run keeps torch's own default"
+        )
+
+
+def test_fsdp_critic_config_cannot_carry_an_nccl_timeout():
+    """The premise of the test above: only the Megatron critic declares the key.
+
+    ``verl/trainer/config/critic/dp_critic.yaml`` has no ``nccl_timeout`` either, so an FSDP
+    critic has no way to set one - which is why the fallback is the *only* value it can ever see.
+    """
+    assert "nccl_timeout" in McoreCriticConfig.__dataclass_fields__
+    assert McoreCriticConfig.__dataclass_fields__["nccl_timeout"].default == 600
+    assert "nccl_timeout" not in FSDPCriticConfig.__dataclass_fields__
+
+    fsdp_critic = _critic_config(FSDPCriticConfig)
+    assert fsdp_critic.get("nccl_timeout") is None
+    # BaseConfig.get swallows the AttributeError, so a literal default is returned verbatim.
+    assert fsdp_critic.get("nccl_timeout", 600) == 600
+
+
+def _critic_config(cls, **kwargs):
+    """A minimal critic config; ``model`` only has to expose ``fsdp_config`` to the trainer."""
+    return cls(
+        ppo_micro_batch_size_per_gpu=1,
+        model=SimpleNamespace(fsdp_config=FSDPEngineConfig()),
+        **kwargs,
+    )
+
+
+@dataclass
+class _CriticConfigWithNcclTimeout(FSDPCriticConfig):
+    """An FSDP critic that declares the key, the way ``McoreCriticConfig`` does."""
+
+    nccl_timeout: int = 1234
+
+
+def _critic_worker_config_built_by_separate_trainer(critic_config):
+    """Run the separate-trainer critic wiring and return the ``TrainingWorkerConfig`` it builds."""
+    from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
+    from verl.trainer.ppo.ray_trainer import Role
+
+    built = {}
+
+    trainer = SimpleNamespace(
+        use_critic=True,
+        config=SimpleNamespace(critic=critic_config),
+        resource_pool_manager=SimpleNamespace(get_resource_pool=lambda role: "pool"),
+        resource_pool_to_cls={"pool": {}},
+        role_worker_mapping={Role.Critic: object()},
+    )
+
+    with (
+        patch("verl.experimental.separation.ray_trainer.omega_conf_to_dataclass", lambda cfg: cfg),
+        patch(
+            "verl.experimental.separation.ray_trainer.RayClassWithInitArgs",
+            lambda cls, config: built.setdefault("config", config),
+        ),
+    ):
+        SeparateRayPPOTrainer._create_critic_class(trainer)
+
+    assert "config" in built, "the trainer never built a critic worker config"
+    return built["config"]
+
+
+def test_separate_trainer_keeps_torch_default_for_fsdp_critic():
+    """An FSDP critic has no ``nccl_timeout`` key, so the worker must keep torch's own default."""
+    worker_config = _critic_worker_config_built_by_separate_trainer(_critic_config(FSDPCriticConfig))
+
+    assert isinstance(worker_config, TrainingWorkerConfig)
+    assert worker_config.nccl_timeout is None
+
+
+def test_separate_trainer_forwards_configured_critic_nccl_timeout():
+    """A critic config that does declare the key has it copied over verbatim."""
+    worker_config = _critic_worker_config_built_by_separate_trainer(_critic_config(_CriticConfigWithNcclTimeout))
+
+    assert worker_config.nccl_timeout == 1234
+
+
+# ---------------------------------------------------------------------------
+# Colocation: one process group per process, so one timeout per process
+# ---------------------------------------------------------------------------
+
+
+def test_colocated_workers_share_the_first_workers_timeout(monkeypatch):
+    """``initialize_global_process_group_ray`` is a no-op once the group exists.
+
+    In a colocated PPO run the actor's and the critic's ``TrainingWorker`` live in the same
+    process, so whichever is constructed first decides the timeout for both and the second
+    worker's ``nccl_timeout`` is silently dropped. This pins that behavior rather than endorsing
+    it - see the PR discussion on which role should win.
+    """
+    initialized = {"value": False}
+    calls = []
+
+    def _init_process_group(**kwargs):
+        calls.append(kwargs)
+        initialized["value"] = True
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: initialized["value"])
+    monkeypatch.setattr(torch.distributed, "init_process_group", _init_process_group)
+
+    def _stop():
+        raise _StopInit
+
+    with (
+        patch.object(engine_workers.Worker, "__init__", lambda self: None),
+        # The real initialize_global_process_group_ray runs; abort on the next statement.
+        patch.object(engine_workers, "set_numa_affinity", _stop),
+    ):
+        for nccl_timeout in (1800, 600):
+            config = TrainingWorkerConfig(model_type="language_model", nccl_timeout=nccl_timeout)
+            with pytest.raises(_StopInit):
+                engine_workers.TrainingWorker(config=config)
+
+    assert len(calls) == 1, "the second colocated worker must not create a second process group"
+    assert calls[0]["timeout"] == timedelta(seconds=1800), "the first worker constructed wins"
