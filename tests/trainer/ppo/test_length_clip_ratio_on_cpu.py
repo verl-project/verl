@@ -18,6 +18,8 @@ equals the configured cap. V1 stores jagged tensors and pads to the *batch* maxi
 so the width is data dependent and cannot be used as the truncation threshold.
 """
 
+import math
+
 import pytest
 import torch
 
@@ -153,3 +155,45 @@ def test_v0_shape_is_unchanged_by_the_fallback():
         "prompt_length/clip_ratio",
     ):
         assert explicit[key] == fallback[key]
+
+
+def test_v1_all_aborted_batch_reports_nan_clip_ratio():
+    # Every response is aborted, so the padded response width is 0 and the tensors are
+    # ``(bsz, 0)`` -- a shape the V0 padding path can never produce. The non-aborted
+    # statistics have no samples to average over and must fall back to NaN rather than
+    # raising.
+    batch = _make_v1_batch(prompt_lengths=[3, 4, 2, 4], response_lengths=[0, 0, 0, 0])
+    assert batch.batch["responses"].shape == (4, 0)
+
+    metrics = compute_data_metrics(
+        batch,
+        use_critic=False,
+        max_prompt_length=8,
+        max_response_length=6,
+    )
+
+    assert math.isnan(metrics["response_length_non_aborted/clip_ratio"])
+    assert metrics["response/aborted_ratio"] == 1.0
+    # the all-sample clip_ratio still has samples to average, none of which hit the cap
+    assert metrics["response_length/clip_ratio"] == 0.0
+    assert metrics["prompt_length/clip_ratio"] == 0.0
+
+
+def test_over_cap_length_is_not_counted_as_clipped():
+    # A true length above the passed cap yields 0.0, because the metric uses
+    # ``torch.eq`` and ``eq(10, 8)`` is False. No rollout path produces this today --
+    # every registered agent loop slices at the cap -- but V1 stores prompts jagged, so
+    # an over-cap prompt would flow through silently where V0 would crash on the shape.
+    # This test pins the chosen equality semantics so that switching to ``torch.ge``
+    # becomes a deliberate decision rather than an accident.
+    batch = _make_v1_batch(prompt_lengths=[10], response_lengths=[4])
+
+    metrics = compute_data_metrics(
+        batch,
+        use_critic=False,
+        max_prompt_length=8,
+        max_response_length=6,
+    )
+
+    assert metrics["prompt_length/clip_ratio"] == 0.0
+    assert metrics["prompt_length/max"] == 10.0

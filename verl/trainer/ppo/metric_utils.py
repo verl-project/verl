@@ -446,6 +446,10 @@ def compute_data_metrics(
             ``prompt_length/clip_ratio``. Defaults to the width of ``batch["prompts"]``.
         max_response_length: Configured response length cap used as the threshold for
             ``response_length/clip_ratio``. Defaults to the width of ``batch["responses"]``.
+            Note that the effective rollout cap may additionally be bounded per sample by
+            ``rollout.max_model_len``, which the rollout servers subtract the prompt length
+            from; while that bound binds, no sample reaches the configured cap and the
+            clip_ratio metrics under-report.
 
     Returns:
         A dictionary of metrics including:
