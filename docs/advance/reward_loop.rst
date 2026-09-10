@@ -200,7 +200,7 @@ Model-Base Reward
          }
          output = await self._post_request(payloads, "classify")
          rm_score = output["data"][-1]["probs"][-1]
-         return {"reward_score": rm_score}
+         return {"reward_score": rm_score, "reward_extra_info": {}}
 
 pass the question and the model rollout as inputs to the reward model and obtain a reward score. This is also the standard practice for most DisRM.
 
