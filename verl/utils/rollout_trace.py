@@ -23,6 +23,7 @@ from typing import Optional
 from pydantic import BaseModel
 
 from verl.utils.ray_utils import get_event_loop
+from verl.utils.tracking import mlflow_experiment_name
 
 _trace_enabled: ContextVar[bool] = ContextVar("_trace_enabled", default=True)
 _trace_attributes: ContextVar[dict | None] = ContextVar("_trace_attributes", default=None)
@@ -99,7 +100,7 @@ class RolloutTraceConfig:
             MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "sqlite:////tmp/mlruns.db")
             mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
-            mlflow.set_experiment(project_name)
+            mlflow.set_experiment(mlflow_experiment_name(project_name))
         elif backend == "trackio":
             import trackio
             from trackio import context_vars
