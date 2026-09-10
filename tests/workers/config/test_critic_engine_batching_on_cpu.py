@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
+
 from verl.workers.config.critic import CriticConfig
 from verl.workers.config.engine import EngineConfig
 from verl.workers.config.optimizer import OptimizerConfig
@@ -68,3 +70,34 @@ def test_v1_train_budget_is_not_overwritten_by_infer_budget():
     critic.apply_engine_batching(engine)
     assert engine.max_token_len_per_gpu == 8192
     assert engine.infer_max_token_len_per_gpu == 1024
+
+
+def test_apply_engine_batching_copies_dynamic_bsz_true():
+    """The True direction was untested; only the False direction was asserted."""
+    critic = _make_critic(use_dynamic_bsz=True, ppo_max_token_len_per_gpu=8192)
+    engine = EngineConfig(use_dynamic_bsz=False)
+    critic.apply_engine_batching(engine)
+    assert engine.use_dynamic_bsz is True
+    assert engine.max_token_len_per_gpu == 8192
+
+
+def test_static_path_rejects_missing_micro_batch_size_per_gpu():
+    """Guard the engine's `total_data_size % (group * mbs)`: a None there is a TypeError
+    deep inside prepare_micro_batches. The deprecated global ppo_micro_batch_size is not
+    normalized into the per-GPU field, so it cannot stand in for it."""
+    critic = _make_critic(
+        use_dynamic_bsz=False,
+        ppo_mini_batch_size=8,
+        ppo_micro_batch_size=8,
+        ppo_micro_batch_size_per_gpu=None,
+    )
+    engine = EngineConfig()
+    with pytest.raises(ValueError, match="ppo_micro_batch_size_per_gpu"):
+        critic.apply_engine_batching(engine)
+
+
+def test_dynamic_path_rejects_missing_token_budget():
+    critic = _make_critic(use_dynamic_bsz=True, ppo_max_token_len_per_gpu=None)
+    engine = EngineConfig()
+    with pytest.raises(ValueError, match="ppo_max_token_len_per_gpu"):
+        critic.apply_engine_batching(engine)
