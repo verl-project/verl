@@ -30,6 +30,9 @@ external_lib: null
 # override hf config
 override_config: {}
 
+# regex pattern to freeze parameters. null means no freeze is applied.
+freeze_module_pattern: null
+
 # whether to enable gradient checkpointing. Only valid when we use hf model definition
 enable_gradient_checkpointing: True
 
