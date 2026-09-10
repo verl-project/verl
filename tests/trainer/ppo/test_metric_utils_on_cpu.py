@@ -70,6 +70,37 @@ class TestReduceMetrics(unittest.TestCase):
 
         self.assertEqual(result["single"], 5.0)
 
+    def test_reduce_metrics_empty_max_min(self):
+        """Empty lists under /max and /min keys reduce to NaN, not a ValueError."""
+        metrics = {
+            "critic/values/max": [],
+            "response_length/min": [],
+            "plain": [],
+        }
+        result = reduce_metrics(metrics)
+        for key in metrics:
+            self.assertTrue(np.isnan(result[key]), f"{key} should be NaN")
+
+    def test_reduce_metrics_final_segment_matching(self):
+        """Reduction follows the final path segment, not a substring.
+
+        Keys ending in /max or /min are max/min-reduced; a mid-key 'max'/'min'
+        (e.g. global_seqlen/minmax_diff) is mean-reduced.
+        """
+        metrics = {
+            "critic/values/max": [1.0, 3.0, 2.0],
+            "response_length/min": [4.0, 1.0, 2.0],
+            "global_seqlen/minmax_diff": [10.0, 20.0, 30.0],
+            "perf/max_memory_allocated_gb": [5.0, 7.0, 9.0],
+            "loss": [1.0, 2.0, 3.0],
+        }
+        result = reduce_metrics(metrics)
+        self.assertEqual(result["critic/values/max"], 3.0)
+        self.assertEqual(result["response_length/min"], 1.0)
+        self.assertEqual(result["global_seqlen/minmax_diff"], 20.0)
+        self.assertEqual(result["perf/max_memory_allocated_gb"], 7.0)
+        self.assertEqual(result["loss"], 2.0)
+
 
 class TestMetric(unittest.TestCase):
     """Tests for the Metric class."""
@@ -95,6 +126,13 @@ class TestMetric(unittest.TestCase):
         """Test Metric initialization with invalid aggregation type."""
         with self.assertRaises(ValueError):
             Metric(aggregation="invalid")
+
+    def test_aggregate_empty_min_max(self):
+        """Empty MIN/MAX aggregation returns NaN instead of raising (np.min/np.max on [])."""
+        for agg in ("min", "max"):
+            metric = Metric(aggregation=agg)
+            result = metric.aggregate()
+            self.assertTrue(np.isnan(result), f"empty {agg} should be NaN, got {result}")
 
     def test_append_float(self):
         """Test appending float values."""
