@@ -52,7 +52,7 @@ on:
       - "!examples/**"
       - "!tests/**"
       - "!verl/trainer/main_*.py"
-      - "!verl/trainer/fsdp_sft_trainer.py" # FSDP
+      - "!verl/trainer/sft_trainer.py" # FSDP
       - "!verl/workers/**/*dp_*.py"
       # Megatron
       - "!verl/workers/**/megatron_*.py"
@@ -61,9 +61,9 @@ on:
 
       # Entrypoints
       - ".github/workflows/sgl.yml"
-      - "tests/rollout/*sglang*"
+      - "tests/workers/rollout/rollout_sglang"
       - "tests/experimental/agent_loop"
-      - "tests/rollout/async_rollout_utils.py"
+      - "tests/checkpoint_engine"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
