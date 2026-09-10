@@ -155,6 +155,46 @@ def _packed_causal_conv1d_fallback(
     return torch.cat(outputs, dim=-1)
 
 
+def _delta_net_kernel(module, name):
+    """Resolve a gated-delta-net kernel however the installed stack exposes it.
+
+    Older transformers releases bound these on the GatedDeltaNet instance. Current
+    ones define them at module scope, the two rules behind a `torch_` prefix and a
+    decorator that dispatches to FLA when it is installed.
+
+    FLA's own function is preferred over that decorated wrapper on purpose. The
+    wrapper does call FLA, but it re-exports the torch fallback's signature, and
+    this file decides what it may pass by inspecting the signature: through the
+    wrapper `cu_seqlens` and `cp_context` look unsupported, which silently costs
+    the packed-sequence fast path and makes ulysses sequence parallelism raise
+    NotImplementedError on a stack that in fact supports it.
+    """
+    fn = getattr(module, name, None)
+    if fn is not None:
+        return fn
+
+    if name in ("chunk_gated_delta_rule", "recurrent_gated_delta_rule"):
+        try:
+            import fla.ops.gated_delta_rule as fla_ops
+
+            fla_fn = getattr(fla_ops, name, None)
+            if fla_fn is not None:
+                return fla_fn
+        except ImportError:
+            pass
+
+    from transformers.models.qwen3_5 import modeling_qwen3_5 as hf_qwen3_5
+
+    fn = getattr(hf_qwen3_5, name, None) or getattr(hf_qwen3_5, f"torch_{name}", None)
+    if fn is None:
+        raise AttributeError(
+            f"{type(module).__name__} has no {name}, and transformers exposes neither "
+            f"{name} nor torch_{name} at module scope. This file and the installed "
+            "transformers disagree about where the delta-net kernels live."
+        )
+    return fn
+
+
 def _packed_chunk_gated_delta_rule(self, query, key, value, g, beta, cu_seqlens, cu_seqlens_cpu, cp_context=None):
     kwargs = {
         "g": g,
@@ -164,19 +204,19 @@ def _packed_chunk_gated_delta_rule(self, query, key, value, g, beta, cu_seqlens,
         "use_qk_l2norm_in_kernel": True,
     }
     if cu_seqlens is None:
-        return self.chunk_gated_delta_rule(query, key, value, **kwargs)
+        return _delta_net_kernel(self, "chunk_gated_delta_rule")(query, key, value, **kwargs)
 
     if cp_context is not None:
-        if not _call_accepts_kwarg(self.chunk_gated_delta_rule, "cp_context"):
+        if not _call_accepts_kwarg(_delta_net_kernel(self, "chunk_gated_delta_rule"), "cp_context"):
             raise NotImplementedError("Qwen3.5 Ulysses SP requires FLA chunk_gated_delta_rule cp_context support.")
         kwargs["cp_context"] = cp_context
-        return self.chunk_gated_delta_rule(query, key, value, **kwargs)
+        return _delta_net_kernel(self, "chunk_gated_delta_rule")(query, key, value, **kwargs)
 
-    if _call_accepts_kwarg(self.chunk_gated_delta_rule, "cu_seqlens"):
+    if _call_accepts_kwarg(_delta_net_kernel(self, "chunk_gated_delta_rule"), "cu_seqlens"):
         kwargs["cu_seqlens"] = cu_seqlens
-        if _call_accepts_kwarg(self.chunk_gated_delta_rule, "cu_seqlens_cpu"):
+        if _call_accepts_kwarg(_delta_net_kernel(self, "chunk_gated_delta_rule"), "cu_seqlens_cpu"):
             kwargs["cu_seqlens_cpu"] = cu_seqlens_cpu
-        return self.chunk_gated_delta_rule(query, key, value, **kwargs)
+        return _delta_net_kernel(self, "chunk_gated_delta_rule")(query, key, value, **kwargs)
 
     outputs = []
     for q_i, k_i, v_i, g_i, beta_i in _split_packed_args(
@@ -185,7 +225,7 @@ def _packed_chunk_gated_delta_rule(self, query, key, value, g, beta, cu_seqlens,
         split_kwargs = dict(kwargs)
         split_kwargs["g"] = g_i
         split_kwargs["beta"] = beta_i
-        out_i, _ = self.chunk_gated_delta_rule(q_i, k_i, v_i, **split_kwargs)
+        out_i, _ = _delta_net_kernel(self, "chunk_gated_delta_rule")(q_i, k_i, v_i, **split_kwargs)
         outputs.append(out_i)
     return torch.cat(outputs, dim=1), None
 
@@ -239,7 +279,7 @@ def qwen3_5_gated_delta_net_forward(
     a = self.in_proj_a(hidden_states)
 
     if use_precomputed_states:
-        mixed_qkv = self.causal_conv1d_update(
+        mixed_qkv = _delta_net_kernel(self, "causal_conv1d_update")(
             mixed_qkv,
             conv_state,
             self.conv1d.weight.squeeze(1),
@@ -250,7 +290,7 @@ def qwen3_5_gated_delta_net_forward(
         if cache_params is not None:
             conv_state = F.pad(mixed_qkv, (self.conv_kernel_size - mixed_qkv.shape[-1], 0))
             cache_params.conv_states[self.layer_idx] = conv_state
-        if self.causal_conv1d_fn is not None:
+        if _delta_net_kernel(self, "causal_conv1d_fn") is not None:
             conv_prefix_len = 0
             conv_input = mixed_qkv
             if cp_context is not None:
@@ -262,7 +302,7 @@ def qwen3_5_gated_delta_net_forward(
                 if model_cu_seqlens is not None
                 else None
             )
-            conv_output = self.causal_conv1d_fn(
+            conv_output = _delta_net_kernel(self, "causal_conv1d_fn")(
                 x=conv_input,
                 weight=self.conv1d.weight.squeeze(1),
                 bias=self.conv1d.bias,
@@ -312,7 +352,7 @@ def qwen3_5_gated_delta_net_forward(
             self, query, key, value, g, beta, model_cu_seqlens, model_cu_seqlens_cpu, cp_context
         )
     else:
-        core_attn_out, last_recurrent_state = self.recurrent_gated_delta_rule(
+        core_attn_out, last_recurrent_state = _delta_net_kernel(self, "recurrent_gated_delta_rule")(
             query,
             key,
             value,
@@ -350,7 +390,21 @@ def qwen3_5_decoder_layer_forward(
 
     hidden_states = self.input_layernorm(hidden_states)
 
-    if self.layer_type == "linear_attention":
+    # transformers names this `block_type` on Qwen3_5DecoderLayer; older releases
+    # called it `layer_type`. Accept either, and refuse an unknown value rather than
+    # falling through: with neither branch taken the layer would return its input
+    # unchanged, i.e. train silently with no attention at all.
+    block_type = getattr(self, "block_type", None)
+    if block_type is None:
+        block_type = getattr(self, "layer_type", None)
+    if block_type not in ("linear_attention", "full_attention"):
+        raise ValueError(
+            f"{type(self).__name__} exposes neither block_type nor layer_type with a "
+            f"known value (got {block_type!r}); refusing to run a decoder layer that "
+            "would skip attention entirely."
+        )
+
+    if block_type == "linear_attention":
         hidden_states = self.linear_attn(
             hidden_states=hidden_states,
             cache_params=past_key_values,
@@ -358,7 +412,7 @@ def qwen3_5_decoder_layer_forward(
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
         )
-    elif self.layer_type == "full_attention":
+    elif block_type == "full_attention":
         hidden_states, _ = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
