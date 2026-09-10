@@ -116,47 +116,6 @@ def _tq_supports_checkpoint() -> bool:
     )
 
 
-def _probe_step(batch: KVBatchMeta, metrics: dict, step: int) -> None:
-    """Correctness checkpoints for the optimization campaign (contract.md).
-
-    Records a handful of per-step scalars with `probe` when PROBE=1 and is a no-op
-    otherwise. Driver side only, after the step timer has closed; the fields are
-    fetched from TransferQueue onto the CPU, so nothing here touches a GPU stream.
-    """
-    try:
-        import probe
-    except ImportError:
-        return
-    if not probe.enabled():
-        return
-    p = f"step{step}/"
-    fields = ["responses", "response_mask", "old_log_probs", "ref_log_prob", "advantages"]
-    data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
-    data = data.to_padded_tensor()
-    mask = data["response_mask"].float()
-    probe.record(f"{p}responses.n", int(data["responses"].shape[0]))
-    probe.record(f"{p}responses.max_len", int(data["responses"].shape[1]))
-    probe.record(f"{p}response_tokens", int(mask.sum().item()))
-    for name in ("old_log_probs", "ref_log_prob"):
-        t = data[name].float()
-        probe.record(f"{p}{name}.masked_mean", float((t * mask).sum() / mask.sum()))
-    a = data["advantages"].float()
-    probe.record(f"{p}advantages.absmean", float((a.abs() * mask).sum() / mask.sum()))
-    for key in (
-        "actor/pg_loss",
-        "actor/kl_loss",
-        "actor/entropy",
-        "actor/pg_clipfrac",
-        "actor/grad_norm",
-        "critic/score/mean",
-        "response_length/mean",
-        "global_seqlen/mean",
-    ):
-        if key in metrics:
-            probe.record(f"{p}{key}", float(metrics[key]))
-    probe.flush()
-
-
 class PPOTrainer(ABC):
     """Base class for PPO trainer.
 
@@ -525,8 +484,6 @@ class PPOTrainer(ABC):
             rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
             if rollout_data_dir:
                 self._log_rollout_data(batch, self.timing_raw, rollout_data_dir)
-
-            _probe_step(batch, metrics, self.global_steps)
 
             # 7. cleanup transfer queue
             tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
