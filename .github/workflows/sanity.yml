@@ -47,6 +47,9 @@ on:
       - "**/*.py"
       - .github/workflows/sanity.yml
       - "tests/special_sanity/**"
+      # Dependency set: the `uv run --frozen` below installs from these
+      - "pyproject.toml"
+      - "uv.lock"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:

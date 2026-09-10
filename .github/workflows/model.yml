@@ -51,6 +51,9 @@ on:
       - "tests/special_distributed/test_tensor_dict.py"
       - "tests/models/**"
       - "tests/special_distributed/run_all.sh"
+      # Dependency set: the `uv run --frozen` below installs from these
+      - "pyproject.toml"
+      - "uv.lock"
 
 # Declare permissions just read content.
 permissions:
@@ -62,7 +65,7 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130.dev3"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:

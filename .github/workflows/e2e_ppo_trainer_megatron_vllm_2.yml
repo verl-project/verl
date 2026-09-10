@@ -49,6 +49,9 @@ on:
       - "!verl/utils/fsdp_utils.py"
       - "!verl/utils/checkpoint/fsdp_checkpoint_manager.py"
       - "!verl/model_merger/fsdp_model_merger.py"
+      # Dependency set: the `uv run --frozen` below installs from these
+      - "pyproject.toml"
+      - "uv.lock"
   pull_request:
     branches:
       - main
@@ -76,6 +79,9 @@ on:
       - "tests/special_e2e/run_ppo_trainer_megatron.sh"
       - "verl/trainer/main_ppo.py"
       - "verl/trainer/config/ppo_megatron_trainer.yaml"
+      # Dependency set: the `uv run --frozen` below installs from these
+      - "pyproject.toml"
+      - "uv.lock"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -87,7 +93,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130.dev3"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
