@@ -85,11 +85,12 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         from verl.workers.engine import BaseEngine, EngineRegistry
 
-        initialize_global_process_group_ray(timeout_second=None)
+        self.config = config
+
+        initialize_global_process_group_ray(timeout_second=self.config.nccl_timeout)
 
         set_numa_affinity()
 
-        self.config = config
         self.model_config = self.config.model_config
         self.engine_config = self.config.engine_config
         self.optimizer_config = self.config.optimizer_config
@@ -573,6 +574,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 optimizer_config=ref_config.optim,
                 checkpoint_config=ref_config.checkpoint,
                 profiler_config=ref_profiler_config,
+                nccl_timeout=self.config.get("nccl_timeout", 600),
             )
 
             # assign engine configs
@@ -610,6 +612,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 optimizer_config=actor_config.optim,
                 checkpoint_config=actor_config.checkpoint,
                 profiler_config=actor_profiler_config,
+                nccl_timeout=self.config.get("nccl_timeout", 600),
             )
 
             assert self.config.actor.use_dynamic_bsz == self.config.rollout.log_prob_use_dynamic_bsz

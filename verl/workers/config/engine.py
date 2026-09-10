@@ -689,6 +689,8 @@ class TrainingWorkerConfig(BaseConfig):
     optimizer_config: OptimizerConfig = None
     checkpoint_config: CheckpointConfig = None
     profiler_config: ProfilerConfig = None
+    # timeout in seconds for the worker's torch process group. None keeps torch's own default.
+    nccl_timeout: Optional[int] = None
     # automatically select engine and optimizer function.
     # This function takes model config and the device name as parameter.
     # Users can pass in a higher-order function to take more parameters

@@ -174,6 +174,7 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
                 optimizer_config=self.orig_critic_cfg.optim,
                 checkpoint_config=self.orig_critic_cfg.checkpoint,
                 profiler_config=critic_profiler_config,
+                nccl_timeout=self.orig_critic_cfg.get("nccl_timeout", 600),
             )
 
             critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=critic_cfg)
