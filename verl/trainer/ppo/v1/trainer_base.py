@@ -1877,7 +1877,16 @@ class PPOTrainer(ABC):
                 accumulator=self._rollout_moe_lb_metrics_accumulator,
             )
         )
-        metrics.update(compute_data_metrics(batch=metrics_batch, use_critic=self.use_critic))
+        # V1 pads to the batch maximum, so pass the configured caps explicitly: the
+        # tensor width is not the truncation threshold. See #7817.
+        metrics.update(
+            compute_data_metrics(
+                batch=metrics_batch,
+                use_critic=self.use_critic,
+                max_prompt_length=self.config.actor_rollout_ref.rollout.prompt_length,
+                max_response_length=self.config.actor_rollout_ref.rollout.response_length,
+            )
+        )
         metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
         n_gpus = self._get_n_gpus_for_throughput()
         metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))

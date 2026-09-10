@@ -426,7 +426,12 @@ class RolloutMoELoadBalanceMetricsAccumulator:
         return metrics
 
 
-def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str, Any]:
+def compute_data_metrics(
+    batch: DataProto,
+    use_critic: bool = True,
+    max_prompt_length: int | None = None,
+    max_response_length: int | None = None,
+) -> dict[str, Any]:
     """
     Computes various metrics from a batch of data for PPO training.
 
@@ -437,6 +442,10 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     Args:
         batch: A DataProto object containing batch data with token-level scores, rewards, advantages, etc.
         use_critic: Whether to include critic-specific metrics. Defaults to True.
+        max_prompt_length: Configured prompt length cap used as the threshold for
+            ``prompt_length/clip_ratio``. Defaults to the width of ``batch["prompts"]``.
+        max_response_length: Configured response length cap used as the threshold for
+            ``response_length/clip_ratio``. Defaults to the width of ``batch["responses"]``.
 
     Returns:
         A dictionary of metrics including:
@@ -456,8 +465,14 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     advantages = batch.batch["advantages"]
     returns = batch.batch["returns"]
 
-    max_prompt_length = batch.batch["prompts"].shape[-1]
-    max_response_length = batch.batch["responses"].shape[-1]
+    # The clip_ratio metrics report the truncation rate, so they must be measured
+    # against the configured length caps. V0 pads every sample to those caps before
+    # stacking, so the tensor width is an exact fallback; V1 keeps jagged tensors and
+    # pads to the batch maximum, where the width would make the metric never reach 0.
+    if max_prompt_length is None:
+        max_prompt_length = batch.batch["prompts"].shape[-1]
+    if max_response_length is None:
+        max_response_length = batch.batch["responses"].shape[-1]
 
     response_mask = batch.batch["response_mask"].bool()
 
