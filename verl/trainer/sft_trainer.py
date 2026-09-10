@@ -31,7 +31,12 @@ from torch.utils.data import DistributedSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
-from verl.trainer.sft_val_utils import resolve_sft_val_batch_size, sft_val_num_samples
+from verl.trainer.sft_val_utils import (
+    build_sft_val_dataloader,
+    pad_sft_val_batch,
+    sft_val_batch_divisor,
+    sft_val_num_tokens,
+)
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint import CheckpointHandler
 from verl.utils.dataset.dataset_utils import SFTTensorCollator
@@ -254,23 +259,21 @@ class SFTTrainer:
         )
 
         if self.val_dataset:
-            val_batch_size = resolve_sft_val_batch_size(config.data, len(self.val_dataset))
-            self.val_sampler = DistributedSampler(
-                self.val_dataset, shuffle=False, num_replicas=dp_size, rank=dp_rank, drop_last=False
-            )
-            self.val_dataloader = StatefulDataLoader(
+            self.val_dataloader = build_sft_val_dataloader(
                 dataset=self.val_dataset,
-                batch_size=val_batch_size,
-                sampler=self.val_sampler,
+                data_config=config.data,
+                dp_rank=dp_rank,
+                dp_size=dp_size,
                 collate_fn=self.collate_fn,
                 num_workers=self.config.data.num_workers,
-                pin_memory=False,
-                drop_last=False,
-                pin_memory_device=device_name,
+                device_name=device_name,
             )
-            assert len(self.val_dataloader) >= 1, "Validation dataloader is empty!"
+            self.val_sampler = self.val_dataloader.sampler
+            # the dataloader is already sharded per DP rank here, so no dispatch-time chunk
+            self.val_batch_divisor = sft_val_batch_divisor(config.data, dp_size=1)
         else:
             self.val_dataloader = None
+            self.val_batch_divisor = 1
 
     def _get_batch_seqlens(self, data):
         # mean over dp group
@@ -419,20 +422,23 @@ class SFTTrainer:
                 # early exit or validation step
                 if is_last_step and self.val_dataloader is not None or (self.test_freq > 0 and is_valid_step):
                     # Perform validation
-                    val_losses_and_counts = []
+                    val_losses_and_tokens = []
                     for val_data in self.val_dataloader:
                         val_data = tu.get_tensordict(tensor_dict=val_data, non_tensor_dict=meta_info)
-                        n_samples = sft_val_num_samples(val_data)
+                        val_data, _ = pad_sft_val_batch(val_data, self.val_batch_divisor)
+                        num_tokens = sft_val_num_tokens(val_data)
                         output = self.training_client.infer_batch(val_data)
 
                         if self.engine.is_mp_src_rank_with_outputs():
                             metrics = tu.get(output, "metrics")
-                            val_losses_and_counts.append((metrics["loss"], n_samples))
+                            val_losses_and_tokens.append((metrics["loss"], num_tokens))
 
                     if self.engine.is_mp_src_rank_with_outputs():
-                        n_val = torch.tensor(float(sum(n for _, n in val_losses_and_counts)), device=self.device_name)
+                        # each reported loss is already the global per-token NLL of its batch, so
+                        # the DP-local token counts sum straight into the token-weighted mean.
+                        n_val = torch.tensor(float(sum(t for _, t in val_losses_and_tokens)), device=self.device_name)
                         sum_val = torch.tensor(
-                            float(sum(float(loss) * n for loss, n in val_losses_and_counts)),
+                            float(sum(float(loss) * t for loss, t in val_losses_and_tokens)),
                             device=self.device_name,
                         )
                         dp_group = self.engine.get_data_parallel_group()

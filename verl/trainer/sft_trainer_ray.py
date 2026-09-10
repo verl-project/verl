@@ -32,7 +32,13 @@ from torch.utils.data import DistributedSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
-from verl.trainer.sft_val_utils import reduce_sft_val_loss, resolve_sft_val_batch_size, sft_val_num_samples
+from verl.trainer.sft_val_utils import (
+    build_sft_val_dataloader,
+    pad_sft_val_batch,
+    reduce_sft_val_loss,
+    sft_val_batch_divisor,
+    sft_val_num_tokens,
+)
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint import CheckpointHandler, OrchestrationMode
 from verl.utils.dataset.dataset_utils import SFTTensorCollator
@@ -53,6 +59,8 @@ class SFTTrainer:
         config,
     ):
         self.config = config
+
+        self._train_dp_size_cache = None
 
         self._build_config()
         self._build_dataset()
@@ -202,21 +210,18 @@ class SFTTrainer:
         )
 
         if self.val_dataset:
-            val_batch_size = resolve_sft_val_batch_size(config.data, len(self.val_dataset))
-            self.val_sampler = DistributedSampler(
-                self.val_dataset, shuffle=False, num_replicas=dp_size, rank=dp_rank, drop_last=False
-            )
-            self.val_dataloader = StatefulDataLoader(
+            # the driver holds whole batches here (dp_size == 1 above); the worker group
+            # chunks them across the real DP mesh, which `_train_dp_size` reports.
+            self.val_dataloader = build_sft_val_dataloader(
                 dataset=self.val_dataset,
-                batch_size=val_batch_size,
-                sampler=self.val_sampler,
+                data_config=config.data,
+                dp_rank=dp_rank,
+                dp_size=dp_size,
                 collate_fn=self.collate_fn,
                 num_workers=8,
-                pin_memory=False,
-                drop_last=False,
-                pin_memory_device=device_name,
+                device_name=device_name,
             )
-            assert len(self.val_dataloader) >= 1, "Validation dataloader is empty!"
+            self.val_sampler = self.val_dataloader.sampler
         else:
             self.val_dataloader = None
 
@@ -237,6 +242,18 @@ class SFTTrainer:
         self.test_freq = self.config.trainer.test_freq
         if self.test_freq == "after_each_epoch":
             self.test_freq = self.steps_per_epoch
+
+    def _train_dp_size(self) -> int:
+        """Number of chunks the worker group splits a dispatched batch into.
+
+        The driver builds its dataloaders with ``dp_size = 1`` -- it holds whole batches and
+        the worker group shards them on dispatch. This is the same
+        ``max(dp_rank_mapping) + 1`` that ``dispatch_lazy_compute_data_proto`` uses, so a
+        batch sized to a multiple of it is guaranteed to chunk evenly.
+        """
+        if self._train_dp_size_cache is None:
+            self._train_dp_size_cache = max(self.training_client._query_dispatch_info("train")) + 1
+        return self._train_dp_size_cache
 
     def _get_batch_seqlens(self, data):
         # mean over dp group
@@ -314,7 +331,7 @@ class SFTTrainer:
                 if self.config.trainer.balance_batch:
                     global_seqlen_lst = torch.Tensor([item.size()[0] for item in data["input_ids"]])
                     global_seqlen_lst = calculate_workload(global_seqlen_lst)
-                    dp_size = max(self.training_client._query_dispatch_info("train")) + 1
+                    dp_size = self._train_dp_size()
 
                     global_partition_lst = get_seqlen_balanced_partitions(
                         global_seqlen_lst, k_partitions=dp_size, equal_size=True
@@ -359,16 +376,18 @@ class SFTTrainer:
                 # early exit or validation step
                 if is_last_step and self.val_dataloader is not None or (self.test_freq > 0 and is_valid_step):
                     # Perform validation
-                    val_losses_and_counts = []
+                    val_losses_and_tokens = []
+                    val_batch_divisor = sft_val_batch_divisor(self.config.data, dp_size=self._train_dp_size())
                     for val_data in self.val_dataloader:
                         val_data = tu.get_tensordict(tensor_dict=val_data, non_tensor_dict=meta_info)
-                        n_samples = sft_val_num_samples(val_data)
+                        val_data, _ = pad_sft_val_batch(val_data, val_batch_divisor)
+                        num_tokens = sft_val_num_tokens(val_data)
                         output = self.training_client.infer_batch(val_data)
                         output = output.get()
                         metrics = tu.get(output, "metrics")
-                        val_losses_and_counts.append((metrics["loss"], n_samples))
+                        val_losses_and_tokens.append((metrics["loss"], num_tokens))
 
-                    val_loss = reduce_sft_val_loss(val_losses_and_counts)
+                    val_loss = reduce_sft_val_loss(val_losses_and_tokens)
                     if val_loss is None:
                         log_with_rank(
                             "Validation produced no batches; skip val/loss rather than logging NaN.",
