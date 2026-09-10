@@ -148,7 +148,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
 
     async def _agent_loop_postprocess(
-        self, output: AgentLoopOutput | list[AgentLoopOutput], validate, **kwargs
+        self, output: AgentLoopOutput | list[AgentLoopOutput], /, validate, **kwargs
     ) -> None:
         """Put agent loop outputs into TransferQueue."""
         uid, session_id = kwargs["uid"], kwargs["session_id"]
