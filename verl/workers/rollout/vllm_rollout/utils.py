@@ -43,6 +43,7 @@ from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedW
 from verl.workers.rollout.vllm_rollout.weight_update_utils import (
     apply_buffer_updates,
     drop_tied_alias_updates,
+    refresh_weight_caches,
     split_buffer_updates,
 )
 
@@ -363,6 +364,12 @@ class vLLMColocateWorkerExtension:
             with fold_unquantized_moe_params(staged_moe_layers):
                 for model, model_config in self._iter_all_models_with_config():
                     process_weights_after_loading(model, model_config, self.device)
+
+        if not (peft_config and base_sync_done):
+            for model in self._iter_all_models():
+                refreshed = refresh_weight_caches(model)
+                if refreshed:
+                    logger.info("Refreshed %d weight caches", refreshed)
 
     def _apply_buffer_updates_all_models(self, buffer_updates, main_named_buffers):
         """Apply buffer updates to the main model and any synced MTP drafter.
