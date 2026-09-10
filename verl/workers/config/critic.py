@@ -146,6 +146,24 @@ class CriticConfig(BaseConfig):
         infer_tokens = self.ppo_infer_max_token_len_per_gpu
         forward_tokens = getattr(self, "forward_max_token_len_per_gpu", None)
         engine_config.infer_max_token_len_per_gpu = infer_tokens if infer_tokens is not None else forward_tokens
+
+        # Mirror the actor's guard in engine_workers.py: the engine reads whichever pair
+        # `use_dynamic_bsz` selects, and a None there fails deep inside
+        # `prepare_micro_batches` instead of here. The deprecated global
+        # `critic.ppo_micro_batch_size` is not normalized into the per-GPU field, so it
+        # cannot stand in for it.
+        if engine_config.use_dynamic_bsz:
+            if engine_config.max_token_len_per_gpu is None or engine_config.infer_max_token_len_per_gpu is None:
+                raise ValueError(
+                    "critic.use_dynamic_bsz=True requires critic.ppo_max_token_len_per_gpu and "
+                    "critic.ppo_infer_max_token_len_per_gpu (or critic.forward_max_token_len_per_gpu)."
+                )
+        elif engine_config.micro_batch_size_per_gpu is None or engine_config.infer_micro_batch_size_per_gpu is None:
+            raise ValueError(
+                "critic.use_dynamic_bsz=False requires critic.ppo_micro_batch_size_per_gpu and "
+                "critic.ppo_infer_micro_batch_size_per_gpu (or critic.forward_micro_batch_size_per_gpu). "
+                "The deprecated critic.ppo_micro_batch_size is not a substitute."
+            )
         return engine_config
 
     @staticmethod
