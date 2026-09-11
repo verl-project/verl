@@ -132,6 +132,9 @@ def load_reward_manager(config: DictConfig, tokenizer: Any, **reward_kwargs: Any
     default_compute_score_ = get_default_compute_score(reward_manager_cfg.name)
 
     if compute_score is None:
+        # Extra keyword arguments forwarded to the default compute_score function, e.g.
+        # `compute_score_kwargs: {method: flexible}` switches the GSM8K scorer to flexible answer extraction.
+        compute_score_kwargs = dict(config.reward.get("compute_score_kwargs", None) or {})
         sandbox_config = config.reward.get("sandbox_fusion")
         sandbox_url = sandbox_config.get("url") if sandbox_config else None
         memory_limit_mb = sandbox_config.get("memory_limit_mb", 1024) if sandbox_config else 1024
@@ -144,9 +147,10 @@ def load_reward_manager(config: DictConfig, tokenizer: Any, **reward_kwargs: Any
                 sandbox_fusion_url=sandbox_url,
                 concurrent_semaphore=_concurrent_semaphore,
                 memory_limit_mb=memory_limit_mb,
+                **compute_score_kwargs,
             )
         else:
-            final_compute_score = default_compute_score_
+            final_compute_score = partial(default_compute_score_, **compute_score_kwargs)
 
     # Instantiate and return the reward manager with the specified parameters
     return reward_manager_cls(

@@ -12,6 +12,11 @@ custom_reward_function:
   # The name of the reward function within the specified file. Default is 'compute_score'.
   name: compute_score
 
+# Extra keyword arguments passed to the built-in compute_score function (only used when
+# custom_reward_function.path is not set). For example, `{method: flexible}` makes the GSM8K
+# scorer take the last number in the response as the answer instead of requiring '#### <answer>'.
+compute_score_kwargs: {}
+
 # reward manager, see `verl/trainer/config/reward_manager.yaml` for details.
 reward_manager:
   _target_: verl.workers.config.reward.RewardManagerConfig
