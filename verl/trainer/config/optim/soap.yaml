@@ -1,0 +1,72 @@
+# Target class for this configuration
+_target_: verl.workers.config.FSDPOptimizerConfig
+
+# Optimizer class name (e.g., "AdamW", "AdamW8bit", "_AdamW", "Adam")
+optimizer: SOAP
+
+# Module path to import optimizer
+# Examples: "torch.optim", "torchao.optim", "bitsandbytes.optim"
+optimizer_impl: verl.optimizers.soap
+
+# Learning rate (paper default)
+lr: 3e-3
+
+# LR warmup steps ratio
+lr_warmup_steps_ratio: 0.0
+
+# Total training steps
+total_training_steps: -1
+
+# Weight decay (paper default)
+weight_decay: 0.01
+
+# LR warmup steps
+lr_warmup_steps: -1
+
+# Betas for Adam optimizer (paper default)
+betas: [0.95, 0.95]
+
+# Clip gradient
+clip_grad: 1.0
+
+# Minimum LR ratio for cosine schedule
+min_lr_ratio: 0.0
+
+# Number of cosine cycles in LR schedule
+num_cycles: 0.5
+
+# LR scheduler type: "constant" or "cosine"
+lr_scheduler_type: constant
+
+# deprecated
+warmup_style: null
+
+# Additional optimizer-specific keyword arguments (paper defaults)
+override_optimizer_config:
+
+  # Use betas[1] when < 0; otherwise use the explicit value
+  shampoo_beta: -1
+
+  # Adam epsilon for numerical stability
+  eps: 1e-8
+
+  # How often to update the preconditioner
+  precondition_frequency: 10
+
+  # Maximum dimension of the preconditioner
+  max_precond_dim: 10000
+
+  # Merge dimensions when product is <= max_precond_dim
+  merge_dims: false
+
+  # Whether to precondition 1D gradients
+  precondition_1d: false
+
+  # Normalize gradients per layer
+  normalize_grads: false
+
+  # Data format for convolutional layers: channels_first | channels_last
+  data_format: channels_first
+
+  # Whether to use bias correction in Adam
+  correct_bias: true
