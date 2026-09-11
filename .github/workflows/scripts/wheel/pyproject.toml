@@ -1,0 +1,7 @@
+[variant.default-priorities]
+namespace = ["ascend"]
+
+[variant.providers.ascend]
+enable-if = "platform_system == 'Linux'"
+plugin-api = "huawei_ascend_variant_provider.plugin:AscendVariantPlugin"
+requires = ["huawei-ascend-variant-provider>=0.0.2,<1.0.0"]
