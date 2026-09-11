@@ -629,6 +629,15 @@ class vLLMHttpServer:
             extra_args["kv_transfer_params"] = kv_transfer_params
             sampling_params["extra_args"] = extra_args
 
+        # verl rollout is token-in-token-out: the output path below only reads token_ids
+        # and numeric logprobs (never .text), so detokenizing every generated token into a
+        # string is pure overhead. Skip it. Guard: string-based `stop` / `bad_words` need
+        # detokenized text to match, so only skip when neither is used (`stop_token_ids`
+        # is unaffected). Teacher requests already set detokenize=False upstream, so this
+        # setdefault leaves them untouched.
+        if not sampling_params.get("stop") and not sampling_params.get("bad_words"):
+            sampling_params.setdefault("detokenize", False)
+
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         prompt_ids = qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
         multi_modal_data = {}
