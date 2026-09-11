@@ -894,7 +894,11 @@ def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> flo
 
 
 def process_validation_metrics(
-    data_sources: list[str], sample_uids: list[str], infos_dict: dict[str, list[Any]], seed: int = 42
+    data_sources: list[str],
+    sample_uids: list[str],
+    infos_dict: dict[str, list[Any]],
+    seed: int = 42,
+    expected_acc_counts: dict[tuple[str, str], int] | None = None,
 ) -> dict[str, dict[str, dict[str, float]]]:
     """
     Process validation metrics into a structured format with statistical analysis.
@@ -909,6 +913,9 @@ def process_validation_metrics(
         sample_uids: List of sample uids corresponding to each sample.
         infos_dict: Dictionary mapping variable names to lists of values for each sample.
         seed: Random seed for bootstrap sampling. Defaults to 42.
+        expected_acc_counts: Expected session count keyed by ``(data_source, uid)``. For data
+            sources that emit ``acc``, failure sessions are included with ``acc=0`` while
+            ``acc_success_only`` preserves the metric over materialized sessions.
 
     Returns:
         A nested dictionary with the structure:
@@ -945,6 +952,24 @@ def process_validation_metrics(
         for var_name, var_vals in infos_dict.items():
             var2vals[var_name].append(var_vals[sample_idx])
 
+    if expected_acc_counts:
+        # Only sources that actually define acc opt into this policy; reward-only evaluators must not
+        # acquire a synthetic accuracy metric merely because another source emits one.
+        acc_data_sources = {
+            data_source
+            for data_source, uid2var2vals in data_src2uid2var2vals.items()
+            if any(value is not None for var2vals in uid2var2vals.values() for value in var2vals.get("acc", []))
+        }
+        for (data_source, uid), expected_count in expected_acc_counts.items():
+            if data_source not in acc_data_sources:
+                continue
+
+            var2vals = data_src2uid2var2vals[data_source][uid]
+            observed_acc = [value for value in var2vals.get("acc", []) if value is not None]
+            var2vals["acc_success_only"] = observed_acc
+            missing_count = max(expected_count - len(observed_acc), 0)
+            var2vals["acc"] = observed_acc + [0.0] * missing_count
+
     np_mean = np.mean
     np_std = np.std
     reduce_fns_best_worst = [np.max, np.min]
@@ -974,13 +999,18 @@ def process_validation_metrics(
 
         for uid, var2vals in uid2var2vals.items():
             pred_vals = var2vals.get("pred")
-            has_pred = pred_vals is not None
             var_dict = uid_dict.setdefault(uid, {})
 
             for var_name, var_vals in var2vals.items():
+                var_vals = [value for value in var_vals if value is not None]
                 # skip empty or string values
                 if not var_vals or isinstance(var_vals[0], str):
                     continue
+                has_pred = (
+                    pred_vals is not None
+                    and len(pred_vals) == len(var_vals)
+                    and all(pred is not None for pred in pred_vals)
+                )
 
                 # compute mean and std
                 n_resps = len(var_vals)

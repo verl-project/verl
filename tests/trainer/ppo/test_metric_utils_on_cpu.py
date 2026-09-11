@@ -568,6 +568,44 @@ class TestProcessValidationMetrics(unittest.TestCase):
         # For bootstrap with n=2, the majority vote could be either A or B
         # depending on the random sampling, so we don't check the exact value
 
+    def test_process_validation_metrics_counts_missing_sessions_as_incorrect(self):
+        data_sources = ["source1", "source1"]
+        sample_uids = ["prompt1", "prompt1"]
+        infos_dict = {
+            "reward": [0.4, 0.6],
+            "acc": [1.0, 1.0],
+        }
+
+        result = process_validation_metrics(
+            data_sources,
+            sample_uids,
+            infos_dict,
+            expected_acc_counts={
+                ("source1", "prompt1"): 4,
+                ("source1", "prompt2"): 4,
+            },
+        )
+
+        self.assertAlmostEqual(result["source1"]["acc"]["mean@4"], 0.25)
+        self.assertAlmostEqual(result["source1"]["acc_success_only"]["mean@2"], 1.0)
+        self.assertAlmostEqual(result["source1"]["reward"]["mean@2"], 0.5)
+
+    def test_process_validation_metrics_does_not_add_acc_to_reward_only_source(self):
+        result = process_validation_metrics(
+            data_sources=["acc_source", "reward_source"],
+            sample_uids=["acc_prompt", "reward_prompt"],
+            infos_dict={"reward": [1.0, 0.5], "acc": [1.0, None]},
+            expected_acc_counts={
+                ("acc_source", "acc_prompt"): 2,
+                ("reward_source", "reward_prompt"): 2,
+            },
+        )
+
+        self.assertAlmostEqual(result["acc_source"]["acc"]["mean@2"], 0.5)
+        self.assertAlmostEqual(result["acc_source"]["acc_success_only"]["mean@1"], 1.0)
+        self.assertNotIn("acc", result["reward_source"])
+        self.assertNotIn("acc_success_only", result["reward_source"])
+
 
 if __name__ == "__main__":
     unittest.main()
