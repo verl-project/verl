@@ -22,6 +22,11 @@ top_k: -1
 # Top-p sampling parameter. Default 1.0.
 top_p: 1
 
+# Penalty applied to tokens already present in the generated text. Values above 1.0
+# discourage repetition, below 1.0 encourage it. Used as the default for the
+# repetition_penalty sampling parameter.
+repetition_penalty: 1.0
+
 # Whether to enable full determinism for reproducibility in rollout.
 # See https://pytorch.org/docs/stable/notes/randomness.html for details.
 full_determinism: false
@@ -45,6 +50,11 @@ dtype: bfloat16
 # Fraction of GPU memory used by vLLM/SGLang/TRTLLM for KV cache.
 gpu_memory_utilization: 0.5
 
+# Fraction of GPU memory used by the rollout engine when it runs on its own resource
+# pool, as in one-step-off/fully async training. Falls back to gpu_memory_utilization
+# when null.
+standalone_gpu_memory_utilization: null
+
 # Whether to ignore EOS and continue generating after EOS is hit.
 ignore_eos: False
 
@@ -60,6 +70,10 @@ cudagraph_capture_sizes: null
 # Whether to free engine KVCache after generation.
 free_cache_engine: True
 
+# Whether the inference engine may sleep (offload its weights and KV cache) while the
+# trainer holds the GPU. Set to False when the engine owns a separate resource pool.
+enable_sleep_mode: True
+
 # TP size for rollout. Not effective for hf
 tensor_model_parallel_size: 2
 
@@ -73,6 +87,10 @@ expert_parallel_size: 1
 
 # PP size for rollout.
 pipeline_model_parallel_size: 1
+
+# MoE TP size for rollout. Only supported by the trtllm engine, where it must satisfy
+# moe_tensor_parallel_size * expert_parallel_size == tensor_model_parallel_size.
+moe_tensor_parallel_size: 1
 
 # max number of tokens in a batch
 max_num_batched_tokens: 8192
@@ -134,6 +152,10 @@ over_sample_rate: 0
 # to reduce peak memory during training-rollout transition.
 # This is only effective for SGLang rollout.
 multi_stage_wake_up: false
+
+# Maximum number of images per prompt, passed to the engine as limit_mm_per_prompt.
+# Required for multi-image data; null leaves the engine default in place.
+limit_images: null
 
 # Extra inference engine arguments (vllm, sglang, trtllm), please refer vllm/sglang/trtllm official doc for detail
 engine_kwargs:
@@ -271,6 +293,10 @@ agent:
 
     # Class name of the custom async server class (e.g. AsyncvLLMServer)
     name: null
+
+# Fully qualified class name for a custom CheckpointEngineManager. When set, the trainer
+# loads this class instead of the built-in CheckpointEngineManager.
+checkpoint_manager_class: null
 
 # Checkpoint Engine config for update weights from trainer to rollout
 checkpoint_engine:
@@ -450,6 +476,27 @@ profiler:
 
       # Whether to fail on unknown stage or missing msprobe
       strict: ${oc.select:actor_rollout_ref.actor.profiler.tool_config.precision_debugger.strict,${oc.select:global_profiler.global_tool_config.precision_debugger.strict,False}}
+
+# HTTP client settings used to reach a rollout server, read by the trtllm rollout
+server:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.ServerConfig
+
+  # Per-request timeout in seconds
+  timeout: 60.0
+
+  # Number of attempts per request before giving up
+  max_attempts: 3
+
+  # Seconds to wait between attempts
+  retry_delay: 2.0
+
+  # Maximum number of concurrent connections to the server
+  max_connections: 1000
+
+  # Seconds to wait for the server to come up before failing
+  max_start_wait_time: 300.0
 
 # prometheus configuration for vllm/sglang server mode
 prometheus:
