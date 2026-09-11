@@ -26,6 +26,12 @@ repos:
         language: python
         pass_filenames: false
 
+      - id: check-docs-file-refs
+        name: Check docs reference existing files
+        entry: python3 tests/special_sanity/check_docs_file_refs.py
+        language: python
+        pass_filenames: false
+
       - id: check-docstrings
         name: Check doc string coverage
         entry: python3 tests/special_sanity/check_docstrings.py
