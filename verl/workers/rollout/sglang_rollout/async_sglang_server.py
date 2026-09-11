@@ -70,6 +70,23 @@ logger.setLevel(logging.INFO)
 visible_devices_keyword = get_visible_devices_keyword()
 
 
+def _pop_token_ids_logprob_request_sglang(
+    sampling_params: dict[str, Any],
+) -> tuple[Optional[list[int]], dict[str, Any]]:
+    """Translate fixed-token logprob parameters into SGLang request fields."""
+    token_ids_logprob = sampling_params.pop("token_ids_logprob", None)
+    logprob_start_len = sampling_params.pop("logprob_start_len", 0)
+    if logprob_start_len and not token_ids_logprob:
+        raise ValueError("logprob_start_len is only supported with token_ids_logprob.")
+    if not token_ids_logprob:
+        return token_ids_logprob, {}
+    return token_ids_logprob, {
+        "return_logprob": True,
+        "logprob_start_len": logprob_start_len,
+        "token_ids_logprob": token_ids_logprob,
+    }
+
+
 def _extract_prompt_logprobs_sglang(
     meta_info: dict,
     num_prompt_logprobs: int,
@@ -118,6 +135,14 @@ def _extract_prompt_logprobs_sglang(
     )
     result_dict["prompt_ids"] = prompt_ids_ls
     result_dict["prompt_logprobs"] = prompt_logprobs_ls
+
+
+def _extract_token_ids_logprobs_sglang(meta_info: dict, result_dict: dict[str, Any]) -> None:
+    """Expose SGLang's fixed-token input logprobs through ``TokenOutput``."""
+    input_token_ids_logprobs = meta_info.get("input_token_ids_logprobs")
+    if input_token_ids_logprobs is None:
+        raise ValueError("SGLang did not return input_token_ids_logprobs for a token_ids_logprob request.")
+    result_dict["input_token_ids_logprobs"] = input_token_ids_logprobs
 
 
 class SGLangHttpServer:
@@ -618,6 +643,7 @@ class SGLangHttpServer:
         # input-token logprobs for every position (top-K when K>0, sampled-token
         # logprob only when K==0). Translate to SGLang's per-request logprob API.
         prompt_logprobs = sampling_params.pop("prompt_logprobs", None)
+        token_ids_logprob, token_ids_logprob_request = _pop_token_ids_logprob_request_sglang(sampling_params)
         if prompt_logprobs is not None:
             return_logprob = True
 
@@ -635,6 +661,8 @@ class SGLangHttpServer:
             request["logprob_start_len"] = 0
             if prompt_logprobs > 0:
                 request["top_logprobs_num"] = prompt_logprobs
+        request.update(token_ids_logprob_request)
+        return_logprob = request["return_logprob"]
 
         if self.config.enable_rollout_routing_replay:
             request.update({"return_routed_experts": True})
@@ -704,6 +732,8 @@ class SGLangHttpServer:
                 sequence_length=len(prompt_ids),
                 result_dict=extra_fields,
             )
+        if token_ids_logprob:
+            _extract_token_ids_logprobs_sglang(meta_info=meta_info, result_dict=extra_fields)
 
         # Re-key backend spec-decoding stats to the rollout-common names.
         if self.config.mtp is not None and self.config.mtp.enable and self.config.mtp.enable_rollout:
