@@ -292,6 +292,17 @@ trainer:
       # Whether sync trainers replace failed groups that have no trajectories
       sync_refill_failed_groups: False
 
+      # How async trainers dispatch new prompts.
+      # batch: dump a full training batch on warmup / prepare_step (default)
+      # sample_level: refill one prompt when group_size samples finish from any groups
+      dispatch_mode: batch
+
+      # GRPO group size for sample_level. null uses actor_rollout_ref.rollout.n
+      group_size: null
+
+      # In-flight sample cap for sample_level. null uses train_batch_size * group_size
+      max_inflight_samples: null
+
       # Custom sampler config
       custom_sampler:
 

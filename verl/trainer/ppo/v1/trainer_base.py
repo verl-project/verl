@@ -196,6 +196,20 @@ class PPOTrainer(ABC):
                     else (self.config.data.get("gen_batch_size", None) or train_batch_size),
                     max_inflight_gen_batches=max_inflight_gen_batches,
                 )
+            else:
+                dispatch_mode = str(sampler_config.get("dispatch_mode", "batch"))
+                replay_buffer_kwargs["dispatch_mode"] = dispatch_mode
+                if dispatch_mode == "sample_level":
+                    group_size = sampler_config.get("group_size", None)
+                    if group_size in (None, 0):
+                        group_size = self.config.actor_rollout_ref.rollout.n
+                    max_inflight_samples = sampler_config.get("max_inflight_samples", None)
+                    if max_inflight_samples in (None, 0):
+                        max_inflight_samples = self.config.data.train_batch_size * int(group_size)
+                    replay_buffer_kwargs.update(
+                        group_size=int(group_size),
+                        max_inflight_samples=int(max_inflight_samples),
+                    )
         return sampler_cls(**replay_buffer_kwargs)
 
     def _resolve_filter_groups_metric(self) -> str | None:
