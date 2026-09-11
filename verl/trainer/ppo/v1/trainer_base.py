@@ -607,9 +607,16 @@ class PPOTrainer(ABC):
         """Called before the training loop starts."""
         return
 
+    def _should_add_batch_to_generate(self) -> bool:
+        """False when a custom sampler owns prompt dispatch (sample-level)."""
+        return bool(getattr(self.replay_buffer, "trainer_owns_dispatch", True))
+
     def _add_async_warmup_batches(self, num_warmup_batches: int) -> None:
         """Fill the async prefetch window without duplicating checkpointed prompt groups."""
         if self.config.skip.rollout_tq.enable or num_warmup_batches <= 0:
+            return
+        if not self._should_add_batch_to_generate():
+            logger.info("sampler owns dispatch; skip warmup batch dump")
             return
 
         restored_prompts = self._restored_tq_prompt_count
@@ -1465,7 +1472,8 @@ class PPOTrainer(ABC):
         self._submit_batch_to_rollout(batch)
 
     def prepare_step(self) -> dict:
-        self._add_batch_to_generate()
+        if self._should_add_batch_to_generate():
+            self._add_batch_to_generate()
         return {}
 
     def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict | None = None) -> KVBatchMeta:
