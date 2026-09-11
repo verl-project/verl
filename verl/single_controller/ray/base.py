@@ -26,6 +26,7 @@ from ray.util.placement_group import PlacementGroup, placement_group
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy, PlacementGroupSchedulingStrategy
 
 from verl.plugin.platform import get_platform
+from verl.plugin.platform.platform_tpu_workarounds import get_platform_worker_env_vars
 from verl.protocol import DataProto, _padding_size_key
 from verl.single_controller.base import ClassWithInitArgs, ResourcePool, Worker, WorkerGroup
 from verl.single_controller.base.decorator import MAGIC_ATTR, Dispatch
@@ -120,6 +121,8 @@ class RayResourcePool(ResourcePool):
         detached=False,
         accelerator_type: Optional[str] = None,
     ) -> None:
+        if get_platform().device_name == "tpu":
+            max_colocate_count = 1
         super().__init__(process_on_nodes, max_colocate_count)
         self.use_gpu = use_gpu
         # print(f"in RayProcessDispatchConfiguration: name_prefix = {name_prefix}")
@@ -146,8 +149,8 @@ class RayResourcePool(ResourcePool):
         bundle = {"CPU": self.max_colocate_count}
         if self.use_gpu:
             bundle[device_name] = 1
-            if self.accelerator_type is not None:
-                bundle[self.accelerator_type] = 1e-4
+        if self.accelerator_type is not None:
+            bundle[self.accelerator_type] = 1e-4
         pg_scheme = [[bundle.copy() for _ in range(process_count)] for process_count in self._store]
 
         lifetime = "detached" if self.detached else None
@@ -192,6 +195,10 @@ class ResourcePoolManager:
     max_colocate_count: int = 3
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
 
+    def __post_init__(self):
+        if get_platform().device_name == "tpu":
+            self.max_colocate_count = 1
+
     def create_resource_pool(self):
         """Create Ray resource pools for distributed training.
 
@@ -226,9 +233,9 @@ class ResourcePoolManager:
     def _check_resource_available(self):
         """Check if the resource pool can be satisfied in this ray cluster."""
         node_available_resources = ray._private.state.available_resources_per_node()
+        device_name = get_platform().ray_resource_name()
         node_available_gpus = {
-            node: node_info.get("GPU", 0) if "GPU" in node_info else node_info.get("NPU", 0)
-            for node, node_info in node_available_resources.items()
+            node: node_info.get(device_name, 0) for node, node_info in node_available_resources.items()
         }
 
         # check total required gpus can be satisfied
@@ -638,6 +645,16 @@ class RayWorkerGroup(WorkerGroup):
             "MASTER_ADDR": self._master_addr,
             "MASTER_PORT": self._master_port,
         }
+        platform_env = get_platform_worker_env_vars(
+            resource_pool=resource_pool,
+            rank=rank,
+            world_size=world_size,
+            local_rank=local_rank,
+            local_world_size=local_world_size,
+            name_prefix=self.name_prefix,
+            device_name=self.device_name,
+        )
+        env_vars.update(platform_env)
         if worker_env is not None:
             logging.debug(f"Appending ray class env, origin: {env_vars}, customized env: {worker_env}")
             conflict_env_vars = set(env_vars.keys()) & set(worker_env.keys())

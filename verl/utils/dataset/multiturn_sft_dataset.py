@@ -93,8 +93,8 @@ class MultiTurnSFTDataset(Dataset):
         # Set defaults and extract parameters from config if provided
         config = config or {}
         self.pad_mode = config.get("pad_mode", "right")
-        assert self.pad_mode in ["right", "no_padding"], (
-            f"Expect pad_mode to be 'right' or 'no_padding'. Got {self.pad_mode}"
+        assert self.pad_mode in ["right", "no_padding", "tpu_binned_pack"], (
+            f"Expect pad_mode to be 'right', 'no_padding', or 'tpu_binned_pack'. Got {self.pad_mode}"
         )
         self.truncation = config.get("truncation", "error")
         # for right padding
@@ -401,7 +401,7 @@ class MultiTurnSFTDataset(Dataset):
             if len(multi_modal_inputs) > 0:
                 res["multi_modal_inputs"] = multi_modal_inputs
             return res
-        elif self.pad_mode == DatasetPadMode.NO_PADDING:
+        elif self.pad_mode in [DatasetPadMode.NO_PADDING, DatasetPadMode.TPU_BINNED_PACK]:
             if sequence_length > self.max_length and self.truncation == "error":
                 raise ValueError(f"{sequence_length=} is larger than {self.max_length=}")
             # truncate input_ids if it is longer than max_length

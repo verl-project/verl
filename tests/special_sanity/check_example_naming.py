@@ -79,6 +79,7 @@ ALLOWED_BACKENDS = (
     "mindspeed",
     "automodel",
     "veomni",
+    "torchtitan",
 )
 
 # Directories whose scripts have their own conventions and are exempt from

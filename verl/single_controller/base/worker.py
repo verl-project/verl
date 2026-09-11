@@ -276,9 +276,17 @@ class Worker(WorkerHelper):
             # RAY_EXPERIMENTAL_NOSET_*_VISIBLE_DEVICES is set,
             # so we need to set local rank when the flag is set.
             device_name = get_resource_name()
-            local_rank = ray.get_runtime_context().get_accelerator_ids()[device_name][0]
-            os.environ["LOCAL_RANK"] = local_rank
-            get_torch_device().set_device(int(local_rank))
+            if device_name == "TPU":
+                local_rank = os.environ.get("TPU_VISIBLE_CHIPS", "0")
+            else:
+                local_rank = ray.get_runtime_context().get_accelerator_ids()[device_name][0]
+
+            os.environ["LOCAL_RANK"] = str(local_rank)
+
+            # Avoid eager device initialization for non-TPU engine workers (e.g. CheckpointEngineWorker)
+            # which could lock TPU chips unnecessarily.
+            if self.__class__.__name__ != "CheckpointEngineWorker" or device_name != "TPU":
+                get_torch_device().set_device(int(local_rank))
 
     def _configure_with_store(self, store: dict):
         """
