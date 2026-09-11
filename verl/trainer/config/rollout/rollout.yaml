@@ -60,10 +60,13 @@ cudagraph_capture_sizes: null
 # Whether to free engine KVCache after generation.
 free_cache_engine: True
 
-# TP size for rollout. Not effective for hf
+# TP size for rollout. Not effective for hf.
+# For SGLang, verl passes tensor_model_parallel_size * data_parallel_size as the global tp_size;
+# SGLang divides it by dp_size to obtain the per-DP attention TP size.
 tensor_model_parallel_size: 2
 
-# DP size for rollout
+# DP size for rollout.
+# SGLang requires engine_kwargs.sglang.enable_dp_attention: true when data_parallel_size > 1.
 data_parallel_size: 1
 
 # EP size for rollout
@@ -135,7 +138,8 @@ over_sample_rate: 0
 # This is only effective for SGLang rollout.
 multi_stage_wake_up: false
 
-# Extra inference engine arguments (vllm, sglang, trtllm), please refer vllm/sglang/trtllm official doc for detail
+# Extra inference engine arguments (vllm, sglang, trtllm), please refer vllm/sglang/trtllm official doc for detail.
+# SGLang tp_size and dp_size are managed by the generic fields above and must not be set here.
 engine_kwargs:
 
   # vllm engine config
