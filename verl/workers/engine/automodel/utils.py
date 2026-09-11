@@ -234,7 +234,12 @@ def build_automodel_model(model_config, engine_config, distributed_setup, strate
     if engine_config.enable_fp8:
         from nemo_automodel.components.quantization.fp8 import FP8Config
 
-        kwargs["fp8_config"] = FP8Config()
+        kwargs["fp8_config"] = FP8Config(
+            enabled=True,
+            recipe_name="rowwise_with_gw_hp",
+            enable_fsdp_float8_all_gather=False,
+            precompute_float8_dynamic_scale_for_fsdp=False,
+        )
 
     if engine_config.enable_compile:
         from nemo_automodel.components.utils.compile_utils import CompileConfig
