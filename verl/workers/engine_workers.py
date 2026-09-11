@@ -723,6 +723,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         assert "actor" in self.role, "save_checkpoint only support actor role"
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
+    def _offload_actor_after_weight_sync(self, metrics: dict | None) -> dict:
+        """Return Megatron actor parameters to CPU after checkpoint-engine weight sync."""
+        engine = self.actor.engine
+        if self.config.actor.strategy != "megatron" or not engine.is_param_offload_enabled:
+            return metrics or {}
+        engine.to("cpu", model=True, optimizer=False, grad=False)
+        return metrics or {}
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None, mode: str = "auto"):
         """Update weights from trainer to rollout.
@@ -759,10 +767,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 # the delta engine owns the sync state machine (seed vs steady,
                 # snapshot prime), so it drives the training engine itself.
                 metrics = await self.checkpoint_engine.send_weights(self.actor.engine, global_steps=global_steps)
-                return metrics or {}
+                return self._offload_actor_after_weight_sync(metrics)
             per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
             metrics = await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
-            return metrics or {}
+            return self._offload_actor_after_weight_sync(metrics)
 
         set_expandable_segments(False)
         aggressive_empty_cache(force_sync=True)

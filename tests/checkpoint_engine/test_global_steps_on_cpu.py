@@ -60,6 +60,7 @@ def test_actor_worker_passes_global_steps_to_checkpoint_engine_send():
     checkpoint_engine = _FakeCheckpointEngine()
     worker = ActorRolloutRefWorker.__new__(ActorRolloutRefWorker)
     worker.config = SimpleNamespace(
+        actor=SimpleNamespace(strategy="fsdp"),
         rollout=SimpleNamespace(
             checkpoint_engine=SimpleNamespace(backend="modelexpress"),
         ),
