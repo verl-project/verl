@@ -510,7 +510,12 @@ try:
     from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel as _MegatronFSDP
     from megatron.core.distributed.fsdp.src.megatron_fsdp.megatron_fsdp import MegatronFSDP
 
-    ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module, _MegatronFSDP, MegatronFSDP)
+    # Newer megatron-core exposes some of these as factory FUNCTIONS (the class
+    # moved behind a wrapper) and isinstance() rejects non-types, so keep only
+    # real classes: unwrap_model() then works on either core revision.
+    ALL_MODULE_WRAPPER_CLASSNAMES = tuple(
+        cls for cls in (DDP, Float16Module, _MegatronFSDP, MegatronFSDP) if isinstance(cls, type)
+    )
 except ImportError:
     ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
 
@@ -1680,8 +1685,31 @@ def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
     from megatron.core.distributed import finalize_model_grads
     from megatron.core.utils import get_model_config
 
+    # Mint (glm52/glm53): shared expert LoRA weights (shared-outer and
+    # rank_shared layouts) are replicated across EP ranks. The bridge moves
+    # their cross-EP gradient sum from per-layer backward hooks to one
+    # coalesced all-reduce inside finalize_model_grads. Activate that path
+    # when the bridge is importable; without the bridge there are no shared
+    # expert adapters, so the stock finalize is correct and the EP sum is a
+    # no-op anyway.
+    try:
+        from megatron.bridge.peft.utils import (
+            enable_expert_parallel_grad_sync_in_finalize,
+            finalize_model_grads_with_expert_adapter_sync,
+        )
+    except ImportError:
+        enable_expert_parallel_grad_sync_in_finalize = None
+        finalize_model_grads_with_expert_adapter_sync = None
+
     try:
         from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel as megatron_FSDP
+
+        # Newer megatron-core exposes this entry point as a factory FUNCTION (the
+        # wrapper class itself lives in the inner megatron_fsdp module, imported
+        # as MegatronFSDP above). isinstance() and PEP-604 unions need real
+        # classes, so fall back to DDP for the isinstance guard below.
+        if not isinstance(megatron_FSDP, type):
+            megatron_FSDP = DDP
     except ImportError:
         megatron_FSDP = DDP
 
@@ -1689,7 +1717,15 @@ def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
     for one_model in model:
         config = get_model_config(one_model)
         config.grad_scale_func = optimizer.scale_loss
-        config.finalize_model_grads_func = finalize_model_grads
+        if finalize_model_grads_with_expert_adapter_sync is not None:
+            # Drop the per-layer fallback hooks (registered at adapter
+            # construction) so the finalize wrapper owns the cross-EP sum:
+            # one coalesced reduce per step over the EP group instead of one
+            # blocking all-reduce per shared side per layer per microbatch.
+            enable_expert_parallel_grad_sync_in_finalize([one_model])
+            config.finalize_model_grads_func = finalize_model_grads_with_expert_adapter_sync
+        else:
+            config.finalize_model_grads_func = finalize_model_grads
 
         overlap_param_gather = getattr(optimizer.config, "overlap_param_gather", False)
         overlap_grad_reduce = getattr(one_model.ddp_config, "overlap_grad_reduce", False)
@@ -1806,10 +1842,12 @@ def check_mtp_config(model_config: HFModelConfig, engine_config: McoreEngineConf
     Check and configure MTP (Multi-Token Prediction) settings.
 
     Cases:
-        - mtp.enable == False and no MTP layers: force provider MTP config to None
-        - mtp.enable == False and has MTP layers: clear HF MTP fields and force provider MTP config to None
-        - mtp.enable == True and no MTP layers: raise ValueError
-        - mtp.enable == True and has MTP layers: configure override_transformer_config
+        - mtp.enable == False: clear supported HF MTP layer-count fields,
+          force the provider MTP config to None, and remove stale loss scaling.
+        - mtp.enable == True and MTP layers are configured: keep the existing
+          layer counts and populate ``override_transformer_config`` as needed.
+        - mtp.enable == True and no MTP layers are configured: raise
+          ``ValueError``.
     """
     hf_config = model_config.hf_config
     mtp_num_layers = _get_mtp_num_layers(hf_config)
