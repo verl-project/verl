@@ -1,0 +1,283 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the verl project.
+#
+
+name: Auto Doc Translate
+
+on:
+  schedule:
+    - cron: '0 0 */3 * *'
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: 'Target branch for the PR'
+        required: false
+        default: 'main'
+        type: string
+      full_translate:
+        description: 'Full translation: translate ALL docs under docs/ascend_tutorial/zh/ (excluding index.rst)'
+        required: false
+        default: false
+        type: boolean
+      api_base:
+        description: 'LLM API base URL (default: https://st8tp3ajl0df3n8b8l8qu.apigateway-cn-beijing.volceapi.com/v1). Example for Zhipu AI: https://open.bigmodel.cn/api/paas/v4'
+        required: false
+        default: ''
+        type: string
+      model:
+        description: 'LLM model name (default: glm-5.2). Example for Zhipu AI: glm-4-plus'
+        required: false
+        default: ''
+        type: string
+
+concurrency:
+  group: translation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      TARGET_BRANCH: ${{ inputs.target_branch || 'main' }}
+    steps:
+      # Resolve the git token explicitly. Using
+      # `secrets.PAT_TOKEN || secrets.GITHUB_TOKEN` inline does NOT work: when
+      # PAT_TOKEN is not configured (e.g. on a fork), GitHub evaluates the
+      # whole expression to an empty string instead of falling through to
+      # GITHUB_TOKEN, which makes actions/checkout fail with:
+      #   "fatal: could not read Username for 'https://github.com': terminal prompts disabled"
+      - name: Resolve Git token (PAT when configured, else GITHUB_TOKEN)
+        id: resolve_token
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          if [ -n "$PAT_TOKEN" ]; then
+            # PAT has explicit push/PR permissions on the target repo.
+            echo "token=${PAT_TOKEN}" >> "$GITHUB_OUTPUT"
+            # Expose the same token for later `git push` / `gh pr create` steps.
+            echo "GH_TOKEN=${PAT_TOKEN}" >> "$GITHUB_ENV"
+            echo "Using PAT_TOKEN for git authentication"
+          else
+            # Fall back to the job-scoped GITHUB_TOKEN (permissions declared
+            # at the job level: contents: write, pull-requests: write).
+            echo "token=${{ github.token }}" >> "$GITHUB_OUTPUT"
+            echo "GH_TOKEN=${{ github.token }}" >> "$GITHUB_ENV"
+            echo "PAT_TOKEN not configured; using GITHUB_TOKEN"
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          token: ${{ steps.resolve_token.outputs.token }}
+          ref: ${{ env.TARGET_BRANCH }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install openai
+
+      - name: Clean stale translation memory for full translation
+        if: inputs.full_translate
+        run: |
+          echo "Cleaning old .po translation memory to force full retranslation..."
+          rm -rf docs/ascend_tutorial/locale/en/LC_MESSAGES/
+          echo "Cleaned."
+
+      - name: Detect whether to translate
+        id: detect
+        run: |
+          # Determine mode: full translation or incremental
+          if [ "${{ inputs.full_translate }}" = "true" ]; then
+            echo "Full translation mode"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "full_translate=true" >> $GITHUB_OUTPUT
+          elif [ -d "docs/ascend_tutorial/en" ] && [ "$(find docs/ascend_tutorial/en/ -name '*.md' -o -name '*.rst' 2>/dev/null | wc -l)" -gt 0 ]; then
+            echo "Incremental mode: will detect changes via .po translation memory"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "full_translate=false" >> $GITHUB_OUTPUT
+          else
+            echo "No existing English docs — performing full translation"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "full_translate=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Translate via LLM API
+        if: steps.detect.outputs.has_changes == 'true'
+        env:
+          # The API key used for translation. Store one of these secrets in the repo:
+          #   TRANSLATION_ASCEND - primary key for any OpenAI-compatible provider
+          #   LLM_API_KEY        - legacy generic key (used as fallback)
+          #   DEEPSEEK_API_KEY   - legacy DeepSeek key (used as fallback)
+          TRANSLATION_ASCEND: ${{ secrets.TRANSLATION_ASCEND }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          # Endpoint and model can be overridden per run via the workflow
+          # inputs below, or set permanently via repository variables/environment.
+          LLM_API_BASE: ${{ inputs.api_base }}
+          LLM_MODEL: ${{ inputs.model }}
+        run: |
+          if [ "${{ steps.detect.outputs.full_translate }}" = "true" ]; then
+            python .github/workflows/scripts/translate_md.py \
+              --first-time \
+              --output-json /tmp/translation_results.json
+          else
+            python .github/workflows/scripts/translate_md.py \
+              --all \
+              --output-json /tmp/translation_results.json
+          fi
+
+      - name: Process translated files
+        if: steps.detect.outputs.has_changes == 'true'
+        id: results
+        run: |
+          if [ ! -f /tmp/translation_results.json ]; then
+            echo "No translation results found"
+            exit 1
+          fi
+
+          success_files=$(python3 -c "
+          import json
+          with open('/tmp/translation_results.json') as f:
+              data = json.load(f)
+          for p in data.get('success_files', []):
+              print(p)
+          ")
+
+          if [ -z "$success_files" ]; then
+            echo "No changes to translate - nothing to commit"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          count=0
+          file_list=""
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            if [ -f "$file" ]; then
+              count=$((count + 1))
+              file_list="${file_list}- <code>${file}</code>"$'\n'
+              git add "$file"
+            fi
+          done <<< "$success_files"
+
+          [ $count -eq 0 ] && echo "No files to commit" && echo "has_changes=false" >> $GITHUB_OUTPUT && exit 0
+          echo "Staged $count translated file(s) (English docs + .po translation memory)"
+          {
+            echo "has_changes=true"
+            echo "file_count=$count"
+            echo "file_list<<EOF"
+            echo "$file_list"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Create branch and commit
+        if: steps.results.outputs.has_changes == 'true'
+        env:
+          # The resolved git token (PAT if configured, else GITHUB_TOKEN).
+          # Injected explicitly so `git push` uses credentials with write
+          # access. A plain `git push origin` can fall back to credentials
+          # lacking write permission -> 403 "denied to <user>".
+          PUSH_TOKEN: ${{ steps.resolve_token.outputs.token }}
+          # Fallback credential: if the primary token (e.g. an expired or
+          # under-scoped PAT) is rejected by the remote with 403, retry the
+          # push with the job-scoped GITHUB_TOKEN instead of failing the run.
+          GH_TOKEN_FALLBACK: ${{ github.token }}
+        run: |
+          git diff --cached --quiet && echo "Nothing to commit" && exit 1
+
+          BRANCH_NAME="auto-pr/doc-translate-$(date +%Y%m%d%H%M%S)"
+          echo "BRANCH_NAME=${BRANCH_NAME}" >> $GITHUB_ENV
+
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git checkout -b "${BRANCH_NAME}"
+
+          count=$(git diff --cached --name-only | wc -l)
+          git commit -s -m "[doc] feat: Auto-translate Chinese docs to English (${count} file(s))"
+
+          # Try the primary token (PAT if configured, else GITHUB_TOKEN) first.
+          # If it is rejected (e.g. stale/expired PAT), retry once with the
+          # job-scoped GITHUB_TOKEN so the workflow no longer dies on a bad
+          # secret, and re-export GH_TOKEN so later `gh pr create` works too.
+          git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git push origin "${BRANCH_NAME}"; then
+            echo "Push succeeded with primary token"
+          else
+            echo "::warning::Primary token push rejected; retrying with job-scoped GITHUB_TOKEN..."
+            git remote set-url origin "https://x-access-token:${GH_TOKEN_FALLBACK}@github.com/${GITHUB_REPOSITORY}.git"
+            git push origin "${BRANCH_NAME}"
+            echo "GH_TOKEN=${GH_TOKEN_FALLBACK}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Create Pull Request
+        if: steps.results.outputs.has_changes == 'true'
+        env:
+          FILE_LIST: ${{ steps.results.outputs.file_list }}
+          FILE_COUNT: ${{ steps.results.outputs.file_count }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PR_HEAD: ${{ github.repository_owner }}:${{ env.BRANCH_NAME }}
+          PR_BASE: ${{ env.TARGET_BRANCH }}
+        run: |
+          if [ -z "${{ env.BRANCH_NAME }}" ]; then
+            echo "Error: BRANCH_NAME not set"
+            exit 1
+          fi
+
+          DATE=$(date +%Y-%m-%d)
+          # PR title must pass tests/special_sanity/check_pr_title.py:
+          #   [BREAKING][module] type: description
+          #   module in {doc, ...}, type in {feat, fix, refactor, chore, test}
+          TITLE="[doc] feat: Auto-translate Chinese docs to English ${DATE}"
+
+          BODY=$(cat <<-BODYEOF
+          ## Auto-Translation Summary
+
+          Translated **${FILE_COUNT}** file(s):
+
+          ${FILE_LIST}
+
+          This PR uses the **direct doc translation workflow**:
+          - Scans \`docs/ascend_tutorial/zh/\` for Chinese source files (.md, .rst)
+          - Translates them via DeepSeek API into English docs under \`docs/ascend_tutorial/en/\` (same format, mirrored directory structure)
+          - Caches per-block translations as .po files under \`docs/ascend_tutorial/locale/en/LC_MESSAGES/\` for incremental runs
+          - \`docs/ascend_tutorial/zh/index.rst\` (Sphinx toctree index) is not translated
+
+          ---
+
+          [Workflow run](${RUN_URL})
+
+          > This PR was automatically generated by the scheduled doc translation workflow.
+          BODYEOF
+          )
+
+          if gh pr create \
+            --base "${PR_BASE}" \
+            --head "${PR_HEAD}" \
+            --title "${TITLE}" \
+            --body "${BODY}" \
+            --repo "${{ github.repository }}" 2>&1; then
+            echo "Pull request created successfully"
+          else
+            echo "::warning::gh pr create failed (a PR may already exist for ${PR_HEAD}, or the token lacks pull-requests write permission)"
+          fi
