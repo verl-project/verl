@@ -13,6 +13,7 @@
 # limitations under the License.
 import argparse
 import asyncio
+import functools
 import inspect
 import json
 import logging
@@ -53,7 +54,12 @@ from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tracking import RLInsightLogger
 from verl.utils.vllm.vllm_quant_utils import apply_vllm_quant_patches
 from verl.workers.config import HFModelConfig, RolloutConfig
-from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
+from verl.workers.rollout.replica import (
+    CONTROL_METHOD_CONCURRENCY,
+    RolloutMode,
+    RolloutReplica,
+    TokenOutput,
+)
 from verl.workers.rollout.utils import (
     get_max_position_embeddings,
     get_vision_placeholder_token_ids,
@@ -82,6 +88,28 @@ if os.getenv("VERL_USE_GPT_OSS", "0") == "1":
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
+
+
+def _control_method(server_method):
+    """Decorator used inside vLLMHttpServer to mark control methods that should
+    be scheduled on their own concurrency group but submit work to the default
+    asyncio loop.
+
+    See comment on `vLLMHttpServer._default_asyncio_loop`."""
+
+    server_method = ray.method(concurrency_group="control")(server_method)
+
+    @functools.wraps(server_method)
+    async def wrapper(self, *args, **kwargs):
+        if asyncio.get_running_loop() is self._default_asyncio_loop:
+            return await server_method(self, *args, **kwargs)
+        future = asyncio.run_coroutine_threadsafe(
+            server_method(self, *args, **kwargs),
+            self._default_asyncio_loop,
+        )
+        return await asyncio.wrap_future(future)
+
+    return wrapper
 
 
 class vLLMHttpServer:
@@ -217,6 +245,17 @@ class vLLMHttpServer:
 
         self._post_init(cuda_visible_devices)
 
+        # Ray associates actors with a capped number of async tasks that can be
+        # running. To avoid deadlocks, we use separate 'concurrency groups' for
+        # control messages and generate() requests. Each concurrency group is
+        # backed by a different CPU thread and asyncio event loop. To ensure
+        # thread safety, we require that any code that reads or writes
+        # vLLMHttpServer's state executes on default_asyncio_loop. Methods
+        # annotated with `concurrency_group="..."` run on non-default asyncio
+        # loops, so they should enqueue work onto _default_asyncio_loop. The
+        # _control_method decorator ensures this for control methods.
+        self._default_asyncio_loop = asyncio.get_running_loop()
+
     def get_master_address(self):
         """Get master address and port for data parallel.
         Returns:
@@ -244,6 +283,7 @@ class vLLMHttpServer:
             self.model_config.lora_rank > 0 or self.model_config.lora.get("rank", 0) > 0
         ) and not self.model_config.lora.get("merge", False)
 
+    @_control_method
     async def collective_rpc(
         self,
         method: str | Callable,
@@ -258,6 +298,7 @@ class vLLMHttpServer:
             kwargs=kwargs,
         )
 
+    @_control_method
     async def set_pd_peer(
         self,
         decode_peers: list,
@@ -567,6 +608,8 @@ class vLLMHttpServer:
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out.
 
+        This consumes slots on the default Ray concurrency group.
+
         Args:
             kv_transfer_params: vLLM KV-transfer payload for PD requests.
         """
@@ -830,6 +873,7 @@ class vLLMHttpServer:
             kv_transfer_params=decode_kv_params,
         )
 
+    @_control_method
     async def wake_up(self, tags: list[str] | None = None):
         if self.node_rank != 0:
             return
@@ -851,6 +895,7 @@ class vLLMHttpServer:
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip wake_up in standalone mode")
 
+    @_control_method
     async def sleep(self):
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
@@ -862,6 +907,7 @@ class vLLMHttpServer:
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
+    @_control_method
     async def clear_kv_cache(self):
         if self.node_rank == 0:
             # reset_connector=True drops any attached external KV store
@@ -873,6 +919,7 @@ class vLLMHttpServer:
             await self.engine.reset_mm_cache()
             await self.engine.reset_encoder_cache()
 
+    @_control_method
     async def release_kv_cache(self):
         """Free the kv_cache pool for the duration of a weight sync."""
         # TODO: use the real release_kv_cache() method after vllm supports it (vllm#44890/46438)
@@ -883,6 +930,7 @@ class vLLMHttpServer:
         await self.engine.sleep(level=self._resolve_sleep_level())
         await self.engine.wake_up(tags=["weights"])
 
+    @_control_method
     async def resume_kv_cache(self):
         """Restore kv_cache GPU memory after a weight sync. Counterpart to release_kv_cache()."""
         if self.node_rank != 0 or not self.config.free_cache_engine:
@@ -900,12 +948,14 @@ class vLLMHttpServer:
             and self.profiler_controller.is_discrete_mode()
         )
 
+    @_control_method
     async def start_profile(self, **kwargs):
         if self.node_rank != 0:
             return
         if self._should_profile():
             await self.engine.start_profile(**kwargs)
 
+    @_control_method
     async def stop_profile(self):
         if self.node_rank != 0:
             return
@@ -922,13 +972,16 @@ class vLLMHttpServer:
                 self.profiler_keep_global_ranks,
             )
 
+    @_control_method
     async def set_global_steps(self, global_steps: int):
         """Set the global steps of the model weights."""
         self.global_steps = global_steps
 
+    @_control_method
     async def wait_for_requests_to_drain(self):
         await self.engine.wait_for_requests_to_drain()
 
+    @_control_method
     async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort all ongoing generation requests.
 
@@ -992,6 +1045,7 @@ class vLLMHttpServer:
             logger.exception("Error aborting requests")
             raise
 
+    @_control_method
     async def resume_generation(self):
         """Resume generation after abort_all_requests (pause_generation)."""
         # Before the node_rank guard: every server in the replica closed the gate, so every
@@ -1002,6 +1056,7 @@ class vLLMHttpServer:
             return
         await self.engine.resume_generation()
 
+    @_control_method
     async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort a specific generation request.
 
@@ -1290,7 +1345,15 @@ class vLLMReplica(RolloutReplica):
         super().__init__(
             replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model, name_suffix
         )
-        self.server_class = ray.remote(vLLMHttpServer)
+        self.server_class = ray.remote(
+            concurrency_groups={"control": CONTROL_METHOD_CONCURRENCY},
+        )(vLLMHttpServer)
+
+    @property
+    def max_concurrency(self) -> int:
+        # Control calls have their own concurrency group, so this only caps
+        # methods in Ray's default group, primarily generate().
+        return max(1000, self.config.max_num_seqs)
 
     async def launch_servers(self):
         """Launch http server in each node."""
