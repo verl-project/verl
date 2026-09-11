@@ -34,9 +34,10 @@ __all__ = ["McoreCheckpointConfig"]
 class McoreCheckpointConfig(CheckpointConfig):
     """Checkpoint config for the Megatron-Core backend.
 
-    Adds the mbridge-specific knobs consumed by
-    :class:`verl.utils.checkpoint.megatron_checkpoint_manager.MegatronCheckpointManager`
-    when it forwards kwargs to ``bridge.save_weights()``.
+    Adds the mcore-only knobs consumed by
+    :class:`verl.utils.checkpoint.megatron_checkpoint_manager.MegatronCheckpointManager`:
+    ``mbridge_config`` is forwarded to ``bridge.save_weights()``, while the
+    ``fully_parallel_*`` flags select the dist-checkpoint strategy wrappers.
 
     Args:
         mbridge_config (dict[str, Any]): Extra kwargs forwarded to
@@ -44,6 +45,17 @@ class McoreCheckpointConfig(CheckpointConfig):
             ``distributed_filesystem`` and ``memory_efficient`` for the
             ``vanilla_mbridge`` path. Keys that are not accepted by the active
             bridge's ``save_weights`` signature are silently ignored.
+        fully_parallel_save (bool): Whether to wrap Megatron distributed checkpoint saves with
+            ``FullyParallelSaveStrategyWrapper``, which spreads shard writes across the
+            DP(+CP) group.
+        fully_parallel_load (bool): Whether to wrap Megatron distributed checkpoint loads with
+            ``FullyParallelLoadStrategyWrapper``, which spreads shard reads across the DP(+CP)
+            group. Disabling it markedly reduces peak host memory when loading
+            ``fully_reshardable`` checkpoints, at the cost of load parallelism. Both wrappers
+            only affect how I/O is distributed, not the on-disk format, so checkpoints stay
+            mutually readable whichever way these are set.
     """
 
     mbridge_config: dict[str, Any] = field(default_factory=dict)
+    fully_parallel_save: bool = True
+    fully_parallel_load: bool = True

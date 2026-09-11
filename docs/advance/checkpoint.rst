@@ -3,7 +3,7 @@
 Using Checkpoints to Support Fault Tolerance Training
 =====================================================
 
-Last updated: 08/24/2026.
+Last updated: 08/26/2026.
 
 There could be training errors or machine failure during the whole RLHF training process, 
 so it is recommended to enable checkpoints to minimize your loss.
@@ -394,3 +394,28 @@ No need to convert the model to Megatron dist-checkpoint format.
 
     This may increase CPU memory usage and lead to OOM issues for large models.
     We recommend using the default dp-reshardable format in most cases.
+
+.. tip::
+
+    **Reducing peak host memory during load.** Megatron dist-checkpoint saves and loads are
+    wrapped with the fully-parallel strategy wrappers by default, which distribute shard I/O
+    across the data-parallel (+ context-parallel) group. Both wrappers can be turned off, for
+    the actor and the critic:
+
+    .. code:: bash
+
+        actor_rollout_ref.actor.checkpoint.fully_parallel_load=False \
+        actor_rollout_ref.actor.checkpoint.fully_parallel_save=False \
+        critic.checkpoint.fully_parallel_load=False \
+        critic.checkpoint.fully_parallel_save=False
+
+    Setting ``fully_parallel_load=False`` significantly reduces peak host memory when loading
+    ``fully_reshardable`` checkpoints, at the cost of less I/O parallelism, and is worth trying
+    if a resume OOMs on the host. ``fully_parallel_save`` is the equivalent knob for saving.
+    Neither flag changes the on-disk format, so checkpoints remain mutually readable whichever
+    way they are set.
+
+    The flags are declared on ``McoreCheckpointConfig``, so they are only available where a
+    role selects that config: the actor and the critic. Roles that keep the backend-agnostic
+    ``CheckpointConfig`` -- the reference model and the SFT trainer -- run with the
+    fully-parallel default.
