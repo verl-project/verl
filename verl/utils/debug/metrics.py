@@ -77,7 +77,17 @@ def calculate_debug_metrics(data: DataProto) -> dict:
             "training/rollout_probs_diff_max": max value of logprob diff of rollout vs. actor
             "training/rollout_probs_diff_mean": mean value of logprob diff of rollout vs. actor
             "training/rollout_probs_diff_std": std value of logprob diff of rollout vs. actor
+            "training/rollout_probs_diff_p50/p90/p99": quantiles of the same distribution
+            "training/rollout_probs_diff_frac_gt_0.1": fraction of tokens disagreeing by more than 0.1
             "training/rollout_actor_probs_pearson_corr": logprob's pearson corrcoef of rollout vs. actor, reference to https://arxiv.org/pdf/2506.13585
+
+    The mean alone cannot separate "every token is slightly off" from "most tokens
+    agree and a few are wildly wrong", and the two have opposite implications: the
+    first is a numeric precision gap that weight-side fixes can close, the second
+    is the signature of MoE routing flips, where a token is routed to different
+    experts in the two engines and its probability moves discontinuously. Since
+    truncated importance sampling reweights by the ratio, a heavy tail is also what
+    decides whether the correction is doing real work or clipping noise.
     """
 
     rollout_old_log_probs = data.batch["rollout_log_probs"]
@@ -107,15 +117,28 @@ def calculate_debug_metrics(data: DataProto) -> dict:
             "training/rollout_probs_diff_max": float("nan"),
             "training/rollout_probs_diff_mean": float("nan"),
             "training/rollout_probs_diff_std": float("nan"),
+            "training/rollout_probs_diff_p50": float("nan"),
+            "training/rollout_probs_diff_p90": float("nan"),
+            "training/rollout_probs_diff_p99": float("nan"),
+            "training/rollout_probs_diff_frac_gt_0.1": float("nan"),
             "training/rollout_actor_probs_pearson_corr": float("nan"),
         }
 
     pearson_corrcoef = pearson_correlation_coefficient(actor_probs, rollout_probs, response_mask_bool)
     rollout_probs_diff = calculate_log_prob_diff(actor_probs, rollout_probs, response_mask_bool)
+    # float() because torch.quantile rejects bf16, and sorts the input internally,
+    # so asking for the three cut points at once costs one sort rather than three.
+    quantiles = torch.quantile(
+        rollout_probs_diff.float(), torch.tensor([0.5, 0.9, 0.99], device=rollout_probs_diff.device)
+    )
     return {
         "training/rollout_probs_diff_valid": 1,
         "training/rollout_probs_diff_max": torch.max(rollout_probs_diff).detach().item(),
         "training/rollout_probs_diff_mean": torch.mean(rollout_probs_diff).detach().item(),
         "training/rollout_probs_diff_std": torch.std(rollout_probs_diff).detach().item(),
+        "training/rollout_probs_diff_p50": quantiles[0].detach().item(),
+        "training/rollout_probs_diff_p90": quantiles[1].detach().item(),
+        "training/rollout_probs_diff_p99": quantiles[2].detach().item(),
+        "training/rollout_probs_diff_frac_gt_0.1": (rollout_probs_diff > 0.1).float().mean().detach().item(),
         "training/rollout_actor_probs_pearson_corr": pearson_corrcoef,
     }

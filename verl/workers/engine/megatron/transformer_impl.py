@@ -209,6 +209,11 @@ class MegatronEngine(BaseEngine):
         # QAT configuration
         self._qat_config = getattr(self.engine_config, "qat", None)
         self._qat_enabled = self._qat_config is not None and getattr(self._qat_config, "enable", False)
+        # Whether QAT simulates the checkpoint's own quantized format rather than
+        # inserting ModelOpt's fake-quant modules. Decided once because two places
+        # below branch on it, and a mode string compared literally in each of them
+        # is one edit away from disagreeing.
+        self._qat_checkpoint_format = self._qat_enabled and self._qat_config.mode == "mxfp4_experts"
         if self._qat_enabled:
             if self.engine_config.vanilla_mbridge:
                 raise ValueError(
@@ -389,7 +394,12 @@ class MegatronEngine(BaseEngine):
                 else:
                     provider_overrides["enable_routing_replay"] = True
 
-            if self._qat_enabled:
+            # Only the ModelOpt modes need its layer spec. Swapping it in for
+            # mxfp4_experts would rebuild the decoder with a different module
+            # structure, which shifts the parameter count and leaves the bridge
+            # without a weight mapping, so the checkpoint fails to load; that mode
+            # works on the stock grouped-MoE layers and needs no spec change.
+            if self._qat_enabled and not self._qat_checkpoint_format:
                 from megatron.bridge.models.gpt_provider import modelopt_transformer_layer_spec
 
                 provider.transformer_layer_spec = modelopt_transformer_layer_spec
@@ -581,9 +591,20 @@ class MegatronEngine(BaseEngine):
         self.module = self._build_megatron_module()
 
         if self._qat_enabled and not self.engine_config.forward_only:
-            from verl.utils.modelopt import apply_qat_to_modules
+            if self._qat_checkpoint_format:
+                from verl.utils.modelopt.mxfp4_qat import enable_mxfp4_qat
 
-            self.module = apply_qat_to_modules(self.module, self._qat_config)
+                n_hooked = enable_mxfp4_qat(self.module)
+                logger.info("QAT mxfp4_experts: hooked %d grouped expert linears", n_hooked)
+                if n_hooked == 0:
+                    raise ValueError(
+                        "qat.mode=mxfp4_experts found no TEGroupedMLP experts to hook; "
+                        "it needs a grouped-GEMM MoE model (moe_grouped_gemm=True)."
+                    )
+            else:
+                from verl.utils.modelopt import apply_qat_to_modules
+
+                self.module = apply_qat_to_modules(self.module, self._qat_config)
 
         self._maybe_enable_fused_kernels()
 
