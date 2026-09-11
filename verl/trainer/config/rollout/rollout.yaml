@@ -295,6 +295,9 @@ checkpoint_engine:
   # when using Tensor Parallelism (TP) >= 8.
   update_weights_bucket_megabytes: 2048
 
+  # Python GC after weight-transfer sender cleanup: true for full collection, false to disable, or a generation integer
+  gc_on_weight_transfer_cleanup: true
+
   # Additional keyword arguments to pass to the checkpoint engine constructor
   engine_kwargs: {}
 

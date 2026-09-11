@@ -19,6 +19,7 @@ and because CUDA IPC requires distinct processes.
 
 import asyncio
 import multiprocessing as mp
+import time
 import uuid
 
 import pytest
@@ -27,6 +28,7 @@ import torch
 from verl.utils.device import get_device_name, get_torch_device, is_support_ipc
 
 PROCESS_TIMEOUT = 60
+PROCESS_CLEANUP_TIMEOUT = 5
 
 # Use string checks to avoid initializing CUDA in the main pytest process,
 # which would make subsequent fork-based multiprocessing in other tests unsafe.
@@ -71,6 +73,9 @@ class _FakeSocket:
 
 class _FakeTorchDevice:
     def synchronize(self):
+        pass
+
+    def empty_cache(self):
         pass
 
 
@@ -166,43 +171,65 @@ def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm):
     result_queue = ctx.Queue()
 
     sender_p = ctx.Process(
+        name="weight-sender",
         target=_sender_fn,
         args=(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm),
     )
     receiver_p = ctx.Process(
+        name="weight-receiver",
         target=_receiver_fn,
         args=(zmq_handle, use_shm, result_queue),
     )
 
-    # Start sender first (it binds), then receiver (it connects)
-    sender_p.start()
-    receiver_p.start()
+    processes = (sender_p, receiver_p)
+    try:
+        # Start sender first (it binds), then receiver (it connects).
+        sender_p.start()
+        receiver_p.start()
 
-    sender_p.join(timeout=PROCESS_TIMEOUT)
-    receiver_p.join(timeout=PROCESS_TIMEOUT)
+        # Both processes share one deadline so a peer failure cannot make this
+        # test wait PROCESS_TIMEOUT twice.
+        deadline = time.monotonic() + PROCESS_TIMEOUT
+        for process in processes:
+            process.join(timeout=max(0, deadline - time.monotonic()))
 
-    assert sender_p.exitcode == 0, f"Sender process failed with exit code {sender_p.exitcode}"
-    assert receiver_p.exitcode == 0, f"Receiver process failed with exit code {receiver_p.exitcode}"
+        timed_out = [process.name for process in processes if process.is_alive()]
+        assert not timed_out, f"Weight transfer processes timed out: {', '.join(timed_out)}"
+        assert sender_p.exitcode == 0, f"Sender process failed with exit code {sender_p.exitcode}"
+        assert receiver_p.exitcode == 0, f"Receiver process failed with exit code {receiver_p.exitcode}"
 
-    summaries = result_queue.get(timeout=5)
+        summaries = result_queue.get(timeout=PROCESS_CLEANUP_TIMEOUT)
 
-    # Regenerate expected weights on device with the same seed
-    expected = _generate_weights(weight_specs, seed)
+        # Regenerate expected weights on device with the same seed
+        expected = _generate_weights(weight_specs, seed)
 
-    assert len(summaries) == len(expected), f"Expected {len(expected)} weights, got {len(summaries)}"
+        assert len(summaries) == len(expected), f"Expected {len(expected)} weights, got {len(summaries)}"
 
-    for (exp_name, exp_tensor), (recv_name, recv_dtype, recv_shape, recv_cksum) in zip(
-        expected, summaries, strict=False
-    ):
-        assert exp_name == recv_name, f"Name mismatch: expected {exp_name}, got {recv_name}"
-        assert tuple(exp_tensor.shape) == recv_shape, (
-            f"Shape mismatch for {exp_name}: expected {tuple(exp_tensor.shape)}, got {recv_shape}"
-        )
-        assert exp_tensor.dtype == recv_dtype, (
-            f"Dtype mismatch for {exp_name}: expected {exp_tensor.dtype}, got {recv_dtype}"
-        )
-        exp_sum = exp_tensor.float().sum().item()
-        assert exp_sum == recv_cksum, f"Data mismatch for {exp_name}"
+        for (exp_name, exp_tensor), (recv_name, recv_dtype, recv_shape, recv_cksum) in zip(
+            expected, summaries, strict=False
+        ):
+            assert exp_name == recv_name, f"Name mismatch: expected {exp_name}, got {recv_name}"
+            assert tuple(exp_tensor.shape) == recv_shape, (
+                f"Shape mismatch for {exp_name}: expected {tuple(exp_tensor.shape)}, got {recv_shape}"
+            )
+            assert exp_tensor.dtype == recv_dtype, (
+                f"Dtype mismatch for {exp_name}: expected {exp_tensor.dtype}, got {recv_dtype}"
+            )
+            exp_sum = exp_tensor.float().sum().item()
+            assert exp_sum == recv_cksum, f"Data mismatch for {exp_name}"
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+        for process in processes:
+            if process.pid is not None:
+                process.join(timeout=PROCESS_CLEANUP_TIMEOUT)
+        for process in processes:
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=PROCESS_CLEANUP_TIMEOUT)
+        result_queue.close()
+        result_queue.join_thread()
 
 
 # ---------------------------------------------------------------------------

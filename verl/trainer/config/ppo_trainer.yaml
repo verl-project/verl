@@ -55,6 +55,9 @@ actor_rollout_ref:
   # Whether it's a hybrid engine, currently only supports hybrid engine
   hybrid_engine: true
 
+  # Whether to print diagnostics for configurable GC points
+  gc_diagnostics: false
+
   # Timeout for operations executed against the process group
   nccl_timeout: 600
 

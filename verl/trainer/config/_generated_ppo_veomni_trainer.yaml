@@ -350,6 +350,7 @@ actor_rollout_ref:
       _target_: verl.workers.config.CheckpointEngineConfig
       backend: naive
       update_weights_bucket_megabytes: 2048
+      gc_on_weight_transfer_cleanup: true
       engine_kwargs: {}
       custom_backend_module: null
     trace:
@@ -472,6 +473,7 @@ actor_rollout_ref:
       freeze_vision_projection: true
       freeze_language_model: true
   hybrid_engine: true
+  gc_diagnostics: false
   nccl_timeout: 600
 data:
   tokenizer: null

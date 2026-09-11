@@ -463,6 +463,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     ):
         Worker.__init__(self)
         self.config = config
+        self.gc_diagnostics = config.get("gc_diagnostics", False)
+        if not isinstance(self.gc_diagnostics, bool):
+            raise ValueError(f"gc_diagnostics must be a boolean, got {self.gc_diagnostics!r}")
         self.distillation_config = distillation_config
         self.distillation_enabled = is_distillation_enabled(distillation_config)
         self.role = role
@@ -797,11 +800,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 layered_summon=self.layered_summon, base_sync_done=False
             )
             await self.rollout.update_weights(
-                per_tensor_param_base, peft_config=_base_peft_config, base_sync_done=False, global_steps=global_steps
+                per_tensor_param_base,
+                peft_config=_base_peft_config,
+                base_sync_done=False,
+                global_steps=global_steps,
+                gc_diagnostics=self.gc_diagnostics,
             )
 
         await self.rollout.update_weights(
-            per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
+            per_tensor_param,
+            peft_config=peft_config,
+            base_sync_done=True,
+            global_steps=global_steps,
+            gc_diagnostics=self.gc_diagnostics,
         )
 
         log_gpu_memory_usage("After update_weights", logger=logger)
