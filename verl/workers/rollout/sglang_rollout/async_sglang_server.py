@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import secrets
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Optional
 
@@ -41,6 +42,7 @@ from sglang.srt.managers.io_struct import (
     ResumeMemoryOccupationReqInput,
 )
 from sglang.srt.managers.tokenizer_manager import ServerStatus
+from sglang.srt.sampling.custom_logit_processor import DisallowedTokensLogitsProcessor
 
 from verl.plugin.platform import get_platform
 from verl.utils.config import omega_conf_to_dataclass
@@ -62,12 +64,48 @@ from verl.workers.rollout.sglang_rollout.utils import (
     lora_served_as_adapter,
     sglang_lora_target_modules,
 )
-from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
+from verl.workers.rollout.utils import (
+    get_max_position_embeddings,
+    get_vision_placeholder_token_ids,
+    run_uvicorn,
+)
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 visible_devices_keyword = get_visible_devices_keyword()
+
+
+def _merge_banned_token_params(sampling_params: dict[str, Any], banned_token_ids: list[int]) -> None:
+    """Attach banned token ids without dropping caller-defined custom_params."""
+    current = sampling_params.get("custom_params")
+    if current is None:
+        custom_params: dict[str, Any] = {}
+    elif not isinstance(current, Mapping):
+        raise TypeError("sampling_params.custom_params must be a mapping when banned token ids are enabled")
+    else:
+        custom_params = dict(current)
+
+    configured_ids = custom_params.get("token_ids")
+    if configured_ids is not None and list(configured_ids) != list(banned_token_ids):
+        raise ValueError(
+            "sampling_params.custom_params.token_ids conflicts with the vision placeholder ban; "
+            "remove the custom value or make the lists identical"
+        )
+    custom_params["token_ids"] = list(banned_token_ids)
+    sampling_params["custom_params"] = custom_params
+
+
+def _resolve_enable_custom_logit_processor(banned_token_ids: list[int], engine_kwargs: dict[str, Any]) -> bool:
+    """Launch flag and per-request processor must agree, or SGLang rejects every request."""
+    if banned_token_ids and engine_kwargs.get("enable_custom_logit_processor") is False:
+        raise ValueError(
+            "engine_kwargs.sglang.enable_custom_logit_processor=False conflicts with "
+            f"{len(banned_token_ids)} banned vision placeholder id(s) {sorted(banned_token_ids)}. "
+            "SGLang would reject every request that carries the logits processor. "
+            "Drop that engine_kwargs override."
+        )
+    return bool(banned_token_ids) or bool(engine_kwargs.get("enable_custom_logit_processor"))
 
 
 def _extract_prompt_logprobs_sglang(
@@ -172,6 +210,10 @@ class SGLangHttpServer:
                     f"max_model_len ({self.config.max_model_len}) should be less than or equal to "
                     f"max_position_embeddings ({max_position_embeddings})"
                 )
+        self._banned_token_ids = get_vision_placeholder_token_ids(self.model_config.processor)
+        self._banned_logit_processor_str = DisallowedTokensLogitsProcessor.to_str() if self._banned_token_ids else None
+        if self._banned_token_ids:
+            logger.info(f"SGLang rollout: banning token ids {self._banned_token_ids} from being sampled")
         self.rollout_mode = rollout_mode
         self.workers = workers
 
@@ -337,8 +379,12 @@ class SGLangHttpServer:
             if quantization == "fp8"
             else json.dumps({}),
             "custom_weight_loader": custom_weight_loader or None,
+            "enable_custom_logit_processor": bool(self._banned_token_ids),
             **engine_kwargs,
         }
+        args["enable_custom_logit_processor"] = _resolve_enable_custom_logit_processor(
+            self._banned_token_ids, engine_kwargs
+        )
 
         # update lora-related args
         if self.lora_as_adapter:
@@ -612,6 +658,8 @@ class SGLangHttpServer:
             f"max_new_tokens {max_new_tokens} exceeds available context space {max_possible_tokens}"
         )
         sampling_params["max_new_tokens"] = max_new_tokens
+        if self._banned_token_ids:
+            _merge_banned_token_params(sampling_params, self._banned_token_ids)
         return_logprob = sampling_params.pop("logprobs", False)
 
         # vLLM-style "prompt_logprobs=K" from the distillation teacher: request
@@ -630,6 +678,8 @@ class SGLangHttpServer:
             # TODO: support video input for sglang
             # video_data=video_data,
         }
+        if self._banned_logit_processor_str:
+            request["custom_logit_processor"] = self._banned_logit_processor_str
 
         if prompt_logprobs is not None:
             request["logprob_start_len"] = 0
