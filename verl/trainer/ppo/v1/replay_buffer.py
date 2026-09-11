@@ -542,92 +542,10 @@ class ReplayBuffer:
 
 
 class ReplayBufferAsync(ReplayBuffer):
-    """Async sampling policy over the shared TransferQueue and dynamic-filter implementation.
-
-    ``dispatch_mode=sample_level`` keeps an in-flight sample cap and refills one prompt
-    when ``group_size`` samples finish, from any mix of groups. ``batch`` (default) leaves
-    prompt dispatch to the trainer's warmup / ``prepare_step``.
-    """
-
-    def __init__(
-        self,
-        *args,
-        dispatch_mode: str = "batch",
-        group_size: int | None = None,
-        max_inflight_samples: int | None = None,
-        **kwargs,
-    ):
-        super().__init__(*args, **kwargs)
-        self.dispatch_mode = dispatch_mode
-        self.group_size = int(group_size) if group_size is not None else None
-        self.max_inflight_samples = int(max_inflight_samples) if max_inflight_samples is not None else None
-        self._sample_credit = 0
-        self._seen_traj_keys: set[str] = set()
-        self._dispatched_prompts = 0
-        if self.dispatch_mode not in ("batch", "sample_level"):
-            raise ValueError(f"Invalid dispatch_mode: {self.dispatch_mode}, must be one of ['batch', 'sample_level']")
-        if self.dispatch_mode == "sample_level":
-            if self.group_size is None or self.group_size <= 0:
-                raise ValueError(f"sample_level dispatch requires a positive group_size, got {self.group_size}")
-            if self.max_inflight_samples is None or self.max_inflight_samples < self.group_size:
-                raise ValueError(
-                    f"max_inflight_samples ({self.max_inflight_samples}) must be >= group_size ({self.group_size})"
-                )
-            logger.info(
-                "sample-level dispatch: group_size=%s max_inflight_samples=%s",
-                self.group_size,
-                self.max_inflight_samples,
-            )
-
-    @property
-    def trainer_owns_dispatch(self) -> bool:
-        return self.dispatch_mode != "sample_level"
+    """Async sampling policy over the shared TransferQueue and dynamic-filter implementation."""
 
     def _validate_mode_config(self) -> None:
         pass
-
-    def _update_sample_credit(self, partition_id: str) -> int:
-        current = set(self.partitions[partition_id].keys())
-        new_keys = current - self._seen_traj_keys
-        self._sample_credit += len(new_keys)
-        self._seen_traj_keys = current
-        return len(new_keys)
-
-    def _inflight_samples(self, partition_id: str) -> int:
-        return count_inflight_samples(
-            self.pending_keys[partition_id],
-            self.running_keys[partition_id],
-            set(self.partitions[partition_id].keys()),
-            self.group_size,
-        )
-
-    def _maybe_dispatch(self, partition_id: str, sampleable_keys: set[str], target_count: int) -> int:
-        if partition_id == "val" or self.refill_fn is None:
-            return 0
-        self._update_sample_credit(partition_id)
-        inflight = self._inflight_samples(partition_id)
-        dispatch, remaining = compute_sample_level_dispatch(
-            group_size=self.group_size,
-            max_inflight_samples=self.max_inflight_samples,
-            inflight_samples=inflight,
-            sample_credit=self._sample_credit,
-            sampleable_groups=len(sampleable_keys),
-            target_groups=target_count,
-        )
-        if dispatch <= 0:
-            return 0
-        self.refill_fn(dispatch)
-        self._sample_credit = remaining
-        self._dispatched_prompts += dispatch
-        logger.info(
-            "sample-level dispatch=%s inflight=%s credit=%s sampleable=%s/%s",
-            dispatch,
-            inflight,
-            self._sample_credit,
-            len(sampleable_keys),
-            target_count,
-        )
-        return dispatch
 
     def _stale_terminal_keys(self, global_steps: int, partition_id: str) -> set[str]:
         if partition_id == "val" or self.max_off_policy_strategy != "drop":
@@ -691,22 +609,13 @@ class ReplayBufferAsync(ReplayBuffer):
             )
             if evicted_uids:
                 _accumulate_eviction_metrics(eviction_metrics, metrics, stale_count)
-                if self.dispatch_mode != "sample_level" and self.refill_fn is not None:
+                if self.refill_fn is not None:
                     self.refill_fn(len(evicted_uids))
-                    continue
+                continue
 
             sampleable_keys = self._sampleable_terminal_keys(partition_id, eviction_reasons)
             if self._has_enough_samples(global_steps, partition_id, target_count, sampleable_keys):
-                if self.dispatch_mode == "sample_level":
-                    eviction_metrics["training/sample_level/dispatched_prompts"] = self._dispatched_prompts
-                    eviction_metrics["training/sample_level/inflight_samples"] = self._inflight_samples(partition_id)
-                    eviction_metrics["training/sample_level/sample_credit"] = self._sample_credit
                 return sampleable_keys, eviction_metrics
-
-            if self.dispatch_mode == "sample_level" and self._maybe_dispatch(
-                partition_id, sampleable_keys, target_count
-            ):
-                continue
 
             last_debug_time = self._wait_for_next_poll(partition_id, last_debug_time)
 
@@ -728,3 +637,102 @@ class ReplayBufferAsync(ReplayBuffer):
             )
 
         return self._materialize_batch(partition_id, selected_prompt_uids, partition_snapshot), eviction_metrics
+
+
+class SampleLevelReplayBuffer(ReplayBufferAsync):
+    """Sample-level dispatch: refill one prompt per ``group_size`` completed samples.
+
+    ``group_size`` and ``max_inflight_samples`` are filled by the trainer from
+    ``rollout.n`` and ``train_batch_size * rollout.n``. They are not user-facing
+    config keys.
+    """
+
+    trainer_owns_dispatch = False
+
+    def __init__(self, *args, group_size: int, max_inflight_samples: int, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.group_size = int(group_size)
+        self.max_inflight_samples = int(max_inflight_samples)
+        if self.group_size <= 0:
+            raise ValueError(f"group_size must be a positive integer, got {self.group_size}")
+        if self.max_inflight_samples < self.group_size:
+            raise ValueError(
+                f"max_inflight_samples ({self.max_inflight_samples}) must be >= group_size ({self.group_size})"
+            )
+        self._sample_credit = 0
+        self._seen_traj_keys: set[str] = set()
+        self._dispatched_prompts = 0
+        logger.info(
+            "sample-level dispatch: group_size=%s max_inflight_samples=%s",
+            self.group_size,
+            self.max_inflight_samples,
+        )
+
+    def _update_sample_credit(self, partition_id: str) -> int:
+        current = set(self.partitions[partition_id].keys())
+        new_keys = current - self._seen_traj_keys
+        self._sample_credit += len(new_keys)
+        self._seen_traj_keys = current
+        return len(new_keys)
+
+    def _inflight_samples(self, partition_id: str) -> int:
+        return count_inflight_samples(
+            self.pending_keys[partition_id],
+            self.running_keys[partition_id],
+            set(self.partitions[partition_id].keys()),
+            self.group_size,
+        )
+
+    def _maybe_dispatch(self, partition_id: str, sampleable_keys: set[str], target_count: int) -> int:
+        if partition_id == "val" or self.refill_fn is None:
+            return 0
+        self._update_sample_credit(partition_id)
+        inflight = self._inflight_samples(partition_id)
+        dispatch, remaining = compute_sample_level_dispatch(
+            group_size=self.group_size,
+            max_inflight_samples=self.max_inflight_samples,
+            inflight_samples=inflight,
+            sample_credit=self._sample_credit,
+            sampleable_groups=len(sampleable_keys),
+            target_groups=target_count,
+        )
+        if dispatch <= 0:
+            return 0
+        self.refill_fn(dispatch)
+        self._sample_credit = remaining
+        self._dispatched_prompts += dispatch
+        logger.info(
+            "sample-level dispatch=%s inflight=%s credit=%s sampleable=%s/%s",
+            dispatch,
+            inflight,
+            self._sample_credit,
+            len(sampleable_keys),
+            target_count,
+        )
+        return dispatch
+
+    def wait_for_sampleable(self, global_steps: int, partition_id: str, target_count: int) -> tuple[set[str], dict]:
+        last_debug_time = time.time()
+        eviction_metrics: dict = {}
+
+        while True:
+            self._sync_metadata_from_transfer_queue()
+
+            eviction_reasons = self._terminal_eviction_reasons(global_steps, partition_id)
+            evicted_uids, stale_count, _dapo_count, metrics = self._evict_terminal_groups(
+                global_steps, partition_id, eviction_reasons
+            )
+            if evicted_uids:
+                _accumulate_eviction_metrics(eviction_metrics, metrics, stale_count)
+
+            sampleable_keys = self._sampleable_terminal_keys(partition_id, eviction_reasons)
+            if self._has_enough_samples(global_steps, partition_id, target_count, sampleable_keys):
+                eviction_metrics["training/sample_level/dispatched_prompts"] = self._dispatched_prompts
+                eviction_metrics["training/sample_level/inflight_samples"] = self._inflight_samples(partition_id)
+                eviction_metrics["training/sample_level/sample_credit"] = self._sample_credit
+                return sampleable_keys, eviction_metrics
+
+            if self._maybe_dispatch(partition_id, sampleable_keys, target_count):
+                continue
+
+            last_debug_time = self._wait_for_next_poll(partition_id, last_debug_time)

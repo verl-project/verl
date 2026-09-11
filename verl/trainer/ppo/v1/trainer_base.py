@@ -72,7 +72,12 @@ from verl.trainer.ppo.utils import (
     need_reference_policy,
     need_teacher_policy,
 )
-from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY, ReplayBuffer, ReplayBufferAsync
+from verl.trainer.ppo.v1.replay_buffer import (
+    DAPO_FILTERED_REWARD_COUNTS_KEY,
+    ReplayBuffer,
+    ReplayBufferAsync,
+    SampleLevelReplayBuffer,
+)
 from verl.trainer.ppo.v1.utils import MetricsAggregator, compute_advantage_for_multi_trajectories
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
@@ -163,8 +168,12 @@ class PPOTrainer(ABC):
         )
         if has_custom_sampler:
             sampler_cls = load_extern_type(custom_sampler.path, custom_sampler.name)
+        elif self.trainer_mode == "sync":
+            sampler_cls = ReplayBuffer
+        elif str(sampler_config.get("dispatch_mode", "batch")) == "sample_level":
+            sampler_cls = SampleLevelReplayBuffer
         else:
-            sampler_cls = ReplayBuffer if self.trainer_mode == "sync" else ReplayBufferAsync
+            sampler_cls = ReplayBufferAsync
 
         replay_buffer_kwargs = dict(
             trainer_mode=self.trainer_mode,
@@ -196,20 +205,12 @@ class PPOTrainer(ABC):
                     else (self.config.data.get("gen_batch_size", None) or train_batch_size),
                     max_inflight_gen_batches=max_inflight_gen_batches,
                 )
-            else:
-                dispatch_mode = str(sampler_config.get("dispatch_mode", "batch"))
-                replay_buffer_kwargs["dispatch_mode"] = dispatch_mode
-                if dispatch_mode == "sample_level":
-                    group_size = sampler_config.get("group_size", None)
-                    if group_size in (None, 0):
-                        group_size = self.config.actor_rollout_ref.rollout.n
-                    max_inflight_samples = sampler_config.get("max_inflight_samples", None)
-                    if max_inflight_samples in (None, 0):
-                        max_inflight_samples = self.config.data.train_batch_size * int(group_size)
-                    replay_buffer_kwargs.update(
-                        group_size=int(group_size),
-                        max_inflight_samples=int(max_inflight_samples),
-                    )
+            elif sampler_cls is SampleLevelReplayBuffer:
+                group_size = int(self.config.actor_rollout_ref.rollout.n)
+                replay_buffer_kwargs.update(
+                    group_size=group_size,
+                    max_inflight_samples=int(self.config.data.train_batch_size) * group_size,
+                )
         return sampler_cls(**replay_buffer_kwargs)
 
     def _resolve_filter_groups_metric(self) -> str | None:

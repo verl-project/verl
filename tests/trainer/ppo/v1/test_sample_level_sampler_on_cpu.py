@@ -22,6 +22,7 @@ import transfer_queue as tq
 
 from verl.trainer.ppo.v1.replay_buffer import (
     ReplayBufferAsync,
+    SampleLevelReplayBuffer,
     compute_sample_level_dispatch,
     count_inflight_samples,
 )
@@ -143,14 +144,13 @@ def test_prompt_level_would_wait_sample_level_does_not(tq_init, partition_id):
         calls.append(n)
         return n
 
-    rb = ReplayBufferAsync(
+    rb = SampleLevelReplayBuffer(
         trainer_mode="colocate_async",
         trainer_config={},
         max_off_policy_threshold=8,
         max_off_policy_strategy="drop",
         sampler_kwargs={},
         refill_fn=refill_fn,
-        dispatch_mode="sample_level",
         group_size=2,
         max_inflight_samples=6,
     )
@@ -202,11 +202,15 @@ def test_build_replay_buffer_wires_sample_level_from_rollout_n():
     )
     trainer._add_prompts_to_generate = lambda n: n
     rb = trainer._build_replay_buffer()
-    assert isinstance(rb, ReplayBufferAsync)
-    assert rb.dispatch_mode == "sample_level"
+    assert type(rb) is SampleLevelReplayBuffer
     assert rb.group_size == 8
     assert rb.max_inflight_samples == 64
     assert rb.trainer_owns_dispatch is False
+
+    trainer.config.trainer.v1.sampler.dispatch_mode = "batch"
+    default_rb = trainer._build_replay_buffer()
+    assert type(default_rb) is ReplayBufferAsync
+    assert getattr(default_rb, "trainer_owns_dispatch", True) is True
 
 
 def test_trainer_skips_batch_dump_when_sampler_owns_dispatch():
@@ -220,8 +224,8 @@ def test_trainer_skips_batch_dump_when_sampler_owns_dispatch():
             pass
 
     trainer = _T.__new__(_T)
-    trainer.replay_buffer = ReplayBufferAsync.__new__(ReplayBufferAsync)
-    trainer.replay_buffer.dispatch_mode = "sample_level"
+    trainer.replay_buffer = SampleLevelReplayBuffer.__new__(SampleLevelReplayBuffer)
+    trainer.replay_buffer.trainer_owns_dispatch = False
     trainer._add_batch_to_generate = MagicMock()
 
     assert trainer._should_add_batch_to_generate() is False
