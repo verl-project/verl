@@ -86,9 +86,9 @@ if HAVE_TRITON:
         num_splits,
         vocab_start,
         stride_hidden_m: tl.int64,
-        stride_hidden_k: tl.int64,
+        stride_hidden_k: tl.constexpr,
         stride_weight_n: tl.int64,
-        stride_weight_k: tl.int64,
+        stride_weight_k: tl.constexpr,
         stride_ids_m: tl.int64,
         stride_ids_k: tl.int64,
         stride_selected_m: tl.int64,
@@ -103,7 +103,12 @@ if HAVE_TRITON:
         BLOCK_N: tl.constexpr,
         BLOCK_K: tl.constexpr,
     ):
-        """Compute stable softmax statistics without storing the logits matrix."""
+        """Compute stable softmax statistics without storing the logits matrix.
+
+        Specialize H-axis strides to expose contiguous loads to Triton's
+        layout analysis and asynchronous load pipeline. Row strides remain
+        runtime values; no extra pointer-alignment assumptions are required.
+        """
         pid = tl.program_id(0)
         num_pid_m = tl.cdiv(num_tokens, BLOCK_M)
         pid_m = pid % num_pid_m
