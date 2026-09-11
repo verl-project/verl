@@ -71,6 +71,27 @@ def update_dict_with_config(dictionary: dict, config: DictConfig):
             dictionary[key] = getattr(config, key)
 
 
+def _validate_v1_fsdp_strategy(config: DictConfig) -> None:
+    """Reject conflicting FSDP backend selectors in the V1 trainer only."""
+    if not config.trainer.get("use_v1", False):
+        return
+
+    actor_config = config.actor_rollout_ref.actor
+    fsdp_config = actor_config.get("fsdp_config")
+    if fsdp_config is None:
+        return
+
+    actor_strategy = actor_config.strategy
+    nested_strategy = fsdp_config.get("strategy", "fsdp")
+    if nested_strategy not in {"fsdp", actor_strategy}:
+        raise ValueError(
+            "Conflicting FSDP strategies: the role's top-level `strategy` is the source of truth for "
+            f"the V1 trainer, but strategy={actor_strategy!r} and "
+            f"fsdp_config.strategy={nested_strategy!r}. Set the role's top-level `strategy` to select "
+            "the FSDP backend instead of overriding `fsdp_config.strategy`."
+        )
+
+
 def validate_config(
     config: DictConfig,
     use_reference_policy: bool,
@@ -83,6 +104,8 @@ def validate_config(
         use_reference_policy (bool): is ref policy needed
         use_critic (bool): is critic needed
     """
+    _validate_v1_fsdp_strategy(config)
+
     # number of GPUs total
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 

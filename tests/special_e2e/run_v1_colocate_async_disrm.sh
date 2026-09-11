@@ -81,7 +81,7 @@ echo "Total GPUs: ${NUM_GPUS} (shared by training / rollout / reward model)"
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
-    actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
+    actor_rollout_ref.actor.strategy=fsdp2 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.rollout.name=${rollout_name} \
