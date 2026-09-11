@@ -90,9 +90,7 @@ def wrap_model_chunks_with_layerwise_aware_ddp(
     ``tag_params_for_buffer_routing`` + ``compute_full_param_layout`` before DDP
     construction — verl's plain DDP wrap omits this and causes redundant buffers.
     """
-    from megatron.core.distributed import (
-        DistributedDataParallel as DDP,
-    )
+    from megatron.core.distributed import DistributedDataParallel as DDP
     from megatron.core.optimizer.layer_wise_optimizer import (
         LayerWiseDistributedOptimizer,
         tag_params_for_buffer_routing,
@@ -516,6 +514,7 @@ except ImportError:
 
 
 def unwrap_model(model, module_instances=ALL_MODULE_WRAPPER_CLASSNAMES):
+    module_instances = tuple(m for m in module_instances if isinstance(m, type))
     return_list = True
     if not isinstance(model, list):
         model = [model]
@@ -1682,6 +1681,9 @@ def register_megatron_training_hooks(model: list[torch.nn.Module], optimizer):
 
     try:
         from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel as megatron_FSDP
+
+        if not isinstance(megatron_FSDP, type):
+            from megatron.core.distributed.fsdp.src.megatron_fsdp.megatron_fsdp import MegatronFSDP as megatron_FSDP
     except ImportError:
         megatron_FSDP = DDP
 

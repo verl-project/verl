@@ -30,6 +30,7 @@ dispatch below stays unconditional.
 
 import importlib.metadata
 import logging
+import re
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
@@ -161,11 +162,58 @@ def _resolve_expert_weight_module(module):
     return module
 
 
+def _get_hf_config(model):
+    """Return the HF config on ``model`` (descending ``.config``/``.model``)."""
+    seen: set[int] = set()
+    obj = model
+    while obj is not None and id(obj) not in seen:
+        seen.add(id(obj))
+        cfg = getattr(obj, "config", None)
+        if cfg is not None and hasattr(cfg, "num_hidden_layers"):
+            return cfg
+        obj = getattr(obj, "model", None)
+    return None
+
+
+def _is_mtp_layer_weight(name, model) -> bool:
+    """True when ``name`` belongs to a next-token-prediction (MTP) layer.
+
+    The actor exports MTP layers while the vLLM runtime omits them when MTP is
+    disabled, so such weights must be skipped during FP8 re-quantization.
+    Determined generically from the HF config: any ``layers.{i}.`` whose index
+    is ``>= num_hidden_layers`` is an MTP layer. No model-specific hardcoding.
+    """
+    cfg = _get_hf_config(model)
+    if cfg is None:
+        return False
+    num_hidden_layers = getattr(cfg, "num_hidden_layers", None)
+    if not num_hidden_layers:
+        return False
+    # ``layers.{i}.`` may appear at any depth (e.g. ``model.layers.45.`` /
+    # ``language_model.model.layers.45.``); match the first ``layers.N.`` token.
+    m = re.search(r"\blayers\.(\d+)\.", name)
+    if m is None:
+        return False
+    return int(m.group(1)) >= num_hidden_layers
+
+
 def get_module_from_param_name(model, name: str):
+    # Translate the checkpoint namespace to the live VLM module hierarchy.
+    mapper = getattr(model, "hf_to_vllm_mapper", None)
+    if mapper is not None:
+        mapped = mapper.apply_list([name])
+        if mapped:
+            name = mapped[0]
     # Split the name into parts (e.g., 'layers', '0', 'self_attn', 'q_proj', 'weight')
     # The module path is all but the last part (the parameter's own name)
     path_parts = name.split(".")
     module_path = path_parts[:-1]
+    # merge=False LoRA base sync: strip trailing ``.base_layer`` so the shard
+    # name (e.g. ``q_a_proj``) becomes the last path segment for fusion lookup.
+    had_base_layer = False
+    if len(module_path) >= 2 and module_path[-1] == "base_layer":
+        had_base_layer = True
+        module_path = module_path[:-1]
     # Replace with the fused model name
     packed_modules_mapping = model.packed_modules_mapping
     reversed_mapping = {
@@ -175,6 +223,9 @@ def get_module_from_param_name(model, name: str):
     }
     if module_path[-1] in reversed_mapping.keys():
         module_path[-1] = reversed_mapping[module_path[-1]]
+    if had_base_layer:
+        # Re-insert base_layer so traversal lands on the FP8 weight, not the LoRA root.
+        module_path.append("base_layer")
 
     current_module = model
     try:
@@ -204,6 +255,11 @@ _FP8_CANDIDATE_LEAVES: frozenset = frozenset({"weight", "gate_up_proj", "down_pr
 
 
 def is_fp8_weight(name, model):
+    # The actor exports the optional next-token-prediction (MTP) layer, while
+    # the vLLM runtime omits it when MTP is disabled. Skip those weights so
+    # verl does not re-quantize BF16->FP8 for a layer rollout never loads.
+    if _is_mtp_layer_weight(name, model):
+        return False
     if name not in fp8_state.seen_params:
         fp8_state.seen_params.add(name)
         leaf = name.rsplit(".", 1)[-1]
@@ -335,6 +391,12 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
             yield (k, v)
             continue
 
+        # Preserve already-FP8 weights (e.g. Megatron-Bridge exports) — requantizing
+        # already-quantized bytes corrupts the scale.
+        if v.dtype == torch.float8_e4m3fn:
+            yield (k, v)
+            continue
+
         # Cast the weight into fp8 and its scale factor
         if torch.distributed.get_rank() == 0:
             logger.debug(f"Quantizing to FP8 blockwise: {k}")
@@ -346,10 +408,20 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
             )
             param_scale = param_scale.flatten(-2, -1)
         else:
-            param_lp, param_scale = scaled_fp8_blockwise(
-                v.to(dtype),
-                weight_block_size=quant_config.weight_block_size,
-            )
+            try:
+                from vllm.model_executor.layers.quantization.utils.quant_utils import scaled_quantize
+
+                param_lp, param_scale = scaled_quantize(
+                    v.to(dtype),
+                    tuple(quant_config.weight_block_size),
+                    torch.float8_e4m3fn,
+                    compute_dtype=torch.float32,
+                )
+            except (ImportError, AttributeError):
+                param_lp, param_scale = scaled_fp8_blockwise(
+                    v.to(dtype),
+                    weight_block_size=quant_config.weight_block_size,
+                )
         param_scale = param_scale.squeeze(-1)
 
         # Yield the quantized weight
@@ -393,7 +465,7 @@ def process_quanted_weights_after_loading(model, reload_state):
     refresh_rocm_attention_weight_caches(model)
 
 
-def load_quanted_weights(weights, model_runner, is_drafter=False):
+def load_quanted_weights(weights, model_runner, is_drafter=False, peft_config=None):
     if is_drafter:
         drafter = getattr(model_runner, "drafter", None)
         model = drafter.model if drafter is not None and hasattr(drafter, "model") else None
@@ -408,6 +480,16 @@ def load_quanted_weights(weights, model_runner, is_drafter=False):
 
     weights = list(weights)
     weights_quantized = quant_weights(weights, model, quant_config, dtype=vllm_dtype)
+    # Reconcile LoRA ``.base_layer.`` names on the FP8/mxfp4 path too, so a
+    # merge=False base sync doesn't orphan the suffix on an unwrappable fused
+    # target (e.g. DSV4 ``compressor.fused_wkv_wgate``). Scoped to LoRA via
+    # ``peft_config``: only a LoRA base sync exports ``.base_layer.`` names.
+    if peft_config is not None:
+        from verl.utils.vllm.utils import resolve_weight_name
+
+        live_names = {n for n, _ in model.named_parameters(remove_duplicate=False)}
+        live_names.update(n for n, _ in model.named_buffers())
+        weights_quantized = [(resolve_weight_name(model, n, live_names), t) for n, t in weights_quantized]
 
     # Monkey patch the param class to their subclass, as certain models
     # will check the param type to call the proper weightloader

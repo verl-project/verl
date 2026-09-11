@@ -17,6 +17,38 @@ import torch
 WeightUpdate = tuple[str, torch.Tensor]
 
 
+@torch.inference_mode()
+def refresh_weight_caches(model: torch.nn.Module) -> int:
+    """Refresh derived weights after a complete reload.
+
+    vLLM lazily caches concatenated KDA convolutions and FP32 indexer gates.
+    Preserve their storage because captured CUDA graphs may reference it.
+    """
+    refreshed = 0
+    for name, module in model.named_modules():
+        if type(module).__name__ == "Glm5NextLinearAttention":
+            cached = getattr(module, "_merged_conv_weight", None)
+            if cached is None:
+                continue
+            weights = [getattr(module, f"{kind}_conv1d").weight for kind in "qkv"]
+            updated = torch.cat([weight.view(weight.size(0), weight.size(2)) for weight in weights], dim=0)
+            cache_name = f"{name}._merged_conv_weight"
+        elif type(module).__name__ == "Glm5NextMLAAttention":
+            indexer = getattr(module, "indexer", None)
+            cached = getattr(indexer, "_wp_fp32", None)
+            if cached is None:
+                continue
+            updated = indexer.wk_weights_proj.weight[indexer.head_dim :, :].t().contiguous().float()
+            cache_name = f"{name}.indexer._wp_fp32"
+        else:
+            continue
+        if cached.shape != updated.shape:
+            raise ValueError(f"Weight cache shape changed for {cache_name}: {cached.shape} vs {updated.shape}")
+        cached.copy_(updated)
+        refreshed += 1
+    return refreshed
+
+
 def split_buffer_updates(
     model: torch.nn.Module, weights: list[WeightUpdate]
 ) -> tuple[list[WeightUpdate], list[WeightUpdate], dict[str, torch.Tensor]]:

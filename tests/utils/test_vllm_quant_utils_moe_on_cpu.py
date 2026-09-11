@@ -151,6 +151,20 @@ PACKED_MODULES_MAPPING = {
 }
 
 
+def test_vlm_checkpoint_names_resolve_to_live_module():
+    mod, ns = _load_quant_utils(fused_moe_is_function=False)
+    model = torch.nn.Module()
+    model.packed_modules_mapping = {}
+    model.language_model = torch.nn.Module()
+    model.language_model.model = torch.nn.Module()
+    projection = ns["LinearBase"](dtype=torch.bfloat16)
+    model.language_model.model.proj = projection
+    model.hf_to_vllm_mapper = types.SimpleNamespace(
+        apply_list=lambda names: [name.replace("model.language_model.", "language_model.model.", 1) for name in names]
+    )
+    assert mod.get_module_from_param_name(model, "model.language_model.proj.weight") is projection
+
+
 def _build_model(ns: dict, moe_dtype=torch.float8_e4m3fn):
     """Build ``model.layers.0`` with an attention linear and a fused-MoE block."""
     linear_cls = ns["LinearBase"]
