@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import base64
 import dataclasses
 import json
 import logging
@@ -21,6 +22,7 @@ import secrets
 from pathlib import Path
 from typing import Any, Optional
 
+import numpy as np
 import ray
 import sglang
 import sglang.srt.entrypoints.engine
@@ -68,6 +70,17 @@ logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 visible_devices_keyword = get_visible_devices_keyword()
+
+
+def _decode_routed_experts_payload(captured):
+    """Normalize SGLang's tensor or 0.5.12 base64-int32 route payload."""
+    if captured is None:
+        return None
+    if isinstance(captured, str):
+        return np.frombuffer(base64.b64decode(captured), dtype=np.int32)
+    if hasattr(captured, "numpy"):
+        return captured.numpy()
+    return np.asarray(captured)
 
 
 def _extract_prompt_logprobs_sglang(
@@ -678,23 +691,26 @@ class SGLangHttpServer:
 
         routed_experts = None
         if self.config.enable_rollout_routing_replay:
-            if self.config.skip_tokenizer_init:
-                # convert to numpy
-                captured = output.get("meta_info", {}).get("routed_experts", None)
-                routed_experts = captured.numpy() if captured is not None else None
-            else:
-                from sglang.srt.layers.moe.routed_experts_capturer import extract_routed_experts_from_meta_info
-
-                hf_config = self.model_config.hf_config
-                if not hasattr(hf_config, "num_hidden_layers") or not hasattr(hf_config, "num_experts_per_tok"):
-                    raise AttributeError(
-                        "enable_rollout_routing_replay is set, but hf_config is missing "
-                        "'num_hidden_layers' or 'num_experts_per_tok'. This feature requires an MoE model "
-                        "configuration that defines these attributes."
-                    )
-                routed_experts = extract_routed_experts_from_meta_info(output).reshape(
-                    -1, hf_config.num_hidden_layers, hf_config.num_experts_per_tok
+            hf_config = self.model_config.hf_config
+            if not hasattr(hf_config, "num_hidden_layers") or not hasattr(hf_config, "num_experts_per_tok"):
+                raise AttributeError(
+                    "enable_rollout_routing_replay is set, but hf_config is missing "
+                    "'num_hidden_layers' or 'num_experts_per_tok'. This feature requires an MoE model "
+                    "configuration that defines these attributes."
                 )
+            if self.config.skip_tokenizer_init:
+                captured = output.get("meta_info", {}).get("routed_experts", None)
+                routed_experts = _decode_routed_experts_payload(captured)
+            else:
+                captured = output.get("meta_info", {}).get("routed_experts", None)
+                if isinstance(captured, str):
+                    routed_experts = _decode_routed_experts_payload(captured)
+                else:
+                    from sglang.srt.layers.moe.routed_experts_capturer import extract_routed_experts_from_meta_info
+
+                    routed_experts = extract_routed_experts_from_meta_info(output) if captured is not None else None
+            if routed_experts is not None:
+                routed_experts = routed_experts.reshape(-1, hf_config.num_hidden_layers, hf_config.num_experts_per_tok)
 
         extra_fields = {"global_steps": self.global_steps}
         if prompt_logprobs is not None:

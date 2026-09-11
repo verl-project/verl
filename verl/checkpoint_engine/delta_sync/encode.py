@@ -13,9 +13,10 @@
 # limitations under the License.
 """On-wire schema for delta sync: per-parameter manifest, flush container, checksum.
 
-One layout: a uint8 positions blob (``indices`` encoding -- int32 absolute
-positions, 4 bytes / nnz) plus a parameter-dtype values tensor, described by a
-per-parameter manifest. Values are sent verbatim in the parameter's dtype.
+One layout: a uint8 positions blob (``indices`` encoding -- little-endian
+absolute positions, 3 or 4 bytes / nnz) plus a parameter-dtype values tensor,
+described by a per-parameter manifest. Values are sent verbatim in the
+parameter's dtype.
 """
 
 from __future__ import annotations
@@ -26,6 +27,46 @@ from typing import Literal
 import torch
 
 DeltaEncodingName = Literal["indices"]
+
+
+def absolute_index_width(numel: int) -> int:
+    """Return the narrowest supported width for an index into ``numel`` elements."""
+    if numel < 0:
+        raise ValueError(f"negative tensor size: {numel}")
+    if numel <= (1 << 24):
+        return 3
+    if numel < (1 << 31):
+        return 4
+    raise ValueError(f"{numel} elements exceeds the int32 absolute-index encoding")
+
+
+def pack_absolute_indices(indices: torch.Tensor, width: int) -> torch.Tensor:
+    """Pack non-negative int32 absolute indices into a contiguous uint8 blob."""
+    indices = indices.to(torch.int32).contiguous()
+    raw = indices.view(torch.uint8).view(-1, 4)
+    if width == 4:
+        return raw.view(-1)
+    if width == 3:
+        return raw[:, :3].contiguous().view(-1)
+    raise ValueError(f"unsupported absolute-index width: {width}")
+
+
+def unpack_absolute_indices(packed: torch.Tensor, width: int) -> torch.Tensor:
+    """Inverse of :func:`pack_absolute_indices`; return int32 indices."""
+    if width not in (3, 4):
+        raise ValueError(f"unsupported absolute-index width: {width}")
+    if packed.numel() % width:
+        raise ValueError(f"position blob length {packed.numel()} is not divisible by width {width}")
+    if width == 4:
+        # A 4-byte parameter may follow a 3-byte parameter in the shared blob,
+        # leaving this otherwise-contiguous slice at an unaligned byte offset.
+        # clone() both re-bases it and keeps the decode valid on CPU and CUDA.
+        return packed.clone().view(torch.int32)
+    if width == 3:
+        raw = torch.zeros((packed.numel() // 3, 4), dtype=torch.uint8, device=packed.device)
+        raw[:, :3] = packed.view(-1, 3)
+        return raw.view(torch.int32).view(-1)
+    raise AssertionError("unreachable")
 
 
 # ---------- diff ----------------------------------------------------------

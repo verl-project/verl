@@ -21,22 +21,10 @@ import torch
 import torch.distributed as dist
 
 from verl.utils.device import get_device_name
+from verl.utils.fusion_groups import DEEPSEEK_V4_FUSION_GROUPS
 from verl.workers.rollout.utils import ensure_async_iterator
 
 SGLANG_LORA_NAME = "verl_actor_lora_name"
-
-_DEEPSEEK_V4_FUSION_MEMBERS = (
-    ("wq_a.weight", "wkv.weight"),
-    ("wq_a.scale", "wkv.scale"),
-    ("wq_a.weight_scale_inv", "wkv.weight_scale_inv"),
-    ("compressor.wkv.weight", "compressor.wgate.weight"),
-    ("indexer.compressor.wkv.weight", "indexer.compressor.wgate.weight"),
-)
-DEEPSEEK_V4_FUSION_GROUPS = tuple(
-    tuple(f".{attention}.{member}" for member in members)
-    for attention in ("self_attn", "attn")
-    for members in _DEEPSEEK_V4_FUSION_MEMBERS
-)
 
 
 def _fusion_key(name: str, groups: tuple[tuple[str, ...], ...]):

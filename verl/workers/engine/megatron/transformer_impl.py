@@ -1051,6 +1051,60 @@ class MegatronEngine(BaseEngine):
 
             per_tensor_param = export_qat_weights(per_tensor_param, self.module, self._qat_config.mode, self.bridge)
 
+        # explicit rollout-format request: the backend owns format production
+        # (codes + scale_inv exactly as the serving engine names them) without
+        # knowing who asked -- the caller distills its quant config into the
+        # spec.
+        quant_spec = kwargs.get("quant_spec")
+        if quant_spec is not None:
+            from verl.utils.fp8_sharded import quantize_hf_stream
+
+            if not self.vanilla_bridge:
+                # For fp8-serialized checkpoints the bridge quantizes on export
+                # at TWO levels, and both must be disarmed or the wrap below
+                # receives fp8 codes instead of the bf16 master:
+                #   1. export_hf_weights auto-builds build_export_fp8_tasks
+                #      (quantizing task family) -- bypassed by handing it
+                #      explicit plain tasks;
+                #   2. the DSv4 bridge's maybe_modify_converted_hf_weight hook
+                #      re-quantizes EVERY task's output to match the fp8 shard
+                #      index (plain amax/448 scales -- the ".scale" family
+                #      changes its scale dialect) -- skipped only when
+                #      task.weight_dtype is set, so stamp it on each task
+                #      (frozen dataclass, hence replace()).
+                # weight_dtype cannot be passed to export_hf_weights here: with
+                # caller-supplied tasks the stream rejects the combination, and
+                # without tasks the auto-fp8 branch fires first.
+                # The stamp is bf16 EXCEPT for the checkpoint's fp32 families
+                # (spec.fp32_predicate; DSv4's hc_*/ape/attn_sink/router bias):
+                # stamping those bf16 is where the seed used to lose their last
+                # 16 mantissa bits -- the hook-disarming stamp itself did the
+                # folding, before the wire ever saw the tensor. Stamping them
+                # float32 disarms the hook identically (any set weight_dtype
+                # skips it) and keeps the master's exact bytes. A fused task
+                # with mixed outputs stamps float32 for all of them; harmless,
+                # since bf16->fp32 is exact and the wire folds non-predicate
+                # names back to bf16. (None rows filtered for the same reason
+                # as the QAT branch above.)
+                import dataclasses
+
+                fp32_pred = getattr(quant_spec, "fp32_predicate", None)
+
+                def _stamp_dtype(task):
+                    if fp32_pred is None:
+                        return torch.bfloat16
+                    hf = task.mapping.hf_param  # resolved concrete name(s)
+                    names = [hf] if isinstance(hf, str) else list(hf.values())
+                    return torch.float32 if any(fp32_pred(n) for n in names) else torch.bfloat16
+
+                tasks = [
+                    dataclasses.replace(t, weight_dtype=_stamp_dtype(t))
+                    for t in self.bridge.get_conversion_tasks(self.module)
+                    if t is not None
+                ]
+                per_tensor_param = self.bridge.export_hf_weights(self.module, conversion_tasks=tasks)
+            per_tensor_param = quantize_hf_stream(per_tensor_param, quant_spec)
+
         return per_tensor_param, peft_config
 
     def _mcore_export_index(self):
@@ -1072,13 +1126,17 @@ class MegatronEngine(BaseEngine):
             self._delta_export_by_name = {rec.megatron_name: rec for rec in index}
         return index
 
-    def get_per_tensor_param_shard(self, **kwargs):
+    def get_per_tensor_param_shard(self, quant_spec=None, **kwargs):
         """Yield each rank's *local* mcore shard ``(name, local_flat_bf16,
         ShardSpec)`` -- the spec carries only the wire merge group (the
         comm-stubbed probe owns all shard geometry). Pure export, no side
         effects. Params owned by another pipeline stage yield an empty shard
         (zero-count lockstep rows; see the index builder)."""
         load_megatron_model_to_gpu(self.module, load_grad=False)
+        if quant_spec is not None:
+            from .delta_export import quant_shard_stream
+
+            return quant_shard_stream(self, quant_spec), None
         index = self._mcore_export_index()
 
         def _gen():
@@ -1104,16 +1162,42 @@ class MegatronEngine(BaseEngine):
         rec = self._delta_export_by_name[name]
         return mcore_hf_delta_entry(rec, place, lidx, lval, self._delta_slot_cache)
 
-    def get_per_tensor_param_delta_shard(self, **kwargs):
+    def get_per_tensor_param_delta_shard(self, quant_spec=None, **kwargs):
         """Yield the delta engine's steady payloads -- FINAL HF-coordinate entries
         per mcore parameter (see the FSDP engine's method of the same name for the
         contract; MegatronEngine extends BaseEngine directly, so the thin wrapper
-        is repeated here). Requires a prior :meth:`prime_delta_snapshots` call."""
-        from ..utils import hf_delta_export
+        is repeated here). Requires a prior :meth:`prime_delta_snapshots` call.
 
+        With ``quant_spec`` the payloads are produced directly in the rollout's
+        quantization domain (codes + scale grids diffed against the engine-held
+        quant snapshots) -- the backend owns delta production for every dtype."""
+        from ..utils import hf_delta_export
+        from .delta_export import quant_delta_entry
+
+        gen, _ = self.get_per_tensor_param_shard(quant_spec=quant_spec)
+        # ONE snapshot store for both domains: quant groups key as
+        # "{megatron_name}::{kind}", bf16 shards as plain megatron names --
+        # disjoint namespaces, identical prime/diff/refresh semantics.
         self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
-        gen, _ = self.get_per_tensor_param_shard()
-        return hf_delta_export(gen, self._delta_shard_snap, self._hf_delta_entry), None
+        entry = quant_delta_entry(self) if quant_spec is not None else self._hf_delta_entry
+        return hf_delta_export(gen, self._delta_shard_snap, entry), None
+
+    def prime_delta_snapshots(self, quant_spec=None) -> None:
+        """Capture the state the NEXT delta-shard call will diff against. With
+        ``quant_spec``, runs the same quant-domain walk as the steady export in
+        prime-only mode (same keys, same collective sequence)."""
+        if quant_spec is not None:
+            from verl.utils.device import is_cuda_available
+            from verl.workers.engine.utils import prime_delta_snapshots
+
+            self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
+            gen, _ = self.get_per_tensor_param_shard(quant_spec=quant_spec)
+            # quant snapshots pin unconditionally: they are ~4x smaller than the
+            # bf16 shard sets that motivated delta_pin_snapshots=False, and the
+            # pageable H2D/D2H round-trip costs seconds per sync at 7B already.
+            prime_delta_snapshots(gen, self._delta_shard_snap, pin=is_cuda_available)
+            return
+        super().prime_delta_snapshots()
 
     def disable_adapter(self) -> ContextManager:
         return self.peft_cls.disable_adapter(self.module)

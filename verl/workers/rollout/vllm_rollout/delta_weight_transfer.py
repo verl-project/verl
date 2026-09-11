@@ -137,7 +137,7 @@ def decode_delta_payload(
 ) -> tuple[str, list[CheckpointWeightPatch]]:
     """Validate and decode one DeltaFlush into vLLM checkpoint patches."""
 
-    from verl.checkpoint_engine.delta_sync.encode import checksum
+    from verl.checkpoint_engine.delta_sync.encode import checksum, unpack_absolute_indices
 
     CheckpointWeightPatch, _ = _checkpoint_patch_api()
     tensors = dict(named_tensors)
@@ -176,12 +176,11 @@ def decode_delta_payload(
         if encoding == "dense":
             patch_indices = None
         else:
-            if param_spec["pos_width"] != 4:
-                raise ValueError(f"{name}: indices encoding requires pos_width=4")
+            pos_width = param_spec["pos_width"]
             pos_bytes = positions[param_spec["pos_start"] : param_spec["pos_end"]]
-            if pos_bytes.numel() != patch_values.numel() * 4:
+            if pos_bytes.numel() != patch_values.numel() * pos_width:
                 raise ValueError(f"{name}: position and value slices have inconsistent lengths")
-            patch_indices = pos_bytes.view(torch.int32)
+            patch_indices = unpack_absolute_indices(pos_bytes, pos_width)
 
         patches.append(
             CheckpointWeightPatch(
