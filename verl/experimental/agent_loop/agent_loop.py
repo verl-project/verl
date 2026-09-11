@@ -58,6 +58,7 @@ from verl.utils.rollout_trace import (
     RolloutTraceConfig,
     rollout_trace_attr,
 )
+from verl.utils.routed_experts import pack_padded_routed_experts, unrecorded_fill_value
 from verl.utils.skip import SkipManager
 from verl.utils.tokenizer import (
     build_multimodal_processor_inputs,
@@ -129,10 +130,11 @@ class AgentLoopOutput(BaseModel):
             # Router replay indexes this field by absolute token position, so it must
             # span the whole sequence. The rollout engine records fewer rows than that:
             # it only sees tokens fed through the model, and multi-turn loops stop
-            # recording at the last generation. Trailing rows stay zero; replay masks
-            # them out instead of consuming them.
+            # recording at the last generation. Trailing rows hold the unrecorded
+            # sentinel; replay masks them out instead of consuming them.
             total_length = output["prompts"].size(0) + output["responses"].size(0)
-            aligned = routed_experts.new_zeros((total_length, *routed_experts.shape[1:]))
+            fill = unrecorded_fill_value(routed_experts.dtype)
+            aligned = routed_experts.new_full((total_length, *routed_experts.shape[1:]), fill)
             num_rows = min(routed_experts.size(0), total_length)
             aligned[:num_rows] = routed_experts[:num_rows]
             output["routed_experts"] = aligned
@@ -764,7 +766,8 @@ class AgentLoopWorker:
             else:
                 raise TypeError(f"Unsupported type for routed_experts: {type(output.routed_experts)}")
             experts_tensor = experts_tensor.to(torch.int16)
-            routed_experts = torch.zeros(1, total_length, layer_num, topk_num, dtype=experts_tensor.dtype)
+            fill = unrecorded_fill_value(experts_tensor.dtype)
+            routed_experts = torch.full((1, total_length, layer_num, topk_num), fill, dtype=experts_tensor.dtype)
 
             # Calculate start position: left padding means original prompt starts at the end
             start_pos = prompt_output["input_ids"].shape[1] - len(output.prompt_ids)
@@ -1040,8 +1043,12 @@ class AgentLoopWorker:
         optional_outputs = {}
         if inputs[0].response_logprobs is not None:
             optional_outputs["rollout_log_probs"] = torch.cat([input.response_logprobs for input in inputs], dim=0)
+        routed_experts_ragged = None
         if inputs[0].routed_experts is not None:
-            optional_outputs["routed_experts"] = torch.cat([input.routed_experts for input in inputs], dim=0)
+            routed_experts_ragged = pack_padded_routed_experts(
+                [input.routed_experts for input in inputs],
+                attention_mask,
+            )
         if inputs[0].teacher_logprobs is not None and inputs[0].teacher_ids is not None:
             optional_outputs["teacher_logprobs"] = torch.cat([input.teacher_logprobs for input in inputs], dim=0)
             optional_outputs["teacher_ids"] = torch.cat([input.teacher_ids for input in inputs], dim=0)
@@ -1072,6 +1079,8 @@ class AgentLoopWorker:
         }
         if self.reward_loop_worker_handles is None and input_non_tensor_batch:
             non_tensor_batch.update(input_non_tensor_batch)
+        if routed_experts_ragged is not None:
+            non_tensor_batch["routed_experts"] = routed_experts_ragged
 
         # add reward_extra_info to non_tensor_batch
         reward_extra_infos = [input.extra_fields.get("reward_extra_info", {}) for input in inputs]

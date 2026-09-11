@@ -1599,7 +1599,9 @@ class RayPPOTrainer:
                             }
                             metrics.update(old_log_prob_metrics)
                             old_log_prob.batch.pop("entropys")
-                            if "routed_experts" in batch.batch and "routed_experts" in old_log_prob.batch:
+                            from verl.utils.routed_experts import rollout_and_actor_routed_experts_conflict
+
+                            if rollout_and_actor_routed_experts_conflict(batch, old_log_prob):
                                 raise ValueError(
                                     "Detected conflicting router replay configuration: "
                                     "router_replay.mode='R2' and enable_rollout_routing_replay=True "

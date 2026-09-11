@@ -30,6 +30,7 @@ from verl import DataProto
 from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import deprecated
 from verl.utils.model import update_model_config
+from verl.utils.routed_experts import get_routed_experts_from_data_proto
 
 logger = logging.getLogger(__name__)
 
@@ -202,18 +203,41 @@ def _compute_rollout_moe_load_balance_metrics_from_counts(
     return metrics
 
 
-def _compute_rollout_moe_load_counts(
-    routed_experts: torch.Tensor | None,
-    response_mask: torch.Tensor | None,
-    num_experts: int | None,
+def _select_response_routed_experts(
+    routed_experts: torch.Tensor | np.ndarray,
+    response_mask: torch.Tensor,
 ) -> torch.Tensor | None:
-    """Count routed experts in response tokens as [num_layers, num_experts].
+    """Gather response-token routing, dropping each sequence's last valid token."""
+    if isinstance(routed_experts, np.ndarray) and routed_experts.dtype == object:
+        if response_mask.dim() != 2 or response_mask.shape[0] != len(routed_experts):
+            logger.warning(
+                "Response mask shape %s is incompatible with ragged routed_experts len %s",
+                response_mask.shape,
+                len(routed_experts),
+            )
+            return None
+        parts = []
+        response_mask_cpu = response_mask.detach().to(device="cpu")
+        for i, row in enumerate(routed_experts):
+            n_resp = int(response_mask_cpu[i].sum())
+            if n_resp <= 1:
+                continue
+            arr = np.asarray(row)
+            if arr.shape[0] < n_resp:
+                logger.warning(
+                    "ragged routed_experts sample %s has %s tokens, shorter than response length %s",
+                    i,
+                    arr.shape[0],
+                    n_resp,
+                )
+                return None
+            parts.append(arr[-n_resp:-1])
+        if not parts:
+            return None
+        return torch.as_tensor(np.concatenate(parts, axis=0), dtype=torch.long)
 
-    Each sequence's last valid response position is excluded: that token is
-    sampled but never fed back through the model, so it carries no routing
-    record (its slot is filler, not data).
-    """
-    if routed_experts is None or response_mask is None or num_experts is None or num_experts <= 0:
+    if not isinstance(routed_experts, torch.Tensor):
+        logger.warning("Expected routed_experts tensor or ragged object array, got %s", type(routed_experts))
         return None
     if routed_experts.dim() != 4:
         logger.warning("Expected routed_experts with shape [bsz, seqlen, layers, topk], got %s", routed_experts.shape)
@@ -238,19 +262,35 @@ def _compute_rollout_moe_load_counts(
     response_routed_experts = routed_experts[:, -response_len:]
     response_mask = response_mask.to(device=response_routed_experts.device, dtype=torch.bool)
     # The final response token is sampled but never fed back through the model,
-    # so it has no routing record; its slot holds filler from batch assembly
-    # (zeros, see AgentLoopWorker._postprocess). Counting it would credit
-    # expert 0 with num_layers * topk phantom assignments per sequence, so drop
-    # each sequence's last valid position. This is the metrics counterpart of
-    # build_r3_replay_mask, which skips the same row on the replay side.
+    # so it has no routing record; its slot holds the unrecorded sentinel.
+    # Counting it would credit a phantom expert, so drop each sequence's last
+    # valid position. This is the metrics counterpart of build_r3_replay_mask.
     positions = torch.arange(response_len, device=response_mask.device)
     last_valid = torch.where(response_mask, positions, positions.new_full((), -1)).amax(dim=-1)
     has_valid = last_valid >= 0
     is_last_valid = (positions.unsqueeze(0) == last_valid.unsqueeze(1)) & has_valid.unsqueeze(1)
     response_mask = response_mask & ~is_last_valid
     selected = response_routed_experts[response_mask]
-    selected = selected.detach().to(device="cpu", dtype=torch.long)
     if selected.numel() == 0:
+        return None
+    return selected.detach().to(device="cpu", dtype=torch.long)
+
+
+def _compute_rollout_moe_load_counts(
+    routed_experts: torch.Tensor | np.ndarray | None,
+    response_mask: torch.Tensor | None,
+    num_experts: int | None,
+) -> torch.Tensor | None:
+    """Count routed experts in response tokens as [num_layers, num_experts].
+
+    Each sequence's last valid response position is excluded: that token is
+    sampled but never fed back through the model, so it carries no routing
+    record (its slot is filler, not data).
+    """
+    if routed_experts is None or response_mask is None or num_experts is None or num_experts <= 0:
+        return None
+    selected = _select_response_routed_experts(routed_experts, response_mask)
+    if selected is None or selected.numel() == 0:
         return None
     if selected.min() < 0 or selected.max() >= num_experts:
         logger.warning(
@@ -319,8 +359,8 @@ def compute_moe_lb_metrics(
         return {}
 
     updated_moe_lb_metrics = accumulator.update(
-        routed_experts=metrics_batch.batch.get("routed_experts", None),
-        response_mask=metrics_batch.batch.get("response_mask", None),
+        routed_experts=get_routed_experts_from_data_proto(metrics_batch),
+        response_mask=metrics_batch.batch.get("response_mask", None) if metrics_batch.batch is not None else None,
     )
     if global_steps % moe_lb_metrics_interval != 0:
         return {}

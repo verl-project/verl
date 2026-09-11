@@ -26,6 +26,7 @@ import logging
 import uuid
 from typing import Any
 
+import numpy as np
 import torch
 
 try:
@@ -35,6 +36,7 @@ except ImportError:
     from verl.utils.transferqueue_utils import KVBatchMeta, tq
 
 from verl.utils.model import compute_position_id_with_mask
+from verl.utils.routed_experts import ROUTER_REPLAY_UNRECORDED, unrecorded_fill_value
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
 logger = logging.getLogger(__name__)
@@ -56,14 +58,24 @@ def build_padding_position_ids(source_position_ids: Any, attention_mask: torch.T
     return position_ids.reshape(view_shape).expand(*source_position_ids.shape[:-1], -1).clone()
 
 
-def build_padding_routed_experts(source_routed_experts: Any, seq_len: int) -> torch.Tensor | None:
-    """Build a zero routed-experts tensor matching the source per-token expert shape."""
+def build_padding_routed_experts(source_routed_experts: Any, seq_len: int) -> Any:
+    """Build an all-unrecorded routed-experts block matching the source representation."""
+    if isinstance(source_routed_experts, np.ndarray) and source_routed_experts.dtype != object:
+        info = np.iinfo(source_routed_experts.dtype)
+        fill = ROUTER_REPLAY_UNRECORDED if info.min < 0 else 0
+        return np.full(
+            (seq_len, *source_routed_experts.shape[1:]),
+            fill,
+            dtype=source_routed_experts.dtype,
+        )
     if not isinstance(source_routed_experts, torch.Tensor):
         return None
+    fill = unrecorded_fill_value(source_routed_experts.dtype)
     if source_routed_experts.dim() == 0:
-        return torch.zeros_like(source_routed_experts)
-    return torch.zeros(
+        return torch.full_like(source_routed_experts, fill)
+    return torch.full(
         (seq_len, *source_routed_experts.shape[1:]),
+        fill,
         dtype=source_routed_experts.dtype,
         device=source_routed_experts.device,
     )

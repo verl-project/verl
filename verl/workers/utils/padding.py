@@ -18,6 +18,7 @@ from tensordict import TensorDict
 
 from verl.utils import tensordict_utils as tu
 from verl.utils.attention_utils import index_first_axis, unpad_input
+from verl.utils.routed_experts import ragged_routed_experts_to_nested
 
 
 def left_right_2_no_padding(data: TensorDict) -> TensorDict:
@@ -70,13 +71,14 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
     data["position_ids"] = position_ids_nested
     data["loss_mask"] = data["response_mask"]
 
-    routed_experts = data.get("routed_experts", None)
-    if routed_experts is not None and not routed_experts.is_nested:
+    routed_experts = ragged_routed_experts_to_nested(data.get("routed_experts", None), cu_seqlens)
+    if routed_experts is not None and isinstance(routed_experts, torch.Tensor) and routed_experts.is_nested:
+        data["routed_experts"] = routed_experts
+    elif routed_experts is not None and isinstance(routed_experts, torch.Tensor):
         routed_experts_rmpad = index_first_axis(routed_experts.unsqueeze(-1).flatten(0, 1), indices)
-        routed_experts_nested = torch.nested.nested_tensor_from_jagged(
+        data["routed_experts"] = torch.nested.nested_tensor_from_jagged(
             routed_experts_rmpad.squeeze(-1), offsets=cu_seqlens
         )
-        data["routed_experts"] = routed_experts_nested
 
     # (bsz, seqlen, topk)
     teacher_logprobs = data.get("teacher_logprobs", None)

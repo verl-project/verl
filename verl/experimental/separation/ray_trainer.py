@@ -534,7 +534,9 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
                 }
                 metrics.update(old_log_prob_metrics)
                 old_log_prob.batch.pop("entropys")
-                if "routed_experts" in batch.batch and "routed_experts" in old_log_prob.batch:
+                from verl.utils.routed_experts import rollout_and_actor_routed_experts_conflict
+
+                if rollout_and_actor_routed_experts_conflict(batch, old_log_prob):
                     actor_cfg = self.config.actor_rollout_ref.actor
                     if getattr(actor_cfg, "strategy", None) == "megatron":
                         engine_cfg = getattr(actor_cfg, "megatron", None)
@@ -544,7 +546,9 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
                         engine_cfg = None
                     router_mode = getattr(getattr(engine_cfg, "router_replay", None), "mode", "disabled")
                     if router_mode == "R2":
-                        batch.batch.pop("routed_experts")
+                        if batch.batch is not None:
+                            batch.batch.pop("routed_experts", None)
+                        batch.non_tensor_batch.pop("routed_experts", None)
                     else:
                         old_log_prob.batch.pop("routed_experts")
                 batch = batch.union(old_log_prob)

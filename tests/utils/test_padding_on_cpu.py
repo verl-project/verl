@@ -338,6 +338,34 @@ def test_response_to_nested():
         torch.testing.assert_close(tensor, expected)
 
 
+def test_left_right_2_no_padding_dense_routed_experts():
+    batch_size, seq_len, layers, topk = 2, 8, 2, 2
+    attention_mask = torch.tensor(
+        [[0, 0, 1, 1, 1, 1, 0, 0], [1, 1, 1, 0, 0, 0, 0, 0]],
+        dtype=torch.int64,
+    )
+    input_ids = torch.arange(batch_size * seq_len).reshape(batch_size, seq_len)
+    response_mask = torch.zeros(batch_size, 3, dtype=torch.int64)
+    position_ids = torch.arange(seq_len).unsqueeze(0).expand(batch_size, -1)
+    routed = torch.arange(batch_size * seq_len * layers * topk, dtype=torch.int16).reshape(
+        batch_size, seq_len, layers, topk
+    )
+    data = TensorDict(
+        {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "response_mask": response_mask,
+            "position_ids": position_ids,
+            "routed_experts": routed,
+        },
+        batch_size=[batch_size],
+    )
+    converted = left_right_2_no_padding(data)
+    assert converted["routed_experts"].is_nested
+    expected = torch.cat([routed[i, attention_mask[i].bool()] for i in range(batch_size)], dim=0)
+    torch.testing.assert_close(converted["routed_experts"].values(), expected)
+
+
 if __name__ == "__main__":
     test_padding_conversion_with_log_probs()
     test_padding_conversion_without_log_probs()
@@ -346,4 +374,5 @@ if __name__ == "__main__":
     test_embeds_padding_2_no_padding_varying_lengths()
     test_response_from_nested()
     test_response_to_nested()
+    test_left_right_2_no_padding_dense_routed_experts()
     print("All padding conversion tests passed!")

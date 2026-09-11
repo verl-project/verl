@@ -15,6 +15,7 @@
 import math
 from types import SimpleNamespace
 
+import numpy as np
 import torch
 
 import verl.trainer.ppo.metric_utils as metric_utils
@@ -106,6 +107,40 @@ def test_rollout_moe_load_balance_metrics_survive_negative_filler():
     )
 
     assert metrics
+
+
+def test_rollout_moe_load_balance_metrics_ragged_matches_dense():
+    # Same two sequences as the dense per-sequence drop-last case, stored as
+    # attended-token rows: last token of each row is the unrecorded filler.
+    dense = torch.zeros(2, 4, 1, 1, dtype=torch.long)
+    dense[0, :, 0, 0] = torch.tensor([1, 2, 3, 0])
+    dense[1, :, 0, 0] = torch.tensor([2, 0, 0, 0])
+    response_mask = torch.tensor([[True, True, True, True], [True, True, False, False]])
+    dense_counts = metric_utils._compute_rollout_moe_load_counts(
+        routed_experts=dense, response_mask=response_mask, num_experts=4
+    )
+
+    ragged = np.empty(2, dtype=object)
+    ragged[0] = np.array([[[1]], [[2]], [[3]], [[0]]], dtype=np.int16)
+    ragged[1] = np.array([[[2]], [[0]]], dtype=np.int16)
+    ragged_counts = metric_utils._compute_rollout_moe_load_counts(
+        routed_experts=ragged, response_mask=response_mask, num_experts=4
+    )
+    assert torch.equal(dense_counts, ragged_counts)
+
+
+def test_compute_moe_lb_metrics_reads_non_tensor_routed_experts():
+    accumulator = RolloutMoELoadBalanceMetricsAccumulator(model_config={"num_experts": 2})
+    ragged = np.empty(1, dtype=object)
+    ragged[0] = np.array([[[0]], [[1]], [[0]]], dtype=np.int16)
+    batch = SimpleNamespace(
+        batch={"response_mask": torch.tensor([[True, True, True]], dtype=torch.bool)},
+        non_tensor_batch={"routed_experts": ragged},
+    )
+
+    metrics = compute_moe_lb_metrics(batch, moe_lb_metrics_interval=1, global_steps=1, accumulator=accumulator)
+    assert metrics["rollout/moe/routed_experts_found"] == 1.0
+    assert metrics["rollout/moe/routed_expert_assignments"] == 2
 
 
 def test_rollout_moe_load_balance_metrics_drop_last_valid_per_sequence():
