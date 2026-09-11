@@ -72,7 +72,12 @@ from verl.trainer.ppo.utils import (
     need_reference_policy,
     need_teacher_policy,
 )
-from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY, ReplayBuffer, ReplayBufferAsync
+from verl.trainer.ppo.v1.replay_buffer import (
+    DAPO_FILTERED_REWARD_COUNTS_KEY,
+    ReplayBuffer,
+    ReplayBufferAsync,
+    SampleLevelReplayBuffer,
+)
 from verl.trainer.ppo.v1.utils import MetricsAggregator, compute_advantage_for_multi_trajectories
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
@@ -157,14 +162,25 @@ class PPOTrainer(ABC):
         ``ReplayBuffer`` subclass; otherwise the built-in implementation is used.
         """
         sampler_config = self.config.trainer.v1.sampler
+        dispatch_mode = str(sampler_config.get("dispatch_mode", "batch"))
+        if dispatch_mode == "sample_level" and self.trainer_mode != "colocate_async":
+            raise ValueError(
+                "trainer.v1.sampler.dispatch_mode=sample_level requires "
+                "trainer.v1.trainer_mode=colocate_async, "
+                f"got trainer_mode={self.trainer_mode}"
+            )
         custom_sampler = sampler_config.get("custom_sampler", None)
         has_custom_sampler = bool(
             custom_sampler is not None and custom_sampler.get("path") and custom_sampler.get("name")
         )
         if has_custom_sampler:
             sampler_cls = load_extern_type(custom_sampler.path, custom_sampler.name)
+        elif self.trainer_mode == "sync":
+            sampler_cls = ReplayBuffer
+        elif dispatch_mode == "sample_level":
+            sampler_cls = SampleLevelReplayBuffer
         else:
-            sampler_cls = ReplayBuffer if self.trainer_mode == "sync" else ReplayBufferAsync
+            sampler_cls = ReplayBufferAsync
 
         replay_buffer_kwargs = dict(
             trainer_mode=self.trainer_mode,
@@ -195,6 +211,12 @@ class PPOTrainer(ABC):
                     if filter_groups_metric is not None or sync_refill_failed_groups
                     else (self.config.data.get("gen_batch_size", None) or train_batch_size),
                     max_inflight_gen_batches=max_inflight_gen_batches,
+                )
+            elif sampler_cls is SampleLevelReplayBuffer:
+                group_size = int(self.config.actor_rollout_ref.rollout.n)
+                replay_buffer_kwargs.update(
+                    group_size=group_size,
+                    max_inflight_samples=int(self.config.data.train_batch_size) * group_size,
                 )
         return sampler_cls(**replay_buffer_kwargs)
 
@@ -607,9 +629,16 @@ class PPOTrainer(ABC):
         """Called before the training loop starts."""
         return
 
+    def _should_add_batch_to_generate(self) -> bool:
+        """False when a custom sampler owns prompt dispatch (sample-level)."""
+        return bool(getattr(self.replay_buffer, "trainer_owns_dispatch", True))
+
     def _add_async_warmup_batches(self, num_warmup_batches: int) -> None:
         """Fill the async prefetch window without duplicating checkpointed prompt groups."""
         if self.config.skip.rollout_tq.enable or num_warmup_batches <= 0:
+            return
+        if not self._should_add_batch_to_generate():
+            logger.info("sampler owns dispatch; skip warmup batch dump")
             return
 
         restored_prompts = self._restored_tq_prompt_count
@@ -1465,7 +1494,8 @@ class PPOTrainer(ABC):
         self._submit_batch_to_rollout(batch)
 
     def prepare_step(self) -> dict:
-        self._add_batch_to_generate()
+        if self._should_add_batch_to_generate():
+            self._add_batch_to_generate()
         return {}
 
     def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict | None = None) -> KVBatchMeta:
