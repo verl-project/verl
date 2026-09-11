@@ -828,6 +828,7 @@ class RayPPOTrainer:
                 optimizer_config=orig_critic_cfg.optim,
                 checkpoint_config=orig_critic_cfg.checkpoint,
                 profiler_config=critic_profiler_config,
+                nccl_timeout=orig_critic_cfg.get("nccl_timeout"),
                 extra_context=getattr(self, "_critic_extra_context", {}),
             )
 
