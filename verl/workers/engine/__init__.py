@@ -67,5 +67,7 @@ try:
     __all__ += ["MegatronEngine", "MegatronEngineWithLMHead", "MegatronEngineWithValueHead"]
 except ImportError as e:
     warnings.warn(f"megatron engine is not available: {e!r}", stacklevel=1)
+    # mint: make a broken megatron import visible even when warnings are filtered.
+    print(f"[ENGINE_INIT] megatron import failed: {type(e).__name__}: {e}", file=__import__("sys").stderr, flush=True)
     MegatronEngine = None
     MegatronEngineWithLMHead = None

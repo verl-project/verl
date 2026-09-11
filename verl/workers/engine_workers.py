@@ -73,6 +73,28 @@ def _with_routing_replay_flag(enabled: bool):
     return decorator
 
 
+def _set_lr_internal(optimizer, lr: float) -> None:
+    """Set learning rate on optimizer param groups (handles ChainedOptimizer)."""
+    if optimizer is None:
+        return
+    from megatron.core.optimizer import ChainedOptimizer
+
+    def _set_on_opt(opt):
+        if hasattr(opt, "param_groups"):
+            for pg in opt.param_groups:
+                pg["lr"] = lr
+        inner = getattr(opt, "optimizer", None)
+        if inner is not None and hasattr(inner, "param_groups"):
+            for pg in inner.param_groups:
+                pg["lr"] = lr
+
+    if isinstance(optimizer, ChainedOptimizer):
+        for chained_opt in optimizer.chained_optimizers:
+            _set_on_opt(chained_opt)
+    else:
+        _set_on_opt(optimizer)
+
+
 class TrainingWorker(Worker, DistProfilerExtension):
     """
     TrainingWorker provides a Tinker-like API (https://thinkingmachines.ai/tinker/) as a RayWorkerGroup
@@ -152,6 +174,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
             self.flops_counter = FlopsCounter(self.model_config.hf_config)
         else:
             self.flops_counter = None
+
+        # Client-requested LR for dynamic scheduling (set via set_lr RPC)
+        self._client_lr: float | None = None
 
         self.loss_fn = None
 
@@ -392,6 +417,141 @@ class TrainingWorker(Worker, DistProfilerExtension):
             final_output = None
 
         return final_output
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
+    def forward_backward_only(self, data: TensorDict) -> TensorDict:
+        """Forward + backward only (no optimizer step).
+
+        Enters train_mode but does NOT exit — optim_step_only will exit it.
+        This avoids train_mode.__exit__ calling optimizer_zero_grad() which
+        would destroy the gradients we just computed.
+
+        Must be followed by optim_step_only() which:
+        1. Applies client LR (via _client_lr)
+        2. Runs optimizer_step
+        3. Steps LR scheduler
+        4. Zeroes gradients
+        5. Exits train_mode
+        """
+        assert self.loss_fn is not None, "loss function can't be None when calling forward_backward_only"
+        assert not self.engine_config.forward_only, "Can't run `forward_backward_only` when forward_only is in the engine config."
+        global_token_num = tu.get(data, key="global_token_num")
+        disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
+        images_seqlens = tu.get(data, key="images_seqlens", default=None)
+
+        default_keys = dict(
+            use_remove_padding=self.model_config.get("use_remove_padding", False),
+            use_dynamic_bsz=self.engine_config.use_dynamic_bsz,
+            max_token_len_per_gpu=self.engine_config.max_token_len_per_gpu,
+            micro_batch_size_per_gpu=self.engine_config.micro_batch_size_per_gpu,
+            use_fused_kernels=self.engine_config.use_fused_kernels,
+        )
+        for key, val in default_keys.items():
+            if key not in data.keys():
+                tu.assign_non_tensor(data, **{key: val})
+
+        import time as _time
+        _tm_enter_t0 = _time.perf_counter()
+        # Enter train_mode manually — DO NOT use 'with' statement.
+        # optim_step_only will call __exit__ after optimizer step.
+        self._train_mode_ctx = self.engine.train_mode(disable_auto_offload=disable_auto_offload)
+        self._train_mode_ctx.__enter__()
+        _tm_enter_ms = (_time.perf_counter() - _tm_enter_t0) * 1000.0
+
+        # Zero gradients before forward (aligns with mint's pre_forward_backward)
+        self.engine.optimizer_zero_grad()
+
+        # Forward + backward
+        _fb_t0 = _time.perf_counter()
+        output = self.engine.forward_backward_batch(data, loss_function=self.loss_fn)
+        _fb_batch_ms = (_time.perf_counter() - _fb_t0) * 1000.0
+
+        # Store timing for optim_step_only to include in metrics
+        self._fb_timing = {
+            "train_mode_enter_ms:mean": _tm_enter_ms,
+            "forward_backward_batch_ms:mean": _fb_batch_ms,
+        }
+
+        if self.engine.is_mp_src_rank_with_outputs():
+            if "model_output" in output:
+                output.pop("model_output")
+            final_output = self._postprocess_output(
+                output,
+                global_token_num=global_token_num,
+                delta_time=_fb_batch_ms,
+                forward_only=False,
+                images_seqlens=images_seqlens,
+            ).cpu()
+        else:
+            final_output = None
+
+        return final_output
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def optim_step_only(self) -> TensorDict:
+        """Optimizer step + LR scheduler step, then exit train_mode.
+
+        Must be called after forward_backward_only().
+        Applies client-requested LR (_client_lr) before optimizer step,
+        and re-applies it after lr_scheduler_step to override constant scheduler.
+        Exits train_mode (which calls zero_grad — harmless since grads already consumed).
+        """
+        import time as _time
+
+        # Apply client-requested LR before optimizer step
+        if self._client_lr is not None:
+            _set_lr_internal(self.engine.optimizer, self._client_lr)
+
+        _opt_t0 = _time.perf_counter()
+        grad_norm = self.engine.optimizer_step()
+        _optim_batch_ms = (_time.perf_counter() - _opt_t0) * 1000.0
+
+        # LR scheduler step (constant mode = no-op, but keeps step counter)
+        lr = self.engine.lr_scheduler_step()
+
+        # Re-apply client LR after scheduler (constant scheduler resets to init value)
+        if self._client_lr is not None:
+            _set_lr_internal(self.engine.optimizer, self._client_lr)
+            lr = self._client_lr
+
+        # Zero gradients after optimizer step
+        self.engine.optimizer_zero_grad()
+
+        # Exit train_mode (gradients already consumed + zeroed, so __exit__'s zero_grad is harmless)
+        _tm_exit_t0 = _time.perf_counter()
+        if hasattr(self, "_train_mode_ctx") and self._train_mode_ctx is not None:
+            self._train_mode_ctx.__exit__(None, None, None)
+            self._train_mode_ctx = None
+        _tm_exit_ms = (_time.perf_counter() - _tm_exit_t0) * 1000.0
+
+        if self.engine.is_mp_src_rank_with_outputs():
+            result = {}
+            if grad_norm is not None:
+                result["grad_norm"] = float(grad_norm) if hasattr(grad_norm, "item") else grad_norm
+            if lr is not None:
+                result["lr"] = float(lr) if hasattr(lr, "item") else lr
+            # Timing metrics
+            _fb_timing = getattr(self, "_fb_timing", {})
+            result["train_mode_enter_ms:mean"] = _fb_timing.get("train_mode_enter_ms:mean", 0.0)
+            result["train_mode_exit_ms:mean"] = _tm_exit_ms
+            result["train_mode_reused:mean"] = 0.0
+            result["optim_step_batch_ms:mean"] = _optim_batch_ms
+            result["grad_restore_skipped:mean"] = 0.0
+            result["forward_backward_batch_ms:mean"] = _fb_timing.get("forward_backward_batch_ms:mean", 0.0)
+            return result
+        else:
+            return None
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def set_lr(self, lr: float) -> None:
+        """Set learning rate on all optimizer param groups.
+
+        Directly modifies param_groups["lr"] to apply client-requested LR.
+        Handles ChainedOptimizer structure used by Megatron.
+        Also caches the LR for re-application after lr_scheduler_step.
+        """
+        self._client_lr = float(lr)
+        _set_lr_internal(self.engine.optimizer, lr)
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
     def infer_batch(self, data: TensorDict) -> TensorDict:
