@@ -30,6 +30,7 @@ block-FP8 layer:
 ``verl/utils/vllm/vllm_quant_utils.py`` is the entry point that drives these.
 """
 
+import importlib
 import inspect
 import logging
 import math
@@ -425,6 +426,17 @@ def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
             )
 
 
+def _uses_refactored_fp8_post_load(vllm_version):
+    if vllm_version >= version.parse("0.20.0"):
+        return True
+
+    try:
+        fp8_utils = importlib.import_module("vllm.model_executor.layers.quantization.utils.fp8_utils")
+    except ModuleNotFoundError:
+        return True
+    return not hasattr(fp8_utils, "maybe_post_process_fp8_weight_block")
+
+
 def build_fp8_method_patchers(vllm_version):
     """Patchers that make the FP8 quant methods survive a refit, not yet started.
 
@@ -437,7 +449,7 @@ def build_fp8_method_patchers(vllm_version):
     # vLLM 0.20 refactored FP8 post-load handling and removed
     # maybe_post_process_fp8_weight_block. Keep its native transformation logic,
     # but preserve parameter subclass metadata for RL weight reloads.
-    if vllm_version >= version.parse("0.20.0"):
+    if _uses_refactored_fp8_post_load(vllm_version):
         from vllm.model_executor.layers.quantization.fp8 import (
             Fp8LinearMethod,
             Fp8MoEMethod,

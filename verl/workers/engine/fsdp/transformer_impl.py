@@ -51,14 +51,18 @@ from verl.utils.fsdp_utils import (
     fsdp_version,
     get_fsdp_wrap_policy,
     get_init_weight_context_manager,
+    get_no_placement_param_registrations,
     init_fn,
     load_fsdp_model_to_gpu,
     load_fsdp_optimizer,
+    materialize_no_placement_params,
     merged_lora_context,
     normalize_peft_param_name,
     offload_fsdp_model_to_cpu,
     offload_fsdp_optimizer,
     replace_lora_wrapper,
+    set_no_placement_param_registrations,
+    temporarily_detach_no_placement_params,
 )
 from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
 from verl.utils.py_functional import convert_to_regular_types
@@ -463,9 +467,20 @@ class FSDPEngine(BaseEngine):
                 "offload_policy": offload_policy,
                 "reshard_after_forward": self.engine_config.reshard_after_forward,
             }
-            full_state = module.state_dict()
+            no_placement = materialize_no_placement_params(
+                get_no_placement_param_registrations(module),
+                cache_scope=self.model_config.local_path,
+            )
+            with temporarily_detach_no_placement_params(module, no_placement):
+                full_state = module.state_dict()
+                buffers = {name: buffer.detach().cpu() for name, buffer in module.named_buffers() if not buffer.is_meta}
+                module.to_empty(device="meta")
+            if no_placement:
+                fsdp_kwargs["ignored_params"] = {param for _, _, param, _ in no_placement}
             apply_fsdp2(module, fsdp_kwargs, self.engine_config)
-            fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
+            set_no_placement_param_registrations(module, no_placement)
+            with temporarily_detach_no_placement_params(module):
+                fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy, buffers)
         else:
             raise NotImplementedError(f"Unknown strategy {self.engine_config.strategy}")
 

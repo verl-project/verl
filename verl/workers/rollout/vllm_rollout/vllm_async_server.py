@@ -84,6 +84,22 @@ logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 
+def _resolve_rollout_model_path(config: RolloutConfig, model_config: HFModelConfig) -> str:
+    return config.model_path or model_config.local_path
+
+
+def _validate_rollout_model_path(config: RolloutConfig, model_config: HFModelConfig) -> None:
+    if config.model_path is None:
+        return
+    lora_rank = model_config.lora.get("rank", 0) or model_config.lora_rank
+    if lora_rank <= 0 or model_config.lora.get("merge", False):
+        raise ValueError("rollout.model_path requires adapter-only LoRA (merge=False)")
+    if "dummy" in config.load_format:
+        raise ValueError("rollout.model_path requires a non-dummy rollout load_format")
+    if config.checkpoint_engine.backend not in ("naive", None):
+        raise ValueError("rollout.model_path requires checkpoint_engine.backend=naive")
+
+
 class vLLMHttpServer:
     """vLLM http server in single node, this is equivalent to launch server with command line:
     ```
@@ -144,6 +160,7 @@ class vLLMHttpServer:
 
         self.config = self._init_config(config)
         self.model_config = self._init_model_config(model_config)
+        _validate_rollout_model_path(self.config, self.model_config)
         self._validate_configs()
 
         if self.config.full_determinism:
@@ -451,7 +468,8 @@ class vLLMHttpServer:
         if self._disaggregation_role != "null":
             args["kv_transfer_config"] = json.dumps(self._disaggregation_kv_transfer_config)
 
-        server_args = ["serve", self.model_config.local_path] + build_cli_args_from_config(args)
+        model_path = _resolve_rollout_model_path(self.config, self.model_config)
+        server_args = ["serve", model_path] + build_cli_args_from_config(args)
 
         if self.replica_rank == 0:
             pprint(server_args)

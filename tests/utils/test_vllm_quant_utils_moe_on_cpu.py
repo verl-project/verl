@@ -30,14 +30,38 @@ import types
 from pathlib import Path
 
 import torch
+from packaging import version
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _VLLM_UTILS_DIR = _REPO_ROOT / "verl/utils/vllm"
 _MODULE_PATH = _VLLM_UTILS_DIR / "vllm_quant_utils.py"
+_FP8_MODULE_PATH = _VLLM_UTILS_DIR / "vllm_fp8_utils.py"
 
 
 def _make_module(name: str) -> types.ModuleType:
     return types.ModuleType(name)
+
+
+def _load_fp8_utils():
+    spec = importlib.util.spec_from_file_location("verl_vllm_fp8_utils_under_test", _FP8_MODULE_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_fp8_patch_selection_uses_runtime_capability(monkeypatch):
+    mod = _load_fp8_utils()
+    module_name = "vllm.model_executor.layers.quantization.utils.fp8_utils"
+    legacy_api = _make_module(module_name)
+    legacy_api.maybe_post_process_fp8_weight_block = object()
+    monkeypatch.setitem(sys.modules, module_name, legacy_api)
+
+    assert not mod._uses_refactored_fp8_post_load(version.parse("0.19.0"))
+
+    refactored_api = _make_module(module_name)
+    monkeypatch.setitem(sys.modules, module_name, refactored_api)
+    assert mod._uses_refactored_fp8_post_load(version.parse("0.1.dev20073"))
 
 
 def _load_quant_utils(fused_moe_is_function: bool):
