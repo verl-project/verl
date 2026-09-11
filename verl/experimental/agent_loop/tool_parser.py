@@ -648,6 +648,93 @@ class KimiToolParser(ToolParser):
         return content, function_calls
 
 
+@ToolParser.register("deepseek_v3")
+class DeepSeekV3ToolParser(ToolParser):
+    """Tool parser for the DeepSeek-V3 family (V3, R1, V3.1, V3.2) special-token function calls.
+
+    Two layouts share the same section and call markers. V3 and R1 write the call type,
+    the name and a fenced JSON block::
+
+        <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+        ```json
+        {"city": "Seattle"}
+        ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+
+    V3.1 and V3.2 drop the type and the fence::
+
+        <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"city": "Seattle"}<｜tool▁call▁end｜>
+        <｜tool▁calls▁end｜>
+
+    The models emit ``<｜end▁of▁sentence｜>`` right after the section, so no extra stop
+    token is needed. Text before the section is returned as content.
+    """
+
+    def __init__(self, tokenizer) -> None:
+        super().__init__(tokenizer)
+        self.tool_calls_start_token = "<｜tool▁calls▁begin｜>"
+        self.tool_calls_end_token = "<｜tool▁calls▁end｜>"
+        self.tool_call_regex = regex.compile(r"<｜tool▁call▁begin｜>(.*?)<｜tool▁call▁end｜>", regex.DOTALL)
+        # V3 / R1: "<type><｜tool▁sep｜><name>\n```json\n<arguments>\n```"
+        self.fenced_call_regex = regex.compile(
+            r"^\s*(?:[^\s<｜]+)<｜tool▁sep｜>\s*(?P<name>[^\s<｜]+)\s*```(?:json)?\s*(?P<arguments>.*?)\s*```\s*$",
+            regex.DOTALL,
+        )
+        # V3.1 / V3.2: "<name><｜tool▁sep｜><arguments>"
+        self.plain_call_regex = regex.compile(
+            r"^\s*(?P<name>[^\s<｜]+)<｜tool▁sep｜>\s*(?P<arguments>.*?)\s*$",
+            regex.DOTALL,
+        )
+
+    @staticmethod
+    def _normalize_arguments(raw_arguments: str) -> str:
+        try:
+            return json.dumps(json.loads(raw_arguments), ensure_ascii=False)
+        except Exception:
+            logger.warning("DeepSeek tool-call arguments are not valid JSON; keeping them verbatim.")
+            return raw_arguments
+
+    def _parse_tool_call(self, tool_call_text: str) -> Optional[FunctionCall]:
+        # Try the fenced layout first and fall back to the plain one. A fence inside the
+        # arguments does not pick the layout: a plain call writing a code block ends at
+        # the JSON, not at a fence, so the fenced pattern declines it and the plain one
+        # reads it. The reverse order would misread a fenced call, whose call type sits
+        # where the plain layout expects the tool name.
+        match = self.fenced_call_regex.match(tool_call_text) or self.plain_call_regex.match(tool_call_text)
+        if match is None:
+            return None
+        return FunctionCall(
+            name=match.group("name"),
+            arguments=self._normalize_arguments(match.group("arguments")),
+        )
+
+    @rollout_trace_op
+    async def extract_tool_calls(
+        self, responses_ids: list[int], tools: list[OpenAIFunctionToolSchema] = None
+    ) -> tuple[str, list[FunctionCall]]:
+        del tools
+        loop = get_event_loop()
+        text = await loop.run_in_executor(
+            None,
+            lambda: self.tokenizer.decode(responses_ids, skip_special_tokens=False),
+        )
+        if self.tool_calls_start_token not in text or self.tool_calls_end_token not in text:
+            return text, []
+
+        function_calls: list[FunctionCall] = []
+        section_start = text.find(self.tool_calls_start_token)
+        # Everything between the first section opener and the last closer: distilled
+        # checkpoints sometimes emit one section per call instead of one for all.
+        section_end = text.rfind(self.tool_calls_end_token)
+        for tool_call_text in self.tool_call_regex.findall(text[section_start:section_end]):
+            function_call = self._parse_tool_call(tool_call_text)
+            if function_call is None:
+                logger.error(f"Failed to decode DeepSeek tool call: {tool_call_text[:200]!r}")
+                continue
+            function_calls.append(function_call)
+
+        return text[:section_start], function_calls
+
+
 @ToolParser.register("deepseek_v4")
 class DeepSeekV4ToolParser(ToolParser):
     """Tool parser for DeepSeek-V4 DSML function calls.
