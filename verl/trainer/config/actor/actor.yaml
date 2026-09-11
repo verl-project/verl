@@ -144,6 +144,11 @@ checkpoint:
   # Whether to perform strict validation during weight export
   strict: True
 
+  # When the model has LoRA adapters, save only the adapter weights instead of the
+  # full model state dict. LoRA-only checkpoints are detected and merged on load.
+  # No effect when the model has no LoRA adapters.
+  save_lora_only: False
+
 # optimizer configs
 optim:
 
