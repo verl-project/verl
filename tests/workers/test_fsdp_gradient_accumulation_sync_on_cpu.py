@@ -21,9 +21,11 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from tensordict import TensorDict
 from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, ShardingStrategy, fully_shard
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import ShardingStrategy, fully_shard
+from torch.distributed.tensor import DTensor
 
+from verl.utils.fsdp_utils import apply_fsdp2
 from verl.workers.engine.fsdp import transformer_impl
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngine
 
@@ -249,6 +251,71 @@ def test_distributed_accumulation_matches_per_micro_batch_sync(tmp_path):
     rendezvous_file = str(tmp_path / "fsdp_rdzv")
     mp.spawn(
         _distributed_equivalence_worker,
+        args=(world_size, rendezvous_file),
+        nprocs=world_size,
+        join=True,
+    )
+
+
+class _DirectWeightCausalLM(torch.nn.Module):
+    """Minimal untied model matching the Torch fused LM-head access pattern."""
+
+    _no_split_modules = ["Qwen3_5DecoderLayer"]
+
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(tie_word_embeddings=False)
+        self.embed_tokens = torch.nn.Embedding(16, 8)
+        self.lm_head = torch.nn.Linear(8, 16, bias=False)
+
+    def forward(self, input_ids):
+        hidden_states = self.embed_tokens(input_ids)
+        vocab_weights = self.lm_head.weight
+        if isinstance(vocab_weights, DTensor):
+            vocab_weights = vocab_weights.full_tensor()
+        hidden_states = hidden_states.to(vocab_weights.dtype)
+        return hidden_states @ vocab_weights.t()
+
+
+def _direct_weight_deferred_sync_worker(rank, world_size, rendezvous_file):
+    dist.init_process_group(
+        backend="gloo",
+        init_method=f"file://{rendezvous_file}",
+        rank=rank,
+        world_size=world_size,
+    )
+    try:
+        mesh = init_device_mesh("cpu", (world_size,))
+        model = _DirectWeightCausalLM()
+        apply_fsdp2(
+            model,
+            {
+                "mesh": mesh,
+                "mp_policy": MixedPrecisionPolicy(
+                    param_dtype=torch.bfloat16,
+                    reduce_dtype=torch.float32,
+                    cast_forward_inputs=True,
+                ),
+                "reshard_after_forward": True,
+            },
+            {"use_fused_kernels": True},
+        )
+        assert not isinstance(model.lm_head, FSDPModule)
+
+        engine = _make_engine(model)
+        for micro_batch_idx in range(2):
+            with engine._gradient_sync_context(is_last_micro_batch=micro_batch_idx == 1):
+                input_ids = torch.tensor([[rank, micro_batch_idx + 1]], dtype=torch.long)
+                model(input_ids).float().square().sum().backward()
+    finally:
+        dist.destroy_process_group()
+
+
+def test_fsdp2_deferred_sync_with_fused_direct_weight_access(tmp_path):
+    world_size = 2
+    rendezvous_file = str(tmp_path / "fsdp_direct_weight_rdzv")
+    mp.spawn(
+        _direct_weight_deferred_sync_worker,
         args=(world_size, rendezvous_file),
         nprocs=world_size,
         join=True,
