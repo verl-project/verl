@@ -9,9 +9,9 @@
 # | ------------------------------ | ---------------- | ------------------------------------------ |
 # | vllm-project/vllm              | releases/v0.23.0 | `0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665` |
 # | vllm-project/vllm-ascend       | releases/v0.23.0 | `dc55ef82f8236585c8f2ee237f5b43507cae8686` |
-# | NVIDIA/Megatron-LM             | core_r0.18.0     | `dc0ee41ada177d4c74ba46bb501bba5967264815` |
+# | NVIDIA/Megatron-LM             | core_v0.18.0     | `ba7b5ebce12af60627a80985792a1449ce45f46c` |
 # | Ascend/MindSpeed               | core_r0.18.0     | `1881e01a996074b30d424349237d55a2c608e6b7` |
-# | Ascend/MegatronAdaptor         | core_r0.18.0     | `746fe27ce8a1a59ffee7a237029fccce8fac35a9` |
+# | Ascend/MegatronAdaptor         | core_r0.18.0     | `eb0e5043438dd753099432bc3b3d8e5916ed1844` |
 # | Ascend/TransformerEngineNPU    | main             | `e40ec34036eb7e04ad11b983f8c6b0dc9fcd88f9` |
 # | Ascend/MindSpeed-Ops           | master           | `dbee3f41b156bb051fc046facf69548400be2be1` |
 # | Ascend/MindSpeed-Bridge        | master           | `d82eec3ce2b31deb82cc5474b6813498efded908` |
@@ -131,6 +131,7 @@ ACTOR_ARGS=(
     actor_rollout_ref.actor.use_torch_compile=False
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss}
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef}
+    actor_rollout_ref.actor.checkpoint.strict=False # MTP layers are unused in both training/rollout and are omitted from exported HF weights
     actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low}
     actor_rollout_ref.actor.clip_ratio_high=${clip_ratio_high}
     actor_rollout_ref.actor.clip_ratio_c=10.0
