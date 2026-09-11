@@ -28,6 +28,10 @@ from tensordict import TensorDict
 
 import verl.utils.torch_functional as verl_F
 from verl.models.mcore import get_mcore_weight_converter
+from verl.models.mcore.response_only_lm_head import (
+    restore_response_only_outputs,
+    select_response_only_inputs,
+)
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
@@ -1192,8 +1196,13 @@ class MegatronEngineWithLMHead(MegatronEngine):
         logits_processor_func: Callable,
         batch: TensorDict,
         data_format: str,
+        projection_mask: torch.Tensor | None = None,
     ):
-        assert logits.shape[:2] == label.shape[:2]
+        num_selected = None
+        if projection_mask is not None:
+            label, temperature, num_selected = select_response_only_inputs(label, temperature, projection_mask)
+        if logits.ndim != 3 or logits.shape[:2] != label.shape:
+            raise ValueError(f"logits and labels are misaligned: logits={logits.shape}, label={label.shape}")
         # avoid non-positive temperature such as padding
         temperature[temperature <= 0] = 1e-8
         assert torch.all(temperature > 0).item(), f"temperature tensor must be positive. Got {temperature}"
@@ -1229,6 +1238,8 @@ class MegatronEngineWithLMHead(MegatronEngine):
         if not distillation_only:
             ret["log_probs"] = vocab_parallel_log_probs_from_logits(logits_bak, label)
 
+        if projection_mask is not None:
+            ret = restore_response_only_outputs(ret, projection_mask, num_selected)
         return ret
 
     def forward_step(
@@ -1249,6 +1260,15 @@ class MegatronEngineWithLMHead(MegatronEngine):
         calculate_sum_pi_squared = tu.get_non_tensor_data(batch, key="calculate_sum_pi_squared", default=False)
         distillation_use_topk = tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
         distillation_only = tu.get_non_tensor_data(batch, key="distillation_only", default=False)
+
+        if self.engine_config.response_only_lm_head and distillation_use_topk:
+            raise NotImplementedError("response_only_lm_head does not support top-k distillation")
+        if (
+            self.engine_config.response_only_lm_head
+            and self.model_config.mtp.enable
+            and self.model_config.mtp.enable_train
+        ):
+            raise NotImplementedError("response_only_lm_head does not support MTP training")
         pad_to_length_bucket = (
             self.engine_config.pad_to_length_bucket
             if self.engine_config.pad_to_length and self.engine_config.use_remove_padding
@@ -1322,6 +1342,9 @@ class MegatronEngineWithLMHead(MegatronEngine):
         if use_fused_kernels:
             from verl.models.mcore import get_mcore_forward_fused_model_engine_fn
 
+            response_attention_mask = None
+            if self.engine_config.response_only_lm_head and attention_mask is not None and not loss_mask.is_nested:
+                response_attention_mask = attention_mask[:, -loss_mask.shape[-1] :]
             fused_forward_fn = get_mcore_forward_fused_model_engine_fn(self.model_config.hf_config)
             output = fused_forward_fn(
                 model=model,
@@ -1335,6 +1358,8 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 local_cp_size=local_cp_size,
                 router_padding_mask=router_padding_mask,
                 pad_to_length_bucket=pad_to_length_bucket,
+                loss_mask=loss_mask if self.engine_config.response_only_lm_head else None,
+                response_attention_mask=response_attention_mask,
             )
         else:
             if not isinstance(temperature, torch.Tensor):
@@ -1390,6 +1415,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 pad_token_id=self.model_config.tokenizer.pad_token_id,
                 data_format=data_format,
                 mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
+                response_only_lm_head=self.engine_config.response_only_lm_head,
                 local_cp_size=local_cp_size,
                 router_padding_mask=router_padding_mask,
                 mtp_loss_normalization_factor=mtp_loss_normalization_factor,

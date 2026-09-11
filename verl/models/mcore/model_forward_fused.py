@@ -17,7 +17,6 @@
 import inspect
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Optional
 
 import megatron.core as mcore
 import torch
@@ -26,7 +25,10 @@ from megatron.core.config_logger import has_config_logger_enabled, log_config_to
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.packed_seq_params import PackedSeqParams
-from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
+from megatron.core.tensor_parallel.mappings import (
+    copy_to_tensor_model_parallel_region,
+    gather_from_sequence_parallel_region,
+)
 from megatron.core.utils import deprecate_inference_params
 from packaging import version
 from torch import Tensor
@@ -36,6 +38,8 @@ from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 from verl.utils.megatron_utils import unwrap_model
 from verl.utils.model import CausalLMOutputForPPO
 
+from .model_forward import _build_full_loss_mask_nested
+from .response_only_lm_head import restore_response_only_outputs, select_response_only_hidden_states
 from .util import postprocess_packed_seqs_for_dict_output, postprocess_thd_engine
 
 _FUSED_FORWARD_MODE_ATTR = "_verl_fused_forward_mode"
@@ -78,6 +82,35 @@ class FusedOutputProcessorContext:
     """Context passed through Megatron's native output-processor hook."""
 
     temperature: float
+    projection_mask: Tensor | None = None
+
+
+def _compute_fused_lm_head(hidden_states, weight, labels, temperature, sequence_parallel, projection_mask=None):
+    """Run the fused head on all rows or only the loss-bearing predictor rows."""
+    tp_group = parallel_state.get_tensor_model_parallel_group()
+    if sequence_parallel:
+        hidden_states = gather_from_sequence_parallel_region(hidden_states)
+    elif tp_group is not None:
+        # The fused kernel returns a vocabulary-local input gradient. Without
+        # SP's backward reduce-scatter, sum that gradient over TP explicitly.
+        hidden_states = copy_to_tensor_model_parallel_region(hidden_states, group=tp_group)
+
+    if projection_mask is not None:
+        hidden_states = select_response_only_hidden_states(hidden_states, projection_mask)
+        labels = labels[projection_mask]
+        num_selected = labels.numel()
+        if not num_selected:
+            labels = labels.new_zeros(1)
+
+    log_probs, entropy = linear_cross_entropy(hidden_states, weight, labels, temperature, "none", tp_group)
+    if projection_mask is not None:
+        outputs = restore_response_only_outputs(
+            {"log_probs": log_probs.reshape(1, -1), "entropy": entropy.reshape(1, -1)},
+            projection_mask,
+            num_selected,
+        )
+        log_probs, entropy = outputs["log_probs"], outputs["entropy"]
+    return log_probs, entropy
 
 
 def fused_output_processor(
@@ -99,21 +132,18 @@ def fused_output_processor(
         attentions=None,
     )
 
-    if config.sequence_parallel:
-        hidden_states = gather_from_sequence_parallel_region(hidden_states)
-
     # Megatron passes the shared embedding as output_weight for tied models. For
     # untied models the weight lives on output_layer.
     weight = output_weight if output_weight is not None else output_layer.weight
 
     temperature = context.temperature
-    logprobs, entropy = linear_cross_entropy(
+    logprobs, entropy = _compute_fused_lm_head(
         hidden_states,
         weight,
         labels,
         temperature,
-        "none",
-        parallel_state.get_tensor_model_parallel_group(),
+        config.sequence_parallel,
+        context.projection_mask,
     )
 
     if has_config_logger_enabled(config):
@@ -269,6 +299,8 @@ def fused_forward_model_engine(vision_model: bool = False):
         local_cp_size: int | None = None,
         router_padding_mask: Tensor | None = None,
         pad_to_length_bucket: int | None = None,
+        loss_mask: Tensor | None = None,
+        response_attention_mask: Tensor | None = None,
     ):
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
@@ -318,6 +350,21 @@ def fused_forward_model_engine(vision_model: bool = False):
             local_cp_size=local_cp_size,
         )
         labels_rmpad = labels_rmpad.contiguous()
+        projection_mask = None
+        if loss_mask is not None and post_process:
+            full_loss_mask = _build_full_loss_mask_nested(
+                loss_mask, input_ids.offsets().diff().tolist(), response_attention_mask
+            )
+            projection_mask = preprocess_thd_engine(
+                full_loss_mask,
+                pre_process=True,
+                need_roll=True,
+                use_fp8_padding=use_fp8_padding,
+                min_local_rows=min_local_rows,
+                pad_to_length_bucket=pad_to_length_bucket,
+                cp_layout=cp_layout,
+                local_cp_size=local_cp_size,
+            )[0].to(torch.bool)
         forward_kwargs = dict(
             input_ids=input_ids_rmpad,
             attention_mask=attention_mask,
@@ -330,10 +377,12 @@ def fused_forward_model_engine(vision_model: bool = False):
             output_orig: CausalLMOutputForPPO = model(
                 **forward_kwargs,
                 output_processor=fused_output_processor,
-                output_processor_context=FusedOutputProcessorContext(temperature=temperature),
+                output_processor_context=FusedOutputProcessorContext(temperature, projection_mask),
             )
         else:
-            output_orig: CausalLMOutputForPPO = model(temperature=temperature, **forward_kwargs)
+            output_orig: CausalLMOutputForPPO = model(
+                temperature=temperature, projection_mask=projection_mask, **forward_kwargs
+            )
 
         if not post_process:
             return output_orig
@@ -383,12 +432,13 @@ def _fused_GPTModel_forward(
     inference_context: BaseInferenceContext = None,
     packed_seq_params: PackedSeqParams = None,
     extra_block_kwargs: dict = None,
-    runtime_gather_output: Optional[bool] = None,
+    runtime_gather_output: bool | None = None,
     *,
-    inference_params: Optional[BaseInferenceContext] = None,
-    loss_mask: Optional[Tensor] = None,
+    inference_params: BaseInferenceContext | None = None,
+    loss_mask: Tensor | None = None,
     temperature: float = 1.0,
     padding_mask: Tensor | None = None,
+    projection_mask: Tensor | None = None,
     **kwargs,
 ) -> CausalLMOutputForPPO:
     """
@@ -450,9 +500,6 @@ def _fused_GPTModel_forward(
         attentions=None,
     )
 
-    if model.config.sequence_parallel:
-        hidden_states = gather_from_sequence_parallel_region(hidden_states)
-
     # Get the output weight - use embedding weight if output_layer is None or weight is shared
     if hasattr(model, "output_layer") and model.output_layer is not None and model.output_layer.weight is not None:
         output_weight = model.output_layer.weight
@@ -460,13 +507,13 @@ def _fused_GPTModel_forward(
         # When embeddings are tied, use the embedding weight
         output_weight = model.embedding.word_embeddings.weight
 
-    logprobs, entropy = linear_cross_entropy(
+    logprobs, entropy = _compute_fused_lm_head(
         hidden_states,
         output_weight,
         labels,
         temperature,
-        "none",
-        parallel_state.get_tensor_model_parallel_group(),
+        model.config.sequence_parallel,
+        projection_mask,
     )
 
     if has_config_logger_enabled(model.config):
