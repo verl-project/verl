@@ -21,6 +21,7 @@ from tensordict import TensorDict
 from verl.base_config import BaseConfig
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.metric import AggregationType, Metric
+from verl.utils.trajectory import LOSS_WEIGHT_KEY, apply_loss_weight_to_advantages
 from verl.workers.config import ActorConfig, DistillationConfig, DistillationLossConfig
 from verl.workers.utils.losses import ppo_loss
 from verl.workers.utils.padding import no_padding_2_padding
@@ -277,10 +278,13 @@ def distillation_loss(
         if response_mask.is_nested:
             response_mask = response_mask.to_padded_tensor(False)
         rollout_is_weights = data.get("rollout_is_weights", None)
+        distillation_advantages = apply_loss_weight_to_advantages(
+            -distillation_losses.detach(), data.get(LOSS_WEIGHT_KEY, None)
+        )
         distillation_loss, pg_metrics = policy_loss_fn(
             old_log_prob=old_log_prob,
             log_prob=log_prob,
-            advantages=-distillation_losses.detach(),
+            advantages=distillation_advantages,
             response_mask=response_mask,
             loss_agg_mode=loss_agg_mode,
             config=loss_config,

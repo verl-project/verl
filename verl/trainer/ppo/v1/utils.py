@@ -47,11 +47,27 @@ class MetricsAggregator:
                 "validation/filter_groups/discarded_surplus_samples",
                 "training/rollout_failure/evicted_samples",
                 "validation/rollout_failure/evicted_samples",
+                # Per-iteration counts: the sum over one parameter_sync_step cycle is the
+                # quantity of interest (total rows / total optimizer updates for the step).
+                "training/trajectory/stored_rows",
+                "training/trajectory/expanded_rows",
+                "training/trajectory/logical_sessions",
+                "training/actor/optimizer_updates",
             ],
             "last": [
                 "training/global_step",
                 "training/rollout_probs_diff_valid",
             ],
+            # These must be listed explicitly: _get_aggregation_type() falls back to
+            # substring matching, and "mini_batches" contains "min", which would
+            # otherwise reduce a per-iteration average with min().
+            "weighted_avg": [
+                "training/actor/mini_batches_per_epoch",
+                "training/trajectory/segments_per_session/mean",
+                "training/trajectory/loss_weight/mean",
+            ],
+            "min": ["training/trajectory/loss_weight/min"],
+            "max": ["training/trajectory/loss_weight/max"],
         }
 
     def add_step_metrics(self, metrics: dict[str, Any], sample_count: int = 0):

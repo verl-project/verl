@@ -1,13 +1,13 @@
 Agent Loop
 ==========
 
-Last updated: 07/17/2025.
+Last updated: 08/27/2026.
 
 .. versionadded:: 0.4.2
    [status: alpha]
 
 .. warning::
-   Agent Loop is ready for use, but the API may change in future releaes.
+   Agent Loop is ready for use, but the API may change in future releases.
 
 Agent Loop is designed as general interface for multi-turn rollout and agentic reinforcement learning.
 
@@ -44,7 +44,9 @@ could do whatever user wants, such as
 
    class AgentLoopBase(ABC):
        @abstractmethod
-       async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
+       async def run(
+           self, sampling_params: dict[str, Any], **kwargs
+       ) -> AgentLoopOutput | list[AgentLoopOutput]:
            """Run agent loop to interact with LLM server and environment.
 
            Args:
@@ -52,12 +54,19 @@ could do whatever user wants, such as
                **kwargs: dataset fields from `verl.utils.dataset.RLHFDataset`.
 
            Returns:
-               AgentLoopOutput: Agent loop output.
+               AgentLoopOutput | list[AgentLoopOutput]: One output for a regular
+                   trajectory, or an ordered list of outputs for multiple training
+                   segments belonging to the same logical trajectory.
            """
            raise NotImplementedError
 
-After running user defined loop, run method should return ``AgentLoopOutput``, including prompt token ids,
-response token ids, and response mask.
+After running the user-defined loop, ``run`` should return an ``AgentLoopOutput``
+including prompt token ids, response token ids, and response mask. The V1
+TransferQueue adapter also accepts an ordered list of ``AgentLoopOutput`` values.
+It writes each value as a separate training row, computes the reward from the
+last value, and broadcasts the final output's GRPO advantage to all values in
+the same logical trajectory. The legacy batch adapter intentionally keeps the
+single-output contract.
 
 .. code:: python
 
@@ -70,10 +79,55 @@ response token ids, and response mask.
        """Response token ids including LLM generated token, tool response token."""
        response_mask: list[int]
        """Response mask, 1 for LLM generated token, 0 for tool response token."""
+       loss_weight: Optional[float] = None
+       """Optional positive multiplier for this output's policy-gradient loss."""
+
+``loss_weight`` is optional and defaults to neutral ``1.0``. It is an explicit
+positive policy-gradient multiplier that the rollout adapters pass through
+unchanged; padding rows with no valid response tokens are zeroed. The weight is
+applied only to the policy-gradient term; it does not modify critic returns,
+entropy regularization, or KL regularization.
+
+.. warning::
+   The weight needed to make a split trajectory equivalent to an unsplit one
+   depends on ``actor.loss_agg_mode``, because each mode normalizes by a
+   different quantity. Splitting preserves the token count but multiplies the
+   row count by ``N``:
+
+   .. list-table::
+      :header-rows: 1
+
+      * - ``loss_agg_mode``
+        - Normalizes by
+        - Weight for an N-segment trajectory
+      * - ``token-mean`` (default), ``token-sum``, ``seq-mean-token-sum``
+        - tokens
+        - ``1.0`` (splitting is already neutral)
+      * - ``seq-mean-token-mean``
+        - rows
+        - ``1.0 / N``
+
+   verl therefore defaults every segment to ``1.0`` rather than guessing
+   ``1 / N``: under the default ``token-mean`` mode a ``1 / N`` default would
+   silently shrink the trajectory's gradient contribution by a factor of ``N``.
+   When a multi-output loop stores segments without an explicit weight, the V1
+   adapter logs a warning once per segment count so the choice stays visible.
+   If you train with ``seq-mean-token-mean``, set ``loss_weight = 1 / N``
+   explicitly on each segment.
+
+Each list element is stored as an independent training row. Consequently,
+``ppo_mini_batch_size`` continues to count stored rows, not logical
+trajectories; expanding a trajectory into more segments increases the number
+of rows and optimizer mini-batches. Training logs expose the applied weight
+range and the segment-to-session ratio under
+``training/trajectory/`` so experiments can keep this change explicit when
+comparing update counts or throughput.
 
 .. image:: https://github.com/eric-haibin-lin/verl-community/blob/main/docs/agent_loop_output.svg?raw=true
 
-.. note:: AgentLoopOutput only output one trajectory for a given prompt, multiple trajectories output is still under discussion.
+.. note:: Multiple outputs from one ``run`` call are supported by the V1
+   TransferQueue adapter. They are intended for ordered segments of one logical
+   trajectory, rather than an alternative spelling of ``rollout.n``.
 
 Architecture Design
 -------------------

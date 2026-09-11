@@ -64,6 +64,7 @@ from verl.utils.tokenizer import (
     get_processor_token_id,
 )
 from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
+from verl.utils.trajectory import resolve_agent_loop_loss_weight, validate_loss_weights
 from verl.workers.config import (
     HFModelConfig,
     RolloutConfig,
@@ -102,6 +103,8 @@ class AgentLoopOutput(BaseModel):
     """Multi-modal data for multi-modal tools."""
     reward_score: Optional[float] = None
     """Reward score for the trajectory."""
+    loss_weight: Optional[float] = None
+    """Optional positive multiplier for this output's policy-gradient loss."""
     num_turns: int = 0
     """Number of chat turns, including user, assistant, tool."""
     metrics: AgentLoopMetrics
@@ -416,7 +419,7 @@ class AgentLoopBase(ABC):
         return prompt_ids
 
     @abstractmethod
-    async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
+    async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput | list[AgentLoopOutput]:
         """Run agent loop to interact with LLM server and environment.
 
         Args:
@@ -424,7 +427,9 @@ class AgentLoopBase(ABC):
             **kwargs: dataset fields from `verl.utils.dataset.RLHFDataset`.
 
         Returns:
-            AgentLoopOutput: Agent loop output.
+            AgentLoopOutput | list[AgentLoopOutput]: One output for a regular
+                trajectory, or an ordered list of outputs for multiple training
+                segments belonging to the same logical trajectory.
         """
         raise NotImplementedError
 
@@ -661,7 +666,7 @@ class AgentLoopWorker:
                 data_config=DictConfigWrap(self.config.data),
                 tools=ToolListWrap(self.tools),
             )
-            output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
+            output: AgentLoopOutput | list[AgentLoopOutput] = await agent_loop.run(sampling_params, **kwargs)
             return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
 
     def _pad_token_ids(
@@ -695,9 +700,19 @@ class AgentLoopWorker:
                 padded["attention_mask"] = padded["attention_mask"].unsqueeze(0)
         return padded
 
-    async def _agent_loop_postprocess(self, output, validate, **kwargs) -> _InternalAgentLoopOutput:
+    async def _agent_loop_postprocess(
+        self, output: AgentLoopOutput | list[AgentLoopOutput], validate, **kwargs
+    ) -> _InternalAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""
+        if isinstance(output, list):
+            raise NotImplementedError(
+                "Multiple AgentLoopOutput values require the V1 TransferQueue agent-loop manager."
+            )
+        if not isinstance(output, AgentLoopOutput):
+            raise TypeError(f"Agent loop must return AgentLoopOutput or list[AgentLoopOutput], got {type(output)}")
+
         output.extra_fields["raw_prompt"] = kwargs["raw_prompt"]
+        loss_weight = resolve_agent_loop_loss_weight(output)
 
         # Some AgentLoop may have already computed the reward score, e.g SWE-agent.
 
@@ -830,6 +845,7 @@ class AgentLoopWorker:
             teacher_logprobs=teacher_logprobs,
             teacher_ids=teacher_ids,
             reward_score=output.reward_score,
+            loss_weight=loss_weight,
             num_turns=output.num_turns,
             metrics=output.metrics,
             extra_fields=output.extra_fields,
@@ -1037,6 +1053,9 @@ class AgentLoopWorker:
         attention_mask = torch.cat([input.attention_mask for input in inputs], dim=0)
         input_ids = torch.cat([input.input_ids for input in inputs], dim=0)
         position_ids = torch.cat([input.position_ids for input in inputs], dim=0)
+        loss_weights = torch.tensor(
+            [resolve_agent_loop_loss_weight(input_item) for input_item in inputs], dtype=torch.float32
+        )
         optional_outputs = {}
         if inputs[0].response_logprobs is not None:
             optional_outputs["rollout_log_probs"] = torch.cat([input.response_logprobs for input in inputs], dim=0)
@@ -1054,6 +1073,7 @@ class AgentLoopWorker:
                 "attention_mask": attention_mask,  # [bsz, prompt_length + response_length]
                 # position_ids: [bsz, 3, prompt_length + response_length] or [bsz, prompt_length + response_length]
                 "position_ids": position_ids,
+                "loss_weight": validate_loss_weights(loss_weights, valid_mask=response_mask.any(dim=1)),
                 **optional_outputs,
             },
             batch_size=len(inputs),
