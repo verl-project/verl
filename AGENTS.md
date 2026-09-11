@@ -85,3 +85,15 @@ change and explain why**.
 ## Acknowledgements
 
 Adapted from the [vLLM project](https://github.com/vllm-project/vllm)'s [`AGENTS.md`](https://github.com/vllm-project/vllm/blob/main/AGENTS.md).
+
+## Fork Notes (MindLab-Research)
+
+- `main` is the working trunk and syncs from `volcengine/verl` `main` by merge.
+- The `verl-mint/*` and `mint/*` refs are separate lines kept for specific
+  deployments. Work moves between lines by porting (cherry-pick or a 3-way apply
+  of a diff), never by merging the lines into each other.
+- Compatibility notes for newer megatron-core: the NVIDIA `dev` line drops
+  `get_default_save_sharded_strategy` (construct the save strategy directly), and
+  newer cores expose the FSDP wrappers as factory functions, so
+  `ALL_MODULE_WRAPPER_CLASSNAMES` must keep only real classes or `unwrap_model`
+  raises `TypeError` from `isinstance`.
