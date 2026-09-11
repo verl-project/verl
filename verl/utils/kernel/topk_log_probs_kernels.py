@@ -222,7 +222,7 @@ if HAVE_TRITON:
         tl.store(local_max_ptr + offs_m, local_max, mask=valid_rows)
         tl.store(local_sum_ptr + offs_m * stride_local_sum_m, local_sum, mask=valid_rows)
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["split_idx"])
     def _topk_dlogits_split_kernel(
         hidden_ptr,
         weight_ptr,
@@ -245,22 +245,24 @@ if HAVE_TRITON:
         stride_dlogits_m: tl.int64,
         stride_dlogits_n: tl.int64,
         rcp_temperature: tl.float32,
-        SPLIT_IDX: tl.constexpr,
+        split_idx: tl.int32,
         TOPK: tl.constexpr,
         VOCAB_PER_SPLIT: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_N: tl.constexpr,
         BLOCK_K: tl.constexpr,
     ):
+        # Keep the shard index runtime-only, including Triton value/alignment
+        # specialization, so equal-shaped vocabulary splits reuse one kernel.
         pid = tl.program_id(0)
         num_pid_m = tl.cdiv(num_tokens, BLOCK_M)
         pid_m = pid % num_pid_m
         pid_n = pid // num_pid_m
         offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
         result_offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-        offs_n = SPLIT_IDX * VOCAB_PER_SPLIT + result_offs_n
+        offs_n = split_idx * VOCAB_PER_SPLIT + result_offs_n
         offs_k = tl.arange(0, BLOCK_K)
-        split_end = tl.minimum((SPLIT_IDX + 1) * VOCAB_PER_SPLIT, vocab_size)
+        split_end = tl.minimum((split_idx + 1) * VOCAB_PER_SPLIT, vocab_size)
 
         hidden_ptrs = hidden_ptr + offs_m[:, None] * stride_hidden_m + offs_k[None, :] * stride_hidden_k
         weight_ptrs = weight_ptr + offs_n[:, None] * stride_weight_n + offs_k[None, :] * stride_weight_k
@@ -439,7 +441,7 @@ def topk_log_probs_backward(
             dlogits.stride(0),
             dlogits.stride(1),
             1.0 / temperature,
-            SPLIT_IDX=split_idx,
+            split_idx=split_idx,
             TOPK=topk,
             VOCAB_PER_SPLIT=vocab_per_split,
             BLOCK_M=32,
