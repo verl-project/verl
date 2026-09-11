@@ -992,15 +992,20 @@ class vLLMHttpServer:
             logger.exception("Error aborting requests")
             raise
 
-    async def resume_generation(self):
-        """Resume generation after abort_all_requests (pause_generation)."""
-        # Before the node_rank guard: every server in the replica closed the gate, so every
-        # server must reopen it.
+    async def resume_engine_generation(self):
+        """Resume the DP engines while request admission remains closed."""
+        if self.node_rank == 0:
+            await self.engine.resume_generation()
+
+    async def open_submission_gate(self):
+        """Admit requests after the replica has finished resuming its engines."""
         self._submission_paused = False
         self._resume_event.set()
-        if self.node_rank != 0:
-            return
-        await self.engine.resume_generation()
+
+    async def resume_generation(self):
+        """Resume generation after abort_all_requests (pause_generation)."""
+        await self.resume_engine_generation()
+        await self.open_submission_gate()
 
     async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort a specific generation request.
@@ -1400,8 +1405,14 @@ class vLLMReplica(RolloutReplica):
         }
 
     async def resume_generation(self):
-        """Resume generation on all servers after abort_all_requests."""
-        await asyncio.gather(*[server.resume_generation.remote() for server in self.servers])
+        """Resume the DP engines before admitting requests on any server."""
+        # KV-cache wake-up may already have resumed scheduling. Keep admission
+        # closed during this resume too: new requests could otherwise start a
+        # DP wave while only some ranks have entered the resume collective.
+        # Separate phases prevent non-head servers from opening their gates
+        # before the head's engine resume completes. On failure, gates stay closed.
+        await self.servers[0].resume_engine_generation.remote()
+        await asyncio.gather(*[server.open_submission_gate.remote() for server in self.servers])
 
     async def abort_request(self, request_id: str) -> dict[str, Any]:
         """Abort a specific request. Tries all servers since we don't know which one has it.
