@@ -760,8 +760,23 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 # snapshot prime), so it drives the training engine itself.
                 metrics = await self.checkpoint_engine.send_weights(self.actor.engine, global_steps=global_steps)
                 return metrics or {}
-            per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
+            # LoRA (merge=False) needs the same two-phase protocol as the colocated
+            # path below: push the base once, then push adapters. Calling
+            # get_per_tensor_param() with defaults pins base_sync_done=False, which
+            # collects the frozen base and skips every `lora_` tensor, so the adapter
+            # never reaches the rollout engine and the rollout policy silently stays
+            # at the initial checkpoint.
+            if not hasattr(self, "ckpt_base_sync_done"):
+                # Mirror the colocated init: a "dummy" load_format is the only case
+                # where the rollout engine lacks real base weights.
+                self.ckpt_base_sync_done = "dummy" not in self.config.rollout.load_format
+            per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
+                layered_summon=self.config.rollout.get("layered_summon", False),
+                base_sync_done=self.ckpt_base_sync_done,
+            )
             metrics = await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
+            if peft_config is not None:
+                self.ckpt_base_sync_done = True
             return metrics or {}
 
         set_expandable_segments(False)
