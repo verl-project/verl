@@ -162,6 +162,13 @@ class PPOTrainer(ABC):
         ``ReplayBuffer`` subclass; otherwise the built-in implementation is used.
         """
         sampler_config = self.config.trainer.v1.sampler
+        dispatch_mode = str(sampler_config.get("dispatch_mode", "batch"))
+        if dispatch_mode == "sample_level" and self.trainer_mode != "colocate_async":
+            raise ValueError(
+                "trainer.v1.sampler.dispatch_mode=sample_level requires "
+                "trainer.v1.trainer_mode=colocate_async, "
+                f"got trainer_mode={self.trainer_mode}"
+            )
         custom_sampler = sampler_config.get("custom_sampler", None)
         has_custom_sampler = bool(
             custom_sampler is not None and custom_sampler.get("path") and custom_sampler.get("name")
@@ -170,7 +177,7 @@ class PPOTrainer(ABC):
             sampler_cls = load_extern_type(custom_sampler.path, custom_sampler.name)
         elif self.trainer_mode == "sync":
             sampler_cls = ReplayBuffer
-        elif str(sampler_config.get("dispatch_mode", "batch")) == "sample_level":
+        elif dispatch_mode == "sample_level":
             sampler_cls = SampleLevelReplayBuffer
         else:
             sampler_cls = ReplayBufferAsync

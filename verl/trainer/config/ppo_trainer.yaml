@@ -292,9 +292,10 @@ trainer:
       # Whether sync trainers replace failed groups that have no trajectories
       sync_refill_failed_groups: False
 
-      # How async trainers dispatch new prompts.
+      # How colocate_async dispatches new prompts.
       # batch: dump a full training batch on warmup / prepare_step (default)
-      # sample_level: refill one prompt when rollout.n samples finish from any groups
+      # sample_level: refill one prompt when rollout.n samples finish from any groups.
+      #   only valid with trainer.v1.trainer_mode=colocate_async
       dispatch_mode: batch
 
       # Custom sampler config

@@ -213,6 +213,46 @@ def test_build_replay_buffer_wires_sample_level_from_rollout_n():
     assert getattr(default_rb, "trainer_owns_dispatch", True) is True
 
 
+@pytest.mark.parametrize("trainer_mode", ["sync", "separate_async"])
+def test_sample_level_rejected_outside_colocate_async(trainer_mode):
+    from omegaconf import OmegaConf
+
+    from verl.trainer.ppo.v1.trainer_base import PPOTrainer
+
+    class _T(PPOTrainer):
+        def on_step_end(self):
+            pass
+
+        def on_sample_end(self):
+            pass
+
+    trainer = _T.__new__(_T)
+    trainer.trainer_mode = trainer_mode
+    trainer.config = OmegaConf.create(
+        {
+            "algorithm": {"filter_groups": {"enable": False}},
+            "data": {"train_batch_size": 8},
+            "actor_rollout_ref": {"rollout": {"n": 8}},
+            "reward": {"reward_model": {"enable": False, "enable_resource_pool": False}},
+            "trainer": {
+                "v1": {
+                    trainer_mode: {},
+                    "sampler": {
+                        "custom_sampler": None,
+                        "max_off_policy_threshold": 8,
+                        "max_off_policy_strategy": "drop",
+                        "sampler_kwargs": {},
+                        "dispatch_mode": "sample_level",
+                    },
+                }
+            },
+        }
+    )
+    trainer._add_prompts_to_generate = lambda n: n
+    with pytest.raises(ValueError, match="colocate_async"):
+        trainer._build_replay_buffer()
+
+
 def test_trainer_skips_batch_dump_when_sampler_owns_dispatch():
     from verl.trainer.ppo.v1.trainer_base import PPOTrainer
 
