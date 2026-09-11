@@ -73,6 +73,11 @@ jobs:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       TRANSFORMERS_VERBOSITY: 'error'
+      # Test steps spawn repeated multi-process HCCL groups on the same NPUs;
+      # without an explicit socket port range, a leaked holder of the default
+      # port (16666) fails every subsequent hcclCommInitRootInfoConfig (EI0020).
+      HCCL_HOST_SOCKET_PORT_RANGE: "60000-60050"
+      HCCL_NPU_SOCKET_PORT_RANGE: "61000-61050"
     steps:
       - name: Check npu and CANN info
         run: |
@@ -123,6 +128,8 @@ jobs:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       TRANSFORMERS_VERBOSITY: 'error'
+      HCCL_HOST_SOCKET_PORT_RANGE: "60000-60050"
+      HCCL_NPU_SOCKET_PORT_RANGE: "61000-61050"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
