@@ -72,6 +72,15 @@ def kl_divergence(log_q: torch.Tensor, log_p: torch.Tensor) -> torch.Tensor:
     return kld.sum(dim=-1)
 
 
+def reverse_kl_divergence(log_q: torch.Tensor, log_p: torch.Tensor) -> torch.Tensor:
+    """Compute KL(q || p) from log probabilities on a truncated support."""
+    log_p = log_p.float()
+    log_q = log_q.float()
+    q = log_q.exp()
+    kld = q * (log_q - log_p)
+    return kld.sum(dim=-1)
+
+
 def compute_forward_kl_topk(
     student_logits: torch.Tensor,
     teacher_topk_log_probs: torch.Tensor,
@@ -146,4 +155,61 @@ def compute_forward_kl_topk(
         "teacher_mass": teacher_mass,
         "overlap_count": overlap_count,
         "overlap_token_advantage": overlap_token_advantage,
+    }
+
+
+def compute_reverse_kl_topk(
+    student_logits: torch.Tensor,
+    teacher_topk_log_probs: torch.Tensor,
+    teacher_topk_ids: torch.Tensor,
+    config: DistillationConfig,
+    data_format: str,
+) -> dict[str, torch.Tensor]:
+    """Compute reverse KL on the rollout student's fixed top-k support."""
+    assert teacher_topk_log_probs.is_nested and teacher_topk_ids.is_nested
+    teacher_topk_log_probs = teacher_topk_log_probs.values().unsqueeze(0)  # (1, total_nnz, topk)
+    teacher_topk_ids = teacher_topk_ids.values().unsqueeze(0)  # (1, total_nnz, topk)
+
+    if get_ulysses_sequence_parallel_world_size() > 1:
+        teacher_topk_log_probs = slice_input_tensor(teacher_topk_log_probs, dim=1)
+        teacher_topk_ids = slice_input_tensor(teacher_topk_ids, dim=1)
+    assert teacher_topk_log_probs.shape[:2] == teacher_topk_ids.shape[:2] == student_logits.shape[:2]
+
+    loss_config: DistillationLossConfig = config.distillation_loss
+    student_topk = loss_config.topk
+    if student_topk is None:
+        raise ValueError("reverse_kl_topk requires distillation_loss.topk.")
+    if teacher_topk_ids.shape[-1] != student_topk:
+        raise ValueError(
+            f"reverse_kl_topk expected {student_topk} support IDs per token, but got {teacher_topk_ids.shape[-1]}."
+        )
+
+    support_ids = teacher_topk_ids.long()
+    if getattr(loss_config, "use_chunked_topk", False):
+        student_topk_log_probs = _chunked_topk_log_probs(
+            student_logits,
+            support_ids,
+            chunk_size=getattr(loss_config, "chunked_topk_chunk_size", 4096),
+        )
+    else:
+        student_log_probs = F.log_softmax(student_logits, dim=-1)
+        student_topk_log_probs = torch.gather(student_log_probs, dim=-1, index=support_ids)
+    teacher_log_probs_on_student_topk = teacher_topk_log_probs
+
+    student_mass = student_topk_log_probs.exp().sum(dim=-1)
+    teacher_mass = teacher_log_probs_on_student_topk.exp().sum(dim=-1)
+
+    if loss_config.log_prob_min_clamp is not None:
+        student_topk_log_probs = student_topk_log_probs.clamp_min(loss_config.log_prob_min_clamp)
+        teacher_log_probs_on_student_topk = teacher_log_probs_on_student_topk.clamp_min(loss_config.log_prob_min_clamp)
+
+    distillation_losses = reverse_kl_divergence(
+        log_q=student_topk_log_probs,
+        log_p=teacher_log_probs_on_student_topk,
+    )
+
+    return {
+        "distillation_losses": distillation_losses,
+        "student_mass": student_mass,
+        "teacher_mass": teacher_mass,
     }
