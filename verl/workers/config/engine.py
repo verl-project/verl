@@ -85,6 +85,9 @@ class EngineConfig(BaseConfig):
         "use_remove_padding",
         "forward_only",
         "param_offload",
+        # prefix-tree flags: set by apply_engine_config (SFT) or TrainingWorker.__init__ (PPO)
+        "use_prefix_tree",
+        "prefix_tree_attention",
     }
     # whether to offload param
     param_offload: bool = False
@@ -108,6 +111,9 @@ class EngineConfig(BaseConfig):
     use_fused_kernels: bool = False
     # TODO (this may conflict with the one in model config)
     use_remove_padding: bool = True
+    # prefix-tree shared-prefix dedup flags
+    use_prefix_tree: bool = False
+    prefix_tree_attention: str = "magi"
 
     seed: int = 42
 

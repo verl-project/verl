@@ -265,6 +265,7 @@ def fused_forward_model_engine(vision_model: bool = False):
         temperature: float,
         calculate_entropy: bool,
         pad_token_id: int,
+        logits_processor_args: Optional[dict] = None,
         cp_layout: str = "zigzag",
         local_cp_size: int | None = None,
         router_padding_mask: Tensor | None = None,
@@ -272,6 +273,25 @@ def fused_forward_model_engine(vision_model: bool = False):
     ):
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
+
+        _pt_args = logits_processor_args or {}
+        use_prefix_tree = _pt_args.get("use_prefix_tree", False)
+
+        if use_prefix_tree:
+            from verl.utils.prefix_tree.forward import run_fused_prefix_tree
+
+            output = run_fused_prefix_tree(
+                model,
+                input_ids,
+                _pt_args,
+                labels,
+                temperature,
+                calculate_entropy,
+                vision_model=vision_model,
+                has_vision_data="pixel_values" in multi_modal_inputs,
+            )
+            if output is not None:
+                return output
 
         fp8 = unwrap_model(model).config.fp8
         use_fp8_padding = fp8 in ["e4m3", "hybrid"]

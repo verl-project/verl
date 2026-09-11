@@ -299,18 +299,39 @@ def gptmodel_forward_model_engine(
         model_kwargs["video_grid_thw"] = multi_modal_inputs["video_grid_thw"].to(input_ids.device)
 
     batch_size = input_ids.shape[0]
+
     if data_format == "thd":
-        input_ids_rmpad, packed_seq_params, position_ids_rmpad = preprocess_thd_engine(
-            input_ids,
-            pre_process=pre_process or (post_process and mtp_enable_train),
-            use_fp8_padding=use_fp8_padding,
-            local_cp_size=local_cp_size,
-            pad_to_length_bucket=pad_to_length_bucket,
-            cp_layout=cp_layout,
-        )
-        if mtp_loss_normalization_factor is not None:
-            packed_seq_params._verl_mtp_loss_normalization_factor = mtp_loss_normalization_factor
-        input_ids_rmpad = input_ids_rmpad.contiguous()
+        use_prefix_tree = (logits_processor_args or {}).get("use_prefix_tree", False)
+
+        tree_ctx = None
+        if use_prefix_tree:
+            from verl.utils.prefix_tree.forward import prepare_prefix_tree, tree_post_processing
+
+            tree_ctx = prepare_prefix_tree(
+                model,
+                input_ids,
+                logits_processor_args,
+                model_kwargs,
+                vision_model=vision_model,
+                mtp_enable_train=mtp_enable_train,
+            )
+
+        if tree_ctx is None:
+            input_ids_rmpad, packed_seq_params, position_ids_rmpad = preprocess_thd_engine(
+                input_ids,
+                pre_process=pre_process or (post_process and mtp_enable_train),
+                use_fp8_padding=use_fp8_padding,
+                local_cp_size=local_cp_size,
+                pad_to_length_bucket=pad_to_length_bucket,
+                cp_layout=cp_layout,
+            )
+            if mtp_loss_normalization_factor is not None:
+                packed_seq_params._verl_mtp_loss_normalization_factor = mtp_loss_normalization_factor
+            input_ids_rmpad = input_ids_rmpad.contiguous()
+        else:
+            input_ids_rmpad = tree_ctx.input_ids
+            position_ids_rmpad = tree_ctx.position_ids
+            packed_seq_params = None
 
         args = {}
         if mtp_enable_train and post_process:
@@ -360,7 +381,9 @@ def gptmodel_forward_model_engine(
             **model_kwargs,
         )
 
-        if post_process and logits_processor is not None:
+        if tree_ctx is not None:
+            output = tree_post_processing(tree_ctx, output_orig, logits_processor, logits_processor_args, post_process)
+        elif post_process and logits_processor is not None:
             args = {
                 k: preprocess_thd_engine(
                     v,

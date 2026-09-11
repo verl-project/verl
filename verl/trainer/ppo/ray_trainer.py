@@ -65,6 +65,8 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.utils.import_utils import deprecated, load_class_from_fqn
 from verl.utils.metric import reduce_metrics
+from verl.utils.prefix_tree.dynamic import balance_prefix_tree_v0
+from verl.utils.prefix_tree.trainer import build_global_trie
 from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.skip.skip_manager import SkipManager
@@ -1218,6 +1220,19 @@ class RayPPOTrainer:
                 k_partitions=dp_size,
             )
 
+        elif self.config.actor_rollout_ref.model.get("use_prefix_tree", False):
+            if balance_prefix_tree_v0(
+                batch,
+                self.config.actor_rollout_ref.model,
+                dp_size,
+                attention_mask=attention_mask,
+                metrics=metrics,
+                logging_prefix=logging_prefix,
+                keep_minibatch=keep_minibatch,
+                minibatch_size=self.config.actor_rollout_ref.actor.get("ppo_mini_batch_size"),
+            ):
+                return
+
         elif keep_minibatch:
             # Decouple the DP balancing and mini-batching.
             minibatch_size = self.config.actor_rollout_ref.actor.get("ppo_mini_batch_size")
@@ -1308,7 +1323,8 @@ class RayPPOTrainer:
         routed_experts = tu.get(output, "routed_experts")
         sum_pi_squared = tu.get(output, "sum_pi_squared") if calculate_sum_pi_squared else None
 
-        old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
+        output_metrics = tu.get(output, "metrics") or {}
+        old_log_prob_mfu = output_metrics["mfu"]
         # step 4. No padding to padding
         entropy = no_padding_2_padding(entropy, batch_td)
         log_probs = no_padding_2_padding(log_probs, batch_td)
@@ -1322,6 +1338,9 @@ class RayPPOTrainer:
             result["sum_pi_squared"] = sum_pi_squared.float()
         old_log_prob = tu.get_tensordict(result)
         old_log_prob = DataProto.from_tensordict(old_log_prob)
+        old_log_prob.meta_info["prefix_tree_metrics"] = {
+            f"actor/{k}": v for k, v in output_metrics.items() if k.startswith("prefix_tree/")
+        }
         return old_log_prob, old_log_prob_mfu
 
     def _update_actor(self, batch: DataProto) -> DataProto:
@@ -1540,6 +1559,13 @@ class RayPPOTrainer:
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
 
+                    if self.config.actor_rollout_ref.model.get("use_prefix_tree", False):
+                        trie, leaf_idx, _ = build_global_trie(
+                            batch.batch["input_ids"], batch.batch.get("attention_mask", None), metrics=metrics
+                        )
+                        if trie is not None:
+                            batch.meta_info["prefix_tree"] = trie
+                            batch.batch["leaf_idx"] = leaf_idx
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
                     # Balance the number of valid tokens across DP ranks.
@@ -1547,7 +1573,11 @@ class RayPPOTrainer:
                     # which won't affect the advantage calculation (since it's based on uid),
                     # but might affect the loss calculation (due to the change of mini-batching).
                     if self.config.trainer.balance_batch:
-                        self._balance_batch(batch, metrics=metrics)
+                        self._balance_batch(
+                            batch,
+                            metrics=metrics,
+                            keep_minibatch=getattr(self.config.trainer, "balance_keep_minibatch", False),
+                        )
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
@@ -1598,6 +1628,8 @@ class RayPPOTrainer:
                                 "perf/mfu/actor_infer": old_log_prob_mfu,
                             }
                             metrics.update(old_log_prob_metrics)
+                            if old_log_prob.meta_info.get("prefix_tree_metrics"):
+                                metrics.update(old_log_prob.meta_info.pop("prefix_tree_metrics"))
                             old_log_prob.batch.pop("entropys")
                             if "routed_experts" in batch.batch and "routed_experts" in old_log_prob.batch:
                                 raise ValueError(
@@ -1716,6 +1748,7 @@ class RayPPOTrainer:
                             self.checkpoint_manager.update_weights(self.global_steps)
 
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+
                         metrics.update(actor_output_metrics)
 
                     # Log rollout generations if enabled
