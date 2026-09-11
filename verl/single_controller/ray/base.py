@@ -81,9 +81,11 @@ def sort_placement_group_by_node_ip(pgs: list[PlacementGroup]) -> list[Placement
     pg_ip = {}
     for pg in pgs:
         specs = ray._private.state.state.placement_group_table(pg.id)
-        # all bunles should be on the same node
-        node_id = specs["bundles_to_node_id"][0]
-        pg_ip[pg.id] = node_ip[node_id]
+        # All bundles are on the same node, so any one identifies the group. Indices need not
+        # start at 0, and the mapping is empty while a group is pending -- both were KeyError.
+        bundles_to_node_id = specs.get("bundles_to_node_id") or {}
+        node_id = bundles_to_node_id.get(min(bundles_to_node_id)) if bundles_to_node_id else None
+        pg_ip[pg.id] = node_ip.get(node_id, "")
     return sorted(pgs, key=lambda pg: pg_ip[pg.id])
 
 
@@ -120,6 +122,10 @@ class RayResourcePool(ResourcePool):
         detached=False,
         accelerator_type: Optional[str] = None,
     ) -> None:
+        # Where a device is claimed exclusively, asking to colocate more than one WorkerGroup
+        # builds a placement group that can never be satisfied.
+        if not get_platform().supports_colocated_worker_groups():
+            max_colocate_count = 1
         super().__init__(process_on_nodes, max_colocate_count)
         self.use_gpu = use_gpu
         # print(f"in RayProcessDispatchConfiguration: name_prefix = {name_prefix}")
@@ -192,6 +198,11 @@ class ResourcePoolManager:
     max_colocate_count: int = 3
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
 
+    def __post_init__(self):
+        # Mirror the cap in RayResourcePool so the bundle CPU count matches what it creates.
+        if not get_platform().supports_colocated_worker_groups():
+            self.max_colocate_count = 1
+
     def create_resource_pool(self):
         """Create Ray resource pools for distributed training.
 
@@ -225,20 +236,19 @@ class ResourcePoolManager:
 
     def _check_resource_available(self):
         """Check if the resource pool can be satisfied in this ray cluster."""
+        # accelerator resource key differs per platform ("GPU", "NPU", ...)
+        resource_name = get_platform().ray_resource_name()
         node_available_resources = ray._private.state.available_resources_per_node()
-        node_available_gpus = {
-            node: node_info.get("GPU", 0) if "GPU" in node_info else node_info.get("NPU", 0)
-            for node, node_info in node_available_resources.items()
-        }
 
-        # check total required gpus can be satisfied
-        total_available_gpus = sum(node_available_gpus.values())
-        total_required_gpus = sum(
+        # check total required devices can be satisfied
+        total_available = sum(node_info.get(resource_name, 0) for node_info in node_available_resources.values())
+        total_required = sum(
             [n_gpus for process_on_nodes in self.resource_pool_spec.values() for n_gpus in process_on_nodes]
         )
-        if total_available_gpus < total_required_gpus:
+        if total_available < total_required:
             raise ValueError(
-                f"Total available GPUs {total_available_gpus} is less than total desired GPUs {total_required_gpus}"
+                f"Total available {resource_name} {total_available} is less than "
+                f"total desired {resource_name} {total_required}"
             )
 
 
@@ -638,6 +648,18 @@ class RayWorkerGroup(WorkerGroup):
             "MASTER_ADDR": self._master_addr,
             "MASTER_PORT": self._master_port,
         }
+        # Platforms needing topology or mesh information from the placement groups add it here.
+        env_vars.update(
+            get_platform().get_worker_env_vars(
+                resource_pool=resource_pool,
+                rank=rank,
+                world_size=world_size,
+                local_rank=local_rank,
+                local_world_size=local_world_size,
+                name_prefix=self.name_prefix,
+                device_name=self.device_name,
+            )
+        )
         if worker_env is not None:
             logging.debug(f"Appending ray class env, origin: {env_vars}, customized env: {worker_env}")
             conflict_env_vars = set(env_vars.keys()) & set(worker_env.keys())

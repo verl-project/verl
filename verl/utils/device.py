@@ -58,8 +58,33 @@ def is_torch_npu_available(check_device=True) -> bool:
         return False
 
 
+def is_torch_tpu_available(check_device=True) -> bool:
+    """Check if Google TPU is available for PyTorch operations.
+
+    ``torch.tpu`` only exists once ``torch_tpu`` has been imported, which the TPU platform
+    module does at import time.
+
+    Args:
+        check_device : only check torch_tpu package or strictly check if TPU device is available
+
+    Returns:
+        bool: True if TPU is available, False otherwise.
+    """
+    try:
+        if not hasattr(torch, "tpu"):
+            return False
+
+        if check_device:
+            return torch.tpu.is_available()
+        else:
+            return True
+    except ImportError:
+        return False
+
+
 is_cuda_available = torch.cuda.is_available()
 is_npu_available = is_torch_npu_available()
+is_tpu_available = is_torch_tpu_available()
 
 
 def get_resource_name() -> str:

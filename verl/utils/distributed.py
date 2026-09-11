@@ -23,13 +23,24 @@ import ray
 import torch.distributed
 from torch.distributed import TCPStore
 
-from verl.utils.device import get_device_name, get_nccl_backend, get_resource_name, get_torch_device, is_npu_available
+from verl.utils.device import (
+    get_device_name,
+    get_nccl_backend,
+    get_resource_name,
+    get_torch_device,
+    is_npu_available,
+    is_tpu_available,
+)
 from verl.utils.net_utils import is_ipv6
 
 
 def set_numa_affinity():
     if is_npu_available:
         # TODO (FightingZhen) libnuma.so is not available in e2e_ascend CI image, remove this code after image update.
+        return
+
+    if is_tpu_available:
+        # affinity is applied through NVML, which has no TPU equivalent
         return
 
     initialized = False

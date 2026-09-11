@@ -35,6 +35,7 @@ verl/plugin/platform/
 ├── platform_base.py       # ABC – all methods a backend must implement
 ├── platform_cuda.py       # NVIDIA CUDA implementation (built-in)
 ├── platform_npu.py        # Huawei Ascend NPU implementation (built-in)
+├── platform_tpu.py        # Google TPU implementation (built-in, experimental – engines not landed yet)
 ├── platform_manager.py    # PlatformRegistry + singleton manager with auto-detection
 └── README.md              # This file
 ```
