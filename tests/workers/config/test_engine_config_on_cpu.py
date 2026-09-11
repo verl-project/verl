@@ -53,6 +53,11 @@ class TestFSDPEngineConfigCPU:
         assert config.fsdp_size == -1
         assert config.use_no_sync_for_gradient_accumulation is True
 
+    def test_param_offload_defaults_and_overrides(self):
+        assert FSDPEngineConfig(forward_only=True).param_offload is True
+        assert FSDPEngineConfig(forward_only=True, param_offload=False).param_offload is False
+        assert FSDPEngineConfig(forward_only=True, param_offload=True).param_offload is True
+
     def test_gradient_accumulation_sync_can_be_restored_per_micro_batch(self):
         config = FSDPEngineConfig(use_no_sync_for_gradient_accumulation=False)
         assert config.use_no_sync_for_gradient_accumulation is False
