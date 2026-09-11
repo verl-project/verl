@@ -455,15 +455,49 @@ def _get_input_embeds(
     video_grid_thw: Optional[torch.LongTensor] = None,
 ):
     inputs_embeds = model.get_input_embeddings()(input_ids)
+
+    # FSDP requires every rank to enter wrapped modules in the same order. A
+    # dynamic micro-batch may contain both image and video samples on one rank
+    # but only one modality (or text) on another. Calling ``model.visual`` once
+    # per present modality therefore desynchronizes the visual FSDP units.
+    # Images and videos share the same encoder, whose ``grid_thw`` cu-sequences
+    # keep individual media independent, so encode all present media together.
+    visual_values = []
+    visual_grids = []
     if pixel_values is not None:
         pixel_values = pixel_values.type(model.visual.dtype)
-        image_embeds = model.visual(pixel_values, grid_thw=image_grid_thw).pooler_output
+        visual_values.append(pixel_values)
+        visual_grids.append(image_grid_thw)
+
+    if pixel_values_videos is not None:
+        pixel_values_videos = pixel_values_videos.type(model.visual.dtype)
+        visual_values.append(pixel_values_videos)
+        visual_grids.append(video_grid_thw)
+
+    if visual_values:
+        if len(visual_values) == 1:
+            visual_inputs = visual_values[0]
+            visual_grid_thw = visual_grids[0]
+        else:
+            visual_inputs = torch.cat(visual_values, dim=0)
+            visual_grid_thw = torch.cat(visual_grids, dim=0)
+        visual_embeds = model.visual(visual_inputs, grid_thw=visual_grid_thw).pooler_output
+        visual_offset = 0
+
+    if pixel_values is not None:
         n_image_tokens = (input_ids == model.config.image_token_id).sum().item()
+        if pixel_values_videos is None:
+            image_embeds = visual_embeds
+        else:
+            merge_length = model.config.vision_config.spatial_merge_size**2
+            n_image_features_from_grid = (image_grid_thw.prod(dim=-1) // merge_length).sum().item()
+            image_embeds = visual_embeds[visual_offset : visual_offset + n_image_features_from_grid]
         n_image_features = image_embeds.shape[0]
         if n_image_tokens != n_image_features:
             raise ValueError(
                 f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}"
             )
+        visual_offset += n_image_features
 
         mask = input_ids == model.config.image_token_id
         mask_unsqueezed = mask.unsqueeze(-1)
@@ -474,9 +508,8 @@ def _get_input_embeds(
         inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
     if pixel_values_videos is not None:
-        pixel_values_videos = pixel_values_videos.type(model.visual.dtype)
-        video_embeds = model.visual(pixel_values_videos, grid_thw=video_grid_thw).pooler_output
         n_video_tokens = (input_ids == model.config.video_token_id).sum().item()
+        video_embeds = visual_embeds[visual_offset:]
         n_video_features = video_embeds.shape[0]
         if n_video_tokens != n_video_features:
             raise ValueError(
