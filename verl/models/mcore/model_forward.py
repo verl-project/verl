@@ -278,8 +278,19 @@ def gptmodel_forward_model_engine(
     cp_layout: str = "zigzag",
     router_padding_mask: torch.Tensor | None = None,
     mtp_loss_normalization_factor: float | None = None,
+    fused_output_processor_context=None,
 ):
-    """Default forward pass for GPT models with optional sequence packing."""
+    """Default forward pass for GPT models with optional sequence packing.
+
+    ``fused_output_processor_context`` opts the bshd path into Megatron Core
+    0.18's output-processor hook, so log-probs and entropy are computed straight
+    from hidden states.  Without it the model returns a ``[b, s, vocab]`` logits
+    tensor that the caller then reduces -- for a 248k vocab at 128k sequence that
+    single tensor is ~30 GB per rank (doubled again when entropy forces a clone),
+    which is what makes long-context training OOM.  Only bshd needs this: the thd
+    path already has ``fused_forward_model_engine``, but sequence packing is
+    unavailable for models whose attention (e.g. Qwen3.5 GDN) has no THD kernel.
+    """
 
     assert data_format in ["thd", "bshd"], "data_format must be 'thd' or 'bshd'"
     pre_process = unwrap_model(model).pre_process
@@ -450,13 +461,52 @@ def gptmodel_forward_model_engine(
         else:
             attention_mask = attention_mask_bshd
 
+        use_fused_output_processor = fused_output_processor_context is not None and post_process
+        if use_fused_output_processor:
+            from verl.models.mcore.model_forward_fused import fused_output_processor
+
+            # The hook needs labels, but they must NOT go in as ``model_kwargs["labels"]``:
+            # GPTModel forwards that straight into _postprocess, where the MTP patch
+            # gates its drafter forward on ``labels is not None``.  With
+            # mtp.enable_train=False that branch is meant to stay dormant, and waking
+            # it hits MultiTokenPredictionLayer._checkpointed_forward(padding_mask=...),
+            # which older Megatron builds do not accept.  Carry them on the context
+            # instead; mtp_patch reads them from there when invoking the processor.
+            fused_output_processor_context.labels = preprocess_bshd_engine(
+                logits_processor_args["label"],
+                pre_process=True,
+                need_roll=True,
+                use_fp8_padding=use_fp8_padding,
+                forced_max_seqlen=forced_max_seqlen,
+            )[0].contiguous()
+            model_kwargs["output_processor"] = fused_output_processor
+            model_kwargs["output_processor_context"] = fused_output_processor_context
+
         output_orig = model(
             input_ids=input_ids_bshd,
             attention_mask=attention_mask,
             position_ids=None if vision_model else position_ids_bshd,
             **model_kwargs,
         )
-        if post_process and logits_processor is not None:
+        if use_fused_output_processor:
+            # output_orig is a CausalLMOutputForPPO; mirror the key names the
+            # logits_processor branch produces so downstream code is unchanged.
+            # linear_cross_entropy returns flat (num_tokens,) tensors, while the
+            # bshd postprocess asserts output.shape[:2] == attention_mask.shape,
+            # so restore the [b, s] layout the rest of the path expects.
+            bshd_shape = input_ids_bshd.shape
+
+            def _to_bshd(t):
+                return t.view(bshd_shape) if t.dim() == 1 else t
+
+            output_dict = {"log_probs": _to_bshd(output_orig.log_probs)}
+            if output_orig.entropy is not None:
+                output_dict["entropy"] = _to_bshd(output_orig.entropy)
+            output = {
+                k: postprocess_bshd_engine(v, attention_mask_bshd, post_process=post_process)
+                for k, v in output_dict.items()
+            }
+        elif post_process and logits_processor is not None:
             args = {
                 k: preprocess_bshd_engine(
                     v,
