@@ -786,7 +786,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         shipped, so the next steady diff base equals the shipped state by
         construction and the separate prime pass disappears.
         """
-        from verl.checkpoint_engine.delta_sync.sparse_gather import dense_gather_group
+        from verl.checkpoint_engine.delta_sync.sparse_gather import dense_gather_group, indexed_dense_gather_group
         from verl.utils.device import is_cuda_available
 
         gen, _ = engine.get_per_tensor_param_shard(quant_spec=spec)
@@ -806,11 +806,25 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
                 snap.copy_(flat, non_blocking=True)
                 if meta is None:
                     meta = engine._quant_group_meta
-                slots, sizes, dtype_str = meta[name]
+                slots, sizes, dtype_str, positions = meta[name]
                 # replicas do not contribute: zero their size vector so the
                 # gather's exactly-one-owner assert sees the true ownership map
                 sizes_eff = sizes if sspec.contributes else [0] * len(sizes)
-                pieces = dense_gather_group(flat, sizes_eff, sspec.gather_group)
+                if positions is None:
+                    pieces = dense_gather_group(flat, sizes_eff, sspec.gather_group)
+                else:
+                    pos_eff = (
+                        positions
+                        if sspec.contributes
+                        else [torch.empty(0, dtype=torch.int32, device=flat.device) for _ in positions]
+                    )
+                    pieces = indexed_dense_gather_group(
+                        flat,
+                        sizes_eff,
+                        pos_eff,
+                        [_prodshape(shape) for _slot_name, shape in slots],
+                        sspec.gather_group,
+                    )
                 if pieces is None:
                     continue
                 dtype = getattr(torch, dtype_str)

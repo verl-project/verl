@@ -434,6 +434,105 @@ def mcore_hf_delta_entry(rec: McoreParamExport, _place, lidx: torch.Tensor, lval
     return slots, dtype_str, counts, hf_idx, hf_val
 
 
+def _local_block_owner_mask(t: torch.Tensor, block: tuple[int, int], full_shape: tuple[int, int]) -> torch.Tensor:
+    """Return the HF block cells containing at least one value owned here.
+
+    The communication-free Megatron probe represents other TP/ETP ranks with
+    NaNs in the final HF-coordinate tensor.  Ownership is therefore structural
+    (non-NaN), not value based: an all-zero but locally owned block must still
+    have an owner.
+    """
+    from verl.utils.kernel.fp8_kernel import ceil_div
+
+    bm, bn = block
+    m, n = full_shape
+    assert t.dim() == 2 and tuple(t.shape) == full_shape, (
+        f"probe output shape {tuple(t.shape)} does not match HF slot {full_shape}; owner positions would be ambiguous"
+    )
+    n_br, n_bc = ceil_div(m, bm), ceil_div(n, bn)
+    valid = ~torch.isnan(t)
+    pad_m, pad_n = n_br * bm - int(t.shape[0]), n_bc * bn - n
+    if pad_m or pad_n:
+        valid = torch.nn.functional.pad(valid, (0, pad_n, 0, pad_m), value=False)
+    return valid.view(n_br, bm, n_bc, bn).any(dim=(1, 3))
+
+
+def _block_owner_plan(
+    local_masks: list[torch.Tensor],
+    group,
+    group_rank: int,
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    """Build static ``(cross_positions, scale_positions)`` per HF slot.
+
+    A full owner-count exchange happens once when the export plan is first
+    used.  Steady syncs communicate amax values only at ``cross_positions``.
+    Singleton blocks keep their amax and scale on their unique owner; a
+    cross-rank block's reduced scale is emitted by group rank zero.
+    """
+    import torch.distributed as dist
+
+    if not local_masks:
+        return []
+    if group is None:
+        return [
+            (
+                torch.empty(0, dtype=torch.int32, device=mask.device),
+                mask.reshape(-1).nonzero(as_tuple=False).view(-1).to(torch.int32),
+            )
+            for mask in local_masks
+        ]
+    sizes = [int(mask.numel()) for mask in local_masks]
+    flat_local = torch.cat([mask.reshape(-1) for mask in local_masks])
+    counts = flat_local.to(torch.int32)
+    dist.all_reduce(counts, op=dist.ReduceOp.SUM, group=group)
+    assert bool(torch.all(counts > 0)), "quantized HF block has no contributing trainer rank"
+
+    out = []
+    off = 0
+    for mask, n in zip(local_masks, sizes, strict=True):
+        count = counts[off : off + n]
+        local = mask.reshape(-1)
+        cross = count > 1
+        scale_owner = (local & (count == 1)) | (cross & (group_rank == 0))
+        out.append(
+            (
+                cross.nonzero(as_tuple=False).view(-1).to(torch.int32),
+                scale_owner.nonzero(as_tuple=False).view(-1).to(torch.int32),
+            )
+        )
+        off += n
+    return out
+
+
+def _reduce_cross_block_amax(
+    grids: list[torch.Tensor],
+    plan: list[tuple[torch.Tensor, torch.Tensor]],
+    group,
+) -> int:
+    """MAX-reduce only block cells whose owner count is greater than one.
+
+    Returns the number of FP32 cells placed on the collective data plane.  A
+    zero return performs no collective at all, which is the common PP/EP-only
+    case because those parallelisms own whole HF tensors/experts.
+    """
+    import torch.distributed as dist
+
+    pieces = [g.reshape(-1)[cross.long()] for g, (cross, _scale) in zip(grids, plan, strict=True)]
+    n_cross = sum(int(piece.numel()) for piece in pieces)
+    if not n_cross:
+        return 0
+    assert group is not None, "cross-rank HF blocks require a merge process group"
+    flat = torch.cat(pieces)
+    dist.all_reduce(flat, op=dist.ReduceOp.MAX, group=group)
+    off = 0
+    for grid, (cross, _scale) in zip(grids, plan, strict=True):
+        n = int(cross.numel())
+        if n:
+            grid.reshape(-1)[cross.long()] = flat[off : off + n]
+        off += n
+    return n_cross
+
+
 def quant_shard_stream(engine, quant_spec):
     """Quant-domain shard exporter with the SAME contract as
     ``get_per_tensor_param_shard``: yields ``(name, local_flat, ShardSpec)``
@@ -442,22 +541,24 @@ def quant_shard_stream(engine, quant_spec):
     implementation by construction.
 
     Per export-index record: run the comm-stubbed probe on the FULL local
-    shard, batch every quantizable slot's partial absmax grid into ONE
-    all_reduce over the record's merge group, quantize locally, and yield up
-    to three dtype-homogeneous groups (concatenated across the record's union
+    shard, exchange static block ownership once, compact/reduce only amax cells
+    shared by more than one owner, quantize locally, and yield up to four
+    dtype-homogeneous groups (concatenated across the record's union
     slots, zero-length segments for rows other ranks own -- lockstep by
     construction):
 
         ``{megatron_name}::c``  fp8 codes        (contributes: always)
-        ``{megatron_name}::s``  fp32 scale grids (contributes: group rank 0)
+        ``{megatron_name}::s``  fp32 scale cells (contributes: per-block owner)
         ``{megatron_name}::b``  bf16 passthrough (contributes: always)
+        ``{megatron_name}::f``  fp32 passthrough (contributes: always)
 
     Slot metadata for the entry builder is registered on
-    ``engine._quant_group_meta[name]`` as ``(slots, sizes)``.
+    ``engine._quant_group_meta[name]`` as
+    ``(slots, local_sizes, dtype, optional_full_slot_positions)``.
     """
     import torch.distributed as dist
-
     from megatron.core import parallel_state as mpu
+
     from verl.utils.fp8_sharded import (
         _ABSMAX_EPS,
         local_blockwise_absmax,
@@ -479,6 +580,9 @@ def quant_shard_stream(engine, quant_spec):
     index = engine._mcore_export_index()
     slot_cache = engine._delta_slot_cache
     meta = engine._quant_group_meta = getattr(engine, "_quant_group_meta", {})
+    owner_plans = engine._quant_block_owner_plans = getattr(engine, "_quant_block_owner_plans", {})
+    planned_cells = 0
+    planned_cross_cells = 0
 
     for rec in index:
         if rec.probe is None:
@@ -500,14 +604,51 @@ def quant_shard_stream(engine, quant_spec):
             slots = [(n, tuple(int(x) for x in t.shape)) for n, t in outs.items()]
             slot_cache[rec.megatron_name] = slots
 
-        quantizable = [
-            (sname, sshape)
-            for sname, sshape in slots
-            if len(sshape) == 2 and helper_should_quantize(sname)
-        ]
-        # one absmax all_reduce per record: concatenated partial grids stay
-        # aligned because every rank walks the same union order; absent rows
-        # contribute zero partials without materializing shards.
+        quantizable = [(sname, sshape) for sname, sshape in slots if len(sshape) == 2 and helper_should_quantize(sname)]
+
+        # Deduplicate DP/CP replicas before both value and scale ownership are
+        # planned.  Otherwise identical replicas would make every local block
+        # look cross-rank and defeat boundary-only amax exchange.
+        _tp_world = torch.distributed.get_world_size(group=mpu.get_tensor_model_parallel_group())
+        _ep_size = mpu.get_expert_model_parallel_world_size()
+        _is_expert = ".experts." in rec.megatron_name and (_ep_size > 1 or _tp_world > 1)
+        _is_tp_sharded = rec.param is not None and getattr(rec.param, "tensor_model_parallel", False) and _tp_world > 1
+        if _is_expert:
+            owns_replica = mpu.get_expert_data_parallel_rank() == 0
+        elif _is_tp_sharded:
+            owns_replica = mpu.get_data_parallel_rank(with_context_parallel=True) == 0
+        else:
+            owns_replica = (
+                mpu.get_tensor_model_parallel_rank() == 0
+                and mpu.get_data_parallel_rank(with_context_parallel=True) == 0
+            )
+
+        # The probe's NaN pattern is a static ownership map in final HF block
+        # coordinates.  Exchange owner counts once, then cache only compact
+        # positions: steady syncs reduce amax values for genuinely shared
+        # boundary blocks and nothing else.
+        plan_key = (rec.megatron_name, tuple(block), tuple(quantizable))
+        plan = owner_plans.get(plan_key)
+        if plan is None:
+            local_masks = []
+            for sname, sshape in quantizable:
+                t = outs.get(sname)
+                if t is None or not owns_replica:
+                    local_masks.append(
+                        torch.zeros(
+                            ceil_div(int(sshape[0]), bm),
+                            ceil_div(int(sshape[1]), bn),
+                            dtype=torch.bool,
+                            device=dev,
+                        )
+                    )
+                else:
+                    local_masks.append(_local_block_owner_mask(t, (bm, bn), tuple(sshape)))
+            plan = _block_owner_plan(local_masks, pg, group_rank)
+            owner_plans[plan_key] = plan
+            planned_cells += sum(int(mask.numel()) for mask in local_masks)
+            planned_cross_cells += sum(int(cross.numel()) for cross, _scale in plan)
+
         grids = []
         for sname, sshape in quantizable:
             t = outs.get(sname)
@@ -518,38 +659,14 @@ def quant_shard_stream(engine, quant_spec):
             else:
                 g = local_blockwise_absmax(t.to(torch.bfloat16), block, 0, tuple(sshape))
             grids.append(g)
-        if grids and pg is not None:
-            flatg = torch.cat([g.reshape(-1) for g in grids])
-            dist.all_reduce(flatg, op=dist.ReduceOp.MAX, group=pg)
-            off = 0
-            for i2, g in enumerate(grids):
-                n2 = g.numel()
-                grids[i2] = flatg[off : off + n2].view_as(g)
-                off += n2
+        _reduce_cross_block_amax(grids, plan, pg)
 
-        # Deduplicate replicated parameters before transfer using the same
-        # ownership rule as the bf16 path. Scale grids are emitted by group
-        # rank zero; codes and passthrough values follow model ownership.
-        _tp_world = torch.distributed.get_world_size(group=mpu.get_tensor_model_parallel_group())
-        _ep_size = mpu.get_expert_model_parallel_world_size()
-        _is_expert = ".experts." in rec.megatron_name and (_ep_size > 1 or _tp_world > 1)
-        _is_tp_sharded = (
-            rec.param is not None
-            and getattr(rec.param, "tensor_model_parallel", False)
-            and _tp_world > 1
-        )
-        if _is_expert:
-            owns_replica = mpu.get_expert_data_parallel_rank() == 0
-        elif _is_tp_sharded:
-            owns_replica = mpu.get_data_parallel_rank(with_context_parallel=True) == 0
-        else:
-            owns_replica = (
-                mpu.get_tensor_model_parallel_rank() == 0
-                and mpu.get_data_parallel_rank(with_context_parallel=True) == 0
-            )
+        # Codes and passthrough values follow model ownership.  Scale cells
+        # follow the block plan above and may therefore have several ranks
+        # contributing disjoint positions to one HF scale tensor.
         groups = {
             "c": {"slots": [], "pieces": [], "dtype": FP8_DTYPE, "contributes": owns_replica},
-            "s": {"slots": [], "pieces": [], "dtype": torch.float32, "contributes": group_rank == 0},
+            "s": {"slots": [], "pieces": [], "positions": [], "dtype": torch.float32, "contributes": True},
             "b": {"slots": [], "pieces": [], "dtype": torch.bfloat16, "contributes": owns_replica},
             "f": {"slots": [], "pieces": [], "dtype": torch.float32, "contributes": owns_replica},
         }
@@ -569,7 +686,9 @@ def quant_shard_stream(engine, quant_spec):
                 groups["c"]["slots"].append((sname, tuple(sshape)))
                 groups["c"]["pieces"].append(codes.reshape(-1))
                 groups["s"]["slots"].append((sname + "_scale_inv", tuple(descale.shape)))
-                groups["s"]["pieces"].append(descale.reshape(-1))
+                scale_pos = plan[qi - 1][1]
+                groups["s"]["positions"].append(scale_pos)
+                groups["s"]["pieces"].append(descale.reshape(-1)[scale_pos.long()])
             elif fp32_pred is not None and fp32_pred(sname):
                 # fp32 passthrough group: same fidelity rule as the seed wire --
                 # DSv4's special params are fp32 on disk and in the serving
@@ -599,19 +718,25 @@ def quant_shard_stream(engine, quant_spec):
                 continue
             name = f"{rec.megatron_name}::{kind}"
             sizes = [int(pc.numel()) for pc in g["pieces"]]
-            meta[name] = (g["slots"], sizes, str(g["dtype"]).replace("torch.", ""))
-            flat = (
-                torch.cat(g["pieces"])
-                if g["pieces"]
-                else torch.empty(0, dtype=g["dtype"], device=dev)
-            )
+            positions = g.get("positions")
+            meta[name] = (g["slots"], sizes, str(g["dtype"]).replace("torch.", ""), positions)
+            flat = torch.cat(g["pieces"]) if g["pieces"] else torch.empty(0, dtype=g["dtype"], device=dev)
             spec = ShardSpec(
                 full_shape=(int(flat.numel()),),
                 place=0,
-                contributes=g["contributes"],
+                contributes=g["contributes"] and bool(flat.numel()),
                 gather_group=pg,
             )
             yield name, flat, spec
+
+    if planned_cells:
+        logger.warning(
+            "quant amax owner plan rank=%d: scale_cells=%d cross_rank_cells=%d steady_max_payload_bytes=%d",
+            dist.get_rank(),
+            planned_cells,
+            planned_cross_cells,
+            planned_cross_cells * 4,
+        )
 
 
 def quant_delta_entry(engine):
@@ -621,12 +746,19 @@ def quant_delta_entry(engine):
     bf16 path produces."""
 
     def _entry(name, spec, place, lidx, lval):
-        slots, sizes, dtype_str = engine._quant_group_meta[name]
+        slots, sizes, dtype_str, positions = engine._quant_group_meta[name]
         bounds = torch.tensor(sizes, device=lidx.device).cumsum(0)
         seg = torch.searchsorted(bounds, lidx, right=True)
         counts = torch.bincount(seg, minlength=len(sizes)).to("cpu")
         offsets = torch.cat([torch.zeros(1, dtype=bounds.dtype, device=lidx.device), bounds[:-1]])
         local_idx = (lidx - offsets[seg]).to(torch.int32)
+        if positions is not None and lidx.numel():
+            mapped = torch.empty_like(local_idx)
+            for i, pos in enumerate(positions):
+                sel = seg == i
+                if bool(sel.any()):
+                    mapped[sel] = pos.to(lidx.device)[local_idx[sel].long()]
+            local_idx = mapped
         return (slots, dtype_str, counts, local_idx, lval)
 
     return _entry

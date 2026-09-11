@@ -188,6 +188,7 @@ def gather_slot_entries_to_rank0(
             )
     return out
 
+
 def dense_gather_group(
     flat: torch.Tensor,
     sizes_local: list[int],
@@ -253,4 +254,52 @@ def dense_gather_group(
         r = owners[0]
         off = sum(sizes_cpu[r][:i])
         out.append(per_rank_flat[r][off : off + sizes_cpu[r][i]])
+    return out
+
+
+def indexed_dense_gather_group(
+    flat: torch.Tensor,
+    sizes_local: list[int],
+    positions_local: list[torch.Tensor],
+    full_sizes: list[int],
+    group: dist.ProcessGroup | None = None,
+) -> list[torch.Tensor] | None:
+    """Assemble position-sharded dense slots on group rank 0.
+
+    This is the seed counterpart of the ordinary sparse-delta gather.  Each
+    slot may be owned block-by-block by several ranks, so values carry their
+    within-slot flat positions.  Reuse the exact-length sparse gather, then
+    scatter each complete slot on rank 0; the owner plan guarantees disjoint
+    positions and the aggregate-size check guarantees full coverage.
+    """
+    k = len(sizes_local)
+    assert len(positions_local) == k and len(full_sizes) == k
+    assert int(flat.numel()) == sum(sizes_local), f"flat has {flat.numel()} values, sizes describe {sum(sizes_local)}"
+    for i, (n, pos, full_n) in enumerate(zip(sizes_local, positions_local, full_sizes, strict=True)):
+        assert int(pos.numel()) == n, f"slot {i}: {pos.numel()} positions for {n} values"
+        assert n <= full_n, f"slot {i}: {n} owned cells exceed dense size {full_n}"
+    dev = flat.device
+    if group is None and not (dist.is_available() and dist.is_initialized()):
+        out, off = [], 0
+        for pos, n, full_n in zip(positions_local, sizes_local, full_sizes, strict=True):
+            full = torch.empty(full_n, dtype=flat.dtype, device=dev)
+            full[pos.to(device=dev, dtype=torch.long)] = flat[off : off + n]
+            out.append(full)
+            off += n
+        return out
+    pos_flat = (
+        torch.cat([p.to(device=dev, dtype=torch.int32).reshape(-1) for p in positions_local])
+        if positions_local
+        else torch.empty(0, dtype=torch.int32, device=dev)
+    )
+    counts = torch.tensor(sizes_local, dtype=torch.int64, device=dev)
+    gathered = gather_slot_entries_to_rank0(pos_flat, flat, counts, group)
+    if gathered is None:
+        return None
+    out = []
+    for i, ((pos, val), full_n) in enumerate(zip(gathered, full_sizes, strict=True)):
+        assert int(pos.numel()) == full_n, f"slot {i}: position owners cover {pos.numel()} cells, expected {full_n}"
+        full = torch.empty(full_n, dtype=flat.dtype, device=dev)
+        full[pos.long()] = val
+        out.append(full)
     return out

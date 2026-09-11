@@ -56,6 +56,105 @@ def test_shard_delta_indices_no_change_is_empty():
     assert gval.numel() == 0
 
 
+def test_megatron_block_owner_mask_is_structural_not_value_based():
+    from verl.workers.engine.megatron.delta_export import _local_block_owner_mask
+
+    # Four 2x2 blocks.  Owned zeros must count; NaNs are the probe's remote-rank
+    # placeholders and must not count.
+    t = torch.full((4, 4), float("nan"))
+    t[:2, :2] = 0.0
+    t[2:, 2:] = 7.0
+    got = _local_block_owner_mask(t, (2, 2), (4, 4))
+    assert torch.equal(got, torch.tensor([[True, False], [False, True]]))
+
+
+def test_block_owner_plan_selects_only_cross_cells_for_amax(monkeypatch):
+    import torch.distributed as dist
+
+    from verl.workers.engine.megatron.delta_export import _block_owner_plan
+
+    # Across two ranks: cell 0 belongs only to rank 0, cell 1 crosses both,
+    # cell 2 belongs only to rank 1.  Mock the one-time owner-count reduction.
+    def reduce_to_global_counts(tensor, op, group):
+        assert op == dist.ReduceOp.SUM
+        tensor.copy_(torch.tensor([1, 2, 1], dtype=tensor.dtype))
+
+    monkeypatch.setattr(dist, "all_reduce", reduce_to_global_counts)
+    group = object()
+    rank0 = _block_owner_plan([torch.tensor([[True, True, False]])], group, 0)
+    rank1 = _block_owner_plan([torch.tensor([[False, True, True]])], group, 1)
+    assert rank0[0][0].tolist() == [1] and rank1[0][0].tolist() == [1]
+    # Singleton scales remain on their owners; group rank zero owns the shared
+    # cell after receiving its compact reduced amax.
+    assert rank0[0][1].tolist() == [0, 1]
+    assert rank1[0][1].tolist() == [2]
+
+
+def test_cross_block_amax_reduces_only_compact_shared_cells(monkeypatch):
+    import torch.distributed as dist
+
+    from verl.workers.engine.megatron.delta_export import _reduce_cross_block_amax
+
+    seen = []
+
+    def compact_max(tensor, op, group):
+        assert op == dist.ReduceOp.MAX and group is marker
+        seen.append(tensor.clone())
+        tensor.add_(100)
+
+    monkeypatch.setattr(dist, "all_reduce", compact_max)
+    marker = object()
+    grids = [torch.tensor([[1.0, 2.0, 3.0]]), torch.tensor([[4.0, 5.0]])]
+    plan = [
+        (torch.tensor([1], dtype=torch.int32), torch.tensor([0, 1], dtype=torch.int32)),
+        (torch.tensor([0], dtype=torch.int32), torch.tensor([1], dtype=torch.int32)),
+    ]
+    assert _reduce_cross_block_amax(grids, plan, marker) == 2
+    assert torch.equal(seen[0], torch.tensor([2.0, 4.0]))
+    assert torch.equal(grids[0], torch.tensor([[1.0, 102.0, 3.0]]))
+    assert torch.equal(grids[1], torch.tensor([[104.0, 5.0]]))
+
+
+def test_cross_block_amax_skips_collective_when_no_shared_cells(monkeypatch):
+    import torch.distributed as dist
+
+    from verl.workers.engine.megatron.delta_export import _reduce_cross_block_amax
+
+    monkeypatch.setattr(dist, "all_reduce", lambda *_args, **_kwargs: pytest.fail("unexpected collective"))
+    grids = [torch.tensor([[1.0, 2.0]])]
+    plan = [(torch.empty(0, dtype=torch.int32), torch.tensor([0, 1], dtype=torch.int32))]
+    assert _reduce_cross_block_amax(grids, plan, None) == 0
+
+
+def test_quant_delta_entry_maps_compact_scale_indices_to_full_slot_positions():
+    from types import SimpleNamespace
+
+    from verl.workers.engine.megatron.delta_export import quant_delta_entry
+
+    name = "mcore.weight::s"
+    engine = SimpleNamespace(
+        _quant_group_meta={
+            name: (
+                [("hf.a_scale_inv", (4,)), ("hf.b_scale_inv", (5,))],
+                [2, 2],
+                "float32",
+                [torch.tensor([1, 3], dtype=torch.int32), torch.tensor([0, 4], dtype=torch.int32)],
+            )
+        }
+    )
+    slots, dtype_str, counts, idx, val = quant_delta_entry(engine)(
+        name,
+        None,
+        0,
+        torch.tensor([0, 3]),
+        torch.tensor([10.0, 20.0]),
+    )
+    assert slots == [("hf.a_scale_inv", (4,)), ("hf.b_scale_inv", (5,))]
+    assert dtype_str == "float32" and counts.tolist() == [1, 1]
+    assert idx.tolist() == [1, 4]
+    assert val.tolist() == [10.0, 20.0]
+
+
 def test_derive_dtensor_placement_unsharded():
     # A non-DTensor (replicated / unsharded) param: offset 0, no gather group,
     # and outside a process group rank 0 is assumed -> contributes.
@@ -125,6 +224,21 @@ def test_gather_slot_entries_sub_rounds_world1():
         # same session (repo convention: init in the test -> destroy in finally)
         if owns_pg:
             dist.destroy_process_group()
+
+
+def test_indexed_dense_gather_group_world1():
+    """Position-sharded scale cells reconstruct the dense HF scale slots."""
+    from verl.checkpoint_engine.delta_sync.sparse_gather import indexed_dense_gather_group
+
+    flat = torch.tensor([30.0, 10.0, 20.0, 200.0, 400.0, 100.0, 300.0])
+    got = indexed_dense_gather_group(
+        flat,
+        [3, 4],
+        [torch.tensor([2, 0, 1]), torch.tensor([1, 3, 0, 2])],
+        [3, 4],
+    )
+    assert torch.equal(got[0], torch.tensor([10.0, 20.0, 30.0]))
+    assert torch.equal(got[1], torch.tensor([100.0, 200.0, 300.0, 400.0]))
 
 
 def test_exact_length_gather_posts_only_matching_nonempty_peers(monkeypatch):
