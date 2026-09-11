@@ -54,7 +54,7 @@ on:
       - "!examples/**"
       - "!tests/special_sanity/**"
       - "!verl/trainer/main_*.py"
-      - "!verl/trainer/fsdp_sft_trainer.py"
+      - "!verl/trainer/sft_trainer.py"
       # Entrypoints
       - .github/workflows/gpu_unit_tests.yml
       - "tests/**test_*.py"
