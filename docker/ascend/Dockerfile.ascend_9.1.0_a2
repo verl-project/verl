@@ -1,0 +1,86 @@
+# Pull base image
+FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.1.0-910b-ubuntu22.04-py3.12
+
+ARG SOC_VERSION="ascend910b1"
+
+# Prepare required system dependencies
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends gcc g++ cmake libnuma-dev wget git curl jq vim build-essential && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
+    pip install --upgrade pip packaging setuptools==80.10.2 && \
+    pip cache purge
+
+# Prepare repositories with low update frequency
+RUN ARCH=$(uname -m) && \
+    # Set extra pip index for x86_64 platform
+    echo "[LOG INFO] Detected architecture: $ARCH" && \
+    if [ "$ARCH" = "x86_64" ]; then \
+        pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"; \
+    fi && \
+    # Clone libs
+    git clone --depth 1 --branch v0.23.0 https://github.com/vllm-project/vllm.git && \
+    git clone -b releases/v0.23.0 https://github.com/vllm-project/vllm-ascend.git && \
+    git clone --branch core_r0.18.0 https://gitcode.com/Ascend/MindSpeed.git && \
+    git clone --depth 1 --branch core_v0.18.0 https://github.com/NVIDIA/Megatron-LM.git && \
+    git clone --depth 1 --branch core_r0.18.0 https://gitcode.com/ascend/MegatronAdaptor.git && \
+    git clone --depth 1 https://gitcode.com/ascend/TransformerEngineNPU.git && \
+    git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Ops.git && \
+    git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Bridge.git && \
+    git clone --depth 1 --branch v0.5.0 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+
+# Install repositories with low update frequency
+RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && \
+    export PIP_TRUSTED_HOST=triton-ascend.osinfra.cn && \
+    ARCH=$(uname -m) && \
+    # Export and source env
+    if [ "$ARCH" = "aarch64" ]; then \
+        export LD_LIBRARY_PATH=/usr/local/Ascend/cann-9.1.0/aarch64-linux/devlib/linux/aarch64:$LD_LIBRARY_PATH; \
+    elif [ "$ARCH" = "x86_64" ]; then \
+        export LD_LIBRARY_PATH=/usr/local/Ascend/cann-9.1.0/x86_64-linux/devlib/linux/x86_64/:$LD_LIBRARY_PATH; \
+    fi && \
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    source /usr/local/Ascend/nnal/atb/set_env.sh && \
+    # Install vllm
+    cd vllm && \
+    VLLM_TARGET_DEVICE=empty pip install -v -e . && cd .. && \
+    if [ "$ARCH" = "x86_64" ]; then \
+        pip install torch==2.10.0+cpu --index-url https://download.pytorch.org/whl/cpu/; \
+        pip install torchvision==0.25.0+cpu --index-url https://download.pytorch.org/whl/cpu/; \
+    fi && \
+    # Install vllm-ascend
+    cd vllm-ascend && pip install -r requirements.txt && \
+    export COMPILE_CUSTOM_KERNELS=1 && pip install --no-build-isolation --no-deps -v -e . && cd .. && \
+    # Install Megatron & MindSpeed
+    pip install -e Megatron-LM && \
+    pip install -e MindSpeed && \
+    # Install MegatronAdaptor
+    pip install -e MegatronAdaptor && \
+    # Install TransformerEngineNPU
+    pip install -e TransformerEngineNPU --no-build-isolation && \
+    # Install MindSpeed-Ops
+    pip install -e MindSpeed-Ops --no-build-isolation --no-deps && \
+    # Install MindSpeed-Bridge
+    pip install -r MindSpeed-Bridge/requirements.txt && \
+    pip install -e MindSpeed-Bridge --no-deps && \
+    # Install Megatron-Bridge
+    pip install -e Megatron-Bridge --no-build-isolation --no-deps && \
+    # Clear extra files
+    rm -rf /tmp/* /var/tmp/* && \
+    pip cache purge
+
+# Prepare and install verl (update frequently)
+RUN git clone --recursive https://github.com/verl-project/verl.git && \
+    cd verl && pip install -r requirements-npu.txt && pip install -v -e . --no-deps && cd .. && \
+    # Clear extra files
+    rm -rf /tmp/* /var/tmp/* && \
+    pip cache purge
+
+# Show install results
+RUN pip list
+
+# Patch megatron-lm unconditionally
+ENV VERL_USE_EXTERNAL_MODULES=megatron_adaptor
+
+# Setting Default Commands
+CMD ["/bin/bash"]

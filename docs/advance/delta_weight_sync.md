@@ -1,6 +1,6 @@
 # Delta Weight Sync
 
-Last updated: 07/10/2026.
+Last updated: 08/23/2026.
 
 ## Motivation
 
@@ -73,8 +73,9 @@ checkpoint engine (including the V1 ``separate_async`` trainer).
   ``get_per_tensor_param_delta_shard()`` — per-parameter entries ``(slots, dtype_str, counts,
   hf_idx, hf_val, gather_group)`` whose coordinates are already final HF coordinates. The engine
   only batches, gathers, buckets and ships.
-- **Diff (backend-owned)**: the default strategy (shared by the FSDP and veomni backends via
-  ``verl.workers.engine.utils.hf_delta_export``) byte-diffs each rank's **own shard** against its
+- **Diff (backend-owned)**: the default strategy (``BaseEngine.get_per_tensor_param_delta_shard`` via
+  ``verl.workers.engine.utils.hf_delta_export``, so any backend that implements the shard export gets
+  it for free) byte-diffs each rank's **own shard** against its
   pinned-CPU snapshot, refreshed on every export (no rank holds a full-model snapshot). The
   comparison is bit-exact (integer view inequality), so the reconstruction is lossless by
   construction — no thresholds, no drift. A backend that already keeps the previous step's weights
@@ -86,13 +87,12 @@ checkpoint engine (including the V1 ``separate_async`` trainer).
 - **Transport**: the sparse payload is broadcast over the existing NCCL collective group in
   bucket-sized flushes (streamed: each flush is sent and freed as it is produced, so sender peak
   memory stays ~2 buckets regardless of model size).
-- **Apply**: each rollout worker hands its local copy of the sparse payload to its colocated SGLang
-  TP worker via same-GPU ``update_weights_from_tensor`` IPC, where a verl-shipped loader —
-  registered automatically through SGLang's stock ``--custom-weight-loader`` hook, so **no SGLang
-  fork or patch is needed** — verifies the flush checksum (fail loud), densifies each parameter's
-  delta into a NaN-masked tensor, and overwrites only the changed positions *in place* on the live
-  weights. No full-model mirror is staged anywhere on the rollout side: receiver peak memory is one
-  bucket plus one decode chunk, independent of model size.
+- **Apply**: each rollout worker forwards its local copy over same-GPU IPC. SGLang uses a
+  VERL loader registered through the stock ``--custom-weight-loader`` hook, so no SGLang
+  patch is needed. vLLM uses a VERL ``WeightTransferEngine`` adapter and vLLM's checkpoint
+  patch API. The native model loader still handles checkpoint names, packed
+  parameters, and TP slicing. Both paths verify the checksum and update live weights
+  without keeping a full rollout-model copy.
 - **Seeding**: the first sync is an explicit **dense** pass — the raw weights stream through the same
   bucketed wire with no positions attached (values only), populating the trainer-side snapshot as they
   go — so a dummy-initialized rollout gets a correct base without any sparse-encoding overhead.
@@ -118,7 +118,7 @@ checksum, and the rollout-side receiver are all unchanged. Each rank computes it
 position in the full flattened parameter purely locally (from the DTensor spec, no extra collective).
 
 **Supported training engines**: the shard export requires ``Shard(0)`` DTensor parameters, which both
-FSDP versions provide:
+FSDP versions and TorchTitan provide:
 
 - **FSDP2** (``fully_shard``, ``actor.strategy=fsdp2``): native DTensor params; the export never stages
   the whole shard on the GPU (``state_dict()`` is reference-only, shards move lazily per parameter).
@@ -127,6 +127,14 @@ FSDP versions provide:
   machinery, so the whole-shard GPU staging round trip is kept for it (it is skipped for FSDP2).
   Single-GPU FSDP1 uses ``FULL_STATE_DICT`` (plain tensors) and degrades to the replicated/rank-0 path —
   still correct, just not shard-parallel.
+- **TorchTitan** (``model_engine=torchtitan``): FSDP2 underneath, with HF names from TorchTitan's
+  own state dict adapter. HSDP replicate, CP, TP and EP all work — TP and EP cut a dim FSDP2 has
+  already cut, which torch spells ``_StridedShard`` but is still one block per rank, and a
+  replicate dim beside them is held fixed rather than spanned. EP differs in naming, not geometry:
+  ``to_hf()`` keeps only the locally owned experts, so the export ships the fused stack whole with
+  a slot table naming every one. HSDP with EP also needs a TorchTitan-side fix — its MoE adapter
+  reads ``placement.dim`` before checking the placement type, which raises at checkpoint load.
+  PP is rejected at the export boundary: its stages hold disjoint slices, and the gather is lockstep.
 
 Other shard dimensions than ``Shard(0)`` are not supported and raise.
 
@@ -154,6 +162,26 @@ materialization that grows linearly with parameter bytes, so the advantage widen
 and with MoE sparsity. The per-step changed ratio is ~1-3% of parameter bytes for dense models
 (0.02-0.05% for the 235B MoE early steps) and stays there over long runs.
 
+The TorchTitan engine and verl's own FSDP engine (``model_engine=dp``) were measured separately --
+A100/A800 80GB, ``one_step_off_policy``, offload off -- so they are not comparable to the above:
+
+| model (trainer placement) | ``delta_sharded`` | ``nccl`` (full broadcast) | speedup |
+|---|---|---|---|
+| Qwen3-8B (2+2 nodes, FSDP2 `dp_shard=16`) | **3.34 s** | 34.26 s | **10.3x** |
+| Qwen3-8B (2+2 nodes, FSDP2 `dp_shard=8` x TP2) | **3.40 s** | 34.26 s | **10.1x** |
+| Qwen3-8B (2+2 nodes, HSDP `dp_replicate=2` x `dp_shard=4` x TP2) | **2.41 s** | 10.24 s | **4.2x** |
+| Qwen3-8B (1+1 nodes, 50 steps sustained) | **3.00 s** | 11.00 s | 3.7x |
+| Qwen3-30B-A3B MoE (2+2 nodes, FSDP2 x EP8, efsdp=2) | **8.07 s** | 43.43 s | **5.4x** |
+| Qwen3-0.6B (1 node, intra-node NVLink) | 0.59 s | 0.61 s | 1.0x |
+| Qwen3-8B (2+2 nodes, FSDP engine, FSDP2 ``fsdp_size=16``) | **2.24 s** | 38.58 s | **17.2x** |
+| Qwen3-8B (2+2 nodes, FSDP engine, FSDP1 ``fsdp_size=16``) | 24.86 s | 65.22 s | 2.6x |
+
+Neither TP nor HSDP replicas change the payload (0.884%, 0.884% and 0.895% changed across the
+three 8B TorchTitan rows), and the FSDP engine lands independently on 0.893% for the same config:
+they change which rank reports an element, not how many moved. Speedups are per session -- the
+HSDP and FSDP rows ran on faster nodes, so compare each only to its own ``nccl`` baseline. FSDP1
+is the config note above ignored: its export pages the model back to GPU on every sync.
+
 Correctness evidence (details in the PR):
 
 - **200-step GRPO equivalence at 7B** (delta vs nccl, 400 syncs): reward trajectories track
@@ -169,9 +197,16 @@ Correctness evidence (details in the PR):
 A runnable example is ``verl/experimental/one_step_off_policy/shell/grpo_0.6b_gsm8k_fsdp2_sglang_delta_sharded_2_6.sh`` —
 the SGLang 2+6 disaggregated GRPO recipe with ``backend=delta_sharded``.
 
-Current scope: disaggregated (``hybrid_engine=False``) + SGLang rollout in BF16, FSDP1/FSDP2 training engines.
-Selecting a delta backend with any other rollout engine raises ``NotImplementedError`` at worker startup;
-a per-backend apply interface (vllm/trt-llm plugins) is planned.
+Current scope is disaggregated (``hybrid_engine=False``) BF16 rollout. The
+producer side supports FSDP1, FSDP2, and TorchTitan training engines; the
+rollout consumer may be SGLang or vLLM. The vLLM path requires CUDA IPC,
+``data_parallel_size=1``, ``pipeline_parallel_size=1``, a non-quantized model,
+and vLLM's checkpoint patch API. For sparse updates, the model loader's final
+runtime write must be a floating-point ``copy_`` whose source and destination
+have the same shape. The vLLM path does not support ``verify_every > 0``, PD
+disaggregation, speculative decoding, or EPLB. vLLM MoE delta updates require
+the Triton backend. Selecting any other rollout engine raises
+``NotImplementedError`` at worker startup.
 
 ## Roadmap
 

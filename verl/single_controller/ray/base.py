@@ -656,17 +656,13 @@ class RayWorkerGroup(WorkerGroup):
         name = f"{self.name_prefix}{cia_name}_{pg_idx}:{local_rank}"  # e.g. Worker_2:5
 
         if self.profile_steps and self.device_name == "cuda":
-            ray_cls_with_init.update_options(
-                {
-                    "runtime_env": {
-                        "env_vars": env_vars,
-                        "nsight": self.worker_nsight_options,
-                    },
-                    "name": name,
-                }
-            )
+            runtime_env = {
+                "env_vars": env_vars,
+                "nsight": self.worker_nsight_options,
+            }
         else:
-            ray_cls_with_init.update_options({"runtime_env": {"env_vars": env_vars}, "name": name})
+            runtime_env = {"env_vars": env_vars}
+        ray_cls_with_init.update_options({"runtime_env": runtime_env, "name": name})
 
         if detached:
             ray_cls_with_init.update_options({"lifetime": "detached"})

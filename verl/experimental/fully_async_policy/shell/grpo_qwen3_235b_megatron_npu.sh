@@ -105,7 +105,6 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.rollout.max_num_batched_tokens=1024 \
     actor_rollout_ref.actor.megatron.param_offload=${offload} \
     actor_rollout_ref.actor.megatron.optimizer_offload=${offload} \
-    actor_rollout_ref.actor.megatron.grad_offload=${offload} \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.75 \
     actor_rollout_ref.rollout.name=${rollout_name} \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \

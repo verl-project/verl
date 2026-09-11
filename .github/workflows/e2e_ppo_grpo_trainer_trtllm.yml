@@ -94,6 +94,9 @@ permissions:
 env:
   IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:trtllm-1.3.0rc15"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
+  # This image is not the uv.cu130 one: it ships its own torch/TensorRT-LLM stack, so
+  # the shared e2e scripts must launch with ambient python instead of `uv run`.
+  VERL_USE_UV: 0
 
 jobs:
   setup:
@@ -116,8 +119,6 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 30 # Increase this timeout value as needed
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.9;9.0;10.0;12.0+PTX"
@@ -125,6 +126,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      # Diagnostic: show whether this runner can reach the outside world at all
+      # before pip needs it. Never fails the job.
       - name: Reinstall FlashInfer for runtime GPU arch
         run: |
           unset TORCH_CUDA_ARCH_LIST
@@ -156,8 +159,6 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 30 # Increase this timeout value as needed
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.9;9.0;10.0;12.0+PTX"
@@ -165,6 +166,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      # Diagnostic: show whether this runner can reach the outside world at all
+      # before pip needs it. Never fails the job.
       - name: Reinstall FlashInfer for runtime GPU arch
         run: |
           unset TORCH_CUDA_ARCH_LIST
@@ -216,8 +219,6 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 30 # Increase this timeout value as needed
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.9;9.0;10.0;12.0+PTX"
@@ -225,6 +226,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      # Diagnostic: show whether this runner can reach the outside world at all
+      # before pip needs it. Never fails the job.
       - name: Reinstall FlashInfer for runtime GPU arch
         run: |
           unset TORCH_CUDA_ARCH_LIST

@@ -92,7 +92,6 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${ETP}
     actor_rollout_ref.actor.megatron.param_offload=True
     actor_rollout_ref.actor.megatron.optimizer_offload=True
-    actor_rollout_ref.actor.megatron.grad_offload=True
     actor_rollout_ref.actor.megatron.dtype=bfloat16
     actor_rollout_ref.actor.checkpoint.strict=False
     +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True

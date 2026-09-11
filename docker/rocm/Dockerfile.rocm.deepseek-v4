@@ -1,0 +1,49 @@
+# From upstream, vllm - rocm 7.2.3
+FROM vllm/vllm-openai-rocm:v0.26.0 AS verl_base
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install \
+    https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.3/apex-1.9.0%2Brocm7.2.3.git355db9b8-cp312-cp312-linux_x86_64.whl \
+    https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.3/transformer_engine-2.6.0-py3-none-any.whl \
+    https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.3/transformer_engine_rocm-2.6.0-py3-none-manylinux_2_28_x86_64.whl
+
+RUN pip install --no-build-isolation  https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.3/transformer_engine_torch-2.6.0.tar.gz
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -U git+https://github.com/ISEEKYAN/mbridge.git@v0.15.1 && \
+    pip install mathruler && \
+    pip install qwen_vl_utils && \
+    pip install flash-linear-attention
+
+ARG MEGATRON_LM_REPO="https://github.com/NVIDIA/Megatron-LM.git"
+ARG MEGATRON_LM_COMMIT="fd1121b8ff7e3a4f83a28d35aed172d7bc0260e1"
+
+COPY docker/rocm/patches /opt/patches
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-deps "nvidia-modelopt>=0.37.0" "pulp<4.0" && \
+    git clone ${MEGATRON_LM_REPO} /opt/Megatron-LM && \
+    cd /opt/Megatron-LM && \
+    git fetch --depth 1 origin ${MEGATRON_LM_COMMIT} && \
+    git checkout ${MEGATRON_LM_COMMIT} && \
+    git apply /opt/patches/non-leaf-fix.patch && \
+    pip install -e . --no-deps
+
+ARG MEGATRON_BRIDGE_REPO="https://github.com/NVIDIA-NeMo/Megatron-Bridge"
+ARG MEGATRON_BRIDGE_COMMIT="v0.5.0"
+
+RUN pip install --no-deps --no-build-isolation --ignore-requires-python \
+    git+${MEGATRON_BRIDGE_REPO}@${MEGATRON_BRIDGE_COMMIT}
+
+RUN pip install "transformers==5.12.1"  "TransferQueue==0.1.8"
+
+ARG BUILD_DATE="2026-08-07"
+RUN --mount=type=cache,target=/root/.cache/pip \
+    git clone https://github.com/verl-project/verl.git && \
+    cd verl && \
+    pip install -e .
+
+ENV VLLM_ROCM_USE_AITER=1
+ENV VLLM_ROCM_USE_AITER_MOE=1
+
+WORKDIR /app/verl
+CMD ["/bin/bash"]

@@ -82,7 +82,6 @@ python3 -X faulthandler -m verl.experimental.fully_async_policy.fully_async_main
     actor_rollout_ref.actor.megatron.use_mbridge=True \
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=False \
     actor_rollout_ref.actor.megatron.param_offload=${True} \
-    actor_rollout_ref.actor.megatron.grad_offload=${True} \
     actor_rollout_ref.actor.megatron.optimizer_offload=${True} \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=4 \
     actor_rollout_ref.actor.megatron.expert_model_parallel_size=8 \

@@ -14,6 +14,11 @@
 # limitations under the License.
 
 import functools
+import glob
+import logging
+import os
+import shutil
+import socket
 from contextlib import contextmanager
 from typing import Callable, Optional
 
@@ -23,6 +28,16 @@ from verl.plugin.platform import get_platform
 
 from .config import NsightToolConfig
 from .profile import DistProfiler, ProfilerConfig
+
+logger = logging.getLogger(__name__)
+
+# Ray writes Nsight Systems reports to a fixed, non-configurable directory
+# (see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html):
+#   /tmp/ray/session_latest/logs/nsight/worker_process_<pid>[.<range_id>].nsys-rep
+# The ``<pid>`` is nsys's ``%p`` token, i.e. the PID of the profiled (worker) process,
+# which matches ``os.getpid()`` inside the verl worker. We use that to relocate only the
+# current process's own artifacts and avoid races between co-located ranks.
+RAY_NSIGHT_LOG_DIR = "/tmp/ray/session_latest/logs/nsight"
 
 
 def mark_start_range(
@@ -137,11 +152,77 @@ class NsightSystemsProfiler(DistProfiler):
         if not self.discrete:
             get_platform().profiler_stop()
 
-    def step(self):
-        """No-op per-mini-batch step hook.
+    def relocate_results(
+        self,
+        save_path: Optional[str],
+        *,
+        rank: Optional[int] = None,
+        save_file_prefix: Optional[str] = None,
+        source_dir: Optional[str] = None,
+    ) -> list[str]:
+        """Move this process's Nsight reports out of Ray's fixed log dir into ``save_path``.
 
-        Nsight Systems profiling is controlled via start/stop and has no per-step schedule
-        to advance. It must still be defined here: without it, the dispatcher's
+        Ray hardcodes the Nsight output directory and offers no way to change it, which makes the
+        ``*.nsys-rep`` files awkward to collect. This moves the current worker process's artifacts
+        (matched by PID, so co-located ranks never touch each other's files) into ``save_path``.
+
+        This is best-effort and safe to call repeatedly: files that do not exist yet (nsys finalizes
+        the report only after the profiling session shuts down) are simply skipped, and nothing is
+        deleted. Destination filenames are prefixed with the hostname (and role, when known) to keep
+        them unique across nodes that may reuse PIDs and to identify which worker produced them.
+
+        Args:
+            save_path: Destination directory. When falsy, relocation is skipped.
+            rank: Owning rank, used only for logging.
+            save_file_prefix: Optional role label embedded in the destination filename.
+            source_dir: Override for the Ray Nsight log directory (defaults to ``RAY_NSIGHT_LOG_DIR``).
+
+        Returns:
+            The list of destination paths that were successfully moved.
+        """
+        if not save_path:
+            logger.warning("nsys relocate_results: save_path is not set, skipping relocation (rank=%s)", rank)
+            return []
+
+        src_dir = source_dir or RAY_NSIGHT_LOG_DIR
+        pid = os.getpid()
+        # nsys may emit worker_process_<pid>.nsys-rep and, in discrete/capture-range mode,
+        # worker_process_<pid>.<range_id>.nsys-rep, plus intermediate .qdstrm files.
+        matches = sorted(glob.glob(os.path.join(src_dir, f"worker_process_{pid}.*")))
+        if not matches:
+            logger.info(
+                "nsys relocate_results: no reports for pid=%s under %s yet (rank=%s); "
+                "nsys writes the report after the profiling session shuts down.",
+                pid,
+                src_dir,
+                rank,
+            )
+            return []
+
+        os.makedirs(save_path, exist_ok=True)
+        hostname = socket.gethostname()
+        prefix = f"{save_file_prefix}_" if save_file_prefix else ""
+        moved: list[str] = []
+        for src in matches:
+            dst = os.path.join(save_path, f"{prefix}{hostname}_{os.path.basename(src)}")
+            try:
+                shutil.move(src, dst)
+                moved.append(dst)
+            except FileNotFoundError:
+                # Another attempt (or process) already moved it; ignore.
+                continue
+            except OSError as e:
+                logger.warning("nsys relocate_results: failed to move %s -> %s (rank=%s): %s", src, dst, rank, e)
+        if moved:
+            logger.info("nsys relocate_results: moved %d file(s) to %s (rank=%s)", len(moved), save_path, rank)
+        return moved
+
+    def step(self):
+        """No-op per-mini-batch hook.
+
+        The actor update loop calls this once per mini-batch to drive the torch profiler's
+        schedule, but Nsight Systems profiling is controlled via start/stop, so it has nothing to
+        advance here. It must still be defined here: without it, the dispatcher's
         ``getattr(self._impl, "step", lambda: None)`` resolves to the inherited
         ``DistProfiler.step`` (backend impls subclass ``DistProfiler`` but never run its
         ``__init__``), which then reads dispatcher-only state such as ``_enable`` and raises
@@ -176,7 +257,10 @@ class NsightSystemsProfiler(DistProfiler):
         def decorator(func):
             @functools.wraps(func)
             def wrapper(*args, **kwargs_inner):
-                profile_name = message or func.__name__
+                # Prefer the stage label (`role`, e.g. "actor_compute_log_prob"): it names both the
+                # role and the function, which the method name alone cannot do for a colocated
+                # worker. Fall back to the method name for stages that declare no role.
+                profile_name = message or kwargs_outer.get("role") or func.__name__
 
                 if self.discrete:
                     get_platform().profiler_start()

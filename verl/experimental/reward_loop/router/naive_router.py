@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import binascii
 import logging
 import multiprocessing
 import os
@@ -94,6 +95,7 @@ class NaiveRouter:
         self.app = FastAPI()
         self.worker_urls = worker_urls
         self.request_counts = {url: 0 for url in worker_urls}
+        self.full_determinism = os.getenv("VERL_FULL_DETERMINISM", "0") == "1"
 
         self.max_connections = max_connections
         self.timeout = timeout
@@ -137,15 +139,16 @@ class NaiveRouter:
         if not self.worker_urls:
             return JSONResponse(status_code=503, content={"error": "No available workers"})
 
-        worker_url = self._select_worker()
+        # Read the body first so it can seed deterministic routing under
+        # full_determinism (same body → same worker across runs).
+        body = await request.body()
+        headers = dict(request.headers)
+
+        worker_url = self._select_worker(body if self.full_determinism else None)
         target_url = f"{worker_url}/{endpoint}"
 
         if self.verbose:
             logger.debug(f"[router] Forwarding request → {target_url}")
-
-        # Copy request data
-        body = await request.body()
-        headers = dict(request.headers)
 
         try:
             for attempt in range(self.max_attempts):
@@ -177,9 +180,23 @@ class NaiveRouter:
             # worker's count leaks upward and skews load balancing permanently.
             self._release_worker(worker_url)
 
-    def _select_worker(self) -> str:
-        """Select the least-loaded worker (simple round-robin by request count)."""
-        url = min(self.request_counts, key=self.request_counts.get)
+    def _select_worker(self, request_id: bytes | None = None) -> str:
+        """Select the least-loaded worker.
+
+        Under ``full_determinism`` (signalled by a non-None ``request_id`` derived
+        from the request body), tie-break among equally-loaded workers with
+        ``binascii.crc32(request_id)`` so the same request always routes to the same
+        worker across runs — otherwise each replica may diverge in floating-point state.
+        crc32 is platform-independent and does not rely on PYTHONHASHSEED.
+        """
+        min_count = min(self.request_counts.values())
+        candidates = [url for url, c in self.request_counts.items() if c == min_count]
+        if len(candidates) == 1:
+            url = candidates[0]
+        elif request_id is not None:
+            url = candidates[binascii.crc32(request_id) % len(candidates)]
+        else:
+            url = candidates[0]
         self.request_counts[url] += 1
         return url
 

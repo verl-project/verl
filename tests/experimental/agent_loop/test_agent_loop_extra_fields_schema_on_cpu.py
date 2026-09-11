@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import warnings
+from contextlib import nullcontext
 from typing import Any, Optional
 
 import numpy as np
@@ -22,6 +23,7 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
+import verl.experimental.agent_loop.agent_loop as agent_loop_module
 from verl.experimental.agent_loop.agent_loop import (
     AgentLoopMetrics,
     AgentLoopOutput,
@@ -120,6 +122,94 @@ class _FakeTokenizer:
         return "<decoded>"
 
 
+def _make_agent_loop_output() -> AgentLoopOutput:
+    return AgentLoopOutput(
+        prompt_ids=[101, 102],
+        response_ids=[11, 12],
+        response_mask=[1, 1],
+        metrics=AgentLoopMetrics(),
+    )
+
+
+def test_agent_loop_output_as_dict_handles_default_extra_fields():
+    fields = _make_agent_loop_output().as_dict()
+
+    assert fields["extra_fields"] == {}
+
+
+def test_agent_loop_output_as_dict_preserves_mutated_default_extra_fields():
+    output = _make_agent_loop_output()
+    output.extra_fields["raw_prompt"] = [{"role": "user", "content": "hello"}]
+
+    fields = output.as_dict()
+
+    assert fields["extra_fields"] == {"raw_prompt": [{"role": "user", "content": "hello"}]}
+
+
+def test_agent_loop_output_as_dict_promotes_teacher_fields_without_mutating_model():
+    output = _make_agent_loop_output()
+    output.extra_fields.update(
+        {
+            "raw_prompt": [{"role": "user", "content": "hello"}],
+            "teacher_ids": [201, 202],
+            "teacher_logprobs": [-0.1, -0.2],
+        }
+    )
+
+    fields = output.as_dict()
+
+    assert fields["teacher_ids"] == [201, 202]
+    assert fields["teacher_logprobs"] == [-0.1, -0.2]
+    assert fields["extra_fields"] == {"raw_prompt": [{"role": "user", "content": "hello"}]}
+    assert output.extra_fields["teacher_ids"] == [201, 202]
+    assert output.extra_fields["teacher_logprobs"] == [-0.1, -0.2]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_worker_passes_only_hf_model_type_through_hydra(monkeypatch):
+    captured_kwargs: dict[str, Any] = {}
+    expected_output = object()
+
+    class _FakeAgentLoop:
+        async def run(self, sampling_params: dict[str, Any], **kwargs):
+            del sampling_params, kwargs
+            return expected_output
+
+    def fake_instantiate(*, config, **kwargs):
+        del config
+        captured_kwargs.update(kwargs)
+        return _FakeAgentLoop()
+
+    monkeypatch.setattr(agent_loop_module.hydra.utils, "instantiate", fake_instantiate)
+    monkeypatch.setattr(agent_loop_module, "rollout_trace_attr", lambda **kwargs: nullcontext())
+    monkeypatch.setitem(agent_loop_module._agent_loop_registry, "scalar_model_type_test", {"_target_": "unused"})
+
+    worker = object.__new__(AgentLoopWorker)
+    worker.config = OmegaConf.create({"data": {}})
+    worker.llm_client = object()
+    worker.tokenizer = _FakeTokenizer()
+    worker.processor = None
+    worker.hf_model_type = "qwen2_5_vl"
+    worker.dataset_cls = RLHFDataset
+    worker.tools = []
+
+    async def passthrough_postprocess(output, validate, **kwargs):
+        del validate, kwargs
+        return output
+
+    worker._agent_loop_postprocess = passthrough_postprocess
+    result = await worker._run_agent_loop(
+        {},
+        {"step": 0, "sample_index": 0, "rollout_n": 0, "validate": False},
+        agent_name="scalar_model_type_test",
+    )
+
+    assert result is expected_output
+    assert captured_kwargs["hf_model_type"] == "qwen2_5_vl"
+    assert isinstance(captured_kwargs["hf_model_type"], str)
+    assert "hf_config" not in captured_kwargs
+
+
 def _pad_1d(ids: list[int], *, length: int, pad_id: int = 0) -> list[int]:
     if len(ids) > length:
         return ids[:length]
@@ -178,12 +268,13 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
         {
             "actor_rollout_ref": {
                 "rollout": {"prompt_length": 16, "response_length": 16, "multi_turn": {"tool_config_path": None}},
-                "model": {},
+                # AgentLoopBase unconditionally builds the Continuous Token builder; without an
+                # HF model type or multimodal processor it falls back to the default builder.
+                "model": {"path": "dummy-model", "tokenizer_path": "dummy-model"},
             },
             "data": {
                 "tool_config_path": None,
                 "apply_chat_template_kwargs": {},
-                "continuous_token": {"enable": False, "model_family": "auto"},
             },
         }
     )
@@ -302,8 +393,11 @@ async def test_agent_loop_postprocess_accepts_read_only_routed_experts_on_cpu():
             raw_prompt=[{"role": "user", "content": "hi"}],
         )
 
-    expected = torch.tensor(routed_experts.copy()).unsqueeze(0)
+    # Rollout is where routed_experts gets its int16 storage dtype, whatever dtype
+    # the backend handed over.
+    expected = torch.tensor(routed_experts.copy()).to(torch.int16).unsqueeze(0)
     assert internal.routed_experts is not None
+    assert internal.routed_experts.dtype == torch.int16
     assert internal.routed_experts.shape == (1, 8, 2, 1)
     torch.testing.assert_close(internal.routed_experts[:, 2:6], expected)
     assert torch.count_nonzero(internal.routed_experts[:, :2]) == 0

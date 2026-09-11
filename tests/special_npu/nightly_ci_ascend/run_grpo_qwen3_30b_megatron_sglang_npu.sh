@@ -132,7 +132,6 @@ ACTOR_CONFIG=(
     # Memory Optimization
     actor_rollout_ref.actor.megatron.param_offload=${all_offload}
     actor_rollout_ref.actor.megatron.optimizer_offload=${all_offload}
-    actor_rollout_ref.actor.megatron.grad_offload=${all_offload}
     # Model Weights Management
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=False
     actor_rollout_ref.actor.megatron.use_mbridge=True

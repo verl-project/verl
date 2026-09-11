@@ -49,6 +49,7 @@ from verl.single_controller.ray import (
 )
 from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo import core_algos
+from verl.trainer.ppo.checkpoint_callback import build_checkpoint_callback
 from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.metric_utils import (
     RolloutMoELoadBalanceMetricsAccumulator,
@@ -115,6 +116,14 @@ def _tq_supports_checkpoint() -> bool:
     )
 
 
+def _count_tq_prompt_groups(partition_id: str = "train") -> int:
+    """Number of prompt groups currently registered in a TransferQueue partition."""
+    data = tq.kv_list(partition_id)
+    if not data:
+        return 0
+    return sum(1 for tag in data.get(partition_id, {}).values() if tag.get("is_prompt", False))
+
+
 class PPOTrainer(ABC):
     """Base class for PPO trainer.
 
@@ -124,6 +133,7 @@ class PPOTrainer(ABC):
 
     def __init__(self, config: DictConfig):
         self.config = config
+        self.checkpoint_callback = build_checkpoint_callback(config)
         self.use_critic = need_critic(self.config)
         self.use_reference_policy = need_reference_policy(self.config)
         self.use_teacher_policy = need_teacher_policy(self.config)
@@ -138,6 +148,7 @@ class PPOTrainer(ABC):
         )
         # track mini-batch index within a parameter_sync_step cycle for Decoupled PPO
         self.local_trigger_step = 0
+        self._restored_tq_prompt_count = 0
 
     def _build_replay_buffer(self) -> ReplayBuffer:
         """Instantiate the replay buffer (or a user-provided custom sampler).
@@ -427,7 +438,6 @@ class PPOTrainer(ABC):
 
         # we start from step 1
         self.global_steps += 1
-        # SkipManager skips warmup batches in async trainers, so it doesn't conflict with reissue.
         SkipManager.set_step(self.global_steps)
         self._reissue_inflight_prompts()
         self.prev_step_profile = False
@@ -514,9 +524,11 @@ class PPOTrainer(ABC):
         )
         sample_batch_size = train_batch_size // self.parameter_sync_step
 
-        self._add_batch_to_generate()
+        prepare_metrics = self.prepare_step()
 
         metrics_aggregator = MetricsAggregator()
+        if prepare_metrics:
+            metrics_aggregator.add_step_metrics(prepare_metrics)
         combined_keys: list = []
         combined_tags: list = []
         combined_partition_id = "train"
@@ -594,6 +606,27 @@ class PPOTrainer(ABC):
     def on_train_begin(self):
         """Called before the training loop starts."""
         return
+
+    def _add_async_warmup_batches(self, num_warmup_batches: int) -> None:
+        """Fill the async prefetch window without duplicating checkpointed prompt groups."""
+        if self.config.skip.rollout_tq.enable or num_warmup_batches <= 0:
+            return
+
+        restored_prompts = self._restored_tq_prompt_count
+        target_prompts = num_warmup_batches * self.config.data.train_batch_size
+        missing_prompts = max(0, target_prompts - restored_prompts)
+        if missing_prompts == 0:
+            logger.info(
+                f"Skipping async warmup: {restored_prompts} restored prompt groups already fill the "
+                f"{target_prompts}-prompt prefetch window"
+            )
+            return
+
+        self._add_prompts_to_generate(missing_prompts)
+        logger.info(
+            f"Added {missing_prompts} warmup prompts after restoring {restored_prompts} of "
+            f"{target_prompts} target prompt groups"
+        )
 
     def on_train_end(self):
         """Called after the training loop ends."""
@@ -843,6 +876,8 @@ class PPOTrainer(ABC):
             if os.path.exists(tq_ckpt_path):
                 logger.info(f"Loading TransferQueue state from {tq_ckpt_path}")
                 tq.load_checkpoint(tq_ckpt_path)
+                self._restored_tq_prompt_count = _count_tq_prompt_groups()
+                logger.info(f"Restored {self._restored_tq_prompt_count} training prompt groups from TransferQueue")
 
     def _reissue_inflight_prompts(self, partition_id: str = "train") -> int:
         """Restart checkpointed pending/running prompt groups from their persisted prompt data."""
@@ -949,12 +984,22 @@ class PPOTrainer(ABC):
         actor_ckpt_cfg = self.config.actor_rollout_ref.actor.get("checkpoint", {})
         if actor_ckpt_cfg.get("async_save", False):
             logger.info("skip write latest_checkpointed_iteration.txt when async_save is True")
+            self.checkpoint_callback.on_save(
+                trainer=self,
+                global_step=self.global_steps,
+                checkpoint_dir=local_global_step_folder,
+                async_save=True,
+            )
             return
         local_latest_checkpointed_iteration = os.path.join(
             self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt"
         )
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
+
+        self.checkpoint_callback.on_save(
+            trainer=self, global_step=self.global_steps, checkpoint_dir=local_global_step_folder, async_save=False
+        )
 
     def _validate(self) -> dict[str, float]:
         # Lists to collect samples for the table
@@ -1275,6 +1320,25 @@ class PPOTrainer(ABC):
 
         return metric_dict
 
+    def _rollout_server_managers(self) -> list:
+        """LLM server managers whose inference engines take part in rollout profiling.
+
+        Subclasses owning additional replicas (e.g. the standalone rollout of separate-async
+        training) extend this list so those engines are profiled as well.
+        """
+        managers = [getattr(self, "llm_server_manager", None)]
+        return [manager for manager in managers if manager is not None]
+
+    def _start_rollout_profiling(self) -> None:
+        """Start rollout profiling."""
+        for manager in self._rollout_server_managers():
+            manager.start_profile()
+
+    def _stop_rollout_profiling(self) -> None:
+        """Stop rollout profiling."""
+        for manager in self._rollout_server_managers():
+            manager.stop_profile()
+
     def _start_profiling(self) -> None:
         """Start profiling for all worker groups if profiling is enabled."""
         do_profile = (
@@ -1284,14 +1348,29 @@ class PPOTrainer(ABC):
         )
 
         if do_profile:
-            self.actor_rollout_wg.start_profile(role="e2e", profile_step=self.global_steps)
-            if self.use_reference_policy:
+            # "train", not "e2e": this window only holds what the training worker itself runs
+            # (log-prob forwards and the actor update). Generation happens in the inference
+            # engines below, which write their own traces.
+            #
+            # In the hybrid engine, actor/rollout and the (colocated) reference -- and sometimes the
+            # critic -- share ONE worker group object, so ref_policy_wg / critic_wg can alias
+            # actor_rollout_wg. Each start/stop_profile round-trips to every rank and, on stop, runs
+            # the finish hook (e.g. the user's trace-upload command); driving the same physical
+            # workers more than once would fire that hook once per alias and upload the same trace
+            # file multiple times. Drive each distinct worker group exactly once.
+            self.actor_rollout_wg.start_profile(role="train", profile_step=self.global_steps)
+            seen = {id(self.actor_rollout_wg)}
+            if self.use_reference_policy and id(self.ref_policy_wg) not in seen:
+                seen.add(id(self.ref_policy_wg))
                 self.ref_policy_wg.start_profile(profile_step=self.global_steps)
-            if self.use_critic:
+            if self.use_critic and id(self.critic_wg) not in seen:
+                seen.add(id(self.critic_wg))
                 self.critic_wg.start_profile(profile_step=self.global_steps)
+            self._start_rollout_profiling()
 
     def _stop_profiling(self) -> None:
         """Stop profiling for all worker groups if profiling is enabled."""
+        this_step_profile = self.curr_step_profile
         self.next_step_profile = (
             self.global_steps + 1 in self.config.global_profiler.steps
             if self.config.global_profiler.steps is not None
@@ -1306,11 +1385,25 @@ class PPOTrainer(ABC):
         self.curr_step_profile = self.next_step_profile
 
         if do_profile:
-            self.actor_rollout_wg.stop_profile()
-            if self.use_reference_policy:
-                self.ref_policy_wg.stop_profile()
-            if self.use_critic:
-                self.critic_wg.stop_profile()
+            # Run the finish command (e.g. the trace upload) only once, on the last profiled step, so
+            # a command that uploads the whole save_path sends each trace once instead of re-uploading
+            # the accumulating directory every step. "Last" is the largest configured step, or the
+            # run's final step if it ends earlier on a profiled step.
+            profiled_steps = self.config.global_profiler.steps
+            is_last_step = self.global_steps >= self.total_training_steps
+            run_command = bool(
+                this_step_profile and profiled_steps and (self.global_steps == max(profiled_steps) or is_last_step)
+            )
+            # See _start_profiling: skip aliased worker groups so the finish hook (and any trace
+            # upload it triggers) fires exactly once per distinct process, not once per role alias.
+            self.actor_rollout_wg.stop_profile(run_command=run_command)
+            seen = {id(self.actor_rollout_wg)}
+            if self.use_reference_policy and id(self.ref_policy_wg) not in seen:
+                seen.add(id(self.ref_policy_wg))
+                self.ref_policy_wg.stop_profile(run_command=run_command)
+            if self.use_critic and id(self.critic_wg) not in seen:
+                seen.add(id(self.critic_wg))
+                self.critic_wg.stop_profile(run_command=run_command)
 
     def _fetch_one_gen_batch(self) -> TensorDict:
         """Fetch one ``gen_batch_size`` chunk from the dataloader."""
@@ -1370,6 +1463,10 @@ class PPOTrainer(ABC):
         """Add one training batch to the AgentLoopManager."""
         batch = self._next_train_batch()
         self._submit_batch_to_rollout(batch)
+
+    def prepare_step(self) -> dict:
+        self._add_batch_to_generate()
+        return {}
 
     def _compute_reward_colocate(self, batch: KVBatchMeta, metrics: dict | None = None) -> KVBatchMeta:
         """Compute the reward score with a colocated reward model."""
@@ -1751,10 +1848,15 @@ class PPOTrainer(ABC):
                 partition_id=batch.partition_id,
                 select_fields=["extra_fields"],
             )
-            extra_fields = spec_data["extra_fields"].tolist()
-            spec_drafts = [extra_field["spec_num_draft_tokens"] for extra_field in extra_fields]
-            spec_accepts = [extra_field["spec_num_accepted_tokens"] for extra_field in extra_fields]
-            spec_verifies = [extra_field["spec_num_verify_steps"] for extra_field in extra_fields]
+            extra_fields = spec_data.pop("extra_fields").tolist()
+            # The rollout omits the spec_* stats when the backend does not report
+            # per-request spec-decode stats; leave all three as None in that case.
+            if extra_fields and all(
+                isinstance(extra_field, dict) and "spec_num_draft_tokens" in extra_field for extra_field in extra_fields
+            ):
+                spec_drafts = [extra_field["spec_num_draft_tokens"] for extra_field in extra_fields]
+                spec_accepts = [extra_field["spec_num_accepted_tokens"] for extra_field in extra_fields]
+                spec_verifies = [extra_field["spec_num_verify_steps"] for extra_field in extra_fields]
 
         data = data.to_padded_tensor()
         data["token_level_scores"] = data["rm_scores"]

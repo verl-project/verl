@@ -13,7 +13,7 @@
 # limitations under the License.
 
 
-from verl.utils.device import get_torch_device
+from verl.utils.device import get_torch_device, is_cuda_available, is_npu_available
 
 
 def set_random_seed(seed):
@@ -25,7 +25,14 @@ def set_random_seed(seed):
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
-    if get_torch_device().device_count() > 0:
+    # model_parallel_cuda_manual_seed() seeds Megatron-Core's CUDA RNG tracker. This is
+    # required for Megatron model construction: layers such as VocabParallelEmbedding call
+    # get_cuda_rng_tracker().fork() and raise "cuda rng state model-parallel-rng is not
+    # added" if the tracker was never seeded. On Ascend/NPU torch has no CUDA backend, but
+    # torch_npu/MindSpeed patch Megatron's tracker so this call works there as well. Only
+    # skip it when no real accelerator (CUDA or NPU) is present, which avoids "Torch not
+    # compiled with CUDA enabled" on CPU-only environments.
+    if (is_cuda_available or is_npu_available) and get_torch_device().device_count() > 0:
         from megatron.core import tensor_parallel
 
         tensor_parallel.model_parallel_cuda_manual_seed(seed)

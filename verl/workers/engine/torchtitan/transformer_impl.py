@@ -58,11 +58,35 @@ from verl.workers.engine.torchtitan.utils import (
     derive_torchtitan_name_and_flavor,
     enable_fsdp_gradient_division,
     get_attention_masks,
-    iter_per_tensor_params_ep,
 )
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
+
+
+def _hf_entry_row_slots(name, spec, place, lidx, lval):
+    """Dim-0 identity slot profile: slot ``e`` IS ``full[e]``, so a position's slot is one divmod away."""
+    from ..spec import translate_flat_indices
+    from ..utils import _prodshape
+
+    slots = spec.hf_slots
+    n_slots = len(slots)
+    rows = int(spec.full_shape[0])
+    assert n_slots == rows, (
+        f"{name}: dim-0 identity slots need one slot per dim-0 row, got {n_slots} slots for {rows} rows; "
+        "a converter that emits several HF tensors per row belongs on the to_hf_chunk path"
+    )
+    dtype_str = str(lval.dtype).replace("torch.", "")
+    if lidx.numel() == 0:
+        return slots, dtype_str, torch.zeros(n_slots, dtype=torch.int64), lidx.to(torch.int32), lval
+
+    row_numel = max(_prodshape(spec.full_shape[1:]), 1)
+    gidx = translate_flat_indices(lidx, place)
+    edges = torch.arange(n_slots + 1, device=gidx.device, dtype=gidx.dtype) * row_numel
+    # One D2H for the run lengths; the diff's nonzero already synced this stream.
+    counts = torch.searchsorted(gidx, edges).diff().cpu()
+    return slots, dtype_str, counts, (gidx % row_numel).to(torch.int32), lval
+
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -327,7 +351,7 @@ class TorchTitanEngine(BaseEngine):
 
     def _get_data_parallel_mesh(self):
         """Get the data parallel mesh, handling hybrid/fully/replicate shard modes."""
-        mesh = self.parallel_dims.get_optional_mesh(["dp_replicate", "fsdp"])
+        mesh = self.parallel_dims.get_optional_mesh("loss")
         if mesh is None:
             mesh = self.parallel_dims.get_optional_mesh("fsdp")
         if mesh is None:
@@ -358,8 +382,10 @@ class TorchTitanEngine(BaseEngine):
 
         # train_context activates the (thread-local) SPMD mesh required by spmd_types; it must
         # span backward too, since activation-checkpoint recompute re-runs the forward there.
-        for micro_batch in micro_batches:
-            with self.trainer.train_context(), ctx:
+        # record_function names each micro-batch so a forward-only stage (compute_log_prob /
+        # compute_ref_log_prob) shows "micro_batch<i>" rows instead of a single anonymous forward.
+        for micro_batch_idx, micro_batch in enumerate(micro_batches):
+            with self.trainer.train_context(), ctx, torch.profiler.record_function(f"micro_batch{micro_batch_idx}"):
                 loss, output = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
                 if not forward_only:
                     loss.backward()
@@ -506,6 +532,104 @@ class TorchTitanEngine(BaseEngine):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.optimizer)
 
+    def _to_hf_named_params(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Re-key a torchtitan state dict to HuggingFace names, values untouched."""
+        # Convert TorchTitan key names to HuggingFace key names (expected by vLLM)
+        sd_adapter = self.checkpointer.sd_adapter
+        if sd_adapter is not None:
+            params = sd_adapter.to_hf(params)
+
+        # When weight tying is enabled, the sd_adapter skips lm_head.weight during
+        # to_hf() conversion (since it's the same tensor as embed_tokens.weight in
+        # the torchtitan model). But vLLM needs lm_head.weight explicitly, so we
+        # add it back as a reference to embed_tokens.weight.
+        if "model.embed_tokens.weight" in params and "lm_head.weight" not in params:
+            params["lm_head.weight"] = params["model.embed_tokens.weight"]
+        return params
+
+    def _expert_stack_slots(self, name: str, param: Any) -> Optional[list[tuple[str, tuple]]]:
+        """If ``name`` is a fused expert stack, enumerate ALL its experts' HF tensors, else ``None``."""
+        sd_adapter = self.checkpointer.sd_adapter
+        from_hf_map = getattr(sd_adapter, "from_hf_map", None) if sd_adapter is not None else None
+        if not from_hf_map or param.ndim < 2:
+            return None
+        abstract = re.sub(r"(\d+)", "{}", name, count=1)
+        hf_template = next((hf for hf, titan in from_hf_map.items() if titan == abstract), None)
+        if hf_template is None or hf_template.count("{}") != 2:
+            return None
+        layer_id = re.search(r"\d+", name).group(0)
+        slot_shape = tuple(int(d) for d in param.shape[1:])
+        return [(hf_template.format(layer_id, e), slot_shape) for e in range(int(param.shape[0]))]
+
+    def _hf_delta_entry(self, name, spec, place, lidx, lval):
+        """Build one parameter's final HF-coordinate delta entry: expert stack via slots, else identity."""
+        from ..utils import _hf_entry_identity
+
+        if spec.hf_slots is not None:
+            return _hf_entry_row_slots(name, spec, place, lidx, lval)
+        assert spec.to_hf_chunk is None, (
+            f"{name}: the torchtitan engine has no opaque to-HF converters; "
+            "a spec carrying one did not come from this engine"
+        )
+        return _hf_entry_identity(name, spec, place, lidx, lval)
+
+    def get_per_tensor_param_delta_shard(self, **kwargs):
+        """Yield FINAL HF-coordinate delta entries per parameter; needs a prior :meth:`prime_delta_snapshots`."""
+        from ..utils import hf_delta_export
+
+        self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
+        gen, _ = self.get_per_tensor_param_shard()
+        return hf_delta_export(gen, self._delta_shard_snap, self._hf_delta_entry), None
+
+    def _assert_shard_export_supported(self) -> None:
+        """Reject PP, the one layout whose local shard is not a block; every FSDP2 layout is one."""
+        pd = self.parallel_dims
+        if pd.pp_enabled:
+            raise NotImplementedError(
+                "the torchtitan sharded delta export does not support pipeline parallelism: "
+                "each stage holds a disjoint slice of the model, so the export order is not "
+                "identical across ranks the way the delta engine's lockstep gather requires "
+                f"(pipeline_parallel_size={pd.pp})"
+            )
+        # TP, EP and HSDP replicate all stay blocks, so derive_dtensor_placement handles them.
+
+    def get_per_tensor_param_shard(self, **kwargs):
+        """Yield this rank's *local* shard ``(hf_name, local_flat_bf16, ShardSpec)`` instead of the full tensor."""
+        self._assert_shard_export_supported()
+        raw = {}
+        for module in self.module:
+            raw.update(module.state_dict())
+
+        # Expert stacks go WHOLE with a slot table; to_hf would name only the local experts, breaking lockstep.
+        stacks = {}
+        for name, param in raw.items():
+            slots = self._expert_stack_slots(name, param)
+            if slots is not None:
+                stacks[name] = slots
+        params = self._to_hf_named_params({k: v for k, v in raw.items() if k not in stacks})
+        device = get_device_id()  # local shards live on CPU under an offload policy
+
+        from ..spec import ShardSpec
+
+        def _shard(param):
+            p = param.to(device, non_blocking=True)
+            # The wire speaks bf16, but mixed precision keeps fp32 masters: cast before the diff sees them.
+            if p.is_floating_point():
+                p = p.to(torch.bfloat16, non_blocking=True)
+            local = p.to_local() if isinstance(p, DTensor) else p
+            return local.reshape(-1)
+
+        def _gen():
+            for name, param in params.items():
+                yield name, _shard(param), ShardSpec.from_param(param)
+            # Keyed by the torchtitan name: the entry is the stack, not any one HF tensor.
+            for name, slots in stacks.items():
+                spec = ShardSpec.from_param(raw[name])
+                spec.hf_slots = slots
+                yield name, _shard(raw[name]), spec
+
+        return _gen(), None
+
     def get_per_tensor_param(self, **kwargs):
         for module in self.module:
             load_fsdp_model_to_gpu(module)
@@ -519,42 +643,37 @@ class TorchTitanEngine(BaseEngine):
             for module in self.module:
                 offload_fsdp_model_to_cpu(module)
 
-        # Convert TorchTitan key names to HuggingFace key names (expected by vLLM)
-        sd_adapter = self.checkpointer.sd_adapter
-        if sd_adapter is not None:
-            params = sd_adapter.to_hf(params)
-
-        # When weight tying is enabled, the sd_adapter skips lm_head.weight during
-        # to_hf() conversion (since it's the same tensor as embed_tokens.weight in
-        # the torchtitan model). But vLLM needs lm_head.weight explicitly, so we
-        # add it back as a reference to embed_tokens.weight.
-        if "model.embed_tokens.weight" in params and "lm_head.weight" not in params:
-            params["lm_head.weight"] = params["model.embed_tokens.weight"]
+        # Gather the stack before splitting it: to_hf splits first and drops every expert EFSDP holds elsewhere.
+        stacks = {}
+        for name, param in params.items():
+            slots = self._expert_stack_slots(name, param)
+            if slots is not None:
+                stacks[name] = slots
+        expert_stacks = [(params[name], slots) for name, slots in stacks.items()]
+        dense = self._to_hf_named_params({k: v for k, v in params.items() if k not in stacks})
+        params.clear()
 
         device = get_device_id()  # used when fsdp2 set cpu_offload_policy
 
-        # When Expert Parallel (EP) is used, sd_adapter.to_hf() only produces
-        # individual expert weights for the locally-owned experts (e.g., 16 out of
-        # 128 with EP=8). vLLM needs ALL experts. We gather the missing experts
-        # by all-gathering each expert weight across the EP process group.
-        if self.parallel_dims.ep_enabled:
-            ep_mesh = self.parallel_dims.get_optional_mesh("ep")
-            ep_group = ep_mesh.get_group()
-            ep_size = self.parallel_dims.ep
-            per_tensor_param = iter_per_tensor_params_ep(params, device, ep_group, ep_size)
-        else:
+        def _gen():
             # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
-            per_tensor_param = (
-                (
-                    name,
-                    param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
-                    if isinstance(param, DTensor)
-                    else param,
-                )
-                for name, param in params.items()
-            )
+            for name, param in dense.items():
+                if isinstance(param, DTensor):
+                    yield name, param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+                else:
+                    yield name, param
+            # One stack at a time: the gathered (num_experts, ...) tensor is the peak allocation here.
+            for stack, slots in expert_stacks:
+                full = stack.to(device, non_blocking=True)
+                if isinstance(full, DTensor):
+                    full = full.full_tensor()
+                full = full.to(torch.bfloat16, non_blocking=True)
+                for e, (hf_name, _shape) in enumerate(slots):
+                    yield hf_name, full[e].clone()
+                del full
+
         # TODO: support Torchtitan PEFT
-        return per_tensor_param, None
+        return _gen(), None
 
 
 class EngineEvalModeCtx(BaseEngineCtx):

@@ -29,7 +29,7 @@ from megatron.core.dist_checkpointing.mapping import ShardedObject
 from packaging import version
 from transformers import GenerationConfig
 
-from verl.utils.device import get_device_name, get_torch_device
+from verl.utils.device import get_device_name, get_torch_device, is_device_available
 from verl.utils.fs import is_non_local, local_mkdir_safe
 from verl.utils.logger import log_with_rank
 from verl.utils.megatron.dist_checkpointing import load_dist_checkpointing, save_dist_checkpointing
@@ -274,7 +274,10 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             "rng_tracker_states": tensor_parallel.get_cuda_rng_tracker().get_states(),
         }
 
-        if get_device_name() != "cpu":
+        # get_device_name() reports the platform's accelerator even on hosts that have
+        # none, so the accelerator RNG state is only reachable when the device is
+        # actually usable in this process.
+        if get_device_name() != "cpu" and is_device_available():
             rng_state[f"{get_device_name()}_rng_state"] = get_torch_device().get_rng_state()
 
         rng_state_list = None
@@ -832,8 +835,9 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         np.random.set_state(rng_states["np_rng_state"])
         torch.set_rng_state(rng_states["torch_rng_state"])
 
-        if get_device_name() != "cpu":
-            get_torch_device().set_rng_state(rng_states[f"{get_device_name()}_rng_state"])
+        device_rng_key = f"{get_device_name()}_rng_state"
+        if is_device_available() and device_rng_key in rng_states:
+            get_torch_device().set_rng_state(rng_states[device_rng_key])
 
         # Check for empty states array
         if not rng_states["rng_tracker_states"]:

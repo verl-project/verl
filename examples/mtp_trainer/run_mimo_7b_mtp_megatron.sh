@@ -87,7 +87,6 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${actor_pp}
     actor_rollout_ref.actor.megatron.context_parallel_size=${actor_cp}
     actor_rollout_ref.actor.megatron.param_offload=True
-    actor_rollout_ref.actor.megatron.grad_offload=True
     actor_rollout_ref.actor.megatron.optimizer_offload=True
     actor_rollout_ref.actor.megatron.use_mbridge=True
 )
@@ -138,7 +137,16 @@ EXTRA=(
 )
 
 ########################### launch ###########################
-python3 -m verl.trainer.main_ppo \
+# uv (set VERL_USE_UV=0 for system python): on GPU, the driver and every Ray worker
+# (runtime_env.py_executable) run through `uv run` on the sglang × megatron extras of the committed uv.lock;
+# NPU falls back to ambient python. Run from the verl repo root.
+LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ]; then
+    LAUNCH=(uv run --frozen --all-packages --extra sglang --extra megatron python3)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages --extra sglang --extra megatron")
+fi
+"${LAUNCH[@]}" -m verl.trainer.main_ppo \
     "${DATA[@]}" \
     "${MODEL[@]}" \
     "${ACTOR[@]}" \
@@ -147,4 +155,5 @@ python3 -m verl.trainer.main_ppo \
     "${REWARD[@]}" \
     "${TRAINER[@]}" \
     "${EXTRA[@]}" \
+    "${RAY[@]}" \
     "$@"

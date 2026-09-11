@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import ctypes
+import dataclasses
+import functools
 import json
 import logging
 import os
@@ -26,7 +28,7 @@ import torch
 from vllm.outputs import RequestOutput
 
 from verl.utils.device import get_device_name, is_npu_available
-from verl.utils.vllm import TensorLoRARequest, VLLMHijack
+from verl.utils.vllm import TensorLoRARequest, VLLMHijack, resolve_weight_name
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.utils.vllm.vllm_quant_utils import apply_vllm_quant_patches, is_fp8_model, load_quanted_weights
 from verl.workers.rollout.vllm_rollout.weight_update_utils import apply_buffer_updates, split_buffer_updates
@@ -157,6 +159,13 @@ class vLLMColocateWorkerExtension:
         # 1. patch for Lora
         VLLMHijack.hijack()
         vllm_config = kwargs.get("vllm_config")
+        weight_transfer_config = getattr(vllm_config, "weight_transfer_config", None)
+        if getattr(weight_transfer_config, "backend", None) == "verl_delta_ipc":
+            from verl.workers.rollout.vllm_rollout.delta_weight_transfer import (
+                register_verl_delta_weight_transfer_engine,
+            )
+
+            register_verl_delta_weight_transfer_engine()
         # 2. patch online fp8 quant. Some models, including DeepSeek-V4, get
         # fp8 from the HF config rather than an explicit rollout quantization arg.
         if os.environ.get("VERL_VLLM_FP8_QUANT_ENABLED", "0") == "1" or is_fp8_model(vllm_config):
@@ -241,6 +250,15 @@ class vLLMColocateWorkerExtension:
         # =========================== step 1: prepare for weight loading ===========================
         quant_reload_states = None
 
+        # The engine came up on dummy weights, whose init zeroes integer buffers on
+        # ROCm -- including the expert-parallel routing maps, which no weight stream
+        # restores. Repair them before the reload so the rollout routes correctly.
+        if torch.version.hip is not None:
+            from verl.utils.vllm.rocm_vllm_moe_expert_map import restore_moe_expert_maps
+
+            for model in self._iter_all_models():
+                restore_moe_expert_maps(model)
+
         if self._is_qat_model:
             # QAT (compressed-tensors): Prepare for weight loading BEFORE receiving any buckets
             from verl.utils.qat import prepare_qat_for_load_weights
@@ -254,8 +272,7 @@ class vLLMColocateWorkerExtension:
             prepare_modelopt_for_weight_reload(self.model_runner.model, device=self.device)
             logger.info("ModelOpt: prepare_modelopt_for_weight_reload completed")
         elif peft_config and base_sync_done:
-            # In async mode, make sure the old lora is removed before adding the new one
-            # TODO: this is buggy if lora span multiple buckets.
+            # Remove the old LoRA before the new one arrives (applied after is_last below).
             self.remove_lora(VLLM_LORA_INT_ID)
             logger.info("LoRA adapter sync: remove old lora and prepare new lora")
         elif is_fp8_model(self.model_runner.vllm_config):
@@ -275,13 +292,31 @@ class vLLMColocateWorkerExtension:
             device=self.device,
             use_shm=use_shm,
         )
-        receiver.receive_weights(
-            on_bucket_received=lambda weights: self._update_weights(
+        # LoRA adapters need a single complete tensor dict per ``add_lora``, but
+        # the bucketed transport may split one across buckets. Accumulate and
+        # apply only after ``is_last``; standard base weights load per bucket.
+        lora_weights: dict[str, torch.Tensor] | None = {} if (peft_config and base_sync_done) else None
+
+        def on_bucket_received(weights: list[tuple[str, torch.Tensor]], is_last: bool) -> None:
+            if lora_weights is not None:
+                # Clone: add_lora keeps these past the callback (reused IPC buffer, #6454).
+                lora_weights.update((name, tensor.clone()) for name, tensor in weights)
+                if not is_last:
+                    return
+                self._update_weights(
+                    list(lora_weights.items()),
+                    peft_config=peft_config,
+                    base_sync_done=base_sync_done,
+                )
+                lora_weights.clear()
+                return
+            self._update_weights(
                 weights,
                 peft_config=peft_config,
                 base_sync_done=base_sync_done,
             )
-        )
+
+        receiver.receive_weights(on_bucket_received=on_bucket_received)
 
         # =========================== step 3: process weights after loading ===========================
         if self._is_qat_model:
@@ -359,7 +394,12 @@ class vLLMColocateWorkerExtension:
             else:
                 if param_updates:
                     for model in self._iter_all_models():
-                        model.load_weights(param_updates)
+                        if peft_config is None:
+                            model.load_weights(param_updates)
+                        else:
+                            names = {n for n, _ in model.named_parameters(remove_duplicate=False)}
+                            names.update(n for n, _ in model.named_buffers())
+                            model.load_weights((resolve_weight_name(model, n, names), t) for n, t in param_updates)
                 loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
                 logger.info(
                     f"Loading standard weights (non-FP8, async), "
@@ -383,6 +423,12 @@ class vLLMColocateWorkerExtension:
         trainer_rank = int(trainer_rank_base) + local_rank if trainer_rank_base is not None else local_rank
         return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{trainer_rank}.sock"
 
+    def update_verl_delta_weights(self, update_info: dict) -> None:
+        """Add this worker's IPC endpoint and forward the delta update to vLLM."""
+        worker_update_info = dict(update_info)
+        worker_update_info["zmq_handle"] = self._get_zmq_handle()
+        self.update_weights(worker_update_info)
+
 
 class SuppressSignalInThread:
     def __enter__(self):
@@ -401,6 +447,20 @@ class SuppressSignalInThread:
         signal.signal = self.original_signal
 
 
+@functools.lru_cache(maxsize=1)
+def _optional_bool_vllm_args() -> set[str]:
+    """Return the names of vLLM `AsyncEngineArgs` fields typed exactly `bool | None`.
+
+    For such fields an omitted flag leaves the None default, which vLLM can
+    resolve to True at engine-config time (e.g. `enable_prefix_caching`), so
+    an explicit False must be serialized as `--no-<flag>` instead of being
+    dropped.
+    """
+    from vllm.engine.arg_utils import AsyncEngineArgs
+
+    return {f.name for f in dataclasses.fields(AsyncEngineArgs) if set(get_args(f.type)) == {bool, type(None)}}
+
+
 def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     """
     Convert a config dictionary to CLI arguments for vLLM server.
@@ -408,7 +468,8 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     Handles different value types appropriately:
     - None: skipped
     - bool True: adds '--key'
-    - bool False: skipped
+    - bool False: adds '--no-key' for Optional[bool] engine args (whose None
+      default resolves to True), otherwise skipped
     - list: expands to '--key item1 item2 ...'
     - empty list: skipped (vLLM uses nargs="+" which requires at least one value)
     - dict: JSON serialized
@@ -427,6 +488,9 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
         if isinstance(v, bool):
             if v:
                 cli_args.append(f"--{k}")
+            elif k.replace("-", "_") in _optional_bool_vllm_args():
+                # Absent flag resolves to True at engine-config time.
+                cli_args.append(f"--no-{k}")
         elif isinstance(v, list):
             if not v:
                 # Skip empty lists - vLLM uses nargs="+" which requires at least one value

@@ -124,7 +124,6 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.rollout.expert_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_seqs=${max_num_seqs} \
-    +actor_rollout_ref.rollout.enable_sleep_mode=False \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
     actor_rollout_ref.rollout.enforce_eager=${enforce_eager} \
     actor_rollout_ref.actor.use_torch_compile=False \

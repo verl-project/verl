@@ -38,6 +38,8 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.name = "trtllm"
     config.actor_rollout_ref.rollout.mode = "async"
     config.actor_rollout_ref.rollout.skip_tokenizer_init = False
+    # No trainer to sync weights from, so the server must load them from disk.
+    config.actor_rollout_ref.rollout.load_format = "auto"
 
     return config
 
@@ -76,9 +78,12 @@ async def test_inter_node_trtllm_rollout(init_config):
         assert len(server_handles) == num_replicas
         assert len(server_addresses) == num_replicas
 
-        os.environ.pop("HTTPS_PROXY", None)
-        os.environ.pop("HTTP_PROXY", None)
-        os.environ.pop("NO_PROXY", None)
+        # The rollout servers listen on Ray node addresses, which NO_PROXY does
+        # not cover, so no proxy must apply here. CI sets the upper-case names and
+        # dev shells usually the lower-case ones; httpx honours either, drop both.
+        for var in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"):
+            os.environ.pop(var, None)
+            os.environ.pop(var.lower(), None)
 
         client = AsyncOpenAI(
             api_key="123-abc",

@@ -17,13 +17,17 @@ Puts the delta on the trainer->rollout wire: the trainer byte-diffs against a
 pinned-CPU snapshot and broadcasts only the changed ``(position, value)`` pairs
 over the same ``ray.util.collective`` NCCL group the full-weight
 :class:`NCCLCheckpointEngine` uses (actor rank0 -> rollout CheckpointEngineWorkers).
-Each rollout worker then hands its local copy of the sparse payload to its
-colocated SGLang TP worker via same-GPU ``update_weights_from_tensor`` IPC, where
-the verl-shipped :mod:`verl.workers.rollout.sglang_rollout.delta_loader` (registered through SGLang's
-stock ``--custom-weight-loader`` hook — no SGLang fork or patch needed) decodes
-and masked-applies it *in place* onto the live weights. No full-model mirror is
-staged anywhere on the rollout side: receiver peak memory is one bucket plus one
-decode chunk, independent of model size.
+With SGLang, each rollout worker hands its local copy of the sparse payload to
+its colocated SGLang TP worker via same-GPU ``update_weights_from_tensor`` IPC,
+where the verl-shipped :mod:`verl.workers.rollout.sglang_rollout.delta_loader`
+(registered through SGLang's stock ``--custom-weight-loader`` hook — no SGLang
+fork or patch needed) decodes and masked-applies it *in place* onto the live
+weights. No full-model mirror is staged anywhere on the rollout side: receiver
+peak memory is one bucket plus one decode chunk, independent of model size.
+
+With vLLM, the rollout adapter forwards the same payload over same-GPU IPC to
+VERL's registered weight-transfer backend. It decodes each flush into vLLM
+checkpoint patches, whose loader reuses native ``model.load_weights()`` mapping.
 
 The first (seed) sync streams the backend's FULL HF export (``get_per_tensor_
 param()``) over the values-only wire -- every backend already knows how to
@@ -63,7 +67,7 @@ from .base import CheckpointEngineRegistry
 from .delta_sync.encode import DeltaFlush, DeltaParam
 from .delta_sync.encode import checksum as _checksum
 from .delta_sync.sparse_gather import gather_slot_entries_to_rank0
-from .nccl_checkpoint_engine import MasterMetadata, NCCLCheckpointEngine
+from .nccl_checkpoint_engine import MasterMetadata, NCCLCheckpointEngine, WorkerMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -246,22 +250,23 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
 
     wire_format = "delta_flush"
 
-    def prepare(self) -> MasterMetadata | None:
+    def prepare(self) -> WorkerMetadata:
         # Delta broadcasts small per-flush buffers directly, so skip the parent's
         # 2 * bucket_size fixed buffers. Still hand back the master zmq endpoint
         # that build_topology() distributes to the rollout workers.
-        return MasterMetadata(zmq_ip=self.ip, zmq_port=self.listen_port) if self.is_master else None
+        #
+        # Only rank 0 broadcasts here (see the assert in send_weights) and this engine has no relay
+        # path, so it always takes the parent's single-sender topology.
+        master = (
+            MasterMetadata(zmq_ip=self.ip, zmq_port=self.listen_port, multi_sender=False) if self.is_master else None
+        )
+        return WorkerMetadata(node_id=self.get_node_id(), master=master)
 
     # ---- trainer side ----
     # ---- shared STREAMING wire ----
-    # Broadcast each flush the moment it is produced and free it, instead of materializing every
-    # flush up front. Peak device memory stays ~2 buckets (like NCCLCheckpointEngine's send/recv
-    # buffers) rather than the whole model -- required for large models where the first (full-seed)
-    # sync would otherwise hold the entire delta on rank 0. Wire: one zmq manifest + NCCL broadcast
-    # per flush, with an ``is_last`` flag so the receiver loops until the stream ends. Each
-    # CheckpointEngineWorker then hands its local copy of the sparse payload to its colocated
-    # SGLang TP worker (same-GPU IPC), where the verl-shipped custom weight loader applies it
-    # in place -- no full-model staging anywhere on the rollout side.
+    # Stream each flush as soon as it is produced so trainer peak memory stays near two buckets,
+    # including during the full seed. Each ZMQ manifest + NCCL broadcast carries ``is_last``;
+    # rollout adapters then forward that flush over same-GPU IPC to their backend-specific consumer.
     def _publish_flush(self, flush: DeltaFlush, first: bool, is_last: bool) -> None:
         meta = {
             "is_full": first,
@@ -351,16 +356,11 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
 
     # ---- rollout worker side ----
     def receive_weights(self, global_steps: int | None = None) -> Iterator[tuple[list[tuple[str, torch.Tensor]], bool]]:
-        """Yield the sparse flushes for the server adapter to apply in place.
+        """Yield delta flushes for the rollout adapter to consume.
 
-        Each item is ``(named_tensors, is_last)``: the sentinel-encoded flush
-        (``__delta_spec__`` json bytes, optional ``__positions__``, ``__values__``)
-        received into this worker's own GPU buffer -- one flush resident at a
-        time, freed as soon as the consumer drops it. The sglang server adapter
-        forwards each flush over same-GPU CUDA IPC to the verl-shipped
-        ``delta_loader.apply_delta`` (registered through the custom-weight-loader
-        hook), which decodes and masked-applies it against SGLang's live weights;
-        no full-model mirror is staged anywhere.
+        Each ``(named_tensors, is_last)`` item contains a JSON manifest, optional
+        int32 position bytes, and patch values. The generator keeps at most one
+        received GPU flush live at a time.
         """
         assert self.rank > 0, "Rank 0 should not receive weights."
         applied = 0
@@ -401,8 +401,7 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
         super().__init__(*args, **kwargs)
         assert encoding == "indices", f"delta_sharded ships only the 'indices' position encoding; got {encoding!r}"
         self.encoding = encoding
-        # every K-th steady sync appends a full state-verification sweep
-        # (0 = off); see _verify_due / delta_loader._verify_dense.
+        # SGLang supports verify_every > 0; vLLM rejects it at startup.
         self.verify_every = int(verify_every)
         self._shard_seeded = False
         # Gather the per-param sparse deltas in groups of this many parameters
@@ -535,8 +534,6 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             total_elems += int(flat.numel())
             bkt.add(_ValuesPiece(name, str(flat.dtype).replace("torch.", ""), list(tensor.shape), flat), flat.nbytes)
 
-        if not verify:
-            self._shard_seeded = True
         if not is_r0:
             return
         bkt.seal()
@@ -593,6 +590,8 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             # weights do not move during the sync, so the snapshots equal exactly
             # what the rollout just received.
             engine.prime_delta_snapshots()
+            # The seed is complete only after its baseline snapshots are ready.
+            self._shard_seeded = True
             return metrics
         weights, _ = engine.get_per_tensor_param_delta_shard()
         is_r0 = self.is_master
@@ -636,11 +635,11 @@ class DeltaShardedCheckpointEngine(NCCLCheckpointEngine):
             gq.put(pg, slots, dtype_str, counts, hf_idx, hf_val)
         gq.flush_all()
 
-        # verify_every=K (engine kwarg) appends a full state-verification sweep to
-        # every K-th steady sync, inside the SAME receive session: the steady
-        # bucket keeps is_last unset and the sweep's final flush carries it. The
-        # receiver bit-compares each copy_ destination before overwriting and
-        # fails loud on any mismatch (see delta_loader._verify_dense).
+        # For SGLang, verify_every=K appends a dense state-verification sweep to
+        # every K-th steady sync inside the same receive stream. The steady bucket
+        # keeps ``is_last`` unset, and the sweep's final flush carries it. The
+        # receiver bit-compares each destination before overwriting it and fails
+        # on any mismatch (see delta_loader._verify_dense).
         verify = self._verify_due()
         if is_r0:
             bkt.seal()  # seal the final partial bucket into the pending flush

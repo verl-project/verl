@@ -63,7 +63,8 @@ use_fused_kernels: False
 # fused kernel options.
 fused_kernel_options:
 
-  # the implementation backend for fused kernels.
+  # the implementation backend for fused kernels: torch, triton, or liger.
+  # Megatron only supports triton.
   impl_backend: torch
 
 # TiledMLP configuration for memory-efficient MLP computation.

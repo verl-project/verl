@@ -115,6 +115,10 @@ class TestPlatformDetection:
         with mock.patch.dict(os.environ, {"VERL_PLATFORM": "huawei"}):
             assert _detect_platform_name() == "huawei"
 
+    def test_env_override_amd(self):
+        with mock.patch.dict(os.environ, {"VERL_PLATFORM": "amd"}):
+            assert _detect_platform_name() == "amd"
+
     def test_invalid_value_passes_through(self):
         # When an explicit platform name is set, _detect_platform_name returns
         # it as-is (validation happens later in _create_platform).
@@ -127,7 +131,7 @@ class TestPlatformDetection:
 
     def test_empty_triggers_auto_detection(self):
         with mock.patch.dict(os.environ, {"VERL_PLATFORM": ""}):
-            assert _detect_platform_name() in ("nvidia", "huawei")
+            assert _detect_platform_name() in ("nvidia", "huawei", "amd")
 
 
 class TestPlatformCreation:
@@ -178,6 +182,7 @@ class TestPlatformRegistry:
         names = PlatformRegistry.registered_names()
         assert "nvidia" in names
         assert "huawei" in names
+        assert "amd" in names
 
     def test_register_custom_platform(self):
         """External plugin registers a new platform via @PlatformRegistry.register()."""

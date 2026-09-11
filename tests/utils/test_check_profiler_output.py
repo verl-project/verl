@@ -29,26 +29,27 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 class DeviceCheckConfig:
     """Device check configuration: encapsulates device-specific validation rules"""
 
-    # Search path pattern
-    search_pattern: str
-    # Directory count validation function: takes stage and dir list, returns bool
-    dir_count_validator: Callable[[str, list[str]], bool]
-    # PROF file/dir validation function: takes directory path, returns bool
+    search_patterns: Callable[[str], list[str]]
+    path_filter: Callable[[str], bool]
+    count_validator: Callable[[str, list[str]], bool]
     prof_validator: Callable[[str], bool]
 
 
 class ProfilerChecker:
     """Unified Profiler checker supporting GPU/NPU devices"""
 
-    TARGET_STAGES = ["actor_update", "*_rollout_*", "ref_*"]
+    TARGET_STAGES = ["actor_update", "*rollout*", "ref_*"]
 
-    def __init__(self, device_type: str, profiler_dir: str):
+    def __init__(self, device_type: str, profiler_dir: str, stages: list[str] | None = None):
         self.device_type = device_type.lower()
         self.profiler_dir = profiler_dir
 
         # Validate device type
         if self.device_type not in ["gpu", "npu"]:
             raise ValueError(f"Unsupported device type: {device_type}, only gpu/npu are supported")
+        self.stages = stages if stages is not None else self.TARGET_STAGES
+        if not self.stages:
+            raise ValueError("At least one profiler stage is required")
 
         # Initialize device-specific configuration
         self._init_device_config()
@@ -57,19 +58,18 @@ class ProfilerChecker:
         """Initialize validation rules for different devices (core: device differences as config)"""
         if self.device_type == "gpu":
             self.config = DeviceCheckConfig(
-                # GPU search pattern: match stage directory directly
-                search_pattern=os.path.join(self.profiler_dir, "{stage}"),
-                # GPU: all stages must have exactly 1 directory
-                dir_count_validator=lambda stage, dirs: len(dirs) == 1,
-                # GPU: any file/subdirectory exists under the directory
-                prof_validator=lambda d: len(glob.glob(os.path.join(d, "*"))) > 0,
+                search_patterns=lambda stage: [os.path.join(f"*{stage}*", "**", "*.json*"), f"*{stage}*.json*"],
+                path_filter=lambda p: os.path.isfile(p) and p.endswith((".json", ".json.gz")),
+                count_validator=lambda stage, paths: len(paths) > 0,
+                prof_validator=lambda p: os.path.getsize(p) > 0,
             )
         else:  # NPU
             self.config = DeviceCheckConfig(
                 # NPU search pattern: match ascend subdirectory under stage
-                search_pattern=os.path.join(self.profiler_dir, "{stage}", "*_ascend_*"),
-                # NPU: rollout requires >1 dir, others require exactly 1 dir
-                dir_count_validator=lambda stage, dirs: (len(dirs) > 1 if stage == "*_rollout_*" else len(dirs) == 1),
+                search_patterns=lambda stage: [os.path.join(stage, "*_ascend_*")],
+                path_filter=os.path.isdir,
+                # Each stage needs output; multiple ranks or windows may produce multiple directories.
+                count_validator=lambda stage, paths: len(paths) > 0,
                 # NPU: PROF_* subdirectory must exist and be a valid directory
                 prof_validator=lambda d: (
                     len(glob.glob(os.path.join(d, "PROF_*"))) > 0
@@ -77,20 +77,28 @@ class ProfilerChecker:
                 ),
             )
 
-    def _validate_stage_dirs(self, stage: str) -> bool:
-        """Generic stage directory validation: extracted common logic for GPU/NPU"""
-        # 1. Generate search path and match directories
-        search_pattern = self.config.search_pattern.format(stage=stage)
-        dirs = glob.glob(search_pattern, recursive=True)
+    def _validate_stage(self, stage: str) -> bool:
+        """Match, log and validate the stage's profiler output."""
+        patterns = [os.path.join(self.profiler_dir, p) for p in self.config.search_patterns(stage)]
+        paths = sorted(
+            {
+                path
+                for pattern in patterns
+                for path in glob.glob(pattern, recursive=True)
+                if self.config.path_filter(path)
+            }
+        )
+        logger.info(f"[{stage}] Found {len(paths)} profiler paths (patterns: {patterns})")
+        for path in paths:
+            logger.info(f"[{stage}] Found: {path}")
 
-        # 2. Log found directories
-        for d in dirs:
-            logger.info(f"[{stage}] Found: {d}")
+        if not self.config.count_validator(stage, paths):
+            logger.error(f"[{stage}] Unexpected profiler output count: {len(paths)}")
+            return False
 
-        # 3. Validate PROF files/directories
-        for target_dir in dirs:
-            if not self.config.prof_validator(target_dir):
-                logger.error(f"[{stage}] PROF not found in {target_dir}")
+        for path in paths:
+            if not self.config.prof_validator(path):
+                logger.error(f"[{stage}] Missing or empty profiler output: {path}")
                 return False
 
         return True
@@ -105,8 +113,8 @@ class ProfilerChecker:
             return False
 
         # Run validation for all target stages
-        for stage in self.TARGET_STAGES:
-            if not self._validate_stage_dirs(stage):
+        for stage in self.stages:
+            if not self._validate_stage(stage):
                 return False
 
         logger.info(f"All {self.device_type.upper()} validation stages passed")
@@ -129,6 +137,12 @@ def parse_args():
         default="./profiler_data",
         help="Path to profiler data directory (default: ./profiler_data)",
     )
+    parser.add_argument(
+        "--stage",
+        nargs="+",
+        default=None,
+        help=f"Stage patterns to check (default: {ProfilerChecker.TARGET_STAGES})",
+    )
     return parser.parse_args()
 
 
@@ -136,7 +150,7 @@ def main():
     args = parse_args()
 
     try:
-        checker = ProfilerChecker(device_type=args.device, profiler_dir=args.profiler_dir)
+        checker = ProfilerChecker(device_type=args.device, profiler_dir=args.profiler_dir, stages=args.stage)
         if checker.check():
             logger.info(f"All {args.device.upper()} profiler deliverables check passed!")
             sys.exit(0)

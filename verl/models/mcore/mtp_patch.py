@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import warnings
 from inspect import signature
 from typing import Callable
@@ -22,11 +23,7 @@ from typing import Callable
 import torch
 from megatron.core import parallel_state, tensor_parallel
 from megatron.core.models.gpt.gpt_model import GPTModel
-from megatron.core.transformer.multi_token_prediction import (
-    MTPLossAutoScaler,
-    MTPLossLoggingHelper,
-    roll_tensor,
-)
+from megatron.core.transformer.multi_token_prediction import MTPLossAutoScaler, MTPLossLoggingHelper, roll_tensor
 
 try:
     from megatron.core.transformer.multi_token_prediction import process_mtp_loss as _process_mtp_loss
@@ -37,10 +34,37 @@ except ImportError:
     _HAS_PROCESS_MTP_LOSS = False
     _PROCESS_MTP_LOSS_PARAMS = set()
 
+_ROLL_TENSOR_HAS_FILL_VALUE = "fill_value" in signature(roll_tensor).parameters
+_MTP_LOSS_NORMALIZATION_FACTOR_ATTR = "_verl_mtp_loss_normalization_factor"
+
 try:
     from megatron.core.utils import unwrap_model
 except ImportError:
     from verl.utils.megatron_utils import unwrap_model
+
+
+def _resolve_cp_group(module, packed_seq_params=None):
+    """Use the per-microbatch Dynamic CP group when packed metadata provides one."""
+    dynamic_cp_group = getattr(packed_seq_params, "cp_group", None)
+    if dynamic_cp_group is not None:
+        return dynamic_cp_group
+    static_cp_group = getattr(module, "cp_group", None)
+    if static_cp_group is None:
+        static_cp_group = getattr(getattr(module, "pg_collection", None), "cp", None)
+    return static_cp_group
+
+
+def _get_mtp_loss_config(config, packed_seq_params=None):
+    """Adjust MTP scaling when MCore finalizes against routed rather than loss tokens."""
+    factor = getattr(packed_seq_params, _MTP_LOSS_NORMALIZATION_FACTOR_ATTR, None)
+    if not config.calculate_per_token_loss or factor is None:
+        return config
+    if factor <= 0:
+        raise ValueError(f"MTP loss normalization factor must be positive, got {factor}")
+
+    adjusted_config = copy.copy(config)
+    adjusted_config.mtp_loss_scaling_factor = config.mtp_loss_scaling_factor * factor
+    return adjusted_config
 
 
 def _get_patching_model(model: torch.nn.Module):
@@ -93,6 +117,7 @@ def _megatron_gptmodel_postprocess(
     output_processor=None,
     output_processor_context=None,
     is_spec_decode=None,
+    mhc_multistream=None,
 ):
     """Postprocesses decoder hidden states to generate logits or compute loss.
 
@@ -111,6 +136,8 @@ def _megatron_gptmodel_postprocess(
             self.mtp._forward_has_padding_mask = "padding_mask" in signature(self.mtp.forward).parameters
         if self.mtp._forward_has_padding_mask:
             mtp_kwargs["padding_mask"] = padding_mask
+        if mhc_multistream is not None:
+            mtp_kwargs["mhc_multistream"] = mhc_multistream
         hidden_states = self.mtp(
             input_ids=input_ids,
             position_ids=position_ids,
@@ -135,7 +162,8 @@ def _megatron_gptmodel_postprocess(
             # New Megatron API (>= verl megatron fork with process_mtp_loss):
             # process_mtp_loss handles chunking, rolling, loss scaling all internally.
             pg_collection = getattr(self, "pg_collection", None)
-            cp_group = getattr(self, "cp_group", None) or (pg_collection.cp if pg_collection is not None else None)
+            cp_group = _resolve_cp_group(self, packed_seq_params)
+            mtp_loss_config = _get_mtp_loss_config(self.config, packed_seq_params)
             scale_logits_fn = self._scale_logits if (hasattr(self, "_scale_logits") and self.config.use_mup) else None
             process_mtp_loss_kwargs = {
                 "hidden_states": hidden_states,
@@ -146,7 +174,7 @@ def _megatron_gptmodel_postprocess(
                 "runtime_gather_output": runtime_gather_output,
                 "is_training": self.training,
                 "compute_language_model_loss": self.compute_language_model_loss,
-                "config": self.config,
+                "config": mtp_loss_config,
                 "cp_group": cp_group,
                 "packed_seq_params": packed_seq_params,
                 "scale_logits_fn": scale_logits_fn,
@@ -411,10 +439,9 @@ def _patched_get_embeddings_for_detach(
     # - Modify the embedding computation
 
     # Original logic with custom modifications
-    from megatron.core.transformer.multi_token_prediction import roll_tensor
     from megatron.core.utils import make_viewless_tensor
 
-    cp_group = getattr(self, "cp_group", None)
+    cp_group = _resolve_cp_group(self, packed_seq_params)
 
     # Calc logits for the current Multi-Token Prediction (MTP) layers.
     input_ids, _ = roll_tensor(
@@ -432,12 +459,14 @@ def _patched_get_embeddings_for_detach(
         packed_seq_params=packed_seq_params,
     )
     if padding_mask is not None:
+        roll_kwargs = {"fill_value": True} if _ROLL_TENSOR_HAS_FILL_VALUE else {}
         padding_mask, _ = roll_tensor(
             padding_mask,
             shifts=-1,
             dims=-1,
             cp_group=cp_group,
             packed_seq_params=packed_seq_params,
+            **roll_kwargs,
         )
 
     # embedding computation - you can modify this part

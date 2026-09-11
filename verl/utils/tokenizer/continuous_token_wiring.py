@@ -22,11 +22,19 @@ from typing import Any
 
 from .continuous_token import (
     ContinuousTokenBuilder,
+    DeepSeekContinuousTokenBuilder,
+    DeepSeekVL2ContinuousTokenBuilder,
     Gemma4ContinuousTokenBuilder,
+    Gemma4VLContinuousTokenBuilder,
+    GLM46VContinuousTokenBuilder,
     GLMContinuousTokenBuilder,
     GptOssContinuousTokenBuilder,
+    KimiVLContinuousTokenBuilder,
     MiniMaxContinuousTokenBuilder,
+    MiniMaxVLContinuousTokenBuilder,
     QwenContinuousTokenBuilder,
+    QwenVLContinuousTokenBuilder,
+    VLContinuousTokenBuilder,
 )
 from .deepseek import DeepSeekV4ContinuousTokenBuilder
 
@@ -53,6 +61,17 @@ class ContinuousTokenModelFamily(str, Enum):
     GLM5 = "glm5"
     GEMMA4 = "gemma4"
     GPTOSS = "gptoss"
+    DEEPSEEK = "deepseek"
+    # Multimodal (VL) families
+    VL_DEFAULT = "vldefault"
+    QWEN_VL = "qwenvl"
+    QWEN25_VL = "qwen25vl"
+    QWEN3_VL = "qwen3vl"
+    MINIMAX_VL = "minimaxvl"
+    GEMMA4_VL = "gemma4vl"
+    KIMI_VL = "kimivl"
+    GLM4V = "glm4v"
+    DEEPSEEK_VL2 = "deepseekvl2"
     DEEPSEEKV4 = "deepseekv4"
 
 
@@ -70,10 +89,65 @@ _CONTINUOUS_TOKEN_BUILDER_REGISTRY: dict[ContinuousTokenModelFamily, type[Any]] 
     ContinuousTokenModelFamily.GLM5: GLMContinuousTokenBuilder,
     ContinuousTokenModelFamily.GEMMA4: Gemma4ContinuousTokenBuilder,
     ContinuousTokenModelFamily.GPTOSS: GptOssContinuousTokenBuilder,
+    ContinuousTokenModelFamily.DEEPSEEK: DeepSeekContinuousTokenBuilder,
+    # Multimodal (VL) families
+    ContinuousTokenModelFamily.VL_DEFAULT: VLContinuousTokenBuilder,
+    ContinuousTokenModelFamily.QWEN_VL: QwenVLContinuousTokenBuilder,
+    ContinuousTokenModelFamily.QWEN25_VL: QwenVLContinuousTokenBuilder,
+    ContinuousTokenModelFamily.QWEN3_VL: QwenVLContinuousTokenBuilder,
+    ContinuousTokenModelFamily.MINIMAX_VL: MiniMaxVLContinuousTokenBuilder,
+    ContinuousTokenModelFamily.GEMMA4_VL: Gemma4VLContinuousTokenBuilder,
+    ContinuousTokenModelFamily.KIMI_VL: KimiVLContinuousTokenBuilder,
+    ContinuousTokenModelFamily.GLM4V: GLM46VContinuousTokenBuilder,
+    ContinuousTokenModelFamily.DEEPSEEK_VL2: DeepSeekVL2ContinuousTokenBuilder,
     ContinuousTokenModelFamily.DEEPSEEKV4: DeepSeekV4ContinuousTokenBuilder,
 }
 
 CONTINUOUS_TOKEN_BUILDER_FAMILIES = tuple(family.value for family in _CONTINUOUS_TOKEN_BUILDER_REGISTRY)
+
+# Exact Hugging Face ``config.json`` model_type -> Continuous Token protocol.
+# Only model types validated against a model-specific builder belong here. Unknown
+# values deliberately use the generic text/VL builder rather than being guessed
+# from repository names or implementation class names.
+_MODEL_TYPE_TO_FAMILY: dict[str, ContinuousTokenModelFamily] = {
+    # Text models.
+    "qwen2": ContinuousTokenModelFamily.QWEN,
+    "qwen3": ContinuousTokenModelFamily.QWEN3,
+    "qwen3_moe": ContinuousTokenModelFamily.QWEN3,
+    "qwen3_5": ContinuousTokenModelFamily.QWEN35,
+    "qwen3_5_moe": ContinuousTokenModelFamily.QWEN35,
+    "minimax": ContinuousTokenModelFamily.MINIMAX,
+    "minimax_text_01": ContinuousTokenModelFamily.MINIMAX,
+    # MiniMax M2-series checkpoints share this root model_type. Exact config
+    # matching therefore selects their shared builder without guessing a minor
+    # version from the repository path.
+    "minimax_m2": ContinuousTokenModelFamily.MINIMAX_M2,
+    "glm4_moe": ContinuousTokenModelFamily.GLM47,
+    "glm_moe_dsa": ContinuousTokenModelFamily.GLM5,
+    "gemma4": ContinuousTokenModelFamily.GEMMA4,
+    "gpt_oss": ContinuousTokenModelFamily.GPTOSS,
+    "deepseek_v2": ContinuousTokenModelFamily.DEEPSEEK,
+    "deepseek_v3": ContinuousTokenModelFamily.DEEPSEEK,
+    "deepseek_v4": ContinuousTokenModelFamily.DEEPSEEKV4,
+    # Vision-language models. The processor is still required at construction.
+    "qwen2_vl": ContinuousTokenModelFamily.QWEN_VL,
+    "qwen2_5_vl": ContinuousTokenModelFamily.QWEN25_VL,
+    "qwen3_vl": ContinuousTokenModelFamily.QWEN3_VL,
+    "qwen3_vl_moe": ContinuousTokenModelFamily.QWEN3_VL,
+    "minimax_vl_01": ContinuousTokenModelFamily.MINIMAX_VL,
+    "kimi_vl": ContinuousTokenModelFamily.KIMI_VL,
+    "glm4v": ContinuousTokenModelFamily.GLM4V,
+    "glm4v_moe": ContinuousTokenModelFamily.GLM4V,
+    "deepseek_vl_v2": ContinuousTokenModelFamily.DEEPSEEK_VL2,
+}
+
+# Unified checkpoints whose root model type is shared by their text and vision
+# modes. A multimodal processor selects the processor-backed builder.
+_TEXT_TO_VL_FAMILY: dict[ContinuousTokenModelFamily, ContinuousTokenModelFamily] = {
+    ContinuousTokenModelFamily.DEFAULT: ContinuousTokenModelFamily.VL_DEFAULT,
+    ContinuousTokenModelFamily.GEMMA4: ContinuousTokenModelFamily.GEMMA4_VL,
+    ContinuousTokenModelFamily.QWEN35: ContinuousTokenModelFamily.QWEN3_VL,
+}
 
 
 def get_continuous_token_builder_class(model_family: str | ContinuousTokenModelFamily) -> type[Any]:
@@ -94,9 +168,8 @@ def list_continuous_token_builder_families() -> tuple[str, ...]:
 def resolve_continuous_token_model_family(
     model_family: str | ContinuousTokenModelFamily,
     *,
-    model_path: str | None = None,
-    tokenizer: Any | None = None,
-    tokenizer_name_or_path: str | None = None,
+    hf_model_type: str | None = None,
+    has_multimodal_processor: bool = False,
 ) -> ContinuousTokenModelFamily:
     """Resolve ``auto`` to a concrete family, or canonicalize an explicit family."""
     family = _normalize_model_family(model_family)
@@ -105,89 +178,149 @@ def resolve_continuous_token_model_family(
         return family
 
     resolved = infer_continuous_token_model_family(
-        model_path=model_path,
-        tokenizer=tokenizer,
-        tokenizer_name_or_path=tokenizer_name_or_path,
+        hf_model_type=hf_model_type,
+        has_multimodal_processor=has_multimodal_processor,
     )
     logger.info(
-        "Resolved Continuous Token builder family from auto: %s (model_path=%r, tokenizer_name_or_path=%r)",
+        "Resolved Continuous Token builder family from config.json model_type=%r: %s",
+        _normalize_hf_model_type(hf_model_type),
         resolved,
-        model_path,
-        tokenizer_name_or_path or _tokenizer_name_or_path(tokenizer),
     )
     return resolved
 
 
 def infer_continuous_token_model_family(
     *,
-    model_path: str | None = None,
-    tokenizer: Any | None = None,
-    tokenizer_name_or_path: str | None = None,
+    hf_model_type: str | None = None,
+    has_multimodal_processor: bool = False,
 ) -> ContinuousTokenModelFamily:
-    """Infer a built-in model family from model/tokenizer names.
+    """Infer a builder from the root ``config.json`` ``model_type`` field.
 
-    Unknown models intentionally fall back to ``default`` so enabling
-    ``model_family=auto`` remains conservative.
+    Matching is exact. Repository paths, tokenizer names, nested configs, and
+    ``architectures`` are intentionally ignored. Unknown model types use the
+    generic builder selected by whether a multimodal processor is present.
     """
-    candidates = [model_path, tokenizer_name_or_path, _tokenizer_name_or_path(tokenizer)]
-    haystack = " ".join(str(item).lower() for item in candidates if item)
-    compact = re.sub(r"[^a-z0-9]+", "", haystack)
+    model_type = _normalize_hf_model_type(hf_model_type)
+    if model_type is not None:
+        family = _MODEL_TYPE_TO_FAMILY.get(model_type)
+        if family is not None:
+            return family
 
-    if any(marker in haystack for marker in ("glm-5", "glm_5")) or "glm5" in compact:
-        return ContinuousTokenModelFamily.GLM5
-    if any(marker in haystack for marker in ("glm-4.7", "glm_4.7", "glm4.7")) or "glm47" in compact:
-        return ContinuousTokenModelFamily.GLM47
-    if any(marker in haystack for marker in ("gemma-4", "gemma_4")) or any(
-        marker in compact for marker in ("gemma4", "gemma4unified")
-    ):
-        return ContinuousTokenModelFamily.GEMMA4
-    if any(marker in haystack for marker in ("gpt-oss", "gpt_oss")) or "gptoss" in compact:
-        return ContinuousTokenModelFamily.GPTOSS
-    # Only the V4 series uses the DSML turn format; earlier DeepSeek models fall back to default.
-    if any(marker in compact for marker in ("deepseekv4", "dsv4")):
-        return ContinuousTokenModelFamily.DEEPSEEKV4
-    if "minimaxm27" in compact:
-        return ContinuousTokenModelFamily.MINIMAX_M27
-    if "minimaxm25" in compact:
-        return ContinuousTokenModelFamily.MINIMAX_M25
-    if "minimaxm2" in compact:
-        return ContinuousTokenModelFamily.MINIMAX_M2
-    if "minimax" in compact:
-        return ContinuousTokenModelFamily.MINIMAX
-    if any(marker in haystack for marker in ("qwen3.5", "qwen3_5", "qwen3-5")) or "qwen35" in compact:
-        return ContinuousTokenModelFamily.QWEN35
-    if any(marker in haystack for marker in ("qwen2.5", "qwen2_5", "qwen2-5")) or "qwen25" in compact:
-        return ContinuousTokenModelFamily.QWEN25
-    if "qwen3" in compact:
-        return ContinuousTokenModelFamily.QWEN3
+    fallback = ContinuousTokenModelFamily.VL_DEFAULT if has_multimodal_processor else ContinuousTokenModelFamily.DEFAULT
     logger.warning(
-        "No model-specific Continuous Token builder matched model_path=%r, tokenizer_name_or_path=%r; "
-        "falling back to the default ContinuousTokenBuilder.",
-        model_path,
-        tokenizer_name_or_path or _tokenizer_name_or_path(tokenizer),
+        "No model-specific Continuous Token builder is registered for config.json model_type=%r; falling back to %s.",
+        model_type,
+        fallback,
     )
-    return ContinuousTokenModelFamily.DEFAULT
+    return fallback
 
 
 def create_continuous_token_builder(
     tokenizer: Any,
     *,
-    model_family: str | ContinuousTokenModelFamily,
-    model_path: str | None = None,
-    tokenizer_name_or_path: str | None = None,
+    model_family: str | ContinuousTokenModelFamily = "auto",
+    hf_model_type: str | None = None,
     chat_template_kwargs: dict[str, Any] | None = None,
+    mm_processor_kwargs: dict[str, Any] | None = None,
+    processor: Any | None = None,
     **builder_kwargs: Any,
 ) -> Any:
-    """Instantiate the registered builder selected by config/model metadata."""
+    """Instantiate the Continuous Token builder inferred from the root Hugging Face ``model_type``.
+
+    Inference uses an exact registry lookup on the root Hugging Face config's
+    ``model_type``. Repository/tokenizer names and ``architectures`` are not used.
+    Whether an unknown model gets the generic text or VL builder is decided by the
+    presence of a multimodal ``processor``.
+
+    Resolution rules:
+      * Text (no multimodal processor): use the inferred model-specific text
+        builder, or the default builder when nothing matched (a warning is emitted
+        by the inference step in that case).
+      * VL (multimodal processor present):
+          - If ``model_type`` resolves to a VL family, use that VL builder.
+          - If it resolves to a unified text family, upgrade to its VL builder.
+          - If it is unknown, use the default VL builder and warn.
+          - Any other recognized text-specific family paired with a processor is
+            treated as a misconfiguration and raises.
+    """
+    has_mm_processor = _is_multimodal_processor(processor)
     resolved_family = resolve_continuous_token_model_family(
         model_family,
-        model_path=model_path,
-        tokenizer=tokenizer,
-        tokenizer_name_or_path=tokenizer_name_or_path,
+        hf_model_type=hf_model_type,
+        has_multimodal_processor=has_mm_processor,
     )
     builder_cls = get_continuous_token_builder_class(resolved_family)
+
+    if has_mm_processor:
+        # --- Vision-language run ---
+        # mm_processor_kwargs is a multimodal-only concern, so (like ``processor``) it
+        # is passed only to VL builders; text builders never receive it.
+        if builder_cls.supports_multimodal():
+            # The root model_type identified a model-specific VL family.
+            logger.info("Creating Continuous Token builder: family=%s class=%s", resolved_family, builder_cls)
+            return builder_cls(
+                tokenizer,
+                processor,
+                chat_template_kwargs=chat_template_kwargs,
+                mm_processor_kwargs=mm_processor_kwargs,
+                **builder_kwargs,
+            )
+
+        # Inferred a text family, but a multimodal processor is present. Only
+        # explicitly unified families are safe to auto-upgrade.
+        if resolved_family in _TEXT_TO_VL_FAMILY:
+            upgraded_family = _TEXT_TO_VL_FAMILY[resolved_family]
+            if upgraded_family == ContinuousTokenModelFamily.VL_DEFAULT:
+                logger.warning(
+                    "No model-specific VL Continuous Token builder matched (inferred %s); "
+                    "falling back to the default VL builder (VLContinuousTokenBuilder).",
+                    resolved_family,
+                )
+            else:
+                logger.info(
+                    "Multimodal processor detected with unified family %s; upgrading to VL family %s.",
+                    resolved_family,
+                    upgraded_family,
+                )
+            resolved_family = upgraded_family
+            builder_cls = get_continuous_token_builder_class(resolved_family)
+            logger.info("Creating Continuous Token builder: family=%s class=%s", resolved_family, builder_cls)
+            return builder_cls(
+                tokenizer,
+                processor,
+                chat_template_kwargs=chat_template_kwargs,
+                mm_processor_kwargs=mm_processor_kwargs,
+                **builder_kwargs,
+            )
+
+        raise ValueError(
+            f"Model resolved to the text Continuous Token family {resolved_family!r}, but a multimodal "
+            f"processor was provided. Register config.json model_type={_normalize_hf_model_type(hf_model_type)!r} "
+            f"as a VL or unified family, or do not load a multimodal processor."
+        )
+
+    # --- Text-only run (no multimodal processor) ---
+    if builder_cls.supports_multimodal():
+        raise ValueError(
+            f"Model resolved to the VL Continuous Token family {resolved_family!r} "
+            f"({builder_cls.__name__}), which requires a processor, but none was provided. "
+            f"Ensure the processor is loaded for vision-language models."
+        )
     logger.info("Creating Continuous Token builder: family=%s class=%s", resolved_family, builder_cls)
     return builder_cls(tokenizer, chat_template_kwargs=chat_template_kwargs, **builder_kwargs)
+
+
+def _is_multimodal_processor(processor: Any | None) -> bool:
+    """Whether ``processor`` is a multimodal processor (has an image processor)."""
+    return processor is not None and getattr(processor, "image_processor", None) is not None
+
+
+def _normalize_hf_model_type(hf_model_type: str | None) -> str | None:
+    """Normalize a root Hugging Face ``model_type`` value."""
+    if not isinstance(hf_model_type, str):
+        return None
+    normalized = hf_model_type.strip().lower()
+    return normalized or None
 
 
 def _normalize_model_family(model_family: str | ContinuousTokenModelFamily) -> ContinuousTokenModelFamily:
@@ -206,15 +339,3 @@ def _normalize_model_family(model_family: str | ContinuousTokenModelFamily) -> C
             f"Unknown Continuous Token model_family {model_family!r}. "
             f"Supported families: {(ContinuousTokenModelFamily.AUTO.value, *CONTINUOUS_TOKEN_BUILDER_FAMILIES)}."
         ) from exc
-
-
-def _tokenizer_name_or_path(tokenizer: Any | None) -> str | None:
-    if tokenizer is None:
-        return None
-    name = getattr(tokenizer, "name_or_path", None)
-    if name:
-        return str(name)
-    init_kwargs = getattr(tokenizer, "init_kwargs", None)
-    if isinstance(init_kwargs, dict) and init_kwargs.get("name_or_path"):
-        return str(init_kwargs["name_or_path"])
-    return None

@@ -47,18 +47,15 @@ class SingleTurnAgentLoop(AgentLoopBase):
         audios = multi_modal_data.get("audios")
         mm_processor_kwargs = self._get_mm_processor_kwargs(audios)
 
-        # 2. apply chat template and tokenize
-        use_continuous_token = self.enable_continuous_token and not multi_modal_data
-        if use_continuous_token:
-            prompt_ids = await self.ct_build_initial_tokens(messages)
-        else:
-            prompt_ids = await self.apply_chat_template(
-                messages,
-                images=images,
-                videos=videos,
-                audios=audios,
-                mm_processor_kwargs=mm_processor_kwargs,
-            )
+        # 2. build the initial prompt with Continuous Token (the only tokenization path).
+        # Multimodal inputs require a VL builder + processor; fail loudly otherwise.
+        self._assert_mm_supported(bool(multi_modal_data))
+        prompt_ids = await self.ct_build_initial_tokens(
+            messages,
+            images=images,
+            videos=videos,
+            audios=audios,
+        )
 
         # 3. generate sequences
         metrics = {}
@@ -77,20 +74,15 @@ class SingleTurnAgentLoop(AgentLoopBase):
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
 
-        if use_continuous_token:
-            merge_result, response_mask, response_logprobs = await self.ct_merge_assistant_token(
-                prompt_ids,
-                output.token_ids,
-                [],
-                [] if output.log_probs else None,
-                assistant_logprobs=output.log_probs if output.log_probs else None,
-            )
-            response_ids = merge_result.token_ids[-len(response_mask) :] if response_mask else []
-            prompt_ids = merge_result.token_ids[: len(merge_result.token_ids) - len(response_mask)]
-        else:
-            response_ids = output.token_ids
-            response_mask = [1] * len(output.token_ids)
-            response_logprobs = output.log_probs
+        merge_result, response_mask, response_logprobs = await self.ct_merge_assistant_token(
+            prompt_ids,
+            output.token_ids,
+            [],
+            [] if output.log_probs else None,
+            assistant_logprobs=output.log_probs if output.log_probs else None,
+        )
+        response_ids = merge_result.token_ids[-len(response_mask) :] if response_mask else []
+        prompt_ids = merge_result.token_ids[: len(merge_result.token_ids) - len(response_mask)]
 
         output: AgentLoopOutput = AgentLoopOutput(
             prompt_ids=prompt_ids,

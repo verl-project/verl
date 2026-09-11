@@ -72,15 +72,25 @@ class DetachActorWorker(ActorRolloutRefWorker):
 
         strategy = self.config.actor.strategy
 
-        # NOTE: VeOmni internally uses FSDP2 for data parallelism (VeOmniEngine inherits from
+        # NOTE: FSDP1 shards parameters as plain (flat) tensors, while FSDP2 shards them as
+        # DTensors, so the two need different save/restore utilities.
+        #
+        # VeOmni internally uses FSDP2 for data parallelism (VeOmniEngine inherits from
         # FSDPEngine and sets data_parallel_mode="fsdp2"), so its model parameters are DTensors
         # that are compatible with FSDP2's sharded save/load utilities.
         #
-        # CAVEAT: When VeOmni's param_offload=True, parameters may reside on CPU at the time of
-        # save/restore. The current fsdp2_sharded_save_to_cpu / fsdp2_sharded_load_from_cpu
-        # assume parameters are on GPU. Callers should ensure the model is loaded back to GPU
-        # before calling save_model_to_cpu / restore_model_from_cpu in offload scenarios.
-        if strategy in ["fsdp", "fsdp2", "veomni"]:
+        # CAVEAT: When param_offload=True, parameters may reside on CPU at the time of
+        # save/restore. The current sharded save/load helpers assume parameters are on GPU.
+        # Callers should ensure the model is loaded back to GPU before calling
+        # save_model_to_cpu / restore_model_from_cpu in offload scenarios.
+        if strategy == "fsdp":
+            from verl.utils.fsdp_utils import (
+                fsdp1_sharded_load_from_cpu,
+                fsdp1_sharded_save_to_cpu,
+            )
+
+            self._strategy_handlers = (fsdp1_sharded_save_to_cpu, fsdp1_sharded_load_from_cpu)
+        elif strategy in ["fsdp2", "veomni"]:
             from verl.utils.fsdp_utils import (
                 fsdp2_sharded_load_from_cpu,
                 fsdp2_sharded_save_to_cpu,
@@ -114,9 +124,9 @@ class DetachActorWorker(ActorRolloutRefWorker):
         """
         Save the current model state to CPU memory.
 
-        For FSDP/FSDP2/VeOmni strategies, this uses fsdp2_sharded_save_to_cpu which
-        expects model parameters to be on GPU (as DTensors). If VeOmni param_offload
-        is enabled, ensure the model has been reloaded to GPU before calling this method.
+        For FSDP/FSDP2/VeOmni strategies, this uses the strategy's sharded save helper, which
+        expects model parameters to be on GPU. If param_offload is enabled, ensure the model
+        has been reloaded to GPU before calling this method.
 
         Args:
             n: Identifier/Key for the saved model state.
@@ -131,9 +141,9 @@ class DetachActorWorker(ActorRolloutRefWorker):
         """
         Restore the model state from CPU memory.
 
-        For FSDP/FSDP2/VeOmni strategies, the saved state is a tuple of
+        For FSDP2/VeOmni strategies, the saved state is a tuple of
         (cpu_sharded_state, global_spec) produced by fsdp2_sharded_save_to_cpu.
-        For Megatron, the saved state is passed directly to the restore handler.
+        For FSDP1 and Megatron, the saved state is passed directly to the restore handler.
 
         Args:
             n: Identifier/Key for the saved model state to restore.
@@ -141,7 +151,7 @@ class DetachActorWorker(ActorRolloutRefWorker):
         if n in self.cpu_saved_models:
             strategy = self.config.actor.strategy
 
-            if strategy in ["fsdp", "fsdp2", "veomni"]:
+            if strategy in ["fsdp2", "veomni"]:
                 cpu_sharded_state, global_spec = self.cpu_saved_models[n]
                 self.restore_handler(self.actor.engine.module, cpu_sharded_state, global_spec)
             else:

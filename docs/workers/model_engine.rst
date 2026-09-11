@@ -111,7 +111,7 @@ Add a new backend
    ``transformer_impl.py``. If you want to implement a non-transformer
    model, please contact us in advance.
 -  Add the engine config to the GSM8k SFT trainer script:
-   https://github.com/verl-project/verl/blob/main/tests/special_e2e/sft/run_sft_engine_gsm8k.sh
+   https://github.com/verl-project/verl/blob/main/tests/special_e2e/sft/run_sft_engine.sh
 -  Invoke the tests with your backend:
    https://github.com/verl-project/verl/blob/main/tests/special_e2e/sft/test_sft_engine_all.sh.
    This test script will run various backends and various

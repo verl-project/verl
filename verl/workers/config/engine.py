@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import math
 import os
 import warnings
 from dataclasses import dataclass, field
@@ -35,7 +36,6 @@ __all__ = [
     "EngineConfig",
     "EngineRouterReplayConfig",
     "QATEngineConfig",
-    "MindSpeedEngineConfig",
 ]
 
 
@@ -90,8 +90,6 @@ class EngineConfig(BaseConfig):
     param_offload: bool = False
     # whether to offload optimizer
     optimizer_offload: bool = False
-    # whether to offload grad
-    grad_offload: bool = False
     # whether the engine is forward only (e.g., ref policy)
     forward_only: bool = False
     # the strategy (backend)
@@ -153,8 +151,7 @@ class McoreEngineConfig(EngineConfig):
     The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
 
     Args:
-        param_offload (bool): Whether to offload parameters to CPU.
-        grad_offload (bool): Whether to offload gradients to CPU.
+        param_offload (bool): Whether to offload parameters to CPU and release gradient buffers while inactive.
         optimizer_offload (bool): Whether to offload optimizer states to CPU.
         tensor_model_parallel_size (int): Tensor model parallel size.
         expert_model_parallel_size (int): Expert model parallel size for MoE models.
@@ -163,7 +160,7 @@ class McoreEngineConfig(EngineConfig):
         virtual_pipeline_model_parallel_size (Optional[int]): Virtual pipeline model parallel size
             for interleaved scheduling.
         context_parallel_size (int): Context parallel size for long sequences.
-        dynamic_context_parallel (bool): Whether to enable hybrid context parallelism.
+        dynamic_context_parallel (bool): Whether to enable dynamic context parallel scheduling.
         max_seqlen_per_dp_cp_rank (Optional[int]): Maximum sequence length per DPxCP rank.
         sequence_parallel (bool): Whether to enable sequence parallelism.
         use_distributed_optimizer (bool): Whether to use distributed optimizer.
@@ -177,6 +174,8 @@ class McoreEngineConfig(EngineConfig):
         use_mbridge (bool): Whether to use MBridge for communication.
         vanilla_mbridge (bool): Whether to use the deprecated legacy mbridge backend instead of Megatron-Bridge.
         use_megatron_fsdp (bool): Whether to use Megatron-FSDP (Zero-3 sharding).
+        pad_to_length (bool): Whether to round every packed micro-batch up to a bucket-aligned length.
+        pad_to_length_bucket (int): Padding granularity on the global packed sequence.
         dtype (str): Mixed precision training param dtype, default "bfloat16"
     """
 
@@ -196,6 +195,8 @@ class McoreEngineConfig(EngineConfig):
     sequence_parallel: bool = True
     use_distributed_optimizer: bool = True
     pad_bshd_to_minibatch_max: bool = True
+    pad_to_length: bool = False
+    pad_to_length_bucket: int = 512
     use_dist_checkpointing: bool = False
     dist_checkpointing_path: Optional[str] = None
     dist_checkpointing_prefix: str = ""
@@ -221,6 +222,14 @@ class McoreEngineConfig(EngineConfig):
                 "in a future release. Use Megatron-Bridge by setting `vanilla_mbridge=False` or removing the option.",
                 FutureWarning,
                 stacklevel=2,
+            )
+        if self.dynamic_context_parallel and (
+            not isinstance(self.max_seqlen_per_dp_cp_rank, int)
+            or isinstance(self.max_seqlen_per_dp_cp_rank, bool)
+            or self.max_seqlen_per_dp_cp_rank <= 0
+        ):
+            raise ValueError(
+                "max_seqlen_per_dp_cp_rank must be a positive integer when dynamic_context_parallel is enabled"
             )
         if self.tensor_model_parallel_size == 1:
             warnings.warn("set sequence parallel to false as TP size is 1", stacklevel=2)
@@ -249,6 +258,9 @@ class FSDPEngineConfig(EngineConfig):
             debugging.
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
         dtype (str): Mixed precision training param dtype, default "bfloat16"
+        use_no_sync_for_gradient_accumulation (bool): Whether to defer FSDP gradient synchronization until the
+            final micro-batch. Disabling this reduces peak memory by synchronizing and resharding gradients after
+            every micro-batch. default True
         pad_to_length (bool): Round every packed micro-batch up to a multiple of
             ``pad_to_length_bucket`` tokens, so the packed shape only takes a handful of distinct
             values instead of a new one per micro-batch, which avoids repeated kernel
@@ -282,14 +294,16 @@ class FSDPEngineConfig(EngineConfig):
     entropy_from_logits_chunk_size: int = 2048
     use_torch_compile: bool = True
     entropy_checkpointing: bool = False
+    use_no_sync_for_gradient_accumulation: bool = True
     strategy: str = "fsdp"
     pad_to_length: bool = False
     pad_to_length_bucket: int = 1024
     qat: QATEngineConfig = field(default_factory=QATEngineConfig)
+    turbo_config: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         super().__post_init__()
-        assert self.strategy in ["fsdp", "fsdp2"], f"strategy {self.strategy} not supported"
+        assert self.strategy in ["fsdp", "fsdp2", "fsdp_turbo"], f"strategy {self.strategy} not supported"
 
 
 @dataclass
@@ -343,8 +357,18 @@ class VeOmniEngineConfig(EngineConfig):
         load_balancing_loss_implementation (str): MoE load-balancing loss kernel.
             ``"eager"`` (default) or ``"triton"``.
         force_use_huggingface (bool): Force loading model from huggingface, default False
-        activation_gpu_limit (float): When enabling activation offload, `activation_gpu_limit` GB
-            activations are allowed to reserve on GPU, default 0.0
+        enable_async_activation_offload (bool): Offload activations to CPU with VeOmni's
+            stream-based D2H/H2D transfers. This is the only activation offload mode the VeOmni
+            engine supports; ``model.enable_activation_offload`` (the synchronous
+            ``saved_tensors_hooks`` path) is rejected. default False
+        activation_offload_modules (list[str]): Module name patterns whose activations are
+            offloaded when ``enable_async_activation_offload=True``. Supports segment-aware globs
+            (``model.layers.*`` matches direct children only) and ``{*}`` for sequential groups
+            (``model.layers.{*}``). Empty means auto-discovery from ``model._no_split_modules``,
+            which fails loudly when the model does not declare them. default []
+        activation_offload_host_cache_limit_gb (float): Upper bound in GB on the free pinned-host
+            buffers that async activation offload keeps around for reuse between steps. In-flight
+            offloads may exceed it; 0 disables buffer reuse. default 4.0
         basic_modules (list[str]): List of basic modules to use, default None
         forward_prefetch (bool): Whether to prefetch parameters for next forward pass, default False
         model_dtype (str): Model data type used to initialize the transformers model. default "fp32"
@@ -424,8 +448,11 @@ class VeOmniEngineConfig(EngineConfig):
     dsa_indexer_implementation: str = "eager"
     dsa_attention_implementation: str = "eager"
     mhc_implementation: str = "eager"
+    qat_implementation: str = "none"
     force_use_huggingface: bool = False
-    activation_gpu_limit: float = 0.0
+    enable_async_activation_offload: bool = False
+    activation_offload_modules: list[str] = field(default_factory=list)
+    activation_offload_host_cache_limit_gb: float = 4.0
     basic_modules: Optional[list[str]] = field(default_factory=list)
     pad_to_length: bool = False
     pad_to_length_bucket: int = 1024
@@ -433,6 +460,14 @@ class VeOmniEngineConfig(EngineConfig):
     def __post_init__(self):
         super().__post_init__()
         assert self.strategy in ["veomni"], f"strategy {self.strategy} not supported"
+
+        if not math.isfinite(self.activation_offload_host_cache_limit_gb) or (
+            self.activation_offload_host_cache_limit_gb < 0
+        ):
+            raise ValueError(
+                "activation_offload_host_cache_limit_gb must be a finite non-negative value, got "
+                f"{self.activation_offload_host_cache_limit_gb}."
+            )
 
         replacements = {
             "flash_attention_2": "veomni_flash_attention_2_with_sp",
@@ -644,30 +679,6 @@ class AutomodelEngineConfig(EngineConfig):
             f"distributed_strategy {self.distributed_strategy} not supported"
         )
         assert self.pp_size == 1, "Pipeline parallelism (pp_size > 1) is not yet supported for automodel backend"
-
-
-@dataclass
-class MindSpeedEngineConfig(McoreEngineConfig):
-    """Configuration for mindspeed parallelism.
-
-    The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
-
-    Args:
-        mcore_kwargs dict[str, Any]: mindspeed_megatron engine kwargs.
-        fsdp_kwargs dict[str, Any]: mindspeed_fsdp engine kwargs.
-    """
-
-    strategy: str = "mindspeed_megatron"
-    mcore_kwargs: dict[str, Any] = field(default_factory=dict)
-    fsdp_kwargs: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        """config validation logics go here"""
-        assert self.strategy in ["mindspeed_megatron", "mindspeed_fsdp"], f"strategy {self.strategy} not supported"
-        assert self.dtype in ["bfloat16", "float16"], f"dtype {self.dtype} not supported"
-        if self.tensor_model_parallel_size == 1:
-            warnings.warn("set sequence parallel to false as TP size is 1", stacklevel=2)
-            self.sequence_parallel = False
 
 
 @dataclass

@@ -42,8 +42,23 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 @dataclass
 class MasterMetadata:
+    """Endpoint of the broadcast source (actor rank 0), handed to every worker in the group."""
+
     zmq_ip: str
     zmq_port: int
+    multi_sender: bool
+
+
+@dataclass
+class WorkerMetadata:
+    """What each worker reports from `prepare()` for `build_topology` to place it in the group.
+
+    Only the source rank fills `master`; every worker reports `node_id` so it can be matched
+    against the source's.
+    """
+
+    node_id: str
+    master: MasterMetadata | None = None
 
 
 class BroadcastOperation:
@@ -85,6 +100,7 @@ class BroadcastOperation:
         else:
             self.socket.recv_string()
             self.metadata = self.socket.recv_pyobj()
+            self.bucket = self.bucket[: self.metadata["length"]]
 
         # broadcast tensor via NCCL
         collective.broadcast(self.bucket, src_rank=0, group_name=self.group_name)
@@ -111,6 +127,9 @@ class NCCLCheckpointEngine(CheckpointEngine):
         rebuild_group (bool): Whether to rebuild the NCCL process group in each update. Defaults to False.
         is_master (bool): Whether the current process is the master process. Defaults to False.
         rollout_dtype (torch.dtype): The dtype of the weights received from rollout workers. Defaults to torch.bfloat16.
+        multi_sender (bool): Whether to also admit the source's NVLink-local actor workers into the
+            broadcast group as relays, widening the fan-out at the root. Defaults to False, which
+            keeps the group at one sender (actor rank 0) plus the rollout workers.
     """
 
     def __init__(
@@ -120,11 +139,13 @@ class NCCLCheckpointEngine(CheckpointEngine):
         rebuild_group: bool = False,
         is_master: bool = False,
         rollout_dtype: torch.dtype = torch.bfloat16,
+        multi_sender: bool = True,
     ) -> None:
         self.bucket_size = bucket_size
         self.group_name = group_name
         self.rebuild_group = rebuild_group
         self.rollout_dtype = rollout_dtype
+        self.multi_sender = multi_sender
 
         # start zeromq server for broadcasting bucket tensor metadata
         self.is_master = is_master
@@ -132,7 +153,16 @@ class NCCLCheckpointEngine(CheckpointEngine):
         if self.is_master:
             self._start_zmq_server()
 
-    def prepare(self) -> MasterMetadata:
+    @staticmethod
+    def get_node_id() -> str:
+        """Identity of the node this GPU belongs to, used as a proxy for NVLink reachability.
+
+        GPUs on the same node are NVLink-reachable, and a node never spans more than one NVLink
+        domain, so matching on node id can only ever under-select peers, never over-select them.
+        """
+        return ray.get_runtime_context().get_node_id()
+
+    def prepare(self) -> WorkerMetadata:
         # For master process, use cupy instead of torch to avoid memory register error
         # when `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
         if self.is_master:
@@ -142,7 +172,12 @@ class NCCLCheckpointEngine(CheckpointEngine):
             self.send_buf = torch.zeros(self.bucket_size, dtype=torch.uint8, device="cuda")
             self.recv_buf = torch.zeros(self.bucket_size, dtype=torch.uint8, device="cuda")
 
-        return MasterMetadata(zmq_ip=self.ip, zmq_port=self.listen_port) if self.is_master else None
+        master = (
+            MasterMetadata(zmq_ip=self.ip, zmq_port=self.listen_port, multi_sender=self.multi_sender)
+            if self.is_master
+            else None
+        )
+        return WorkerMetadata(node_id=self.get_node_id(), master=master)
 
     def finalize(self):
         """Destroy the NCCL process group if rebuild_group is True."""
@@ -157,17 +192,60 @@ class NCCLCheckpointEngine(CheckpointEngine):
 
         torch.cuda.empty_cache()
 
+    @staticmethod
+    def _single_sender_ranks(actor_wg_world_size: int) -> list[int]:
+        """Only actor rank 0 joins the group; every other actor worker sits the broadcast out."""
+        return [0] + [-1] * (actor_wg_world_size - 1)
+
+    @staticmethod
+    def _multi_sender_ranks(actor_wg_world_size: int, metadata: list[WorkerMetadata]) -> list[int]:
+        """Actor rank 0 joins, plus every actor worker on its node, which are its NVLink peers.
+
+        Those peers carry no data the rollout needs. They join so NCCL has somewhere to fan a
+        bucket out to over NVLink, from which it can push on over each peer's own NIC. A peer on
+        any other node would have to pull a full copy over the fabric to contribute nothing, so it
+        gets rank -1 instead.
+        """
+        source_node = metadata[0].node_id
+
+        # Ranks must stay contiguous, so number the survivors as we walk the actor workers.
+        ranks, next_rank = [], 0
+        for i in range(actor_wg_world_size):
+            if i == 0 or metadata[i].node_id == source_node:
+                ranks.append(next_rank)
+                next_rank += 1
+            else:
+                ranks.append(-1)
+        return ranks
+
     @classmethod
-    def build_topology(cls, actor_wg_world_size: int, rollout_world_size: int, metadata: list[dict]):
+    def build_topology(cls, actor_wg_world_size: int, rollout_world_size: int, metadata: list[WorkerMetadata]):
+        master = metadata[0].master
+        assert master is not None, "actor rank 0 must be the checkpoint engine master"
+
+        if master.multi_sender:
+            actor_ranks = cls._multi_sender_ranks(actor_wg_world_size, metadata)
+        else:
+            actor_ranks = cls._single_sender_ranks(actor_wg_world_size)
+
+        # Multi-sender degrades to a single sender when rank 0 has no actor peers on its node.
+        num_senders = sum(rank >= 0 for rank in actor_ranks)
+        world_size = num_senders + rollout_world_size
+        logger.info(
+            f"build_topology: {num_senders} of {actor_wg_world_size} actor workers send, world_size {world_size}"
+        )
+
         actor_wg_kwargs = {
-            "rank": [0] + [-1] * (actor_wg_world_size - 1),
-            "world_size": [rollout_world_size + 1] * actor_wg_world_size,
-            "master_metadata": [metadata[0]] * actor_wg_world_size,
+            "rank": actor_ranks,
+            "world_size": [world_size] * actor_wg_world_size,
+            "master_metadata": [master] * actor_wg_world_size,
+            "num_senders": [num_senders] * actor_wg_world_size,
         }
         rollout_kwargs = {
-            "rank": list(range(1, rollout_world_size + 1)),
-            "world_size": [rollout_world_size + 1] * rollout_world_size,
-            "master_metadata": [metadata[0]] * rollout_world_size,
+            "rank": list(range(num_senders, world_size)),
+            "world_size": [world_size] * rollout_world_size,
+            "master_metadata": [master] * rollout_world_size,
+            "num_senders": [num_senders] * rollout_world_size,
         }
         return actor_wg_kwargs, rollout_kwargs
 
@@ -198,14 +276,19 @@ class NCCLCheckpointEngine(CheckpointEngine):
         self.socket.connect(address)
         self.socket.setsockopt_string(zmq.SUBSCRIBE, self.topic)
 
-    def init_process_group(self, rank: int, world_size: int, master_metadata: MasterMetadata):
+    def init_process_group(self, rank: int, world_size: int, master_metadata: MasterMetadata, num_senders: int):
         """Initialize the NCCL process group.
 
         Args:
             rank (int): The rank of the current process.
             world_size (int): The total number of processes.
+            master_metadata (MasterMetadata): The endpoint of the broadcast source.
+            num_senders (int): How many actor-side ranks the group starts with. Ranks below this
+                send or relay weights; ranks at or above it consume them.
         """
-        # For actor workers other than rank 0, their rank should be -1.
+        self.num_senders = num_senders
+
+        # Actor workers left out of the group are given rank -1.
         if rank < 0:
             self.rank = rank
             self.world_size = world_size
@@ -221,7 +304,8 @@ class NCCLCheckpointEngine(CheckpointEngine):
                 f"world_size {world_size} is not equal to self.world_size {self.world_size}"
             )
 
-        if self.rank > 0:
+        # Only consumers read the bucket metadata stream; relays never touch the payload.
+        if self.rank >= num_senders:
             self._connect_zmq_client(master_metadata)
         collective.barrier(self.group_name)
 
@@ -238,16 +322,27 @@ class NCCLCheckpointEngine(CheckpointEngine):
         Args:
             weights: A generator that yields the name of the weight tensor and the tensor itself.
         """
-        assert self.rank <= 0, "Trainer workers other than rank 0 should not send weights."
+        assert self.rank < self.num_senders, "Rollout workers should not send weights."
 
-        # For actor rank other than 0, consume weights without sending.
+        # Actor workers left out of the group still have to walk the generator: producing each
+        # weight is itself collective over the actor group.
         if self.rank < 0:
-            for name, weight in weights:
+            for _name, _weight in weights:
                 pass
+            return
+
+        if self.rank > 0:
+            await self._relay_weights(weights)
             return
 
         send_buf, recv_buf = self.send_buf, self.recv_buf
         broadcast_op = None
+
+        # In the case of multi senders, the broadcast and all-gather kernels must
+        # be queued in a deterministic order, otherwise the NCCL kernel may deadlock.
+        # Moreover the wait_for_complete() function only waits for the NCCL kernel to be enqueued,
+        # not for the kernel to finish.
+        pipelined = self.num_senders == 1
 
         start_time = time.time()
         bucket_meta: dict[str, TensorMeta] = {}
@@ -258,14 +353,14 @@ class NCCLCheckpointEngine(CheckpointEngine):
                 torch.cuda.synchronize()
 
                 # wait previous broadcast op finish
-                if broadcast_op is not None:
+                if pipelined and broadcast_op is not None:
                     await broadcast_op.wait_for_complete()
 
                 broadcast_op = BroadcastOperation(
                     rank=self.rank,
                     group_name=self.group_name,
-                    bucket=send_buf,
-                    metadata={"bucket_meta": bucket_meta, "is_last": False},
+                    bucket=send_buf[:offset],
+                    metadata={"bucket_meta": bucket_meta, "is_last": False, "length": offset},
                     socket=self.socket,
                     topic=self.topic,
                 )
@@ -283,16 +378,20 @@ class NCCLCheckpointEngine(CheckpointEngine):
             send_buf[offset : offset + tensor_meta.chunk_size] = cp.asarray(chunk)
             offset += tensor_meta.chunk_size
 
+            # keep the relays in step: no-op once the bucket's broadcast has already been drained
+            if not pipelined and broadcast_op is not None:
+                await broadcast_op.wait_for_complete()
+
         # broadcast last bucket
         torch.cuda.synchronize()
-        if broadcast_op is not None:
+        if pipelined and broadcast_op is not None:
             await broadcast_op.wait_for_complete()
 
         broadcast_op = BroadcastOperation(
             rank=self.rank,
             group_name=self.group_name,
-            bucket=send_buf,
-            metadata={"bucket_meta": bucket_meta, "is_last": True},
+            bucket=send_buf[:offset],
+            metadata={"bucket_meta": bucket_meta, "is_last": True, "length": offset},
             socket=self.socket,
             topic=self.topic,
         )
@@ -304,6 +403,35 @@ class NCCLCheckpointEngine(CheckpointEngine):
         torch.cuda.synchronize()
 
         logger.info(f"Rank {self.rank} send weights done, time cost: {time.time() - start_time:.2f}s")
+
+    async def _relay_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None]):
+        """Join every broadcast as an NVLink-local relay for rank 0, dropping the payload.
+
+        A relay holds nothing the rollout needs, so it only has to match the root bucket for
+        bucket. It recomputes the boundaries from its own copy of the weight stream under the same
+        rule `send_weights` uses above, which keeps the two in step without a round trip -- and it
+        has to be derived locally rather than read off the wire, because pulling a weight is itself
+        collective over the actor group, so blocking on the wire would deadlock against rank 0's
+        own gathers.
+        """
+        start_time = time.time()
+        offset = 0
+
+        # a single buffer suffices: nothing reads the bucket, so successive broadcasts can share it
+        async for tensor_meta, _ in split_weight_chunks(weights, self.bucket_size, meta_only=True):
+            if offset + tensor_meta.chunk_size > self.bucket_size:
+                collective.broadcast(self.recv_buf[:offset], src_rank=0, group_name=self.group_name)
+                offset = 0
+
+            offset += tensor_meta.chunk_size
+
+        # relay last bucket
+        collective.broadcast(self.recv_buf[:offset], src_rank=0, group_name=self.group_name)
+
+        # wait for the enqueued NCCL kernels, so finalize() cannot free the buffer under them
+        torch.cuda.synchronize()
+
+        logger.info(f"Rank {self.rank} relay weights done, time cost: {time.time() - start_time:.2f}s")
 
     @torch.no_grad()
     async def receive_weights(
@@ -339,7 +467,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
             topic=self.topic,
         )
         metadata = await broadcast_op.wait_for_complete()
-        total_bytes += self.bucket_size
+        total_bytes += metadata["length"]
         total_params += len(metadata["bucket_meta"])
 
         # wait for the NCCL broadcast kernel to finish before we yield the tensors
@@ -367,7 +495,7 @@ class NCCLCheckpointEngine(CheckpointEngine):
 
             # 3. wait for next bucket broadcast finish
             metadata = await broadcast_op.wait_for_complete()
-            total_bytes += self.bucket_size
+            total_bytes += metadata["length"]
             total_params += len(metadata["bucket_meta"])
 
             # 4. swap send_buf and recv_buf

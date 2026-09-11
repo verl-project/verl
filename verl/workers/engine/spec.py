@@ -88,6 +88,7 @@ class ShardSpec:
     # ``to_hf_chunk``) the engine can convert on the SENDER side: every rank
     # converts only its own touched dim-0 rows and ships final HF-coordinate
     # entries keyed by slot index -- rank 0 does no conversion at all.
+    # Without ``to_hf_chunk`` the split is the identity: slot ``e`` is ``full[e]``, handled by index math.
     hf_slots: Optional[list[tuple[str, tuple]]] = None
 
     @classmethod
@@ -148,6 +149,31 @@ class BlockPlacement:
         return int(self.global_offset[0]) * _prod(self.full_shape[1:]) if self.full_shape else 0
 
 
+def _shard_dim(p) -> Optional[int]:
+    """Which tensor dim this placement cuts, or None. ``is_shard()`` misses ``_StridedShard`` on torch 2.13."""
+    if p.is_shard():
+        return int(p.dim)
+    return int(p.dim) if type(p).__name__ == "_StridedShard" else None
+
+
+def _assert_even_strided(spec: ShardSpec, placements: tuple) -> None:
+    """Strided offsets assume equal shards, and switch every tensor dim to that rule -- so check them all."""
+    if not any(type(p).__name__ == "_StridedShard" for p in placements):
+        return
+    cuts: dict[int, int] = {}
+    for mesh_dim, p in enumerate(placements):
+        tdim = _shard_dim(p)
+        if tdim is not None:
+            cuts[tdim] = cuts.get(tdim, 1) * spec.mesh.size(mesh_dim)
+    for tdim, total in cuts.items():
+        if spec.full_shape[tdim] % total:
+            raise NotImplementedError(
+                f"sharded delta does not support uneven strided sharding: tensor dim {tdim} "
+                f"has size {spec.full_shape[tdim]}, which {total} shards do not divide evenly "
+                f"(placements={placements})"
+            )
+
+
 def translate_flat_indices(lidx: torch.Tensor, place: int | BlockPlacement) -> torch.Tensor:
     """Map shard-local flat positions to full-tensor flat positions.
 
@@ -193,11 +219,11 @@ def derive_dtensor_placement(spec: ShardSpec) -> tuple[int | BlockPlacement, boo
       default ``Shard(0)`` yields a flat-contiguous block, which keeps the add
       fast path in :func:`translate_flat_indices`. With several Shard dims (e.g.
       automodel's EP x FSDP ``(Shard(0), Shard(1))`` expert mesh) every rank holds
-      a distinct block, the gather group spans the whole mesh (created once and
-      cached), and Replicate dims are not supported alongside them.
+      a distinct block and the gather group spans every Shard dim at once; a
+      Replicate dim beside them is held fixed rather than spanned.
 
-    ``_StridedShard`` placements (interleaved local tensors, from some HSDP/TP
-    orderings) are rejected: the local tensor is not a single block.
+    ``_StridedShard`` is a block too: it permutes which block a rank gets, and
+    ``compute_local_shape_and_global_offset`` returns the permuted offset.
     """
     import torch.distributed as dist
 
@@ -207,13 +233,8 @@ def derive_dtensor_placement(spec: ShardSpec) -> tuple[int | BlockPlacement, boo
         return 0, (dist.get_rank() == 0 if dist.is_initialized() else True), None
 
     placements = spec.placements
-    for p in placements:
-        if type(p).__name__ == "_StridedShard":
-            raise NotImplementedError(
-                f"sharded delta does not support _StridedShard (local tensor is not one block); "
-                f"got placements={placements}"
-            )
-    shard_dims = [d for d, p in enumerate(placements) if p.is_shard()]
+    shard_dims = [d for d, p in enumerate(placements) if _shard_dim(p) is not None]
+    _assert_even_strided(spec, placements)
 
     coord = spec.mesh.get_coordinate()
     contributes = True
@@ -228,35 +249,36 @@ def derive_dtensor_placement(spec: ShardSpec) -> tuple[int | BlockPlacement, boo
         return 0, contributes, None
 
     local_shape, global_offset = compute_local_shape_and_global_offset(spec.full_shape, spec.mesh, list(placements))
+    place = BlockPlacement(tuple(local_shape), tuple(global_offset), tuple(spec.full_shape))
 
     if len(shard_dims) == 1:
-        group = spec.mesh.get_group(mesh_dim=shard_dims[0])
-        return BlockPlacement(tuple(local_shape), tuple(global_offset), tuple(spec.full_shape)), contributes, group
-
-    # several Shard dims: every rank owns a distinct block; gather spans the whole mesh.
-    assert all(p.is_shard() for p in placements), (
-        f"Replicate dims are not supported alongside multiple Shard dims; got placements={placements}"
-    )
-    group = _flattened_mesh_group(spec.mesh)
-    return BlockPlacement(tuple(local_shape), tuple(global_offset), tuple(spec.full_shape)), contributes, group
+        return place, contributes, spec.mesh.get_group(mesh_dim=shard_dims[0])
+    return place, contributes, _shard_dims_group(spec.mesh, shard_dims)
 
 
-_FLAT_GROUPS: dict[tuple, ProcessGroup] = {}
+_GATHER_GROUPS: dict[tuple, ProcessGroup] = {}
 
 
-def _flattened_mesh_group(mesh: DeviceMesh) -> ProcessGroup:
-    """One process group spanning every rank of ``mesh``, created once per mesh.
+def _shard_dims_group(mesh: DeviceMesh, shard_dims: list[int]) -> ProcessGroup:
+    """The ranks reached by varying the Shard mesh dims, with this rank's coordinate fixed on the others."""
+    import itertools
 
-    ``dist.new_group`` must be called by all processes in the same order; every
-    trainer rank walks the export in an identical order, so the cache stays in
-    lockstep. The group's rank 0 is the mesh's smallest global rank, which keeps
-    the gathered result on the engine master whenever it is part of the mesh.
-    """
     import torch.distributed as dist
 
-    ranks = tuple(sorted(int(r) for r in mesh.mesh.flatten().tolist()))
-    got = _FLAT_GROUPS.get(ranks)
-    if got is None:
-        got = dist.new_group(list(ranks))
-        _FLAT_GROUPS[ranks] = got
-    return got
+    coord = mesh.get_coordinate()
+    assert coord is not None, "cannot derive a gather group for a rank outside the mesh it exports from"
+    other = [d for d in range(mesh.ndim) if d not in shard_dims]
+    mine = None
+    for combo in itertools.product(*[range(mesh.size(d)) for d in other]):
+        index: list = [slice(None)] * mesh.ndim
+        for d, c in zip(other, combo, strict=True):
+            index[d] = c
+        ranks = tuple(sorted(int(r) for r in mesh.mesh[tuple(index)].flatten().tolist()))
+        got = _GATHER_GROUPS.get(ranks)
+        if got is None:
+            got = dist.new_group(list(ranks))
+            _GATHER_GROUPS[ranks] = got
+        if all(coord[d] == c for d, c in zip(other, combo, strict=True)):
+            mine = got
+    assert mine is not None, f"no gather group covers coordinate {coord} of mesh {tuple(mesh.mesh.shape)}"
+    return mine

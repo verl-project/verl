@@ -77,12 +77,13 @@ jobs:
     runs-on: linux-aarch64-a2b3-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-910b-ubuntu22.04-py3.11-vllm
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
       options: >-
         --shm-size 16g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
         run: |
@@ -110,7 +111,16 @@ jobs:
         run: |
           ray stop --force
           python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
-      - name: Test the latest vLLM Rollout async with agent loop with seed 0(non deter)
+      - name: Test the latest vLLM Rollout async with deterministic agent loop
+        env:
+          PYTHONHASHSEED: "0"
+          AGENT_LOOP_TOOL_AGENT_ROLLOUT_CONFIG: |
+            temperature: 0.0
+            top_p: 1.0
+            top_k: -1
+            full_determinism: true
+            seed: 0
+            scheduling_policy: priority
         run: |
           export HCCL_HOST_SOCKET_PORT_RANGE=auto
           export HCCL_NPU_SOCKET_PORT_RANGE=auto

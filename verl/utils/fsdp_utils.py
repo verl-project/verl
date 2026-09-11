@@ -194,7 +194,19 @@ def offload_fsdp_model_to_cpu(model: FSDP, empty_cache: bool = True):
 
 @torch.no_grad()
 def offload_fsdp2_model_to_cpu(model, empty_cache: bool = True):
-    model.cpu()
+    # PyTorch currently allocates pinned host storage for CUDA-to-CPU
+    # Tensor.to() copies when non_blocking=True. This behavior is not strictly
+    # documented, so keep it covered by the FSDP2 model-transfer regression
+    # test. The pinned parameters also make the subsequent CPU-to-GPU copy
+    # asynchronous.
+    #
+    # The CPU tensors are not safe for host access until the D2H copy finishes.
+    # Current callers reload them on the same CUDA stream, whose ordering keeps
+    # the D2H-to-H2D round trip correct. A caller that reads the tensors on the
+    # host must synchronize first, and a caller that reloads them on another
+    # stream must establish an explicit stream dependency. empty_cache() below
+    # is not a synchronization point.
+    model.to("cpu", non_blocking=True)
     if empty_cache:
         get_torch_device().empty_cache()
 
@@ -222,7 +234,7 @@ def load_fsdp_model_to_gpu(model: FSDP):
 @torch.no_grad()
 def load_fsdp2_model_to_gpu(model):
     device = get_device_id()
-    model.to(device)
+    model.to(device, non_blocking=True)
 
 
 @torch.no_grad()
@@ -1088,6 +1100,47 @@ def merged_lora_context(actor, backup_adapters=False):
         else:
             # Fall back to unmerge if no backup was made
             fsdp_merge_unmerge(actor, do_merge=False)
+
+
+def fsdp1_sharded_save_to_cpu(model: torch.nn.Module) -> dict[str, torch.Tensor]:
+    """
+    Sharded Save for FSDP1: each rank copies its own local parameter shards to CPU memory.
+
+    FSDP1 exposes flat, already-sharded ``torch.nn.Parameter`` tensors (or views into them when
+    ``use_orig_params=True``) instead of DTensors, so the sharding layout is implicit in the local
+    shapes and does not need to be recorded.
+
+    Args:
+        model: FSDP1-wrapped model.
+
+    Returns:
+        Dictionary mapping parameter name to its local shard on CPU.
+    """
+    cpu_sharded_state = {}
+    for param_name, param in model.named_parameters():
+        cpu_sharded_state[param_name] = param.data.detach().to("cpu", copy=True)
+    return cpu_sharded_state
+
+
+def fsdp1_sharded_load_from_cpu(model: torch.nn.Module, cpu_sharded_state: dict[str, torch.Tensor]) -> None:
+    """
+    Sharded Load for FSDP1: each rank copies its own CPU shards back into the live parameters.
+
+    The model must be in the same sharding state as when :func:`fsdp1_sharded_save_to_cpu` was
+    called, so that local shapes still match.
+
+    Args:
+        model: FSDP1-wrapped model to be restored.
+        cpu_sharded_state: Shards saved by :func:`fsdp1_sharded_save_to_cpu` on this rank.
+    """
+    with torch.no_grad():
+        for param_name, param in model.named_parameters():
+            # Skip parameters not in the saved state (e.g., newly added parameters)
+            if param_name not in cpu_sharded_state:
+                continue
+            param.data.copy_(cpu_sharded_state[param_name].to(param.device))
+
+    dist.barrier()
 
 
 def fsdp2_sharded_save_to_cpu(

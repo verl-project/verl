@@ -583,7 +583,7 @@ def forward_with_torch_backend(
     else:
         raise RuntimeError("To use forward_with_torch_backend, either labels or input_ids must be provided.")
 
-    fused_linear_for_ppo = FusedLinearForPPO()
+    fused_linear_for_ppo = FusedLinearForPPO(impl_backend=getattr(self, "_verl_fused_kernels_backend", "torch"))
     vocab_weights = self.lm_head.weight
     if isinstance(vocab_weights, DTensor):
         vocab_weights = vocab_weights.full_tensor()

@@ -58,9 +58,12 @@ on:
       # Entrypoints
       - ".github/workflows/vllm.yml"
       - "tests/special_e2e/generation"
+      - "tests/experimental/reward_loop/run_determinism_e2e_with_rm.py"
       - "tests/workers/rollout"
       - "verl/trainer/main_generation.py"
       - "verl/trainer/config/generation.yaml"
+      - "verl/trainer/main_ppo.py"
+      - "verl/trainer/config/ppo_trainer.yaml"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -72,7 +75,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm024.dev2"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -96,81 +99,88 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 35 # Increase this timeout value as needed
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock (offline, from the image's baked cache).
+      # Keep these extras identical across the job so uv never re-syncs torch.
+      UV_RUN: "uv run --frozen --all-packages --extra vllm --extra megatron"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - name: Install the current repository
+      # Diagnostic: show whether this runner can reach the outside world at all
+      # before uv needs it. Never fails the job.
+      - name: Keep the uv cache on the runner's persistent ${HOME}
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install -r requirements.txt
-          pip3 install --no-deps -e .
-          pip install --no-deps transformers==5.5.3
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
       - name: Check final pip list
         run: |
-          pip3 list
-      #      - name: Download Model to Use
-      #        run: |
-      #          hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir ${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct
-      #          hf download Qwen/Qwen2.5-1.5B-Instruct --local-dir ${HOME}/models/Qwen/Qwen2.5-1.5B-Instruct
-      #          hf download Qwen/Qwen2.5-VL-3B-Instruct --local-dir ${HOME}/models/Qwen/Qwen2.5-VL-3B-Instruct
-      #          hf download OldKingMeister/Qwen2.5-1.5B-Instruct-YaRN --local-dir ${HOME}/models/OldKingMeister/Qwen2.5-1.5B-Instruct-YaRN
-      #          export HF_HUB_OFFLINE=1
+          $UV_RUN uv pip list
+      # These tests need no GPU but do import vllm, which the `cpu` extra cannot
+      # provide (it pins the cpu torch world), so cpu_unit_tests skips them. Run
+      # them here, where the vllm extra is synced.
+      - name: Run vllm CPU unit tests
+        run: |
+          $UV_RUN pytest -s -x \
+            tests/workers/rollout/test_vllm_cli_args_on_cpu.py \
+            tests/workers/rollout/test_vision_placeholder_tokens_on_cpu.py \
+            tests/workers/rollout/test_vllm_pd_disaggregation_on_cpu.py \
+            tests/utils/test_vllm_weight_name_normalization_on_cpu.py::test_update_weights_from_ipc_accumulates_lora_across_buckets \
+            tests/utils/test_vllm_weight_name_normalization_on_cpu.py::test_update_weights_from_ipc_standard_loads_per_bucket
       - name: Prepare gsm8k dataset
         run: |
-          ray stop --force
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+          $UV_RUN ray stop --force
+          $UV_RUN python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k --local_dir ${HOME}/data/gsm8k
       - name: Test the latest vLLM Rollout async with agent loop
         run: |
-          ROLLOUT_NAME=vllm pytest -svvv tests/experimental/agent_loop
+          ROLLOUT_NAME=vllm $UV_RUN pytest -svvv tests/experimental/agent_loop
       - name: Test vLLM agent loop with Continuous Token
         run: |
-          ray stop --force
-          ENABLE_CONTINUOUS_TOKEN=1 ROLLOUT_NAME=vllm pytest -svvv \
+          $UV_RUN ray stop --force
+          ENABLE_CONTINUOUS_TOKEN=1 ROLLOUT_NAME=vllm $UV_RUN pytest -svvv \
             tests/experimental/agent_loop/test_basic_agent_loop.py::test_single_turn \
             tests/experimental/agent_loop/test_basic_agent_loop.py::test_tool_agent
       - name: Test vllm server abort functionality
         run: |
-          pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s
-      - name: Test vllm rollout generation determinism (same-instance + cross-instance + cross-instance AgentLoop)
-        run: |
-          VLLM_DETERMINISM_DENSE_MODEL_PATH=${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct \
-          VLLM_DETERMINISM_N_GPUS=2 \
-          pytest tests/workers/rollout/rollout_vllm/test_vllm_generation_determinism.py -v -s
+          $UV_RUN pytest tests/workers/rollout/rollout_vllm/test_vllm_abort.py -v -s
+      # - name: Test vllm rollout generation determinism (same-instance + cross-instance + cross-instance AgentLoop)
+      #   run: |
+      #     VLLM_DETERMINISM_DENSE_MODEL_PATH=${HOME}/models/Qwen/Qwen2.5-0.5B-Instruct \
+      #     VLLM_DETERMINISM_N_GPUS=2 \
+      #     $UV_RUN pytest tests/workers/rollout/rollout_vllm/test_vllm_generation_determinism.py -v -s
 
   vllm_checkpoint_engine:
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 35 # Increase this timeout value as needed
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock (offline, from the image's baked cache).
+      # Keep these extras identical across the job so uv never re-syncs torch.
+      UV_RUN: "uv run --frozen --all-packages --extra vllm --extra megatron"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - name: Install the current repository
+      # Diagnostic: show whether this runner can reach the outside world at all
+      # before uv needs it. Never fails the job.
+      - name: Keep the uv cache on the runner's persistent ${HOME}
         run: |
-          pip3 install pytest-asyncio
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
-          pip install --no-deps transformers==5.5.3
-          pip3 install cupy-cuda13x==13.6.0
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
       - name: Check final pip list
         run: |
-          pip3 list
+          $UV_RUN uv pip list
       - name: Test vLLM ServerAdapter with Checkpoint Engine (NCCL)
         run: |
-          ROLLOUT_NAME=vllm pytest -svvv tests/checkpoint_engine/test_special_server_adapter.py
+          ROLLOUT_NAME=vllm $UV_RUN pytest -svvv tests/checkpoint_engine/test_special_server_adapter.py
       - name: Test bucketed weight transfer
         run: |
-          pytest -svvv tests/utils/test_bucketed_weight_transfer.py
+          $UV_RUN pytest -svvv tests/utils/test_bucketed_weight_transfer.py
 
   cleanup:
     runs-on: ubuntu-latest

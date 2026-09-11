@@ -147,7 +147,9 @@ def _receiver_fn(zmq_handle, use_shm, result_queue):
         use_shm=use_shm,
     )
     received = []
-    receiver.receive_weights(on_bucket_received=lambda w: received.extend([(name, t.clone()) for name, t in w]))
+    receiver.receive_weights(
+        on_bucket_received=lambda w, is_last: received.extend([(name, t.clone()) for name, t in w])
+    )
     # Only send lightweight metadata + checksum back through the queue
     summaries = [(name, t.dtype, tuple(t.shape), t.float().sum().item()) for name, t in received]
     result_queue.put(summaries)
@@ -264,6 +266,9 @@ class TestBucketedWeightTransferIPC:
 
     def test_mixed_dtypes(self):
         specs = [
+            ("__delta_spec__", (5,), torch.uint8),
+            ("__positions__", (8,), torch.uint8),
+            ("__values__", (2,), torch.bfloat16),
             ("fp32_param", (64, 64), torch.float32),
             ("bf16_param", (64, 64), torch.bfloat16),
             ("fp16_param", (32, 32), torch.float16),

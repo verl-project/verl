@@ -7,6 +7,9 @@
 #
 # Multi-node (e.g. 2 nodes, rollout_tp=16):
 #   NNODES=2 ROLLOUT_TP=16 bash run_deepseek_llm_7b.sh
+#
+# rollout.load_format defaults to `dummy` because RL training receives weights from
+# the trainer. Generation-only runs have no trainer, so it must be set to `auto`.
 
 set -xeuo pipefail
 
@@ -34,6 +37,7 @@ python3 -m verl.trainer.main_generation_server \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.trust_remote_code=True \
     actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.load_format=auto \
     actor_rollout_ref.rollout.temperature=1.0 \
     actor_rollout_ref.rollout.top_k=50 \
     actor_rollout_ref.rollout.top_p=0.7 \

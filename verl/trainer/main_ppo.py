@@ -64,10 +64,9 @@ def run_ppo(config, task_runner_class) -> None:
         runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
 
         if config.transfer_queue.enable:
-            # Add runtime environment variables for transfer queue
-            runtime_env_vars = runtime_env_kwargs.get("env_vars", {})
-            runtime_env_vars["TRANSFER_QUEUE_ENABLE"] = "1"
-            runtime_env_kwargs["env_vars"] = runtime_env_vars
+            # Set this on the defaults, not on ray_init.runtime_env: the latter is a struct
+            # DictConfig, so adding an `env_vars` key to it raises ConfigKeyError.
+            default_runtime_env.setdefault("env_vars", {})["TRANSFER_QUEUE_ENABLE"] = "1"
 
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})

@@ -172,7 +172,6 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size} \
     actor_rollout_ref.actor.megatron.param_offload=False \
     actor_rollout_ref.actor.megatron.optimizer_offload=${OPTIM_OFFLOAD} \
-    actor_rollout_ref.actor.megatron.grad_offload=${offload} \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${train_pp} \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${train_tp} \
     actor_rollout_ref.actor.megatron.expert_model_parallel_size=${EP} \

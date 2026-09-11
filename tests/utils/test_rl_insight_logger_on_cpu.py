@@ -28,10 +28,12 @@ def _reset_rl_insight_logger():
     RLInsightLogger._init_done = False
     RLInsightLogger._rl_insight_module = None
     RLInsightLogger._registered_metrics.clear()
+    RLInsightLogger._warned_unsupported_features.clear()
     yield
     RLInsightLogger._init_done = False
     RLInsightLogger._rl_insight_module = None
     RLInsightLogger._registered_metrics.clear()
+    RLInsightLogger._warned_unsupported_features.clear()
 
 
 @pytest.fixture
@@ -130,3 +132,38 @@ def test_register_metrics_dedups_and_finish_resets(monkeypatch, mock_rl_insight)
     mock_rl_insight.finish.assert_called_once_with()
     assert RLInsightLogger._init_done is False
     assert not RLInsightLogger._registered_metrics
+
+
+def test_trace_span_warns_and_noops_with_old_rl_insight(monkeypatch, mock_rl_insight, caplog):
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+    mock_rl_insight.__version__ = "0.2.1"
+    mock_rl_insight.trace_span = None
+
+    with caplog.at_level("WARNING", logger="verl.utils.tracking"):
+        RLInsightLogger.trace_span("agent_task", start_time_ns=1, end_time_ns=2)
+
+    assert "RL-Insight does not support trace_span" in caplog.text
+    mock_rl_insight.init.assert_not_called()
+
+
+def test_agent_loop_session_falls_back_with_old_rl_insight(monkeypatch, mock_rl_insight, caplog):
+    from verl.utils.rollout_trace import RolloutTraceConfig
+
+    monkeypatch.setenv(RLInsightLogger.ENABLE_ENV, "1")
+    mock_rl_insight.__version__ = "0.2.1"
+    RolloutTraceConfig.reset()
+    RolloutTraceConfig.init(project_name="project", experiment_name="experiment", backend=None)
+
+    with caplog.at_level("WARNING", logger="verl.utils.tracking"):
+        session = RLInsightLogger.agent_loop_session(
+            sample=7,
+            session=1,
+            uid="uid",
+            global_steps=3,
+            session_id="session-id",
+        )
+
+    assert session.identity["state_lane_id"] == "experiment=experiment/sample=7/session=1/traj=0"
+    assert session.identity["global_steps"] == 3
+    session.finish(status="success", trajectories=[])
+    assert "RL-Insight does not support agent_loop_session" in caplog.text

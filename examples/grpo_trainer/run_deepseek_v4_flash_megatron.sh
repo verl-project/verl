@@ -20,7 +20,7 @@ export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:Tr
 
 ############################### configs ################################
 
-MODEL_PATH=$HDFS_ROOT/model/DeepSeek-V4-Flash
+MODEL_PATH=${MODEL_PATH:-$HDFS_ROOT/model/DeepSeek-V4-Flash}
 NNODES=${NNODES:-8}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 
@@ -70,8 +70,8 @@ PROJECT_NAME=${PROJECT_NAME:-wuxibin_dapo}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-deepseek_v4_flash_grpo_vllm_megatron}
 CKPTS_DIR=${CKPTS_DIR:-"${HOME}/verl/ckpts/${PROJECT_NAME}/${EXPERIMENT_NAME}"}
 
-TRAIN_FILE=$DATA_ROOT/dataset/BytedTsinghua-SIA/DAPO-Math-17k/data/dapo-math-17k.parquet
-TEST_FILE=$DATA_ROOT/dataset/aime25_test.parquet
+TRAIN_FILE=${TRAIN_FILE:-$DATA_ROOT/dataset/BytedTsinghua-SIA/DAPO-Math-17k/data/dapo-math-17k.parquet}
+TEST_FILE=${TEST_FILE:-$DATA_ROOT/dataset/aime25_test.parquet}
 OVERLONG_BUFFER_LEN=${OVERLONG_BUFFER_LEN:-${MAX_RESPONSE_LENGTH}}
 OVERLONG_BUFFER_ENABLE=${OVERLONG_BUFFER_ENABLE:-False}
 OVERLONG_PENALTY_FACTOR=${OVERLONG_PENALTY_FACTOR:-1.0}
@@ -96,8 +96,6 @@ DATA=(
     data.truncation=left
     data.dataloader_num_workers=${DATALOADER_NUM_WORKERS}
     +data.apply_chat_template_kwargs.enable_thinking=${ENABLE_THINKING}
-    data.continuous_token.enable=True
-    data.continuous_token.model_family=deepseekv4
 )
 
 MODEL=(
@@ -125,7 +123,6 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.context_parallel_size=${ACTOR_CP}
     actor_rollout_ref.actor.megatron.param_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.megatron.optimizer_offload=${ALL_OFFLOAD}
-    actor_rollout_ref.actor.megatron.grad_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.megatron.router_replay.mode=${ROUTER_REPLAY_MODE}
     ++actor_rollout_ref.actor.megatron.override_transformer_config.apply_dsa_kernel_fusion=True
     ++actor_rollout_ref.actor.megatron.override_transformer_config.dsa_indexer_use_sparse_loss=True
@@ -136,6 +133,29 @@ ACTOR=(
     ++actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_mhc=False
     "++actor_rollout_ref.actor.megatron.override_transformer_config.pipeline_model_parallel_layout='${PIPELINE_MODEL_PARALLEL_LAYOUT}'"
 )
+
+# Context parallelism needs three extra transformer-config settings for DeepSeek-V4 on top of
+# `context_parallel_size`. Each of them is enforced by Megatron-Core, so without them the run
+# aborts at model build or in the first attention forward. They are appended only when CP > 1.
+#
+#   cp_partition_mode=contiguous
+#     DSv4 attention requires every CP rank to own ONE consecutive interval of the packed THD
+#     buffer. Megatron-Core defaults to "zigzag" and raises
+#     "DSv4 Hybrid with CP requires cp_partition_mode='contiguous'."
+#   sequence_packing_scheduler=dp_balanced
+#     Megatron-Core asserts "DSv4 Hybrid with CP requires a sequence_packing_scheduler for THD
+#     inputs." Needs Transformer Engine >= 2.9.
+#   max_seqlen_per_dp_cp_rank
+#     Documented as max sequence length / cp_size; it drives how sub-samples are assigned to
+#     each DPxCP rank.
+CP_ARGS=()
+if [ "${ACTOR_CP}" -gt 1 ]; then
+    CP_ARGS=(
+        ++actor_rollout_ref.actor.megatron.override_transformer_config.cp_partition_mode=contiguous
+        ++actor_rollout_ref.actor.megatron.override_transformer_config.sequence_packing_scheduler=dp_balanced
+        ++actor_rollout_ref.actor.megatron.override_transformer_config.max_seqlen_per_dp_cp_rank=$(((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH) / ACTOR_CP))
+    )
+fi
 
 ROLLOUT=(
     actor_rollout_ref.rollout.name=vllm
@@ -188,13 +208,24 @@ EXTRA=(
 
 ########################### launch ###########################
 
-python3 -m verl.trainer.main_ppo \
+# uv (set VERL_USE_UV=0 for system python): the GPU vllm × megatron driver and every Ray worker
+# (runtime_env.py_executable) run through `uv run` on the matching extras of the committed uv.lock.
+# Run from the verl repo root.
+LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ]; then
+    LAUNCH=(uv run --frozen --all-packages --extra vllm --extra megatron python3)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages --extra vllm --extra megatron")
+fi
+"${LAUNCH[@]}" -m verl.trainer.main_ppo \
     "${ALGORITHM[@]}" \
     "${DATA[@]}" \
     "${MODEL[@]}" \
     "${ACTOR[@]}" \
+    "${CP_ARGS[@]}" \
     "${ROLLOUT[@]}" \
     "${REWARD[@]}" \
     "${TRAINER[@]}" \
     "${EXTRA[@]}" \
+    "${RAY[@]}" \
     "$@"

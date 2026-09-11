@@ -718,10 +718,12 @@ def compute_reinforce_plus_plus_outcome_advantage(
         running_return = 0
 
         for t in reversed(range(token_level_rewards.shape[1])):
-            running_return = token_level_rewards[:, t] + gamma * running_return
-            returns[:, t] = running_return
-            # Reset after EOS
-            running_return = running_return * response_mask[:, t]
+            new_running_return = token_level_rewards[:, t] + gamma * running_return
+            # For valid tokens (mask=1): update returns and running_return.
+            # For observation tokens (mask=0): skip — carry running_return
+            # through unchanged so rewards propagate past observation spans.
+            returns[:, t] = new_running_return * response_mask[:, t]
+            running_return = new_running_return * response_mask[:, t] + running_return * (1 - response_mask[:, t])
 
         advantages = verl_F.masked_whiten(returns, response_mask)
         advantages = advantages * response_mask
@@ -1598,9 +1600,10 @@ def compute_policy_loss_gspo(
     if rollout_is_weights is not None:
         pg_losses = pg_losses * rollout_is_weights
 
-    # for GSPO, we need to aggregate the loss at the sequence level (seq-mean-token-mean)
+    # NOTE: differ from GSPO original paper that aggregate the loss at the sequence level (seq-mean-token-mean),
+    # we support aggregate the loss in different modes, default is token-mean.
     pg_loss = agg_loss(
-        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode="seq-mean-token-mean", **config.global_batch_info
+        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
     )
 
     # For compatibility, return zero for pg_clipfrac_lower (not used in standard GSPO)

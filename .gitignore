@@ -97,7 +97,9 @@ celerybeat-schedule
 
 # virtualenv
 venv/
-.venv/
+.venv
+.venv-*
+.venvs/
 ENV/
 !**/workers/env/
 
@@ -121,6 +123,9 @@ ENV/
 
 # ckpt
 *.lock
+
+# data
+*.parquet
 
 
 # local logs

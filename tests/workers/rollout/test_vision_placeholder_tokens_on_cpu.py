@@ -22,7 +22,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 import torch
+
+# vllm is not part of the `cpu` extra (it conflicts with the cpu torch world), so
+# cpu_unit_tests skips this module; vllm.yml runs it in the vllm venv.
+pytest.importorskip("vllm")
 
 from verl.workers.rollout.utils import get_vision_placeholder_token_ids
 from verl.workers.rollout.vllm_rollout.utils import monkey_patch_compute_logits
