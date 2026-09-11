@@ -108,7 +108,8 @@ def test_targets_are_written_to_the_forwarded_models_own_routers(orphans_then_mo
     for layer in range(NUM_LAYERS):
         layers_topk_idx[:, :, layer, :] = layer
 
-    router_replay_utils.set_router_replay_data(layers_topk_idx, None, tf_config, vp_rank=0, model=model)
+    attention_mask = torch.ones(1, NUM_TOKENS, dtype=torch.bool)
+    router_replay_utils.set_router_replay_data(layers_topk_idx, attention_mask, tf_config, vp_rank=0, model=model)
 
     for layer, router in enumerate(_routers(model)):
         assert torch.equal(router.target_topk_idx, torch.full((NUM_TOKENS, TOPK), layer, dtype=torch.int64))

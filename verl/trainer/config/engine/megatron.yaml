@@ -126,7 +126,8 @@ router_replay:
   _target_: verl.workers.config.EngineRouterReplayConfig
 
   # Router replay mode: disabled, R2, R3
-  # - R2: Use R2 routing strategy (record mode)
+  # - R2: Record actor old-logprob routes and replay them during update.
+  #       Requires algorithm.rollout_correction.bypass_mode=false.
   # - R3: Use R3 routing strategy (record mode)
   mode: disabled
 
