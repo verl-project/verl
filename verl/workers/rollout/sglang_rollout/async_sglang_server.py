@@ -627,8 +627,10 @@ class SGLangHttpServer:
             "sampling_params": sampling_params,
             "return_logprob": return_logprob,
             "image_data": image_data,
-            # TODO: support video input for sglang
-            # video_data=video_data,
+            # video_data holds processor features ({"format": "processor_output", ...}) built by
+            # the agent loop, not raw frames: SGLang's video_data only accepts a path/url/base64
+            # or a dict. Dropping it silently makes the model answer video questions blind.
+            "video_data": video_data,
         }
 
         if prompt_logprobs is not None:

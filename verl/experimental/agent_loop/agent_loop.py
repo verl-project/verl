@@ -319,6 +319,7 @@ class AgentLoopBase(ABC):
         images: list[Image.Image] = None,
         videos: list[tuple[torch.Tensor, dict]] = None,
         audios: list[Any] = None,
+        mm_inputs_out: dict[str, Any] = None,
     ) -> list[int]:
         """Build the initial prompt token ids with Continuous Token.
 
@@ -336,6 +337,7 @@ class AgentLoopBase(ABC):
                 images=images,
                 videos=videos,
                 audios=audios,
+                mm_inputs_out=mm_inputs_out,
             ),
         )
 
@@ -355,6 +357,31 @@ class AgentLoopBase(ABC):
                 f"increase ``rollout.prompt_length``."
             )
         return self._cap_text_prompt_length(prompt_ids)
+
+    @staticmethod
+    def build_sglang_video_payload(videos, mm_inputs: dict[str, Any]) -> Optional[list[dict[str, Any]]]:
+        """Wrap already-computed video features for SGLang's ``video_data``.
+
+        SGLang cannot ingest raw frames — its ``video_data`` accepts a path / URL / base64 string or
+        a dict. ``mm_inputs`` is the processor output captured during tokenization (via the
+        ``mm_inputs_out`` hook). Tagging it ``format="processor_output"`` makes
+        ``BaseMultimodalProcessor`` pass the dict through untouched instead of re-decoding the video,
+        which would re-sample frames and desync the rollout from the actor. Returns ``None`` when
+        there is no video, so callers can hand the result straight to ``generate(...)``.
+
+        Shared by SingleTurnAgentLoop and ToolAgentLoop; vLLM keeps the raw frames and ignores this
+        (the per-backend split lives in ``LLMServerClient.generate``).
+        """
+        if not videos or "pixel_values_videos" not in mm_inputs:
+            return None
+        payload = {
+            "format": "processor_output",
+            "pixel_values_videos": mm_inputs["pixel_values_videos"],
+            "video_grid_thw": mm_inputs["video_grid_thw"],
+        }
+        if "second_per_grid_ts" in mm_inputs:
+            payload["second_per_grid_ts"] = mm_inputs["second_per_grid_ts"]
+        return [payload]
 
     async def ct_merge_context_msg(
         self,

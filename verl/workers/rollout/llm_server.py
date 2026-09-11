@@ -134,6 +134,12 @@ class LLMServerClient:
                 multimodal_kwargs["audio_data"] = audio_data
             if mm_processor_kwargs:
                 multimodal_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
+            # SGLang cannot take raw frames, so it gets the pre-computed video features while vLLM
+            # keeps the frames. Both reach here; pick per backend and never forward the unused one
+            # (neither server signature accepts **kwargs).
+            mm_processor_output = kwargs.pop("mm_processor_output", None)
+            if mm_processor_output is not None and self.config.actor_rollout_ref.rollout.name == "sglang":
+                video_data = mm_processor_output
             # priority is only supported by vLLM rollout server.
             priority = kwargs.pop("priority", 0)
             priority_kwargs = (
