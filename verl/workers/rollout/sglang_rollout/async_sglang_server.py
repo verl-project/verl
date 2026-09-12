@@ -324,6 +324,17 @@ class SGLangHttpServer:
 
                 if MXFP8_LOADER_FQN not in custom_weight_loader:
                     custom_weight_loader.append(MXFP8_LOADER_FQN)
+                if "fp8_gemm_runner_backend" not in engine_kwargs:
+                    # sglang (0.5.12) dispatches MXFP8 dense GEMMs to a generic Triton kernel
+                    # unless a FlashInfer backend is selected; on 2xB200 that path decoded ~2x
+                    # slower than bf16, while flashinfer_cutlass was ~1.3x slower. Say so at
+                    # launch instead of leaving users to discover it from gen timings.
+                    logger.warning(
+                        "SGLang MXFP8 rollout is using sglang's default (Triton) MXFP8 GEMM backend, which is "
+                        "markedly slower than bf16 decode. For native Blackwell kernels set "
+                        "actor_rollout_ref.rollout.engine_kwargs.sglang.fp8_gemm_runner_backend=flashinfer_cutlass "
+                        "(flashinfer_trtllm is not supported with weight sync)."
+                    )
             else:
                 raise ValueError(f"Currently only support fp8/mxfp8 quantization, got: {quantization}")
         infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
