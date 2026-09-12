@@ -25,13 +25,14 @@ __all__ = [
 ]
 
 try:
-    from .torchtitan import TorchTitanEngine, TorchTitanEngineWithLMHead
+    from .torchtitan import TorchTitanEngine, TorchTitanEngineWithLMHead, TorchTitanEngineWithValueHead
 
-    __all__ += ["TorchTitanEngine", "TorchTitanEngineWithLMHead"]
+    __all__ += ["TorchTitanEngine", "TorchTitanEngineWithLMHead", "TorchTitanEngineWithValueHead"]
 except ImportError as e:
     warnings.warn(f"torchtitan engine is not available: {e!r}", stacklevel=1)
     TorchTitanEngine = None
     TorchTitanEngineWithLMHead = None
+    TorchTitanEngineWithValueHead = None
 
 try:
     from .veomni import VeOmniEngine, VeOmniEngineWithLMHead
