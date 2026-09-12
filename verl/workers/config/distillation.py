@@ -124,6 +124,10 @@ class DistillationLossConfig(BaseConfig):
             )
 
 
+def _default_teacher_inference_config() -> RolloutConfig:
+    return RolloutConfig(load_format="auto")
+
+
 @dataclass
 class DistillationTeacherModelConfig(BaseConfig):
     """Configuration for on-policy distillation teacher.
@@ -146,7 +150,7 @@ class DistillationTeacherModelConfig(BaseConfig):
 
     key: Optional[str] = None
     model_path: Optional[str] = None
-    inference: RolloutConfig = field(default_factory=RolloutConfig)
+    inference: RolloutConfig = field(default_factory=_default_teacher_inference_config)
     num_replicas: Optional[int] = 0
 
     @property
@@ -168,6 +172,13 @@ class DistillationTeacherModelConfig(BaseConfig):
             raise ValueError("key must be specified for distillation teacher model config.")
         if self.num_replicas is None:
             raise ValueError("num_replicas must be specified for distillation teacher model config.")
+        if self.inference.load_format.startswith("dummy"):
+            raise ValueError(
+                "Distillation teachers must load checkpoint weights at startup; "
+                "dummy load formats initialize random weights and teacher weights "
+                "are not synchronized later. Set inference.load_format=auto or "
+                "another checkpoint-loading format."
+            )
 
     def validate_and_prepare_for_distillation(self, use_topk: bool, topk: Optional[int]) -> None:
         # Prompt + Response from student are fed into teacher as context
