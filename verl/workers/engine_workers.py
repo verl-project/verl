@@ -447,6 +447,14 @@ class TrainingWorker(Worker, DistProfilerExtension):
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
         return self.engine.load_checkpoint(local_path, hdfs_path, del_local_after_load)
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def prepare_checkpoint_retention(self, loaded_path):
+        return self.engine.prepare_checkpoint_retention(loaded_path)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def finalize_checkpoint_retention(self, new_path, max_ckpt_to_keep=None):
+        return self.engine.finalize_checkpoint_retention(new_path, max_ckpt_to_keep)
+
 
 class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     """Hybrid worker that includes actor model, rollout and optional ref model.
