@@ -32,6 +32,7 @@ CUDA_KEYWORD_CHECK_WHITELIST = [
     "verl/plugin/platform/platform_manager.py",  # platform auto-detection probes torch.cuda
     "verl/utils/profiler/nvtx_profile.py",  # appear in NsightSystemsProfiler
     "verl/utils/profiler/torch_profile.py",  # appear in TorchProfiler
+    "verl/utils/profiler/torch_memory_profile.py",  # explicitly limit OOM observers to CUDA/NPU
     "verl/utils/profiler/config.py",  # appear in TorchProfilerToolConfig
     "verl/utils/kernel/linear_cross_entropy.py",  # appear in nvidia nvtx
     "verl/utils/rendezvous/ray_backend.py",  # appear in cupy importance

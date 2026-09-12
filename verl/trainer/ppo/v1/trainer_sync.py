@@ -40,3 +40,5 @@ class PPOTrainerSync(PPOTrainer):
     def on_sample_end(self):
         # sleep all replicas to discard weights and kv cache
         self.checkpoint_manager.sleep_replicas()
+        if self.curr_step_profile:
+            self._stop_rollout_profiling()

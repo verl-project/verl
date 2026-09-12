@@ -108,6 +108,9 @@ def _trainer(
     trainer.parameter_sync_step = parameter_sync_step
     trainer.global_steps = global_steps
     trainer.total_training_steps = total_training_steps
+    trainer.prev_step_profile = False
+    trainer.curr_step_profile = False
+    trainer.next_step_profile = False
     trainer.timing_raw = {}
     trainer.current_mode = HybridEngineMode.ROLLOUT
     trainer.replay_buffer = _RecordingReplayBuffer(eviction_metrics, sampleable_count)

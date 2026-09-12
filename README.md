@@ -153,7 +153,7 @@ verl is fast with:
   - [Ray API design tutorial](https://verl.readthedocs.io/en/latest/advance/placement.html)
 
 **Blogs from the community**
-
+- [Hands-on: Launch verl Fully Async DAPO Training on 4 AMD Instinct GPUs with AMD Developer Cloud](https://cloud.oneclickamd.ai/templates/1925/preview)
 - [When Reasoning Models Break Tokenization: The Hidden Complexity of Multiturn Training](https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/verl/multi-turn/fast_tokenization/multiturn_tokenization_and_masking.md)
 - [verl deployment on AWS SageMaker](https://medium.com/@kaige.yang0110/run-verl-on-sagemaker-using-4x8-l40s-gpus-8e6d5c3c61d3)
 - [verl x SGLang Multi-turn Code Walkthrough](https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/verl/multi-turn/code-walk-through/readme_EN.md)
