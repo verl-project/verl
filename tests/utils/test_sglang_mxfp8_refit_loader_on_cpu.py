@@ -31,6 +31,12 @@ class _Backend:
     def is_flashinfer_cutlass(self):
         return self.name == "flashinfer_cutlass"
 
+    def is_flashinfer_cutedsl(self):
+        return self.name == "flashinfer_cutedsl"
+
+    def is_deep_gemm(self):
+        return self.name == "deep_gemm"
+
 
 def _install_stub(backend_name):
     mod = types.ModuleType("sglang.srt.layers.quantization.fp8_utils")
@@ -44,8 +50,11 @@ class _QuantMethod:
     use_mxfp8 = True
     is_checkpoint_fp8_serialized = True
 
-    def __init__(self):
+    def __init__(self, resolved_backend=None):
         self.calls = 0
+        # sglang >= 0.5.18 stores the resolved MXFP8 dense backend on the quant method
+        if resolved_backend is not None:
+            self.mxfp8_dense_backend = _Backend(resolved_backend)
 
     def process_weights_after_loading(self, layer):
         self.calls += 1
@@ -53,18 +62,18 @@ class _QuantMethod:
 
 
 class _Linear(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, resolved_backend=None):
         super().__init__()
         self.weight = torch.nn.Parameter(torch.zeros(4, 64, dtype=torch.float32), requires_grad=False)
         self.weight_scale_inv = torch.nn.Parameter(torch.zeros(4, 2, dtype=torch.uint8), requires_grad=False)
-        self.quant_method = _QuantMethod()
+        self.quant_method = _QuantMethod(resolved_backend)
 
 
 class _Model(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, resolved_backend=None):
         super().__init__()
-        self.a = _Linear()
-        self.b = _Linear()
+        self.a = _Linear(resolved_backend)
+        self.b = _Linear(resolved_backend)
         self.plain = torch.nn.Linear(2, 2)  # no quant_method → ignored
         self.loaded = []
 
@@ -96,6 +105,35 @@ def test_triton_backend_is_a_noop_after_load():
 def test_trtllm_backend_is_rejected():
     _install_stub("flashinfer_trtllm")
     m = _Model()
+    try:
+        refit.reprocess_mxfp8_layers(m)
+    except NotImplementedError as e:
+        assert "flashinfer_trtllm" in str(e)
+    else:
+        raise AssertionError("expected NotImplementedError")
+
+
+def test_resolved_backend_on_layer_wins_over_launch_flag():
+    # sglang >= 0.5.18: --fp8-gemm-backend left at auto, but the quant method resolved the
+    # MXFP8 dense backend to FlashInfer CuTe-DSL (the Blackwell default). The derived copy
+    # must be rebuilt even though the requested backend is not "flashinfer_cutlass".
+    _install_stub("auto")
+    m = _Model(resolved_backend="flashinfer_cutedsl")
+    new_scale = torch.full((4, 2), 3, dtype=torch.uint8)
+    refit.load_and_reprocess(m, [("a.weight_scale_inv", new_scale)])
+    assert m.a.quant_method.calls == 1 and m.b.quant_method.calls == 1
+    assert torch.equal(m.a.weight_scale_inv_swizzled, new_scale + 1)
+
+
+def test_resolved_deep_gemm_backend_is_reprocessed():
+    _install_stub("auto")
+    m = _Model(resolved_backend="deep_gemm")
+    assert refit.reprocess_mxfp8_layers(m) == 2
+
+
+def test_resolved_trtllm_backend_is_rejected():
+    _install_stub("auto")
+    m = _Model(resolved_backend="flashinfer_trtllm")
     try:
         refit.reprocess_mxfp8_layers(m)
     except NotImplementedError as e:

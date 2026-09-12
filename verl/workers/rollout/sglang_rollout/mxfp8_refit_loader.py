@@ -27,11 +27,19 @@ What it does. ``load_and_reprocess`` is registered as a custom loader and named
 as the request ``load_format``; SGLang ``dynamic_import``s it inside every TP
 worker and calls it with ``(model, named_tensors)``. It loads the tensors the
 standard way, then re-runs ``process_weights_after_loading`` on every module
-whose quant method is MXFP8, which rebuilds the swizzled scales from the just
-written canonical ones. For the default Triton backend the re-run is a no-op
-(``apply()`` reads ``weight_scale_inv`` directly), so the loader is safe to use
-unconditionally. The ``flashinfer_trtllm`` backend is rejected: it shuffles the
-*weight* tensor itself in place at load, so re-running the processing on an
+whose quant method is MXFP8, which rebuilds the kernel-layout copies from the
+just written canonical scales.
+
+Which backend a layer runs on is read from the layer, not from the launch flag.
+sglang >= 0.5.18 (#33208) resolves the MXFP8 dense backend at construction and
+stores it as ``quant_method.mxfp8_dense_backend`` — with no ``--fp8-gemm-backend``
+that is FlashInfer CuTe-DSL or CUTLASS on Blackwell and DeepGEMM on Hopper, all
+of which keep derived copies (``weight_scale_inv_swizzled`` /
+``weight_scale_inv_deepgemm``) that a sync must rebuild. sglang <= 0.5.17 has no
+such attribute and dispatches on the requested backend, where ``auto`` means
+Triton, which reads the canonical scale directly and needs no re-processing.
+The ``flashinfer_trtllm`` backend is rejected on both: it shuffles the *weight*
+tensor itself in place at load, so re-running the processing on an
 already-shuffled layer would shuffle twice; supporting it needs per-layer
 tracking of which parameters a sync touched.
 
@@ -66,30 +74,52 @@ def _is_mxfp8_linear(module: torch.nn.Module) -> bool:
     )
 
 
+def _layer_backend(qm) -> tuple[object, bool]:
+    """Return ``(backend, resolved)`` for one MXFP8 quant method.
+
+    ``resolved`` is True when sglang itself resolved the MXFP8 dense backend
+    (>= 0.5.18, ``quant_method.mxfp8_dense_backend``); otherwise the requested
+    ``--fp8-gemm-backend`` is returned, where ``auto`` means Triton for MXFP8.
+    """
+    backend = getattr(qm, "mxfp8_dense_backend", None)
+    if backend is not None:
+        return backend, True
+    from sglang.srt.layers.quantization.fp8_utils import get_fp8_gemm_runner_backend
+
+    return get_fp8_gemm_runner_backend(), False
+
+
+def _needs_reprocess(backend, resolved: bool) -> bool:
+    if backend.is_flashinfer_trtllm():
+        raise NotImplementedError(
+            "MXFP8 weight sync with the flashinfer_trtllm GEMM backend is not supported: that backend "
+            "shuffles the weight tensor in place at load time, so post-load processing cannot be re-run "
+            "after a sync. Use flashinfer_cutlass / flashinfer_cutedsl, or leave the backend unset."
+        )
+    if resolved:
+        # CUTLASS, CuTe-DSL and DeepGEMM all derive their kernel layout from the canonical
+        # weight_scale_inv the sync just rewrote; re-running the processing is idempotent for
+        # them and a no-op for backends that read the canonical scale directly.
+        return True
+    # sglang <= 0.5.17: only flashinfer_cutlass keeps a derived copy; Triton (auto) reads
+    # weight_scale_inv directly.
+    return backend.is_flashinfer_cutlass()
+
+
 def reprocess_mxfp8_layers(model: torch.nn.Module) -> int:
     """Re-derive backend-specific MXFP8 scale layouts from the canonical scales.
 
     Returns the number of modules reprocessed. Raises for backends whose
     post-load processing is not idempotent (``flashinfer_trtllm``).
     """
-    from sglang.srt.layers.quantization.fp8_utils import get_fp8_gemm_runner_backend
-
-    backend = get_fp8_gemm_runner_backend()
-    if backend.is_flashinfer_trtllm():
-        raise NotImplementedError(
-            "MXFP8 weight sync with fp8_gemm_runner_backend=flashinfer_trtllm is not supported: "
-            "that backend shuffles the weight tensor in place at load time, so post-load processing "
-            "cannot be re-run after a sync. Use flashinfer_cutlass or the default (triton) backend."
-        )
-    if not backend.is_flashinfer_cutlass():
-        # Triton (default) consumes canonical UE8M0 scales directly; nothing to rebuild.
-        return 0
-
     count = 0
     for name, module in model.named_modules():
         if not _is_mxfp8_linear(module):
             continue
         qm = module.quant_method
+        backend, resolved = _layer_backend(qm)
+        if not _needs_reprocess(backend, resolved):
+            continue
         if not getattr(qm, "is_checkpoint_fp8_serialized", True):
             # Would re-quantize from a bf16 master weight that a sync just replaced with fp8 data.
             raise RuntimeError(

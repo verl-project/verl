@@ -254,32 +254,39 @@ Notes:
 
 #### SGLang MXFP8 GEMM backend
 
-SGLang (0.5.12) runs MXFP8 dense GEMMs on a generic Triton kernel by default
-(`dispatch_w8a8_mxfp8_linear`); in a 2xB200 measurement, MXFP8 decode on that path was about
-2x slower than bf16 decode. The FlashInfer CUTLASS backend runs native Blackwell block-scaled
-kernels and was about 1.3x slower than bf16 in the same setup. Select it with:
+Which kernel SGLang uses for MXFP8 dense GEMMs depends on the SGLang version:
 
-```bash
-+actor_rollout_ref.rollout.engine_kwargs.sglang.fp8_gemm_runner_backend=flashinfer_cutlass
-```
+- **sglang <= 0.5.17** (e.g. 0.5.12) runs them on a generic Triton kernel unless a FlashInfer
+  backend is requested. In a 2xB200 measurement, MXFP8 decode on that path was about 2x slower
+  than bf16 decode; the FlashInfer CUTLASS backend was about 1.3x slower than bf16 in the same
+  setup. verl logs a warning at launch on these versions when no backend is set. Select CUTLASS with
 
-(`fp8_gemm_runner_backend` is the `ServerArgs` field name; the CLI spelling `--fp8-gemm-backend`
-is not accepted through `engine_kwargs`.) verl logs a warning at launch when `quantization: mxfp8`
-is used with SGLang and no backend is set.
+  ```bash
+  +actor_rollout_ref.rollout.engine_kwargs.sglang.fp8_gemm_runner_backend=flashinfer_cutlass
+  ```
+
+  (`fp8_gemm_runner_backend` is the `ServerArgs` field name; the CLI spelling
+  `--fp8-gemm-backend` is not accepted through `engine_kwargs`.)
+- **sglang >= 0.5.18** (sgl-project/sglang#33208) removed the Triton path. With no backend set,
+  Blackwell uses FlashInfer CuTe-DSL when available, otherwise FlashInfer CUTLASS; Hopper uses
+  DeepGEMM. No flag is needed.
 
 Two constraints on this path:
 
-- verl registers an MXFP8 refit loader for SGLang (`mxfp8_refit_loader.py`) that re-derives the
-  FlashInfer backend's swizzled scale layout after every weight sync. Without it the backend keeps
-  serving the scale layout derived at load time against freshly synced weights and generates
-  garbage from step 0. `flashinfer_trtllm` shuffles the weight tensor itself in place at load and
-  is rejected by the loader; use `flashinfer_cutlass` or the default.
+- Every one of these FlashInfer / DeepGEMM backends derives a kernel-specific copy of the
+  weight scales at load time (`weight_scale_inv_swizzled` / `weight_scale_inv_deepgemm`), and
+  SGLang's weight-update path does not rebuild it. verl therefore registers an MXFP8 refit loader
+  (`mxfp8_refit_loader.py`) that re-runs the post-load processing after every weight sync; it reads
+  the backend each layer actually resolved to, so it covers the version-dependent defaults above.
+  Without it the engine keeps serving load-time scales against freshly synced weights and generates
+  garbage from step 0. `flashinfer_trtllm` shuffles the weight tensor itself in place at load and is
+  rejected by the loader.
 - Do not set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` for an SGLang rollout: verl
   launches SGLang with `enable_memory_saver=True`, and `torch_memory_saver` refuses that
   allocator mode, killing the server in `load_model`. The vLLM path tolerates the variable.
 
-Neither engine showed an MXFP8 rollout throughput gain over bf16 in these runs; the measurements
-are in the PR description.
+Neither engine showed an MXFP8 rollout throughput gain over bf16 in these runs (SGLang 0.5.12 and
+vLLM 0.24.0); the measurements are in the PR description.
 
 ### MXFP8 Rollout and Train-Inference Consistency
 
