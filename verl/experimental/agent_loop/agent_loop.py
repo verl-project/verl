@@ -1006,7 +1006,15 @@ class AgentLoopWorker:
         validate: bool,
         sample_kwargs: Optional[dict[str, Any]] = None,
     ) -> None:
-        """Compute teacher logprobs for single sample."""
+        """Compute teacher logprobs for single sample.
+
+        Default (same-tokenizer OPD): score ``prompt_ids + response_ids`` as-is.
+
+        When the routed teacher has ``system_prompt`` / ``system_prompt_path`` set,
+        rebuild the teacher prefix from ``raw_prompt`` with that system turn injected,
+        append the same ``response_ids``, score that longer sequence, then remap the
+        teacher logprobs onto the student sequence layout for the distillation loss.
+        """
         if self.distillation_enabled and not validate:
             routing_key = None
             if sample_kwargs is not None:
@@ -1014,14 +1022,109 @@ class AgentLoopWorker:
                 if routing_value is not None:
                     # Non-tensor batch values arrive as 0-d numpy objects / arrays; normalize to Python.
                     routing_key = routing_value.item() if hasattr(routing_value, "item") else routing_value
+
+            sequence_ids = list(prompt_ids) + list(response_ids)
+            teacher_prompt_len = len(prompt_ids)
+            system_prompt = self._get_teacher_system_prompt(routing_key)
+            if system_prompt is not None:
+                sequence_ids, teacher_prompt_len = self._build_teacher_sequence_with_system(
+                    output=output,
+                    sample_kwargs=sample_kwargs,
+                    response_ids=response_ids,
+                    system_prompt=system_prompt,
+                )
+
             teacher_ids, teacher_logprobs = await self.teacher_server_manager.compute_teacher_logprobs_single(
-                sequence_ids=prompt_ids + response_ids,
+                sequence_ids=sequence_ids,
                 multi_modal_data=output.multi_modal_data,
                 mm_processor_kwargs=output.mm_processor_kwargs,
                 routing_key=routing_key,
             )
+            if system_prompt is not None:
+                from verl.experimental.teacher_loop.teacher_manager import align_teacher_outputs_to_student
+
+                pad_token_id = self.tokenizer.pad_token_id
+                if pad_token_id is None:
+                    pad_token_id = 0
+                teacher_ids, teacher_logprobs = align_teacher_outputs_to_student(
+                    teacher_ids,
+                    teacher_logprobs,
+                    student_prompt_len=len(prompt_ids),
+                    student_response_len=len(response_ids),
+                    teacher_prompt_len=teacher_prompt_len,
+                    pad_token_id=int(pad_token_id),
+                )
             output.extra_fields["teacher_ids"] = teacher_ids
             output.extra_fields["teacher_logprobs"] = teacher_logprobs
+
+    def _get_teacher_system_prompt(self, routing_key: Optional[str]) -> Optional[str]:
+        from verl.experimental.teacher_loop.teacher_manager import resolve_teacher_system_prompt
+
+        teacher_key = self.teacher_server_manager._resolve_teacher_key(routing_key)
+        return resolve_teacher_system_prompt(self.teacher_server_manager.teacher_model_configs[teacher_key])
+
+    def _build_teacher_sequence_with_system(
+        self,
+        output: AgentLoopOutput,
+        sample_kwargs: Optional[dict[str, Any]],
+        response_ids: list[int],
+        system_prompt: str,
+    ) -> tuple[list[int], int]:
+        """Re-template raw messages with a teacher system prompt; append student response ids."""
+        from verl.experimental.teacher_loop.teacher_manager import inject_system_message
+        from verl.utils.tokenizer.chat_template import apply_chat_template
+        from verl.utils.tokenizer.tokenizer import normalize_token_ids
+
+        multi_modal_data = output.multi_modal_data or {}
+        if multi_modal_data.get("images") or multi_modal_data.get("videos") or multi_modal_data.get("audios"):
+            raise NotImplementedError(
+                "Teacher system_prompt / system_prompt_path is not supported for multimodal samples."
+            )
+
+        raw_prompt = output.extra_fields.get("raw_prompt") if output.extra_fields else None
+        if raw_prompt is None and sample_kwargs is not None:
+            raw_prompt = sample_kwargs.get("raw_prompt")
+        if raw_prompt is None:
+            raise ValueError(
+                "Teacher system_prompt is set but raw_prompt is missing from the sample; "
+                "cannot rebuild the teacher chat template."
+            )
+
+        # Dataset / TransferQueue may wrap messages as numpy object arrays.
+        if hasattr(raw_prompt, "tolist"):
+            raw_prompt = raw_prompt.tolist()
+        messages = [dict(m) for m in list(raw_prompt)]
+        teacher_messages = inject_system_message(messages, system_prompt)
+
+        apply_chat_template_kwargs = dict(self.config.data.get("apply_chat_template_kwargs", {}) or {})
+        tokenized = apply_chat_template(
+            self.tokenizer,
+            teacher_messages,
+            tools=None,
+            add_generation_prompt=True,
+            tokenize=True,
+            **apply_chat_template_kwargs,
+        )
+        teacher_prompt_ids = normalize_token_ids(tokenized)
+        if not teacher_prompt_ids:
+            raise ValueError("Teacher prompt tokenization produced an empty sequence.")
+
+        max_model_len = None
+        # Single-teacher configs expose max_model_len on the one teacher; multi-teacher
+        # uses the routed config's inference.max_model_len via the manager when needed.
+        try:
+            any_teacher = next(iter(self.teacher_server_manager.teacher_model_configs.values()))
+            max_model_len = any_teacher.inference.max_model_len
+        except StopIteration:
+            max_model_len = None
+        total_len = len(teacher_prompt_ids) + len(response_ids)
+        if max_model_len is not None and total_len > max_model_len:
+            raise ValueError(
+                "Teacher sequence with system prompt exceeds inference.max_model_len: "
+                f"teacher_prompt_len={len(teacher_prompt_ids)}, response_len={len(response_ids)}, "
+                f"total={total_len}, max_model_len={max_model_len}."
+            )
+        return list(teacher_prompt_ids) + list(response_ids), len(teacher_prompt_ids)
 
     def _postprocess(
         self,

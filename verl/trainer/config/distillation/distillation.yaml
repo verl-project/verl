@@ -84,6 +84,11 @@ teacher_models:
     key: null
     model_path: null
     num_replicas: 0
+    # Optional teacher-only system prompt (asymmetric / privileged-context OPD).
+    # When set, the teacher re-templates raw_prompt with this system turn and scores
+    # the student's response tokens under that longer prefix. Student rollout is unchanged.
+    system_prompt: null
+    system_prompt_path: null
     inference:
       _target_: verl.workers.config.RolloutConfig
       name: ${oc.select:actor_rollout_ref.rollout.name}
