@@ -1,11 +1,11 @@
 TorchTitan Backend
 ==================
 
-Last updated: 07/08/2026.
+Last updated: 09/12/2026.
 
 We support the `TorchTitan <https://github.com/pytorch/torchtitan>`_ backend by
-implementing the ``TorchTitanEngine`` and ``TorchTitanEngineWithLMHead`` engine
-classes. The TorchTitan backend delegates model building, parallelization
+implementing the ``TorchTitanEngine``, ``TorchTitanEngineWithLMHead``, and
+``TorchTitanEngineWithValueHead`` engine classes. The TorchTitan backend delegates model building, parallelization
 (FSDP2 / TP / CP / EP), optimizer construction and sharding, LR scheduling,
 gradient clipping, and checkpointing to TorchTitan's infrastructure, while using
 verl's own training loop (``forward_backward_batch``), data pipeline, and loss
@@ -133,3 +133,52 @@ To mirror ``FSDP_SIZE=2 TP_SIZE=2`` on 4 GPUs:
 .. code:: shell
 
    NUM_GPUS=4 FSDP_SIZE=2 TP_SIZE=2 bash tests/special_e2e/run_ppo_trainer_torchtitan.sh
+
+PPO critic
+----------
+
+The TorchTitan backend also provides ``TorchTitanEngineWithValueHead`` for a
+dense Qwen3 critic. With ``model_engine=torchtitan``, choosing
+``algorithm.adv_estimator=gae`` selects the existing TorchTitan critic config.
+For example, using the GSM8K script above:
+
+.. code:: shell
+
+   NUM_GPUS=2 FSDP_SIZE=2 AC_MODE=none \
+     bash tests/special_e2e/run_ppo_trainer_torchtitan.sh \
+       algorithm.adv_estimator=gae \
+       actor_rollout_ref.rollout.n=1 \
+       critic.torchtitan.data_parallel_shard_size=2 \
+       critic.torchtitan.attn_type=flex \
+       critic.torchtitan.activation_checkpoint=none \
+       critic.torchtitan.use_torch_compile=False
+
+The critic retains the input embedding vocabulary and replaces the output
+projection with an independent scalar head before TorchTitan creates FSDP
+shards and optimizers. Its per-token values feed verl's existing clipped value
+loss. Both packed and right-padded execution return values in the input's
+jagged sequence layout. For ``attn_type=flex``, the critic uses the full
+FlexAttention kernel: the supported PyTorch dev20260625 nightly's short-query
+GQA decoding path can disagree with padded evaluation.
+
+``critic.model.path`` may point to a causal LM checkpoint or a Qwen3 checkpoint
+with a scalar ``score.weight`` and optional ``score.bias``. Missing head weights
+are initialized; a missing bias starts at zero. A vocabulary-sized
+``lm_head.weight`` is never used as the value head. Missing backbone weights and
+incompatible score shapes are errors. Native TorchTitan checkpoints retain
+the value head, optimizer, and LR scheduler for resuming training.
+
+The initial critic implementation supports dense Qwen3 on CUDA with FSDP2 data
+parallelism. TP, CP, PP, EP, and LoRA are rejected during engine construction.
+The actor's parallelism support is unchanged. Validation uses the Qwen3 debug
+model with FlexAttention and ``spmd_types``; a download-free distributed
+training and checkpoint regression test is available:
+
+.. code:: shell
+
+   torchrun --nproc_per_node=2 \
+     tests/special_distributed/test_torchtitan_critic.py \
+     --work-dir /tmp/verl-torchtitan-critic
+   torchrun --nproc_per_node=2 \
+     tests/special_distributed/test_torchtitan_critic.py \
+     --work-dir /tmp/verl-torchtitan-score --with-score

@@ -15,12 +15,14 @@
 The concrete Engine implementation using PyTorch TorchTitan parallelism (FSDP2 + TP + PP)
 """
 
+import copy
 import gc
 import importlib
 import logging
 import os
 import re
 from contextlib import nullcontext
+from functools import partial
 from typing import Any, Callable, Optional
 
 import torch
@@ -62,6 +64,7 @@ from verl.workers.engine.torchtitan.utils import (
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
+from .value_model import Qwen3ValueStateDictAdapter, parallelize_qwen3_value_model
 
 
 def _hf_entry_row_slots(name, spec, place, lidx, lval):
@@ -133,6 +136,7 @@ class TorchTitanEngine(BaseEngine):
         # Get ModelSpec from model registry
         model_module = importlib.import_module(f"torchtitan.models.{torchtitan_name}")
         model_spec = model_module.model_registry(torchtitan_flavor, attn_backend=self.engine_config.attn_type)
+        model_spec = self._configure_model_spec(model_spec)
 
         optimizer = OptimizersContainer.Config(
             param_groups=[
@@ -269,6 +273,13 @@ class TorchTitanEngine(BaseEngine):
             is_collect = is_collect and (cp_mesh.get_local_rank() == 0)
         return is_collect
 
+    def _configure_model_spec(self, model_spec):
+        """Customize the model before TorchTitan creates parameters and optimizers."""
+        return model_spec
+
+    def _load_initial_weights(self):
+        self.checkpointer.load()
+
     def initialize(self):
         """
         Build the model, optimizer, and learning rate scheduler with TorchTitan parallelism.
@@ -279,7 +290,7 @@ class TorchTitanEngine(BaseEngine):
         self.module = self.trainer.model_parts
         self.checkpointer = self.trainer.checkpointer
         # load initial HF weights
-        self.checkpointer.load()
+        self._load_initial_weights()
 
         if not self.engine_config.forward_only:
             self.optimizer = self.trainer.optimizers
@@ -883,3 +894,79 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
             }
 
             return loss, output
+
+
+@EngineRegistry.register(model_type="value_model", backend=["torchtitan"], device=["cuda"])
+class TorchTitanEngineWithValueHead(TorchTitanEngineWithLMHead):
+    """Dense Qwen3 critic with FSDP2 data parallelism."""
+
+    def _configure_model_spec(self, model_spec):
+        if self.model_config.hf_config.model_type != "qwen3":
+            raise NotImplementedError("The TorchTitan critic currently supports dense Qwen3 models only.")
+        for field in (
+            "tensor_parallel_size",
+            "context_parallel_size",
+            "pipeline_parallel_size",
+            "expert_parallel_size",
+        ):
+            if getattr(self.engine_config, field) != 1:
+                raise NotImplementedError(f"The TorchTitan critic requires {field}=1; use FSDP2 data parallelism.")
+        if (
+            self.model_config.lora_rank > 0
+            or self.model_config.lora.get("rank", 0) > 0
+            or self.model_config.lora_adapter_path
+        ):
+            raise NotImplementedError("The TorchTitan critic does not support LoRA.")
+
+        model_spec = copy.deepcopy(model_spec)
+        # Do this before Trainer constructs/shards the model and its optimizer.
+        # Preserve the full input vocabulary and untie only the scalar head.
+        model_spec.model.enable_weight_tying = False
+        model_spec.model.lm_head.out_features = 1
+        model_spec.model.lm_head.bias = True
+        model_spec.model.lm_head.param_init = {
+            "weight": partial(torch.nn.init.normal_, std=self.model_config.hf_config.initializer_range),
+            "bias": torch.nn.init.zeros_,
+        }
+        model_spec.state_dict_adapter = Qwen3ValueStateDictAdapter
+        model_spec.parallelize_fn = parallelize_qwen3_value_model
+        if self.engine_config.attn_type == "flex":
+            # Critics evaluate full sequences. On the supported dev20260625
+            # nightly, the short-query GQA decoding kernel disagrees with the
+            # full attention path; this also affects short critic micro-batches.
+            for layer in model_spec.model.layers:
+                layer.attention.inner_attention.kernel_options["FORCE_USE_FLEX_ATTENTION"] = True
+        return model_spec
+
+    def _load_initial_weights(self):
+        with self.checkpointer.sd_adapter.initial_hf_load(self.model_config.path):
+            super()._load_initial_weights()
+
+    def _to_hf_named_params(self, params):
+        return self.checkpointer.sd_adapter.to_hf(params)
+
+    def prepare_model_inputs(self, micro_batch: TensorDict):
+        """Prepare token inputs and TorchTitan attention metadata for either layout."""
+        inputs, extra_inputs, extra_kwargs, output_args = super().prepare_model_inputs(micro_batch)
+        if not tu.get_non_tensor_data(micro_batch, "use_remove_padding", default=True):
+            # TorchTitan attention consumes BlockMask/VarlenMetadata, not a HF
+            # binary padding mask. Right padding cannot affect preceding tokens.
+            extra_kwargs["attention_masks"] = get_attention_masks(
+                inputs, extra_inputs["positions"], self.engine_config.attn_type
+            )
+        return inputs, extra_inputs, extra_kwargs, output_args
+
+    def prepare_model_outputs(self, logits, output_args, micro_batch: TensorDict):
+        """Return differentiable token values in the original jagged sequence layout."""
+        pad_mode = tu.get_non_tensor_data(micro_batch, "pad_mode", default=DatasetPadMode.NO_PADDING)
+        if pad_mode != DatasetPadMode.NO_PADDING:
+            raise NotImplementedError(f"pad_mode {pad_mode} not supported")
+        offsets = micro_batch["input_ids"].offsets()
+        values = logits.squeeze(-1)
+        if tu.get_non_tensor_data(micro_batch, "use_remove_padding", default=True):
+            values = values.squeeze(0)
+        else:
+            lengths = offsets.diff()
+            values = torch.nested.narrow(values, 1, torch.zeros_like(lengths), lengths, layout=torch.jagged)
+            values = torch.cat(values.unbind())
+        return {"values": torch.nested.nested_tensor_from_jagged(values, offsets)}
