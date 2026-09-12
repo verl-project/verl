@@ -26,7 +26,16 @@ from transformers.models.qwen2_vl.modeling_qwen2_vl import (
     Qwen2VLCausalLMOutputWithPast,
     Qwen2VLForConditionalGeneration,
 )
-from transformers.utils import is_flash_attn_2_available, is_flash_attn_greater_or_equal_2_10
+from transformers.utils import is_flash_attn_2_available
+
+try:
+    from transformers.utils import is_flash_attn_greater_or_equal_2_10
+except ImportError:  # transformers >= 5.4.0 removed the versioned helper
+    from transformers.utils import is_flash_attn_greater_or_equal
+
+    def is_flash_attn_greater_or_equal_2_10():
+        return is_flash_attn_greater_or_equal("2.10")
+
 
 from verl.utils.device import is_npu_available
 from verl.utils.transformers_compat import is_transformers_version_in_range, unpack_visual_output
