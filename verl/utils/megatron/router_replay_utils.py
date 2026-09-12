@@ -36,6 +36,7 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 
 from verl.models.mcore.util import (
+    get_fp8_padding_options,
     postprocess_packed_seqs,
     postprocess_thd_engine,
     preprocess_packed_seqs,
@@ -271,8 +272,7 @@ def merge_router_topk_indices(
             .contiguous()
         )
 
-        fp8 = tf_config.fp8
-        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+        use_fp8_padding, fp8_recipe = get_fp8_padding_options(tf_config)
         cp_layout = _context_parallel_layout(tf_config)
         min_local_rows = (
             tf_config.csa_window_size
@@ -288,6 +288,7 @@ def merge_router_topk_indices(
                 input_ids,
                 pre_process=True,
                 use_fp8_padding=use_fp8_padding,
+                fp8_recipe=fp8_recipe,
                 min_local_rows=min_local_rows,
                 local_cp_size=local_cp_size,
                 cp_layout=cp_layout,
@@ -309,7 +310,7 @@ def merge_router_topk_indices(
         else:
             batch_size, seq_len = attention_mask.shape[:2]
             _, packed_seq_params = preprocess_packed_seqs(
-                input_ids, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding
+                input_ids, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding, fp8_recipe=fp8_recipe
             )
             layers_topk_idx = postprocess_packed_seqs(
                 layers_topk_idx, packed_seq_params, attention_mask, batch_size, seq_len, post_process=True
@@ -404,8 +405,7 @@ def set_router_replay_data(
         None: The function updates internal RouterReplay instances in-place.
     """
     with torch.no_grad():
-        fp8 = tf_config.fp8
-        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+        use_fp8_padding, fp8_recipe = get_fp8_padding_options(tf_config)
         cp_layout = _context_parallel_layout(tf_config)
         min_local_rows = (
             tf_config.csa_window_size
@@ -421,6 +421,7 @@ def set_router_replay_data(
                 layers_topk_idx,
                 pre_process=True,
                 use_fp8_padding=use_fp8_padding,
+                fp8_recipe=fp8_recipe,
                 min_local_rows=min_local_rows,
                 local_cp_size=local_cp_size,
                 cp_layout=cp_layout,
@@ -430,13 +431,18 @@ def set_router_replay_data(
                     replay_mask,
                     pre_process=True,
                     use_fp8_padding=use_fp8_padding,
+                    fp8_recipe=fp8_recipe,
                     min_local_rows=min_local_rows,
                     local_cp_size=local_cp_size,
                     cp_layout=cp_layout,
                 )
         else:
             layers_topk_idx_rmpad, _ = preprocess_packed_seqs(
-                layers_topk_idx, attention_mask, pre_process=True, use_fp8_padding=use_fp8_padding
+                layers_topk_idx,
+                attention_mask,
+                pre_process=True,
+                use_fp8_padding=use_fp8_padding,
+                fp8_recipe=fp8_recipe,
             )
         layers_topk_idx_rmpad = layers_topk_idx_rmpad.contiguous()  # 1, dynamic_bs_all, layer_num, topk
 
