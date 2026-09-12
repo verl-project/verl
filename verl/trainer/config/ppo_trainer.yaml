@@ -439,7 +439,7 @@ ray_kwargs:
   ray_init:
 
     # Number of CPUs for Ray. Use a fixed number instead of null when using SLURM.
-    num_cpus: null
+    num_cpus: 16
 
   # Path to save Ray timeline JSON for performance profiling
   timeline_json_file: null

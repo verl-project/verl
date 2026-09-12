@@ -17,7 +17,7 @@ rollout_rs: null
 rollout_rs_threshold: null
 
 # Operating mode: false = Decoupled (3 policies), true = Bypass (2 policies)
-bypass_mode: false
+bypass_mode: true
 
 # Loss type in bypass mode (bypass_mode=true):
 # - "ppo_clip": PPO clipped objective (IS handled by ratio, default)

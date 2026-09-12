@@ -1585,6 +1585,33 @@ class PPOTrainer(ABC):
 
         return batch
 
+    def _apply_zero_variance_filter(self, data: DataProto, metrics: dict, eps: float = 1e-8) -> DataProto:
+        """Zero advantages/returns for questions whose group rewards have no variance.
+
+        Also logs the fraction of unique questions in the batch that were filtered.
+        """
+        rewards = data.batch["token_level_rewards"].sum(dim=-1)
+        uids = data.non_tensor_batch["uid"]
+        unique_uids = np.unique(uids)
+        keep = torch.ones(len(rewards), dtype=torch.bool, device=rewards.device)
+        zero_var_questions = 0
+        for uid in unique_uids:
+            idx = np.where(uids == uid)[0]
+            if len(idx) > 1 and float(rewards[idx].std()) < eps:
+                keep[idx] = False
+                zero_var_questions += 1
+
+        num_questions = len(unique_uids)
+        metrics["train/zero_variance_questions"] = zero_var_questions
+        metrics["train/zero_variance_question_frac"] = (
+            zero_var_questions / num_questions if num_questions > 0 else 0.0
+        )
+
+        mask = keep.unsqueeze(-1)
+        data.batch["advantages"] = data.batch["advantages"] * mask
+        data.batch["returns"] = data.batch["returns"] * mask
+        return data
+
     def _compute_advantage(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the advantage of the batch."""
         fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob", "values"]
@@ -1627,6 +1654,10 @@ class PPOTrainer(ABC):
             norm_adv_by_std_in_grpo=self.config.algorithm.get("norm_adv_by_std_in_grpo", True),
             config=self.config.algorithm,
         )
+
+        # Zero-variance groups (all responses of a question share the same reward)
+        # contribute no GRPO signal; drop their advantages/returns from the update.
+        data = self._apply_zero_variance_filter(data, metrics)
 
         # 4. write nested advantages and returns back to TransferQueue
         fields = ["advantages", "returns"]

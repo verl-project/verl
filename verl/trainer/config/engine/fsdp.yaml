@@ -72,7 +72,7 @@ pad_to_length_bucket: 1024
 forward_only: false
 
 # fsdp or fsdp2
-strategy: fsdp
+strategy: fsdp2
 
 # Mixed precision training param dtype
 dtype: bfloat16 # ["bfloat16", "float16"]
