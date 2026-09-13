@@ -182,6 +182,7 @@ def _process_single_case(
     language: str,
     concurrent_semaphore: Optional[threading.Semaphore] = None,
     fn_name: Optional[str] = None,
+    is_assert_case: bool = False,
 ) -> tuple[int, dict[str, Any]]:
     """Helper function to process a single test case."""
     api_response = None
@@ -272,7 +273,8 @@ def _execute_user_function():
         sys.stderr.write(f"Error during setup or execution of '{{_SANDBOX_FN_NAME}}':\\n{{traceback.format_exc()}}\\n")
         return None, True # result, error_occurred
 
-if __name__ == '__main__':
+# Assertion cases already invoke the solution with their own arguments.
+if __name__ == '__main__' and not {is_assert_case}:
     _result, _error_occurred = _execute_user_function()
 
     if not _error_occurred:
@@ -284,9 +286,8 @@ if __name__ == '__main__':
         else:
             # For other types, default to string representation.
             print(str(_result))
-    # Optional: To explicitly exit with an error code if the sandbox relies on it
-    # else:
-    #    sys.exit(1)
+    else:
+        sys.exit(1)
 """
         current_generation_code = wrapper_code
 
@@ -522,6 +523,7 @@ def check_correctness(
                 language,
                 concurrent_semaphore,
                 fn_name,
+                bool(assert_cases[i]),
             ): i
             for i, stdin_data in enumerate(inputs)
         }

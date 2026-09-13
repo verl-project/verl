@@ -1,7 +1,7 @@
 Sandbox Fusion Example
 ============================
 
-Last updated: 05/17/2026.
+Last updated: 09/13/2026.
 
 Introduction
 ------------
@@ -14,6 +14,8 @@ Step 1: Prepare the Dataset
 ---------------------------
 
 We use the Eurus-2-RL-Data dataset for training. This dataset combines math and code questions, making it suitable for LLM training tasks. You can download it from HuggingFace: `Eurus-2-RL-Data Dataset <https://huggingface.co/datasets/PRIME-RL/Eurus-2-RL-Data>`_.
+
+For call-based test cases, ``fn_name`` identifies the function to invoke and each line of the corresponding ``inputs`` entry supplies one JSON-encoded argument. A function that raises an exception fails the test case, including when the expected output is empty or ``None``. A case with a nonempty ``assert_case`` executes that assertion instead; the assertion supplies its own arguments and the function is not called a second time from ``inputs``.
 
 Step 2: Set Up the Sandbox Fusion Service
 -----------------------------------------
