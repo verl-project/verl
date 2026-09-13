@@ -552,7 +552,7 @@ Algorithm
      kl_penalty: kl  # how to estimate kl divergence
      kl_ctrl:
        type: fixed
-       kl_coef: 0.005
+       kl_coef: 0.001
        horizon: 10000
        target_kl: 0.1
      # Rollout Correction

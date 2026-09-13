@@ -94,6 +94,6 @@ where `Ŵ(τ)` is the realized energy built. Given a mini-batch `{τ_i}` of siz
   Var_proxy = (1/(N-1)) · (P_total - S)
   ```
 
-`verl/trainer/ppo/metric_utils.py#L306` implements these diagnostics via `compute_variance_proxy_metrics`, emitting `variance_proxy/proxy1_signal_strength`, `variance_proxy/proxy2_total_power`, and `variance_proxy/proxy3_pure_noise`.
+`compute_variance_proxy_metrics` in `verl/trainer/ppo/metric_utils.py` implements these diagnostics, emitting `variance_proxy/proxy1_signal_strength`, `variance_proxy/proxy2_total_power`, and `variance_proxy/proxy3_pure_noise`.
 
 Tracking these metrics provides a forward-only, low-overhead view of gradient health for any advantage estimator that supplies `sum_pi_squared`.
