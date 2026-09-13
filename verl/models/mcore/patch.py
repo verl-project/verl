@@ -441,6 +441,44 @@ def apply_patch():
 
     if not mcore_ge_0162:
         MultiLatentAttention.forward = patch_forward
+    else:
+        # mcore >= 0.16.2 upstream _run_core_attention does not forward the x/qr
+        # extra kwargs that DSA (experimental_attention_variant="dsa") requires.
+        # Route DSA instances through the verl patch_forward so those tensors
+        # reach core_attention; leave standard MLA on the upstream forward.
+        _mcore_forward = MultiLatentAttention.forward
+
+        def _forward_dsa_compat(self, *args, **kwargs):
+            if getattr(self.config, "experimental_attention_variant", None) == "dsa":
+                return patch_forward(self, *args, **kwargs)
+            return _mcore_forward(self, *args, **kwargs)
+
+        MultiLatentAttention.forward = _forward_dsa_compat
+
+    # DSA imports fast_hadamard_transform at module load time and falls back to
+    # hadamard_transform=None when the CUDA package is absent.  Inject a pure-
+    # PyTorch Walsh-Hadamard fallback so DSA can run without the C extension.
+    try:
+        import megatron.core.transformer.experimental_attention_variant.dsa as _dsa_mod
+
+        if _dsa_mod.hadamard_transform is None:
+
+            def _pytorch_hadamard_transform(x, scale: float = 1.0):
+                """Walsh-Hadamard transform over the last dim (must be power of 2)."""
+                n = x.shape[-1]
+                h = x.to(torch.float32)
+                s = 1
+                while s < n:
+                    shape = h.shape[:-1]
+                    h = h.reshape(*shape, n // (2 * s), 2, s)
+                    left, right = h[..., 0, :], h[..., 1, :]
+                    h = torch.stack([left + right, left - right], dim=-2).reshape(*shape, n)
+                    s *= 2
+                return h.to(x.dtype) * scale
+
+            _dsa_mod.hadamard_transform = _pytorch_hadamard_transform
+    except ImportError:
+        pass  # not a DSA model, nothing to do
 
 
 def apply_patch_mbridge():
@@ -476,24 +514,26 @@ def apply_patch_mbridge():
 def apply_patch_megatron_v012_with_torch_v28_v29() -> None:
     # Error due to missing serialization_format in _write_item of megatron v012;
     # resolved by using megatron v013's implementation.
-    import inspect
-    import logging
-    import os
-    from pathlib import Path
-
     import megatron.core
     import torch
-    from megatron.core.dist_checkpointing.strategies.async_utils import _disable_gc
-    from megatron.core.dist_checkpointing.strategies.filesystem_async import _process_memory
     from packaging import version
-    from torch import multiprocessing as mp
-    from torch.distributed.checkpoint.filesystem import _write_item
 
     if (
         version.parse(torch.__version__).base_version not in ("2.8.0", "2.9.0")
         or version.parse(megatron.core.__version__).base_version != "0.12.1"
     ):
         return
+
+    # Only import private megatron internals when we know the exact version that has them.
+    import inspect
+    import logging
+    import os
+    from pathlib import Path
+
+    from megatron.core.dist_checkpointing.strategies.async_utils import _disable_gc
+    from megatron.core.dist_checkpointing.strategies.filesystem_async import _process_memory
+    from torch import multiprocessing as mp
+    from torch.distributed.checkpoint.filesystem import _write_item
 
     WriteBucket = tuple[Path, str, tuple[list, list]]
 
