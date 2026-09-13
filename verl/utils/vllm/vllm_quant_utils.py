@@ -408,20 +408,52 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
             )
             param_scale = param_scale.flatten(-2, -1)
         else:
-            try:
-                from vllm.model_executor.layers.quantization.utils.quant_utils import scaled_quantize
+            from vllm.model_executor.layers.quantization.utils.quant_utils import (
+                _normalize_quant_group_shape,
+                scaled_quantize,
+            )
 
+            w = v.to(dtype)
+            block = tuple(quant_config.weight_block_size)
+            group = _normalize_quant_group_shape(w, block)
+            # scaled_quantize asserts shape % group == 0; TP-sharded weights may
+            # not be block-aligned. Pad, quantize, then trim back.
+            pad = [0] * (2 * w.ndim)
+            need_pad = False
+            for i in range(w.ndim):
+                if group[i] > 1 and w.shape[i] % group[i] != 0:
+                    pad[2 * (w.ndim - 1 - i) + 1] = group[i] - (w.shape[i] % group[i])
+                    need_pad = True
+            if need_pad:
+                w = torch.nn.functional.pad(w, pad)
+            try:
                 param_lp, param_scale = scaled_quantize(
-                    v.to(dtype),
-                    tuple(quant_config.weight_block_size),
+                    w,
+                    block,
                     torch.float8_e4m3fn,
                     compute_dtype=torch.float32,
                 )
             except (ImportError, AttributeError):
                 param_lp, param_scale = scaled_fp8_blockwise(
-                    v.to(dtype),
+                    w,
                     weight_block_size=quant_config.weight_block_size,
                 )
+            if need_pad:
+                w_slices = []
+                for i in range(w.ndim):
+                    if group[i] > 1 and pad[2 * (w.ndim - 1 - i) + 1] > 0:
+                        w_slices.append(slice(0, w.shape[i] - pad[2 * (w.ndim - 1 - i) + 1]))
+                    else:
+                        w_slices.append(slice(None))
+                param_lp = param_lp[tuple(w_slices)]
+                # Scale keeps ceil(orig/block) blocks (vLLM shards scales by ceil);
+                # trim only the fully-padded trailing blocks.
+                s_slices = [slice(None)] * param_scale.ndim
+                for i in range(w.ndim):
+                    if group[i] > 1 and pad[2 * (w.ndim - 1 - i) + 1] > 0 and i < param_scale.ndim:
+                        orig = w.shape[i] - pad[2 * (w.ndim - 1 - i) + 1]
+                        s_slices[i] = slice(0, (orig + group[i] - 1) // group[i])
+                param_scale = param_scale[tuple(s_slices)]
         param_scale = param_scale.squeeze(-1)
 
         # Yield the quantized weight
