@@ -49,6 +49,24 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def _try_pin_memory(tensor: torch.Tensor) -> torch.Tensor:
+    """Try to pin a CPU tensor; fall back to the unpinned tensor on failure.
+
+    pin_memory() is a performance optimization for faster H2D copies.
+    On resume with CPU-offloaded optimizer state, the pinned-memory pool
+    may already be exhausted, causing pin_memory() to raise.  Falling
+    back to a pageable tensor is functionally correct -- only the next
+    H2D copy for that buffer will be slightly slower.
+    """
+    try:
+        return tensor.pin_memory()
+    except Exception:
+        logger.warning(
+            "pin_memory() failed (likely pinned-memory pool exhausted "
+            "by CPU-offloaded optimizer on resume); using non-pinned CPU copy."
+        )
+        return tensor
+
 def get_model_config(model):
     return get_attr_wrapped_model(model, "config", allow_none=False)
 
@@ -691,11 +709,12 @@ def offload_megatron_model_to_cpu(models):
                         # rather than silently worked around.
                         existing = getattr(buffer.param_data, "cpu_data", None)
                         if existing is None:
-                            buffer.param_data.cpu_data = torch.empty(
-                                buffer.param_data.size(),
-                                dtype=buffer.param_data.dtype,
-                                device="cpu",
-                                pin_memory=True,
+                            buffer.param_data.cpu_data = _try_pin_memory(
+                                torch.empty(
+                                    buffer.param_data.size(),
+                                    dtype=buffer.param_data.dtype,
+                                    device="cpu",
+                                )
                             )
                             buffer.param_data_size = buffer.param_data.storage().size()
                         else:
@@ -1888,9 +1907,9 @@ def copy_megatron_model_to_cpu(models):
 
                     # Copy parameter data to CPU
                     if buffer.param_data.storage().size() > 0:
-                        buffer_state["param_data"] = buffer.param_data.data.cpu().clone().pin_memory()
+                        buffer_state["param_data"] = _try_pin_memory(buffer.param_data.data.cpu().clone())
                     else:
-                        buffer_state["param_data"] = buffer.param_data.cpu_data.clone().pin_memory()
+                        buffer_state["param_data"] = _try_pin_memory(buffer.param_data.cpu_data.clone())
 
                     buffer_list.append(buffer_state)
                 buffer_states.append(buffer_list)
@@ -1900,7 +1919,7 @@ def copy_megatron_model_to_cpu(models):
             # Handle non-DDP models (ref module)
             model_state = {}
             for name, param in model_chunk.named_parameters():
-                param_state = {"data": param.data.cpu().clone().pin_memory()}
+                param_state = {"data": _try_pin_memory(param.data.cpu().clone())}
                 model_state[name] = param_state
 
             cpu_state[f"model_chunk_{model_idx}"] = {"model_state": model_state, "is_ddp": False}
