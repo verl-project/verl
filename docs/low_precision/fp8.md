@@ -304,6 +304,14 @@ stale kernel scale layouts after a weight sync). verl now fails loudly in both c
   dequantized bf16 reference of the canonical weight and scale; a stale or mis-laid-out scale
   shows up as O(1) relative error and raises. Disable with `VERL_MXFP8_REFIT_CHECK=0`; the
   tolerance (default 0.25) is `VERL_MXFP8_REFIT_CHECK_TOL`.
+- **Quantized-layer audit** (trainer worker, Megatron engine). "Matched" train/rollout quantization
+  presumes both sides quantize the same layers, but training decides implicitly (TE linear modules
+  inside `fp8_autocast`) and rollout decides by name blacklist (`ignored_layers`). At the first weight
+  sync after a training step, verl reads which decoder layers actually ran fp8 GEMMs (TE's fp8 weight
+  workspaces), evaluates the rollout's own selection rule on every synced parameter name, and logs
+  each disagreement (e.g. `first_last_layers_bf16` without the matching rollout regex, a router the
+  name patterns miss, `lm_head` left in the quantized set). `VERL_QUANT_LAYER_AUDIT=raise` turns the
+  report into an error, `=0` disables it.
 - **MoE experts on SGLang.** SGLang's MXFP8 MoE method rewrites the expert scales in place at
   load (swizzled on the Triton MoE runner, packed on DeepGEMM), so the refit loader stages them
   back to the canonical `[E, N, K/32]` layout for `load_weights` and re-derives the kernel layout

@@ -800,9 +800,20 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 per_tensor_param_base, peft_config=_base_peft_config, base_sync_done=False, global_steps=global_steps
             )
 
+        # Quantized-layer audit: at the first sync after a training step, check that the layers the
+        # rollout quantizes are exactly the layers whose GEMMs ran in fp8 on the training side
+        # (no-op unless both sides are quantized; see verl/utils/quant_layer_audit.py).
+        from verl.utils.quant_layer_audit import QuantLayerAuditor
+
+        auditor = getattr(self, "_quant_layer_auditor", None)
+        if auditor is None:
+            auditor = self._quant_layer_auditor = QuantLayerAuditor.from_worker(self)
+        per_tensor_param = auditor.record(per_tensor_param)
+
         await self.rollout.update_weights(
             per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
         )
+        auditor.run(getattr(self.actor.engine, "module", []))
 
         log_gpu_memory_usage("After update_weights", logger=logger)
 
