@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -22,12 +23,12 @@ from typing import Any, Literal
 from .chat_template import apply_chat_template
 from .tokenizer import build_multimodal_processor_inputs, normalize_token_ids
 
-_SUPPORTED_APPEND_ROLES = frozenset({"tool", "user", "system"})
+_SUPPORTED_APPEND_ROLES = frozenset({"tool", "user", "system", "assistant"})
 _SYNTHETIC_SYSTEM_MESSAGE: dict[str, Any] = {"role": "system", "content": "continuous token synthetic system"}
 _SYNTHETIC_USER_MESSAGE: dict[str, Any] = {"role": "user", "content": "continuous token synthetic user"}
 _ASSISTANT_REASONING_CONTENT: str = "reasoning"
 _DUMMY_TOOL_NAME = "continuous_token_tool"
-MergeKind = Literal["assistant", "non_assistant"]
+MergeKind = Literal["assistant", "context"]
 
 
 logger = logging.getLogger(__name__)
@@ -40,7 +41,7 @@ class MergeResult:
     ``token_ids`` is the updated runtime token stream. The other fields describe
     how the stream changed at the merge junction: ``inserted_token_ids`` are
     CT-created boundary tokens, ``appended_token_count`` counts newly appended
-    assistant or non-assistant tokens excluding those inserted boundary tokens,
+    model-generated assistant or context tokens excluding those inserted boundary tokens,
     and ``removed_prefix_token_count`` counts stale prefix tokens dropped before
     appending. Boundary tokens are not model-generated and therefore must not
     carry loss or model logprobs.
@@ -48,7 +49,7 @@ class MergeResult:
 
     token_ids: list[int]
     appended_token_count: int
-    kind: MergeKind = "non_assistant"
+    kind: MergeKind = "context"
     inserted_token_ids: list[int] = field(default_factory=list)
     removed_prefix_token_count: int = 0
 
@@ -59,8 +60,8 @@ class ContinuousTokenBuilder:
     This class exposes two API layers:
 
     AgentLoop-facing runtime APIs:
-        ``build_initial_tokens`` renders the first prompt, ``merge_non_assistant_tokens``
-        merges append-only tool/user/system messages, ``merge_assistant_tokens``
+        ``build_initial_tokens`` renders the first prompt, ``merge_context_tokens``
+        merges append-only context messages, ``merge_assistant_tokens``
         appends model-generated assistant tokens, and ``align_response_metadata``
         applies the recorded token edits to masks/logprobs.
 
@@ -68,8 +69,9 @@ class ContinuousTokenBuilder:
         Model-specific builders should subclass this class and keep the runtime
         API contracts above stable. Chat template specific behavior belongs in hooks
         such as ``_tokenize_tool_group``, ``_tokenize_single_non_tool``,
+        ``_merge_context_group``,
         ``_should_fuse_generation_prompt_with_last_group``,
-        ``_tokenize_generation_prompt_delta``, and ``_merge_non_assistant_token_ids``.
+        ``_tokenize_generation_prompt_delta``, and ``_merge_context_token_ids``.
         ``render_delta_token_id`` is the shared suffix-diff helper those hooks can reuse.
     """
 
@@ -106,7 +108,7 @@ class ContinuousTokenBuilder:
         # Text-only builders ignore multimodal inputs; VL builders override this.
         return self._render_tokens(messages, add_generation_prompt=True, tools=tools)
 
-    def tokenize_non_assistant_incremental_messages(
+    def tokenize_context_incremental_messages(
         self,
         previous_messages: list[dict[str, Any]],
         updated_messages: list[dict[str, Any]],
@@ -118,6 +120,7 @@ class ContinuousTokenBuilder:
         if not appended_messages:
             return []
         incremental_ids: list[int] = []
+        processed_messages = list(previous_messages)
 
         groups = self._iter_append_groups(appended_messages)
         fuse_generation_prompt = self._should_fuse_generation_prompt_with_last_group()
@@ -126,35 +129,53 @@ class ContinuousTokenBuilder:
             add_generation_prompt = fuse_generation_prompt and index == len(groups) - 1
             role = group[0].get("role")
             if role == "tool":
-                incremental_ids.extend(
-                    self._tokenize_tool_group(
-                        group,
-                        previous_messages=previous_messages,
-                        tools=tools,
-                        add_generation_prompt=add_generation_prompt,
-                    )
+                group_token_ids = self._tokenize_tool_group(
+                    group,
+                    previous_messages=processed_messages,
+                    tools=tools,
+                    add_generation_prompt=add_generation_prompt,
                 )
-            elif role in {"user", "system"}:
+            elif role in {"user", "system", "assistant"}:
                 # System appends can represent retry/control messages; unsupported templates will fail in suffix diff.
                 if len(group) != 1:
                     raise ValueError(
                         f"Continuous Token expects one {role!r} message per append group, got {len(group)}"
                     )
-                incremental_ids.extend(
-                    self._tokenize_single_non_tool(
-                        group[0],
-                        tools=tools,
-                        add_generation_prompt=add_generation_prompt,
-                    )
+                if role == "assistant" and index == len(groups) - 1:
+                    raise ValueError("Continuous Token context incremental messages cannot end with assistant")
+                group_token_ids = self._tokenize_single_non_tool(
+                    group[0],
+                    tools=tools,
+                    add_generation_prompt=add_generation_prompt,
                 )
             else:
                 raise ValueError(f"Unsupported Continuous Token append role: {role!r}")
+            self._merge_context_group(
+                incremental_ids,
+                group_token_ids,
+                group=group,
+                processed_messages=processed_messages,
+                tools=tools,
+            )
+            processed_messages.extend(group)
 
         if not fuse_generation_prompt:
             incremental_ids.extend(self._tokenize_generation_prompt_delta(updated_messages, tools=tools))
         return incremental_ids
 
-    def merge_non_assistant_tokens(
+    def _merge_context_group(
+        self,
+        incremental_ids: list[int],
+        group_token_ids: list[int],
+        *,
+        group: list[dict[str, Any]],
+        processed_messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Merge one encoded context group into the incremental token stream."""
+        incremental_ids.extend(group_token_ids)
+
+    def merge_context_tokens(
         self,
         previous_messages: list[dict[str, Any]],
         updated_messages: list[dict[str, Any]],
@@ -162,10 +183,14 @@ class ContinuousTokenBuilder:
         *,
         tools: list[dict[str, Any]] | None = None,
     ) -> MergeResult:
-        appended_ids = self.tokenize_non_assistant_incremental_messages(
-            previous_messages, updated_messages, tools=tools
+        appended_messages = updated_messages[len(previous_messages) :]
+        appended_ids = self.tokenize_context_incremental_messages(previous_messages, updated_messages, tools=tools)
+        return self._merge_context_token_ids(
+            runtime_token_ids,
+            appended_ids,
+            previous_messages=previous_messages,
+            appended_messages=appended_messages,
         )
-        return self._merge_non_assistant_token_ids(runtime_token_ids, appended_ids)
 
     def merge_assistant_tokens(self, runtime_token_ids: list[int], assistant_token_ids: list[int]) -> MergeResult:
         """Merge model-generated assistant tokens into the runtime token stream."""
@@ -176,19 +201,24 @@ class ContinuousTokenBuilder:
             kind="assistant",
         )
 
-    def _merge_non_assistant_token_ids(
-        self, runtime_token_ids: list[int], appended_token_ids: list[int]
+    def _merge_context_token_ids(
+        self,
+        runtime_token_ids: list[int],
+        appended_token_ids: list[int],
+        **kwargs: Any,
     ) -> MergeResult:
-        """Merge runtime prefix tokens and appended non-assistant tokens.
+        """Merge runtime prefix tokens and appended context tokens.
 
         Model-specific builders usually override this hook for boundary handling,
         such as inserting or trimming tokens at the prefix/appended-token junction.
+        ``merge_context_tokens`` also supplies message-level boundary context as
+        keyword arguments for builders whose token edits depend on message roles.
         """
         merged_token_ids = list(runtime_token_ids) + list(appended_token_ids)
         return MergeResult(
             token_ids=merged_token_ids,
             appended_token_count=len(appended_token_ids),
-            kind="non_assistant",
+            kind="context",
         )
 
     def _render_tokens(
@@ -343,7 +373,7 @@ class ContinuousTokenBuilder:
         ``MergeResult`` records token edits at the runtime-prefix boundary. This
         method applies the same edits to response-side metadata: trimming
         metadata for removed prefix tokens, assigning zero mask/logprob to
-        inserted boundary or non-assistant tokens, and assigning assistant
+        inserted boundary or context tokens, and assigning model-generated assistant
         mask/logprobs to appended assistant tokens.
         """
         aligned_mask = list(response_mask)
@@ -363,7 +393,7 @@ class ContinuousTokenBuilder:
         if aligned_logprobs is not None:
             aligned_logprobs += [0.0] * inserted_token_count
 
-        # Assistant tokens get mask 1 and their logprobs; tool/user/system tokens get mask/logprob 0.
+        # Model-generated assistant tokens get mask 1 and their logprobs; context tokens get mask/logprob 0.
         if merge_result.kind == "assistant":
             aligned_mask += [1] * merge_result.appended_token_count
             if aligned_logprobs is not None:
@@ -377,7 +407,7 @@ class ContinuousTokenBuilder:
                         f"got {len(assistant_logprobs)} and {merge_result.appended_token_count}"
                     )
                 aligned_logprobs += list(assistant_logprobs)
-        elif merge_result.kind == "non_assistant":
+        elif merge_result.kind == "context":
             aligned_mask += [0] * merge_result.appended_token_count
             if aligned_logprobs is not None:
                 aligned_logprobs += [0.0] * merge_result.appended_token_count
@@ -433,6 +463,27 @@ class ContinuousTokenBuilder:
 class GptOssContinuousTokenBuilder(ContinuousTokenBuilder):
     """GPT-OSS tool-response formatting."""
 
+    def _tokenize_single_non_tool(
+        self,
+        message: dict[str, Any],
+        *,
+        add_generation_prompt: bool = False,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> list[int]:
+        if message.get("role") == "assistant" and not message.get("tool_calls"):
+            del add_generation_prompt, tools
+            # Context incremental messages currently reject a final assistant turn,
+            # so a plain GPT-OSS assistant here is always historical context. Keep
+            # its analysis/reasoning channel before the final channel, and close
+            # both with <|end|> rather than the training-only final <|return|>.
+            # If final assistant context is supported in the future, this function may need change.
+            return self.tokenizer.encode(self._format_plain_assistant_context(message), add_special_tokens=False)
+        return super()._tokenize_single_non_tool(
+            message,
+            add_generation_prompt=add_generation_prompt,
+            tools=tools,
+        )
+
     def _should_fuse_generation_prompt_with_last_group(self) -> bool:
         # Tool responses are encoded directly rather than through a chat-template
         # suffix diff, so keep generation-prompt derivation as a separate step.
@@ -464,15 +515,37 @@ class GptOssContinuousTokenBuilder(ContinuousTokenBuilder):
     @staticmethod
     def _format_tool_response(tool_message: dict[str, Any], tool_name: str) -> str:
         content = _stringify_tool_content(tool_message.get("content", ""))
-        return f"<|start|>functions.{tool_name} to=assistant<|channel|>commentary<|message|>{content}<|end|>"
+        json_content = json.dumps(content, ensure_ascii=False, separators=(",", ":"))
+        return f"<|start|>functions.{tool_name} to=assistant<|channel|>commentary<|message|>{json_content}<|end|>"
+
+    @staticmethod
+    def _format_plain_assistant_context(message: dict[str, Any]) -> str:
+        thinking = message.get("thinking")
+        if thinking is None:
+            thinking = message.get("reasoning_content")
+        if thinking is None:
+            thinking = message.get("reasoning")
+
+        rendered = ""
+        if thinking:
+            thinking_text = _stringify_tool_content(thinking)
+            rendered += f"<|start|>assistant<|channel|>analysis<|message|>{thinking_text}<|end|>"
+        content = _stringify_tool_content(message.get("content", ""))
+        return rendered + f"<|start|>assistant<|channel|>final<|message|>{content}<|end|>"
 
 
 class QwenContinuousTokenBuilder(ContinuousTokenBuilder):
     """Qwen ChatML boundary handling.
 
-    Qwen2.5, Qwen3, and Qwen3.5 templates render ``<|im_end|>\n`` after a turn,
+    Qwen2, Qwen2.5, Qwen3, and Qwen3.5 templates render ``<|im_end|>\n`` after a turn,
     while generation may stop at ``<|im_end|>``. When the runtime prefix ends
-    there, insert the missing newline before appending non-assistant tokens.
+    there, insert the missing newline before appending context tokens.
+
+    Note: when a Qwen3/Qwen3.5 context assistant message has no thinking, grouped
+    CT encoding renders that assistant in a synthetic context and may produce an
+    empty ``<think></think>`` block. Rendering that assistant together with the
+    following context messages through the full chat template does not produce
+    the empty thinking block.
     """
 
     def __init__(self, tokenizer: Any, **kwargs: Any):
@@ -483,8 +556,11 @@ class QwenContinuousTokenBuilder(ContinuousTokenBuilder):
         self._newline_id = int(newline_ids[0])
         self._im_end_id = require_token_id(tokenizer, "<|im_end|>")
 
-    def _merge_non_assistant_token_ids(
-        self, runtime_token_ids: list[int], appended_token_ids: list[int]
+    def _merge_context_token_ids(
+        self,
+        runtime_token_ids: list[int],
+        appended_token_ids: list[int],
+        **kwargs: Any,
     ) -> MergeResult:
         prefix = list(runtime_token_ids)
         inserted_token_ids: list[int] = []
@@ -494,7 +570,7 @@ class QwenContinuousTokenBuilder(ContinuousTokenBuilder):
         return MergeResult(
             token_ids=prefix + list(appended_token_ids),
             appended_token_count=len(appended_token_ids),
-            kind="non_assistant",
+            kind="context",
             inserted_token_ids=inserted_token_ids,
         )
 
@@ -504,7 +580,7 @@ class MiniMaxContinuousTokenBuilder(ContinuousTokenBuilder):
 
     MiniMax templates render ``[e~[\n`` after a turn, while generation may stop
     at ``[e~[``. When the runtime prefix ends there, insert the missing newline
-    before appending non-assistant tokens.
+    before appending context tokens.
     """
 
     def __init__(self, tokenizer: Any, **kwargs: Any):
@@ -515,8 +591,11 @@ class MiniMaxContinuousTokenBuilder(ContinuousTokenBuilder):
         self._newline_id = int(newline_ids[0])
         self._eos_id = require_token_id(tokenizer, "[e~[")
 
-    def _merge_non_assistant_token_ids(
-        self, runtime_token_ids: list[int], appended_token_ids: list[int]
+    def _merge_context_token_ids(
+        self,
+        runtime_token_ids: list[int],
+        appended_token_ids: list[int],
+        **kwargs: Any,
     ) -> MergeResult:
         prefix = list(runtime_token_ids)
         inserted_token_ids: list[int] = []
@@ -526,7 +605,7 @@ class MiniMaxContinuousTokenBuilder(ContinuousTokenBuilder):
         return MergeResult(
             token_ids=prefix + list(appended_token_ids),
             appended_token_count=len(appended_token_ids),
-            kind="non_assistant",
+            kind="context",
             inserted_token_ids=inserted_token_ids,
         )
 
@@ -536,7 +615,7 @@ class GLMContinuousTokenBuilder(ContinuousTokenBuilder):
 
     ``<|observation|>`` and ``<|user|>`` can be both assistant stop tokens and
     next-message start tokens. If the runtime prefix ends with either, remove
-    that token before appending the next non-assistant segment.
+    that token before appending the next context segment.
     """
 
     def __init__(self, tokenizer: Any, **kwargs: Any):
@@ -545,8 +624,11 @@ class GLMContinuousTokenBuilder(ContinuousTokenBuilder):
         self._user_id = require_token_id(tokenizer, "<|user|>")
         self._ambiguous_boundary_ids = {self._observation_id, self._user_id}
 
-    def _merge_non_assistant_token_ids(
-        self, runtime_token_ids: list[int], appended_token_ids: list[int]
+    def _merge_context_token_ids(
+        self,
+        runtime_token_ids: list[int],
+        appended_token_ids: list[int],
+        **kwargs: Any,
     ) -> MergeResult:
         prefix = list(runtime_token_ids)
         removed_prefix_token_count = 0
@@ -556,17 +638,78 @@ class GLMContinuousTokenBuilder(ContinuousTokenBuilder):
         return MergeResult(
             token_ids=prefix + list(appended_token_ids),
             appended_token_count=len(appended_token_ids),
-            kind="non_assistant",
+            kind="context",
             removed_prefix_token_count=removed_prefix_token_count,
         )
 
 
 class Gemma4ContinuousTokenBuilder(ContinuousTokenBuilder):
-    """Gemma4 tool-response boundary handling."""
+    """Gemma4 turn-continuation and tool-response boundary handling."""
 
     def __init__(self, tokenizer: Any, **kwargs: Any):
         super().__init__(tokenizer, **kwargs)
         self._tool_response_id = require_token_id(tokenizer, "<|tool_response>")
+        turn_separator_ids = normalize_token_ids(tokenizer.encode("<turn|>\n", add_special_tokens=False))
+        if not turn_separator_ids:
+            raise ValueError("Expected Gemma4 '<turn|>\\n' turn separator to tokenize to at least one token")
+        self._turn_separator_ids = turn_separator_ids
+        model_turn_header_ids = normalize_token_ids(tokenizer.encode("<|turn>model\n", add_special_tokens=False))
+        if not model_turn_header_ids:
+            raise ValueError("Expected Gemma4 '<|turn>model\\n' header to tokenize to at least one token")
+        self._model_turn_header_ids = model_turn_header_ids
+
+    def _merge_context_group(
+        self,
+        incremental_ids: list[int],
+        group_token_ids: list[int],
+        *,
+        group: list[dict[str, Any]],
+        processed_messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> None:
+        if group[0].get("role") == "user" and self._needs_user_turn_separator(
+            incremental_ids,
+            processed_messages=processed_messages,
+            tools=tools,
+        ):
+            incremental_ids.extend(self._turn_separator_ids)
+        super()._merge_context_group(
+            incremental_ids,
+            group_token_ids,
+            group=group,
+            processed_messages=processed_messages,
+            tools=tools,
+        )
+
+    def _needs_user_turn_separator(
+        self,
+        incremental_ids: list[int],
+        *,
+        processed_messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+    ) -> bool:
+        if not incremental_ids and not processed_messages:
+            return False
+        return not self._context_prefix_ends_with_turn_separator(
+            incremental_ids,
+            processed_messages=processed_messages,
+            tools=tools,
+        )
+
+    def _context_prefix_ends_with_turn_separator(
+        self,
+        incremental_ids: list[int],
+        *,
+        processed_messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+    ) -> bool:
+        separator_ids = self._turn_separator_ids
+        if incremental_ids:
+            return incremental_ids[-len(separator_ids) :] == separator_ids
+        if not processed_messages:
+            return False
+        rendered_ids = self._render_tokens(processed_messages, add_generation_prompt=False, tools=tools)
+        return rendered_ids[-len(separator_ids) :] == separator_ids
 
     def _should_fuse_generation_prompt_with_last_group(self) -> bool:
         # Gemma4's generation scaffold depends on the preceding message type and
@@ -635,41 +778,66 @@ class Gemma4ContinuousTokenBuilder(ContinuousTokenBuilder):
             tools=tools,
         )
 
-    def merge_non_assistant_tokens(
+    def _merge_context_token_ids(
         self,
-        previous_messages: list[dict[str, Any]],
-        updated_messages: list[dict[str, Any]],
         runtime_token_ids: list[int],
-        *,
-        tools: list[dict[str, Any]] | None = None,
+        appended_token_ids: list[int],
+        **kwargs: Any,
     ) -> MergeResult:
-        appended_token_ids = self.tokenize_non_assistant_incremental_messages(
-            previous_messages, updated_messages, tools=tools
-        )
-        appended_messages = updated_messages[len(previous_messages) :]
-
+        previous_messages = kwargs.get("previous_messages", [])
+        appended_messages = kwargs.get("appended_messages", [])
         prefix = list(runtime_token_ids)
+        appended = list(appended_token_ids)
         inserted_token_ids: list[int] = []
+        removed_prefix_token_count = 0
+
+        # Gemma renders tool messages inside the preceding model turn. An
+        # appended assistant therefore continues that turn only when the latest
+        # non-tool message is also assistant; after user/system it must retain
+        # both the previous turn separator and its own model-turn header.
+        if (
+            appended_messages
+            and appended_messages[0].get("role") == "assistant"
+            and self._last_non_tool_role(previous_messages) == "assistant"
+        ):
+            separator_ids = self._turn_separator_ids
+            if prefix[-len(separator_ids) :] == separator_ids:
+                del prefix[-len(separator_ids) :]
+                removed_prefix_token_count = len(separator_ids)
+
+            header_ids = self._model_turn_header_ids
+            if appended[: len(header_ids)] == header_ids:
+                del appended[: len(header_ids)]
+
         # Gemma's tool block opens with <|tool_response>. The synthetic-prefix
         # suffix diff attributes that boundary token to the diffed-away assistant
-        # turn, so it is missing from ``appended_token_ids``; re-insert it at the
+        # turn, so it is missing from ``appended``; re-insert it at the
         # junction. Guard against double insertion in case the prefix already ends
         # with it or the diff happens to retain it.
         if (
             appended_messages
             and appended_messages[0].get("role") == "tool"
             and prefix[-1:] != [self._tool_response_id]
-            and appended_token_ids[:1] != [self._tool_response_id]
+            and appended[:1] != [self._tool_response_id]
         ):
             prefix.append(self._tool_response_id)
             inserted_token_ids.append(self._tool_response_id)
 
         return MergeResult(
-            token_ids=prefix + appended_token_ids,
-            appended_token_count=len(appended_token_ids),
-            kind="non_assistant",
+            token_ids=prefix + appended,
+            appended_token_count=len(appended),
+            kind="context",
             inserted_token_ids=inserted_token_ids,
+            removed_prefix_token_count=removed_prefix_token_count,
         )
+
+    @staticmethod
+    def _last_non_tool_role(messages: list[dict[str, Any]]) -> str | None:
+        for message in reversed(messages):
+            role = message.get("role")
+            if role != "tool":
+                return role
+        return None
 
 
 def require_token_id(tokenizer: Any, token: str) -> int:
@@ -791,6 +959,7 @@ class DeepSeekContinuousTokenBuilder(ContinuousTokenBuilder):
     _BOS_TOKEN = "<\uff5cbegin\u2581of\u2581sentence\uff5c>"
     _USER_TOKEN = "<\uff5cUser\uff5c>"
     _ASSISTANT_TOKEN = "<\uff5cAssistant\uff5c>"
+    _TOOL_OUTPUTS_END_TOKEN = "<\uff5ctool\u2581outputs\u2581end\uff5c>"
 
     def __init__(self, tokenizer: Any, **kwargs: Any):
         super().__init__(tokenizer, **kwargs)
@@ -800,6 +969,11 @@ class DeepSeekContinuousTokenBuilder(ContinuousTokenBuilder):
         self._bos_id = self._optional_token_id(tokenizer, self._BOS_TOKEN)
         self._user_id = self._optional_token_id(tokenizer, self._USER_TOKEN)
         self._assistant_id = self._optional_token_id(tokenizer, self._ASSISTANT_TOKEN)
+        self._tool_outputs_end_ids = normalize_token_ids(
+            tokenizer.encode(self._TOOL_OUTPUTS_END_TOKEN, add_special_tokens=False)
+        )
+        if not self._tool_outputs_end_ids:
+            raise ValueError(f"Expected DeepSeek {self._TOOL_OUTPUTS_END_TOKEN!r} to tokenize to at least one token")
 
     @staticmethod
     def _optional_token_id(tokenizer: Any, token: str) -> int | None:
@@ -822,16 +996,50 @@ class DeepSeekContinuousTokenBuilder(ContinuousTokenBuilder):
             tool_call["function"]["arguments"] = "{}"
         return synthetic_assistant
 
-    def _merge_non_assistant_token_ids(
-        self, runtime_token_ids: list[int], appended_token_ids: list[int]
-    ) -> MergeResult:
-        # Direct concatenation — DeepSeek template has no inter-turn separator
-        merged_token_ids = list(runtime_token_ids) + list(appended_token_ids)
-        return MergeResult(
-            token_ids=merged_token_ids,
-            appended_token_count=len(appended_token_ids),
-            kind="non_assistant",
+    def _merge_context_group(
+        self,
+        incremental_ids: list[int],
+        group_token_ids: list[int],
+        *,
+        group: list[dict[str, Any]],
+        processed_messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> None:
+        if group[0].get("role") == "user":
+            self._strip_trailing_tool_outputs_end(incremental_ids)
+        super()._merge_context_group(
+            incremental_ids,
+            group_token_ids,
+            group=group,
+            processed_messages=processed_messages,
+            tools=tools,
         )
+
+    def _merge_context_token_ids(
+        self,
+        runtime_token_ids: list[int],
+        appended_token_ids: list[int],
+        **kwargs: Any,
+    ) -> MergeResult:
+        appended_messages = kwargs.get("appended_messages", [])
+        prefix = list(runtime_token_ids)
+        removed_prefix_token_count = 0
+        if appended_messages and appended_messages[0].get("role") == "user":
+            removed_prefix_token_count = self._strip_trailing_tool_outputs_end(prefix)
+
+        return MergeResult(
+            token_ids=prefix + list(appended_token_ids),
+            appended_token_count=len(appended_token_ids),
+            kind="context",
+            removed_prefix_token_count=removed_prefix_token_count,
+        )
+
+    def _strip_trailing_tool_outputs_end(self, token_ids: list[int]) -> int:
+        suffix = self._tool_outputs_end_ids
+        if token_ids[-len(suffix) :] != suffix:
+            return 0
+        del token_ids[-len(suffix) :]
+        return len(suffix)
 
 
 # =============================================================================
@@ -846,7 +1054,7 @@ class VLContinuousTokenMixin:
     incremental dummy+trim encoding) common to all VL builders. Subclasses
     combine this mixin with a text-family builder (e.g. QwenContinuousTokenBuilder)
     via Python MRO so that boundary handling like Qwen's newline insertion or
-    GLM's observation/user trim still applies through ``_merge_non_assistant_token_ids``.
+    GLM's observation/user trim still applies through ``_merge_context_token_ids``.
     """
 
     def __init__(
@@ -1036,7 +1244,7 @@ class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxContinuousT
         super().__init__(tokenizer, processor, **kwargs)
         # MiniMax-VL-01 uses ``<end_of_sentence>`` as its turn terminator, not the
         # MiniMax-Text-01 ``[e~[`` token the base builder resolves. Repoint the EOS
-        # so the boundary-newline reinsertion in ``_merge_non_assistant_token_ids``
+        # so the boundary-newline reinsertion in ``_merge_context_token_ids``
         # fires for VL turns.
         self._eos_id = require_token_id(tokenizer, "<end_of_sentence>")
         self._vl_scaffold_ids = self._compute_generation_scaffold_ids()
@@ -1227,7 +1435,7 @@ class DeepSeekVL2ContinuousTokenBuilder(DeepSeekContinuousTokenBuilder):
             return self._render_tokens(messages, add_generation_prompt=True, tools=tools)
         return self._render_via_processor(messages, images, add_generation_prompt=True)
 
-    def merge_non_assistant_tokens(
+    def merge_context_tokens(
         self,
         previous_messages: list[dict[str, Any]],
         updated_messages: list[dict[str, Any]],
@@ -1248,4 +1456,4 @@ class DeepSeekVL2ContinuousTokenBuilder(DeepSeekContinuousTokenBuilder):
 
         prefix_len = len(runtime_token_ids)
         appended_token_ids = full_token_ids[prefix_len:]
-        return self._merge_non_assistant_token_ids(runtime_token_ids, appended_token_ids)
+        return self._merge_context_token_ids(runtime_token_ids, appended_token_ids)

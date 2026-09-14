@@ -125,3 +125,42 @@ def test_pp_gather_normalizes_nested_routes_to_cpu(monkeypatch):
     assert routes.device.type == "cpu"
     assert routes.dtype == torch.int16
     assert [part.tolist() for part in routes.unbind()] == [[[[1], [3]], [[2], [4]]]]
+
+
+def test_pp_gather_supports_zero_layer_bshd_stage(monkeypatch):
+    local = torch.empty((1, 3, 0, 2), dtype=torch.int16)
+    remote = torch.arange(12, dtype=torch.int16).reshape(1, 3, 2, 2)
+    collective_calls = []
+
+    monkeypatch.setattr(router_utils, "device_name", "cpu")
+    monkeypatch.setattr(router_utils.mpu, "get_pipeline_model_parallel_group", lambda: object())
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda _group: 2)
+
+    def fake_all_gather(tensor_list, tensor, group, async_op=False):
+        collective_calls.append((tuple(tensor.shape), async_op))
+        if tensor.numel() == 1:
+            tensor_list[0].fill_(0)
+            tensor_list[1].fill_(2)
+            return
+        tensor_list[0].zero_()
+        tensor_list[1].copy_(remote.contiguous().view(torch.uint8))
+
+    monkeypatch.setattr(torch.distributed, "all_gather", fake_all_gather)
+    config = SimpleNamespace(pipeline_model_parallel_size=2, virtual_pipeline_model_parallel_size=None)
+
+    routes = router_utils.pp_gather(local, config)
+
+    assert collective_calls == [((1,), False), ((1, 3, 2, 4), False)]
+    assert routes.shape == remote.shape
+    torch.testing.assert_close(routes, remote)
+
+
+def test_reorder_and_merge_vpp_layers_keeps_dense_chunk_placeholder(monkeypatch):
+    empty_chunk = torch.empty((1, 3, 0, 2), dtype=torch.int16)
+    moe_chunk = torch.arange(6, dtype=torch.int16).reshape(1, 3, 1, 2)
+    monkeypatch.setattr(router_utils, "get_schedule_table", lambda *_args: [(0, 0), (0, 1)])
+
+    routes = router_utils.reorder_and_merge_vpp_layers([empty_chunk, moe_chunk], 1, 2, 1)
+
+    assert routes.shape == moe_chunk.shape
+    torch.testing.assert_close(routes, moe_chunk)

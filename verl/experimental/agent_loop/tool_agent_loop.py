@@ -375,7 +375,7 @@ class ToolAgentLoop(AgentLoopBase):
         agent_data.messages.extend(add_messages)
 
         schemas = getattr(agent_data, "_active_tool_schemas", self.tool_schemas)
-        merge_result, response_mask, response_logprobs = await self.ct_merge_non_assistant_msg(
+        merge_result, response_mask, response_logprobs = await self.ct_merge_context_msg(
             previous_messages,
             agent_data.messages,
             agent_data.prompt_ids,
