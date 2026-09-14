@@ -73,7 +73,6 @@ NPU 相关的工作流主要包括：
 | dapo-math-17k | ``$HOME/.cache/datasets/dapo-math-17k.parquet``  |
 +--------------+---------------------------------------------------+
 
-
 **Note**
 
    ${HOME}是root
