@@ -86,10 +86,22 @@ def is_fp8_model(vllm_config):
     if hasattr(vllm_config, "quant_config"):
         if isinstance(vllm_config.quant_config, Fp8Config):
             return True
+        elif is_mxfp8_vllm_cuda(vllm_config.quant_config):
+            return True
         elif is_mxfp8_vllm_ascend(vllm_config.quant_config):
             return True
 
     return False
+
+
+def is_mxfp8_vllm_cuda(quant_config):
+    """Whether quant_config is vLLM's ModelOpt MXFP8 config (CUDA path)."""
+    try:
+        from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
+    except ImportError:
+        # Older vLLM without MXFP8 support
+        return False
+    return isinstance(quant_config, ModelOptMxFp8Config)
 
 
 # vLLM 0.24.0 (MoE refactor, vllm-project/vllm#41184) removed the ``FusedMoE``
@@ -328,8 +340,11 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
     fp8_state.seen_params.clear()
     fp8_state.fp8_param_names.clear()
     is_mxfp8_npu = is_mxfp8_vllm_ascend(quant_config)
+    is_mxfp8_cuda = is_mxfp8_vllm_cuda(quant_config)
     if is_mxfp8_npu:
         import torch_npu
+    if is_mxfp8_cuda:
+        from verl.utils.mxfp8_quant import mxfp8_quantize
     for k, v in weights:
         if not is_fp8_weight(k, model):
             yield (k, v)
@@ -337,7 +352,7 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
 
         # Cast the weight into fp8 and its scale factor
         if torch.distributed.get_rank() == 0:
-            logger.debug(f"Quantizing to FP8 blockwise: {k}")
+            logger.debug(f"Quantizing to FP8 ({'mxfp8' if is_mxfp8_npu or is_mxfp8_cuda else 'blockwise'}): {k}")
         if is_mxfp8_npu:
             param_lp, param_scale = torch_npu.npu_dynamic_mx_quant(
                 v.to(dtype),
@@ -345,17 +360,23 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
                 dst_type=torch_npu.float8_e4m3fn,
             )
             param_scale = param_scale.flatten(-2, -1)
+            param_scale = param_scale.squeeze(-1)
+        elif is_mxfp8_cuda:
+            # TE MXFP8Quantizer: the same quantizer the trainer's FP8 GEMMs use
+            # under fp8_recipe="mxfp8", so rollout serves the training weight
+            # grid. Scale is already compact 2D [n, k // 32] uint8 UE8M0.
+            param_lp, param_scale = mxfp8_quantize(v.to(dtype))
         else:
             param_lp, param_scale = scaled_fp8_blockwise(
                 v.to(dtype),
                 weight_block_size=quant_config.weight_block_size,
             )
-        param_scale = param_scale.squeeze(-1)
+            param_scale = param_scale.squeeze(-1)
 
         # Yield the quantized weight
         yield (k, param_lp)
 
-        if is_mxfp8_npu:
+        if is_mxfp8_npu or is_mxfp8_cuda:
             yield (k + "_scale", param_scale)
         else:
             yield (k + "_scale_inv", param_scale)

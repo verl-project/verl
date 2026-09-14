@@ -235,7 +235,13 @@ def get_model(
 
     # Fp16 conversion.
     config: TransformerConfig = get_model_config(model[0])
-    config.fp8 = None
+    if getattr(config, "fp8", None) is not None:
+        # FP8 training recipes are only supported through the Megatron-Bridge model path
+        # (megatron.use_mbridge=True), which builds the model without going through here.
+        raise NotImplementedError(
+            "override_transformer_config.fp8 is not supported on this legacy model-building path; "
+            "set actor_rollout_ref.actor.megatron.use_mbridge=True to enable FP8 training."
+        )
     tfconfig: TransformerConfig = model[0].config
     if config.fp16 or config.bf16:  # the ModelParallelConfig in GPTModel
         model = [Float16Module(config, model_module) for model_module in model]
