@@ -51,3 +51,4 @@ def test_sender_cleanup_forwards_gc_configuration(monkeypatch, sender_kwargs, ex
     sender._cleanup()
 
     assert calls == [(expected_setting, {"diagnostics_point": expected_point})]
+    assert type(calls[0][0]) is type(expected_setting)

@@ -39,7 +39,6 @@ async def test_update_weights_forwards_gc_setting_to_sender(monkeypatch):
         config=SimpleNamespace(
             checkpoint_engine=SimpleNamespace(
                 update_weights_bucket_megabytes=128,
-                gc_on_weight_transfer_cleanup=1,
             )
         ),
         zmq_handle="tcp://unused",
@@ -51,7 +50,7 @@ async def test_update_weights_forwards_gc_setting_to_sender(monkeypatch):
     )
     monkeypatch.setattr(vllm_rollout, "BucketedWeightSender", FakeSender)
 
-    await vllm_rollout.ServerAdapter.update_weights(adapter, iter(()), gc_diagnostics=True)
+    await vllm_rollout.ServerAdapter.update_weights(adapter, iter(()), gc_on_cleanup=1, gc_diagnostics=True)
 
     assert sender_args == {
         "zmq_handle": "tcp://unused",

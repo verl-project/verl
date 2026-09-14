@@ -38,6 +38,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from verl import DataProto
 from verl.third_party.vllm import VLLM_SLEEP_LEVEL
 from verl.utils.device import is_support_ipc
+from verl.utils.memory_utils import GCSetting
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
 from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
@@ -216,6 +217,7 @@ class ServerAdapter(BaseRollout):
         weights: Generator[tuple[str, torch.Tensor], None, None],
         global_steps: int = None,
         wire_format: str = "named_tensors",
+        gc_on_cleanup: GCSetting = True,
         gc_diagnostics: bool = False,
         **kwargs,
     ):
@@ -242,7 +244,7 @@ class ServerAdapter(BaseRollout):
             zmq_handle=self.zmq_handle,
             bucket_size_mb=bucket_size_mb,
             use_shm=self.use_shm,
-            gc_on_cleanup=self.config.checkpoint_engine.gc_on_weight_transfer_cleanup,
+            gc_on_cleanup=gc_on_cleanup,
             gc_diagnostics=gc_diagnostics,
         )
         await sender.async_send_weights(weights)

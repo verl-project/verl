@@ -27,15 +27,14 @@ if ! NUM_GPUS=1 \
         actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
         actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
         actor_rollout_ref.gc_diagnostics=True \
-        actor_rollout_ref.rollout.checkpoint_engine.gc_on_weight_transfer_cleanup=1 \
         trainer.total_training_steps="${training_steps}" \
         2>&1 | tee "${log_file}"; then
     echo "GC diagnostics smoke failed; log preserved at ${log_file}" >&2
     exit 1
 fi
 
-if ! grep -q '\[gc_diagnostics\] point=weight_transfer_cleanup .* generation=1 ' "${log_file}"; then
-    echo "Missing GC diagnostics point=weight_transfer_cleanup generation=1; log preserved at ${log_file}" >&2
+if ! grep -q '\[gc_diagnostics\] point=weight_transfer_cleanup .* generation=full ' "${log_file}"; then
+    echo "Missing GC diagnostics point=weight_transfer_cleanup generation=full; log preserved at ${log_file}" >&2
     exit 1
 fi
 
