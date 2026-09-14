@@ -112,6 +112,32 @@ custom_cls:
   # The name of the dataset class within the specified file.
   name: null
 
+# Optional: specify a custom sampler class for the training dataloader.
+# When class_path is set, the sampler is loaded dynamically and replaces the
+# default RandomSampler/SequentialSampler.  The sampler class must accept
+# ``data_source=dataset`` and ``data_config=data_config`` as keyword arguments
+# and implement ``state_dict`` / ``load_state_dict`` for checkpoint resumption.
+sampler:
+
+  # Path to the module containing the sampler class (supports pkg:// prefix,
+  # file:// prefix, or plain file path).
+  class_path: null
+
+  # Name of the sampler class within the specified module.
+  class_name: null
+
+  # GroupRatioSampler parameters (used when class_path points to
+  # verl.utils.dataset.group_ratio_sampler.GroupRatioSampler).
+  # Dot-separated path to extract group value from each dataset row.
+  group_key: null
+
+  # Expected group values.  Must match values found in the dataset.
+  group_names: null
+
+  # Per-group sampling ratios.  Each batch will contain
+  # batch_size * ratio / sum(ratios) indices from each group.
+  group_ratios: null
+
 # Whether to return multi-modal inputs in the dataset. Set to False if rollout generates new multi-modal inputs.
 return_multi_modal_inputs: True
 
