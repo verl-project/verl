@@ -110,7 +110,7 @@ jobs:
       - name: Check final pip list
         run: uv pip list
       - name: Prepare weights
-        run: ln -s /root/.cache/models "${HOME}/models"
+        run: ln -s /root/.cache/modelscope/hub/models "${HOME}/models"
       - name: Prepare GSM8K dataset
         run: python examples/data_preprocess/gsm8k.py --local_dataset_path "${HOME}/.cache/datasets/openai/gsm8k"
       - name: Run V1 separate_async with FSDP2
@@ -164,7 +164,7 @@ jobs:
       - name: Check final pip list
         run: uv pip list
       - name: Prepare weights
-        run: ln -s /root/.cache/models "${HOME}/models"
+        run: ln -s /root/.cache/modelscope/hub/models "${HOME}/models"
       - name: Prepare GSM8K dataset
         run: python examples/data_preprocess/gsm8k.py --local_dataset_path "${HOME}/.cache/datasets/openai/gsm8k"
       - name: Run V1 separate_async with Megatron
