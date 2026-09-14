@@ -1,7 +1,7 @@
 NPU-CI 添加指导
 ===========
 
-Last updated: 02/02/2026.
+Last updated: 09/14/2026.
 
 我们在 verl 上提供基于华为昇腾设备的CI用例添加指导。
 
@@ -56,6 +56,8 @@ NPU 相关的工作流主要包括：
 | Qwen3.5-35B-A3B                       | ``${HOME}/.cache/modelscope/hub/models/Qwen/Qwen3.5-35B-A3B``                    |
 +---------------------------------------+-------------------------------------------------------------------+
 | Moonlight-16B-A3B-Instruct            | ``${HOME}/.cache/modelscope/hub/models/moonshotai/Moonlight-16B-A3B-Instruct``   |
++---------------------------------------+-------------------------------------------------------------------+
+| deepseek-coder-1.3b-instruct          | ``${HOME}/.cache/modelscope/hub/models/deepseek-ai/deepseek-coder-1.3b-instruct``   |
 +---------------------------------------+-------------------------------------------------------------------+
 
 
