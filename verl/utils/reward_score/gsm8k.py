@@ -14,39 +14,59 @@
 
 import re
 
+# Size of the tail window that is searched before falling back to the whole response.
 _SOLUTION_CLIP_CHARS = 300
+
+_STRICT_ANSWER_RE = re.compile("#### (\\-?[0-9\\.\\,]+)")
+_FLEXIBLE_ANSWER_RE = re.compile("\\-?[0-9\\.\\,]+")
+_INVALID_ANSWERS = ("", ".")
+
+
+def _select_last(pattern, text, is_valid):
+    """Return the last match of ``pattern`` in ``text`` accepted by ``is_valid``, else None."""
+    selected = None
+    for match in pattern.finditer(text):
+        if is_valid(match):
+            selected = match
+    return selected
+
+
+def _find_answer_match(pattern, solution_str, is_valid):
+    """Locate the answer, searching only the tail of the response when that is safe.
+
+    Regular expression matching on very long strings can be slow, and for math problems
+    the final answer is usually at the end, so a short tail window is searched first.
+    The window result is only trusted when the selected match starts past the left edge
+    of the window, because a match touching that edge may be the tail half of a longer
+    one that the window cut in two. Otherwise the whole response is rescanned.
+
+    Clipping the response unconditionally, which this module used to do, silently dropped
+    a correct answer whenever the model kept generating for more than
+    ``_SOLUTION_CLIP_CHARS`` characters after writing it.
+    """
+    if len(solution_str) <= _SOLUTION_CLIP_CHARS:
+        return _select_last(pattern, solution_str, is_valid)
+
+    match = _select_last(pattern, solution_str[-_SOLUTION_CLIP_CHARS:], is_valid)
+    if match is not None and match.start() > 0:
+        return match
+    return _select_last(pattern, solution_str, is_valid)
 
 
 def extract_solution(solution_str, method="strict"):
     assert method in ["strict", "flexible"]
 
-    # Optimization: Regular expression matching on very long strings can be slow.
-    # For math problems, the final answer is usually at the end.
-    # We only match on the last 300 characters, which is a safe approximation for 300 tokens.
-    if len(solution_str) > _SOLUTION_CLIP_CHARS:
-        solution_str = solution_str[-_SOLUTION_CLIP_CHARS:]
-
     if method == "strict":
         # this also tests the formatting of the model
-        solutions = re.findall("#### (\\-?[0-9\\.\\,]+)", solution_str)
-        if len(solutions) == 0:
-            final_answer = None
-        else:
-            # take the last solution
-            final_answer = solutions[-1].replace(",", "").replace("$", "")
-    elif method == "flexible":
-        answer = re.findall("(\\-?[0-9\\.\\,]+)", solution_str)
-        final_answer = None
-        if len(answer) == 0:
-            # no reward is there is no answer
-            pass
-        else:
-            invalid_str = ["", "."]
-            # find the last number that is not '.'
-            for final_answer in reversed(answer):
-                if final_answer not in invalid_str:
-                    break
-    return final_answer
+        # take the last solution
+        match = _find_answer_match(_STRICT_ANSWER_RE, solution_str, lambda _: True)
+        # no reward if there is no answer
+        return None if match is None else match.group(1).replace(",", "").replace("$", "")
+
+    # find the last number that is not '.'
+    match = _find_answer_match(_FLEXIBLE_ANSWER_RE, solution_str, lambda m: m.group(0) not in _INVALID_ANSWERS)
+    # no reward if there is no answer
+    return None if match is None else match.group(0)
 
 
 def compute_score(solution_str, ground_truth, method="strict", format_score=0.0, score=1.0):
