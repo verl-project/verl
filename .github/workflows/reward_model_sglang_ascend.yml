@@ -109,7 +109,7 @@ jobs:
           uv pip list
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Prepare gsm8k dataset
         run: |
           ray stop --force

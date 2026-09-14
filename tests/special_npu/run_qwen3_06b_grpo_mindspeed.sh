@@ -1,7 +1,7 @@
 set -x
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-0.6B}
-MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/${MODEL_ID}}
 
 USE_DIST_CKPT=${USE_DIST_CKPT:-False}
 DIST_CKPT_PATH=${DIST_CKPT_PATH:-${HOME}/dist_ckpt/qwen3_06b_grpo_mindspeed}

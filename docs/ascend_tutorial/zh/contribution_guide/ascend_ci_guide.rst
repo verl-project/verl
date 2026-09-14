@@ -21,41 +21,41 @@ NPU 相关的工作流主要包括：
 +---------------------------------------+-------------------------------------------------------------------+
 | 模型名称                              | 绝对路径                                                          |
 +=======================================+===================================================================+
-| Qwen2.5-0.5B                          | ``${HOME}/.cache/models/Qwen/Qwen2.5-0.5B``                       |
+| Qwen2.5-0.5B                          | ``${HOME}/.cache/modelscope/hub/models/Qwen/Qwen2.5-0.5B``                       |
 +---------------------------------------+-------------------------------------------------------------------+
-| Qwen2.5-0.5B-Instruct                 | ``${HOME}/.cache/models/Qwen/Qwen2.5-0.5B-Instruct``              |
+| Qwen2.5-0.5B-Instruct                 | ``${HOME}/.cache/modelscope/hub/models/Qwen/Qwen2.5-0.5B-Instruct``              |
 +---------------------------------------+-------------------------------------------------------------------+
-| Qwen2.5-1.5B-Instruct                 | ``${HOME}/.cache/models/Qwen/Qwen2.5-1.5B-Instruct``              |
+| Qwen2.5-1.5B-Instruct                 | ``${HOME}/.cache/modelscope/hub/models/Qwen/Qwen2.5-1.5B-Instruct``              |
 +---------------------------------------+-------------------------------------------------------------------+
-| Qwen2.5-7B-Instruct                   | ``${HOME}/.cache/models/Qwen/Qwen2.5-7B-Instruct``                |
+| Qwen2.5-7B-Instruct                   | ``${HOME}/.cache/modelscope/hub/models/Qwen/Qwen2.5-7B-Instruct``                |
 +---------------------------------------+-------------------------------------------------------------------+
-| Qwen2.5-VL-3B-Instruct                | ``${HOME}/.cache/models/Qwen/Qwen2.5-VL-3B-Instruct``             |
+| Qwen2.5-VL-3B-Instruct                | ``${HOME}/.cache/modelscope/hub/models/Qwen/Qwen2.5-VL-3B-Instruct``             |
 +---------------------------------------+-------------------------------------------------------------------+
-| Qwen3-0.6B                            | ``${HOME}/.cache/models/Qwen/Qwen3-0.6B``                         |
+| Qwen3-0.6B                            | ``${HOME}/.cache/modelscope/hub/models/Qwen/Qwen3-0.6B``                         |
 +---------------------------------------+-------------------------------------------------------------------+
-| Qwen3-8B                              | ``${HOME}/.cache/models/Qwen/Qwen3-8B``                           |
+| Qwen3-8B                              | ``${HOME}/.cache/modelscope/hub/models/Qwen/Qwen3-8B``                           |
 +---------------------------------------+-------------------------------------------------------------------+
-| Qwen3-8B-Base                         | ``${HOME}/.cache/models/Qwen/Qwen3-8B-Base``                      |
+| Qwen3-8B-Base                         | ``${HOME}/.cache/modelscope/hub/models/Qwen/Qwen3-8B-Base``                      |
 +---------------------------------------+-------------------------------------------------------------------+
-| Qwen3-30B-A3B-Instruct-2507           | ``${HOME}/.cache/models/Qwen/Qwen3-30B-A3B-Instruct-2507``        |
+| Qwen3-30B-A3B-Instruct-2507           | ``${HOME}/.cache/modelscope/hub/models/Qwen/Qwen3-30B-A3B-Instruct-2507``        |
 +---------------------------------------+-------------------------------------------------------------------+
-| Qwen3-32B                             | ``${HOME}/.cache/models/Qwen/Qwen3-32B``                          |
+| Qwen3-32B                             | ``${HOME}/.cache/modelscope/hub/models/Qwen/Qwen3-32B``                          |
 +---------------------------------------+-------------------------------------------------------------------+
-| Qwen3-VL-2B-Instruct                  | ``${HOME}/.cache/models/Qwen/Qwen3-VL-2B-Instruct``               |
+| Qwen3-VL-2B-Instruct                  | ``${HOME}/.cache/modelscope/hub/models/Qwen/Qwen3-VL-2B-Instruct``               |
 +---------------------------------------+-------------------------------------------------------------------+
-| Qwen3-VL-4B-Instruct                  | ``${HOME}/.cache/models/Qwen/Qwen3-VL-4B-Instruct``               |
+| Qwen3-VL-4B-Instruct                  | ``${HOME}/.cache/modelscope/hub/models/Qwen/Qwen3-VL-4B-Instruct``               |
 +---------------------------------------+-------------------------------------------------------------------+
-| Qwen3-4B-Instruct-2507                | ``${HOME}/.cache/models/Qwen/Qwen3-4B-Instruct-2507``             |
+| Qwen3-4B-Instruct-2507                | ``${HOME}/.cache/modelscope/hub/models/Qwen/Qwen3-4B-Instruct-2507``             |
 +---------------------------------------+-------------------------------------------------------------------+
-| Qwen3-VL-8B-Instruct                  | ``${HOME}/.cache/models/Qwen/Qwen3-VL-8B-Instruct``               |
+| Qwen3-VL-8B-Instruct                  | ``${HOME}/.cache/modelscope/hub/models/Qwen/Qwen3-VL-8B-Instruct``               |
 +---------------------------------------+-------------------------------------------------------------------+
-| Skywork-Reward-V2-Llama-3.2-1B        | ``${HOME}/.cache/models/Skywork/Skywork-Reward-V2-Llama-3.2-1B``  |
+| Skywork-Reward-V2-Llama-3.2-1B        | ``${HOME}/.cache/modelscope/hub/models/Skywork/Skywork-Reward-V2-Llama-3.2-1B``  |
 +---------------------------------------+-------------------------------------------------------------------+
-| Qwen3.5-2B                            | ``${HOME}/.cache/models/Qwen/Qwen3.5-2B``                         |
+| Qwen3.5-2B                            | ``${HOME}/.cache/modelscope/hub/models/Qwen/Qwen3.5-2B``                         |
 +---------------------------------------+-------------------------------------------------------------------+
-| Qwen3.5-35B-A3B                       | ``${HOME}/.cache/models/Qwen/Qwen3.5-35B-A3B``                    |
+| Qwen3.5-35B-A3B                       | ``${HOME}/.cache/modelscope/hub/models/Qwen/Qwen3.5-35B-A3B``                    |
 +---------------------------------------+-------------------------------------------------------------------+
-| Moonlight-16B-A3B-Instruct            | ``${HOME}/.cache/models/moonshotai/Moonlight-16B-A3B-Instruct``   |
+| Moonlight-16B-A3B-Instruct            | ``${HOME}/.cache/modelscope/hub/models/moonshotai/Moonlight-16B-A3B-Instruct``   |
 +---------------------------------------+-------------------------------------------------------------------+
 
 
@@ -76,7 +76,7 @@ NPU 相关的工作流主要包括：
 
    ${HOME}是root
 
-   GPU用例中权重在~/models/路径下，如需适配可以用软链接，``ln -s /root/.cache/models ~/models``
+   GPU用例中权重在~/models/路径下，如需适配可以用软链接，``ln -s /root/.cache/modelscope/hub/modelscope/hub/models ~/models``
 
    以下为原始数据集，请按需进行数据处理，示例如下。
    

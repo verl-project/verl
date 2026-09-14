@@ -83,7 +83,7 @@ jobs:
           pip list
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Prepare GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
@@ -132,7 +132,7 @@ jobs:
           pip list
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Preprocess geo3k dataset
         run: |
           python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
@@ -183,7 +183,7 @@ jobs:
   #         pip list
   #     - name: Prepare weights
   #       run: |
-  #         ln -s /root/.cache/models ~/models
+  #         ln -s /root/.cache/modelscope/hub/models ~/models
   #     - name: Preprocess geo3k dataset
   #       run: |
   #         python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
@@ -250,7 +250,7 @@ jobs:
           clean: true
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Preprocess GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
@@ -305,7 +305,7 @@ jobs:
           clean: true
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Running nightlyCI_grpo-qwen3-30b-megatron-sglang_ascend
         run: |
           ray stop --force
@@ -357,7 +357,7 @@ jobs:
           git checkout de93536e9028ecf1e4dc28608dc80f336dcdfe59
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Preprocess geo3k dataset
         run: |
           python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
@@ -403,7 +403,7 @@ jobs:
           pip list
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Preprocess geo3k dataset
         run: |
           python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
@@ -447,7 +447,7 @@ jobs:
           pip list
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Prepare GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
@@ -484,7 +484,7 @@ jobs:
           clean: true
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Prepare GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
@@ -521,7 +521,7 @@ jobs:
           clean: true
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Prepare GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
@@ -558,7 +558,7 @@ jobs:
           clean: true
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Prepare GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
@@ -611,7 +611,7 @@ jobs:
           uv pip list
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Prepare GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
@@ -651,7 +651,7 @@ jobs:
           pip list
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Prepare GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
@@ -702,7 +702,7 @@ jobs:
   #         git checkout de93536e9028ecf1e4dc28608dc80f336dcdfe59
   #     - name: Prepare weights
   #       run: |
-  #         ln -s /root/.cache/models ~/models
+  #         ln -s /root/.cache/modelscope/hub/models ~/models
   #     - name: Preprocess geo3k dataset
   #       run: |
   #         python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k

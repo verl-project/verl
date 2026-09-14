@@ -3,7 +3,7 @@ ENGINE=${1:-vllm}
 DEVICE=${DEVICE:-$(python3 -c 'import torch_npu' 2>/dev/null && echo npu || echo gpu)}
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-30B-A3B-Instruct-2507}
-MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/${MODEL_ID}}
 TRAIN_FILE=$HOME/data/gsm8k/train.parquet
 TEST_FILE=$HOME/data/gsm8k/test.parquet
 max_prompt_length=$((1024 * 2))

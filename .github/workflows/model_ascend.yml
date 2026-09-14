@@ -94,7 +94,7 @@ jobs:
           pip list
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Running rmpad model tests on 8 NPUs
         run: |
           pytest -s tests/models/test_transformer.py
@@ -137,7 +137,7 @@ jobs:
           pip3 list
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Running FSDP2 rmpad model tests on 8 NPUs
         run: |
           STRATEGY=fsdp2 torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
