@@ -288,6 +288,28 @@ Two constraints on this path:
 Neither engine showed an MXFP8 rollout throughput gain over bf16 in these runs (SGLang 0.5.12 and
 vLLM 0.24.0); the measurements are in the PR description.
 
+#### Guard rails for a quantized rollout
+
+Two failures met during the B200 validation were silent — the run kept going with exit code 0
+while every sample was garbage (a quantized `lm_head` producing `nan` logits; an engine serving
+stale kernel scale layouts after a weight sync). verl now fails loudly in both cases:
+
+- **Quantized-rollout sentinel** (trainer side, both trainers). When `rollout.quantization` is set,
+  the step metrics are checked after each step: non-finite `training/rollout_probs_diff_mean`,
+  `rollout_corr/kl` above 1.0 (typical values are 0.001–0.03), or every response hitting the
+  length cap on two consecutive steps raise a `RuntimeError` naming the likely causes. Disable
+  with `VERL_QUANT_SENTINEL=0`; tune with `VERL_QUANT_SENTINEL_KL_MAX` / `VERL_QUANT_SENTINEL_CLIP_STEPS`.
+- **MXFP8 refit self-check** (engine side, vLLM and SGLang). After every weight sync the smallest
+  MXFP8 linear layer's own quantized GEMM is run on a small random input and compared with a
+  dequantized bf16 reference of the canonical weight and scale; a stale or mis-laid-out scale
+  shows up as O(1) relative error and raises. Disable with `VERL_MXFP8_REFIT_CHECK=0`; the
+  tolerance (default 0.25) is `VERL_MXFP8_REFIT_CHECK_TOL`.
+- **MoE experts on SGLang.** SGLang's MXFP8 MoE method rewrites the expert scales in place at
+  load (swizzled on the Triton MoE runner, packed on DeepGEMM), so the refit loader stages them
+  back to the canonical `[E, N, K/32]` layout for `load_weights` and re-derives the kernel layout
+  afterwards into the storage the CUDA graph captured. This path is covered by CPU tests and has
+  not yet been validated on hardware; see the PR description for the MoE validation status.
+
 ### MXFP8 Rollout and Train-Inference Consistency
 
 With `quantization: mxfp8`, the rollout engine (SGLang or vLLM) is launched in MXFP8 mode

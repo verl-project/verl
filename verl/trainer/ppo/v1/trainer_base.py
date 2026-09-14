@@ -1878,6 +1878,10 @@ class PPOTrainer(ABC):
             )
         )
         metrics.update(compute_data_metrics(batch=metrics_batch, use_critic=self.use_critic))
+        # Quantized rollout guard (no-op unless rollout.quantization is set); see verl/utils/quant_sentinel.py.
+        from verl.utils.quant_sentinel import check_quantized_rollout_metrics
+
+        check_quantized_rollout_metrics(self, metrics, global_steps)
         metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
         n_gpus = self._get_n_gpus_for_throughput()
         metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
