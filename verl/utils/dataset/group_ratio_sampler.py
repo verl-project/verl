@@ -23,20 +23,24 @@ Example config::
 
     data:
       sampler:
-        class_path: verl.utils.dataset.group_ratio_sampler
+        class_path: pkg://verl.utils.dataset.group_ratio_sampler
         class_name: GroupRatioSampler
         group_key: data_source
         group_names: ["openai/gsm8k", "lighteval/MATH"]
         group_ratios: [3, 7]
+
+``class_path`` is resolved by :func:`verl.utils.import_utils.load_module`,
+which accepts a ``pkg://`` prefix (recommended for modules inside the
+package), a ``file://`` prefix, or a plain filesystem path. A bare dotted
+module path like ``verl.utils.dataset.group_ratio_sampler`` is **not**
+accepted — use ``pkg://`` for that.
 """
 
 import logging
-import os
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def _resolve_dot_path(obj, dot_path: str):
@@ -78,6 +82,20 @@ class GroupRatioSampler:
     The sampler is stateful: ``state_dict`` / ``load_state_dict`` save and
     restore the shuffled index arrays, cursors, RNG state, and epoch count
     for reproducible checkpoint resumption.
+
+    .. note::
+
+        Unlike a vanilla ``torch.utils.data.Sampler``, calling ``iter(sampler)``
+        a second time does **not** start a fresh epoch — it resumes from the
+        cursors left by the previous iteration. This is intentional: the
+        sampler is designed to be driven by
+        ``torchdata.stateful_dataloader.StatefulDataLoader``, which advances
+        the sampling stream and snapshots/restores it via ``state_dict`` /
+        ``load_state_dict``. Epoch boundaries (a full re-shuffle of every
+        group) are not triggered by re-iteration; only an individual group's
+        pool being exhausted re-shuffles that one group. If you need a fresh
+        epoch outside of checkpoint restore, construct a new sampler or call
+        ``load_state_dict`` with a snapshot taken right after ``_reset_epoch``.
     """
 
     def __init__(
@@ -92,17 +110,21 @@ class GroupRatioSampler:
         **kwargs,
     ):
         self.data_source = data_source
-        self.group_key = group_key
-        self.seed = seed
 
-        # Resolve config overrides when called via create_rl_sampler
+        # When constructed via create_rl_sampler, the sampler config is nested
+        # under data_config.sampler.*; when constructed directly (tests, ad-hoc
+        # use), the keyword arguments carry the values. data_config wins when
+        # present so the training config is the single source of truth.
         if data_config is not None:
             sampler_cfg = data_config.get("sampler", {})
             group_key = sampler_cfg.get("group_key", group_key)
             group_names = sampler_cfg.get("group_names", group_names)
             group_ratios = sampler_cfg.get("group_ratios", group_ratios)
             seed = sampler_cfg.get("seed", seed)
-        # Persist the resolved values on self so the config overrides take effect
+            batch_size = data_config.get("train_batch_size", 256)
+        else:
+            batch_size = kwargs.get("batch_size", 256)
+
         self.group_key = group_key
         self.seed = seed
 
@@ -121,11 +143,7 @@ class GroupRatioSampler:
         )
         assert all(r > 0 for r in self.group_ratios), "group_ratios must all be positive"
 
-        # Resolve batch_size from config or dataset
-        if data_config is not None:
-            self.batch_size = data_config.get("train_batch_size", 256)
-        else:
-            self.batch_size = kwargs.get("batch_size", 256)
+        self.batch_size = batch_size
 
         # Largest-remainder method for per-group counts
         total_ratio = sum(self.group_ratios)
@@ -160,40 +178,50 @@ class GroupRatioSampler:
                     f"Check that group_key='{self.group_key}' resolves to "
                     f"'{name}' for at least some rows in the dataset."
                 )
+            if count < self.per_group_counts[name]:
+                logger.warning(
+                    f"GroupRatioSampler: group '{name}' has {count} samples but "
+                    f"per_batch={self.per_group_counts[name]}; the same index will "
+                    f"appear multiple times within a single batch (intentional "
+                    f"oversampling, but may cause overfitting on this group)."
+                )
 
         self._epoch_count = 0
         self._reset_epoch()
 
     def _group_indices(self):
-        """Iterate the dataset once and group indices by group value."""
+        """Iterate the dataset once and group indices by group value.
+
+        ``group_key`` is a dot-separated path whose first segment must name a
+        column in ``dataframe`` (e.g. ``data_source`` or
+        ``extra_info.csnvList.0.label`` where ``extra_info`` is a column). We
+        fetch that top-level column once (a pandas ``Series``), then for each
+        row resolve any remaining dot-path segments against the cell value —
+        which may be a dict, list, or object — never against the DataFrame
+        itself (``dataframe[i]`` returns a *column*, not a row, on pandas).
+        """
         dataframe = self.data_source.dataframe
         total = len(dataframe)
+        parts = self.group_key.split(".")
+        head, rest = parts[0], parts[1:]
+        rest_path = ".".join(rest)
         logger.info(f"GroupRatioSampler: grouping {total} samples by '{self.group_key}'...")
 
         try:
-            column = dataframe[self.group_key.split(".")[0]]
-            use_column = True
-        except Exception:
-            use_column = False
+            column = dataframe[head]
+        except Exception as e:
+            raise ValueError(
+                f"GroupRatioSampler: group_key head '{head}' is not a column of "
+                f"the dataset dataframe ({e}). Check group_key='{self.group_key}'."
+            ) from e
 
-        if use_column and "." not in self.group_key:
-            # Simple column access (e.g., "data_source")
-            for i, value in enumerate(column):
-                value_str = str(value) if value is not None else None
-                if value_str in self.group_to_indices:
-                    self.group_to_indices[value_str].append(i)
-                elif value_str is not None:
-                    logger.warning(f"GroupRatioSampler: unknown group '{value_str}' at index {i}, skipping")
-        else:
-            # Dot-path access (e.g., "extra_info.csnvList.0.label")
-            for i in range(total):
-                row = dataframe[i]
-                value = _resolve_dot_path(row, self.group_key)
-                value_str = str(value) if value is not None else None
-                if value_str in self.group_to_indices:
-                    self.group_to_indices[value_str].append(i)
-                elif value_str is not None:
-                    logger.warning(f"GroupRatioSampler: unknown group '{value_str}' at index {i}, skipping")
+        for i, cell in enumerate(column):
+            value = _resolve_dot_path(cell, rest_path) if rest_path else cell
+            value_str = str(value) if value is not None else None
+            if value_str in self.group_to_indices:
+                self.group_to_indices[value_str].append(i)
+            elif value_str is not None:
+                logger.warning(f"GroupRatioSampler: unknown group '{value_str}' at index {i}, skipping")
 
     def _reset_epoch(self):
         """Shuffle each group's indices independently for a new epoch."""
@@ -211,9 +239,11 @@ class GroupRatioSampler:
 
         Each ``next()`` call on the returned iterator produces one batch
         (``batch_size`` indices with the configured group ratio), repeated
-        ``len(dataset) // batch_size`` times to cover one epoch.
+        ``len(dataset) // batch_size`` times to cover one epoch (drop_last).
         Minority groups wrap around independently; majority groups are
-        exhausted exactly once per epoch.
+        exhausted exactly once per epoch unless their pool is smaller than
+        ``per_group_counts[name]``, in which case the same index can appear
+        more than once within a single batch (warned at init time).
         """
         num_batches = len(self.data_source) // self.batch_size
         for _ in range(num_batches):
@@ -252,7 +282,10 @@ class GroupRatioSampler:
             yield from batch_arr.tolist()
 
     def __len__(self):
-        return len(self.data_source)
+        # ``__iter__`` yields exactly ``num_batches * batch_size`` indices where
+        # ``num_batches = len(dataset) // batch_size`` (drop_last semantics).
+        # Report that count so ``len(sampler)`` matches the produced stream.
+        return (len(self.data_source) // self.batch_size) * self.batch_size
 
     def state_dict(self) -> dict:
         """Return sampler state for checkpoint resumption."""

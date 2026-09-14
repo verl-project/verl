@@ -117,10 +117,20 @@ custom_cls:
 # default RandomSampler/SequentialSampler.  The sampler class must accept
 # ``data_source=dataset`` and ``data_config=data_config`` as keyword arguments
 # and implement ``state_dict`` / ``load_state_dict`` for checkpoint resumption.
+# Example: GroupRatioSampler for per-group balanced mixing
+#   sampler:
+#     class_path: pkg://verl.utils.dataset.group_ratio_sampler
+#     class_name: GroupRatioSampler
+#     group_key: data_source            # or a dot-path like extra_info.label
+#     group_names: ["openai/gsm8k", "lighteval/MATH"]
+#     group_ratios: [3, 7]
 sampler:
 
-  # Path to the module containing the sampler class (supports pkg:// prefix,
-  # file:// prefix, or plain file path).
+  # Path to the module containing the sampler class. Accepts a ``pkg://``
+  # prefix (recommended for modules inside the installed package, e.g.
+  # ``pkg://verl.utils.dataset.group_ratio_sampler``), a ``file://`` prefix,
+  # or a plain filesystem path. A bare dotted module path without ``pkg://``
+  # is NOT accepted (load_module would treat it as a file path).
   class_path: null
 
   # Name of the sampler class within the specified module.
@@ -128,7 +138,11 @@ sampler:
 
   # GroupRatioSampler parameters (used when class_path points to
   # verl.utils.dataset.group_ratio_sampler.GroupRatioSampler).
-  # Dot-separated path to extract group value from each dataset row.
+  # Dot-separated path to extract group value from each dataset row. The first
+  # segment must name a top-level dataframe column (e.g. ``data_source`` or
+  # ``extra_info``); subsequent segments resolve against each cell value, so
+  # ``extra_info.csnvList.0.label`` reads column ``extra_info`` then walks
+  # ``csnvList[0].label`` on each cell (dict/list/attribute access).
   group_key: null
 
   # Expected group values.  Must match values found in the dataset.

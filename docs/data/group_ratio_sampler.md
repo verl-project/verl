@@ -21,14 +21,18 @@ Set `data.sampler.*` in the training config:
 data:
   train_batch_size: 64
   sampler:
-    class_path: verl.utils.dataset.group_ratio_sampler
+    class_path: pkg://verl.utils.dataset.group_ratio_sampler
     class_name: GroupRatioSampler
     group_key: data_source
     group_names: ["openai/gsm8k", "lighteval/MATH"]
     group_ratios: [3, 7]
 ```
 
+`class_path` is resolved by `verl.utils.import_utils.load_module`. Use the `pkg://` prefix for modules inside the installed package (recommended), a `file://` prefix, or a plain filesystem path — a bare dotted module path like `verl.utils.dataset.group_ratio_sampler` (without `pkg://`) is **not** accepted.
+
 When `data.sampler.class_path` is set, `create_rl_sampler` loads the class via `load_extern_object` and instantiates it with `data_source=dataset, data_config=data_config`. If the sampler block is absent, the default `RandomSampler` is used.
+
+`group_key` may be a plain column name (`data_source`) or a dot-separated path into a column whose cells are dicts/lists (e.g. `extra_info.csnvList.0.label`). The first segment must always name a top-level column; subsequent segments resolve against each cell value.
 
 ## Behavior and Semantics
 
@@ -43,3 +47,5 @@ Groups are not sampled uniformly from the full dataset. Instead:
 Rows whose group value is not listed in `group_names` are logged with a warning and skipped. A group with zero matching rows raises a `ValueError` at init time to catch configuration mistakes early.
 
 The sampler is stateful: `state_dict` / `load_state_dict` save and restore the shuffled index arrays, cursors, RNG state, and epoch count. It pairs with `torchdata.stateful_dataloader.StatefulDataLoader`, so training can resume from a checkpoint at exactly the same point in the sampling stream.
+
+> **Iteration semantics.** Unlike a vanilla PyTorch `Sampler`, calling `iter(sampler)` a second time does **not** start a fresh epoch — it resumes from the cursors left by the previous iteration. Epoch boundaries are driven by `StatefulDataLoader`'s `state_dict` checkpoint/restore, not by re-iteration. If a group's pool is smaller than its per-batch count, the same index may appear more than once within a single batch (a warning is logged at init time); this is intentional oversampling, but can overfit small groups.

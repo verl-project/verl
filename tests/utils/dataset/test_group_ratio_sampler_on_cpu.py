@@ -157,3 +157,82 @@ def test_create_rl_sampler_wiring():
     sampler = create_rl_sampler(data_cfg, data)
     assert isinstance(sampler, GroupRatioSampler)
     assert sampler.per_group_counts == {"a": 3, "b": 7}
+
+
+def _make_nested_data(rows):
+    """Build a DataFrame whose ``extra_info`` column holds dict-like cells."""
+    return _FakeData(pd.DataFrame({"extra_info": rows}))
+
+
+def test_dot_path_group_key_resolves_into_nested_cells():
+    """group_key='extra_info.label' reads the top-level column then resolves
+    the remaining dot-path against each cell value (dict access), not against
+    the DataFrame itself (which would return a column, not a row)."""
+    rows = [{"label": "a"}] * 30 + [{"label": "b"}] * 70
+    data = _make_nested_data(rows)
+    sampler = GroupRatioSampler(
+        data_source=data,
+        data_config=_Cfg(train_batch_size=10),
+        group_key="extra_info.label",
+        group_names=["a", "b"],
+        group_ratios=[3, 7],
+        seed=0,
+    )
+    assert sampler.per_group_counts == {"a": 3, "b": 7}
+    assert len(sampler.group_to_indices["a"]) == 30
+    assert len(sampler.group_to_indices["b"]) == 70
+
+    it = iter(sampler)
+    for _ in range(len(data) // 10):
+        batch = [next(it) for _ in range(10)]
+        cells = [data.dataframe["extra_info"].iloc[i] for i in batch]
+        assert sum(1 for c in cells if c["label"] == "a") == 3
+        assert sum(1 for c in cells if c["label"] == "b") == 7
+
+
+def test_dot_path_with_list_index_segment():
+    """A numeric segment in the dot-path indexes into a list cell, e.g.
+    'extra_info.items.0.kind' resolves items[0].kind on each cell."""
+    rows = [
+        {"items": [{"kind": "a"}]},
+        {"items": [{"kind": "b"}]},
+    ] * 50  # 50 'a' rows and 50 'b' rows, interleaved
+    data = _make_nested_data(rows)
+    sampler = GroupRatioSampler(
+        data_source=data,
+        data_config=_Cfg(train_batch_size=10),
+        group_key="extra_info.items.0.kind",
+        group_names=["a", "b"],
+        group_ratios=[1, 1],
+        seed=0,
+    )
+    assert len(sampler.group_to_indices["a"]) == 50
+    assert len(sampler.group_to_indices["b"]) == 50
+
+
+def test_dot_path_head_must_be_a_column():
+    """A group_key whose head is not a column raises ValueError at init."""
+    data = _make_nested_data([{"label": "a"}] * 10)
+    try:
+        GroupRatioSampler(
+            data_source=data,
+            data_config=_Cfg(train_batch_size=10),
+            group_key="nonexistent.label",
+            group_names=["a"],
+            group_ratios=[1],
+            seed=0,
+        )
+    except ValueError as e:
+        assert "nonexistent" in str(e)
+    else:
+        raise AssertionError("expected ValueError for missing group_key head")
+
+
+def test_len_matches_iter_yield_count():
+    """__len__ equals the number of indices the iterator actually yields
+    (drop_last), not len(dataset), when the dataset is not divisible by
+    batch_size."""
+    data = _make_data(["a"] * 33 + ["b"] * 67)  # 100 rows, batch_size=16 -> 96
+    sampler = _sampler(data, ["a", "b"], [3, 7], batch_size=16)
+    assert len(sampler) == 96
+    assert len(list(iter(sampler))) == 96
