@@ -1,0 +1,14 @@
+
+task:
+  - mnist
+  - classification_small
+  - tabular
+optimizer:
+  - name: dummy_optimizer_yamltest
+engine:
+  seed: [42]
+  data_dir: examples/data
+  output_dir: outputs/experiment_dummy_optimizer_yamltest
+  train: true
+  test: true
+  plot: false
