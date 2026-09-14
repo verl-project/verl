@@ -91,7 +91,12 @@ def get_huggingface_actor_config(model_name: str, override_config_kwargs=None, t
     assert isinstance(override_config_kwargs, dict), (
         f"override_config_kwargs must be a dict, got {type(override_config_kwargs)}"
     )
-    module_config = AutoConfig.from_pretrained(model_name, trust_remote_code=trust_remote_code)
+    try:
+        module_config = AutoConfig.from_pretrained(model_name, trust_remote_code=trust_remote_code)
+    except ValueError:
+        from vllm.transformers_utils.config import get_config
+
+        module_config = get_config(model_name, trust_remote_code=trust_remote_code)
     update_model_config(module_config, override_config_kwargs)
 
     return module_config

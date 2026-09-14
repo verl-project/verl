@@ -189,10 +189,7 @@ class HFModelConfig(BaseConfig):
                 trust_remote_code=self.trust_remote_code,
                 attn_implementation=attn_implementation,
             )
-        except ValueError as error:
-            lookup_error = error.__cause__ or error.__context__
-            if not isinstance(lookup_error, KeyError) or lookup_error.args != ("deepseek_v4",):
-                raise
+        except ValueError:
             from vllm.transformers_utils.config import get_config
 
             self.hf_config = get_config(
