@@ -414,7 +414,13 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
     """
 
     if is_deepseek_v4_model(model):
-        yield from iter_deepseek_v4_weights(weights)
+        block_size = 128
+        wbs = getattr(quant_config, "weight_block_size", None)
+        if wbs is None and isinstance(quant_config, dict):
+            wbs = quant_config.get("weight_block_size")
+        if isinstance(wbs, list | tuple) and len(wbs) == 2 and wbs[0] == wbs[1]:
+            block_size = int(wbs[0])
+        yield from iter_deepseek_v4_weights(weights, block_size=block_size)
         return
 
     fp8_state.seen_params.clear()
