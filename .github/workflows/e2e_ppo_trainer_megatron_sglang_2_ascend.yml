@@ -14,7 +14,7 @@
 
 # Accelerators for tests
 # - By default tests are run with GPU available, except for the ones under `special_npu`, and any test script whose name ends with `on_cpu.py`.
-# - For test scripts with `on_cpu.py` name suffix would be tested on CPU resources in linux environment.
+# - For test scripts with `on_cpu.py` name suffix would be tested on CPU resources in linux environment
 
 # # Workflow layout
 
