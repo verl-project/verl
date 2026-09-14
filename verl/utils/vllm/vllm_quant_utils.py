@@ -403,12 +403,62 @@ def prepare_quanted_weights_for_loading(model):
     return reload_state
 
 
+def _is_modelopt_mxfp8_linear(module) -> bool:
+    qm = getattr(module, "quant_method", None)
+    return (
+        qm is not None
+        and type(qm).__name__ == "ModelOptMxFp8LinearMethod"
+        and isinstance(getattr(module, "weight", None), torch.Tensor)
+        and isinstance(getattr(module, "weight_scale", None), torch.Tensor)
+    )
+
+
+def snapshot_mxfp8_linear_for_check(model):
+    """Pick the smallest ModelOpt MXFP8 linear and copy its canonical weight / scale.
+
+    Must run after ``load_weights`` and before ``process_fp8_weights_after_loading``:
+    at that point the layer's ``weight_scale`` is the canonical 2D UE8M0 tensor the
+    sync just wrote, which the kernel post-processing then rewrites in place.
+    """
+    from verl.utils.mxfp8_refit_check import refit_check_enabled
+
+    if not refit_check_enabled():
+        return None
+    best = None
+    for name, module in model.named_modules():
+        if not _is_modelopt_mxfp8_linear(module):
+            continue
+        scale = module.weight_scale
+        if scale.dtype != torch.uint8 or scale.ndim != 2:
+            continue  # not canonical (kernel layout already applied) - cannot serve as reference
+        if best is None or module.weight.numel() < best[1].weight.numel():
+            best = (name, module)
+    if best is None:
+        return None
+    name, module = best
+    return name, module, module.weight.data.detach().clone(), module.weight_scale.data.detach().clone()
+
+
+def self_check_mxfp8_linear(snapshot):
+    from verl.utils.mxfp8_refit_check import assert_mxfp8_linear_matches
+
+    if snapshot is None:
+        return
+    name, module, qweight, scale = snapshot
+    qm = module.quant_method
+    assert_mxfp8_linear_matches(name, lambda x: qm.apply(module, x), qweight, scale, engine="vllm")
+
+
 def process_quanted_weights_after_loading(model, reload_state):
     """Re-apply the inference layout undone by ``prepare_quanted_weights_for_loading``."""
     apply_mxfp8_transformation_after_loading(model)
     reload_state = reload_state or {}
+    # Canonical MXFP8 weight/scale of one layer, captured before the kernel layout is re-derived.
+    snapshot = snapshot_mxfp8_linear_for_check(model)
     process_fp8_weights_after_loading(reload_state.get("fp8_layers") or [])
     process_mxfp4_moe_weights_after_loading(reload_state.get("mxfp4_moe_modules") or [])
+    # The re-derived layout is now what the kernel reads; it must reproduce the canonical reference.
+    self_check_mxfp8_linear(snapshot)
     # Last: the rebuild reads ``wo_a``, which is only back in its inference
     # layout once the staged FP8 params above have been reinstated.
     refresh_rocm_attention_weight_caches(model)

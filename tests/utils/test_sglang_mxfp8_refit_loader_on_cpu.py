@@ -18,6 +18,7 @@ import types
 
 import torch
 
+from verl.utils.mxfp8_refit_check import mxfp8_dequantize
 from verl.workers.rollout.sglang_rollout import mxfp8_refit_loader as refit
 
 
@@ -60,13 +61,61 @@ class _QuantMethod:
         self.calls += 1
         layer.weight_scale_inv_swizzled = layer.weight_scale_inv.clone() + 1
 
+    def apply(self, layer, x, bias=None):
+        # A FlashInfer-style kernel reads only the derived copy; "+1" is the fake swizzle.
+        scale = layer.weight_scale_inv_swizzled - 1
+        return (x.float() @ mxfp8_dequantize(layer.weight.data, scale).t()).to(torch.bfloat16)
+
 
 class _Linear(torch.nn.Module):
     def __init__(self, resolved_backend=None):
         super().__init__()
-        self.weight = torch.nn.Parameter(torch.zeros(4, 64, dtype=torch.float32), requires_grad=False)
-        self.weight_scale_inv = torch.nn.Parameter(torch.zeros(4, 2, dtype=torch.uint8), requires_grad=False)
+        g = torch.Generator().manual_seed(0)
+        self.weight = torch.nn.Parameter(
+            torch.randint(-6, 7, (4, 64), generator=g).to(torch.float8_e4m3fn), requires_grad=False
+        )
+        self.weight_scale_inv = torch.nn.Parameter(torch.full((4, 2), 127, dtype=torch.uint8), requires_grad=False)
         self.quant_method = _QuantMethod(resolved_backend)
+        self.weight_scale_inv_swizzled = self.weight_scale_inv.clone() + 1  # as after the initial load
+
+
+class _MoEQuantMethod:
+    """sglang ``Fp8MoEMethod`` with an fp8-serialized MXFP8 checkpoint on the Triton MoE runner:
+    post-load processing swizzles the expert scales *in place* into a different shape."""
+
+    use_mxfp8 = True
+    is_checkpoint_fp8_serialized = True
+
+    def __init__(self):
+        self.calls = 0
+
+    def process_weights_after_loading(self, layer):
+        self.calls += 1
+        for name in ("w13_weight_scale_inv", "w2_weight_scale_inv"):
+            p = getattr(layer, name)
+            swizzled = p.data.reshape(p.data.shape[0], -1).clone() + 1
+            if p.data.shape == swizzled.shape:
+                p.data.copy_(swizzled)
+            else:
+                p.data = swizzled  # sglang's _copy_or_rebind on shape change
+
+
+class _MoE(torch.nn.Module):
+    def __init__(self, experts=2, inter=64, hidden=64):
+        super().__init__()
+        self.w13_weight = torch.nn.Parameter(
+            torch.zeros(experts, 2 * inter, hidden, dtype=torch.float8_e4m3fn), requires_grad=False
+        )
+        self.w2_weight = torch.nn.Parameter(
+            torch.zeros(experts, hidden, inter, dtype=torch.float8_e4m3fn), requires_grad=False
+        )
+        self.w13_weight_scale_inv = torch.nn.Parameter(
+            torch.full((experts, 2 * inter, hidden // 32), 127, dtype=torch.uint8), requires_grad=False
+        )
+        self.w2_weight_scale_inv = torch.nn.Parameter(
+            torch.full((experts, hidden, inter // 32), 127, dtype=torch.uint8), requires_grad=False
+        )
+        self.quant_method = _MoEQuantMethod()
 
 
 class _Model(torch.nn.Module):
@@ -140,6 +189,55 @@ def test_resolved_trtllm_backend_is_rejected():
         assert "flashinfer_trtllm" in str(e)
     else:
         raise AssertionError("expected NotImplementedError")
+
+
+def test_moe_expert_scales_are_staged_reprocessed_and_folded_into_live_storage():
+    _install_stub("auto")
+    m = _Model(resolved_backend="flashinfer_cutlass")
+    m.moe = _MoE()
+    m.moe.quant_method.process_weights_after_loading(m.moe)  # initial load: scales now swizzled [E, 256]
+    assert tuple(m.moe.w13_weight_scale_inv.shape) == (2, 256)
+    live_ptr = m.moe.w13_weight_scale_inv.data_ptr()
+
+    new_w13 = torch.full((2, 128, 2), 7, dtype=torch.uint8)  # canonical [E, N, K/32] as the sync sends it
+    new_w2 = torch.full((2, 64, 2), 5, dtype=torch.uint8)
+    refit.load_and_reprocess(m, [("moe.w13_weight_scale_inv", new_w13), ("moe.w2_weight_scale_inv", new_w2)])
+
+    # load_weights could only write canonical tensors because the scales were staged back to that layout
+    assert m.moe.quant_method.calls == 2
+    p = m.moe.w13_weight_scale_inv
+    assert tuple(p.shape) == (2, 256) and p.data_ptr() == live_ptr  # CUDA-graph storage kept
+    assert torch.equal(p.data, torch.full((2, 256), 8, dtype=torch.uint8))  # re-swizzled from the NEW scales
+    assert torch.equal(m.moe.w2_weight_scale_inv.data, torch.full((2, 128), 6, dtype=torch.uint8))
+
+
+def test_moe_scales_kept_canonical_by_the_runner_are_not_staged():
+    class _CanonicalMoEQuantMethod(_MoEQuantMethod):
+        def process_weights_after_loading(self, layer):  # CUTLASS / TRT-LLM MoE runners: scales stay canonical
+            self.calls += 1
+
+    moe = _MoE()
+    moe.quant_method = _CanonicalMoEQuantMethod()
+    m = torch.nn.Module()
+    m.moe = moe
+    assert refit.stage_mxfp8_moe_scales(m) == []
+    assert refit.reprocess_mxfp8_moe_layers(m, []) == 1
+
+
+def test_self_check_catches_a_stale_swizzled_copy():
+    _install_stub("flashinfer_cutlass")
+    m = _Model()
+    refit.self_check_mxfp8_linear(m)  # healthy: derived copy matches canonical scale
+    m.a.weight_scale_inv.data.fill_(130)  # a sync wrote new scales ...
+    m.b.weight_scale_inv.data.fill_(130)
+    try:  # ... but nothing rebuilt the copy the kernel reads
+        refit.self_check_mxfp8_linear(m)
+    except RuntimeError as e:
+        assert "refit self-check failed" in str(e)
+    else:
+        raise AssertionError("expected the self-check to fail on stale swizzled scales")
+    refit.reprocess_mxfp8_layers(m)  # the loader's re-processing is exactly what fixes it
+    refit.self_check_mxfp8_linear(m)
 
 
 def test_loader_fqn_matches_function():

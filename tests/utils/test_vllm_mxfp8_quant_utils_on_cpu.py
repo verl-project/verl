@@ -80,6 +80,14 @@ class _StubVllm:
             scale = layer.weight_scale
             layer.weight_scale = torch.nn.Parameter(scale.data.reshape(-1).clone() + 1, requires_grad=False)
 
+        def _apply(self, layer, x, bias=None):
+            # The kernel reads the swizzled copy; "+1" is the fake swizzle, so undo it for the math.
+            from verl.utils.mxfp8_refit_check import mxfp8_dequantize
+
+            n, k = layer.weight.shape
+            scale = layer.weight_scale.data.reshape(n, k // 32) - 1
+            return (x.float() @ mxfp8_dequantize(layer.weight.data, scale).t()).to(torch.bfloat16)
+
         def replace_parameter(layer, name, new):
             setattr(layer, name, torch.nn.Parameter(new, requires_grad=False))
 
@@ -89,7 +97,7 @@ class _StubVllm:
         fp8.replace_parameter = replace_parameter
         modelopt.ModelOptMxFp8Config = ModelOptMxFp8Config
         modelopt.ModelOptMxFp8LinearMethod = type(
-            "ModelOptMxFp8LinearMethod", (), {"process_weights_after_loading": _swizzle_process}
+            "ModelOptMxFp8LinearMethod", (), {"process_weights_after_loading": _swizzle_process, "apply": _apply}
         )
         modelopt.ModelOptMxFp8FusedMoE = type(
             "ModelOptMxFp8FusedMoE", (), {"process_weights_after_loading": _noop_process}
@@ -183,6 +191,54 @@ def test_modelopt_mxfp8_methods_are_patched_and_survive_a_refit():
             assert tuple(layer.weight_scale.shape) == (8,)
             assert layer.weight_scale.data_ptr() == live_ptr
             assert torch.equal(layer.weight_scale.data, torch.full((8,), 6, dtype=torch.uint8))
+        finally:
+            for p in patchers:
+                p.stop()
+
+
+def test_full_refit_cycle_runs_the_self_check(monkeypatch):
+    module, _ = _helpers._load_quant_utils(fused_moe_is_function=True)
+    monkeypatch.delenv("VERL_MXFP8_REFIT_CHECK", raising=False)
+    # The MXFP4 MoE hooks import vLLM's fused-MoE oracle, which the stub cannot provide; they are
+    # exercised by their own tests and are unrelated to the fp8 stage/reprocess cycle under test.
+    monkeypatch.setattr(module, "stage_mxfp4_moe_params_for_loading", lambda model: [])
+    monkeypatch.setattr(module, "process_mxfp4_moe_weights_after_loading", lambda modules: None)
+    with _StubVllm() as stub:
+        patchers = module.build_fp8_method_patchers(version.parse("0.24.0"))
+        for p in patchers:
+            p.start()
+        try:
+            layer = torch.nn.Module()
+            g = torch.Generator().manual_seed(0)
+            layer.weight = torch.nn.Parameter(
+                torch.randint(-6, 7, (4, 64), generator=g).to(torch.float8_e4m3fn), requires_grad=False
+            )
+            layer.weight_scale = torch.nn.Parameter(torch.full((4, 2), 127, dtype=torch.uint8), requires_grad=False)
+            layer.quant_method = stub.modelopt.ModelOptMxFp8LinearMethod()
+            layer.quant_method.process_weights_after_loading(layer)  # initial load
+            model = torch.nn.Module()
+            model.proj = layer
+
+            # Healthy refit: stage -> write new canonical scale -> reprocess -> self-check passes.
+            state = module.prepare_quanted_weights_for_loading(model)
+            layer.weight_scale.data.copy_(torch.full((4, 2), 129, dtype=torch.uint8))
+            module.process_quanted_weights_after_loading(model, state)
+            assert torch.equal(layer.weight_scale.data, torch.full((8,), 130, dtype=torch.uint8))
+
+            # Broken refit: the kernel keeps an old layout -> the self-check must raise.
+            state = module.prepare_quanted_weights_for_loading(model)
+            layer.weight_scale.data.copy_(torch.full((4, 2), 125, dtype=torch.uint8))
+
+            def _stale_process(self, lyr):  # post-processing that derives the kernel layout from OLD scales
+                lyr.weight_scale = torch.nn.Parameter(torch.full((8,), 130, dtype=torch.uint8), requires_grad=False)
+
+            monkeypatch.setattr(type(layer.quant_method), "process_weights_after_loading", _stale_process)
+            try:
+                module.process_quanted_weights_after_loading(model, state)
+            except RuntimeError as e:
+                assert "refit self-check failed" in str(e)
+            else:
+                raise AssertionError("expected the self-check to fail")
         finally:
             for p in patchers:
                 p.stop()
