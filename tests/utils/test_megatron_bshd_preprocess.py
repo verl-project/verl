@@ -161,6 +161,24 @@ def test_preprocess_thd_engine_pads_to_minimum_rows(monkeypatch):
     torch.testing.assert_close(local_positions[0, 100:], torch.zeros(28, dtype=torch.long))
 
 
+def test_thd_router_replay_drops_record_padding_and_restores_expert_zero(monkeypatch):
+    mcore_util = _load_mcore_util_with_stubbed_megatron(monkeypatch, tp_size=2, cp_size=1)
+    input_ids = _nested_tensor([torch.arange(7, dtype=torch.long)])
+    recorded_routes = torch.tensor([[[[1]], [[2]], [[3]], [[4]], [[5]], [[6]], [[7]], [[9]]]], dtype=torch.uint8)
+
+    _, packed_seq_params, _ = mcore_util.preprocess_thd_engine(input_ids)
+    exported_routes = mcore_util.postprocess_thd_engine(
+        recorded_routes,
+        packed_seq_params,
+        input_ids,
+        batch_size=1,
+    )
+    replay_routes, _, _ = mcore_util.preprocess_thd_engine(exported_routes)
+
+    torch.testing.assert_close(replay_routes[0, :7], recorded_routes[0, :7])
+    assert replay_routes[0, 7].item() == 0
+
+
 @pytest.mark.parametrize("cp_rank", [0, 1])
 def test_preprocess_thd_engine_pads_multidimensional_router_data(monkeypatch, cp_rank):
     mcore_util = _load_mcore_util_with_stubbed_megatron(
