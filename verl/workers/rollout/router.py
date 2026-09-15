@@ -35,6 +35,8 @@ class RequestLoadBalancer(Protocol):
     All strategies must satisfy this interface via structural subtyping.
     """
 
+    # TODO: Use session_id for the sticky key across rollout clients and routers;
+    # reserve request_id for each individual inference-engine request.
     def acquire_server(self, request_id: str, **extra) -> tuple[str, Any]:
         """Acquire a server for the given request.
 

@@ -17,8 +17,11 @@ import json
 import logging
 import os
 import random
+import shutil
+import tempfile
 from dataclasses import fields, is_dataclass
 from enum import Enum
+from typing import Any
 
 import megatron.core
 import numpy as np
@@ -1003,20 +1006,39 @@ class MegatronCheckpointManager(BaseCheckpointManager):
 
     def _save_model_as_hf_via_bridge(self, hf_ckpt_path: str):
         """Save model weights through megatron-bridge."""
-        if self.vanilla_bridge:
-            self.bridge.save_weights(self.model, hf_ckpt_path, **self._get_bridge_extended_args())
-        else:
-            if self.peft_cls is not None:
-                hf_adapter_ckpt_path = os.path.join(hf_ckpt_path, "adapter")
-                self.bridge.save_hf_adapter(self.model, hf_adapter_ckpt_path, self.peft_cls)
-                log_with_rank(
-                    f"Saved HF PEFT adapter checkpoint to {hf_adapter_ckpt_path}",
-                    rank=self.rank,
-                    logger=logger,
-                    log_only_rank_0=True,
-                )
+        import safetensors
+        import safetensors.torch as safetensors_torch
+
+        original_serialize_file = safetensors_torch.serialize_file
+        if version.parse(safetensors.__version__) >= version.parse("0.8.0"):
+            # Keep safetensors allocation calls off shared filesystem mounts.
+            def serialize_file_via_posix(
+                data: dict[str, Any], filename: str | os.PathLike, metadata: dict[str, str] | None = None
+            ) -> None:
+                with tempfile.TemporaryDirectory(prefix="verl_safetensors_", dir="/tmp") as staging_dir:
+                    shard_path = os.path.join(staging_dir, "shard.safetensors")
+                    original_serialize_file(data, shard_path, metadata=metadata)
+                    shutil.copyfile(shard_path, filename)
+
+            # save_file resolves this global even when a bridge imported it earlier.
+            safetensors_torch.serialize_file = serialize_file_via_posix
+        try:
+            if self.vanilla_bridge:
+                self.bridge.save_weights(self.model, hf_ckpt_path, **self._get_bridge_extended_args())
             else:
-                self.bridge.save_hf_weights(self.model, hf_ckpt_path, strict=self.checkpoint_config.strict)
+                if self.peft_cls is not None:
+                    hf_adapter_ckpt_path = os.path.join(hf_ckpt_path, "adapter")
+                    self.bridge.save_hf_adapter(self.model, hf_adapter_ckpt_path, self.peft_cls)
+                    log_with_rank(
+                        f"Saved HF PEFT adapter checkpoint to {hf_adapter_ckpt_path}",
+                        rank=self.rank,
+                        logger=logger,
+                        log_only_rank_0=True,
+                    )
+                else:
+                    self.bridge.save_hf_weights(self.model, hf_ckpt_path, strict=self.checkpoint_config.strict)
+        finally:
+            safetensors_torch.serialize_file = original_serialize_file
 
     def _save_hf_config_and_tokenizer(self, local_path: str):
         """Rank-0 saves HF config, tokenizer, and generation config."""

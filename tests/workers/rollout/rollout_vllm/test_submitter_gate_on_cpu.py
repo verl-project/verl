@@ -22,6 +22,7 @@ makes such an admission impossible.
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -150,3 +151,38 @@ def test_barrier_times_out_instead_of_hanging(monkeypatch):
         assert server.engine.pause_calls == 1, "barrier must proceed rather than deadlock"
 
     asyncio.run(main())
+
+
+def test_abort_without_pause_keeps_gate_and_caches_open():
+    server = _make_server()
+    server._admitting = 1
+    server.engine.output_processor.request_states = {"internal-1": object(), "internal-2": object()}
+    server.engine.abort = AsyncMock()
+    server.clear_kv_cache = AsyncMock()
+
+    result = asyncio.run(server.abort_all_requests(reset_prefix_cache=False, pause_generation=False))
+
+    assert result == {"aborted_count": 2, "request_ids": ["internal-1", "internal-2"]}
+    server.engine.abort.assert_awaited_once_with(["internal-1", "internal-2"], internal=True)
+    server.clear_kv_cache.assert_not_awaited()
+    assert server.engine.pause_calls == 0
+    assert server._submission_paused is False
+    assert server._resume_event.is_set()
+
+
+def test_abort_without_pause_propagates_engine_failure():
+    server = _make_server()
+    server.engine.abort = AsyncMock(side_effect=RuntimeError("abort failed"))
+
+    with pytest.raises(RuntimeError, match="abort failed"):
+        asyncio.run(server.abort_all_requests(reset_prefix_cache=False, pause_generation=False))
+
+
+def test_abort_without_pause_only_runs_on_head():
+    server = _make_server(node_rank=1)
+    del server.engine
+
+    assert asyncio.run(server.abort_all_requests(reset_prefix_cache=False, pause_generation=False)) == {
+        "aborted_count": 0,
+        "request_ids": [],
+    }
