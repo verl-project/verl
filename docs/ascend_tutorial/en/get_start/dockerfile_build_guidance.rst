@@ -1,21 +1,21 @@
-昇腾镜像说明
+Ascend Image Description
 ===================================
 
 Last updated: 08/10/2026.
 
 
-镜像获取与公开镜像地址
---------------------------
+Obtaining Images and Public Image Addresses
+-------------------------------------------
 
-昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3 镜像，基于 `Dockerfile <../../../../docker/ascend>`_ 构建，具体说明见 :ref:`Dockerfile构建镜像脚本清单 <ascend-dockerfile-list>`。
+Ascend hosts daily built A2/A3 images in `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_, built using the `Dockerfile <../../../../docker/ascend>`_. For details, refer to :ref:`Dockerfile Image Build Script List <ascend-dockerfile-list>`.
 
-每日构建镜像名格式：latest-{推理后端}-{适用产品信息}-{操作系统}-{其他字段}
+Daily build image name format: latest-{inference backend}-{applicable product information}-{operating system}-{other fields}
 
-verl release版本镜像名格式：{verl release版本号}-{CANN版本}-{TorchNPU版本}[-{适用产品信息}-{操作系统}]-{Python版本}[-{推理后端}-{其他字段}]
+The format of the verl release image name is: {verl release version}-{CANN version}-{TorchNPU version}[-{applicable product information}-{operating system}]-{Python version}[-{inference backend}-{other fields}]
 
 
 
-镜像硬件支持
+Image hardware support
 -----------------------------------
 
 Atlas 200T A2 Box16
@@ -25,15 +25,15 @@ Atlas 900 A2 PODc
 Atlas 800T A3
 
 
-最新镜像内各组件版本信息清单
-----------------
+List of component versions in the latest image
+----------------------------------------------
 
 .. list-table::
    :header-rows: 1
 
-   * - 组件
-     - 版本
-   * - 基础镜像
+   * - Component
+     - Version
+   * - Base image
      - Ubuntu 22.04
    * - Python
      - 3.12
@@ -66,18 +66,18 @@ Atlas 800T A3
 
 .. _ascend-dockerfile-list:
 
-Dockerfile构建镜像脚本清单
----------------------------
+Dockerfile image build script list
+----------------------------------
 
-**通用镜像**
+**General-purpose image**
 
 .. list-table::
    :header-rows: 1
 
-   * - 设备类型
-     - CANN基础镜像版本
-     - 推理后端
-     - 参考文件
+   * - Device type
+     - CANN base image version
+     - Inference backend
+     - Reference file
    * - A2
      - 9.1.0
      - vLLM
@@ -128,16 +128,16 @@ Dockerfile构建镜像脚本清单
      - `Dockerfile.ascend_8.2.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.2.rc1_a3>`_
 
 
-**verl release版本镜像**
+**verl release version image**
 
 .. list-table::
    :header-rows: 1
 
-   * - 设备类型
-     - CANN基础镜像版本
-     - 推理后端
-     - verl版本
-     - 参考文件
+   * - Device type
+     - CANN base image version
+     - Inference backend
+     - verl version
+     - Reference file
    * - A2
      - 9.0.0
      - vLLM
@@ -160,16 +160,16 @@ Dockerfile构建镜像脚本清单
      - `Dockerfile.ascend_8.5.0_a3_v0.7.1 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a3_v0.7.1>`_
 
 
-**模型定制镜像**
+**Custom model image**
 
 .. list-table::
    :header-rows: 1
 
-   * - 设备类型
-     - CANN基础镜像版本
-     - 推理后端
-     - 模型
-     - 参考文件
+   * - Device type
+     - CANN base image version
+     - Inference backend
+     - Model
+     - Reference file
    * - A2
      - 8.5.2
      - vLLM
@@ -183,14 +183,14 @@ Dockerfile构建镜像脚本清单
 
 
 
-**说明：**
+**Description:**
 
-* 推理后端为 ``vLLM`` 镜像中，vLLM、vLLM-ascend、MindSpeed、Megatron-LM、verl 为源码安装，源码位于镜像根目录 ``/`` 下。
-* 推理后端为 ``SGLang`` 镜像中，SGLang、MindSpeed、verl 为源码安装，源码位于镜像根目录 ``/`` 下。
+* For images where the inference backend is ``vLLM``, vLLM, vLLM-ascend, MindSpeed, Megatron-LM, and verl are installed from source. The source code is located in the root directory ``/`` of the image.
+* For images where the inference backend is ``SGLang``, SGLang, MindSpeed, and verl are installed from source. The source code is located in the root directory ``/`` of the image.
 
 
-镜像构建命令示例
---------------------
+Image build command examples
+-----------------------------
 
 .. code:: bash
 
@@ -206,12 +206,12 @@ Dockerfile构建镜像脚本清单
    # Query local images after build
    docker images
 
-**说明：**
+**Description:**
 
-* 以 vLLM 的镜像为例，``Dockerfile.ascend_8.5.0_a2`` 为 Dockerfile 文件名，``verl-ascend:8.5.0-a2`` 中，verl-ascend 为自定义的镜像名称，8.5.0-a2 为自定义的镜像标签
+* Using the vLLM image as an example, ``Dockerfile.ascend_8.5.0_a2`` is the Dockerfile name. In ``verl-ascend:8.5.0-a2``, verl-ascend is the custom image name, and 8.5.0-a2 is the custom image tag.
 
-容器启动命令模板
-----------------
+Container Startup Command Template
+----------------------------------
 
 .. code:: bash
 
@@ -229,28 +229,28 @@ Dockerfile构建镜像脚本清单
        {image_name}:{tag} \
        /bin/bash
 
-**说明：**
+**Description:**
 
-* 如需挂载其他本地路径到容器，请自行添加 ``-v <宿主机路径>:<容器内路径>``
-* 建议将 ``{your_docker_name}`` 替换为具有实际意义的容器名称
-* ``--privileged`` 参数授予容器扩展权限，请根据实际安全需求评估是否必要
-* ``{image_name}:{tag}`` 请换成容器构建时对应的镜像名称与标签
+* If you need to mount other local paths to the container, add ``-v <host machine path>:<container path>``.
+* We recommend replacing ``{your_docker_name}`` with a meaningful container name.
+* The ``--privileged`` parameter grants extended permissions to the container. Evaluate whether this is necessary based on your security requirements.
+* Replace ``{image_name}:{tag}`` with the image name and tag used during the container build.
 
-启动容器
---------
+Start the container
+-------------------
 
 .. code:: bash
 
    docker start {your_docker_name}
 
-进入正在运行的容器
-------------------
+Enter the running container
+---------------------------
 
 .. code:: bash
 
    docker exec -it {your_docker_name} bash
 
 
-声明
+Disclaimer
 --------------------
-verl中提供的ascend相关Dockerfile、镜像皆为参考样例，可用于尝鲜体验，如在生产环境中使用请通过官方正式途径沟通，谢谢。
+The Ascend-related Dockerfiles and images provided in verl are reference samples. You can use them to try out the features. If you want to use them in a production environment, communicate through official channels. Thank you.
