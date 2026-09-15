@@ -124,10 +124,10 @@ Atlas 800T A3
      - ``0.23.0``
      - NPU vLLM 后端适配
    * - Megatron-LM
-     - ``core_r0.16.0``
+     - ``core_r0.18.0``
      - 大规模分布式训练框架
    * - MindSpeed
-     - ``core_r0.16.0``
+     - ``core_r0.18.0``
      - Megatron-LM 在昇腾 NPU 上的适配和优化组件
 
 
