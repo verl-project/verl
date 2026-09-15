@@ -17,7 +17,6 @@ Bucketed weight transfer via ZMQ + IPC (or shared memory fallback).
 Not recommended depending on vllm for this file.
 """
 
-import gc
 import logging
 import os
 from collections.abc import Iterator
@@ -160,6 +159,7 @@ class BucketedWeightSender:
                 offset += weight.nbytes
 
             # send the last bucket
+            name = weight = None
             get_torch_device().synchronize()
             self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": True})
             self.socket.recv()
@@ -217,7 +217,6 @@ class BucketedWeightSender:
             self.shm.unlink()
             del self.shm
             self.shm = None
-        gc.collect()
         if is_support_ipc():
             get_torch_device().ipc_collect()
         get_torch_device().empty_cache()
@@ -311,8 +310,8 @@ class BucketedWeightReceiver:
                     # finishes, so skipping the ACK converts a real consumer
                     # error into a silent hang that burns the whole wall clock.
                     get_torch_device().synchronize()
-                    self.socket.send(b"")
                     del weights, tensor
+                    self._acknowledge_bucket(is_last)
                 if is_last:
                     break
         except BaseException:
@@ -378,11 +377,11 @@ class BucketedWeightReceiver:
                     # clone/to/copy operations above may still be queued on the
                     # current stream. Fence them before allowing sender reuse.
                     get_torch_device().synchronize()
+                    del weights, tensor
                     if is_last and self._defer_last_ack:
                         self._last_ack_deferred = True
                     else:
-                        self.socket.send(b"")
-                    del weights, tensor
+                        self._acknowledge_bucket(is_last)
 
                 if is_last:
                     self.iterator_exhausted = True
@@ -405,8 +404,7 @@ class BucketedWeightReceiver:
         if not self._last_ack_deferred or self.socket is None:
             raise RuntimeError("no deferred final weight-sync ACK is pending")
         try:
-            get_torch_device().synchronize()
-            self.socket.send(b"")
+            self._acknowledge_bucket(is_last=True)
         finally:
             self._last_ack_deferred = False
             self._cleanup()
@@ -423,8 +421,7 @@ class BucketedWeightReceiver:
             if self.socket is not None:
                 try:
                     if self._last_ack_deferred:
-                        get_torch_device().synchronize()
-                        self.socket.send(b"")
+                        self._acknowledge_bucket(is_last=True)
                         self._last_ack_deferred = False
                     else:
                         self._drain_remaining_buckets_after_failure()
@@ -441,9 +438,27 @@ class BucketedWeightReceiver:
         """ACK and discard the rest of a failed iterator-based sync round."""
         while True:
             metadata = self.socket.recv_pyobj()
-            self.socket.send(b"")
+            self._acknowledge_bucket(metadata["is_last"])
             if metadata["is_last"]:
                 return
+
+    def _acknowledge_bucket(self, is_last: bool) -> None:
+        """Release the final IPC mapping before allowing sender reclamation.
+
+        Consumers fence their per-bucket copies and drop temporary tensor views
+        before calling this method. On the deferred path, the native reload has
+        also finalized. A final ACK alone is not enough: an outstanding receiver
+        mapping otherwise parks the sender allocation in CUDA IPC limbo.
+        """
+        if is_last:
+            try:
+                self._release_buffer()
+            finally:
+                # A cleanup failure must surface through the receiver future,
+                # not strand the sender before it can await that future.
+                self.socket.send(b"")
+        else:
+            self.socket.send(b"")
 
     def _init_socket(self):
         """Initialize ZMQ REP socket and connect."""
@@ -466,21 +481,24 @@ class BucketedWeightReceiver:
         self.buffer = buffer
         self.shm = shm
 
-    def _cleanup(self):
-        """clean up"""
-        if self.socket is not None:
-            self.socket.close()
-            self.socket = None
+    def _release_buffer(self):
+        """Idempotently release receiver-owned mappings without a full GC."""
         # Synchronize before releasing the buffer to ensure all async ops
         # referencing it (e.g. clone, .to()) have completed.
         get_torch_device().synchronize()
-        del self.buffer
         self.buffer = None
         if self.shm is not None:
             self.shm.close()
-            del self.shm
             self.shm = None
-        gc.collect()
-        if is_support_ipc():
-            get_torch_device().ipc_collect()
-        get_torch_device().empty_cache()
+
+    def _cleanup(self):
+        """Release resources on success, callback failure and iterator close."""
+        try:
+            self._release_buffer()
+            if is_support_ipc():
+                get_torch_device().ipc_collect()
+            get_torch_device().empty_cache()
+        finally:
+            if self.socket is not None:
+                self.socket.close()
+                self.socket = None
