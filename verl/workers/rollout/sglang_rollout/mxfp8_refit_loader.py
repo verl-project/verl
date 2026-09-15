@@ -56,8 +56,14 @@ derivable from the expert weight shape.
 
 Self-check. After re-processing, one dense MXFP8 layer's own ``apply`` is compared
 against a dequantized reference (``verl.utils.mxfp8_refit_check``); a stale or
-mis-laid-out scale shows up as O(1) relative error and raises. For staged MoE
-scales the loader also verifies, before re-processing, that the sync wrote every
+mis-laid-out scale shows up as O(1) relative error and raises. One local expert
+of the smallest MXFP8 MoE layer is probed the same way: its canonical ``w13`` /
+``w2`` weights and scales are snapshotted after ``load_weights`` (before the
+runner rewrites the scales), then every probe row is routed to that expert via a
+``StandardTopKOutput`` and the layer's forward is compared against the gated-MLP
+reference. Skipped when expert parallelism is on (routing to a global expert id
+would need the EP dispatch) or when TP>1 without ``reduce_results``. For staged
+MoE scales the loader also verifies, before re-processing, that the sync wrote every
 entry: the staging buffer is pre-filled with ``0xFF`` (the UE8M0 NaN code), so an
 expert whose HF name misses the sync-side quantization rule — shipped as bf16,
 which the engine's weight loader silently casts into the fp8 buffer with no scale —
@@ -260,6 +266,16 @@ def reprocess_mxfp8_moe_layers(model: torch.nn.Module, staged: list[tuple[torch.
                 live.copy_(new)
             param.data = live
         count += 1
+    # Post-condition: every staged scale is back on the storage the CUDA graph captured. A module
+    # that was staged but not visited above (predicate changed between stage and reprocess) would
+    # otherwise keep serving the staging buffer while the graph replays the stale live one.
+    for module, sname, live in staged:
+        param = getattr(module, sname)
+        if param.data.data_ptr() != live.data_ptr():
+            raise RuntimeError(
+                f"{type(module).__name__}.{sname}: staged for the sync but not folded back into its live "
+                "storage by reprocess_mxfp8_moe_layers; the CUDA graph would keep reading stale scales."
+            )
     return count
 
 
@@ -293,12 +309,105 @@ def self_check_mxfp8_linear(model: torch.nn.Module) -> None:
     )
 
 
+def snapshot_mxfp8_moe_for_check(model: torch.nn.Module):
+    """Pick the smallest MXFP8 MoE layer and copy one local expert's canonical weights / scales.
+
+    Must run after ``load_weights`` and before ``reprocess_mxfp8_moe_layers``: the
+    scales are canonical ``[E, N, K/32]`` uint8 at that point (staging buffers for
+    runners that rewrite them, the live buffers for runners that keep them). Returns
+    ``None`` when the check is disabled, no MoE layer qualifies, or the layer's
+    parallelism is one the probe cannot reproduce.
+    """
+    from verl.utils.mxfp8_refit_check import refit_check_enabled
+
+    if not refit_check_enabled():
+        return None
+    best = None
+    for name, module in model.named_modules():
+        if not _is_mxfp8_moe(module) or not hasattr(module, "w13_weight") or not hasattr(module, "w2_weight"):
+            continue
+        if best is None or module.w13_weight.numel() < best[1].w13_weight.numel():
+            best = (name, module)
+    if best is None:
+        return None
+    name, module = best
+    if getattr(module, "moe_ep_size", 1) > 1:
+        logger.debug("mxfp8 MoE refit check skipped on %s: expert parallelism %d", name, module.moe_ep_size)
+        return None
+    if getattr(module, "moe_tp_size", 1) > 1 and not getattr(module, "reduce_results", False):
+        logger.debug("mxfp8 MoE refit check skipped on %s: TP without reduce_results", name)
+        return None
+    w13, w2 = module.w13_weight.data, module.w2_weight.data
+    s13, s2 = module.w13_weight_scale_inv.data, module.w2_weight_scale_inv.data
+    if (
+        s13.dtype != torch.uint8
+        or s2.dtype != torch.uint8
+        or tuple(s13.shape) != _canonical_scale_shape(w13)
+        or tuple(s2.shape) != _canonical_scale_shape(w2)
+    ):
+        logger.debug("mxfp8 MoE refit check skipped on %s: scales not in canonical layout after load", name)
+        return None
+    expert = 0  # local expert 0 == global expert 0 when EP is off
+    return (
+        name,
+        module,
+        expert,
+        w13[expert].detach().clone(),
+        s13[expert].detach().clone(),
+        w2[expert].detach().clone(),
+        s2[expert].detach().clone(),
+    )
+
+
+def _route_everything_to(module: torch.nn.Module, expert: int):
+    """Return ``apply_fn(x)`` running the fused-MoE layer with every row routed to ``expert`` at weight 1."""
+
+    def _apply(x: torch.Tensor) -> torch.Tensor:
+        from sglang.srt.layers.moe.topk import StandardTopKOutput
+
+        rows = x.shape[0]
+        topk_weights = torch.ones(rows, 1, dtype=torch.float32, device=x.device)
+        topk_ids = torch.full((rows, 1), expert, dtype=torch.int32, device=x.device)
+        num_experts = getattr(module, "num_experts", None) or module.w13_weight.shape[0]
+        router_logits = torch.zeros(rows, num_experts, dtype=torch.float32, device=x.device)
+        return module.forward(x, StandardTopKOutput(topk_weights, topk_ids, router_logits))
+
+    return _apply
+
+
+def self_check_mxfp8_moe(snapshot) -> None:
+    """Probe the expert captured by ``snapshot_mxfp8_moe_for_check`` after re-processing."""
+    from verl.utils.mxfp8_refit_check import assert_mxfp8_moe_expert_matches
+
+    if snapshot is None:
+        return
+    name, module, expert, w13_q, s13, w2_q, s2 = snapshot
+    reduce_ref = None
+    if getattr(module, "moe_tp_size", 1) > 1:
+        from sglang.srt.distributed import tensor_model_parallel_all_reduce
+
+        reduce_ref = tensor_model_parallel_all_reduce  # the layer applies the same reduction to its output
+    assert_mxfp8_moe_expert_matches(
+        name,
+        expert,
+        _route_everything_to(module, expert),
+        w13_q,
+        s13,
+        w2_q,
+        s2,
+        engine="sglang",
+        reduce_ref=reduce_ref,
+    )
+
+
 def load_and_reprocess(model: torch.nn.Module, named_tensors: Iterable[tuple[str, torch.Tensor]]) -> None:
-    """Standard ``load_weights`` bracketed by MXFP8 layout staging / re-processing, then a self-check."""
+    """Standard ``load_weights`` bracketed by MXFP8 layout staging / re-processing, then self-checks."""
     staged = stage_mxfp8_moe_scales(model)
     model.load_weights(named_tensors)
+    moe_snapshot = snapshot_mxfp8_moe_for_check(model)
     n = reprocess_mxfp8_layers(model)
     m = reprocess_mxfp8_moe_layers(model, staged)
     if n or m:
         logger.debug("mxfp8 refit: re-derived kernel scale layouts for %d linear and %d MoE modules", n, m)
     self_check_mxfp8_linear(model)
+    self_check_mxfp8_moe(moe_snapshot)

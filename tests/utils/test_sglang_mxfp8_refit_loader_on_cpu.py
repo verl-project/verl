@@ -15,6 +15,7 @@
 
 import sys
 import types
+from typing import NamedTuple
 
 import torch
 
@@ -39,12 +40,27 @@ class _Backend:
         return self.name == "deep_gemm"
 
 
+class _StandardTopKOutput(NamedTuple):  # sglang.srt.layers.moe.topk.StandardTopKOutput
+    topk_weights: torch.Tensor
+    topk_ids: torch.Tensor
+    router_logits: torch.Tensor
+
+
 def _install_stub(backend_name):
     mod = types.ModuleType("sglang.srt.layers.quantization.fp8_utils")
     mod.get_fp8_gemm_runner_backend = lambda: _Backend(backend_name)
-    for name in ("sglang", "sglang.srt", "sglang.srt.layers", "sglang.srt.layers.quantization"):
+    for name in (
+        "sglang",
+        "sglang.srt",
+        "sglang.srt.layers",
+        "sglang.srt.layers.quantization",
+        "sglang.srt.layers.moe",
+    ):
         sys.modules.setdefault(name, types.ModuleType(name))
     sys.modules["sglang.srt.layers.quantization.fp8_utils"] = mod
+    topk = types.ModuleType("sglang.srt.layers.moe.topk")
+    topk.StandardTopKOutput = _StandardTopKOutput
+    sys.modules["sglang.srt.layers.moe.topk"] = topk
 
 
 class _QuantMethod:
@@ -91,6 +107,8 @@ class _MoEQuantMethod:
 
     def process_weights_after_loading(self, layer):
         self.calls += 1
+        # the copy the kernel reads is derived from the canonical scales present at this moment
+        layer._kernel_scales = (layer.w13_weight_scale_inv.data.clone(), layer.w2_weight_scale_inv.data.clone())
         for name in ("w13_weight_scale_inv", "w2_weight_scale_inv"):
             p = getattr(layer, name)
             swizzled = p.data.reshape(p.data.shape[0], -1).clone() + 1
@@ -101,14 +119,25 @@ class _MoEQuantMethod:
 
 
 class _MoE(torch.nn.Module):
-    def __init__(self, experts=2, inter=64, hidden=64):
+    def __init__(self, experts=2, inter=64, hidden=64, random=False):
         super().__init__()
-        self.w13_weight = torch.nn.Parameter(
-            torch.zeros(experts, 2 * inter, hidden, dtype=torch.float8_e4m3fn), requires_grad=False
+        g = torch.Generator().manual_seed(0)
+        w13 = (
+            torch.randint(-6, 7, (experts, 2 * inter, hidden), generator=g)
+            if random
+            else torch.zeros(experts, 2 * inter, hidden)
         )
-        self.w2_weight = torch.nn.Parameter(
-            torch.zeros(experts, hidden, inter, dtype=torch.float8_e4m3fn), requires_grad=False
+        w2 = (
+            torch.randint(-6, 7, (experts, hidden, inter), generator=g)
+            if random
+            else torch.zeros(experts, hidden, inter)
         )
+        self.w13_weight = torch.nn.Parameter(w13.to(torch.float8_e4m3fn), requires_grad=False)
+        self.w2_weight = torch.nn.Parameter(w2.to(torch.float8_e4m3fn), requires_grad=False)
+        self.moe_ep_size = 1
+        self.moe_tp_size = 1
+        self.reduce_results = False
+        self.num_experts = experts
         self.w13_weight_scale_inv = torch.nn.Parameter(
             torch.full((experts, 2 * inter, hidden // 32), 127, dtype=torch.uint8), requires_grad=False
         )
@@ -116,6 +145,16 @@ class _MoE(torch.nn.Module):
             torch.full((experts, hidden, inter // 32), 127, dtype=torch.uint8), requires_grad=False
         )
         self.quant_method = _MoEQuantMethod()
+
+    def forward(self, x, topk_output):
+        """sglang FusedMoE.forward stand-in: gated MLP of the routed expert on the scales the kernel reads."""
+        assert isinstance(topk_output, _StandardTopKOutput) and topk_output.topk_ids.shape[1] == 1
+        e = int(topk_output.topk_ids[0, 0])
+        s13, s2 = self._kernel_scales
+        from verl.utils.mxfp8_refit_check import mxfp8_moe_expert_reference
+
+        out = mxfp8_moe_expert_reference(x, self.w13_weight.data[e], s13[e], self.w2_weight.data[e], s2[e])
+        return (out * topk_output.topk_weights).to(torch.bfloat16)
 
 
 class _Model(torch.nn.Module):
@@ -255,6 +294,86 @@ def test_moe_scales_the_sync_never_wrote_are_reported_instead_of_swizzled():
         ],
     )
     assert m2.moe.quant_method.calls == 2
+
+
+def _canonical_moe_model():
+    """A model whose MoE runner keeps scales canonical (no staging) but derives a kernel copy at load."""
+
+    class _CanonicalRunner(_MoEQuantMethod):
+        def process_weights_after_loading(self, layer):
+            self.calls += 1
+            layer._kernel_scales = (layer.w13_weight_scale_inv.data.clone(), layer.w2_weight_scale_inv.data.clone())
+
+    _install_stub("auto")
+    m = _Model(resolved_backend="flashinfer_cutlass")
+    m.moe = _MoE(random=True)
+    m.moe.quant_method = _CanonicalRunner()
+    m.moe.quant_method.process_weights_after_loading(m.moe)  # initial load
+    return m
+
+
+def test_moe_self_check_passes_after_a_full_refit_cycle_on_the_swizzling_runner():
+    _install_stub("auto")
+    m = _Model(resolved_backend="flashinfer_cutlass")
+    m.moe = _MoE(random=True)
+    m.moe.quant_method.process_weights_after_loading(m.moe)  # initial load: scales swizzled, kernel copy = 127s
+    new_w13 = torch.full((2, 128, 2), 129, dtype=torch.uint8)  # a sync ships 4x scales
+    new_w2 = torch.full((2, 64, 2), 129, dtype=torch.uint8)
+    # stage -> load -> snapshot (canonical) -> reprocess (kernel copy re-derived from the NEW scales) -> probe
+    refit.load_and_reprocess(m, [("moe.w13_weight_scale_inv", new_w13), ("moe.w2_weight_scale_inv", new_w2)])
+    assert torch.equal(m.moe._kernel_scales[0], new_w13)
+
+
+def test_moe_self_check_catches_expert_scales_the_kernel_never_re_derived():
+    m = _canonical_moe_model()
+    new_w13 = torch.full((2, 128, 2), 129, dtype=torch.uint8)
+    new_w2 = torch.full((2, 64, 2), 129, dtype=torch.uint8)
+    # the sync writes new canonical scales in place, but nothing re-derives the kernel copy: stale by 4x
+    m.load_weights([("moe.w13_weight_scale_inv", new_w13), ("moe.w2_weight_scale_inv", new_w2)])
+    snap = refit.snapshot_mxfp8_moe_for_check(m)
+    assert snap is not None and snap[0] == "moe" and snap[2] == 0
+    try:
+        refit.self_check_mxfp8_moe(snap)
+    except RuntimeError as e:
+        assert "MoE layer 'moe', expert 0" in str(e) and "w13_/w2_weight_scale" in str(e)
+    else:
+        raise AssertionError("expected the MoE self-check to fail on stale expert scales")
+    refit.reprocess_mxfp8_moe_layers(m, [])  # the loader's re-processing is exactly what fixes it
+    refit.self_check_mxfp8_moe(snap)
+
+
+def test_moe_self_check_is_skipped_under_expert_parallelism_and_when_disabled(monkeypatch):
+    m = _canonical_moe_model()
+    m.moe.moe_ep_size = 2
+    assert refit.snapshot_mxfp8_moe_for_check(m) is None  # cannot route to a global expert without EP dispatch
+    m.moe.moe_ep_size = 1
+    m.moe.moe_tp_size = 2  # TP without reduce_results: the layer output is a partial sum, no reference possible
+    assert refit.snapshot_mxfp8_moe_for_check(m) is None
+    m.moe.moe_tp_size = 1
+    monkeypatch.setenv("VERL_MXFP8_REFIT_CHECK", "0")
+    assert refit.snapshot_mxfp8_moe_for_check(m) is None
+    monkeypatch.delenv("VERL_MXFP8_REFIT_CHECK")
+    assert refit.snapshot_mxfp8_moe_for_check(m) is not None
+
+
+def test_reprocess_reports_a_staged_scale_that_was_not_folded_back():
+    _install_stub("auto")
+    m = _Model(resolved_backend="flashinfer_cutlass")
+    m.moe = _MoE()
+    m.moe.quant_method.process_weights_after_loading(m.moe)
+    staged = refit.stage_mxfp8_moe_scales(m)
+    assert len(staged) == 2  # two scale params of one module: the count is per parameter, not per module
+    orphan = _MoE()  # staged entry whose module is not in the model -> never visited by reprocess
+    orphan.quant_method.process_weights_after_loading(orphan)
+    staged += refit.stage_mxfp8_moe_scales(torch.nn.ModuleDict({"x": orphan}))
+    for module, sname, _ in staged:
+        getattr(module, sname).data.fill_(7)  # "the sync wrote every scale", so only the fold-back check can fire
+    try:
+        refit.reprocess_mxfp8_moe_layers(m, staged)
+    except RuntimeError as e:
+        assert "not folded back into its live storage" in str(e)
+    else:
+        raise AssertionError("expected the post-condition to fire for the orphaned staged scale")
 
 
 def test_self_check_catches_a_stale_swizzled_copy():

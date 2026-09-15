@@ -32,6 +32,15 @@ Knobs (environment variables, read at call time):
 
 - ``VERL_MXFP8_REFIT_CHECK`` — ``0`` disables the check (default enabled).
 - ``VERL_MXFP8_REFIT_CHECK_TOL`` — relative-error threshold (default ``0.25``).
+- ``VERL_MXFP8_REFIT_CHECK_MOE_TOL`` — threshold for the MoE expert probe
+  (defaults to the linear threshold; the gated MLP compounds the activation
+  quantization noise of two GEMMs).
+
+MoE experts. The same stale-layout failure applies to the fused expert weights
+``w13`` / ``w2`` (their scales are rewritten in place by the MoE runner), so one
+local expert is probed the same way: every probe row is routed to that expert
+with weight 1.0 and the layer's own forward is compared against
+``silu(x @ w1^T) * (x @ w3^T) @ w2^T`` on the dequantized weights.
 """
 
 from __future__ import annotations
@@ -41,6 +50,7 @@ import os
 from collections.abc import Callable
 
 import torch
+import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +65,10 @@ def refit_check_enabled() -> bool:
 
 def refit_check_tolerance() -> float:
     return float(os.environ.get("VERL_MXFP8_REFIT_CHECK_TOL", str(_DEFAULT_TOL)))
+
+
+def refit_check_moe_tolerance() -> float:
+    return float(os.environ.get("VERL_MXFP8_REFIT_CHECK_MOE_TOL", str(refit_check_tolerance())))
 
 
 def mxfp8_dequantize(qweight: torch.Tensor, scale_u8: torch.Tensor) -> torch.Tensor:
@@ -135,4 +149,96 @@ def assert_mxfp8_linear_matches(
             "bypass (not recommended) or VERL_MXFP8_REFIT_CHECK_TOL to loosen the threshold."
         )
     logger.debug("mxfp8 refit check on %s (%s): rel err %.4f <= %.2f", name, engine, rel, tol)
+    return rel
+
+
+# ---------------------------------------------------------------------------
+# MoE experts
+# ---------------------------------------------------------------------------
+
+
+def mxfp8_moe_expert_reference(
+    x: torch.Tensor,
+    w13_q: torch.Tensor,
+    w13_scale_u8: torch.Tensor,
+    w2_q: torch.Tensor,
+    w2_scale_u8: torch.Tensor,
+) -> torch.Tensor:
+    """fp32 reference of one gated expert on dequantized weights.
+
+    ``w13_q`` is ``[2I, H]`` in the fused-MoE convention (rows ``[:I]`` = w1 /
+    gate, rows ``[I:]`` = w3 / up), ``w2_q`` is ``[H, I]``. ``x`` is ``[rows, H]``.
+    """
+    w13 = mxfp8_dequantize(w13_q, w13_scale_u8)
+    w2 = mxfp8_dequantize(w2_q, w2_scale_u8)
+    h = x.to(torch.float32) @ w13.t()
+    gate, up = h.chunk(2, dim=-1)
+    return (F.silu(gate) * up) @ w2.t()
+
+
+@torch.no_grad()
+def probe_mxfp8_moe_expert(
+    apply_fn: Callable[[torch.Tensor], torch.Tensor],
+    w13_q: torch.Tensor,
+    w13_scale_u8: torch.Tensor,
+    w2_q: torch.Tensor,
+    w2_scale_u8: torch.Tensor,
+    *,
+    reduce_ref: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    rows: int = _PROBE_ROWS,
+    seed: int = 0,
+) -> float:
+    """Relative error between the MoE layer routed entirely to one expert and the dequantized reference.
+
+    ``apply_fn(x)`` must run the layer's own forward with every row of ``x``
+    (``[rows, H]`` bf16) routed to the probed expert with weight 1.0 and return
+    ``[rows, H]``. With tensor parallelism the caller passes the local expert
+    shards and ``reduce_ref`` (the same all-reduce the layer applies), so the
+    reference is summed the way the kernel output is.
+    """
+    hidden = w13_q.shape[-1]
+    gen = torch.Generator(device="cpu").manual_seed(seed)
+    x = torch.randn(rows, hidden, generator=gen, dtype=torch.float32).to(device=w13_q.device, dtype=torch.bfloat16)
+    ref = mxfp8_moe_expert_reference(x, w13_q, w13_scale_u8, w2_q, w2_scale_u8)
+    if reduce_ref is not None:
+        ref = reduce_ref(ref)
+    out = apply_fn(x)
+    if isinstance(out, tuple):
+        out = out[0]
+    out = out.to(torch.float32).reshape(ref.shape)
+    if not torch.isfinite(out).all():
+        return float("inf")
+    denom = ref.norm().item()
+    return float((out - ref).norm().item() / denom) if denom > 0 else float(out.norm().item())
+
+
+def assert_mxfp8_moe_expert_matches(
+    name: str,
+    expert_id: int,
+    apply_fn: Callable[[torch.Tensor], torch.Tensor],
+    w13_q: torch.Tensor,
+    w13_scale_u8: torch.Tensor,
+    w2_q: torch.Tensor,
+    w2_scale_u8: torch.Tensor,
+    *,
+    engine: str,
+    reduce_ref: Callable[[torch.Tensor], torch.Tensor] | None = None,
+) -> float:
+    """MoE counterpart of ``assert_mxfp8_linear_matches``: raise on a mismatch, skip (warn) on probe errors."""
+    tol = refit_check_moe_tolerance()
+    try:
+        rel = probe_mxfp8_moe_expert(apply_fn, w13_q, w13_scale_u8, w2_q, w2_scale_u8, reduce_ref=reduce_ref)
+    except Exception as err:  # noqa: BLE001 - the probe is best-effort
+        logger.warning("mxfp8 MoE refit check skipped on %s expert %d (%s): %s", name, expert_id, engine, err)
+        return float("nan")
+    if rel > tol:
+        raise RuntimeError(
+            f"MXFP8 refit self-check failed on {engine} MoE layer '{name}', expert {expert_id}: the layer routed "
+            f"to this expert disagrees with the dequantized reference by {rel:.3f} relative error (tolerance "
+            f"{tol}). This is the signature of expert scales (w13_/w2_weight_scale) whose kernel layout was "
+            "not re-derived after a weight sync, or of a MoE runner whose scale layout the loader does not "
+            "know. Check the engine version and MoE backend against docs/low_precision/fp8.md. Set "
+            "VERL_MXFP8_REFIT_CHECK=0 to bypass (not recommended) or VERL_MXFP8_REFIT_CHECK_MOE_TOL to loosen."
+        )
+    logger.debug("mxfp8 MoE refit check on %s expert %d (%s): rel err %.4f <= %.2f", name, expert_id, engine, rel, tol)
     return rel

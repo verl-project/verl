@@ -302,7 +302,11 @@ stale kernel scale layouts after a weight sync). verl now fails loudly in both c
 - **MXFP8 refit self-check** (engine side, vLLM and SGLang). After every weight sync the smallest
   MXFP8 linear layer's own quantized GEMM is run on a small random input and compared with a
   dequantized bf16 reference of the canonical weight and scale; a stale or mis-laid-out scale
-  shows up as O(1) relative error and raises. On SGLang MoE layers the loader additionally checks,
+  shows up as O(1) relative error and raises. On SGLang one local expert of the smallest MXFP8 MoE
+  layer is probed the same way (every probe row routed to it, compared with the gated-MLP reference on
+  the dequantized `w13` / `w2`; tolerance `VERL_MXFP8_REFIT_CHECK_MOE_TOL`, default = the linear one);
+  the expert probe is skipped under expert parallelism and under TP without `reduce_results`, which
+  the log states. On SGLang MoE layers the loader additionally checks,
   before re-deriving the kernel layout, that the sync wrote every staged expert scale (the staging
   buffer is pre-filled with the UE8M0 NaN code `0xFF`): experts whose HF names miss the sync-side
   rule would otherwise arrive as a scale-less bf16 cast in the fp8 buffer. The kernel-vs-reference
