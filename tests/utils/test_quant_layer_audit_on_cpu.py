@@ -17,9 +17,11 @@ import pytest
 import torch
 
 from verl.utils.quant_layer_audit import (
+    FP8_WORKSPACE_SEEN_ATTR,
     QuantLayerAuditor,
     audit_layer_sets,
     collect_train_fp8_report,
+    remember_fp8_workspaces,
     vllm_rollout_predicate,
 )
 from verl.utils.sglang.sglang_mxfp8_utils import SGLangMXFP8QuantizerHelper, build_sglang_mxfp8_quant_config
@@ -221,3 +223,50 @@ def test_fused_expert_layout_without_weight_suffix_is_still_judged():
     ]
     problems = audit_layer_sets(r, names, _sglang_pred())
     assert len(problems) == N_LAYERS * 2 and all("experts" in p and "rule does not quantize it" in p for p in problems)
+
+
+def _offload_like_verl(chunk):
+    """What offload_megatron_model_to_cpu does to TE caches: mark, then drop."""
+    for sub in chunk.modules():
+        ws = getattr(sub, "_fp8_workspaces", None)
+        if isinstance(ws, dict) and ws:
+            assert remember_fp8_workspaces(sub)
+            ws.clear()
+
+
+def test_audit_survives_param_offload_clearing_the_te_workspaces():
+    # With param_offload=True verl clears module._fp8_workspaces at the end of every train_mode(); the
+    # sync that follows must still see which layers ran fp8, through the marker set before clearing.
+    chunk = _Chunk(quantized_layers={1, 2})
+    _offload_like_verl(chunk)
+    assert all(not getattr(m, "_fp8_workspaces", {}) for m in chunk.modules())  # caches really gone
+    r = collect_train_fp8_report([chunk])
+    assert r.quantized_layers == {1, 2} and r.active
+    assert not remember_fp8_workspaces(chunk.decoder.layers[0].mlp.linear_fc1)  # bf16 layer: nothing to mark
+    assert not hasattr(chunk.decoder.layers[0].mlp.linear_fc1, FP8_WORKSPACE_SEEN_ATTR)
+
+
+def test_auditor_warns_once_when_there_is_no_training_side_signal(caplog):
+    # sync 0 before any step is expected to find nothing; a second sync without any trace means the
+    # signal is missing (not "too early") and the auditor must say so, then stop trying.
+    auditor = QuantLayerAuditor(_sglang_pred(), "warn")
+    weights = [(n, torch.zeros(1)) for n in _hf_names()]
+    list(auditor.record(iter(weights)))
+    assert auditor.run([_Chunk(quantized_layers=set())]) is None and not auditor.done
+    assert "no training-side signal" not in caplog.text
+    list(auditor.record(iter(weights)))
+    assert auditor.run([_Chunk(quantized_layers=set())]) is None and auditor.done
+    assert "no training-side signal" in caplog.text and "_fp8_workspaces" in caplog.text
+
+
+def test_auditor_names_disable_parameter_transpose_cache_as_the_cause(caplog):
+    # mcore's TE wrappers expose config.disable_parameter_transpose_cache on the module; True means TE
+    # never caches the fp8 weight, so the audit reports the cause at the very first sync it sees it.
+    chunk = _Chunk(quantized_layers=set())
+    for m in chunk.modules():
+        if isinstance(m, _TELinear):
+            m.disable_parameter_transpose_cache = True
+    auditor = QuantLayerAuditor(_sglang_pred(), "warn")
+    list(auditor.record((n, torch.zeros(1)) for n in _hf_names()))
+    assert auditor.run([chunk]) is None and auditor.done
+    assert "disable_parameter_transpose_cache=True" in caplog.text

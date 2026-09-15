@@ -42,10 +42,19 @@ weight sync applies (SGLang) or a reconstruction of the engine's blacklist
 the predicate on each, derives the training-side expectation from the layer
 index, and reports every name where the two disagree.
 
-Runs once, at the first weight sync that happens after a training step (the
+Runs once, at the first weight sync that happens after an fp8 forward (the
 first sync, before any step, has no workspaces yet). Controlled by
 ``VERL_QUANT_LAYER_AUDIT``: ``warn`` (default) logs the mismatches, ``raise``
 raises ``RuntimeError``, ``0`` disables.
+
+Two things can remove the signal, and the audit says so instead of staying
+silent. verl drops the workspaces when it offloads the training model
+(``offload_megatron_model_to_cpu``, at the end of every ``train_mode()`` when
+``param_offload`` is on), so the clearing helper first marks every module that
+held one (``remember_fp8_workspaces``) and the audit accepts the marker. And TE
+only caches the fp8 weight when mcore passes ``is_first_microbatch``, which
+``disable_parameter_transpose_cache=True`` turns off; with that flag there is
+nothing to read, and the audit warns once that it cannot run.
 """
 
 from __future__ import annotations
@@ -79,15 +88,31 @@ class TrainFp8Report:
     seen_layers: set[int] = field(default_factory=set)
     quantized_layers: set[int] = field(default_factory=set)
     outside_layers_quantized: list[str] = field(default_factory=list)
+    # mcore's TE wrappers carry config.disable_parameter_transpose_cache; True means TE never caches
+    # the fp8 weight (is_first_microbatch=None), so no workspace can ever appear.
+    transpose_cache_disabled: bool = False
 
     @property
     def active(self) -> bool:
         return bool(self.quantized_layers) or bool(self.outside_layers_quantized)
 
 
+# Set on a TE module whose fp8 weight workspace verl has dropped (param offload); survives the offload.
+FP8_WORKSPACE_SEEN_ATTR = "_verl_fp8_workspace_seen"
+
+
+def remember_fp8_workspaces(module: torch.nn.Module) -> bool:
+    """Mark ``module`` as having held an fp8 weight workspace. Call before clearing ``_fp8_workspaces``."""
+    ws = getattr(module, "_fp8_workspaces", None)
+    if isinstance(ws, dict) and len(ws) > 0:
+        setattr(module, FP8_WORKSPACE_SEEN_ATTR, True)
+        return True
+    return False
+
+
 def _has_fp8_workspace(module: torch.nn.Module) -> bool:
     ws = getattr(module, "_fp8_workspaces", None)
-    return isinstance(ws, dict) and len(ws) > 0
+    return (isinstance(ws, dict) and len(ws) > 0) or bool(getattr(module, FP8_WORKSPACE_SEEN_ATTR, False))
 
 
 def _is_transformer_layer(module: torch.nn.Module) -> bool:
@@ -108,6 +133,8 @@ def collect_train_fp8_report(modules: Iterable[torch.nn.Module] | torch.nn.Modul
             report.seen_layers.add(idx)
             for sub in layer.modules():
                 in_layer.add(id(sub))
+                if getattr(sub, "disable_parameter_transpose_cache", False):
+                    report.transpose_cache_disabled = True
                 if _has_fp8_workspace(sub):
                     report.quantized_layers.add(idx)
         for name, sub in chunk.named_modules():
@@ -199,6 +226,7 @@ class QuantLayerAuditor:
         self.enabled = rollout_quantizes is not None and mode not in ("0", "off", "false")
         self.done = False
         self.names: list[str] = []
+        self.inactive_runs = 0  # syncs that found no fp8 trace; the first one (before any step) is expected
 
     @classmethod
     def from_worker(cls, worker) -> QuantLayerAuditor:
@@ -252,6 +280,26 @@ class QuantLayerAuditor:
             return None
         report = collect_train_fp8_report(modules)
         if not report.active:
+            self.inactive_runs += 1
+            if report.transpose_cache_disabled or self.inactive_runs >= 2:
+                # Not "too early" any more: the trainer has run at least one step and still left no trace.
+                self.done = True
+                cause = (
+                    "disable_parameter_transpose_cache=True: TE caches the fp8 weight only when mcore passes "
+                    "is_first_microbatch, which that flag turns off"
+                    if report.transpose_cache_disabled
+                    else "no TE module holds an fp8 weight workspace after a training step; check that "
+                    "override_transformer_config.fp8 is set on the model that ran, and that nothing other "
+                    "than offload_megatron_model_to_cpu clears module._fp8_workspaces"
+                )
+                logger.warning(
+                    "quantized-layer audit: no training-side signal on this rank (%d of %d decoder layers seen), "
+                    "the audit cannot run. Cause: %s. The train/rollout layer sets are therefore unverified.",
+                    len(report.seen_layers),
+                    len(report.seen_layers),
+                    cause,
+                )
+                return None
             logger.debug("quantized-layer audit: no fp8 workspaces yet (sync before the first training step)")
             return None
         problems = audit_layer_sets(report, self.names, self.rollout_quantizes)

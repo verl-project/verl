@@ -319,7 +319,10 @@ stale kernel scale layouts after a weight sync). verl now fails loudly in both c
   SGLang sync-time include list does not match). On SGLang the rule evaluated is the sync-time
   include/exclude rule in `verl/utils/fp8_utils.py`; a name it misses is shipped unquantized even
   when the engine built that layer as fp8. Fused expert tensors as `transformers >= 5` saves them
-  (`mlp.experts.gate_up_proj`, no `.weight` suffix) are judged too. `VERL_QUANT_LAYER_AUDIT=raise`
+  (`mlp.experts.gate_up_proj`, no `.weight` suffix) are judged too. The signal survives
+  `param_offload=True` (verl marks each module before it drops the TE workspace cache on offload);
+  when there is no signal at all — `disable_parameter_transpose_cache=True` makes TE skip the cache —
+  the audit warns once that it cannot run instead of staying silent. `VERL_QUANT_LAYER_AUDIT=raise`
   turns the report into an error, `=0` disables it.
 - **MoE experts on SGLang.** SGLang's MXFP8 MoE method rewrites the expert scales in place at
   load (swizzled on the Triton MoE runner, packed on DeepGEMM), so the refit loader stages them
