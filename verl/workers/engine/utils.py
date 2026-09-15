@@ -275,3 +275,27 @@ def prime_delta_snapshots(gen, snaps: dict, pin: bool) -> None:
             snap = torch.empty_like(local, device="cpu", pin_memory=pin)
             snaps[name] = snap
         snap.copy_(local, non_blocking=True)
+
+
+def detach_tree(obj):
+    """Strip the autograd graph from reported tensors, keeping the data.
+
+    Megatron's pipeline schedules accumulate one entry per micro-batch in
+    ``forward_data_store`` and only clear it when the whole mini-batch finishes
+    (megatron/core/pipeline_parallel/schedules.py). Anything grad-attached that
+    lands there pins that micro-batch's *entire* autograd graph -- including the
+    graph's input, which under 1F1B is the freshly allocated P2P receive buffer
+    (p2p_communication.py::create_tensor_recv_prev). Residency therefore grows
+    from O(pipeline_depth) to O(num_micro_batches).
+
+    Gradients are unaffected: they flow through the first return value
+    (``scaled_loss``), which is what Megatron calls backward on. This dict is
+    only read by ``postprocess_batch_func``, after every backward has run.
+    """
+    if isinstance(obj, torch.Tensor):
+        return obj.detach() if obj.requires_grad else obj
+    if isinstance(obj, dict):
+        return {k: detach_tree(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(detach_tree(v) for v in obj)
+    return obj
