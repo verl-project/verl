@@ -32,6 +32,7 @@ class MockDecoderLayer(nn.Module):
 
     def __init__(self, hidden_size=64):
         super().__init__()
+        self.aux_embedding = nn.Embedding(8, hidden_size)
         self.self_attn = nn.Linear(hidden_size, hidden_size)
         self.mlp = nn.Linear(hidden_size, hidden_size)
 
@@ -125,6 +126,17 @@ class TestFSDP2PeftWrapping(unittest.TestCase):
 
         embed_count = sum(1 for n in names if n == "model.embed_tokens")
         self.assertEqual(embed_count, 1, f"embed_tokens wrapped {embed_count} times, expected 1")
+
+    def test_embedding_inside_a_wrapped_layer_is_not_selected_twice(self):
+        model = MockCausalLM(tie_word_embeddings=False)
+        names = self._get_wrapped_names(model, ["MockDecoderLayer"])
+
+        self.assertIn("model.embed_tokens", names)
+        self.assertIn("model.layers.0", names)
+        self.assertIn("model.layers.1", names)
+        self.assertIn("lm_head", names)
+        self.assertNotIn("model.layers.0.aux_embedding", names)
+        self.assertNotIn("model.layers.1.aux_embedding", names)
 
 
 if __name__ == "__main__":
