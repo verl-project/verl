@@ -356,7 +356,7 @@ class AgentLoopBase(ABC):
             )
         return self._cap_text_prompt_length(prompt_ids)
 
-    async def ct_merge_non_assistant_msg(
+    async def ct_merge_context_msg(
         self,
         previous_messages: list[dict],
         updated_messages: list[dict],
@@ -365,10 +365,10 @@ class AgentLoopBase(ABC):
         response_logprobs: Optional[list[float]] = None,
         tools: list[dict] = None,
     ):
-        """Merge appended non-assistant messages into runtime tokens and metadata."""
+        """Merge appended context messages into runtime tokens and metadata."""
         merge_result = await self.loop.run_in_executor(
             None,
-            lambda: self.continuous_token_builder.merge_non_assistant_tokens(
+            lambda: self.continuous_token_builder.merge_context_tokens(
                 previous_messages,
                 updated_messages,
                 runtime_token_ids,

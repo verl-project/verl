@@ -29,6 +29,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS = int(os.getenv("VERL_REPLAY_BUFFER_DEBUG_INTERVAL_SECONDS", "60"))
 
 DAPO_FILTERED_REWARD_COUNTS_KEY = "_dapo_filtered_reward_counts"
+FILTER_GROUPS_REWARD_METRIC = "reward"
 
 
 def _accumulate_eviction_metrics(acc: dict, new: dict, stale_count: int) -> None:
@@ -120,7 +121,8 @@ class ReplayBuffer:
         sampler_kwargs (dict): Additional kwargs for the custom sampler.
         poll_interval (float, optional): Poll interval in seconds. Defaults to 2.0.
         refill_fn (callable, optional): Trainer-injected function that submits an exact number of fresh prompts.
-        filter_groups_metric (str, optional): DAPO group-filtering metric read from each trajectory's
+        filter_groups_metric (str, optional): DAPO group-filtering metric. ``"reward"`` reads the canonical
+            pre-KL reward from ``rm_scores``; other names read each trajectory's
             ``extra_fields.reward_extra_info``. ``None`` disables DAPO filtering.
         train_batch_size (int, optional): Prompt count represented by one Sync DAPO in-flight batch.
         gen_batch_size (int, optional): Dataloader fetch granularity for refill dispatches.
@@ -262,6 +264,7 @@ class ReplayBuffer:
 
         new_finished_uids = finished_uids - classification_cache.keys()
         trajectory_keys = [key for key in self.partitions[partition_id] if key.split("_")[0] in new_finished_uids]
+        use_canonical_reward = self.filter_groups_metric == FILTER_GROUPS_REWARD_METRIC
         metrics_by_uid: dict[str, list[float]] = defaultdict(list)
         missing_metric_uids = new_finished_uids - {key.split("_")[0] for key in trajectory_keys}
 
@@ -269,20 +272,23 @@ class ReplayBuffer:
             data = tq.kv_batch_get(
                 keys=trajectory_keys,
                 partition_id=partition_id,
-                select_fields=["extra_fields"],
+                select_fields=["rm_scores"] if use_canonical_reward else ["extra_fields"],
             )
-            extra_fields_list = list(data["extra_fields"])
+            metric_data = list(data["rm_scores"] if use_canonical_reward else data["extra_fields"])
         else:
-            extra_fields_list = []
+            metric_data = []
 
-        for key, extra_fields in zip(trajectory_keys, extra_fields_list, strict=True):
+        for key, value in zip(trajectory_keys, metric_data, strict=True):
             uid = key.split("_")[0]
-            extra_fields = getattr(extra_fields, "data", extra_fields)
-            reward_extra_info = extra_fields.get("reward_extra_info", {}) if isinstance(extra_fields, dict) else {}
-            if self.filter_groups_metric not in reward_extra_info:
-                missing_metric_uids.add(uid)
+            if use_canonical_reward:
+                metrics_by_uid[uid].append(float(value.sum().item()))
             else:
-                metrics_by_uid[uid].append(float(reward_extra_info[self.filter_groups_metric]))
+                extra_fields = getattr(value, "data", value)
+                reward_extra_info = extra_fields.get("reward_extra_info", {}) if isinstance(extra_fields, dict) else {}
+                if self.filter_groups_metric not in reward_extra_info:
+                    missing_metric_uids.add(uid)
+                else:
+                    metrics_by_uid[uid].append(float(reward_extra_info[self.filter_groups_metric]))
 
         if missing_metric_uids:
             raise RuntimeError(

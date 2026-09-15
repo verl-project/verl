@@ -122,7 +122,8 @@ if [ -n "$device_name" ] && [ "$device_name" == "cuda" ]; then
         global_profiler.tool=torch $@
 
     assert_finish_hook_ran
-    python3 "tests/utils/test_check_profiler_output.py" --profiler_dir="$SAVE_PATH" --device="gpu"
+    python3 "tests/utils/test_check_profiler_output.py" --profiler_dir="$SAVE_PATH" --device="gpu" \
+        --stage actor-update 'rollout?replica*' ref-compute-log-prob
     
 elif [ -n "$device_name" ] && [ "$device_name" == "npu" ]; then
     CONTENTS=['npu','cpu']

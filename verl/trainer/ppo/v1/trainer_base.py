@@ -116,6 +116,14 @@ def _tq_supports_checkpoint() -> bool:
     )
 
 
+def _count_tq_prompt_groups(partition_id: str = "train") -> int:
+    """Number of prompt groups currently registered in a TransferQueue partition."""
+    data = tq.kv_list(partition_id)
+    if not data:
+        return 0
+    return sum(1 for tag in data.get(partition_id, {}).values() if tag.get("is_prompt", False))
+
+
 class PPOTrainer(ABC):
     """Base class for PPO trainer.
 
@@ -140,6 +148,7 @@ class PPOTrainer(ABC):
         )
         # track mini-batch index within a parameter_sync_step cycle for Decoupled PPO
         self.local_trigger_step = 0
+        self._restored_tq_prompt_count = 0
 
     def _build_replay_buffer(self) -> ReplayBuffer:
         """Instantiate the replay buffer (or a user-provided custom sampler).
@@ -429,7 +438,6 @@ class PPOTrainer(ABC):
 
         # we start from step 1
         self.global_steps += 1
-        # SkipManager skips warmup batches in async trainers, so it doesn't conflict with reissue.
         SkipManager.set_step(self.global_steps)
         self._reissue_inflight_prompts()
         self.prev_step_profile = False
@@ -598,6 +606,27 @@ class PPOTrainer(ABC):
     def on_train_begin(self):
         """Called before the training loop starts."""
         return
+
+    def _add_async_warmup_batches(self, num_warmup_batches: int) -> None:
+        """Fill the async prefetch window without duplicating checkpointed prompt groups."""
+        if self.config.skip.rollout_tq.enable or num_warmup_batches <= 0:
+            return
+
+        restored_prompts = self._restored_tq_prompt_count
+        target_prompts = num_warmup_batches * self.config.data.train_batch_size
+        missing_prompts = max(0, target_prompts - restored_prompts)
+        if missing_prompts == 0:
+            logger.info(
+                f"Skipping async warmup: {restored_prompts} restored prompt groups already fill the "
+                f"{target_prompts}-prompt prefetch window"
+            )
+            return
+
+        self._add_prompts_to_generate(missing_prompts)
+        logger.info(
+            f"Added {missing_prompts} warmup prompts after restoring {restored_prompts} of "
+            f"{target_prompts} target prompt groups"
+        )
 
     def on_train_end(self):
         """Called after the training loop ends."""
@@ -847,6 +876,8 @@ class PPOTrainer(ABC):
             if os.path.exists(tq_ckpt_path):
                 logger.info(f"Loading TransferQueue state from {tq_ckpt_path}")
                 tq.load_checkpoint(tq_ckpt_path)
+                self._restored_tq_prompt_count = _count_tq_prompt_groups()
+                logger.info(f"Restored {self._restored_tq_prompt_count} training prompt groups from TransferQueue")
 
     def _reissue_inflight_prompts(self, partition_id: str = "train") -> int:
         """Restart checkpointed pending/running prompt groups from their persisted prompt data."""
@@ -1298,6 +1329,16 @@ class PPOTrainer(ABC):
         managers = [getattr(self, "llm_server_manager", None)]
         return [manager for manager in managers if manager is not None]
 
+    def _start_rollout_profiling(self) -> None:
+        """Start rollout profiling."""
+        for manager in self._rollout_server_managers():
+            manager.start_profile()
+
+    def _stop_rollout_profiling(self) -> None:
+        """Stop rollout profiling."""
+        for manager in self._rollout_server_managers():
+            manager.stop_profile()
+
     def _start_profiling(self) -> None:
         """Start profiling for all worker groups if profiling is enabled."""
         do_profile = (
@@ -1325,11 +1366,7 @@ class PPOTrainer(ABC):
             if self.use_critic and id(self.critic_wg) not in seen:
                 seen.add(id(self.critic_wg))
                 self.critic_wg.start_profile(profile_step=self.global_steps)
-            # Rollout generation is decoupled from the training step in V1 (prompts are served
-            # asynchronously and consumed from the replay buffer), so the inference engines are
-            # profiled across the whole step rather than around a single generation call.
-            for manager in self._rollout_server_managers():
-                manager.start_profile()
+            self._start_rollout_profiling()
 
     def _stop_profiling(self) -> None:
         """Stop profiling for all worker groups if profiling is enabled."""
@@ -1367,8 +1404,6 @@ class PPOTrainer(ABC):
             if self.use_critic and id(self.critic_wg) not in seen:
                 seen.add(id(self.critic_wg))
                 self.critic_wg.stop_profile(run_command=run_command)
-            for manager in self._rollout_server_managers():
-                manager.stop_profile()
 
     def _fetch_one_gen_batch(self) -> TensorDict:
         """Fetch one ``gen_batch_size`` chunk from the dataloader."""

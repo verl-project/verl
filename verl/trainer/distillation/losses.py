@@ -136,7 +136,7 @@ def compute_topk_loss(
     """
     match config.strategy:
         # VeOmni uses FSDP2 internally, so its loss computation is identical to FSDP.
-        case "fsdp" | "veomni":
+        case "fsdp" | "veomni" | "fsdp2":
             import verl.trainer.distillation.fsdp.losses as fsdp_losses
 
             distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
