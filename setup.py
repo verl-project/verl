@@ -32,6 +32,7 @@ install_requires = [
     "numpy>=2.0.0",
     "pandas",
     "peft",
+    "psutil",
     "pyarrow>=19.0.0",
     "pybind11",
     "pylatexenc",

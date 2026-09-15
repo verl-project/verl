@@ -18,9 +18,12 @@ import inspect
 import logging
 import os
 import pickle
+import time
 from datetime import datetime
 from pathlib import Path
+from typing import TypeAlias
 
+import psutil
 import torch
 
 from verl.utils.device import get_device_name, get_torch_device
@@ -28,8 +31,91 @@ from verl.utils.device import get_device_name, get_torch_device
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+GCSetting: TypeAlias = bool | int
 
-def aggressive_empty_cache(force_sync: bool = True, max_retries: int = 3) -> None:
+
+def validate_gc_setting(value: object, *, name: str = "gc_setting") -> None:
+    """Validate a GC switch without assuming a fixed set of generations."""
+    if not isinstance(value, bool) and (not isinstance(value, int) or value < 0):
+        raise ValueError(f"{name} must be a boolean or non-negative integer, got {value!r}")
+
+
+def collect_garbage(
+    gc_setting: GCSetting = True,
+    *,
+    diagnostics_point: str | None = None,
+) -> int:
+    """Run a configured collection, optionally printing resource diagnostics."""
+    validate_gc_setting(gc_setting)
+    if gc_setting is False:
+        return 0
+
+    if diagnostics_point is not None:
+        process = psutil.Process()
+        device = get_torch_device()
+        device_available = device.is_available()
+        gc_stats_before = gc.get_stats()
+        rss_before = process.memory_info().rss
+        device_before = (device.memory_allocated(), device.memory_reserved()) if device_available else None
+        wall_start = time.perf_counter()
+        cpu_start = time.thread_time()
+
+    collected = gc.collect() if gc_setting is True else gc.collect(gc_setting)
+
+    if diagnostics_point is None:
+        return collected
+
+    thread_cpu_s = time.thread_time() - cpu_start
+    wall_s = time.perf_counter() - wall_start
+    gc_stats_after = gc.get_stats()
+    rss_after = process.memory_info().rss
+    device_after = (device.memory_allocated(), device.memory_reserved()) if device_available else None
+    uncollectable = sum(
+        after["uncollectable"] - before["uncollectable"]
+        for before, after in zip(gc_stats_before, gc_stats_after, strict=False)
+    )
+    rank = (
+        torch.distributed.get_rank()
+        if torch.distributed.is_available() and torch.distributed.is_initialized()
+        else int(os.getenv("RANK", "0"))
+    )
+
+    fields = [
+        f"point={diagnostics_point}",
+        f"rank={rank}",
+        f"generation={'full' if gc_setting is True else gc_setting}",
+        f"wall_ms={wall_s * 1000:.3f}",
+        f"thread_cpu_ms={thread_cpu_s * 1000:.3f}",
+        f"collected={collected}",
+        f"uncollectable={uncollectable}",
+        f"rss_before_mib={rss_before / 1024**2:.3f}",
+        f"rss_after_mib={rss_after / 1024**2:.3f}",
+        f"rss_delta_mib={(rss_after - rss_before) / 1024**2:.3f}",
+    ]
+    if device_before is not None and device_after is not None:
+        for metric, before, after in zip(("allocated", "reserved"), device_before, device_after, strict=False):
+            fields.extend(
+                [
+                    f"cuda_{metric}_before_mib={before / 1024**2:.3f}",
+                    f"cuda_{metric}_after_mib={after / 1024**2:.3f}",
+                    f"cuda_{metric}_delta_mib={(after - before) / 1024**2:.3f}",
+                ]
+            )
+    for generation, (before, after) in enumerate(zip(gc_stats_before, gc_stats_after, strict=False)):
+        for name in ("collections", "collected", "uncollectable"):
+            fields.append(f"generation_{generation}_{name}={after[name] - before[name]}")
+
+    print("[gc_diagnostics] " + " ".join(fields), flush=True)
+    return collected
+
+
+def aggressive_empty_cache(
+    force_sync: bool = True,
+    max_retries: int = 3,
+    *,
+    gc_setting: GCSetting = True,
+    gc_diagnostics_point: str | None = None,
+) -> None:
     """
     More aggressive GPU memory cleanup function, tries to release PyTorch reserved
     but unallocated memory.
@@ -37,6 +123,8 @@ def aggressive_empty_cache(force_sync: bool = True, max_retries: int = 3) -> Non
     Args:
         force_sync: Whether to force device synchronization
         max_retries: Maximum number of retries
+        gc_setting: True for a full collection, False to skip GC, or a generation integer.
+        gc_diagnostics_point: Print isolated GC resource deltas under this point name.
     """
     device = get_torch_device()
     if not device.is_available():
@@ -48,7 +136,10 @@ def aggressive_empty_cache(force_sync: bool = True, max_retries: int = 3) -> Non
         before_allocated = device.memory_allocated()
 
         # Run garbage collection
-        gc.collect()
+        collect_garbage(
+            gc_setting,
+            diagnostics_point=gc_diagnostics_point,
+        )
 
         # Clear PyTorch cache
         device.empty_cache()

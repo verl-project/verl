@@ -26,7 +26,9 @@ arguments without requiring GPU, ray, or sglang infrastructure.
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, call
+import inspect
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 # ---------------------------------------------------------------------------
 # Helper: simulate engine_workers.update_weights() logic
@@ -113,6 +115,44 @@ def _make_mocks(peft_config=None, params_by_base_sync_done=None):
     actor_engine.get_per_tensor_param = MagicMock(side_effect=_get_per_tensor_param)
 
     return rollout, actor_engine
+
+
+def test_gc_diagnostics_is_forwarded_to_rollout_update_weights():
+    from verl.workers import engine_workers
+
+    rollout = AsyncMock()
+    actor_engine = MagicMock()
+    actor_engine.get_per_tensor_param.return_value = ("fake_params", None)
+    actor_engine.is_param_offload_enabled = False
+    rollout_config = MagicMock()
+    rollout_config.checkpoint_engine.backend = "naive"
+    rollout_config.free_cache_engine = False
+    rollout_config.get.return_value = "vllm"
+    worker = SimpleNamespace(
+        config=SimpleNamespace(rollout=rollout_config),
+        actor=SimpleNamespace(engine=actor_engine),
+        rollout=rollout,
+        layered_summon=False,
+        peft_merge=False,
+        base_sync_done=True,
+        gc_diagnostics=True,
+    )
+
+    update_weights = inspect.unwrap(engine_workers.ActorRolloutRefWorker.update_weights)
+    with (
+        patch.object(engine_workers, "aggressive_empty_cache"),
+        patch.object(engine_workers, "log_gpu_memory_usage"),
+        patch.object(engine_workers, "set_expandable_segments"),
+    ):
+        asyncio.run(update_weights(worker, global_steps=3, mode="naive"))
+
+    rollout.update_weights.assert_awaited_once_with(
+        "fake_params",
+        peft_config=None,
+        base_sync_done=True,
+        global_steps=3,
+        gc_diagnostics=True,
+    )
 
 
 # ---------------------------------------------------------------------------

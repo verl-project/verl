@@ -27,7 +27,8 @@ import torch
 import zmq
 from torch.multiprocessing.reductions import reduce_tensor
 
-from verl.utils.device import get_device_id, get_device_name, get_torch_device, is_support_ipc
+from verl.utils.device import get_device_id, get_device_name, get_torch_device
+from verl.utils.memory_utils import GCSetting, collect_garbage
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -82,6 +83,8 @@ class BucketedWeightSender:
         zmq_handle: ZMQ IPC socket path (e.g., "ipc:///tmp/rl-colocate-zmq-<uuid>.sock")
         bucket_size_mb: Communication buffer size in MB
         use_shm: Use shared memory instead of CUDA IPC (for NPU compatibility)
+        gc_on_cleanup: True for full GC on cleanup, False to skip it, or a generation integer
+        gc_diagnostics: Whether to print resource diagnostics for cleanup GC
     """
 
     def __init__(
@@ -89,11 +92,15 @@ class BucketedWeightSender:
         zmq_handle: str,
         bucket_size_mb: int = 512,
         use_shm: bool = False,
+        gc_on_cleanup: GCSetting = True,
+        gc_diagnostics: bool = False,
     ):
         self.zmq_handle = zmq_handle
         self.bucket_size_mb = bucket_size_mb
         self.bucket_size = int(bucket_size_mb) << 20
         self.use_shm = use_shm
+        self.gc_on_cleanup = gc_on_cleanup
+        self.gc_diagnostics = gc_diagnostics
 
         self.zmq_context = zmq.Context.instance()
         self.socket = None
@@ -216,8 +223,11 @@ class BucketedWeightSender:
             self.shm.unlink()
             del self.shm
             self.shm = None
-        gc.collect()
-        if is_support_ipc():
+        collect_garbage(
+            self.gc_on_cleanup,
+            diagnostics_point="weight_transfer_cleanup" if self.gc_diagnostics else None,
+        )
+        if not self.use_shm:
             get_torch_device().ipc_collect()
         get_torch_device().empty_cache()
 
@@ -342,6 +352,6 @@ class BucketedWeightReceiver:
             del self.shm
             self.shm = None
         gc.collect()
-        if is_support_ipc():
+        if not self.use_shm:
             get_torch_device().ipc_collect()
         get_torch_device().empty_cache()
