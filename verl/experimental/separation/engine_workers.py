@@ -15,6 +15,7 @@
 
 import logging
 import os
+from functools import partial
 from typing import Callable, Optional
 
 from omegaconf import DictConfig
@@ -103,7 +104,11 @@ class DetachActorWorker(ActorRolloutRefWorker):
                 restore_megatron_model_from_cpu,
             )
 
-            self._strategy_handlers = (copy_megatron_model_to_cpu, restore_megatron_model_from_cpu)
+            param_offload_groups = self.actor.engine._param_offload_groups
+            self._strategy_handlers = (
+                partial(copy_megatron_model_to_cpu, param_offload_groups=param_offload_groups),
+                partial(restore_megatron_model_from_cpu, param_offload_groups=param_offload_groups),
+            )
         else:
             raise NotImplementedError(f"Unsupported strategy: {strategy}")
 
