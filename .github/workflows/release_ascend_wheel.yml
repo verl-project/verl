@@ -1,0 +1,181 @@
+#
+# Release verl Ascend NPU wheel variants via PEP 817 wheel variants (WheelNext).
+#
+# verl itself is a pure-Python package, so the 910b/a3 wheels differ only in
+# variant metadata, not in binary content. The value of this workflow is that
+# `uv pip install verl --extra-index-url <variant index>` auto-selects the
+# wheel matching the local NPU (via huawei-ascend-variant-provider), so users
+# no longer need to know their chip type. Each variant is built inside the
+# matching CANN container, i.e. it is the delivery artifact for that CANN
+# environment. Adapted from sgl-kernel-npu (PR #506) and vllm-ascend.
+#
+name: Release verl Ascend Wheel (wheelnext)
+
+on:
+  release:
+    types:
+      - published
+
+  workflow_dispatch:
+
+  pull_request:
+    branches:
+      - 'main'
+    paths:
+      - '.github/workflows/release_ascend_wheel.yml'
+      - '.github/workflows/scripts/wheel/**'
+
+jobs:
+
+  build_verl_wheel_910b:
+    name: build verl wheel (910b)
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64]
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: quay.io/ascend/cann:9.1.0-910b-ubuntu22.04-py3.12
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Build verl wheel (910b CANN env)
+        run: |
+          pip install --upgrade build wheel
+          pip wheel . --no-deps -w output/
+          ls output/
+
+      - name: Generate variant wheels
+        env:
+          WHEEL_FILE: output
+          PROJECT_TOML: .github/workflows/scripts/wheel/pyproject.toml
+          OUTPUT_DIR: output/variants
+        run: |
+          pip install build git+https://github.com/wheelnext/variantlib.git --quiet
+          mkdir -p output/variants
+          python3 .github/workflows/scripts/wheel/make_variant.py \
+            -c .github/workflows/scripts/wheel/config.json \
+            -l 910b
+          echo "Generated variant wheels:"
+          ls output/variants/
+
+      - name: Archive wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: verl-910b-${{ matrix.arch }}-wheel
+          path: output/
+          if-no-files-found: error
+
+
+  build_verl_wheel_a3:
+    name: build verl wheel (a3)
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64]
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: quay.io/ascend/cann:9.1.0-a3-ubuntu22.04-py3.12
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Build verl wheel (a3 CANN env)
+        run: |
+          pip install --upgrade build wheel
+          pip wheel . --no-deps -w output/
+          ls output/
+
+      - name: Generate variant wheels
+        env:
+          WHEEL_FILE: output
+          PROJECT_TOML: .github/workflows/scripts/wheel/pyproject.toml
+          OUTPUT_DIR: output/variants
+        run: |
+          pip install build git+https://github.com/wheelnext/variantlib.git --quiet
+          mkdir -p output/variants
+          python3 .github/workflows/scripts/wheel/make_variant.py \
+            -c .github/workflows/scripts/wheel/config.json \
+            -l a3
+          echo "Generated variant wheels:"
+          ls output/variants/
+
+      - name: Archive wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: verl-a3-${{ matrix.arch }}-wheel
+          path: output/
+          if-no-files-found: error
+
+
+  generate_and_upload_variant_index:
+    name: generate and upload variant index
+    needs: [build_verl_wheel_910b, build_verl_wheel_a3]
+    if: ${{ github.event_name == 'release' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download all variant wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: 'verl-*-wheel'
+          path: all-wheels/
+          merge-multiple: true
+
+      - name: Collect variant wheels
+        run: |
+          mkdir -p combined-variants
+          find all-wheels/ -path '*/variants/*.whl' -exec cp {} combined-variants/ \;
+          echo "Combined variant wheels:"
+          ls combined-variants/
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Generate combined variant index
+        run: |
+          pip install git+https://github.com/wheelnext/variantlib.git --quiet
+          variantlib generate-index-json -d combined-variants/
+          echo "Generated index files:"
+          ls combined-variants/
+
+      - name: Upload wheels and variant index to OBS
+        env:
+          OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_ID }}
+          OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
+        run: |
+          pip install esdk-obs-python --quiet
+          python3 - <<'EOF'
+          import os, glob
+          from obs import ObsClient
+          OBS_BUCKET = 'ascend-artifcat-packages'
+          OBS_PATH = 'pypi/packages/ascend/repos/pypi/variant/verl'
+          client = ObsClient(
+              access_key_id=os.environ['OBS_ACCESS_KEY'],
+              secret_access_key=os.environ['OBS_SECRET_KEY'],
+              server='https://obs.cn-north-4.myhuaweicloud.com'
+          )
+          files = glob.glob('combined-variants/*.whl') + glob.glob('combined-variants/*.json')
+          for file in files:
+              filename = os.path.basename(file)
+              resp = client.putFile(OBS_BUCKET, f'{OBS_PATH}/{filename}', file)
+              if resp.status < 300:
+                  print(f'Uploaded: {filename}')
+              else:
+                  raise Exception(f'Failed to upload {filename}: {resp.errorMessage}')
+          EOF

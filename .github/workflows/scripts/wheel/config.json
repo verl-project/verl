@@ -1,0 +1,23 @@
+{
+  "variables": {
+    "wheel_env": "WHEEL_FILE",
+    "pyproject_toml_env": "PROJECT_TOML",
+    "output_dir_env": "OUTPUT_DIR"
+  },
+  "jobs": [
+    {
+      "variant_label": "910b",
+      "properties": [
+        "ascend :: npu_type :: 910b"
+      ],
+      "skip_plugin_validation": true
+    },
+    {
+      "variant_label": "a3",
+      "properties": [
+        "ascend :: npu_type :: a3"
+      ],
+      "skip_plugin_validation": true
+    }
+  ]
+}
