@@ -3,7 +3,7 @@
 Using Checkpoints to Support Fault Tolerance Training
 =====================================================
 
-Last updated: 08/24/2026.
+Last updated: 09/05/2026.
 
 There could be training errors or machine failure during the whole RLHF training process, 
 so it is recommended to enable checkpoints to minimize your loss.
@@ -82,7 +82,7 @@ Hook semantics:
 Checkpoint Saving Directory Structure
 -------------------------------------
 
-Commonly, we use the ``default_local_dir`` declared in ``ppo_trainer.yaml`` or ``ppo_megatron_trainer.yml``
+Commonly, we use the ``default_local_dir`` declared in ``ppo_trainer.yaml``
 to work as preffix when saving checkpoints, which is ``checkpoints/${trainer.project_name}/${trainer.experiment_name}``.
 
 So the inner checkpoint structure of **FSDP** is like:
@@ -290,7 +290,7 @@ Convert FSDP and Megatron Checkpoints to HuggingFace Format Model
 -----------------------------------------------------------------
 
 We provide a tool to convert the FSDP and Megatron checkpoints to HuggingFace format model.
-The tool is located in ``verl/model_merger``. For older versions of verl that don't include fsdp_config.json in checkpoints, you can use the legacy model merger located at ``verl/scripts/legacy_model_merger.py``.
+The tool is located in ``verl/model_merger``. For older versions of verl that don't include fsdp_config.json in checkpoints, you can use the legacy model merger located at ``scripts/legacy_model_merger.py``.
 
 The script supports two main sub-commands: `merge` (to convert and save checkpoints) and `test` (to validate merged checkpoints against a reference model).
 The arguments for the `merge` sub-command are as follows:

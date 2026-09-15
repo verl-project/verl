@@ -1,14 +1,14 @@
 NPU-CI 添加指导
 ===========
 
-Last updated: 02/02/2026.
+Last updated: 09/05/2026.
 
 我们在 verl 上提供基于华为昇腾设备的CI用例添加指导。
 
 verl 仓库使用 GitHub Actions 作为 CI 平台，通过分层测试架构保障代码质量与系统稳定性。
 NPU 相关的工作流主要包括：
 
-* ``npu_unit_test.yml``：运行单元测试。
+* ``npu_unit_tests.yml``：运行单元测试。
 * 以 ``_ascend.yml`` 结尾的文件：运行针对 Ascend NPU 的端到端测试或专项测试。
 
 添加新用例指南
@@ -163,13 +163,13 @@ NPU 相关的工作流主要包括：
 步骤：
 
 (1) 在 ``tests/`` 目录下创建或修改单元测试文件（例如 ``test_xxx.py``）。
-(2) 若测试文件路径未被 ``npu_unit_test.yml`` 中的 ``--ignore-glob`` 规则排除，则会在以下命令中自动执行：
+(2) 若测试文件路径未被 ``npu_unit_tests.yml`` 中的 ``--ignore-glob`` 规则排除，则会在以下命令中自动执行：
 
    .. code-block:: yaml
    
       pytest -s -x --ignore-glob="xxx" --ignore-glob="xxx" tests/
    
-(3) 若测试路径在 ``--ignore-glob`` 排除范围内，需在 ``npu_unit_test.yml`` 中新增一个 step 来显式运行该测试。
+(3) 若测试路径在 ``--ignore-glob`` 排除范围内，需在 ``npu_unit_tests.yml`` 中新增一个 step 来显式运行该测试。
 (4) 如新增一批相关用例，建议单独创建专门的工作流文件以保持清晰。
 
 4. 添加端到端测试脚本
