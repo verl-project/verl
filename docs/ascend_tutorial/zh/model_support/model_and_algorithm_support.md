@@ -45,6 +45,8 @@ Last updated: 05/14/2026.
 | 40 | Qwen3-1.7B | GRPO | [1.7B](https://huggingface.co/Qwen/Qwen3-1.7B) | VeOmni | vllm | [`link`](https://github.com/verl-project/verl-ascend-recipe/blob/main/verl_ascend_practice/run_qwen3_1_7b_npu.sh) | - | Atlas 800T A3 |
 | 41 | Qwen3-30B-A3B | GRPO | [30B](https://huggingface.co/Qwen/Qwen3-30B-A3B) | VeOmni | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_30b_veomni.sh) | - | Atlas 800T A3 |
 | 42 | Qwen3-VL-30B-A3B-Instruct | GRPO | [30B](https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct) | VeOmni | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_vl_30b_moe_veomni.sh) | - | Atlas 800T A3 |
+| 43 | DeepSeek-V4-Flash | GRPO | [284B](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash ) | MindSpeed-llm | vllm | [`link`](https://github.com/verl-project/verl-ascend-recipe/blob/main/DeepSeek-V4-Flash/examples/train_deepseek_v4_grpo_mindspeed_vllm.sh) | - | Atlas 800T A3 |
+| 44 | DeepSeek-V4-Flash | GRPO | [284B](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash ) | MindSpeed-llm | vllm | [`link`](https://github.com/verl-project/verl-ascend-recipe/blob/main/DeepSeek-V4-Flash/examples/train_deepseek_v4_grpo_mindspeed_vllm_A5.sh) | - | Ascend 950 系列产品 |
 
 ## Table 2 SFT Algorithms
 
