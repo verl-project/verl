@@ -292,10 +292,17 @@ def process_fp8_weights_after_loading(layers):
             delattr(layer, _FP8_LIVE_ATTR)
 
 
+# vLLM 0.24 ``ModelOptMxFp8FusedMoE.process_weights_after_loading`` sets this on the layer and
+# returns early on every later call. A refit is exactly such a later call: without clearing the
+# flag the kernel layout would never be re-derived from the scales the sync just wrote.
+_VLLM_PROCESS_ONCE_FLAG = "_already_called_process_weights_after_loading"
+
+
 def _make_process_weights_after_loading_for_vllm20(original_fn):
     def _patched_process_weights_after_loading(self, layer) -> None:
         old_params = dict(layer.named_parameters(recurse=False))
         _record_pristine_fp8_layout(layer, old_params)
+        layer.__dict__.pop(_VLLM_PROCESS_ONCE_FLAG, None)
         with patch(
             "vllm.model_executor.layers.quantization.fp8.replace_parameter", replace_parameter_preserve_subclass
         ):

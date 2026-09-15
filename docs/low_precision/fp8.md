@@ -306,7 +306,11 @@ stale kernel scale layouts after a weight sync). verl now fails loudly in both c
   layer is probed the same way (every probe row routed to it, compared with the gated-MLP reference on
   the dequantized `w13` / `w2`; tolerance `VERL_MXFP8_REFIT_CHECK_MOE_TOL`, default = the linear one);
   the expert probe is skipped under expert parallelism and under TP without `reduce_results`, which
-  the log states. On SGLang MoE layers the loader additionally checks,
+  the log states. On vLLM the same expert probe runs on `ModelOptMxFp8FusedMoE` layers by calling the
+  weight holder's `forward_modular` / `forward_monolithic` directly (skipped under expert or data
+  parallelism and for non-SiLU gates). vLLM 0.24's ModelOpt MXFP8 MoE method processes its weights
+  only once per layer and returns early afterwards; verl's patched hook clears that flag on every
+  refit so the kernel layout is re-derived from the synced scales. On SGLang MoE layers the loader additionally checks,
   before re-deriving the kernel layout, that the sync wrote every staged expert scale (the staging
   buffer is pre-filled with the UE8M0 NaN code `0xFF`): experts whose HF names miss the sync-side
   rule would otherwise arrive as a scale-less bf16 cast in the fp8 buffer. The kernel-vs-reference
