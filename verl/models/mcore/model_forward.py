@@ -13,7 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional
+from contextlib import nullcontext
 
 import torch
 from torch.nested._internal.nested_tensor import NestedTensor
@@ -21,6 +21,7 @@ from torch.nested._internal.nested_tensor import NestedTensor
 from verl.utils.megatron_utils import unwrap_model
 from verl.workers.config import MtpConfig
 
+from .response_only_lm_head import response_only_output_projection
 from .util import (
     build_vlm_attn_mask_bshd,
     build_vlm_attn_mask_thd,
@@ -210,8 +211,8 @@ def _convert_to_nested_tensor(v, input_ids_lengths):
     return v
 
 
-def _build_mtp_loss_mask_nested(response_mask, input_ids_lengths, response_attention_mask):
-    """Build a nested loss_mask aligned to ``input_ids = [prompt; response]`` for MTP.
+def _build_full_loss_mask_nested(response_mask, input_ids_lengths, response_attention_mask):
+    """Build a nested loss_mask aligned to ``input_ids = [prompt; response]``.
 
     ``response_mask`` is response-only data. This expands it to full packed
     input length as prompt zeros followed by valid response positions.
@@ -222,7 +223,7 @@ def _build_mtp_loss_mask_nested(response_mask, input_ids_lengths, response_atten
         batch_size = len(response_lengths)
         response_values = response_mask.values()
     else:
-        assert response_attention_mask is not None, "response_attention_mask is required to align padded MTP loss_mask"
+        assert response_attention_mask is not None, "response_attention_mask is required to align a padded loss_mask"
         assert not isinstance(response_attention_mask, NestedTensor), (
             "response_attention_mask must be a padded (bs, max_response_len) tensor, got NestedTensor"
         )
@@ -272,9 +273,10 @@ def gptmodel_forward_model_engine(
     pad_token_id=None,
     data_format: str = "thd",
     mtp_enable_train: bool = False,
-    local_cp_size: Optional[int] = None,
-    forced_max_seqlen: Optional[int] = None,
-    pad_to_length_bucket: Optional[int] = None,
+    response_only_lm_head: bool = False,
+    local_cp_size: int | None = None,
+    forced_max_seqlen: int | None = None,
+    pad_to_length_bucket: int | None = None,
     cp_layout: str = "zigzag",
     router_padding_mask: torch.Tensor | None = None,
     mtp_loss_normalization_factor: float | None = None,
@@ -284,7 +286,6 @@ def gptmodel_forward_model_engine(
     assert data_format in ["thd", "bshd"], "data_format must be 'thd' or 'bshd'"
     pre_process = unwrap_model(model).pre_process
     post_process = unwrap_model(model).post_process
-
     fp8 = unwrap_model(model).config.fp8
     use_fp8_padding = fp8 in ["e4m3", "hybrid"]
 
@@ -312,6 +313,24 @@ def gptmodel_forward_model_engine(
             packed_seq_params._verl_mtp_loss_normalization_factor = mtp_loss_normalization_factor
         input_ids_rmpad = input_ids_rmpad.contiguous()
 
+        projection_mask = None
+        if response_only_lm_head and post_process and logits_processor is not None:
+            input_ids_lengths = input_ids.offsets().diff().tolist()
+            full_loss_mask = _build_full_loss_mask_nested(
+                logits_processor_args["loss_mask"],
+                input_ids_lengths,
+                logits_processor_args.get("response_attention_mask"),
+            )
+            projection_mask = preprocess_thd_engine(
+                full_loss_mask,
+                pre_process=True,
+                need_roll=True,
+                use_fp8_padding=use_fp8_padding,
+                local_cp_size=local_cp_size,
+                pad_to_length_bucket=pad_to_length_bucket,
+                cp_layout=cp_layout,
+            )[0].to(torch.bool)
+
         args = {}
         if mtp_enable_train and post_process:
             # Use input_ids sequence length to ensure label and loss_mask alignment
@@ -322,7 +341,7 @@ def gptmodel_forward_model_engine(
             for k in ["label", "loss_mask"]:
                 v = logits_processor_args[k]
                 if k == "loss_mask":
-                    v = _build_mtp_loss_mask_nested(v, input_ids_lengths, response_attention_mask)
+                    v = _build_full_loss_mask_nested(v, input_ids_lengths, response_attention_mask)
                 else:
                     v = _convert_to_nested_tensor(v, input_ids_lengths)
                 logits_processor_args[k] = v
@@ -352,13 +371,17 @@ def gptmodel_forward_model_engine(
         if router_padding_mask is not None:
             model_kwargs["padding_mask"] = router_padding_mask
 
-        output_orig = model(
-            input_ids=input_ids_rmpad,
-            attention_mask=attention_mask,
-            position_ids=position_ids_rmpad if mtp_enable_train else None,  # position_ids is only needed for MTP
-            packed_seq_params=packed_seq_params,
-            **model_kwargs,
+        projection_context = (
+            response_only_output_projection(model, projection_mask) if projection_mask is not None else nullcontext()
         )
+        with projection_context:
+            output_orig = model(
+                input_ids=input_ids_rmpad,
+                attention_mask=attention_mask,
+                position_ids=position_ids_rmpad if mtp_enable_train else None,  # position_ids is only needed for MTP
+                packed_seq_params=packed_seq_params,
+                **model_kwargs,
+            )
 
         if post_process and logits_processor is not None:
             args = {
@@ -373,6 +396,8 @@ def gptmodel_forward_model_engine(
                 )[0]
                 for k, v in logits_processor_args.items()
             }
+            if projection_mask is not None:
+                args["projection_mask"] = projection_mask
             output_dict = logits_processor(output_orig, **args)
             output = {
                 k: postprocess_thd_engine(
@@ -413,6 +438,22 @@ def gptmodel_forward_model_engine(
             forced_max_seqlen=forced_max_seqlen,
         )
 
+        projection_mask = None
+        if response_only_lm_head and post_process and logits_processor is not None:
+            input_ids_lengths = input_ids.offsets().diff().tolist()
+            full_loss_mask = _build_full_loss_mask_nested(
+                logits_processor_args["loss_mask"],
+                input_ids_lengths,
+                logits_processor_args.get("response_attention_mask"),
+            )
+            projection_mask = preprocess_bshd_engine(
+                full_loss_mask,
+                pre_process=True,
+                need_roll=True,
+                use_fp8_padding=use_fp8_padding,
+                forced_max_seqlen=forced_max_seqlen,
+            )[0].to(torch.bool)
+
         if mtp_enable_train and post_process:
             args = {}
             # Use input_ids sequence length to ensure label and loss_mask alignment
@@ -423,7 +464,7 @@ def gptmodel_forward_model_engine(
             for k in ["label", "loss_mask"]:
                 v = logits_processor_args[k]
                 if k == "loss_mask":
-                    v = _build_mtp_loss_mask_nested(v, input_ids_lengths, response_attention_mask)
+                    v = _build_full_loss_mask_nested(v, input_ids_lengths, response_attention_mask)
                 else:
                     v = _convert_to_nested_tensor(v, input_ids_lengths)
                 logits_processor_args[k] = v
@@ -450,12 +491,16 @@ def gptmodel_forward_model_engine(
         else:
             attention_mask = attention_mask_bshd
 
-        output_orig = model(
-            input_ids=input_ids_bshd,
-            attention_mask=attention_mask,
-            position_ids=None if vision_model else position_ids_bshd,
-            **model_kwargs,
+        projection_context = (
+            response_only_output_projection(model, projection_mask) if projection_mask is not None else nullcontext()
         )
+        with projection_context:
+            output_orig = model(
+                input_ids=input_ids_bshd,
+                attention_mask=attention_mask,
+                position_ids=None if vision_model else position_ids_bshd,
+                **model_kwargs,
+            )
         if post_process and logits_processor is not None:
             args = {
                 k: preprocess_bshd_engine(
@@ -467,6 +512,8 @@ def gptmodel_forward_model_engine(
                 )[0]
                 for k, v in logits_processor_args.items()
             }
+            if projection_mask is not None:
+                args["projection_mask"] = projection_mask
             output_dict = logits_processor(output_orig, **args)
             output = {
                 k: postprocess_bshd_engine(v, attention_mask_bshd, post_process=post_process)
