@@ -41,7 +41,13 @@ identical to its training recipe, including BF16 carve-outs.
 An unmodified vLLM 0.26 wheel is **not** sufficient. Apply the audited fixes
 using `runtime_backports/apply_vllm_online_nvfp4_50029_50074.py` in the runtime
 build: they remove an extra BF16 rounding step and preserve the MoE kernel
-across refits. The worker checks the normalized source of these implementations;
+across refits. The script also includes a local derived-scale lifecycle fix:
+post-processing must use the newly loaded tensors, while the retained execution
+kernel keeps references to the original storage that native reload updates in
+place. Applying kernel reuse alone leaves TRT-LLM's derived `g1_scale_c` one
+refit behind and can split eager and CUDA-graph references. The worker verifies
+both scale references and current derived values after loading/refit.
+The worker checks the normalized source of these implementations;
 an unpatched or changed implementation fails before training. Updating that
 allowlist requires re-auditing the dependency, not adding a version marker.
 Refit verifies unique coverage of every `(layer, expert, projection)` key as

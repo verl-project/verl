@@ -79,6 +79,17 @@ class _FakeNativeMoE(torch.nn.Module):
         self.w2_weight_scale = torch.ones((2, 2), dtype=torch.float8_e4m3fn)
         self.w13_weight_scale_2 = torch.ones(2, dtype=torch.float32)
         self.w2_weight_scale_2 = torch.ones(2, dtype=torch.float32)
+        self.g1_scale_c = self.w13_weight_scale_2.clone()
+        experts = self.quant_method.moe_kernel.fused_experts
+        experts.quant_config = SimpleNamespace(
+            g1_alphas=self.w13_weight_scale_2,
+            g2_alphas=self.w2_weight_scale_2,
+            w1_scale=self.w13_weight_scale,
+            w2_scale=self.w2_weight_scale,
+            a2_gscale=torch.ones(2),
+        )
+        experts.moe_config = SimpleNamespace(is_act_and_mul=True)
+        experts.g1_scale_c = self.g1_scale_c
 
 
 class _FakeUnquantizedMoE(torch.nn.Module):
@@ -129,6 +140,36 @@ def test_native_vllm_runtime_attests_exact_carveout_layers():
             expected_quantized_layer_indices=[1, 2, 3, 4],
             expected_bf16_layer_indices=[0, 5, 6, 7],
         )
+
+
+def test_native_vllm_rejects_one_refit_stale_derived_scale():
+    model = torch.nn.Sequential(_FakeNativeMoE())
+    model[0].w13_weight_scale_2.mul_(2)
+    with pytest.raises(RuntimeError, match="does not match current"):
+        attest_vllm_native_nvfp4_runtime(model, expected_moe_layers=1)
+
+
+def test_native_vllm_rejects_rebound_eager_scale_even_if_values_match():
+    model = torch.nn.Sequential(_FakeNativeMoE())
+    model[0].quant_method.moe_kernel.fused_experts.g1_scale_c = model[0].g1_scale_c.clone()
+    with pytest.raises(RuntimeError, match="stale eager/CUDA-graph"):
+        attest_vllm_native_nvfp4_runtime(model, expected_moe_layers=1)
+
+
+@pytest.mark.parametrize("field", ["g1_alphas", "g2_alphas", "w1_scale", "w2_scale"])
+def test_native_vllm_rejects_detached_quant_config_scale(field):
+    model = torch.nn.Sequential(_FakeNativeMoE())
+    config = model[0].quant_method.moe_kernel.fused_experts.quant_config
+    setattr(config, field, getattr(config, field).clone())
+    with pytest.raises(RuntimeError, match="stale scale reference"):
+        attest_vllm_native_nvfp4_runtime(model, expected_moe_layers=1)
+
+
+def test_native_vllm_fingerprint_covers_derived_scale():
+    model = torch.nn.Sequential(_FakeNativeMoE())
+    before = vllm_native_nvfp4_fingerprint(model)
+    model[0].g1_scale_c[0] = 1.00001
+    assert before != vllm_native_nvfp4_fingerprint(model)
 
 
 def test_native_vllm_reload_contract_is_exact():

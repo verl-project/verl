@@ -12,17 +12,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Backport the two post-v0.26 online-NVFP4 fixes needed by Verl refit.
+"""Backport online-NVFP4 packing and graph-safe refit lifecycle fixes.
 
 The replacements intentionally match the vLLM v0.26.0 source exactly.  Refuse
 to modify an unexpected dependency version instead of producing a partial
 backport.
+
+The kernel-cache change from #50074 additionally needs fresh postprocessing:
+the retained quant config points to original storage, not the temporary newly
+loaded layer tensors. Processing it directly produces one-refit-stale derived
+scales and rebinds eager-only references away from the captured graph storage.
 """
 
 from importlib.metadata import distribution, version
 
 PACKING_COMMIT = "9c22668436a4d94aab87ea74a220e060415cf1d8"
 RELOAD_COMMIT = "3ac9525507b2d0de5c1b08cbca96cc94850c7c7a"
+DERIVED_SCALE_BACKPORT = "verl-20260915-fresh-postprocess-retained-kernel-v1"
 
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
@@ -101,7 +107,7 @@ def main() -> None:
             layer=layer,
             per_token_activation=True,
         )"""
-    new_reload = """        if self.moe_kernel is None:
+    cached_reload = """        if self.moe_kernel is None:
             self.moe_quant_config = self.get_fused_moe_quant_config(layer)
             assert self.experts_cls is not None
             self.moe_kernel = make_nvfp4_moe_kernel(
@@ -113,7 +119,32 @@ def main() -> None:
                 layer=layer,
                 per_token_activation=True,
             )"""
-    text = replace_once(text, old_reload, new_reload, "NVFP4 reload kernel reuse")
+    new_reload = """        # Postprocess with the freshly loaded tensors, not the retained kernel's
+        # quant config (which still references the pre-refit tensor storage).
+        # The native layerwise loader copies these processed parameters back
+        # into the original storage after this method returns. Keep the original
+        # kernel and all of its eager/CUDA-graph references untouched on reload.
+        processing_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.experts_cls is not None
+        processing_kernel = make_nvfp4_moe_kernel(
+            moe_quant_config=processing_quant_config,
+            moe_config=self.moe,
+            experts_cls=self.experts_cls,
+            backend=self.nvfp4_backend,
+            routing_tables=layer._expert_routing_tables(),
+            layer=layer,
+            per_token_activation=True,
+        )
+        if self.moe_kernel is None:
+            self.moe_quant_config = processing_quant_config
+            self.moe_kernel = processing_kernel
+        processing_kernel.fused_experts.process_weights_after_loading(layer)"""
+    postprocess = "\n        self.moe_kernel.fused_experts.process_weights_after_loading(layer)"
+    if new_reload not in text:
+        candidates = [block + postprocess for block in (old_reload, cached_reload)]
+        matches = [block for block in candidates if block in text]
+        assert len(matches) == 1, "NVFP4 refit: expected original or #50074-only implementation"
+        text = replace_once(text, matches[0], new_reload, "NVFP4 fresh postprocess / retained kernel")
 
     path.write_text(text)
     verified = path.read_text()
@@ -132,6 +163,7 @@ def main() -> None:
         path,
         flush=True,
     )
+    print("REAL_NVFP4_VLLM_DERIVED_SCALE_BACKPORT_PASS", DERIVED_SCALE_BACKPORT, path, flush=True)
 
 
 if __name__ == "__main__":

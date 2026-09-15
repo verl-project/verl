@@ -35,11 +35,13 @@ REAL_NVFP4_MOE_BACKEND = "flashinfer_trtllm"
 # Canonical function ASTs from vLLM v0.26.0 with upstream fixes #50029
 # (9c22668436a4d94aab87ea74a220e060415cf1d8) and #50074
 # (3ac9525507b2d0de5c1b08cbca96cc94850c7c7a). These are the exact
-# implementations installed by runtime_backports/apply_vllm_online_nvfp4_50029_50074.py.
+# implementations installed by runtime_backports/apply_vllm_online_nvfp4_50029_50074.py,
+# including the local fresh-postprocess/retained-kernel fix: #50074 alone leaves
+# TRTLLM's derived g1_scale_c one refit behind and rebinds eager references.
 # Unlike a version/marker check, this also rejects a partially patched wheel.
 _NVFP4_BACKPORT_AST_SHA256 = {
     "_quantize_moe_weight_to_nvfp4": "11c7d914f31e74d425151fd3ea54b1a6e8aa92ea001aa7ddd6b9eafa30ab187a",
-    "_setup_kernel": "d2e8753af4efaef6f226c01db9c9675f9b459ef869f0656ad35bdddfa173db1e",
+    "_setup_kernel": "f24270b096b5ee9f05cf303c4630b43355e1d0b347754e18740449c516437db8",
 }
 
 
@@ -75,7 +77,7 @@ def require_vllm_nvfp4_backports() -> None:
             raise RuntimeError(f"cannot verify required vLLM NVFP4 backports for {name}") from exc
         if actual != _NVFP4_BACKPORT_AST_SHA256[name]:
             raise RuntimeError(
-                f"real_nvfp4 requires audited vLLM #50029/#50074 backports: {name} "
+                f"real_nvfp4 requires audited vLLM #50029/#50074 and derived-scale backports: {name} "
                 f"has unrecognized implementation {actual}. Use the validated runtime build; "
                 "the unmodified vLLM 0.26 wheel is not sufficient."
             )
@@ -111,6 +113,38 @@ def require_vllm_native_reload_contract(model_runner) -> None:
     checkpoint_parameter = parameters["is_checkpoint_format"]
     if checkpoint_parameter.default is not True:
         raise RuntimeError("vLLM native reload_weights no longer defaults is_checkpoint_format=True")
+
+
+@torch.no_grad()
+def _attest_native_scale_references(module, experts) -> None:
+    """Check both original-storage references and derived scale values after refit."""
+    quant_config = getattr(experts, "quant_config", None)
+    for config_name, parameter_name in (
+        ("g1_alphas", "w13_weight_scale_2"),
+        ("g2_alphas", "w2_weight_scale_2"),
+        ("w1_scale", "w13_weight_scale"),
+        ("w2_scale", "w2_weight_scale"),
+    ):
+        actual = getattr(quant_config, config_name, None)
+        registered = getattr(module, parameter_name, None)
+        if not isinstance(actual, torch.Tensor) or not isinstance(registered, torch.Tensor):
+            raise RuntimeError(f"native NVFP4 scale reference missing: {config_name}/{parameter_name}")
+        if actual.device != registered.device or actual.data_ptr() != registered.data_ptr():
+            raise RuntimeError(f"native NVFP4 stale scale reference: {config_name}/{parameter_name}")
+    actual = getattr(experts, "g1_scale_c", None)
+    registered = getattr(module, "g1_scale_c", None)
+    if not isinstance(actual, torch.Tensor) or not isinstance(registered, torch.Tensor):
+        raise RuntimeError("native NVFP4 derived scale g1_scale_c is missing")
+    if actual.device != registered.device or actual.data_ptr() != registered.data_ptr():
+        raise RuntimeError("native NVFP4 stale eager/CUDA-graph g1_scale_c reference")
+    a2_gscale = getattr(quant_config, "a2_gscale", None)
+    if not isinstance(a2_gscale, torch.Tensor):
+        raise RuntimeError("native NVFP4 activation scale a2_gscale is missing")
+    expected = a2_gscale
+    if experts.moe_config.is_act_and_mul:
+        expected = quant_config.g1_alphas * a2_gscale
+    if not torch.equal(registered, expected):
+        raise RuntimeError("native NVFP4 g1_scale_c does not match current weight/activation scales")
 
 
 def attest_vllm_native_nvfp4_runtime(
@@ -160,6 +194,7 @@ def attest_vllm_native_nvfp4_runtime(
             )
         if not getattr(experts, "per_token_activation", False):
             raise RuntimeError("native NVFP4 MoE kernel is not executing per-token activation quantization")
+        _attest_native_scale_references(module, experts)
 
     if expected_quantized_layer_indices is not None:
         expected_quantized = set(expected_quantized_layer_indices)
@@ -187,7 +222,7 @@ def attest_vllm_native_nvfp4_runtime(
     logger.warning(
         "VERL_REAL_NVFP4_ROLLOUT_ATTESTATION PASS dense_layers=0 moe_layers=%d expected=%d bf16_moe_layers=%s "
         "method=vllm_native_nvfp4_per_token backend=FLASHINFER_TRTLLM "
-        "scope=routed_expert_mlp attention=bf16 activation=per_token",
+        "scope=routed_expert_mlp attention=bf16 activation=per_token scale_references=current derived_scale=current",
         moe_count,
         expected_moe_layers,
         sorted(expected_bf16_layer_indices),
@@ -213,6 +248,7 @@ def vllm_native_nvfp4_fingerprint(model: torch.nn.Module) -> int:
             "w2_weight_scale",
             "w13_weight_scale_2",
             "w2_weight_scale_2",
+            "g1_scale_c",
         )
         for tensor_index, name in enumerate(fingerprint_tensors, start=1):
             flat = getattr(module, name).view(torch.uint8).flatten()
@@ -220,7 +256,7 @@ def vllm_native_nvfp4_fingerprint(model: torch.nn.Module) -> int:
             # global-scale tensors are read in full. This makes refit-change
             # detection sensitive to scale changes even when a 1e-6 optimizer
             # step does not cross many 4-bit bins.
-            sample_size = flat.numel() if name.endswith("_scale_2") else 2048
+            sample_size = flat.numel() if name.endswith("_scale_2") or name == "g1_scale_c" else 2048
             stride = max(flat.numel() // sample_size, 1)
             sample = flat[::stride][:sample_size].to(torch.int64)
             coefficients = torch.arange(
