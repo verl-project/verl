@@ -78,7 +78,7 @@ def _load_vllm_rollout_utils():
 
     fake_vllm_quant = types.ModuleType("verl.utils.vllm.vllm_quant_utils")
     fake_vllm_quant.apply_vllm_quant_patches = lambda: None
-    fake_vllm_quant.is_fp8_model = lambda config: False
+    fake_vllm_quant.is_quantized_model = lambda config: False
     fake_vllm_quant.load_quanted_weights = lambda weights, runner, is_drafter=False: weights
 
     # NOTE: deliberately do NOT stub verl.plugin.platform. It is lightweight and
