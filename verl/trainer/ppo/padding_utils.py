@@ -102,6 +102,15 @@ def construct_minimal_padding_template(
     position_ids = build_padding_position_ids(template_sample.get("position_ids"), attention_mask)
     routed_experts = build_padding_routed_experts(template_sample.get("routed_experts"), input_ids.size(0))
 
+    sequence_length = input_ids.size(0)
+    teacher_ids = template_sample.get("teacher_ids")
+    if teacher_ids is not None:
+        template_sample["teacher_ids"] = teacher_ids.new_full((sequence_length, *teacher_ids.shape[1:]), eos_token_id)
+
+    teacher_logprobs = template_sample.get("teacher_logprobs")
+    if teacher_logprobs is not None:
+        template_sample["teacher_logprobs"] = teacher_logprobs.new_zeros((sequence_length, *teacher_logprobs.shape[1:]))
+
     # Update the fields and remove redundant parts
     template_sample.update(
         prompts=prompts,

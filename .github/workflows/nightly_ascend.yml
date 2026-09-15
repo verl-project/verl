@@ -187,13 +187,6 @@ jobs:
   #     - name: Preprocess geo3k dataset
   #       run: |
   #         python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
-  #     - name: update mbridge
-  #       run: |
-  #         # get mbridge path
-  #         MBRIDGE_PATH=$(pip show mbridge | grep Location | awk '{print $2}')
-  #         # cuda to npu
-  #         TARGET_FILE="${MBRIDGE_PATH}/mbridge/models/ext/deepseek_v3/dequant_fp8_safetensor_io.py"
-  #         sed -i '34s/cuda/npu/;51s/cuda/npu/' "$TARGET_FILE"
   #     - name: Running nightlyCI_dapo-moonlight-16b-megatron-vllm_ascend
   #       run: |
   #         ray stop --force
@@ -349,12 +342,6 @@ jobs:
       - name: Check final pip list
         run: |
           pip list
-      - name: Clone Megatron Bridge
-        run: |
-          git clone --depth 1 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git /Megatron-Bridge
-          cd /Megatron-Bridge
-          git fetch --depth 1 origin de93536e9028ecf1e4dc28608dc80f336dcdfe59
-          git checkout de93536e9028ecf1e4dc28608dc80f336dcdfe59
       - name: Prepare weights
         run: |
           ln -s /root/.cache/models ~/models
@@ -364,7 +351,6 @@ jobs:
       - name: Running nightlyCI_grpo_qwen3_5_2b_fsdp2_vllm_ascend
         run: |
           ray stop --force
-          export PYTHONPATH=/Megatron-Bridge/src:$PYTHONPATH
           bash tests/special_npu/nightly_ci_ascend/run_grpo_qwen3_5_2b_fsdp2_npu.sh
 
   # Test grpo qwen3_5_2b fsdp_turbo vllm

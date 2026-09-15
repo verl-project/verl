@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import functools
 import logging
 import os
@@ -765,7 +766,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             return metrics or {}
 
         set_expandable_segments(False)
-        aggressive_empty_cache(force_sync=True)
+        get_torch_device().empty_cache()
         log_gpu_memory_usage("Before resume weights", logger=logger)
 
         # 1. resume rollout memory (weights were released during sleep)
@@ -813,6 +814,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 4. resume kv_cache
         if self.config.rollout.free_cache_engine:
+            # All trainer ranks enter this naive sync path via ONE_TO_ALL. Wait for
+            # their offload and device cleanup before a leader wakes the rollout
+            # workers; local device synchronization alone cannot prevent OOM on peers.
+            await asyncio.to_thread(torch.distributed.barrier)
             await self.rollout.resume(tags=["kv_cache"])
         log_gpu_memory_usage("After resume kv_cache", logger=logger)
 

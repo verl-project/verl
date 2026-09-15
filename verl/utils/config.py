@@ -71,6 +71,20 @@ def update_dict_with_config(dictionary: dict, config: DictConfig):
             dictionary[key] = getattr(config, key)
 
 
+def _validate_router_replay_config(actor_config: Any, rollout_correction: Any) -> None:
+    engine_config = getattr(actor_config, "engine", None)
+    router_replay = getattr(engine_config, "router_replay", None)
+    if (
+        getattr(router_replay, "mode", "disabled") == "R2"
+        and rollout_correction
+        and rollout_correction.get("bypass_mode", False)
+    ):
+        raise ValueError(
+            "router_replay.mode='R2' requires algorithm.rollout_correction.bypass_mode=False: "
+            "R2 records routes while recomputing actor old_log_probs, but bypass mode skips that forward."
+        )
+
+
 def validate_config(
     config: DictConfig,
     use_reference_policy: bool,
@@ -149,6 +163,7 @@ def validate_config(
     # Actor validation done in ActorConfig.__post_init__ and validate()
     actor_config = omega_conf_to_dataclass(config.actor_rollout_ref.actor)
     actor_config.validate(n_gpus, config.data.train_batch_size, config.actor_rollout_ref.model)
+    _validate_router_replay_config(actor_config, config.algorithm.get("rollout_correction", None))
 
     if not config.actor_rollout_ref.actor.use_dynamic_bsz:
         if use_reference_policy:

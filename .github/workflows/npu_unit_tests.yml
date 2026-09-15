@@ -84,6 +84,7 @@ jobs:
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      VERL_USE_EXTERNAL_MODULES: "megatron_adaptor" # import megatron_adaptor to patch megatron-lm
     steps:
       - name: Check npu and CANN info
         run: |

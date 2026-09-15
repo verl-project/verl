@@ -248,8 +248,10 @@ Actor/Rollout/Reference Policy
   used.
 
   - ``actor_rollout_ref.model.fused_kernel_options.impl_backend``: The
-    implementation backend for fused kernels. Options: "triton" or
-    "torch". Default is "torch".
+    implementation backend for fused kernels. Options: "triton", "torch", or
+    "liger". The "torch" backend always uses verl's native output-head implementation;
+    select "liger" explicitly to use Liger's fused output-head kernel.
+    Default is "torch".
     While in megatron, we only support "triton" as the
     implementation backend, so there is no need for this option.
 
