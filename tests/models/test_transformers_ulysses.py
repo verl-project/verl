@@ -86,6 +86,36 @@ def test_configs():
             )
         )
 
+    if version.parse(transformers.__version__) >= version.parse("5.8.0"):
+        from transformers import Cohere2MoeConfig
+
+        # Cohere2Moe interleaves sliding-window and full (NoPE) attention and uses a
+        # parallel block; both go through the generic flash-attention integration that
+        # `apply_monkey_patch` patches, so Ulysses must hold without model-specific code.
+        configs.append(
+            SequenceParallelConfig(
+                Cohere2MoeConfig(
+                    num_hidden_layers=4,
+                    num_attention_heads=32,
+                    num_key_value_heads=4,
+                    hidden_size=2048,
+                    intermediate_size=768,
+                    head_dim=128,
+                    num_experts=4,
+                    num_experts_per_tok=2,
+                    first_k_dense_replace=1,
+                    prefix_dense_intermediate_size=1024,
+                    sliding_window=64,
+                    vocab_size=1024,
+                    bos_token_id=1,
+                    eos_token_id=2,
+                    pad_token_id=0,
+                ),
+                sp_size=8,
+                is_valid=True,
+            )
+        )
+
     return configs
 
 
