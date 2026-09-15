@@ -54,6 +54,13 @@ and ``reprocess_mxfp8_moe_layers`` after it — the SGLang analogue of verl's vL
 pristine-layout cycle, without a record step because the canonical layout is
 derivable from the expert weight shape.
 
+Sync-vs-engine check. Before anything is written, every incoming linear weight's
+dtype is compared with the dtype of the engine parameter that will receive it
+(``check_sync_matches_engine``): the engine decided at build time which layers are
+fp8, the sync decided by name, and where the two differ ``load_weights`` would
+silently cast into the wrong buffer. Together with the trainer-side layer audit
+(training vs the sync rule) this closes the chain training = sync = engine.
+
 Self-check. After re-processing, one dense MXFP8 layer's own ``apply`` is compared
 against a dequantized reference (``verl.utils.mxfp8_refit_check``); a stale or
 mis-laid-out scale shows up as O(1) relative error and raises. One local expert
@@ -400,8 +407,107 @@ def self_check_mxfp8_moe(snapshot) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Sync-vs-engine dtype check
+# ---------------------------------------------------------------------------
+
+# HF leaf names that can be linear weights: ``.weight`` and the fused expert tensors transformers >= 5 writes.
+_CHECKED_LEAVES = ("weight", "gate_up_proj", "down_proj")
+# HF projections SGLang fuses into one module (the model's stacked_params_mapping, restated).
+_STACKED = {
+    "q_proj": "qkv_proj",
+    "k_proj": "qkv_proj",
+    "v_proj": "qkv_proj",
+    "gate_proj": "gate_up_proj",
+    "up_proj": "gate_up_proj",
+}
+_W2_LEAVES = ("down_proj", "w2")
+_SYNC_CACHE_ATTR = "_verl_sync_engine_fp8"
+
+
+def resolve_engine_param(model: torch.nn.Module, hf_name: str) -> torch.Tensor | None:
+    """Map an HF parameter name onto the engine tensor that will receive it, or None if unknown.
+
+    Walks the module tree by name, trying the fused module name for projections SGLang stacks
+    (``q_proj`` -> ``qkv_proj``, ``gate_proj`` -> ``gate_up_proj``) and stopping at a fused-MoE block
+    (a module holding ``w13_weight``), where the remaining per-expert parts select ``w13`` or ``w2``.
+    """
+    parts = hf_name.split(".")
+    module_path = parts[:-1] if parts[-1] == "weight" else parts
+    cur: object = model
+    for i, part in enumerate(module_path):
+        if hasattr(cur, "w13_weight"):
+            rest = module_path[i:] + ([parts[-1]] if parts[-1] != "weight" else [])
+            return cur.w2_weight if any(r in _W2_LEAVES for r in rest) else cur.w13_weight
+        nxt = getattr(cur, part, None)
+        if nxt is None and part in _STACKED:
+            nxt = getattr(cur, _STACKED[part], None)
+        if nxt is None:
+            return None
+        cur = nxt
+    if hasattr(cur, "w13_weight"):
+        return cur.w2_weight if parts[-1] in _W2_LEAVES else cur.w13_weight
+    if isinstance(cur, torch.nn.Module):
+        w = getattr(cur, "weight", None)
+        return w if isinstance(w, torch.Tensor) else None
+    return cur if isinstance(cur, torch.Tensor) else None
+
+
+def check_sync_matches_engine(model: torch.nn.Module, named_tensors: list[tuple[str, torch.Tensor]]) -> int:
+    """Raise if the sync ships a weight in a precision other than the engine parameter that receives it.
+
+    The engine decided at build time which layers are fp8 (``ignored_layers`` and model code); the sync
+    decided by name what to quantize. Where they differ, ``load_weights`` would silently ``copy_`` a bf16
+    tensor into an fp8 buffer (no scale ever arrives) or fp8 data into a bf16 parameter. This is the
+    "sync vs engine" half of the train/rollout layer audit, done where the engine can be seen. Returns
+    the number of parameters checked. Disabled with ``VERL_MXFP8_REFIT_CHECK=0``.
+    """
+    from verl.utils.mxfp8_refit_check import refit_check_enabled
+
+    if not refit_check_enabled():
+        return 0
+    cache: dict[str, bool | None] = model.__dict__.setdefault(_SYNC_CACHE_ATTR, {})
+    problems = []
+    checked = 0
+    unresolved = 0
+    for name, tensor in named_tensors:
+        if name.rsplit(".", 1)[-1] not in _CHECKED_LEAVES:
+            continue
+        if name not in cache:
+            target = resolve_engine_param(model, name)
+            cache[name] = None if target is None else target.dtype == torch.float8_e4m3fn
+        engine_fp8 = cache[name]
+        if engine_fp8 is None:
+            unresolved += 1
+            continue
+        checked += 1
+        sync_fp8 = tensor.dtype == torch.float8_e4m3fn
+        if sync_fp8 != engine_fp8:
+            problems.append(
+                f"{name}: the sync ships {'fp8' if sync_fp8 else str(tensor.dtype)}, the engine parameter is "
+                f"{'fp8' if engine_fp8 else 'high precision'}"
+            )
+    if unresolved:
+        logger.debug(
+            "sync-vs-engine dtype check: %d parameter names could not be mapped onto engine modules", unresolved
+        )
+    if problems:
+        raise RuntimeError(
+            f"MXFP8 weight sync and the SGLang engine disagree on the precision of {len(problems)} parameter(s):\n  - "
+            + "\n  - ".join(problems[:40])
+            + ("\n  - ..." if len(problems) > 40 else "")
+            + "\nThe engine built these layers by quantization_config.ignored_layers and model code; the sync decided "
+            "by the name rule in verl/utils/fp8_utils.py. load_weights would cast the tensor into the mismatched "
+            "buffer silently (an fp8 layer never receives its scale). Make the sync rule and ignored_layers agree "
+            "for these names. VERL_MXFP8_REFIT_CHECK=0 bypasses this check (not recommended)."
+        )
+    return checked
+
+
 def load_and_reprocess(model: torch.nn.Module, named_tensors: Iterable[tuple[str, torch.Tensor]]) -> None:
     """Standard ``load_weights`` bracketed by MXFP8 layout staging / re-processing, then self-checks."""
+    named_tensors = list(named_tensors)
+    check_sync_matches_engine(model, named_tensors)  # before anything is written into the engine
     staged = stage_mxfp8_moe_scales(model)
     model.load_weights(named_tensors)
     moe_snapshot = snapshot_mxfp8_moe_for_check(model)

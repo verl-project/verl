@@ -169,9 +169,12 @@ def expected_train_quantized(name: str, report: TrainFp8Report) -> bool | None:
 
 
 def audit_layer_sets(
-    report: TrainFp8Report, hf_names: Iterable[str], rollout_quantizes: Callable[[str], bool]
+    report: TrainFp8Report,
+    hf_names: Iterable[str],
+    rollout_quantizes: Callable[[str], bool],
+    rollout_label: str = "the rollout-side rule",
 ) -> list[str]:
-    """Return one line per HF parameter on which training and rollout disagree."""
+    """Return one line per HF parameter on which training and ``rollout_quantizes`` disagree."""
     problems = []
     for name in hf_names:
         expected = expected_train_quantized(name, report)
@@ -179,10 +182,19 @@ def audit_layer_sets(
             continue
         actual = bool(rollout_quantizes(name))
         if actual and not expected:
-            problems.append(f"{name}: the rollout-side rule quantizes it, training ran it in high precision")
+            problems.append(f"{name}: {rollout_label} quantizes it, training ran it in high precision")
         elif expected and not actual:
-            problems.append(f"{name}: training ran it in fp8, the rollout-side rule does not quantize it")
+            problems.append(f"{name}: training ran it in fp8, {rollout_label} does not quantize it")
     return problems
+
+
+# What the rollout-side predicate stands for, per source. Said out loud in every message so a reader
+# knows whether a disagreement is about the sync, the engine as configured, or the engine as built.
+ROLLOUT_LABELS = {
+    "sglang": "the weight-sync rule (verl/utils/fp8_utils.py exclude + include lists)",
+    "vllm": "the engine blacklist as configured (quantization_config.ignored_layers)",
+    "engine": "the rollout engine's live parameters (read back from the engine)",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -218,15 +230,23 @@ def vllm_rollout_predicate(num_hidden_layers: int, keep_high_precision: Iterable
 
 
 class QuantLayerAuditor:
-    """Records one weight sync's HF names, then compares against the training-side fp8 trace."""
+    """Records one weight sync's HF names, then compares against the training-side fp8 trace.
 
-    def __init__(self, rollout_quantizes: Callable[[str], bool] | None, mode: str):
+    The rollout side of the comparison is, in order of preference: what the engine reports about its
+    own parameters (``run(..., engine_truth=...)``, available on vLLM where ``collective_rpc`` returns
+    values), else the configured rule (``rollout_quantizes``): on SGLang the weight-sync rule, on vLLM
+    the engine blacklist restated on names. Which one was used is stated in every message.
+    """
+
+    def __init__(self, rollout_quantizes: Callable[[str], bool] | None, mode: str, engine: str = ""):
         self.rollout_quantizes = rollout_quantizes
         self.mode = mode
+        self.engine = engine
         self.enabled = rollout_quantizes is not None and mode not in ("0", "off", "false")
         self.done = False
         self.names: list[str] = []
         self.inactive_runs = 0  # syncs that found no fp8 trace; the first one (before any step) is expected
+        self._pending_report: TrainFp8Report | None = None
 
     @classmethod
     def from_worker(cls, worker) -> QuantLayerAuditor:
@@ -242,7 +262,8 @@ class QuantLayerAuditor:
                 # bf16 rollout, or quantized rollout on a bf16 trainer: no "matched" claim to audit
                 return cls(None, mode)
             hf_config = engine.model_config.hf_config
-            if rollout_cfg.get("name", "") == "sglang":
+            engine_name = rollout_cfg.get("name", "")
+            if engine_name == "sglang":
                 from verl.utils.sglang.sglang_fp8_utils import SGLangFP8QuantizerHelper, build_sglang_fp8_quant_config
                 from verl.utils.sglang.sglang_mxfp8_utils import (
                     SGLangMXFP8QuantizerHelper,
@@ -259,7 +280,7 @@ class QuantLayerAuditor:
 
                 keep = MXFP8_KEEP_HIGH_PRECISION_LAYERS if quantization == "mxfp8" else ()
                 pred = vllm_rollout_predicate(hf_config.num_hidden_layers, keep)
-            return cls(pred, mode)
+            return cls(pred, mode, engine=engine_name)
         except Exception as err:  # noqa: BLE001 - the audit must never break weight sync
             logger.warning("quantized-layer audit disabled: %s", err)
             return cls(None, mode)
@@ -274,11 +295,23 @@ class QuantLayerAuditor:
             self.names.append(name)
             yield name, tensor
 
-    def run(self, modules) -> list[str] | None:
-        """After a sync: compare. Returns the mismatch list, or None if not run (disabled / no fp8 trace yet)."""
+    def wants_engine_truth(self, modules) -> bool:
+        """True when the next ``run`` will compare, so the caller may fetch the engine's own answer first."""
+        if not self.enabled or self.done or not self.names:
+            return False
+        self._pending_report = collect_train_fp8_report(modules)
+        return self._pending_report.active
+
+    def run(self, modules, engine_truth: dict[str, bool] | None = None) -> list[str] | None:
+        """After a sync: compare. Returns the mismatch list, or None if not run (disabled / no fp8 trace yet).
+
+        ``engine_truth`` maps HF parameter names to "the engine holds this parameter quantized", as read
+        back from the rollout engine; when given it replaces the configured rule.
+        """
         if not self.enabled or self.done or not self.names:
             return None
-        report = collect_train_fp8_report(modules)
+        report = self._pending_report if self._pending_report is not None else collect_train_fp8_report(modules)
+        self._pending_report = None
         if not report.active:
             self.inactive_runs += 1
             if report.transpose_cache_disabled or self.inactive_runs >= 2:
@@ -293,39 +326,69 @@ class QuantLayerAuditor:
                     "than offload_megatron_model_to_cpu clears module._fp8_workspaces"
                 )
                 logger.warning(
-                    "quantized-layer audit: no training-side signal on this rank (%d of %d decoder layers seen), "
-                    "the audit cannot run. Cause: %s. The train/rollout layer sets are therefore unverified.",
-                    len(report.seen_layers),
+                    "quantized-layer audit: no training-side signal on this rank (0 of %d decoder layers left an "
+                    "fp8 trace), the audit cannot run. Cause: %s. The train/rollout layer sets are therefore "
+                    "unverified.",
                     len(report.seen_layers),
                     cause,
                 )
                 return None
             logger.debug("quantized-layer audit: no fp8 workspaces yet (sync before the first training step)")
             return None
-        problems = audit_layer_sets(report, self.names, self.rollout_quantizes)
+        if engine_truth is not None:
+            label = ROLLOUT_LABELS["engine"]
+            pred = lambda n: bool(engine_truth.get(n, False))  # noqa: E731
+        else:
+            label = ROLLOUT_LABELS.get(self.engine, "the rollout-side rule")
+            pred = self.rollout_quantizes
+        problems = audit_layer_sets(report, self.names, pred, rollout_label=label)
         self.done = True
         n_q = len(report.quantized_layers)
         n_seen = len(report.seen_layers)
         if not problems:
             logger.info(
-                "quantized-layer audit: training and rollout quantize the same layers (%d of %d decoder layers "
-                "on this rank in fp8, %d parameters checked)",
+                "quantized-layer audit: training and %s quantize the same layers (%d of %d decoder layers on this "
+                "rank in fp8, %d parameters checked)",
+                label,
                 n_q,
                 n_seen,
                 len(self.names),
             )
             return []
+        if engine_truth is not None:
+            meaning = (
+                "This compared the layers that ran fp8 GEMMs on the training side (TE fp8 weight workspaces) "
+                "against the parameters the rollout engine itself reports as quantized: a disagreement is a "
+                "real train/rollout precision mismatch on that layer."
+            )
+        elif self.engine == "sglang":
+            meaning = (
+                "This compared the layers that ran fp8 GEMMs on the training side (TE fp8 weight workspaces) "
+                "against the weight-sync rule, NOT against the engine's live parameters. A name the rule does "
+                "not quantize is shipped as bf16; if the engine built that layer as fp8 the loader's "
+                "sync-vs-engine dtype check reports it at load time."
+            )
+        elif self.engine == "vllm":
+            meaning = (
+                "This compared the layers that ran fp8 GEMMs on the training side (TE fp8 weight workspaces) "
+                "against the engine blacklist as configured, NOT against the engine's live parameters (the "
+                "engine could not be asked). On vLLM the sync follows the engine's live dtype, so a "
+                "disagreement means engine and trainer quantize different layers, not that the sync is broken."
+            )
+        else:
+            meaning = (
+                "This compared the layers that ran fp8 GEMMs on the training side (TE fp8 weight workspaces) "
+                "against the configured rollout-side rule, NOT against the engine's live parameters."
+            )
         msg = (
-            f"quantized-layer audit: training and rollout disagree on {len(problems)} parameter(s) "
+            f"quantized-layer audit: training and {label} disagree on {len(problems)} parameter(s) "
             f"({n_q} of {n_seen} decoder layers on this rank ran fp8 GEMMs):\n  - "
             + "\n  - ".join(problems[:40])
             + ("\n  - ..." if len(problems) > 40 else "")
-            + "\nThe 'matched' train/rollout grid only holds for layers both sides quantize. On SGLang the rule "
-            "evaluated is the sync-time one (verl/utils/fp8_utils.py): a name it does not quantize is shipped "
-            "unquantized even when the engine built that layer as fp8, so the engine casts bf16 into the fp8 "
-            "buffer and never receives a scale. On vLLM it is the engine blacklist. Fix with "
-            "quantization_config.ignored_layers / the sync rule (rollout) or first_last_layers_bf16 / model "
-            "wiring (training). VERL_QUANT_LAYER_AUDIT=raise turns this into an error, =0 silences it."
+            + "\n"
+            + meaning
+            + " Fix with quantization_config.ignored_layers / the sync rule (rollout) or first_last_layers_bf16 / "
+            "model wiring (training). VERL_QUANT_LAYER_AUDIT=raise turns this into an error, =0 silences it."
         )
         if self.mode == "raise":
             raise RuntimeError(msg)

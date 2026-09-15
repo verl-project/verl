@@ -192,6 +192,16 @@ class ServerAdapter(BaseRollout):
         future = self.server_handle.collective_rpc.remote(method, timeout=timeout, args=args, kwargs=kwargs)
         return future if non_block else await future
 
+    async def quantized_param_names(self, names: list[str]) -> dict[str, bool] | None:
+        """Ask the engine which of these HF parameters it holds as fp8 weights (None if it cannot be asked)."""
+        results = await self._execute_method("quantized_param_names", kwargs={"names": list(names)})
+        if not results:
+            return None
+        flags = results[0]  # one list per worker; every rank holds the same layers as fp8
+        if not isinstance(flags, list) or len(flags) != len(names):
+            return None
+        return dict(zip(names, flags, strict=True))
+
     async def resume(self, tags: list[str]):
         """Resume rollout weights or kv cache in GPU memory.
 

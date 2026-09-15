@@ -395,3 +395,114 @@ def test_self_check_catches_a_stale_swizzled_copy():
 def test_loader_fqn_matches_function():
     mod, fn = refit.LOADER_FQN.rsplit(".", 1)
     assert mod == refit.__name__ and getattr(refit, fn) is refit.load_and_reprocess
+
+
+def _engine_model():
+    """An SGLang-shaped Qwen-MoE-ish model: fused qkv / gate_up, fp8 where the engine quantized, bf16 elsewhere."""
+
+    def lin(n, k, fp8):
+        m = torch.nn.Module()
+        m.weight = torch.nn.Parameter(
+            torch.zeros(n, k, dtype=torch.float8_e4m3fn if fp8 else torch.bfloat16), requires_grad=False
+        )
+        return m
+
+    layer = torch.nn.Module()
+    layer.self_attn = torch.nn.Module()
+    layer.self_attn.qkv_proj = lin(192, 64, True)
+    layer.self_attn.o_proj = lin(64, 64, True)
+    layer.input_layernorm = lin(64, 1, False)
+    layer.mlp = torch.nn.Module()
+    layer.mlp.gate = lin(8, 64, False)  # router: ReplicatedLinear(quant_config=None)
+    layer.mlp.shared_expert_gate = lin(1, 64, False)
+    layer.mlp.experts = _MoE(random=False)  # fp8 fused experts (w13_weight / w2_weight)
+    layer.block_sparse_moe = torch.nn.Module()  # Mixtral naming, same fused experts
+    layer.block_sparse_moe.experts = _MoE(random=False)
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.embed_tokens = lin(1000, 64, False)
+    model.model.layers = torch.nn.ModuleList([layer])
+    model.lm_head = lin(1000, 64, False)
+    return model
+
+
+def test_resolve_engine_param_follows_sglang_fusion_and_stops_at_fused_experts():
+    m = _engine_model()
+    L = m.model.layers[0]
+    assert refit.resolve_engine_param(m, "model.layers.0.self_attn.q_proj.weight") is L.self_attn.qkv_proj.weight
+    assert refit.resolve_engine_param(m, "model.layers.0.self_attn.k_proj.weight") is L.self_attn.qkv_proj.weight
+    assert refit.resolve_engine_param(m, "model.layers.0.mlp.experts.3.gate_proj.weight") is L.mlp.experts.w13_weight
+    assert refit.resolve_engine_param(m, "model.layers.0.mlp.experts.3.down_proj.weight") is L.mlp.experts.w2_weight
+    assert (
+        refit.resolve_engine_param(m, "model.layers.0.block_sparse_moe.experts.5.w1.weight")
+        is L.block_sparse_moe.experts.w13_weight
+    )
+    assert (
+        refit.resolve_engine_param(m, "model.layers.0.block_sparse_moe.experts.5.w2.weight")
+        is L.block_sparse_moe.experts.w2_weight
+    )
+    assert (
+        refit.resolve_engine_param(m, "model.layers.0.mlp.experts.gate_up_proj") is L.mlp.experts.w13_weight
+    )  # transformers>=5 fused
+    assert refit.resolve_engine_param(m, "model.layers.0.mlp.gate.weight") is L.mlp.gate.weight
+    assert refit.resolve_engine_param(m, "lm_head.weight") is m.lm_head.weight
+    assert (
+        refit.resolve_engine_param(m, "model.visual.blocks.0.attn.qkv.weight") is None
+    )  # unknown: skipped, not judged
+
+
+def test_sync_vs_engine_dtype_check_names_every_precision_mismatch(monkeypatch):
+    monkeypatch.delenv("VERL_MXFP8_REFIT_CHECK", raising=False)
+    m = _engine_model()
+    fp8 = lambda *shape: torch.zeros(*shape, dtype=torch.float8_e4m3fn)  # noqa: E731
+    bf16 = lambda *shape: torch.zeros(*shape, dtype=torch.bfloat16)  # noqa: E731
+    consistent = [
+        ("model.embed_tokens.weight", bf16(1000, 64)),
+        ("model.layers.0.self_attn.q_proj.weight", fp8(64, 64)),
+        ("model.layers.0.self_attn.q_proj.weight_scale_inv", torch.zeros(64, 2, dtype=torch.uint8)),
+        ("model.layers.0.input_layernorm.weight", bf16(64)),
+        ("model.layers.0.mlp.gate.weight", bf16(8, 64)),
+        ("model.layers.0.mlp.shared_expert_gate.weight", bf16(1, 64)),
+        ("model.layers.0.mlp.experts.0.gate_proj.weight", fp8(64, 64)),
+        ("model.layers.0.mlp.experts.0.down_proj.weight", fp8(64, 64)),
+        ("model.visual.blocks.0.attn.qkv.weight", bf16(4, 4)),  # unresolved name: not judged
+        ("lm_head.weight", bf16(1000, 64)),
+    ]
+    assert refit.check_sync_matches_engine(m, consistent) == 8
+    broken = consistent + [
+        ("model.layers.0.block_sparse_moe.experts.0.w1.weight", bf16(64, 64)),  # Mixtral: rule missed it
+        ("model.layers.0.block_sparse_moe.experts.0.w2.weight", bf16(64, 64)),
+        ("model.layers.0.mlp.shared_expert_gate.weight", fp8(1, 64)),  # pre-fix rule: quantized a bf16 layer
+    ]
+    try:
+        refit.check_sync_matches_engine(m, broken)
+    except RuntimeError as e:
+        msg = str(e)
+        assert "disagree on the precision of 3 parameter(s)" in msg
+        assert "block_sparse_moe.experts.0.w1.weight: the sync ships torch.bfloat16, the engine parameter is fp8" in msg
+        assert "mlp.shared_expert_gate.weight: the sync ships fp8, the engine parameter is high precision" in msg
+    else:
+        raise AssertionError("expected the dtype check to report the mismatches")
+    monkeypatch.setenv("VERL_MXFP8_REFIT_CHECK", "0")
+    assert refit.check_sync_matches_engine(m, broken) == 0
+
+
+def test_loader_runs_the_dtype_check_before_writing_anything():
+    _install_stub("auto")
+    m = _Model(resolved_backend="flashinfer_cutlass")
+    m.a.weight_scale_inv.data.fill_(3)
+    before = m.a.weight_scale_inv.data.clone()
+    # ship a bf16 tensor for a.weight, which the engine holds as fp8 -> refused before load_weights runs
+    try:
+        refit.load_and_reprocess(
+            m,
+            [
+                ("a.weight_scale_inv", torch.full_like(before, 9)),
+                ("a.weight", torch.zeros(4, 64, dtype=torch.bfloat16)),
+            ],
+        )
+    except RuntimeError as e:
+        assert "a.weight: the sync ships torch.bfloat16, the engine parameter is fp8" in str(e)
+    else:
+        raise AssertionError("expected the dtype check to refuse the sync")
+    assert torch.equal(m.a.weight_scale_inv.data, before) and m.loaded == []  # nothing was written

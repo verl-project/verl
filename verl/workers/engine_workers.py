@@ -813,7 +813,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         await self.rollout.update_weights(
             per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
         )
-        auditor.run(getattr(self.actor.engine, "module", []))
+        train_modules = getattr(self.actor.engine, "module", [])
+        engine_truth = None
+        if auditor.wants_engine_truth(train_modules) and hasattr(self.rollout, "quantized_param_names"):
+            # vLLM can be asked which parameters it really holds as fp8; SGLang has no return channel and
+            # instead checks sync-vs-engine dtype inside its weight loader.
+            try:
+                engine_truth = await self.rollout.quantized_param_names(auditor.names)
+            except Exception as err:  # noqa: BLE001 - fall back to the configured rule
+                logger.warning("quantized-layer audit: could not read the engine's quantized parameters: %s", err)
+        auditor.run(train_modules, engine_truth=engine_truth)
 
         log_gpu_memory_usage("After update_weights", logger=logger)
 

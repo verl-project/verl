@@ -321,7 +321,11 @@ stale kernel scale layouts after a weight sync). verl now fails loudly in both c
   presumes both sides quantize the same layers, but training decides implicitly (TE linear modules
   inside `fp8_autocast`) and rollout decides by name blacklist (`ignored_layers`). At the first weight
   sync after a training step, verl reads which decoder layers actually ran fp8 GEMMs (TE's fp8 weight
-  workspaces), evaluates the rollout's own selection rule on every synced parameter name, and logs
+  workspaces) and compares them, per synced parameter name, with the rollout side. What "the rollout
+  side" is depends on the engine and every message says which: on vLLM the engine is asked directly
+  (`collective_rpc` into the worker, which resolves each HF name onto its live parameter and reports
+  its dtype); on SGLang there is no return channel, so the trainer compares against the weight-sync
+  rule and the loader's sync-vs-engine dtype check (next bullet) covers the sync-to-engine half. It logs
   each disagreement (e.g. `first_last_layers_bf16` without the matching rollout regex, a router the
   name patterns miss, `lm_head` left in the quantized set, Mixtral's `w1/w2/w3` experts that the
   SGLang sync-time include list does not match). On SGLang the rule evaluated is the sync-time
@@ -332,6 +336,13 @@ stale kernel scale layouts after a weight sync). verl now fails loudly in both c
   when there is no signal at all — `disable_parameter_transpose_cache=True` makes TE skip the cache —
   the audit warns once that it cannot run instead of staying silent. `VERL_QUANT_LAYER_AUDIT=raise`
   turns the report into an error, `=0` disables it.
+- **Sync-vs-engine dtype check** (SGLang loader). Before a sync is written into the engine, every
+  incoming linear weight's dtype is compared with the dtype of the engine parameter that will receive it
+  (HF names are mapped onto SGLang's fused modules: `q_proj` → `qkv_proj`, `gate_proj` → `gate_up_proj`,
+  per-expert names → the fused `w13` / `w2` tensors). A bf16 tensor headed for an fp8 parameter, or fp8
+  data headed for a bf16 one, is refused by name instead of being cast silently by `load_weights` —
+  e.g. Mixtral's `experts.N.w1/w2/w3`, which the sync rule does not match while the engine built them as
+  fp8. Disabled with `VERL_MXFP8_REFIT_CHECK=0`.
 - **MoE experts on SGLang.** SGLang's MXFP8 MoE method rewrites the expert scales in place at
   load (swizzled on the Triton MoE runner, packed on DeepGEMM), so the refit loader stages them
   back to the canonical `[E, N, K/32]` layout for `load_weights` and re-derives the kernel layout

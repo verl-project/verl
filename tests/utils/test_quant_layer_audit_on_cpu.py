@@ -18,6 +18,7 @@ import torch
 
 from verl.utils.quant_layer_audit import (
     FP8_WORKSPACE_SEEN_ATTR,
+    ROLLOUT_LABELS,
     QuantLayerAuditor,
     audit_layer_sets,
     collect_train_fp8_report,
@@ -198,7 +199,7 @@ def test_auditor_waits_for_the_first_training_step_then_runs_once(monkeypatch, c
     list(auditor.record(iter(weights)))
     problems = auditor.run([_Chunk(quantized_layers={1, 2})])
     assert len(problems) == 2 * 7 and auditor.done  # 7 linear weights per bf16 layer
-    assert "training and rollout disagree" in caplog.text
+    assert "training and the rollout-side rule disagree on 14 parameter(s)" in caplog.text
     # later syncs: pass-through, no re-run
     assert list(auditor.record(iter(weights))) == weights and auditor.run([]) is None
 
@@ -270,3 +271,42 @@ def test_auditor_names_disable_parameter_transpose_cache_as_the_cause(caplog):
     list(auditor.record((n, torch.zeros(1)) for n in _hf_names()))
     assert auditor.run([chunk]) is None and auditor.done
     assert "disable_parameter_transpose_cache=True" in caplog.text
+
+
+def test_messages_say_what_the_rollout_side_of_the_comparison_was(caplog):
+    names = _hf_names()
+    weights = [(n, torch.zeros(1)) for n in names]
+    # SGLang without engine truth: the rule compared is the weight-sync rule, and the message says so
+    sgl = QuantLayerAuditor(_sglang_pred(), "warn", engine="sglang")
+    list(sgl.record(iter(weights)))
+    problems = sgl.run([_Chunk(quantized_layers={1, 2})])
+    assert problems and all("the weight-sync rule" in p for p in problems)
+    assert "NOT against the engine's live parameters" in caplog.text and "sync-vs-engine dtype check" in caplog.text
+    caplog.clear()
+    # vLLM without engine truth: the engine blacklist as configured
+    vl = QuantLayerAuditor(vllm_rollout_predicate(N_LAYERS, ("lm_head", "model.embed_tokens")), "warn", engine="vllm")
+    list(vl.record(iter(weights)))
+    assert all("the engine blacklist as configured" in p for p in vl.run([_Chunk(quantized_layers={1, 2})]))
+    assert "the engine could not be asked" in caplog.text
+
+
+def test_engine_truth_replaces_the_configured_rule(caplog):
+    names = _hf_names()
+    weights = [(n, torch.zeros(1)) for n in names]
+    # The configured rule (blacklist) says every decoder linear is fp8; the engine, asked directly, says
+    # it kept layer 3's MLP in bf16 (e.g. model code passed quant_config=None). Truth wins over the rule.
+    truth = {n: n.endswith("_proj.weight") and not n.startswith("model.layers.3.mlp.") for n in names}
+    aud = QuantLayerAuditor(vllm_rollout_predicate(N_LAYERS, ("lm_head", "model.embed_tokens")), "warn", engine="vllm")
+    list(aud.record(iter(weights)))
+    chunk = _Chunk(quantized_layers=set(range(N_LAYERS)))
+    assert aud.wants_engine_truth(chunk)  # a training step happened: the caller should ask the engine now
+    problems = aud.run(chunk, engine_truth=truth)
+    assert sorted(problems) == sorted(
+        f"model.layers.3.mlp.{leaf}.weight: training ran it in fp8, {ROLLOUT_LABELS['engine']} does not quantize it"
+        for leaf in ("gate_proj", "up_proj", "down_proj")
+    )
+    assert "real train/rollout precision mismatch" in caplog.text
+    # before any training step the caller must not bother the engine
+    fresh = QuantLayerAuditor(_sglang_pred(), "warn", engine="sglang")
+    list(fresh.record(iter(weights)))
+    assert not fresh.wants_engine_truth(_Chunk(quantized_layers=set()))
