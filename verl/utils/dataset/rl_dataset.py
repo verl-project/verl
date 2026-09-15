@@ -337,8 +337,11 @@ class RLHFDataset(Dataset):
                         image = image.convert("RGB")
                         content_list.append({"type": "image", "image": image})
                     elif isinstance(image, dict):
+                        image = dict(image)
                         if "bytes" in image:
-                            image["image"] = Image.open(BytesIO(image["bytes"]))
+                            with Image.open(BytesIO(image.pop("bytes"))) as decoded_image:
+                                # Pillow loads lazily, so detach the image before closing the byte stream.
+                                image["image"] = decoded_image.copy()
                         content_list.append({"type": "image", **image})
                     elif isinstance(image, str | os.PathLike):
                         content_list.append({"type": "image", "image": os.fspath(image)})
