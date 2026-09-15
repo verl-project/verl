@@ -83,7 +83,7 @@ The following lists commonly set sglang feature parameters in verl. For more inf
 
 ### 1. FSDP
 
-Ascend provides FSDP support capabilities through torch_npu. For the current PyTorch API support status, refer to the [Release Notes](https://www.hiascend.com/document/detail/en/Pytorch/latest/apiref/nativeapi/docs/en/native_apis/pytorch_2-12-0/torch-distributed-fsdp.md).
+Ascend provides support for FSDP through torch_npu. For the current PyTorch API support level, refer to the [Release Notes](https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/nativeapi/docs/zh/native_apis/pytorch_2-12-0/torch-distributed-fsdp.md).
 
 #### FSDP1
 ##### Parameter Feature Support
@@ -282,30 +282,32 @@ VeOmni is a unified reinforcement learning training backend designed for the eff
 
 #### Parameter Feature Support
 
-| verl parameter | Description |
+| verl Parameter | Description |
 | --- | --- |
-| `actor_rollout_ref.actor.veomni.param_offload` | Determines whether to offload model weights to the CPU. The default value is False. |
-| `actor_rollout_ref.actor.veomni.optimizer_offload` | Determines whether to offload optimizer states to the CPU. The default value is False. |
+| `actor_rollout_ref.actor.veomni.param_offload` | Whether to offload model weights to the CPU. The default value is False. |
+| `actor_rollout_ref.actor.veomni.optimizer_offload` | Whether to offload optimizer states to the CPU. The default value is False. |
 | `actor_rollout_ref.actor.veomni.fsdp_size` | The number of NPUs in each FSDP shard group. The default value -1 indicates automatic configuration. |
 | `actor_rollout_ref.actor.veomni.ulysses_parallel_size` | The Ulysses sequence parallelism size. The default value is 1. |
 | `actor_rollout_ref.actor.veomni.expert_parallel_size` | The expert parallelism size. The default value is 1. |
-| `actor_rollout_ref.actor.veomni.mixed_precision` | Determines whether to enable mixed precision training. The default value is true. |
-| `actor_rollout_ref.actor.veomni.enable_full_shard` | Determines whether to enable full sharding (ZeRO-3). The default value is true. |
-| `actor_rollout_ref.actor.veomni.forward_prefetch` | Determines whether to prefetch the all-gather for the next forward pass before the current forward computation completes. The default value is true. |
+| `actor_rollout_ref.actor.veomni.mixed_precision` | Whether to enable mixed precision training. The default value is true. |
+| `actor_rollout_ref.actor.veomni.enable_full_shard` | Whether to enable full sharding (ZeRO-3). The default value is true. |
+| `actor_rollout_ref.actor.veomni.forward_prefetch` | Whether to prefetch the all-gather for the next forward pass before the current forward computation is complete. The default value is true. |
 | `actor_rollout_ref.actor.veomni.attn_implementation` | The attention implementation method. Supported values include eager, sdpa, flash_attention_2, flash_attention_3, veomni_flash_attention_2_with_sp, veomni_flash_attention_3_with_sp, native-sparse, and so on. |
 | `actor_rollout_ref.actor.veomni.moe_implementation` | The MoE implementation method. Supported values are eager or fused. The default value is fused. |
 | `actor_rollout_ref.actor.veomni.cross_entropy_loss_implementation` | The cross-entropy loss implementation. The default value is eager. |
 | `actor_rollout_ref.actor.veomni.rms_norm_implementation` | The RMSNorm implementation. The default value is eager. |
 | `actor_rollout_ref.actor.veomni.swiglu_mlp_implementation` | The SwiGLU MLP implementation. The default value is eager. |
-| `actor_rollout_ref.actor.veomni.rotary_pos_emb_implementation` | The rotary position embedding implementation. The default value is eager. |
+| `actor_rollout_ref.actor.veomni.rotary_pos_emb_implementation` | The rotary positional encoding implementation. The default value is eager. |
 | `actor_rollout_ref.actor.veomni.load_balancing_loss_implementation` | The MoE load balancing loss implementation. The default value is eager. |
-| `actor_rollout_ref.actor.veomni.use_torch_compile` | Determines whether to use torch compile. The default value is false. |
-| `actor_rollout_ref.actor.veomni.forward_only` | Determines whether to perform only forward computation. The default value is false. |
-| `actor_rollout_ref.actor.veomni.enable_fsdp_offload` | Determines whether to enable CPU offloading for FSDP. The default value is false. |
-| `actor_rollout_ref.actor.veomni.enable_reentrant` | Determines whether to use reentrant gradient checkpointing. The default value is false. |
+| `actor_rollout_ref.actor.veomni.use_torch_compile` | Whether to use torch compile. The default value is false. |
+| `actor_rollout_ref.actor.veomni.forward_only` | Whether to perform only forward computation. The default value is false. |
+| `actor_rollout_ref.actor.veomni.enable_fsdp_offload` | Whether to enable CPU offloading for FSDP. The default value is false. |
+| `actor_rollout_ref.actor.veomni.enable_reentrant` | Whether to use reentrant gradient checkpointing. The default value is false. |
 | `actor_rollout_ref.actor.veomni.ckpt_manager` | The checkpoint manager. The default value is dcp. |
 | `actor_rollout_ref.actor.veomni.init_device` | The device for initializing model weights. Supported values are cpu, cuda, meta, and npu. The default value is meta. |
-| `actor_rollout_ref.actor.veomni.activation_gpu_limit` | The activation device memory limit allowed to be retained on the GPU during activation offloading (in GB). The default value is 0.0. |
+| `actor_rollout_ref.actor.veomni.enable_async_activation_offload` | Whether to enable asynchronous activation offloading based on an independent stream. The default value is false. The VeOmni backend supports only this mode. Setting `actor_rollout_ref.model.enable_activation_offload` directly causes an error. |
+| `actor_rollout_ref.actor.veomni.activation_offload_modules` | The module name matching pattern for asynchronous activation offloading. The default value is [] (automatically discovered from the model's `_no_split_modules`). |
+| `actor_rollout_ref.actor.veomni.activation_offload_host_cache_limit_gb` | The upper limit (in GB) of the idle pinned host buffer retained between steps for asynchronous activation offloading. The default value is 4.0. |
 | `actor_rollout_ref.rollout.moe_load_balance_metrics_interval` | The interval for reporting MoE expert load metrics on the rollout side. The default value is 0 (disabled). You must also enable `actor_rollout_ref.rollout.enable_rollout_routing_replay` to record routing decisions. |
 
 #### Router Replay Support
@@ -347,3 +349,54 @@ actor_rollout_ref.actor.veomni.moe_implementation=fused
 - **MoE optimization**: Provides a fused MoE implementation and the Router Replay feature to improve MoE model training efficiency
 - **Operator optimization**: Supports multiple attention and MLP operator implementations, allowing you to select the optimal implementation based on the hardware
 - **Flexible deployment**: Supports NVIDIA GPUs and Huawei Ascend NPUs, providing good cross-platform compatibility
+
+---
+
+## Checkpoint Engine Backend
+
+Checkpoint Engine is a unified abstraction layer in verl used to synchronize weights between the training and inference sides. It is mainly used in off-policy scenarios, such as separate async (training/inference separation) in the v1 trainer. These scenarios require configuring a non-`naive` backend. Currently, the Ascend NPU supports two backends: `nccl` (automatically recognized as HCCL) and `mooncake`.
+
+### 1. HCCL
+
+When you configure `actor_rollout_ref.rollout.checkpoint_engine.backend=nccl` on an Ascend NPU, verl automatically recognizes and uses the HCCL backend for weight synchronization. You do not need to modify the configuration. This backend is based on HCCL collective communication, where the training side sends the weights to each rollout worker using broadcast.
+
+#### Parameter Feature Support
+
+| verl parameter | Description |
+| --- | --- |
+| `actor_rollout_ref.rollout.checkpoint_engine.backend` | The Checkpoint Engine backend. When set to `nccl` on the NPU, it is automatically recognized as the HCCL backend. |
+| `actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes` | The bucket size for a single weight transfer (MB). The default value is 2048. HCCL uses double buffering for sending and receiving, and the NPU device memory overhead is twice the bucket size. This value must be greater than the memory usage of the largest weight tensor in the model. If the value is insufficient, increase it (for example, to 4096). |
+| `actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.nccl.group_name` | The HCCL process group name. The default value is default. |
+| `actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.nccl.rebuild_group` | Whether to rebuild the HCCL process group on each weight update. The default value is False. |
+
+### 2. Mooncake
+
+On Ascend NPUs, you can also configure `actor_rollout_ref.rollout.checkpoint_engine.backend=mooncake` to synchronize weights in a peer-to-peer manner using the Mooncake Transfer Engine. On NPUs, you must specify the device as npu using engine_kwargs. In this case, the Transfer Engine uses the `ascend_direct` transfer protocol.
+
+Note: Mooncake Transfer Engine does not provide an Ascend precompiled package. You must compile and install it from the source code. For details, refer to [transfer-engine: ascend direct](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/design/transfer-engine/ascend_direct_transport.md).
+
+#### Parameter Feature Support
+
+| verl parameter | Description|
+| --- | --- |
+| `actor_rollout_ref.rollout.checkpoint_engine.backend` |Checkpoint Engine backend, set to `mooncake`|
+| `actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes` |Bucket size for a single weight transfer (MB), default value is 2048|
+| `actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.mooncake.device` |Checkpoint Engine running device, set to `npu` on NPU|
+| `actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.mooncake.device_name` |Mooncake device name filter, default value is empty|
+
+### Usage Examples
+
+The typical configuration on the NPU in the v1 trainer separate async scenario is as follows:
+
+```bash
+# Set v1 trainer separate async mode
+trainer.use_v1=True
+trainer.v1.trainer_mode=separate_async
+
+# Method 1: nccl backend (automatically recognized as HCCL on NPU)
+actor_rollout_ref.rollout.checkpoint_engine.backend=nccl
+
+# Method 2: mooncake backend (specify device as npu on NPU)
+actor_rollout_ref.rollout.checkpoint_engine.backend=mooncake
++actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.mooncake.device=npu
+```

@@ -300,6 +300,6 @@ Performance Profiling
 -----------------------------------
 For detailed documentation on NPU profiling, refer to the `Profiling Guide <../../dev_guide/performance/ascend_profiling.rst>`_.
 
-After data collection is complete, you can use `MindStudio Insight <https://www.hiascend.com/document/detail/en/mindstudio/830/GUI_baseddevelopmenttool/MindStudioInsight/Insight_userguide_0002.html>`_ to parse the data.
+After data collection is complete, you can use `MindStudio Insight <https://www.hiascend.com/document/detail/zh/mindstudio/830/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html>`_ to parse the data.
 
 Note: Collecting full Profiling on the verl framework generates massive and duplicate operator records. You can modify the code according to the documentation to collect only key stages.

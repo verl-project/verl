@@ -29,7 +29,7 @@ In vllm-ascend, you can specify environment variables:
 
 Enable ``torch_npu.npu_mm_all_reduce_base`` in the ``RowParallelLinear`` of the forward computation to merge the separate ``matmul`` and ``allreduce`` into a fused operator.
 
-`RotaryMul&RotaryMulGrad <https://www.hiascend.com/document/detail/en/Pytorch/latest/apiref/customapi/docs/en/custom_APIs/torch_npu/torch_npu-npu_rotary_mul.md>`_
+`RotaryMul&RotaryMulGrad <https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/customapi/docs/zh/custom_APIs/torch_npu/torch_npu-npu_rotary_mul.md>`_
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 torch_npu API:  ``torch_npu.npu_rotary_mul(x, r1, r2)``
@@ -42,7 +42,7 @@ Parameter description:
 
 - r2: The sine value. The input shape must be 4-dimensional, which is generally ``[1, 1, S, D]``, ``[1, S, 1, D]``, or ``[S, 1, 1, D]``.
 
-`RmsNorm&RmsNormGrad <https://www.hiascend.com/document/detail/en/Pytorch/latest/apiref/customapi/docs/en/custom_APIs/torch_npu/(beta)torch_npu-npu_rms_norm.md>`_
+`RmsNorm&RmsNormGrad <https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/customapi/docs/zh/custom_APIs/torch_npu/%EF%BC%88beta%EF%BC%89torch_npu-npu_rms_norm.md>`_
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 torch_npu interface:  ``torch_npu.npu_rms_norm(self, gamma, epsilon=1e-06) -> (Tensor, Tensor)`` 
@@ -60,7 +60,7 @@ Output description:
 
 - The second output is a Tensor, the intermediate result rstd of rms_norm, used for backward computation.
 
-`Swiglu <https://www.hiascend.com/document/detail/en/Pytorch/latest/apiref/customapi/docs/en/custom_APIs/torch_npu/(beta)torch_npu-npu_swiglu.md>`_
+`Swiglu <https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/customapi/docs/zh/custom_APIs/torch_npu/%EF%BC%88beta%EF%BC%89torch_npu-npu_swiglu.md>`_
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 torch_npu API:  ``torch_npu.npu_swiglu(Tensor self, int dim=-1) -> (Tensor)``
@@ -75,7 +75,7 @@ Output description:
 
 - The output is a Tensor, which is the final output y of the calculation formula.
 
-`GroupMatMul <https://www.hiascend.com/document/detail/en/Pytorch/latest/apiref/customapi/docs/en/custom_APIs/torch_npu/torch_npu-npu_grouped_matmul.md>`_
+`GroupMatMul <https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/customapi/docs/zh/custom_APIs/torch_npu/torch_npu-npu_grouped_matmul.md>`_
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Function prototype:
@@ -154,7 +154,7 @@ Megatron fused operators are integrated in MindSpeed. You need to add specific p
 General Ascend Configuration
 ----------------------------
 
-`Operator dispatch <https://www.hiascend.com/document/detail/en/Pytorch/latest/apiref/ENV/docs/en/environment_variable_reference/TASK_QUEUE_ENABLE.md>`_
+`Operator dispatch <https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/ENV/docs/zh/environment_variable_reference/TASK_QUEUE_ENABLE.md>`_
 ************************************************************************************************************************************************************************************************************
 
 You can configure the task_queue operator dispatch queue optimization level using ``TASK_QUEUE_ENABLE``. The default is Level 1 optimization. This configuration can reduce host dispatch time and can be used to alleviate the issue of excessive overall free time caused by dispatch.
@@ -168,7 +168,7 @@ Level 1 splits the operator dispatch task into two stages. The system places a p
 
 Level 2 : Based on the Level 1 optimization, this level further balances the task load between the first-level and second-level pipelines. It mainly migrates workspace-related tasks to the second-level pipeline, achieving better latency hiding and greater performance gains. This configuration takes effect only in binary scenarios. The recommended configuration value is Level 2 optimization.
 
-`Communication Algorithm Orchestration Expansion <https://www.hiascend.com/document/detail/en/canncommercial/850/maintenref/envvar/envref_07_0096.html>`_
+`Communication Algorithm Orchestration Expansion <https://www.hiascend.com/document/detail/zh/canncommercial/850/maintenref/envvar/envref_07_0096.html>`_
 ************************************************************************************************************************************************************************************************************
 Use the environment variable ``HCCL_OP_EXPANSION_MODE=AIV`` to configure the orchestration expansion location of the communication algorithm. The following values are supported:
 

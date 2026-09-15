@@ -6,9 +6,18 @@ Last updated: 2026/08/13.
 Key Updates
 -----------
 
--  2026/08/03: Updated vLLM / vLLM-Ascend from ``0.18.0`` to ``0.23.0``, and adjusted the corresponding base environment versions for vLLM to torch ``2.10.0`` and torch_npu ``2.10.0.post2``.
--  2026/05/13: Updated vLLM / vLLM-Ascend from ``0.13.0`` to ``0.18.0`` according to `PR #6291 <https://github.com/verl-project/verl/pull/6291>`__, and adjusted the corresponding base environment versions for vLLM to torch ``2.9.0`` and torch_npu ``2.9.0.post2``.
--  2025/12/11: Existing verl scenarios currently support automatic identification of NPU device types. In principle, when you run GPU scripts on Ascend, you do not need to explicitly set ``trainer.device=npu``; for new features, you can still prioritize specifying the device type by setting ``trainer.device``.
+-  2026/08/29: Updated MindSpeed / Megatron-LM from ``core_r0.16.0`` to
+   ``core_r0.18.0``\ . Deprecated mbridge and switched to Megatron-Bridge. The Megatron-Bridge version is ``0.5.0``\ .
+-  2026/08/03: Updated vLLM / vLLM-Ascend from ``0.18.0`` to ``0.23.0``\ . The corresponding base environment versions for vLLM
+   are also updated to torch ``2.10.0``\ and torch_npu ``2.10.0.post2``\ .
+-  2026/05/13: Based on \`PR
+   #6291 <https://github.com/verl-project/verl/pull/6291>`__\ , vLLM / vLLM-Ascend were updated from ``0.13.0`` to ``0.18.0``\ . The corresponding base environment versions for vLLM
+   are also updated to torch ``2.9.0``\ and torch_npu
+   ``2.9.0.post2``\ .
+-  2025/12/11: Existing verl scenarios now support automatically identifying NPU device types. In principle, GPU
+   scripts no longer need to explicitly set
+   ``trainer.device=npu``\ when running on Ascend. For new features, you can still set ``trainer.device`` to
+   prioritize specifying the device type.
 
 ..
 
@@ -102,7 +111,7 @@ Key Version Support and Dependencies
      - Triton, used for writing custom operators
    * - triton-ascend
      - ``3.2.2``
-     - NPU Triton adaptation. For the installation command, refer to the script `Installation script <../../../../scripts/install_vllm_mcore_npu.sh>`_
+     - NPU Triton adaptation. For installation commands, refer to the `installation script <../../../../scripts/install_vllm_mcore_npu.sh>`_
    * - transformers
      - ``5.10.4``
      - Hugging Face large model library that provides model architectures and pre-trained weights
@@ -113,10 +122,10 @@ Key Version Support and Dependencies
      - ``0.23.0``
      - NPU vLLM backend adaptation
    * - Megatron-LM
-     - ``core_r0.16.0``
+     - ``core_r0.18.0``
      - Large-scale distributed training framework
    * - MindSpeed
-     - ``core_r0.16.0``
+     - ``core_r0.18.0``
      - Megatron-LM adaptation and optimization component on Ascend NPU
 
 
