@@ -51,6 +51,7 @@ class _FakeEngine:
 
 def _make_server(node_rank: int = 0):
     server = object.__new__(vllm_async_server.vLLMHttpServer)
+    server._default_asyncio_loop = asyncio.get_running_loop()
     server.node_rank = node_rank
     server.engine = _FakeEngine()
     server.engine.server = server

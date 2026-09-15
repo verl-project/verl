@@ -257,6 +257,10 @@ class RolloutReplica(ABC):
     def max_concurrency(self) -> int:
         # 1000 is Ray's default max_concurrency for async execution.
         # Add some margin to account for control method call.
+        # TODO: The vLLMReplica subclass uses separate concurrency groups for
+        # control and generate methods to avoid deadlocks, and so does not use
+        # this method. Other rollout replica subclasses should migrate to
+        # vLLMReplica's approach.
         return max(1000, self.config.max_num_seqs + CONTROL_METHOD_CONCURRENCY)
 
     def rollout_worker_use_gpu(self) -> bool:
