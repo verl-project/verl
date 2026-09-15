@@ -19,7 +19,6 @@ LR scheduling, gradient clipping, and checkpointing to Automodel's
 infrastructure while using verl's training loop, data pipeline, and loss function.
 """
 
-import gc
 import logging
 import os
 from contextlib import nullcontext
@@ -345,7 +344,6 @@ class AutomodelEngine(BaseEngine):
                 load_automodel_model_to_gpu(self.module)
             if optimizer and self.optimizer is not None:
                 load_automodel_optimizer(self.optimizer, get_device_id())
-            gc.collect()
         elif device == "cpu":
             if model:
                 offload_automodel_model_to_cpu(self.module)
