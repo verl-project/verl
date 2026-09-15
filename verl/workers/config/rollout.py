@@ -133,6 +133,13 @@ class CheckpointEngineConfig(BaseConfig):
     backend: Optional[str] = "naive"
     # Bucket size in MB to transfer multiple weights at one time
     update_weights_bucket_megabytes: int = 2048
+    # If True, the weight receiver acks each bucket as soon as the shared
+    # transfer buffer is no longer referenced (before the bucket is processed,
+    # e.g. online quantization + load_weights), so the sender can start filling
+    # the next bucket while the current one is being processed. On the IPC path
+    # this stages one private copy of the bucket (one extra bucket of device
+    # memory). Default False preserves the original lock-step behavior.
+    overlap_bucket_processing: bool = False
     # Additional keyword arguments for checkpoint engine
     engine_kwargs: dict = field(default_factory=dict)
     # If set, this Python module is imported on every worker process before the
