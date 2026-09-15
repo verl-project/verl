@@ -28,10 +28,21 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 import torch.distributed as dist
+from megatron.core import dist_checkpointing
 from megatron.core import parallel_state as mpu
+from megatron.core.dist_checkpointing.strategies.fully_parallel import (
+    FullyParallelLoadStrategyWrapper,
+    FullyParallelSaveStrategyWrapper,
+)
+from megatron.core.dist_checkpointing.strategies.torch import (
+    TorchDistLoadShardedStrategy,
+    TorchDistSaveShardedStrategy,
+)
 
 from verl.trainer.config import CheckpointConfig
 from verl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
+from verl.utils.megatron.dist_checkpointing import load_dist_checkpointing, save_dist_checkpointing
+from verl.workers.config import McoreCheckpointConfig
 
 # ---------------------------------------------------------------------------
 # Session-scoped: initialize torch.distributed + megatron parallel state once
@@ -109,16 +120,19 @@ def _make_manager(
     bridge="auto",
     peft_cls=None,
     use_distributed_optimizer=False,
+    checkpoint_config_cls=CheckpointConfig,
+    **checkpoint_config_kwargs,
 ):
     if save_contents is None:
         save_contents = ["model", "optimizer", "extra"]
     if load_contents is None:
         load_contents = ["model", "optimizer", "extra"]
 
-    ckpt_config = CheckpointConfig(
+    ckpt_config = checkpoint_config_cls(
         save_contents=list(save_contents),
         load_contents=list(load_contents),
         async_save=False,
+        **checkpoint_config_kwargs,
     )
 
     model = _make_mock_model()
@@ -453,7 +467,7 @@ class TestLoadCheckpointDispatch:
         """On the HF path: model loads via bridge; optimizer/extra come from separate dist_ckpt dirs."""
         _make_v2_layout(self.ckpt_path, "optimizer", "extra")
 
-        def fake_load(sharded_state_dict, ckpt_dir):
+        def fake_load(sharded_state_dict, ckpt_dir, fully_parallel_load=True):
             if "optimizer" in sharded_state_dict:
                 return {"optimizer": {"step": 1}, "lr_scheduler": {"last_epoch": 5}}
             if "rng_state" in sharded_state_dict:
@@ -482,7 +496,7 @@ class TestLoadCheckpointDispatch:
         """With dist_ckpt backend, all three subtrees are loaded independently."""
         _make_v2_layout(self.ckpt_path, "model", "optimizer", "extra")
 
-        def fake_load(sharded_state_dict, ckpt_dir):
+        def fake_load(sharded_state_dict, ckpt_dir, fully_parallel_load=True):
             if "model" in sharded_state_dict:
                 return {"model": {"layer.weight": torch.zeros(1)}}
             if "optimizer" in sharded_state_dict:
@@ -655,3 +669,89 @@ class TestModelShardedStateDictNotBuiltUnnecessarily:
 
         mgr.load_checkpoint(ckpt_path)
         mgr.model[0].sharded_state_dict.assert_called_once()
+
+
+# ===========================================================================
+# Tests: fully-parallel save/load strategy wrappers
+# ===========================================================================
+
+
+class TestFullyParallelStrategySelection:
+    """``fully_parallel_{save,load}`` selects the strategy the helpers hand to mcore.
+
+    ``dist_checkpointing.save`` / ``.load`` is the only patched seam; the strategy objects
+    are megatron's real ones. A real save cannot run here because mcore's async writer
+    calls ``torch.cuda.synchronize()`` unconditionally.
+    """
+
+    @pytest.mark.parametrize("fully_parallel", [True, False])
+    def test_save_strategy(self, fully_parallel):
+        with patch.object(dist_checkpointing, "save") as mock_save:
+            save_dist_checkpointing({}, "unused", fully_parallel_save=fully_parallel)
+
+        expected = FullyParallelSaveStrategyWrapper if fully_parallel else TorchDistSaveShardedStrategy
+        assert isinstance(mock_save.call_args.kwargs["sharded_strategy"], expected)
+
+    @pytest.mark.parametrize("fully_parallel", [True, False])
+    def test_load_strategy(self, fully_parallel):
+        with patch.object(dist_checkpointing, "load") as mock_load:
+            load_dist_checkpointing({}, "unused", fully_parallel_load=fully_parallel)
+
+        expected = FullyParallelLoadStrategyWrapper if fully_parallel else TorchDistLoadShardedStrategy
+        assert isinstance(mock_load.call_args.kwargs["sharded_strategy"], expected)
+
+
+class TestFullyParallelConfigPlumbing:
+    """A disabled flag has to reach every dist-checkpoint call site.
+
+    Disabling ``fully_parallel_load`` is what keeps host memory bounded when loading
+    ``fully_reshardable`` checkpoints, so dropping the kwarg at one of the three load
+    subtrees would silently re-enable the wrapper there.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _tmpdir(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.ckpt_path = os.path.join(self.test_dir, "global_step_1")
+        os.makedirs(self.ckpt_path, exist_ok=True)
+        yield
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    @patch("verl.utils.checkpoint.megatron_checkpoint_manager.save_dist_checkpointing", return_value=None)
+    def test_save_forwards_disabled_flag(self, mock_save_dc):
+        mgr = _make_manager(
+            save_contents=["model", "optimizer", "extra"],
+            use_dist_checkpointing=True,
+            checkpoint_config_cls=McoreCheckpointConfig,
+            fully_parallel_save=False,
+        )
+        with patch.object(mgr, "_save_transformer_config"):
+            mgr.save_checkpoint(self.ckpt_path, global_step=1)
+
+        seen = [call.kwargs["fully_parallel_save"] for call in mock_save_dc.call_args_list]
+        assert seen == [False, False, False]  # model / optimizer / extra
+
+    @patch(_PATCH_LOAD_META, return_value=None)
+    @patch("verl.utils.checkpoint.megatron_checkpoint_manager.load_dist_checkpointing")
+    def test_load_forwards_disabled_flag_for_every_subtree(self, mock_load_dc, _mock_meta):
+        _make_v2_layout(self.ckpt_path, "model", "optimizer", "extra")
+
+        def fake_load(sharded_state_dict, ckpt_dir, fully_parallel_load=True):
+            if "model" in sharded_state_dict:
+                return {"model": {"layer.weight": torch.zeros(1)}}
+            if "optimizer" in sharded_state_dict:
+                return {"optimizer": {"step": 1}}
+            return {"rng_state": [{"random_rng_state": None}]}
+
+        mock_load_dc.side_effect = fake_load
+        mgr = _make_manager(
+            load_contents=["model", "optimizer", "extra"],
+            use_dist_checkpointing=True,
+            checkpoint_config_cls=McoreCheckpointConfig,
+            fully_parallel_load=False,
+        )
+        with patch.object(mgr, "load_rng_states"):
+            mgr.load_checkpoint(self.ckpt_path)
+
+        seen = [call.kwargs["fully_parallel_load"] for call in mock_load_dc.call_args_list]
+        assert seen == [False, False, False]  # model / optimizer / extra

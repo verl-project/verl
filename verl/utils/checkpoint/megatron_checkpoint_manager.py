@@ -918,6 +918,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             loaded_model = load_dist_checkpointing(
                 sharded_state_dict=model_sd,
                 ckpt_dir=model_dist_path,
+                fully_parallel_load=getattr(self.checkpoint_config, "fully_parallel_load", True),
             )
             assert "model" in loaded_model or any(
                 f"model{vpp_rank}" in loaded_model for vpp_rank in range(len(self.model))
@@ -946,6 +947,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             loaded_optim = load_dist_checkpointing(
                 sharded_state_dict=optim_sd,
                 ckpt_dir=optim_dist_path,
+                fully_parallel_load=getattr(self.checkpoint_config, "fully_parallel_load", True),
             )
             assert "optimizer" in loaded_optim, (
                 f"Optimizer state dict not found in {loaded_optim.keys()}. "
@@ -970,6 +972,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             loaded_extra = load_dist_checkpointing(
                 sharded_state_dict=extra_sd,
                 ckpt_dir=extra_dist_path,
+                fully_parallel_load=getattr(self.checkpoint_config, "fully_parallel_load", True),
             )
             assert "rng_state" in loaded_extra, (
                 f"RNG state dict not found in {loaded_extra.keys()}. "
@@ -1074,6 +1077,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             ckpt_path=dist_checkpoint_path,
             async_save=self.checkpoint_config.async_save,
             content_metadata=sharded_sd_metadata,
+            fully_parallel_save=getattr(self.checkpoint_config, "fully_parallel_save", True),
         )
 
         if not self.checkpoint_config.async_save:
