@@ -156,7 +156,7 @@ fsdp = [
 ]
 
 # apex / flash-attn / megatron-bridge come prebuilt from the wheelhouse;
-# the exact TE source pin below is built at sync time. megatron-core is also
+# TE uses release packages (its PyTorch extension is built at sync time). megatron-core is also
 # git-sourced. onnxscript works around an undeclared TE import.
 megatron = [
     "verl[verl-core]",
@@ -167,8 +167,8 @@ megatron = [
     "torchaudio==2.11.0",
     "nvidia-mathdx",
     "apex",
-    "transformer-engine",
-    # Exact build dependency used by the audited TE e7c550c5 source build.
+    "transformer-engine[pytorch,core-cu13]==2.18.0",
+    # Keep the extension build dependency aligned with the NeMo RL release runtime.
     "nvidia-cudnn-frontend==1.25.0",
     "onnxscript",
     "trl==0.27.0",
@@ -307,7 +307,7 @@ verl = [
 # coexist in the lock but never in one venv. See docs/start/install.rst.
 [tool.uv]
 preview = true
-no-build-isolation-package = ["transformer-engine"]
+no-build-isolation-package = ["transformer-engine-torch"]
 # Linux + Python 3.12 on both CPU arches verl ships CUDA images for: x86_64 and
 # aarch64 (GH200 / GB200 superchips).
 #
@@ -414,8 +414,8 @@ override-dependencies = [
     "flashinfer-python==0.6.15.post1 ; extra == 'vllm'",
     "flashinfer-cubin==0.6.15.post1 ; extra == 'vllm'",
     "flashinfer-jit-cache==0.6.15.post1 ; extra == 'vllm'",
-    # Match the current NeMo RL PR #3566 runtime used to validate TE
-    # 2.18.0+e7c550c5 with vLLM 0.26 on GB200. Torch 2.11 declares older exact
+    # Keep the CUDA libraries from the validated GB200 runtime while moving TE
+    # to the 2.18.0 release packages. Torch 2.11 declares older exact
     # CUDA library pins, so these must be overrides rather than ordinary direct
     # dependencies.
     "nvidia-cublas==13.5.1.27 ; sys_platform == 'linux'",
@@ -446,11 +446,12 @@ version = "0.18.0"
 requires-dist = ["torch>=2.6.0", "numpy", "packaging>=24.2"]
 
 [[tool.uv.dependency-metadata]]
-name = "transformer-engine"
-version = "2.18.0+e7c550c5"
+# Published 2.18.0 sdist metadata; avoid executing its CUDA build backend
+# during lock resolution on login/CPU hosts. Do not suppress runtime dependencies.
+name = "transformer-engine-torch"
+version = "2.18.0"
 requires-dist = [
     "einops",
-    "importlib-metadata>=1.0",
     "nvdlfw-inspect",
     "nvidia-cudnn-frontend>=1.25.0",
     "onnx",
@@ -458,8 +459,8 @@ requires-dist = [
     "packaging",
     "pydantic",
     "torch>=2.1",
+    "transformer-engine-cu13==2.18.0",
 ]
-provides-extras = ["core-cu13", "pytorch"]
 
 [[tool.uv.dependency-metadata]]
 name = "mbridge"
@@ -486,8 +487,8 @@ requires-dist = []
 
 # Heavy native packages except Transformer Engine come prebuilt from the verl
 # wheelhouse (cu130 / torch 2.11 / cp312, built for x86_64 AND aarch64).
-# Transformer Engine is deliberately built from the exact audited source commit
-# below. megatron-bridge rides along as a pure-python wheel.
+# Transformer Engine comes from PyPI release packages; its PyTorch extension
+# builds against the runtime Torch. megatron-bridge is a pure-python wheel.
 #
 # The inference engines are deliberately NOT routed: upstream publishes cu130 /
 # torch-2.11 wheels for the pinned vllm / sglang / sglang-kernel versions on PyPI,
@@ -498,7 +499,6 @@ requires-dist = []
 [tool.uv.sources]
 apex                 = { index = "verl-wheelhouse" }
 flash-attn           = { index = "verl-wheelhouse" }
-transformer-engine   = { git = "https://github.com/NVIDIA/TransformerEngine.git", rev = "e7c550c5f80636cf841a8204b1d6f85a5f3f28b7" }
 megatron-bridge      = { index = "verl-wheelhouse" }
 flashinfer-cubin     = { index = "flashinfer" }
 flashinfer-jit-cache = { index = "flashinfer-cu130" }
@@ -535,7 +535,7 @@ torchaudio = [
 ]
 
 [tool.uv.extra-build-dependencies]
-transformer-engine = [
+transformer-engine-torch = [
     { requirement = "torch", match-runtime = true },
 ]
 

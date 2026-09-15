@@ -16,7 +16,6 @@
 
 from .bf16_transport import attest_real_nvfp4_bf16_transport
 from .config import (
-    REAL_NVFP4_TE_COMMIT,
     REAL_NVFP4_TE_VERSION,
     real_nvfp4_expected_counts,
     real_nvfp4_moe_layer_indices,
@@ -37,7 +36,6 @@ from .vllm_runtime import (
 __all__ = [
     "NVFP4_PER_TOKEN_METHOD",
     "REAL_NVFP4_MOE_BACKEND",
-    "REAL_NVFP4_TE_COMMIT",
     "REAL_NVFP4_TE_VERSION",
     "attest_real_nvfp4_bf16_transport",
     "attest_vllm_native_nvfp4_runtime",

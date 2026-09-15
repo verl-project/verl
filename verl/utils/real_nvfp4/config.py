@@ -17,8 +17,7 @@
 from importlib.metadata import version
 from typing import Any
 
-REAL_NVFP4_TE_COMMIT = "e7c550c5f80636cf841a8204b1d6f85a5f3f28b7"
-REAL_NVFP4_TE_VERSION = "2.18.0+e7c550c5"
+REAL_NVFP4_TE_VERSION = "2.18.0"
 
 
 def _hf_get(hf_config: Any, name: str, default: Any = None) -> Any:
@@ -151,19 +150,20 @@ def real_nvfp4_expected_counts(hf_config: Any) -> tuple[int, int]:
 def validate_real_nvfp4_te_recipe(recipe: Any, *, backward_override: str) -> None:
     """Fail closed unless TE implements the exact audited training semantics.
 
-    TE ``e7c550c5`` is the current NeMo RL PR #3566 pin. It contains both the
+    TE 2.18 release packages, also used by NeMo RL PR #3566, contain both the
     GroupedLinear packed-wgrad lifetime fix (TE PR #3049) and the fix that
     preserves quantized/dequantized forward operands for a dequantized backward
-    (TE PR #3141). A release-only version check is insufficient because the
-    latter changes gradients without necessarily crashing.
+    (TE PR #3141). Check all three distribution versions to reject mixed
+    Python/core/extension installations, and still validate the recipe payload.
     """
 
-    actual_version = version("transformer-engine")
-    if actual_version != REAL_NVFP4_TE_VERSION:
-        raise RuntimeError(
-            "real_nvfp4 requires the audited Transformer Engine source pin "
-            f"{REAL_NVFP4_TE_COMMIT} ({REAL_NVFP4_TE_VERSION}), got {actual_version}"
-        )
+    for package in ("transformer-engine", "transformer-engine-cu13", "transformer-engine-torch"):
+        actual_version = version(package)
+        if actual_version != REAL_NVFP4_TE_VERSION:
+            raise RuntimeError(
+                "real_nvfp4 requires matched Transformer Engine release packages "
+                f"at {REAL_NVFP4_TE_VERSION}, got {package}=={actual_version}"
+            )
 
     expected = {
         "backward_override": backward_override,

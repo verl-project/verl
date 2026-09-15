@@ -608,6 +608,29 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     return metrics
 
 
+def accumulate_rollout_workload_metrics(batch: DataProto, previous: dict[str, Any]) -> dict[str, Any]:
+    """Count returned LLM tokens before filtering, across all refill batches.
+
+    These are returned response-mask tokens, not engine-internal decode tokens
+    (e.g. speculative rejects or tokens discarded by a multi-turn truncation).
+    The caller must reset ``previous`` between policy updates, not refills.
+    """
+    prefix = "rollout/pre_filter/"
+    lengths = batch.batch["response_mask"].sum(dim=-1)
+    sequences = int(previous.get(prefix + "sequences", 0)) + len(lengths)
+    tokens = int(previous.get(prefix + "response_tokens", 0)) + int(lengths.sum().item())
+    max_length = max(
+        int(previous.get(prefix + "response_length_max", 0)),
+        int(lengths.max().item()) if len(lengths) else 0,
+    )
+    return {
+        prefix + "sequences": sequences,
+        prefix + "response_tokens": tokens,
+        prefix + "response_length_mean": tokens / sequences if sequences else 0.0,
+        prefix + "response_length_max": max_length,
+    }
+
+
 def compute_timing_metrics(batch: DataProto, timing_raw: dict[str, float]) -> dict[str, Any]:
     """
     Computes timing metrics for different processing stages in PPO training.

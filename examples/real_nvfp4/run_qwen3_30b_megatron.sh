@@ -289,8 +289,8 @@ TRAINER=(
   trainer.nnodes="$NNODES"
   trainer.val_before_train=False
   trainer.test_freq=10
-  trainer.save_freq=10
-  trainer.max_actor_ckpt_to_keep=2
+  trainer.save_freq="${CHECKPOINT_SAVE_FREQ:-10}"
+  trainer.max_actor_ckpt_to_keep="${MAX_ACTOR_CKPT_TO_KEEP:-2}"
   trainer.total_epochs=100
   trainer.total_training_steps="$TOTAL_TRAINING_STEPS"
   trainer.default_local_dir="$CKPTS_DIR"
@@ -300,6 +300,9 @@ TRAINER=(
 )
 if [[ "$RESUME_MODE" = resume_path ]]; then
   TRAINER+=(trainer.resume_from_path="$RESUME_FROM_PATH")
+fi
+if [[ -n "${NVFP4_VALIDATION_DUMP_DIR:-}" ]]; then
+  TRAINER+=(+trainer.nvfp4_validation_dump_dir="$NVFP4_VALIDATION_DUMP_DIR")
 fi
 if [[ -n "$VERL_WANDB_RUN_ID" ]]; then
   TRAINER+=(

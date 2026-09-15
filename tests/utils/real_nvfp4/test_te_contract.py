@@ -51,10 +51,14 @@ def test_te_recipe_contract_accepts_exact_audited_semantics(monkeypatch):
     )
 
 
-def test_te_recipe_contract_rejects_release_only_te(monkeypatch):
-    monkeypatch.setattr(config, "version", lambda _name: "2.16.1")
+@pytest.mark.parametrize("package", ["transformer-engine", "transformer-engine-cu13", "transformer-engine-torch"])
+@pytest.mark.parametrize("bad_version", ["2.16.1", "2.18.0+e7c550c5", "2.19.0"])
+def test_te_recipe_contract_rejects_mixed_or_unvalidated_release(monkeypatch, package, bad_version):
+    monkeypatch.setattr(
+        config, "version", lambda name: bad_version if name == package else config.REAL_NVFP4_TE_VERSION
+    )
 
-    with pytest.raises(RuntimeError, match="audited Transformer Engine source pin"):
+    with pytest.raises(RuntimeError, match="matched Transformer Engine release packages"):
         config.validate_real_nvfp4_te_recipe(
             _recipe(),
             backward_override="dequantized",

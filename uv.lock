@@ -55,10 +55,9 @@ version = "0.18.0"
 requires-dist = ["torch>=2.6.0", "numpy", "packaging>=24.2"]
 
 [[manifest.dependency-metadata]]
-name = "transformer-engine"
-version = "2.18.0+e7c550c5"
-requires-dist = ["einops", "importlib-metadata>=1.0", "nvdlfw-inspect", "nvidia-cudnn-frontend>=1.25.0", "onnx", "onnxscript", "packaging", "pydantic", "torch>=2.1"]
-provides-extras = ["core-cu13", "pytorch"]
+name = "transformer-engine-torch"
+version = "2.18.0"
+requires-dist = ["einops", "nvdlfw-inspect", "nvidia-cudnn-frontend>=1.25.0", "onnx", "onnxscript", "packaging", "pydantic", "torch>=2.1", "transformer-engine-cu13==2.18.0"]
 
 [[manifest.dependency-metadata]]
 name = "veomni"
@@ -283,6 +282,8 @@ dependencies = [
     { name = "packaging" },
 ]
 wheels = [
+    { url = "https://github.com/verl-project/verl-wheelhouse/releases/download/apex-master-py3.11/apex-0.1-cp311-cp311-linux_aarch64.whl" },
+    { url = "https://github.com/verl-project/verl-wheelhouse/releases/download/apex-master-py3.11/apex-0.1-cp311-cp311-linux_x86_64.whl" },
     { url = "https://github.com/verl-project/verl-wheelhouse/releases/download/apex-master/apex-0.1-cp312-cp312-linux_aarch64.whl" },
     { url = "https://github.com/verl-project/verl-wheelhouse/releases/download/apex-master/apex-0.1-cp312-cp312-linux_x86_64.whl" },
 ]
@@ -1028,6 +1029,8 @@ dependencies = [
     { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "extra == 'extra-4-verl-fsdp' or extra == 'extra-4-verl-megatron' or extra == 'extra-4-verl-sglang' or extra == 'extra-4-verl-vllm' or extra != 'extra-4-verl-cpu'" },
 ]
 wheels = [
+    { url = "https://github.com/verl-project/verl-wheelhouse/releases/download/flash-attention-v2.8.3-py3.11/flash_attn-2.8.3-cp311-cp311-linux_aarch64.whl" },
+    { url = "https://github.com/verl-project/verl-wheelhouse/releases/download/flash-attention-v2.8.3-py3.11/flash_attn-2.8.3-cp311-cp311-linux_x86_64.whl" },
     { url = "https://github.com/verl-project/verl-wheelhouse/releases/download/flash-attention-v2.8.3/flash_attn-2.8.3-cp312-cp312-linux_aarch64.whl" },
     { url = "https://github.com/verl-project/verl-wheelhouse/releases/download/flash-attention-v2.8.3/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl" },
 ]
@@ -4792,11 +4795,40 @@ dependencies = [
 
 [[package]]
 name = "transformer-engine"
-version = "2.18.0+e7c550c5"
-source = { git = "https://github.com/NVIDIA/TransformerEngine.git?rev=e7c550c5f80636cf841a8204b1d6f85a5f3f28b7#e7c550c5f80636cf841a8204b1d6f85a5f3f28b7" }
+version = "2.18.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/84/6a/29b7ac32c9df481c0284a57ac9639d9f3dbd4e6f8e899f03e685268d7c8d/transformer_engine-2.18.0-py3-none-any.whl", hash = "sha256:9d7c4bd74247e57eeed2af46f7b91c133cc405404953f1f3f2e38be8c47cdb7e", size = 1017270, upload-time = "2026-08-11T00:49:41.88Z" },
+]
+
+[package.optional-dependencies]
+core-cu13 = [
+    { name = "transformer-engine-cu13" },
+]
+pytorch = [
+    { name = "transformer-engine-torch" },
+]
+
+[[package]]
+name = "transformer-engine-cu13"
+version = "2.18.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "importlib-metadata" },
+    { name = "packaging" },
+    { name = "pydantic" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/31/37/b2010e5c18b25b5016064685dbf858d880bdeb859e2d1b2d5b9cd69230fa/transformer_engine_cu13-2.18.0-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:d5e9049256d66e1fb1743b5e1ff78e65a580bc09c371f4977ca71cdf7899fca4", size = 278015862, upload-time = "2026-08-11T00:50:33.011Z" },
+    { url = "https://files.pythonhosted.org/packages/c8/6e/0b069ec61e499d147b34a17af389384a81be02435d37bcbf72d8590ac2f2/transformer_engine_cu13-2.18.0-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:38e842ab60fdb9f7ca4d0345bdea1f7f9219a3d712a169b4973a95bc38011263", size = 279471780, upload-time = "2026-08-11T20:02:03.84Z" },
+]
+
+[[package]]
+name = "transformer-engine-torch"
+version = "2.18.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "einops" },
-    { name = "importlib-metadata" },
     { name = "nvdlfw-inspect" },
     { name = "nvidia-cudnn-frontend" },
     { name = "onnx" },
@@ -4804,7 +4836,9 @@ dependencies = [
     { name = "packaging" },
     { name = "pydantic" },
     { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
+    { name = "transformer-engine-cu13" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/db/f9/34ad04b8e32f3d43f6dd166831a68741eea0a4448a3b30d87e4b6da00bbd/transformer_engine_torch-2.18.0.tar.gz", hash = "sha256:47b812b1cb7b6941fedd3d160a2239a346ee88c28c60937a694f49f54ddccf79", size = 412496, upload-time = "2026-08-11T00:49:35.528Z" }
 
 [[package]]
 name = "transformers"
@@ -5142,7 +5176,7 @@ megatron = [
     { name = "torchdata" },
     { name = "torchvision", version = "0.26.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
     { name = "transferqueue" },
-    { name = "transformer-engine" },
+    { name = "transformer-engine", extra = ["core-cu13", "pytorch"], marker = "extra == 'extra-4-verl-fsdp' or extra == 'extra-4-verl-megatron' or extra == 'extra-4-verl-sglang' or extra == 'extra-4-verl-vllm' or extra != 'extra-4-verl-cpu'" },
     { name = "transformers", version = "5.3.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra != 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra != 'extra-4-verl-fsdp' and extra != 'extra-4-verl-megatron' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-cpu' and extra != 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "transformers", version = "5.12.1", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra != 'extra-4-verl-cpu' and extra != 'extra-4-verl-sglang') or (extra != 'extra-4-verl-fsdp' and extra != 'extra-4-verl-megatron' and extra != 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "trl" },
@@ -5374,7 +5408,7 @@ requires-dist = [
     { name = "torchvision", marker = "extra == 'sglang'", specifier = "==0.26.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "verl", extra = "sglang" } },
     { name = "torchvision", marker = "extra == 'vllm'", specifier = "==0.26.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "verl", extra = "vllm" } },
     { name = "transferqueue", marker = "extra == 'transferqueue'", git = "https://github.com/Ascend/TransferQueue.git?rev=main" },
-    { name = "transformer-engine", marker = "extra == 'megatron'", git = "https://github.com/NVIDIA/TransformerEngine.git?rev=e7c550c5f80636cf841a8204b1d6f85a5f3f28b7" },
+    { name = "transformer-engine", extras = ["core-cu13", "pytorch"], marker = "extra == 'megatron'", specifier = "==2.18.0" },
     { name = "transformers", specifier = ">=5.5.3,!=5.6.0,<5.11" },
     { name = "transformers", marker = "extra == 'cpu'", specifier = "==5.3.0" },
     { name = "transformers", marker = "extra == 'sglang'", specifier = "==5.3.0" },

@@ -42,6 +42,7 @@ from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
+    accumulate_rollout_workload_metrics,
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
@@ -1652,6 +1653,9 @@ class RayPPOTrainer:
                         timing_raw.update(combined_gen_output.meta_info["timing"])
                         combined_gen_output.meta_info.pop("timing", None)
 
+                    # Include discarded groups, refill batches and REMAX baselines:
+                    # all contributed to the cumulative generation wall clock.
+                    metrics.update(accumulate_rollout_workload_metrics(combined_gen_output, metrics))
                     gen_batch_output = combined_gen_output.slice(0, num_sampled_prompts)
                     if "__do_sample__" in gen_batch_output.non_tensor_batch:
                         gen_batch_output.pop(non_tensor_batch_keys=["__do_sample__"])
@@ -1808,6 +1812,14 @@ class RayPPOTrainer:
                                 metrics.update(calculate_debug_metrics(batch))
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
+
+                    alignment_dump_dir = self.config.trainer.get("nvfp4_validation_dump_dir", None)
+                    if alignment_dump_dir:
+                        from verl.utils.real_nvfp4.validation import dump_paired_log_probs
+
+                        dump_paired_log_probs(
+                            batch, alignment_dump_dir, self.global_steps, self.config.actor_rollout_ref.model.path
+                        )
                     if self.use_reference_policy:
                         # compute reference log_prob
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
@@ -1988,6 +2000,12 @@ class RayPPOTrainer:
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()
+                if timing_raw.get("gen", 0) > 0:
+                    # End-to-end generation phase rate, including manager/reward
+                    # overhead. Do not label this as pure GPU decode throughput.
+                    response_rate = metrics["rollout/pre_filter/response_tokens"] / timing_raw["gen"]
+                    metrics["rollout/pre_filter/response_tokens_per_s"] = response_rate
+                    metrics["rollout/pre_filter/response_tokens_per_s_per_gpu"] = response_rate / n_gpus
                 metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
                 # compute variance proxy metrics
                 gradient_norm = metrics.get("actor/grad_norm", None)
