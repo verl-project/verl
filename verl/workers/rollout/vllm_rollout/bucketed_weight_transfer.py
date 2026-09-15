@@ -17,7 +17,6 @@ Bucketed weight transfer via ZMQ + IPC (or shared memory fallback).
 Not recommended depending on vllm for this file.
 """
 
-import gc
 import logging
 import os
 from multiprocessing import shared_memory
@@ -159,6 +158,7 @@ class BucketedWeightSender:
                 offset += weight.nbytes
 
             # send the last bucket
+            name = weight = None
             get_torch_device().synchronize()
             self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": True})
             self.socket.recv()
@@ -216,7 +216,6 @@ class BucketedWeightSender:
             self.shm.unlink()
             del self.shm
             self.shm = None
-        gc.collect()
         if is_support_ipc():
             get_torch_device().ipc_collect()
         get_torch_device().empty_cache()
@@ -265,6 +264,7 @@ class BucketedWeightReceiver:
         self.socket = None
         self.buffer = None
         self.shm = None
+        self._ack_pending = False
 
     def receive_weights(self, on_bucket_received: callable):
         """
@@ -299,9 +299,11 @@ class BucketedWeightReceiver:
                 is_last = metadata["is_last"]
                 on_bucket_received(weights, is_last)
                 get_torch_device().synchronize()
-                self.socket.send(b"")
                 del weights, tensor
-                if is_last:
+                if not is_last:
+                    self.socket.send(b"")
+                else:
+                    self._ack_pending = True
                     break
         finally:
             self._cleanup()
@@ -329,9 +331,6 @@ class BucketedWeightReceiver:
 
     def _cleanup(self):
         """clean up"""
-        if self.socket is not None:
-            self.socket.close()
-            self.socket = None
         # Synchronize before releasing the buffer to ensure all async ops
         # referencing it (e.g. clone, .to()) have completed.
         get_torch_device().synchronize()
@@ -341,7 +340,16 @@ class BucketedWeightReceiver:
             self.shm.close()
             del self.shm
             self.shm = None
-        gc.collect()
         if is_support_ipc():
             get_torch_device().ipc_collect()
         get_torch_device().empty_cache()
+        # Ack last, after the buffer is released: the sender reclaims its bucket
+        # buffer the moment this ack returns, and CUDA IPC only frees the sender's
+        # block once our ref counter reaches zero. Acking earlier strands it in
+        # CudaIPCSentDataLimbo until some later round drains the limbo.
+        # The guard keeps the REP socket's strict recv/send alternation valid.
+        if self.socket is not None:
+            if self._ack_pending:
+                self.socket.send(b"")
+            self.socket.close()
+            self.socket = None
