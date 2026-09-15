@@ -7,7 +7,7 @@ Last updated: 08/10/2026.
 Obtaining Images and Public Image Addresses
 -------------------------------------------
 
-Ascend hosts daily built A2/A3 images in `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_, built using the `Dockerfile <../../../../docker/ascend>`_. For details, See Dockerfile Image Build Script.
+Ascend hosts daily built A2/A3 images in `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_, built using the `Dockerfile <../../../../docker/ascend>`_. For details, refer to :ref:`Dockerfile Image Build Script List <ascend-dockerfile-list>`.
 
 Daily build image name format: latest-{inference backend}-{applicable product information}-{operating system}-{other fields}
 
@@ -28,24 +28,39 @@ Atlas 800T A3
 List of component versions in the latest image
 ----------------------------------------------
 
-================= ============
-Component          Version
-================= ============
-Base image         Ubuntu 22.04
-Python             3.12
-CANN               9.1.0
-torch              2.10.0
-torch_npu          2.10.0.post4
-torchvision        0.25.0
-vLLM               0.23.0
-vLLM-ascend        0.23.0
-Megatron-LM        core_r0.16.0
-MindSpeed          core_r0.16.0
-triton-ascend      3.2.2
-mbridge            0.15.1
-SGLang             v0.5.10
-sgl-kernel-npu     2026.02.01
-================= ============
+.. list-table::
+   :header-rows: 1
+
+   * - Component
+     - Version
+   * - Base image
+     - Ubuntu 22.04
+   * - Python
+     - 3.12
+   * - CANN
+     - 9.1.0
+   * - torch
+     - 2.10.0
+   * - torch_npu
+     - 2.10.0.post4
+   * - torchvision
+     - 0.25.0
+   * - vLLM
+     - 0.23.0
+   * - vLLM-ascend
+     - 0.23.0
+   * - Megatron-LM
+     - core_r0.16.0
+   * - MindSpeed
+     - core_r0.16.0
+   * - triton-ascend
+     - 3.2.2
+   * - mbridge
+     - 0.15.1
+   * - SGLang
+     - v0.5.10
+   * - sgl-kernel-npu
+     - 2026.02.01
 
 
 
@@ -56,44 +71,115 @@ Dockerfile image build script list
 
 **General-purpose image**
 
-============== ==================== ============== ==============================================================
-Device Type     CANN Base Image Version Inference Backend Reference File
-============== ==================== ============== ==============================================================
-A2              9.1.0                  vLLM            `Dockerfile.ascend_9.1.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a2>`_
-A3              9.1.0                  vLLM            `Dockerfile.ascend_9.1.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a3>`_
-A2              8.5.0                  vLLM            `Dockerfile.ascend_8.5.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2>`_
-A3              8.5.0                  vLLM            `Dockerfile.ascend_8.5.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a3>`_
-A2              8.5.0                  SGLang          `Dockerfile.ascend.sglang_8.5.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a2>`_
-A3              8.5.0                  SGLang          `Dockerfile.ascend.sglang_8.5.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a3>`_
-A2              8.3.RC1                vLLM            `Dockerfile.ascend_8.3.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.3.rc1_a2>`_
-A3              8.3.RC1                vLLM            `Dockerfile.ascend_8.3.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.3.rc1_a3>`_
-A2              8.3.RC1                SGLang          `Dockerfile.ascend.sglang_8.3.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.3.rc1_a2>`_
-A3              8.3.RC1                SGLang          `Dockerfile.ascend.sglang_8.3.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.3.rc1_a3>`_
-A2              8.2.RC1                vLLM            `Dockerfile.ascend_8.2.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.2.rc1_a2>`_
-A3              8.2.RC1                vLLM            `Dockerfile.ascend_8.2.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.2.rc1_a3>`_
-============== ==================== ============== ==============================================================
+.. list-table::
+   :header-rows: 1
+
+   * - Device type
+     - CANN base image version
+     - Inference backend
+     - Reference file
+   * - A2
+     - 9.1.0
+     - vLLM
+     - `Dockerfile.ascend_9.1.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a2>`_
+   * - A3
+     - 9.1.0
+     - vLLM
+     - `Dockerfile.ascend_9.1.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a3>`_
+   * - A2
+     - 8.5.0
+     - vLLM
+     - `Dockerfile.ascend_8.5.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2>`_
+   * - A3
+     - 8.5.0
+     - vLLM
+     - `Dockerfile.ascend_8.5.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a3>`_
+   * - A2
+     - 8.5.0
+     - SGLang
+     - `Dockerfile.ascend.sglang_8.5.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a2>`_
+   * - A3
+     - 8.5.0
+     - SGLang
+     - `Dockerfile.ascend.sglang_8.5.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a3>`_
+   * - A2
+     - 8.3.RC1
+     - vLLM
+     - `Dockerfile.ascend_8.3.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.3.rc1_a2>`_
+   * - A3
+     - 8.3.RC1
+     - vLLM
+     - `Dockerfile.ascend_8.3.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.3.rc1_a3>`_
+   * - A2
+     - 8.3.RC1
+     - SGLang
+     - `Dockerfile.ascend.sglang_8.3.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.3.rc1_a2>`_
+   * - A3
+     - 8.3.RC1
+     - SGLang
+     - `Dockerfile.ascend.sglang_8.3.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.3.rc1_a3>`_
+   * - A2
+     - 8.2.RC1
+     - vLLM
+     - `Dockerfile.ascend_8.2.rc1_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.2.rc1_a2>`_
+   * - A3
+     - 8.2.RC1
+     - vLLM
+     - `Dockerfile.ascend_8.2.rc1_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.2.rc1_a3>`_
 
 
 **verl release version image**
 
-============== ==================== ============== ============== ==============================================================
-Device Type         CANN Base Image Version     Inference Backend        verl Version       Reference File                                
-============== ==================== ============== ============== ==============================================================
-A2              9.0.0                vLLM          release/v0.8.0 `Dockerfile.ascend_9.0.0_a2_v0.8.0 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.0.0_a2_v0.8.0>`_     
-A3              9.0.0                vLLM          release/v0.8.0 `Dockerfile.ascend_9.0.0_a3_v0.8.0 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.0.0_a3_v0.8.0>`_ 
-A2              8.5.0                vLLM          release/v0.7.1 `Dockerfile.ascend_8.5.0_a2_v0.7.1 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2_v0.7.1>`_     
-A3              8.5.0                vLLM          release/v0.7.1 `Dockerfile.ascend_8.5.0_a3_v0.7.1 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a3_v0.7.1>`_ 
-============== ==================== ============== ============== ==============================================================
+.. list-table::
+   :header-rows: 1
+
+   * - Device type
+     - CANN base image version
+     - Inference backend
+     - verl version
+     - Reference file
+   * - A2
+     - 9.0.0
+     - vLLM
+     - release/v0.8.0
+     - `Dockerfile.ascend_9.0.0_a2_v0.8.0 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.0.0_a2_v0.8.0>`_
+   * - A3
+     - 9.0.0
+     - vLLM
+     - release/v0.8.0
+     - `Dockerfile.ascend_9.0.0_a3_v0.8.0 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.0.0_a3_v0.8.0>`_
+   * - A2
+     - 8.5.0
+     - vLLM
+     - release/v0.7.1
+     - `Dockerfile.ascend_8.5.0_a2_v0.7.1 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2_v0.7.1>`_
+   * - A3
+     - 8.5.0
+     - vLLM
+     - release/v0.7.1
+     - `Dockerfile.ascend_8.5.0_a3_v0.7.1 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a3_v0.7.1>`_
 
 
 **Custom model image**
 
-============== ==================== ============== ============== ==============================================================
-Device type         CANN base image version     Inference backend        Model           Reference file                            
-============== ==================== ============== ============== ==============================================================
-A2              8.5.2                vLLM          Qwen3.5        `Dockerfile.ascend_8.5.2_a2_qwen3-5 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.2_a2_qwen3-5>`_   
-A3              8.5.2                vLLM          Qwen3.5        `Dockerfile.ascend_8.5.2_a3_qwen3-5 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.2_a3_qwen3-5>`_ 
-============== ==================== ============== ============== ==============================================================
+.. list-table::
+   :header-rows: 1
+
+   * - Device type
+     - CANN base image version
+     - Inference backend
+     - Model
+     - Reference file
+   * - A2
+     - 8.5.2
+     - vLLM
+     - Qwen3.5
+     - `Dockerfile.ascend_8.5.2_a2_qwen3-5 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.2_a2_qwen3-5>`_
+   * - A3
+     - 8.5.2
+     - vLLM
+     - Qwen3.5
+     - `Dockerfile.ascend_8.5.2_a3_qwen3-5 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.2_a3_qwen3-5>`_
 
 
 

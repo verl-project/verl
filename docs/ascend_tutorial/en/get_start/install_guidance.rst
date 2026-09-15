@@ -70,30 +70,60 @@ You can obtain the image from `quay.io/ascend/verl <https://quay.io/repository/a
 Key Version Support and Dependencies
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-============= ======================================= ===================
-Dependency    Version                                  Description
-============= ======================================= ===================
-HDK           ``26.0.rc1``                            NPU hardware driver and firmware
-CANN          ``9.1.0``                               CANN software that helps developers develop and run AI services on Ascend software and hardware platforms
-Python        ``>=3.10, <3.13``\ , recommended ``3.12``      
-torch         ``2.10.0``                              PyTorch deep learning framework base package
-torch_npu     ``2.10.0.post4``                        NPU PyTorch adaptation plugin        
-torchvision   ``0.25.0``                              PyTorch image processing library
-torchaudio    ``2.10.0``                              PyTorch audio processing library
-triton        ``3.5.0``                               Triton, used for writing custom operators
-triton-ascend ``3.2.2``                               NPU Triton adaptation. For the installation command, refer to the script `installation script <../../../../scripts/install_vllm_mcore_npu.sh>`_
-transformers  ``5.10.4``                              Hugging Face large model library, providing model architectures and pre-trained weights
-vLLM          ``0.23.0``                              High-performance LLM inference and serving engine
-vLLM-Ascend   ``0.23.0``                              NPU vLLM backend adaptation  
-Megatron-LM   ``core_r0.16.0``                        Large-scale distributed training framework
-MindSpeed     ``core_r0.16.0``                        Adaptation and optimization component for Megatron-LM on Ascend NPU 
-============= ======================================= ===================
+.. list-table::
+   :header-rows: 1
+
+   * - Dependency
+     - Version
+     - Description
+   * - HDK
+     - ``26.0.rc1``
+     - NPU hardware driver and firmware
+   * - CANN
+     - ``9.1.0``
+     - CANN software that helps developers develop and run AI services on the Ascend software and hardware platform
+   * - Python
+     - ``>=3.10, <3.13``\ , recommended ``3.12``
+     -
+   * - torch
+     - ``2.10.0``
+     - PyTorch deep learning framework base package
+   * - torch_npu
+     - ``2.10.0.post4``
+     - NPU PyTorch adaptation plugin
+   * - torchvision
+     - ``0.25.0``
+     - PyTorch image processing library
+   * - torchaudio
+     - ``2.10.0``
+     - PyTorch audio processing library
+   * - triton
+     - ``3.5.0``
+     - Triton, used for writing custom operators
+   * - triton-ascend
+     - ``3.2.2``
+     - NPU Triton adaptation. For the installation command, refer to the script `Installation script <../../../../scripts/install_vllm_mcore_npu.sh>`_
+   * - transformers
+     - ``5.10.4``
+     - Hugging Face large model library that provides model architectures and pre-trained weights
+   * - vLLM
+     - ``0.23.0``
+     - High-performance LLM inference and serving engine
+   * - vLLM-Ascend
+     - ``0.23.0``
+     - NPU vLLM backend adaptation
+   * - Megatron-LM
+     - ``core_r0.16.0``
+     - Large-scale distributed training framework
+   * - MindSpeed
+     - ``core_r0.16.0``
+     - Megatron-LM adaptation and optimization component on Ascend NPU
 
 
 Preparation before installation (HDK & CANN)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-CANN is the heterogeneous computing architecture for NPUs. The following are the installation commands for A3 on the ARM platform. Follow these commands to download and install HDK and CANN. Alternatively, download and install them from the `CANN community <https://www.hiascend.com/en/cann/download?versionId=791&ids=d803%2Ch0501%2Ch0601%2Ch0703>`_ based on your system hardware model.
+CANN is the heterogeneous computing architecture for NPUs. The following are the installation commands for A3 on the ARM platform. Follow these commands to download and install HDK and CANN. Alternatively, download and install them from the `CANN community <https://www.hiascend.com/cann/download?versionId=723&ids=d803%2Ch0501%2Ch0601%2Ch0702>`_ based on your system hardware model.
 
 .. code:: bash
 
@@ -146,28 +176,52 @@ After you upgrade transformers to version 5.10.4, numerous deprecated alias warn
 Key Version Support and Dependencies
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-============= ======================================= ===================
-Dependency    Version                                 Description
-============= ======================================= ===================
-HDK           ``25.5.0``                              NPU hardware driver and firmware
-CANN          ``>=8.5.0``                             CANN software that helps developers develop and run AI applications on Ascend software and hardware platforms
-Python        ``>=3.10, <3.12``\ , recommended ``3.11``      
-torch         ``2.8.0``                               PyTorch deep learning framework base package
-torch_npu     ``2.8.0.post2``                         NPU PyTorch adaptation plugin
-SGLang        ``v0.5.10``                             High-performance LLM inference engine
-triton        ``3.5.0``                               Triton, used for writing custom operators
-triton-ascend ``3.2.1``                               NPU Triton adaptation. For installation commands, refer to `Installation script <../../../../scripts/install_vllm_mcore_npu.sh>`_
-transformers  ``5.3.0``                               Hugging Face large model library, providing model architectures and pre-trained weights
-Megatron-LM   ``core_r0.16.0``                        Large-scale distributed training framework
-MindSpeed     ``core_r0.16.0``                        Megatron-LM adaptation and optimization component on Ascend NPU
-============= ======================================= ===================
+.. list-table::
+   :header-rows: 1
+
+   * - Dependency
+     - Version
+     - Description
+   * - HDK
+     - ``25.5.0``
+     - NPU hardware driver and firmware
+   * - CANN
+     - ``>=8.5.0``
+     - CANN software that helps developers develop and run AI services on the Ascend software and hardware platform
+   * - Python
+     - ``>=3.10, <3.12``\ , recommended ``3.11``
+     -
+   * - torch
+     - ``2.8.0``
+     - Base package of the PyTorch deep learning framework
+   * - torch_npu
+     - ``2.8.0.post2``
+     - NPU PyTorch adaptation plugin
+   * - SGLang
+     - ``v0.5.10``
+     - High-performance LLM inference engine
+   * - triton
+     - ``3.5.0``
+     - Triton, used for writing custom operators
+   * - triton-ascend
+     - ``3.2.1``
+     - NPU Triton adaptation. For the installation command, refer to the script `Installation script <../../../../scripts/install_vllm_mcore_npu.sh>`_
+   * - transformers
+     - ``5.3.0``
+     - Hugging Face large model library that provides model architectures and pre-trained weights
+   * - Megatron-LM
+     - ``core_r0.16.0``
+     - Large-scale distributed training framework
+   * - MindSpeed
+     - ``core_r0.16.0``
+     - Adaptation and optimization component for Megatron-LM on Ascend NPU
 
 
 Preparation before installation (HDK & CANN)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 CANN is a heterogeneous computing architecture on the NPU. The following are the installation instructions for the ARM platform A3. Refer to the following instructions to download and install HDK and CANN,
-or download and install from the `CANN community <https://www.hiascend.com/en/cann/download?versionId=791&ids=d803%2Ch0501%2Ch0601%2Ch0703>`_ based on your system hardware model.
+or download and install from the `CANN community <https://www.hiascend.com/cann/download?versionId=680&ids=d803%2Ch0501%2Ch0601%2Ch0702>`_ based on your system hardware model.
 
 .. code:: bash
 
@@ -236,11 +290,12 @@ Notes on ecosystem libraries not currently supported by Ascend
 
 Ascend currently does not support the following ecosystem libraries in verl:
 
-+------------------+------------------------------------------------------------------------+
-| Software         | Description                                                            |
-+==================+========================================================================+
-| ``flash_attn``   | Flash attention acceleration is not supported through a standalone    |
-|                  | ``flash_attn`` package. It is supported through transformers.        |
-+------------------+------------------------------------------------------------------------+
+.. list-table::
+   :header-rows: 1
+
+   * - Software
+     - Description
+   * - ``flash_attn``
+     - Flash attention acceleration is not supported through a standalone ``flash_attn`` package, but is supported through transformers.
 
 

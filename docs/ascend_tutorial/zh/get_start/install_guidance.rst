@@ -79,24 +79,54 @@ Atlas 800T A3
 关键版本支持与依赖
 ^^^^^^^^^^^^^^^^^
 
-============= ======================================= ===================
-依赖          版本                                     说明
-============= ======================================= ===================
-HDK           ``26.0.rc1``                            NPU硬件驱动与固件
-CANN          ``9.1.0``                               CANN软件，帮助开发者实现在昇腾软硬件平台上开发和运行AI业务
-Python        ``>=3.10, <3.13``\ ，推荐 ``3.12``      
-torch         ``2.10.0``                              PyTorch 深度学习框架基础包
-torch_npu     ``2.10.0.post4``                        NPU PyTorch 适配插件        
-torchvision   ``0.25.0``                              PyTorch 图像处理库
-torchaudio    ``2.10.0``                              PyTorch 音频处理库
-triton        ``3.5.0``                               Triton，用于编写自定义算子
-triton-ascend ``3.2.2``                               NPU Triton 适配，安装命令需参考脚本 `安装脚本 <../../../../scripts/install_vllm_mcore_npu.sh>`_
-transformers  ``5.10.4``                              Hugging Face 大模型库，提供模型架构与预训练权重
-vLLM          ``0.23.0``                              高性能 LLM 推理与服务引擎
-vLLM-Ascend   ``0.23.0``                              NPU vLLM 后端适配  
-Megatron-LM   ``core_r0.16.0``                        大规模分布式训练框架
-MindSpeed     ``core_r0.16.0``                        Megatron-LM 在昇腾 NPU 上的适配和优化组件 
-============= ======================================= ===================
+.. list-table::
+   :header-rows: 1
+
+   * - 依赖
+     - 版本
+     - 说明
+   * - HDK
+     - ``26.0.rc1``
+     - NPU硬件驱动与固件
+   * - CANN
+     - ``9.1.0``
+     - CANN软件，帮助开发者实现在昇腾软硬件平台上开发和运行AI业务
+   * - Python
+     - ``>=3.10, <3.13``\ ，推荐 ``3.12``
+     -
+   * - torch
+     - ``2.10.0``
+     - PyTorch 深度学习框架基础包
+   * - torch_npu
+     - ``2.10.0.post4``
+     - NPU PyTorch 适配插件
+   * - torchvision
+     - ``0.25.0``
+     - PyTorch 图像处理库
+   * - torchaudio
+     - ``2.10.0``
+     - PyTorch 音频处理库
+   * - triton
+     - ``3.5.0``
+     - Triton，用于编写自定义算子
+   * - triton-ascend
+     - ``3.2.2``
+     - NPU Triton 适配，安装命令需参考脚本 `安装脚本 <../../../../scripts/install_vllm_mcore_npu.sh>`_
+   * - transformers
+     - ``5.10.4``
+     - Hugging Face 大模型库，提供模型架构与预训练权重
+   * - vLLM
+     - ``0.23.0``
+     - 高性能 LLM 推理与服务引擎
+   * - vLLM-Ascend
+     - ``0.23.0``
+     - NPU vLLM 后端适配
+   * - Megatron-LM
+     - ``core_r0.16.0``
+     - 大规模分布式训练框架
+   * - MindSpeed
+     - ``core_r0.16.0``
+     - Megatron-LM 在昇腾 NPU 上的适配和优化组件
 
 
 安装前准备（HDK & CANN）
@@ -156,21 +186,45 @@ transformers版本升级5.10.4后，可能出现大量别名废弃告警，可�
 关键版本支持与依赖
 ^^^^^^^^^^^^^^^^^
 
-============= ======================================= ===================
-依赖          版本                                     说明
-============= ======================================= ===================
-HDK           ``25.5.0``                              NPU硬件驱动与固件
-CANN          ``>=8.5.0``                             CANN软件，帮助开发者实现在昇腾软硬件平台上开发和运行AI业务
-Python        ``>=3.10, <3.12``\ ，推荐 ``3.11``      
-torch         ``2.8.0``                               PyTorch 深度学习框架基础包
-torch_npu     ``2.8.0.post2``                         NPU PyTorch 适配插件
-SGLang        ``v0.5.10``                             高性能 LLM 推理引擎
-triton        ``3.5.0``                               Triton，用于编写自定义算子
-triton-ascend ``3.2.1``                               NPU Triton 适配，安装命令需参考脚本 `安装脚本 <../../../../scripts/install_vllm_mcore_npu.sh>`_
-transformers  ``5.3.0``                               Hugging Face 大模型库，提供模型架构与预训练权重
-Megatron-LM   ``core_r0.16.0``                        大规模分布式训练框架
-MindSpeed     ``core_r0.16.0``                        Megatron-LM 在昇腾 NPU 上的适配和优化组件
-============= ======================================= ===================
+.. list-table::
+   :header-rows: 1
+
+   * - 依赖
+     - 版本
+     - 说明
+   * - HDK
+     - ``25.5.0``
+     - NPU硬件驱动与固件
+   * - CANN
+     - ``>=8.5.0``
+     - CANN软件，帮助开发者实现在昇腾软硬件平台上开发和运行AI业务
+   * - Python
+     - ``>=3.10, <3.12``\ ，推荐 ``3.11``
+     -
+   * - torch
+     - ``2.8.0``
+     - PyTorch 深度学习框架基础包
+   * - torch_npu
+     - ``2.8.0.post2``
+     - NPU PyTorch 适配插件
+   * - SGLang
+     - ``v0.5.10``
+     - 高性能 LLM 推理引擎
+   * - triton
+     - ``3.5.0``
+     - Triton，用于编写自定义算子
+   * - triton-ascend
+     - ``3.2.1``
+     - NPU Triton 适配，安装命令需参考脚本 `安装脚本 <../../../../scripts/install_vllm_mcore_npu.sh>`_
+   * - transformers
+     - ``5.3.0``
+     - Hugging Face 大模型库，提供模型架构与预训练权重
+   * - Megatron-LM
+     - ``core_r0.16.0``
+     - 大规模分布式训练框架
+   * - MindSpeed
+     - ``core_r0.16.0``
+     - Megatron-LM 在昇腾 NPU 上的适配和优化组件
 
 
 安装前准备（HDK & CANN）
@@ -246,11 +300,12 @@ SGLang 使用注意事项
 
 verl 中昇腾暂不支持生态库如下：
 
-+------------------+--------------------------------------------------+
-| 软件             | 说明                                             |
-+==================+==================================================+
-| ``flash_attn``   | 不支持通过独立 ``flash_attn`` 包使能 flash       |
-|                  | attention 加速，支持通过 transformers 使用       |
-+------------------+--------------------------------------------------+
+.. list-table::
+   :header-rows: 1
+
+   * - 软件
+     - 说明
+   * - ``flash_attn``
+     - 不支持通过独立 ``flash_attn`` 包使能 flash attention 加速，支持通过 transformers 使用
 
 

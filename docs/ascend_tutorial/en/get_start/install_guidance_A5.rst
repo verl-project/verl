@@ -5,21 +5,46 @@ Last updated: 08/03/2026.
 
 Key Version Support and Dependencies
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-============= ================================================= ===================
-Dependency    Version                                            Description                                               
-============= ================================================= ===================
-CANN          To be updated after the Q2 CANN version is officially released CANN software, helping developers implement AI business development and running on the Ascend software and hardware platform 
-Python        ``3.11``                                          Python version                                                 
-torch         ``2.10.0``                                        PyTorch deep learning framework base package                                 
-torch_npu     To be updated after the Q2 torch_npu version is officially released NPU PyTorch adaptation plugin                                       
-triton        ``3.5.0``                                         Triton, used for writing custom operators                                 
-triton-ascend ``3.2.2``                                         NPU Triton adaptation                                            
-transformers  ``4.57.6``                                        Hugging Face large model library, providing model architectures and pre-trained weights            
-vLLM          ``0.23.0``                                        High-performance LLM inference and serving engine                                  
-vLLM-Ascend   ``0.23.0``                                        NPU vLLM backend adaptation                                          
-Megatron-LM   ``core_r0.12.0``                                  Large-scale distributed training framework                                       
-MindSpeed     ``0c6c0ceaa523a96032dee1539a52032155e6404e``      Megatron-LM adaptation and optimization component on the Ascend NPU                  
-============= ================================================= ===================
+
+.. list-table::
+   :header-rows: 1
+
+   * - Dependency
+     - Version
+     - Description
+   * - CANN
+     - To be updated with the link after the Q2 CANN version is officially released.
+     - CANN software, which helps developers develop and run AI services on the Ascend software and hardware platform.
+   * - Python
+     - ``3.11``
+     - Python version
+   * - torch
+     - ``2.10.0``
+     - Base package of the PyTorch deep learning framework
+   * - torch_npu
+     - To be updated with the link after the Q2 torch_npu version is officially released.
+     - PyTorch adaptation plugin for NPU
+   * - triton
+     - ``3.5.0``
+     - Triton, used for writing custom operators
+   * - triton-ascend
+     - ``3.2.2``
+     - Triton adaptation for NPU
+   * - transformers
+     - ``4.57.6``
+     - Hugging Face large model library, providing model architectures and pre-trained weights
+   * - vLLM
+     - ``0.23.0``
+     - High-performance LLM inference and serving engine
+   * - vLLM-Ascend
+     - ``0.23.0``
+     - vLLM backend adaptation for NPU
+   * - Megatron-LM
+     - ``core_r0.12.0``
+     - Large-scale distributed training framework
+   * - MindSpeed
+     - ``0c6c0ceaa523a96032dee1539a52032155e6404e``
+     - Adaptation and optimization component of Megatron-LM on Ascend NPU
 
 Environment Installation Steps
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -81,4 +106,3 @@ Installing verl dependencies
     cd verl
     pip install -e .
     pip install -r requirements-npu.txt
-
