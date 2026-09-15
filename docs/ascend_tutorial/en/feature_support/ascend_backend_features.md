@@ -83,7 +83,7 @@ The following lists commonly set sglang feature parameters in verl. For more inf
 
 ### 1. FSDP
 
-Ascend provides support for FSDP through torch_npu. For the current PyTorch API support level, refer to the [Release Notes](https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/nativeapi/docs/zh/native_apis/pytorch_2-12-0/torch-distributed-fsdp.md).
+Ascend provides support for FSDP through torch_npu. For the current PyTorch API support level, refer to the [Release Notes](https://www.hiascend.com/document/detail/en/Pytorch/latest/apiref/nativeapi/docs/en/native_apis/pytorch_2-12-0/torch-distributed-fsdp.md).
 
 #### FSDP1
 ##### Parameter Feature Support

@@ -561,7 +561,7 @@ msgid ""
 "昇腾通过torch_npu提供FSDP相关支持能力，当前pytorch api支持度参照[版本说明](https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/nativeapi/docs/zh/native_apis/pytorch_2-12-0/torch-distributed-fsdp.md)。\n"
 ""
 msgstr ""
-"Ascend provides support for FSDP through torch_npu. For the current PyTorch API support level, refer to the [Release Notes](https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/nativeapi/docs/zh/native_apis/pytorch_2-12-0/torch-distributed-fsdp.md).\n"
+"Ascend provides support for FSDP through torch_npu. For the current PyTorch API support level, refer to the [Release Notes](https://www.hiascend.com/document/detail/en/Pytorch/latest/apiref/nativeapi/docs/en/native_apis/pytorch_2-12-0/torch-distributed-fsdp.md).\n"
 ""
 
 msgid ""

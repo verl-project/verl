@@ -191,8 +191,8 @@ References
 - `Ascend Performance Tuning Guide <../dev_guide/performance/perf_tuning_on_ascend.rst>`_
 - `Ascend Quick Start Guide <../get_start/quick_start.rst>`_
 - `NPU-CI Addition Guide <../contribution_guide/ascend_ci_guide.rst>`_
-- Ascend NPU documentation: https://www.hiascend.com/document
-- CANN toolkit documentation: https://www.hiascend.com/software/cann
+- Ascend NPU documentation: https://www.hiascend.com/en/document
+- CANN toolkit documentation: https://www.hiascend.com/eng/cann
 
 Get more help
 -------------

@@ -274,6 +274,6 @@ For detailed documentation about NPU profiling, refer to `Profiling Collection G
 
 The script for `Qwen3-30B`_ provides the basic performance collection option PROF_CONFIG. By default, it sets global_profiler.steps=null to disable collection. You can modify the parameters based on your actual requirements.
 
-After data collection is complete, you can use `MindStudio Insight <https://www.hiascend.com/document/detail/zh/mindstudio/830/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html>`_ to parse the data.
+After data collection is complete, you can use `MindStudio Insight <https://www.hiascend.com/document/detail/en/mindstudio/830/GUI_baseddevelopmenttool/MindStudioInsight/Insight_userguide_0002.html>`_ to parse the data.
 
 Note: Collecting full Profiling on the verl framework side generates massive and duplicate operator records. You can modify the code according to the documentation to collect only key stages.

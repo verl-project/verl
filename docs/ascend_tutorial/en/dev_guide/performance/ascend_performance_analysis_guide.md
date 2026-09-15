@@ -73,7 +73,7 @@ For enabling and configuration tutorials, refer to the [Profiling Collection Gui
 
 ##### **Performing in-depth memory analysis using the msleaks tool**
 
-- **Procedure**: Refer to the [msleaks tool user guide](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/920beta1/devaids/msMemScope/docs/zh/user_guide/memory_analysis.md).
+- **Procedure**: Refer to the [msleaks tool user guide](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/latest/devaids/msMemScope/docs/en/memory_analysis.md).
 - **Value**: You can view the line chart of total framework memory allocation and the memory block chart. You can directly map them to call stacks for in-depth analysis of framework memory usage.
 - **Demonstration**:
 
