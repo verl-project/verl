@@ -51,10 +51,10 @@ class FP8QuantizerHelper:
             "ln_",  # LayerNorm variants
             "embeddings",  # Embeddings
             "mlp.gate.weight",  # MoE router
-            # Shared-expert gate (Qwen2-MoE style): a [1, hidden] torch linear on the training side and a
-            # ReplicatedLinear(quant_config=None) in SGLang; the "mlp" include pattern below would otherwise
-            # ship it as fp8 + scale into a bf16 parameter.
-            "shared_expert_gate",
+            # Shared-expert gate (Qwen2-MoE / Qwen3-Next / Qwen3.5-MoE): a [1, hidden] torch linear on the
+            # training side and a ReplicatedLinear(quant_config=None) in SGLang; the "mlp" include pattern
+            # below would otherwise ship it as fp8 + scale into a bf16 parameter.
+            "mlp.shared_expert_gate.weight",
         ]
 
         # Check if matches exclude patterns

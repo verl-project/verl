@@ -116,9 +116,18 @@ def collect_train_fp8_report(modules: Iterable[torch.nn.Module] | torch.nn.Modul
     return report
 
 
+# transformers >= 5 saves MoE experts fused and without a ``.weight`` suffix
+# (``mlp.experts.gate_up_proj`` [E, 2I, H], ``mlp.experts.down_proj`` [E, H, I]).
+_FUSED_EXPERT_RE = re.compile(r"\.experts\.(gate_up_proj|down_proj)$")
+
+
+def is_linear_weight_name(name: str) -> bool:
+    return name.endswith(".weight") or bool(_FUSED_EXPERT_RE.search(name))
+
+
 def expected_train_quantized(name: str, report: TrainFp8Report) -> bool | None:
     """Training-side expectation for one HF parameter name; ``None`` when this rank cannot judge."""
-    if not name.endswith(".weight"):
+    if not is_linear_weight_name(name):
         return False
     m = _LAYER_RE.search(name)
     if m is None:
@@ -143,9 +152,9 @@ def audit_layer_sets(
             continue
         actual = bool(rollout_quantizes(name))
         if actual and not expected:
-            problems.append(f"{name}: rollout quantizes it, training ran it in high precision")
+            problems.append(f"{name}: the rollout-side rule quantizes it, training ran it in high precision")
         elif expected and not actual:
-            problems.append(f"{name}: training ran it in fp8, rollout keeps it in high precision")
+            problems.append(f"{name}: training ran it in fp8, the rollout-side rule does not quantize it")
     return problems
 
 
@@ -263,9 +272,12 @@ class QuantLayerAuditor:
             f"({n_q} of {n_seen} decoder layers on this rank ran fp8 GEMMs):\n  - "
             + "\n  - ".join(problems[:40])
             + ("\n  - ..." if len(problems) > 40 else "")
-            + "\nThe 'matched' train/rollout grid only holds for layers both sides quantize. Fix with "
-            "quantization_config.ignored_layers (rollout) or first_last_layers_bf16 / model wiring (training). "
-            "VERL_QUANT_LAYER_AUDIT=raise turns this into an error, =0 silences it."
+            + "\nThe 'matched' train/rollout grid only holds for layers both sides quantize. On SGLang the rule "
+            "evaluated is the sync-time one (verl/utils/fp8_utils.py): a name it does not quantize is shipped "
+            "unquantized even when the engine built that layer as fp8, so the engine casts bf16 into the fp8 "
+            "buffer and never receives a scale. On vLLM it is the engine blacklist. Fix with "
+            "quantization_config.ignored_layers / the sync rule (rollout) or first_last_layers_bf16 / model "
+            "wiring (training). VERL_QUANT_LAYER_AUDIT=raise turns this into an error, =0 silences it."
         )
         if self.mode == "raise":
             raise RuntimeError(msg)

@@ -302,16 +302,25 @@ stale kernel scale layouts after a weight sync). verl now fails loudly in both c
 - **MXFP8 refit self-check** (engine side, vLLM and SGLang). After every weight sync the smallest
   MXFP8 linear layer's own quantized GEMM is run on a small random input and compared with a
   dequantized bf16 reference of the canonical weight and scale; a stale or mis-laid-out scale
-  shows up as O(1) relative error and raises. Disable with `VERL_MXFP8_REFIT_CHECK=0`; the
-  tolerance (default 0.25) is `VERL_MXFP8_REFIT_CHECK_TOL`.
+  shows up as O(1) relative error and raises. On SGLang MoE layers the loader additionally checks,
+  before re-deriving the kernel layout, that the sync wrote every staged expert scale (the staging
+  buffer is pre-filled with the UE8M0 NaN code `0xFF`): experts whose HF names miss the sync-side
+  rule would otherwise arrive as a scale-less bf16 cast in the fp8 buffer. The kernel-vs-reference
+  probe verifies the kernel's *layout*, not that the sync delivered the right scales — the audit
+  below covers that. Disable both with `VERL_MXFP8_REFIT_CHECK=0`; the probe tolerance (default
+  0.25) is `VERL_MXFP8_REFIT_CHECK_TOL`.
 - **Quantized-layer audit** (trainer worker, Megatron engine). "Matched" train/rollout quantization
   presumes both sides quantize the same layers, but training decides implicitly (TE linear modules
   inside `fp8_autocast`) and rollout decides by name blacklist (`ignored_layers`). At the first weight
   sync after a training step, verl reads which decoder layers actually ran fp8 GEMMs (TE's fp8 weight
   workspaces), evaluates the rollout's own selection rule on every synced parameter name, and logs
   each disagreement (e.g. `first_last_layers_bf16` without the matching rollout regex, a router the
-  name patterns miss, `lm_head` left in the quantized set). `VERL_QUANT_LAYER_AUDIT=raise` turns the
-  report into an error, `=0` disables it.
+  name patterns miss, `lm_head` left in the quantized set, Mixtral's `w1/w2/w3` experts that the
+  SGLang sync-time include list does not match). On SGLang the rule evaluated is the sync-time
+  include/exclude rule in `verl/utils/fp8_utils.py`; a name it misses is shipped unquantized even
+  when the engine built that layer as fp8. Fused expert tensors as `transformers >= 5` saves them
+  (`mlp.experts.gate_up_proj`, no `.weight` suffix) are judged too. `VERL_QUANT_LAYER_AUDIT=raise`
+  turns the report into an error, `=0` disables it.
 - **MoE experts on SGLang.** SGLang's MXFP8 MoE method rewrites the expert scales in place at
   load (swizzled on the Triton MoE runner, packed on DeepGEMM), so the refit loader stages them
   back to the canonical `[E, N, K/32]` layout for `load_weights` and re-derives the kernel layout

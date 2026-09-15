@@ -111,7 +111,7 @@ def test_first_last_layers_bf16_without_rollout_regex_is_reported():
     assert flagged == {
         n for n in _hf_names() if n.startswith(("model.layers.0.", "model.layers.3.")) and "norm" not in n
     }
-    assert all("rollout quantizes it" in p for p in problems)
+    assert all("rule quantizes it" in p for p in problems)
     # ... and the matching rollout regex makes it consistent again
     pred = _sglang_pred({"quantization_config": {"ignored_layers": ["re:model\\.layers\\.(0|3)\\..*"]}})
     assert audit_layer_sets(r, _hf_names(), pred) == []
@@ -133,7 +133,7 @@ def test_mixtral_expert_names_miss_the_sglang_sync_whitelist():
     names = _hf_names(router="block_sparse_moe.gate.weight", experts=("block_sparse_moe.experts", ["w1", "w2", "w3"]))
     problems = audit_layer_sets(r, names, _sglang_pred())
     assert len(problems) == N_LAYERS * 2 * 3
-    assert all("block_sparse_moe.experts" in p and "rollout keeps it in high precision" in p for p in problems)
+    assert all("block_sparse_moe.experts" in p and "rule does not quantize it" in p for p in problems)
     # Qwen-MoE expert names (gate_proj/up_proj/down_proj under mlp.experts) pass the whitelist: consistent
     qwen = _hf_names(router="mlp.gate.weight", experts=("mlp.experts", ["gate_proj", "up_proj", "down_proj"]))
     assert audit_layer_sets(r, qwen, _sglang_pred()) == []
@@ -154,7 +154,7 @@ def test_shared_expert_gate_is_excluded_by_sync_and_would_be_reported_otherwise(
     assert [p.split(":")[0] for p in problems] == [
         f"model.layers.{i}.mlp.shared_expert_gate.weight" for i in range(N_LAYERS)
     ]
-    assert all("rollout quantizes it" in p for p in problems)
+    assert all("rule quantizes it" in p for p in problems)
 
 
 def test_lm_head_left_quantized_on_rollout_is_reported():
@@ -169,7 +169,7 @@ def test_training_fp8_but_rollout_unquantized_layer_is_reported():
     pred = _sglang_pred({"quantization_config": {"ignored_layers": ["model.layers.2.mlp.down_proj"]}})
     problems = audit_layer_sets(r, _hf_names(), pred)
     assert problems == [
-        "model.layers.2.mlp.down_proj.weight: training ran it in fp8, rollout keeps it in high precision"
+        "model.layers.2.mlp.down_proj.weight: training ran it in fp8, the rollout-side rule does not quantize it"
     ]
 
 
@@ -209,3 +209,15 @@ def test_auditor_raise_mode_and_disabled_mode():
     off = QuantLayerAuditor(_sglang_pred(), "0")
     assert not off.enabled and off.run([_Chunk(quantized_layers={0})]) is None
     assert not QuantLayerAuditor(None, "warn").enabled  # no predicate: bf16 rollout or bf16 trainer
+
+
+def test_fused_expert_layout_without_weight_suffix_is_still_judged():
+    # transformers >= 5 writes experts as mlp.experts.gate_up_proj / down_proj (no ".weight"); if such a
+    # checkpoint's names ever reach the sync, the name rule (which requires ".weight") ships them in bf16
+    # while training ran the experts in fp8 -> the audit must report it rather than skip the names.
+    r = collect_train_fp8_report([_Chunk(quantized_layers=set(range(N_LAYERS)))])
+    names = _hf_names() + [
+        f"model.layers.{i}.mlp.experts.{leaf}" for i in range(N_LAYERS) for leaf in ("gate_up_proj", "down_proj")
+    ]
+    problems = audit_layer_sets(r, names, _sglang_pred())
+    assert len(problems) == N_LAYERS * 2 and all("experts" in p and "rule does not quantize it" in p for p in problems)

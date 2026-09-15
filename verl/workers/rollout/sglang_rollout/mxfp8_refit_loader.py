@@ -56,8 +56,13 @@ derivable from the expert weight shape.
 
 Self-check. After re-processing, one dense MXFP8 layer's own ``apply`` is compared
 against a dequantized reference (``verl.utils.mxfp8_refit_check``); a stale or
-mis-laid-out scale shows up as O(1) relative error and raises. Disable with
-``VERL_MXFP8_REFIT_CHECK=0``.
+mis-laid-out scale shows up as O(1) relative error and raises. For staged MoE
+scales the loader also verifies, before re-processing, that the sync wrote every
+entry: the staging buffer is pre-filled with ``0xFF`` (the UE8M0 NaN code), so an
+expert whose HF name misses the sync-side quantization rule — shipped as bf16,
+which the engine's weight loader silently casts into the fp8 buffer with no scale —
+is reported by name instead of being swizzled into the live buffer. Both checks
+are disabled by ``VERL_MXFP8_REFIT_CHECK=0``.
 
 Register at server launch (verl does this when ``rollout.quantization=mxfp8``)::
 
@@ -200,9 +205,32 @@ def stage_mxfp8_moe_scales(model: torch.nn.Module) -> list[tuple[torch.nn.Module
     return staged
 
 
+_UNWRITTEN_SCALE = 0xFF
+
+
+def _check_moe_scales_written(name: str, module: torch.nn.Module, staged_names: Iterable[str]) -> None:
+    """Raise if a staged expert scale still holds the staging sentinel after ``load_weights``."""
+    for sname in staged_names:
+        data = getattr(module, sname).data
+        unwritten = int((data == _UNWRITTEN_SCALE).sum().item())
+        if unwritten == 0:
+            continue
+        raise RuntimeError(
+            f"{name}.{sname}: the weight sync did not write {unwritten} of {data.numel()} expert scale entries "
+            "(they still hold the 0xFF staging sentinel). The sync shipped these experts without MXFP8 scales - "
+            "typically their HF names miss the sync-side quantization rule (verl/utils/fp8_utils.py, e.g. "
+            "Mixtral's block_sparse_moe.experts.N.w1/w2/w3) while the engine built them as fp8, so the engine "
+            "cast bf16 weights into the fp8 buffer and would pair them with NaN scales. Fix the sync rule or "
+            "quantization_config.ignored_layers so both sides agree; VERL_MXFP8_REFIT_CHECK=0 bypasses this check."
+        )
+
+
 def reprocess_mxfp8_moe_layers(model: torch.nn.Module, staged: list[tuple[torch.nn.Module, str, torch.Tensor]]) -> int:
     """Re-run the MoE post-load processing and fold results into the captured storage."""
+    from verl.utils.mxfp8_refit_check import refit_check_enabled
+
     live_by_key = {(id(m), n): live for m, n, live in staged}
+    check = refit_check_enabled()
     count = 0
     for name, module in model.named_modules():
         if not _is_mxfp8_moe(module):
@@ -213,6 +241,8 @@ def reprocess_mxfp8_moe_layers(model: torch.nn.Module, staged: list[tuple[torch.
                 f"{name}: MXFP8 MoE quant method expects a non-fp8-serialized checkpoint; refusing to "
                 "re-quantize experts after a weight sync."
             )
+        if check:
+            _check_moe_scales_written(name, module, [n for _, n in _MOE_SCALE_PAIRS if (id(module), n) in live_by_key])
         qm.process_weights_after_loading(module)
         for _, sname in _MOE_SCALE_PAIRS:
             live = live_by_key.get((id(module), sname))

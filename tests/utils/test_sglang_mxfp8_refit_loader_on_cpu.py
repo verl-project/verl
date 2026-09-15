@@ -224,6 +224,39 @@ def test_moe_scales_kept_canonical_by_the_runner_are_not_staged():
     assert refit.reprocess_mxfp8_moe_layers(m, []) == 1
 
 
+def test_moe_scales_the_sync_never_wrote_are_reported_instead_of_swizzled():
+    # The Mixtral case: expert names (block_sparse_moe.experts.N.w1/w2/w3) miss the sync-side rule, so the
+    # sync ships bf16 weights and no scales; the model's load_weights casts them into the fp8 buffer
+    # silently. The staged scale buffers still hold 0xFF afterwards and the loader must say so by name.
+    _install_stub("auto")
+    m = _Model(resolved_backend="flashinfer_cutlass")
+    m.moe = _MoE()
+    m.moe.quant_method.process_weights_after_loading(m.moe)
+    live = m.moe.w13_weight_scale_inv.data.clone()
+    try:
+        refit.load_and_reprocess(m, [("moe.w13_weight", torch.zeros(2, 128, 64, dtype=torch.bfloat16))])
+    except RuntimeError as e:
+        assert "moe.w13_weight_scale_inv: the weight sync did not write 512 of 512" in str(e)
+        assert "block_sparse_moe.experts" in str(e)
+    else:
+        raise AssertionError("expected the loader to report expert scales the sync never wrote")
+    assert m.moe.quant_method.calls == 1  # nothing was re-processed on top of sentinel scales
+    assert torch.equal(m.moe.w13_weight_scale_inv.data, live) or m.moe.w13_weight_scale_inv.data.dtype == torch.uint8
+
+    # a sync that writes every scale is untouched by the check (covered end-to-end by the staging test)
+    m2 = _Model(resolved_backend="flashinfer_cutlass")
+    m2.moe = _MoE()
+    m2.moe.quant_method.process_weights_after_loading(m2.moe)
+    refit.load_and_reprocess(
+        m2,
+        [
+            ("moe.w13_weight_scale_inv", torch.full((2, 128, 2), 7, dtype=torch.uint8)),
+            ("moe.w2_weight_scale_inv", torch.full((2, 64, 2), 5, dtype=torch.uint8)),
+        ],
+    )
+    assert m2.moe.quant_method.calls == 2
+
+
 def test_self_check_catches_a_stale_swizzled_copy():
     _install_stub("flashinfer_cutlass")
     m = _Model()
