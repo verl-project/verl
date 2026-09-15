@@ -36,6 +36,12 @@ from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from verl.utils.device import get_device_id
+from verl.workers.rollout.sglang_rollout.mxfp4_loader import (
+    END_SENTINEL as MXFP4_END_SENTINEL,
+)
+from verl.workers.rollout.sglang_rollout.mxfp4_loader import (
+    LOADER_FQN as MXFP4_LOADER_FQN,
+)
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.base import BaseRollout
@@ -56,6 +62,23 @@ def _strip_lora_base_layer(name: str) -> str:
     """Drop the ``.base_layer`` segment ``replace_lora_wrapper()`` inserts for vLLM; SGLang
     has no such level and its loader raises KeyError on it."""
     return name.replace(".base_layer.", ".") if ".base_layer." in name else name
+
+
+def _rollout_keeps_packed_mxfp4(hf_config) -> bool:
+    """Whether SGLang is serving DSv4 routed experts in the checkpoint's packed layout.
+
+    ``expert_dtype`` is the field that actually distinguishes the two DSv4
+    families -- ``quantization_config.quant_method`` says ``fp8`` on both because
+    it describes the linear/attention layers -- and it is what vLLM keys its own
+    dispatch on. ``SGLANG_DSV4_FP4_DEQUANT`` then overrides it downward: with the
+    flag on, SGLang casts the packed experts to blockwise FP8 at load and the
+    engine no longer holds a packed buffer to refit.
+    """
+    if getattr(hf_config, "model_type", None) != "deepseek_v4":
+        return False
+    if getattr(hf_config, "expert_dtype", "fp4") != "fp4":
+        return False
+    return os.environ.get("SGLANG_DSV4_FP4_DEQUANT", "") not in ("1", "true", "True")
 
 
 def _to_ipc_device(tensor: torch.Tensor) -> torch.Tensor:
@@ -374,15 +397,32 @@ class ServerAdapter(BaseRollout):
                 if getattr(self.model_config.hf_config, "model_type", None) == "deepseek_v4"
                 else ()
             )
+            mxfp4_loader = _rollout_keeps_packed_mxfp4(self.model_config.hf_config)
+
+            async def post(batch, is_last):
+                params = [(_strip_lora_base_layer(name), _to_ipc_device(t)) for name, t in batch]
+                if mxfp4_loader and is_last:
+                    params.append((MXFP4_END_SENTINEL, torch.empty(0, dtype=torch.uint8, device=params[0][1].device)))
+                await sgl_update_weights(
+                    engine=self._engine,
+                    params_batch=params,
+                    device_mesh_key="infer_tp",
+                    device_mesh=self.device_mesh,
+                    load_format=MXFP4_LOADER_FQN if mxfp4_loader else None,
+                )
+
+            # One bucket of lookahead: the mxfp4 loader replays the engine's
+            # weight conversion when it sees the sentinel, and that must happen
+            # after the final bucket rather than after every one.
+            pending = None
             async for params_batch in get_named_tensor_buckets(
                 weights, update_weights_bucket_bytes, fusion_groups=fusion_groups
             ):
-                await sgl_update_weights(
-                    engine=self._engine,
-                    params_batch=[(_strip_lora_base_layer(name), _to_ipc_device(t)) for name, t in params_batch],
-                    device_mesh_key="infer_tp",
-                    device_mesh=self.device_mesh,
-                )
+                if pending is not None:
+                    await post(pending, is_last=False)
+                pending = params_batch
+            if pending is not None:
+                await post(pending, is_last=True)
 
         if self._engine is not None and self._is_server_tp_leader():
             await self._engine.flush_cache()
