@@ -7,7 +7,7 @@ msgstr ""
 
 "X-Source-Commit: e50393fa4a19a3dfbfb52bd0e1ad8354cb4e8a97\n"
 
-"X-Skill-Version: 2.2.0\n"
+"X-Skill-Version: 1.0.0\n"
 
 "Last-Translator: Auto Translation (DeepSeek)\n"
 "Language-Team: English\n"

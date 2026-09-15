@@ -326,7 +326,7 @@ Schematic diagram:
 
 **Usage:** `export CPU_AFFINITY_CONF=1`
 
-For detailed configuration principles, refer to: https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0059.html
+For detailed configuration principles, refer to https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/ENV/docs/zh/environment_variable_reference/CPU_AFFINITY_CONF.md
 
 ### Others
 
@@ -336,13 +336,15 @@ The following content summarizes the tuning configurations of several global env
 
 Usage (note that you need to install the jemalloc library first): `export LD_PRELOAD=/usr/local/lib/libjemalloc.so.2`
 
+**Installation and usage guide:** [MindSpeed-RL/docs/install_guide.md · Ascend/MindSpeed-RL - AtomGit | GitCode](https://gitcode.com/Ascend/MindSpeed-RL/blob/master/docs/install_guide.md#高性能内存库-jemalloc-安装)
+
 #### Multi-stream multiplexing
 
 Memory usage is optimized.
 
 How to enable: `export MULTI_STREAM_MEMORY_REUSE=1`
 
-Principle introduction: https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0040.html
+Principle introduction: https://www.hiascend.com/document/detail/zh/Pytorch/latest/devguide/fwfeatures/docs/zh/framework_feature_guide_pytorch/multistream_memory_reuse.md
 
 #### VLLM_ASCEND_ENABLE_FLASHCOMM
 
@@ -407,6 +409,6 @@ actor_rollout_ref.rollout.enforce_eager=False \
 
 ## NPU Tuning Reference Articles
 
-For environment variables, refer to [Environment Variable List - Ascend Extension for PyTorch6.0.0 - Ascend Community](https://www.hiascend.com/document/detail/en/Pytorch/latest/apiref/ENV/docs/en/environment_variable_reference/env_variable_list.md)
+For environment variables: [Environment variable list - TorchNPU - Ascend Community](https://www.hiascend.com/document/detail/zh/Pytorch/latest/apiref/ENV/docs/zh/environment_variable_reference/env_variable_list.md)
 
-Community performance tuning tutorial: [Performance tuning process-Ascend Extension for PyTorch6.0.0-Ascend Community](https://www.hiascend.com/document/detail/en/ModelZoo/traditional_model_train/PyTorch/docs/en/performance_tuning/performance_overview.md)
+Community performance tuning tutorial: [Model Performance Tuning-TorchNPU-Ascend Community](https://www.hiascend.com/document/detail/zh/ModelZoo/traditional_model_train/PyTorch/docs/zh/performance_tuning/performance_overview.md)

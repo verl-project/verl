@@ -50,13 +50,13 @@ List of component versions in the latest image
    * - vLLM-ascend
      - 0.23.0
    * - Megatron-LM
-     - core_r0.16.0
+     - core_r0.18.0
    * - MindSpeed
-     - core_r0.16.0
+     - core_r0.18.0
+   * - Megatron-Bridge
+     - 0.5.0
    * - triton-ascend
      - 3.2.2
-   * - mbridge
-     - 0.15.1
    * - SGLang
      - v0.5.10
    * - sgl-kernel-npu

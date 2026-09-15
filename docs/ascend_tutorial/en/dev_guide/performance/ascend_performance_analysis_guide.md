@@ -44,10 +44,10 @@ For enabling and configuration tutorials, refer to the [Profiling Collection Gui
 
 #### 3. Overall Cluster Performance Analysis
 
-- **Operation**: Using the rl_analysis feature of MSTT, generate a cluster Timeline thumbnail to observe the overall duration of each stage
-- **Value**: Gain a macro-level understanding of cluster performance bottlenecks
-- **User guide**: [rl_analysis documentation](https://gitcode.com/Ascend/mstt/blob/pre-research/profiler/msprof_analyze/docs/features/rl_analysis.md)
-- **Result demonstration**:
+- **Operation**: Use the rl_analysis feature of MSTT to generate a cluster Timeline thumbnail and observe the overall duration of each stage.
+- **Value**: Gain a macro-level understanding of cluster performance bottlenecks.
+- **Operation guide**: [rl_analysis usage documentation](https://gitcode.com/Ascend/mstt/blob/pre-research/profiler/msprof_analyze/docs/features/rl_analysis.md)
+- **Effect display**:
 
 ![Cluster%20Performance%20Analysis](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/Cluster%20Performance%20Analysis.png)
 
@@ -73,9 +73,9 @@ For enabling and configuration tutorials, refer to the [Profiling Collection Gui
 
 ##### **Performing in-depth memory analysis using the msleaks tool**
 
-- **Procedure**: Refer to the [msleaks Tool Usage Guide](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/latest/devaids/msMemScope/docs/en/memory_analysis.md).
-- **Value**: You can view the total framework memory allocation line chart and memory block diagrams, and directly map them to call stacks for in-depth analysis of framework memory usage.
-- **Result display**:
+- **Procedure**: Refer to the [msleaks tool user guide](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/920beta1/devaids/msMemScope/docs/zh/user_guide/memory_analysis.md).
+- **Value**: You can view the line chart of total framework memory allocation and the memory block chart. You can directly map them to call stacks for in-depth analysis of framework memory usage.
+- **Demonstration**:
 
 ![msleaks](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/msleaks.gif)
 
