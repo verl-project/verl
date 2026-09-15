@@ -42,6 +42,7 @@ from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
+    accumulate_rollout_timing_metrics,
     accumulate_rollout_workload_metrics,
     compute_data_metrics,
     compute_throughout_metrics,
@@ -594,6 +595,41 @@ class RayPPOTrainer:
         batch_reward = self.reward_loop_manager.compute_rm_score(batch)
         return batch_reward
 
+    def _sleep_rollout_before_reward(self):
+        # A colocated model reward must own the GPUs exclusively. Rule rewards
+        # and separately provisioned reward models may overlap with rollout.
+        if self.use_rm and not self.config.reward.reward_model.enable_resource_pool:
+            self.checkpoint_manager.sleep_replicas()
+            self._rollout_asleep_for_reward = True
+
+    def _wake_rollout_for_refill(self):
+        if getattr(self, "_rollout_asleep_for_reward", False):
+            self.checkpoint_manager.wake_up_replicas()
+            self._rollout_asleep_for_reward = False
+
+    def _sleep_rollout_before_training(self):
+        if not getattr(self, "_rollout_asleep_for_reward", False):
+            self.checkpoint_manager.sleep_replicas()
+        # The subsequent update_weights wakes replicas for the next update.
+        self._rollout_asleep_for_reward = False
+
+    def _dump_paired_validation(self, batch):
+        directory = self.config.trainer.get("nvfp4_validation_dump_dir", None)
+        if not directory:
+            return
+        correction = self.config.algorithm.get("rollout_correction", None)
+        if correction and correction.get("bypass_mode", False):
+            raise ValueError("paired log-prob validation requires recomputed actor log-probs; bypass_mode is invalid")
+        from verl.utils.real_nvfp4.validation import dump_paired_log_probs
+
+        dump_paired_log_probs(
+            batch,
+            directory,
+            self.global_steps,
+            self.config.actor_rollout_ref.model.path,
+            actor_log_probs_source="recomputed",
+        )
+
     def _validate(self, merged: bool = False):
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
@@ -1030,9 +1066,7 @@ class RayPPOTrainer:
 
         # save dataloader
         local_mkdir_safe(local_global_step_folder)
-        dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
-        dataloader_state_dict = self.train_dataloader.state_dict()
-        torch.save(dataloader_state_dict, dataloader_local_path)
+        self._save_dataloader_checkpoint(local_global_step_folder)
 
         # latest checkpointed iteration tracker (for atomic usage)
         if (
@@ -1102,20 +1136,53 @@ class RayPPOTrainer:
         # TODO: from remote not implemented yet
         dataloader_local_path = os.path.join(global_step_folder, "data.pt")
         if os.path.exists(dataloader_local_path):
-            steps_per_epoch = len(self.train_dataloader)
-            at_epoch_boundary = steps_per_epoch > 0 and self.global_steps % steps_per_epoch == 0
-            if at_epoch_boundary:
-                print(
-                    f"Skipping dataloader state restore: global_steps={self.global_steps} "
-                    f"is at an epoch boundary (steps_per_epoch={steps_per_epoch}). "
-                    f"The saved state marks the dataloader as exhausted. "
-                    f"Next epoch will iterate from scratch."
-                )
-            else:
-                dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
-                self.train_dataloader.load_state_dict(dataloader_state_dict)
+            self._restore_dataloader_checkpoint(global_step_folder)
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
+
+    def _save_dataloader_checkpoint(self, directory):
+        # Keep data.pt's original format for existing checkpoint consumers.
+        torch.save(self.train_dataloader.state_dict(), os.path.join(directory, "data.pt"))
+        torch.save(
+            {"version": 1, "epoch": self._data_epoch, "batches_consumed": self._data_batches_consumed},
+            os.path.join(directory, "data_progress.pt"),
+        )
+
+    def _restore_dataloader_checkpoint(self, directory):
+        state = torch.load(os.path.join(directory, "data.pt"), weights_only=False)
+        progress_path = os.path.join(directory, "data_progress.pt")
+        if os.path.exists(progress_path):
+            progress = torch.load(progress_path, weights_only=True)
+            if progress.get("version") != 1:
+                raise ValueError("unsupported dataloader progress checkpoint version")
+            epoch, consumed = progress["epoch"], progress["batches_consumed"]
+        else:
+            # Older checkpoints contain the sampler cursor/RNG but not the
+            # number of completed epochs. Refill counts cannot be reconstructed
+            # from optimizer steps. Require an explicit epoch for that case.
+            filtering = self.config.algorithm.get("filter_groups", None)
+            epoch = self.config.trainer.get("dataloader_resume_epoch", None)
+            if epoch is None:
+                if filtering and filtering.get("enable", False):
+                    raise ValueError(
+                        "legacy dynamic-sampling checkpoint lacks data_progress.pt; "
+                        "set trainer.dataloader_resume_epoch to the epoch of its saved data.pt"
+                    )
+                epoch = max(self.global_steps - 1, 0) // len(self.train_dataloader)
+            if "_num_yielded" in state:
+                consumed = state["_num_yielded"]
+            elif "_snapshot" in state:
+                consumed = state["_snapshot"]["_snapshot_step"] + state["_steps_since_snapshot"]
+            else:
+                raise ValueError("legacy dataloader state has no recognizable consumed-batch cursor")
+        if not isinstance(epoch, int) or epoch < 0 or not isinstance(consumed, int) or consumed < 0:
+            raise ValueError("invalid dataloader epoch/cursor checkpoint")
+        self.train_dataloader.load_state_dict(state)
+        # StatefulDataLoader.__iter__ restores sampler state even when finished,
+        # then advances to a new iterator. Do not discard the saved sampler RNG.
+        finished = bool(state.get("_iterator_finished", False))
+        self._data_epoch = epoch + int(finished)
+        self._data_batches_consumed = 0 if finished else consumed
 
     def _start_profiling(self, do_profile: bool) -> None:
         """Start profiling for all worker groups if profiling is enabled."""
@@ -1539,12 +1606,23 @@ class RayPPOTrainer:
         self.logger = logger
 
         self.global_steps = 0
+        self._data_epoch = 0
+        self._data_batches_consumed = 0
+        self._rollout_asleep_for_reward = False
+
+        correction = self.config.algorithm.get("rollout_correction", None)
+        if (
+            self.config.trainer.get("nvfp4_validation_dump_dir", None)
+            and correction
+            and correction.get("bypass_mode", False)
+        ):
+            raise ValueError("paired log-prob validation requires recomputed actor log-probs; bypass_mode is invalid")
 
         # load checkpoint and update weights before doing anything
         self._load_checkpoint()
         self.checkpoint_manager.update_weights(self.global_steps)
 
-        current_epoch = self.global_steps // len(self.train_dataloader)
+        current_epoch = self._data_epoch
 
         SkipManager.init(self.config)
 
@@ -1597,7 +1675,11 @@ class RayPPOTrainer:
                 )
 
         for epoch in range(current_epoch, self.config.trainer.total_epochs):
+            self._data_epoch = epoch
+            if epoch != current_epoch:
+                self._data_batches_consumed = 0
             for batch_dict in self.train_dataloader:
+                self._data_batches_consumed += 1
                 if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                     self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
                 continuing_dynamic_sample = filter_groups_enabled and accumulated_batch is not None
@@ -1644,18 +1726,27 @@ class RayPPOTrainer:
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
+                        self._wake_rollout_for_refill()
                         if curr_step_profile:
                             self.llm_server_manager.start_profile()
                         combined_gen_output = self.async_rollout_manager.generate_sequences(combined_gen_batch)
                         if curr_step_profile:
                             self.llm_server_manager.stop_profile()
 
-                        timing_raw.update(combined_gen_output.meta_info["timing"])
+                        timing_raw.update(
+                            accumulate_rollout_timing_metrics(
+                                timing_raw,
+                                combined_gen_output.meta_info["timing"],
+                                previous_sequences=int(metrics.get("rollout/pre_filter/sequences", 0)),
+                                sequences=len(combined_gen_output),
+                            )
+                        )
                         combined_gen_output.meta_info.pop("timing", None)
 
                     # Include discarded groups, refill batches and REMAX baselines:
                     # all contributed to the cumulative generation wall clock.
                     metrics.update(accumulate_rollout_workload_metrics(combined_gen_output, metrics))
+                    self._sleep_rollout_before_reward()
                     gen_batch_output = combined_gen_output.slice(0, num_sampled_prompts)
                     if "__do_sample__" in gen_batch_output.non_tensor_batch:
                         gen_batch_output.pop(non_tensor_batch_keys=["__do_sample__"])
@@ -1746,7 +1837,7 @@ class RayPPOTrainer:
                     else:
                         metrics["train/num_gen_batches"] = 1
 
-                    self.checkpoint_manager.sleep_replicas()
+                    self._sleep_rollout_before_training()
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
@@ -1813,13 +1904,7 @@ class RayPPOTrainer:
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
 
-                    alignment_dump_dir = self.config.trainer.get("nvfp4_validation_dump_dir", None)
-                    if alignment_dump_dir:
-                        from verl.utils.real_nvfp4.validation import dump_paired_log_probs
-
-                        dump_paired_log_probs(
-                            batch, alignment_dump_dir, self.global_steps, self.config.actor_rollout_ref.model.path
-                        )
+                    self._dump_paired_validation(batch)
                     if self.use_reference_policy:
                         # compute reference log_prob
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):

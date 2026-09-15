@@ -493,6 +493,14 @@ class MegatronEngine(BaseEngine):
         Returns ``(enabled, num_layers_at_start, num_layers_at_end)``.
         """
 
+        from verl.utils.real_nvfp4.config import validate_real_nvfp4_parallelism
+
+        # Even without a carve-out, runtime attestation compares local module
+        # counts to global layer counts. PP/VPP splitting is not supported yet.
+        validate_real_nvfp4_parallelism(
+            pipeline_size=self.engine_config.pipeline_model_parallel_size,
+            virtual_pipeline_size=self.engine_config.virtual_pipeline_model_parallel_size,
+        )
         start = int(override_transformer_config.get("num_layers_at_start_in_bf16") or 0)
         end = int(override_transformer_config.get("num_layers_at_end_in_bf16") or 0)
         enabled = bool(override_transformer_config.get("first_last_layers_bf16") or False)
@@ -513,17 +521,6 @@ class MegatronEngine(BaseEngine):
         num_layers = int(self.model_config.hf_config.num_hidden_layers)
         if start + end >= num_layers:
             raise ValueError(f"real_nvfp4 BF16 layer carve-out {start}/{end} leaves no quantized layer of {num_layers}")
-        if enabled:
-            # The recipe matches on the layer index in the module path, which is
-            # the global index only when the model is not split across pipeline
-            # stages.
-            pipeline_size = int(getattr(self.engine_config, "pipeline_model_parallel_size", 1) or 1)
-            virtual_pipeline_size = getattr(self.engine_config, "virtual_pipeline_model_parallel_size", None)
-            if pipeline_size != 1 or (virtual_pipeline_size or 1) != 1:
-                raise ValueError(
-                    "real_nvfp4 BF16 layer carve-out needs pipeline_model_parallel_size=1 so the "
-                    f"recipe's layer indices are global, got pp={pipeline_size} vpp={virtual_pipeline_size}"
-                )
         return enabled, start, end
 
     def _load_real_nvfp4_precision_recipe(self):
@@ -558,12 +555,9 @@ class MegatronEngine(BaseEngine):
                 "BF16 ahead of the general patterns, and quantize the remaining MLP fc1/fc2; "
                 f"expected={expected_matchers}, got={actual_matchers}"
             )
-        configs = raw.get("configs", {})
-        if (configs.get("bf16", {}).get("training_recipe") or {}) != {}:
-            raise ValueError("real_nvfp4 attention BF16 recipe must have an empty training_recipe")
-        nvfp4_training = configs.get("nvfp4", {}).get("training_recipe") or {}
-        if nvfp4_training != {"fp4_quantization_recipe": "nvfp4"}:
-            raise ValueError(f"real_nvfp4 MLP recipe mismatch: {nvfp4_training}")
+        from verl.utils.real_nvfp4.config import validate_real_nvfp4_precision_configs
+
+        validate_real_nvfp4_precision_configs(raw.get("configs", {}))
 
         from megatron.core.quantization.utils import load_quantization_recipe
 
@@ -643,11 +637,9 @@ class MegatronEngine(BaseEngine):
             raise RuntimeError(f"real_nvfp4 layer precision contract drifted: {mismatched_layer_precision}")
 
         expected_layers = int(self.model_config.hf_config.num_hidden_layers)
-        # Attention exists on every decoder layer, but experts do not: a model
-        # with decoder_sparse_step > 1 or mlp_only_layers has dense layers that
-        # contribute no MLP modules to these counts at all. Carving out a dense
-        # layer is a no-op, so intersect the carve-out with the sparse layers
-        # rather than subtracting raw layer counts.
+        # Derive counts from the structural layer helper. The model contract
+        # currently requires all-MoE decoders: supporting mixed layers also
+        # needs explicit BF16 recipes and attestation for non-expert MLPs.
         from verl.utils.real_nvfp4 import real_nvfp4_moe_layer_indices
 
         moe_layers = set(real_nvfp4_moe_layer_indices(self.model_config.hf_config))
@@ -1391,6 +1383,7 @@ class MegatronEngine(BaseEngine):
             per_tensor_param = attest_real_nvfp4_bf16_transport(
                 per_tensor_param,
                 expected_expert_weights=expected_expert_weights,
+                hf_config=self.model_config.hf_config,
             )
 
         return per_tensor_param, peft_config

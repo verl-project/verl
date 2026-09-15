@@ -92,21 +92,13 @@ def real_nvfp4_vllm_ignore_layers(
 
 
 def validate_real_nvfp4_model_contract(hf_config: Any) -> None:
-    """Fail closed on layouts whose refit counts this recipe cannot predict.
+    """Restrict the current recipe to all-MoE decoders without shared experts.
 
-    This used to be an allowlist of one architecture name
-    (``Qwen3MoeForCausalLM`` with ``decoder_sparse_step=1`` and no
-    ``mlp_only_layers``), which rejected every other MoE model even when the
-    layout was one it handles perfectly well. The properties that actually
-    matter are structural, so check those instead:
-
-    * routed experts exist and their count is known, since the refit
-      attestation is an exact expert-weight count;
-    * at least one layer is sparse under the placement rule above;
-    * there are no shared experts, because those add per-layer weights the
-      expert-count arithmetic below does not model.
-
-    Anything else is still refused rather than quietly mis-counted.
+    Counting a mixed dense/MoE layout is not proof of precision compatibility:
+    the training recipe's fc1/fc2 patterns also quantize dense MLPs, whereas
+    rollout quantizes routed experts only. Keep these layouts unsupported until
+    non-expert precision is explicitly configured and attested on both sides.
+    This is a structural restriction, not an architecture-name allowlist.
     """
 
     num_experts = int(_hf_get(hf_config, "num_experts") or _hf_get(hf_config, "n_routed_experts") or 0)
@@ -121,6 +113,11 @@ def validate_real_nvfp4_model_contract(hf_config: Any) -> None:
             f"{_hf_get(hf_config, 'decoder_sparse_step') or 1} with mlp_only_layers="
             f"{_hf_get(hf_config, 'mlp_only_layers') or []}"
         )
+    if len(real_nvfp4_moe_layer_indices(hf_config)) != int(_hf_get(hf_config, "num_hidden_layers")):
+        raise ValueError(
+            "real_nvfp4 currently requires every decoder layer to be MoE; mixed dense/MoE layouts "
+            "would quantize dense training MLPs that remain BF16 in rollout"
+        )
     # Shared experts would be extra per-layer weights on the refit stream, so the
     # expert-weight attestation would be wrong rather than merely conservative.
     for key in ("n_shared_experts", "shared_expert_intermediate_size", "num_shared_experts"):
@@ -129,6 +126,36 @@ def validate_real_nvfp4_model_contract(hf_config: Any) -> None:
                 f"real_nvfp4 does not model shared experts yet ({key}="
                 f"{_hf_get(hf_config, key)}); the refit expert-weight count would not match"
             )
+
+
+def validate_real_nvfp4_parallelism(*, pipeline_size: int, virtual_pipeline_size: int | None) -> None:
+    """Keep layer-index recipes and rank-local attestation within the PP=1 scope."""
+
+    if pipeline_size != 1 or virtual_pipeline_size not in (None, 1):
+        raise ValueError(
+            "real_nvfp4 currently requires pipeline_model_parallel_size=1 and no virtual pipeline splitting; "
+            f"layer precision and local attestation use global layer indices, got pp={pipeline_size} "
+            f"vpp={virtual_pipeline_size}"
+        )
+
+
+def validate_real_nvfp4_precision_configs(configs: Any) -> None:
+    """Validate both training and evaluation payloads of the audited TE recipe.
+
+    MCore selects evaluation_recipe in module.eval(), including old-log-prob
+    recomputation. Omitting it inherits the training recipe; an explicit payload
+    must be identical so eval cannot silently change attention or MLP precision.
+    """
+
+    expected = {"bf16": {}, "nvfp4": {"fp4_quantization_recipe": "nvfp4"}}
+    for name, training_recipe in expected.items():
+        payload = configs.get(name) if isinstance(configs, dict) else None
+        if not isinstance(payload, dict) or payload.get("transformer_engine_config_type") != "TEQuantizationParams":
+            raise ValueError(f"real_nvfp4 {name} requires a TEQuantizationParams config")
+        if payload.get("training_recipe") != training_recipe:
+            raise ValueError(f"real_nvfp4 {name} training_recipe must be {training_recipe!r}")
+        if "evaluation_recipe" in payload and payload["evaluation_recipe"] != training_recipe:
+            raise ValueError(f"real_nvfp4 {name} evaluation_recipe must match training_recipe")
 
 
 def real_nvfp4_expected_counts(hf_config: Any) -> tuple[int, int]:

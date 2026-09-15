@@ -27,16 +27,17 @@ def _batch():
 def test_paired_dump_masks_padding_and_does_not_mutate(tmp_path):
     batch = _batch()
     before = batch.batch["old_log_probs"].clone()
-    summary = dump_paired_log_probs(batch, str(tmp_path), 1, "/fixed/model")
+    summary = dump_paired_log_probs(batch, str(tmp_path), 1, "/fixed/model", actor_log_probs_source="recomputed")
     assert summary["valid_tokens"] == 3
     assert summary["abs_mean"] == pytest.approx(0.1)
     assert summary["k3_mean"] == pytest.approx(0.0051709, abs=1e-6)
     assert summary["checkpoint_position"] == "initial_before_first_update"
+    assert summary["actor_log_probs_source"] == "recomputed"
     saved = torch.load(tmp_path / "step_1.pt", weights_only=True)
     assert saved["response_tokens"].tolist() == [10, 11, 12]
     torch.testing.assert_close(before, batch.batch["old_log_probs"], equal_nan=True)
     with pytest.raises(FileExistsError):
-        dump_paired_log_probs(batch, str(tmp_path), 1, "/fixed/model")
+        dump_paired_log_probs(batch, str(tmp_path), 1, "/fixed/model", actor_log_probs_source="recomputed")
 
 
 @pytest.mark.parametrize("bad", ["nan", "empty", "shape"])
@@ -49,5 +50,11 @@ def test_paired_dump_refuses_invalid_evidence(tmp_path, bad):
     else:
         batch.batch["rollout_log_probs"] = torch.zeros(1, 1)
     with pytest.raises(ValueError):
-        dump_paired_log_probs(batch, str(tmp_path), 1, "/fixed/model")
+        dump_paired_log_probs(batch, str(tmp_path), 1, "/fixed/model", actor_log_probs_source="recomputed")
+    assert not list(tmp_path.iterdir())
+
+
+def test_paired_dump_rejects_rollout_substitution(tmp_path):
+    with pytest.raises(ValueError, match="independently recomputed"):
+        dump_paired_log_probs(_batch(), str(tmp_path), 1, "/fixed/model", actor_log_probs_source="rollout_bypass")
     assert not list(tmp_path.iterdir())

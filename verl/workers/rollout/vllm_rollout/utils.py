@@ -176,7 +176,7 @@ class vLLMColocateWorkerExtension:
         model_quantization = getattr(getattr(vllm_config, "model_config", None), "quantization", None)
         _is_real_nvfp4 = model_quantization == "nvfp4_per_token"
         _is_modelopt_qat = type(quant_config).__name__ == "ModelOptNvFp4Config"
-        if os.environ.get("VERL_VLLM_REAL_NVFP4_ENABLED") == "1":
+        if _is_real_nvfp4 or os.environ.get("VERL_VLLM_REAL_NVFP4_ENABLED") == "1":
             from verl.utils.real_nvfp4 import require_vllm_native_nvfp4_per_token
 
             require_vllm_native_nvfp4_per_token(vllm_config)
@@ -342,6 +342,7 @@ class vLLMColocateWorkerExtension:
                 raw_weights_iterator,
                 expected_expert_weights=expected_expert_weights,
                 location="vllm_receive",
+                hf_config=self.model_runner.vllm_config.model_config.hf_config,
             )
             try:
                 self.model_runner.reload_weights(
@@ -404,6 +405,8 @@ class vLLMColocateWorkerExtension:
         if os.environ.get("VERL_VLLM_NATIVE_RELOAD") == "1":
             if peft_config is not None:
                 raise NotImplementedError("native reload weight sync does not support LoRA")
+            if self._use_mtp_drafter_weight_sync():
+                raise NotImplementedError("native reload weight sync does not support MTP drafter weight sync")
             if os.environ.get("VERL_DEBUG_MOE_RELOAD") == "1":
                 _install_moe_reload_debug()
             receiver = BucketedWeightReceiver(

@@ -5,10 +5,10 @@ QAT path.
 
 ## Precision contract
 
-- Training uses Megatron-Core plus the exact Transformer Engine
-  `2.18.0+e7c550c5` source pin from the current NeMo RL PR #3566. This pin
-  contains the GroupedLinear packed-wgrad and dequantized-backward operand
-  fixes. Persistent policy
+- Training uses Megatron-Core plus the official Transformer Engine `2.18.0`
+  release (`transformer-engine`, `transformer-engine-cu13`, and
+  `transformer-engine-torch` must all match). The release contains the
+  GroupedLinear packed-wgrad and dequantized-backward operand fixes. Persistent policy
   parameters remain BF16 (`fp4_param=false`) and the optimizer keeps its full
   Adam state.
 - The per-module TE recipe keeps attention BF16 and applies NVFP4 to every
@@ -33,8 +33,20 @@ QAT path.
 
 The runtime is intentionally fail-closed for the validated
 `Qwen3MoeForCausalLM` all-MoE layout, vLLM 0.26.0, rollout TP/PP/EP = 1/1/1,
-BF16 KV cache, and no speculative decoding. It verifies exact expert tensor and
-native W4A4 layer counts rather than accepting a partial refit.
+training PP=1 with no virtual pipeline, BF16 KV cache, and no speculative decoding.
+Mixed dense/MoE layouts are rejected: the current training module recipe does
+not preserve BF16 for their dense MLPs. An evaluation recipe must be absent or
+identical to its training recipe, including BF16 carve-outs.
+
+An unmodified vLLM 0.26 wheel is **not** sufficient. Apply the audited fixes
+using `runtime_backports/apply_vllm_online_nvfp4_50029_50074.py` in the runtime
+build: they remove an extra BF16 rounding step and preserve the MoE kernel
+across refits. The worker checks the normalized source of these implementations;
+an unpatched or changed implementation fails before training. Updating that
+allowlist requires re-auditing the dependency, not adding a version marker.
+Refit verifies unique coverage of every `(layer, expert, projection)` key as
+well as native W4A4 layer counts. These checks do not replace GPU graph/eager
+equivalence tests after consecutive reloads.
 
 ## R3 and loss contract
 
@@ -55,7 +67,15 @@ responses, and `max_num_seqs=128`.
 - vLLM quantization scope: native `nvfp4_per_token` (MoE only; linears BF16)
 - Versioned scheduler bundle: `jobs/r3_nativeonline_20260831_v3/`
 
-## Gated scheduler workflow
+## Historical scheduler workflow
+
+The versioned `r3_nativeonline_20260831_v3` scripts below reproduce an older
+runtime, **not** the current TE 2.18 release build. Do not use their source-pin
+build step to validate the current lockfile. Current validation must use a
+fresh versioned image and frozen checkout, preserving the eight-node recipe
+and explicit runtime backports. Run tests through the cluster scheduler, not
+on a shared login node. Independent formal training chains need not wait for
+unrelated user jobs; test jobs should remain low-concurrency.
 
 Run exactly one phase at a time. Each phase writes a versioned `.pass` marker;
 the next phase refuses to start without it, and `submit.sh` refuses to add work
@@ -91,3 +111,23 @@ Set `PRECISION_MODE=bf16` for the matched control. Do not resume the earlier
 W4A4 checkpoints: they used actor-side packing, static rollout activation
 semantics, and a different quantization scope, so they do not validate this
 implementation.
+
+## Dynamic sampling and diagnostic boundaries
+
+Generation batch size and policy-update batch size are distinct. The launcher
+defaults above are not the overlong/dynamic-sampling experiment contract;
+record the resolved `FILTER_GROUPS`, `GEN_PROMPT_BSZ_MULT`, overlong settings,
+and first/last BF16 carve-outs for every comparison.
+
+With dynamic sampling, optimizer steps do not count consumed dataloader
+batches. New checkpoints store separate dataloader progress alongside
+`data.pt`. Resuming a legacy dynamic-sampling checkpoint without that progress
+requires the explicit zero-based `trainer.dataloader_resume_epoch`; it cannot
+be recovered reliably from the optimizer step. Preserve full Adam state too.
+
+Paired log-prob dumps require a recomputed actor forward and reject bypass
+mode. They compare actor and rollout on each arm's own generated trajectories,
+not four evaluations on one shared set of answers. Refills are included in
+pre-filter token counts and request-latency summaries; these summaries do not
+measure active GPU concurrency. Passing the guards is not proof of quality
+parity or end-to-end speedup.

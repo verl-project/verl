@@ -304,15 +304,8 @@ def test_r3_route_attestation_rejects_missed_capture():
     assert attest_r3_rollout_routes(routes) is routes
 
 
-def test_model_contract_accepts_any_routed_expert_layout():
-    """The contract is structural, not an architecture allowlist.
-
-    It used to accept only ``Qwen3MoeForCausalLM`` with ``decoder_sparse_step=1``
-    and no ``mlp_only_layers``, which refused layouts it handles perfectly well.
-    What it must guarantee is that the refit expert-weight count is predictable,
-    so it checks for routed experts, at least one sparse layer, and the absence
-    of shared experts.
-    """
+def test_model_contract_accepts_all_moe_but_refuses_mixed_precision_scope():
+    """Correct sparse-layer counts alone do not prove train/rollout precision parity."""
 
     all_moe = SimpleNamespace(
         architectures=["Qwen3MoeForCausalLM"],
@@ -342,7 +335,8 @@ def test_model_contract_accepts_any_routed_expert_layout():
         "model.layers.47.mlp.experts",
     ]
 
-    # Interleaved MoE was rejected outright before; now it is counted correctly.
+    # The layout helper can count mixed layers, but the training precision
+    # recipe does not yet keep non-expert MLPs BF16 like rollout does.
     interleaved = SimpleNamespace(
         architectures=["SomeOtherMoeForCausalLM"],
         num_hidden_layers=48,
@@ -350,11 +344,13 @@ def test_model_contract_accepts_any_routed_expert_layout():
         decoder_sparse_step=2,
         mlp_only_layers=[],
     )
-    validate_real_nvfp4_model_contract(interleaved)
+    with pytest.raises(ValueError, match="mixed dense/MoE"):
+        validate_real_nvfp4_model_contract(interleaved)
     assert real_nvfp4_moe_layer_indices(interleaved) == [i for i in range(48) if (i + 1) % 2 == 0]
-    assert real_nvfp4_expected_counts(interleaved) == (24 * 64 * 3, 24 * 64 * 2)
+    with pytest.raises(ValueError, match="mixed dense/MoE"):
+        real_nvfp4_expected_counts(interleaved)
 
-    # So are explicitly dense layers.
+    # Explicitly dense prefixes are likewise unsupported by the current recipe.
     dense_prefix = SimpleNamespace(
         architectures=["SomeOtherMoeForCausalLM"],
         num_hidden_layers=48,
@@ -362,6 +358,8 @@ def test_model_contract_accepts_any_routed_expert_layout():
         decoder_sparse_step=1,
         mlp_only_layers=[0, 1],
     )
+    with pytest.raises(ValueError, match="mixed dense/MoE"):
+        validate_real_nvfp4_model_contract(dense_prefix)
     assert real_nvfp4_moe_layer_indices(dense_prefix) == list(range(2, 48))
     assert real_nvfp4_rollout_layer_partition(
         dense_prefix,

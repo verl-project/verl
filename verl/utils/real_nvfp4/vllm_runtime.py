@@ -14,10 +14,14 @@
 
 """Runtime proofs for vLLM 0.26's native online NVFP4 MoE path."""
 
+import ast
+import hashlib
 import inspect
 import logging
 import re
+import textwrap
 from collections.abc import Collection
+from functools import lru_cache
 from importlib.metadata import version
 
 import torch
@@ -27,6 +31,54 @@ logger = logging.getLogger(__name__)
 
 NVFP4_PER_TOKEN_METHOD = "nvfp4_per_token"
 REAL_NVFP4_MOE_BACKEND = "flashinfer_trtllm"
+
+# Canonical function ASTs from vLLM v0.26.0 with upstream fixes #50029
+# (9c22668436a4d94aab87ea74a220e060415cf1d8) and #50074
+# (3ac9525507b2d0de5c1b08cbca96cc94850c7c7a). These are the exact
+# implementations installed by runtime_backports/apply_vllm_online_nvfp4_50029_50074.py.
+# Unlike a version/marker check, this also rejects a partially patched wheel.
+_NVFP4_BACKPORT_AST_SHA256 = {
+    "_quantize_moe_weight_to_nvfp4": "11c7d914f31e74d425151fd3ea54b1a6e8aa92ea001aa7ddd6b9eafa30ab187a",
+    "_setup_kernel": "d2e8753af4efaef6f226c01db9c9675f9b459ef869f0656ad35bdddfa173db1e",
+}
+
+
+def _function_ast_sha256(function) -> str:
+    tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+    # Python 3.12 adds this empty field; normalize for the supported 3.10–3.12
+    # interpreters. ASTs already ignore whitespace, line numbers and comments.
+    canonical = ast.dump(tree, include_attributes=False).replace(", type_params=[]", "")
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+@lru_cache(maxsize=1)
+def require_vllm_nvfp4_backports() -> None:
+    """Reject unaudited packing/reload implementations before model creation.
+
+    This is an exact audited-implementation guard, not a general claim that
+    every semantically equivalent implementation can be recognized. A future
+    vLLM upgrade must review and update the contract together with its tests.
+    """
+    from vllm.model_executor.layers.quantization.online.nvfp4 import (
+        Nvfp4OnlineMoEMethod,
+        _quantize_moe_weight_to_nvfp4,
+    )
+
+    implementations = {
+        "_quantize_moe_weight_to_nvfp4": _quantize_moe_weight_to_nvfp4,
+        "_setup_kernel": Nvfp4OnlineMoEMethod._setup_kernel,
+    }
+    for name, function in implementations.items():
+        try:
+            actual = _function_ast_sha256(function)
+        except (OSError, TypeError, SyntaxError) as exc:
+            raise RuntimeError(f"cannot verify required vLLM NVFP4 backports for {name}") from exc
+        if actual != _NVFP4_BACKPORT_AST_SHA256[name]:
+            raise RuntimeError(
+                f"real_nvfp4 requires audited vLLM #50029/#50074 backports: {name} "
+                f"has unrecognized implementation {actual}. Use the validated runtime build; "
+                "the unmodified vLLM 0.26 wheel is not sufficient."
+            )
 
 
 def require_vllm_native_nvfp4_per_token(vllm_config) -> None:
@@ -41,6 +93,7 @@ def require_vllm_native_nvfp4_per_token(vllm_config) -> None:
         raise RuntimeError(
             f"real_nvfp4 worker quantization drifted: expected {NVFP4_PER_TOKEN_METHOD!r}, got {quantization!r}"
         )
+    require_vllm_nvfp4_backports()
 
 
 def require_vllm_native_reload_contract(model_runner) -> None:

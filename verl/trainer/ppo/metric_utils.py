@@ -631,6 +631,57 @@ def accumulate_rollout_workload_metrics(batch: DataProto, previous: dict[str, An
     }
 
 
+def accumulate_rollout_timing_metrics(
+    previous: dict[str, float],
+    current: dict[str, float],
+    *,
+    previous_sequences: int,
+    sequences: int,
+) -> dict[str, float]:
+    """Merge agent-loop summaries across refills of one policy update.
+
+    Means are weighted by returned trajectories, not by generation batches.
+    Keep all ``slowest`` fields from the same trajectory (the largest sum of
+    generate/tool/reward time), rather than constructing a fictitious sample
+    out of independent maxima. These summaries are request latencies, not
+    measurements of GPU concurrency or of the update's critical path.
+
+    Other stage timers retain their caller-managed accumulation semantics.
+    The caller must reset both the previous timings and sequence count at the
+    beginning of each policy update.
+    """
+    if previous_sequences < 0 or sequences < 0:
+        raise ValueError("rollout sequence counts must be nonnegative")
+    result = dict(previous)
+    if not sequences:
+        return result
+    slowest_prefix = "agent_loop/slowest/"
+    duration_names = ("generate_sequences", "tool_calls", "compute_score")
+    previous_slowest = sum(previous.get(slowest_prefix + name, 0.0) for name in duration_names)
+    current_slowest = sum(current.get(slowest_prefix + name, 0.0) for name in duration_names)
+    take_current_slowest = previous_sequences == 0 or current_slowest > previous_slowest
+    if take_current_slowest:
+        result = {key: value for key, value in result.items() if not key.startswith(slowest_prefix)}
+    for key, value in current.items():
+        if key.startswith(slowest_prefix):
+            if take_current_slowest:
+                result[key] = value
+        elif key.startswith("agent_loop/") and key in previous and previous_sequences:
+            if key.endswith("/min"):
+                result[key] = min(previous[key], value)
+            elif key.endswith("/max"):
+                result[key] = max(previous[key], value)
+            elif key.endswith("/mean"):
+                result[key] = (previous[key] * previous_sequences + value * sequences) / (
+                    previous_sequences + sequences
+                )
+            else:
+                result[key] = value
+        else:
+            result[key] = value
+    return result
+
+
 def compute_timing_metrics(batch: DataProto, timing_raw: dict[str, float]) -> dict[str, Any]:
     """
     Computes timing metrics for different processing stages in PPO training.

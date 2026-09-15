@@ -12,13 +12,15 @@ from pathlib import Path
 import torch
 
 
-def dump_paired_log_probs(batch, directory: str, step: int, model_path: str) -> dict:
+def dump_paired_log_probs(batch, directory: str, step: int, model_path: str, *, actor_log_probs_source: str) -> dict:
     """Compare actor/rollout on exactly the same masked trajectory positions.
 
     Step 1 is before the first optimizer update. Later steps exercise live refit.
     Different arms may generate different answers: this is NOT a four-way
     BF16/FP4 fixed-answer ablation, nor a dense distribution KL calculation.
     """
+    if actor_log_probs_source != "recomputed":
+        raise ValueError("paired validation requires independently recomputed actor log-probs")
     mask = batch.batch["response_mask"].bool().cpu()
     actor = batch.batch["old_log_probs"].detach().cpu()
     rollout = batch.batch["rollout_log_probs"].detach().cpu()
@@ -36,6 +38,7 @@ def dump_paired_log_probs(batch, directory: str, step: int, model_path: str) -> 
     summary = {
         "step": step,
         "model_path": model_path,
+        "actor_log_probs_source": actor_log_probs_source,
         "checkpoint_position": "initial_before_first_update" if step == 1 else "after_live_updates",
         "temperature": float(batch.meta_info["temperature"]),
         "sequences": len(mask),
