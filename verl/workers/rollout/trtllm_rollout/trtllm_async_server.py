@@ -34,7 +34,7 @@ from verl.utils.profiler import (
     rollout_profiler_global_ranks,
 )
 from verl.workers.config import HFModelConfig, RolloutConfig
-from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
+from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput, wait_rollout_servers_scheduled
 from verl.workers.rollout.utils import get_max_position_embeddings, qwen2_5_vl_dedup_image_tokens, run_uvicorn
 
 logger = logging.getLogger(__file__)
@@ -635,6 +635,9 @@ class TRTLLMReplica(RolloutReplica):
             bundle_indices=bundle_indices,
         )
         self.servers.append(server)
+
+        # Fail fast if a server actor cannot be placed, instead of blocking on the next .remote().
+        await wait_rollout_servers_scheduled(self.servers)
 
         # launch http server in each node
         await asyncio.gather(*[server.launch_server.remote() for server in self.servers])
