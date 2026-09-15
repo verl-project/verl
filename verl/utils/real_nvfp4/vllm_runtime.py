@@ -38,10 +38,11 @@ REAL_NVFP4_MOE_BACKEND = "flashinfer_trtllm"
 # implementations installed by runtime_backports/apply_vllm_online_nvfp4_50029_50074.py,
 # including the local fresh-postprocess/retained-kernel fix: #50074 alone leaves
 # TRTLLM's derived g1_scale_c one refit behind and rebinds eager references.
+# Reciprocal activation scales are also registered for level-2 sleep/refit.
 # Unlike a version/marker check, this also rejects a partially patched wheel.
 _NVFP4_BACKPORT_AST_SHA256 = {
     "_quantize_moe_weight_to_nvfp4": "11c7d914f31e74d425151fd3ea54b1a6e8aa92ea001aa7ddd6b9eafa30ab187a",
-    "_setup_kernel": "f24270b096b5ee9f05cf303c4630b43355e1d0b347754e18740449c516437db8",
+    "_setup_kernel": "fea14afe6f0e89dbbcf14de6343a3ac189ce558e1b9d6d470c278aa7d692c9c5",
 }
 
 
@@ -124,6 +125,8 @@ def _attest_native_scale_references(module, experts) -> None:
         ("g2_alphas", "w2_weight_scale_2"),
         ("w1_scale", "w13_weight_scale"),
         ("w2_scale", "w2_weight_scale"),
+        ("a1_gscale", "nvfp4_a1_gscale"),
+        ("a2_gscale", "nvfp4_a2_gscale"),
     ):
         actual = getattr(quant_config, config_name, None)
         registered = getattr(module, parameter_name, None)
@@ -131,6 +134,16 @@ def _attest_native_scale_references(module, experts) -> None:
             raise RuntimeError(f"native NVFP4 scale reference missing: {config_name}/{parameter_name}")
         if actual.device != registered.device or actual.data_ptr() != registered.data_ptr():
             raise RuntimeError(f"native NVFP4 stale scale reference: {config_name}/{parameter_name}")
+    for config_name, input_name in (("a1_gscale", "w13_input_scale"), ("a2_gscale", "w2_input_scale")):
+        actual = getattr(quant_config, config_name)
+        input_scale = getattr(module, input_name, None)
+        if (
+            not isinstance(input_scale, torch.Tensor)
+            or not torch.isfinite(input_scale).all()
+            or not (input_scale > 0).all()
+            or not torch.equal(actual, 1.0 / input_scale)
+        ):
+            raise RuntimeError(f"native NVFP4 {config_name} does not match current activation scale after sleep/refit")
     actual = getattr(experts, "g1_scale_c", None)
     registered = getattr(module, "g1_scale_c", None)
     if not isinstance(actual, torch.Tensor) or not isinstance(registered, torch.Tensor):

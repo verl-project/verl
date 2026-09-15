@@ -47,6 +47,11 @@ kernel keeps references to the original storage that native reload updates in
 place. Applying kernel reuse alone leaves TRT-LLM's derived `g1_scale_c` one
 refit behind and can split eager and CUDA-graph references. The worker verifies
 both scale references and current derived values after loading/refit.
+The reciprocal activation scales are registered on the layer as well: level-2
+sleep discards their allocation, so keeping only a non-parameter quant-config
+reference would leave them uninitialized after wake-up. Native copyback now
+restores those original addresses along with the packed weights and derived
+scales. Runtime guards check both their references and reciprocal values.
 The worker checks the normalized source of these implementations;
 an unpatched or changed implementation fails before training. Updating that
 allowlist requires re-auditing the dependency, not adding a version marker.

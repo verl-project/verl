@@ -39,6 +39,7 @@ def test_actual_setup_kernel_keeps_current_scales_for_eager_and_graph(monkeypatc
         return SimpleNamespace(
             g1_alphas=current.w13_weight_scale_2,
             g2_alphas=current.w2_weight_scale_2,
+            a1_gscale=1.0 / current.w13_input_scale,
             a2_gscale=1.0 / current.w2_input_scale,
             w1_scale=current.w13_weight_scale,
             w2_scale=current.w2_weight_scale,

@@ -22,13 +22,15 @@ The kernel-cache change from #50074 additionally needs fresh postprocessing:
 the retained quant config points to original storage, not the temporary newly
 loaded layer tensors. Processing it directly produces one-refit-stale derived
 scales and rebinds eager-only references away from the captured graph storage.
+Reciprocal activation scales must also be registered: level-2 sleep discards
+their allocations, and native copyback otherwise cannot restore their contents.
 """
 
 from importlib.metadata import distribution, version
 
 PACKING_COMMIT = "9c22668436a4d94aab87ea74a220e060415cf1d8"
 RELOAD_COMMIT = "3ac9525507b2d0de5c1b08cbca96cc94850c7c7a"
-DERIVED_SCALE_BACKPORT = "verl-20260915-fresh-postprocess-retained-kernel-v1"
+DERIVED_SCALE_BACKPORT = "verl-20260915-fresh-postprocess-registered-scales-v2"
 
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
@@ -119,7 +121,7 @@ def main() -> None:
                 layer=layer,
                 per_token_activation=True,
             )"""
-    new_reload = """        # Postprocess with the freshly loaded tensors, not the retained kernel's
+    fresh_reload = """        # Postprocess with the freshly loaded tensors, not the retained kernel's
         # quant config (which still references the pre-refit tensor storage).
         # The native layerwise loader copies these processed parameters back
         # into the original storage after this method returns. Keep the original
@@ -139,11 +141,20 @@ def main() -> None:
             self.moe_quant_config = processing_quant_config
             self.moe_kernel = processing_kernel
         processing_kernel.fused_experts.process_weights_after_loading(layer)"""
+    new_reload = fresh_reload.replace(
+        "        processing_quant_config = self.get_fused_moe_quant_config(layer)",
+        """        processing_quant_config = self.get_fused_moe_quant_config(layer)
+        # Level-2 sleep discards the retained quant config's non-parameter
+        # allocations too. Register the reciprocal activation scales so native
+        # copyback restores their original eager/CUDA-graph storage on refit.
+        replace_parameter(layer, "nvfp4_a1_gscale", processing_quant_config.a1_gscale)
+        replace_parameter(layer, "nvfp4_a2_gscale", processing_quant_config.a2_gscale)""",
+    )
     postprocess = "\n        self.moe_kernel.fused_experts.process_weights_after_loading(layer)"
     if new_reload not in text:
-        candidates = [block + postprocess for block in (old_reload, cached_reload)]
+        candidates = [block + postprocess for block in (old_reload, cached_reload)] + [fresh_reload]
         matches = [block for block in candidates if block in text]
-        assert len(matches) == 1, "NVFP4 refit: expected original or #50074-only implementation"
+        assert len(matches) == 1, "NVFP4 refit: expected original, #50074-only, or fresh-postprocess implementation"
         text = replace_once(text, matches[0], new_reload, "NVFP4 fresh postprocess / retained kernel")
 
     path.write_text(text)
@@ -151,6 +162,7 @@ def main() -> None:
     assert "quantized_experts = [" in verified
     assert "scaled = scaled.reshape(-1, k)" not in verified
     assert "if self.moe_kernel is None:" in verified
+    assert 'replace_parameter(layer, "nvfp4_a2_gscale", processing_quant_config.a2_gscale)' in verified
     print(
         "REAL_NVFP4_VLLM_EXPERT_PACKING_BACKPORT_PASS",
         f"upstream={PACKING_COMMIT}",
