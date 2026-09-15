@@ -22,6 +22,7 @@ Hardware Support
 
 - NVIDIA GPU (CUDA)
 - Huawei Ascend NPU
+- Google TPU — **experimental, under development**
 
 **Via verl-hardware-plugin (reference implementations):**
 
@@ -79,6 +80,7 @@ Architecture Overview
     |  |  PlatformRegistry                                        |      |
     |  |    ├─ "nvidia"    → PlatformCUDA      (built-in)         |      |
     |  |    ├─ "huawei"    → PlatformNPU       (built-in)         |      |
+    |  |    ├─ "tpu"       → PlatformTPU       (experimental)     |      |
     |  |    ├─ "intel"     → PlatformXPU       (plugin)           |      |
     |  |    ├─ "cambricon" → PlatformMLU       (plugin)           |      |
     |  |    └─ "metax"     → PlatformMetaX     (plugin)           |      |

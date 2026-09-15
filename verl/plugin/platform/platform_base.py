@@ -230,6 +230,37 @@ class PlatformBase(abc.ABC):
             return {"num_gpus": num_gpus}
         return {"resources": {resource_name: num_gpus}}
 
+    def supports_colocated_worker_groups(self) -> bool:
+        """Whether several WorkerGroups can share one accelerator.
+
+        ``False`` where a device is claimed exclusively by a single process, which caps
+        colocation at one WorkerGroup.
+        """
+        return True
+
+    def get_worker_env_vars(
+        self,
+        resource_pool,
+        rank: int,
+        world_size: int,
+        local_rank: int,
+        local_world_size: int,
+        name_prefix: str,
+        device_name: str,
+    ) -> dict[str, str]:
+        """Extra env vars for a Ray worker, called once per worker as the WorkerGroup is built.
+
+        Overridden by platforms that need topology or mesh information from the placement groups.
+        """
+        return {}
+
+    def ray_local_rank_override(self) -> Optional[str]:
+        """This worker's local rank, or ``None`` to use Ray's accelerator IDs.
+
+        For platforms whose devices Ray does not enumerate via ``get_accelerator_ids()``.
+        """
+        return None
+
     # ------------------------------------------------------------------
     # IPC support
     # ------------------------------------------------------------------
