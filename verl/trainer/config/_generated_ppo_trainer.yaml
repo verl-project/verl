@@ -780,6 +780,7 @@ reward:
   custom_reward_function:
     path: null
     name: compute_score
+  compute_score_kwargs: {}
   reward_manager:
     _target_: verl.workers.config.reward.RewardManagerConfig
     source: register
