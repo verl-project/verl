@@ -12,64 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from typing import Any
 
-
-def resolve_config_path(config_path: str) -> str:
-    """Resolve agent loop configuration file path.
-
-    In multi-node Ray training, relative paths may not resolve correctly
-    because the working directory on remote nodes can differ from the driver node.
-    This function resolves relative paths by checking multiple locations in order:
-    1. If already absolute, return as-is
-    2. Try current working directory
-    3. Try relative to verl package installation (project root)
-
-    Args:
-        config_path: Configuration file path (relative or absolute)
-
-    Returns:
-        Absolute path to the configuration file
-
-    Raises:
-        FileNotFoundError: If the configuration file cannot be found
-    """
-    # Return absolute paths unchanged
-    if os.path.isabs(config_path):
-        return config_path
-
-    # Try current working directory first
-    cwd = os.path.abspath(os.getcwd())
-    cwd_path = os.path.abspath(os.path.join(cwd, config_path))
-    if (cwd_path == cwd or cwd_path.startswith(cwd + os.sep)) and os.path.exists(cwd_path):
-        return cwd_path
-
-    # Try relative to verl project root (where verl package is installed)
-    try:
-        import verl
-
-        verl_package_dir = os.path.abspath(os.path.dirname(verl.__file__))
-
-        # Strategy 1: For development/editable installs.
-        project_root = os.path.dirname(verl_package_dir)
-        dev_path = os.path.abspath(os.path.join(project_root, config_path))
-        if (dev_path == project_root or dev_path.startswith(project_root + os.sep)) and os.path.exists(dev_path):
-            return dev_path
-
-        # Strategy 2: For standard package installations.
-        install_path = os.path.abspath(os.path.join(verl_package_dir, config_path))
-        if (install_path == verl_package_dir or install_path.startswith(verl_package_dir + os.sep)) and os.path.exists(
-            install_path
-        ):
-            return install_path
-    except (ImportError, AttributeError):
-        pass  # verl not installed or __file__ not available
-
-    # File not found - raise clear error
-    raise FileNotFoundError(
-        f"Agent loop configuration file not found: {config_path}. Tried current directory and verl project root."
-    )
+# Moved to verl.utils.import_utils; re-exported for compat.
+from verl.utils.import_utils import resolve_config_path  # noqa: F401
 
 
 # tokenizer.apply_chat_template is not working properly for gpt-oss model.

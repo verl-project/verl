@@ -6,6 +6,8 @@ Last updated: 2026/08/13.
 关键更新
 --------
 
+-  2026/08/29：将 MindSpeed / Megatron-LM 从 ``core_r0.16.0`` 更新为
+   ``core_r0.18.0``\ 。弃用mbridge，改用Megatron-Bridge，Megatron-Bridge 版本为 ``0.5.0``\ 。
 -  2026/08/03：将 vLLM / vLLM-Ascend 从 ``0.18.0`` 更新为 ``0.23.0``\ ，vLLM
    对应基础环境版本同步调整为 torch ``2.10.0``\ 、torch_npu ``2.10.0.post2``\ 。
 -  2026/05/13：vLLM 已按 `PR

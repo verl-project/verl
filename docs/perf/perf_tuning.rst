@@ -123,6 +123,16 @@ Therefore, users may need to tune the ``*micro_batch_size_per_gpu`` to accelerat
    Set ``actor_rollout_ref.model.enable_activation_offload=True`` and ``critic.model.enable_activation_offload=True``.
    This often works together with gradient checkpointing to get larger micro-batch sizes and it's only available in FSDP backend now.
 
+   The VeOmni backend does not support this synchronous mode and rejects the flag; use
+   ``actor_rollout_ref.actor.veomni.enable_async_activation_offload=True`` instead, which overlaps
+   the device-to-host and host-to-device copies with compute rather than blocking on them.
+   By default the offloaded modules are discovered from the model's
+   ``_no_split_modules``; override that with
+   ``actor_rollout_ref.actor.veomni.activation_offload_modules=[model.layers.{*}]`` when the model
+   does not declare them or when only part of the stack should be offloaded. Free pinned-host
+   buffers are capped by ``actor_rollout_ref.actor.veomni.activation_offload_host_cache_limit_gb``
+   (default 4.0 GB).
+
 Tuning for Dynamic Batch Size
 -----------------------------
 
@@ -181,9 +191,9 @@ LigerKernel provides fused Triton kernels (RMSNorm, SwiGLU, RoPE) that can impro
       model:
         use_liger: True  # Enable LigerKernel
 
-2. The default value is ``False``. When enabled, verl applies Liger's fused RMSNorm, SwiGLU, and RoPE kernels to the model. The model-level ``fused_linear_cross_entropy`` patch remains disabled because verl computes log-probabilities through its output-head path. With ``use_fused_kernels`` and the ``torch`` backend, that path uses Liger's fused scaled linear cross entropy from v0.8.2 or newer and falls back to verl's existing chunked ``FusedLinearForPPOFunction`` when Liger is not installed.
+2. The default value is ``False``. When enabled, verl applies Liger's fused RMSNorm, SwiGLU, and RoPE kernels to the model. The model-level ``fused_linear_cross_entropy`` patch remains disabled because verl computes log-probabilities through its output-head path.
 
-3. ``use_liger`` is compatible with ``use_fused_kernels``. The former controls model-internal kernels, while the latter controls the output head and can use Liger's scaled cross entropy independently when ``liger-kernel>=0.8.2`` is installed.
+3. ``use_liger`` is compatible with ``use_fused_kernels``. The former controls model-internal kernels, while the latter controls the output head. Set ``fused_kernel_options.impl_backend`` to ``liger`` to use Liger's fused scaled cross entropy, or keep the default ``torch`` backend to use verl's native chunked ``FusedLinearForPPOFunction``. The ``liger`` backend falls back to the native implementation when Liger is not installed.
 
 Forward prefetch in FSDP training backend
 ----------------------

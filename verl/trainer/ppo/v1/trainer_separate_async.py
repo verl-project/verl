@@ -194,12 +194,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         self.checkpoint_manager.update_weights(self.global_steps)
 
     def on_train_begin(self):
-        if self.config.skip.rollout_tq.enable:
-            return
-        num_warmup_batches = self.config.trainer.v1.separate_async.num_warmup_batches
-        for _ in range(num_warmup_batches):
-            self._add_batch_to_generate()
-        logger.info(f"Added {num_warmup_batches} warmup batches to the agent loop manager")
+        self._add_async_warmup_batches(self.config.trainer.v1.separate_async.num_warmup_batches)
 
     def on_validate_begin(self):
         if self.current_mode == HybridEngineMode.TRAINER:
@@ -295,6 +290,10 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         )
 
     def on_step_end(self):
+        # _stop_profiling() already moved this step's flag to prev_step_profile.
+        if self.prev_step_profile:
+            self._stop_rollout_profiling()
+
         config = self.hybrid_rollout_config
         should_switch = False
         prepare_seconds = 0.0

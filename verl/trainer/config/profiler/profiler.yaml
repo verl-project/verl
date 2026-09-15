@@ -140,6 +140,9 @@ tool_config:
     # Stack trace depth for memory allocations
     stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
 
+    # Number of profiled RL steps to retain before dumping a memory snapshot.
+    memory_snapshot_num_steps: ${oc.select:global_profiler.global_tool_config.torch_memory.memory_snapshot_num_steps,1}
+
     name: torch_memory
 
   precision_debugger:
