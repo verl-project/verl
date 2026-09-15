@@ -16,6 +16,7 @@
 """TransferQueue adapter for AgentLoopManager and AgentLoopWorker"""
 
 import asyncio
+import functools
 import logging
 import os
 from typing import Any
@@ -33,6 +34,7 @@ from verl.experimental.agent_loop import (
 )
 from verl.utils.ray_utils import auto_await
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
+from verl.utils.trajectory import LOSS_WEIGHT_KEY, resolve_agent_loop_loss_weight
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -47,6 +49,35 @@ def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
 async def _settle_session_tasks(tasks: list[asyncio.Task[Any]]) -> list[BaseException]:
     results = await asyncio.gather(*tasks, return_exceptions=True)
     return [result for result in results if isinstance(result, BaseException)]
+
+
+@functools.cache
+def _warn_unweighted_multi_output_once(num_outputs: int) -> None:
+    """Log that a multi-output trajectory is being stored without explicit weights.
+
+    Whether the segments need a weight at all depends on ``actor.loss_agg_mode``,
+    which normalizes by a quantity that splitting either preserves or changes:
+
+    - ``token-mean`` / ``token-sum`` / ``seq-mean-token-sum`` normalize by token
+      count (or not at all). Splitting keeps the token count identical, so
+      neutral weight 1.0 already preserves the trajectory's total contribution.
+    - ``seq-mean-token-mean`` normalizes by *row* count, which splitting inflates
+      from 1 to N. That mode needs ``loss_weight = 1 / N`` to stay invariant.
+
+    Defaulting to 1.0 is therefore the behavior-preserving choice for the default
+    ``token-mean`` mode; only flag the case the adapter cannot decide on its own.
+    """
+    logger.warning(
+        "Agent loop returned %d outputs without an explicit %s; each segment defaults to neutral "
+        "weight 1.0. This preserves the trajectory's total policy-gradient contribution for "
+        "loss_agg_mode in {token-mean, token-sum, seq-mean-token-sum}. If you train with "
+        "seq-mean-token-mean, set AgentLoopOutput.loss_weight = 1/%d explicitly, otherwise this "
+        "trajectory contributes %dx a single-output one.",
+        num_outputs,
+        LOSS_WEIGHT_KEY,
+        num_outputs,
+        num_outputs,
+    )
 
 
 @ray.remote
@@ -152,27 +183,40 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
     ) -> None:
         """Put agent loop outputs into TransferQueue."""
         uid, session_id = kwargs["uid"], kwargs["session_id"]
-        outputs = output if isinstance(output, list) else [output]
+        if isinstance(output, list):
+            outputs = output
+        elif isinstance(output, AgentLoopOutput):
+            outputs = [output]
+        else:
+            raise TypeError(f"Agent loop must return AgentLoopOutput or list[AgentLoopOutput], got {type(output)}")
         if not outputs:
             logger.warning(f"Empty output for prompt {uid}_{session_id}")
             return
+        if not all(isinstance(item, AgentLoopOutput) for item in outputs):
+            raise TypeError("Every item in a multi-output agent loop result must be an AgentLoopOutput")
 
         await self._compute_score(outputs, kwargs=kwargs)
 
         final_output = outputs[-1]
-        # TODO: Support output:list[AgentLoopOutput]
-        await self._compute_teacher_logprobs(
-            final_output,
-            prompt_ids=final_output.prompt_ids,
-            response_ids=final_output.response_ids,
-            validate=validate,
-            sample_kwargs=kwargs,
+        await asyncio.gather(
+            *(
+                self._compute_teacher_logprobs(
+                    item,
+                    prompt_ids=item.prompt_ids,
+                    response_ids=item.response_ids,
+                    validate=validate,
+                    sample_kwargs=kwargs,
+                )
+                for item in outputs
+            )
         )
 
         if final_output.reward_score is not None:
+            reward_extra_info = final_output.extra_fields.get("reward_extra_info")
             for output in outputs[:-1]:
                 output.reward_score = final_output.reward_score
-                output.extra_fields["reward_extra_info"] = final_output.extra_fields["reward_extra_info"]
+                if reward_extra_info is not None:
+                    output.extra_fields["reward_extra_info"] = reward_extra_info
 
         # NOTE: agent loop may has multiple outputs, put each output into TransferQueue.
         # key format: {uid}_{session_id}_{index}
@@ -180,6 +224,13 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         # - session_id: session id for rollout.n sampling
         # - index: index of agent loop output
         keys, fields, tags = [], [], []
+        # NOTE: the adapter deliberately does NOT invent a 1/N weight here. The correct
+        # scale depends on actor.loss_agg_mode (see _warn_unweighted_multi_output_once),
+        # which this rollout-side worker does not own, and 1/N would silently halve the
+        # trajectory under the default token-mean mode. Stay neutral and let the agent
+        # loop set loss_weight when it wants a non-default scale.
+        if len(outputs) > 1 and not any(getattr(item, LOSS_WEIGHT_KEY, None) is not None for item in outputs):
+            _warn_unweighted_multi_output_once(len(outputs))
         for i, output in enumerate(outputs):
             prompts = torch.tensor(output.prompt_ids, dtype=torch.int64)
             responses = torch.tensor(output.response_ids, dtype=torch.int64)
@@ -193,6 +244,7 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             keys.append(f"{uid}_{session_id}_{i}")
             field = output.as_dict()
             field.update(kwargs)
+            field[LOSS_WEIGHT_KEY] = torch.tensor(resolve_agent_loop_loss_weight(output), dtype=torch.float32)
             # do not store raw image/video
             field.pop("multi_modal_data", None)
             # TODO: uniform response_mask and loss_mask

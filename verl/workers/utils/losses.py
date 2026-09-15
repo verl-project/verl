@@ -21,6 +21,7 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.metric import AggregationType, Metric
 from verl.utils.torch_functional import masked_mean, masked_sum
+from verl.utils.trajectory import LOSS_WEIGHT_KEY, apply_loss_weight_to_advantages
 from verl.workers.config import ActorConfig, CriticConfig
 from verl.workers.utils.padding import no_padding_2_padding
 
@@ -84,6 +85,8 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     # select fields and convert to padded tensor
     fields = ["response_mask", "old_log_probs", "advantages"]
+    if LOSS_WEIGHT_KEY in data:
+        fields.append(LOSS_WEIGHT_KEY)
     if "rollout_is_weights" in data:
         fields.append("rollout_is_weights")
     if "ref_log_prob" in data:
@@ -93,7 +96,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     response_mask = data["response_mask"].to(bool)
     # compute policy loss
     old_log_prob = data["old_log_probs"]
-    advantages = data["advantages"]
+    advantages = apply_loss_weight_to_advantages(data["advantages"], data.get(LOSS_WEIGHT_KEY, None))
     rollout_is_weights = data.get("rollout_is_weights", None)
 
     loss_agg_mode = config.loss_agg_mode
