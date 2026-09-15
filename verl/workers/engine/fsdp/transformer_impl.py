@@ -258,9 +258,19 @@ class FSDPEngine(BaseEngine):
 
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
-        init_context = get_init_weight_context_manager(
-            use_meta_tensor=not self.model_config.hf_config.tie_word_embeddings, mesh=self.device_mesh
-        )
+        # Only rank 0 materializes real weights; every other rank builds on meta and
+        # receives them by broadcast in fsdp2_load_full_state_dict. Skipping that for
+        # tied-embedding models makes all N ranks materialize the full checkpoint on
+        # host RAM, which is what actually bounds single-node loading: a 61 GB
+        # tied-embedding checkpoint on 8 ranks needs >1.4 TB and is OOM-killed long
+        # before any GPU is touched. FSDP2 supports meta init for tied weights as long
+        # as the tie is restored after to_empty(), which fsdp2_load_full_state_dict
+        # now does.
+        if self.engine_config.strategy == "fsdp2":
+            use_meta_tensor = True
+        else:
+            use_meta_tensor = not self.model_config.hf_config.tie_word_embeddings
+        init_context = get_init_weight_context_manager(use_meta_tensor=use_meta_tensor, mesh=self.device_mesh)
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
