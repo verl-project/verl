@@ -253,6 +253,33 @@ def _megatron_gptmodel_postprocess(
                     safe_num_tokens = num_tokens.clamp(min=1)
                     hidden_states = MTPLossAutoScaler.apply(hidden_states, mtp_loss_scale * mtp_loss / safe_num_tokens)
 
+    # Honour Megatron Core 0.18's output-processor hook, which this patch replaced
+    # along with the rest of GPTModel._postprocess.  Without it the MTP path always
+    # materialises a [s, b, vocab] logits tensor (plus a second copy for the
+    # transpose), which for Qwen3.5's 248k vocab is ~30 GB per copy per rank at a
+    # 128k sequence -- the dominant term in long-context training OOMs.  The fused
+    # processor consumes hidden_states directly, so nothing of that size is built.
+    # Argument list mirrors GPTModel._postprocess in megatron/core/models/gpt/gpt_model.py.
+    if output_processor is not None:
+        return output_processor(
+            hidden_states=hidden_states,
+            output_layer=self.output_layer,
+            output_weight=output_weight,
+            labels=labels,
+            loss_mask=loss_mask,
+            input_ids=input_ids,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            decoder_input=decoder_input,
+            inference_context=inference_context,
+            packed_seq_params=packed_seq_params,
+            runtime_gather_output=runtime_gather_output,
+            context=output_processor_context,
+            compute_language_model_loss=self.compute_language_model_loss,
+            scale_logits=getattr(self, "_scale_logits", None),
+            config=self.config,
+        )
+
     logits, _ = self.output_layer(hidden_states, weight=output_weight, runtime_gather_output=runtime_gather_output)
     # [s b h] => [b s h]
     return logits.transpose(0, 1).contiguous()
