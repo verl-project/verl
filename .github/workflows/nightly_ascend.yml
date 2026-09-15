@@ -143,9 +143,24 @@ jobs:
       - name: Running nightlyCI_grpo_qwen3_vl_8b_Instruct_fsdp2_vllm_ascend checking script
         run: |
           cd /root/.cache/nightly_log/
+          LOG=run_qwen3_vl_8b_Instruct_fsdp2_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.log
+          # The tee'd log has repeatedly arrived empty at this step while the
+          # Actions-captured stdout of the training step was complete. Wait
+          # briefly for a late flush, then dump file diagnostics so the next
+          # occurrence can be pinned down (missing vs empty vs truncated).
+          for i in $(seq 1 6); do
+            if [ -s "$LOG" ]; then
+              break
+            fi
+            echo "attempt $i: $LOG missing or empty, waiting 10s..."
+            sleep 10
+          done
+          ls -l "$LOG" || true
+          wc -c "$LOG" || true
+          tail -c 4096 "$LOG" || true
           curl --fail --location --retry 3 --output check_npu.py "${ASCEND_RECIPE_BASELINE_URL}/check_npu.py"
           curl --fail --location --retry 3 --output baseline.txt "${ASCEND_RECIPE_BASELINE_URL}/a2/nightly_log/run_qwen3_vl_8b_Instruct_fsdp2_npu/baseline_qwen3_vl_8b_Instruct_fsdp2_npu.txt"
-          python check_npu.py --log run_qwen3_vl_8b_Instruct_fsdp2_npu/run_qwen3_vl_8b_Instruct_fsdp2_npu.log --base baseline.txt
+          python check_npu.py --log "$LOG" --base baseline.txt
   
   # Test dapo moonlight-16b megatron vllm
   # Temporarily disabled due to flaky performance metrics; re-enable after analysis.
