@@ -33,11 +33,13 @@ class MtpConfig(BaseConfig):
 
     enable: Enable loading and saving of MTP parameters, but do not use them
 
-    enable_train: Whether to enable using MTP parameters during training
+    enable_train: Whether to enable using MTP parameters during training. Native
+        HybridModel currently requires this when MTP is enabled.
     enable_rollout: Whether to enable using MTP parameters during rollout
 
     Training parameters:
-        detach_encoder: Whether to detach encoder parameters during MTP training
+        detach_encoder: Whether to isolate the base model from auxiliary MTP
+            gradients. Native HybridModel maps this to MCore's mtp_detach_heads.
         mtp_loss_scaling_factor: Loss scaling factor during MTP training
 
     vLLM rollout parameters:
