@@ -410,15 +410,37 @@ def test_set_router_replay_data_requires_bshd_attention_mask():
         rr_utils.set_router_replay_data(routes, None, _config(num_layers=1), model=object())
 
 
-def test_set_router_replay_data_rejects_incomplete_model_routes(monkeypatch):
-    router = _FakeRouter()
-    tf_config = _config(num_layers=4)
-    routed_experts = torch.ones(1, 3, 2, 1, dtype=torch.int64)
-
+def _patch_replay_plumbing(monkeypatch, layer_routers):
     monkeypatch.setattr(rr_utils, "device_name", "cpu")
     monkeypatch.setattr(rr_utils, "preprocess_packed_seqs", lambda tensor, _mask, **_kwargs: (tensor, object()))
     monkeypatch.setattr(rr_utils, "scatter_to_sequence_parallel_region", lambda tensor: tensor)
-    monkeypatch.setattr(rr_utils, "iter_model_routers", lambda model: iter([(4, router)]))
+    monkeypatch.setattr(rr_utils, "iter_model_routers", lambda model: iter(layer_routers))
+
+
+def test_set_router_replay_data_rejects_truncated_route_tensor(monkeypatch):
+    """A route tensor that covers only some of the model's layers cannot be mapped onto the
+    module/MoE/block layouts and is rejected before any router is addressed."""
+    router = _FakeRouter()
+    tf_config = _config(num_layers=4)
+    routed_experts = torch.ones(1, 3, 2, 1, dtype=torch.int64)
+    _patch_replay_plumbing(monkeypatch, [(4, router)])
+
+    with pytest.raises(ValueError, match="Cannot map 2 route layers to 4 modules"):
+        rr_utils.set_router_replay_data(
+            routed_experts,
+            torch.ones(1, 3, dtype=torch.bool),
+            tf_config,
+            model=object(),
+        )
+    assert router.target_topk_idx is None
+
+
+def test_set_router_replay_data_rejects_incomplete_model_routes(monkeypatch):
+    """A complete route tensor that still leaves a forwarded router without a row is a hard failure."""
+    router = _FakeRouter()
+    tf_config = _config(num_layers=4)
+    routed_experts = torch.ones(1, 3, 4, 1, dtype=torch.int64)
+    _patch_replay_plumbing(monkeypatch, [(5, router)])
 
     with pytest.raises(RuntimeError, match="does not cover every forwarded MoE layer"):
         rr_utils.set_router_replay_data(

@@ -1201,17 +1201,38 @@ class vLLMHttpServer:
                 raise ValueError(f"Currently only support {_SUPPORTED_QUANTIZATION} quantization, got: {quantization}")
 
             if quantization == "fp8":
-                # Ignore MoE router layers for FP8 quantization
-                all_mlp_gate_layers = []
-                for layer in range(self.model_config.hf_config.num_hidden_layers):
-                    all_mlp_gate_layers.append(f"model.layers.{layer}.mlp.gate")
+                # Ignore MoE router layers for FP8 quantization.
+                ignored_layers = []
+                hf_cfg = self.model_config.hf_config
+                text_cfg = hf_cfg.get_text_config()
+                num_layers = text_cfg.num_hidden_layers
+                model_type = getattr(hf_cfg, "model_type", "")
+
+                if model_type == "glm5_next":
+                    # Reuse the checkpoint's own modules_to_not_convert list so the
+                    # rollout FP8 scope matches native vLLM exactly.
+                    ckpt_quant = getattr(hf_cfg, "quantization_config", {}) or {}
+                    ignored_layers = list(ckpt_quant.get("modules_to_not_convert", []) or [])
+                    if not ignored_layers:
+                        raise ValueError(
+                            "glm5_next FP8 rollout needs modules_to_not_convert "
+                            "in the checkpoint quantization_config, but it is empty."
+                        )
+                else:
+                    layer_pfx = "language_model.model.layers" if model_type == "glm5_next" else "model.layers"
+                    for layer in range(num_layers):
+                        ignored_layers.append(f"{layer_pfx}.{layer}.mlp.gate")
+                    if model_type == "glm_moe_dsa":
+                        # GLM5.2 DSA: keep rollout kv_b_proj BF16.
+                        for layer in range(num_layers):
+                            ignored_layers.append(f"{layer_pfx}.{layer}.self_attn.kv_b_proj")
 
                 FP8_BLOCK_QUANT_KWARGS = {
                     "activation_scheme": "dynamic",
                     "fmt": "e4m3",
                     "quant_method": "fp8",
                     "weight_block_size": [128, 128],
-                    "ignored_layers": all_mlp_gate_layers,
+                    "ignored_layers": ignored_layers,
                 }
                 hf_overrides["quantization_config"] = dict(FP8_BLOCK_QUANT_KWARGS)
                 # Will remove the patch after vllm support on-the-fly quant for rollout natively.
