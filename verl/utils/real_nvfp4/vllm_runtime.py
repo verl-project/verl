@@ -39,10 +39,11 @@ REAL_NVFP4_MOE_BACKEND = "flashinfer_trtllm"
 # including the local fresh-postprocess/retained-kernel fix: #50074 alone leaves
 # TRTLLM's derived g1_scale_c one refit behind and rebinds eager references.
 # Reciprocal activation scales are also registered for level-2 sleep/refit.
+# Converted activation scales have writable storage, not stride-zero views.
 # Unlike a version/marker check, this also rejects a partially patched wheel.
 _NVFP4_BACKPORT_AST_SHA256 = {
     "_quantize_moe_weight_to_nvfp4": "11c7d914f31e74d425151fd3ea54b1a6e8aa92ea001aa7ddd6b9eafa30ab187a",
-    "_setup_kernel": "fea14afe6f0e89dbbcf14de6343a3ac189ce558e1b9d6d470c278aa7d692c9c5",
+    "_setup_kernel": "b5a3160ff41a3eefc246e1b80ee7d51808cd8c7e0f6524cbf4f232b60a9410a7",
 }
 
 

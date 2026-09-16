@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real CuMem sleep/copyback regression; not a full-model generation test.
 
-Only layout conversion and the kernel factory are metadata stand-ins. Quant
+The kernel factory is a metadata stand-in; the real-layout case also exercises
+the installed FlashInfer weight/scale conversion (including expanded scales). Quant
 config construction, scale registration, expert postprocessing, memory discard,
 native copyback and CUDA graph replay use the installed implementations.
 """
@@ -14,7 +15,8 @@ import torch
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CuMem sleep regression requires a GPU")
-def test_actual_sleep_wake_refit_restores_retained_activation_scales(monkeypatch):
+@pytest.mark.parametrize("real_layout", [False, True], ids=["metadata_layout", "real_layout"])
+def test_actual_sleep_wake_refit_restores_retained_activation_scales(monkeypatch, real_layout):
     from vllm.device_allocator.cumem import CuMemAllocator
     from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import TrtLlmNvFp4ExpertsMonolithic
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
@@ -35,6 +37,8 @@ def test_actual_sleep_wake_refit_restores_retained_activation_scales(monkeypatch
     )
     layer = torch.nn.Module()
     layer._expert_routing_tables = lambda: None
+    layer.activation = SimpleNamespace(is_gated=True)
+    layer.moe_config = SimpleNamespace(hidden_dim=128, hidden_dim_unpadded=None, intermediate_size_per_partition=128)
     processors = []
 
     def make_kernel(**kwargs):
@@ -52,11 +56,12 @@ def test_actual_sleep_wake_refit_restores_retained_activation_scales(monkeypatch
         return SimpleNamespace(fused_experts=expert)
 
     monkeypatch.setattr(nvfp4, "make_nvfp4_moe_kernel", make_kernel)
-    monkeypatch.setattr(
-        nvfp4,
-        "convert_to_nvfp4_moe_kernel_format",
-        lambda **kwargs: tuple(getattr(kwargs["layer"], name) for name in names),
-    )
+    if not real_layout:
+        monkeypatch.setattr(
+            nvfp4,
+            "convert_to_nvfp4_moe_kernel_format",
+            lambda **kwargs: tuple(getattr(kwargs["layer"], name) for name in names),
+        )
     method = SimpleNamespace(
         nvfp4_backend=NvFp4MoeBackend.FLASHINFER_TRTLLM,
         moe=SimpleNamespace(is_act_and_mul=True),
@@ -69,6 +74,12 @@ def test_actual_sleep_wake_refit_restores_retained_activation_scales(monkeypatch
         # Native reload materializes new tensors; never read discarded storage.
         for name in names:
             tensor = torch.ones(128, device="cuda")
+            if real_layout and name in ("w13_weight", "w2_weight"):
+                rows = 256 if name == "w13_weight" else 128
+                tensor = torch.zeros((128, rows, 64), dtype=torch.uint8, device="cuda")
+            elif real_layout and name in ("w13_weight_scale", "w2_weight_scale"):
+                rows = 256 if name == "w13_weight_scale" else 128
+                tensor = torch.ones((128, rows, 8), device="cuda").to(torch.float8_e4m3fn)
             if name.endswith("weight_scale_2"):
                 tensor.fill_(value)
             layer.register_parameter(name, torch.nn.Parameter(tensor, requires_grad=False))

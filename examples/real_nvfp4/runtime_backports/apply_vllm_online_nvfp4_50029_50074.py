@@ -30,7 +30,7 @@ from importlib.metadata import distribution, version
 
 PACKING_COMMIT = "9c22668436a4d94aab87ea74a220e060415cf1d8"
 RELOAD_COMMIT = "3ac9525507b2d0de5c1b08cbca96cc94850c7c7a"
-DERIVED_SCALE_BACKPORT = "verl-20260915-fresh-postprocess-registered-scales-v2"
+DERIVED_SCALE_BACKPORT = "verl-20260916-fresh-postprocess-writable-scales-v3"
 
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
@@ -156,6 +156,18 @@ def main() -> None:
         matches = [block for block in candidates if block in text]
         assert len(matches) == 1, "NVFP4 refit: expected original, #50074-only, or fresh-postprocess implementation"
         text = replace_once(text, matches[0], new_reload, "NVFP4 fresh postprocess / retained kernel")
+
+    # FlashInfer layout conversion expands shared activation scales with stride
+    # zero. Native reload copies into the ORIGINAL parameter storage; registering
+    # the expanded view makes that copy illegal. Materialize once at setup, before
+    # kernel/graph references are retained, never by rebinding during copyback.
+    for name, value in (("w13_input_scale", "a13_scale"), ("w2_input_scale", "a2_scale")):
+        text = replace_once(
+            text,
+            f'        replace_parameter(layer, "{name}", {value})',
+            f'        replace_parameter(layer, "{name}", {value}.contiguous())',
+            f"writable {name}",
+        )
 
     path.write_text(text)
     verified = path.read_text()
