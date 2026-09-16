@@ -109,13 +109,13 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
         target_topk_indices[~topk_indices_in_vocab_mask] = 0
 
         # Target probs/logps (teacher distribution restricted to top-k), masked to this shard.
-        # Note: `target_topk_mass` is computed *before* masking-out-of-shard entries, so it represents
-        # the mass of the provided top-k distribution (global), independent of TP sharding.
+        # Compute the logging metric before clamping and masking so it represents the original
+        # mass of the provided top-k distribution (global), independent of TP sharding.
+        target_topk_mass = torch.sum(torch.exp(target_topk_logps.float()), dim=-1)
         if log_prob_min_clamp is not None:
             target_topk_logps = target_topk_logps.clamp_min(log_prob_min_clamp)
         target_topk_logps = target_topk_logps.float()
         target_topk_probs = torch.exp(target_topk_logps)
-        target_topk_mass = torch.sum(target_topk_probs, dim=-1)
         target_topk_probs[~topk_indices_in_vocab_mask] = 0
         target_topk_logps[~topk_indices_in_vocab_mask] = 0
 
@@ -127,6 +127,16 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
             arange_1d.unsqueeze(-1), target_topk_indices.view(-1, topk)
         ]  # (b*s, topk)
         vp_source_topk_logps = vp_source_topk_logps_2d.view(target_topk_indices.shape)  # (b, s, topk)
+
+        # For logging: mass of student probs that lands on the teacher's top-k indices.
+        # Compute it before clamping; entries outside this TP shard contribute zero.
+        vp_source_topk_probs = vp_source_topk_logps.exp() * topk_indices_in_vocab_mask  # (b, s, topk)
+        per_token_topk_mass = torch.sum(vp_source_topk_probs, dim=-1)  # (b, s)
+        torch.distributed.all_reduce(
+            per_token_topk_mass,
+            op=torch.distributed.ReduceOp.SUM,
+            group=get_tensor_model_parallel_group(),
+        )
 
         # `active_mask` tracks entries that should receive gradient.
         # If clamping is enabled, entries with log p_i <= clamp have zero gradient w.r.t. logits.
@@ -163,15 +173,6 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
         )
 
         ctx.save_for_backward(vp_source_probs, target_topk_probs, target_topk_indices, active_mask, target_active_mass)
-
-        # For logging: mass of student probs that lands on the teacher's top-k indices.
-        vp_source_topk_probs = vp_source_topk_logps.exp() * topk_indices_in_vocab_mask  # (b, s, topk)
-        per_token_topk_mass = torch.sum(vp_source_topk_probs, dim=-1)  # (b, s)
-        torch.distributed.all_reduce(
-            per_token_topk_mass,
-            op=torch.distributed.ReduceOp.SUM,
-            group=get_tensor_model_parallel_group(),
-        )
 
         # Compute the student's global top-k ids from per-rank vocab-shard candidates.
         local_topk = min(topk, partition_vocab_size)
