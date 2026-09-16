@@ -998,6 +998,7 @@ trainer:
       max_off_policy_threshold: 8
       max_off_policy_strategy: drop
       sync_refill_failed_groups: false
+      dispatch_mode: batch
       custom_sampler:
         path: null
         name: null
