@@ -1906,8 +1906,19 @@ def patch_engine_mtp(module, model_config):
             patch_mtp_layer_get_embeddings(m)
 
 
+def _reuse_or_alloc_pinned(cached_tensor, src):
+    """Copy `src` (GPU or CPU) into `cached_tensor` in place if shapes/dtypes match, avoiding a
+    fresh pinned-host allocation; otherwise allocate a new pinned CPU tensor (first call, or a
+    genuine shape/dtype change). Returns the tensor now holding the data.
+    """
+    if cached_tensor is not None and cached_tensor.shape == src.shape and cached_tensor.dtype == src.dtype:
+        cached_tensor.copy_(src)
+        return cached_tensor
+    return src.cpu().clone().pin_memory()
+
+
 @torch.no_grad()
-def copy_megatron_model_to_cpu(models):
+def copy_megatron_model_to_cpu(models, cache=None):
     """
     Copy Megatron model parameters to CPU memory (non-destructive copy).
     Unlike offload_megatron_model_to_cpu which moves data, this function creates
@@ -1915,41 +1926,63 @@ def copy_megatron_model_to_cpu(models):
 
     Args:
         models: List of model chunks (DDP-wrapped or unwrapped)
+        cache: Optional cpu_state dict from a PREVIOUS call (same models, same structure) whose
+            pinned CPU tensors should be reused in place instead of allocating fresh ones. Pass
+            the same cache object back in on every call for a given snapshot slot to keep host
+            pinned-memory usage bounded to one copy per slot instead of growing on every call --
+            PyTorch's pinned-host allocator does not always reclaim a previous call's freed
+            blocks for reuse, so repeatedly calling this function without a cache can leak
+            several GB of host RAM per call under Decoupled PPO's every-step CPU snapshotting
+            (algorithm.rollout_correction.bypass_mode: False with a short parameter_sync_step).
+            Any buffer missing from `cache` (or with a mismatched shape/dtype -- should not
+            happen mid-training, but handled safely) falls back to a fresh allocation, exactly
+            matching the original unconditional behavior when `cache` is None.
 
     Returns:
-        dict: CPU state containing copied parameters and buffers
+        dict: CPU state containing copied parameters and buffers. Pass this same dict back in as
+            `cache` on the next call for the same slot to reuse its pinned buffers.
     """
     cpu_state = {}
+    cache = cache or {}
 
     for model_idx, model_chunk in enumerate(models):
+        chunk_key = f"model_chunk_{model_idx}"
+        cached_chunk = cache.get(chunk_key) or {}
+
         if isinstance(model_chunk, DDP):
             # Handle DDP-wrapped models
             model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
+            cached_buffer_states = cached_chunk.get("buffer_states") or [[], []]
             buffer_states = []
 
-            for buffers in model_chunk_all_buffers:
+            for group_idx, buffers in enumerate(model_chunk_all_buffers):
+                cached_group = cached_buffer_states[group_idx] if group_idx < len(cached_buffer_states) else []
                 buffer_list = []
-                for buffer in buffers:
+                for buf_idx, buffer in enumerate(buffers):
+                    cached_bstate = cached_group[buf_idx] if buf_idx < len(cached_group) else {}
                     buffer_state = {}
 
-                    # Copy parameter data to CPU
+                    # Copy parameter data to CPU, reusing a previously-pinned destination buffer
+                    # when available (see `_reuse_or_alloc_pinned`).
                     if buffer.param_data.storage().size() > 0:
-                        buffer_state["param_data"] = buffer.param_data.data.cpu().clone().pin_memory()
+                        src = buffer.param_data.data
                     else:
-                        buffer_state["param_data"] = buffer.param_data.cpu_data.clone().pin_memory()
+                        src = buffer.param_data.cpu_data
+                    buffer_state["param_data"] = _reuse_or_alloc_pinned(cached_bstate.get("param_data"), src)
 
                     buffer_list.append(buffer_state)
                 buffer_states.append(buffer_list)
 
-            cpu_state[f"model_chunk_{model_idx}"] = {"buffer_states": buffer_states, "is_ddp": True}
+            cpu_state[chunk_key] = {"buffer_states": buffer_states, "is_ddp": True}
         else:
             # Handle non-DDP models (ref module)
+            cached_model_state = cached_chunk.get("model_state") or {}
             model_state = {}
             for name, param in model_chunk.named_parameters():
-                param_state = {"data": param.data.cpu().clone().pin_memory()}
-                model_state[name] = param_state
+                cached_tensor = (cached_model_state.get(name) or {}).get("data")
+                model_state[name] = {"data": _reuse_or_alloc_pinned(cached_tensor, param.data)}
 
-            cpu_state[f"model_chunk_{model_idx}"] = {"model_state": model_state, "is_ddp": False}
+            cpu_state[chunk_key] = {"model_state": model_state, "is_ddp": False}
 
     return cpu_state
 
