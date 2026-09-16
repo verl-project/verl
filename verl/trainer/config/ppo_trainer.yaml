@@ -94,6 +94,33 @@ algorithm:
     # Maximum Sync DAPO prompt batches concurrently in flight, measured in train-batch units
     max_inflight_gen_batches: 1
 
+  # Post-rollout filtering based on prompt-group sample reward variance.
+  reward_variance_filtering:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.trainer.config.RewardVarianceFilteringConfig
+
+    # Disabled by default; unlike DAPO filter_groups this masks the sampled batch without resampling.
+    enable: False
+
+    # "top_p" selects by cumulative variance mass; "top_k" selects a fixed number of groups.
+    strategy: top_p
+
+    # Fraction of total sample reward-variance mass to retain.
+    top_p: 0.9
+
+    # Maximum number of highest-variance prompt groups to retain with strategy=top_k.
+    top_k: 1
+
+    # Make zero-variance prompt groups eligible for selection.
+    include_zero: False
+
+    # Delta degrees of freedom; 1 computes sample variance.
+    variance_ddof: 1
+
+    # Numerical slack subtracted from the target mass; near-zero-signal batches may be fully masked.
+    selection_eps: 0.01
+
   # Whether to enable in-reward KL penalty
   use_kl_in_reward: False
 
