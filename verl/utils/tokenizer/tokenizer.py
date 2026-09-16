@@ -190,9 +190,21 @@ def hf_processor(name_or_path, **kwargs):
         Returns ``None`` for text-only models (including AutoProcessor fallbacks to
         tokenizer backends such as ``TokenizersBackend``).
     """
-    from transformers import AutoConfig, AutoProcessor, PreTrainedTokenizerBase
+    from transformers import AutoConfig, AutoProcessor, PretrainedConfig, PreTrainedTokenizerBase
 
     try:
+        config_dict, _ = PretrainedConfig.get_config_dict(name_or_path, **kwargs)
+        # The V4.1 checkpoint has no registered AutoProcessor.
+        if config_dict.get("model_type") == "deepseek_v41":
+            from nemo_automodel.components.models.deepseek_v41.processing import DeepseekV41Processor
+
+            processor = DeepseekV41Processor.from_pretrained(name_or_path, **kwargs)
+            config = processor.config
+            # Expose the metadata used by verl's multimodal processor detection.
+            processor.image_processor = types.SimpleNamespace(patch_size=config.vision_config.patch_size)
+            processor.image_token_id = config.image_token_id
+            return processor
+
         processor = AutoProcessor.from_pretrained(name_or_path, **kwargs)
         # In newer transformers, AutoProcessor may legitimately fall back to a
         # tokenizer backend (e.g. TokenizersBackend) for text-only models.

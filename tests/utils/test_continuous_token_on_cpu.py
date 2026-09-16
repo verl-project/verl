@@ -490,6 +490,7 @@ def test_builtin_family_surface():
         "glm4v",
         "deepseekvl2",
         "deepseekv4",
+        "deepseekv4vl",
     )
     assert list_continuous_token_builder_families() == CONTINUOUS_TOKEN_BUILDER_FAMILIES
 
