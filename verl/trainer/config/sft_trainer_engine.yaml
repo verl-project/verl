@@ -56,6 +56,17 @@ checkpoint:
   # For more flexibility, you can specify the contents to load from the checkpoint.
   load_contents: ${checkpoint.save_contents}
 
+  # Whether to save checkpoints asynchronously. Only effective for Megatron as of now.
+  async_save: False
+
+  # Whether to perform strict validation during weight export
+  strict: True
+
+  # When the model has LoRA adapters, save only the adapter weights instead of the
+  # full model state dict. LoRA-only checkpoints are detected and merged on load.
+  # No effect when the model has no LoRA adapters.
+  save_lora_only: False
+
 trainer:
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
   default_hdfs_dir: null
