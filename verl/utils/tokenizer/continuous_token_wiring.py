@@ -36,7 +36,7 @@ from .continuous_token import (
     QwenVLContinuousTokenBuilder,
     VLContinuousTokenBuilder,
 )
-from .deepseek import DeepSeekV4ContinuousTokenBuilder
+from .deepseek import DeepSeekV4ContinuousTokenBuilder, DeepSeekV4VLContinuousTokenBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,7 @@ class ContinuousTokenModelFamily(str, Enum):
     GLM4V = "glm4v"
     DEEPSEEK_VL2 = "deepseekvl2"
     DEEPSEEKV4 = "deepseekv4"
+    DEEPSEEKV4_VL = "deepseekv4vl"
 
 
 _CONTINUOUS_TOKEN_BUILDER_REGISTRY: dict[ContinuousTokenModelFamily, type[Any]] = {
@@ -101,6 +102,7 @@ _CONTINUOUS_TOKEN_BUILDER_REGISTRY: dict[ContinuousTokenModelFamily, type[Any]] 
     ContinuousTokenModelFamily.GLM4V: GLM46VContinuousTokenBuilder,
     ContinuousTokenModelFamily.DEEPSEEK_VL2: DeepSeekVL2ContinuousTokenBuilder,
     ContinuousTokenModelFamily.DEEPSEEKV4: DeepSeekV4ContinuousTokenBuilder,
+    ContinuousTokenModelFamily.DEEPSEEKV4_VL: DeepSeekV4VLContinuousTokenBuilder,
 }
 
 CONTINUOUS_TOKEN_BUILDER_FAMILIES = tuple(family.value for family in _CONTINUOUS_TOKEN_BUILDER_REGISTRY)
@@ -129,6 +131,7 @@ _MODEL_TYPE_TO_FAMILY: dict[str, ContinuousTokenModelFamily] = {
     "deepseek_v2": ContinuousTokenModelFamily.DEEPSEEK,
     "deepseek_v3": ContinuousTokenModelFamily.DEEPSEEK,
     "deepseek_v4": ContinuousTokenModelFamily.DEEPSEEKV4,
+    "deepseek_v41": ContinuousTokenModelFamily.DEEPSEEKV4,
     # Vision-language models. The processor is still required at construction.
     "qwen2_vl": ContinuousTokenModelFamily.QWEN_VL,
     "qwen2_5_vl": ContinuousTokenModelFamily.QWEN25_VL,
@@ -147,6 +150,7 @@ _TEXT_TO_VL_FAMILY: dict[ContinuousTokenModelFamily, ContinuousTokenModelFamily]
     ContinuousTokenModelFamily.DEFAULT: ContinuousTokenModelFamily.VL_DEFAULT,
     ContinuousTokenModelFamily.GEMMA4: ContinuousTokenModelFamily.GEMMA4_VL,
     ContinuousTokenModelFamily.QWEN35: ContinuousTokenModelFamily.QWEN3_VL,
+    ContinuousTokenModelFamily.DEEPSEEKV4: ContinuousTokenModelFamily.DEEPSEEKV4_VL,
 }
 
 
