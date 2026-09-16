@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""BF16 Megatron replay consumes identical targets from uint8 and int16 routes."""
+"""BF16/NVFP4 replay consumes identical targets from uint8 and int16 routes."""
 
 import asyncio
 import pickle
@@ -37,8 +37,9 @@ class Router:
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("fp4", [False, True], ids=["bf16", "nvfp4"])
 @pytest.mark.parametrize("codec", ["pickle", "numpy"])
-def test_transport_filter_padding_and_megatron_consumption_match_int16(monkeypatch, device, codec):
+def test_transport_filter_padding_and_megatron_consumption_match_int16(monkeypatch, device, fp4, codec):
     if device == "cuda":
         if not torch.cuda.is_available():
             pytest.skip("CUDA replay requires a GPU")
@@ -70,7 +71,7 @@ def test_transport_filter_padding_and_megatron_consumption_match_int16(monkeypat
         monkeypatch.setattr(rr.mpu, "get_tensor_model_parallel_world_size", lambda: 1)
         monkeypatch.setattr(rr.mpu, "get_context_parallel_world_size", lambda: 1)
         monkeypatch.setattr(rr.mpu, "get_context_parallel_rank", lambda: 0)
-        config = SimpleNamespace(fp8=None, num_layers=2)
+        config = SimpleNamespace(fp8=None, fp4="nvfp4" if fp4 else None, num_layers=2)
         rr.set_router_replay_data(routes, None, config, replay_mask=mask, model=object())
         outputs.append([(r.indices.cpu(), r.replay_mask.cpu()) for r in routers])
     for actual, reference in zip(outputs[0], outputs[1], strict=True):
