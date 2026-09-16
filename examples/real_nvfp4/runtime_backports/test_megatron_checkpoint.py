@@ -26,7 +26,7 @@ def model_parallel(tmp_path):
 
 
 @pytest.mark.parametrize("precision", ["bf16", "nvfp4", "fp8_delayed"])
-def test_grouped_checkpoint_full_adam_resume(model_parallel, tmp_path, precision):
+def test_grouped_checkpoint_full_adam_resume(model_parallel, tmp_path, precision, monkeypatch):
     import transformer_engine.pytorch as te
     from megatron.core import dist_checkpointing
     from megatron.core.extensions.transformer_engine import TEColumnParallelGroupedLinear
@@ -101,7 +101,17 @@ def test_grouped_checkpoint_full_adam_resume(model_parallel, tmp_path, precision
     restored = build()
     restored_optimizer = torch.optim.AdamW(restored.parameters(), lr=0.001, foreach=False)
     loaded = dist_checkpointing.load(restored.sharded_state_dict(metadata=metadata), str(checkpoint))
-    restored.load_state_dict(loaded, strict=True)
+    if precision == "fp8_delayed":
+        # TE protects legacy stateful FP8 pickle payloads by default. Only this
+        # freshly generated fixture is trusted; never opt in in the runtime.
+        with monkeypatch.context() as scoped:
+            scoped.delenv("NVTE_ALLOW_UNSAFE_PICKLE_EXTRA_STATE", raising=False)
+            with pytest.raises(RuntimeError, match="Refusing to load pickled"):
+                restored.load_state_dict(loaded, strict=True)
+            scoped.setenv("NVTE_ALLOW_UNSAFE_PICKLE_EXTRA_STATE", "1")
+            restored.load_state_dict(loaded, strict=True)
+    else:
+        restored.load_state_dict(loaded, strict=True)
     restored_optimizer.load_state_dict(torch.load(tmp_path / "adam.pt", weights_only=True))
     for original, resumed in zip(layer.parameters(), restored.parameters(), strict=True):
         torch.testing.assert_close(original, resumed, rtol=0, atol=0)
