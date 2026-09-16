@@ -1,0 +1,215 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# DPO Trainer Configuration
+
+# specify the default per-component configs
+defaults:
+
+  # Model config.
+  - model@model: hf_model
+
+  # Engine config.
+  - engine@engine: fsdp
+
+  # Optimizer config.
+  - optim@optim: fsdp
+
+  # Profiler config.
+  - profiler@profiler: profiler
+
+  # load the reference default config, then apply the fields in the current yaml
+  # self config override anything above
+  - _self_
+
+# Engine configuration
+engine:
+
+  # Engine strategy type
+  strategy: fsdp2
+
+# Optimizer configuration
+optim:
+
+  # Learning rate
+  lr: 1e-4
+
+  # Adam beta parameters
+  betas: [0.9, 0.95]
+
+  # Weight decay coefficient
+  weight_decay: 0.0
+
+  # Ratio of warmup steps to total training steps
+  lr_warmup_steps_ratio: 0.1
+
+  # Gradient clipping value
+  clip_grad: 1.0
+
+  # Learning rate scheduler type
+  lr_scheduler_type: cosine
+
+  # Minimum learning rate ratio for scheduler
+  min_lr_ratio: 0.1
+
+# Data configuration
+data:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.utils.dataset.dpo_dataset.DPODataConfig
+
+  # Total training batch size across all GPUs
+  train_batch_size: 256
+
+  # Fallback for non-dynamic mode. Each DPO sample = 1 packed sequence.
+  micro_batch_size_per_gpu: 4
+
+  # Max total tokens per micro-batch (for dynamic batching)
+  max_token_len_per_gpu: 8192
+
+  # Safe with packed-sequence packing — pairs are packed into single entries
+  use_dynamic_bsz: True
+
+  # Number of workers for the data loader
+  dataloader_num_workers: 8
+
+  # Path to training data files
+  train_files: null
+
+  # Path to validation data files
+  val_files: null
+
+  # Maximum number of training samples (-1 to use full dataset)
+  train_max_samples: -1
+
+  # Maximum number of validation samples (-1 to use full dataset)
+  val_max_samples: -1
+
+  # Key for prompt field in dataset
+  prompt_key: prompt
+
+  # Key for chosen response field in dataset
+  chosen_key: chosen
+
+  # Key for rejected response field in dataset
+  rejected_key: rejected
+
+  # Padding mode for collator
+  pad_mode: no_padding
+
+  # Maximum sequence length
+  max_length: 1024
+
+  # Truncation strategy: "left", "right", or "error"
+  truncation: error
+
+  # Whether to shuffle the dataset
+  shuffle: true
+
+  # Random seed for reproducibility
+  seed: 42
+
+  # Whether to remove invalid samples from the dataset
+  remove_invalid_samples: false
+
+  # Custom dataset class configuration
+  custom_cls:
+
+    # Path to custom dataset class file
+    path: null
+
+    # Name of the custom dataset class
+    name: null
+
+  # Whether to use shared memory for data loading
+  use_shm: False
+
+  # Additional kwargs for chat template application
+  apply_chat_template_kwargs: {}
+
+  # Key for selecting chat template
+  chat_template_key: null
+
+# Checkpoint configuration
+checkpoint:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.trainer.config.CheckpointConfig
+
+  # Contents to save in checkpoint
+  save_contents: ["model", "optimizer", "extra", "hf_model"]
+
+  # Contents to load from checkpoint
+  load_contents: ${checkpoint.save_contents}
+
+  # When doing LoRA training, save only the adapter (not full model) for regular checkpoints
+  save_only_adapter_if_lora: true
+
+# Trainer configuration
+trainer:
+
+  # DPO beta parameter controlling divergence from reference policy
+  beta: 0.01
+
+  # DPO loss type
+  loss_type: sigmoid
+
+  # Label smoothing coefficient for DPO loss
+  label_smoothing: 0.0
+
+  # Whether to use reference-free DPO
+  reference_free: false
+
+  # Default local directory for saving checkpoints
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+
+  # Default path to distributed filesystem for saving checkpoints
+  default_hdfs_dir: null
+
+  # Project name for experiment tracking
+  project_name: dpo-training
+
+  # Experiment name for run identification
+  experiment_name: test_run
+
+  # Number of epochs in training
+  total_epochs: 3
+
+  # Total training steps (can be set explicitly or derived from epochs)
+  total_training_steps: null
+
+  # Logging backends to use
+  logger: ['console', 'tensorboard', 'wandb']
+
+  # Save frequency (by iteration) for model checkpoints
+  save_freq: -1
+
+  # Validation frequency (in training iterations)
+  test_freq: -1
+
+  # Maximum number of checkpoints to keep
+  max_ckpt_to_keep: null
+
+  # Resume mode: "auto", "disable", or "resume_path"
+  resume_mode: auto
+
+  # Path to resume training from
+  resume_from_path: null
+
+  # Device to run training on
+  device: cuda
+
+  # Number of nodes used in the training
+  nnodes: 1
+
+  # Number of GPUs per node
+  n_gpus_per_node: 1
+
+  # Profile interval range
+  profile_interval: [-1, -1]
+
+  # When true, also save a merged LoRA model for the final HF checkpoint
+  merge_lora_on_final_save: true
