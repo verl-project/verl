@@ -21,6 +21,8 @@ import torch
 import torch.distributed
 import torch.nn.functional as F
 
+import megatron_adaptor  # noqa: F401  # To trigger the patching before importing Megatron-Core
+
 pytest.importorskip("megatron.core")
 
 from megatron.core import parallel_state  # noqa: E402
