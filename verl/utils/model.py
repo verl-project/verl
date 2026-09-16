@@ -56,7 +56,7 @@ from verl.utils.transformers_compat import get_auto_model_for_vision2seq
 
 AutoModelForVision2Seq = get_auto_model_for_vision2seq()
 
-_VARLEN_MULTI_MODAL_KEYS = {"input_features", "feature_attention_mask", "mm_token_type_ids"}
+_VARLEN_MULTI_MODAL_KEYS = {"input_features", "feature_attention_mask", "mm_token_type_ids", "vision_token_types"}
 
 
 class LambdaLayer(nn.Module):
@@ -754,7 +754,7 @@ def _pad_last_dim_and_cat(values: list[torch.Tensor], key: str) -> torch.Tensor:
         if value.shape[-1] == max_len:
             padded_values.append(value)
             continue
-        padded_value = value.new_zeros((*value.shape[:-1], max_len))
+        padded_value = value.new_full((*value.shape[:-1], max_len), -1 if key == "vision_token_types" else 0)
         padded_value[..., : value.shape[-1]] = value
         padded_values.append(padded_value)
 

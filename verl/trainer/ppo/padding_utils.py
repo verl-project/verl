@@ -125,7 +125,14 @@ def construct_minimal_padding_template(
         rollout_log_probs=torch.zeros_like(response_mask, dtype=torch.float32),
     )
     if "multi_modal_inputs" in template_sample:
+        multi_modal_inputs = template_sample["multi_modal_inputs"]
         template_sample["multi_modal_inputs"] = {}
+        if "vision_token_types" in multi_modal_inputs:
+            template_sample["multi_modal_inputs"] = {
+                "vision_token_types": torch.full((1, SYNTHETIC_PADDING_SEQ_LEN), -1, dtype=torch.int64),
+                "pixel_values": multi_modal_inputs["pixel_values"][:0].clone(),
+                "image_grid_hws": multi_modal_inputs["image_grid_hws"][:0].clone(),
+            }
     if routed_experts is not None:
         template_sample["routed_experts"] = routed_experts
     else:
