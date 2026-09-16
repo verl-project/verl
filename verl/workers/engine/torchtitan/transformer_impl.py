@@ -15,7 +15,6 @@
 The concrete Engine implementation using PyTorch TorchTitan parallelism (FSDP2 + TP + PP)
 """
 
-import gc
 import importlib
 import logging
 import os
@@ -466,7 +465,6 @@ class TorchTitanEngine(BaseEngine):
                     load_fsdp_model_to_gpu(module)
             if optimizer and self.optimizer is not None:
                 load_fsdp_optimizer(self.optimizer, device)
-            gc.collect()
         elif device == "cpu":
             if model:
                 for module in self.module:

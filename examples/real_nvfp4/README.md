@@ -38,9 +38,9 @@ Mixed dense/MoE layouts are rejected: the current training module recipe does
 not preserve BF16 for their dense MLPs. An evaluation recipe must be absent or
 identical to its training recipe, including BF16 carve-outs.
 
-An unmodified vLLM 0.26 wheel is **not** sufficient. Apply the audited fixes
-using `runtime_backports/apply_vllm_online_nvfp4_50029_50074.py` in the runtime
-build: they remove an extra BF16 rounding step and preserve the MoE kernel
+Unmodified dependency wheels are **not** the complete validated runtime. Apply
+`runtime_backports/apply_backports.sh` only in a disposable runtime build.
+The vLLM fixes remove an extra BF16 rounding step and preserve the MoE kernel
 across refits. The script also includes a local derived-scale lifecycle fix:
 post-processing must use the newly loaded tensors, while the retained execution
 kernel keeps references to the original storage that native reload updates in
@@ -59,6 +59,15 @@ Refit verifies unique coverage of every `(layer, expert, projection)` key as
 well as native W4A4 layer counts. These checks do not replace GPU graph/eager
 equivalence tests after consecutive reloads.
 
+The wrapper also installs the TE 2.18 row-scale grouped-GEMM backport and the
+single-rank vLLM TCPStore atomic-bind fix. The former batches the per-expert
+global-scale epilogue without changing quantization or its final rounding;
+unsupported layouts use the original TE function. The latter removes a
+probe-close-bind port race for single-rank engines only; other topologies keep
+the upstream path. Exact input hashes guard these dependency patches. They are
+not an installer for arbitrary versions and must not be reapplied to a live
+training environment. See [runtime backport validation](runtime_backports/README.md).
+
 ## R3 and loss contract
 
 The formal recipe enables R3 on both sides. vLLM 0.26 skips
@@ -76,45 +85,35 @@ responses, and `max_num_seqs=128`.
 - Training recipe: `run_qwen3_30b_megatron.sh`
 - TE module recipe: `config/attn_bf16_mlp_nvfp4.yaml`
 - vLLM quantization scope: native `nvfp4_per_token` (MoE only; linears BF16)
-- Versioned scheduler bundle: `jobs/r3_nativeonline_20260831_v3/`
+- Runtime build and verification: `runtime_backports/`
+- Completed-step numerical gate: `check_history.py`
 
-## Historical scheduler workflow
+## Build and scheduler workflow
 
-The versioned `r3_nativeonline_20260831_v3` scripts below reproduce an older
-runtime, **not** the current TE 2.18 release build. Do not use their source-pin
-build step to validate the current lockfile. Current validation must use a
-fresh versioned image and frozen checkout, preserving the eight-node recipe
-and explicit runtime backports. Run tests through the cluster scheduler, not
-on a shared login node. Independent formal training chains need not wait for
-unrelated user jobs; test jobs should remain low-concurrency.
+Site-specific historical Slurm experiments are not part of the feature
+delivery. Freeze a checkout and a fresh versioned image, apply and verify the
+runtime backports, then run numerical/transport tests and matched eight-node
+BF16/W4A4 model regression before releasing long runs. Record the source,
+dependency lock, image hash, resolved configuration, and exact driver command.
+The current integration still needs its merged-source and dependency validation;
+earlier image results do not validate a newly resolved environment.
 
-Run exactly one phase at a time. Each phase writes a versioned `.pass` marker;
-the next phase refuses to start without it, and `submit.sh` refuses to add work
-while this user already has a running or pending job:
+Run tests through your cluster scheduler, not on a shared login node. Keep test
+jobs low-concurrency; independent formal chains need not wait for unrelated jobs.
+Use unique experiment IDs, W&B IDs and checkpoint roots, check collisions before
+submission, and validate scheduler dependencies after submission. Preserve the
+full eight-node recipe for regression rather than substituting the one-node
+smoke profile. Keep one verified full-Adam recovery checkpoint per chain.
 
-```bash
-bash examples/real_nvfp4/jobs/r3_nativeonline_20260831_v3/submit.sh probe
-bash examples/real_nvfp4/jobs/r3_nativeonline_20260831_v3/submit.sh build
-bash examples/real_nvfp4/jobs/r3_nativeonline_20260831_v3/submit.sh preflight
-bash examples/real_nvfp4/jobs/r3_nativeonline_20260831_v3/submit.sh smoke
-bash examples/real_nvfp4/jobs/r3_nativeonline_20260831_v3/submit.sh short
-```
-
-`probe` inspects the old base without modifying it. `build` creates a new,
-checksummed aarch64 image with vLLM 0.26 and the exact TE source pin.
-`preflight` is the only place that
-runs unit/GPU checks. `smoke` performs two real updates on one node; only then
-can the eight-node short arm be submitted. Logs and phase state live under the
-versioned `ray_log/` and `run_state/` directories next to the worktree.
-Smoke and short-run experiment IDs include the Slurm job ID, so a failed
-compatibility attempt cannot collide with a corrected retry or accidentally
-resume its W&B/checkpoint state.
-
-For manual development outside this production gate, run a fresh arm with a
-unique experiment ID:
+Inside your scheduled allocation, with Ray already running on all eight nodes,
+invoke the recipe using explicit local data and model paths:
 
 ```bash
-PRECISION_MODE=real_nvfp4 EXP_NAME=my-new-run \
+MODEL_PATH=/shared/models/Qwen3-30B-A3B-Base \
+TRAIN_FILE=/shared/data/dapo-math-17k.jsonl \
+TEST_FILE=/shared/data/aime-2024.jsonl \
+CKPTS_DIR=/shared/checkpoints/my-new-run \
+PRECISION_MODE=real_nvfp4 EXP_NAME=my-new-run NNODES=8 \
   bash examples/real_nvfp4/run_qwen3_30b_megatron.sh
 ```
 
@@ -142,3 +141,15 @@ not four evaluations on one shared set of answers. Refills are included in
 pre-filter token counts and request-latency summaries; these summaries do not
 measure active GPU concurrency. Passing the guards is not proof of quality
 parity or end-to-end speedup.
+
+After each completed chunk, run the numerical gate on that chunk's log, including
+its final step (use 41 and 80 for a resumed second chunk):
+
+```bash
+python examples/real_nvfp4/check_history.py \
+  --log /shared/logs/chunk1.log --first-step 1 --last-step 40
+```
+
+It rejects missing steps/metrics, NaN/Inf including NumPy scalar formatting,
+inconsistent optimizer progress, and gross rollout desynchronization. It is a
+catastrophic-failure gate, not proof of statistical equivalence or good reward.

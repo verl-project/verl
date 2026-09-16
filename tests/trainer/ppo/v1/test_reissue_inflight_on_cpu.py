@@ -165,6 +165,19 @@ def _clear_partition(partition_id: str) -> None:
         tq.kv_clear(keys=keys, partition_id=partition_id)
 
 
+def test_count_tq_prompt_groups_includes_every_prompt_status(tq_init, partition_id):
+    """Prompt groups occupy the prefetch window whatever their status; trajectories are not prompts."""
+    uids = {status: _uid() for status in ("pending", "running", "finished", "failure")}
+    for status, uid in uids.items():
+        _submit_prompt(partition_id, uid, status, global_steps=2)
+    _add_trajectory(partition_id, uids["finished"], session_id=0, global_steps=2)
+
+    try:
+        assert trainer_base._count_tq_prompt_groups(partition_id) == 4
+    finally:
+        _clear_partition(partition_id)
+
+
 def test_async_submission_persists_reissuable_prompt_fields(monkeypatch):
     stub = type("Stub", (), {})()
     stub.trainer_mode = "separate_async"
@@ -414,6 +427,30 @@ def test_save_load_then_reissue_only_inflight(tq_init, partition_id, tmp_path):
         submitted_uids = {uid for batch in stub.agent_loop_manager.batches for uid in batch["uid"]}
         assert submitted_uids == {pending}
         assert int(stub.agent_loop_manager.batches[0]["global_steps"]) == 5
+    finally:
+        _clear_partition(partition_id)
+
+
+@requires_tq_checkpoint
+def test_save_load_terminal_only_counts_prompts_without_reissue(tq_init, partition_id, tmp_path):
+    """A terminal-only checkpoint re-issues nothing, yet its groups still fill the prefetch window,
+    so warmup must be gated on the prompt count rather than on the re-issue count."""
+    finished = _uid()
+    failure = _uid()
+    _submit_prompt(partition_id, finished, "finished", global_steps=6)
+    _submit_prompt(partition_id, failure, "failure", global_steps=6)
+    _add_trajectory(partition_id, finished, session_id=0, global_steps=6)
+
+    ckpt_dir = str(tmp_path / "transfer_queue")
+    tq.save_checkpoint(ckpt_dir, metadata={"global_steps": 6})
+    _clear_partition(partition_id)
+    tq.load_checkpoint(ckpt_dir)
+
+    stub = _make_trainer_stub(global_steps=7)
+    try:
+        assert trainer_base._count_tq_prompt_groups(partition_id) == 2
+        assert stub._reissue_inflight_prompts(partition_id) == 0
+        assert stub.agent_loop_manager.batches == []
     finally:
         _clear_partition(partition_id)
 

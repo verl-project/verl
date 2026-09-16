@@ -27,7 +27,7 @@ overrides = [
     { name = "flashinfer-cubin", marker = "extra == 'vllm'", specifier = "==0.6.15.post1", index = "https://flashinfer.ai/whl" },
     { name = "flashinfer-jit-cache", marker = "extra == 'vllm'", specifier = "==0.6.15.post1", index = "https://flashinfer.ai/whl/cu130" },
     { name = "flashinfer-python", marker = "extra == 'vllm'", specifier = "==0.6.15.post1" },
-    { name = "kernels", specifier = ">=0.10.2,<0.11" },
+    { name = "kernels", specifier = ">=0.12.0,<0.13" },
     { name = "numpy", specifier = ">=2.0.0" },
     { name = "nvidia-cublas", marker = "sys_platform == 'linux'", specifier = "==13.5.1.27" },
     { name = "nvidia-cudnn-cu13", marker = "sys_platform == 'linux'", specifier = "==9.20.0.48" },
@@ -35,10 +35,7 @@ overrides = [
     { name = "nvidia-cusparselt-cu13", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'", specifier = "==0.9.1" },
     { name = "nvidia-cusparselt-cu13", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = "==0.8.0" },
     { name = "nvidia-nccl-cu13", marker = "sys_platform == 'linux'", specifier = "==2.30.7" },
-    { name = "transformers", marker = "extra == 'cpu'", specifier = "==5.3.0" },
-    { name = "transformers", marker = "extra == 'sglang'", specifier = "==5.3.0" },
-    { name = "transformers", marker = "extra == 'verl-core'", specifier = ">=5.3.0,<=5.12.1" },
-    { name = "transformers", marker = "extra == 'vllm'", specifier = "==5.12.1" },
+    { name = "transformers", specifier = "==5.9.0" },
 ]
 
 [[manifest.dependency-metadata]]
@@ -514,6 +511,7 @@ dependencies = [
     { name = "loguru" },
     { name = "pydantic" },
     { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
+    { name = "transformers" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/2c/9e/d7f18bd9a0354088abc11a0c1f2c7698f7c49e5a709faedf6a46e388f693/compressed_tensors-0.17.0.tar.gz", hash = "sha256:15c20d06bdbcf35b51fc99fd125e7b9be1e1855567c33b7a46dfac26ad6fb126", size = 257091, upload-time = "2026-06-03T16:49:17.208Z" }
 wheels = [
@@ -1020,6 +1018,18 @@ wheels = [
 ]
 
 [[package]]
+name = "fla-core"
+version = "0.5.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "einops" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/94/85/20bdc0fbbbaeec27b5b198e0dbbbc51161a267066a4aebd9e4b413637c6c/fla_core-0.5.2.tar.gz", hash = "sha256:9360fc412f784c1c8f05c320ec2902d5d968764178c9b8a92efc919e17a39680", size = 587835, upload-time = "2026-07-27T18:26:19.424Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2d/ed/dfe19c4da779957eb6a42a26812f9b4e2280bf757a17a71933ff59ffcb98/fla_core-0.5.2-py3-none-any.whl", hash = "sha256:5e830c85bad3d0d34677f98ac7074d08687a3756f0f0499d95ceb96eb6920761", size = 819225, upload-time = "2026-07-27T18:26:16.147Z" },
+]
+
+[[package]]
 name = "flash-attn"
 version = "2.8.3"
 source = { registry = "https://verl-project.github.io/verl-wheelhouse/simple/" }
@@ -1033,6 +1043,19 @@ wheels = [
     { url = "https://github.com/verl-project/verl-wheelhouse/releases/download/flash-attention-v2.8.3-py3.11/flash_attn-2.8.3-cp311-cp311-linux_x86_64.whl" },
     { url = "https://github.com/verl-project/verl-wheelhouse/releases/download/flash-attention-v2.8.3/flash_attn-2.8.3-cp312-cp312-linux_aarch64.whl" },
     { url = "https://github.com/verl-project/verl-wheelhouse/releases/download/flash-attention-v2.8.3/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl" },
+]
+
+[[package]]
+name = "flash-linear-attention"
+version = "0.5.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "fla-core" },
+    { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d2/76/c180949eae5161b9fcf4c928cab52f0c257ce84c1a59b4462b1d2b6e5883/flash_linear_attention-0.5.2.tar.gz", hash = "sha256:c053d3a75c8f5b725063f719ae6bce0f4d9dac6da32735be8ae7d485a6c9820f", size = 208110, upload-time = "2026-07-27T18:26:20.536Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/90/d2/2070e3cf2148c5cce99ca4876633c4b7b89ec085323600bd3d47aeacd306/flash_linear_attention-0.5.2-py3-none-any.whl", hash = "sha256:dcf405d81f5426393b59037097aa700d0f4a841465d5028d5aa543f4502f2400", size = 399590, upload-time = "2026-07-27T18:26:17.912Z" },
 ]
 
 [[package]]
@@ -1607,16 +1630,16 @@ wheels = [
 
 [[package]]
 name = "kernels"
-version = "0.10.5"
+version = "0.12.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "packaging" },
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a1/5a/92b08df5ba5e103c59978348fa03d2fd4d6c58573af3fdeb749f6149aca3/kernels-0.10.5.tar.gz", hash = "sha256:a4ce25eb73022b1313f2bb270b494c4679bc71088ff22252bd156d17d38d4973", size = 47493, upload-time = "2025-12-04T09:14:25.612Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b3/84/9f68f355f6ce99e977872021fbdbafadcf2820f51d3f7bd697ec3801cb7a/kernels-0.12.3.tar.gz", hash = "sha256:87e29716578e7e71dc5a7578e0132bfdae305bedaeb602698f87c88ca6c60e32", size = 57407, upload-time = "2026-03-20T10:20:42.166Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/36/8c/3f415326e52a52c8696f22fb112c82c65628c615c84b3b19a6a2ccac47c4/kernels-0.10.5-py3-none-any.whl", hash = "sha256:39936236c5067a0931f1f58b04478b2a36d14e7d93320092aac61d450b40ddc3", size = 40444, upload-time = "2025-12-04T09:14:24.421Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/3e/778e4a86830e9139df2d16d86c4488fce426ec19daa83cbd2854ef389030/kernels-0.12.3-py3-none-any.whl", hash = "sha256:5d1d33fcb774e03bb7f0688ac24d91ef6b963692f80f0a85ddd2286e69f3cf2f", size = 55501, upload-time = "2026-03-20T10:20:40.643Z" },
 ]
 
 [[package]]
@@ -2256,11 +2279,11 @@ wheels = [
 
 [[package]]
 name = "nvidia-cuda-nvdisasm"
-version = "13.3.73"
+version = "13.4.49"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/92/be/e9de501cb71b10f7654381a485fa4ebf470ea25c3dce018cccaecf8a8f9a/nvidia_cuda_nvdisasm-13.3.73-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:dd4751884f9016b9b6dbf007abdeb5681d0a2edc731dd3d2fda9d6d878e88f73", size = 4744517, upload-time = "2026-06-29T16:48:33.527Z" },
-    { url = "https://files.pythonhosted.org/packages/86/3e/88460ebd737e559e8e9843db7a63f8ced9ec7be1882344438819dd13aebc/nvidia_cuda_nvdisasm-13.3.73-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:fa17084b07c0dca68a42892f771b4b1b40fbe9b91660209623e61cea611cae8c", size = 4782824, upload-time = "2026-06-29T16:49:05.109Z" },
+    { url = "https://files.pythonhosted.org/packages/0a/89/964fdac6231dd2e689e9b4eaf1fa545c32f7553168265921a2ab300717f5/nvidia_cuda_nvdisasm-13.4.49-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:7f42dfdc804c7aea8a58c044e56394909f38b4ecdb62762d71048d40c8f2fada", size = 5162488, upload-time = "2026-09-09T17:55:29.04Z" },
+    { url = "https://files.pythonhosted.org/packages/95/2e/ca1cfdee39fe05535ea637ed4d55e0ed2cc3333e6be32be4e54c385b1934/nvidia_cuda_nvdisasm-13.4.49-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:d8d828820b7f69a6fa1b73e3206248bc2fd0376ea5224c8d651323151174f3d7", size = 5202364, upload-time = "2026-09-09T17:55:34.612Z" },
 ]
 
 [[package]]
@@ -3103,6 +3126,7 @@ dependencies = [
     { name = "torch", version = "2.11.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "extra == 'extra-4-verl-cpu' or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "extra == 'extra-4-verl-fsdp' or extra == 'extra-4-verl-megatron' or extra == 'extra-4-verl-sglang' or extra == 'extra-4-verl-vllm' or extra != 'extra-4-verl-cpu'" },
     { name = "tqdm" },
+    { name = "transformers" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/86/cf/037f1e3d5186496c05513a6754639e2dab3038a05f384284d49a9bd06a2d/peft-0.19.1.tar.gz", hash = "sha256:0d97542fe96dcdaa20d3b81c06f26f988618f416a73544ab23c3618ccb674a40", size = 763738, upload-time = "2026-04-16T15:46:45.105Z" }
 wheels = [
@@ -4123,6 +4147,7 @@ dependencies = [
     { name = "torchcodec", version = "0.11.1", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64'" },
     { name = "torchvision", version = "0.26.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
     { name = "tqdm" },
+    { name = "transformers" },
     { name = "uvicorn" },
     { name = "uvloop" },
     { name = "watchfiles" },
@@ -4842,50 +4867,22 @@ sdist = { url = "https://files.pythonhosted.org/packages/db/f9/34ad04b8e32f3d43f
 
 [[package]]
 name = "transformers"
-version = "5.3.0"
+version = "5.9.0"
 source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-]
 dependencies = [
-    { name = "huggingface-hub", marker = "extra == 'extra-4-verl-cpu' or extra == 'extra-4-verl-sglang'" },
-    { name = "numpy", marker = "extra == 'extra-4-verl-cpu' or extra == 'extra-4-verl-sglang'" },
-    { name = "packaging", marker = "extra == 'extra-4-verl-cpu' or extra == 'extra-4-verl-sglang'" },
-    { name = "pyyaml", marker = "extra == 'extra-4-verl-cpu' or extra == 'extra-4-verl-sglang'" },
-    { name = "regex", marker = "extra == 'extra-4-verl-cpu' or extra == 'extra-4-verl-sglang'" },
-    { name = "safetensors", marker = "extra == 'extra-4-verl-cpu' or extra == 'extra-4-verl-sglang'" },
-    { name = "tokenizers", marker = "extra == 'extra-4-verl-cpu' or extra == 'extra-4-verl-sglang'" },
-    { name = "tqdm", marker = "extra == 'extra-4-verl-cpu' or extra == 'extra-4-verl-sglang'" },
-    { name = "typer", marker = "extra == 'extra-4-verl-cpu' or extra == 'extra-4-verl-sglang'" },
+    { name = "huggingface-hub" },
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "pyyaml" },
+    { name = "regex" },
+    { name = "safetensors" },
+    { name = "tokenizers" },
+    { name = "tqdm" },
+    { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/fc/1a/70e830d53ecc96ce69cfa8de38f163712d2b43ac52fbd743f39f56025c31/transformers-5.3.0.tar.gz", hash = "sha256:009555b364029da9e2946d41f1c5de9f15e6b1df46b189b7293f33a161b9c557", size = 8830831, upload-time = "2026-03-04T17:41:46.119Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/51/58/7f843608f2e8421f86bb97060b54649be6239ec612b82bf9d41e65c26c00/transformers-5.9.0.tar.gz", hash = "sha256:25997cb8fa6053533171634b6162d7df54346530ec2aa9b42bb834e63668c842", size = 8642240, upload-time = "2026-05-20T14:50:49.278Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b8/88/ae8320064e32679a5429a2c9ebbc05c2bf32cefb6e076f9b07f6d685a9b4/transformers-5.3.0-py3-none-any.whl", hash = "sha256:50ac8c89c3c7033444fb3f9f53138096b997ebb70d4b5e50a2e810bf12d3d29a", size = 10661827, upload-time = "2026-03-04T17:41:42.722Z" },
-]
-
-[[package]]
-name = "transformers"
-version = "5.12.1"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-]
-dependencies = [
-    { name = "huggingface-hub", marker = "(extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra != 'extra-4-verl-cpu' and extra != 'extra-4-verl-sglang') or (extra != 'extra-4-verl-fsdp' and extra != 'extra-4-verl-megatron' and extra != 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
-    { name = "numpy", marker = "(extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra != 'extra-4-verl-cpu' and extra != 'extra-4-verl-sglang') or (extra != 'extra-4-verl-fsdp' and extra != 'extra-4-verl-megatron' and extra != 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
-    { name = "packaging", marker = "(extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra != 'extra-4-verl-cpu' and extra != 'extra-4-verl-sglang') or (extra != 'extra-4-verl-fsdp' and extra != 'extra-4-verl-megatron' and extra != 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
-    { name = "pyyaml", marker = "(extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra != 'extra-4-verl-cpu' and extra != 'extra-4-verl-sglang') or (extra != 'extra-4-verl-fsdp' and extra != 'extra-4-verl-megatron' and extra != 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
-    { name = "regex", marker = "(extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra != 'extra-4-verl-cpu' and extra != 'extra-4-verl-sglang') or (extra != 'extra-4-verl-fsdp' and extra != 'extra-4-verl-megatron' and extra != 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
-    { name = "safetensors", marker = "(extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra != 'extra-4-verl-cpu' and extra != 'extra-4-verl-sglang') or (extra != 'extra-4-verl-fsdp' and extra != 'extra-4-verl-megatron' and extra != 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
-    { name = "tokenizers", marker = "(extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra != 'extra-4-verl-cpu' and extra != 'extra-4-verl-sglang') or (extra != 'extra-4-verl-fsdp' and extra != 'extra-4-verl-megatron' and extra != 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
-    { name = "tqdm", marker = "(extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra != 'extra-4-verl-cpu' and extra != 'extra-4-verl-sglang') or (extra != 'extra-4-verl-fsdp' and extra != 'extra-4-verl-megatron' and extra != 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
-    { name = "typer", marker = "(extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra != 'extra-4-verl-cpu' and extra != 'extra-4-verl-sglang') or (extra != 'extra-4-verl-fsdp' and extra != 'extra-4-verl-megatron' and extra != 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/aa/7c/8240f612819718100a9346dc28dea6a11370c3ca9c8c6eabadd3dea4ef29/transformers-5.12.1.tar.gz", hash = "sha256:679ee731c8225347889ad4fb3b2c926a62e9da3b7d284e9d12c791da7272466b", size = 8924054, upload-time = "2026-06-15T17:27:50.604Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/df/56/bbd60dd8668055803bf8ba55a81f9b8a8b31497f620109a9671d26a2076d/transformers-5.12.1-py3-none-any.whl", hash = "sha256:2a5e109d2021265df7098ffbb738295acaf5ad256f12cbc586db2ea4dcbb1a8a", size = 11150587, upload-time = "2026-06-15T17:27:46.679Z" },
+    { url = "https://files.pythonhosted.org/packages/02/ca/2eaa5359f2ccb8c2e1656bc26305ad0cf438aa392ce4b29ae67a315c186e/transformers-5.9.0-py3-none-any.whl", hash = "sha256:1d19509bcff7028ebc6b277d71caa712e8353778463d38764237d14b42b52788", size = 10787648, upload-time = "2026-05-20T14:50:45.337Z" },
 ]
 
 [[package]]
@@ -4909,6 +4906,7 @@ dependencies = [
     { name = "accelerate" },
     { name = "datasets" },
     { name = "packaging" },
+    { name = "transformers" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/85/2b/9615b2f43973dc72ba2d723926c36c9cc62fb8f89060bc283884e14fa519/trl-0.27.0.tar.gz", hash = "sha256:e12262064d0212738ae79f4411bc014fbe444c8ff665b9a61fea34261e0ee386", size = 448607, upload-time = "2026-01-16T02:14:01.488Z" }
 wheels = [
@@ -5032,6 +5030,7 @@ dependencies = [
     { name = "tensorboard" },
     { name = "tensordict" },
     { name = "torchdata" },
+    { name = "transformers" },
     { name = "wandb" },
 ]
 
@@ -5074,7 +5073,7 @@ cpu = [
     { name = "torchdata" },
     { name = "torchvision", version = "0.26.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" } },
     { name = "transferqueue" },
-    { name = "transformers", version = "5.3.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "transformers" },
     { name = "triton" },
     { name = "uvicorn" },
     { name = "wandb" },
@@ -5095,6 +5094,7 @@ fsdp = [
     { name = "fastapi", version = "0.136.3", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'x86_64' and extra != 'extra-4-verl-cpu') or extra == 'extra-4-verl-vllm' or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang')" },
     { name = "fastapi", version = "0.137.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and extra == 'extra-4-verl-sglang') or (platform_machine == 'x86_64' and extra != 'extra-4-verl-cpu' and extra != 'extra-4-verl-vllm') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm')" },
     { name = "flash-attn" },
+    { name = "flash-linear-attention" },
     { name = "hydra-core" },
     { name = "liger-kernel" },
     { name = "mathruler" },
@@ -5120,8 +5120,7 @@ fsdp = [
     { name = "torchdata" },
     { name = "torchvision", version = "0.26.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
     { name = "transferqueue" },
-    { name = "transformers", version = "5.3.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra != 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra != 'extra-4-verl-fsdp' and extra != 'extra-4-verl-megatron' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-cpu' and extra != 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
-    { name = "transformers", version = "5.12.1", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra != 'extra-4-verl-cpu' and extra != 'extra-4-verl-sglang') or (extra != 'extra-4-verl-fsdp' and extra != 'extra-4-verl-megatron' and extra != 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
+    { name = "transformers" },
     { name = "trl" },
     { name = "uvicorn" },
     { name = "wandb" },
@@ -5177,8 +5176,7 @@ megatron = [
     { name = "torchvision", version = "0.26.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
     { name = "transferqueue" },
     { name = "transformer-engine", extra = ["core-cu13", "pytorch"], marker = "extra == 'extra-4-verl-fsdp' or extra == 'extra-4-verl-megatron' or extra == 'extra-4-verl-sglang' or extra == 'extra-4-verl-vllm' or extra != 'extra-4-verl-cpu'" },
-    { name = "transformers", version = "5.3.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra != 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra != 'extra-4-verl-fsdp' and extra != 'extra-4-verl-megatron' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-cpu' and extra != 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
-    { name = "transformers", version = "5.12.1", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra != 'extra-4-verl-cpu' and extra != 'extra-4-verl-sglang') or (extra != 'extra-4-verl-fsdp' and extra != 'extra-4-verl-megatron' and extra != 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
+    { name = "transformers" },
     { name = "trl" },
     { name = "uvicorn" },
     { name = "wandb" },
@@ -5218,7 +5216,7 @@ sglang = [
     { name = "torchdata" },
     { name = "torchvision", version = "0.26.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
     { name = "transferqueue" },
-    { name = "transformers", version = "5.3.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "transformers" },
     { name = "uvicorn" },
     { name = "wandb" },
 ]
@@ -5264,8 +5262,7 @@ verl-core = [
     { name = "torchcodec", version = "0.16.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or extra == 'extra-4-verl-cpu' or extra != 'extra-4-verl-sglang' or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "torchdata" },
     { name = "transferqueue" },
-    { name = "transformers", version = "5.3.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-4-verl-cpu' or extra == 'extra-4-verl-sglang'" },
-    { name = "transformers", version = "5.12.1", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra != 'extra-4-verl-cpu' and extra != 'extra-4-verl-sglang') or (extra != 'extra-4-verl-fsdp' and extra != 'extra-4-verl-megatron' and extra != 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
+    { name = "transformers" },
     { name = "uvicorn" },
     { name = "wandb" },
 ]
@@ -5305,7 +5302,7 @@ vllm = [
     { name = "torchdata" },
     { name = "torchvision", version = "0.26.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
     { name = "transferqueue" },
-    { name = "transformers", version = "5.12.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "transformers" },
     { name = "uvicorn" },
     { name = "vllm", version = "0.26.0", source = { url = "https://github.com/vllm-project/vllm/releases/download/v0.26.0/vllm-0.26.0-cp38-abi3-manylinux_2_28_aarch64.whl" }, marker = "(platform_machine != 'x86_64' and extra == 'extra-4-verl-vllm') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "vllm", version = "0.26.0", source = { url = "https://github.com/vllm-project/vllm/releases/download/v0.26.0/vllm-0.26.0-cp38-abi3-manylinux_2_28_x86_64.whl" }, marker = "(platform_machine == 'x86_64' and extra == 'extra-4-verl-vllm') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm')" },
@@ -5327,6 +5324,7 @@ requires-dist = [
     { name = "dill", marker = "extra == 'verl-core'" },
     { name = "fastapi", marker = "extra == 'verl-core'" },
     { name = "flash-attn", marker = "extra == 'flash-attn-cu130torch211'", specifier = "==2.8.3", index = "https://verl-project.github.io/verl-wheelhouse/simple/" },
+    { name = "flash-linear-attention", marker = "extra == 'fsdp'", specifier = "==0.5.2" },
     { name = "flashinfer-cubin", marker = "extra == 'vllm'", specifier = "==0.6.15.post1", index = "https://flashinfer.ai/whl" },
     { name = "flashinfer-jit-cache", marker = "extra == 'vllm'", specifier = "==0.6.15.post1", index = "https://flashinfer.ai/whl/cu130" },
     { name = "flashinfer-python", marker = "extra == 'vllm'", specifier = "==0.6.15.post1" },
@@ -5410,10 +5408,10 @@ requires-dist = [
     { name = "transferqueue", marker = "extra == 'transferqueue'", git = "https://github.com/Ascend/TransferQueue.git?rev=main" },
     { name = "transformer-engine", extras = ["core-cu13", "pytorch"], marker = "extra == 'megatron'", specifier = "==2.18.0" },
     { name = "transformers", specifier = ">=5.5.3,!=5.6.0,<5.11" },
-    { name = "transformers", marker = "extra == 'cpu'", specifier = "==5.3.0" },
-    { name = "transformers", marker = "extra == 'sglang'", specifier = "==5.3.0" },
+    { name = "transformers", marker = "extra == 'cpu'", specifier = "==5.9.0" },
+    { name = "transformers", marker = "extra == 'sglang'", specifier = "==5.9.0" },
     { name = "transformers", marker = "extra == 'verl-core'" },
-    { name = "transformers", marker = "extra == 'vllm'", specifier = "==5.12.1" },
+    { name = "transformers", marker = "extra == 'vllm'", specifier = "==5.9.0" },
     { name = "triton", marker = "extra == 'cpu'" },
     { name = "trl", marker = "extra == 'fsdp'", specifier = "==0.27.0" },
     { name = "trl", marker = "extra == 'megatron'", specifier = "==0.27.0" },
@@ -5528,6 +5526,7 @@ dependencies = [
     { name = "torchcodec", version = "0.16.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64'" },
     { name = "torchvision", version = "0.26.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "platform_machine != 'x86_64'" },
     { name = "tqdm", marker = "platform_machine != 'x86_64'" },
+    { name = "transformers", marker = "platform_machine != 'x86_64'" },
     { name = "typing-extensions", marker = "platform_machine != 'x86_64'" },
     { name = "watchfiles", marker = "platform_machine != 'x86_64'" },
     { name = "xgrammar", version = "0.2.2", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64'" },
@@ -5714,6 +5713,7 @@ dependencies = [
     { name = "torchcodec", version = "0.16.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64'" },
     { name = "torchvision", version = "0.26.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "platform_machine == 'x86_64'" },
     { name = "tqdm", marker = "platform_machine == 'x86_64'" },
+    { name = "transformers", marker = "platform_machine == 'x86_64'" },
     { name = "typing-extensions", marker = "platform_machine == 'x86_64'" },
     { name = "watchfiles", marker = "platform_machine == 'x86_64'" },
     { name = "xgrammar", version = "0.2.2", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64'" },
@@ -5951,6 +5951,7 @@ dependencies = [
     { name = "numpy" },
     { name = "pydantic" },
     { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
+    { name = "transformers" },
     { name = "triton", marker = "platform_machine == 'x86_64'" },
     { name = "typing-extensions" },
 ]
@@ -5977,6 +5978,7 @@ dependencies = [
     { name = "numpy" },
     { name = "pydantic" },
     { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
+    { name = "transformers" },
     { name = "triton", marker = "platform_machine == 'x86_64'" },
     { name = "typing-extensions" },
 ]

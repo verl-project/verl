@@ -70,6 +70,7 @@ ENGINE_CONFIG=(
     actor_rollout_ref.actor.veomni.enable_fsdp_offload=True
     # actor_rollout_ref.actor.veomni.param_offload=True
     # actor_rollout_ref.actor.veomni.optimizer_offload=True
+    actor_rollout_ref.actor.veomni.enable_async_activation_offload=True
     actor_rollout_ref.actor.veomni.enable_full_shard=True
     actor_rollout_ref.actor.veomni.ulysses_parallel_size=$usp_size
     actor_rollout_ref.actor.veomni.expert_parallel_size=$expert_size
@@ -80,12 +81,14 @@ ENGINE_CONFIG=(
     actor_rollout_ref.actor.veomni.mhc_implementation=tilelang
     actor_rollout_ref.actor.veomni.qat_implementation=fp8_blockwise
     actor_rollout_ref.actor.veomni.router_replay.mode=R3
+    actor_rollout_ref.actor.veomni.cross_entropy_loss_implementation=chunk_loss
 )
 
 # Actor model config
 ACTOR_CONFIG=(
     actor_rollout_ref.model.path=$model_path
     actor_rollout_ref.model.use_remove_padding=$use_remove_padding
+    actor_rollout_ref.model.use_fused_kernels=True
     actor_rollout_ref.actor.optim.lr=$actor_lr
     actor_rollout_ref.actor.use_kl_loss=$use_kl_loss
     actor_rollout_ref.actor.kl_loss_coef=$kl_loss_coef
