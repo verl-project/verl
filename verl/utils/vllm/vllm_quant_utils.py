@@ -80,13 +80,13 @@ class FP8State:
 fp8_state: FP8State = FP8State()
 
 
-def is_fp8_model(vllm_config):
+def is_quantized_model(vllm_config):
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 
     if hasattr(vllm_config, "quant_config"):
         if isinstance(vllm_config.quant_config, Fp8Config):
             return True
-        elif is_mxfp8_vllm_ascend(vllm_config.quant_config):
+        elif is_vllm_ascend_mx_quant(vllm_config.quant_config):
             return True
 
     return False
@@ -221,23 +221,41 @@ def is_fp8_weight(name, model):
     return name in fp8_state.fp8_param_names
 
 
-def is_mxfp8_vllm_ascend(quant_config):
-    try:
-        from vllm_ascend.quantization.modelslim_config import AscendModelSlimConfig
+def is_w4a8_weight(module) -> bool:
+    """Check if a module holds W4A8 (FP4) quantized weights.
 
-        if isinstance(quant_config, AscendModelSlimConfig):
-            quant_method = quant_config.quant_description.get("quant_method")
-            return quant_method in ["ascend"]
-        return False
+    W4A8 stores weights as packed FP4 in uint8 tensors, unlike W8A8 which
+    uses float8_e4m3fn. This function detects those uint8 weight holders so
+    that ``quant_weights`` can select the correct destination dtype for the
+    incoming BF16 weights.
+    """
+    from vllm.model_executor.layers.linear import LinearBase
+
+    is_w4a8_linear = isinstance(module, LinearBase) and module.weight.dtype == torch.uint8
+    is_w4a8_moe = (
+        _is_expert_weight_module(module)
+        and module.w13_weight.dtype == torch.uint8
+        and module.w2_weight.dtype == torch.uint8
+    )
+    return is_w4a8_linear or is_w4a8_moe
+
+
+def is_vllm_ascend_mx_quant(quant_config):
+    try:
+        from vllm_ascend.quantization import AscendModelSlimConfig
     except ImportError:
-        # vllm_ascend not installed, so this can't be an Ascend MXFP8 config
+        # vllm_ascend not installed, so this can't be an Ascend MX config
         return False
+    if not isinstance(quant_config, AscendModelSlimConfig):
+        return False
+    mx_quant_types = ("W8A8_MXFP8", "W4A8_MXFP")
+    return any(quant_type in mx_quant_types for quant_type in quant_config.quant_description.values())
 
 
 def restore_mxfp8_weights_for_loading(model):
     for name, module in model.named_modules():
         if (
-            hasattr(module, "_mxfp8_transformed")
+            (hasattr(module, "_mxfp8_transformed") or hasattr(module, "_mxfp4_transformed"))
             and hasattr(module, "quant_method")
             and hasattr(module.quant_method, "quant_method")
             and hasattr(module.quant_method.quant_method, "restore_weights_for_rl_loading")
@@ -261,8 +279,8 @@ def apply_mxfp8_transformation_after_loading(model):
         return
 
     for name, module in model.named_modules():
-        if (isinstance(module, LinearBase) or _is_expert_weight_module(module)) and hasattr(
-            module, "_mxfp8_original_shapes"
+        if (isinstance(module, LinearBase) or _is_expert_weight_module(module)) and (
+            hasattr(module, "_mxfp8_original_shapes") or hasattr(module, "_mxfp4_original_shapes")
         ):
             if hasattr(module, "quant_method") and hasattr(module.quant_method, "process_weights_after_loading"):
                 logger.debug(f"Applying MXFP8 transformation for module: {name}")
@@ -307,6 +325,24 @@ def refresh_rocm_attention_weight_caches(model):
             module._dsv4_wo_a_bf16 = live
 
 
+def _classify_quant_weight(name, model, is_ascend_mx):
+    """Determine what kind of quantization a weight parameter needs.
+
+    Returns
+        ``"mx_fp8"``   Ascend W8A8_MXFP8 or standard FP8 weight on Ascend NPU,
+        ``"mx_fp4"``   Ascend W4A8_MXFP weight (packed FP4 in uint8),
+        ``"fp8"``      standard blockwise FP8 weight (non-Ascend),
+        ``None``       parameter should pass through unquantized.
+    """
+    if is_fp8_weight(name, model):
+        return "mx_fp8" if is_ascend_mx else "fp8"
+    if is_ascend_mx and name.endswith("weight"):
+        module = get_module_from_param_name(model, name)
+        if is_w4a8_weight(module):
+            return "mx_fp4"
+    return None
+
+
 def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
     """Quantize weights to FP8 format using a memory-efficient generator.
 
@@ -327,24 +363,31 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
 
     fp8_state.seen_params.clear()
     fp8_state.fp8_param_names.clear()
-    is_mxfp8_npu = is_mxfp8_vllm_ascend(quant_config)
-    if is_mxfp8_npu:
+    is_ascend_mx = is_vllm_ascend_mx_quant(quant_config)
+    if is_ascend_mx:
         import torch_npu
     for k, v in weights:
-        if not is_fp8_weight(k, model):
+        quant_type = _classify_quant_weight(k, model, is_ascend_mx)
+        if quant_type is None:
             yield (k, v)
             continue
 
-        # Cast the weight into fp8 and its scale factor
+        # Cast the weight into quantized format and its scale factor
         if torch.distributed.get_rank() == 0:
-            logger.debug(f"Quantizing to FP8 blockwise: {k}")
-        if is_mxfp8_npu:
+            logger.debug(f"Quantizing to {quant_type} blockwise: {k}")
+        if quant_type in ("mx_fp8", "mx_fp4"):
+            dst_type = torch_npu.float4_e2m1fn_x2 if quant_type == "mx_fp4" else torch_npu.float8_e4m3fn
             param_lp, param_scale = torch_npu.npu_dynamic_mx_quant(
                 v.to(dtype),
                 axis=-1,
-                dst_type=torch_npu.float8_e4m3fn,
+                dst_type=dst_type,
             )
             param_scale = param_scale.flatten(-2, -1)
+            if quant_type == "mx_fp4":
+                # W4A8 params are uint8 holding packed FP4 pairs; the mx quant
+                # op returns those bytes as float4_e2m1fn_x2, so reinterpret
+                # them as uint8 to match the parameter dtype.
+                param_lp = param_lp.view(torch.uint8)
         else:
             param_lp, param_scale = scaled_fp8_blockwise(
                 v.to(dtype),
@@ -355,7 +398,7 @@ def quant_weights(weights, model, quant_config, dtype=torch.bfloat16):
         # Yield the quantized weight
         yield (k, param_lp)
 
-        if is_mxfp8_npu:
+        if is_ascend_mx:
             yield (k + "_scale", param_scale)
         else:
             yield (k + "_scale_inv", param_scale)
