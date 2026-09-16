@@ -5,6 +5,7 @@ import json
 from importlib.metadata import distribution, version
 from pathlib import Path
 
+from patch_megatron_fa4 import verify_patched_source
 from transformer_engine.pytorch.cpp_extensions import gemm
 from transformer_engine.pytorch.module import grouped_linear
 
@@ -12,6 +13,8 @@ from verl.utils.real_nvfp4.vllm_runtime import require_vllm_nvfp4_backports
 
 
 def main():
+    attention_source = distribution("megatron-core").locate_file("megatron/core/transformer/attention.py")
+    verify_patched_source(Path(attention_source).read_text())
     expected_versions = {
         "transformer-engine": "2.18.0",
         "transformer-engine-cu13": "2.18.0",
@@ -23,8 +26,9 @@ def main():
         raise RuntimeError(f"Unexpected dependency versions: {actual_versions}")
     targets = {
         Path(gemm.__file__): "dc3233868f739d67d86a8b6dde9dbfa519a195ae08c40a751c85b08fbe9a931b",
-        Path(distribution("vllm").locate_file("vllm/v1/executor/multiproc_executor.py")):
-            "b7fd3cbd61b4a46be5498ffde63e69d9b743fbf06aa5e64ea5345f5acf8d9147",
+        Path(
+            distribution("vllm").locate_file("vllm/v1/executor/multiproc_executor.py")
+        ): "b7fd3cbd61b4a46be5498ffde63e69d9b743fbf06aa5e64ea5345f5acf8d9147",
     }
     hashes = {}
     for path, expected in targets.items():
@@ -37,9 +41,16 @@ def main():
     if grouped_linear.general_grouped_gemm is not gemm.general_grouped_gemm:
         raise RuntimeError("GroupedLinear did not import the patched implementation")
     require_vllm_nvfp4_backports()
-    print("DELIVERY_RUNTIME_GUARD_PASS", json.dumps({
-        "versions": actual_versions, "installed_sha256": hashes,
-    }), flush=True)
+    print(
+        "DELIVERY_RUNTIME_GUARD_PASS",
+        json.dumps(
+            {
+                "versions": actual_versions,
+                "installed_sha256": hashes,
+            }
+        ),
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

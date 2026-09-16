@@ -18,6 +18,12 @@ that every platform/backend works. Configure PYTHONPATH to the frozen checkout.
 
 Payloads:
 
+- `patch_megatron_fa4.py`: backport Megatron-LM
+  [#6964](https://github.com/NVIDIA/Megatron-LM/pull/6964) to the pinned Core 0.18
+  source. Check FA4 distribution metadata before importing its optional module;
+  FA2's bundled `flash_attn.cute` namespace is not evidence that FA4 is installed.
+  Apply this before the first Megatron/Bridge import in a freshly synced runtime.
+  Source hashes reject unrelated changes; repeated application is a checked no-op.
 - `apply_vllm_online_nvfp4_50029_50074.py`: native online packing, kernel reuse,
   derived-scale and level-2 sleep/refit storage-lifetime corrections.
 - `candidate.py` / `patch_te.py`: TE row-scale grouped-GEMM epilogue batching;
