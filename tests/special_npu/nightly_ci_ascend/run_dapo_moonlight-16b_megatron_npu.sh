@@ -26,7 +26,7 @@ infer_ppo_micro_batch_size_per_gpu=2
 
 # Paths
 MODEL_ID=${MODEL_ID:-moonshotai/Moonlight-16B-A3B-Instruct}
-MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/${MODEL_ID}}
 
 SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}" .sh)"
 LOG_DIR=/root/.cache/nightly_log/$SCRIPT_NAME

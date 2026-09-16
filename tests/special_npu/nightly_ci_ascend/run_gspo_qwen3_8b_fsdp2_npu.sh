@@ -12,7 +12,7 @@ export CPU_AFFINITY_CONF=1
 export VLLM_USE_V1=1
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-8B}
-MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/${MODEL_ID}}
 TRAIN_FILE=${TRAIN_FILE:-$HOME/data/gsm8k/train.parquet}
 TEST_FILE=${TEST_FILE:-$HOME/data/gsm8k/test.parquet}
 

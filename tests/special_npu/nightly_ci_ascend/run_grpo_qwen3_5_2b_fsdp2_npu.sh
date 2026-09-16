@@ -7,7 +7,7 @@ set -xeuo pipefail
 
 INFER_BACKEND=${INFER_BACKEND:-vllm}
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3.5-2B}
-MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/${MODEL_ID}}
 TRAIN_FILE=${TRAIN_FILE:-$HOME/data/geo3k/train.parquet}
 TEST_FILE=${TEST_FILE:-$HOME/data/geo3k/test.parquet}
 

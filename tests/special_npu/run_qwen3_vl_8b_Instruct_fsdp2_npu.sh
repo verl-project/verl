@@ -5,7 +5,7 @@
 set -xeuo pipefail
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-VL-8B-Instruct}
-MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/${MODEL_ID}}
 NNODES=${NNODES:-1}
 NDEVICES_PER_NODE=${NDEVICES_PER_NODE:-}
 
