@@ -76,6 +76,16 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 DEFAULT_ROUTING_CACHE_SIZE = 10000
 
 
+def _route_storage_dtype(routes) -> torch.dtype:
+    """Keep backend uint8 IDs losslessly compact; retain the legacy fallback.
+
+    Do not choose signed int8: valid expert IDs can include 128..255. Backends
+    with signed sentinels or wider IDs keep the existing int16 conversion.
+    Megatron converts replay targets to int64 at their consumption boundary.
+    """
+    return torch.uint8 if getattr(routes, "dtype", None) in (np.dtype("uint8"), torch.uint8) else torch.int16
+
+
 class AgentLoopMetrics(BaseModel):
     """Agent loop performance metrics."""
 
@@ -128,7 +138,7 @@ class AgentLoopOutput(BaseModel):
 
         routed_experts = output.pop("routed_experts", None)
         if routed_experts is not None:
-            routed_experts = torch.tensor(routed_experts, dtype=torch.int16)
+            routed_experts = torch.tensor(routed_experts, dtype=_route_storage_dtype(routed_experts))
             # Router replay indexes this field by absolute token position, so it must
             # span the whole sequence. The rollout engine records fewer rows than that:
             # it only sees tokens fed through the model, and multi-turn loops stop
@@ -793,7 +803,7 @@ class AgentLoopWorker:
                 experts_tensor = output.routed_experts
             else:
                 raise TypeError(f"Unsupported type for routed_experts: {type(output.routed_experts)}")
-            experts_tensor = experts_tensor.to(torch.int16)
+            experts_tensor = experts_tensor.to(_route_storage_dtype(experts_tensor))
             routed_experts = torch.zeros(1, total_length, layer_num, topk_num, dtype=experts_tensor.dtype)
 
             # Calculate start position: left padding means original prompt starts at the end
