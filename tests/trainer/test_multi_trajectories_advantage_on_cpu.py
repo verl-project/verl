@@ -66,6 +66,22 @@ def test_compute_advantage_for_single_trajectory(batch_data: DataProto):
     assert torch.equal(result.batch["returns"], expected.batch["returns"])
 
 
+@pytest.mark.parametrize("normalize", [True, False])
+def test_vectorized_grpo_respects_normalization(batch_data: DataProto, normalize: bool):
+    expected = compute_advantage(
+        batch_data,
+        adv_estimator=AdvantageEstimator.GRPO,
+        norm_adv_by_std_in_grpo=normalize,
+    ).batch["advantages"]
+    result = compute_advantage(
+        batch_data,
+        adv_estimator=AdvantageEstimator.GRPO_VECTORIZED,
+        norm_adv_by_std_in_grpo=normalize,
+    )
+    torch.testing.assert_close(result.batch["advantages"], expected)
+    torch.testing.assert_close(result.batch["returns"], expected)
+
+
 def test_compute_advantage_for_multi_trajectories(batch_data: DataProto):
     result = compute_advantage_for_multi_trajectories(
         data=batch_data,

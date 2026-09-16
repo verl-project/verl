@@ -253,6 +253,8 @@ def compute_advantage(
             "response_mask": data.batch["response_mask"],
             "config": config,
         }
+        if adv_estimator == AdvantageEstimator.GRPO_VECTORIZED:
+            adv_kwargs["norm_adv_by_std_in_grpo"] = norm_adv_by_std_in_grpo
         if "uid" in data.non_tensor_batch:  # optional
             adv_kwargs["index"] = data.non_tensor_batch["uid"]
         if "reward_baselines" in data.batch:  # optional
