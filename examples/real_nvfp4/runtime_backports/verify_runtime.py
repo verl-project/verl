@@ -5,6 +5,7 @@ import json
 from importlib.metadata import distribution, version
 from pathlib import Path
 
+from patch_megatron_checkpoint import verify_patched_source as verify_checkpoint_source
 from patch_megatron_fa4 import verify_patched_source
 from transformer_engine.pytorch.cpp_extensions import gemm
 from transformer_engine.pytorch.module import grouped_linear
@@ -15,6 +16,8 @@ from verl.utils.real_nvfp4.vllm_runtime import require_vllm_nvfp4_backports
 def main():
     attention_source = distribution("megatron-core").locate_file("megatron/core/transformer/attention.py")
     verify_patched_source(Path(attention_source).read_text())
+    checkpoint_source = distribution("megatron-core").locate_file("megatron/core/extensions/transformer_engine.py")
+    verify_checkpoint_source(Path(checkpoint_source).read_text())
     expected_versions = {
         "transformer-engine": "2.18.0",
         "transformer-engine-cu13": "2.18.0",

@@ -18,6 +18,12 @@ that every platform/backend works. Configure PYTHONPATH to the frozen checkout.
 
 Payloads:
 
+- `patch_megatron_checkpoint.py`: backport the stateless grouped extra-state
+  handling from Megatron-LM [#5997](https://github.com/NVIDIA/Megatron-LM/pull/5997).
+  TE 2.18 returns an empty byte tensor for stateless recipes; this is valid and
+  must not be decoded and indexed as a nonempty FP8 metadata dictionary.
+  The guard checks the installed source, not just its version string.
+
 - `patch_megatron_fa4.py`: backport Megatron-LM
   [#6964](https://github.com/NVIDIA/Megatron-LM/pull/6964) to the pinned Core 0.18
   source. Check FA4 distribution metadata before importing its optional module;
