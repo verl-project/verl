@@ -37,6 +37,7 @@ from nemo_automodel.components.training.utils import (
 )
 from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
+from torch.utils._pytree import tree_map_only
 
 import verl.utils.torch_functional as verl_F
 from verl.trainer.config import CheckpointConfig
@@ -56,6 +57,7 @@ from verl.workers.engine.automodel.utils import (
     split_packed_expert,
     to_vllm_peft_dict,
 )
+from verl.workers.utils.padding import build_attention_mask_from_nested
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
@@ -753,12 +755,11 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
             if pad_mode == DatasetPadMode.NO_PADDING:
                 input_ids = micro_batch["input_ids"]
                 position_ids = micro_batch["position_ids"]
-                loss_mask = micro_batch["loss_mask"]
 
                 pad_token_id = tu.get_non_tensor_data(data=micro_batch, key="pad_token_id", default=0)
                 batch_size = micro_batch.batch_size[0]
                 seq_len_effective = input_ids.offsets().diff()
-                max_seq_len = max(seq_len_effective)
+                max_seq_len = int(seq_len_effective.max().item())
 
                 input_ids_rmpad_rolled = torch.roll(input_ids.values(), shifts=-1, dims=0)
                 output_args["input_ids_rmpad_rolled"] = input_ids_rmpad_rolled
@@ -777,10 +778,10 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
                         position_ids, padding=0, output_size=(batch_size, max_seq_len)
                     )
 
-                attention_mask_list = [torch.ones_like(t, dtype=torch.int32) for t in loss_mask]
-                attention_mask = torch.nested.as_nested_tensor(attention_mask_list, layout=torch.jagged)
-                attention_mask = torch.nested.to_padded_tensor(
-                    attention_mask, padding=0, output_size=(batch_size, max_seq_len)
+                # Loss masks can cover responses only; attention covers the entire
+                # prompt + response, including tool tokens with zero loss.
+                attention_mask = build_attention_mask_from_nested(
+                    input_ids=micro_batch["input_ids"], max_seq_len=max_seq_len
                 )
 
                 model_inputs = {
@@ -797,7 +798,7 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
             extra_args["temperature"] = temperature_item
             extra_args["return_dict"] = True
 
-        model_inputs.update(multi_modal_inputs)
+        model_inputs.update(tree_map_only(torch.Tensor, lambda value: value.to(input_ids.device), multi_modal_inputs))
         model_inputs.update(extra_args)
 
         return model_inputs, output_args
@@ -909,10 +910,12 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
         micro_batch = micro_batch.to(get_device_id())
         model_inputs, output_args = self.prepare_model_inputs(micro_batch=micro_batch)
 
-        raw_output = self.module(
-            **model_inputs,
-            use_cache=False,
-        )
+        if getattr(self.model_config.hf_config, "model_type", None) == "deepseek_v41":
+            # DeepSeek V4.1 uses contiguous positions and a padded forward without KV cache.
+            model_inputs["position_ids"] = None
+        else:
+            model_inputs["use_cache"] = False
+        raw_output = self.module(**model_inputs)
 
         model_output = self.prepare_model_outputs(output=raw_output, output_args=output_args, micro_batch=micro_batch)
 
