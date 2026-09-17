@@ -465,7 +465,15 @@ class RayWorkerGroup(WorkerGroup):
         self.worker_nsight_options = kwargs.get("worker_nsight_options", None)
         self.customized_worker_env = kwargs.get("worker_env", {})
         if self.worker_nsight_options is not None and self.worker_nsight_options["capture-range-end"] is None:
-            self.worker_nsight_options["capture-range-end"] = f"repeat-shutdown:{6 * len(self.profile_steps)}"
+            # Continuous profiling (discrete=False) opens a single cudaProfilerApi
+            # capture range per profiled step, while discrete profiling opens one
+            # per annotated role. Match repeat-shutdown to the number of ranges
+            # that are actually produced; otherwise nsys keeps waiting for ranges
+            # that never arrive and only finalizes the .nsys-rep at process exit.
+            ranges_per_step = 6 if kwargs.get("profiler_discrete", True) else 1
+            self.worker_nsight_options["capture-range-end"] = (
+                f"repeat-shutdown:{ranges_per_step * len(self.profile_steps)}"
+            )
 
         if worker_names is not None and (not self.fused_worker_used):
             assert self._is_init_with_detached_workers
