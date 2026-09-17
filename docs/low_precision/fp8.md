@@ -321,7 +321,10 @@ stale kernel scale layouts after a weight sync). verl now fails loudly in both c
   presumes both sides quantize the same layers, but training decides implicitly (TE linear modules
   inside `fp8_autocast`) and rollout decides by name blacklist (`ignored_layers`). At the first weight
   sync after a training step, verl reads which decoder layers actually ran fp8 GEMMs (TE's fp8 weight
-  workspaces) and compares them, per synced parameter name, with the rollout side. What "the rollout
+  workspaces) and compares them, per synced parameter name, with the rollout side. The audit wraps the
+  training engine's weight export (`get_per_tensor_param`), which every sync route shares - the
+  colocated worker, the checkpoint engine and the server-replica path - and produces its verdict when
+  the weight stream ends. What "the rollout
   side" is depends on the engine and every message says which: on vLLM the engine is asked directly
   (`collective_rpc` into the worker, which resolves each HF name onto its live parameter and reports
   its dtype); on SGLang there is no return channel, so the trainer compares against the weight-sync
