@@ -53,10 +53,24 @@ import torch
 import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
+# verl configures the "verl" logger only in the driver; worker processes (trainer actors, vLLM/SGLang
+# workers) fall back to the root WARNING level and would drop the INFO evidence lines below.
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 MXFP8_BLOCK_SIZE = 32
 _DEFAULT_TOL = 0.25
 _PROBE_ROWS = 8
+# First successful probe per (engine, kind) is logged at INFO so a run leaves the measured kernel error
+# in its log without a negative test; later probes go to DEBUG.
+_ANNOUNCED: set[tuple[str, str]] = set()
+
+
+def _announce(key: tuple[str, str], msg: str, *args) -> None:
+    if key in _ANNOUNCED:
+        logger.debug(msg, *args)
+    else:
+        _ANNOUNCED.add(key)
+        logger.info(msg, *args)
 
 
 def refit_check_enabled() -> bool:
@@ -148,7 +162,9 @@ def assert_mxfp8_linear_matches(
             "backend, and that this layer is meant to be quantized at all. Set VERL_MXFP8_REFIT_CHECK=0 to "
             "bypass (not recommended) or VERL_MXFP8_REFIT_CHECK_TOL to loosen the threshold."
         )
-    logger.debug("mxfp8 refit check on %s (%s): rel err %.4f <= %.2f", name, engine, rel, tol)
+    _announce(
+        (engine, "linear"), "mxfp8 refit self-check passed on %s (%s): rel err %.4f <= tol %.2f", name, engine, rel, tol
+    )
     return rel
 
 
@@ -240,5 +256,13 @@ def assert_mxfp8_moe_expert_matches(
             "know. Check the engine version and MoE backend against docs/low_precision/fp8.md. Set "
             "VERL_MXFP8_REFIT_CHECK=0 to bypass (not recommended) or VERL_MXFP8_REFIT_CHECK_MOE_TOL to loosen."
         )
-    logger.debug("mxfp8 MoE refit check on %s expert %d (%s): rel err %.4f <= %.2f", name, expert_id, engine, rel, tol)
+    _announce(
+        (engine, "moe"),
+        "mxfp8 MoE refit self-check passed on %s expert %d (%s): rel err %.4f <= tol %.2f",
+        name,
+        expert_id,
+        engine,
+        rel,
+        tol,
+    )
     return rel

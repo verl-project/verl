@@ -88,11 +88,15 @@ and send every ``update_weights_from_tensor`` request with
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Iterable
 
 import torch
 
 logger = logging.getLogger(__name__)
+# verl configures the "verl" logger only in the driver; worker processes (trainer actors, vLLM/SGLang
+# workers) fall back to the root WARNING level and would drop the INFO evidence lines below.
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 MXFP8_BLOCK_SIZE = 32
 
@@ -487,10 +491,6 @@ def check_sync_matches_engine(model: torch.nn.Module, named_tensors: list[tuple[
                 f"{name}: the sync ships {'fp8' if sync_fp8 else str(tensor.dtype)}, the engine parameter is "
                 f"{'fp8' if engine_fp8 else 'high precision'}"
             )
-    if unresolved:
-        logger.debug(
-            "sync-vs-engine dtype check: %d parameter names could not be mapped onto engine modules", unresolved
-        )
     if problems:
         raise RuntimeError(
             f"MXFP8 weight sync and the SGLang engine disagree on the precision of {len(problems)} parameter(s):\n  - "
@@ -500,6 +500,14 @@ def check_sync_matches_engine(model: torch.nn.Module, named_tensors: list[tuple[
             "by the name rule in verl/utils/fp8_utils.py. load_weights would cast the tensor into the mismatched "
             "buffer silently (an fp8 layer never receives its scale). Make the sync rule and ignored_layers agree "
             "for these names. VERL_MXFP8_REFIT_CHECK=0 bypasses this check (not recommended)."
+        )
+    if not model.__dict__.get(_SYNC_CACHE_ATTR + "_announced"):
+        model.__dict__[_SYNC_CACHE_ATTR + "_announced"] = True
+        logger.info(
+            "sync-vs-engine dtype check: %d parameters consistent with the engine's live dtypes (%d names not "
+            "mapped onto engine modules, not judged)",
+            checked,
+            unresolved,
         )
     return checked
 

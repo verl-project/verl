@@ -44,6 +44,9 @@ import os
 from typing import Any
 
 logger = logging.getLogger(__name__)
+# verl configures the "verl" logger only in the driver; worker processes (trainer actors, vLLM/SGLang
+# workers) fall back to the root WARNING level and would drop the INFO evidence lines below.
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 _KEY_DIFF_MEAN = "training/rollout_probs_diff_mean"
 _KEY_DIFF_VALID = "training/rollout_probs_diff_valid"
