@@ -13,6 +13,8 @@
 # limitations under the License.
 """CPU tests for the train/rollout quantized-layer audit (Megatron modules faked)."""
 
+import logging
+
 import pytest
 import torch
 
@@ -254,10 +256,11 @@ def test_auditor_warns_once_when_there_is_no_training_side_signal(caplog):
     weights = [(n, torch.zeros(1)) for n in _hf_names()]
     list(auditor.record(iter(weights)))
     assert auditor.run([_Chunk(quantized_layers=set())]) is None and not auditor.done
-    assert "no training-side signal" not in caplog.text
+    assert "produced no verdict" not in caplog.text
     list(auditor.record(iter(weights)))
     assert auditor.run([_Chunk(quantized_layers=set())]) is None and auditor.done
-    assert "no training-side signal" in caplog.text and "_fp8_workspaces" in caplog.text
+    assert "produced no verdict" in caplog.text and "_fp8_workspaces" in caplog.text
+    assert "0 of 4 decoder layers" in caplog.text
 
 
 def test_auditor_names_disable_parameter_transpose_cache_as_the_cause(caplog):
@@ -270,7 +273,7 @@ def test_auditor_names_disable_parameter_transpose_cache_as_the_cause(caplog):
     auditor = QuantLayerAuditor(_sglang_pred(), "warn")
     list(auditor.record((n, torch.zeros(1)) for n in _hf_names()))
     assert auditor.run([chunk]) is None and auditor.done
-    assert "disable_parameter_transpose_cache=True" in caplog.text
+    assert "disable_parameter_transpose_cache=True" in caplog.text and "produced no verdict" in caplog.text
 
 
 def test_messages_say_what_the_rollout_side_of_the_comparison_was(caplog):
@@ -290,23 +293,190 @@ def test_messages_say_what_the_rollout_side_of_the_comparison_was(caplog):
     assert "the engine could not be asked" in caplog.text
 
 
-def test_engine_truth_replaces_the_configured_rule(caplog):
+def test_engine_recheck_catches_what_the_configured_rule_missed(caplog):
     names = _hf_names()
     weights = [(n, torch.zeros(1)) for n in names]
-    # The configured rule (blacklist) says every decoder linear is fp8; the engine, asked directly, says
-    # it kept layer 3's MLP in bf16 (e.g. model code passed quant_config=None). Truth wins over the rule.
-    truth = {n: n.endswith("_proj.weight") and not n.startswith("model.layers.3.mlp.") for n in names}
+    # The configured rule (blacklist) says every decoder linear is fp8, and the training side agrees, so
+    # the rule-based verdict is clean. The engine, asked directly after the sync, says it kept layer 3's
+    # MLP in bf16 (e.g. model code passed quant_config=None): the recheck catches what the rule could not.
     aud = QuantLayerAuditor(vllm_rollout_predicate(N_LAYERS, ("lm_head", "model.embed_tokens")), "warn", engine="vllm")
     list(aud.record(iter(weights)))
-    chunk = _Chunk(quantized_layers=set(range(N_LAYERS)))
-    assert aud.wants_engine_truth(chunk)  # a training step happened: the caller should ask the engine now
-    problems = aud.run(chunk, engine_truth=truth)
+    assert aud.run(_Chunk(quantized_layers=set(range(N_LAYERS)))) == []  # rule-based verdict stands, clean
+    assert aud.wants_engine_recheck()
+    truth = {n: n.endswith("_proj.weight") and not n.startswith("model.layers.3.mlp.") for n in names}
+    problems = aud.recheck_against_engine(truth)
     assert sorted(problems) == sorted(
         f"model.layers.3.mlp.{leaf}.weight: training ran it in fp8, {ROLLOUT_LABELS['engine']} does not quantize it"
         for leaf in ("gate_proj", "up_proj", "down_proj")
     )
-    assert "real train/rollout precision mismatch" in caplog.text
-    # before any training step the caller must not bother the engine
+    assert "the configured rule looked consistent" in caplog.text
+    assert not aud.wants_engine_recheck()  # a recheck runs at most once
+    # before a verdict exists there is nothing to re-check against the engine
     fresh = QuantLayerAuditor(_sglang_pred(), "warn", engine="sglang")
     list(fresh.record(iter(weights)))
-    assert not fresh.wants_engine_truth(_Chunk(quantized_layers=set()))
+    assert not fresh.wants_engine_recheck()
+
+
+def test_from_worker_arms_on_the_real_config_objects(caplog):
+    """The arming path reads two nested config values; a CPU test on the real dataclasses is the only
+    thing that catches a wrong access path before a GPU hour is spent (it did not, on 2026-09-16)."""
+    import types
+
+    from omegaconf import OmegaConf
+
+    from verl.workers.config.engine import McoreEngineConfig
+
+    def _worker(quantization, override):
+        engine = types.SimpleNamespace(
+            engine_config=McoreEngineConfig(override_transformer_config=override),
+            model_config=types.SimpleNamespace(
+                hf_config=types.SimpleNamespace(num_hidden_layers=N_LAYERS, quantization_config=None)
+            ),
+        )
+        return types.SimpleNamespace(
+            config=OmegaConf.create({"rollout": {"quantization": quantization, "name": "vllm"}}),
+            actor=types.SimpleNamespace(engine=engine),
+        )
+
+    fp8 = {"fp8": "e4m3", "fp8_recipe": "mxfp8"}
+    armed = QuantLayerAuditor.from_worker(_worker("mxfp8", fp8))
+    assert armed.enabled and armed.engine == "vllm" and armed.rollout_quantizes is not None
+    assert armed.rollout_quantizes("model.layers.1.mlp.down_proj.weight") is True
+    assert armed.rollout_quantizes("model.layers.1.mlp.gate.weight") is False
+    # bf16 trainer + quantized rollout: not armed, and loud about it (this is the silent-guard case)
+    caplog.clear()
+    off = QuantLayerAuditor.from_worker(_worker("mxfp8", {}))
+    assert not off.enabled and "not armed" in caplog.text
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("runs unaudited" in r.getMessage() for r in warnings)
+    # bf16 rollout: not armed either, but this is an ordinary config, so it is noted at INFO, never warned
+    caplog.clear()
+    assert not QuantLayerAuditor.from_worker(_worker(None, fp8)).enabled
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+def test_record_runs_the_comparison_when_the_weight_stream_ends():
+    """The audit must not depend on any single sync route: wrapping the producer's stream is enough.
+
+    This is the regression test for the 2026-09-16 hardware finding - the hook used to sit in the
+    colocated worker's update_weights, which the v1 trainer with server-mode replicas does not drive,
+    so the audit never ran and said nothing.
+    """
+    aud = QuantLayerAuditor(_sglang_pred(), "warn", engine="sglang")
+    weights = [(n, torch.zeros(1)) for n in _hf_names()]
+    chunk = _Chunk(quantized_layers={1, 2})  # layers 0 and 3 stayed bf16 on the training side
+    stream = aud.record(iter(weights), modules=[chunk])
+    assert not aud.done  # nothing happens until the stream is consumed
+    out = list(stream)
+    assert out == weights and aud.done  # passed through untouched, and the verdict was reached
+    assert aud._verdict is not None and len(aud._verdict[1]) == len(weights)
+
+    # raise mode propagates out of the consumer, which is what stops a mismatched run
+    strict = QuantLayerAuditor(_sglang_pred(), "raise", engine="sglang")
+    with pytest.raises(RuntimeError, match="disagree"):
+        list(strict.record(iter(weights), modules=[chunk]))
+
+    # disabled auditor: pure pass-through, no comparison
+    off = QuantLayerAuditor(None, "warn")
+    assert list(off.record(iter(weights), modules=[chunk])) == weights and not off.done
+
+
+def test_engine_recheck_reports_only_when_the_engine_disagrees(caplog):
+    names = _hf_names()
+    weights = [(n, torch.zeros(1)) for n in names]
+    aud = QuantLayerAuditor(vllm_rollout_predicate(N_LAYERS, ("lm_head", "model.embed_tokens")), "warn", engine="vllm")
+    chunk = _Chunk(quantized_layers=set(range(N_LAYERS)))
+    list(aud.record(iter(weights), modules=[chunk]))  # rule-based verdict: consistent
+    assert aud.done and aud.wants_engine_recheck()
+    caplog.clear()
+    # the engine agrees with the rule. The "everything is fine" line is INFO, and the module logger sits
+    # at VERL_LOGGING_LEVEL (WARN by default) - the very filter that hid this guard on hardware - so the
+    # test has to raise the level explicitly to see it.
+    agree = {n: bool(aud.rollout_quantizes(n)) for n in names}
+    with caplog.at_level(logging.INFO, logger="verl.utils.quant_layer_audit"):
+        assert aud.recheck_against_engine(agree) == []
+    assert "agree with the training side" in caplog.text
+    assert not aud.wants_engine_recheck()  # once only
+
+    # a second auditor whose engine kept layer 2's MLP in bf16 although training ran it in fp8
+    aud2 = QuantLayerAuditor(vllm_rollout_predicate(N_LAYERS, ("lm_head", "model.embed_tokens")), "warn", engine="vllm")
+    list(aud2.record(iter(weights), modules=[chunk]))
+    caplog.clear()
+    truth = {n: bool(aud2.rollout_quantizes(n)) and not n.startswith("model.layers.2.mlp.") for n in names}
+    problems = aud2.recheck_against_engine(truth)
+    assert len(problems) == 3 and "even though the configured rule looked consistent" in caplog.text
+    assert aud2.recheck_against_engine(truth) is None  # not repeated
+
+
+def test_trace_makes_every_step_visible_in_one_run(monkeypatch, caplog):
+    """VERL_QUANT_LAYER_AUDIT_TRACE=1 must show install, wrap, stream end and verdict at WARNING.
+
+    Three hardware rounds were spent telling "never installed" from "installed but never reached" from
+    "reached but silent", each needing the source patched by hand on the pod. One env var now answers it.
+    """
+    from verl.utils.quant_layer_audit import trace
+
+    monkeypatch.setenv("VERL_QUANT_LAYER_AUDIT_TRACE", "0")
+    caplog.clear()
+    trace("should-not-appear")
+    assert caplog.text == ""
+
+    monkeypatch.setenv("VERL_QUANT_LAYER_AUDIT_TRACE", "1")
+    caplog.clear()
+    aud = QuantLayerAuditor(_sglang_pred(), "warn", engine="sglang")
+    list(aud.record(iter([(n, torch.zeros(1)) for n in _hf_names()]), modules=[_Chunk(quantized_layers={1, 2})]))
+    for where in ("trace: record", "record.stream_end", "trace: run"):
+        assert where in caplog.text, where
+    assert "names=" in caplog.text and "will_run=True" in caplog.text
+
+
+def test_record_can_tee_names_for_a_later_explicit_run():
+    """The worker consumes the stream (possibly off-process) and then calls run() itself.
+
+    record() must populate names during pass-through even without modules, so a later run() with the
+    modules produces the verdict. This is the deployment-robust path: it does not need the export
+    generator's tail to fire in-process. run() is idempotent, so a tail-triggered run does not double.
+    """
+    aud = QuantLayerAuditor(_sglang_pred(), "warn", engine="sglang")
+    weights = [(n, torch.zeros(1)) for n in _hf_names()]
+    # engine wraps without driving the tail's comparison (modules=None): only tees names
+    out = list(aud.record(iter(weights), modules=None))
+    assert out == weights and not aud.done and len(aud.names) == len(weights)
+    # worker runs later with the modules; verdict now produced
+    problems = aud.run([_Chunk(quantized_layers={1, 2})])
+    assert aud.done and len(problems) == 2 * 7
+    # a second run (e.g. a stray tail) is a no-op
+    assert aud.run([_Chunk(quantized_layers={1, 2})]) is None
+
+
+def test_init_sync_then_training_sync_produces_verdict_not_premature_done():
+    """Regression for the double-run premature-done bug (found by review, 2026-09-17).
+
+    The engine wraps every sync with record(modules=...) whose tail runs the comparison. The
+    pre-training-step ("init") sync has no fp8 workspace yet; that must NOT mark the audit done, or the
+    first real training-step sync (which does have workspaces) is skipped and no verdict is ever produced.
+    Give-up is judged per distinct sync, so even a spurious second run() on the same sync cannot trip it.
+    """
+    aud = QuantLayerAuditor(_sglang_pred(), "warn", engine="sglang")
+    weights = [(n, torch.zeros(1)) for n in _hf_names()]
+    empty = [_Chunk(quantized_layers=set())]  # init sync: no layer has run fp8 yet
+
+    list(aud.record(iter(weights), modules=empty))  # sync 0 (init): record tail runs the comparison
+    assert not aud.done and aud.syncs_seen == 1  # inactive but NOT given up after one sync
+    assert aud.run(empty) is None and not aud.done  # a spurious extra run() on the same sync: still waiting
+
+    trained = [_Chunk(quantized_layers={1, 2})]  # sync 1: training step produced fp8 workspaces
+    problems = list(aud.record(iter(weights), modules=trained))  # returns the passed-through weights
+    assert problems == weights and aud.done and aud._verdict is not None  # verdict produced, not skipped
+
+
+def test_two_inactive_syncs_do_give_up_and_warn(caplog):
+    """The give-up path still fires - but only after two *distinct* syncs with no fp8 trace."""
+    aud = QuantLayerAuditor(_sglang_pred(), "warn", engine="sglang")
+    weights = [(n, torch.zeros(1)) for n in _hf_names()]
+    empty = [_Chunk(quantized_layers=set())]
+    list(aud.record(iter(weights), modules=empty))  # sync 0: inactive, not done
+    assert not aud.done
+    caplog.clear()
+    list(aud.record(iter(weights), modules=empty))  # sync 1: still inactive -> give up
+    assert aud.done and "produced no verdict" in caplog.text

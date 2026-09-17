@@ -62,12 +62,38 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 
 import torch
 
-logger = logging.getLogger(__name__)
+
+def _configure_audit_logger() -> logging.Logger:
+    """Route the audit's own output to stderr, past whatever the root logger was set to.
+
+    The audit's evidence lines are INFO/WARNING. Inside the trainer worker process a vLLM transitive
+    dependency (``model_hosting_container_standards.logging_config.configure_root_logger``, pulled in
+    for SageMaker) raises the root logger and every root handler to ERROR at import time; anything that
+    reaches this logger and then propagates to the root handlers is silently dropped - which is why the
+    audit was invisible on the first B200 runs even though it was executing. A dedicated stderr handler
+    on this logger with ``propagate=False`` carries the audit's INFO/WARNING lines out on their own,
+    independent of the root configuration.
+    """
+    log = logging.getLogger(__name__)
+    log.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO").upper())
+    log.propagate = False
+    handler_name = "verl.quant_audit.stderr"
+    if not any(getattr(h, "name", None) == handler_name for h in log.handlers):
+        handler = logging.StreamHandler(sys.stderr)
+        handler.set_name(handler_name)
+        handler.setLevel(logging.NOTSET)  # let the logger's own level decide
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [quant-audit pid=%(process)d] %(message)s"))
+        log.addHandler(handler)
+    return log
+
+
+logger = _configure_audit_logger()
 
 _LAYER_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.")
 # Routers (and mcore's shared-expert gate) are plain torch linears on the training side, never TE,
@@ -79,6 +105,21 @@ _NON_LINEAR_RE = re.compile(r"(norm|embed|rotary|bias$)", re.IGNORECASE)
 
 def audit_mode() -> str:
     return os.environ.get("VERL_QUANT_LAYER_AUDIT", "warn").strip().lower()
+
+
+def trace(where: str, **state) -> None:
+    """Log one checkpoint of the audit's own execution, at WARNING, when tracing is on.
+
+    A guard that produces nothing is impossible to diagnose from the outside: on the first B200 runs
+    the audit was silent and telling "never installed" from "installed but never reached" from "reached
+    but found nothing" needed three separate instrumented runs, each patched by hand on the pod.
+    ``VERL_QUANT_LAYER_AUDIT_TRACE=1`` makes every one of those states visible in a single run, at a
+    level no logging configuration drops, without touching the source on the machine.
+    """
+    if os.environ.get("VERL_QUANT_LAYER_AUDIT_TRACE", "0") != "1":
+        return
+    detail = " ".join(f"{k}={v}" for k, v in state.items())
+    logger.warning("quantized-layer audit trace: %s%s", where, f" | {detail}" if detail else "")
 
 
 @dataclass
@@ -232,10 +273,11 @@ def vllm_rollout_predicate(num_hidden_layers: int, keep_high_precision: Iterable
 class QuantLayerAuditor:
     """Records one weight sync's HF names, then compares against the training-side fp8 trace.
 
-    The rollout side of the comparison is, in order of preference: what the engine reports about its
-    own parameters (``run(..., engine_truth=...)``, available on vLLM where ``collective_rpc`` returns
-    values), else the configured rule (``rollout_quantizes``): on SGLang the weight-sync rule, on vLLM
-    the engine blacklist restated on names. Which one was used is stated in every message.
+    ``run`` compares the training trace against the configured rule (``rollout_quantizes``): on SGLang
+    the weight-sync rule, on vLLM the engine blacklist restated on names. On vLLM the verdict is then
+    re-checked against what the engine reports about its own parameters (``recheck_against_engine``,
+    available where ``collective_rpc`` returns values). Which side was compared is stated in every
+    message.
     """
 
     def __init__(self, rollout_quantizes: Callable[[str], bool] | None, mode: str, engine: str = ""):
@@ -245,12 +287,15 @@ class QuantLayerAuditor:
         self.enabled = rollout_quantizes is not None and mode not in ("0", "off", "false")
         self.done = False
         self.names: list[str] = []
-        self.inactive_runs = 0  # syncs that found no fp8 trace; the first one (before any step) is expected
-        self._pending_report: TrainFp8Report | None = None
+        self.syncs_seen = 0  # distinct weight syncs the auditor wrapped; the give-up threshold counts these
+        self._explained = False  # one-shot "why this guard produced nothing" warning
+        self._verdict: tuple[TrainFp8Report, list[str]] | None = None  # kept for the optional engine re-check
+        self._rechecked = False
 
     @classmethod
     def from_worker(cls, worker) -> QuantLayerAuditor:
         mode = audit_mode()
+        trace("from_worker", worker=type(worker).__name__)
         try:
             rollout_cfg = worker.config.rollout
             quantization = rollout_cfg.get("quantization", None)
@@ -259,7 +304,16 @@ class QuantLayerAuditor:
                 getattr(getattr(engine, "engine_config", None), "override_transformer_config", {}).get("fp8", None)
             )
             if quantization is None or not train_fp8:
-                # bf16 rollout, or quantized rollout on a bf16 trainer: no "matched" claim to audit
+                # bf16 rollout, or quantized rollout on a bf16 trainer: no "matched" claim to audit.
+                # A quantized rollout that ends up unaudited is worth a warning - it is the case where
+                # the audit was expected to run and silently did not (the first B200 run hit exactly this).
+                (logger.warning if quantization is not None else logger.info)(
+                    "quantized-layer audit: not armed, nothing to compare (rollout quantization=%r, training "
+                    "fp8=%r read from %s.engine_config.override_transformer_config); the rollout runs unaudited",
+                    quantization,
+                    train_fp8,
+                    type(engine).__name__,
+                )
                 return cls(None, mode)
             hf_config = engine.model_config.hf_config
             engine_name = rollout_cfg.get("name", "")
@@ -280,41 +334,114 @@ class QuantLayerAuditor:
 
                 keep = MXFP8_KEEP_HIGH_PRECISION_LAYERS if quantization == "mxfp8" else ()
                 pred = vllm_rollout_predicate(hf_config.num_hidden_layers, keep)
+            logger.info(
+                "quantized-layer audit: armed (engine=%s, rollout quantization=%s, mode=%s); runs at the first "
+                "weight sync after an fp8 forward",
+                engine_name,
+                quantization,
+                mode,
+            )
             return cls(pred, mode, engine=engine_name)
         except Exception as err:  # noqa: BLE001 - the audit must never break weight sync
             logger.warning("quantized-layer audit disabled: %s", err)
             return cls(None, mode)
 
-    def record(self, weights: Iterable[tuple[str, torch.Tensor]]) -> Iterator[tuple[str, torch.Tensor]]:
-        """Pass the sync generator through, remembering the HF names it yields."""
+    def record(self, weights: Iterable[tuple[str, torch.Tensor]], modules=None) -> Iterator[tuple[str, torch.Tensor]]:
+        """Pass the sync stream through, remembering the HF names it yields.
+
+        ``modules`` makes the auditor self-contained: the comparison runs as soon as the stream is
+        exhausted, so wrapping the stream where the trainer *produces* it is enough. That matters
+        because the weights reach the engine by more than one route (colocated worker, checkpoint
+        engine, server replicas) and only the producer is common to all of them.
+        """
+        trace("record", enabled=self.enabled, done=self.done, with_modules=modules is not None)
         if not self.enabled or self.done:
             yield from weights
             return
         self.names = []
+        self.syncs_seen += 1  # one wrapped weight stream == one sync; give-up is judged per sync, not per run() call
         for name, tensor in weights:
             self.names.append(name)
             yield name, tensor
+        trace("record.stream_end", names=len(self.names), will_run=modules is not None)
+        # The train-vs-rule comparison runs here, at the tail of the stream the trainer produces, because
+        # that producer is the one point common to every sync route (colocated worker, checkpoint engine,
+        # server replicas). It fires only once ``done`` is set, so re-consuming the stream is a no-op; the
+        # engine re-check (vLLM) happens separately in the worker once the sync itself has completed.
+        if modules is not None:
+            self.run(modules)
 
-    def wants_engine_truth(self, modules) -> bool:
-        """True when the next ``run`` will compare, so the caller may fetch the engine's own answer first."""
-        if not self.enabled or self.done or not self.names:
-            return False
-        self._pending_report = collect_train_fp8_report(modules)
-        return self._pending_report.active
+    def wants_engine_recheck(self) -> bool:
+        """True when a rule-based verdict stands and is worth re-checking against the live engine."""
+        return self.enabled and self.done and bool(self.names) and self._verdict is not None and not self._rechecked
 
-    def run(self, modules, engine_truth: dict[str, bool] | None = None) -> list[str] | None:
-        """After a sync: compare. Returns the mismatch list, or None if not run (disabled / no fp8 trace yet).
+    def recheck_against_engine(self, engine_truth: dict[str, bool] | None) -> list[str] | None:
+        """Repeat the comparison against what the engine reports about its own parameters.
 
-        ``engine_truth`` maps HF parameter names to "the engine holds this parameter quantized", as read
-        back from the rollout engine; when given it replaces the configured rule.
+        The rule-based verdict is what the audit can always produce; this says whether the engine
+        actually agrees with the rule. Only a disagreement is reported - the rule verdict already
+        covered the train-vs-rule half.
         """
-        if not self.enabled or self.done or not self.names:
+        if not engine_truth or self._verdict is None or self._rechecked:
             return None
-        report = self._pending_report if self._pending_report is not None else collect_train_fp8_report(modules)
-        self._pending_report = None
+        self._rechecked = True
+        report, names = self._verdict
+        problems = audit_layer_sets(report, names, lambda n: bool(engine_truth.get(n, False)), ROLLOUT_LABELS["engine"])
+        if not problems:
+            logger.info(
+                "quantized-layer audit: the rollout engine's live parameters agree with the training side "
+                "(%d parameters re-checked against the engine itself)",
+                len(names),
+            )
+            return []
+        msg = (
+            f"quantized-layer audit: training and {ROLLOUT_LABELS['engine']} disagree on {len(problems)} "
+            f"parameter(s), even though the configured rule looked consistent:\n  - "
+            + "\n  - ".join(problems[:40])
+            + ("\n  - ..." if len(problems) > 40 else "")
+            + "\nThe engine built different layers as fp8 than the trainer quantized. Fix with "
+            "quantization_config.ignored_layers (rollout) or first_last_layers_bf16 / model wiring (training)."
+        )
+        if self.mode == "raise":
+            raise RuntimeError(msg)
+        logger.warning(msg)
+        return problems
+
+    def _explain_silence(self, reason: str) -> None:
+        """Warn once that the audit produced no verdict. A guard that silently does nothing is the
+        failure this module exists to prevent, so the reason is reported at WARNING, not INFO."""
+        if self._explained:
+            return
+        self._explained = True
+        logger.warning(
+            "quantized-layer audit produced no verdict (%s). enabled=%s engine=%s names=%d. The train/rollout "
+            "layer sets are unverified for this run; VERL_QUANT_LAYER_AUDIT=0 silences the audit entirely.",
+            reason,
+            self.enabled,
+            self.engine or "?",
+            len(self.names),
+        )
+
+    def run(self, modules) -> list[str] | None:
+        """After a sync: compare the training trace against the configured rollout rule.
+
+        Returns the mismatch list, or None if not run (disabled / no fp8 trace yet). The optional
+        second half - comparing against what the engine reports about its own parameters - lives in
+        ``recheck_against_engine``, run by the worker after the sync completes (vLLM only).
+        """
+        trace("run", enabled=self.enabled, done=self.done, names=len(self.names))
+        if self.done:
+            return None
+        if not self.enabled:
+            return None  # from_worker already said why, at WARNING when the rollout is quantized
+        if not self.names:
+            self._explain_silence("the weight sync streamed no parameter names through the auditor")
+            return None
+        report = collect_train_fp8_report(modules)
         if not report.active:
-            self.inactive_runs += 1
-            if report.transpose_cache_disabled or self.inactive_runs >= 2:
+            # Give up only after at least two distinct syncs left no fp8 trace - counted by syncs (record()),
+            # not by run() calls, so a second run() on the same sync cannot trip this prematurely.
+            if report.transpose_cache_disabled or self.syncs_seen >= 2:
                 # Not "too early" any more: the trainer has run at least one step and still left no trace.
                 self.done = True
                 cause = (
@@ -325,24 +452,22 @@ class QuantLayerAuditor:
                     "override_transformer_config.fp8 is set on the model that ran, and that nothing other "
                     "than offload_megatron_model_to_cpu clears module._fp8_workspaces"
                 )
-                logger.warning(
-                    "quantized-layer audit: no training-side signal on this rank (0 of %d decoder layers left an "
-                    "fp8 trace), the audit cannot run. Cause: %s. The train/rollout layer sets are therefore "
-                    "unverified.",
-                    len(report.seen_layers),
-                    cause,
+                self._explain_silence(
+                    f"no training-side fp8 trace on this rank: 0 of {len(report.seen_layers)} decoder layers "
+                    f"left an fp8 weight workspace. Cause: {cause}"
                 )
                 return None
-            logger.debug("quantized-layer audit: no fp8 workspaces yet (sync before the first training step)")
+            logger.info(
+                "quantized-layer audit: no fp8 trace yet on this rank (%d decoder layers seen, %d names recorded); "
+                "expected before the first training step, will retry at the next sync",
+                len(report.seen_layers),
+                len(self.names),
+            )
             return None
-        if engine_truth is not None:
-            label = ROLLOUT_LABELS["engine"]
-            pred = lambda n: bool(engine_truth.get(n, False))  # noqa: E731
-        else:
-            label = ROLLOUT_LABELS.get(self.engine, "the rollout-side rule")
-            pred = self.rollout_quantizes
-        problems = audit_layer_sets(report, self.names, pred, rollout_label=label)
+        label = ROLLOUT_LABELS.get(self.engine, "the rollout-side rule")
+        problems = audit_layer_sets(report, self.names, self.rollout_quantizes, rollout_label=label)
         self.done = True
+        self._verdict = (report, list(self.names))
         n_q = len(report.quantized_layers)
         n_seen = len(report.seen_layers)
         if not problems:
@@ -355,13 +480,7 @@ class QuantLayerAuditor:
                 len(self.names),
             )
             return []
-        if engine_truth is not None:
-            meaning = (
-                "This compared the layers that ran fp8 GEMMs on the training side (TE fp8 weight workspaces) "
-                "against the parameters the rollout engine itself reports as quantized: a disagreement is a "
-                "real train/rollout precision mismatch on that layer."
-            )
-        elif self.engine == "sglang":
+        if self.engine == "sglang":
             meaning = (
                 "This compared the layers that ran fp8 GEMMs on the training side (TE fp8 weight workspaces) "
                 "against the weight-sync rule, NOT against the engine's live parameters. A name the rule does "
