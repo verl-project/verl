@@ -38,6 +38,7 @@ from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.metrics.loggers import PrometheusStatLogger
 
 from verl.plugin.platform import get_platform
 from verl.utils.config import omega_conf_to_dataclass
@@ -72,6 +73,17 @@ from verl.workers.rollout.vllm_rollout.utils import (
 )
 
 _VLLM_VERSION = version.parse(vllm.__version__)
+_VLLM_HYBRID_ROUTING_REPLAY_MIN_VERSION = version.parse("0.22.0")
+
+
+def _hybrid_routing_replay_requires_vllm_022(hf_config: Any, vllm_version: version.Version) -> bool:
+    if vllm_version >= _VLLM_HYBRID_ROUTING_REPLAY_MIN_VERSION:
+        return False
+
+    from vllm.transformers_utils.config import is_interleaved
+
+    return is_interleaved(hf_config)
+
 
 # Max wait for admissions already past the submission gate to reach the engine.
 _GATE_BARRIER_TIMEOUT_S = 60.0
@@ -82,6 +94,36 @@ if os.getenv("VERL_USE_GPT_OSS", "0") == "1":
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
+
+# TODO: remove this VLLM_PORT partition after vLLM RFC
+# https://github.com/vllm-project/vllm/issues/51275 lands in the pinned vLLM
+# (at least #51018 world-group bind-at-time; also #50969 if Ray V2 executor).
+# This is only Category II scan-start mitigation for get_open_port() TOCTOU.
+# Do not add a range-end fallback. Do not delete until the runtime image
+# actually contains those commits and colocated replica cold-start is
+# re-verified without VLLM_PORT.
+_VLLM_PORT_BASE = 25000
+_VLLM_PORT_STRIDE = 32
+_MAX_TCP_PORT = 65535
+
+
+def _get_vllm_port_start(replica_rank: int, node_rank: int, nnodes: int) -> int:
+    """Return a disjoint vLLM internal port-scan start for one server actor.
+
+    TODO: drop this helper with the VLLM_PORT injection below after vLLM #51275.
+    """
+    if replica_rank < 0 or nnodes < 1 or not 0 <= node_rank < nnodes:
+        raise ValueError(
+            f"Invalid vLLM server rank: replica_rank={replica_rank}, node_rank={node_rank}, nnodes={nnodes}"
+        )
+
+    port = _VLLM_PORT_BASE + (replica_rank * nnodes + node_rank) * _VLLM_PORT_STRIDE
+    if port + _VLLM_PORT_STRIDE - 1 > _MAX_TCP_PORT:
+        raise ValueError(
+            f"vLLM port partition exceeds TCP range: "
+            f"replica_rank={replica_rank}, node_rank={node_rank}, nnodes={nnodes}, port={port}"
+        )
+    return port
 
 
 class vLLMHttpServer:
@@ -433,18 +475,14 @@ class vLLMHttpServer:
             args.update(lora_args)
 
         if self.config.enable_rollout_routing_replay:
-            # R3 (Rollout Router Replay) relies on vLLM's ``enable_return_routed_experts``
-            # path (RoutedExpertsManager / RoutedExpertsCapturer), which is only correct
-            # for hybrid-attention MoE models (e.g. Qwen3.5, whose linear + full attention
-            # layout produces >1 KV-cache group) starting from vLLM 0.22.0. Earlier
-            # releases either lack the feature or under-size the routed-experts host
-            # buffer and crash with an IndexError. Fail fast with an actionable message
-            # instead of surfacing an opaque runtime error deep inside vLLM.
-            if _VLLM_VERSION < version.parse("0.22.0"):
+            # vLLM already supports routed-experts capture for standard-attention MoE
+            # models before 0.22.0. Hybrid-attention models create multiple KV-cache
+            # groups, whose routed-experts host buffer is under-sized on older versions.
+            if _hybrid_routing_replay_requires_vllm_022(self.model_config.hf_config, _VLLM_VERSION):
                 raise RuntimeError(
-                    "rollout.enable_rollout_routing_replay=True requires vLLM >= 0.22.0 "
-                    f"(installed: {vllm.__version__}). Upgrade vLLM (e.g. `pip install -U "
-                    "'vllm>=0.22.0'`) or disable enable_rollout_routing_replay."
+                    "rollout.enable_rollout_routing_replay=True with a hybrid-attention model "
+                    f"requires vLLM >= 0.22.0 (installed: {vllm.__version__}). Upgrade vLLM "
+                    "(e.g. `pip install -U 'vllm>=0.22.0'`) or disable enable_rollout_routing_replay."
                 )
             args.update({"enable_return_routed_experts": True})
 
@@ -564,11 +602,13 @@ class vLLMHttpServer:
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         priority: int = 0,
         kv_transfer_params: Optional[dict] = None,
+        cache_salt: Optional[str] = None,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out.
 
         Args:
             kv_transfer_params: vLLM KV-transfer payload for PD requests.
+            cache_salt: Optional namespace for prefix-cache entries in local and shared KV cache pools.
         """
         if self._disaggregation_role == "prefill" and self._pd_decode_peers and kv_transfer_params is None:
             return await self._pd_dispatch(
@@ -580,6 +620,7 @@ class vLLMHttpServer:
                 audio_data=audio_data,
                 mm_processor_kwargs=mm_processor_kwargs,
                 priority=priority,
+                cache_salt=cache_salt,
             )
 
         prompt_ids = normalize_token_ids(prompt_ids)
@@ -642,6 +683,8 @@ class vLLMHttpServer:
         prompt_kwargs = {"prompt_token_ids": prompt_ids, "multi_modal_data": multi_modal_data}
         if mm_processor_kwargs:
             prompt_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
+        if cache_salt is not None:
+            prompt_kwargs["cache_salt"] = cache_salt
         try:
             prompt = TokensPrompt(**prompt_kwargs)
         except TypeError:
@@ -774,6 +817,7 @@ class vLLMHttpServer:
         audio_data: Optional[list[Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         priority: int = 0,
+        cache_salt: Optional[str] = None,
     ) -> TokenOutput:
         """Run prefill locally, then decode on a selected peer."""
         decode_peer = self._select_decode_peer()
@@ -802,6 +846,7 @@ class vLLMHttpServer:
             mm_processor_kwargs=mm_processor_kwargs,
             priority=priority,
             kv_transfer_params=prefill_kv_params,
+            cache_salt=cache_salt,
         )
         if is_mooncake:
             # Mooncake does not return decode params from the prefill leg.
@@ -828,6 +873,7 @@ class vLLMHttpServer:
             mm_processor_kwargs=mm_processor_kwargs,
             priority=priority,
             kv_transfer_params=decode_kv_params,
+            cache_salt=cache_salt,
         )
 
     async def wake_up(self, tags: list[str] | None = None):
@@ -862,13 +908,16 @@ class vLLMHttpServer:
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
-    async def clear_kv_cache(self):
+    async def clear_kv_cache(self, reset_connector: bool = True) -> None:
+        """Clear local caches and optionally reset the attached KV connector.
+
+        Args:
+            reset_connector: Whether to reset the attached connector's cache.
+                Set to False to retain entries in a shared KV cache pool.
+        """
         if self.node_rank == 0:
-            # reset_connector=True drops any attached external KV store
-            # (e.g. MooncakeStoreConnector) whose entries were computed
-            # against the previous model weights. With no connector it
-            # is a no-op success, so we can pass it unconditionally.
-            await self.engine.reset_prefix_cache(reset_connector=True)
+            if not await self.engine.reset_prefix_cache(reset_connector=reset_connector):
+                raise RuntimeError("vLLM prefix-cache reset failed")
 
             await self.engine.reset_mm_cache()
             await self.engine.reset_encoder_cache()
@@ -891,6 +940,65 @@ class vLLMHttpServer:
             return
         await self.engine.wake_up(tags=["kv_cache"])
         await self.engine.reset_prefix_cache(reset_connector=True)
+
+    async def snapshot(self) -> dict[str, Any]:
+        """Return live KV-cache and scheduler queue observations.
+
+        Values come from vLLM's PrometheusStatLogger gauges so callers can
+        route or admit traffic without scraping the HTTP metrics endpoint.
+        """
+        prometheus_logger = self._prometheus_logger
+        kv_cache_usage = self._prometheus_values(
+            prometheus_logger.gauge_kv_cache_usage,
+            "vllm:kv_cache_usage_perc",
+        )
+        if not kv_cache_usage:
+            raise RuntimeError("vLLM KV-cache gauges are unavailable")
+        return {
+            "kv_cache_usage": max(kv_cache_usage),
+            "num_waiting_requests": int(
+                sum(
+                    self._prometheus_values(
+                        prometheus_logger.gauge_scheduler_waiting,
+                        "vllm:num_requests_waiting",
+                    )
+                )
+            ),
+            "num_running_requests": int(
+                sum(
+                    self._prometheus_values(
+                        prometheus_logger.gauge_scheduler_running,
+                        "vllm:num_requests_running",
+                    )
+                )
+            ),
+        }
+
+    @staticmethod
+    def _prometheus_values(metrics_by_engine: dict[int, Any], sample_name: str) -> list[float]:
+        return [
+            float(sample.value)
+            for metric in metrics_by_engine.values()
+            for family in metric.collect()
+            for sample in family.samples
+            if sample.name == sample_name
+        ]
+
+    @property
+    def _prometheus_logger(self) -> PrometheusStatLogger:
+        # vLLM has moved PrometheusStatLogger between logger_manager attributes.
+        logger_manager = self.engine.logger_manager
+        assert logger_manager is not None
+
+        prometheus_logger = getattr(logger_manager, "prometheus_logger", None)
+        if isinstance(prometheus_logger, PrometheusStatLogger):
+            return prometheus_logger
+
+        for stat_logger in getattr(logger_manager, "stat_loggers", []):
+            if isinstance(stat_logger, PrometheusStatLogger):
+                return stat_logger
+
+        raise RuntimeError("Unable to locate vLLM PrometheusStatLogger on logger_manager.")
 
     def _should_profile(self) -> bool:
         """Whether this replica drives the engine profiler."""
@@ -929,15 +1037,15 @@ class vLLMHttpServer:
     async def wait_for_requests_to_drain(self):
         await self.engine.wait_for_requests_to_drain()
 
-    async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
+    async def abort_all_requests(
+        self, reset_prefix_cache: bool = True, *, pause_generation: bool = True
+    ) -> dict[str, Any]:
         """Abort all ongoing generation requests.
 
-        On vLLM >= 0.12.0, uses AsyncLLM.pause_generation() to abort in-flight
-        requests, drain, and clear caches. The engine remains paused after this
-        call — use resume_generation() to accept new requests (e.g. before
-        validation).
-
-        On vLLM < 0.12.0, manually aborts each request and resets prefix cache.
+        By default, pauses generation, aborts in-flight requests, drains, and
+        clears caches. Use resume_generation() to accept new requests again.
+        With pause_generation=False, aborts the current requests while leaving
+        generation open; reset_prefix_cache=False also preserves their caches.
 
         Returns:
             dict[str, Any]: Dictionary containing:
@@ -949,6 +1057,13 @@ class vLLMHttpServer:
         # engine object to abort through on those actors.
         if self.node_rank != 0:
             return {"aborted_count": 0, "request_ids": []}
+
+        if not pause_generation:
+            request_ids = list(self.engine.output_processor.request_states)
+            await self.engine.abort(request_ids, internal=True)
+            if reset_prefix_cache:
+                await self.clear_kv_cache()
+            return {"aborted_count": len(request_ids), "request_ids": request_ids}
 
         try:
             # Close the gate first, then let admissions already past it land, so the pause
@@ -1332,6 +1447,15 @@ class vLLMReplica(RolloutReplica):
                 **{var: "1" for var in get_platform().ray_noset_envvars()},
                 **get_platform().rollout_env_vars(),
             }
+            # TODO: drop VLLM_PORT injection after vLLM #51275; see `_get_vllm_port_start`.
+            vllm_port_start = _get_vllm_port_start(self.replica_rank, node_rank, nnodes)
+            env_vars["VLLM_PORT"] = str(vllm_port_start)
+            logger.info(
+                "Using vLLM internal port-scan start %s for replica_rank=%s node_rank=%s",
+                vllm_port_start,
+                self.replica_rank,
+                node_rank,
+            )
 
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(

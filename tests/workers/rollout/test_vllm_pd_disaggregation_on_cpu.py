@@ -523,12 +523,14 @@ async def test_pd_dispatch_routes_prefill_leg_then_decode_peer():
         prompt_ids=[1, 2, 3],
         sampling_params={"max_tokens": 64, "temperature": 0.0},
         request_id="req-foo",
+        cache_salt="cache-namespace",
     )
 
     # Prefill leg was called once with max_tokens=1 + do_remote_decode params.
     assert len(captured_prefill_calls) == 1
     pcall = captured_prefill_calls[0]
     assert pcall["request_id"] == "req-foo_P"
+    assert pcall["cache_salt"] == "cache-namespace"
     assert pcall["sampling_params"]["max_tokens"] == 1
     # `transfer_id` is added unconditionally (Mooncake requires it; NIXL
     # ignores it). Check the other two flags but allow the extra field.
@@ -545,6 +547,7 @@ async def test_pd_dispatch_routes_prefill_leg_then_decode_peer():
     assert dkw.args[2] == "req-foo_D"
     assert dkw.kwargs["kv_transfer_params"] == server_decode_kv
     assert dkw.kwargs["priority"] == 0
+    assert dkw.kwargs["cache_salt"] == "cache-namespace"
 
     assert result.token_ids == expected_decode_token_ids
 
