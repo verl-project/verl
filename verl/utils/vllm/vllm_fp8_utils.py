@@ -177,6 +177,8 @@ def dsv4_fp8_linear_leaf(name: str) -> str | None:
         return None
     leaf = parts[-1]
     parent = parts[-2]
+    if parent == "engram" and leaf == "wkv":
+        return leaf
     # ``indexer.wq_b`` -> parent ``indexer``; ``attn.wq_a`` -> parent ``attn``;
     # ``shared_experts.w1`` -> parent ``shared_experts``.
     if leaf in _DSV4_FP8_LINEAR_LEAVES and parent in _DSV4_FP8_LINEAR_PARENTS:
@@ -203,6 +205,57 @@ def quantize_dsv4_fp8_linear(weight, leaf: str, block_size=_FP8_BLOCK_SIZE):
         weight, src_scale, name=f"dsv4_fp8_{leaf}", block_size=block_size
     )
     return fp8_weight, scale
+
+
+def iter_dsv41_engram_rows(name, table, device, chunk_bytes=64 << 20):
+    """Stream logical Engram rows without gathering the full owner-sharded table."""
+    from torch.distributed.tensor import DTensor, Shard
+
+    if not isinstance(table, DTensor) or table.device_mesh.ndim != 1 or table.placements != (Shard(0),):
+        raise ValueError("Engram refit requires a one-dimensional row-owner DTensor")
+    mesh = table.device_mesh
+    group = mesh.get_group()
+    local = table.to_local()
+    owner_rows = math.ceil(table.shape[0] / mesh.size())
+    chunk_rows = max(1, chunk_bytes // (table.shape[1] * table.element_size()))
+    for owner in range(mesh.size()):
+        begin = owner * owner_rows
+        end = min(begin + owner_rows, table.shape[0])
+        for start in range(begin, end, chunk_rows):
+            rows = min(chunk_rows, end - start)
+            if mesh.get_local_rank() == owner:
+                chunk = local[start - begin : start - begin + rows].to(device=device).contiguous()
+            else:
+                chunk = torch.empty((rows, table.shape[1]), device=device, dtype=table.dtype)
+            # All actor ranks feed the transport, including ranks that only drain it.
+            torch.distributed.broadcast(chunk, src=torch.distributed.get_global_rank(group, owner), group=group)
+            yield f"{name}.__rows_{start}", chunk
+
+
+def load_dsv41_engram_rows(weights, model):
+    """Refit each vLLM Engram head shard in place from bounded BF16 row chunks."""
+    remaining, loaded = [], set()
+    for name, weight in weights:
+        if ".engram.embed.weight.__rows_" not in name:
+            remaining.append((name, weight))
+            continue
+        base, row_start = name.rsplit(".__rows_", 1)
+        row_start = int(row_start)
+        mapped = model.hf_to_vllm_mapper.apply_list([base])[0]
+        module = model.get_submodule(mapped.removesuffix(".weight"))
+        start = module.weight.engram_vocab_start
+        end = start + module.weight.shape[0]
+        left, right = max(start, row_start), min(end, row_start + weight.shape[0])
+        if left < right:
+            value = weight[left - row_start : right - row_start]
+            scales = torch.empty(
+                (value.shape[0], value.shape[1] // 32), device=value.device, dtype=torch.float8_e8m0fnu
+            )
+            fp8, scales = _quantize_fp8_per_row_tiles(value, scales)
+            module.weight.data[left - start : right - start].copy_(fp8)
+            module.weight_scale_inv.data[left - start : right - start].copy_(scales.view(torch.uint8))
+        loaded.update((mapped, mapped.removesuffix(".weight") + ".weight_scale_inv"))
+    return remaining, loaded
 
 
 # ---------------------------------------------------------------------------

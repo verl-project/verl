@@ -555,6 +555,14 @@ class AutomodelEngine(BaseEngine):
                 return key
 
             for name, param in params.items():
+                if self.module.config.model_type == "deepseek_v41" and name.endswith(".engram.embed.weight"):
+                    from verl.utils.vllm.vllm_fp8_utils import iter_dsv41_engram_rows
+
+                    device = torch.device(get_device_name(), get_device_id())
+                    for hf_key, owner_table in _sd_adapter.convert_single_tensor_to_hf(name, param):
+                        yield from iter_dsv41_engram_rows(hf_key, owner_table, device)
+                    continue
+                # Gather one offloaded parameter on GPU.
                 unsharded_tensor = param.full_tensor() if isinstance(param, DTensor) else param
                 # Phase 2: split MoE adapter params into per-expert lora_A/lora_B.
                 moe_lora_spec = moe_lora_prefixes.get(name)
@@ -572,13 +580,17 @@ class AutomodelEngine(BaseEngine):
                     if not is_packed_expert:
                         ckpt_name = _add_base_layer(name)
                         for hf_key, hf_tensor in _sd_adapter.convert_single_tensor_to_hf(ckpt_name, unsharded_tensor):
+                            hf_tensor = hf_tensor.contiguous()
                             yield hf_key, hf_tensor
                     else:
                         for hf_key, hf_tensor in _sd_adapter.convert_single_tensor_to_hf(name, unsharded_tensor):
                             if lora_base_sync:
                                 head, _, leaf = hf_key.rpartition(".")
                                 hf_key = f"{head}.base_layer.{leaf}"
+                            hf_tensor = hf_tensor.contiguous()
                             yield hf_key, hf_tensor
+                    # Release the full expert layer before gathering the next parameter.
+                    del unsharded_tensor
                     continue
                 # Phase 1: split packed MoE base tensors into per-expert keys.
                 spec = packed_expert_prefixes.get(name)
