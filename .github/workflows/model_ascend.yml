@@ -47,8 +47,7 @@ on:
       - "verl/**/*.py"
       # Entrypoints
       - ".github/workflows/model_ascend.yml"
-      - "tests/special_distributed/test_fsdp_ckpt.py"
-      - "tests/special_distributed/test_tensor_dict.py"
+      - "tests/special_distributed/*.py"
       - "tests/models/**"
       - "tests/special_distributed/run_all.sh"
 
@@ -120,6 +119,7 @@ jobs:
       options: >-
         --shm-size 16g
     env:
+      VERL_USE_EXTERNAL_MODULES: "megatron_adaptor" # Patch Megatron in the driver as well as workers.
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       TRANSFORMERS_VERBOSITY: 'error'

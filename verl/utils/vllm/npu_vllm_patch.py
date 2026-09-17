@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 _GLM52_PATCH_ENV = "VERL_VLLM_ASCEND_GLM52_PATCH"
 _GLM52_PATCH_TRUTHY_VALUES = {"1", "true", "yes"}
 _GLM52_PATCH_MARKER = "_verl_vllm_ascend_glm52_patched"
+_glm52_original_run_engine_core = None
 
 
 def _glm52_patch_enabled() -> bool:
@@ -38,7 +39,7 @@ def _normalized_source(fn) -> str:
     try:
         return "".join(inspect.getsource(fn).split())
     except (OSError, TypeError) as exc:
-        raise RuntimeError(f"{_GLM52_PATCH_ENV} requires inspectable vllm-ascend 0.23.x Python sources.") from exc
+        raise RuntimeError(f"{_GLM52_PATCH_ENV} requires inspectable vllm/vllm-ascend 0.23.x Python sources.") from exc
 
 
 def _patch_glm52_ascend_rms_norm(layernorm_module) -> bool:
@@ -156,6 +157,87 @@ def patch_vllm_ascend_glm52() -> None:
     logger.info("GLM-5.2 vllm-ascend compatibility patch %s", status)
 
 
+def _glm52_run_engine_core(*args, **kwargs):
+    # Keep this callable at module scope, without @wraps: multiprocessing spawn
+    # must import it by its verl name, then patch the fresh child's vLLM classes.
+    patch_vllm_glm52_partial_wake_up()
+    return _glm52_original_run_engine_core(*args, **kwargs)
+
+
+def patch_vllm_glm52_partial_wake_up() -> None:
+    """Port vLLM 6f1ada0f91 + 11d60545e2: no forwards during partial wake-up."""
+    global _glm52_original_run_engine_core
+
+    from vllm.v1.engine import core
+
+    engine_core = core.EngineCore
+    dp_engine_core = core.DPEngineCoreProc
+    original_wake_up = engine_core.wake_up
+    original_dummy_batch = dp_engine_core.execute_dummy_batch
+    wake_up_patched = getattr(original_wake_up, _GLM52_PATCH_MARKER, False)
+    dummy_batch_patched = getattr(original_dummy_batch, _GLM52_PATCH_MARKER, False)
+
+    # Validate both targets before changing either. Already-fixed installations
+    # retain their upstream methods; unknown implementations fail explicitly.
+    if not wake_up_patched:
+        source = _normalized_source(original_wake_up)
+        wake_up_patched = "ifnotself.model_executor.is_sleeping:self.resume_scheduler()" in source
+        if not wake_up_patched and (
+            tuple(inspect.signature(original_wake_up).parameters) != ("self", "tags")
+            or 'tags=[tfortintagsift!="scheduling"]' not in source
+            or "iftagsisNoneortags:self.model_executor.wake_up(tags)" not in source
+            or not source.endswith("self.resume_scheduler()")
+        ):
+            raise RuntimeError(f"{_GLM52_PATCH_ENV} found an unsupported EngineCore.wake_up implementation.")
+
+    if not dummy_batch_patched:
+        loop_source = _normalized_source(dp_engine_core.run_busy_loop)
+        dummy_batch_patched = (
+            "elifnotself.model_executor.is_sleeping:withself.log_iteration_details(None):self.execute_dummy_batch()"
+        ) in loop_source
+        if not dummy_batch_patched and (
+            "withself.log_iteration_details(None):self.execute_dummy_batch()" not in loop_source
+            or _normalized_source(original_dummy_batch)
+            != "defexecute_dummy_batch(self):self.model_executor.execute_dummy_batch()"
+        ):
+            raise RuntimeError(f"{_GLM52_PATCH_ENV} found an unsupported DPEngineCoreProc dummy-batch implementation.")
+
+    if not wake_up_patched:
+
+        @wraps(original_wake_up)
+        def patched_wake_up(self, tags=None):
+            if tags is not None and "scheduling" in tags:
+                tags = [t for t in tags if t != "scheduling"]
+            if tags is None or tags:
+                self.model_executor.wake_up(tags)
+            if not self.model_executor.is_sleeping:
+                self.resume_scheduler()
+
+        setattr(patched_wake_up, _GLM52_PATCH_MARKER, True)
+        engine_core.wake_up = patched_wake_up
+
+    if not dummy_batch_patched:
+
+        @wraps(original_dummy_batch)
+        def patched_dummy_batch(self):
+            # Leave the busy loop and its DP collectives intact. Its logging
+            # context still runs, but no dummy forward touches sleeping memory.
+            if not self.model_executor.is_sleeping:
+                return original_dummy_batch(self)
+
+        setattr(patched_dummy_batch, _GLM52_PATCH_MARKER, True)
+        dp_engine_core.execute_dummy_batch = patched_dummy_batch
+
+    entrypoint = core.EngineCoreProc.run_engine_core
+    if entrypoint is not _glm52_run_engine_core:
+        _glm52_original_run_engine_core = entrypoint
+        if not (wake_up_patched and dummy_batch_patched):
+            core.EngineCoreProc.run_engine_core = staticmethod(_glm52_run_engine_core)
+
+    status = "already present" if wake_up_patched and dummy_batch_patched else "applied"
+    logger.info("GLM-5.2 vLLM partial wake-up patch %s", status)
+
+
 def vllm_v013_weight_loader_method_wrapper(fn):
     @wraps(fn)
     def wrapper(self, param, loaded_weight, weight_name, shard_id, expert_id, return_success=False):
@@ -250,3 +332,4 @@ def apply_npu_vllm_patches() -> None:
 
         patch_camem_sleep()
         patch_vllm_ascend_glm52()
+        patch_vllm_glm52_partial_wake_up()

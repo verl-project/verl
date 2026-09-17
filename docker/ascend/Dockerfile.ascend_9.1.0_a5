@@ -1,7 +1,8 @@
 # Pull base image
-FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.1.0-910b-ubuntu22.04-py3.12
+FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:9.1.0-950-ubuntu22.04-py3.12
 
-ARG SOC_VERSION="ascend910b1"
+ARG SOC_VERSION="ascend950dt_9582"
+
 
 # Prepare required system dependencies
 RUN apt-get update -y && \
@@ -21,13 +22,8 @@ RUN ARCH=$(uname -m) && \
     # Clone libs
     git clone --depth 1 --branch v0.23.0 https://github.com/vllm-project/vllm.git && \
     git clone -b releases/v0.23.0 https://github.com/vllm-project/vllm-ascend.git && \
-    git clone --branch core_r0.18.0 https://gitcode.com/Ascend/MindSpeed.git && \
-    git clone --depth 1 --branch core_v0.18.0 https://github.com/NVIDIA/Megatron-LM.git && \
-    git clone --depth 1 --branch core_r0.18.0 https://gitcode.com/ascend/MegatronAdaptor.git && \
-    git clone --depth 1 https://gitcode.com/ascend/TransformerEngineNPU.git && \
-    git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Ops.git && \
-    git clone --depth 1 https://gitcode.com/ascend/MindSpeed-Bridge.git && \
-    git clone --depth 1 --branch v0.5.0 https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+    git clone https://gitcode.com/Ascend/MindSpeed.git && cd MindSpeed && git checkout 0c6c0ce && cd .. && \
+    git clone --depth 1 --branch core_v0.12.0 https://github.com/NVIDIA/Megatron-LM.git
 
 # Install repositories with low update frequency
 RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && \
@@ -54,17 +50,6 @@ RUN export PIP_EXTRA_INDEX_URL=https://triton-ascend.osinfra.cn/pypi/simple/ && 
     # Install Megatron & MindSpeed
     pip install -e Megatron-LM && \
     pip install -e MindSpeed && \
-    # Install MegatronAdaptor
-    pip install -e MegatronAdaptor && \
-    # Install TransformerEngineNPU
-    pip install -e TransformerEngineNPU --no-build-isolation && \
-    # Install MindSpeed-Ops
-    pip install -e MindSpeed-Ops --no-build-isolation --no-deps && \
-    # Install MindSpeed-Bridge
-    pip install -r MindSpeed-Bridge/requirements.txt && \
-    pip install -e MindSpeed-Bridge --no-deps && \
-    # Install Megatron-Bridge
-    pip install -e Megatron-Bridge --no-build-isolation --no-deps && \
     # Fix transformers
     pip install transformers==5.10.4 && \
     # Clear extra files

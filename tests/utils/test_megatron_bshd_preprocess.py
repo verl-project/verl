@@ -200,10 +200,12 @@ def test_preprocess_thd_engine_pads_multidimensional_router_data(monkeypatch, cp
     torch.testing.assert_close(local_routes[0], expected)
 
 
+# [1..7] is padded to [1, 2, 3, 4, 5, 6, 7, 0], and rolling it by -1 gives [2, 3, 4, 5, 6, 7, 0, 1].
+# Zigzag gives rank 0 the global rows {0, 1, 6, 7} and rank 1 the rows {2, 3, 4, 5}.
 @pytest.mark.parametrize(
     ("cp_rank", "expected"),
     [
-        (0, [2, 3, 1, 1]),
+        (0, [2, 3, 0, 1]),
         (1, [4, 5, 6, 7]),
     ],
 )
