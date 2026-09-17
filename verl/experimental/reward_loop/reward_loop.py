@@ -28,7 +28,14 @@ from verl.single_controller.ray.base import RayResourcePool
 from verl.trainer.ppo.reward import load_reward_manager, resolve_reward_manager_cls
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
-from verl.utils.ray_utils import get_event_loop
+from verl.utils.ray_utils import (
+    assign_loop_worker_nodes,
+    available_cpu_per_node,
+    get_event_loop,
+    get_loop_worker_node_resource,
+    loop_worker_node_affinity_resources,
+    schedulable_loop_worker_node_ids,
+)
 
 from .reward_model import RewardModelManager
 
@@ -324,20 +331,35 @@ class RewardLoopManager:
     def _init_reward_loop_workers(self):
         self.reward_loop_workers = []
         num_workers = self.config.reward.num_workers
-        node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
+        # Restrict candidate nodes to this job's node group when configured, so a
+        # shared/heterogeneous cluster never round-robins a worker onto a foreign
+        # node that lacks this job's runtime. See VERL_LOOP_WORKER_NODE_RESOURCE.
+        node_resource = get_loop_worker_node_resource()
+        node_ids = schedulable_loop_worker_node_ids(node_resource)
+        worker_resources = loop_worker_node_affinity_resources(node_resource)
+        num_cpus_per_worker = self.config.reward.num_cpus_per_worker
+        # Spread workers toward the nodes with the most available CPU so they do
+        # not all pile onto node_ids[0]; falls back to round-robin when Ray does
+        # not report per-node availability.
+        node_assignments = assign_loop_worker_nodes(
+            node_ids, num_workers, available_cpu_per_node(), num_cpus_per_worker
+        )
 
         for i in range(num_workers):
-            # Round-robin scheduling over the all nodes
-            node_id = node_ids[i % len(node_ids)]
+            node_id = node_assignments[i]
 
+            options = {
+                "name": f"reward_loop_worker_{i}",
+                "num_cpus": num_cpus_per_worker,
+                "scheduling_strategy": ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
+                    node_id=node_id,
+                    soft=True,
+                ),
+            }
+            if worker_resources is not None:
+                options["resources"] = worker_resources
             self.reward_loop_workers.append(
-                self.reward_loop_workers_class.options(
-                    name=f"reward_loop_worker_{i}",
-                    scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                        node_id=node_id,
-                        soft=True,
-                    ),
-                ).remote(self.config, self.reward_router_address)
+                self.reward_loop_workers_class.options(**options).remote(self.config, self.reward_router_address)
             )
 
     def compute_rm_score(self, data: DataProto) -> DataProto:
