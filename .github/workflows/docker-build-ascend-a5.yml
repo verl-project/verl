@@ -7,11 +7,6 @@ on:
     paths:
       - "docker/ascend/Dockerfile.ascend_9.1.0_a5"
       - ".github/workflows/docker-build-ascend-a5.yml"
-  pull_request:              # ← 新增 PR 验证后删除
-    paths:
-      - "docker/ascend/Dockerfile.ascend_9.1.0_a5"
-      - ".github/workflows/docker-build-ascend-a5.yml"
-    
 
   # schedule:
   #   - cron: "0 19 * * *"
@@ -26,9 +21,7 @@ jobs:
   # ============================================================
   build-push-digest:
     name: build-${{ matrix.tag }}
-    #if: ${{ github.event_name != 'pull_request' && github.repository_owner == 'verl-project' }}
-    # pr验证后恢复
-    if: ${{ github.repository_owner == 'verl-project' }}
+    if: ${{ github.event_name != 'pull_request' && github.repository_owner == 'verl-project' }}
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.tag }}
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -88,7 +81,6 @@ jobs:
 
       # Build 阶段只推送到临时仓库，只需登录临时仓库
       - name: Login to Quay Temp
-        if: ${{ github.event_name != 'pull_request' }}   # ← PR 不登录
         uses: docker/login-action@v3
         with:
           registry: quay.io
@@ -106,36 +98,34 @@ jobs:
           context: .
           platforms: ${{ matrix.arch }}
           file: ./docker/ascend/Dockerfile.ascend_9.1.0_a5
-          push: ${{ github.event_name != 'pull_request' }}
-          #outputs: ${{ steps.cfg.outputs.outputs }}     # ← 替换原来的硬编码 outputs
+          push: true
+          outputs: type=image,name=${{ env.QUAY_TEMP_REPO }},push-by-digest=true,name-canonical=true,push=true
           provenance: false
           cache-from: type=gha,scope=ascend-a5-${{ matrix.tag }}
-          cache-to: ${{ github.event_name != 'pull_request' && format('type=gha,mode=max,scope=ascend-a5-{0}', matrix.tag) || '' }}
+          cache-to: type=gha,mode=max,scope=ascend-a5-${{ matrix.tag }}
           build-args: |
             BUILDKIT_INLINE_CACHE=1
 
       # Quay.io 约 1 小时自动清理未打 tag 的 digest，构建后立即打临时 tag 防止 GC
       - name: Tag digest to prevent GC
-        if: ${{ github.event_name != 'pull_request' }}
         run: |
           docker buildx imagetools create \
-            -t "${{ env.QUAY_TEMP_REPO }}:tmp-a5-${{ matrix.tag }}" \
+            -t "${{ env.QUAY_TEMP_REPO }}:tmp-${{ matrix.tag }}" \
             "${{ env.QUAY_TEMP_REPO }}@${{ steps.build_main.outputs.digest }}"
 
       - name: Export digest (main image)
-        if: ${{ github.event_name != 'pull_request' }}
         run: |
           mkdir -p ${{ runner.temp }}/digests
           digest="${{ steps.build_main.outputs.digest }}"
           touch "${{ runner.temp }}/digests/main-${digest#sha256:}"
 
-      # - name: Upload digest (main image)
-      #   uses: actions/upload-artifact@v4
-      #   with:
-      #     name: digests-main-${{ matrix.tag }}
-      #     path: ${{ runner.temp }}/digests/*
-      #     if-no-files-found: error
-      #     retention-days: 1
+      - name: Upload digest (main image)
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-main-${{ matrix.tag }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
 
   # ============================================================
   # 第二阶段：合并多架构 manifest（main 镜像）
