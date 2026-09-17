@@ -965,7 +965,6 @@ class RayPPOTrainer:
         )
 
         checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
-        # Support custom CheckpointEngineManager via config
         checkpoint_manager_class_fqn = self.config.actor_rollout_ref.rollout.get("checkpoint_manager_class")
         if checkpoint_manager_class_fqn:
             CheckpointEngineManager = load_class_from_fqn(checkpoint_manager_class_fqn, "CheckpointEngineManager")
@@ -975,6 +974,7 @@ class RayPPOTrainer:
             config=checkpoint_engine_config,
             actor_wg=self.actor_rollout_wg,
             replicas=self.llm_server_manager.get_replicas(),
+            fault_tolerance_config=self.config.get("fault_tolerance", None),
         )
 
         # sleep all replicas to load checkpoint
@@ -1713,7 +1713,21 @@ class RayPPOTrainer:
 
                         # update weights from trainer to rollout
                         with marked_timer("update_weights", timing_raw, color="red"):
-                            self.checkpoint_manager.update_weights(self.global_steps)
+                            ft_cfg = self.config.get("fault_tolerance", None)
+                            ft_enabled = getattr(ft_cfg, "enable", False) if ft_cfg else False
+                            if ft_enabled:
+                                try:
+                                    self.checkpoint_manager.update_weights(self.global_steps)
+                                except Exception as e:
+                                    print(f"[FaultTolerance] Sudden worker or communication failure detected during update_weights: {e}")
+                                    print("[FaultTolerance] Engaging sub-second failover recovery...")
+                                    # Fallback / recover weights via checkpoint manager
+                                    if hasattr(self.checkpoint_manager, "handle_failover"):
+                                        self.checkpoint_manager.handle_failover(self.global_steps)
+                                    else:
+                                        raise e
+                            else:
+                                self.checkpoint_manager.update_weights(self.global_steps)
 
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)

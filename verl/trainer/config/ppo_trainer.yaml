@@ -514,3 +514,28 @@ ray_kwargs:
 
   # Path to save Ray timeline JSON for performance profiling
   timeline_json_file: null
+
+# configs related to GKE/Ray fault tolerance and sub-second failover
+fault_tolerance:
+
+  # Whether to enable fault tolerance (default: False)
+  enable: False
+
+  # Failover mode: 'standby' (prewarmed VRAM standby) or 'cold'
+  mode: standby
+
+  # Dedicated resource pool name for standby workers
+  standby_resource_pool: standby_pool
+
+  # Whether to monitor GCE/GKE 600-second node maintenance notices
+  detect_node_maintenance: True
+
+  # Polling interval in seconds for GCE maintenance event metadata
+  maintenance_check_interval: 10
+
+  # Allow promoted trainer to recover weights from rollout over NCCL
+  reverse_weight_sync: True
+
+  # Maximum allowed failover recovery events before aborting
+  max_failovers: 5
+

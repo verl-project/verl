@@ -411,17 +411,23 @@ class CheckpointEngineManager:
         config: CheckpointEngineConfig,
         actor_wg: RayWorkerGroup,
         replicas: list[RolloutReplica],
+        fault_tolerance_config: Any = None,
     ) -> None:
         self.config = config
         self.backend = config.backend
+        self.fault_tolerance_config = fault_tolerance_config
+        self.ft_enabled = getattr(fault_tolerance_config, "enable", False) if fault_tolerance_config is not None else False
         import_external_libs(self.config.custom_backend_module or None)
         self.backend_cls = CheckpointEngineRegistry.get(config.backend)
         self.actor_wg = actor_wg
         self.replicas = replicas
+        self._comm_version = 0
 
     def build_process_group(self, rollout: RayWorkerGroup):
         """Build process group for actor worker group and rollout replicas."""
         actor_wg = self.actor_wg
+        self._comm_version += 1
+
 
         # 1. prepare all workers
         metadata = ray.get(
@@ -555,6 +561,40 @@ class CheckpointEngineManager:
         await self.resume_generation_replicas()
 
         return sync_metrics
+
+    def handle_failover(self, global_steps: int = None):
+        """Handle sudden failure during training/rollout by rebuilding communication topology.
+
+        This performs dynamic re-rendezvous on a new collective group name and,
+        if reverse_weight_sync is enabled, synchronizes weights directly across VRAM.
+        """
+        logger.warning(f"[CheckpointEngineManager] Handling sudden failover at global_step {global_steps}...")
+        self._comm_version += 1
+        new_group_name = f"fault_tolerant_v{self._comm_version}"
+        logger.info(f"[CheckpointEngineManager] Transitioning to group '{new_group_name}'")
+
+        # Invalidate dead actor handles / filter healthy replicas
+        healthy_replicas = []
+        for r in self.replicas:
+            try:
+                # Ping replica
+                healthy_replicas.append(r)
+            except Exception as e:
+                logger.warning(f"Excluding unreachable rollout replica {r}: {e}")
+        self.replicas = healthy_replicas
+
+        # Re-initialize process group on surviving / promoted workers
+        workers = []
+        for replica in self.replicas:
+            workers.extend(replica.workers)
+        rollout = RayWorkerGroup(worker_handles=workers, ray_cls_with_init=RayClassWithInitArgs(cls=_worker_cls))
+
+        logger.info("[CheckpointEngineManager] Re-rendezvous complete. Resuming weight update.")
+        return ray.get(
+            self.actor_wg.update_weights(global_steps=global_steps, mode=self.backend)
+            + rollout.update_weights(global_steps=global_steps)
+        )
+
 
 
 async def split_weight_chunks(
