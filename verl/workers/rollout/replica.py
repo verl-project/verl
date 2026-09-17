@@ -45,6 +45,8 @@ class TokenOutput(BaseModel):
     """routed experts of response token ids"""
     stop_reason: Optional[str] = None
     """stop reason: 'completed', 'aborted', or None for unknown"""
+    is_truncated: Optional[bool] = None
+    """Whether a length limit stopped generation; None when the backend does not report it."""
     num_preempted: Optional[int] = None
     """number of preempted times for metric calculation"""
     extra_fields: dict[str, Any] = {}
