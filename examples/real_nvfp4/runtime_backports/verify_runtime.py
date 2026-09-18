@@ -5,7 +5,6 @@ import json
 from importlib.metadata import distribution, version
 from pathlib import Path
 
-from patch_megatron_checkpoint import verify_patched_source as verify_checkpoint_source
 from patch_megatron_fa4 import verify_patched_source
 from transformer_engine.pytorch.cpp_extensions import gemm
 from transformer_engine.pytorch.module import grouped_linear
@@ -17,12 +16,17 @@ def main():
     attention_source = distribution("megatron-core").locate_file("megatron/core/transformer/attention.py")
     verify_patched_source(Path(attention_source).read_text())
     checkpoint_source = distribution("megatron-core").locate_file("megatron/core/extensions/transformer_engine.py")
-    verify_checkpoint_source(Path(checkpoint_source).read_text())
+    assert (
+        hashlib.sha256(Path(checkpoint_source).read_bytes()).hexdigest()
+        == "589453c2a7de977531b292c26fd9c7f934333817229fa9d545b04feafc999f43"
+    ), "Core 0.19 release checkpoint source changed"
     expected_versions = {
         "transformer-engine": "2.18.0",
         "transformer-engine-cu13": "2.18.0",
         "transformer-engine-torch": "2.18.0",
-        "vllm": "0.26.0",
+        "vllm": "0.27.1",
+        "megatron-core": "0.19.0",
+        "torch": "2.13.0",
     }
     actual_versions = {name: version(name) for name in expected_versions}
     if actual_versions != expected_versions:
@@ -31,7 +35,7 @@ def main():
         Path(gemm.__file__): "dc3233868f739d67d86a8b6dde9dbfa519a195ae08c40a751c85b08fbe9a931b",
         Path(
             distribution("vllm").locate_file("vllm/v1/executor/multiproc_executor.py")
-        ): "b7fd3cbd61b4a46be5498ffde63e69d9b743fbf06aa5e64ea5345f5acf8d9147",
+        ): "e84685635d48e9e6ce1c1022b982d49baca3f9cd2273530c9502df5f2e0147b4",
     }
     hashes = {}
     for path, expected in targets.items():

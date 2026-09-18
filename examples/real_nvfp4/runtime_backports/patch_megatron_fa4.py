@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Hash-guarded backport of Megatron-LM #6964 to pinned Core 0.18.
+"""Hash-guarded backport of Megatron-LM #6964 to released Core 0.19.
 
 Upstream: 53abe744b5e8d043a06e54cfaef44cbe23b1e2ca.
 FA2 also ships flash_attn.cute; that namespace alone does not establish FA4
@@ -26,11 +26,18 @@ import json
 from importlib.metadata import distribution
 from pathlib import Path
 
-BASE_SHA256 = "5f335eb39883b7d99a8a770ff3b6ed3ce96df16360edc7285a23d8e4524e9b7a"
+BASE_SHA256 = "a019cd00a708a22237383456a7ba85bf522201c14a5b7cb0c1e4f0f12eac9837"
 OLD = """try:
-    from flash_attn.cute import flash_attn_varlen_func as flash_attn4_varlen_func
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _get_dist_version
 
-    HAVE_FA4 = True
+    from flash_attn.cute import flash_attn_varlen_func as flash_attn4_varlen_func
+    from packaging.version import Version as _Version
+
+    try:
+        HAVE_FA4 = _Version(_get_dist_version("flash-attn-4")) >= _Version(_MIN_FA4_VERSION)
+    except PackageNotFoundError:
+        HAVE_FA4 = False
 except ImportError:
     HAVE_FA4 = False
 """

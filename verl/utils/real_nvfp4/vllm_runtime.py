@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Runtime proofs for vLLM 0.26's native online NVFP4 MoE path."""
+"""Runtime proofs for vLLM 0.27.1's native online NVFP4 MoE path."""
 
 import ast
 import hashlib
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 NVFP4_PER_TOKEN_METHOD = "nvfp4_per_token"
 REAL_NVFP4_MOE_BACKEND = "flashinfer_trtllm"
 
-# Canonical function ASTs from vLLM v0.26.0 with upstream fixes #50029
+# Canonical function ASTs from vLLM v0.27.1 with upstream fixes #50029
 # (9c22668436a4d94aab87ea74a220e060415cf1d8) and #50074
 # (3ac9525507b2d0de5c1b08cbca96cc94850c7c7a). These are the exact
 # implementations installed by runtime_backports/apply_vllm_online_nvfp4_50029_50074.py,
@@ -81,7 +81,7 @@ def require_vllm_nvfp4_backports() -> None:
             raise RuntimeError(
                 f"real_nvfp4 requires audited vLLM #50029/#50074 and derived-scale backports: {name} "
                 f"has unrecognized implementation {actual}. Use the validated runtime build; "
-                "the unmodified vLLM 0.26 wheel is not sufficient."
+                "the unmodified vLLM 0.27.1 wheel is not sufficient."
             )
 
 
@@ -89,8 +89,8 @@ def require_vllm_native_nvfp4_per_token(vllm_config) -> None:
     """Fail unless this worker was built for vLLM's native online method."""
 
     current = Version(version("vllm"))
-    if current != Version("0.26.0"):
-        raise RuntimeError(f"real_nvfp4 requires the audited vLLM 0.26.0 native path, got {current}")
+    if current != Version("0.27.1"):
+        raise RuntimeError(f"real_nvfp4 requires the audited vLLM 0.27.1 native path, got {current}")
     model_config = getattr(vllm_config, "model_config", None)
     quantization = getattr(model_config, "quantization", None)
     if quantization != NVFP4_PER_TOKEN_METHOD:
@@ -173,7 +173,7 @@ def attest_vllm_native_nvfp4_runtime(
     moe_count = 0
     quantized_layer_indices = set()
     unquantized_layer_indices = set()
-    # vLLM 0.26's FusedMoE factory receives the quantization prefix ending in
+    # vLLM 0.27.1's FusedMoE factory receives the quantization prefix ending in
     # `.mlp.experts`, then returns an MoERunner whose actual RoutedExperts
     # submodule is usually named `.mlp.experts.routed_experts`.
     layer_pattern = re.compile(r"(?:^|\.)layers\.(\d+)\.mlp\.experts(?:\.routed_experts)?$")

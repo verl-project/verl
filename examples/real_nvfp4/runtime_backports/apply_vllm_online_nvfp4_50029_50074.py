@@ -14,7 +14,7 @@
 # limitations under the License.
 """Backport online-NVFP4 packing and graph-safe refit lifecycle fixes.
 
-The replacements intentionally match the vLLM v0.26.0 source exactly.  Refuse
+The replacements intentionally match the vLLM v0.27.1 source exactly.  Refuse
 to modify an unexpected dependency version instead of producing a partial
 backport.
 
@@ -38,12 +38,12 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
         assert old not in text, f"{label}: old and new implementations coexist"
         return text
     count = text.count(old)
-    assert count == 1, f"{label}: expected one v0.26 source block, found {count}"
+    assert count == 1, f"{label}: expected one v0.27.1 source block, found {count}"
     return text.replace(old, new)
 
 
 def main() -> None:
-    assert version("vllm") == "0.26.0", version("vllm")
+    assert version("vllm") == "0.27.1", version("vllm")
     path = distribution("vllm").locate_file("vllm/model_executor/layers/quantization/online/nvfp4.py")
     text = path.read_text()
 

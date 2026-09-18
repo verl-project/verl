@@ -5,12 +5,12 @@ import hashlib
 import json
 from importlib.metadata import distribution
 
-BEFORE = "fb279ff0e0a08681aa0078037d559351006b5453ecd1b1ea12277995925f3312"
-OLD = '''        distributed_init_method = get_distributed_init_method(
+BEFORE = "ceb3477473bdb1de36e01687e0b2083ad239d42b1ddc2ec8cec16ba2c477efa6"
+OLD = """        distributed_init_method = get_distributed_init_method(
             get_loopback_ip(), get_open_port()
-        )'''
-NEW = '''        distributed_init_method = _get_mp_distributed_init_method(self.parallel_config)'''
-HELPER = '''
+        )"""
+NEW = """        distributed_init_method = _get_mp_distributed_init_method(self.parallel_config)"""
+HELPER = """
 
 VERL_SINGLE_RANK_ATOMIC_TCPSTORE = "20260915-v1"
 
@@ -30,7 +30,7 @@ def _get_mp_distributed_init_method(parallel_config):
     return get_distributed_init_method(
         get_loopback_ip(), 0 if single_rank else get_open_port()
     )
-'''
+"""
 
 
 def patched_source(source):
@@ -50,7 +50,14 @@ if __name__ == "__main__":
     target = distribution("vllm").locate_file("vllm/v1/executor/multiproc_executor.py")
     result = patched_source(target.read_text())
     target.write_text(result)
-    print("ATOMIC_TCPSTORE_PATCH", json.dumps({
-        "path": str(target), "before": BEFORE,
-        "after": hashlib.sha256(result.encode()).hexdigest(),
-    }), flush=True)
+    print(
+        "ATOMIC_TCPSTORE_PATCH",
+        json.dumps(
+            {
+                "path": str(target),
+                "before": BEFORE,
+                "after": hashlib.sha256(result.encode()).hexdigest(),
+            }
+        ),
+        flush=True,
+    )
