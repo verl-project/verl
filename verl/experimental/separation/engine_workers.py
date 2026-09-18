@@ -134,7 +134,22 @@ class DetachActorWorker(ActorRolloutRefWorker):
         if not hasattr(self, "cpu_saved_models"):
             self.cpu_saved_models = {}
 
-        self.cpu_saved_models[n] = self.copy_handler(self.actor.engine.module)
+        if self.config.actor.strategy == "megatron":
+            # Reuse pinned CPU buffers across calls for the same slot `n` instead of allocating
+            # fresh ones every time (see copy_megatron_model_to_cpu's `cache` argument).
+            # `_cpu_pinned_pool` is intentionally a SEPARATE dict from `cpu_saved_models`:
+            # clear_cpu_model() below only ever removes the `cpu_saved_models` alias (the
+            # "currently active" snapshot for slot n), never this pool, so the underlying pinned
+            # tensors for slot n survive to be reused the next time slot n is saved again --
+            # correct as long as a given slot n is never saved-to while a previous snapshot under
+            # that same slot is still being read elsewhere, which is already the existing calling
+            # contract for save_model_to_cpu/restore_model_from_cpu/clear_cpu_model.
+            if not hasattr(self, "_cpu_pinned_pool"):
+                self._cpu_pinned_pool = {}
+            self.cpu_saved_models[n] = self.copy_handler(self.actor.engine.module, self._cpu_pinned_pool.get(n))
+            self._cpu_pinned_pool[n] = self.cpu_saved_models[n]
+        else:
+            self.cpu_saved_models[n] = self.copy_handler(self.actor.engine.module)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def restore_model_from_cpu(self, n):
