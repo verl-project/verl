@@ -141,7 +141,6 @@ python -m verl.experimental.fully_async_policy.fully_async_main \
     actor_rollout_ref.hybrid_engine=False \
     actor_rollout_ref.model.use_fused_kernels=False \
     actor_rollout_ref.actor.megatron.use_mbridge=True \
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=True \
     actor_rollout_ref.model.trust_remote_code=True \
     actor_rollout_ref.actor.megatron.use_remove_padding=False \
     actor_rollout_ref.model.use_remove_padding=False \

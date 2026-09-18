@@ -147,7 +147,6 @@ ACTOR=(
     actor_rollout_ref.actor.entropy_coeff=0
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode}
     actor_rollout_ref.actor.megatron.use_mbridge=True
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=False
 )
 
 ROLLOUT=(

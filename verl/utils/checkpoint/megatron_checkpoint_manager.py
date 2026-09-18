@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import inspect
 import json
 import logging
 import os
@@ -149,7 +148,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         lr_scheduler: The learning rate scheduler instance.
         use_dist_checkpointing: If ``True``, include Megatron ``dist_checkpointing``
             shards for the ``model`` slot. Mirrors ``*.megatron.use_dist_checkpointing``.
-        bridge: mbridge / Megatron-Bridge instance for HF save/load; required whenever
+        bridge: Megatron-Bridge instance for HF save/load; required whenever
             checkpoint contents request HF-format model weights.
     """
 
@@ -198,7 +197,6 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         self.use_checkpoint_opt_param_scheduler = use_checkpoint_opt_param_scheduler
         self.bridge = bridge
         self.provider = provider
-        self.vanilla_bridge = self.provider is None
         self.peft_cls = peft_cls
         self.use_megatron_fsdp = use_megatron_fsdp
         self.rank = torch.distributed.get_rank()
@@ -638,10 +636,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
 
     def _load_model_as_hf_via_bridge(self, hf_model_path: str):
         """Load model weights through megatron-bridge."""
-        if self.vanilla_bridge:
-            self.bridge.load_weights(self.model, hf_model_path)
-        else:
-            self.bridge.load_hf_weights(self.model, hf_model_path)
+        self.bridge.load_hf_weights(self.model, hf_model_path)
 
     @staticmethod
     def _has_checkpoint_files(path: str) -> bool:
@@ -990,33 +985,19 @@ class MegatronCheckpointManager(BaseCheckpointManager):
 
     # -- Save ------------------------------------------------------------------
 
-    def _get_bridge_extended_args(self):
-        """Build extra kwargs for ``bridge.save_weights`` from checkpoint config."""
-        extended_args = {}
-        mbridge_config = getattr(self.checkpoint_config, "mbridge_config", None) or {}
-        for sig in inspect.signature(self.bridge.save_weights).parameters:
-            if sig in ("weights_path", "models"):
-                continue
-            if sig in mbridge_config:
-                extended_args[sig] = mbridge_config[sig]
-        return extended_args
-
     def _save_model_as_hf_via_bridge(self, hf_ckpt_path: str):
         """Save model weights through megatron-bridge."""
-        if self.vanilla_bridge:
-            self.bridge.save_weights(self.model, hf_ckpt_path, **self._get_bridge_extended_args())
+        if self.peft_cls is not None:
+            hf_adapter_ckpt_path = os.path.join(hf_ckpt_path, "adapter")
+            self.bridge.save_hf_adapter(self.model, hf_adapter_ckpt_path, self.peft_cls)
+            log_with_rank(
+                f"Saved HF PEFT adapter checkpoint to {hf_adapter_ckpt_path}",
+                rank=self.rank,
+                logger=logger,
+                log_only_rank_0=True,
+            )
         else:
-            if self.peft_cls is not None:
-                hf_adapter_ckpt_path = os.path.join(hf_ckpt_path, "adapter")
-                self.bridge.save_hf_adapter(self.model, hf_adapter_ckpt_path, self.peft_cls)
-                log_with_rank(
-                    f"Saved HF PEFT adapter checkpoint to {hf_adapter_ckpt_path}",
-                    rank=self.rank,
-                    logger=logger,
-                    log_only_rank_0=True,
-                )
-            else:
-                self.bridge.save_hf_weights(self.model, hf_ckpt_path, strict=self.checkpoint_config.strict)
+            self.bridge.save_hf_weights(self.model, hf_ckpt_path, strict=self.checkpoint_config.strict)
 
     def _save_hf_config_and_tokenizer(self, local_path: str):
         """Rank-0 saves HF config, tokenizer, and generation config."""

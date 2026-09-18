@@ -1,18 +1,12 @@
 #!/bin/bash
-set -x
+set -xeuo pipefail
+
+# Moonlight-16B-A3B-Instruct GRPO on one node with 16 Ascend NPUs.
+# Megatron-Bridge is used for training and vLLM is used for rollout.
+
 # Project Configuration
-
-# This is a temporary fix for https://github.com/sgl-project/sglang/issues/26032
-FILE="/sglang/python/sglang/srt/layers/quantization/unquant.py"
-sed -i '314,318s/^/        # /' "$FILE"
-sed -i 's/weight=\[layer\.w13_weight\]/weight=[layer.w13_weight.transpose(1, 2)]/' "$FILE"
-sed -i 's/weight=\[layer\.w2_weight\]/weight=[layer.w2_weight.transpose(1, 2)]/' "$FILE"
-
-project_name='GRPO-Qwen3-30b-A3B'
-exp_name='GRPO-Qwen3-30B-Megatron-SGLang-NPU'
-SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}" .sh)"
-LOG_DIR=/root/.cache/nightly_log/$SCRIPT_NAME
-mkdir -p $LOG_DIR
+project_name='GRPO-Moonlight-16B-A3B-INSTRUCT-MATH'
+exp_name='GRPO-Moonlight-16B-A3B-INSTRUCT-Megatron-vLLM'
 
 # Necessary env
 export HCCL_CONNECT_TIMEOUT=1500
@@ -24,23 +18,23 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 
 export DISABLE_L2_CACHE=1
 export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
+export VLLM_ASCEND_ENABLE_NZ=0
 
 # Node Info
 NNODES=${NNODES:-1}
 NPUS_PER_NODE=${NPUS_PER_NODE:-16}
 
 # Model Weights Paths
-MODEL_ID=${MODEL_ID:-Qwen/Qwen3-30B-A3B-Instruct-2507}
-MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
+MODEL_PATH=${MODEL_PATH:-moonshotai/Moonlight-16B-A3B-Instruct}
+RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
+CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
 
 # File System Paths
-TRAIN_FILE=$HOME/.cache/datasets/dapo-math-17k.parquet
-TEST_FILE=$HOME/.cache/datasets/dapo-math-17k.parquet
-
+TRAIN_FILE=${TRAIN_FILE:-"${HOME}/data/gsm8k/train.parquet"}
+TEST_FILE=${TEST_FILE:-"${HOME}/data/gsm8k/test.parquet"}
 # Data Length Configuration
-max_prompt_length=$((1024 * 2))
-max_response_length=$((1024 * 8))
+max_prompt_length=$((1024 * 1))
+max_response_length=$((1024 * 2))
 
 # Training Batch Configuration
 train_prompt_bsz=16
@@ -67,10 +61,9 @@ train_etp=4
 train_pp=1
 train_cp=1
 
-# SGLang Generation Configuration
+# vLLM Generation Configuration
 gen_tp=4
 gen_dp=1
-gen_ep=1
 gpu_memory_utilization=0.5
 max_model_len=$((max_prompt_length + max_response_length))
 max_num_batched_tokens=$(((max_prompt_length + max_response_length) * 1))
@@ -97,6 +90,8 @@ MODEL_CONFIG=(
     actor_rollout_ref.model.path="${MODEL_PATH}"
     # Model Processing
     actor_rollout_ref.model.use_remove_padding=True
+    actor_rollout_ref.model.use_fused_kernels=False
+    actor_rollout_ref.model.trust_remote_code=True
 )
 
 # Reinforcement Learning Algorithm Configuration
@@ -136,7 +131,9 @@ ACTOR_CONFIG=(
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=False
     actor_rollout_ref.actor.megatron.use_mbridge=True
     # Transformer Architecture Optimizations
+    +actor_rollout_ref.actor.megatron.override_transformer_config.multi_latent_attention=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=fused
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
@@ -164,8 +161,7 @@ REF_CONFIG=(
 
 ROLLOUT_CONFIG=(
     # Rollout Engine
-    actor_rollout_ref.rollout.name=sglang
-    +actor_rollout_ref.rollout.engine_kwargs.sglang.attention_backend="ascend"
+    actor_rollout_ref.rollout.name=vllm
     # Generation Parameters
     actor_rollout_ref.rollout.n=${n_resp_per_prompt}
     actor_rollout_ref.rollout.top_p=1.0
@@ -180,11 +176,12 @@ ROLLOUT_CONFIG=(
     # Parallelism Strategy
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp}
     actor_rollout_ref.rollout.data_parallel_size=${gen_dp}
-    actor_rollout_ref.rollout.expert_parallel_size=${gen_ep}
-    +actor_rollout_ref.rollout.engine_kwargs.sglang.enable_dp_attention=False
+    actor_rollout_ref.rollout.max_model_len=${max_model_len}
     # Performance Optimization
-    +actor_rollout_ref.rollout.engine_kwargs.sglang.chunked_prefill_size=-1
-    actor_rollout_ref.rollout.enforce_eager=False
+    actor_rollout_ref.rollout.max_num_batched_tokens=${max_num_batched_tokens}
+    actor_rollout_ref.rollout.calculate_log_probs=True
+    actor_rollout_ref.rollout.enforce_eager=True
+    actor_rollout_ref.rollout.free_cache_engine=True
     # Validation Generation
     actor_rollout_ref.rollout.val_kwargs.n=1
     actor_rollout_ref.rollout.val_kwargs.do_sample=True
@@ -192,6 +189,9 @@ ROLLOUT_CONFIG=(
     actor_rollout_ref.rollout.val_kwargs.top_k=-1
     actor_rollout_ref.rollout.val_kwargs.temperature=1.0
 )
+
+TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+ROLLOUT_DATA_DIR=${ROLLOUT_DATA_DIR:-"${RAY_DATA_HOME}/rollout_debug/${TIMESTAMP}"}
 
 TRAINER_CONFIG=(
     # Logger Configuration
@@ -209,24 +209,9 @@ TRAINER_CONFIG=(
     trainer.test_freq=-1
     trainer.save_freq=-1
     # Checkpoint Directory
-    trainer.total_training_steps=15
-)
-
-# profiling configuration
-PROF_CONFIG=(
-    global_profiler.tool=npu 
-    global_profiler.steps=null 
-    global_profiler.save_path=/profpath 
-    actor_rollout_ref.actor.profiler.enable=True 
-    actor_rollout_ref.actor.profiler.ranks="[0]" 
-    actor_rollout_ref.actor.profiler.all_ranks=False 
-    actor_rollout_ref.actor.profiler.tool_config.npu.discrete=True 
-    actor_rollout_ref.actor.profiler.tool_config.npu.contents=['npu','cpu'] 
-    actor_rollout_ref.actor.profiler.tool_config.npu.level=level0 
-    actor_rollout_ref.actor.profiler.tool_config.npu.analysis=True 
-    actor_rollout_ref.rollout.profiler.enable=True 
-    actor_rollout_ref.rollout.profiler.ranks="[0]" 
-    actor_rollout_ref.rollout.profiler.all_ranks=False 
+    trainer.default_local_dir="${CKPTS_DIR}"
+    trainer.resume_mode=disable
+    trainer.rollout_data_dir="${ROLLOUT_DATA_DIR}"
 )
 
 python3 -m verl.trainer.main_ppo \
@@ -239,5 +224,4 @@ python3 -m verl.trainer.main_ppo \
     "${ROLLOUT_CONFIG[@]}" \
     "${ALGORITHM_CONFIG[@]}" \
     "${TRAINER_CONFIG[@]}" \
-    "${PROF_CONFIG[@]}" \
-    "$@" | tee $LOG_DIR/$SCRIPT_NAME.log
+    "$@"

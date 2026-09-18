@@ -58,7 +58,6 @@ MEGATRON_ENGINE_CONFIG=(
     engine.context_parallel_size=${CP_SIZE}
     engine.use_mbridge=True
     engine.dtype=${DTYPE}
-    engine.vanilla_mbridge=False
     engine.expert_model_parallel_size=${EP_SIZE}
     engine.expert_tensor_parallel_size=${ETP_SIZE}
     engine.override_transformer_config.attention_backend=auto

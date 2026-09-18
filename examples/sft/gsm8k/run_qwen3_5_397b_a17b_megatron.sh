@@ -92,7 +92,6 @@ MTP_LOSS_SCALING_FACTOR=${MTP_LOSS_SCALING_FACTOR:-0.1}
 # ============================================================
 # Key Qwen3.5 settings:
 #   engine.use_remove_padding=False   - GDN requires bshd format (no THD)
-#   engine.vanilla_mbridge=True       - use mbridge (not megatron-bridge)
 ENGINE_CONFIG="\
     engine=${BACKEND} \
     optim=${BACKEND} \
@@ -115,7 +114,6 @@ ENGINE_CONFIG="\
     engine.expert_model_parallel_size=${EP_SIZE} \
     engine.expert_tensor_parallel_size=${ETP_SIZE} \
     engine.use_mbridge=True \
-    engine.vanilla_mbridge=True \
     engine.dtype=${DTYPE} \
     engine.use_remove_padding=False \
     engine.override_transformer_config.attention_backend=auto \

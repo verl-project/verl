@@ -74,7 +74,6 @@ ACTOR=(
     actor_rollout_ref.actor.kl_loss_type=low_var_kl
     actor_rollout_ref.actor.entropy_coeff=${entropy_coeff}
     actor_rollout_ref.actor.megatron.use_mbridge=True
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=False
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${actor_tp}
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${actor_pp}
     actor_rollout_ref.actor.megatron.expert_model_parallel_size=${actor_ep}
