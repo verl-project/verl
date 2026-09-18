@@ -462,7 +462,6 @@ def build_fp8_method_patchers(vllm_version):
         from verl.utils.vllm.mxfp8_exclusion_patch import build_mxfp8_exclusion_patchers
 
         patchers.extend(build_mxfp8_exclusion_patchers())
-        return patchers
 
         # ModelOpt MXFP8 (CUDA): kernel post-processing swizzles weight_scale
         # (or dequantizes the weight to bf16 on the emulation backend), so a
