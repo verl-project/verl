@@ -21,8 +21,18 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-from verl.trainer.distillation.fsdp.losses import compute_forward_kl_topk as compute_forward_kl_topk_ref
-from verl.trainer.distillation.megatron.losses import compute_forward_kl_topk as compute_forward_kl_topk_vp
+from verl.trainer.distillation.fsdp.losses import (
+    compute_forward_kl_topk as compute_forward_kl_topk_ref,
+)
+from verl.trainer.distillation.fsdp.losses import (
+    compute_forward_kl_topk_tail as compute_forward_kl_topk_tail_ref,
+)
+from verl.trainer.distillation.megatron.losses import (
+    compute_forward_kl_topk as compute_forward_kl_topk_vp,
+)
+from verl.trainer.distillation.megatron.losses import (
+    compute_forward_kl_topk_tail as compute_forward_kl_topk_tail_vp,
+)
 from verl.utils.distributed import destroy_global_process_group, initialize_global_process_group
 from verl.workers.config import DistillationConfig, DistillationLossConfig
 
@@ -236,6 +246,69 @@ class TestVocabParallelKLDivergence:
         if self.local_rank == 0:
             print(f"[PASS] VP KL divergence correctness verified for test case {self.test_case_idx}")
 
+    def verify_tail_aware_correctness(self, iterations: int = 3):
+        """Compare tail-aware vocab-parallel loss and gradients with the FSDP reference."""
+        self.cleanup()
+        self.generate_hyper()
+
+        cfg = DistillationConfig(
+            distillation_loss=DistillationLossConfig(
+                loss_mode="forward_kl_topk_tail",
+                log_prob_min_clamp=None,
+                tail_mass_eps=1e-7,
+            )
+        )
+        shard_start = self.local_rank * self.shard_size
+        shard_end = shard_start + self.shard_size
+
+        for i in range(iterations):
+            if self.local_rank == 0:
+                torch.manual_seed(142 + self.test_case_idx * 100 + i)
+
+            full_student_logits = torch.randn(self.batch_size, self.seq_len, self.vocab_size, device=self.device)
+            teacher_full_logits = torch.randn_like(full_student_logits)
+            teacher_full_logps = F.log_softmax(teacher_full_logits, dim=-1)
+            teacher_topk_logps, teacher_topk_ids = torch.topk(teacher_full_logps, k=self.topk, dim=-1)
+            dist.broadcast(full_student_logits, src=0, group=self.group)
+            dist.broadcast(teacher_topk_logps, src=0, group=self.group)
+            dist.broadcast(teacher_topk_ids, src=0, group=self.group)
+
+            full_student_logits = full_student_logits.reshape(1, -1, self.vocab_size)
+            teacher_topk_logps = self.to_nested(teacher_topk_logps)
+            teacher_topk_ids = self.to_nested(teacher_topk_ids)
+
+            vp_logits = full_student_logits[..., shard_start:shard_end].contiguous().detach().requires_grad_(True)
+            vp_output = compute_forward_kl_topk_tail_vp(
+                student_logits=vp_logits,
+                teacher_topk_log_probs=teacher_topk_logps,
+                teacher_topk_ids=teacher_topk_ids,
+                config=cfg,
+                data_format="thd",
+            )
+            vp_output["distillation_losses"].sum().backward()
+
+            full_ref = full_student_logits.detach().clone().requires_grad_(True)
+            ref_output = compute_forward_kl_topk_tail_ref(
+                student_logits=full_ref,
+                teacher_topk_log_probs=teacher_topk_logps,
+                teacher_topk_ids=teacher_topk_ids,
+                config=cfg,
+                data_format="thd",
+            )
+            ref_output["distillation_losses"].sum().backward()
+
+            for key in ("distillation_losses", "student_mass", "teacher_mass", "tail_loss"):
+                torch.testing.assert_close(vp_output[key], ref_output[key], atol=1e-4, rtol=1e-4)
+            torch.testing.assert_close(
+                vp_logits.grad,
+                full_ref.grad[..., shard_start:shard_end],
+                atol=1e-4,
+                rtol=1e-4,
+            )
+
+        if self.local_rank == 0:
+            print(f"[PASS] VP tail-aware KL correctness verified for test case {self.test_case_idx}")
+
 
 if __name__ == "__main__":
     assert int(os.environ.get("WORLD_SIZE", 1)) > 1, (
@@ -251,5 +324,6 @@ if __name__ == "__main__":
                 print(f"[INFO] Running test case {test_case_idx}")
             test.initialize(test_case_idx)
             test.verify_correctness()
+            test.verify_tail_aware_correctness()
     finally:
         test.shutdown()

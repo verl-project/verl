@@ -19,6 +19,7 @@ import torch
 from tensordict import TensorDict
 
 from verl.base_config import BaseConfig
+from verl.trainer.distillation.tail_kl import compute_tail_bucket_kl
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.metric import AggregationType, Metric
 from verl.workers.config import ActorConfig, DistillationConfig, DistillationLossConfig
@@ -134,18 +135,29 @@ def compute_topk_loss(
     - student_mass: (bsz, seqlen/cp_size)
     - teacher_mass: (bsz, seqlen/cp_size)
     """
+    loss_mode = distillation_config.distillation_loss.loss_mode
     match config.strategy:
         # VeOmni uses FSDP2 internally, so its loss computation is identical to FSDP.
         case "fsdp" | "veomni" | "fsdp2":
             import verl.trainer.distillation.fsdp.losses as fsdp_losses
 
-            distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
+            loss_functions = {
+                "forward_kl_topk": fsdp_losses.compute_forward_kl_topk,
+                "forward_kl_topk_tail": fsdp_losses.compute_forward_kl_topk_tail,
+            }
         case "megatron":
             import verl.trainer.distillation.megatron.losses as megatron_losses
 
-            distillation_loss_fn = megatron_losses.compute_forward_kl_topk
+            loss_functions = {
+                "forward_kl_topk": megatron_losses.compute_forward_kl_topk,
+                "forward_kl_topk_tail": megatron_losses.compute_forward_kl_topk_tail,
+            }
         case _:
             raise NotImplementedError(f"Unsupported strategy: {config.strategy=}")
+
+    if loss_mode not in loss_functions:
+        raise NotImplementedError(f"Unsupported top-k distillation loss mode: {loss_mode}")
+    distillation_loss_fn = loss_functions[loss_mode]
 
     outputs = distillation_loss_fn(
         student_logits=student_logits,
@@ -302,7 +314,7 @@ def distillation_loss(
     return distillation_loss, distillation_metrics
 
 
-@register_distillation_loss(DistillationLossSettings(names=["forward_kl_topk"], use_topk=True))  # type: ignore[arg-type]
+@register_distillation_loss(DistillationLossSettings(names=["forward_kl_topk", "forward_kl_topk_tail"], use_topk=True))  # type: ignore[arg-type]
 def compute_forward_kl_topk(
     config: ActorConfig,
     distillation_config: DistillationConfig,
@@ -321,9 +333,29 @@ def compute_forward_kl_topk(
     teacher_mass = no_padding_2_padding(model_output["teacher_mass"], data)
     overlap_count = model_output.get("overlap_count")
     overlap_token_advantage = model_output.get("overlap_token_advantage")
+    tail_loss = model_output.get("tail_loss")
+    loss_mode = getattr(distillation_config.distillation_loss, "loss_mode", "forward_kl_topk")
     if overlap_count is not None and overlap_token_advantage is not None:
         overlap_count = no_padding_2_padding(overlap_count, data)
         overlap_token_advantage = no_padding_2_padding(overlap_token_advantage, data)
+    if tail_loss is not None:
+        tail_loss = no_padding_2_padding(tail_loss, data)
+    elif loss_mode == "forward_kl_topk_tail":
+        # Fused engines may compute the existing top-k head in-kernel and expose
+        # differentiable mass tensors without knowing about this loss mode. Add
+        # the tail bucket here so those paths can opt in without changing the
+        # teacher protocol or materializing full logits.
+        if torch.is_grad_enabled() and distillation_losses.requires_grad and not student_mass.requires_grad:
+            raise RuntimeError(
+                "forward_kl_topk_tail requires differentiable student_mass from the fused engine; "
+                "disable fused kernels or update the fused top-k kernel to preserve its mass gradient."
+            )
+        tail_loss = compute_tail_bucket_kl(
+            student_topk_mass=student_mass,
+            teacher_topk_mass=teacher_mass,
+            tail_mass_eps=distillation_config.distillation_loss.tail_mass_eps,
+        )
+        distillation_losses = distillation_losses + tail_loss
     if data["response_mask"].is_nested:
         response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
     else:
@@ -361,8 +393,22 @@ def compute_forward_kl_topk(
         **overlap_metrics,
     }
 
-    # Due to use of top-k, student and teacher distributions don't sum to 1 -> divergences can be negative.
-    distillation_losses = distillation_losses.clamp_min(0.0)
+    if tail_loss is not None:
+        valid_tail_loss = tail_loss[response_mask_bool]
+        valid_head_loss = (distillation_losses - tail_loss)[response_mask_bool]
+        distillation_metrics.update(
+            {
+                "distillation/head_loss": valid_head_loss.mean().item(),
+                "distillation/tail_loss": valid_tail_loss.mean().item(),
+                "distillation/teacher_tail_mass": (1.0 - teacher_mass).clamp_min(0.0).mean().item(),
+                "distillation/student_tail_mass": (1.0 - student_mass).clamp_min(0.0).mean().item(),
+            }
+        )
+
+    # The legacy truncated objective can be negative because its top-k masses
+    # are not normalized. Tail-aware KL is already a valid coarse-grained KL.
+    if loss_mode == "forward_kl_topk":
+        distillation_losses = distillation_losses.clamp_min(0.0)
 
     return distillation_losses, distillation_metrics
 
