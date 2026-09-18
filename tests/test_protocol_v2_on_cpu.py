@@ -149,6 +149,36 @@ def test_index_select_tensor_dict_preserves_3d_nested_tensor_layout_with_equal_s
     tu.assert_tensordict_eq(selected, tu.get_tensordict({"position_ids": expected}))
 
 
+def test_fix_3d_position_ids_rebuilds_equal_length_layout():
+    rows = [torch.arange(20).reshape(4, 5), torch.arange(20, 40).reshape(4, 5)]
+    position_ids = torch.nested.as_nested_tensor(rows, layout=torch.jagged)
+    data = tu.get_tensordict({"position_ids": position_ids})
+
+    tu.maybe_fix_3d_position_ids(data)
+
+    assert data["position_ids"]._ragged_idx == 2
+    assert data["position_ids"].values().shape == torch.Size([4, 10])
+    assert data["position_ids"].offsets().tolist() == [0, 5, 10]
+    assert torch.equal(data["position_ids"][0], rows[0])
+    assert torch.equal(data["position_ids"][1], rows[1])
+
+
+def test_fix_3d_position_ids_restores_lost_ragged_index():
+    position_ids = tu.nested_tensor_from_tensor_list(
+        [torch.arange(8).reshape(4, 2), torch.arange(20).reshape(4, 5)], ragged_idx=2
+    )
+    values_ptr = position_ids.values().data_ptr()
+    offsets_ptr = position_ids.offsets().data_ptr()
+    position_ids._ragged_idx = 1
+    data = tu.get_tensordict({"position_ids": position_ids})
+
+    tu.maybe_fix_3d_position_ids(data)
+
+    assert data["position_ids"]._ragged_idx == 2
+    assert data["position_ids"].values().data_ptr() == values_ptr
+    assert data["position_ids"].offsets().data_ptr() == offsets_ptr
+
+
 def test_tensordict_with_images():
     # each sample contains a sequence with multiple images of different sizes
     vocab_size = 128
