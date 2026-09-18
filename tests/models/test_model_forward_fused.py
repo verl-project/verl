@@ -285,6 +285,115 @@ def test_output_processor_preserves_config_logger_payload(monkeypatch):
     assert logged["prefix"] == "input_and_logits"
 
 
+def test_output_processor_routes_topk_distillation_without_materializing_label_logprobs(monkeypatch):
+    hidden_states = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    weight = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+    teacher_ids = torch.tensor([[0, 2], [1, 2]])
+    teacher_logprobs = torch.log(torch.tensor([[0.6, 0.3], [0.5, 0.25]]))
+    student_logprobs = torch.log(torch.tensor([[0.5, 0.2], [0.4, 0.1]]))
+    seen = {}
+
+    def fake_linear_topk_log_probs(hidden, output_weight, topk_ids, temperature, group):
+        seen.update(
+            hidden=hidden,
+            weight=output_weight,
+            topk_ids=topk_ids,
+            temperature=temperature,
+            group=group,
+        )
+        return student_logprobs
+
+    def fail_linear_cross_entropy(*_args, **_kwargs):
+        raise AssertionError("pure top-k distillation must not invoke linear_cross_entropy")
+
+    monkeypatch.setattr(mff, "linear_topk_log_probs", fake_linear_topk_log_probs)
+    monkeypatch.setattr(mff, "linear_cross_entropy", fail_linear_cross_entropy)
+    monkeypatch.setattr(mff.parallel_state, "get_tensor_model_parallel_group", lambda: "tp-group")
+
+    output = mff.fused_output_processor(
+        hidden_states=hidden_states,
+        output_layer=SimpleNamespace(weight=weight),
+        output_weight=None,
+        labels=torch.tensor([1, 2]),
+        context=mff.FusedOutputProcessorContext(
+            temperature=0.8,
+            teacher_topk_ids=teacher_ids,
+            teacher_topk_log_probs=teacher_logprobs,
+            distillation_only=True,
+        ),
+        config=SimpleNamespace(sequence_parallel=False),
+    )
+
+    expected_loss = (teacher_logprobs.exp() * (teacher_logprobs - student_logprobs)).sum(dim=-1)
+    torch.testing.assert_close(output.distillation_losses, expected_loss)
+    torch.testing.assert_close(output.student_mass, student_logprobs.exp().sum(dim=-1))
+    torch.testing.assert_close(output.teacher_mass, teacher_logprobs.exp().sum(dim=-1))
+    assert getattr(output, "log_probs", None) is None
+    assert seen["hidden"] is hidden_states
+    assert seen["weight"] is weight
+    assert seen["topk_ids"] is teacher_ids
+    assert seen["temperature"] == pytest.approx(0.8)
+    assert seen["group"] == "tp-group"
+
+
+def test_engine_hook_packs_and_passes_teacher_topk_context(monkeypatch):
+    input_ids = torch.tensor([[1, 2, 3]])
+    labels = torch.tensor([[1, 2, 3]])
+    teacher_ids = torch.tensor([[[2, 3], [3, 4], [4, 5]]])
+    teacher_logprobs = torch.tensor([[[-0.1, -0.2], [-0.3, -0.4], [-0.5, -0.6]]])
+    packed_teacher_ids = teacher_ids.clone()
+    packed_teacher_logprobs = teacher_logprobs.clone()
+    preprocess_calls = []
+
+    def fake_preprocess(value, **kwargs):
+        preprocess_calls.append((value, kwargs))
+        if value is teacher_ids:
+            return packed_teacher_ids, "packed", None
+        if value is teacher_logprobs:
+            return packed_teacher_logprobs, "packed", None
+        return value, "packed", None
+
+    monkeypatch.setattr(mff, "preprocess_thd_engine", fake_preprocess)
+
+    class Model:
+        pre_process = True
+        post_process = False
+        config = SimpleNamespace(fp8=None, experimental_attention_variant=None)
+
+        def __init__(self):
+            setattr(self, mff._FUSED_FORWARD_MODE_ATTR, mff._HOOK_MODE)
+            self.kwargs = None
+
+        def __call__(self, **kwargs):
+            self.kwargs = kwargs
+            return SimpleNamespace()
+
+    model = Model()
+    mff.fused_forward_model_engine()(
+        model,
+        input_ids,
+        labels,
+        {},
+        1.0,
+        False,
+        0,
+        teacher_topk_ids=teacher_ids,
+        teacher_topk_log_probs=teacher_logprobs,
+        distillation_only=True,
+        log_prob_min_clamp=-10.0,
+    )
+
+    context = model.kwargs["output_processor_context"]
+    assert model.kwargs["output_processor"] is mff.fused_output_processor
+    torch.testing.assert_close(context.teacher_topk_ids, packed_teacher_ids)
+    torch.testing.assert_close(context.teacher_topk_log_probs, packed_teacher_logprobs)
+    assert context.distillation_only is True
+    assert context.log_prob_min_clamp == -10.0
+    teacher_calls = [kwargs for value, kwargs in preprocess_calls if value is teacher_ids or value is teacher_logprobs]
+    assert len(teacher_calls) == 2
+    assert all("need_roll" not in kwargs for kwargs in teacher_calls)
+
+
 @pytest.mark.parametrize(
     ("sequence_parallel", "use_tied_weight"),
     [(True, True), (False, False)],
