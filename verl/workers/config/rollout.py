@@ -277,6 +277,10 @@ class RolloutConfig(BaseConfig):
 
     def __post_init__(self):
         """Validate the rollout config"""
+        for key in ("n", "tensor_model_parallel_size", "data_parallel_size", "pipeline_model_parallel_size"):
+            value = getattr(self, key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"rollout.{key} must be a positive integer, got {value!r}")
         # Deprecation warning for mode field - only async mode is supported
         if self.mode == "sync":
             raise ValueError(

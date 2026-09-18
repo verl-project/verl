@@ -218,6 +218,10 @@ class ActorConfig(BaseConfig):
         ]
         if self.loss_agg_mode not in valid_loss_agg_modes:
             raise ValueError(f"Invalid loss_agg_mode: {self.loss_agg_mode}")
+        for key in ("ppo_mini_batch_size", "ppo_micro_batch_size", "ppo_micro_batch_size_per_gpu"):
+            value = getattr(self, key)
+            if isinstance(value, int) and not isinstance(value, bool) and value < 1:
+                raise ValueError(f"[actor] {key} must be a positive integer, got {value}")
 
     def validate(self, n_gpus: int, train_batch_size: int, model_config: dict = None):
         """Validate actor configuration with runtime parameters."""
