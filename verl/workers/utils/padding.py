@@ -64,7 +64,12 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
         else:  # (4, seq_len)
             valid_ids = curr_pos_ids[:, curr_mask]
         position_ids_list.append(valid_ids)
-    position_ids_nested = torch.nested.as_nested_tensor(position_ids_list, layout=torch.jagged)
+    # build with explicit ragged_idx semantics instead of as_nested_tensor, whose
+    # uniform-input quirk yields ragged@1 for equal-length 2D (4, L) mRoPE samples —
+    # the canonical layout for 3D position_ids is ragged_idx=2 (the RL-path counterpart
+    # of upstream PR #5689's SFT collator fix). 1D elements keep the default
+    # (ragged_idx == dim == 1) layout.
+    position_ids_nested = tu.nested_tensor_from_tensor_list(position_ids_list, ragged_idx=position_ids_list[0].dim())
 
     data["input_ids"] = input_ids_nested
     data["position_ids"] = position_ids_nested

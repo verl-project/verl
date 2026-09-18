@@ -214,7 +214,14 @@ def concat_nested_tensors(tensors: list[torch.Tensor]) -> torch.Tensor:
         unbind_tensor = tensor.unbind(0)
         unbind_tensors.extend(list(unbind_tensor))
 
-    ragged_idx = getattr(tensors[0], "_ragged_idx", tensors[0].dim() - 1)
+    # Mixed layouts (e.g. a uniform-quirk ragged_idx=1 tensor mixed with a canonical
+    # ragged_idx=2 one) would silently produce a wrong rebuild — fail fast instead.
+    ragged_idxs = [getattr(t, "_ragged_idx", t.dim() - 1) for t in tensors]
+    assert all(r == ragged_idxs[0] for r in ragged_idxs), (
+        f"concat_nested_tensors: inconsistent ragged_idx across inputs: {ragged_idxs}. "
+        "Normalize all inputs to the same layout first (e.g. ragged_idx=2 for 3D position_ids)."
+    )
+    ragged_idx = ragged_idxs[0]
     return nested_tensor_from_tensor_list(unbind_tensors, ragged_idx=ragged_idx)
 
 
@@ -492,6 +499,7 @@ def index_select_tensor_dict(batch: TensorDict, indices: torch.Tensor | list[int
             if isinstance(tensor, torch.Tensor) and not tensor.is_nested:
                 data_dict[key] = tensor[indices]
             elif isinstance(tensor, torch.Tensor) and tensor.is_nested:
+                assert_nested_layout_consistency(tensor, key=key)
                 tensor_lst = tensor.unbind()  # for performance
                 selected_tensors = [tensor_lst[idx] for idx in indices]
                 data_dict[key] = nested_tensor_from_tensor_list(
@@ -907,12 +915,172 @@ def contiguous(data: TensorDict) -> TensorDict:
     return get_tensordict(tensor_dict=tensor_dict, non_tensor_dict=non_tensor_dict)
 
 
+# Plausible upper bound for the mRoPE component count: current models use 3~4 (GLM-V /
+# Qwen3.5); headroom to 8. Used ONLY as the tie-break for the square-overlap corner
+# (values.shape[0] == values.shape[1]) where both layout signatures match simultaneously:
+# a dim-0 size > 8 cannot be a component count, so the tensor must be B*C coordinate-packed.
+_MAX_PLAUSIBLE_COMPONENTS = 8
+
+
+def _coordinate_packed_pattern(values: torch.Tensor, offsets: torch.Tensor) -> tuple[bool, int]:
+    """Match the coordinate-packed (uniform-input quirk) signature, component-count agnostic.
+
+    Coordinate-packed layout: values=(B*C, L) with a constant offsets step C and
+    offsets[-1] == values.shape[0], i.e. offsets describe the dim-0 axis. Returns
+    (matched, batch) with batch == B on a match, (False, 0) otherwise.
+    """
+    batch = offsets.numel() - 1
+    if values.dim() != 2 or batch <= 0 or values.shape[0] % batch != 0:
+        return False, 0
+    if int(offsets[-1]) != int(values.shape[0]):
+        return False, 0
+    if not bool((offsets.diff() == values.shape[0] // batch).all()):
+        return False, 0
+    return True, batch
+
+
+def _repack_3d_position_ids_as_ragged2(samples: list[torch.Tensor]) -> torch.Tensor:
+    """Rebuild per-sample (num_components, L_i) position_ids into the canonical ragged_idx=2 layout."""
+    return nested_tensor_from_tensor_list(samples, ragged_idx=2)
+
+
+def normalize_3d_position_ids(data: TensorDict) -> None:
+    """Normalize 3D (mRoPE) position_ids to the canonical ragged_idx=2 layout. Idempotent.
+
+    Canonical layout: (B, num_components, j) with lengths=[L_i] and values=(num_components, sum(L_i)),
+    i.e. ragged_idx=2. Three non-canonical inputs are repaired:
+
+    - Branch A (cf. upstream PR #7767): sequence-packed data whose ragged-dim metadata was reset
+      to 1 after serialization (observed with torch>=2.11 / tensordict 0.10). values=(C, sum L_i)
+      and offsets step=L_i (variable). Signature (component-count agnostic): offsets[-1] ==
+      values.shape[1] with positive steps, i.e. offsets describe the dim-1 axis. Replaces the
+      `num_components in (3, 4)` heuristic of #7767, which crashed for C=5/6 inputs.
+    - Branch B (the split_with_sizes crash): uniform samples hit torch's as_nested_tensor quirk —
+      the coordinate dim (e.g. 4) was taken as the ragged dim, values=(B*4, L) and offsets step
+      constant == 4. Signature (component-count agnostic, see _coordinate_packed_pattern):
+      offsets[-1] == values.shape[0] with constant steps, i.e. offsets describe the dim-0 axis.
+    - Branch B' (blind re-tag, the old workaround's output): the same coordinate-packed NT after
+      _ragged_idx was blindly overwritten to 2 — metadata canonical but self-inconsistent
+      (offsets[-1]=B*4 != values.shape[1]=L). Rebuilt by chunking the coordinate dim. The square
+      corner (L == B*C, where offsets[-1] == values.shape[1] holds as well and the mistag is
+      invisible to the self-consistency check) is pinned down by
+      values.shape[0] > _MAX_PLAUSIBLE_COMPONENTS.
+
+    The two signatures are mutually exclusive except on squares (values.shape[0] ==
+    values.shape[1]); there the tie-break is _MAX_PLAUSIBLE_COMPONENTS: a dim-0 size > 8 cannot
+    be an mRoPE component count, so the tensor must be coordinate-packed.
+
+    Blindly overwriting _ragged_idx (the old workaround) made a self-consistent ragged_idx=1 tensor
+    internally inconsistent and crashed unbind() downstream; rebuilding keeps values/offsets/lengths
+    coherent. Canonical tensors are left untouched (zero cost).
+    """
+    if "position_ids" not in data.keys():
+        return
+    pos = data["position_ids"]
+    if not (torch.is_tensor(pos) and pos.is_nested and pos.dim() == 3):
+        return
+
+    values = getattr(pos, "_values", None)
+    offsets = getattr(pos, "_offsets", None)
+
+    ragged_idx = getattr(pos, "_ragged_idx", None)
+    if ragged_idx == 2:
+        # Canonical metadata. Leave genuinely canonical tensors untouched (zero cost),
+        # but verify internal consistency: a coordinate-packed NT blindly re-tagged
+        # _ragged_idx=2 by the old workaround (values=(B*C, L), offsets step C) is
+        # self-inconsistent (sum(lengths)=B*C != values.shape[1]=L) and must be
+        # rebuilt, not passed through.
+        if values is None or offsets is None or offsets.numel() < 2:
+            return  # no metadata to reason about; defer to downstream checks
+        coord_match, batch = _coordinate_packed_pattern(values, offsets)
+        if int(offsets[-1]) == int(values.shape[1]):
+            # Self-consistent canonical metadata — except one corner: a SQUARE
+            # coordinate-packed NT blindly re-tagged by the old workaround
+            # (offsets[-1] == B*C coincides with values.shape[1] == L) passes the
+            # check above yet is still mistagged. A dim-0 size larger than
+            # _MAX_PLAUSIBLE_COMPONENTS cannot be a component count and pins that
+            # corner down; canonical square layouts with C <= 8 stay untouched.
+            if not (coord_match and values.shape[0] > _MAX_PLAUSIBLE_COMPONENTS):
+                return  # genuinely canonical layout
+            # square coordinate mistag -> fall through to the chunk rebuild below
+        if coord_match:
+            # coordinate-packed with stale ragged_idx: values rows are B groups of C
+            # components; rebuild per-sample tensors by chunking the coordinate dim.
+            data["position_ids"] = _repack_3d_position_ids_as_ragged2(list(values.chunk(batch, dim=0)))
+        # anything else inconsistent is left for assert_nested_layout_consistency
+        # (fail-fast at index_select) — do not guess further
+        return
+
+    if values is None or offsets is None or offsets.numel() < 2:
+        # No jagged metadata to reason about; fall back to repacking via unbind.
+        data["position_ids"] = _repack_3d_position_ids_as_ragged2(list(pos.unbind(dim=0)))
+        return
+
+    steps = offsets.diff()
+
+    # Branch B (coordinate-packed quirk, any component count): offsets describe the dim-0
+    # axis with constant step C. A dim-0 size > _MAX_PLAUSIBLE_COMPONENTS cannot be a
+    # component count, so the tensor is unambiguously B*C-packed — this also covers the
+    # square corner where both signatures match (e.g. values=(512,512) with steps=4).
+    coord_match, batch = _coordinate_packed_pattern(values, offsets)
+    if coord_match and values.shape[0] > _MAX_PLAUSIBLE_COMPONENTS:
+        data["position_ids"] = _repack_3d_position_ids_as_ragged2(list(values.chunk(batch, dim=0)))
+        return
+
+    # Branch A (sequence-packed stale metadata, any component count): offsets describe the
+    # dim-1 axis (offsets[-1] == values.shape[1], variable positive steps = per-sample L_i).
+    if values.dim() == 2 and int(offsets[-1]) == int(values.shape[1]) and bool((steps > 0).all()):
+        samples = [values[:, offsets[i] : offsets[i + 1]] for i in range(offsets.numel() - 1)]
+        data["position_ids"] = _repack_3d_position_ids_as_ragged2(samples)
+        return
+
+    if coord_match:
+        # Small dim-0 coordinate-packed (B=1 / small non-square corner): same rebuild as
+        # the unbind fall-through below, but without relying on torch's split.
+        data["position_ids"] = _repack_3d_position_ids_as_ragged2(list(values.chunk(batch, dim=0)))
+        return
+
+    # Unknown layout: keep the legacy unbind fall-through (inconsistent metadata fails
+    # loudly downstream) rather than guessing.
+    data["position_ids"] = _repack_3d_position_ids_as_ragged2(list(pos.unbind(dim=0)))
+
+
 def maybe_fix_3d_position_ids(data: TensorDict):
-    # note for tensordict with pickle/unpickle. nested tensor in tensordict after consolidate and pickle/unpickle
-    # will incur indexing error for ragged tensor. This only happens when using 3D position ids in VLMs.
-    # This is likely a bug in tensordict. As a workaround, we manually set _ragged_index.
-    if "position_ids" in data.keys() and data["position_ids"].dim() == 3 and data["position_ids"].is_nested:
-        data["position_ids"]._ragged_idx = 2
+    """Deprecated alias kept for backward compatibility; see normalize_3d_position_ids.
+
+    The old implementation blindly set _ragged_idx=2 without rebuilding values/offsets, which
+    crashed unbind() on coordinate-packed (uniform-sample) batches — the split_with_sizes
+    failure. All callers should prefer normalize_3d_position_ids.
+    """
+    normalize_3d_position_ids(data)
+
+
+def assert_nested_layout_consistency(tensor: torch.Tensor, key: str = "<unnamed>") -> None:
+    """Fail fast on internally inconsistent jagged layouts, with actionable diagnostics.
+
+    unbind()/indexing on a jagged NT reduces to torch.split(values, lengths, dim=ragged_idx-1),
+    which requires sum(lengths) == values.shape[ragged_idx-1]. Checking that here converts an
+    opaque low-level error into one that names the offending key and the likely cause.
+    """
+    if not (torch.is_tensor(tensor) and tensor.is_nested):
+        return
+    values = getattr(tensor, "_values", None)
+    offsets = getattr(tensor, "_offsets", None)
+    if values is None or offsets is None or offsets.numel() < 2:
+        return  # layout metadata unavailable; defer to torch
+    ragged_idx = getattr(tensor, "_ragged_idx", tensor.dim() - 1)
+    if not (1 <= ragged_idx <= values.dim()):
+        return  # malformed ragged_idx; defer to torch
+    total = int(offsets[-1])
+    if total != int(values.shape[ragged_idx - 1]):
+        steps = offsets.diff().tolist()
+        raise RuntimeError(
+            f"Inconsistent nested layout for key='{key}': ragged_idx={ragged_idx}, "
+            f"sum(lengths)={total}, values.shape={tuple(values.shape)}, offsets_steps(head)={steps[:4]}. "
+            f"The tensor was likely built by as_nested_tensor on uniform inputs (torch quirk) or had "
+            f"_ragged_idx overwritten without rebuilding; repair with normalize_3d_position_ids() "
+            f"before indexing."
+        )
 
 
 def list_of_dict_to_tensordict(list_of_dicts: list[dict[str, Any]]) -> TensorDict:
@@ -929,6 +1097,20 @@ def list_of_dict_to_tensordict(list_of_dicts: list[dict[str, Any]]) -> TensorDic
     keys = list_of_dicts[0].keys()
     dict_of_lists = {key: [d[key] for d in list_of_dicts] for key in keys}
     batch_size = len(list_of_dicts)
+
+    for key, val_list in dict_of_lists.items():
+        nested_flags = [isinstance(item, torch.Tensor) and item.is_nested for item in val_list]
+        if any(nested_flags):
+            # Per-sample collate input must be dense per-sample tensors; a nested
+            # tensor here (fully or partially) means the sample was already batched
+            # — torch.stack would hit the NT stack dispatch schema error, and the
+            # batched semantics are undefined either way. Fail fast with context.
+            raise AssertionError(
+                f"list_of_dict_to_tensordict: key '{key}' contains nested tensor element(s) "
+                f"({sum(nested_flags)}/{len(nested_flags)} nested); collating already-batched "
+                f"nested tensors is undefined behavior. Pass per-sample dense tensors and let "
+                f"this function build the batch layout."
+            )
 
     final_data = {
         key: (
