@@ -94,10 +94,10 @@ env:
 jobs:
   e2e_ppo_trainer_fsdp_vllm_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a2b3-8
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 90 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -130,7 +130,7 @@ jobs:
           pip list
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Prepare GSM8K dataset
         run: |
           python examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/.cache/datasets/openai/gsm8k
@@ -178,10 +178,10 @@ jobs:
 
   e2e_ppo_trainer_fsdp-qwen3_5-2b_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a2b3-8
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
@@ -216,7 +216,7 @@ jobs:
           pip list
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       # Geo3k
       - name: Prepare GEO3K dataset
         run: |

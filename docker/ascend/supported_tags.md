@@ -10,8 +10,9 @@ A full list of tags that are supported with Verl on ascend.
 
 | Device | CANN Base Image | Inference Backend | Image Tag | Dockerfile |
 |--------|-----------------|-------------------|-----------|------------|
-| 910b | 9.0.0 | vLLM | `latest-vllm-910b-ubuntu` | [Dockerfile.ascend_9.1.0_a2](https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a2) |
-| A3 | 9.0.0 | vLLM | `latest-vllm-a3-ubuntu` | [Dockerfile.ascend_9.0.1_a3](https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_9.0.1_a3) |
+| 910b | 9.1.0 | vLLM | `latest-vllm-910b-ubuntu` | [Dockerfile.ascend_9.1.0_a2](https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a2) |
+| A3 | 9.1.0 | vLLM | `latest-vllm-a3-ubuntu` | [Dockerfile.ascend_9.0.1_a3](https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_9.0.1_a3) |
+| A5 | 9.1.0 | vLLM | `latest-vllm-950-ubuntu` | [Dockerfile.ascend_9.0.1_a5](https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_9.0.1_a5) |
 | 910b | 8.5.0 | SGLang | `latest-sglang-910b-ubuntu` | [Dockerfile.ascend.sglang_8.5.0_a2](https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a2) |
 | A3 | 8.5.0 | SGLang | `latest-sglang-a3-ubuntu` | [Dockerfile.ascend.sglang_8.5.0_a3](https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a3) |
 

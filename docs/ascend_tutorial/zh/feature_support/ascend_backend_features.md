@@ -349,3 +349,54 @@ actor_rollout_ref.actor.veomni.moe_implementation=fused
 - **MoE优化**：提供融合的MoE实现和Router Replay功能，提升MoE模型训练效率
 - **算子优化**：支持多种attention和MLP算子实现，可根据硬件选择最优实现
 - **灵活部署**：支持NVIDIA GPU和华为Ascend NPU，具有良好的跨平台兼容性
+
+---
+
+## Checkpoint Engine 后端
+
+Checkpoint Engine 是 verl 用于在训练侧与推理侧之间同步权重的统一抽象层，主要应用于 v1 trainer 的 separate async（训练/推理分离）等 off-policy 场景，该场景要求配置非 `naive` 的后端。当前昇腾 NPU 支持 `nccl`（自动识别为 HCCL）与 `mooncake` 两种后端。
+
+### 1. HCCL
+
+昇腾 NPU 上配置 `actor_rollout_ref.rollout.checkpoint_engine.backend=nccl` 时，verl 会自动识别并使用 HCCL 后端完成权重同步，无需额外修改配置。该后端基于 HCCL 集合通信，由训练侧将权重以 broadcast 方式发送至各 rollout worker。
+
+#### 参数特性支持
+
+| verl参数 | 简介|
+| --- | --- |
+| `actor_rollout_ref.rollout.checkpoint_engine.backend` |Checkpoint Engine 后端，NPU 上设置为 `nccl` 时自动识别为 HCCL 后端|
+| `actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes` |单次权重传输的桶大小（MB），默认值为2048。HCCL 采用双缓冲收发，NPU 显存开销为 2 倍桶大小；该值需大于模型中最大权重张量的内存占用，不足时可调大（如4096）|
+| `actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.nccl.group_name` |HCCL 进程组名称，默认值为default|
+| `actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.nccl.rebuild_group` |是否在每次权重更新时重建 HCCL 进程组，默认值为False|
+
+### 2. Mooncake
+
+昇腾 NPU 上同样支持配置 `actor_rollout_ref.rollout.checkpoint_engine.backend=mooncake`，基于 Mooncake Transfer Engine 以 p2p 方式同步权重。NPU 上需通过 engine_kwargs 将 device 指定为 npu，此时 Transfer Engine 使用 `ascend_direct` 传输协议。
+
+注意：Mooncake Transfer Engine 没有 Ascend 预编译包，需从源码编译安装，请参考 [transfer-engine: ascend direct](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/design/transfer-engine/ascend_direct_transport.md)。
+
+#### 参数特性支持
+
+| verl参数 | 简介|
+| --- | --- |
+| `actor_rollout_ref.rollout.checkpoint_engine.backend` |Checkpoint Engine 后端，设置为 `mooncake`|
+| `actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes` |单次权重传输的桶大小（MB），默认值为2048|
+| `actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.mooncake.device` |Checkpoint Engine 运行设备，NPU 上需设置为 `npu`|
+| `actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.mooncake.device_name` |Mooncake 设备名过滤，默认值为空|
+
+### 使用示例
+
+v1 trainer separate async 场景下在 NPU 的典型配置如下：
+
+```bash
+# 设置 v1 trainer separate async 模式
+trainer.use_v1=True
+trainer.v1.trainer_mode=separate_async
+
+# 方式一：nccl 后端（NPU 上自动识别为 HCCL）
+actor_rollout_ref.rollout.checkpoint_engine.backend=nccl
+
+# 方式二：mooncake 后端（NPU 上需指定 device 为 npu）
+actor_rollout_ref.rollout.checkpoint_engine.backend=mooncake
++actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.mooncake.device=npu
+```

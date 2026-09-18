@@ -21,8 +21,12 @@ import torch
 import torch.distributed
 
 from verl.protocol import DataProto, all_gather_data_proto
-from verl.utils.device import get_device_name
+from verl.utils.device import get_device_name, is_npu_available
 from verl.utils.distributed import initialize_global_process_group
+
+if is_npu_available:
+    # Apply Ascend patches before either test imports Megatron-Core.
+    import megatron_adaptor  # noqa: F401
 
 
 def test_all_gather_data_proto():

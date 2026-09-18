@@ -118,6 +118,7 @@ class AsyncTeacherLLMServerManager:
         sequence_ids: list[int],
         multi_modal_data: Optional[dict[str, Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        mm_processor_output: Optional[list[dict[str, Any]]] = None,
         routing_key: Optional[str] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute teacher log probabilities for a single unpadded sequence."""
@@ -132,6 +133,7 @@ class AsyncTeacherLLMServerManager:
             image_data=multi_modal_data.get("images"),
             video_data=multi_modal_data.get("videos"),
             audio_data=multi_modal_data.get("audios"),
+            mm_processor_output=mm_processor_output,
             mm_processor_kwargs=mm_processor_kwargs,
         )
         # Shapes: # S, (1 or K), where S is the response length, K is either 1 or topk depending on
