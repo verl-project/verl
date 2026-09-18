@@ -16,6 +16,8 @@ import sys
 import types
 from unittest.mock import MagicMock, call, patch
 
+import pytest
+
 from verl.utils.tracking import DapoFilteredRewardTableLogger, Tracking, ValidationGenerationsLogger
 
 
@@ -30,15 +32,16 @@ def test_tracking_finish_finalizes_wandb_once():
     tracking.logger["wandb"].finish.assert_called_once_with(exit_code=1)
 
 
-def test_tracking_finish_finalizes_mlflow_once():
+@pytest.mark.parametrize("exit_code", [0, 1, 130])
+def test_tracking_finish_finalizes_mlflow_once(exit_code):
     tracking = Tracking.__new__(Tracking)
     tracking.logger = {"mlflow": MagicMock()}
     tracking._finished = False
 
-    tracking.finish()
+    tracking.finish(exit_code=exit_code)
     tracking.finish()
 
-    tracking.logger["mlflow"].finish.assert_called_once()
+    tracking.logger["mlflow"].finish.assert_called_once_with(exit_code=exit_code)
 
 
 def test_dapo_filtered_reward_table_logs_incremental_rows():
