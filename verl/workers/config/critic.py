@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -29,7 +30,7 @@ from .engine import (
     VeOmniEngineConfig,
 )
 from .model import HFModelConfig
-from .optimizer import OptimizerConfig
+from .optimizer import OptimizerConfig, validate_fsdp_clip_grad
 
 __all__ = [
     "CriticConfig",
@@ -194,7 +195,7 @@ class FSDPCriticConfig(CriticConfig):
         forward_micro_batch_size (int): Forward-only batch size during inference (global).
         forward_micro_batch_size_per_gpu (int): Forward-only batch size during inference (per GPU).
         ulysses_sequence_parallel_size (int): [DEPRECATED] Ulysses sequence parallel size for long sequences.
-        grad_clip (float): Gradient clipping for critic updates.
+        grad_clip (Optional[float]): Deprecated; use ``optim.clip_grad``. If set, it is applied to ``optim.clip_grad``.
     """
 
     _mutable_fields = CriticConfig._mutable_fields | {
@@ -207,11 +208,20 @@ class FSDPCriticConfig(CriticConfig):
     forward_micro_batch_size: int = 1
     forward_micro_batch_size_per_gpu: int = 1
     ulysses_sequence_parallel_size: int = 1
-    grad_clip: float = 1.0
+    grad_clip: Optional[float] = None
 
     def __post_init__(self):
         """Validate FSDP critic configuration parameters."""
         super().__post_init__()
+        if self.grad_clip is not None:
+            warnings.warn(
+                "`critic.grad_clip` is deprecated and is not read by the engine; use `critic.optim.clip_grad`. "
+                "Applying the value to optim.clip_grad.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            validate_fsdp_clip_grad(self.grad_clip)
+            self.optim.clip_grad = self.grad_clip
         self.engine = self.fsdp
         # Sync strategy to engine config so engine_workers can pick the right FSDP version.
         # EngineConfig.strategy defaults to None, so without this, engine_workers.py always
@@ -294,11 +304,20 @@ class VeOmniCriticConfig(CriticConfig):
 
     strategy: str = "veomni"
     veomni: VeOmniEngineConfig = field(default_factory=VeOmniEngineConfig)
-    grad_clip: float = 1.0
+    grad_clip: Optional[float] = None
 
     def __post_init__(self):
         """Set engine to VeOmni config."""
         super().__post_init__()
+        if self.grad_clip is not None:
+            warnings.warn(
+                "`critic.grad_clip` is deprecated and is not read by the engine; use `critic.optim.clip_grad`. "
+                "Applying the value to optim.clip_grad.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            validate_fsdp_clip_grad(self.grad_clip)
+            self.optim.clip_grad = self.grad_clip
         self.engine = self.veomni
 
     def validate(self, n_gpus: int, train_batch_size: int):
