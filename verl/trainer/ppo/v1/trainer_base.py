@@ -1851,6 +1851,7 @@ class PPOTrainer(ABC):
             "rm_scores",
             "token_level_rewards",
             "num_turns",
+            "extra_fields",
         ]
         moe_lb_metrics_interval = self.config.actor_rollout_ref.rollout.get("moe_load_balance_metrics_interval", 0)
         data = get_metric_data_with_optional_routed_experts(
@@ -1870,16 +1871,15 @@ class PPOTrainer(ABC):
         min_global_steps = np.array([tag["min_global_steps"] for tag in batch.tags], dtype=int)[non_padding_mask]
         max_global_steps = np.array([tag["max_global_steps"] for tag in batch.tags], dtype=int)[non_padding_mask]
 
-        # Only fetch speculative decoding stats when rollout writes them.
+        extra_fields = data.pop("extra_fields").tolist()
+        response_truncated = np.array(
+            [extra_field.get("response_truncated") for extra_field in extra_fields], dtype=object
+        )
+
+        # Only compute speculative decoding stats when rollout writes them.
         spec_drafts = spec_accepts = spec_verifies = None
         mtp_config = getattr(self.config.actor_rollout_ref.model, "mtp", None)
         if mtp_config is not None and mtp_config.enable and mtp_config.enable_rollout:
-            spec_data = tq.kv_batch_get(
-                keys=batch.keys,
-                partition_id=batch.partition_id,
-                select_fields=["extra_fields"],
-            )
-            extra_fields = spec_data.pop("extra_fields").tolist()
             # The rollout omits the spec_* stats when the backend does not report
             # per-request spec-decode stats; leave all three as None in that case.
             if extra_fields and all(
@@ -1895,7 +1895,11 @@ class PPOTrainer(ABC):
             data["token_level_rewards"] = data["rm_scores"]
         data["prompt_length"] = prompt_length.float()
         data["response_length"] = response_length.float()
-        batch = DataProto(batch=data, meta_info={"global_token_num": global_token_num})
+        batch = DataProto(
+            batch=data,
+            non_tensor_batch={"response_truncated": response_truncated},
+            meta_info={"global_token_num": global_token_num},
+        )
         metrics_batch = batch.select_idxs(non_padding_mask) if non_padding_mask.any() else batch
 
         # 2. compute metrics
