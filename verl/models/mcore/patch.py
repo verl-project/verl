@@ -669,3 +669,76 @@ def apply_patch_megatron_recomputation_backward():
         return (None, None) + grads
 
     rd.CheckpointFunction.backward = patch_backward
+
+
+def apply_patch_megatron_npu_p2p_shape():
+    """Patch P2P shape exchange on Ascend NPU to use `_p2p_ops` instead of `batch_isend_irecv`."""
+    import torch
+
+    from verl.utils.device import is_torch_npu_available
+
+    if not is_torch_npu_available():
+        return
+
+    from megatron.core.pipeline_parallel import p2p_communication
+
+    if not hasattr(p2p_communication, "P2PCommunicator"):
+        # Older Megatron exposes _communicate_shapes as a module-level function;
+        # this patch only targets the class-method API.
+        return
+
+    P2PCommunicator = p2p_communication.P2PCommunicator
+    _p2p_ops = p2p_communication._p2p_ops
+
+    def patched_communicate_shapes(self, tensor_send_next, tensor_send_prev, recv_prev, recv_next):
+        config = self.config
+        recv_prev_shape_tensor = None
+        recv_next_shape_tensor = None
+        send_prev_shape_tensor = None
+        send_next_shape_tensor = None
+
+        if recv_prev:
+            recv_prev_shape_tensor = torch.empty((3,), device=torch.cuda.current_device(), dtype=torch.int64)
+        if recv_next:
+            recv_next_shape_tensor = torch.empty((3,), device=torch.cuda.current_device(), dtype=torch.int64)
+        if tensor_send_prev is not None:
+            send_prev_shape_tensor = torch.tensor(
+                tensor_send_prev.size(), device=torch.cuda.current_device(), dtype=torch.int64
+            )
+        if tensor_send_next is not None:
+            send_next_shape_tensor = torch.tensor(
+                tensor_send_next.size(), device=torch.cuda.current_device(), dtype=torch.int64
+            )
+
+        if config.use_ring_exchange_p2p:
+            torch.distributed.ring_exchange(
+                tensor_send_prev=send_prev_shape_tensor,
+                tensor_recv_prev=recv_prev_shape_tensor,
+                tensor_send_next=send_next_shape_tensor,
+                tensor_recv_next=recv_next_shape_tensor,
+                group=self.pp_group,
+            )
+        else:
+            reqs = _p2p_ops(
+                tensor_send_prev=send_prev_shape_tensor,
+                tensor_recv_prev=recv_prev_shape_tensor,
+                tensor_send_next=send_next_shape_tensor,
+                tensor_recv_next=recv_next_shape_tensor,
+                group=self.pp_group,
+                prev_pipeline_rank=self.prev_rank,
+                next_pipeline_rank=self.next_rank,
+            )
+            for req in reqs.values():
+                req.wait()
+
+        recv_prev_shape = [0, 0, 0]
+        if recv_prev_shape_tensor is not None:
+            recv_prev_shape = recv_prev_shape_tensor.tolist()
+
+        recv_next_shape = [0, 0, 0]
+        if recv_next_shape_tensor is not None:
+            recv_next_shape = recv_next_shape_tensor.tolist()
+
+        return recv_prev_shape, recv_next_shape
+
+    P2PCommunicator._communicate_shapes = patched_communicate_shapes
