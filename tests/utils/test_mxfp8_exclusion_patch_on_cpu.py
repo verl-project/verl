@@ -19,7 +19,9 @@ quantized weights, or optional vLLM installation is needed for this suite.
 """
 
 import importlib.util
+import pickle
 import sys
+from contextlib import ExitStack
 from fnmatch import fnmatchcase
 from pathlib import Path
 from types import ModuleType
@@ -72,7 +74,10 @@ class _ModelOptBase:
 
 
 class _MxFp8Config(_ModelOptBase):
-    pass
+    @classmethod
+    def from_config(cls, config):
+        # Mimic upstream normalization: unknown HF keys are not kept on the config.
+        return cls(config.get("ignored_layers", config.get("exclude_modules", [])))
 
 
 class _NvFp4Config(_ModelOptBase):
@@ -87,11 +92,15 @@ def patch_module(monkeypatch):
     quant_utils.is_layer_skipped = _is_layer_skipped
     monkeypatch.setitem(sys.modules, modelopt.__name__, modelopt)
     monkeypatch.setitem(sys.modules, quant_utils.__name__, quant_utils)
-    return _load_patch()
+    module = _load_patch()
+    with ExitStack() as stack:
+        for patcher in module.build_mxfp8_exclusion_patchers():
+            stack.enter_context(patcher)
+        yield module
 
 
 def _opt_in(patch_module, cfg):
-    return patch_module.apply_mxfp8_exclusion_patch(
+    return patch_module._mark_generated_config(
         cfg,
         hf_quant_config={"quant_method": "mxfp8", patch_module.VERL_EXACT_MXFP8_EXCLUSIONS: True},
     )
@@ -128,9 +137,9 @@ def test_instance_isolation_idempotence_and_checkpoint_compatibility(patch_modul
     assert _opt_in(patch_module, generated)
     installed = generated.is_layer_excluded
     assert not _opt_in(patch_module, generated)
-    assert generated.is_layer_excluded is installed
+    assert generated.is_layer_excluded.__func__ is installed.__func__
     assert _ModelOptBase.is_layer_excluded is base_method
-    assert _MxFp8Config.is_layer_excluded is base_method
+    assert _MxFp8Config.is_layer_excluded is not base_method
     assert checkpoint.is_layer_excluded("mlp.gate_up_proj")
     assert nvfp4.is_layer_excluded("mlp.gate_up_proj")
     assert _MxFp8Config(["mlp.gate"]).is_layer_excluded("mlp.gate_up_proj")
@@ -141,7 +150,7 @@ def test_instance_isolation_idempotence_and_checkpoint_compatibility(patch_modul
 def test_unmarked_configs_are_noops_without_importing_vllm(marker):
     module = _load_patch()
     # Passing a plain object proves no vLLM type/method inspection is needed.
-    assert not module.apply_mxfp8_exclusion_patch(
+    assert not module._mark_generated_config(
         object(), hf_quant_config={"quant_method": "mxfp8", module.VERL_EXACT_MXFP8_EXCLUSIONS: marker}
     )
 
@@ -150,7 +159,7 @@ def test_unmarked_configs_are_noops_without_importing_vllm(marker):
 def test_marked_other_formats_are_rejected_without_mutation(patch_module, method):
     cfg = _MxFp8Config([])
     with pytest.raises(ValueError, match="quant_method"):
-        patch_module.apply_mxfp8_exclusion_patch(
+        patch_module._mark_generated_config(
             cfg, hf_quant_config={"quant_method": method, patch_module.VERL_EXACT_MXFP8_EXCLUSIONS: True}
         )
     assert "is_layer_excluded" not in vars(cfg)
@@ -244,3 +253,101 @@ def test_empty_and_updated_config_are_read_live(patch_module):
     cfg.exclude_modules = ["mlp.gate"]
     assert cfg.is_layer_excluded("mlp.gate")
     assert not cfg.is_layer_excluded("mlp.gate_up_proj")
+
+
+def test_from_config_carries_opt_in_and_preserves_unmarked_checkpoint(patch_module):
+    raw = {
+        "quant_method": "mxfp8",
+        "ignored_layers": ["mlp.gate"],
+        patch_module.VERL_EXACT_MXFP8_EXCLUSIONS: True,
+    }
+    generated = _MxFp8Config.from_config(raw)
+    assert getattr(generated, patch_module.VERL_EXACT_MXFP8_EXCLUSIONS) is True
+    assert generated.is_layer_excluded("mlp.gate")
+    assert not generated.is_layer_excluded("mlp.gate_up_proj")
+    assert "is_layer_excluded" not in vars(generated)
+    checkpoint = _MxFp8Config.from_config({"quant_method": "mxfp8", "ignored_layers": ["mlp.gate"]})
+    assert checkpoint.is_layer_excluded("mlp.gate_up_proj")
+    assert not hasattr(checkpoint, patch_module.VERL_EXACT_MXFP8_EXCLUSIONS)
+
+
+def test_opt_in_survives_serialization_without_bound_method(patch_module):
+    cfg = _MxFp8Config.from_config(
+        {
+            "quant_method": "mxfp8",
+            "ignored_layers": ["mlp.gate"],
+            patch_module.VERL_EXACT_MXFP8_EXCLUSIONS: True,
+        }
+    )
+    restored = pickle.loads(pickle.dumps(cfg))
+    assert getattr(restored, patch_module.VERL_EXACT_MXFP8_EXCLUSIONS) is True
+    assert "is_layer_excluded" not in vars(restored)
+    assert not restored.is_layer_excluded("mlp.gate_up_proj")
+
+
+def test_from_config_preserves_subclass_binding(patch_module):
+    class ChildConfig(_MxFp8Config):
+        pass
+
+    parsed = ChildConfig.from_config({"quant_method": "mxfp8", "ignored_layers": []})
+    assert type(parsed) is ChildConfig
+
+
+def test_marked_wrong_schema_is_rejected_by_parser(patch_module):
+    with pytest.raises(ValueError, match="quant_method"):
+        _MxFp8Config.from_config({"quant_method": "modelopt", patch_module.VERL_EXACT_MXFP8_EXCLUSIONS: True})
+
+
+def test_patch_stop_restores_original_class_descriptors(patch_module):
+    parser = _MxFp8Config.__dict__["from_config"]
+    matcher = _MxFp8Config.__dict__["is_layer_excluded"]
+    with ExitStack() as stack:
+        for patcher in patch_module.build_mxfp8_exclusion_patchers():
+            stack.enter_context(patcher)
+        assert _MxFp8Config.__dict__["from_config"] is not parser
+    assert _MxFp8Config.__dict__["from_config"] is parser
+    assert _MxFp8Config.__dict__["is_layer_excluded"] is matcher
+
+
+def test_unmarked_configs_delegate_to_original_matcher(patch_module, monkeypatch):
+    original = _MxFp8Config.is_layer_excluded
+    calls = []
+
+    def spy(self, prefix):
+        calls.append(prefix)
+        return original(self, prefix)
+
+    monkeypatch.setattr(_MxFp8Config, "is_layer_excluded", spy)
+    with ExitStack() as stack:
+        for patcher in patch_module.build_mxfp8_exclusion_patchers():
+            stack.enter_context(patcher)
+        cfg = _MxFp8Config.from_config({"ignored_layers": ["mlp.gate"]})
+        assert cfg.is_layer_excluded("mlp.gate_up_proj")
+        assert calls == ["mlp.gate_up_proj"]
+
+
+def test_common_registry_includes_parser_and_matcher(patch_module, monkeypatch):
+    from packaging.version import Version
+
+    fp8 = ModuleType("vllm.model_executor.layers.quantization.fp8")
+
+    class Fp8Method:
+        def process_weights_after_loading(self, layer):
+            pass
+
+    fp8.Fp8LinearMethod = Fp8Method
+    fp8.Fp8MoEMethod = Fp8Method
+    monkeypatch.setitem(sys.modules, fp8.__name__, fp8)
+    monkeypatch.setitem(sys.modules, "verl.utils.vllm.mxfp8_exclusion_patch", patch_module)
+    path = Path(__file__).parents[2] / "verl/utils/vllm/vllm_fp8_utils.py"
+    spec = importlib.util.spec_from_file_location("fp8_patch_registry_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    patchers = module.build_fp8_method_patchers(Version("0.24.0"))
+    assert len(patchers) == 4
+    assert [p.attribute for p in patchers[-2:]] == ["from_config", "is_layer_excluded"]
+    assert all(p.getter() is _MxFp8Config for p in patchers[-2:])
+    assert len(module.build_fp8_method_patchers(Version("0.19.0"))) == 2
+    # An older vLLM without ModelOpt MXFP8 still gets its normal two FP8 patches.
+    monkeypatch.delattr(sys.modules["vllm.model_executor.layers.quantization.modelopt"], "ModelOptMxFp8Config")
+    assert len(module.build_fp8_method_patchers(Version("0.24.0"))) == 2
