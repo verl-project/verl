@@ -7,7 +7,7 @@ Last updated: 08/10/2026.
 镜像获取与公开镜像地址
 --------------------------
 
-昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3 镜像，基于 `Dockerfile <../../../../docker/ascend>`_ 构建，具体说明见 :ref:`Dockerfile构建镜像脚本清单 <ascend-dockerfile-list>`。
+昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3 镜像，基于 `Dockerfile <../../../../docker/ascend>`_ 构建，具体说明见 `Dockerfile构建镜像脚本清单 <#Dockerfile构建镜像脚本清单>`_。
 
 每日构建镜像名格式：latest-{推理后端}-{适用产品信息}-{操作系统}-{其他字段}
 
@@ -47,9 +47,6 @@ SGLang             v0.5.10
 sgl-kernel-npu     2026.02.01
 ================= ============
 
-
-
-.. _ascend-dockerfile-list:
 
 Dockerfile构建镜像脚本清单
 ---------------------------
