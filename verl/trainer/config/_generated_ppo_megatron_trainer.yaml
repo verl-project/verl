@@ -902,6 +902,15 @@ algorithm:
     metric: reward
     max_num_gen_batches: 0
     max_inflight_gen_batches: 1
+  reward_variance_filtering:
+    _target_: verl.trainer.config.RewardVarianceFilteringConfig
+    enable: false
+    strategy: top_p
+    top_p: 0.9
+    top_k: 1
+    include_zero: false
+    variance_ddof: 1
+    selection_eps: 0.01
   use_kl_in_reward: false
   kl_penalty: kl
   kl_ctrl:
