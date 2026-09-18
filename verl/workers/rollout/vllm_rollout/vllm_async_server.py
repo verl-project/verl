@@ -42,7 +42,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from verl.plugin.platform import get_platform
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_resource_name, get_visible_devices_keyword, is_torch_npu_available
-from verl.utils.net_utils import get_free_port, is_valid_ipv6_address
+from verl.utils.net_utils import get_free_port, get_ranked_port_base, is_valid_ipv6_address
 from verl.utils.profiler import (
     build_rollout_dist_profiler,
     build_vllm_profiler_args,
@@ -104,6 +104,7 @@ class vLLMHttpServer:
         cuda_visible_devices: str,
         disaggregation_role: str = "null",
         disaggregation_kv_transfer_config: Optional[dict] = None,
+        port_namespace: str = "rollout",
     ):
         """
         Args:
@@ -117,6 +118,8 @@ class vLLMHttpServer:
             cuda_visible_devices (str): cuda visible devices.
             disaggregation_role: PD role, or ``"null"`` for normal rollout.
             disaggregation_kv_transfer_config: vLLM KVTransferConfig dict for PD.
+            port_namespace (str): stable server namespace used to separate
+                vLLM internal port ranges.
         """
         if disaggregation_role not in ("null", "prefill", "decode"):
             raise ValueError(f"disaggregation_role must be 'null'|'prefill'|'decode', got {disaggregation_role!r}")
@@ -141,6 +144,14 @@ class vLLMHttpServer:
         # with EADDRINUSE; a stale socket from a crashed run trips the same
         # error on restart.
         os.environ["VERL_RAY_JOB_ID"] = ray.get_runtime_context().get_job_id()
+
+        # vLLM probes an available port and releases the socket before its
+        # workers bind the TCPStore. Separate each engine's scan starting point
+        # to avoid concurrent engines selecting the same port in that window.
+        port_namespace = f"{os.environ['VERL_RAY_JOB_ID']}:{port_namespace}"
+        port_rank = replica_rank * max(nnodes, 1) + node_rank
+        self._vllm_port_base = get_ranked_port_base(port_namespace, port_rank)
+        os.environ["VLLM_PORT"] = str(self._vllm_port_base)
 
         self.config = self._init_config(config)
         self.model_config = self._init_model_config(model_config)
@@ -1392,6 +1403,7 @@ class vLLMReplica(RolloutReplica):
                 gpus_per_node=gpus_per_replica_node,
                 nnodes=nnodes,
                 cuda_visible_devices=node_cuda_visible_devices,
+                port_namespace=name,
             )
             self.servers.append(server)
 
