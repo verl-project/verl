@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+from verl.trainer.ppo.ray_trainer import begin_spec_decode_counter_window, end_spec_decode_counter_window
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, register_trainer
 from verl.utils.debug import marked_timer
 from verl.workers.rollout.llm_server import FullyAsyncLLMServerClient
@@ -34,7 +36,11 @@ class PPOTrainerColocateAsync(PPOTrainer):
     def on_train_begin(self):
         self._add_async_warmup_batches(self.config.trainer.v1.colocate_async.num_warmup_batches)
 
+    def on_step_begin(self):
+        begin_spec_decode_counter_window(self)
+
     def on_step_end(self):
+        end_spec_decode_counter_window(self)
         with marked_timer("update_weights", self.timing_raw, color="red"):
             # wake up all replicas to update weights
             self.checkpoint_manager.update_weights(self.global_steps)
