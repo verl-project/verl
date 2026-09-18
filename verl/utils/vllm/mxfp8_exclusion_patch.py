@@ -12,22 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Opt-in, instance-local exclusion matching for verl-generated ModelOpt MXFP8 configs.
+"""Opt-in exclusion matching for verl-generated ModelOpt MXFP8 configs.
 
 vLLM 0.24's ModelOpt matcher retains a legacy substring fallback. A generated
 router exclusion ``mlp.gate`` consequently excludes the SwiGLU ``mlp.gate_up_proj``
 too. This helper removes that fallback only on an explicitly opted-in config
 instance; checkpoint configs and other quantization methods retain their behavior.
 
-This is standalone integration infrastructure, not CUDA MXFP8 rollout support.
-Call it in each model-building process before constructing layers. See
+The patchers are registered by ``build_fp8_method_patchers``. The MXFP8 feature
+branch must still mark its generated configs explicitly. See
 ``docs/low_precision/mxfp8_exclusion_patch.md`` for the integration contract.
 """
 
 from collections.abc import Mapping
 from fnmatch import fnmatchcase
-from types import MethodType
+from functools import wraps
 from typing import Any
+from unittest.mock import patch
 
 # Keep provenance in the HF config passed between processes, not a global env var.
 VERL_EXACT_MXFP8_EXCLUSIONS = "_verl_exact_mxfp8_exclusions"
@@ -52,19 +53,16 @@ def _is_layer_excluded(self, prefix: str) -> bool:
     return is_layer_skipped(prefix, [*excluded, *matched], mapping)
 
 
-def apply_mxfp8_exclusion_patch(quant_config: Any, *, hf_quant_config: Mapping[str, Any]) -> bool:
-    """Opt a single, explicitly marked ModelOpt MXFP8 config into strict matching.
+def _mark_generated_config(quant_config: Any, hf_quant_config: Mapping[str, Any]) -> bool:
+    """Validate and carry the raw HF opt-in onto its parsed config instance.
 
     The caller must mark ONLY configs it generates for online MXFP8 rollout with
     ``VERL_EXACT_MXFP8_EXCLUSIONS: True`` and pass that same raw HF quantization
     config here, alongside its parsed vLLM config. Do not mark user/checkpoint
     configs or infer provenance from the quantization class alone.
 
-    Install after configuration parsing/name mapping but BEFORE model layers are
-    built, separately in every model-building worker (also after deserialization).
-    ``get_quant_method`` and the global ModelOpt classes are left untouched.
-
-    Returns True when installed, False for an unmarked or already-patched config.
+    Only plain metadata is attached; no bound methods cross process boundaries.
+    Returns True when marked, False for an unmarked or already-marked config.
     Invalid explicit opt-ins raise rather than silently leaving the bug active.
     """
     if hf_quant_config.get(VERL_EXACT_MXFP8_EXCLUSIONS) is not True:
@@ -76,7 +74,7 @@ def apply_mxfp8_exclusion_patch(quant_config: Any, *, hf_quant_config: Mapping[s
 
     if not isinstance(quant_config, ModelOptMxFp8Config):
         raise TypeError("Exact MXFP8 exclusions require a parsed ModelOptMxFp8Config")
-    if getattr(getattr(quant_config, "is_layer_excluded", None), "__func__", None) is _is_layer_excluded:
+    if getattr(quant_config, VERL_EXACT_MXFP8_EXCLUSIONS, False) is True:
         return False
     if "is_layer_excluded" in vars(quant_config):
         raise RuntimeError("Refusing to replace an existing instance-specific exclusion matcher")
@@ -88,5 +86,46 @@ def apply_mxfp8_exclusion_patch(quant_config: Any, *, hf_quant_config: Mapping[s
     if not isinstance(excluded, list) or not all(isinstance(name, str) for name in excluded):
         raise TypeError("Unsupported ModelOpt MXFP8 config: exclude_modules must be a list of strings")
 
-    quant_config.is_layer_excluded = MethodType(_is_layer_excluded, quant_config)
+    setattr(quant_config, VERL_EXACT_MXFP8_EXCLUSIONS, True)
     return True
+
+
+def build_mxfp8_exclusion_patchers():
+    """Return unstarted, opt-in MXFP8 parser/matcher patches for the common registry.
+
+    Install before parsing HF configs in the driver, and before model construction
+    in every worker. An already-parsed config carries its boolean opt-in through
+    serialization; the worker only needs to install the class wrapper. Unmarked
+    configs delegate to the original matcher, including legacy substring rules.
+    """
+    try:
+        from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
+    except ImportError:
+        return []  # Older vLLM without ModelOpt MXFP8: leave its FP8 patches alone.
+
+    original_from_config = ModelOptMxFp8Config.from_config.__func__
+    original_is_layer_excluded = ModelOptMxFp8Config.is_layer_excluded
+
+    @wraps(original_from_config)
+    def from_config(cls, config):
+        # Read the marker before upstream normalizes the MiniMax-style dictionary.
+        marked = config.get(VERL_EXACT_MXFP8_EXCLUSIONS) is True
+        method = config.get("quant_method")
+        if marked and method != "mxfp8":
+            raise ValueError("Exact MXFP8 exclusions require a verl-generated quant_method='mxfp8' config")
+        parsed = original_from_config(cls, config)
+        if marked:
+            _mark_generated_config(parsed, {"quant_method": method, VERL_EXACT_MXFP8_EXCLUSIONS: True})
+        return parsed
+
+    @wraps(original_is_layer_excluded)
+    def is_layer_excluded(self, prefix):
+        if getattr(self, VERL_EXACT_MXFP8_EXCLUSIONS, False) is True:
+            return _is_layer_excluded(self, prefix)
+        return original_is_layer_excluded(self, prefix)
+
+    # Target the MXFP8 subclass, not ModelOptQuantConfigBase: NVFP4/FP8 are unchanged.
+    return [
+        patch.object(ModelOptMxFp8Config, "from_config", classmethod(from_config)),
+        patch.object(ModelOptMxFp8Config, "is_layer_excluded", is_layer_excluded),
+    ]
