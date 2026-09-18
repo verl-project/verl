@@ -1235,10 +1235,15 @@ class vLLMHttpServer:
                     # weight_scale, block size [1, 32]). Weight sync quantizes with
                     # TE's MXFP8Quantizer so rollout serves the training weight grid.
                     from verl.utils.mxfp8_quant import MXFP8_KEEP_HIGH_PRECISION_LAYERS
+                    from verl.utils.vllm.mxfp8_exclusion_patch import VERL_EXACT_MXFP8_EXCLUSIONS
 
                     quant_kwargs = {
                         "quant_method": "mxfp8",
                         "ignored_layers": all_mlp_gate_layers + list(MXFP8_KEEP_HIGH_PRECISION_LAYERS),
+                        # Opt this verl-generated config into strict (exact/glob) exclusion matching so
+                        # vLLM's legacy substring fallback does not exclude mlp.gate_up_proj via the
+                        # router's "mlp.gate". Only marked configs are affected (see mxfp8_exclusion_patch).
+                        VERL_EXACT_MXFP8_EXCLUSIONS: True,
                     }
 
                 hf_overrides["quantization_config"] = dict(quant_kwargs)
