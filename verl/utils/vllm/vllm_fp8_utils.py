@@ -433,10 +433,11 @@ def process_weights_after_loading_moe_for_vllm14(self, layer) -> None:
 
 
 def build_fp8_method_patchers(vllm_version):
-    """Patchers that make the FP8 quant methods survive a refit, not yet started.
+    """Unstarted FP8 refit and opt-in ModelOpt MXFP8 exclusion patchers.
 
     The caller owns starting and tracking them so all patch lifetime lives in
-    one place.
+    one place. Install before quant config parsing to retain the MXFP8 opt-in,
+    and in each worker before it constructs model layers.
     """
     linear_path = "vllm.model_executor.layers.quantization.fp8.Fp8LinearMethod.process_weights_after_loading"
     moe_path = "vllm.model_executor.layers.quantization.fp8.Fp8MoEMethod.process_weights_after_loading"
@@ -455,6 +456,13 @@ def build_fp8_method_patchers(vllm_version):
             patch(linear_path, wrap(Fp8LinearMethod.process_weights_after_loading)),
             patch(moe_path, wrap(Fp8MoEMethod.process_weights_after_loading)),
         ]
+        # ModelOpt's legacy substring exclusion can mistake a router's "gate"
+        # for the dense "gate_up_proj". Only explicitly marked, verl-generated
+        # MXFP8 configs use strict matching; checkpoint configs keep the original.
+        from verl.utils.vllm.mxfp8_exclusion_patch import build_mxfp8_exclusion_patchers
+
+        patchers.extend(build_mxfp8_exclusion_patchers())
+        return patchers
 
         # ModelOpt MXFP8 (CUDA): kernel post-processing swizzles weight_scale
         # (or dequantizes the weight to bf16 on the emulation backend), so a
