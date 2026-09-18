@@ -377,7 +377,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
     def switch_to_trainer(self):
         """Stop routing to Hybrid, abort partial requests, and return its GPU memory to training."""
         self.remove_replicas_from_balancer()
-        self.checkpoint_manager.abort_replicas()
+        self.checkpoint_manager.abort_replicas(reject_request=True)
         self.checkpoint_manager.sleep_replicas()
         self.current_mode = HybridEngineMode.TRAINER
 

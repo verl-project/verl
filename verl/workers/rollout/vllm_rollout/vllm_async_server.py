@@ -172,6 +172,8 @@ class vLLMHttpServer:
         self._admitting = 0
         self._resume_event = asyncio.Event()
         self._resume_event.set()
+        # Set by abort_all_requests(reject_request=True) when no resume is coming soon.
+        self._rejecting = False
 
         # used for http server
         self._server_address = ray.util.get_node_ip_address().strip("[]")
@@ -657,12 +659,9 @@ class vLLMHttpServer:
                     lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
                 )
 
-        # No await between the final gate check and the bump: on the actor's single event loop
-        # that keeps "gate closed and _admitting == 0" from being observed mid-admission.
-        while self._submission_paused:
-            logger.debug("parking request %s until weight sync completes", request_id)
-            await self._resume_event.wait()
-        self._admitting += 1
+        rejected = await self._park_until_admitted(request_id)
+        if rejected is not None:
+            return rejected
 
         with RLInsightLogger.trace_state("vllm_generate", state_lane_id=f"replica_{self.replica_rank}"):
             generator = self.engine.generate(
@@ -929,7 +928,7 @@ class vLLMHttpServer:
     async def wait_for_requests_to_drain(self):
         await self.engine.wait_for_requests_to_drain()
 
-    async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
+    async def abort_all_requests(self, reset_prefix_cache: bool = True, reject_request: bool = False) -> dict[str, Any]:
         """Abort all ongoing generation requests.
 
         On vLLM >= 0.12.0, uses AsyncLLM.pause_generation() to abort in-flight
@@ -938,6 +937,16 @@ class vLLMHttpServer:
         validation).
 
         On vLLM < 0.12.0, manually aborts each request and resets prefix cache.
+
+        Args:
+            reset_prefix_cache: Clear the prefix/mm caches along with the pause.
+            reject_request: Fail requests that arrive while the gate is closed
+                instead of parking them. Pass True when this server is leaving
+                the load balancer with no resume_generation coming soon (a hybrid
+                replica handed back to training); parked requests would otherwise
+                wait until the replica returns to rotation. The flag is re-declared
+                by every abort and cleared by the matching resume, so a subsequent
+                plain abort (e.g. the one inside a weight sync) restores parking.
 
         Returns:
             dict[str, Any]: Dictionary containing:
@@ -952,8 +961,10 @@ class vLLMHttpServer:
 
         try:
             # Close the gate first, then let admissions already past it land, so the pause
-            # below actually covers them.
+            # below actually covers them. Closing the gate and declaring how late arrivals
+            # are handled happen together, so no request can observe one without the other.
             self._submission_paused = True
+            self._rejecting = reject_request
             self._resume_event.clear()
             deadline = time.monotonic() + _GATE_BARRIER_TIMEOUT_S
             while self._admitting > 0:
@@ -999,6 +1010,7 @@ class vLLMHttpServer:
 
     async def open_submission_gate(self):
         """Admit requests after the replica has finished resuming its engines."""
+        self._rejecting = False
         self._submission_paused = False
         self._resume_event.set()
 
@@ -1006,6 +1018,30 @@ class vLLMHttpServer:
         """Resume generation after abort_all_requests (pause_generation)."""
         await self.resume_engine_generation()
         await self.open_submission_gate()
+
+    async def _park_until_admitted(self, request_id: str) -> Optional[TokenOutput]:
+        """Wait out a closed gate, or fail the request when the gate rejects late arrivals.
+
+        Returns None once the request is admitted, or an aborted TokenOutput that tells the
+        client to re-route. Rejection is checked before waiting, so a rejecting gate never
+        parks anyone and the request never reaches the engine.
+        """
+        while self._submission_paused:
+            if self._rejecting:
+                logger.debug("rejecting request %s: server left rotation behind a closed gate", request_id)
+                return TokenOutput(
+                    token_ids=[],
+                    log_probs=None,
+                    routed_experts=None,
+                    stop_reason="aborted",
+                    extra_fields={"global_steps": self.global_steps},
+                )
+            logger.debug("parking request %s until weight sync completes", request_id)
+            await self._resume_event.wait()
+        # No await between the final gate check and the bump: on the actor's single event loop
+        # that keeps "gate closed and _admitting == 0" from being observed mid-admission.
+        self._admitting += 1
+        return None
 
     async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort a specific generation request.
@@ -1385,13 +1421,19 @@ class vLLMReplica(RolloutReplica):
         await self.servers[0].wait_for_requests_to_drain.remote()
         await asyncio.gather(*[server.sleep.remote() for server in self.servers])
 
-    async def abort_all_requests(self) -> dict[str, Any]:
+    async def abort_all_requests(self, reject_request: bool = False) -> dict[str, Any]:
         """Abort all ongoing generation requests across all servers.
+
+        Args:
+            reject_request: Fail requests arriving behind the closed gate instead of
+                parking them. See vLLMHttpServer.abort_all_requests().
 
         Returns:
             dict[str, Any]: Combined abort results from all servers.
         """
-        results = await asyncio.gather(*[server.abort_all_requests.remote() for server in self.servers])
+        results = await asyncio.gather(
+            *[server.abort_all_requests.remote(reject_request=reject_request) for server in self.servers]
+        )
 
         total_aborted = sum(r.get("aborted_count", 0) for r in results)
         all_request_ids = []

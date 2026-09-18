@@ -270,9 +270,19 @@ class RolloutReplica(ABC):
         """Sleep each rollout server."""
         await asyncio.gather(*[server.sleep.remote() for server in self.servers])
 
-    async def abort_all_requests(self):
-        """Partial rollout: abort and save all unfinished requests in each rollout server."""
-        await asyncio.gather(*[server.abort_all_requests.remote() for server in self.servers])
+    async def abort_all_requests(self, reject_request: bool = False):
+        """Partial rollout: abort and save all unfinished requests in each rollout server.
+
+        Args:
+            reject_request: Fail requests that arrive while generation is blocked instead
+                of holding them until the next resume_generation(). Pass True when the
+                replica is leaving the load balancer and no resume is coming soon.
+                Backends that cannot intercept their own admission path log a warning
+                and ignore it.
+        """
+        await asyncio.gather(
+            *[server.abort_all_requests.remote(reject_request=reject_request) for server in self.servers]
+        )
 
     async def resume_generation(self):
         """Resume generation on all servers after abort_all_requests."""

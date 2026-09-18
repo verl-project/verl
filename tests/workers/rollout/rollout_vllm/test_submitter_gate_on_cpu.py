@@ -18,6 +18,10 @@ admitted between abort_all_requests() and resume_generation() is parked in the
 scheduler's waiting queue and masked out of the drain's liveness check, so
 wait_for_requests_to_drain() cannot return. These tests pin the ordering that
 makes such an admission impossible.
+
+They also pin abort_all_requests(reject_request=True), which fails late arrivals
+instead of parking them when the server is leaving the load balancer and no
+resume_generation() is coming soon.
 """
 
 import asyncio
@@ -52,12 +56,14 @@ class _FakeEngine:
 def _make_server(node_rank: int = 0):
     server = object.__new__(vllm_async_server.vLLMHttpServer)
     server.node_rank = node_rank
+    server.global_steps = 7
     server.engine = _FakeEngine()
     server.engine.server = server
     server._submission_paused = False
     server._admitting = 0
     server._resume_event = asyncio.Event()
     server._resume_event.set()
+    server._rejecting = False
     return server
 
 
@@ -88,22 +94,67 @@ def test_submission_parks_while_gate_closed_and_wakes_on_resume():
         await server.abort_all_requests()
         assert server._submission_paused is True
 
-        admitted = asyncio.Event()
-
-        async def submitter():
-            # Mirrors the park loop at the head of generate().
-            while server._submission_paused:
-                await server._resume_event.wait()
-            admitted.set()
-
-        task = asyncio.create_task(submitter())
+        task = asyncio.create_task(server._park_until_admitted("r1"))
         await asyncio.sleep(0.05)
         assert not task.done(), "submission must park while the gate is closed"
-        assert not admitted.is_set()
+        assert server._admitting == 0
 
         await server.resume_generation()
-        await asyncio.wait_for(task, timeout=5)
-        assert admitted.is_set()
+        assert await asyncio.wait_for(task, timeout=5) is None
+        assert server._admitting == 1
+
+    asyncio.run(main())
+
+
+def test_reject_request_fails_late_arrivals_instead_of_parking():
+    async def main():
+        server = _make_server()
+        await server.abort_all_requests(reject_request=True)
+
+        output = await asyncio.wait_for(server._park_until_admitted("late"), timeout=5)
+
+        assert output.stop_reason == "aborted", "a rejecting gate must fail over, not park"
+        assert output.token_ids == []
+        assert output.extra_fields["global_steps"] == 7
+        assert server._admitting == 0, "rejected requests never count as admissions"
+        assert server._submission_paused is True, "the gate stays closed until resume_generation"
+
+    asyncio.run(main())
+
+
+def test_weight_sync_abort_restores_parking_after_a_rejecting_abort():
+    # switch_to_trainer aborts with reject_request=True; the weight sync inside the following
+    # switch_to_rollout aborts again with the default, and by then a resume is imminent, so
+    # requests must go back to parking rather than being failed over.
+    async def main():
+        server = _make_server()
+        await server.abort_all_requests(reject_request=True)
+        assert server._rejecting is True
+
+        await server.abort_all_requests()
+        assert server._rejecting is False
+
+        task = asyncio.create_task(server._park_until_admitted("r1"))
+        await asyncio.sleep(0.05)
+        assert not task.done(), "a plain abort must restore parking"
+
+        await server.resume_generation()
+        assert await asyncio.wait_for(task, timeout=5) is None
+
+    asyncio.run(main())
+
+
+def test_resume_clears_rejection():
+    async def main():
+        server = _make_server()
+        await server.abort_all_requests(reject_request=True)
+
+        await server.resume_generation()
+
+        assert server._rejecting is False
+        assert server._submission_paused is False
+        assert await server._park_until_admitted("r1") is None
+        assert server._admitting == 1
 
     asyncio.run(main())
 
