@@ -403,12 +403,198 @@ def prepare_quanted_weights_for_loading(model):
     return reload_state
 
 
+def _is_modelopt_mxfp8_linear(module) -> bool:
+    qm = getattr(module, "quant_method", None)
+    return (
+        qm is not None
+        and type(qm).__name__ == "ModelOptMxFp8LinearMethod"
+        and isinstance(getattr(module, "weight", None), torch.Tensor)
+        and isinstance(getattr(module, "weight_scale", None), torch.Tensor)
+    )
+
+
+def snapshot_mxfp8_linear_for_check(model):
+    """Pick the smallest ModelOpt MXFP8 linear and copy its canonical weight / scale.
+
+    Must run after ``load_weights`` and before ``process_fp8_weights_after_loading``:
+    at that point the layer's ``weight_scale`` is the canonical 2D UE8M0 tensor the
+    sync just wrote, which the kernel post-processing then rewrites in place.
+    """
+    from verl.utils.mxfp8_refit_check import refit_check_enabled
+
+    if not refit_check_enabled():
+        return None
+    best = None
+    for name, module in model.named_modules():
+        if not _is_modelopt_mxfp8_linear(module):
+            continue
+        scale = module.weight_scale
+        if scale.dtype != torch.uint8 or scale.ndim != 2:
+            continue  # not canonical (kernel layout already applied) - cannot serve as reference
+        if best is None or module.weight.numel() < best[1].weight.numel():
+            best = (name, module)
+    if best is None:
+        return None
+    name, module = best
+    return name, module, module.weight.data.detach().clone(), module.weight_scale.data.detach().clone()
+
+
+def self_check_mxfp8_linear(snapshot):
+    from verl.utils.mxfp8_refit_check import assert_mxfp8_linear_matches
+
+    if snapshot is None:
+        return
+    name, module, qweight, scale = snapshot
+    qm = module.quant_method
+    assert_mxfp8_linear_matches(name, lambda x: qm.apply(module, x), qweight, scale, engine="vllm")
+
+
+def _is_modelopt_mxfp8_moe(module) -> bool:
+    qm = getattr(module, "quant_method", None)
+    return (
+        qm is not None
+        and type(qm).__name__ == "ModelOptMxFp8FusedMoE"
+        and all(
+            isinstance(getattr(module, n, None), torch.Tensor)
+            for n in ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale")
+        )
+    )
+
+
+def _moe_parallel(module):
+    """(tp_size, ep_size, dp_size) of a vLLM RoutedExperts / FusedMoE module, defaulting to 1."""
+    pc = getattr(getattr(module, "moe_config", None), "moe_parallel_config", None)
+    tp = int(getattr(pc, "tp_size", 1) or 1)
+    ep = int(getattr(pc, "ep_size", 1) or 1)
+    if getattr(pc, "use_ep", False):
+        ep = max(ep, 2)
+    dp = int(getattr(pc, "dp_size", 1) or 1)
+    return tp, ep, dp
+
+
+def snapshot_mxfp8_moe_for_check(model):
+    """Pick the smallest ModelOpt MXFP8 MoE layer and copy one local expert's canonical weights / scales.
+
+    Must run after ``load_weights`` and before ``process_fp8_weights_after_loading``,
+    while ``w13_weight_scale`` / ``w2_weight_scale`` are the canonical ``[E, N, K/32]``
+    uint8 tensors the sync just wrote. Returns ``None`` when the check is disabled,
+    no layer qualifies, or the layer's parallelism / activation is one the probe
+    cannot reproduce (expert or data parallelism, non-SiLU gating).
+    """
+    from verl.utils.mxfp8_refit_check import refit_check_enabled
+
+    if not refit_check_enabled():
+        return None
+    best = None
+    for name, module in model.named_modules():
+        if not _is_modelopt_mxfp8_moe(module):
+            continue
+        if best is None or module.w13_weight.numel() < best[1].w13_weight.numel():
+            best = (name, module)
+    if best is None:
+        return None
+    name, module = best
+    tp, ep, dp = _moe_parallel(module)
+    if ep > 1 or dp > 1:
+        logger.debug("mxfp8 MoE refit check skipped on %s: ep_size=%d dp_size=%d", name, ep, dp)
+        return None
+    act = getattr(module, "activation", None)
+    if act is not None and "silu" not in str(getattr(act, "value", act)).lower():
+        logger.debug("mxfp8 MoE refit check skipped on %s: activation %s is not the SiLU gate", name, act)
+        return None
+    w13, w2 = module.w13_weight.data, module.w2_weight.data
+    s13, s2 = module.w13_weight_scale.data, module.w2_weight_scale.data
+    canonical = (
+        s13.dtype == torch.uint8
+        and s2.dtype == torch.uint8
+        and tuple(s13.shape) == (*w13.shape[:-1], w13.shape[-1] // 32)
+        and tuple(s2.shape) == (*w2.shape[:-1], w2.shape[-1] // 32)
+    )
+    if not canonical:
+        logger.debug("mxfp8 MoE refit check skipped on %s: scales not in canonical layout after load", name)
+        return None
+    expert = 0  # local expert 0 == global expert 0 without EP
+    return (
+        name,
+        module,
+        expert,
+        w13[expert].detach().clone(),
+        s13[expert].detach().clone(),
+        w2[expert].detach().clone(),
+        s2[expert].detach().clone(),
+    )
+
+
+def _route_everything_to_vllm_expert(module, expert: int):
+    """``apply_fn(x)`` running the RoutedExperts module with every row routed to ``expert`` at weight 1.
+
+    Bypasses the MoERunner (router, shared experts, routed_scaling_factor, final all-reduce) and
+    calls the weight holder directly: ``forward_modular`` with hand-built top-k for modular kernels,
+    ``forward_monolithic`` with a one-hot-dominant logit row for monolithic ones.
+    """
+
+    def _apply(x: torch.Tensor) -> torch.Tensor:
+        if hasattr(module, "_ensure_moe_quant_config_init"):
+            module._ensure_moe_quant_config_init()
+        qm = module.quant_method
+        rows = x.shape[0]
+        n_experts = module.w13_weight.shape[0]
+        if getattr(qm, "is_monolithic", False):
+            logits = torch.full((rows, n_experts), -1e4, dtype=torch.float32, device=x.device)
+            logits[:, expert] = 1e4  # softmax and sigmoid routers both give this expert weight 1, others 0
+            return module.forward_monolithic(x, router_logits=logits)
+        k = max(1, int(getattr(module, "top_k", 1) or 1))
+        ids = [(expert + i) % n_experts for i in range(k)]  # distinct ids; only the first carries weight
+        idx_dtype = getattr(qm, "topk_indices_dtype", None) or torch.int32
+        topk_ids = torch.tensor([ids] * rows, dtype=idx_dtype, device=x.device)
+        topk_weights = torch.zeros(rows, k, dtype=torch.float32, device=x.device)
+        topk_weights[:, 0] = 1.0
+        return module.forward_modular(x, topk_weights, topk_ids)
+
+    return _apply
+
+
+def self_check_mxfp8_moe(snapshot):
+    from verl.utils.mxfp8_refit_check import assert_mxfp8_moe_expert_matches
+
+    if snapshot is None:
+        return
+    name, module, expert, w13_q, s13, w2_q, s2 = snapshot
+    reduce_ref = None
+    tp, _, _ = _moe_parallel(module)
+    kernel = getattr(module.quant_method, "moe_kernel", None)
+    if tp > 1 and kernel is not None and getattr(kernel, "output_is_reduced", lambda: False)():
+        # The kernel already summed the TP shards; the reference (built from local shards) must too.
+        from vllm.distributed import tensor_model_parallel_all_reduce
+
+        reduce_ref = tensor_model_parallel_all_reduce
+    # tp > 1 without an internal reduction: forward_modular returns this rank's partial sum, which is
+    # exactly what the local-shard reference computes, so no reduction is applied.
+    assert_mxfp8_moe_expert_matches(
+        name,
+        expert,
+        _route_everything_to_vllm_expert(module, expert),
+        w13_q,
+        s13,
+        w2_q,
+        s2,
+        engine="vllm",
+        reduce_ref=reduce_ref,
+    )
+
+
 def process_quanted_weights_after_loading(model, reload_state):
     """Re-apply the inference layout undone by ``prepare_quanted_weights_for_loading``."""
     apply_mxfp8_transformation_after_loading(model)
     reload_state = reload_state or {}
+    # Canonical MXFP8 weight/scale of one layer, captured before the kernel layout is re-derived.
+    snapshot = snapshot_mxfp8_linear_for_check(model)
+    moe_snapshot = snapshot_mxfp8_moe_for_check(model)
     process_fp8_weights_after_loading(reload_state.get("fp8_layers") or [])
     process_mxfp4_moe_weights_after_loading(reload_state.get("mxfp4_moe_modules") or [])
+    # The re-derived layout is now what the kernel reads; it must reproduce the canonical reference.
+    self_check_mxfp8_linear(snapshot)
+    self_check_mxfp8_moe(moe_snapshot)
     # Last: the rebuild reads ``wo_a``, which is only back in its inference
     # layout once the staged FP8 params above have been reinstated.
     refresh_rocm_attention_weight_caches(model)

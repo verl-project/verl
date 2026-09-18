@@ -654,12 +654,20 @@ def _clear_te_fp8_weight_workspaces(model_chunk):
     rebuilds the workspace on the next forward, so dropping it here is safe. This is
     a no-op for bf16/fp16 models (the attribute is absent or empty).
 
+    The workspace is also the quantized-layer audit's evidence that a module ran
+    fp8 GEMMs (``verl.utils.quant_layer_audit``); each module is marked as having
+    held one before the cache is dropped, so the audit still works with param
+    offload on.
+
     Returns the number of cached workspace entries cleared.
     """
+    from verl.utils.quant_layer_audit import remember_fp8_workspaces
+
     cleared = 0
     for submodule in model_chunk.modules():
         workspaces = getattr(submodule, "_fp8_workspaces", None)
         if isinstance(workspaces, dict) and workspaces:
+            remember_fp8_workspaces(submodule)
             cleared += len(workspaces)
             workspaces.clear()
     return cleared

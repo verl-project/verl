@@ -288,6 +288,70 @@ Two constraints on this path:
 Neither engine showed an MXFP8 rollout throughput gain over bf16 in these runs (SGLang 0.5.12 and
 vLLM 0.24.0); the measurements are in the PR description.
 
+#### Guard rails for a quantized rollout
+
+Two failures met during the B200 validation were silent — the run kept going with exit code 0
+while every sample was garbage (a quantized `lm_head` producing `nan` logits; an engine serving
+stale kernel scale layouts after a weight sync). verl now fails loudly in both cases:
+
+- **Quantized-rollout sentinel** (trainer side, both trainers). When `rollout.quantization` is set,
+  the step metrics are checked after each step: non-finite `training/rollout_probs_diff_mean`,
+  `rollout_corr/kl` above 1.0 (typical values are 0.001–0.03), or every response hitting the
+  length cap on two consecutive steps raise a `RuntimeError` naming the likely causes. Disable
+  with `VERL_QUANT_SENTINEL=0`; tune with `VERL_QUANT_SENTINEL_KL_MAX` / `VERL_QUANT_SENTINEL_CLIP_STEPS`.
+- **MXFP8 refit self-check** (engine side, vLLM and SGLang). After every weight sync the smallest
+  MXFP8 linear layer's own quantized GEMM is run on a small random input and compared with a
+  dequantized bf16 reference of the canonical weight and scale; a stale or mis-laid-out scale
+  shows up as O(1) relative error and raises. On SGLang one local expert of the smallest MXFP8 MoE
+  layer is probed the same way (every probe row routed to it, compared with the gated-MLP reference on
+  the dequantized `w13` / `w2`; tolerance `VERL_MXFP8_REFIT_CHECK_MOE_TOL`, default = the linear one);
+  the expert probe is skipped under expert parallelism and under TP without `reduce_results`, which
+  the log states. On vLLM the same expert probe runs on `ModelOptMxFp8FusedMoE` layers by calling the
+  weight holder's `forward_modular` / `forward_monolithic` directly (skipped under expert or data
+  parallelism and for non-SiLU gates). vLLM 0.24's ModelOpt MXFP8 MoE method processes its weights
+  only once per layer and returns early afterwards; verl's patched hook clears that flag on every
+  refit so the kernel layout is re-derived from the synced scales. On SGLang MoE layers the loader additionally checks,
+  before re-deriving the kernel layout, that the sync wrote every staged expert scale (the staging
+  buffer is pre-filled with the UE8M0 NaN code `0xFF`): experts whose HF names miss the sync-side
+  rule would otherwise arrive as a scale-less bf16 cast in the fp8 buffer. The kernel-vs-reference
+  probe verifies the kernel's *layout*, not that the sync delivered the right scales — the audit
+  below covers that. Disable both with `VERL_MXFP8_REFIT_CHECK=0`; the probe tolerance (default
+  0.25) is `VERL_MXFP8_REFIT_CHECK_TOL`.
+- **Quantized-layer audit** (trainer worker, Megatron engine). "Matched" train/rollout quantization
+  presumes both sides quantize the same layers, but training decides implicitly (TE linear modules
+  inside `fp8_autocast`) and rollout decides by name blacklist (`ignored_layers`). At the first weight
+  sync after a training step, verl reads which decoder layers actually ran fp8 GEMMs (TE's fp8 weight
+  workspaces) and compares them, per synced parameter name, with the rollout side. The audit wraps the
+  training engine's weight export (`get_per_tensor_param`), which every sync route shares - the
+  colocated worker, the checkpoint engine and the server-replica path - and produces its verdict when
+  the weight stream ends. What "the rollout
+  side" is depends on the engine and every message says which: on vLLM the engine is asked directly
+  (`collective_rpc` into the worker, which resolves each HF name onto its live parameter and reports
+  its dtype); on SGLang there is no return channel, so the trainer compares against the weight-sync
+  rule and the loader's sync-vs-engine dtype check (next bullet) covers the sync-to-engine half. It logs
+  each disagreement (e.g. `first_last_layers_bf16` without the matching rollout regex, a router the
+  name patterns miss, `lm_head` left in the quantized set, Mixtral's `w1/w2/w3` experts that the
+  SGLang sync-time include list does not match). On SGLang the rule evaluated is the sync-time
+  include/exclude rule in `verl/utils/fp8_utils.py`; a name it misses is shipped unquantized even
+  when the engine built that layer as fp8. Fused expert tensors as `transformers >= 5` saves them
+  (`mlp.experts.gate_up_proj`, no `.weight` suffix) are judged too. The signal survives
+  `param_offload=True` (verl marks each module before it drops the TE workspace cache on offload);
+  when there is no signal at all — `disable_parameter_transpose_cache=True` makes TE skip the cache —
+  the audit warns once that it cannot run instead of staying silent. `VERL_QUANT_LAYER_AUDIT=raise`
+  turns the report into an error, `=0` disables it.
+- **Sync-vs-engine dtype check** (SGLang loader). Before a sync is written into the engine, every
+  incoming linear weight's dtype is compared with the dtype of the engine parameter that will receive it
+  (HF names are mapped onto SGLang's fused modules: `q_proj` → `qkv_proj`, `gate_proj` → `gate_up_proj`,
+  per-expert names → the fused `w13` / `w2` tensors). A bf16 tensor headed for an fp8 parameter, or fp8
+  data headed for a bf16 one, is refused by name instead of being cast silently by `load_weights` —
+  e.g. Mixtral's `experts.N.w1/w2/w3`, which the sync rule does not match while the engine built them as
+  fp8. Disabled with `VERL_MXFP8_REFIT_CHECK=0`.
+- **MoE experts on SGLang.** SGLang's MXFP8 MoE method rewrites the expert scales in place at
+  load (swizzled on the Triton MoE runner, packed on DeepGEMM), so the refit loader stages them
+  back to the canonical `[E, N, K/32]` layout for `load_weights` and re-derives the kernel layout
+  afterwards into the storage the CUDA graph captured. This path is covered by CPU tests and has
+  not yet been validated on hardware; see the PR description for the MoE validation status.
+
 ### MXFP8 Rollout and Train-Inference Consistency
 
 With `quantization: mxfp8`, the rollout engine (SGLang or vLLM) is launched in MXFP8 mode
