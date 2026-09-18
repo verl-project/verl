@@ -83,6 +83,7 @@ class TeacherModelManager:
             {
                 "_target_": "verl.workers.config.HFModelConfig",
                 "path": teacher_model_config.model_path,
+                "revision": getattr(teacher_model_config, "revision", None),
             }
         )
         name_suffix = (teacher_model_config.key or "").replace("/", "_")
