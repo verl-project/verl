@@ -155,6 +155,106 @@ def _packed_causal_conv1d_fallback(
     return torch.cat(outputs, dim=-1)
 
 
+# Where each optional fast kernel really lives. transformers wraps these behind
+# decorated module-scope functions that fall back to a torch reference when the
+# package is missing; resolving the package directly is how this file tells a
+# real kernel from that reference.
+_FAST_KERNELS = {
+    "chunk_gated_delta_rule": ("fla.ops.gated_delta_rule", "chunk_gated_delta_rule"),
+    "recurrent_gated_delta_rule": ("fla.ops.gated_delta_rule", "fused_recurrent_gated_delta_rule"),
+    "causal_conv1d_fn": ("causal_conv1d", "causal_conv1d_fn"),
+    "causal_conv1d_update": ("causal_conv1d", "causal_conv1d_update"),
+}
+
+# The torch reference each rule falls back to, by the name transformers gives it.
+_REFERENCE_DELTA_RULES = {
+    "chunk_gated_delta_rule": "torch_chunk_gated_delta_rule",
+    "recurrent_gated_delta_rule": "torch_recurrent_gated_delta_rule",
+}
+
+
+def _fast_kernel(name):
+    module_name, attr = _FAST_KERNELS[name]
+    try:
+        return getattr(import_module(module_name), attr, None)
+    except ImportError:
+        return None
+
+
+def _reference_delta_rule(torch_fn):
+    """Wrap a transformers torch reference behind a closed signature.
+
+    The decorated reference takes `**kwargs` and drops what it does not know, so
+    introspecting it says `cu_seqlens` and `cp_context` are accepted when they are
+    in fact ignored: packed examples would then be processed as one continuous
+    sequence. A closed signature makes `_call_accepts_kwarg` answer no, which sends
+    the packed path through the per-sequence split loop instead.
+    """
+
+    def reference(
+        query, key, value, g, beta, initial_state=None, output_final_state=False, use_qk_l2norm_in_kernel=False
+    ):
+        return torch_fn(
+            query,
+            key,
+            value,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
+
+    reference.__name__ = reference.__qualname__ = f"reference_{torch_fn.__name__}"
+    return reference
+
+
+def _delta_net_kernel(module, name):
+    """Resolve a gated-delta-net kernel however the installed stack exposes it.
+
+    Older transformers releases bound these on the GatedDeltaNet instance, already
+    resolved to the fast kernel, the torch reference, or None. Current ones only
+    define decorated module-scope wrappers, so the resolution happens here:
+
+    1. the instance attribute, when present;
+    2. the fast kernel straight from its package (FLA, causal-conv1d). The
+       decorated transformers wrapper does dispatch to it, but re-exports the torch
+       reference's signature, which hides `cu_seqlens` and `cp_context` from the
+       callers that introspect it;
+    3. otherwise the slow path this file already carries: None for
+       `causal_conv1d_fn` (its callers run the per-sequence conv1d), the delta
+       rules' torch reference behind a closed signature, and transformers' own
+       torch `causal_conv1d_update`.
+    """
+    if name not in _FAST_KERNELS:
+        raise AttributeError(
+            f"{name} is not a delta-net kernel this file knows about; expected one of {sorted(_FAST_KERNELS)}."
+        )
+
+    if hasattr(module, name):
+        return getattr(module, name)
+
+    fn = _fast_kernel(name)
+    if fn is not None:
+        return fn
+
+    if name == "causal_conv1d_fn":
+        return None
+
+    from transformers.models.qwen3_5 import modeling_qwen3_5 as hf_qwen3_5
+
+    if name == "causal_conv1d_update":
+        # transformers 5.x keeps the torch reference under a `torch_` prefix and
+        # sets the bare name to None when causal-conv1d is missing; on main the
+        # bare name is the decorated wrapper that falls back on its own.
+        fn = getattr(hf_qwen3_5, "torch_causal_conv1d_update", None) or hf_qwen3_5.causal_conv1d_update
+        if fn is None:
+            raise AttributeError("transformers exposes no torch causal_conv1d_update reference at module scope.")
+        return fn
+
+    return _reference_delta_rule(getattr(hf_qwen3_5, _REFERENCE_DELTA_RULES[name]))
+
+
 def _packed_chunk_gated_delta_rule(self, query, key, value, g, beta, cu_seqlens, cu_seqlens_cpu, cp_context=None):
     kwargs = {
         "g": g,
@@ -164,19 +264,19 @@ def _packed_chunk_gated_delta_rule(self, query, key, value, g, beta, cu_seqlens,
         "use_qk_l2norm_in_kernel": True,
     }
     if cu_seqlens is None:
-        return self.chunk_gated_delta_rule(query, key, value, **kwargs)
+        return _delta_net_kernel(self, "chunk_gated_delta_rule")(query, key, value, **kwargs)
 
     if cp_context is not None:
-        if not _call_accepts_kwarg(self.chunk_gated_delta_rule, "cp_context"):
+        if not _call_accepts_kwarg(_delta_net_kernel(self, "chunk_gated_delta_rule"), "cp_context"):
             raise NotImplementedError("Qwen3.5 Ulysses SP requires FLA chunk_gated_delta_rule cp_context support.")
         kwargs["cp_context"] = cp_context
-        return self.chunk_gated_delta_rule(query, key, value, **kwargs)
+        return _delta_net_kernel(self, "chunk_gated_delta_rule")(query, key, value, **kwargs)
 
-    if _call_accepts_kwarg(self.chunk_gated_delta_rule, "cu_seqlens"):
+    if _call_accepts_kwarg(_delta_net_kernel(self, "chunk_gated_delta_rule"), "cu_seqlens"):
         kwargs["cu_seqlens"] = cu_seqlens
-        if _call_accepts_kwarg(self.chunk_gated_delta_rule, "cu_seqlens_cpu"):
+        if _call_accepts_kwarg(_delta_net_kernel(self, "chunk_gated_delta_rule"), "cu_seqlens_cpu"):
             kwargs["cu_seqlens_cpu"] = cu_seqlens_cpu
-        return self.chunk_gated_delta_rule(query, key, value, **kwargs)
+        return _delta_net_kernel(self, "chunk_gated_delta_rule")(query, key, value, **kwargs)
 
     outputs = []
     for q_i, k_i, v_i, g_i, beta_i in _split_packed_args(
@@ -185,7 +285,7 @@ def _packed_chunk_gated_delta_rule(self, query, key, value, g, beta, cu_seqlens,
         split_kwargs = dict(kwargs)
         split_kwargs["g"] = g_i
         split_kwargs["beta"] = beta_i
-        out_i, _ = self.chunk_gated_delta_rule(q_i, k_i, v_i, **split_kwargs)
+        out_i, _ = _delta_net_kernel(self, "chunk_gated_delta_rule")(q_i, k_i, v_i, **split_kwargs)
         outputs.append(out_i)
     return torch.cat(outputs, dim=1), None
 
@@ -239,7 +339,7 @@ def qwen3_5_gated_delta_net_forward(
     a = self.in_proj_a(hidden_states)
 
     if use_precomputed_states:
-        mixed_qkv = self.causal_conv1d_update(
+        mixed_qkv = _delta_net_kernel(self, "causal_conv1d_update")(
             mixed_qkv,
             conv_state,
             self.conv1d.weight.squeeze(1),
@@ -250,7 +350,7 @@ def qwen3_5_gated_delta_net_forward(
         if cache_params is not None:
             conv_state = F.pad(mixed_qkv, (self.conv_kernel_size - mixed_qkv.shape[-1], 0))
             cache_params.conv_states[self.layer_idx] = conv_state
-        if self.causal_conv1d_fn is not None:
+        if _delta_net_kernel(self, "causal_conv1d_fn") is not None:
             conv_prefix_len = 0
             conv_input = mixed_qkv
             if cp_context is not None:
@@ -262,7 +362,7 @@ def qwen3_5_gated_delta_net_forward(
                 if model_cu_seqlens is not None
                 else None
             )
-            conv_output = self.causal_conv1d_fn(
+            conv_output = _delta_net_kernel(self, "causal_conv1d_fn")(
                 x=conv_input,
                 weight=self.conv1d.weight.squeeze(1),
                 bias=self.conv1d.bias,
@@ -312,7 +412,7 @@ def qwen3_5_gated_delta_net_forward(
             self, query, key, value, g, beta, model_cu_seqlens, model_cu_seqlens_cpu, cp_context
         )
     else:
-        core_attn_out, last_recurrent_state = self.recurrent_gated_delta_rule(
+        core_attn_out, last_recurrent_state = _delta_net_kernel(self, "recurrent_gated_delta_rule")(
             query,
             key,
             value,
@@ -350,7 +450,21 @@ def qwen3_5_decoder_layer_forward(
 
     hidden_states = self.input_layernorm(hidden_states)
 
-    if self.layer_type == "linear_attention":
+    # transformers names this `block_type` on Qwen3_5DecoderLayer; older releases
+    # called it `layer_type`. Accept either, and refuse an unknown value rather than
+    # falling through: with neither branch taken the layer would return its input
+    # unchanged, i.e. train silently with no attention at all.
+    block_type = getattr(self, "block_type", None)
+    if block_type is None:
+        block_type = getattr(self, "layer_type", None)
+    if block_type not in ("linear_attention", "full_attention"):
+        raise ValueError(
+            f"{type(self).__name__} exposes neither block_type nor layer_type with a "
+            f"known value (got {block_type!r}); refusing to run a decoder layer that "
+            "would skip attention entirely."
+        )
+
+    if block_type == "linear_attention":
         hidden_states = self.linear_attn(
             hidden_states=hidden_states,
             cache_params=past_key_values,
@@ -358,7 +472,7 @@ def qwen3_5_decoder_layer_forward(
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
         )
-    elif self.layer_type == "full_attention":
+    elif block_type == "full_attention":
         hidden_states, _ = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
