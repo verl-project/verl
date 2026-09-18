@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import dataclass, field
+from inspect import signature
 from typing import Any, Optional
 
 from omegaconf import MISSING
-from transformers import AutoConfig
+from transformers import AutoConfig, PretrainedConfig
 
 from verl.base_config import BaseConfig
 from verl.utils import hf_processor, hf_tokenizer
@@ -24,6 +25,31 @@ from verl.utils.import_utils import import_external_libs
 from verl.utils.model import get_generation_config, update_model_config
 
 __all__ = ["HFModelConfig", "MtpConfig"]
+
+
+def _get_sglang_deepseek_v4_config_class():
+    """Adapt public DeepSeek-V4 config fields to SGLang's strict dataclass."""
+    from sglang.srt.configs.deepseek_v4 import DeepSeekV4Config
+
+    class DeepSeekV4ConfigCompat(DeepSeekV4Config):
+        def __init__(self, **kwargs):
+            kwargs = dict(kwargs)
+            for source, target in {
+                "head_dim": "v_head_dim",
+                "sliding_window": "window_size",
+                "num_hash_layers": "n_hash_layers",
+            }.items():
+                if source in kwargs and target not in kwargs:
+                    kwargs[target] = kwargs[source]
+
+            accepted_fields = set(signature(DeepSeekV4Config).parameters)
+            config_kwargs = {key: value for key, value in kwargs.items() if key in accepted_fields}
+            extra_kwargs = {key: value for key, value in kwargs.items() if key not in accepted_fields}
+            super().__init__(**config_kwargs)
+            for key, value in extra_kwargs.items():
+                setattr(self, key, value)
+
+    return DeepSeekV4ConfigCompat
 
 
 @dataclass
@@ -191,15 +217,29 @@ class HFModelConfig(BaseConfig):
             )
         except ValueError as error:
             lookup_error = error.__cause__ or error.__context__
-            if not isinstance(lookup_error, KeyError) or lookup_error.args != ("deepseek_v4",):
-                raise
-            from vllm.transformers_utils.config import get_config
+            is_deepseek_v4_lookup = isinstance(lookup_error, KeyError) and lookup_error.args == ("deepseek_v4",)
+            if not is_deepseek_v4_lookup:
+                config_dict, _ = PretrainedConfig.get_config_dict(
+                    self.local_hf_config_path, trust_remote_code=self.trust_remote_code
+                )
+                if config_dict.get("model_type") != "deepseek_v4":
+                    raise
+            try:
+                from vllm.transformers_utils.config import get_config
 
-            self.hf_config = get_config(
-                self.local_hf_config_path,
-                trust_remote_code=self.trust_remote_code,
-                attn_implementation=attn_implementation,
-            )
+                self.hf_config = get_config(
+                    self.local_hf_config_path,
+                    trust_remote_code=self.trust_remote_code,
+                    attn_implementation=attn_implementation,
+                )
+            except ImportError:
+                deepseek_v4_config_class = _get_sglang_deepseek_v4_config_class()
+                AutoConfig.register("deepseek_v4", deepseek_v4_config_class, exist_ok=True)
+                self.hf_config = AutoConfig.from_pretrained(
+                    self.local_hf_config_path,
+                    trust_remote_code=self.trust_remote_code,
+                    attn_implementation=attn_implementation,
+                )
 
         override_config_kwargs = {}
 

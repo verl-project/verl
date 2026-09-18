@@ -23,10 +23,13 @@ Design follows THUDM/slime's delta-sync implementation
 (``slime/backends/megatron_utils/update_weight/update_weight_from_distributed_delta.py``).
 """
 
-from .encode import DeltaFlush, DeltaParam, checksum
+from .encode import DeltaFlush, DeltaParam, absolute_index_width, checksum, pack_absolute_indices, unpack_absolute_indices
 
 __all__ = [
     "DeltaFlush",
     "DeltaParam",
+    "absolute_index_width",
     "checksum",
+    "pack_absolute_indices",
+    "unpack_absolute_indices",
 ]
