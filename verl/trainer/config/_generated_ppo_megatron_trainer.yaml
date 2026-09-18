@@ -97,6 +97,7 @@ actor_rollout_ref:
         - '*mlp.gate'
         activation_observer: null
         quantization_config_path: null
+        bypass_te_fp8_assert: false
     _target_: verl.workers.config.McoreActorConfig
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: megatron
@@ -300,6 +301,7 @@ actor_rollout_ref:
         - '*mlp.gate'
         activation_observer: null
         quantization_config_path: null
+        bypass_te_fp8_assert: false
     _target_: verl.workers.config.McoreActorConfig
     entropy_from_logits_with_chunking: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_with_chunking,False}
     entropy_from_logits_chunk_size: ${oc.select:actor_rollout_ref.actor.entropy_from_logits_chunk_size,2048}
@@ -639,6 +641,7 @@ critic:
       - '*mlp.gate'
       activation_observer: null
       quantization_config_path: null
+      bypass_te_fp8_assert: false
   _target_: verl.workers.config.McoreCriticConfig
   rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
   strategy: megatron

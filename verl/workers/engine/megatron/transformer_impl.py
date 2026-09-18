@@ -389,7 +389,11 @@ class MegatronEngine(BaseEngine):
                 else:
                     provider_overrides["enable_routing_replay"] = True
 
-            if self._qat_enabled:
+            # Models with an experimental_attention_variant (DeepSeek-V4 "dsv4_hybrid", GLM5 "dsa",
+            # Qwen3-Next "gated_delta_net") install their own layer spec in provider_bridge(); the generic
+            # modelopt GPT spec would replace it and build a different model. modelopt swaps
+            # QuantModules by class, so the spec change is not required for quantization.
+            if self._qat_enabled and not getattr(provider, "experimental_attention_variant", None):
                 from megatron.bridge.models.gpt_provider import modelopt_transformer_layer_spec
 
                 provider.transformer_layer_spec = modelopt_transformer_layer_spec
@@ -581,6 +585,18 @@ class MegatronEngine(BaseEngine):
         self.module = self._build_megatron_module()
 
         if self._qat_enabled and not self.engine_config.forward_only:
+            if getattr(self._qat_config, "bypass_te_fp8_assert", False):
+                # Weight-only fake-quant feeding TE's real FP8 GEMM is the intended stack (DeepSeek-V4 does
+                # FP4 QAT inside FP8 training). modelopt refuses any quantizer under fp8_autocast; lift that
+                # guard at runtime. Activations are quantized once, by TE. modelopt's call sites resolve
+                # this module global by bare name at call time, so reassigning it is sufficient.
+                import modelopt.torch.quantization.plugins.transformer_engine as _mo_te
+
+                if hasattr(_mo_te, "_assert_te_fp8_enabled"):
+                    _mo_te._assert_te_fp8_enabled = lambda: None
+                    logger.warning(
+                        "QAT: bypassing modelopt _assert_te_fp8_enabled (weight-only fake-quant + TE FP8 GEMM)"
+                    )
             from verl.utils.modelopt import apply_qat_to_modules
 
             self.module = apply_qat_to_modules(self.module, self._qat_config)
@@ -811,6 +827,12 @@ class MegatronEngine(BaseEngine):
         """
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.module)
+        if self._is_offload_optimizer:
+            # HDO rebuilds its CPU/GPU parameter mappings in load_state_dict.
+            # Restore the optimizer's main parameter shards first: loading only
+            # the model leaves the offloaded copies on CPU, where HDO treats
+            # them as native CPU parameters and loses the GPU copy mappings.
+            load_megatron_optimizer(self.optimizer)
         self.checkpoint_mananager.load_checkpoint(
             local_path=local_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load
         )
@@ -1055,7 +1077,9 @@ class MegatronEngine(BaseEngine):
             )
 
         # QAT: process weights through QATWeightExporter for quantized weight sync to vLLM
-        if self._qat_enabled:
+        # QATWeightExporter re-quantizes to NVFP4 for vLLM. MXFP4 experts are re-quantized by the bridge
+        # itself (_dsv4_use_mxfp4_export) on every sync, so that path is skipped for mxfp4_experts.
+        if self._qat_enabled and self._qat_config.mode in ("w4a16", "w4a4"):
             from verl.utils.modelopt import export_qat_weights
 
             per_tensor_param = export_qat_weights(per_tensor_param, self.module, self._qat_config.mode, self.bridge)
