@@ -240,10 +240,17 @@ jobs:
       - name: Running GEO3K VLM GRPO E2E lora training tests on 8 L20 GPUs with rmpad using function rm
         run: |
           ray stop --force
+          # NOTE: the vllm-ascend fused LoRA kernels (bgmv/sgmv) require
+          # lora_rank <= every packed output slice width
+          # (TORCH_CHECK "hidden in should be smaller than hidden out").
+          # Qwen3.5-2B (qwen3_next) has 8-wide GDN `in_proj_ba` slices at
+          # rollout TP=2, so LORA_RANK=32 crashes the vLLM engine at
+          # startup during the dummy-adapter graph capture. Keep the rank
+          # at 8 on Ascend until the kernel relaxes the constraint.
           TRAIN_FILES=$HOME/data/geo3k/train.parquet VAL_FILES=$HOME/data/geo3k/test.parquet \
             MAX_PROMPT_LEN=1536 MAX_RESPONSE_LEN=1536 \
             MODEL_ID=Qwen/Qwen3.5-2B \
             ADV_ESTIMATOR=grpo RM_PAD=True USE_KL=True \
-            LORA_RANK=32 LORA_EXCLUDE=".*visual.*" \
+            LORA_RANK=8 LORA_EXCLUDE=".*visual.*" \
             bash tests/special_e2e/ppo_trainer/run_function_reward.sh \
               +actor_rollout_ref.model.lora.fully_sharded_loras=True
