@@ -215,6 +215,12 @@ class MegatronEngine(BaseEngine):
                     "QAT requires non-vanilla Megatron bridge. "
                     "Please set 'use_mbridge=True' and 'vanilla_mbridge=False'."
                 )
+            if self.engine_config.override_transformer_config.get("fp8"):
+                raise ValueError(
+                    "QAT and Transformer Engine FP8 training are mutually exclusive: QAT fake-quantizes weights "
+                    "inside bf16 GEMMs, while override_transformer_config.fp8 switches the GEMMs themselves to "
+                    "FP8. Disable one of them."
+                )
             logger.info(f"QAT enabled in MegatronEngine: mode={self._qat_config.mode}")
 
         # Router replay configuration for MoE models
@@ -1031,6 +1037,9 @@ class MegatronEngine(BaseEngine):
         return self._hf_export_tasks
 
     def get_per_tensor_param(self, base_sync_done=False, **kwargs):
+        from verl.utils.quant_layer_audit import trace as _audit_trace
+
+        _audit_trace("engine.get_per_tensor_param.enter", base_sync_done=base_sync_done)
         peft_config = None
         non_merge_lora_sync = self.peft_cls is not None and not self.model_config.lora.get("merge", False)
         adapter_only = base_sync_done and non_merge_lora_sync
@@ -1059,6 +1068,15 @@ class MegatronEngine(BaseEngine):
             from verl.utils.modelopt import export_qat_weights
 
             per_tensor_param = export_qat_weights(per_tensor_param, self.module, self._qat_config.mode, self.bridge)
+
+        # Quantized-layer audit (no-op unless the worker installed an auditor): this export is the one
+        # point every weight-sync route passes through on the trainer side - the colocated worker, the
+        # checkpoint engine and the server-replica path all call it - so the guard lives here rather
+        # than in any single caller. The comparison runs when the stream is exhausted.
+        auditor = getattr(self, "_verl_quant_auditor", None)
+        _audit_trace("engine.get_per_tensor_param.exit", auditor=auditor is not None, base_sync_done=base_sync_done)
+        if auditor is not None:
+            per_tensor_param = auditor.record(per_tensor_param, modules=self.module)
 
         return per_tensor_param, peft_config
 

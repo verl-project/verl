@@ -245,6 +245,20 @@ class vLLMColocateWorkerExtension:
             # patch weight loader to support MoE model
             patch_vllm_moe_model_weight_loader(model)
 
+    def quantized_param_names(self, names: list[str]) -> list[bool]:
+        """For each HF parameter name, whether the live engine holds it as an fp8 weight.
+
+        Runs inside the vLLM worker with the model in hand, so this is the engine's own answer -
+        the same resolution the weight sync uses to decide what to quantize (``is_fp8_weight``).
+        Read by the trainer-side quantized-layer audit through ``collective_rpc``.
+        """
+        model = self.model_runner.model
+        if not is_fp8_model(self.model_runner.vllm_config):
+            return [False] * len(names)
+        from verl.utils.vllm.vllm_quant_utils import is_fp8_weight
+
+        return [bool(is_fp8_weight(name, model)) for name in names]
+
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
         from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver

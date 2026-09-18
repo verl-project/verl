@@ -687,6 +687,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 backend, is_master=(torch.distributed.get_rank() == 0), bucket_size=bucket_size, **engine_kwargs
             )
 
+        # 5. arm the quantized-layer audit on the training engine. It has to be installed here because
+        # only the worker holds both halves (the rollout's quantization config and the training engine),
+        # and it has to live on the engine because the engine's weight export is the single point every
+        # sync route passes through - a hook in this class's update_weights misses the checkpoint-engine
+        # and server-replica routes entirely.
+        if "actor" in self.role and getattr(self.actor, "engine", None) is not None:
+            from verl.utils.quant_layer_audit import QuantLayerAuditor
+
+            self.actor.engine._verl_quant_auditor = QuantLayerAuditor.from_worker(self)
+
         # Free cached GPU memory so colocated vLLM processes can see it via cudaMemGetInfo
         aggressive_empty_cache(force_sync=True)
 
@@ -751,8 +761,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                   trainer/rollout deployments.
         """
 
+        from verl.utils.quant_layer_audit import trace as _audit_trace
+
         # Resolve mode: "auto" falls back to config, explicit values take precedence
         effective_mode = mode if mode != "auto" else self.config.rollout.checkpoint_engine.backend
+        _audit_trace("worker.update_weights", mode=mode, effective=effective_mode, role=self.role)
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if effective_mode != "naive":
@@ -767,6 +780,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         set_expandable_segments(False)
         get_torch_device().empty_cache()
+        _audit_trace("worker.after_empty_cache")
         log_gpu_memory_usage("Before resume weights", logger=logger)
 
         # 1. resume rollout memory (weights were released during sleep)
@@ -778,14 +792,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         else:
             # vLLM: level-1 sleep still unmaps weights → must resume.
             resume_weights = self.config.rollout.free_cache_engine
+        _audit_trace("worker.before_resume", resume_weights=resume_weights, rollout=type(self.rollout).__name__)
         if resume_weights:
             await self.rollout.resume(tags=["weights"])
+        _audit_trace("worker.after_resume")
         log_gpu_memory_usage("After resume weights", logger=logger)
 
         # 2. determine if we need a base weight sync (adapter path only)
+        _audit_trace("worker.before_export", engine=type(self.actor.engine).__name__)
         per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
             layered_summon=self.layered_summon, base_sync_done=True
         )
+        _audit_trace("worker.after_export")
 
         do_lora_base_sync = False
         if not self.peft_merge and peft_config is not None:
@@ -801,9 +819,27 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 per_tensor_param_base, peft_config=_base_peft_config, base_sync_done=False, global_steps=global_steps
             )
 
+        # The quantized-layer audit is installed on the training engine (see install_quant_layer_audit):
+        # it wraps the weight export itself, so it covers this route and every other one.
         await self.rollout.update_weights(
             per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
         )
+        # The comparison already ran once, at the tail of the engine's weight-export stream
+        # (auditor.record wraps it and runs when the stream is exhausted in-process). Do NOT run it a
+        # second time here: a second run() on the same sync would count as a second "no fp8 trace yet"
+        # observation on the pre-training-step sync and trip the give-up threshold, marking the audit
+        # done before the first real training step ever produces an fp8 workspace.
+        auditor = getattr(getattr(self.actor, "engine", None), "_verl_quant_auditor", None)
+        _audit_trace("worker.after_sync", armed=auditor is not None, done=getattr(auditor, "done", None))
+        # vLLM can additionally be asked which parameters it really holds as fp8; when the audit already
+        # ruled on the configured blacklist, this re-checks that ruling against the live engine.
+        if auditor is not None and auditor.wants_engine_recheck() and hasattr(self.rollout, "quantized_param_names"):
+            try:
+                engine_truth = await self.rollout.quantized_param_names(auditor.names)
+            except Exception as err:  # noqa: BLE001 - the configured-rule verdict already stands
+                logger.warning("quantized-layer audit: could not read the engine's quantized parameters: %s", err)
+            else:
+                auditor.recheck_against_engine(engine_truth)
 
         log_gpu_memory_usage("After update_weights", logger=logger)
 
