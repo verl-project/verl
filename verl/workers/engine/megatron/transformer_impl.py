@@ -1468,19 +1468,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
         # of the aux/z loss by num_tokens; a 2-tuple leaves total_num_tokens=0, so the factor
         # is never cancelled (the ~1e4 grad_norm blow-up at CP>1).
         if self.tf_config is not None and self.tf_config.calculate_per_token_loss and loss_function is not None:
-            # Static CP cannot compose per-sequence token means from local output shards.
-            # DCP reconstructs each sequence inside its dynamic CP group before applying
-            # the native loss, so all aggregation modes remain valid there.
-            if hasattr(loss_function, "keywords") and "config" in loss_function.keywords:
-                _agg_mode = getattr(loss_function.keywords["config"], "loss_agg_mode", None)
-                if _agg_mode == "seq-mean-token-mean" and not self.engine_config.dynamic_context_parallel:
-                    raise ValueError(
-                        "loss_agg_mode='seq-mean-token-mean' is incompatible with "
-                        "calculate_per_token_loss=True (auto-enabled by Megatron-Bridge "
-                        "under CP>1). The per-sequence inner division by n_s requires "
-                        "local-shard counts that diverge from global under CP. Use one "
-                        "of: 'token-mean', 'seq-mean-token-sum', 'seq-mean-token-sum-norm'."
-                    )
             # The static BSHD path does not pass a router padding mask, so the MoE router
             # normalizes aux/z loss by B*S while gradients are divided by real tokens.
             if not self.engine_config.use_remove_padding:
