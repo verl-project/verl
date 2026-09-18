@@ -62,6 +62,32 @@ TASK_TOKENS = {
 # Roles that collapse into a single user turn when they appear back to back.
 _USER_RUN_ROLES = ("user", "tool")
 
+# vLLM expands one placeholder per image into its image-token span.
+IMAGE_PLACEHOLDER = "<｜deepseek_image｜>"
+
+
+def expand_image_tokens(input_ids, image_grid_hws, image_token_id, downsample_ratio):
+    """Expand [sequence] image placeholders, returning [1, sequence] IDs and types."""
+    raw_ids = input_ids.reshape(-1).tolist()
+    grids = image_grid_hws.tolist()
+    if raw_ids.count(image_token_id) != len(grids):
+        raise ValueError("DeepSeek-V4.1 requires one unexpanded placeholder per image")
+    grids = iter(grids)
+    ids, types = [], []
+    for token in raw_ids:
+        if token != image_token_id:
+            ids.append(token)
+            types.append(-1)
+            continue
+        height, width = next(grids)
+        height = (height + downsample_ratio - 1) // downsample_ratio
+        width = (width + downsample_ratio - 1) // downsample_ratio
+        span = [0] + ([1] * width + [2]) * height + [3]
+        ids.extend([image_token_id] * len(span))
+        types.extend(span)
+    return input_ids.new_tensor([ids]), input_ids.new_tensor([types])
+
+
 REASONING_EFFORT_MAX = (
     "Reasoning Effort: Absolute maximum with no shortcuts permitted.\n"
     "You MUST be very thorough in your thinking and comprehensively decompose the problem to "
@@ -375,3 +401,42 @@ class DeepSeekV4ContinuousTokenBuilder(ContinuousTokenBuilder):
             kind="context",
             inserted_token_ids=inserted_token_ids,
         )
+
+
+class DeepSeekV4VLContinuousTokenBuilder(DeepSeekV4ContinuousTokenBuilder):
+    """Use DeepSeek text formatting with one placeholder per image."""
+
+    def __init__(
+        self,
+        tokenizer: Any,
+        processor: Any,
+        *,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ):
+        super().__init__(tokenizer, **kwargs)
+
+    @classmethod
+    def supports_multimodal(cls) -> bool:
+        return True
+
+    def _encode(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None,
+        add_bos_token: bool,
+        drop_thinking: bool | None = None,
+    ) -> list[int]:
+        messages = [dict(message) for message in messages]
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            message["content"] = [
+                {"type": "text", "text": IMAGE_PLACEHOLDER}
+                if isinstance(block, dict) and block.get("type") in ("image", "image_url")
+                else block
+                for block in content
+            ]
+        return super()._encode(messages, tools=tools, add_bos_token=add_bos_token, drop_thinking=drop_thinking)
