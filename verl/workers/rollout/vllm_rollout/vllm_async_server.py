@@ -322,11 +322,14 @@ class vLLMHttpServer:
             compilation_config["cudagraph_capture_sizes"] = self.config.cudagraph_capture_sizes
 
         compilation_config = json.dumps(compilation_config)
+        distributed_executor_backend = (
+            get_platform().distributed_executor_backend(self.config.tensor_model_parallel_size) or "mp"
+        )
         args = {
             "dtype": self.config.dtype,
             "load_format": self.config.load_format,
             "skip_tokenizer_init": False,
-            "distributed_executor_backend": "mp",
+            "distributed_executor_backend": distributed_executor_backend,
             "worker_extension_cls": self._get_worker_extension_cls(),
             "trust_remote_code": self.model_config.trust_remote_code,
             "max_model_len": self.config.max_model_len,

@@ -247,6 +247,16 @@ class PlatformBase(abc.ABC):
         """Return platform-specific env vars to inject when launching rollout engines."""
         return {}
 
+    def distributed_executor_backend(self, tensor_parallel_size: int) -> Optional[str]:
+        """Return a platform-preferred vLLM ``distributed_executor_backend`` override.
+
+        Return ``None`` (default) to keep verl's default choice (``'mp'``).
+        Subclasses may override, e.g. to avoid spawning extra worker
+        processes on devices where each process carries significant driver
+        context overhead.
+        """
+        return None
+
     # ------------------------------------------------------------------
     # Collective communication
     # ------------------------------------------------------------------
