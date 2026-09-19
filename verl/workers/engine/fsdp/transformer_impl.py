@@ -592,6 +592,31 @@ class FSDPEngine(BaseEngine):
         module = self._build_module()
         try:
             self.pass_packed_cu_seqlens = "cu_seqlens" in signature(module.forward).parameters
+            module_cls = type(module)
+            # Native value models must not acquire an optional TRL import dependency.
+            if (
+                not self.pass_packed_cu_seqlens
+                and self.model_config.model_type == "value_model"
+                and module_cls.__module__.startswith("trl.")
+                and module_cls.__name__ == "AutoModelForCausalLMWithValueHead"
+            ):
+                from verl.utils.import_utils import is_trl_available
+
+                if is_trl_available():
+                    try:
+                        from trl.experimental.ppo import AutoModelForCausalLMWithValueHead
+                    except ImportError:
+                        from trl import AutoModelForCausalLMWithValueHead
+
+                    # TRL forwards **kwargs to the pretrained model without exposing its signature.
+                    # Only unwrap its exact class using the class-defined forward.
+                    if (
+                        module_cls is AutoModelForCausalLMWithValueHead
+                        and getattr(module.forward, "__func__", None) is AutoModelForCausalLMWithValueHead.forward
+                    ):
+                        self.pass_packed_cu_seqlens = (
+                            "cu_seqlens" in signature(module.pretrained_model.forward).parameters
+                        )
         except (TypeError, ValueError):
             self.pass_packed_cu_seqlens = False
         # Apply LoRA adapters if low-rank adaptation is enabled
