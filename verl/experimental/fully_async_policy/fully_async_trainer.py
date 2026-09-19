@@ -1008,7 +1008,8 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         print(f"[FullyAsyncTrainer] Load from checkpoint folder: {global_step_folder}")
         # set global step
         self.current_param_version = int(global_step_folder.split("global_step_")[-1])
-        self.global_steps = self.current_param_version * self.trigger_parameter_sync_step + 1
+        # Restore completed steps; fit() advances once before the first update.
+        self.global_steps = self.current_param_version * self.trigger_parameter_sync_step
         self.last_ckpt_version = self.current_param_version
         print(
             f"[FullyAsyncTrainer] Setting global step to {self.global_steps}, "
