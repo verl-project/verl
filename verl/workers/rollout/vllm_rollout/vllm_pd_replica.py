@@ -302,4 +302,5 @@ class vLLMPDReplica(vLLMReplica):
             cuda_visible_devices=cuda_visible_devices,
             disaggregation_role=role,
             disaggregation_kv_transfer_config=kv_transfer_config,
+            state_lane_prefix=self.state_lane_prefix,
         )

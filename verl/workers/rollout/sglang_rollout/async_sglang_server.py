@@ -148,6 +148,7 @@ class SGLangHttpServer:
         base_gpu_id: int,
         disaggregation_role: str = "null",
         disaggregation_bootstrap_port: Optional[int] = None,
+        state_lane_prefix: str = "rollout",
     ):
         print(
             f"SGLang http server: {rollout_mode=}, {replica_rank=}, {node_rank=}, "
@@ -179,6 +180,7 @@ class SGLangHttpServer:
         self.node_rank = node_rank
         self.nnodes = nnodes
         self.base_gpu_id = base_gpu_id
+        self.state_lane_prefix = state_lane_prefix
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
 
@@ -653,7 +655,10 @@ class SGLangHttpServer:
         if self.lora_as_adapter:
             generate_request.lora_path = SGLANG_LORA_NAME
 
-        with RLInsightLogger.trace_state("sglang_generate", state_lane_id=f"replica_{self.replica_rank}"):
+        with RLInsightLogger.trace_state(
+            "sglang_generate",
+            state_lane_id=RLInsightLogger.rollout_state_lane_id(self.replica_rank, self.state_lane_prefix),
+        ):
             output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
         meta_info = output.get("meta_info", {})
         finish_reason = meta_info.get("finish_reason")
@@ -864,6 +869,7 @@ class SGLangReplica(RolloutReplica):
                 nnodes=self.nnodes,
                 cuda_visible_devices=node_cuda_visible_devices,
                 base_gpu_id=base_gpu_id,
+                state_lane_prefix=self.state_lane_prefix,
             )
             self.servers.append(server)
 

@@ -224,6 +224,7 @@ class SGLangPDReplica(SGLangReplica):
             base_gpu_id=base_gpu_id,
             disaggregation_role=role,
             disaggregation_bootstrap_port=bootstrap_port,
+            state_lane_prefix=self.state_lane_prefix,
         )
         await server.launch_server.remote(master_address=None, master_port=None)
         return [server]

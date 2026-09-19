@@ -104,6 +104,7 @@ class vLLMHttpServer:
         cuda_visible_devices: str,
         disaggregation_role: str = "null",
         disaggregation_kv_transfer_config: Optional[dict] = None,
+        state_lane_prefix: str = "rollout",
     ):
         """
         Args:
@@ -162,6 +163,7 @@ class vLLMHttpServer:
         self.node_rank = node_rank
         self.gpus_per_node = gpus_per_node
         self.nnodes = nnodes
+        self.state_lane_prefix = state_lane_prefix
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
         self._warned_missing_spec_decode_stats = False
@@ -663,7 +665,10 @@ class vLLMHttpServer:
         if rejected is not None:
             return rejected
 
-        with RLInsightLogger.trace_state("vllm_generate", state_lane_id=f"replica_{self.replica_rank}"):
+        with RLInsightLogger.trace_state(
+            "vllm_generate",
+            state_lane_id=RLInsightLogger.rollout_state_lane_id(self.replica_rank, self.state_lane_prefix),
+        ):
             generator = self.engine.generate(
                 prompt=prompt,
                 sampling_params=sampling_params,
@@ -1392,6 +1397,7 @@ class vLLMReplica(RolloutReplica):
                 gpus_per_node=gpus_per_replica_node,
                 nnodes=nnodes,
                 cuda_visible_devices=node_cuda_visible_devices,
+                state_lane_prefix=self.state_lane_prefix,
             )
             self.servers.append(server)
 

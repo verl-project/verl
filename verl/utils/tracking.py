@@ -305,6 +305,11 @@ class RLInsightLogger:
         cls._init_done = False
         cls._registered_metrics.clear()
 
+    @staticmethod
+    def rollout_state_lane_id(replica_rank: int, state_lane_prefix: str = "rollout") -> str:
+        """Return the RL-Insight timeline lane for one rollout role and replica."""
+        return f"{state_lane_prefix}_replica_{replica_rank}"
+
     @classmethod
     @contextmanager
     def trace_state(
