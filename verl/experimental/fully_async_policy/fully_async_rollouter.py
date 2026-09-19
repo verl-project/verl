@@ -1347,11 +1347,13 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         poll_interval: float = 1.0,
         timeout: float | None = None,
     ) -> int:
-        """Block until the message queue contains at least ``required_count`` samples.
+        """Wait for ``required_count`` queued samples or producer completion.
 
         Polls ``message_queue_client.get_queue_size()`` every ``poll_interval``
-        seconds and returns only when the queue size reaches or exceeds
-        ``required_count``.  If ``required_count`` is ``None``, defaults to
+        seconds and returns when the queue size reaches ``required_count`` or
+        the producer has finished. This lets the Trainer consume the remaining
+        queue entries and EOS even when a full batch can no longer arrive.
+        If ``required_count`` is ``None``, defaults to
         ``self.required_samples``.
 
         The Trainer uses this to confirm that the queue truly holds enough
@@ -1366,7 +1368,8 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 exceeded.  ``None`` means no timeout.
 
         Returns:
-            The final queue size observed (≥ required_count).
+            The final queue size observed; it may be below ``required_count``
+            if the producer has finished. This method does not consume entries.
 
         Raises:
             TimeoutError: If ``timeout`` is set and the wait exceeds it.
@@ -1382,6 +1385,11 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                     f"waited={time.time() - start_time:.2f}s",
                     flush=True,
                 )
+                return queue_size
+
+            # _streaming_generation_main publishes EOS before clearing running.
+            # Waiting for more samples here would hide EOS from the consumer.
+            if not self.running:
                 return queue_size
 
             if timeout is not None and (time.time() - start_time) >= timeout:
