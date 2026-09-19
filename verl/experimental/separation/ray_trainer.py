@@ -154,7 +154,10 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
 
             self.orig_critic_cfg = critic_cfg
             if self.orig_critic_cfg.strategy == "fsdp":
-                engine_config: FSDPEngineConfig = self.orig_critic_cfg.model.fsdp_config
+                # `critic.model` is an HFModelConfig, which has no `fsdp_config`; the engine
+                # config lives on the critic itself (FSDPCriticConfig.__post_init__ sets
+                # `engine = fsdp`). This is the same object the v0 and v1 trainers pass. See #7822.
+                engine_config: FSDPEngineConfig = self.orig_critic_cfg.engine
                 self.orig_critic_cfg.apply_engine_batching(engine_config)
             else:
                 raise NotImplementedError(f"Unknown strategy {self.orig_critic_cfg.strategy=}")

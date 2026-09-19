@@ -101,3 +101,29 @@ def test_dynamic_path_rejects_missing_token_budget():
     engine = EngineConfig()
     with pytest.raises(ValueError, match="ppo_max_token_len_per_gpu"):
         critic.apply_engine_batching(engine)
+
+
+def test_fsdp_critic_exposes_its_engine_config_not_model_fsdp_config():
+    """The separation trainer used to read `critic.model.fsdp_config`, which does not exist.
+
+    `critic.model` is an `HFModelConfig`; the engine config lives on the critic itself, and
+    `FSDPCriticConfig.__post_init__` points `engine` at it. Reading it off the model raised
+    `AttributeError` before the worker group was built, so the separation-family critic path
+    could not start at all (#7822).
+    """
+    from verl.workers.config.critic import FSDPCriticConfig
+    from verl.workers.config.model import HFModelConfig
+
+    critic = FSDPCriticConfig(
+        strategy="fsdp",
+        use_dynamic_bsz=True,
+        ppo_micro_batch_size_per_gpu=2,
+        optim=OptimizerConfig(lr=1e-5),
+    )
+    assert critic.engine is not None
+    assert not hasattr(HFModelConfig, "fsdp_config")
+    # the engine carries the strategy, which is what lets engine_workers pick the FSDP version
+    assert critic.engine.strategy == "fsdp"
+    # and it is a usable target for the batching copy
+    critic.apply_engine_batching(critic.engine)
+    assert critic.engine.use_dynamic_bsz is True
