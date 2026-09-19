@@ -15,6 +15,7 @@ import logging
 import os
 import time
 from collections import deque
+from copy import deepcopy
 from dataclasses import replace
 from enum import Enum
 
@@ -151,8 +152,15 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         # initialize standalone rollout
         # TODO: make initialization parallel with super().init()
         hybrid_num_replicas = len(self.llm_server_manager.rollout_replicas)
+        # Standalone replicas have dedicated GPUs; keep their memory budget
+        # separate from the hybrid replicas that share GPUs with training.
+        standalone_config = deepcopy(self.config)
+        standalone_rollout_config = standalone_config.actor_rollout_ref.rollout
+        standalone_memory = standalone_rollout_config.get("standalone_gpu_memory_utilization")
+        if standalone_memory is not None:
+            standalone_rollout_config.gpu_memory_utilization = standalone_memory
         self.standalone_server_manager: LLMServerManager = LLMServerManager.create(
-            config=self.config, start_rank=hybrid_num_replicas
+            config=standalone_config, start_rank=hybrid_num_replicas
         )
         rollout_config = self.config.actor_rollout_ref.rollout
         if rollout_config.prometheus.enable:
@@ -180,8 +188,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
             self.current_mode = HybridEngineMode.TRAINER
             logger.info(
                 "[V1SepAsync] hybrid replicas disabled (actor_rollout_ref.hybrid_engine=False): "
-                f"rollout served by {len(self.standalone_server_manager.get_replicas())} standalone replicas only",
-                flush=True,
+                f"rollout served by {len(self.standalone_server_manager.get_replicas())} standalone replicas only"
             )
 
     def _compute_old_log_prob(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
