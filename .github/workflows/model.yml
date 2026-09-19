@@ -62,11 +62,8 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm024.dev2"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
-  # The image bakes Megatron-LM at /workspace/Megatron-LM onto PYTHONPATH, but the vemlp
-  # dynamic runner does not inherit the image ENV, so re-declare it for the job steps.
-  PYTHONPATH: "/workspace/Megatron-LM"
 
 jobs:
   setup:
@@ -89,44 +86,45 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 20 # Increase this timeout value as needed
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock (offline, from the image's baked cache).
+      # Keep these extras identical across the job so uv never re-syncs torch.
+      UV_RUN: "uv run --frozen --all-packages --extra vllm --extra megatron"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - name: Install the current repository and upgrade to latest transformers
+      # Diagnostic: show whether this runner can reach the outside world at all
+      # before uv needs it. Never fails the job.
+      - name: Keep the uv cache on the runner's persistent ${HOME}
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install -r requirements.txt
-          pip3 install --no-deps -e .
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
       - name: Check final pip list
         run: |
-          pip3 list
+          $UV_RUN uv pip list
       - name: Running rmpad model tests on 8 L20 GPUs + flash_attn 2.5.8
         run: |
-          pytest -s tests/models/test_transformer.py
+          $UV_RUN pytest -s tests/models/test_transformer.py
       - name: Running rmpad model tests on 8 L20 GPUs + latest flash_attn
         run: |
-          pytest -s tests/models/test_transformer.py
+          $UV_RUN pytest -s tests/models/test_transformer.py
       - name: Running FSDP rmpad model tests on 8 L20 GPUs + latest flash_attn
         run: |
-          STRATEGY=fsdp torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
+          STRATEGY=fsdp $UV_RUN torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
       - name: Running transformers ulysses tests on 8 L20 GPUs + latest transformers
         run: |
-          torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
+          $UV_RUN torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
+      # `--with` layers 4.54.1 over the synced env for this step alone, so the
+      # downgrade no longer leaks into the steps below and needs no restore after.
       - name: Running transformers ulysses tests on 8 L20 GPUs + transformers 4.54.1
         run: |
-          pip3 install transformers==4.54.1
-          torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
+          $UV_RUN --with transformers==4.54.1 torchrun --nproc_per_node=8 -m pytest tests/models/test_transformers_ulysses.py
       - name: Run distributed test
         run: |
-          bash tests/special_distributed/run_all.sh
-      - name: Clean up and recover transformers
-        run: |
-          pip3 install --upgrade "transformers==5.5.3"
+          $UV_RUN bash tests/special_distributed/run_all.sh
 
   # TODO: Move this back to model_rmpad once FSDP2 is stable.
   # NOTE: List as an independent job to make rerun easier.
@@ -135,55 +133,61 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 20 # Increase this timeout value as needed
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock (offline, from the image's baked cache).
+      # Keep these extras identical across the job so uv never re-syncs torch.
+      UV_RUN: "uv run --frozen --all-packages --extra vllm --extra megatron"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - name: Install the current repository and upgrade to latest transformers/flash_attn
+      # Diagnostic: show whether this runner can reach the outside world at all
+      # before uv needs it. Never fails the job.
+      - name: Keep the uv cache on the runner's persistent ${HOME}
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
       - name: Check final pip list
         run: |
-          pip3 list
+          $UV_RUN uv pip list
       - name: Running FSDP2 rmpad model tests on 8 L20 GPUs + latest flash_attn
         run: |
-          STRATEGY=fsdp2 torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
+          STRATEGY=fsdp2 $UV_RUN torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py
 
   model_engine:
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 20 # Increase this timeout value as needed
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock (offline, from the image's baked cache).
+      # Keep these extras identical across the job so uv never re-syncs torch.
+      UV_RUN: "uv run --frozen --all-packages --extra vllm --extra megatron"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - name: Install the current repository
+      # Diagnostic: show whether this runner can reach the outside world at all
+      # before uv needs it. Never fails the job.
+      - name: Keep the uv cache on the runner's persistent ${HOME}
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
-          pip3 install --upgrade "accelerate>=1.13.0"
-          pip3 install "nvidia-modelopt>=0.37.0"
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
       - name: Check final pip list
         run: |
-          pip3 list
+          $UV_RUN uv pip list
       - name: Download model config files
         run: |
-          hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir $HOME/models/Qwen/Qwen2.5-0.5B-Instruct
+          $UV_RUN hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir $HOME/models/Qwen/Qwen2.5-0.5B-Instruct
       - name: Running mcore engine tests on 8 L20 GPUs
         run: |
-          ray stop --force
-          pytest -s -x tests/models/test_engine.py
-          pytest -s -x tests/models/test_model_forward_fused.py
+          $UV_RUN ray stop --force
+          $UV_RUN pytest -s -x tests/models/test_engine.py
+          $UV_RUN pytest -s -x tests/models/test_model_forward_fused.py
 
   cleanup:
     runs-on: ubuntu-latest

@@ -13,11 +13,17 @@
 # limitations under the License.
 
 import json
+from dataclasses import make_dataclass
 from types import SimpleNamespace
 
 import pytest
 
+# vllm is not part of the `cpu` extra (it conflicts with the cpu torch world), so
+# cpu_unit_tests skips this module; vllm.yml runs it in the vllm venv.
+pytest.importorskip("vllm")
+
 from verl.workers.rollout.vllm_rollout.utils import (
+    _optional_bool_vllm_args,
     _resolve_vllm_weight_sync_local_rank,
     build_cli_args_from_config,
     vLLMColocateWorkerExtension,
@@ -52,10 +58,57 @@ class TestBuildCliArgsFromConfig:
         assert result == ["--enable-prefix-caching"]
 
     def test_bool_false(self):
-        """Bool False is skipped entirely."""
+        """Optional[bool] args emit '--no-key' for an explicit False."""
         config = {"enable-prefix-caching": False}
         result = build_cli_args_from_config(config)
+        assert result == ["--no-enable-prefix-caching"]
+
+    def test_bool_false_plain_bool_omitted(self):
+        """Bool False on a plain-bool arg is skipped (parser default is False)."""
+        config = {"enforce_eager": False}
+        result = build_cli_args_from_config(config)
         assert result == []
+
+    def test_bool_false_union_str_arg_omitted(self):
+        """Bool False on a `bool | str | None` arg is skipped (string flag, no --no- form)."""
+        config = {"hf_token": False}
+        result = build_cli_args_from_config(config)
+        assert result == []
+
+    def test_bool_false_underscore_key(self):
+        """Underscore keys emit the negative flag in the key's own spelling."""
+        config = {"enable_prefix_caching": False}
+        result = build_cli_args_from_config(config)
+        assert result == ["--no-enable_prefix_caching"]
+
+    def test_bool_false_non_engine_arg_omitted(self):
+        """Bool False on args unknown to AsyncEngineArgs is omitted."""
+        config = {"disable-log-requests": False}
+        result = build_cli_args_from_config(config)
+        assert result == []
+
+    def test_delayed_and_true_plain_bool_defaults(self, monkeypatch):
+        import vllm.engine.arg_utils as arg_utils
+
+        args_class = make_dataclass(
+            "Args",
+            [
+                ("delayed", bool, None),
+                ("enabled", bool, True),
+                ("disabled", bool, False),
+                ("optional", bool | None, None),
+                ("token", bool | str | None, None),
+            ],
+        )
+        _optional_bool_vllm_args.cache_clear()
+        try:
+            monkeypatch.setattr(arg_utils, "AsyncEngineArgs", args_class)
+            result = build_cli_args_from_config(
+                dict.fromkeys(["delayed", "enabled", "disabled", "optional", "token", "unknown"], False)
+            )
+            assert result == ["--no-delayed", "--no-enabled", "--no-optional"]
+        finally:
+            _optional_bool_vllm_args.cache_clear()
 
     def test_none_value(self):
         """None values are skipped."""
@@ -132,6 +185,57 @@ class TestBuildCliArgsFromConfig:
         config = {"sizes": [42]}
         result = build_cli_args_from_config(config)
         assert result == ["--sizes", "42"]
+
+
+class TestCliArgsVllmParserRoundTrip:
+    """Serialized args must round-trip through vLLM's serve CLI parser."""
+
+    @staticmethod
+    def _build_parser():
+        import vllm.entrypoints.cli.serve as serve_mod
+        from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+        parser = FlexibleArgumentParser(description="test")
+        subparsers = parser.add_subparsers(required=False, dest="subparser")
+        for cmd in serve_mod.cmd_init():
+            cmd.subparser_init(subparsers).set_defaults(dispatch_function=cmd.cmd)
+        return parser
+
+    def test_explicit_false_survives_parsing(self):
+        """Explicit False survives parse_args and AsyncEngineArgs.from_cli_args."""
+        from vllm.engine.arg_utils import AsyncEngineArgs
+
+        parser = self._build_parser()
+        config = {
+            "skip_tokenizer_init": False,
+            "enable_chunked_prefill": True,
+            "enable_prefix_caching": False,
+            "enable_sleep_mode": True,
+            "enforce_eager": False,
+            "disable_log_stats": False,
+        }
+        argv = ["serve", "dummy-model"] + build_cli_args_from_config(config)
+        namespace = parser.parse_args(args=argv)
+        engine_args = AsyncEngineArgs.from_cli_args(namespace)
+        assert engine_args.enable_prefix_caching is False
+        assert engine_args.enable_chunked_prefill is True
+        assert engine_args.enable_sleep_mode is True
+        assert engine_args.skip_tokenizer_init is False
+        assert engine_args.enforce_eager is False
+        assert engine_args.disable_log_stats is False
+
+    @pytest.mark.parametrize("spelling", ["enable_flashinfer_autotune", "enable-flashinfer-autotune"])
+    @pytest.mark.parametrize("enabled", [False, True])
+    def test_autotune_explicit_value_survives_parser(self, spelling, enabled):
+        from vllm.engine.arg_utils import AsyncEngineArgs
+
+        if "enable_flashinfer_autotune" not in AsyncEngineArgs.__dataclass_fields__:
+            pytest.skip("installed vLLM predates the autotune engine flag")
+        parser = self._build_parser()
+        argv = ["serve", "dummy-model"] + build_cli_args_from_config({spelling: enabled})
+        namespace = parser.parse_args(args=argv)
+        engine_args = AsyncEngineArgs.from_cli_args(namespace)
+        assert engine_args.enable_flashinfer_autotune is enabled
 
 
 class TestVllmColocateZmqHandle:

@@ -3,7 +3,7 @@
 Config Explanation
 ===================
 
-Last updated: 06/18/2025.
+Last updated: 08/24/2026.
 
 ppo_trainer.yaml for RL FSDP Backend
 -------------------------------------
@@ -221,8 +221,11 @@ Actor/Rollout/Reference Policy
 
 **Common config for actor, rollout and reference model**
 
-- ``actor_rollout_ref.hybrid_engine``: Whether it's a hybrid engine,
-  currently only supports hybrid engine
+- ``actor_rollout_ref.hybrid_engine``: Whether actor and rollout colocate
+  on the same GPUs (hybrid engine). Set to ``False`` only with the V1
+  ``separate_async`` trainer: no colocated rollout replicas are created
+  on the training GPUs and rollout is served exclusively by the
+  standalone rollout pool. All other trainers require ``True``
 - ``actor_rollout_ref.model.path``: Huggingface model path. This can be
   either local path or HDFS path. For HDFS path, we provide utils to
   download it to DRAM and convert the HDFS path to local path.
@@ -248,8 +251,10 @@ Actor/Rollout/Reference Policy
   used.
 
   - ``actor_rollout_ref.model.fused_kernel_options.impl_backend``: The
-    implementation backend for fused kernels. Options: "triton" or
-    "torch". Default is "torch".
+    implementation backend for fused kernels. Options: "triton", "torch", or
+    "liger". The "torch" backend always uses verl's native output-head implementation;
+    select "liger" explicitly to use Liger's fused output-head kernel.
+    Default is "torch".
     While in megatron, we only support "triton" as the
     implementation backend, so there is no need for this option.
 
@@ -604,6 +609,7 @@ Trainer
      default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name} # local checkpoint path
      resume_mode: auto # or disable or resume_path if resume_from_path is set
      resume_from_path: null
+     checkpoint_callback_class: null
      remove_previous_ckpt_in_save: False
      del_local_ckpt_after_load: False
      ray_wait_register_center_timeout: 300
@@ -628,6 +634,11 @@ Trainer
   from the path specified in ``resume_from_path``.
 - ``trainer.resume_from_path``: The path to resume training from. Only
   effective when ``resume_mode`` is set to ``resume_path``.
+- ``trainer.checkpoint_callback_class``: Fully qualified class name of a
+  user-defined checkpoint callback (a ``CheckpointCallback`` subclass).
+  Instantiated on the driver; its ``on_save`` hook is called after each
+  checkpoint save. See :doc:`../advance/checkpoint` for the interface.
+  Default is null (no callback).
 - ``trainer.remove_previous_ckpt_in_save``: Whether to remove previous
   checkpoints in the save directory. Default is False.
 - ``trainer.del_local_ckpt_after_load``: Whether to delete local
@@ -749,4 +760,4 @@ Most parameters for Model are similar to Reward Model.
   default to ``all-linear``. See `peft docs <https://huggingface.co/docs/peft/v0.15.0/en/package_reference/lora#peft.LoraConfig.target_modules>`_ for detail.
 
 - ``use_liger``: Whether to enable Liger kernel, default to False. If True,
-  we apply Liger kernel to the model (depends on `liger-kernel`).
+  we apply Liger kernel to the model (depends on ``liger-kernel>=0.8.2``).

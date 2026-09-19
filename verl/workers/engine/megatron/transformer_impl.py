@@ -80,7 +80,7 @@ from verl.utils.seqlen_balancing import restore_dynamic_batch
 from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizerConfig
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
-from ..utils import postprocess_batch_func, prepare_micro_batches
+from ..utils import detach_tree, postprocess_batch_func, prepare_micro_batches
 from .utils import set_random_seed
 
 logger = logging.getLogger(__file__)
@@ -195,7 +195,6 @@ class MegatronEngine(BaseEngine):
         set_random_seed(seed=self.engine_config.seed)
 
         self._is_offload_param = self.engine_config.param_offload
-        self._is_offload_grad = self.engine_config.grad_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
 
         self.mode = None
@@ -295,11 +294,15 @@ class MegatronEngine(BaseEngine):
 
         override_transformer_config = mapping_string_to_attn_backend({**self.engine_config.override_transformer_config})
         if self.is_value_model:
-            # A value head cannot share weights with the vocabulary embedding. This must
-            # be set before either bridge creates and finalizes its Megatron config.
+            # A value head cannot share weights with the vocabulary embedding. Force the HF
+            # flag off (both bridges derive the model's tie-embeddings behavior from it) and
+            # record it for the checkpoint manager. Do NOT push
+            # share_embeddings_and_output_weights through override_transformer_config: the
+            # vanilla-mbridge path forwards those into TransformerConfig(**kwargs) via
+            # set_extra_args, and some Megatron builds (e.g. Ascend) reject it as an
+            # unexpected kwarg. It is applied per-bridge below, mirroring routing-replay.
             self.model_config.hf_config.tie_word_embeddings = False
             self.share_embeddings_and_output_weights = False
-            override_transformer_config["share_embeddings_and_output_weights"] = False
         if self.engine_config.dynamic_context_parallel:
             override_transformer_config.update(
                 {
@@ -330,6 +333,10 @@ class MegatronEngine(BaseEngine):
             tf_config = bridge.config
             tf_config.fp16 = self.param_dtype == torch.float16
             tf_config.bf16 = self.param_dtype == torch.bfloat16
+            # Value head can't tie embeddings; set it on the built config rather than through
+            # set_extra_args -> TransformerConfig(**kwargs), which some Megatron builds reject.
+            if self.is_value_model and hasattr(tf_config, "share_embeddings_and_output_weights"):
+                tf_config.share_embeddings_and_output_weights = False
         else:
             from verl.models.mcore.bridge import AutoBridge
 
@@ -363,6 +370,10 @@ class MegatronEngine(BaseEngine):
             }
             for key, value in override_transformer_config.items():
                 provider_overrides[key] = value
+            # Value head can't tie embeddings (see the value-model note above). Apply it on
+            # the provider here rather than via override_transformer_config.
+            if self.is_value_model and hasattr(provider, "share_embeddings_and_output_weights"):
+                provider_overrides["share_embeddings_and_output_weights"] = False
             if (
                 self.model_config.hf_config.model_type == "deepseek_v4"
                 and not self.model_config.mtp.enable
@@ -428,11 +439,10 @@ class MegatronEngine(BaseEngine):
     def _resolve_override_ddp_config(self):
         """Keep the DDP grad-bucket dtype consistent with the optimizer's grad buffer.
 
-        When the precision-aware optimizer is opted into with a sub-fp32
-        ``main_grads_dtype``, the DDP grad bucket must reduce grads in the same
-        dtype, so inject ``grad_reduce_in_fp32=False`` unless the user set it
-        explicitly via ``override_ddp_config``. Default (opt-out) leaves the fp32
-        grad bucket untouched, preserving prior behavior.
+        Default to FP32 gradient reduction for the conventional optimizer. When
+        the precision-aware optimizer is opted into with a sub-FP32
+        ``main_grads_dtype``, reduce gradients in that lower precision instead.
+        An explicit ``override_ddp_config`` value always wins.
 
         For Muon + LayerWise, also enable ``use_layer_wise_param_layout`` on the
         DDP config so master weights live in the param buffer (not fp32 clones).
@@ -442,13 +452,12 @@ class MegatronEngine(BaseEngine):
 
         override_ddp_config = dict(self.engine_config.override_ddp_config or {})
         opt_cfg = self.optimizer_config
-        if (
-            opt_cfg is not None
-            and getattr(opt_cfg, "use_precision_aware_optimizer", False)
-            and PrecisionType.to_dtype(getattr(opt_cfg, "main_grads_dtype", "fp32")) != torch.float32
-            and "grad_reduce_in_fp32" not in override_ddp_config
-        ):
-            override_ddp_config["grad_reduce_in_fp32"] = False
+        if opt_cfg is not None and "grad_reduce_in_fp32" not in override_ddp_config:
+            use_low_precision_main_grads = (
+                getattr(opt_cfg, "use_precision_aware_optimizer", False)
+                and PrecisionType.to_dtype(getattr(opt_cfg, "main_grads_dtype", "fp32")) != torch.float32
+            )
+            override_ddp_config["grad_reduce_in_fp32"] = not use_low_precision_main_grads
         if opt_cfg is not None and is_muon_layer_wise_config(opt_cfg):
             override_ddp_config.setdefault("use_layer_wise_param_layout", True)
         return override_ddp_config
@@ -911,8 +920,17 @@ class MegatronEngine(BaseEngine):
         # compute input shapes for pp stages
         n_micro_batch = len(micro_batches)
 
+        enable_routing_replay = tu.get_non_tensor_data(data, key="enable_routing_replay", default=False)
+        record_r2_routes = (
+            enable_routing_replay
+            and forward_only
+            and self.engine_config.router_replay.mode == "R2"
+            and data.get("routed_experts", None) is None
+        )
+
         for micro_batch in micro_batches:
             tu.assign_non_tensor(micro_batch, num_micro_batch=n_micro_batch)
+            tu.assign_non_tensor(micro_batch, record_r2_routes=record_r2_routes)
             if global_max_seqlen is not None:
                 tu.assign_non_tensor(micro_batch, forced_max_seqlen=global_max_seqlen)
 
@@ -932,12 +950,10 @@ class MegatronEngine(BaseEngine):
             postprocess_micro_batch_func=postprocess_micro_batch_func,
         )
 
-        enable_routing_replay = tu.get_non_tensor_data(data, key="enable_routing_replay", default=False)
-
         if enable_routing_replay:
             # Set to REPLAY mode: for R3 mode or actor update phase in R2 mode
             RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
-            if forward_only and self.engine_config.router_replay.mode == "R2":
+            if record_r2_routes:
                 # In R2 mode, forward_only calls (e.g., compute_log_probs) need to record routing information
                 RouterReplay.set_global_router_replay_action(RouterReplayAction.RECORD)
 
@@ -966,7 +982,9 @@ class MegatronEngine(BaseEngine):
                     losses_reduced[0]["metrics"] = {}
                 losses_reduced[0]["metrics"].update(metrics)
 
-        if RouterReplayHelper.is_r2_record_action(self.tf_config):
+        if record_r2_routes:
+            if not self.mini_layer_topk_idx_list:
+                raise RuntimeError("R2 RECORD completed without capturing any router routes.")
             if self.tf_config.virtual_pipeline_model_parallel_size is not None:
                 # config = self.actor_module[0].module.module.config
                 vp_size = len(self.module)
@@ -979,7 +997,7 @@ class MegatronEngine(BaseEngine):
                 topk_idx_td = merge_nested_router_maps(self.mini_layer_topk_idx_list)
             self.mini_layer_topk_idx_list = []
 
-            layers_topk_idx = pp_gather(topk_idx_td.to(torch.uint8), self.tf_config)
+            layers_topk_idx = pp_gather(topk_idx_td, self.tf_config)
             use_dynamic_bsz = tu.get_non_tensor_data(data=data, key="use_dynamic_bsz", default=True)
             if use_dynamic_bsz and indices is not None:
                 layers_topk_idx = restore_dynamic_batch(layers_topk_idx, indices)
@@ -997,7 +1015,7 @@ class MegatronEngine(BaseEngine):
                 )
             else:
                 output = postprocess_batch_func(output_lst=losses_reduced, indices=indices, data=data)
-            if RouterReplayHelper.is_r2_record_action(self.tf_config) and dcp_group is None:
+            if record_r2_routes and dcp_group is None:
                 output["model_output"]["routed_experts"] = layers_topk_idx
         if enable_routing_replay:
             RouterReplay.clear_global_indices()
@@ -1280,21 +1298,27 @@ class MegatronEngineWithLMHead(MegatronEngine):
         else:
             vp_rank = 0
 
-        if RouterReplayHelper.is_replay_backward_action(self.tf_config, vp_rank):
-            router_instance_list = RouterReplayHelper.get_micro_batch_router_list(self.tf_config, vp_rank)
-            for router in router_instance_list:
-                router.set_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+        if self.enable_routing_replay and RouterReplayHelper.is_replay_backward_action(
+            self.tf_config, vp_rank, model=unwrapped_model
+        ):
             set_model_router_replay_action(unwrapped_model, RouterReplayAction.REPLAY_FORWARD)
 
-        if RouterReplayHelper.is_replay_forward_action(self.tf_config, vp_rank):
+        if self.enable_routing_replay and RouterReplayHelper.is_replay_forward_action(
+            self.tf_config, vp_rank, model=unwrapped_model
+        ):
             layers_topk_idx = model_inputs["routed_experts"]
+            if layers_topk_idx is None:
+                raise RuntimeError(
+                    "router_replay REPLAY: micro_batch has no routed_experts. "
+                    "R2 compute_log_prob must record and preserve routes before actor update."
+                )
             replay_mask = None
             if self.engine_config.router_replay.mode == "R3":
                 layers_topk_idx = align_r3_router_replay_data(layers_topk_idx, input_ids)
                 replay_mask = build_r3_replay_mask(input_ids, batch["response_mask"])
             set_router_replay_data(
                 layers_topk_idx,
-                None,
+                attention_mask,
                 self.tf_config,
                 vp_rank,
                 replay_mask=replay_mask,
@@ -1390,16 +1414,21 @@ class MegatronEngineWithLMHead(MegatronEngine):
             )
 
         # Router replay: record routing decisions for R2 mode
-        if RouterReplayHelper.is_r2_record_action(self.tf_config, vp_rank):
+        if tu.get_non_tensor_data(batch, key="record_r2_routes", default=False):
             merge_router_topk_indices(
-                None, input_ids, self.mini_layer_topk_idx_list, self.tf_config, vp_rank, local_cp_size=local_cp_size
+                attention_mask,
+                input_ids,
+                self.mini_layer_topk_idx_list,
+                self.tf_config,
+                vp_rank,
+                local_cp_size=local_cp_size,
+                model=unwrapped_model,
             )
 
         # Router replay: switch to backward replay mode for next backward pass
-        if RouterReplayHelper.is_replay_forward_action(self.tf_config, vp_rank):
-            router_instance_list = RouterReplayHelper.get_micro_batch_router_list(self.tf_config, vp_rank)
-            for router in router_instance_list:
-                router.set_router_replay_action(RouterReplayAction.REPLAY_BACKWARD)
+        if self.enable_routing_replay and RouterReplayHelper.is_replay_forward_action(
+            self.tf_config, vp_rank, model=unwrapped_model
+        ):
             set_model_router_replay_action(unwrapped_model, RouterReplayAction.REPLAY_BACKWARD)
 
         return output, partial(postprocess_micro_batch_func, data=batch, local_cp_size=local_cp_size)
@@ -1426,7 +1455,8 @@ class MegatronEngineWithLMHead(MegatronEngine):
             metrics = {}
         output = {"loss": loss.detach().item(), "metrics": metrics}
         if forward_only or not self.engine_config.dynamic_context_parallel:
-            output["model_output"] = model_output
+            # Detach before this reaches Megatron's forward_data_store; see detach_tree.
+            output["model_output"] = detach_tree(model_output)
         if self.engine_config.dynamic_context_parallel:
             output[DCP_SAMPLE_IDS] = tu.get_non_tensor_data(data, key=DCP_SAMPLE_IDS, default=None)
             output[DCP_GROUP_LEADER] = tu.get_non_tensor_data(data, key=DCP_GROUP_LEADER, default=False)
@@ -1438,19 +1468,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
         # of the aux/z loss by num_tokens; a 2-tuple leaves total_num_tokens=0, so the factor
         # is never cancelled (the ~1e4 grad_norm blow-up at CP>1).
         if self.tf_config is not None and self.tf_config.calculate_per_token_loss and loss_function is not None:
-            # Static CP cannot compose per-sequence token means from local output shards.
-            # DCP reconstructs each sequence inside its dynamic CP group before applying
-            # the native loss, so all aggregation modes remain valid there.
-            if hasattr(loss_function, "keywords") and "config" in loss_function.keywords:
-                _agg_mode = getattr(loss_function.keywords["config"], "loss_agg_mode", None)
-                if _agg_mode == "seq-mean-token-mean" and not self.engine_config.dynamic_context_parallel:
-                    raise ValueError(
-                        "loss_agg_mode='seq-mean-token-mean' is incompatible with "
-                        "calculate_per_token_loss=True (auto-enabled by Megatron-Bridge "
-                        "under CP>1). The per-sequence inner division by n_s requires "
-                        "local-shard counts that diverge from global under CP. Use one "
-                        "of: 'token-mean', 'seq-mean-token-sum', 'seq-mean-token-sum-norm'."
-                    )
             # The static BSHD path does not pass a router padding mask, so the MoE router
             # normalizes aux/z loss by B*S while gradients are divided by real tokens.
             if not self.engine_config.use_remove_padding:

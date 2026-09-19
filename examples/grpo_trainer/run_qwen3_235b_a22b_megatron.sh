@@ -105,7 +105,6 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.expert_model_parallel_size=${ACTOR_EP}
     actor_rollout_ref.actor.megatron.param_offload=${ALL_OFFLOAD}
     actor_rollout_ref.actor.megatron.optimizer_offload=${ALL_OFFLOAD}
-    actor_rollout_ref.actor.megatron.grad_offload=${ALL_OFFLOAD}
     +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_first_pipeline_stage=11
     +actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_last_pipeline_stage=11
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
@@ -187,7 +186,16 @@ if [ -n "$MCORE_MODEL_PATH" ]; then
 fi
 
 ########################### launch ###########################
-python3 -m verl.trainer.main_ppo \
+# uv (set VERL_USE_UV=0 for system python): on GPU, the driver and every Ray worker
+# (runtime_env.py_executable) run through `uv run` on the vllm × megatron extras of the committed uv.lock;
+# NPU falls back to ambient python. Run from the verl repo root.
+LAUNCH=(python3)
+RAY=(ray_kwargs.ray_init.runtime_env.py_executable=null)
+if [ "${VERL_USE_UV:-1}" != 0 ] && [ "${DEVICE:-gpu}" = gpu ]; then
+    LAUNCH=(uv run --frozen --all-packages --extra vllm --extra megatron python3)
+    RAY=(ray_kwargs.ray_init.runtime_env.py_executable="uv -v run --frozen --all-packages --extra vllm --extra megatron")
+fi
+"${LAUNCH[@]}" -m verl.trainer.main_ppo \
     "${ALGORITHM[@]}" \
     "${DATA[@]}" \
     "${MODEL[@]}" \
@@ -196,4 +204,5 @@ python3 -m verl.trainer.main_ppo \
     "${REF[@]}" \
     "${TRAINER[@]}" \
     "${EXTRA[@]}" \
+    "${RAY[@]}" \
     "$@"

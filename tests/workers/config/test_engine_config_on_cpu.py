@@ -39,7 +39,7 @@ class TestMcoreEngineConfig:
         with pytest.raises(AttributeError):
             config.tensor_model_parallel_size = 2  # Frozen field
 
-    @pytest.mark.parametrize("offload_field", ["param_offload", "grad_offload", "optimizer_offload"])
+    @pytest.mark.parametrize("offload_field", ["param_offload", "optimizer_offload"])
     def test_offload_flags(self, offload_field):
         config = McoreEngineConfig(**{offload_field: True})
         assert getattr(config, offload_field) is True
@@ -51,6 +51,11 @@ class TestFSDPEngineConfigCPU:
         assert config.param_offload is False
         assert config.optimizer_offload is False
         assert config.fsdp_size == -1
+        assert config.use_no_sync_for_gradient_accumulation is True
+
+    def test_gradient_accumulation_sync_can_be_restored_per_micro_batch(self):
+        config = FSDPEngineConfig(use_no_sync_for_gradient_accumulation=False)
+        assert config.use_no_sync_for_gradient_accumulation is False
 
     @pytest.mark.parametrize(
         "offload_params",

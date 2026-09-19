@@ -161,6 +161,10 @@ def test_dispatcher_vllm_with_flag_returns_pd_replica():
     """``get_rollout_replica_class('vllm', disaggregation_enabled=True)``
     resolves to ``vLLMPDReplica``; the same name without the flag resolves to
     the colocated ``vLLMReplica``. Mirrors the SGLang dispatch from PR #6117."""
+    # Both branches import the vLLM engine modules eagerly, and
+    # verl.third_party.vllm raises (not ImportError) when neither vllm nor
+    # sglang is installed, as in the CPU-only CI env.
+    pytest.importorskip("vllm")
     from verl.workers.rollout.replica import get_rollout_replica_class
 
     plain_cls = get_rollout_replica_class("vllm", disaggregation_enabled=False)

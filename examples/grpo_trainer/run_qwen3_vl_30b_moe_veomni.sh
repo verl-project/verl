@@ -114,7 +114,6 @@ ROLLOUT_CONFIG="
     actor_rollout_ref.rollout.data_parallel_size=$infer_dp \
     actor_rollout_ref.rollout.expert_parallel_size=$infer_ep \
     actor_rollout_ref.rollout.gpu_memory_utilization=$gpu_memory_utilization \
-    actor_rollout_ref.rollout.enable_chunked_prefill=False \
     actor_rollout_ref.rollout.enable_prefix_caching=False \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.free_cache_engine=True \

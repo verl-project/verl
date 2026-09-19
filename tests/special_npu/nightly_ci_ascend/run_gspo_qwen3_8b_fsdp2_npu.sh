@@ -12,7 +12,7 @@ export CPU_AFFINITY_CONF=1
 export VLLM_USE_V1=1
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-8B}
-MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/${MODEL_ID}}
 TRAIN_FILE=${TRAIN_FILE:-$HOME/data/gsm8k/train.parquet}
 TEST_FILE=${TEST_FILE:-$HOME/data/gsm8k/test.parquet}
 
@@ -22,7 +22,7 @@ mkdir -p "$LOG_DIR"
 rm -rf "$LOG_DIR/$SCRIPT_NAME.log"
 
 # ---- user-adjustable (CI defaults keep runtime short) ----
-NGPUS_PER_NODE=${NGPUS_PER_NODE:-16}
+NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-32}
 PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-16}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-2048}

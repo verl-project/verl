@@ -103,7 +103,6 @@ def create_training_config(model_type, strategy, device_count, model):
     kwargs = dict(
         param_offload=True,
         optimizer_offload=True,
-        grad_offload=True,
         use_dynamic_bsz=True,
         use_remove_padding=True,
         max_token_len_per_gpu=500,

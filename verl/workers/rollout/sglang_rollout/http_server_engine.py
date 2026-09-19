@@ -70,6 +70,8 @@ DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_RETRY_DELAY = 2.0
 DEFAULT_MAX_CONNECTIONS = 2000
 DEFAULT_MAX_WAIT_TIME = 300.0
+# Cap on how much of a failed response body reaches the log.
+_ERROR_BODY_CHARS = 2000
 
 
 def _read_response(response: requests.Response):
@@ -82,6 +84,11 @@ def _read_response(response: requests.Response):
             "content_type": response.headers.get("Content-Type", ""),
             "text": response.text,
         }
+
+
+def _log_error_body(endpoint: str, status: int, body: str) -> None:
+    """Log a failed response's body; the raised error carries only the status line."""
+    logger.error(f"HTTP error for {endpoint}: {status}, body={body[:_ERROR_BODY_CHARS]}")
 
 
 async def _read_async_response(resp: aiohttp.ClientResponse) -> dict[str, Any]:
@@ -333,7 +340,7 @@ class HttpServerAdapter(EngineBase):
             except requests.exceptions.ConnectionError:
                 logger.warning(f"Connection error for {endpoint} (attempt {attempt + 1})")
             except requests.exceptions.HTTPError as e:
-                logger.error(f"HTTP error for {endpoint}: {e}")
+                _log_error_body(endpoint, e.response.status_code, e.response.text)
                 raise
             except Exception as e:
                 logger.error(f"Unexpected error for {endpoint}: {e}")
@@ -691,11 +698,17 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
                 async with self._get_session() as session:
                     if method.upper() == "GET":
                         async with session.get(url, timeout=timeout) as response:
-                            response.raise_for_status()
+                            # Read the body here: it is gone once this block exits, and
+                            # ClientResponseError does not carry it.
+                            if response.status >= 400:
+                                _log_error_body(endpoint, response.status, await response.text())
+                                response.raise_for_status()
                             return await _read_async_response(response)
                     else:
                         async with session.post(url, json=payload or {}, timeout=timeout) as response:
-                            response.raise_for_status()
+                            if response.status >= 400:
+                                _log_error_body(endpoint, response.status, await response.text())
+                                response.raise_for_status()
                             return await _read_async_response(response)
 
             except asyncio.TimeoutError:
@@ -775,12 +788,16 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
         )
 
     async def load_lora_adapter_from_tensor(self, req):
+        import base64
+
+        # Base64 like update_weights_from_tensor above: the field is List[bytes], JSON has none.
+        serialized_named_tensors = [base64.b64encode(t).decode("utf-8") for t in req.serialized_named_tensors]
         return await self._make_async_request(
             "load_lora_adapter_from_tensors",
             {
                 "lora_name": req.lora_name,
                 "config_dict": req.config_dict,
-                "serialized_tensors": req.serialized_tensors,
+                "serialized_named_tensors": serialized_named_tensors,
             },
         )
 

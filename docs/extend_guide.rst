@@ -1,7 +1,7 @@
 How to Extend verl
 ===================
 
-Last updated: 06/23/2026.
+Last updated: 08/24/2026.
 
 Author: `Xibin Wu <https://github.com/wuxibin89>`_
 
@@ -129,6 +129,21 @@ provides a set of hooks to customize trainer behavior:
 - on_sample_end
 
 These hooks are also used by the ``sync``, ``colocate_async``, and ``separate_async`` trainers to change model engine, LLM server, and checkpoint engine behavior.
+
+How do I run custom code when the trainer checkpoints?
+++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+Subclass ``verl.trainer.ppo.checkpoint_callback.CheckpointCallback`` and override
+``on_save`` (similar to the ``on_save`` event of the ``transformers`` ``TrainerCallback``),
+then point the trainer at it with a fully qualified class name (the class must be
+importable on the driver):
+
+.. code:: bash
+
+    trainer.checkpoint_callback_class=my_package.module.MyCheckpointCallback
+
+The hook runs on the driver after each checkpoint save in the v1 PPO trainer.
+See :ref:`checkpoint-page` for the full hook semantics.
 
 Agent Framework Developer
 -------------------------

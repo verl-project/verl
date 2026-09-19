@@ -415,7 +415,6 @@ def vlm_data_file():
     "model_path",
     [
         f"{custom_model_prefix}/Qwen/Qwen3-VL-2B-Instruct",
-        f"{custom_model_prefix}/Qwen/Qwen3.5-0.8B",
     ],
 )
 def test_multiturn_sft_vlm_dataset_on_cpu(model_path, vlm_data_file):

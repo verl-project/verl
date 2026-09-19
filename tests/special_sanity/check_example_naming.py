@@ -73,6 +73,7 @@ FORBIDDEN_TOKENS = (
 ALLOWED_BACKENDS = (
     "fsdp",
     "fsdp2",
+    "fsdp_turbo",
     "megatron",
     "megatron_lite",
     "mindspeed",

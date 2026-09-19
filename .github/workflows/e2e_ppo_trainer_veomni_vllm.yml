@@ -68,6 +68,7 @@ on:
       - "examples/data_preprocess/gsm8k.py"
       - "examples/data_preprocess/geo3k.py"
       - "tests/special_e2e/run_ppo_trainer_veomni.sh"
+      - "tests/special_e2e/profiler_finish_hook_marker.sh"
       - "verl/trainer/main_ppo.py"
       - "verl/trainer/config/ppo_trainer.yaml"
 
@@ -105,8 +106,6 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 60 # Increase this timeout value as needed
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
     steps:
@@ -116,7 +115,6 @@ jobs:
       - name: Install the current repository
         run: |
           pip3 install -r requirements-test.txt
-          pip3 install -r requirements.txt
           pip3 install --no-deps -e .
           pip3 install veomni==0.1.11 --ignore-requires-python --no-deps --index-url https://pypi.org/simple/
           pip3 install transformers==5.5.3
@@ -145,11 +143,7 @@ jobs:
 
   cleanup:
     runs-on: ubuntu-latest
-    needs:
-      [
-        setup,
-        e2e_ppo_trainer_veomni_vllm,
-      ]
+    needs: [setup, e2e_ppo_trainer_veomni_vllm]
     if: always()
     steps:
       - id: destroy-runner

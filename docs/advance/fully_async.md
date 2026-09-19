@@ -172,7 +172,7 @@ https://github.com/ArronHZG/verl-community/blob/main/docs/fully_async_policy_rev
 
   During the training process, we observed that metrics and response lengths may become unstable in the later
   stages of training. To mitigate this issue, we can use
-  the [Rollout Importance Sampling](https://verl.readthedocs.io/en/latest/advance/rollout_is.html)
+  the [Rollout Importance Sampling](https://verl.readthedocs.io/en/latest/algo/rollout_corr.html)
   technique for importance sampling. To utilize Rollout Importance Sampling, we need to compute log_prob using
   the training engine, which requires enabling this switch.
   Additionally, when `algorithm.rollout_correction.bypass_mode=False` and Rollout Importance Sampling are enabled under

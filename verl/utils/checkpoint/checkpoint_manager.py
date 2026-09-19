@@ -23,7 +23,7 @@ from omegaconf import DictConfig
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from verl.trainer.config import CheckpointConfig
-from verl.utils.device import get_device_name, get_torch_device
+from verl.utils.device import get_device_name, get_torch_device, is_device_available
 
 
 class BaseCheckpointManager:
@@ -201,7 +201,10 @@ class BaseCheckpointManager:
             "random": random.getstate(),
         }
 
-        if get_device_name() != "cpu":
+        # get_device_name() reports the platform's accelerator even on hosts that have
+        # none, so the accelerator RNG state is only reachable when the device is
+        # actually usable in this process.
+        if get_device_name() != "cpu" and is_device_available():
             rng_state[get_device_name()] = get_torch_device().get_rng_state()
 
         return rng_state
@@ -212,7 +215,7 @@ class BaseCheckpointManager:
         np.random.set_state(rng_state["numpy"])
         random.setstate(rng_state["random"])
 
-        if get_device_name() != "cpu":
+        if is_device_available() and get_device_name() in rng_state:
             get_torch_device().set_rng_state(rng_state[get_device_name()])
 
 

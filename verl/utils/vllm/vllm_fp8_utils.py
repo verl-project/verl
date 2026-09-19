@@ -198,7 +198,16 @@ def _record_pristine_fp8_layout(layer, params):
 def _layer_needs_fp8_staging(layer, pristine) -> bool:
     for name, (shape, dtype) in pristine.items():
         param = getattr(layer, name, None)
-        if isinstance(param, torch.nn.Parameter) and (tuple(param.shape) != shape or param.dtype != dtype):
+        if not isinstance(param, torch.nn.Parameter):
+            continue
+        if tuple(param.shape) != shape or param.dtype != dtype:
+            return True
+        # ROCm's AITER MoE backend permutes the expert weights into its MFMA
+        # layout while leaving shape and dtype untouched, so the comparison
+        # above cannot see it. ``is_shuffled``, which that backend sets on the
+        # repacked parameter, is the only signal that the live buffer is no
+        # longer in checkpoint layout.
+        if getattr(param, "is_shuffled", False):
             return True
     return False
 

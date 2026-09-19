@@ -17,12 +17,13 @@ import gc
 import inspect
 import logging
 import os
+import pickle
 from datetime import datetime
 from pathlib import Path
 
 import torch
 
-from verl.utils.device import get_torch_device
+from verl.utils.device import get_device_name, get_torch_device
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -181,18 +182,22 @@ def enable_memory_visualize(
         return
 
     f = device.memory._record_memory_history
-    params = set(inspect.signature(f).parameters.keys())
+    params = inspect.signature(f).parameters
+    # torch-npu exposes the modern API through an (enabled, *args, **kwargs) wrapper.
+    accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
 
     def _one_call(dev_kw=None):
         kwargs = {}
-        if "context" in params:
+        if "context" in params or (accepts_kwargs and "record_context" not in params):
             kwargs["context"] = context
-        if "stacks" in params:
+        if "stacks" in params or (accepts_kwargs and "record_context" not in params):
             kwargs["stacks"] = stacks
         if "max_entries" in params:
             kwargs["max_entries"] = trace_alloc_max_entries
         elif "trace_alloc_max_entries" in params:
             kwargs["trace_alloc_max_entries"] = trace_alloc_max_entries
+        elif accepts_kwargs:
+            kwargs["max_entries"] = trace_alloc_max_entries
         if "stack_depth" in params:
             kwargs["stack_depth"] = stack_depth
         if dev_kw is not None:
@@ -200,6 +205,8 @@ def enable_memory_visualize(
                 kwargs["device"] = dev_kw
             elif "devices" in params:
                 kwargs["devices"] = dev_kw if isinstance(dev_kw, list) else [dev_kw]
+            elif accepts_kwargs:
+                kwargs["device"] = dev_kw
         if "record_context" in params:
             kwargs["record_context"] = record_context
 
@@ -252,7 +259,7 @@ def clear_memory_history(trace_alloc_max_entries: int = 200_000, stack_depth: in
 
 class MemorySnapshotSampler:
     """
-    A utility class that dumps GPU memory snapshots.
+    A utility class that dumps CUDA/NPU memory snapshots.
     This is useful for monitoring memory usage over a long-running process.
 
     The dumped files can be visualized with https://docs.pytorch.org/memory_viz
@@ -266,7 +273,9 @@ class MemorySnapshotSampler:
         self.out_dir = out_dir
         self.tag = tag
 
-    def dump_memory_snapshot(self, out_dir: str = "./mem_snapshots", tag: str = "snapshot", sub_dir: str = None):
+    def dump_memory_snapshot(
+        self, out_dir: str = "./mem_snapshots", tag: str = "snapshot", sub_dir: str = None, synchronize: bool = True
+    ) -> Path | None:
         """
         Generates a memory snapshot and saves it as a pickle file in a specified directory.
         The files are organized by timestamp in subdirectories, with all ranks' files
@@ -277,6 +286,8 @@ class MemorySnapshotSampler:
                 The directory is created if it does not exist.
             tag (str): A string tag to prepend to the filename for easier identification.
             sub_dir (str): A subdirectory to place the snapshot file in.
+            synchronize (bool): Whether to synchronize the device before dumping. Disable this
+                for an OOM observer because the device stream may already be in an error state.
         """
         if sub_dir is None:
             timestamp = datetime.now().strftime("%Y%m%d-%H%M")
@@ -285,7 +296,7 @@ class MemorySnapshotSampler:
             out_path = Path(out_dir) / sub_dir
         out_path.mkdir(parents=True, exist_ok=True)
 
-        # get the GPU rank on the current process
+        # get the accelerator rank on the current process
         rank = os.environ.get("RANK", "0")
         pid = os.getpid()
         # todo(chenyang): check wether we need to sync all ranks before dump
@@ -294,12 +305,21 @@ class MemorySnapshotSampler:
 
         device = get_torch_device()
         if not device.is_available():
-            logger.warning("[memory_visualize] is only available on CUDA devices.")
-            return
+            logger.warning("[memory_visualize] is only available on accelerator devices.")
+            return None
         try:
-            device.synchronize()
-            # Memory snapshot is CUDA-specific functionality
-            device.memory._dump_snapshot(str(path))
+            if synchronize:
+                device.synchronize()
+            if get_device_name() == "npu":
+                # NPU's _dump_snapshot may start/stop a profiler to collect extra device data.
+                # Only serialize allocator state for both regular and OOM snapshots.
+                snapshot = device.memory._snapshot()
+                with path.open("wb") as f:
+                    pickle.dump(snapshot, f)
+            else:
+                device.memory._dump_snapshot(str(path))
             logger.info(f"[memory_visualize] dumped: {path}")
+            return path
         except Exception as e:
-            logger.info(f"[memory_visualize][warn] dump failed: {e}")
+            logger.warning(f"[memory_visualize] dump failed: {e}")
+            return None

@@ -1,11 +1,8 @@
 # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
 _target_: verl.workers.config.McoreEngineConfig
 
-# Whether to offload model parameters to CPU
+# Whether to offload model parameters to CPU and release gradient buffers while inactive
 param_offload: False
-
-# Whether to offload gradients to CPU
-grad_offload: False
 
 # Whether to offload optimizer state to CPU
 optimizer_offload: False
@@ -129,7 +126,8 @@ router_replay:
   _target_: verl.workers.config.EngineRouterReplayConfig
 
   # Router replay mode: disabled, R2, R3
-  # - R2: Use R2 routing strategy (record mode)
+  # - R2: Record actor old-logprob routes and replay them during update.
+  #       Requires algorithm.rollout_correction.bypass_mode=false.
   # - R3: Use R3 routing strategy (record mode)
   mode: disabled
 

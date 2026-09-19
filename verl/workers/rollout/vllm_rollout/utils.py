@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import ctypes
+import dataclasses
+import functools
 import json
 import logging
 import os
@@ -28,7 +30,7 @@ from vllm.outputs import RequestOutput
 from verl.utils.device import get_device_name, is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack, resolve_weight_name
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
-from verl.utils.vllm.vllm_quant_utils import apply_vllm_quant_patches, is_fp8_model, load_quanted_weights
+from verl.utils.vllm.vllm_quant_utils import apply_vllm_quant_patches, is_quantized_model, load_quanted_weights
 from verl.workers.rollout.vllm_rollout.weight_update_utils import apply_buffer_updates, split_buffer_updates
 
 logger = logging.getLogger(__file__)
@@ -109,16 +111,23 @@ def monkey_patch_compute_logits(model, vocab_size: int, banned_token_ids: Option
     unless a real image or video sits behind them. See `get_vision_placeholder_token_ids`.
     """
     original_compute_logits = model.compute_logits
+    # Built once and cached on the device: compute_logits runs on every decode step, and
+    # rebuilding the index there costs a host-to-device copy per step.
+    banned_index = torch.tensor(banned_token_ids, dtype=torch.long) if banned_token_ids else None
 
     def compute_logits(
         self,
         *args,
         **kwargs,
     ) -> torch.Tensor:
+        nonlocal banned_index
+
         logits = original_compute_logits(*args, **kwargs)
         logits[..., vocab_size:] = float("-inf")
-        if banned_token_ids:
-            logits[..., banned_token_ids] = float("-inf")
+        if banned_index is not None:
+            if banned_index.device != logits.device:
+                banned_index = banned_index.to(logits.device)
+            logits.index_fill_(-1, banned_index, float("-inf"))
         return logits
 
     model.compute_logits = MethodType(compute_logits, model)
@@ -157,9 +166,16 @@ class vLLMColocateWorkerExtension:
         # 1. patch for Lora
         VLLMHijack.hijack()
         vllm_config = kwargs.get("vllm_config")
+        weight_transfer_config = getattr(vllm_config, "weight_transfer_config", None)
+        if getattr(weight_transfer_config, "backend", None) == "verl_delta_ipc":
+            from verl.workers.rollout.vllm_rollout.delta_weight_transfer import (
+                register_verl_delta_weight_transfer_engine,
+            )
+
+            register_verl_delta_weight_transfer_engine()
         # 2. patch online fp8 quant. Some models, including DeepSeek-V4, get
         # fp8 from the HF config rather than an explicit rollout quantization arg.
-        if os.environ.get("VERL_VLLM_FP8_QUANT_ENABLED", "0") == "1" or is_fp8_model(vllm_config):
+        if os.environ.get("VERL_VLLM_FP8_QUANT_ENABLED", "0") == "1" or is_quantized_model(vllm_config):
             apply_vllm_quant_patches()
         # 3. patch QAT (compressed-tensors NVFP4) for dynamic weight loading
         quant_config = getattr(vllm_config, "quant_config", None) if vllm_config else None
@@ -266,7 +282,7 @@ class vLLMColocateWorkerExtension:
             # Remove the old LoRA before the new one arrives (applied after is_last below).
             self.remove_lora(VLLM_LORA_INT_ID)
             logger.info("LoRA adapter sync: remove old lora and prepare new lora")
-        elif is_fp8_model(self.model_runner.vllm_config):
+        elif is_quantized_model(self.model_runner.vllm_config):
             from verl.utils.vllm.vllm_quant_utils import prepare_quanted_weights_for_loading
 
             quant_reload_states = [
@@ -324,7 +340,7 @@ class vLLMColocateWorkerExtension:
             logger.info("ModelOpt QAT: process_weights_after_loading completed")
         elif peft_config and base_sync_done:
             logger.info("LoRA adapter sync, no post-process needed")
-        elif is_fp8_model(self.model_runner.vllm_config):
+        elif is_quantized_model(self.model_runner.vllm_config):
             from verl.utils.vllm.vllm_quant_utils import process_quanted_weights_after_loading
 
             for model, reload_state in quant_reload_states:
@@ -371,7 +387,7 @@ class vLLMColocateWorkerExtension:
             param_updates, buffer_updates, named_buffers = split_buffer_updates(self.model_runner.model, weights)
             # Add the FP8 related logic here as sharding manager has been deprecated.
             # Check if FP8 quantization is enabled and apply appropriate weight loading
-            if is_fp8_model(self.model_runner.vllm_config):
+            if is_quantized_model(self.model_runner.vllm_config):
                 logger.info(f"FP8 model detected (async): {self.model_runner.vllm_config.quant_config}")
                 # Convert bf16 weights to fp8 format before loading
                 loaded_params = load_quanted_weights(param_updates, self.model_runner) if param_updates else []
@@ -414,6 +430,12 @@ class vLLMColocateWorkerExtension:
         trainer_rank = int(trainer_rank_base) + local_rank if trainer_rank_base is not None else local_rank
         return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{trainer_rank}.sock"
 
+    def update_verl_delta_weights(self, update_info: dict) -> None:
+        """Add this worker's IPC endpoint and forward the delta update to vLLM."""
+        worker_update_info = dict(update_info)
+        worker_update_info["zmq_handle"] = self._get_zmq_handle()
+        self.update_weights(worker_update_info)
+
 
 class SuppressSignalInThread:
     def __enter__(self):
@@ -432,6 +454,26 @@ class SuppressSignalInThread:
         signal.signal = self.original_signal
 
 
+@functools.lru_cache(maxsize=1)
+def _optional_bool_vllm_args() -> set[str]:
+    """Return boolean engine fields for which omitting False changes semantics.
+
+    For such fields an omitted flag leaves the None default, which vLLM can
+    resolve to True at engine-config time (e.g. `enable_prefix_caching`), so
+    an explicit False must be serialized as `--no-<flag>` instead of being
+    dropped. Some vLLM versions annotate delayed-default fields as plain bool
+    despite a None default (e.g. enable_flashinfer_autotune in 0.26). Plain
+    bool fields defaulting to True also require an explicit negative flag.
+    """
+    from vllm.engine.arg_utils import AsyncEngineArgs
+
+    return {
+        f.name
+        for f in dataclasses.fields(AsyncEngineArgs)
+        if set(get_args(f.type)) == {bool, type(None)} or (f.type is bool and (f.default is None or f.default is True))
+    }
+
+
 def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     """
     Convert a config dictionary to CLI arguments for vLLM server.
@@ -439,7 +481,8 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     Handles different value types appropriately:
     - None: skipped
     - bool True: adds '--key'
-    - bool False: skipped
+    - bool False: adds '--no-key' for optional boolean engine args or plain
+      boolean engine args defaulting to None/True, otherwise skipped
     - list: expands to '--key item1 item2 ...'
     - empty list: skipped (vLLM uses nargs="+" which requires at least one value)
     - dict: JSON serialized
@@ -458,6 +501,9 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
         if isinstance(v, bool):
             if v:
                 cli_args.append(f"--{k}")
+            elif k.replace("-", "_") in _optional_bool_vllm_args():
+                # Omission may preserve True or resolve a delayed None to True.
+                cli_args.append(f"--no-{k}")
         elif isinstance(v, list):
             if not v:
                 # Skip empty lists - vLLM uses nargs="+" which requires at least one value

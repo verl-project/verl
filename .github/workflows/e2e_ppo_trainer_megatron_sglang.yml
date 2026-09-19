@@ -86,11 +86,8 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:sgl0512.dev4"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
-  # The image bakes Megatron-LM at /workspace/Megatron-LM onto PYTHONPATH, but the vemlp
-  # dynamic runner does not inherit the image ENV, so re-declare it for the job steps.
-  PYTHONPATH: "/workspace/Megatron-LM"
 
 jobs:
   setup:
@@ -113,40 +110,42 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 60 # Increase this timeout value as needed
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock. These extras must match what the e2e script
+      # picks for this backend combo, or each step would re-sync torch.
+      UV_RUN: "uv run --frozen --all-packages --extra sglang --extra megatron --extra math"
       ENGINE: sglang
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - name: Install the current repository
+      # Diagnostic: show whether this runner can reach the outside world at all
+      # before uv needs it. Never fails the job.
+      - name: Keep the uv cache on the runner's persistent ${HOME}
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install "nvidia-modelopt>=0.37.0"
-          pip3 install --no-deps -e .
-          pip install --no-deps transformers==5.3.0
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
       - name: Check final pip list
         run: |
-          pip3 list
+          $UV_RUN uv pip list
       - name: Prepare GSM8K dataset
         run: |
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+          $UV_RUN python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron (DeepSeek)
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           OPTIM_MEMORY_EFFICIENT=True ENGINE=sglang SAVE_FREQ=1 MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct bash tests/special_e2e/run_ppo_trainer_megatron.sh
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron (DeepSeek)
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           export VLLM_USE_V1=1
-          ray start --head
+          $UV_RUN ray start --head
           ENGINE=sglang MODE=async RESUME_MODE=auto MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct TOTAL_TRAIN_STEPS=2 bash tests/special_e2e/run_ppo_trainer_megatron.sh
       - name: Profiling GRPO GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron (Deepseek)
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           PROFILE_ENABLE=True ENGINE=sglang ADV_ESTIMATOR=grpo USE_DYNAMIC_BSZ=False MODEL_ID=deepseek-ai/deepseek-coder-1.3b-instruct bash tests/special_e2e/run_ppo_trainer_megatron.sh
           if [ -z "$( ls -A '/tmp/ray/session_latest/logs/nsight/' )" ]; then
             echo "[ERROR] not found any profiling files"
@@ -164,35 +163,36 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 60 # Increase this timeout value as needed
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      # No install step: every command below runs through uv, which syncs .venv
+      # from the committed uv.lock. These extras must match what the e2e script
+      # picks for this backend combo, or each step would re-sync torch.
+      UV_RUN: "uv run --frozen --all-packages --extra sglang --extra megatron --extra math"
       ENGINE: sglang
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - name: Install the current repository
+      # Diagnostic: show whether this runner can reach the outside world at all
+      # before uv needs it. Never fails the job.
+      - name: Keep the uv cache on the runner's persistent ${HOME}
         run: |
-          pip3 install -r requirements-test.txt
-          pip3 install -r requirements.txt
-          pip3 install --no-deps -e .
-          pip install --no-deps transformers==5.3.0
-          pip3 install "nvidia-modelopt>=0.37.0"
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
       - name: Check final pip list
         run: |
-          pip3 list
+          $UV_RUN uv pip list
       - name: Prepare GSM8K dataset
         run: |
-          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+          $UV_RUN python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with Megatron (Qwen3) testing learning rate scheduler
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           ALL_OFFLOAD=True VAL_BEFORE_TRAIN=True TEST_FREQ=1 SAVE_FREQ=1 LR_WARMUP_STEPS=1 TOTAL_TRAIN_STEPS=2 MODEL_ID=Qwen/Qwen3-0.6B bash tests/special_e2e/run_ppo_trainer_megatron.sh
       - name: Running GSM8K E2E training tests with 3D parallelism on 8 L20 GPUs with FP8 rollout
         run: |
-          ray stop --force
+          $UV_RUN ray stop --force
           export VLLM_USE_V1=1
           ROLLOUT_QUANTIZATION=fp8 TOTAL_TRAIN_STEPS=2 MODEL_ID=Qwen/Qwen3-0.6B bash tests/special_e2e/run_ppo_trainer_megatron.sh
       - name: clean up

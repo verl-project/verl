@@ -32,6 +32,24 @@ from tqdm import tqdm
 from .base_model_merger import BaseModelMerger
 
 
+def merge_non_dtensor_shards(key: str, shards: list[torch.Tensor]) -> torch.Tensor:
+    """Return the single copy of a plain (non-DTensor) checkpoint entry.
+
+    FSDP only produces DTensors for what it actually shards; plain tensors are buffers and
+    unwrapped parameters, replicated in full on every rank (or the whole tensor when
+    world_size == 1). Concatenating them would give a world_size-times oversized tensor
+    and fails outright for 0-d tensors, so keep one copy and fail loudly if the ranks
+    disagree, which would mean the checkpoint is malformed.
+    """
+    for rank, shard in enumerate(shards[1:], start=1):
+        if shard.shape != shards[0].shape or not torch.equal(shard, shards[0]):
+            raise ValueError(
+                f"Non-DTensor entry {key!r} differs between rank 0 and rank {rank}; "
+                "expected a replicated buffer/parameter identical on every rank"
+            )
+    return shards[0]
+
+
 class FSDPModelMerger(BaseModelMerger):
     """
     Model merger for FSDP (Fully Sharded Data Parallel) checkpoints.
@@ -199,7 +217,7 @@ class FSDPModelMerger(BaseModelMerger):
                     # 2-D list, FSDP + TP
                     raise NotImplementedError("FSDP + TP is not supported yet")
             else:
-                state_dict[key] = torch.cat(state_dict[key], dim=0)
+                state_dict[key] = merge_non_dtensor_shards(key, state_dict[key])
 
         return state_dict
 

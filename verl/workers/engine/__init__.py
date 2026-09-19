@@ -14,13 +14,14 @@
 import warnings
 
 from .base import BaseEngine, EngineRegistry
-from .fsdp import FSDPEngine, FSDPEngineWithLMHead
+from .fsdp import FSDPEngine, FSDPEngineWithLMHead, FSDPTurboEngineWithLMHead
 
 __all__ = [
     "BaseEngine",
     "EngineRegistry",
     "FSDPEngine",
     "FSDPEngineWithLMHead",
+    "FSDPTurboEngineWithLMHead",
 ]
 
 try:
@@ -52,14 +53,13 @@ except ImportError as e:
 
 # Mindspeed must be imported before Megatron to ensure the related monkey patches take effect as expected
 try:
-    from .mindspeed import MindspeedEngineWithLMHead, MindspeedEngineWithValueHead, MindSpeedMegatronEngineWithLMHead
+    from .mindspeed import MindspeedEngineWithLMHead, MindspeedEngineWithValueHead
 
-    __all__ += ["MindspeedEngineWithLMHead", "MindspeedEngineWithValueHead", "MindSpeedMegatronEngineWithLMHead"]
+    __all__ += ["MindspeedEngineWithLMHead", "MindspeedEngineWithValueHead"]
 except ImportError as e:
     warnings.warn(f"mindspeed engine is not available: {e!r}", stacklevel=1)
     MindspeedEngineWithLMHead = None
     MindspeedEngineWithValueHead = None
-    MindSpeedMegatronEngineWithLMHead = None
 
 try:
     from .megatron import MegatronEngine, MegatronEngineWithLMHead, MegatronEngineWithValueHead

@@ -79,6 +79,8 @@ class VLLMHijack:
                 hf_to_vllm_mapper = None
                 if hasattr(model, "hf_to_vllm_mapper") and model.hf_to_vllm_mapper is not None:
                     hf_to_vllm_mapper = model.hf_to_vllm_mapper
+                    if is_version_ge(minver="0.25.0"):
+                        hf_to_vllm_mapper = hf_to_vllm_mapper.get_unstacked_mapper()
 
                 lora_request_kwargs = {
                     "peft_helper": peft_helper,

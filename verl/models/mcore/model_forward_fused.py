@@ -31,7 +31,7 @@ from megatron.core.utils import deprecate_inference_params
 from packaging import version
 from torch import Tensor
 
-from verl.models.mcore.util import preprocess_packed_seqs, preprocess_thd_engine
+from verl.models.mcore.util import build_vlm_attn_mask_thd, preprocess_packed_seqs, preprocess_thd_engine
 from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 from verl.utils.megatron_utils import unwrap_model
 from verl.utils.model import CausalLMOutputForPPO
@@ -305,12 +305,7 @@ def fused_forward_model_engine(vision_model: bool = False):
 
         attention_mask = None
         if vision_model:
-            input_ids_rmpad = input_ids.to_padded_tensor(pad_token_id)
-            seqlens_in_batch = input_ids.offsets().diff().to(input_ids.device)
-            max_seq_len = input_ids_rmpad.shape[1]
-            attention_mask = torch.arange(max_seq_len, device=input_ids.device).unsqueeze(
-                0
-            ) < seqlens_in_batch.unsqueeze(1)
+            input_ids_rmpad, attention_mask = build_vlm_attn_mask_thd(input_ids, pad_token_id)
 
         labels_rmpad, _, _ = preprocess_thd_engine(
             labels,
