@@ -861,7 +861,11 @@ def compute_rloo_vectorized_outcome_advantage(
         inv = torch.from_numpy(np.unique(index, return_inverse=True)[1]).to(scores.device)
 
         c = torch.bincount(inv)[inv].to(scores.dtype)
-        adv = ((c * scores - torch.bincount(inv, weights=scores)[inv]) / (c - 1).clamp_min(1)) * (c > 1)
+        adv = (c * scores - torch.bincount(inv, weights=scores)[inv]) / (c - 1).clamp_min(1)
+        # Singleton groups keep the raw score, matching the scalar implementation and
+        # the GRPO singleton convention (they can appear when filtering drops all
+        # other samples of a prompt group).
+        adv = torch.where(c > 1, adv, scores)
 
         adv = adv.unsqueeze(-1) * response_mask
 
