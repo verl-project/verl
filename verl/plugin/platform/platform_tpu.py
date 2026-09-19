@@ -458,13 +458,8 @@ class PlatformTPU(PlatformCUDA):
         """Return env vars to inject into the rollout engine.
 
         Overrides PlatformCUDA, whose NCCL_CUMEM_ENABLE is meaningless here.
-
-        The rollout server actor is created with an explicit runtime_env, which
-        replaces inheritance from the job, so compiler flags set on the driver
-        have to be named to survive. The caller appends VERL_TPU_EXTRA_<VAR> and
-        falls back to the value forwarded off the worker.
         """
-        return {var: os.environ[var] for var in ("XLA_FLAGS", "LIBTPU_INIT_ARGS") if os.environ.get(var)}
+        return {}
 
     def get_ray_init_kwargs(self) -> dict[str, Any]:
         """Return Ray initialization arguments with runtime_env configured for GKE TPU workers."""

@@ -20,7 +20,6 @@ import ray
 import ray._private.worker
 import torch
 
-
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
@@ -76,8 +75,8 @@ def patch_ray_worker():
                 import traceback
 
                 print(
-                    f"[patch_ray_worker] Intercepted Ray accelerator lookup IndexError for resource '{resource_name}': {e}\n"
-                    f"{traceback.format_exc()}"
+                    f"[patch_ray_worker] Intercepted Ray accelerator lookup IndexError "
+                    f"for resource '{resource_name}': {e}\n{traceback.format_exc()}"
                 )
                 return []
 

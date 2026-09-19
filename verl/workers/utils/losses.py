@@ -23,11 +23,8 @@ from verl.utils.device import get_device_name
 from verl.utils.metric import AggregationType, Metric
 from verl.utils.torch_functional import masked_mean, masked_sum
 from verl.workers.config import ActorConfig, CriticConfig
-from verl.workers.utils.padding import no_padding_2_padding
 from verl.workers.engine.torchtitan.tpu_utils import safe_to_padded_tensor
-
-
-
+from verl.workers.utils.padding import no_padding_2_padding
 
 
 def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):

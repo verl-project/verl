@@ -742,9 +742,7 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
                     else:
                         entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)
                 else:
-                    entropy_rmpad = torch.utils.checkpoint.checkpoint(
-                        self.compute_entropy_from_logits, logits_rmpad
-                    )
+                    entropy_rmpad = torch.utils.checkpoint.checkpoint(self.compute_entropy_from_logits, logits_rmpad)
 
             log_probs = torch.nested.nested_tensor_from_jagged(log_probs.squeeze(0), cu_seqlens)
             if calculate_entropy:

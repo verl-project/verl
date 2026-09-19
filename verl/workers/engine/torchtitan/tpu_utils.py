@@ -21,16 +21,9 @@ import torch
 import torch.distributed
 import torch.nn.functional as F
 from tensordict import TensorDict
-from tensordict.tensorclass import NonTensorData
-
-import verl.utils.torch_functional as verl_F
-from verl.utils import tensordict_utils as tu
-from verl.utils.torch_functional import logprobs_from_logits
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
-
-
 
 
 def unwrap_metadata(val):
@@ -53,7 +46,11 @@ def monkey_patch_varlen_attention_tpu():
         from torchtitan.models.common.attention import VarlenAttention
 
         def tpu_varlen_forward(self, xq, xk, xv, *, attention_masks, scale=None, **kwargs):
-            if hasattr(attention_masks, "cu_seq_q") or hasattr(attention_masks, "cu_seqlens_q") or hasattr(attention_masks, "cu_seqlens"):
+            if (
+                hasattr(attention_masks, "cu_seq_q")
+                or hasattr(attention_masks, "cu_seqlens_q")
+                or hasattr(attention_masks, "cu_seqlens")
+            ):
                 cu_seqs = getattr(
                     attention_masks,
                     "cu_seq_q",
@@ -148,5 +145,3 @@ def safe_to_padded_tensor(nt: Any, padding: Any = 0, output_size: Any = None) ->
             slices = (i,) + tuple(slice(0, s) for s in t.shape)
             out[slices] = t
         return out
-
-

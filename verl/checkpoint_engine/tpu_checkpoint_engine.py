@@ -14,7 +14,6 @@
 
 import asyncio
 import logging
-import os
 import re
 import time
 from typing import Any, Generator
@@ -416,7 +415,7 @@ async def update_tpu_weights(manager, global_steps: int | None = None) -> dict:
 
     flat_counts: list = []
     for replica_result in results:
-        if isinstance(replica_result, (list, tuple)):
+        if isinstance(replica_result, list | tuple):
             flat_counts.extend(replica_result)
         elif replica_result is not None:
             flat_counts.append(replica_result)

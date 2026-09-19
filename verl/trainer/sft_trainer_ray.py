@@ -363,7 +363,8 @@ class SFTTrainer:
                 is_valid_step = global_step % self.test_freq == 0
                 is_save_step = global_step % self.save_freq == 0
 
-                # HACK: Ensure test_freq > 0 is required for validation pass to bypass validation loop when test_freq=-1.
+                # HACK: Ensure test_freq > 0 is required for validation pass to bypass validation
+                # loop when test_freq=-1.
                 # TODO: remove HACK once TPU forward_only validation execution is stabilized.
                 if self.test_freq > 0 and (is_last_step or is_valid_step) and self.val_dataloader is not None:
                     # Perform validation

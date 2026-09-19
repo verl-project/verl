@@ -21,6 +21,7 @@ import torch
 
 logger = logging.getLogger(__name__)
 
+
 def _tpu_sign(x: torch.Tensor) -> torch.Tensor:
     """Builds [[-1], [1]] with the dtype/device of ``x``.
 
@@ -44,13 +45,7 @@ def _tpu_widen(t: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     """[..., half] -> [..., 1, 2 * half], i.e. cat((t, t), -1).unsqueeze(-2)."""
     lead = t.shape[:-1]
     half = t.shape[-1]
-    return (
-        t.unsqueeze(-2)
-        .expand(*lead, 2, half)
-        .reshape(*lead, 2 * half)
-        .unsqueeze(-2)
-        .to(dtype)
-    )
+    return t.unsqueeze(-2).expand(*lead, 2, half).reshape(*lead, 2 * half).unsqueeze(-2).to(dtype)
 
 
 # TODO: Remove this workaround once upstream vLLM PR #56879 is merged and released.
@@ -117,7 +112,7 @@ def _tpu_runtime_present() -> bool:
 
     ``VERL_PLATFORM`` is the cheap signal, but it does not reach every process
     that matters. The vLLM TPU executor reuses *pooled* Ray workers —
-    ``tpu_inference/executors/ray_distributed_executor.py`` creates
+    ``vllm_torchtpu/executors/ray_distributed_executor.py`` creates
     ``RayWorkerWrapper`` with no ``runtime_env`` — so those workers were started
     before the job existed and see ``VERL_PLATFORM`` unset, even though they are
     precisely the processes that compile and execute the model.
@@ -144,5 +139,3 @@ def apply_tpu_vllm_patches() -> None:
     os.environ.setdefault("VLLM_DISABLE_COMPILE_CACHE", "1")
 
     patch_tpu_rotary_emb()
-
-
