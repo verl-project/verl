@@ -79,11 +79,20 @@ def get_free_port(address: str, with_alive_sock: bool = False) -> tuple[int, soc
     responsible for closing the socket before the port is actually bound
     by the target service (e.g. NCCL, uvicorn).
     """
-    family = socket.AF_INET6 if is_valid_ipv6_address(address) else socket.AF_INET
+    # Callers pass node addresses that may arrive in the bracketed form used by
+    # URLs and by `ray.util.get_node_ip_address()` for IPv6 (e.g. `[::1]`).
+    # `socket.bind()` cannot resolve the brackets, and without stripping them
+    # the address is also not recognised as IPv6 here, so it would be bound as
+    # AF_INET and fail with a confusing `gaierror`.
+    bind_address = address
+    if bind_address.startswith("[") and bind_address.endswith("]"):
+        bind_address = bind_address[1:-1]
+
+    family = socket.AF_INET6 if is_valid_ipv6_address(bind_address) else socket.AF_INET
 
     sock = socket.socket(family=family, type=socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind((address, 0))
+    sock.bind((bind_address, 0))
     port = sock.getsockname()[1]
     if with_alive_sock:
         return port, sock
