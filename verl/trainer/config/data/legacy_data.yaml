@@ -85,7 +85,7 @@ filter_overlong_prompts: False
 # Number of workers for filtering overlong prompts.
 # For large-scale datasets, filtering can be time-consuming.
 # Use multiprocessing to speed up. Default is 1.
-filter_overlong_prompts_workers: 1
+filter_overlong_prompts_workers: 16
 
 # Truncate the input_ids or prompt if they exceed max_prompt_length.
 # Options: 'error', 'left', 'right', 'middle'. Default is 'error'.

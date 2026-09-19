@@ -47,6 +47,8 @@ class MetricsAggregator:
                 "validation/filter_groups/discarded_surplus_samples",
                 "training/rollout_failure/evicted_samples",
                 "validation/rollout_failure/evicted_samples",
+                "training/zero_variance/filtered_prompt_count",
+                "training/zero_variance/num_prompts",
             ],
             "last": [
                 "training/global_step",
@@ -79,6 +81,12 @@ class MetricsAggregator:
                 return int(evicted_samples.item()) if evicted_samples.numel() == 1 else sample_count
             if isinstance(evicted_samples, int | float | np.number):
                 return int(evicted_samples)
+        if metric_name == "training/zero_variance/filtered_prompt_frac":
+            num_prompts = metrics.get("training/zero_variance/num_prompts", sample_count)
+            if isinstance(num_prompts, torch.Tensor):
+                return int(num_prompts.item()) if num_prompts.numel() == 1 else sample_count
+            if isinstance(num_prompts, int | float | np.number):
+                return int(num_prompts)
         return sample_count
 
     def _get_aggregation_type(self, metric_name: str) -> str:
@@ -208,10 +216,17 @@ def compute_advantage_for_multi_trajectories(
     first_nnz_indices = final_data.batch["response_mask"].argmax(dim=1)
     final_scores = final_data.batch["advantages"][torch.arange(len(final_data)), first_nnz_indices]
 
+    # Broadcast GRPO zero-variance masking from final sessions to every output in the session.
+    keep = final_data.batch["response_mask"].any(dim=-1)
+    row_keep = keep[row_to_local_index].to(dtype=data.batch["response_mask"].dtype)
+    data.batch["response_mask"] = data.batch["response_mask"] * row_keep.unsqueeze(-1)
+
     # scatter final scores to all rows in batch data
     scores = final_scores[row_to_local_index]
     scores = scores.unsqueeze(-1) * data.batch["response_mask"]
 
     data.batch["advantages"] = scores
     data.batch["returns"] = scores
+    if "zero_variance_metrics" in final_data.meta_info:
+        data.meta_info["zero_variance_metrics"] = final_data.meta_info["zero_variance_metrics"]
     return data

@@ -20,6 +20,7 @@ Group-wise helpers for RL training utilities.
 Public API:
     - as_torch_index(index, device=None) -> torch.LongTensor
     - group_mean_std(scores, gidx, eps=1e-6, device=None) -> (mean_g, std_g, count_g)
+    - mask_zero_variance_group_response(token_level_rewards, response_mask, index) -> (response_mask, stats)
 
 Default device policy:
     - If `device` is None:
@@ -48,7 +49,7 @@ import torch
 
 from verl.utils.device import get_device_name
 
-__all__ = ["as_torch_index", "group_mean_std"]
+__all__ = ["as_torch_index", "group_mean_std", "mask_zero_variance_group_response"]
 
 
 def _resolve_device(explicit: Optional[torch.device | str]) -> torch.device:
@@ -220,3 +221,42 @@ def group_mean_std(
         std[single] = 1.0
 
     return mean, std, count
+
+
+def _zero_variance_filter_stats(num_filtered: int, num_prompts: int) -> dict[str, float]:
+    frac = (num_filtered / num_prompts) if num_prompts else 0.0
+    return {
+        "training/zero_variance/filtered_prompt_frac": frac,
+        "training/zero_variance/filtered_prompt_count": float(num_filtered),
+        "training/zero_variance/num_prompts": float(num_prompts),
+    }
+
+
+@torch.no_grad()
+def mask_zero_variance_group_response(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: Any,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Zero ``response_mask`` for groups whose outcome rewards have no variance.
+
+    Groups with more than one sample and standard deviation 0 (all rewards equal)
+    contribute no GRPO signal but still inflate the token-mean loss denominator.
+    Masking them out avoids that gradient dampening. Singleton groups are kept,
+    matching ``group_mean_std`` (std forced to 1).
+
+    Returns:
+        response_mask: Mask with zero-variance groups cleared.
+        stats: Prompt-level filter counts/fractions for logging.
+    """
+    scores = token_level_rewards.sum(dim=-1)
+    gidx = as_torch_index(index, device=scores.device)
+    _, std_g, count_g = group_mean_std(scores, gidx, eps=0.0, device=scores.device)
+    drop_g = (count_g > 1) & (std_g == 0)
+    num_prompts = int(count_g.numel())
+    num_filtered = int(drop_g.sum().item()) if num_prompts else 0
+    stats = _zero_variance_filter_stats(num_filtered, num_prompts)
+    if not torch.any(drop_g):
+        return response_mask, stats
+    keep = (~drop_g[gidx]).to(device=response_mask.device, dtype=response_mask.dtype)
+    return response_mask * keep.unsqueeze(-1), stats

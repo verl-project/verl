@@ -218,3 +218,25 @@ def test_rollout_failure_evicted_samples_are_summed_across_iterations():
     agg.add_step_metrics({"training/rollout_failure/evicted_samples": 1})
     agg.add_step_metrics({"training/rollout_failure/evicted_samples": 2})
     assert agg.get_aggregated_metrics()["training/rollout_failure/evicted_samples"] == pytest.approx(3.0)
+
+
+def test_zero_variance_prompt_frac_is_weighted_by_num_prompts():
+    agg = MetricsAggregator()
+    agg.add_step_metrics(
+        {
+            "training/zero_variance/filtered_prompt_frac": 0.5,
+            "training/zero_variance/filtered_prompt_count": 2,
+            "training/zero_variance/num_prompts": 4,
+        }
+    )
+    agg.add_step_metrics(
+        {
+            "training/zero_variance/filtered_prompt_frac": 0.25,
+            "training/zero_variance/filtered_prompt_count": 3,
+            "training/zero_variance/num_prompts": 12,
+        }
+    )
+    out = agg.get_aggregated_metrics()
+    assert out["training/zero_variance/filtered_prompt_count"] == pytest.approx(5.0)
+    assert out["training/zero_variance/num_prompts"] == pytest.approx(16.0)
+    assert out["training/zero_variance/filtered_prompt_frac"] == pytest.approx((2 + 3) / 16)

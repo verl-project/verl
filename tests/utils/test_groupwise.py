@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 import torch
 
-from verl.utils import as_torch_index, group_mean_std
+from verl.utils import as_torch_index, group_mean_std, mask_zero_variance_group_response
 
 
 def test_as_torch_index_basic_integers():
@@ -75,6 +75,34 @@ def test_group_mean_std_low_variance_matches_torch_std():
     assert torch.equal(cnt_g, torch.tensor([2.0, 2.0]))
     assert torch.allclose(std_g[0], torch.std(scores[:2]), rtol=1e-5, atol=1e-6)
     assert torch.allclose(std_g[1], torch.std(scores[2:]), rtol=1e-5, atol=1e-6)
+
+
+def test_mask_zero_variance_group_response():
+    token_level_rewards = torch.tensor(
+        [
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 0.0],
+            [5.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+    response_mask = torch.ones_like(token_level_rewards)
+    index = np.array(["all-ones", "all-ones", "mixed", "mixed", "singleton"], dtype=object)
+
+    masked, stats = mask_zero_variance_group_response(token_level_rewards, response_mask, index)
+
+    assert torch.equal(masked[0], torch.zeros_like(response_mask[0]))
+    assert torch.equal(masked[1], torch.zeros_like(response_mask[1]))
+    assert torch.equal(masked[2], response_mask[2])
+    assert torch.equal(masked[3], response_mask[3])
+    assert torch.equal(masked[4], response_mask[4])
+    # Helper must not mutate the input mask.
+    assert torch.equal(response_mask, torch.ones_like(token_level_rewards))
+    assert stats["training/zero_variance/filtered_prompt_count"] == 1.0
+    assert stats["training/zero_variance/num_prompts"] == 3.0
+    assert stats["training/zero_variance/filtered_prompt_frac"] == pytest.approx(1.0 / 3.0)
 
 
 def test_group_mean_std_empty():

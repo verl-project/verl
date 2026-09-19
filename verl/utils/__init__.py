@@ -14,7 +14,7 @@
 
 from . import config, tokenizer
 from .config import omega_conf_to_dataclass, validate_config
-from .groupwise import as_torch_index, group_mean_std
+from .groupwise import as_torch_index, group_mean_std, mask_zero_variance_group_response
 from .tokenizer import (
     build_multimodal_processor_inputs,
     get_processor_token_id,
@@ -35,5 +35,5 @@ __all__ = (
         "omega_conf_to_dataclass",
         "validate_config",
     ]
-    + ["as_torch_index", "group_mean_std"]
+    + ["as_torch_index", "group_mean_std", "mask_zero_variance_group_response"]
 )

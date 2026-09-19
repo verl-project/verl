@@ -1654,17 +1654,17 @@ class PPOTrainer(ABC):
             norm_adv_by_std_in_grpo=self.config.algorithm.get("norm_adv_by_std_in_grpo", True),
             config=self.config.algorithm,
         )
+        metrics.update(data.meta_info.get("zero_variance_metrics", {}))
 
         # Zero-variance groups (all responses of a question share the same reward)
         # contribute no GRPO signal; drop their advantages/returns from the update.
         data = self._apply_zero_variance_filter(data, metrics)
 
         # 4. write nested advantages and returns back to TransferQueue
-        fields = ["advantages", "returns"]
+        fields = ["advantages", "returns", "response_mask"]
         if self.config.algorithm.use_kl_in_reward:
             fields.append("token_level_rewards")
         if rollout_correction:
-            fields.append("response_mask")
             if "rollout_is_weights" in data.batch:
                 fields.append("rollout_is_weights")
 

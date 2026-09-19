@@ -64,6 +64,7 @@ def test_compute_advantage_for_single_trajectory(batch_data: DataProto):
     )
     assert torch.equal(result.batch["advantages"], expected.batch["advantages"])
     assert torch.equal(result.batch["returns"], expected.batch["returns"])
+    assert torch.equal(result.batch["response_mask"], expected.batch["response_mask"])
 
 
 def test_compute_advantage_for_multi_trajectories(batch_data: DataProto):
@@ -84,3 +85,69 @@ def test_compute_advantage_for_multi_trajectories(batch_data: DataProto):
     )
     assert torch.equal(result.batch["advantages"], adv_expected)
     assert torch.equal(result.batch["returns"], adv_expected)
+
+
+def test_compute_advantage_masks_zero_variance_grpo_groups():
+    tensors = {
+        "token_level_rewards": torch.tensor(
+            [
+                [1.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 0.0],
+                [0.0, 0.0],
+            ],
+            dtype=torch.float32,
+        ),
+        "response_mask": torch.ones(4, 2, dtype=torch.long),
+    }
+    non_tensors = {
+        "uid": np.array(["zero-var", "zero-var", "mixed", "mixed"], dtype=object),
+    }
+    data = DataProto.from_dict(tensors=tensors, non_tensors=non_tensors)
+
+    result = compute_advantage(data, adv_estimator=AdvantageEstimator.GRPO)
+
+    assert torch.equal(result.batch["response_mask"][0], torch.zeros(2, dtype=torch.long))
+    assert torch.equal(result.batch["response_mask"][1], torch.zeros(2, dtype=torch.long))
+    assert torch.equal(result.batch["response_mask"][2], torch.ones(2, dtype=torch.long))
+    assert torch.equal(result.batch["response_mask"][3], torch.ones(2, dtype=torch.long))
+    assert torch.equal(result.batch["advantages"][0], torch.zeros(2, dtype=torch.float32))
+    assert torch.equal(result.batch["advantages"][1], torch.zeros(2, dtype=torch.float32))
+    assert result.meta_info["zero_variance_metrics"]["training/zero_variance/filtered_prompt_count"] == 1.0
+    assert result.meta_info["zero_variance_metrics"]["training/zero_variance/num_prompts"] == 2.0
+    assert result.meta_info["zero_variance_metrics"]["training/zero_variance/filtered_prompt_frac"] == 0.5
+
+
+def test_compute_advantage_for_multi_trajectories_masks_zero_variance_groups():
+    tensors = {
+        "token_level_rewards": torch.tensor(
+            [
+                [1.0, 0.0],  # session 0 prefix of zero-var group
+                [1.0, 0.0],  # session 0 final of zero-var group
+                [1.0, 0.0],  # session 1 final of zero-var group
+                [1.0, 0.0],  # mixed group final
+                [0.0, 0.0],  # mixed group final
+            ],
+            dtype=torch.float32,
+        ),
+        "response_mask": torch.ones(5, 2, dtype=torch.long),
+    }
+    non_tensors = {
+        "uid": np.array(["zero-var", "zero-var", "zero-var", "mixed", "mixed"], dtype=object),
+    }
+    data = DataProto.from_dict(tensors=tensors, non_tensors=non_tensors)
+
+    result = compute_advantage_for_multi_trajectories(
+        data=data,
+        batch_keys=["zero-var_0_0", "zero-var_0_1", "zero-var_1_0", "mixed_0_0", "mixed_1_0"],
+        adv_estimator=AdvantageEstimator.GRPO,
+    )
+
+    assert torch.equal(result.batch["response_mask"][0], torch.zeros(2, dtype=torch.long))
+    assert torch.equal(result.batch["response_mask"][1], torch.zeros(2, dtype=torch.long))
+    assert torch.equal(result.batch["response_mask"][2], torch.zeros(2, dtype=torch.long))
+    assert torch.equal(result.batch["response_mask"][3], torch.ones(2, dtype=torch.long))
+    assert torch.equal(result.batch["response_mask"][4], torch.ones(2, dtype=torch.long))
+    assert result.meta_info["zero_variance_metrics"]["training/zero_variance/filtered_prompt_count"] == 1.0
+    assert result.meta_info["zero_variance_metrics"]["training/zero_variance/num_prompts"] == 2.0
+    assert result.meta_info["zero_variance_metrics"]["training/zero_variance/filtered_prompt_frac"] == 0.5

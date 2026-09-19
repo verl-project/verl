@@ -60,6 +60,7 @@ from verl.trainer.ppo.utils import (
     need_teacher_policy,
 )
 from verl.utils import tensordict_utils as tu
+from verl.utils.groupwise import mask_zero_variance_group_response
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
@@ -279,6 +280,20 @@ def compute_advantage(
         advantages, returns = adv_estimator_fn(**adv_kwargs)
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+
+    # Zero-variance GRPO groups have advantage 0 but still inflate the token-mean
+    # loss denominator. Drop them from response_mask so they do not dampen the gradient.
+    if adv_estimator in {
+        AdvantageEstimator.GRPO,
+        AdvantageEstimator.GRPO_VECTORIZED,
+        AdvantageEstimator.GRPO_PASSK,
+    }:
+        data.batch["response_mask"], zero_variance_metrics = mask_zero_variance_group_response(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=data.batch["response_mask"],
+            index=data.non_tensor_batch["uid"],
+        )
+        data.meta_info["zero_variance_metrics"] = zero_variance_metrics
     return data
 
 
@@ -1648,6 +1663,7 @@ class RayPPOTrainer:
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )
+                        metrics.update(batch.meta_info.get("zero_variance_metrics", {}))
                     # update critic
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):
