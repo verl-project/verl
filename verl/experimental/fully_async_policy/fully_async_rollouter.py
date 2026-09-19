@@ -431,6 +431,8 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         # Statistics
         self.total_generated_samples = 0
         self.staleness_samples = 0
+        # Lifetime dispatches to the fresh, exclusively owned message queue.
+        self._total_dispatched_samples = 0
         self.dropped_stale_samples = 0
         self.processed_sample_count = 0
         # Per-step sample counter: counts fully-generated samples in the current param version.
@@ -601,8 +603,14 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             # Wake the drain loop in _processor_worker so it can exit early and resume submitting
             # new samples to idle replicas instead of waiting for long-tail in-flight tasks.
             self._resume_event.set()
-            # every time param change, reset staleness_samples
-            self.staleness_samples = len(self.active_tasks) + await self.message_queue_client.get_queue_size()
+            # Completed tasks may still be in active_tasks after publishing their
+            # samples. Use one queue snapshot, independent of task reaping and
+            # put_sample RPC acknowledgements. Dispatches cannot change while
+            # this lock is held; produced - queued counts consumed/removed items.
+            queue_stats = await self.message_queue_client.get_statistics()
+            removed_samples = queue_stats["total_produced"] - queue_stats["queue_size"]
+            # The final EOS is not a data dispatch and may itself be consumed.
+            self.staleness_samples = max(0, self._total_dispatched_samples - removed_samples)
             timing_raw = {}
             rollout_version_time = max(time.time() - self.step_start_time, 1e-6)
             if self.idle_start_time > self.step_start_time:
@@ -949,7 +957,6 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             # Get sample from appropriate queue and immediately mark task as done
             rollout_sample = await self.pending_queue.get()
             self.pending_queue.task_done()
-            self.staleness_samples += 1
 
             if rollout_sample is None:
                 print(
@@ -986,6 +993,10 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                     name=rollout_sample.sample_id,
                     task_set=self.active_tasks,
                 )
+                # Reserve only real samples, atomically with dispatch. Reserving
+                # before a capacity wait lets reset_staleness erase the increment.
+                self.staleness_samples += 1
+                self._total_dispatched_samples += 1
                 self._record_active_count()
 
     async def _process_single_sample_streaming(self, rollout_sample: RolloutSample):
