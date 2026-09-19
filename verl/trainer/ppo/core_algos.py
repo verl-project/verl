@@ -1845,6 +1845,25 @@ def compute_policy_loss_clip_cov(
     return pg_loss, pg_metrics
 
 
+def compute_kl_cov_mask(advantages, log_prob, response_mask, kl_cov_ratio):
+    """Select KL-Cov tokens over the supplied batch, excluding padding."""
+    if not 0 < kl_cov_ratio <= 1:
+        raise ValueError("kl_cov_ratio must be in (0, 1].")
+    valid = response_mask.to(bool)
+    selected = torch.zeros_like(valid)
+    valid_adv = advantages[valid].detach().cpu()
+    valid_log_prob = log_prob[valid].detach().cpu()
+    if valid_adv.numel() == 0:
+        return selected
+    covariance = (valid_adv - valid_adv.mean()) * (valid_log_prob - valid_log_prob.mean())
+    quota = max(1, int(valid_adv.numel() * kl_cov_ratio))
+    indices = torch.topk(covariance, quota).indices
+    selected_valid = torch.zeros_like(valid_adv, dtype=torch.bool)
+    selected_valid[indices] = True
+    selected[valid] = selected_valid.to(selected.device)
+    return selected
+
+
 @register_policy_loss("kl_cov")
 def compute_policy_loss_kl_cov(
     old_log_prob: torch.Tensor,
@@ -1854,9 +1873,10 @@ def compute_policy_loss_kl_cov(
     loss_agg_mode: str = "token-mean",
     config: Optional[ActorConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
+    kl_cov_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
-    Compute the clipped policy objective and related metrics for Clip-Cov.
+    Compute the policy objective and selective KL penalty for KL-Cov.
 
     Adapted from
     https://github.com/PRIME-RL/Entropy-Mechanism-of-RL/blob/main/verl/trainer/ppo/core_algos.py
@@ -1876,6 +1896,9 @@ def compute_policy_loss_kl_cov(
             Ratio for selecting the top-k covariance values. Defaults to 0.0002.
         ppo_kl_coef (float, optional):
             Coefficient for the KL penalty term in the loss. Defaults to 1.
+        kl_cov_mask (torch.Tensor, optional):
+            This microbatch's slice of the optimizer-minibatch selection. If omitted,
+            selection is computed locally for compatibility with other callers.
     """
     assert config is not None
     assert not isinstance(config, AlgoConfig), "passing AlgoConfig not supported yet"
@@ -1890,27 +1913,12 @@ def compute_policy_loss_kl_cov(
     abs_kl = negative_approx_kl.abs()
     ratio = torch.exp(negative_approx_kl)
     ppo_kl_abs = verl_F.masked_mean(negative_approx_kl.abs(), response_mask)
-    pg_losses1 = -advantages * ratio
-    pg_losses_kl = -advantages * ratio + ppo_kl_coef * abs_kl
-    pg_losses = pg_losses1
-
-    all_valid = response_mask > 0
-    all_valid_idx = torch.nonzero(all_valid.reshape(-1), as_tuple=True)[0]
-    all_valid_adv = advantages[all_valid].detach().reshape(-1).cpu()
-    all_valid_logp = log_prob[all_valid].detach().reshape(-1).cpu()
-
-    k = min(kl_cov_ratio, len(all_valid_adv))
-
-    if k != 0:
-        cov_lst_all = (all_valid_adv - all_valid_adv.mean()) * (all_valid_logp - all_valid_logp.mean())
-        k_percent_nums = max(1, int(len(cov_lst_all) * kl_cov_ratio))
-        large_cov_idxs = torch.topk(cov_lst_all, k_percent_nums, largest=True).indices
-
-        if len(large_cov_idxs) != 0:
-            large_cov_idxs = all_valid_idx[large_cov_idxs]
-            pg_losses[large_cov_idxs // advantages.shape[1], large_cov_idxs % advantages.shape[1]] = pg_losses_kl[
-                large_cov_idxs // advantages.shape[1], large_cov_idxs % advantages.shape[1]
-            ]
+    if kl_cov_mask is None:
+        kl_cov_mask = compute_kl_cov_mask(advantages, log_prob, response_mask, kl_cov_ratio)
+    if kl_cov_mask.shape != response_mask.shape:
+        raise ValueError("kl_cov_mask must have the same shape as response_mask.")
+    selected = kl_cov_mask.to(bool) & response_mask.to(bool)
+    pg_losses = -advantages * ratio + torch.where(selected, ppo_kl_coef * abs_kl, 0.0)
 
     # Apply rollout correction weights if provided
     if rollout_is_weights is not None:
