@@ -135,6 +135,12 @@ class FSDPModelMerger(BaseModelMerger):
         self, mesh: np.ndarray, mesh_dim_names: tuple[str, ...]
     ) -> tuple[int, tuple[int, ...]]:
         """Calculates the total number of shards and the shape of the device mesh."""
+        # VeOmni's FSDP2 engine names its single shard dimension "dp_shard"
+        # (DeviceMesh((dp_shard=32)), placements (Shard(0),)). Structurally it is
+        # the same 1-D full-shard layout the merger already handles as ("fsdp",),
+        # so accept it rather than refusing every veomni checkpoint on a name.
+        if mesh_dim_names == ("dp_shard",):
+            mesh_dim_names = ("fsdp",)
         assert mesh_dim_names in (("fsdp",), ("ddp", "fsdp")), f"Unsupported mesh_dim_names {mesh_dim_names}"
 
         if "tp" in mesh_dim_names:
