@@ -369,6 +369,25 @@ class VeOmniEngine(FSDPEngine):
         )
         log_gpu_memory_usage("After parallelize model", logger=logger)
 
+        # VeOmni's fused linear-CE (chunk_logprobs) saves a reference to lm_head.weight
+        # in forward and re-reads it in backward to recompute logits chunk by chunk.
+        # VeOmni places lm_head in the ROOT fully_shard unit with
+        # reshard_after_forward=True, so by the time chunk_logprobs.backward runs the
+        # unsharded copy has been freed:
+        #   RuntimeError: setStorage: sizes [..., vocab_size] ... storage of size 0
+        # Keep the root unit unsharded across the step. recurse=False: decoder layers
+        # still reshard; only the root-level params (lm_head, final norm, and for VLMs
+        # the visual merger / MTP heads) stay resident -- about one lm_head's worth.
+        # VeOmniEngineConfig has no reshard_after_forward knob and veomni's
+        # build_parallelize_model does not take one, so set it on the built module.
+        # hasattr: the root is only an FSDPModule when enable_full_shard wrapped it.
+        if self.model_config.use_fused_kernels and hasattr(module, "set_reshard_after_forward"):
+            module.set_reshard_after_forward(False, recurse=False)
+            logger.info(
+                "use_fused_kernels: root FSDP unit set reshard_after_forward=False "
+                "(lm_head stays unsharded for chunk_logprobs.backward)"
+            )
+
         if not self.engine_config.forward_only:
             # Initialize optimizer with model parameters and config settings
             optimizer = self._build_optimizer(module)
