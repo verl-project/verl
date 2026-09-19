@@ -70,10 +70,11 @@ def gather_slot_entries_to_rank0(
 
     Each rank passes its K per-parameter deltas concatenated (``idx_concat``,
     ``val_concat``) plus the per-parameter length vector ``counts`` ([K] int64).
-    One all_gather exchanges the K x world count matrix; two padded gathers move
-    the blobs. Rank 0 slices per (rank, param) and returns K ``(idx, val)`` pairs
-    (None elsewhere) -- bit-identical to K individual gathers, ~K x fewer
-    collectives and host syncs.
+    One all_gather exchanges the K x world count matrix; the ranks holding entries
+    then send their blobs point-to-point to rank 0 (one batched isend/irecv group).
+    Rank 0 slices per (rank, param) and returns K ``(idx, val)`` pairs (None
+    elsewhere) -- bit-identical to K individual gathers, ~K x fewer collectives and
+    host syncs, and no padded ``world x max_n`` receive buffers on rank 0.
     """
     rank = dist.get_rank(group)
     world = dist.get_world_size(group)
@@ -125,28 +126,57 @@ def gather_slot_entries_to_rank0(
         empty_v = torch.empty(0, dtype=val_concat.dtype, device=dev)
         return [(empty_i, empty_v) for _ in range(k)]
 
-    idx_pad = torch.zeros(max_n, dtype=idx_concat.dtype, device=dev)
-    val_pad = torch.zeros(max_n, dtype=val_concat.dtype, device=dev)
-    n = int(idx_concat.numel())
-    idx_pad[:n] = idx_concat
-    val_pad[:n] = val_concat
-
-    idx_list = [torch.zeros(max_n, dtype=idx_pad.dtype, device=dev) for _ in range(world)] if rank == 0 else None
-    val_list = [torch.zeros(max_n, dtype=val_concat.dtype, device=dev) for _ in range(world)] if rank == 0 else None
-    dist.gather(idx_pad, idx_list, dst=dst, group=group)
-    dist.gather(val_pad, val_list, dst=dst, group=group)
+    # Targeted point-to-point transfer instead of two padded, group-wide gathers. The
+    # all-gathered counts matrix tells every rank which ranks hold entries for this round,
+    # so only those ranks send (idx then val, one batched P2P group) and rank 0 receives
+    # exactly their sizes: no ``world x max_n`` padded receive lists on rank 0, and the
+    # fan-in is the number of contributing ranks instead of the whole group. This matters
+    # under Megatron PP>1, where every parameter merges over the WORLD group: a padded
+    # ``dist.gather`` to rank 0 from hundreds of peers allocated up to ``world x
+    # max_round_bytes`` on rank 0 (OOM) and, once the deltas carried real data, stalled
+    # inside NCCL's launch of the many-to-one gather (rank 0 blocked in ``dist.gather``
+    # for the full collective timeout; observed on a 480-rank trainer). The result is
+    # bit-identical: per slot, pieces are concatenated in rank order.
+    contributors = [r for r in range(world) if totals[r] > 0]
     if rank != 0:
+        if totals[rank] > 0:
+            ops = [
+                dist.P2POp(dist.isend, idx_concat.contiguous(), dst, group=group),
+                dist.P2POp(dist.isend, val_concat.contiguous(), dst, group=group),
+            ]
+            for w in dist.batch_isend_irecv(ops):
+                w.wait()
         return None
 
+    recv_idx: dict[int, torch.Tensor] = {}
+    recv_val: dict[int, torch.Tensor] = {}
+    ops = []
+    for r in contributors:
+        if r == 0:
+            recv_idx[0] = idx_concat
+            recv_val[0] = val_concat
+            continue
+        src = dist.get_global_rank(group, r) if group is not None else r
+        recv_idx[r] = torch.empty(totals[r], dtype=idx_concat.dtype, device=dev)
+        recv_val[r] = torch.empty(totals[r], dtype=val_concat.dtype, device=dev)
+        ops.append(dist.P2POp(dist.irecv, recv_idx[r], src, group=group))
+        ops.append(dist.P2POp(dist.irecv, recv_val[r], src, group=group))
+    if ops:
+        for w in dist.batch_isend_irecv(ops):
+            w.wait()
+
     # per-rank cumulative offsets into each blob, sliced per param then stitched across ranks
-    offs = [[0] * (k + 1) for _ in range(world)]
-    for r in range(world):
-        for i in range(k):
-            offs[r][i + 1] = offs[r][i] + counts_cpu[r][i]
+    offs = {r: 0 for r in contributors}
     out = []
     for i in range(k):
-        idx_pieces = [idx_list[r][offs[r][i] : offs[r][i + 1]] for r in range(world) if counts_cpu[r][i]]
-        val_pieces = [val_list[r][offs[r][i] : offs[r][i + 1]] for r in range(world) if counts_cpu[r][i]]
+        idx_pieces = []
+        val_pieces = []
+        for r in contributors:
+            c = counts_cpu[r][i]
+            if c:
+                idx_pieces.append(recv_idx[r][offs[r] : offs[r] + c])
+                val_pieces.append(recv_val[r][offs[r] : offs[r] + c])
+                offs[r] += c
         if idx_pieces:
             out.append((torch.cat(idx_pieces), torch.cat(val_pieces)))
         else:
