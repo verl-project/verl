@@ -1138,6 +1138,19 @@ class RayPPOTrainer:
             seen.add(id(self.critic_wg))
             self.critic_wg.start_profile(profile_step=self.global_steps)
 
+    def _rollout_server_managers(self) -> list:
+        """LLM server managers whose inference engines take part in rollout profiling."""
+        managers = [getattr(self, "llm_server_manager", None), getattr(self, "teacher_model_manager", None)]
+        return [manager for manager in managers if manager is not None]
+
+    def _start_rollout_profiling(self) -> None:
+        for manager in self._rollout_server_managers():
+            manager.start_profile()
+
+    def _stop_rollout_profiling(self) -> None:
+        for manager in self._rollout_server_managers():
+            manager.stop_profile()
+
     def _stop_profiling(self, do_profile: bool, run_command: bool = False) -> None:
         """Stop profiling for all worker groups if profiling is enabled.
 
@@ -1509,11 +1522,11 @@ class RayPPOTrainer:
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
                         if curr_step_profile:
-                            self.llm_server_manager.start_profile()
+                            self._start_rollout_profiling()
                         combined_gen_output = self.async_rollout_manager.generate_sequences(combined_gen_batch)
                         self.checkpoint_manager.sleep_replicas()
                         if curr_step_profile:
-                            self.llm_server_manager.stop_profile()
+                            self._stop_rollout_profiling()
 
                         timing_raw.update(combined_gen_output.meta_info["timing"])
                         combined_gen_output.meta_info.pop("timing", None)

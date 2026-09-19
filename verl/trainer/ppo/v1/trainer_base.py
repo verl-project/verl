@@ -1399,7 +1399,7 @@ class PPOTrainer(ABC):
         Subclasses owning additional replicas (e.g. the standalone rollout of separate-async
         training) extend this list so those engines are profiled as well.
         """
-        managers = [getattr(self, "llm_server_manager", None)]
+        managers = [getattr(self, "llm_server_manager", None), getattr(self, "teacher_model_manager", None)]
         return [manager for manager in managers if manager is not None]
 
     def _start_rollout_profiling(self) -> None:

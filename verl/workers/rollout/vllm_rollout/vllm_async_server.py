@@ -104,6 +104,7 @@ class vLLMHttpServer:
         cuda_visible_devices: str,
         disaggregation_role: str = "null",
         disaggregation_kv_transfer_config: Optional[dict] = None,
+        state_lane_prefix: str = "rollout",
     ):
         """
         Args:
@@ -162,6 +163,7 @@ class vLLMHttpServer:
         self.node_rank = node_rank
         self.gpus_per_node = gpus_per_node
         self.nnodes = nnodes
+        self.state_lane_prefix = state_lane_prefix
         # model weights version, set by ServerAdapter when update weights.
         self.global_steps = None
         self._warned_missing_spec_decode_stats = False
@@ -361,6 +363,7 @@ class vLLMHttpServer:
                 self.profiler_controller.tool_config,
                 self.replica_rank,
                 legacy_env=not use_cli_args,
+                state_lane_prefix=self.state_lane_prefix,
             )
             if use_cli_args:
                 args.update(profiler_args)
@@ -919,6 +922,7 @@ class vLLMHttpServer:
                 self.replica_rank,
                 self.replica_world_size,
                 self.profiler_keep_global_ranks,
+                self.state_lane_prefix,
             )
 
     async def set_global_steps(self, global_steps: int):
@@ -1392,6 +1396,7 @@ class vLLMReplica(RolloutReplica):
                 gpus_per_node=gpus_per_replica_node,
                 nnodes=nnodes,
                 cuda_visible_devices=node_cuda_visible_devices,
+                state_lane_prefix=self.state_lane_prefix,
             )
             self.servers.append(server)
 

@@ -88,6 +88,22 @@ class TestServerProfilerArgs(unittest.TestCase):
         self.assertEqual(profiler_config_dict["delay_iterations"], 12)
         self.assertEqual(profiler_config_dict["max_iterations"], 34)
 
+    def test_profiler_paths_use_teacher_lane_prefix(self):
+        tool_config = TorchProfilerToolConfig(contents=["cpu"])
+        config = ProfilerConfig(save_path="/tmp/test", tool_config=tool_config)
+
+        expected = rollout_trace_dir(config, rank=0, state_lane_prefix="teacher_default")
+        self.assertEqual(expected, "/tmp/test/agent_loop_teacher_default_replica_0")
+        self.assertEqual(
+            build_sglang_profiler_args(
+                config,
+                tool_config,
+                rank=0,
+                state_lane_prefix="teacher_default",
+            )["output_dir"],
+            expected,
+        )
+
     def test_build_vllm_profiler_args_with_npu_profile_window(self):
         tool_config = NPUToolConfig(contents=["npu"], profile_token_start=5, profile_token_end=13)
         config = ProfilerConfig(save_path="/tmp/test", tool_config=tool_config)

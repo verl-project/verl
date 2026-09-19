@@ -69,6 +69,20 @@ def test_profiled_step_starts_rollout_engines():
     manager.start_profile.assert_called_once()
 
 
+def test_profiled_step_starts_teacher_engines():
+    rollout_manager, teacher_manager = MagicMock(), MagicMock()
+    trainer = _trainer(
+        _StubTrainer,
+        llm_server_manager=rollout_manager,
+        teacher_model_manager=teacher_manager,
+    )
+
+    trainer._start_profiling()
+
+    rollout_manager.start_profile.assert_called_once()
+    teacher_manager.start_profile.assert_called_once()
+
+
 def test_unprofiled_step_leaves_rollout_engines_alone():
     manager = MagicMock()
     trainer = _trainer(_StubTrainer, llm_server_manager=manager)
