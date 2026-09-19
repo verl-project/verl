@@ -21,6 +21,11 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.metric import AggregationType, Metric
 from verl.utils.torch_functional import masked_mean, masked_sum
+from verl.utils.trajectory import (
+    LOSS_WEIGHT_KEY,
+    apply_loss_weight_to_advantages,
+    apply_loss_weight_to_loss_mat,
+)
 from verl.workers.config import ActorConfig, CriticConfig
 from verl.workers.utils.padding import no_padding_2_padding
 
@@ -84,6 +89,8 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     # select fields and convert to padded tensor
     fields = ["response_mask", "old_log_probs", "advantages"]
+    if LOSS_WEIGHT_KEY in data:
+        fields.append(LOSS_WEIGHT_KEY)
     if "rollout_is_weights" in data:
         fields.append("rollout_is_weights")
     if "ref_log_prob" in data:
@@ -93,7 +100,31 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     response_mask = data["response_mask"].to(bool)
     # compute policy loss
     old_log_prob = data["old_log_probs"]
-    advantages = data["advantages"]
+
+    # ---- trajectory loss weight, applied to EVERY term of the loss ----------
+    # Already rescaled to mean 1.0 over the GLOBAL batch by the trainer (see
+    # normalize_loss_weight_global); this function only ever sees a micro-batch,
+    # so it must NOT renormalize -- doing so would erase the reweighting
+    # whenever a micro-batch holds only same-weight samples.
+    #
+    # The weight is applied to pg / entropy / KL alike -- the whole per-sample
+    # loss is scaled (as ScaleCUA does with `loss * loss_weight[i]`), not the
+    # advantages only. Weighting advantages alone would leave the KL term at
+    # full strength, so a trajectory split into N segments would keep N x the
+    # KL pressure while its policy gradient was divided by N -- i.e. the deeper
+    # a trajectory, the harder it is held to the reference policy. That is a
+    # silent coupling between segmentation depth and KL strength, and it grows
+    # with kl_loss_coef.
+    trajectory_weight = data.get(LOSS_WEIGHT_KEY, None)
+    if trajectory_weight is not None and trajectory_weight.ndim == 2 and trajectory_weight.shape[1] == 1:
+        # to_padded_tensor() gives per-sample scalars a trailing dim.
+        trajectory_weight = trajectory_weight.squeeze(-1)
+
+    # The policy-loss functions aggregate internally and return a scalar, so the
+    # only place a per-sample weight can enter the pg term is its advantages.
+    # Because advantages are a linear factor of the pg loss, scaling them by
+    # w_i is exactly equivalent to scaling that sample's pg loss by w_i.
+    advantages = apply_loss_weight_to_advantages(data["advantages"], trajectory_weight)
     rollout_is_weights = data.get("rollout_is_weights", None)
 
     loss_agg_mode = config.loss_agg_mode
@@ -121,8 +152,15 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     # add entropy loss
     if entropy is not None:
+        # Weighted like the pg term so a segmented trajectory does not get N x
+        # the entropy pressure. agg_loss() has no per-sample weight argument, so
+        # the weight is broadcast onto the per-token matrix it consumes, which is
+        # equivalent for every loss_agg_mode (all of them are linear in loss_mat).
         entropy_loss = agg_loss(
-            loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
+            loss_mat=apply_loss_weight_to_loss_mat(entropy, trajectory_weight),
+            loss_mask=response_mask,
+            loss_agg_mode=loss_agg_mode,
+            **config.global_batch_info,
         )
         entropy_coeff = config.entropy_coeff
         policy_loss -= entropy_coeff * entropy_loss
@@ -134,7 +172,10 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         # compute kl loss
         kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=config.kl_loss_type)
         kl_loss = agg_loss(
-            loss_mat=kld, loss_mask=response_mask, loss_agg_mode=config.loss_agg_mode, **config.global_batch_info
+            loss_mat=apply_loss_weight_to_loss_mat(kld, trajectory_weight),
+            loss_mask=response_mask,
+            loss_agg_mode=config.loss_agg_mode,
+            **config.global_batch_info,
         )
 
         policy_loss += kl_loss * config.kl_loss_coef

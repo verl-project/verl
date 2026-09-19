@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import json
 import logging
 import math
@@ -86,6 +87,12 @@ from verl.utils.py_functional import rename_dict
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.skip import SkipManager
 from verl.utils.tracking import DapoFilteredRewardTableLogger, Tracking, ValidationGenerationsLogger
+from verl.utils.trajectory import (
+    LOSS_WEIGHT_KEY,
+    final_row_per_session,
+    normalize_loss_weight_global,
+    validate_loss_weights,
+)
 from verl.workers.config import CriticConfig, DistillationConfig, HFModelConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
 from verl.workers.rollout.llm_server import LLMServerClient, LLMServerManager
@@ -100,6 +107,20 @@ def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
 
 
 logger = logging.getLogger(__name__)
+
+
+@functools.cache
+def _warn_missing_loss_weight_once() -> None:
+    """Warn once, not per batch: during a rolling upgrade every batch may hit this."""
+    logger.warning(
+        "%s missing from a training batch; falling back to neutral weight 1.0 for the whole batch. "
+        "TransferQueue only returns a field when every requested row carries it, so one legacy row "
+        "(written before loss weights existed) flattens the real weights of the new rows. Expected only "
+        "while draining pre-upgrade trajectories; further occurrences are not logged.",
+        LOSS_WEIGHT_KEY,
+    )
+
+
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
@@ -1602,7 +1623,13 @@ class PPOTrainer(ABC):
         return (positions < lengths.unsqueeze(1)).to(torch.int64)
 
     def _get_required_batch_multiple(self, dp_size: int) -> int:
-        """Return the global batch multiple required by downstream train steps(e.g. critics, actors)."""
+        """Return the global row multiple required by downstream train steps.
+
+        V1 treats ``ppo_mini_batch_size`` as a stored-row count. Agent-loop
+        segments are intentionally separate rows and are controlled by their
+        explicit ``loss_weight``; their variable expansion factor cannot be
+        used as a static divisibility constraint here.
+        """
         required_multiple = dp_size
 
         # If enabled with critic training, the batch should align with critic PPO mini-batches.
@@ -1757,11 +1784,87 @@ class PPOTrainer(ABC):
 
     def _compute_advantage(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the advantage of the batch."""
-        fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob", "values"]
+        fields = [
+            "uid",
+            "response_mask",
+            "rm_scores",
+            "rollout_log_probs",
+            "old_log_probs",
+            "ref_log_prob",
+            "values",
+            LOSS_WEIGHT_KEY,
+        ]
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
 
         response_mask = data["response_mask"]
         data = DataProto(batch=data.to_padded_tensor())
+        if LOSS_WEIGHT_KEY not in data.batch:
+            # Keep rows written by older workers backward compatible. New workers always
+            # persist this field, but a restored TransferQueue may still contain a
+            # trajectory produced before loss weights became part of the agent-loop
+            # contract. NOTE: TransferQueue only returns a field when *every* requested
+            # row carries it, so a single legacy row makes the whole batch fall back to
+            # neutral weights and discards the real weights on the new rows. Warn so that
+            # this shows up during a rolling upgrade instead of silently flattening them.
+            _warn_missing_loss_weight_once()
+            data.batch[LOSS_WEIGHT_KEY] = torch.ones(
+                data.batch["response_mask"].shape[0], dtype=torch.float32, device=data.batch["response_mask"].device
+            )
+        valid_row_mask = data.batch["response_mask"].any(dim=1)
+        data.batch[LOSS_WEIGHT_KEY] = validate_loss_weights(data.batch[LOSS_WEIGHT_KEY], valid_mask=valid_row_mask)
+        # Rescale to mean 1.0 over the GLOBAL batch, exactly once, here.
+        #
+        # WHY HERE AND NOT IN ppo_loss(). Raw 1/N weights fix which trajectory
+        # dominates the gradient but also shrink the total loss, because every
+        # loss_agg_mode divides by an unweighted denominator -- MEASURED at 18%
+        # of the unweighted magnitude on a 10-deep + 1-shallow batch, i.e. a
+        # silent 5.5x learning-rate cut that drifts with each step's mix.
+        #
+        # Normalizing inside ppo_loss() would fix the magnitude but DESTROY the
+        # reweighting, because ppo_loss() sees one micro-batch at a time. If a
+        # micro-batch happens to hold only same-weight samples, local mean-1
+        # rescaling turns every weight into 1.0. MEASURED on 10 deep + 1
+        # shallow, where the deep trajectory must end up at 50%:
+        #     all deep in one micro-batch -> 90.9%   (weight erased)
+        #     interleaved                 -> 83.5%
+        # i.e. the objective would depend on how the batcher happened to pack
+        # the samples. Normalizing over the global batch is packing-invariant.
+        #
+        # Trainers that weight per-sample losses after aggregation can divide by
+        # the weighted denominator instead. verl aggregates inside the loss
+        # function, so the equivalent is to normalize the weights themselves,
+        # once, globally.
+        data.batch[LOSS_WEIGHT_KEY] = normalize_loss_weight_global(data.batch[LOSS_WEIGHT_KEY], valid_row_mask)
+        valid_loss_weights = data.batch[LOSS_WEIGHT_KEY][valid_row_mask]
+        if valid_loss_weights.numel() > 0:
+            metrics.update(
+                {
+                    "training/trajectory/loss_weight/mean": valid_loss_weights.mean().item(),
+                    "training/trajectory/loss_weight/min": valid_loss_weights.min().item(),
+                    "training/trajectory/loss_weight/max": valid_loss_weights.max().item(),
+                }
+            )
+
+        real_positions = [i for i, tag in enumerate(batch.tags) if not tag.get("is_padding", False)]
+        real_keys = [batch.keys[i] for i in real_positions]
+        # final row per logical session, as positions into the full (padded) batch
+        session_final = {
+            session: real_positions[local_pos] for session, local_pos in final_row_per_session(real_keys).items()
+        }
+        if session_final:
+            trajectory_metrics = {
+                "training/trajectory/expanded_rows": len(real_keys),
+                "training/trajectory/logical_sessions": len(session_final),
+                "training/trajectory/segments_per_session/mean": len(real_keys) / len(session_final),
+            }
+            # compute_data_metrics() below sees every stored row, so critic/score/* is a
+            # row-weighted distribution: a trajectory stored as N rows counts N times. Report
+            # the trajectory-level score alongside it -- one value per logical session, taken
+            # from the final row, which is the row the GRPO advantage is computed from.
+            final_positions = torch.tensor(list(session_final.values()), dtype=torch.long)
+            session_scores = data.batch["rm_scores"][final_positions].sum(dim=-1).float()
+            trajectory_metrics["training/trajectory/score_mean"] = session_scores.mean().item()
+            metrics.update(trajectory_metrics)
         data.batch["token_level_scores"] = data.batch["rm_scores"]
         data.non_tensor_batch["uid"] = np.array(data.batch.pop("uid").tolist(), dtype=object)
 
@@ -1799,7 +1902,7 @@ class PPOTrainer(ABC):
         )
 
         # 4. write nested advantages and returns back to TransferQueue
-        fields = ["advantages", "returns"]
+        fields = ["advantages", "returns", LOSS_WEIGHT_KEY]
         if self.config.algorithm.use_kl_in_reward:
             fields.append("token_level_rewards")
         if rollout_correction:
@@ -1809,7 +1912,10 @@ class PPOTrainer(ABC):
 
         output = {}
         for field in fields:
-            output[field] = response_to_nested(data.batch[field], response_mask)
+            if field == LOSS_WEIGHT_KEY:
+                output[field] = data.batch[field]
+            else:
+                output[field] = response_to_nested(data.batch[field], response_mask)
         output = TensorDict(output, batch_size=len(batch))
 
         batch = tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=output)
@@ -1870,6 +1976,15 @@ class PPOTrainer(ABC):
             "dataloader_kwargs": {"shuffle": self.config.actor_rollout_ref.actor.shuffle},
             "temperature": self.config.actor_rollout_ref.rollout.temperature,
         }
+        metrics.update(
+            {
+                "training/trajectory/stored_rows": len(batch),
+                "training/actor/mini_batches_per_epoch": len(batch) / ppo_mini_batch_size,
+                "training/actor/optimizer_updates": len(batch)
+                / ppo_mini_batch_size
+                * self.config.actor_rollout_ref.actor.ppo_epochs,
+            }
+        )
         batch.extra_info.update(extra_info)
 
         output: TensorDict = self.actor_rollout_wg.update_actor(batch)
