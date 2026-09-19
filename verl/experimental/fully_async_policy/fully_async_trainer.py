@@ -532,6 +532,8 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 self._fit_log_aggregated_training_metrics(rollout_reset_timing_raw)
             await self._fit_validate()
         self._fit_save_checkpoint(force=True)
+        # Wait for trainer-owned dumps and surface write failures before reporting success.
+        await asyncio.to_thread(self._shutdown_dump_executor)
 
     async def fit_step(self, batch_dict: dict = None):
         """
