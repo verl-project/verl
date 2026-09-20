@@ -56,6 +56,7 @@ from verl.utils.vllm.vllm_fp4_utils import (
 )
 from verl.utils.vllm.vllm_fp8_utils import (
     build_fp8_method_patchers,
+    load_dsv41_engram_rows,
     process_fp8_weights_after_loading,
     stage_fp8_params_for_loading,
 )
@@ -450,6 +451,9 @@ def load_quanted_weights(weights, model_runner, is_drafter=False):
     vllm_dtype = model_runner.vllm_config.model_config.dtype
 
     weights = list(weights)
+    weights, engram_loaded = load_dsv41_engram_rows(weights, model)
+    if engram_loaded and not weights:
+        return engram_loaded
     weights_quantized = quant_weights(weights, model, quant_config, dtype=vllm_dtype)
 
     # Monkey patch the param class to their subclass, as certain models
@@ -479,7 +483,7 @@ def load_quanted_weights(weights, model_runner, is_drafter=False):
                 param.__class__ = param.orig_type
                 del param.orig_type
 
-    return loaded_params
+    return loaded_params | engram_loaded if engram_loaded else loaded_params
 
 
 def apply_vllm_quant_patches():

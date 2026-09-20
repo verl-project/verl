@@ -37,6 +37,7 @@ from nemo_automodel.components.training.utils import (
 )
 from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
+from torch.utils._pytree import tree_map_only
 
 import verl.utils.torch_functional as verl_F
 from verl.trainer.config import CheckpointConfig
@@ -56,6 +57,7 @@ from verl.workers.engine.automodel.utils import (
     split_packed_expert,
     to_vllm_peft_dict,
 )
+from verl.workers.utils.padding import build_attention_mask_from_nested
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
@@ -553,7 +555,19 @@ class AutomodelEngine(BaseEngine):
                 return key
 
             for name, param in params.items():
-                unsharded_tensor = param.full_tensor() if isinstance(param, DTensor) else param
+                if self.module.config.model_type == "deepseek_v41" and name.endswith(".engram.embed.weight"):
+                    from verl.utils.vllm.vllm_fp8_utils import iter_dsv41_engram_rows
+
+                    device = torch.device(get_device_name(), get_device_id())
+                    for hf_key, owner_table in _sd_adapter.convert_single_tensor_to_hf(name, param):
+                        yield from iter_dsv41_engram_rows(hf_key, owner_table, device)
+                    continue
+                # Gather a temporary GPU copy, preserving the offloaded CPU shard.
+                unsharded_tensor = (
+                    param.to(get_device_name(), non_blocking=True).full_tensor()
+                    if isinstance(param, DTensor)
+                    else param
+                )
                 # Phase 2: split MoE adapter params into per-expert lora_A/lora_B.
                 moe_lora_spec = moe_lora_prefixes.get(name)
                 if moe_lora_spec is not None and unsharded_tensor.dim() == 3:
@@ -570,13 +584,17 @@ class AutomodelEngine(BaseEngine):
                     if not is_packed_expert:
                         ckpt_name = _add_base_layer(name)
                         for hf_key, hf_tensor in _sd_adapter.convert_single_tensor_to_hf(ckpt_name, unsharded_tensor):
+                            hf_tensor = hf_tensor.contiguous()
                             yield hf_key, hf_tensor
                     else:
                         for hf_key, hf_tensor in _sd_adapter.convert_single_tensor_to_hf(name, unsharded_tensor):
                             if lora_base_sync:
                                 head, _, leaf = hf_key.rpartition(".")
                                 hf_key = f"{head}.base_layer.{leaf}"
+                            hf_tensor = hf_tensor.contiguous()
                             yield hf_key, hf_tensor
+                    # Release the full expert layer before gathering the next parameter.
+                    del unsharded_tensor
                     continue
                 # Phase 1: split packed MoE base tensors into per-expert keys.
                 spec = packed_expert_prefixes.get(name)
@@ -753,12 +771,11 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
             if pad_mode == DatasetPadMode.NO_PADDING:
                 input_ids = micro_batch["input_ids"]
                 position_ids = micro_batch["position_ids"]
-                loss_mask = micro_batch["loss_mask"]
 
                 pad_token_id = tu.get_non_tensor_data(data=micro_batch, key="pad_token_id", default=0)
                 batch_size = micro_batch.batch_size[0]
                 seq_len_effective = input_ids.offsets().diff()
-                max_seq_len = max(seq_len_effective)
+                max_seq_len = int(seq_len_effective.max().item())
 
                 input_ids_rmpad_rolled = torch.roll(input_ids.values(), shifts=-1, dims=0)
                 output_args["input_ids_rmpad_rolled"] = input_ids_rmpad_rolled
@@ -777,10 +794,10 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
                         position_ids, padding=0, output_size=(batch_size, max_seq_len)
                     )
 
-                attention_mask_list = [torch.ones_like(t, dtype=torch.int32) for t in loss_mask]
-                attention_mask = torch.nested.as_nested_tensor(attention_mask_list, layout=torch.jagged)
-                attention_mask = torch.nested.to_padded_tensor(
-                    attention_mask, padding=0, output_size=(batch_size, max_seq_len)
+                # Loss masks can cover responses only; attention covers the entire
+                # prompt + response, including tool tokens with zero loss.
+                attention_mask = build_attention_mask_from_nested(
+                    input_ids=micro_batch["input_ids"], max_seq_len=max_seq_len
                 )
 
                 model_inputs = {
@@ -797,7 +814,7 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
             extra_args["temperature"] = temperature_item
             extra_args["return_dict"] = True
 
-        model_inputs.update(multi_modal_inputs)
+        model_inputs.update(tree_map_only(torch.Tensor, lambda value: value.to(input_ids.device), multi_modal_inputs))
         model_inputs.update(extra_args)
 
         return model_inputs, output_args
@@ -909,10 +926,12 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
         micro_batch = micro_batch.to(get_device_id())
         model_inputs, output_args = self.prepare_model_inputs(micro_batch=micro_batch)
 
-        raw_output = self.module(
-            **model_inputs,
-            use_cache=False,
-        )
+        if getattr(self.model_config.hf_config, "model_type", None) == "deepseek_v41":
+            # DeepSeek V4.1 uses contiguous positions and a padded forward without KV cache.
+            model_inputs["position_ids"] = None
+        else:
+            model_inputs["use_cache"] = False
+        raw_output = self.module(**model_inputs)
 
         model_output = self.prepare_model_outputs(output=raw_output, output_args=output_args, micro_batch=micro_batch)
 

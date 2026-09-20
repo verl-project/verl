@@ -13,18 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""FP8 support for the RL weight-refit stream.
+"""Refit support for vLLM's ``Fp8LinearMethod`` and ``Fp8MoEMethod``.
 
-DSV4 checkpoint re-quantization: ``from_hf`` dequantizes the non-expert FP8
-linears (attn wq_a/wkv/wq_b/wo_a/wo_b, indexer.wq_b, shared experts) to bf16
-and strips their ``.scale``; ``quantize_dsv4_fp8_linear`` / \
-``dsv4_fp8_linear_leaf`` re-pack them to fp8_e4m3 + e8m0 scale before
-``load_weights`` (called from ``vllm_fp4_utils.iter_deepseek_v4_weights``).
+Two problems have to be solved for an RL weight refit to land correctly on a
+block-FP8 layer:
 
-vLLM-native refit (``Fp8LinearMethod`` / ``Fp8MoEMethod``): keep parameter
-subclass metadata across vLLM's post-load rebuild, and stage checkpoint-layout
-buffers so kernel post-processing folds back into the storage a CUDA graph
-captured. ``vllm_quant_utils.py`` is the entry point.
+* vLLM's post-load hooks rebuild parameters as plain ``torch.nn.Parameter``,
+  dropping the subclass metadata (``ModelWeightParameter`` and friends) that
+  the weight loaders dispatch on. The patches here keep that metadata.
+* Kernel post-processing rewrites weights and scales into an inference layout
+  the checkpoint tensors no longer fit. The staging helpers hand
+  ``load_weights`` a checkpoint-layout buffer and then fold the re-derived
+  result back into the original storage, so pointers captured by a CUDA graph
+  stay valid.
+
+``verl/utils/vllm/vllm_quant_utils.py`` is the entry point that drives these.
 """
 
 import inspect
@@ -174,6 +177,8 @@ def dsv4_fp8_linear_leaf(name: str) -> str | None:
         return None
     leaf = parts[-1]
     parent = parts[-2]
+    if parent == "engram" and leaf == "wkv":
+        return leaf
     # ``indexer.wq_b`` -> parent ``indexer``; ``attn.wq_a`` -> parent ``attn``;
     # ``shared_experts.w1`` -> parent ``shared_experts``.
     if leaf in _DSV4_FP8_LINEAR_LEAVES and parent in _DSV4_FP8_LINEAR_PARENTS:
@@ -181,18 +186,76 @@ def dsv4_fp8_linear_leaf(name: str) -> str | None:
     return None
 
 
-def quantize_dsv4_fp8_linear(weight, leaf: str):
-    """Re-quantize a bf16 non-expert FP8 linear weight to fp8_e4m3 + e8m0 scale."""
+def quantize_dsv4_fp8_linear(weight, leaf: str, block_size=_FP8_BLOCK_SIZE):
+    """Re-quantize a bf16 non-expert FP8 linear weight to fp8_e4m3 + e8m0 scale.
+
+    ``block_size`` is the checkpoint's FP8 weight block size (e.g. 128 for
+    DeepSeek-V4-Flash, 32 for DeepSeek-V4.1-Flash). It must match the scale
+    geometry vLLM's quant method expects, otherwise the staged scale tensor is
+    mis-shaped and the refit silently corrupts the linear.
+    """
     rows, cols = weight.shape
-    # weight_block_size is [128, 128] for every DSV4-Flash FP8 linear.
     src_scale = torch.empty(
-        (rows + 127) // 128,
-        (cols + 127) // 128,
+        (rows + block_size - 1) // block_size,
+        (cols + block_size - 1) // block_size,
         dtype=torch.float8_e8m0fnu,
         device=weight.device,
     )
-    fp8_weight, scale = _quantize_fp8_e4m3fn_like_scale(weight, src_scale, name=f"dsv4_fp8_{leaf}")
+    fp8_weight, scale = _quantize_fp8_e4m3fn_like_scale(
+        weight, src_scale, name=f"dsv4_fp8_{leaf}", block_size=block_size
+    )
     return fp8_weight, scale
+
+
+def iter_dsv41_engram_rows(name, table, device, chunk_bytes=64 << 20):
+    """Stream logical Engram rows without gathering the full owner-sharded table."""
+    from torch.distributed.tensor import DTensor, Shard
+
+    if not isinstance(table, DTensor) or table.device_mesh.ndim != 1 or table.placements != (Shard(0),):
+        raise ValueError("Engram refit requires a one-dimensional row-owner DTensor")
+    mesh = table.device_mesh
+    group = mesh.get_group()
+    local = table.to_local()
+    owner_rows = math.ceil(table.shape[0] / mesh.size())
+    chunk_rows = max(1, chunk_bytes // (table.shape[1] * table.element_size()))
+    for owner in range(mesh.size()):
+        begin = owner * owner_rows
+        end = min(begin + owner_rows, table.shape[0])
+        for start in range(begin, end, chunk_rows):
+            rows = min(chunk_rows, end - start)
+            if mesh.get_local_rank() == owner:
+                chunk = local[start - begin : start - begin + rows].to(device=device).contiguous()
+            else:
+                chunk = torch.empty((rows, table.shape[1]), device=device, dtype=table.dtype)
+            # All actor ranks feed the transport, including ranks that only drain it.
+            torch.distributed.broadcast(chunk, src=torch.distributed.get_global_rank(group, owner), group=group)
+            yield f"{name}.__rows_{start}", chunk
+
+
+def load_dsv41_engram_rows(weights, model):
+    """Refit each vLLM Engram head shard in place from bounded BF16 row chunks."""
+    remaining, loaded = [], set()
+    for name, weight in weights:
+        if ".engram.embed.weight.__rows_" not in name:
+            remaining.append((name, weight))
+            continue
+        base, row_start = name.rsplit(".__rows_", 1)
+        row_start = int(row_start)
+        mapped = model.hf_to_vllm_mapper.apply_list([base])[0]
+        module = model.get_submodule(mapped.removesuffix(".weight"))
+        start = module.weight.engram_vocab_start
+        end = start + module.weight.shape[0]
+        left, right = max(start, row_start), min(end, row_start + weight.shape[0])
+        if left < right:
+            value = weight[left - row_start : right - row_start]
+            scales = torch.empty(
+                (value.shape[0], value.shape[1] // 32), device=value.device, dtype=torch.float8_e8m0fnu
+            )
+            fp8, scales = _quantize_fp8_per_row_tiles(value, scales)
+            module.weight.data[left - start : right - start].copy_(fp8)
+            module.weight_scale_inv.data[left - start : right - start].copy_(scales.view(torch.uint8))
+        loaded.update((mapped, mapped.removesuffix(".weight") + ".weight_scale_inv"))
+    return remaining, loaded
 
 
 # ---------------------------------------------------------------------------
@@ -615,10 +678,31 @@ def build_fp8_method_patchers(vllm_version):
         from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod, Fp8MoEMethod
 
         wrap = _make_process_weights_after_loading_for_vllm20
-        return [
+        patchers = [
             patch(linear_path, wrap(Fp8LinearMethod.process_weights_after_loading)),
             patch(moe_path, wrap(Fp8MoEMethod.process_weights_after_loading)),
         ]
+        # DeepSeek-V4.1 Flash (weight_block_size=[32,32] + expert_dtype=fp4)
+        # routes every FP8 linear through ModelOptLinearMethod (MXFP8 / ue8m0)
+        # instead of Fp8LinearMethod. Its post-load rebuilds ``weight`` /
+        # ``weight_scale`` as plain nn.Parameters, so the same subclass-restore
+        # + pristine-layout recording is required for a refit to land. The
+        # patch is harmless for models that don't use ModelOptLinearMethod.
+        try:
+            from vllm.model_executor.layers.quantization.modelopt import ModelOptLinearMethod
+        except ImportError:
+            ModelOptLinearMethod = None
+        if ModelOptLinearMethod is not None:
+            modelopt_linear_path = (
+                "vllm.model_executor.layers.quantization.modelopt.ModelOptLinearMethod.process_weights_after_loading"
+            )
+            patchers.append(
+                patch(
+                    modelopt_linear_path,
+                    wrap(ModelOptLinearMethod.process_weights_after_loading),
+                )
+            )
+        return patchers
 
     return [
         patch(linear_path, process_weights_after_loading_for_vllm14),

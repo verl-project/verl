@@ -15,12 +15,20 @@
 
 """Refit support for vLLM's ``Mxfp4MoEMethod`` (DeepSeek V4 routed experts).
 
-The refit stream carries checkpoint-layout tensors; live params hold whatever the
-backend rewrote them into. Each expert param is handed a checkpoint-layout buffer to
-absorb the reload, then the backend's conversion is replayed and folded back into the
-live storage (so the addresses the CUDA graph captured stay put). Only block scales
-(change element count) need a real allocation; expert weights stage as a reinterpret of
-their own storage. Entry point: ``verl/utils/vllm/vllm_quant_utils.py``.
+Reloading these experts means undoing the kernel's weight conversion: the refit
+stream carries checkpoint-layout tensors while the live parameters hold whatever
+layout the selected backend rewrote them into. Each expert param is handed a
+checkpoint-layout buffer to absorb the reload, then the backend's conversion is
+replayed and folded back into the live storage, so the addresses the CUDA graph
+captured stay put.
+
+Backends differ only in how much of that buffer has to be a real allocation.
+A param whose kernel layout spans the same bytes as the checkpoint one -- the
+expert weights under both DeepGEMM and Marlin -- stages as a reinterpret of its
+own storage and costs nothing. Only the block scales, which change element
+count, need an allocation, and those are a sixteenth of the weights.
+
+``verl/utils/vllm/vllm_quant_utils.py`` is the entry point that drives these.
 """
 
 import logging
@@ -31,6 +39,10 @@ import torch
 from verl.utils.vllm.vllm_fp8_utils import _scale_from_amax, dsv4_fp8_linear_leaf, quantize_dsv4_fp8_linear
 
 logger = logging.getLogger(__name__)
+
+# Default FP8 weight block size for DeepSeek-V4-Flash (128x128). DeepSeek-V4.1-Flash
+# uses 32x32; pass the correct value via iter_deepseek_v4_weights(block_size=...).
+_DSV4_DEFAULT_BLOCK_SIZE = 128
 
 _MXFP4_SF_BLOCK = 32
 _MXFP4_LIVE_ATTR = "_verl_mxfp4_live_params"
@@ -84,41 +96,36 @@ def _quantize_mxfp4_e2m1_like_scale(weight, source_scale, *, name="", block_size
     return packed.contiguous().view(torch.int8), output_scale
 
 
+_DEEPSEEK_V4_MODEL_TYPES = ("deepseek_v4", "deepseek_v41")
+
+
 def is_deepseek_v4_model(model):
     if model is None:
         return False
 
     for obj in (model, getattr(model, "config", None), getattr(model, "hf_config", None)):
         if obj is not None and getattr(obj, "model_type", None) is not None:
-            return obj.model_type == "deepseek_v4"
+            return obj.model_type in _DEEPSEEK_V4_MODEL_TYPES
 
     text_config = getattr(getattr(model, "config", None), "text_config", None)
-    return getattr(text_config, "model_type", None) == "deepseek_v4"
+    return getattr(text_config, "model_type", None) in _DEEPSEEK_V4_MODEL_TYPES
 
 
 def _quantize_expert_to_mxfp4(weight):
-    """Quantize a 2-D bf16 expert weight to packed MXFP4 E2M1 + e8m0 scale (geometry [out, in] -> scale [out, in//32])."""
+    """Quantize a 2-D bf16 expert weight to packed MXFP4 E2M1 + e8m0 scale
+    (geometry [out, in] -> scale [out, in//32])."""
     rows, cols = weight.shape
     scale_geom = torch.empty(rows, cols // _MXFP4_SF_BLOCK, dtype=torch.uint8, device=weight.device)
     packed, scale = _quantize_mxfp4_e2m1_like_scale(weight, scale_geom, name="dsv4_expert")
     return packed, scale
 
 
-def iter_deepseek_v4_weights(weights):
-    """Normalize the refit stream to the packed layout vLLM expects.
+def iter_deepseek_v4_weights(weights, block_size=_DSV4_DEFAULT_BLOCK_SIZE):
+    """Pass the refit stream through untouched apart from a dtype reinterpret.
 
-    Automodel loads the checkpoint through ``from_hf``, which unpacks FP4
-    experts -> bf16 and dequantizes the non-expert FP8 linears -> bf16
-    (stripping their ``.scale``). vLLM wants experts packed ``[out, in // 2]``
-    int8 + ``[out, in // 32]`` e8m0 scale, and the FP8 linears as fp8_e4m3 +
-    block scale — so both must be re-quantized here before ``load_weights``
-    (else a 2x shape mismatch, or NaN from the staging-fill scale). The
-    paired ``.scale`` is emitted right after each ``.weight``. The
-    Megatron-Bridge path already streams quantized tensors and is handled by
-    the ``int8`` branch (``uint8`` reinterpret only).
-    ``dsv4_fp8_linear_leaf`` (from ``vllm_fp8_utils``) selects the
-    checkpoint-FP8 linears; bf16-on-disk layers (compressor, norms, embed,
-    gate, head) pass through untouched.
+    A DSv4 checkpoint already ships quantized experts, so unlike the BF16 path
+    there is nothing to quantize here. The expert tensors only need to be seen
+    as the raw ``uint8`` byte layout that ``Mxfp4MoEMethod`` allocated.
     """
     for name, weight in weights:
         if ".experts." in name and name.endswith(".weight") and weight.dtype == torch.bfloat16:
@@ -132,7 +139,7 @@ def iter_deepseek_v4_weights(weights):
             continue
         fp8_leaf = dsv4_fp8_linear_leaf(name)
         if fp8_leaf is not None and weight.dtype == torch.bfloat16:
-            fp8_weight, scale = quantize_dsv4_fp8_linear(weight, fp8_leaf)
+            fp8_weight, scale = quantize_dsv4_fp8_linear(weight, fp8_leaf, block_size=block_size)
             yield name, fp8_weight
             yield name[: -len(".weight")] + ".scale", scale
             continue
