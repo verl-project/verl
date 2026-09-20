@@ -101,6 +101,9 @@ jobs:
         run: |
           pip3 install --no-deps -e .[test]
           pip3 install pytest-asyncio
+          # The image ships nvidia-resiliency-ext 0.4.1, whose module has no __version__
+          # attribute, crashing megatron-core's dist_checkpointing nvrx strategy on import.
+          pip3 install -U "nvidia-resiliency-ext>=0.6.0"
       - name: Check final pip list
         run: |
           pip list
