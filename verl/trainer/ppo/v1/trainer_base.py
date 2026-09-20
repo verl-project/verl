@@ -29,7 +29,6 @@ import ray
 import torch
 import transfer_queue as tq
 from omegaconf import DictConfig, OmegaConf, open_dict
-from packaging.version import InvalidVersion, Version
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -101,19 +100,6 @@ def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
-
-
-def _tq_supports_checkpoint() -> bool:
-    """Whether the installed TransferQueue can snapshot/restore its state for checkpoint consistency."""
-    try:
-        version_supported = Version(getattr(tq, "__version__", "")) >= Version("0.1.9")
-    except InvalidVersion:
-        return False
-    return (
-        version_supported
-        and callable(getattr(tq, "save_checkpoint", None))
-        and callable(getattr(tq, "load_checkpoint", None))
-    )
 
 
 def _count_tq_prompt_groups(partition_id: str = "train") -> int:
@@ -871,7 +857,7 @@ class PPOTrainer(ABC):
 
         # 5. restore TransferQueue state (async modes). Re-issuing the restored in-flight prompts is
         # deferred to fit() to use the agent_loop_manager.
-        if self.trainer_mode != "sync" and _tq_supports_checkpoint():
+        if self.trainer_mode != "sync":
             tq_ckpt_path = os.path.join(global_step_folder, "transfer_queue")
             if os.path.exists(tq_ckpt_path):
                 logger.info(f"Loading TransferQueue state from {tq_ckpt_path}")
@@ -881,7 +867,7 @@ class PPOTrainer(ABC):
 
     def _reissue_inflight_prompts(self, partition_id: str = "train") -> int:
         """Restart checkpointed pending/running prompt groups from their persisted prompt data."""
-        if self.trainer_mode == "sync" or not _tq_supports_checkpoint():
+        if self.trainer_mode == "sync":
             return 0
         data = tq.kv_list(partition_id)
         if not data:
@@ -973,8 +959,7 @@ class PPOTrainer(ABC):
         # save TransferQueue state for async modes so in-flight prompts (already fetched from the
         # dataloader but not yet trained into this checkpoint's weights) survive a restart:
         # finished trajectories are restored as-is, pending/running prompts are re-issued on resume.
-        # Requires a TransferQueue release with checkpoint support (see _tq_supports_checkpoint).
-        if self.trainer_mode != "sync" and _tq_supports_checkpoint():
+        if self.trainer_mode != "sync":
             tq.save_checkpoint(
                 os.path.join(local_global_step_folder, "transfer_queue"),
                 metadata={"global_steps": self.global_steps},

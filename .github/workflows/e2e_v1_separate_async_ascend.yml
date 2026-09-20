@@ -106,7 +106,7 @@ jobs:
       - name: Install the current repository
         run: |
           uv pip install --no-deps -e .
-          uv pip install --no-deps TransferQueue==0.1.8
+          uv pip install --no-deps TransferQueue==0.1.10
       - name: Check final pip list
         run: uv pip list
       - name: Prepare weights
@@ -159,7 +159,7 @@ jobs:
       - name: Install the current repository
         run: |
           uv pip install --no-deps -e .
-          uv pip install --no-deps TransferQueue==0.1.8
+          uv pip install --no-deps TransferQueue==0.1.10
       - name: Check final pip list
         run: uv pip list
       - name: Prepare weights

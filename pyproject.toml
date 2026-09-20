@@ -27,14 +27,12 @@ requires-python = ">=3.10,<3.13"
 test          = ["pytest", "pre-commit", "py-spy", "pytest-asyncio", "pytest-rerunfailures"]
 math          = ["math-verify"]
 mcore         = ["mbridge"]
-# Named extra so the git source lives in one place; verl-core pulls it in, so it
-# is always installed (no longer opt-in).
-transferqueue = ["TransferQueue @ git+https://github.com/Ascend/TransferQueue.git@main"]
 
 # Shared runtime deps, included by every backend via `verl[verl-core]`.
-# TransferQueue is always installed (imported at top level on core paths).
 verl-core = [
-    "verl[transferqueue]",
+    "TransferQueue>=0.1.10",
+    "pyzmq",
+    "msgspec",
     "accelerate",
     "codetiming",
     "datasets",
@@ -424,6 +422,16 @@ requires-dist = []
 [[tool.uv.dependency-metadata]]
 name = "veomni"
 version = "0.1.11"
+requires-dist = []
+
+# TransferQueue is installed deps-free as well: it asks for an unbounded
+# `ray[default]` and a `tensordict>=0.10.0` that sits right on verl's `<=0.10.0`
+# cap, and its optional storage backends drag in extras we never use. verl-core
+# supplies what it actually imports (see the pyzmq / msgspec note there). No
+# `version` key on purpose — the requirement is an open-ended `>=0.1.10`, so this
+# has to apply to every release it may resolve to, not one pinned version.
+[[tool.uv.dependency-metadata]]
+name = "TransferQueue"
 requires-dist = []
 
 # Heavy native packages come prebuilt from the verl wheelhouse (cu130 / torch 2.11

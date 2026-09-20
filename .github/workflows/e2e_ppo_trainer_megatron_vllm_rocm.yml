@@ -137,7 +137,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
-          pip install --no-deps TransferQueue==0.1.8
+          pip install --no-deps TransferQueue==0.1.10
       - name: Check final pip list
         run: |
           pip list
@@ -226,7 +226,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
-          pip install --no-deps TransferQueue==0.1.8
+          pip install --no-deps TransferQueue==0.1.10
       - name: Check final pip list
         run: |
           pip list
