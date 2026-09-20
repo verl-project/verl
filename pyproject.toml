@@ -488,7 +488,7 @@ requires-dist = [
     "opt-einsum>=3.3; extra == \"opt-einsum\"",
     "pyyaml; extra == \"pyyaml\""
 ]
-provides-extras = ["optree", "opt-einsum", "pyyaml"]
+provides-extra = ["optree", "opt-einsum", "pyyaml"]
 
 [[tool.uv.dependency-metadata]]
 name = "cuda-toolkit"
@@ -545,7 +545,7 @@ requires-dist = [
     "nvidia-cuda-profiler-api==13.0.85.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"profiler\"",
     "nvidia-cuda-sanitizer-api==13.0.85.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"sanitizer\""
 ]
-provides-extras = ["all", "cccl", "crt", "cublas", "cudart", "cufft", "cufile", "culibos", "cupti", "curand", "cusolver", "cusparse", "cuxxfilt", "npp", "nvcc", "nvfatbin", "nvjitlink", "nvjpeg", "nvml", "nvptxcompiler", "nvrtc", "nvtx", "nvvm", "opencl", "profiler", "sanitizer"]
+provides-extra = ["all", "cccl", "crt", "cublas", "cudart", "cufft", "cufile", "culibos", "cupti", "curand", "cusolver", "cusparse", "cuxxfilt", "npp", "nvcc", "nvfatbin", "nvjitlink", "nvjpeg", "nvml", "nvptxcompiler", "nvrtc", "nvtx", "nvvm", "opencl", "profiler", "sanitizer"]
 
 [[tool.uv.dependency-metadata]]
 name = "torch"
@@ -570,7 +570,7 @@ requires-dist = [
     "opt-einsum>=3.3; extra == \"opt-einsum\"",
     "pyyaml; extra == \"pyyaml\""
 ]
-provides-extras = ["optree", "opt-einsum", "pyyaml"]
+provides-extra = ["optree", "opt-einsum", "pyyaml"]
 
 [tool.uv.sources]
 # No published Torch 2.13 ABI wheel is available in the current wheelhouse.
