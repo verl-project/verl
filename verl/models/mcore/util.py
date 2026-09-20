@@ -848,22 +848,36 @@ def postprocess_bshd_engine(
     return output_new_tensor
 
 
-def build_vlm_attn_mask_thd(input_ids: torch.Tensor, pad_token_id: int = None):
-    seqlens_in_batch = input_ids.offsets().diff()
+def build_vlm_attn_mask_thd(
+    input_ids: torch.Tensor,
+    pad_token_id: int = None,
+    packed_seq_params: PackedSeqParams | None = None,
+):
+    """Build dense VLM inputs for a THD forward.
+
+    The Megatron-Bridge VLM wrapper repacks these dense inputs after inserting
+    vision embeddings. When THD bucket padding is enabled, use the padded
+    sequence lengths from the outer metadata so Bridge reconstructs the same
+    physical layout that the language model receives.
+    """
+    if packed_seq_params is None or packed_seq_params.cu_seqlens_q_padded is None:
+        padded_lengths = input_ids.offsets().diff()
+    else:
+        padded_lengths = packed_seq_params.cu_seqlens_q_padded.diff()
 
     # Align to TP/CP so ``combined_embeddings`` is divisible by tp_size before
     # the SP scatter. Mirrors ``build_vlm_attn_mask_bshd``.
     tp_size = mpu.get_tensor_model_parallel_world_size()
     cp_size = mpu.get_context_parallel_world_size()
     align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
-    max_seqlen = int(seqlens_in_batch.max().item())
+    max_seqlen = int(padded_lengths.max().item())
     if align_size > 1:
         max_seqlen += (align_size - max_seqlen % align_size) % align_size
 
     batch_size = input_ids.shape[0]
     input_ids_with_pad = input_ids.to_padded_tensor(pad_token_id, output_size=(batch_size, max_seqlen))
     attention_mask = torch.zeros_like(input_ids_with_pad, dtype=torch.bool)
-    for i, seqlen in enumerate(seqlens_in_batch):
+    for i, seqlen in enumerate(padded_lengths):
         attention_mask[i, :seqlen] = True
 
     return input_ids_with_pad, attention_mask

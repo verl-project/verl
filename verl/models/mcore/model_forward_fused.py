@@ -305,7 +305,11 @@ def fused_forward_model_engine(vision_model: bool = False):
 
         attention_mask = None
         if vision_model:
-            input_ids_rmpad, attention_mask = build_vlm_attn_mask_thd(input_ids, pad_token_id)
+            input_ids_rmpad, attention_mask = build_vlm_attn_mask_thd(
+                input_ids,
+                pad_token_id,
+                packed_seq_params=packed_seq_params,
+            )
 
         labels_rmpad, _, _ = preprocess_thd_engine(
             labels,

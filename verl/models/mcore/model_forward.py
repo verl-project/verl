@@ -347,7 +347,11 @@ def gptmodel_forward_model_engine(
         # For VLM model, need to pass bshd format `input_ids` and `attention_mask`.
         attention_mask = None
         if vision_model:
-            input_ids_rmpad, attention_mask = build_vlm_attn_mask_thd(input_ids, pad_token_id)
+            input_ids_rmpad, attention_mask = build_vlm_attn_mask_thd(
+                input_ids,
+                pad_token_id,
+                packed_seq_params=packed_seq_params,
+            )
 
         if router_padding_mask is not None:
             model_kwargs["padding_mask"] = router_padding_mask
