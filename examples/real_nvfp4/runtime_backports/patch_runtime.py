@@ -6,6 +6,7 @@ import json
 from importlib.metadata import distribution
 
 BEFORE = "ceb3477473bdb1de36e01687e0b2083ad239d42b1ddc2ec8cec16ba2c477efa6"
+AFTER = "e84685635d48e9e6ce1c1022b982d49baca3f9cd2273530c9502df5f2e0147b4"
 OLD = """        distributed_init_method = get_distributed_init_method(
             get_loopback_ip(), get_open_port()
         )"""
@@ -34,7 +35,11 @@ def _get_mp_distributed_init_method(parallel_config):
 
 
 def patched_source(source):
-    assert hashlib.sha256(source.encode()).hexdigest() == BEFORE
+    actual = hashlib.sha256(source.encode()).hexdigest()
+    if actual == AFTER:
+        return source
+    if actual != BEFORE:
+        raise RuntimeError(f"Unexpected vLLM executor source: {actual}")
     assert source.count(OLD) == 1
     assert "import os\n" in source
     assert source.count("\nclass MultiprocExecutor(Executor):") == 1
@@ -43,19 +48,24 @@ def patched_source(source):
         HELPER + "\n\nclass MultiprocExecutor(Executor):",
     )
     ast.parse(patched)
+    if hashlib.sha256(patched.encode()).hexdigest() != AFTER:
+        raise RuntimeError("Atomic TCPStore patch output differs from audited bytes")
     return patched
 
 
 if __name__ == "__main__":
     target = distribution("vllm").locate_file("vllm/v1/executor/multiproc_executor.py")
-    result = patched_source(target.read_text())
-    target.write_text(result)
+    source = target.read_text()
+    result = patched_source(source)
+    if result != source:
+        target.write_text(result)
     print(
         "ATOMIC_TCPSTORE_PATCH",
         json.dumps(
             {
                 "path": str(target),
-                "before": BEFORE,
+                "before": hashlib.sha256(source.encode()).hexdigest(),
+                "changed": result != source,
                 "after": hashlib.sha256(result.encode()).hexdigest(),
             }
         ),

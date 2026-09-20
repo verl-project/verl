@@ -16,8 +16,8 @@ requires-python = ">=3.10,<3.13"
 #
 #   uv sync --extra fsdp --extra vllm     # or: python manage_envs.py sync fsdp vllm
 #
-# All backends use torch 2.11.0: vllm/sglang/fsdp/megatron on cu130, cpu on cpu
-# wheels (CI/dev). Both torch worlds coexist via [tool.uv].conflicts forks.
+# vLLM selects torch 2.13 / cu130; SGLang and CPU retain torch 2.11.
+# Trainers accept either engine version and build native extensions against it.
 # DEFERRED: trtllm (torch 2.10.0+cu130) — its RC sdist makes `uv lock` explode.
 # cuDNN/NCCL: torch's wheel pins them, so after `uv lock` sync CUDNN_VERSION /
 # NCCL_VERSION in docker/Dockerfile.uv.cu130 to the resolved values.
@@ -63,7 +63,7 @@ verl-core = [
     # torchcodec every video sample dies with AttributeError. It reached only
     # the sglang venv (a transitive sglang dep), leaving vllm / fsdp / megatron
     # / cpu broken — hence verl-core. Left unpinned the way sglang has it: it is
-    # ABI-coupled to torch and every extra here pins the same torch 2.11.0.
+    # ABI-coupled to torch; the engine selects its compatible version.
     # Decoding needs FFmpeg's shared libs (`ffmpeg`, docker/Dockerfile.uv.cu130).
     "torchcodec",
     "cachetools",
@@ -73,9 +73,9 @@ verl-core = [
     "pytest-rerunfailures",
 ]
 
-# Pins flash-attn once for the fsdp / megatron parents (wheelhouse-routed below).
+# Pins flash-attn once for the fsdp / megatron parents (source-built below).
 # Don't install alone — needs the parent extra's torch / cuDNN pins.
-flash-attn-cu130torch211 = ["flash-attn==2.8.3"]
+flash-attn-cu130 = ["flash-attn==2.8.3"]
 
 # Pins cupy once for the fsdp / megatron parents. Two unrelated consumers, both
 # on the training side: `ray.util.collective`'s NCCL backend is cupy-based, so
@@ -87,27 +87,21 @@ cupy-cu130 = ["cupy-cuda13x==14.0.1"]
 # ---- inference backends ----------------------------------------------------
 vllm = [
     "verl[verl-core]",
-    "torch==2.11.0",
-    "torchvision==0.26.0",
+    "torch==2.13.0",
+    "torchvision==0.28.0",
     "torchaudio==2.11.0",
-    # Per-token NVFP4 routed experts require vLLM's per_token_activation kernel
-    # argument and native graph-stable reload lifecycle, released in 0.26.0.
-    #
-    "vllm @ https://github.com/vllm-project/vllm/releases/download/v0.26.0/vllm-0.26.0-cp38-abi3-manylinux_2_28_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'",
-    "vllm @ https://github.com/vllm-project/vllm/releases/download/v0.26.0/vllm-0.26.0-cp38-abi3-manylinux_2_28_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "vllm==0.26.0 ; sys_platform != 'linux' or (platform_machine != 'aarch64' and platform_machine != 'x86_64')",
-    # FlashInfer moves ahead of the version vLLM 0.26.0 pins; see
-    # override-dependencies for why 0.6.15.post1 exactly. vLLM 0.27 would bring a
-    # newer FlashInfer for free but only via torch 2.13, which would mean
-    # rebuilding the prebuilt apex / flash-attn / megatron-bridge wheelhouse.
-    "flashinfer-python==0.6.15.post1",
-    "flashinfer-cubin==0.6.15.post1",
-    "flashinfer-jit-cache==0.6.15.post1",
-    "nvidia-cutlass-dsl[cu13]==4.6.0",
-    "quack-kernels==0.6.1",
+    # 0.27 contains the CuMem allocator-aware memory-profiling fix (#49208).
+    "vllm==0.27.1",
+    # 0.6.18 fixes the SM100 tile-192 non-finite output issue (sglang#34629).
+    "flashinfer-python==0.6.18",
+    "flashinfer-cubin==0.6.18",
+    "flashinfer-jit-cache==0.6.18",
+    "nvidia-cutlass-dsl[cu13]==4.6.2",
+    "quack-kernels==0.6.4",
+    # Keep the validated vLLM grammar runtime; SGLang pins its own older release.
+    "xgrammar==0.2.7",
+    "openai==3.15.0",
     "mbridge",
-    # vllm 0.26 needs transformers>=5.5.3; 5.9.0 is the project-wide pin
-    # (enforced in override-dependencies below).
     "transformers==5.9.0",
 ]
 
@@ -148,10 +142,10 @@ sglang = [
 # ---- training backends -----------------------------------------------------
 fsdp = [
     "verl[verl-core]",
-    "verl[flash-attn-cu130torch211]",
+    "verl[flash-attn-cu130]",
     "verl[cupy-cu130]",
-    "torch==2.11.0",
-    "torchvision==0.26.0",
+    "torch>=2.11.0,<=2.13.0,!=2.12.*",
+    "torchvision>=0.26.0,<=0.28.0,!=0.27.*",
     "torchaudio==2.11.0",
     "liger-kernel>=0.8.2",
     "trl==0.27.0",
@@ -160,19 +154,21 @@ fsdp = [
     # override below settles the version (5.9.0). See override-dependencies.
 ]
 
-# apex / flash-attn / megatron-bridge come prebuilt from the wheelhouse;
-# TE uses release packages (its PyTorch extension is built at sync time). megatron-core is also
-# git-sourced. onnxscript works around an undeclared TE import.
+# Apex / flash-attn build from official source with runtime-matched Torch.
+# TE/Core use release packages; Bridge is pinned to its official tag commit.
+# onnxscript works around an undeclared TE import.
 megatron = [
     "verl[verl-core]",
-    "verl[flash-attn-cu130torch211]",
+    "verl[flash-attn-cu130]",
     "verl[cupy-cu130]",
-    "torch==2.11.0",
-    "torchvision==0.26.0",
+    "torch>=2.11.0,<=2.13.0,!=2.12.*",
+    "torchvision>=0.26.0,<=0.28.0,!=0.27.*",
     "torchaudio==2.11.0",
     "nvidia-mathdx",
     "apex",
     "transformer-engine[pytorch,core-cu13]==2.18.0",
+    # TE builds without isolation and imports wheel.bdist_wheel from this env.
+    "wheel",
     # Keep the extension build dependency aligned with the NeMo RL release runtime.
     "nvidia-cudnn-frontend==1.25.0",
     "onnxscript",
@@ -181,13 +177,15 @@ megatron = [
     "liger-kernel>=0.8.2",
     # Two Megatron<->HF connectors: mbridge (legacy) and megatron-bridge (NVIDIA,
     # imported as megatron.bridge; the migration target, installed deps-free — see
-    # [[tool.uv.dependency-metadata]] below). 0.5.2 is the wheelhouse build of the
-    # r0.5.0 release branch.
+    # [[tool.uv.dependency-metadata]] below). The exact v0.6.0 tag commit reports
+    # package version 0.6.1+51885cf13.
     "mbridge",
-    "megatron-bridge==0.5.2",
-    "megatron-core",
+    "megatron-bridge==0.6.1+51885cf13",
+    "megatron-core==0.19.0",
+    # Required by Bridge training.config, including text-only model setup.
+    "megatron-energon==7.4.1",
     # megatron-bridge hard-imports modelopt but is installed deps-free (below), so
-    # megatron needs it explicitly. 0.44.0: PyPI stable of bridge r0.5.0's 0.44.x.
+    # megatron needs it explicitly; preserve the validated 0.44.0 runtime.
     "nvidia-modelopt==0.44.0",
     # transformers NOT pinned here (see fsdp note): settled via override-deps below.
 ]
@@ -224,7 +222,7 @@ cpu = [
     # with pure-torch fallbacks. It is what lets the `*_on_cpu.py` tests that
     # exercise verl's Megatron wiring run here instead of being skipped. The
     # CUDA-only half of the megatron extra (apex / TE / megatron-bridge) stays out.
-    "megatron-core",
+    "megatron-core==0.18.0",
     # megatron.core.transformer.moe.paged_stash `import triton` unguarded, and
     # `import megatron.core` reaches it. megatron-core doesn't declare triton
     # because on the GPU backends torch's cu130 wheel already pulls it in; the cpu
@@ -312,6 +310,13 @@ verl = [
 # coexist in the lock but never in one venv. See docs/start/install.rst.
 [tool.uv]
 preview = true
+# Preserve the resolved Bridge/vLLM-compatible runtime rather than reviving
+# metadata conflicts that were fixed during release validation.
+constraint-dependencies = [
+    "hydra-core==1.3.2",
+    "protobuf==6.33.6",
+    "setuptools==80.10.2",
+]
 no-build-isolation-package = ["transformer-engine-torch"]
 # Linux + Python 3.12 on both CPU arches verl ships CUDA images for: x86_64 and
 # aarch64 (GH200 / GB200 superchips).
@@ -325,9 +330,9 @@ no-build-isolation-package = ["transformer-engine-torch"]
 # That works because everything the cu130 backends need is published for both:
 # torch / torchvision / torchaudio cu130 (download.pytorch.org ships
 # manylinux_2_28_aarch64), vllm / sglang / sglang-kernel / cupy-cuda13x /
-# sglang-router (PyPI), the native wheelhouse builds apex / flash-attn, and the
-# Transformer Engine release packages. megatron-bridge is py3-none-any;
-# megatron-core / mbridge also build from git. The second entry costs one extra
+# sglang-router (PyPI), with apex / flash-attn built from official source for
+# each runtime Torch ABI. Transformer Engine uses its release packages;
+# GPU Core uses PyPI, CPU Core and mbridge use source. The second entry costs one extra
 # package (sglang's aarch64-only decord2) and leaves every pinned version
 # unchanged.
 #
@@ -339,7 +344,7 @@ no-build-isolation-package = ["transformer-engine-torch"]
 #     "some-x86-only-pkg ; platform_machine == 'x86_64'",
 #
 # or, for more than one package, as a marker-gated sub-extra (the same
-# convention flash-attn-cu130torch211 / cupy-cu130 use to share a pin):
+# convention flash-attn-cu130 / cupy-cu130 use to share a pin):
 #
 #     megatron-x86_64 = ["pkg-a", "pkg-b"]                      # in the extras
 #     "verl[megatron-x86_64] ; platform_machine == 'x86_64'",   # inside megatron
@@ -394,52 +399,14 @@ override-dependencies = [
     "numpy>=2.0.0",
     "kernels>=0.12.0,<0.13",
     "flash-attn-4 ; platform_machine == 'flash-attn-4-excluded'",
-    # vLLM 0.26.0 pins flashinfer-python==0.6.14 exactly, but 0.6.14 (2026-07-02)
-    # predates flashinfer#3973 (merged 2026-07-15, first released in v0.6.15),
-    # the cubin update that fixes flashinfer#3279: a probabilistic *silent* hang
-    # in the SM100 FP4 MoE GEMM's 2-CTA TMA-multicast path, no Xid. It cost us
-    # 1-2 of 32 vLLM servers on startup and is the only reason this recipe
-    # carried an enable_pdl=False patch. vLLM itself moved to 0.6.16.post3 in
-    # 0.27, so this override tracks upstream rather than diverging from it.
-    #
-    # Safe to override rather than upgrade vLLM: the three MoE entry points vLLM
-    # calls (trtllm_bf16_moe, trtllm_fp4_block_scale_moe,
-    # trtllm_fp4_block_scale_routed_moe) take identical parameter sets in 0.6.14,
-    # 0.6.15 and 0.6.16.post3, and vLLM's own 0.26->0.27 changes to those call
-    # sites were structural, not API adaptations.
-    #
-    # 0.6.15.post1 and not something newer: every release after 0.6.16rc4
-    # regenerates the TRTLLM_GEN batched-GEMM artifact
-    # (b368d003.../batched_gemm-da58956-b4ac80e ->
-    # 5988e15c.../batched_gemm-3d40263-3e19f0a, FlashInfer #4180 / #4252), and on
-    # SM100 that artifact's tile-192 path returns non-finite MoE output in online
-    # NVFP4 mode -- sglang#34629. Qwen3-30B-A3B forces exactly that path: with
-    # moe_intermediate_size 768 the only valid tactics are [192,1] and [192,3].
-    # We reproduced it twice, at step 2 and step 4 of an 8-node run, with the PDL
-    # workaround both off and on. 0.6.15.post1 keeps the #3973 cubin fix and the
-    # last good batched-GEMM artifact.
-    "flashinfer-python==0.6.15.post1 ; extra == 'vllm'",
-    "flashinfer-cubin==0.6.15.post1 ; extra == 'vllm'",
-    "flashinfer-jit-cache==0.6.15.post1 ; extra == 'vllm'",
-    # Keep the CUDA libraries from the validated GB200 runtime while moving TE
-    # to the 2.18.0 release packages. Torch 2.11 declares older exact
-    # CUDA library pins, so these must be overrides rather than ordinary direct
-    # dependencies.
-    "nvidia-cublas==13.5.1.27 ; sys_platform == 'linux'",
+    # vLLM-specific FI/DSL/QuACK pins are overridden in its version-scoped
+    # dependency-metadata below; SGLang keeps its own declared dependency pins.
+    # Shared cuDNN selection is unchanged from the existing runtime.
     "nvidia-cudnn-cu13==9.20.0.48 ; sys_platform == 'linux'",
     "nvidia-cudnn-frontend==1.25.0 ; sys_platform == 'linux'",
-    "nvidia-nccl-cu13==2.30.7 ; sys_platform == 'linux'",
-    # aarch64 only: nvidia-cusparselt-cu13 0.8.0/0.8.1 ship an internal WHEEL tag
-    # of `manylinux2014_sbsa` while the filename says `aarch64`. uv rejects the
-    # mismatch and reinstalls the package on EVERY `uv run`; 100+ concurrent Ray
-    # workers then race deleting libcusparseLt.so.0 and crash torch import
-    # (astral-sh/uv#17711). 0.9.1 fixed the internal tag to `manylinux2014_aarch64`
-    # and moves the lib to nvidia/cu13/lib/, which torch 2.11's _preload_cuda_deps
-    # already searches ("nvidia/cuXX/lib since CUDA 13.0"). SONAME stays .so.0.
-    # x86_64 keeps 0.8.0 (its tag is correct; no reinstall) to avoid churning a
-    # working config.
-    "nvidia-cusparselt-cu13==0.8.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "nvidia-cusparselt-cu13==0.9.1 ; platform_machine == 'aarch64' and sys_platform == 'linux'",
+    # Torch's version-scoped metadata below retains each x86 cuSPARSELt pin
+    # and the existing ARM 0.9.1 wheel-tag workaround (astral-sh/uv#17711).
+
 ]
 
 # Skip lock-time metadata builds for git-source packages with no [project] /
@@ -447,6 +414,7 @@ override-dependencies = [
 # [tool.uv.sources] below; bump together. (Wheelhouse packages read metadata from
 # the wheel — no entry needed, except megatron-bridge, whose wheel metadata we
 # deliberately discard; see below.)
+# Existing CPU-only 0.18 metadata shortcut, unchanged from the baseline.
 [[tool.uv.dependency-metadata]]
 name = "megatron-core"
 version = "0.18.0"
@@ -474,14 +442,12 @@ name = "mbridge"
 version = "0.15.1"
 requires-dist = []
 
-# megatron-bridge 0.5.2 comes prebuilt from the wheelhouse (megatron-bridge-r0.5.0
-# tag), pairing with megatron-core 0.18.0. The wheel's real metadata pulls a
-# conflicting transformers + NeMo stack (plus its own flashinfer pins), so we
-# declare EMPTY requires-dist (like `pip install --no-deps`) — the megatron extra
-# already provides torch / megatron-core / TE.
+# Bridge's full optional model/logger dependency set is intentionally not
+# installed. The megatron extra explicitly provides the text-training imports,
+# including Energon, ModelOpt, torch, Core and TE; model validation is required.
 [[tool.uv.dependency-metadata]]
 name = "megatron-bridge"
-version = "0.5.2"
+version = "0.6.1+51885cf13"
 requires-dist = []
 
 # veomni 0.1.11 (veomni-sft extra) is likewise installed deps-free: its metadata
@@ -492,29 +458,135 @@ name = "veomni"
 version = "0.1.11"
 requires-dist = []
 
-# Heavy native packages except Transformer Engine come prebuilt from the verl
-# wheelhouse (cu130 / torch 2.11 / cp312, built for x86_64 AND aarch64).
-# Transformer Engine comes from PyPI release packages; its PyTorch extension
-# builds against the runtime Torch. megatron-bridge is a pure-python wheel.
-#
-# The inference engines are deliberately NOT routed: upstream publishes cu130 /
-# torch-2.11 wheels for the pinned vllm / sglang / sglang-kernel versions on PyPI,
-# so the wheelhouse copies bought nothing (same builds, same download size, same
-# install time) while costing a hash-less index entry. flashinfer stays on PyPI
-# for the same reason — vllm/sglang pin their own and the wheelhouse's 0.6.13
-# matches neither.
+# Use official pinned sources while Torch 2.13 wheelhouse artifacts are absent.
+# Native builds are cached per runtime Torch ABI via extra-build-dependencies.
+# Bridge is pure Python; FlashInfer release wheels retain their official indexes.
+# Preserve baseline Torch 2.11 CUDA overrides without changing the 2.13 fork.
+# Complete official metadata: preserve the existing NCCL/cublas overrides
+# only in the 2.11 fork and the ARM cuSPARSELt wheel-tag workaround in both.
+
+[[tool.uv.dependency-metadata]]
+name = "torch"
+version = "2.11.0+cu130"
+requires-dist = [
+    "filelock",
+    "typing-extensions>=4.10.0",
+    "setuptools<82",
+    "sympy>=1.13.3",
+    "networkx>=2.5.1",
+    "jinja2",
+    "fsspec>=0.8.5",
+    "cuda-toolkit[cublas,cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.2; platform_system == \"Linux\"",
+    "cuda-bindings<14,>=13.0.3; platform_system == \"Linux\"",
+    "nvidia-cudnn-cu13==9.19.0.56; platform_system == \"Linux\"",
+    "nvidia-cusparselt-cu13==0.8.0; (platform_system == \"Linux\") and platform_machine == \"x86_64\"",
+    "nvidia-cusparselt-cu13==0.9.1; (platform_system == \"Linux\") and platform_machine == \"aarch64\"",
+    "nvidia-nccl-cu13==2.30.7; platform_system == \"Linux\"",
+    "nvidia-nvshmem-cu13==3.4.5; platform_system == \"Linux\"",
+    "triton==3.6.0; platform_system == \"Linux\"",
+    "optree>=0.13.0; extra == \"optree\"",
+    "opt-einsum>=3.3; extra == \"opt-einsum\"",
+    "pyyaml; extra == \"pyyaml\""
+]
+provides-extras = ["optree", "opt-einsum", "pyyaml"]
+
+[[tool.uv.dependency-metadata]]
+name = "cuda-toolkit"
+version = "13.0.2"
+requires-dist = [
+    "nvidia-cublas==13.5.1.27; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-cuda-cccl==13.0.85.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-cuda-crt==13.0.88.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-cuda-culibos==13.0.85.*; sys_platform == \"linux\" and extra == \"all\"",
+    "nvidia-cuda-cupti==13.0.85.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-cuda-cuxxfilt==13.0.85.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-cuda-nvcc==13.0.88.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-cuda-nvrtc==13.0.88.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-cuda-opencl==13.0.85.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-cuda-profiler-api==13.0.85.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-cuda-runtime==13.0.96.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-cuda-sanitizer-api==13.0.85.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-cufft==12.0.0.61.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-cufile==1.15.1.6.*; sys_platform == \"linux\" and extra == \"all\"",
+    "nvidia-curand==10.4.0.35.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-cusolver==12.0.4.66.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-cusparse==12.6.3.3.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-npp==13.0.1.2.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-nvfatbin==13.0.85.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-nvjitlink==13.0.88.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-nvjpeg==13.0.1.86.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-nvml-dev==13.0.87.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-nvptxcompiler==13.0.88.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-nvtx==13.0.85.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-nvvm==13.0.88.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"all\"",
+    "nvidia-cuda-cccl==13.0.85.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"cccl\"",
+    "nvidia-cuda-crt==13.0.88.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"crt\"",
+    "nvidia-cublas==13.5.1.27; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"cublas\"",
+    "nvidia-cuda-runtime==13.0.96.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"cudart\"",
+    "nvidia-cufft==12.0.0.61.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"cufft\"",
+    "nvidia-cufile==1.15.1.6.*; sys_platform == \"linux\" and extra == \"cufile\"",
+    "nvidia-cuda-culibos==13.0.85.*; sys_platform == \"linux\" and extra == \"culibos\"",
+    "nvidia-cuda-cupti==13.0.85.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"cupti\"",
+    "nvidia-curand==10.4.0.35.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"curand\"",
+    "nvidia-cusolver==12.0.4.66.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"cusolver\"",
+    "nvidia-cusparse==12.6.3.3.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"cusparse\"",
+    "nvidia-cuda-cuxxfilt==13.0.85.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"cuxxfilt\"",
+    "nvidia-npp==13.0.1.2.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"npp\"",
+    "nvidia-cuda-nvcc==13.0.88.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"nvcc\"",
+    "nvidia-nvfatbin==13.0.85.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"nvfatbin\"",
+    "nvidia-nvjitlink==13.0.88.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"nvjitlink\"",
+    "nvidia-nvjpeg==13.0.1.86.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"nvjpeg\"",
+    "nvidia-nvml-dev==13.0.87.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"nvml\"",
+    "nvidia-nvptxcompiler==13.0.88.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"nvptxcompiler\"",
+    "nvidia-cuda-nvrtc==13.0.88.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"nvrtc\"",
+    "nvidia-nvtx==13.0.85.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"nvtx\"",
+    "nvidia-nvvm==13.0.88.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"nvvm\"",
+    "nvidia-cuda-opencl==13.0.85.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"opencl\"",
+    "nvidia-cuda-profiler-api==13.0.85.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"profiler\"",
+    "nvidia-cuda-sanitizer-api==13.0.85.*; (sys_platform == \"linux\" or sys_platform == \"win32\") and extra == \"sanitizer\""
+]
+provides-extras = ["all", "cccl", "crt", "cublas", "cudart", "cufft", "cufile", "culibos", "cupti", "curand", "cusolver", "cusparse", "cuxxfilt", "npp", "nvcc", "nvfatbin", "nvjitlink", "nvjpeg", "nvml", "nvptxcompiler", "nvrtc", "nvtx", "nvvm", "opencl", "profiler", "sanitizer"]
+
+[[tool.uv.dependency-metadata]]
+name = "torch"
+version = "2.13.0+cu130"
+requires-dist = [
+    "filelock",
+    "typing-extensions>=4.10.0",
+    "setuptools>=77.0.3",
+    "sympy>=1.13.3",
+    "networkx>=2.5.1",
+    "jinja2",
+    "fsspec>=0.8.5",
+    "cuda-toolkit[cublas,cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==13.0.3; platform_system == \"Linux\"",
+    "cuda-bindings<14,>=13.0.3; platform_system == \"Linux\" and python_version < \"3.15\"",
+    "nvidia-cudnn-cu13==9.20.0.48; platform_system == \"Linux\"",
+    "nvidia-cusparselt-cu13==0.8.1; (platform_system == \"Linux\") and platform_machine == \"x86_64\"",
+    "nvidia-cusparselt-cu13==0.9.1; (platform_system == \"Linux\") and platform_machine == \"aarch64\"",
+    "nvidia-nccl-cu13==2.29.7; platform_system == \"Linux\"",
+    "nvidia-nvshmem-cu13==3.4.5; platform_system == \"Linux\"",
+    "triton==3.7.1; platform_system == \"Linux\" and python_version < \"3.15\"",
+    "optree>=0.13.0; extra == \"optree\"",
+    "opt-einsum>=3.3; extra == \"opt-einsum\"",
+    "pyyaml; extra == \"pyyaml\""
+]
+provides-extras = ["optree", "opt-einsum", "pyyaml"]
+
 [tool.uv.sources]
-apex                 = { index = "verl-wheelhouse" }
-flash-attn           = { index = "verl-wheelhouse" }
-megatron-bridge      = { index = "verl-wheelhouse" }
+# No published Torch 2.13 ABI wheel is available in the current wheelhouse.
+# Use official pinned sources; match-runtime below separates the build cache
+# for Torch 2.11 and 2.13. Replace with ABI-qualified wheels when published.
+apex = { git = "https://github.com/NVIDIA/apex.git", rev = "8a6508aaad6e75a2b939e33f308cd63d745d97f1" }
+# flash-attn uses the official PyPI sdist; setup tries its matching release wheel first.
+megatron-bridge = { git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge.git", rev = "51885cf132b2814188b6855c25a8588254274c2a" }
 flashinfer-cubin     = { index = "flashinfer" }
 flashinfer-jit-cache = { index = "flashinfer-cu130" }
 
-# megatron-core / mbridge aren't in the wheelhouse; git-sourced (built at sync
-# time). The wheelhouse megatron-bridge 0.5.2 (r0.5.0 branch) pairs with
-# megatron-core core_v0.18.0 — bump the two together.
+# Core 0.19 uses the official PyPI release wheel on both architectures.
+# mbridge retains its existing pinned source.
+# Preserve the existing CPU Core source; GPU Core uses its PyPI release.
+megatron-core = { git = "https://github.com/NVIDIA/Megatron-LM.git", tag = "core_v0.18.0", extra = "cpu" }
 mbridge            = { git = "https://github.com/ISEEKYAN/mbridge.git",            rev = "641a5a0" }
-megatron-core      = { git = "https://github.com/NVIDIA/Megatron-LM.git",          tag = "core_v0.18.0" }
 
 # Per-extra routing to the matching pytorch wheel index.
 torch = [
@@ -542,6 +614,14 @@ torchaudio = [
 ]
 
 [tool.uv.extra-build-dependencies]
+apex = [
+    { requirement = "torch", match-runtime = true },
+    "packaging", "ninja", "wheel", "setuptools<81",
+]
+flash-attn = [
+    { requirement = "torch", match-runtime = true },
+    "packaging", "ninja", "wheel", "setuptools<81",
+]
 transformer-engine-torch = [
     { requirement = "torch", match-runtime = true },
 ]
@@ -574,3 +654,123 @@ explicit = true
 name = "flashinfer-cu130"
 url = "https://flashinfer.ai/whl/cu130"
 explicit = true
+
+[tool.uv.extra-build-variables]
+apex = { APEX_CPP_EXT = "1", APEX_CUDA_EXT = "1" }
+
+[[tool.uv.dependency-metadata]]
+name = "apex"
+version = "0.1"
+requires-dist = ["packaging>20.6"]
+
+[[tool.uv.dependency-metadata]]
+name = "flash-attn"
+version = "2.8.3"
+requires-dist = ["torch", "einops"]
+
+# Version-scoped replacement of exactly three upstream pins. All other
+# published Requires-Dist entries, including optional extras, remain intact.
+[[tool.uv.dependency-metadata]]
+name = "vllm"
+version = "0.27.1"
+provides-extra = ["zen", "bench", "tensorizer", "fastsafetensors", "instanttensor", "runai", "audio", "video", "deepstream", "flashinfer", "helion", "grpc", "otel", "extra-quant"]
+requires-python = ">=3.10,<3.15"
+requires-dist = [
+    "regex",
+    "cachetools",
+    "psutil",
+    "sentencepiece",
+    "numpy",
+    "requests>=2.26.0",
+    "tqdm",
+    "blake3",
+    "py-cpuinfo",
+    "transformers>=5.5.3",
+    "tokenizers>=0.21.1",
+    "safetensors>=0.6.2",
+    "protobuf!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*,>=5.29.6",
+    "fastapi[standard]<0.137.0,>=0.133.0",
+    "starlette>=1.0.1",
+    "aiohttp>=3.13.3",
+    "openai>=2.0.0",
+    "pydantic>=2.12.0",
+    "prometheus_client>=0.18.0",
+    "pillow",
+    "prometheus-fastapi-instrumentator>=8.0.0",
+    "tiktoken>=0.6.0",
+    "lm-format-enforcer==0.11.3",
+    "llguidance<1.8.0,>=1.7.0; platform_machine == \"x86_64\" or platform_machine == \"arm64\" or platform_machine == \"aarch64\" or platform_machine == \"ppc64le\" or platform_machine == \"s390x\"",
+    "outlines_core==0.2.14",
+    "lark==1.2.2",
+    "xgrammar<1.0.0,>=0.2.1; platform_machine == \"x86_64\" or platform_machine == \"aarch64\" or platform_machine == \"arm64\" or platform_machine == \"s390x\" or platform_machine == \"ppc64le\"",
+    "typing_extensions>=4.10",
+    "filelock>=3.16.1",
+    "partial-json-parser",
+    "jsonschema>=4.23.0",
+    "pyzmq>=25.0.0",
+    "msgspec",
+    "mistral_common[image]>=1.11.6",
+    "opencv-python-headless>=4.13.0",
+    "pyyaml",
+    "six>=1.16.0; python_version > \"3.11\"",
+    "setuptools<81.0.0,>=77.0.3; python_version > \"3.11\"",
+    "einops",
+    "compressed-tensors==0.17.0",
+    "depyf==0.20.0",
+    "cloudpickle",
+    "watchfiles",
+    "python-json-logger",
+    "ninja",
+    "pybase64",
+    "cbor2",
+    "ijson",
+    "setproctitle",
+    "openai-harmony>=0.0.3",
+    "anthropic>=0.71.0",
+    "model-hosting-container-standards<1.0.0,>=0.1.14",
+    "mcp",
+    "opentelemetry-sdk>=1.27.0",
+    "opentelemetry-api>=1.27.0",
+    "opentelemetry-exporter-otlp>=1.27.0",
+    "opentelemetry-semantic-conventions-ai>=0.4.1",
+    "numba==0.65.0",
+    "torch==2.13.0",
+    "torchaudio==2.11.0",
+    "torchvision==0.28.0",
+    "torchcodec>=0.14",
+    "PyNvVideoCodec==2.0.4",
+    "flashinfer-python==0.6.18",
+    "apache-tvm-ffi==0.1.11",
+    "tilelang==0.1.12",
+    "nvidia-cudnn-frontend>=1.19.1",
+    "nvtx==0.2.15",
+    "fastsafetensors>=0.3.2",
+    "nvidia-cutlass-dsl[cu13]==4.6.2",
+    "quack-kernels==0.6.4",
+    "tokenspeed-mla==0.1.8; platform_system == \"Linux\"",
+    "humming-kernels[cu13]==0.1.10",
+    "zentorch==2.11.0.0; extra == \"zen\"",
+    "pandas; extra == \"bench\"",
+    "matplotlib; extra == \"bench\"",
+    "seaborn; extra == \"bench\"",
+    "datasets; extra == \"bench\"",
+    "scipy; extra == \"bench\"",
+    "plotly; extra == \"bench\"",
+    "tensorizer==2.10.1; extra == \"tensorizer\"",
+    "fastsafetensors>=0.3.2; extra == \"fastsafetensors\"",
+    "instanttensor>=0.1.9; extra == \"instanttensor\"",
+    "runai-model-streamer[azure,gcs,s3]>=0.15.7; extra == \"runai\"",
+    "av; extra == \"audio\"",
+    "scipy; extra == \"audio\"",
+    "soundfile; extra == \"audio\"",
+    "soxr; extra == \"audio\"",
+    "mistral_common[audio]; extra == \"audio\"",
+    "nvidia-deepstream-videodecode-cu13>=9.0.2; extra == \"deepstream\"",
+    "helion==1.4.0; extra == \"helion\"",
+    "smg-grpc-servicer[vllm]>=0.5.2; extra == \"grpc\"",
+    "opentelemetry-sdk>=1.26.0; extra == \"otel\"",
+    "opentelemetry-api>=1.26.0; extra == \"otel\"",
+    "opentelemetry-exporter-otlp>=1.26.0; extra == \"otel\"",
+    "opentelemetry-semantic-conventions-ai>=0.4.1; extra == \"otel\"",
+    "vllm-gguf-plugin>=0.0.2; extra == \"extra-quant\"",
+]

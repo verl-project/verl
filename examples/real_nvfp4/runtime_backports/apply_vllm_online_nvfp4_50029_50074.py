@@ -26,7 +26,11 @@ Reciprocal activation scales must also be registered: level-2 sleep discards
 their allocations, and native copyback otherwise cannot restore their contents.
 """
 
+import hashlib
 from importlib.metadata import distribution, version
+
+BEFORE = "5e59f672e3ad3d7ed92a221adf4f7d1b7700e21c61333f8aa5bd0304ac8dbf93"
+AFTER = "e2b296b2898199b273fef3901d01ff38a6b02e530e91efe6fa83126f290e3dcf"
 
 PACKING_COMMIT = "9c22668436a4d94aab87ea74a220e060415cf1d8"
 RELOAD_COMMIT = "3ac9525507b2d0de5c1b08cbca96cc94850c7c7a"
@@ -46,6 +50,12 @@ def main() -> None:
     assert version("vllm") == "0.27.1", version("vllm")
     path = distribution("vllm").locate_file("vllm/model_executor/layers/quantization/online/nvfp4.py")
     text = path.read_text()
+    actual = hashlib.sha256(text.encode()).hexdigest()
+    if actual == AFTER:
+        print("REAL_NVFP4_VLLM_BACKPORTS_UNCHANGED", path, flush=True)
+        return
+    if actual != BEFORE:
+        raise RuntimeError(f"Unexpected vLLM online NVFP4 source: {actual}")
 
     old_packing = """    num_experts, n, k = weight.shape
     assert k % 16 == 0, f"last dim must be a multiple of 16, got {k}"
@@ -169,6 +179,8 @@ def main() -> None:
             f"writable {name}",
         )
 
+    if hashlib.sha256(text.encode()).hexdigest() != AFTER:
+        raise RuntimeError("vLLM online NVFP4 patch output differs from audited bytes")
     path.write_text(text)
     verified = path.read_text()
     assert "quantized_experts = [" in verified

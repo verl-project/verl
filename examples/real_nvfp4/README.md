@@ -14,12 +14,12 @@ QAT path.
 - The per-module TE recipe keeps attention BF16 and applies NVFP4 to every
   routed-expert MLP `linear_fc1`/`linear_fc2`. The backward path is currently
   `dequantized`.
-- TE adaptive 4-over-6 is deliberately off: vLLM 0.26's native
+- TE adaptive 4-over-6 is deliberately off: vLLM 0.27.1's native
   `nvfp4_per_token` rollout consumes standard NVFP4, so enabling 4-over-6 only
   on the training side would create a precision mismatch.
 - Actor-to-rollout refit transports ordinary BF16 checkpoint tensors. It never
   sends actor-side packed FP4 weights or activation scales.
-- Each vLLM worker uses vLLM 0.26's built-in `nvfp4_per_token` online method
+- Each vLLM worker uses vLLM 0.27.1's built-in `nvfp4_per_token` online method
   while native `model_runner.reload_weights(..., is_checkpoint_format=True)`
   consumes the stream. It batches complete expert layers before quantization;
   the fused gate/up matrix shares one global scale per expert and down uses its
@@ -31,14 +31,30 @@ QAT path.
   only after native layerwise reload, post-processing, attestation, and a device
   fence complete.
 
-The runtime is intentionally fail-closed for the validated
-`Qwen3MoeForCausalLM` all-MoE layout, vLLM 0.26.0, rollout TP/PP/EP = 1/1/1,
+The runtime is intentionally fail-closed for the audited
+`Qwen3MoeForCausalLM` all-MoE layout, vLLM 0.27.1, rollout TP/PP/EP = 1/1/1,
 training PP=1 with no virtual pipeline, BF16 KV cache, and no speculative decoding.
 Mixed dense/MoE layouts are rejected: the current training module recipe does
 not preserve BF16 for their dense MLPs. An evaluation recipe must be absent or
 identical to its training recipe, including BF16 carve-outs.
 
-Unmodified dependency wheels are **not** the complete validated runtime. Apply
+The release-upgrade candidate uses PyTorch 2.13.0 (CUDA 13), vLLM 0.27.1,
+Megatron-Core 0.19.0, TE 2.18.0, and FlashInfer 0.6.18. Keep FlashInfer's Python,
+cubin, and CUDA-13 JIT-cache packages aligned; this candidate also uses CUTLASS
+DSL 4.6.2 and QuACK 0.6.4. These are explicit overrides of vLLM 0.27.1's
+FlashInfer/CUTLASS/QuACK pins, not an unmodified upstream dependency resolution.
+They require matched full-model validation. This scope does not establish
+compatibility for optional vision, audio, or alternative-attention components.
+
+vLLM's CuMem-aware memory-profiling correction
+([#49208](https://github.com/vllm-project/vllm/pull/49208)) first shipped in
+0.27.0 and is included in 0.27.1. Core 0.19.0 includes the stateless grouped
+checkpoint extra-state correction
+([#5997](https://github.com/NVIDIA/Megatron-LM/pull/5997)); neither fix needs a
+local backport in this candidate. Correct initial KV-cache accounting does not
+establish that later sleep/wake cycles fit in memory.
+
+Unmodified dependency wheels are **not** the complete candidate runtime. Apply
 `runtime_backports/apply_backports.sh` only in a disposable runtime build.
 The vLLM fixes remove an extra BF16 rounding step and preserve the MoE kernel
 across refits. The script also includes a local derived-scale lifecycle fix:
@@ -70,7 +86,7 @@ training environment. See [runtime backport validation](runtime_backports/README
 
 ## R3 and loss contract
 
-The formal recipe enables R3 on both sides. vLLM 0.26 skips
+The formal recipe enables R3 on both sides. vLLM 0.27.1 skips
 `router.select_experts` in monolithic fused-MoE kernels, so this integration
 installs the routed-expert capture hook inside every vLLM model worker and
 rejects an all-zero route payload.
@@ -95,8 +111,16 @@ delivery. Freeze a checkout and a fresh versioned image, apply and verify the
 runtime backports, then run numerical/transport tests and matched eight-node
 BF16/W4A4 model regression before releasing long runs. Record the source,
 dependency lock, image hash, resolved configuration, and exact driver command.
-The current integration still needs its merged-source and dependency validation;
-earlier image results do not validate a newly resolved environment.
+Use the repository's official install/build entry points and matching published
+wheels where available. Rebuild only native components without a wheel matching
+the target Python, architecture, CUDA and PyTorch ABI, and retain those artifacts
+for subsequent builds. Bound compilation parallelism by the scheduled CPU and
+memory allocation; the single-test-job limit does not require single-worker
+compilation. Do not sync an older lock into a release-upgrade runtime.
+
+The candidate still needs reproducible dependency-lock integration and completed
+matched full-model validation; earlier image or component results do not validate
+a newly resolved environment.
 
 Run tests through your cluster scheduler, not on a shared login node. Keep test
 jobs low-concurrency; independent formal chains need not wait for unrelated jobs.

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from importlib import import_module
 from importlib.metadata import distribution, version
 from pathlib import Path
 
@@ -26,11 +27,22 @@ def main():
         "transformer-engine-torch": "2.18.0",
         "vllm": "0.27.1",
         "megatron-core": "0.19.0",
-        "torch": "2.13.0",
     }
     actual_versions = {name: version(name) for name in expected_versions}
     if actual_versions != expected_versions:
         raise RuntimeError(f"Unexpected dependency versions: {actual_versions}")
+    # PyPI and the official cu130 index use these two audited distribution
+    # identities for the same Torch release. Do not normalize other packages.
+    actual_versions["torch"] = version("torch")
+    if actual_versions["torch"] not in {"2.13.0", "2.13.0+cu130"}:
+        raise RuntimeError(f"Unexpected Torch distribution: {actual_versions['torch']}")
+    torch = import_module("torch")
+    if torch.version.cuda != "13.0":
+        raise RuntimeError(f"Unexpected Torch CUDA build: {torch.version.cuda}")
+    native_extensions = {
+        name: str(import_module(name).__file__)
+        for name in ("flash_attn_2_cuda", "fused_weight_gradient_mlp_cuda", "amp_C")
+    }
     targets = {
         Path(gemm.__file__): "dc3233868f739d67d86a8b6dde9dbfa519a195ae08c40a751c85b08fbe9a931b",
         Path(
@@ -54,6 +66,8 @@ def main():
             {
                 "versions": actual_versions,
                 "installed_sha256": hashes,
+                "torch_cuda": torch.version.cuda,
+                "native_extensions": native_extensions,
             }
         ),
         flush=True,
