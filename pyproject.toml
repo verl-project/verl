@@ -184,6 +184,9 @@ megatron = [
     "megatron-core==0.19.0",
     # Required by Bridge training.config, including text-only model setup.
     "megatron-energon==7.4.1",
+    # Preserve Bridge requirements already present in the validated runtime.
+    "diffusers==0.40.0",
+    "nvidia-resiliency-ext==0.7.0",
     # megatron-bridge hard-imports modelopt but is installed deps-free (below), so
     # megatron needs it explicitly; preserve the validated 0.44.0 runtime.
     "nvidia-modelopt==0.44.0",

@@ -907,6 +907,27 @@ wheels = [
 ]
 
 [[package]]
+name = "defusedxml"
+version = "0.7.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/0f/d5/c66da9b79e5bdb124974bfe172b4daf3c984ebd9c2a06e2b8a4dc7331c72/defusedxml-0.7.1.tar.gz", hash = "sha256:1bb3032db185915b62d7c6209c5a8792be6a32ab2fedacc84e01b52c51aa3e69", size = 75520, upload-time = "2021-03-08T10:59:26.269Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/6c/aa3f2f849e01cb6a001cd8554a88d4c77c5c1a31c95bdf1cf9301e6d9ef4/defusedxml-0.7.1-py2.py3-none-any.whl", hash = "sha256:a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61", size = 25604, upload-time = "2021-03-08T10:59:24.45Z" },
+]
+
+[[package]]
+name = "deprecated"
+version = "1.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "wrapt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/49/85/12f0a49a7c4ffb70572b6c2ef13c90c88fd190debda93b23f026b25f9634/deprecated-1.3.1.tar.gz", hash = "sha256:b1b50e0ff0c1fddaa5708a2c6b0a6588bb09b892825ab2b214ac9ea9d92a5223", size = 2932523, upload-time = "2025-10-30T08:19:02.757Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/84/d0/205d54408c08b13550c733c4b85429e7ead111c7f0014309637425520a9a/deprecated-1.3.1-py2.py3-none-any.whl", hash = "sha256:597bfef186b6f60181535a29fbe44865ce137a5079f295b479886c82729d5f3f", size = 11298, upload-time = "2025-10-30T08:19:00.758Z" },
+]
+
+[[package]]
 name = "deprecation"
 version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -938,6 +959,26 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/cd/eb/77b0cc7fc0235b0495b32410edebe14cf6757b826135a7f92bb0f5d843b9/detect_installer-0.2.1.tar.gz", hash = "sha256:85f889d4d19c1caf5bef89ef389eb920cd8c6c2a868e1eeceec24527b93021e7", size = 3634, upload-time = "2026-09-02T14:14:38.961Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/61/fe/a245e1d579e7abf47208f7c1ce5684caa2cd956ede5ff646d66d0299d9e8/detect_installer-0.2.1-py3-none-any.whl", hash = "sha256:87e2ce7d05cb108b178f8e45bb80d3d88c0cb4b397983345c18ad6562e02e620", size = 5371, upload-time = "2026-09-02T14:14:38.106Z" },
+]
+
+[[package]]
+name = "diffusers"
+version = "0.40.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "filelock" },
+    { name = "httpx" },
+    { name = "huggingface-hub" },
+    { name = "importlib-metadata" },
+    { name = "numpy" },
+    { name = "pillow" },
+    { name = "regex" },
+    { name = "requests" },
+    { name = "safetensors" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/59/32/b9c6a198812e2a7d2c2828a850dba384306f9af285eac23e35e89d5b008a/diffusers-0.40.0.tar.gz", hash = "sha256:49f112ce52ff6d332ab68afec01f79a53e6489b42cb69104444c98b4a2f64af8", size = 4886420, upload-time = "2026-08-20T14:30:40.923Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/db/df/ffb593ebed2a068d2d6be44261283f39a6b809c0fcdfdcafbd448cbeec77/diffusers-0.40.0-py3-none-any.whl", hash = "sha256:5b5da7c3ddb62152fa4afc577f02e050af688c797375c34fb2d01006da3f3541", size = 5911654, upload-time = "2026-08-20T14:30:38.422Z" },
 ]
 
 [[package]]
@@ -1503,6 +1544,31 @@ wheels = [
 ]
 
 [[package]]
+name = "grpcio-tools"
+version = "1.78.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "grpcio" },
+    { name = "protobuf" },
+    { name = "setuptools" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8b/d1/cbefe328653f746fd319c4377836a25ba64226e41c6a1d7d5cdbc87a459f/grpcio_tools-1.78.0.tar.gz", hash = "sha256:4b0dd86560274316e155d925158276f8564508193088bc43e20d3f5dff956b2b", size = 5393026, upload-time = "2026-02-06T09:59:59.53Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/36/1b/b6135aa9534e22051c53e5b9c0853d18024a41c50aaff464b7b47c1ed379/grpcio_tools-1.78.0-cp310-cp310-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:fe6b0081775394c61ec633c9ff5dbc18337100eabb2e946b5c83967fe43b2748", size = 2591905, upload-time = "2026-02-06T09:57:35.338Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/07/9b369f37c8f4956b68778c044d57390a8f0f3b1cca590018809e75a4fce2/grpcio_tools-1.78.0-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:b874991797e96c41a37e563236c3317ed41b915eff25b292b202d6277d30da85", size = 2656234, upload-time = "2026-02-06T09:57:41.157Z" },
+    { url = "https://files.pythonhosted.org/packages/51/61/40eee40e7a54f775a0d4117536532713606b6b177fff5e327f33ad18746e/grpcio_tools-1.78.0-cp310-cp310-musllinux_1_2_aarch64.whl", hash = "sha256:daa8c288b728228377aaf758925692fc6068939d9fa32f92ca13dedcbeb41f33", size = 3105770, upload-time = "2026-02-06T09:57:43.373Z" },
+    { url = "https://files.pythonhosted.org/packages/be/b9/facb3430ee427c800bb1e39588c85685677ea649491d6e0874bd9f3a1c0e/grpcio_tools-1.78.0-cp310-cp310-musllinux_1_2_x86_64.whl", hash = "sha256:f3d3ced52bfe39eba3d24f5a8fab4e12d071959384861b41f0c52ca5399d6920", size = 3322529, upload-time = "2026-02-06T09:57:47.292Z" },
+    { url = "https://files.pythonhosted.org/packages/e0/2c/dc1ae9ec53182c96d56dfcbf3bcd3e55a8952ad508b188c75bf5fc8993d4/grpcio_tools-1.78.0-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:fa9056742efeaf89d5fe14198af71e5cbc4fbf155d547b89507e19d6025906c6", size = 2591744, upload-time = "2026-02-06T09:57:58.341Z" },
+    { url = "https://files.pythonhosted.org/packages/96/b2/0ad8d789f3a2a00893131c140865605fa91671a6e6fcf9da659e1fabba10/grpcio_tools-1.78.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:283239ddbb67ae83fac111c61b25d8527a1dbd355b377cbc8383b79f1329944d", size = 2656436, upload-time = "2026-02-06T09:58:03.038Z" },
+    { url = "https://files.pythonhosted.org/packages/09/4d/580f47ce2fc61b093ade747b378595f51b4f59972dd39949f7444b464a03/grpcio_tools-1.78.0-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:ac977508c0db15301ef36d6c79769ec1a6cc4e3bc75735afca7fe7e360cead3a", size = 3106128, upload-time = "2026-02-06T09:58:05.064Z" },
+    { url = "https://files.pythonhosted.org/packages/08/71/917ce85633311e54fefd7e6eb1224fb780ef317a4d092766f5630c3fc419/grpcio_tools-1.78.0-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:0197d7b561c79be78ab93d0fe2836c8def470683df594bae3ac89dd8e5c821b2", size = 3322630, upload-time = "2026-02-06T09:58:10.305Z" },
+    { url = "https://files.pythonhosted.org/packages/c6/69/4285583f40b37af28277fc6b867d636e3b10e1b6a7ebd29391a856e1279b/grpcio_tools-1.78.0-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:77e5aa2d2a7268d55b1b113f958264681ef1994c970f69d48db7d4683d040f57", size = 2593972, upload-time = "2026-02-06T09:58:23.29Z" },
+    { url = "https://files.pythonhosted.org/packages/ae/a9/511d0040ced66960ca10ba0f082d6b2d2ee6dd61837b1709636fdd8e23b4/grpcio_tools-1.78.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:975d4cb48694e20ebd78e1643e5f1cd94cdb6a3d38e677a8e84ae43665aa4790", size = 2656909, upload-time = "2026-02-06T09:58:28.022Z" },
+    { url = "https://files.pythonhosted.org/packages/06/a3/3d2c707e7dee8df842c96fbb24feb2747e506e39f4a81b661def7fed107c/grpcio_tools-1.78.0-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:553ff18c5d52807dedecf25045ae70bad7a3dbba0b27a9a3cdd9bcf0a1b7baec", size = 3109778, upload-time = "2026-02-06T09:58:30.091Z" },
+    { url = "https://files.pythonhosted.org/packages/45/de/0a5ef3b3e79d1011375f5580dfee3a9c1ccb96c5f5d1c74c8cee777a2483/grpcio_tools-1.78.0-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:96183e2b44afc3f9a761e9d0f985c3b44e03e8bb98e626241a6cbfb3b6f7e88f", size = 3325116, upload-time = "2026-02-06T09:58:34.894Z" },
+]
+
+[[package]]
 name = "h11"
 version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1936,6 +2002,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/ff/a5/27575f85fd91cb92a0d72b4c37daa79021334926b5c4624f7ce9fa15e6ae/liger_kernel-0.8.2.tar.gz", hash = "sha256:387673ed6bf64fc8150cc8315fed578d2fc717ec3450f53489f480880223c1b8", size = 6136426, upload-time = "2026-08-18T20:54:30.62Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e2/b3/a66f1d9143697784ad2c2abf665b02c47aa17857232ed72224588186103c/liger_kernel-0.8.2-py3-none-any.whl", hash = "sha256:84c0a7bc9bf4d4cf8ea5ba89ff84d28686afc94215b220851d9f57dc87852741", size = 644266, upload-time = "2026-08-18T20:54:28.728Z" },
+]
+
+[[package]]
+name = "limits"
+version = "5.8.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "deprecated" },
+    { name = "packaging" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/71/69/826a5d1f45426c68d8f6539f8d275c0e4fcaa57f0c017ec3100986558a41/limits-5.8.0.tar.gz", hash = "sha256:c9e0d74aed837e8f6f50d1fcebcf5fd8130957287206bc3799adaee5092655da", size = 226104, upload-time = "2026-02-05T07:17:35.859Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b9/98/cb5ca20618d205a09d5bec7591fbc4130369c7e6308d9a676a28ff3ab22c/limits-5.8.0-py3-none-any.whl", hash = "sha256:ae1b008a43eb43073c3c579398bd4eb4c795de60952532dc24720ab45e1ac6b8", size = 60954, upload-time = "2026-02-05T07:17:34.425Z" },
 ]
 
 [[package]]
@@ -3023,6 +3103,35 @@ wheels = [
 ]
 
 [[package]]
+name = "nvidia-resiliency-ext"
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "defusedxml" },
+    { name = "fastapi", version = "0.136.3", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'x86_64' and extra != 'extra-4-verl-cpu') or extra == 'extra-4-verl-vllm' or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang')" },
+    { name = "fastapi", version = "0.137.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and extra == 'extra-4-verl-sglang') or (platform_machine == 'x86_64' and extra != 'extra-4-verl-cpu' and extra != 'extra-4-verl-vllm') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm')" },
+    { name = "grpcio" },
+    { name = "grpcio-tools" },
+    { name = "httpx" },
+    { name = "numpy" },
+    { name = "nvidia-ml-py" },
+    { name = "packaging" },
+    { name = "protobuf" },
+    { name = "psutil" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pyyaml" },
+    { name = "slowapi" },
+    { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "(extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra != 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra != 'extra-4-verl-fsdp' and extra != 'extra-4-verl-megatron' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-cpu' and extra != 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
+    { name = "torch", version = "2.13.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "(extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra != 'extra-4-verl-cpu' and extra != 'extra-4-verl-sglang') or (extra != 'extra-4-verl-fsdp' and extra != 'extra-4-verl-megatron' and extra != 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
+    { name = "uvicorn", extra = ["standard"], marker = "extra == 'extra-4-verl-fsdp' or extra == 'extra-4-verl-megatron' or extra == 'extra-4-verl-sglang' or extra == 'extra-4-verl-vllm' or extra != 'extra-4-verl-cpu'" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/39/75/39f7695a7a384b3879296d8b21ae691fa83c87f1cb30b0381517de14842d/nvidia_resiliency_ext-0.7.0-cp312-cp312-manylinux_2_39_aarch64.whl", hash = "sha256:8cbce0ddb2742484fcc68c1959e69b137cab95a64592b04cf3fca64e2d8f9c21", size = 999871, upload-time = "2026-09-16T06:41:18.163Z" },
+    { url = "https://files.pythonhosted.org/packages/04/a8/bca04e8e193e801e357202d012c08e9f39448ff4bc635f7373ea86ece579/nvidia_resiliency_ext-0.7.0-cp312-cp312-manylinux_2_39_x86_64.whl", hash = "sha256:e0c646ccae211de81a4c2b5bb5cff96a5e12af1373fb0eb818a40716eef685ad", size = 1003318, upload-time = "2026-09-16T06:41:40.233Z" },
+]
+
+[[package]]
 name = "nvtx"
 version = "0.2.15"
 source = { registry = "https://pypi.org/simple" }
@@ -3917,9 +4026,9 @@ name = "pydantic-settings"
 version = "2.15.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pydantic" },
-    { name = "python-dotenv" },
-    { name = "typing-inspection" },
+    { name = "pydantic", marker = "extra == 'extra-4-verl-fsdp' or extra == 'extra-4-verl-megatron' or extra == 'extra-4-verl-sglang' or extra == 'extra-4-verl-vllm' or extra != 'extra-4-verl-cpu'" },
+    { name = "python-dotenv", marker = "extra == 'extra-4-verl-fsdp' or extra == 'extra-4-verl-megatron' or extra == 'extra-4-verl-sglang' or extra == 'extra-4-verl-vllm' or extra != 'extra-4-verl-cpu'" },
+    { name = "typing-inspection", marker = "extra == 'extra-4-verl-fsdp' or extra == 'extra-4-verl-megatron' or extra == 'extra-4-verl-sglang' or extra == 'extra-4-verl-vllm' or extra != 'extra-4-verl-cpu'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/68/ca/31c57507b13119d7d3cfa1576dad2911a4861e3be07b579395f4e9d393f9/pydantic_settings-2.15.0.tar.gz", hash = "sha256:694b793e84f766ba76a90ebdefc01d0a9a045dab0382bee70393da93712ad117", size = 261253, upload-time = "2026-08-07T09:24:57.419Z" }
 wheels = [
@@ -4620,6 +4729,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
+]
+
+[[package]]
+name = "slowapi"
+version = "0.1.10"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "limits" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b9/52/24527cf25a8b508926aff53350b0136561dfe86c7125f61526653666e1b2/slowapi-0.1.10.tar.gz", hash = "sha256:d320d5bc04d9f171a77fb16700faf3036d85b00f420f22924c8a225f95bd14f9", size = 13841, upload-time = "2026-06-13T11:59:31.571Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c4/8b/1d359f38706b4097d9a943bf8bd22599f537de4cbaff1e622d3e3936e164/slowapi-0.1.10-py3-none-any.whl", hash = "sha256:3acb61561dc9d687e3d3669362ff6a439de9ba44e2fed3a9c165da26b4b83e28", size = 14921, upload-time = "2026-06-13T11:59:30.485Z" },
 ]
 
 [[package]]
@@ -5484,12 +5605,12 @@ wheels = [
 
 [package.optional-dependencies]
 standard = [
-    { name = "httptools" },
-    { name = "python-dotenv" },
-    { name = "pyyaml" },
-    { name = "uvloop", marker = "platform_python_implementation != 'PyPy'" },
-    { name = "watchfiles" },
-    { name = "websockets" },
+    { name = "httptools", marker = "extra == 'extra-4-verl-fsdp' or extra == 'extra-4-verl-megatron' or extra == 'extra-4-verl-sglang' or extra == 'extra-4-verl-vllm' or extra != 'extra-4-verl-cpu'" },
+    { name = "python-dotenv", marker = "extra == 'extra-4-verl-fsdp' or extra == 'extra-4-verl-megatron' or extra == 'extra-4-verl-sglang' or extra == 'extra-4-verl-vllm' or extra != 'extra-4-verl-cpu'" },
+    { name = "pyyaml", marker = "extra == 'extra-4-verl-fsdp' or extra == 'extra-4-verl-megatron' or extra == 'extra-4-verl-sglang' or extra == 'extra-4-verl-vllm' or extra != 'extra-4-verl-cpu'" },
+    { name = "uvloop", marker = "(platform_python_implementation != 'PyPy' and extra != 'extra-4-verl-cpu') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
+    { name = "watchfiles", marker = "extra == 'extra-4-verl-fsdp' or extra == 'extra-4-verl-megatron' or extra == 'extra-4-verl-sglang' or extra == 'extra-4-verl-vllm' or extra != 'extra-4-verl-cpu'" },
+    { name = "websockets", marker = "extra == 'extra-4-verl-fsdp' or extra == 'extra-4-verl-megatron' or extra == 'extra-4-verl-sglang' or extra == 'extra-4-verl-vllm' or extra != 'extra-4-verl-cpu'" },
 ]
 
 [[package]]
@@ -5651,6 +5772,7 @@ megatron = [
     { name = "codetiming" },
     { name = "cupy-cuda13x" },
     { name = "datasets" },
+    { name = "diffusers" },
     { name = "dill" },
     { name = "fastapi", version = "0.136.3", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'x86_64' and extra != 'extra-4-verl-cpu') or extra == 'extra-4-verl-vllm' or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang')" },
     { name = "fastapi", version = "0.137.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and extra == 'extra-4-verl-sglang') or (platform_machine == 'x86_64' and extra != 'extra-4-verl-cpu' and extra != 'extra-4-verl-vllm') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm')" },
@@ -5667,6 +5789,7 @@ megatron = [
     { name = "nvidia-cudnn-frontend" },
     { name = "nvidia-mathdx" },
     { name = "nvidia-modelopt" },
+    { name = "nvidia-resiliency-ext" },
     { name = "nvtx" },
     { name = "onnxscript" },
     { name = "packaging" },
@@ -5838,6 +5961,7 @@ requires-dist = [
     { name = "cupy-cuda13x", marker = "extra == 'cupy-cu130'", specifier = "==14.0.1" },
     { name = "datasets" },
     { name = "datasets", marker = "extra == 'verl-core'" },
+    { name = "diffusers", marker = "extra == 'megatron'", specifier = "==0.40.0" },
     { name = "dill" },
     { name = "dill", marker = "extra == 'verl-core'" },
     { name = "fastapi", marker = "extra == 'verl-core'" },
@@ -5868,6 +5992,7 @@ requires-dist = [
     { name = "nvidia-cutlass-dsl", extras = ["cu13"], marker = "extra == 'vllm'", specifier = "==4.6.2" },
     { name = "nvidia-mathdx", marker = "extra == 'megatron'" },
     { name = "nvidia-modelopt", marker = "extra == 'megatron'", specifier = "==0.44.0" },
+    { name = "nvidia-resiliency-ext", marker = "extra == 'megatron'", specifier = "==0.7.0" },
     { name = "nvtx", marker = "extra == 'verl-core'" },
     { name = "onnxscript", marker = "extra == 'megatron'" },
     { name = "openai", marker = "extra == 'vllm'", specifier = "==3.15.0" },
@@ -6084,7 +6209,7 @@ name = "watchfiles"
 version = "1.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "anyio" },
+    { name = "anyio", marker = "extra == 'extra-4-verl-fsdp' or extra == 'extra-4-verl-megatron' or extra == 'extra-4-verl-sglang' or extra == 'extra-4-verl-vllm' or extra != 'extra-4-verl-cpu'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/cd/41/5e1a4bb12aac5f1493fa1bdc11154eca3b258ca4eba65d39c473fe19d8e9/watchfiles-1.2.0.tar.gz", hash = "sha256:c995fba777f1ea992f090f9236e9284cf7a5d1a0130dd5a3d82c598cacd76838", size = 108252, upload-time = "2026-05-18T04:32:04.251Z" }
 wheels = [
