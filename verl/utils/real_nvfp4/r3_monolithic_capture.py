@@ -14,13 +14,13 @@
 
 """Make vLLM's monolithic fused-MoE path observable to router replay.
 
-vLLM 0.26 calls ``router.select_experts`` on its modular MoE path.  The
+vLLM 0.26 and 0.27.1 call ``router.select_experts`` on its modular MoE path.  The
 FlashInfer TRT-LLM NVFP4 kernel is monolithic and performs routing internally,
 so the call that drives ``RoutedExpertsCapturer`` is otherwise skipped.  R3
 would then receive an all-zero route tensor.
 
 This is deliberately a narrow, fail-closed compatibility patch for the vLLM
-0.26 private API.  It should be removed when the behavior is available in
+0.26 / 0.27.1 private API.  It should be removed when the behavior is available in
 upstream vLLM.
 """
 
@@ -74,7 +74,7 @@ def attest_r3_rollout_routes(routed_experts):
 
 
 def _monolithic_branch(method) -> str:
-    """Return the known vLLM 0.26 monolithic branch or fail closed."""
+    """Return the audited vLLM monolithic branch or fail closed."""
 
     try:
         source = inspect.getsource(method)
@@ -150,12 +150,14 @@ def _patch_moe_runner_class(moe_runner_cls) -> str:
 
 
 def patch_vllm_monolithic_moe_r3_capture() -> str:
-    """Install the vLLM 0.26 R3 capture fix before engine construction."""
+    """Install the audited vLLM R3 capture fix before engine construction."""
 
     current = Version(version("vllm"))
-    if current != Version("0.26.0"):
+    # _apply_quant_method is AST-identical in the two audited release tags.
+    # Keep the signature and branch checks below; do not accept arbitrary newer APIs.
+    if current not in (Version("0.26.0"), Version("0.27.1")):
         raise RuntimeError(
-            f"the R3 monolithic-MoE compatibility patch supports only the audited vLLM 0.26.0 build, got {current}"
+            f"the R3 monolithic-MoE compatibility patch supports only the audited vLLM 0.26.0 and 0.27.1 builds, got {current}"
         )
 
     from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner

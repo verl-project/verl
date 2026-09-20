@@ -450,3 +450,29 @@ def test_model_contract_still_refuses_layouts_it_cannot_count():
     )
     with pytest.raises(ValueError, match="no sparse decoder layer"):
         validate_real_nvfp4_model_contract(no_sparse_layer)
+
+
+@pytest.mark.parametrize("release", ["0.26.0", "0.27.1"])
+def test_monolithic_r3_public_entry_accepts_audited_releases(monkeypatch, release):
+    from verl.utils.real_nvfp4 import r3_monolithic_capture as capture
+    from vllm.model_executor.layers.fused_moe.runner import moe_runner
+
+    class Runner(_FakeMoERunner):
+        _apply_quant_method = getattr(
+            _FakeMoERunner._apply_quant_method, "__wrapped__", _FakeMoERunner._apply_quant_method
+        )
+
+    monkeypatch.setattr(capture, "version", lambda name: release)
+    monkeypatch.setattr(moe_runner, "MoERunner", Runner)
+    assert capture.patch_vllm_monolithic_moe_r3_capture() == "verl_wrapper"
+    runner = Runner(monolithic=True, capture=True)
+    assert runner._apply_quant_method(None, None, None) == (None, "monolithic")
+    assert runner.router.select_calls == 1
+
+
+def test_monolithic_r3_public_entry_rejects_unaudited_release(monkeypatch):
+    from verl.utils.real_nvfp4 import r3_monolithic_capture as capture
+
+    monkeypatch.setattr(capture, "version", lambda name: "0.28.0")
+    with pytest.raises(RuntimeError, match="audited vLLM"):
+        capture.patch_vllm_monolithic_moe_r3_capture()
