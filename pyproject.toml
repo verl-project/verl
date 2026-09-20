@@ -499,5 +499,5 @@ explicit = true
 # on PyPI.
 [[tool.uv.index]]
 name = "verl-wheelhouse"
-url = "https://verl-project.github.io/verl-wheelhouse/simple/"
+url = "https://verl-project.github.io/verl-wheelhouse/cu130/torch2.11/simple/"
 explicit = true
