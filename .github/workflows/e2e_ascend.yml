@@ -67,7 +67,7 @@ jobs:
   llm_rl_job:
     if: github.repository_owner == 'verl-project'
     name: E2E Ascend testing for RL training scenarios of LLM models
-    runs-on: linux-aarch64-a3-8
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 120
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -104,7 +104,7 @@ jobs:
       - name: Install the current repository
         run: |
           uv pip install --no-deps -e .
-          uv pip install --no-deps TransferQueue==0.1.8
+          uv pip install --no-deps TransferQueue==0.1.10
       - name: Check final pip list
         run: |
           uv pip list
@@ -138,10 +138,10 @@ jobs:
   vlm_rl_job:
     if: github.repository_owner == 'verl-project'
     name: E2E Ascend testing for RL training scenarios of VLM models
-    runs-on: linux-aarch64-a2b3-8
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 120
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 80g
     env:
@@ -164,7 +164,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip install --no-deps -e .
-          pip install --no-deps TransferQueue==0.1.8
+          pip install --no-deps TransferQueue==0.1.10
       - name: Check final pip list
         run: |
           pip list

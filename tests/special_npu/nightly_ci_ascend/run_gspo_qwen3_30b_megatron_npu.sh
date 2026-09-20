@@ -6,7 +6,7 @@ export VLLM_USE_V1=1
 
 # ---- user-adjustable ----
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-30B-A3B-Instruct-2507}
-MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/${MODEL_ID}}
 
 SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}" .sh)"
 LOG_DIR=/root/.cache/nightly_log/$SCRIPT_NAME

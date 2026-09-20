@@ -30,7 +30,7 @@ from vllm.outputs import RequestOutput
 from verl.utils.device import get_device_name, get_torch_device, is_npu_available
 from verl.utils.vllm import TensorLoRARequest, VLLMHijack, resolve_weight_name
 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
-from verl.utils.vllm.vllm_quant_utils import apply_vllm_quant_patches, is_fp8_model, load_quanted_weights
+from verl.utils.vllm.vllm_quant_utils import apply_vllm_quant_patches, is_quantized_model, load_quanted_weights
 from verl.workers.rollout.vllm_rollout.weight_update_utils import apply_buffer_updates, split_buffer_updates
 
 logger = logging.getLogger(__file__)
@@ -111,16 +111,23 @@ def monkey_patch_compute_logits(model, vocab_size: int, banned_token_ids: Option
     unless a real image or video sits behind them. See `get_vision_placeholder_token_ids`.
     """
     original_compute_logits = model.compute_logits
+    # Built once and cached on the device: compute_logits runs on every decode step, and
+    # rebuilding the index there costs a host-to-device copy per step.
+    banned_index = torch.tensor(banned_token_ids, dtype=torch.long) if banned_token_ids else None
 
     def compute_logits(
         self,
         *args,
         **kwargs,
     ) -> torch.Tensor:
+        nonlocal banned_index
+
         logits = original_compute_logits(*args, **kwargs)
         logits[..., vocab_size:] = float("-inf")
-        if banned_token_ids:
-            logits[..., banned_token_ids] = float("-inf")
+        if banned_index is not None:
+            if banned_index.device != logits.device:
+                banned_index = banned_index.to(logits.device)
+            logits.index_fill_(-1, banned_index, float("-inf"))
         return logits
 
     model.compute_logits = MethodType(compute_logits, model)
@@ -168,7 +175,7 @@ class vLLMColocateWorkerExtension:
             register_verl_delta_weight_transfer_engine()
         # 2. patch online fp8 quant. Some models, including DeepSeek-V4, get
         # fp8 from the HF config rather than an explicit rollout quantization arg.
-        if os.environ.get("VERL_VLLM_FP8_QUANT_ENABLED", "0") == "1" or is_fp8_model(vllm_config):
+        if os.environ.get("VERL_VLLM_FP8_QUANT_ENABLED", "0") == "1" or is_quantized_model(vllm_config):
             apply_vllm_quant_patches()
         # 3. patch quantized MoE paths for dynamic weight loading
         quant_config = getattr(vllm_config, "quant_config", None) if vllm_config else None
@@ -407,8 +414,6 @@ class vLLMColocateWorkerExtension:
                 raise NotImplementedError("native reload weight sync does not support LoRA")
             if self._use_mtp_drafter_weight_sync():
                 raise NotImplementedError("native reload weight sync does not support MTP drafter weight sync")
-            if os.environ.get("VERL_DEBUG_MOE_RELOAD") == "1":
-                _install_moe_reload_debug()
             receiver = BucketedWeightReceiver(
                 zmq_handle=self._get_zmq_handle(),
                 device=self.device,
@@ -448,7 +453,7 @@ class vLLMColocateWorkerExtension:
             # Remove the old LoRA before the new one arrives (applied after is_last below).
             self.remove_lora(VLLM_LORA_INT_ID)
             logger.info("LoRA adapter sync: remove old lora and prepare new lora")
-        elif is_fp8_model(self.model_runner.vllm_config):
+        elif is_quantized_model(self.model_runner.vllm_config):
             from verl.utils.vllm.vllm_quant_utils import prepare_quanted_weights_for_loading
 
             quant_reload_states = [
@@ -506,7 +511,7 @@ class vLLMColocateWorkerExtension:
             logger.info("ModelOpt legacy QAT W4A16: process_weights_after_loading completed")
         elif peft_config and base_sync_done:
             logger.info("LoRA adapter sync, no post-process needed")
-        elif is_fp8_model(self.model_runner.vllm_config):
+        elif is_quantized_model(self.model_runner.vllm_config):
             from verl.utils.vllm.vllm_quant_utils import process_quanted_weights_after_loading
 
             for model, reload_state in quant_reload_states:
@@ -553,7 +558,7 @@ class vLLMColocateWorkerExtension:
             param_updates, buffer_updates, named_buffers = split_buffer_updates(self.model_runner.model, weights)
             # Add the FP8 related logic here as sharding manager has been deprecated.
             # Check if FP8 quantization is enabled and apply appropriate weight loading
-            if is_fp8_model(self.model_runner.vllm_config):
+            if is_quantized_model(self.model_runner.vllm_config):
                 logger.info(f"FP8 model detected (async): {self.model_runner.vllm_config.quant_config}")
                 # Convert bf16 weights to fp8 format before loading
                 loaded_params = load_quanted_weights(param_updates, self.model_runner) if param_updates else []
@@ -603,57 +608,6 @@ class vLLMColocateWorkerExtension:
         self.update_weights(worker_update_info)
 
 
-def _install_moe_reload_debug() -> None:
-    """One-shot instrumentation for vLLM 0.26 RoutedExperts weight matching.
-
-    BF16 rollout sync silently leaves every ``*.experts.routed_experts.w13_weight``
-    / ``w2_weight`` unloaded, so the model keeps dummy weights. Log the names the
-    layer actually receives, its layer_name, and the first mapping entries, so the
-    mismatch can be read off instead of inferred.
-    """
-    try:
-        from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
-    except ImportError:
-        logger.warning("VERL_MOE_RELOAD_DEBUG: RoutedExperts unavailable")
-        return
-    if getattr(RoutedExperts, "_verl_reload_debug", False):
-        return
-    original = RoutedExperts.load_weights
-
-    def _debug_load_weights(self, weights):
-        received = list(weights)
-        if not getattr(RoutedExperts, "_verl_reload_logged", False):
-            RoutedExperts._verl_reload_logged = True
-            try:
-                mapping = self.get_expert_mapping(include_fused=True)
-            except Exception as exc:  # noqa: BLE001
-                mapping = f"<get_expert_mapping failed: {exc!r}>"
-            logger.warning(
-                "VERL_MOE_RELOAD_DEBUG layer_name=%r n_received=%d received_names=%s",
-                getattr(self, "layer_name", None),
-                len(received),
-                [name for name, _ in received[:4]],
-            )
-            logger.warning(
-                "VERL_MOE_RELOAD_DEBUG received_shapes=%s",
-                [tuple(t.shape) for _, t in received[:4]],
-            )
-            logger.warning("VERL_MOE_RELOAD_DEBUG mapping_head=%s", mapping[:6])
-        loaded = list(original(self, iter(received)))
-        if not getattr(RoutedExperts, "_verl_reload_logged_out", False):
-            RoutedExperts._verl_reload_logged_out = True
-            logger.warning(
-                "VERL_MOE_RELOAD_DEBUG loaded=%d of received=%d loaded_head=%s",
-                len(loaded),
-                len(received),
-                loaded[:4],
-            )
-        return loaded
-
-    RoutedExperts.load_weights = _debug_load_weights
-    RoutedExperts._verl_reload_debug = True
-
-
 class SuppressSignalInThread:
     def __enter__(self):
         self.original_signal = signal.signal
@@ -687,8 +641,7 @@ def _optional_bool_vllm_args() -> set[str]:
     return {
         f.name
         for f in dataclasses.fields(AsyncEngineArgs)
-        if set(get_args(f.type)) == {bool, type(None)}
-        or (f.type is bool and (f.default is None or f.default is True))
+        if set(get_args(f.type)) == {bool, type(None)} or (f.type is bool and (f.default is None or f.default is True))
     }
 
 

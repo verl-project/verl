@@ -39,6 +39,7 @@ class _RecordingCheckpointManager:
         self.update_calls: list[int] = []
         self.resume_calls = 0
         self.abort_calls = 0
+        self.abort_reject_requests: list[bool] = []
         self.sleep_calls = 0
 
     def update_weights(self, global_steps: int):
@@ -50,9 +51,10 @@ class _RecordingCheckpointManager:
         self.events.append(f"{self.name}_resume")
         self.resume_calls += 1
 
-    def abort_replicas(self):
+    def abort_replicas(self, reject_request: bool = False):
         self.events.append(f"{self.name}_abort")
         self.abort_calls += 1
+        self.abort_reject_requests.append(reject_request)
 
     def sleep_replicas(self):
         self.events.append(f"{self.name}_sleep")
@@ -239,6 +241,9 @@ def test_step_lends_the_engine_out_and_reclaims_it_exactly_once():
     assert trainer.current_mode == HybridEngineMode.TRAINER
     assert trainer.replay_buffer.wait_calls == [16]
     assert trainer.checkpoint_manager.abort_calls == 1
+    assert trainer.checkpoint_manager.abort_reject_requests == [True], (
+        "leaving rotation must reject late arrivals rather than park them until the replica returns"
+    )
     assert trainer.checkpoint_manager.sleep_calls == 1
     assert trainer.balancer_calls == ["add", "clear", "remove"]
     assert trainer.timing_raw["switch_to_trainer"] >= 0.0

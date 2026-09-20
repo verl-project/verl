@@ -13,3 +13,5 @@ env_vars:
   NVTE_NVFP4_4OVER6_ERR_MODE: "MAE"
   FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH: "1"
   TRTLLM_DISABLE_FP4_QUANT_FAST_MATH: "1"
+  # The launcher overwrites this with its validated STRICT_MINERVA setting.
+  VERL_MATH_DAPO_STRICT_MINERVA: "1"

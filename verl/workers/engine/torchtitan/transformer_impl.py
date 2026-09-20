@@ -60,7 +60,7 @@ from verl.workers.engine.torchtitan.utils import (
 )
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
-from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
+from ..utils import detach_tree, enable_full_determinism, postprocess_batch_func, prepare_micro_batches
 
 
 def _hf_entry_row_slots(name, spec, place, lidx, lval):
@@ -874,8 +874,9 @@ class TorchTitanEngineWithLMHead(TorchTitanEngine):
                 loss = torch.tensor(1.0, device=device_name)
                 metrics = {}
 
+            # Detach before this lands in forward_backward_batch's output_lst; see detach_tree.
             output = {
-                "model_output": model_output,
+                "model_output": detach_tree(model_output),
                 "loss": loss.detach().item(),
                 "metrics": metrics,
             }

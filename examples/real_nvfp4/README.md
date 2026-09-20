@@ -11,9 +11,10 @@ QAT path.
   GroupedLinear packed-wgrad and dequantized-backward operand fixes. Persistent policy
   parameters remain BF16 (`fp4_param=false`) and the optimizer keeps its full
   Adam state.
-- The per-module TE recipe keeps attention BF16 and applies NVFP4 to every
-  routed-expert MLP `linear_fc1`/`linear_fc2`. The backward path is currently
-  `dequantized`.
+- The default per-module TE recipe keeps attention and the first two and last
+  four decoder-layer MLPs BF16. It applies NVFP4 to routed-expert MLP
+  `linear_fc1`/`linear_fc2` in the remaining 42 layers. The backward path is
+  currently `dequantized`.
 - TE adaptive 4-over-6 is deliberately off: vLLM 0.27.1's native
   `nvfp4_per_token` rollout consumes standard NVFP4, so enabling 4-over-6 only
   on the training side would create a precision mismatch.
@@ -92,14 +93,15 @@ installs the routed-expert capture hook inside every vLLM model worker and
 rejects an all-zero route payload.
 
 This version contains none of the three Slime stability losses. It uses the
-plain token-mean PPO/GRPO loss, token-level TIS, no KL loss/reward, and no DAPO
-overlong penalty. Formal scale is 8 nodes × 4 GPUs, EP=4, 32 prompts × 16
-responses, and `max_num_seqs=128`.
+plain token-mean PPO/GRPO loss, token-level TIS, no KL loss/reward, and a DAPO
+overlong penalty with a 512-token buffer and factor 1.0. Formal scale is
+8 nodes × 4 GPUs, EP=4, 32 training prompts × 16 responses, and
+`max_num_seqs=256`.
 
 ## Entry points
 
 - Training recipe: `run_qwen3_30b_megatron.sh`
-- TE module recipe: `config/attn_bf16_mlp_nvfp4.yaml`
+- Default TE module recipe: `config/attn_bf16_mlp_nvfp4_first2_last4.yaml`
 - vLLM quantization scope: native `nvfp4_per_token` (MoE only; linears BF16)
 - Runtime build and verification: `runtime_backports/`
 - Completed-step numerical gate: `check_history.py`
@@ -130,7 +132,9 @@ full eight-node recipe for regression rather than substituting the one-node
 smoke profile. Keep one verified full-Adam recovery checkpoint per chain.
 
 Inside your scheduled allocation, with Ray already running on all eight nodes,
-invoke the recipe using explicit local data and model paths:
+invoke the recipe using your own shared data and model paths. `MODEL_PATH`,
+`TRAIN_FILE`, and `TEST_FILE` are required and must be accessible on every node;
+the paths below are placeholders to replace:
 
 ```bash
 MODEL_PATH=/shared/models/Qwen3-30B-A3B-Base \
@@ -148,10 +152,30 @@ implementation.
 
 ## Dynamic sampling and diagnostic boundaries
 
-Generation batch size and policy-update batch size are distinct. The launcher
-defaults above are not the overlong/dynamic-sampling experiment contract;
-record the resolved `FILTER_GROUPS`, `GEN_PROMPT_BSZ_MULT`, overlong settings,
-and first/last BF16 carve-outs for every comparison.
+Generation batch size and policy-update batch size are distinct. The formal
+example uses 64 generation prompts with 16 responses, filters prompt groups
+for at most 10 generation batches, and trains on 32 selected groups. It uses
+strict Minerva scoring, a 512-token overlong buffer with penalty factor 1.0,
+and keeps the first two and last four decoder-layer MLPs in BF16. Adam uses
+betas (0.9, 0.999), with constant learning rate 1e-6 and no warmup.
+
+The colocated rollout budget defaults to 0.80, with 32768 batched tokens and
+256 sequences. These settings reserve more space for the trainer's post-update
+resident tensors; correct initial KV profiling alone does not guarantee later
+wake cycles fit. They are workload settings, not framework-wide defaults.
+Checkpoint scheduler loading is enabled for resume. Fresh training still uses
+the configured constant learning rate; resumed training restores saved scheduler
+state. Record any environment overrides when comparing runs. The launcher merges its
+validated `STRICT_MINERVA` value into the submitted Ray runtime environment,
+preserving the other YAML fields. Explicit `STRICT_MINERVA=0` overrides the YAML
+value for both the driver and its workers; the source YAML is not modified.
+
+The scheduled 40-step fresh / 80-step resumed validation is a separate execution
+chain. This portable example does not implement its Slurm dependencies,
+checkpoint-validation gates, or post-save retention watcher. Set
+`TOTAL_TRAINING_STEPS`, `RESUME_MODE`, checkpoint paths, and W&B identity explicitly
+for your allocation. Preserve a verified full-Adam recovery point before pruning.
+The reduced one-node smoke profile is not evidence for the formal 8-node contract.
 
 With dynamic sampling, optimizer steps do not count consumed dataloader
 batches. New checkpoints store separate dataloader progress alongside

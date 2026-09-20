@@ -34,7 +34,7 @@ ARG MEGATRON_BRIDGE_COMMIT="v0.5.0"
 RUN pip install --no-deps --no-build-isolation --ignore-requires-python \
     git+${MEGATRON_BRIDGE_REPO}@${MEGATRON_BRIDGE_COMMIT}
 
-RUN pip install "transformers==5.12.1"  "TransferQueue==0.1.8"
+RUN pip install "transformers==5.12.1"  "TransferQueue==0.1.10"
 
 ARG BUILD_DATE="2026-08-07"
 RUN --mount=type=cache,target=/root/.cache/pip \

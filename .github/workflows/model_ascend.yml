@@ -47,8 +47,7 @@ on:
       - "verl/**/*.py"
       # Entrypoints
       - ".github/workflows/model_ascend.yml"
-      - "tests/special_distributed/test_fsdp_ckpt.py"
-      - "tests/special_distributed/test_tensor_dict.py"
+      - "tests/special_distributed/*.py"
       - "tests/models/**"
       - "tests/special_distributed/run_all.sh"
 
@@ -63,7 +62,7 @@ permissions:
 jobs:
   model_rmpad_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a3-8
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -94,7 +93,7 @@ jobs:
           pip list
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Running rmpad model tests on 8 NPUs
         run: |
           pytest -s tests/models/test_transformer.py
@@ -113,13 +112,14 @@ jobs:
   # NOTE: List as an independent job to make rerun easier.
   model_rmpad_fsdp2_unstable_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a3-8
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 60
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
+      VERL_USE_EXTERNAL_MODULES: "megatron_adaptor" # Patch Megatron in the driver as well as workers.
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       TRANSFORMERS_VERBOSITY: 'error'
@@ -137,7 +137,7 @@ jobs:
           pip3 list
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Running FSDP2 rmpad model tests on 8 NPUs
         run: |
           STRATEGY=fsdp2 torchrun --nproc_per_node=8 tests/special_distributed/test_fsdp_ckpt.py

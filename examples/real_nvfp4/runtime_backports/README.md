@@ -21,9 +21,8 @@ Payloads:
 
 - Core 0.19.0 already includes the stateless grouped extra-state correction from
   Megatron-LM [#5997](https://github.com/NVIDIA/Megatron-LM/pull/5997).
-  `apply_backports.sh` no longer invokes `patch_megatron_checkpoint.py`;
-  `verify_runtime.py` checks the unchanged release implementation instead.
-  The historical patch script is not an installation step for Core 0.19.0.
+  `verify_runtime.py` checks the unchanged release implementation; no local
+  checkpoint backport is applied.
 - vLLM 0.27.1 already includes the CuMem-aware memory-profiling correction from
   [#49208](https://github.com/vllm-project/vllm/pull/49208), first released in
   0.27.0. No local memory-profiling backport is applied.
@@ -41,9 +40,9 @@ Payloads:
   still required with the audited 0.27.1 source; upgrading alone does not replace
   them.
 - `candidate.py` / `patch_te.py`: TE row-scale grouped-GEMM epilogue batching;
-  unsupported layouts retain the original function. The candidate's historical
-  diagnostic header is preserved for hash identity; `patch_te.py` installs the
-  already tested function, not its diagnostic context manager.
+  unsupported layouts retain the original function. `patch_te.py` verifies the
+  candidate source hash and installs only the batching function, not its
+  context manager.
 - `patch_runtime.py`: atomic port allocation for a single-rank vLLM executor;
   multi-rank/elastic/agent-store configurations keep the upstream selector.
 
@@ -57,7 +56,6 @@ export CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 export MAX_JOBS=1 CMAKE_BUILD_PARALLEL_LEVEL=1
 export FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH=1 TRTLLM_DISABLE_FP4_QUANT_FAST_MATH=1
 export PYTHONPATH="$PWD:$PWD/examples/real_nvfp4/runtime_backports"
-export EFFICIENCY_OUTPUT=/shared/diagnostics/new-unique-rowscale-output
 python examples/real_nvfp4/runtime_backports/test_exported.py
 python -m pytest -q examples/real_nvfp4/runtime_backports/test_atomic.py \
   examples/real_nvfp4/runtime_backports/test_native_packing.py
@@ -65,10 +63,10 @@ python -m pytest -q tests/utils/real_nvfp4 tests/utils/test_bucketed_weight_tran
 python examples/real_nvfp4/runtime_backports/verify_runtime.py
 ```
 
-`EFFICIENCY_OUTPUT` must not exist beforehand. The differential probe tests
+The installed-package differential regression tests
 forward/input-gradient/weight-gradient equality across two weight versions,
 uniform and ragged expert splits, and fallback/zero/small/large inputs. These
-operator timings are not full-training benchmarks. The communication tests
+checks emit no timing or profiler artifacts. The communication tests
 exercise real stores/process groups and the packing tests use the actual GPU
 quantizer. Full multi-node training, resume, quality and performance still need
 separate matched BF16/W4A4 validation after dependency or source changes.

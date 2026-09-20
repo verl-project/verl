@@ -48,7 +48,7 @@ from verl.utils.torch_functional import logprobs_from_logits
 from verl.workers.config import AutomodelEngineConfig, AutomodelOptimizerConfig, HFModelConfig
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
-from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
+from ..utils import detach_tree, enable_full_determinism, postprocess_batch_func, prepare_micro_batches
 from .utils import (
     build_automodel_model,
     build_distributed_config_from_engine_config,
@@ -709,8 +709,9 @@ class AutomodelEngineWithLMHead(AutomodelEngine):
                 loss = torch.tensor(1.0, device=device_name)
                 metrics = {}
 
+            # Detach before this lands in forward_backward_batch's output_lst; see detach_tree.
             output = {
-                "model_output": model_output,
+                "model_output": detach_tree(model_output),
                 "loss": loss.detach().item(),
                 "metrics": metrics,
             }

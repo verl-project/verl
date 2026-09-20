@@ -1,3 +1,17 @@
+# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Scheduler-only tests of installed vLLM selector and real distributed stores."""
 
 import socket
@@ -28,10 +42,15 @@ def test_single_rank_does_not_probe(monkeypatch):
     assert mp._get_mp_distributed_init_method(config()) == "tcp://127.0.0.1:0"
 
 
-@pytest.mark.parametrize("overrides", [
-    {"world_size": 2}, {"data_parallel_size": 2}, {"nnodes": 2},
-    {"enable_elastic_ep": True},
-])
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"world_size": 2},
+        {"data_parallel_size": 2},
+        {"nnodes": 2},
+        {"enable_elastic_ep": True},
+    ],
+)
 def test_other_topologies_keep_upstream(monkeypatch, overrides):
     monkeypatch.delenv("TORCHELASTIC_USE_AGENT_STORE", raising=False)
     monkeypatch.setattr(mp, "get_loopback_ip", lambda: "127.0.0.1")
@@ -74,8 +93,11 @@ def test_real_process_group_lifecycle(monkeypatch, backend):
     for _ in range(3):
         try:
             dist.init_process_group(
-                backend=backend, init_method=mp._get_mp_distributed_init_method(config()),
-                rank=0, world_size=1, timeout=timedelta(seconds=30),
+                backend=backend,
+                init_method=mp._get_mp_distributed_init_method(config()),
+                rank=0,
+                world_size=1,
+                timeout=timedelta(seconds=30),
             )
             value = torch.tensor([7.0], device="cuda" if backend == "nccl" else "cpu")
             dist.all_reduce(value)

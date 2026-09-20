@@ -78,6 +78,9 @@ requires-dist = ["filelock", "typing-extensions>=4.10.0", "setuptools>=77.0.3", 
 provides-extras = ["optree", "opt-einsum", "pyyaml"]
 
 [[manifest.dependency-metadata]]
+name = "transferqueue"
+
+[[manifest.dependency-metadata]]
 name = "transformer-engine-torch"
 version = "2.18.0"
 requires-dist = ["einops", "nvdlfw-inspect", "nvidia-cudnn-frontend>=1.25.0", "onnx", "onnxscript", "packaging", "pydantic", "torch>=2.1", "transformer-engine-cu13==2.18.0"]
@@ -5397,18 +5400,10 @@ wheels = [
 
 [[package]]
 name = "transferqueue"
-version = "0.1.9.dev0"
-source = { git = "https://github.com/Ascend/TransferQueue.git?rev=main#434f8c476b4be24bc087e6e95070e64efcc739f9" }
-dependencies = [
-    { name = "hydra-core" },
-    { name = "msgspec" },
-    { name = "numpy" },
-    { name = "omegaconf" },
-    { name = "prometheus-client" },
-    { name = "psutil" },
-    { name = "pyzmq" },
-    { name = "ray", extra = ["default"] },
-    { name = "tensordict" },
+version = "0.1.10"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/42/6b/374c1ce1078baa628314d068fe0994a58380a020d57b9b0427cc2560c98f/transferqueue-0.1.10-py3-none-any.whl", hash = "sha256:a8efceb971fe57d52ac7ddd86d9a6ef63f1824819dddc2ea980a96b73ff2f8ea", size = 360774, upload-time = "2026-08-21T21:23:24.561Z" },
 ]
 
 [[package]]
@@ -5682,6 +5677,7 @@ cpu = [
     { name = "hydra-core" },
     { name = "mathruler" },
     { name = "megatron-core", version = "0.18.0", source = { git = "https://github.com/NVIDIA/Megatron-LM.git?tag=core_v0.18.0#ba7b5ebce12af60627a80985792a1449ce45f46c" } },
+    { name = "msgspec" },
     { name = "numpy" },
     { name = "nvtx" },
     { name = "packaging" },
@@ -5695,6 +5691,7 @@ cpu = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-rerunfailures" },
+    { name = "pyzmq" },
     { name = "qwen-vl-utils" },
     { name = "ray", extra = ["default"], marker = "extra == 'extra-4-verl-cpu' or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "tensorboard" },
@@ -5730,6 +5727,7 @@ fsdp = [
     { name = "hydra-core" },
     { name = "liger-kernel" },
     { name = "mathruler" },
+    { name = "msgspec" },
     { name = "numpy" },
     { name = "nvtx" },
     { name = "packaging" },
@@ -5741,6 +5739,7 @@ fsdp = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-rerunfailures" },
+    { name = "pyzmq" },
     { name = "qwen-vl-utils" },
     { name = "ray", extra = ["default"], marker = "extra == 'extra-4-verl-fsdp' or extra == 'extra-4-verl-megatron' or extra == 'extra-4-verl-sglang' or extra == 'extra-4-verl-vllm' or extra != 'extra-4-verl-cpu'" },
     { name = "tensorboard" },
@@ -5785,6 +5784,7 @@ megatron = [
     { name = "megatron-bridge" },
     { name = "megatron-core", version = "0.19.0", source = { registry = "https://pypi.org/simple" } },
     { name = "megatron-energon" },
+    { name = "msgspec" },
     { name = "numpy" },
     { name = "nvidia-cudnn-frontend" },
     { name = "nvidia-mathdx" },
@@ -5801,6 +5801,7 @@ megatron = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-rerunfailures" },
+    { name = "pyzmq" },
     { name = "qwen-vl-utils" },
     { name = "ray", extra = ["default"], marker = "extra == 'extra-4-verl-fsdp' or extra == 'extra-4-verl-megatron' or extra == 'extra-4-verl-sglang' or extra == 'extra-4-verl-vllm' or extra != 'extra-4-verl-cpu'" },
     { name = "tensorboard" },
@@ -5832,6 +5833,7 @@ sglang = [
     { name = "hydra-core" },
     { name = "mathruler" },
     { name = "mbridge" },
+    { name = "msgspec" },
     { name = "numpy" },
     { name = "nvtx" },
     { name = "packaging" },
@@ -5843,6 +5845,7 @@ sglang = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-rerunfailures" },
+    { name = "pyzmq" },
     { name = "qwen-vl-utils" },
     { name = "ray", extra = ["default"], marker = "(extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra != 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra != 'extra-4-verl-fsdp' and extra != 'extra-4-verl-megatron' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-cpu' and extra != 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "sglang" },
@@ -5867,9 +5870,6 @@ test = [
     { name = "pytest-asyncio" },
     { name = "pytest-rerunfailures" },
 ]
-transferqueue = [
-    { name = "transferqueue" },
-]
 veomni-sft = [
     { name = "veomni" },
 ]
@@ -5883,6 +5883,7 @@ verl-core = [
     { name = "fastapi", version = "0.137.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and extra == 'extra-4-verl-cpu') or (platform_machine == 'x86_64' and extra == 'extra-4-verl-sglang') or (platform_machine == 'x86_64' and extra != 'extra-4-verl-vllm') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "hydra-core" },
     { name = "mathruler" },
+    { name = "msgspec" },
     { name = "numpy" },
     { name = "nvtx" },
     { name = "packaging" },
@@ -5894,6 +5895,7 @@ verl-core = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-rerunfailures" },
+    { name = "pyzmq" },
     { name = "qwen-vl-utils" },
     { name = "ray", extra = ["default"] },
     { name = "tensorboard" },
@@ -5919,6 +5921,7 @@ vllm = [
     { name = "hydra-core" },
     { name = "mathruler" },
     { name = "mbridge" },
+    { name = "msgspec" },
     { name = "numpy" },
     { name = "nvidia-cutlass-dsl", version = "4.6.2", source = { registry = "https://pypi.org/simple" }, extra = ["cu13"], marker = "(extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra != 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (extra != 'extra-4-verl-fsdp' and extra != 'extra-4-verl-megatron' and extra != 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "nvtx" },
@@ -5932,6 +5935,7 @@ vllm = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-rerunfailures" },
+    { name = "pyzmq" },
     { name = "quack-kernels", version = "0.6.4", source = { registry = "https://pypi.org/simple" } },
     { name = "qwen-vl-utils" },
     { name = "ray", extra = ["default"], marker = "(extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra != 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (extra != 'extra-4-verl-fsdp' and extra != 'extra-4-verl-megatron' and extra != 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
@@ -5986,6 +5990,7 @@ requires-dist = [
     { name = "megatron-core", marker = "extra == 'cpu'", git = "https://github.com/NVIDIA/Megatron-LM.git?tag=core_v0.18.0" },
     { name = "megatron-core", marker = "extra == 'megatron'", specifier = "==0.19.0" },
     { name = "megatron-energon", marker = "extra == 'megatron'", specifier = "==7.4.1" },
+    { name = "msgspec", marker = "extra == 'verl-core'" },
     { name = "numpy", specifier = ">=2.0.0" },
     { name = "numpy", marker = "extra == 'verl-core'", specifier = ">=2.0.0" },
     { name = "nvidia-cudnn-frontend", marker = "extra == 'megatron'", specifier = "==1.25.0" },
@@ -6021,6 +6026,7 @@ requires-dist = [
     { name = "pytest-rerunfailures", marker = "extra == 'cpu'" },
     { name = "pytest-rerunfailures", marker = "extra == 'test'" },
     { name = "pytest-rerunfailures", marker = "extra == 'verl-core'" },
+    { name = "pyzmq", marker = "extra == 'verl-core'" },
     { name = "quack-kernels", marker = "extra == 'vllm'", specifier = "==0.6.4" },
     { name = "qwen-vl-utils", marker = "extra == 'verl-core'" },
     { name = "ray", extras = ["default"], specifier = ">=2.41.0" },
@@ -6050,7 +6056,7 @@ requires-dist = [
     { name = "torchvision", marker = "extra == 'megatron'", specifier = ">=0.26.0,!=0.27.*,<=0.28.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "verl", extra = "megatron" } },
     { name = "torchvision", marker = "extra == 'sglang'", specifier = "==0.26.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "verl", extra = "sglang" } },
     { name = "torchvision", marker = "extra == 'vllm'", specifier = "==0.28.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "verl", extra = "vllm" } },
-    { name = "transferqueue", marker = "extra == 'transferqueue'", git = "https://github.com/Ascend/TransferQueue.git?rev=main" },
+    { name = "transferqueue", marker = "extra == 'verl-core'", specifier = ">=0.1.10" },
     { name = "transformer-engine", extras = ["core-cu13", "pytorch"], marker = "extra == 'megatron'", specifier = "==2.18.0" },
     { name = "transformers", specifier = ">=5.5.3,!=5.6.0,<5.11" },
     { name = "transformers", marker = "extra == 'cpu'", specifier = "==5.9.0" },
@@ -6066,7 +6072,6 @@ requires-dist = [
     { name = "verl", extras = ["cupy-cu130"], marker = "extra == 'megatron'" },
     { name = "verl", extras = ["flash-attn-cu130"], marker = "extra == 'fsdp'" },
     { name = "verl", extras = ["flash-attn-cu130"], marker = "extra == 'megatron'" },
-    { name = "verl", extras = ["transferqueue"], marker = "extra == 'verl-core'" },
     { name = "verl", extras = ["verl-core"], marker = "extra == 'cpu'" },
     { name = "verl", extras = ["verl-core"], marker = "extra == 'fsdp'" },
     { name = "verl", extras = ["verl-core"], marker = "extra == 'megatron'" },
@@ -6078,7 +6083,7 @@ requires-dist = [
     { name = "wheel", marker = "extra == 'megatron'" },
     { name = "xgrammar", marker = "extra == 'vllm'", specifier = "==0.2.7" },
 ]
-provides-extras = ["test", "math", "mcore", "transferqueue", "verl-core", "flash-attn-cu130", "cupy-cu130", "vllm", "sglang", "fsdp", "megatron", "ci", "veomni-sft", "cpu"]
+provides-extras = ["test", "math", "mcore", "verl-core", "flash-attn-cu130", "cupy-cu130", "vllm", "sglang", "fsdp", "megatron", "ci", "veomni-sft", "cpu"]
 
 [[package]]
 name = "virtualenv"

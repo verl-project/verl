@@ -474,9 +474,14 @@ class CheckpointEngineManager:
         await asyncio.gather(*[r.wake_up() for r in self.replicas])
 
     @auto_await
-    async def abort_replicas(self):
-        """Abort all in-flight requests on every replica."""
-        await asyncio.gather(*[r.abort_all_requests() for r in self.replicas])
+    async def abort_replicas(self, reject_request: bool = False):
+        """Abort all in-flight requests on every replica.
+
+        Args:
+            reject_request: Fail requests arriving behind the closed gate instead of
+                parking them, for replicas that will not resume generation soon.
+        """
+        await asyncio.gather(*[r.abort_all_requests(reject_request=reject_request) for r in self.replicas])
 
     @auto_await
     async def resume_generation_replicas(self):

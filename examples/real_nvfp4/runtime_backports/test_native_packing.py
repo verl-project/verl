@@ -1,3 +1,17 @@
+# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Actual vLLM function tests. Run only in the scheduled Blackwell job."""
 
 import pytest
@@ -28,9 +42,7 @@ def test_native_packing_matches_per_expert_gpu_reference(dtype, strided):
         torch.stack([s for _, s in reference]),
         scale.reciprocal(),
     )
-    assert torch.equal(weight, original), (
-        "packing must not mutate the incoming BF16 weights"
-    )
+    assert torch.equal(weight, original), "packing must not mutate the incoming BF16 weights"
     for got, want in zip(actual, expected, strict=True):
         assert got.shape == want.shape and got.dtype == want.dtype
         assert torch.equal(got.view(torch.uint8), want.view(torch.uint8))

@@ -103,9 +103,9 @@ class TestBuildCliArgsFromConfig:
         _optional_bool_vllm_args.cache_clear()
         try:
             monkeypatch.setattr(arg_utils, "AsyncEngineArgs", args_class)
-            result = build_cli_args_from_config(dict.fromkeys(
-                ["delayed", "enabled", "disabled", "optional", "token", "unknown"], False
-            ))
+            result = build_cli_args_from_config(
+                dict.fromkeys(["delayed", "enabled", "disabled", "optional", "token", "unknown"], False)
+            )
             assert result == ["--no-delayed", "--no-enabled", "--no-optional"]
         finally:
             _optional_bool_vllm_args.cache_clear()

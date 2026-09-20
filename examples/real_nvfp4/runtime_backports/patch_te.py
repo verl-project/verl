@@ -1,3 +1,17 @@
+# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Build-time, hash-guarded backport of the measured row-scale batching path."""
 
 import ast
@@ -28,7 +42,7 @@ def patched_source(source):
     candidate = Path(__file__).resolve().with_name("candidate.py")
     if (
         hashlib.sha256(candidate.read_bytes()).hexdigest()
-        != "2c75eb8933b4e812357488387c9d317a3f322befdd3b7687718aa75a4c0ef471"
+        != "c23f8540afd8f5f236904f36925387a10c1e175210b1baab29e1ddc5ed98a560"
     ):
         raise RuntimeError("TE rowscale candidate changed")
     tree = ast.parse(candidate.read_text())

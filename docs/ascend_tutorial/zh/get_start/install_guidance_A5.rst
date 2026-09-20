@@ -8,13 +8,13 @@ Last updated: 08/03/2026.
 ============= ================================================= ===================
 依赖          版本                                               说明                                                       
 ============= ================================================= ===================
-CANN          待Q2 CANN版本正式商发后更新链接                    CANN软件，帮助开发者实现在昇腾软硬件平台上开发和运行AI业务 
+CANN          ``9.1.0``                                         CANN软件，帮助开发者实现在昇腾软硬件平台上开发和运行AI业务 
 Python        ``3.11``                                          Python版本                                                 
 torch         ``2.10.0``                                        PyTorch 深度学习框架基础包                                 
-torch_npu     待Q2 torch_npu版本正式商发后更新链接               NPU PyTorch 适配插件                                       
+torch_npu     ``2.10.0.post4``                                  NPU PyTorch 适配插件                                       
 triton        ``3.5.0``                                         Triton，用于编写自定义算子                                 
 triton-ascend ``3.2.2``                                         NPU Triton 适配                                            
-transformers  ``4.57.6``                                        Hugging Face 大模型库，提供模型架构与预训练权重            
+transformers  ``5.10.4``                                        Hugging Face 大模型库，提供模型架构与预训练权重            
 vLLM          ``0.23.0``                                        高性能 LLM 推理与服务引擎                                  
 vLLM-Ascend   ``0.23.0``                                        NPU vLLM 后端适配                                          
 Megatron-LM   ``core_r0.12.0``                                  大规模分布式训练框架                                       

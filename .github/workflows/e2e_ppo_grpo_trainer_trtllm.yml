@@ -138,7 +138,7 @@ jobs:
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
           pip3 install --no-deps transformers==5.3.0
-          pip3 install --no-deps TransferQueue==0.1.8
+          pip3 install --no-deps TransferQueue==0.1.10
       - name: Check final pip list
         run: |
           pip3 list
@@ -237,7 +237,7 @@ jobs:
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
           pip3 install --no-deps transformers==5.3.0
-          pip3 install --no-deps TransferQueue==0.1.8
+          pip3 install --no-deps TransferQueue==0.1.10
           pip3 install qwen_vl_utils
           pip3 install mathruler
           pip3 install msgspec

@@ -404,6 +404,23 @@ class LLMServerManager:
         await instance._init_global_load_balancer()
         return instance
 
+    @classmethod
+    @auto_await
+    async def create_empty(cls, *args, **kwargs):
+        """Create an empty LLMServerManager: no replicas are launched and the
+        load balancer starts empty.
+
+        Used by trainers that serve rollout exclusively from standalone
+        resources (e.g. v1 separate_async with ``actor_rollout_ref.hybrid_engine=False``)
+        so that no inference engine is initialized on the training GPUs.
+        """
+        instance = cls(*args, **kwargs)
+        instance.rollout_replicas = []
+        instance.server_handles = []
+        instance.server_addresses = []
+        await instance._init_global_load_balancer()
+        return instance
+
     async def _initialize_llm_servers(self, start_rank: int = None):
         """Initialize the LLM server replicas.
 

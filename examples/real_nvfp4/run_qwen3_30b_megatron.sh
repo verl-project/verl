@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Matched BF16 vs real W4A4 experiment on Qwen3-30B-A3B. Real W4A4 is
-# routed-expert all-MLP, per-token rollout activation, R3-on, and 0/3 losses.
+# routed-expert MLPs outside BF16 carve-outs, per-token rollout activation,
+# R3-on, and none of the three optional stability losses.
 
 readonly PRECISION_MODE=${PRECISION_MODE:-real_nvfp4}
 case "$PRECISION_MODE" in
@@ -18,8 +19,8 @@ case "$RUN_PROFILE" in
     readonly PPO_MINI_BATCH_SIZE=32
     readonly MAX_RESPONSE_LENGTH=20480
     readonly MAX_TOKEN_LEN=21504
-    readonly MAX_NUM_BATCHED_TOKENS=16384
-    readonly MAX_NUM_SEQS=128
+    readonly MAX_NUM_BATCHED_TOKENS=32768
+    readonly MAX_NUM_SEQS=256
     readonly AGENT_NUM_WORKERS=8
     ;;
   smoke)
@@ -32,7 +33,7 @@ case "$RUN_PROFILE" in
     readonly MAX_RESPONSE_LENGTH=1024
     readonly MAX_TOKEN_LEN=2048
     readonly MAX_NUM_BATCHED_TOKENS=2048
-    # Exercise the same CUDA-graph request-capacity contract as the formal arm.
+    # The reduced smoke profile is not the formal capacity-validation contract.
     readonly MAX_NUM_SEQS=128
     readonly AGENT_NUM_WORKERS=2
     ;;
@@ -47,61 +48,30 @@ readonly N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-4}
 readonly PROJECT_NAME=${PROJECT_NAME:-DAPO-NVFP4-QAT}
 readonly EXP_NAME=${EXP_NAME:?set EXP_NAME to a new W&B/checkpoint run id}
 readonly RAY_DATA_HOME=${RAY_DATA_HOME:-$WORKING_DIR}
-readonly MODEL_PATH=${MODEL_PATH:-/lustre/fsw/general_sa/shuazhang/models/Qwen/Qwen3-30B-A3B-Base}
-readonly TRAIN_FILE=${TRAIN_FILE:-/lustre/fsw/general_sa/shuazhang/python_space/infix.AI/data/dapo-math-17k/dapo-math-17k.jsonl}
-readonly TEST_FILE=${TEST_FILE:-/lustre/fsw/general_sa/shuazhang/python_space/infix.AI/data/aime-2024/aime-2024-canonical-v1.jsonl}
+readonly MODEL_PATH=${MODEL_PATH:?set MODEL_PATH to your shared model directory}
+readonly TRAIN_FILE=${TRAIN_FILE:?set TRAIN_FILE to your shared dataset file}
+readonly TEST_FILE=${TEST_FILE:?set TEST_FILE to your shared dataset file}
 readonly CKPTS_DIR=${CKPTS_DIR:-$RAY_DATA_HOME/checkpoints/$PROJECT_NAME/$EXP_NAME}
 readonly TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-20}
-# Truncated importance sampling. verl weights every token's loss by
-# w = clamp(exp(old_logp - rollout_logp), max=2.0). Under BF16 the train/rollout
-# mismatch is tiny (KL ~0.0012) so w ~ 1 and TIS is inert, but under real W4A4 the
-# mismatch is larger and tail-dominated (rollout_is_std 0.089 vs 0.037), so TIS can
-# systematically tilt the gradient. NeMo RL's W4A4 arms carry no IS correction at
-# all and do grow response length, so this needs to be a single-variable knob.
-# DAPO dynamic sampling. NeMo RL runs `use_dynamic_sampling=True` with
-# batch_multiplier=3 and max_gen_batches=20, which resamples until the batch has
-# no all-wrong / all-correct prompt groups: its reported all-wrong rate is 0.00%
-# early on despite only ~6% per-sample accuracy, where the naive rate would be
-# ~37%. Strict scoring drops accuracy to that regime, so without resampling
-# roughly half the groups carry zero advantage and the gradient is gutted.
-# The two knobs belong together.
-# Training-side BF16 carve-out for the first/last decoder layers. NeMo RL's
-# R3-on arm uses first_last_layers_bf16=True with 2 at the start and 4 at the
-# end (its R3-off arm uses none). The same counts are forwarded to rollout so
-# vLLM leaves those exact RoutedExperts containers in BF16 too.
-readonly FIRST_LAST_BF16=${FIRST_LAST_BF16:-False}
-readonly BF16_LAYERS_AT_START=${BF16_LAYERS_AT_START:-0}
-readonly BF16_LAYERS_AT_END=${BF16_LAYERS_AT_END:-0}
-readonly GEN_PROMPT_BSZ_MULT=${GEN_PROMPT_BSZ_MULT:-1}
-readonly FILTER_GROUPS=${FILTER_GROUPS:-False}
-readonly MAX_GEN_BATCHES=${MAX_GEN_BATCHES:-0}
+# Token-level truncated importance sampling caps each importance weight at 2.
+# Dynamic sampling refills generation batches until enough nonconstant-reward
+# prompt groups are available, up to MAX_GEN_BATCHES.
+# Keep the same first/last BF16 layer carve-outs in training and rollout.
+readonly FIRST_LAST_BF16=${FIRST_LAST_BF16:-True}
+readonly BF16_LAYERS_AT_START=${BF16_LAYERS_AT_START:-2}
+readonly BF16_LAYERS_AT_END=${BF16_LAYERS_AT_END:-4}
+readonly GEN_PROMPT_BSZ_MULT=${GEN_PROMPT_BSZ_MULT:-2}
+readonly FILTER_GROUPS=${FILTER_GROUPS:-True}
+readonly MAX_GEN_BATCHES=${MAX_GEN_BATCHES:-10}
 readonly GEN_PROMPT_BSZ=$((TRAIN_PROMPT_BSZ * GEN_PROMPT_BSZ_MULT))
 readonly ROLLOUT_IS=${ROLLOUT_IS:-token}
-readonly STRICT_MINERVA=${STRICT_MINERVA:-0}
-# DAPO's soft overlong punishment. NeMo-RL's matching arm runs 512 / 1.0; this
-# recipe shipped it disabled, which left nothing pushing back on running to
-# max_response_length. W4A4 then clipped 12.8% of responses at 20480 against
-# BF16's 0.7%, and since a batch's wall clock is set by its slowest sequence
-# that turned a per-token 1.26x rollout win into a per-batch 9% loss.
-# FlashInfer autotune off for both arms, pinned rather than inherited from
-# whatever vLLM defaults to.
-#   bf16       its autotune sweep dies with an illegal memory access at the
-#              1-token profile (flashinfer#4157, open; also #4919 and #3466 on
-#              the same kernel). Reproduced on both 0.6.14 and 0.6.16.post3, so
-#              it is unrelated to the 2-CTA hang #3973 fixed. verl only sets
-#              moe_backend on the real-NVFP4 and delta-sharded paths, so BF16
-#              inherits vLLM's oracle pick -- FLASHINFER_TRTLLM first on CUDA,
-#              demoted only on SM90 -- which puts the baseline on a far less
-#              exercised kernel than W4A4 uses. Switching backend costs more
-#              than it saves (TRTLLM 12163 vs TRITON 11116, CUTLASS 11575), so
-#              keep the kernel and skip the sweep.
-#   real_nvfp4 measured slower with it: 16832 vs 16136 tok/s over three runs
-#              each, spread under 0.4%. An earlier +5.7% reading came from the
-#              pre-#3973 cubins and no longer holds.
+readonly STRICT_MINERVA=${STRICT_MINERVA:-1}
+# Keep FlashInfer autotuning disabled for the matched BF16/W4A4 recipe.
+# Overlong punishment uses a configurable response-length buffer and factor.
 readonly FLASHINFER_AUTOTUNE=${FLASHINFER_AUTOTUNE:-False}
-readonly OVERLONG_PENALTY=${OVERLONG_PENALTY:-False}
-readonly OVERLONG_BUFFER_LEN=${OVERLONG_BUFFER_LEN:-0}
-readonly OVERLONG_PENALTY_FACTOR=${OVERLONG_PENALTY_FACTOR:-0.0}
+readonly OVERLONG_PENALTY=${OVERLONG_PENALTY:-True}
+readonly OVERLONG_BUFFER_LEN=${OVERLONG_BUFFER_LEN:-512}
+readonly OVERLONG_PENALTY_FACTOR=${OVERLONG_PENALTY_FACTOR:-1.0}
 if [[ "$OVERLONG_PENALTY" = True && ( "$OVERLONG_BUFFER_LEN" -le 0 ) ]]; then
   echo "OVERLONG_PENALTY=True requires OVERLONG_BUFFER_LEN>0" >&2; exit 2
 fi
@@ -204,7 +174,8 @@ ACTOR=(
   actor_rollout_ref.actor.optim.lr_warmup_steps=0
   actor_rollout_ref.actor.optim.lr_decay_style=constant
   actor_rollout_ref.actor.optim.weight_decay=0.1
-  actor_rollout_ref.actor.optim.betas='[0.9,0.98]'
+  actor_rollout_ref.actor.optim.betas='[0.9,0.999]'
+  actor_rollout_ref.actor.optim.use_checkpoint_opt_param_scheduler=True
   actor_rollout_ref.actor.optim.clip_grad=1.0
   actor_rollout_ref.actor.megatron.param_offload=True
   actor_rollout_ref.actor.megatron.optimizer_offload=True
@@ -238,7 +209,7 @@ ROLLOUT=(
   actor_rollout_ref.rollout.dtype=bfloat16
   actor_rollout_ref.rollout.enforce_eager=False
   actor_rollout_ref.rollout.calculate_log_probs=True
-  actor_rollout_ref.rollout.gpu_memory_utilization=0.55
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.80
   actor_rollout_ref.rollout.tensor_model_parallel_size=1
   actor_rollout_ref.rollout.expert_parallel_size=1
   actor_rollout_ref.rollout.enable_chunked_prefill=True
@@ -348,6 +319,29 @@ if [[ "${CONFIG_ONLY:-0}" = 1 ]]; then
   exit 0
 fi
 
+# Ray jobs do not inherit arbitrary submission-shell variables. Merge the
+# validated launcher choice into the supplied runtime env, preserving its other
+# fields. STRICT_MINERVA (including explicit 0) takes precedence over YAML.
+RUNTIME_ENV_SUBMIT=$(mktemp "${TMPDIR:-/tmp}/verl-real-nvfp4-runtime.XXXXXXXX.json")
+trap 'rm -f -- "$RUNTIME_ENV_SUBMIT"' EXIT
+python3 - "$RUNTIME_ENV" "$RUNTIME_ENV_SUBMIT" "$STRICT_MINERVA" <<'PY_RUNTIME_ENV'
+import json
+import sys
+
+import yaml
+
+source, target, strict = sys.argv[1:]
+with open(source) as stream:
+    runtime_env = yaml.safe_load(stream)
+if not isinstance(runtime_env, dict):
+    raise ValueError("RUNTIME_ENV must contain a mapping")
+env_vars = runtime_env.setdefault("env_vars", {})
+if not isinstance(env_vars, dict):
+    raise ValueError("RUNTIME_ENV env_vars must contain a mapping")
+env_vars["VERL_MATH_DAPO_STRICT_MINERVA"] = strict
+with open(target, "w") as stream:
+    json.dump(runtime_env, stream)
+PY_RUNTIME_ENV
 export RAY_ADDRESS
-ray job submit --runtime-env="$RUNTIME_ENV" -- \
+ray job submit --runtime-env="$RUNTIME_ENV_SUBMIT" -- \
   python3 -m examples.real_nvfp4.main_dapo_compat "${HYDRA_ARGS[@]}"

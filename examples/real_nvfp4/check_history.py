@@ -1,3 +1,17 @@
+# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Strict, stdlib-only validation of completed training-step metrics."""
 
 import argparse
@@ -84,9 +98,7 @@ def validate_lines(lines, first_step, last_step):
         rows[step] = fields
     expected = list(range(first_step, last_step + 1))
     if sorted(rows) != expected:
-        raise ValueError(
-            f"missing training steps: expected {expected}, found {sorted(rows)}"
-        )
+        raise ValueError(f"missing training steps: expected {expected}, found {sorted(rows)}")
     return rows
 
 
@@ -107,10 +119,7 @@ def main():
                 "last_step": args.last_step,
                 "validated_steps": len(rows),
                 "max_kl": max(row["rollout_corr/kl"] for row in rows.values()),
-                "min_ess": min(
-                    row["rollout_corr/rollout_is_eff_sample_size"]
-                    for row in rows.values()
-                ),
+                "min_ess": min(row["rollout_corr/rollout_is_eff_sample_size"] for row in rows.values()),
             }
         ),
         flush=True,

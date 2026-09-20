@@ -21,9 +21,11 @@ from omegaconf import DictConfig, OmegaConf
 from verl.single_controller.ray.base import RayResourcePool, split_resource_pool
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.ray_utils import auto_await
+from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import DistillationConfig, DistillationTeacherModelConfig
 from verl.workers.rollout.llm_server import LLMServerClient
 from verl.workers.rollout.replica import get_rollout_replica_class
+from verl.workers.rollout.utils import update_prometheus_config
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -108,6 +110,18 @@ class TeacherModelManager:
         )
         self.server_handles = [server._server_handle for server in self.rollout_replicas]
         self.server_addresses = [server._server_address for server in self.rollout_replicas]
+
+        needs_metrics = rollout_config.prometheus.enable or RLInsightLogger.enabled()
+        if rollout_config.disable_log_stats and needs_metrics:
+            raise ValueError("Metrics monitoring requires disable_log_stats=False, but it is currently True.")
+        if not rollout_config.disable_log_stats and rollout_config.prometheus.enable:
+            update_prometheus_config(rollout_config.prometheus, self.server_addresses, rollout_config.name)
+        if not rollout_config.disable_log_stats and RLInsightLogger.enabled():
+            RLInsightLogger.register_rollout_metrics(
+                self.server_addresses,
+                rollout_config.name,
+                labels=[{"replica": f"teacher_{rank}"} for rank, server in enumerate(self.rollout_replicas)],
+            )
 
     def _validate_replica_node_alignment(self, replica_pools, per_replica_world_size, gpus_per_node):
         """Verify that each replica occupies the expected number of nodes.

@@ -653,7 +653,10 @@ class SGLangHttpServer:
         if self.lora_as_adapter:
             generate_request.lora_path = SGLANG_LORA_NAME
 
-        with RLInsightLogger.trace_state("sglang_generate", state_lane_id=f"replica_{self.replica_rank}"):
+        with RLInsightLogger.trace_state(
+            "sglang_generate",
+            state_lane_id=ray.get_runtime_context().get_actor_name(),
+        ):
             output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
         meta_info = output.get("meta_info", {})
         finish_reason = meta_info.get("finish_reason")
@@ -887,12 +890,21 @@ class SGLangReplica(RolloutReplica):
             else f"{server_address}:{server_port}"
         )
 
-    async def abort_all_requests(self):
+    async def abort_all_requests(self, reject_request: bool = False):
         """Abort all ongoing generation requests on the primary server.
 
         SGLang control RPCs are only served by the node-rank 0 server for a
         multi-node replica, so avoid broadcasting this call to every server.
         """
+        if reject_request:
+            # SGLang blocks new requests inside its own tokenizer manager, so verl has no
+            # admission point to fail them at. Requests routed here after the pause wait
+            # until continue_generation(). TODO: add a verl-side gate in front of
+            # tokenizer_manager.pause_generation() so this replica can reject them too.
+            logger.warning(
+                "SGLang rollout ignores reject_request=True: requests arriving while generation "
+                "is paused will wait for the next resume_generation() instead of failing over."
+            )
         await self.servers[0].abort_all_requests.remote()
 
     async def resume_generation(self):

@@ -1,7 +1,22 @@
-"""Diagnostic-only TE 2.18 row-scaled grouped-GEMM batching candidate.
+# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-No quantizer, scale definition, rounding point or backward changes. Not installed
-in the production image. Unsupported layouts use the original implementation.
+"""Production patch input for TE 2.18 row-scaled grouped-GEMM batching.
+
+patch_te.py verifies this file's hash and extracts batched_row_scaled_gemm into
+TE's installed GEMM module. Unsupported layouts use the original implementation;
+quantizers, scale definitions, rounding points and backward remain unchanged.
 """
 
 from contextlib import contextmanager
@@ -42,9 +57,7 @@ def batched_row_scaled_gemm(
         and len(A) == len(B) == len(m_splits) == len(quantization_params)
         and len(A) > 0
         and all(q is None for q in quantization_params)
-        and all(
-            isinstance(t, NVFP4TensorStorage) and not t._row_scaled_nvfp4 for t in A
-        )
+        and all(isinstance(t, NVFP4TensorStorage) and not t._row_scaled_nvfp4 for t in A)
         and all(isinstance(t, NVFP4TensorStorage) and t._row_scaled_nvfp4 for t in B)
         and out[0].ndim == 2
         and out[0].is_contiguous()

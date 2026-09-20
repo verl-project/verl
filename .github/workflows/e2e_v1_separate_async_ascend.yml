@@ -68,7 +68,7 @@ env:
 jobs:
   e2e_v1_separate_async_fsdp2_ascend:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a3-8
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 60
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -106,11 +106,11 @@ jobs:
       - name: Install the current repository
         run: |
           uv pip install --no-deps -e .
-          uv pip install --no-deps TransferQueue==0.1.8
+          uv pip install --no-deps TransferQueue==0.1.10
       - name: Check final pip list
         run: uv pip list
       - name: Prepare weights
-        run: ln -s /root/.cache/models "${HOME}/models"
+        run: ln -s /root/.cache/modelscope/hub/models "${HOME}/models"
       - name: Prepare GSM8K dataset
         run: python examples/data_preprocess/gsm8k.py --local_dataset_path "${HOME}/.cache/datasets/openai/gsm8k"
       - name: Run V1 separate_async with FSDP2
@@ -121,7 +121,7 @@ jobs:
   e2e_v1_separate_async_megatron_ascend:
     if: github.repository_owner == 'verl-project'
     needs: e2e_v1_separate_async_fsdp2_ascend
-    runs-on: linux-aarch64-a3-8
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 60
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
@@ -159,11 +159,11 @@ jobs:
       - name: Install the current repository
         run: |
           uv pip install --no-deps -e .
-          uv pip install --no-deps TransferQueue==0.1.8
+          uv pip install --no-deps TransferQueue==0.1.10
       - name: Check final pip list
         run: uv pip list
       - name: Prepare weights
-        run: ln -s /root/.cache/models "${HOME}/models"
+        run: ln -s /root/.cache/modelscope/hub/models "${HOME}/models"
       - name: Prepare GSM8K dataset
         run: python examples/data_preprocess/gsm8k.py --local_dataset_path "${HOME}/.cache/datasets/openai/gsm8k"
       - name: Run V1 separate_async with Megatron

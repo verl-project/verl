@@ -4,7 +4,7 @@ set -x
 # the optimized model may not be suitable. In this case, set this value to 0 to disable the optimized model.
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-8B}
-MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/${MODEL_ID}}
 
 SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}" .sh)"
 LOG_DIR=/root/.cache/nightly_log/$SCRIPT_NAME
