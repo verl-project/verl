@@ -24,7 +24,13 @@ from torch.distributed.tensor.placement_types import _StridedShard
 
 from verl.checkpoint_engine.delta_sync.sparse_gather import (
     gather_slot_entries_to_rank0,
+    indexed_dense_gather_group,
     shard_delta_indices,
+)
+from verl.workers.engine.megatron.delta_export import (
+    _block_owner_plan,
+    _local_block_owner_mask,
+    _reduce_cross_block_amax,
 )
 from verl.workers.engine.spec import ShardSpec, derive_dtensor_placement, translate_flat_indices
 
@@ -90,12 +96,48 @@ def _run_case(shape, placements, mesh, dev, rank, si):
     return ok
 
 
+def _run_cross_block_amax_case(dev, rank, world):
+    """Exercise the actual owner exchange, compact MAX, and indexed seed path."""
+    if world != 2:
+        return True
+    # A real column-parallel geometry: a 384-row HF matrix split at row 192.
+    # Since 192 is not aligned to a 128-row quant block, the middle block row
+    # crosses the TP boundary; the first/last block rows remain rank-local.
+    mapped = torch.full((384, 256), float("nan"), dtype=torch.float32, device=dev)
+    mapped[:192] = rank + 1 if rank == 0 else float("nan")
+    if rank == 1:
+        mapped[192:] = 2
+    mask = _local_block_owner_mask(mapped, (128, 128), (384, 256))
+    ((cross, scale_pos),) = _block_owner_plan([mask], dist.group.WORLD, rank)
+    grid = torch.tensor([[1.0, 2.0], [3.0, 4.0], [0.0, 0.0]], device=dev)
+    if rank == 1:
+        grid = torch.tensor([[0.0, 0.0], [30.0, 40.0], [50.0, 60.0]], device=dev)
+    communicated = _reduce_cross_block_amax([grid], [(cross, scale_pos)], dist.group.WORLD)
+    assert communicated == 2 and cross.tolist() == [2, 3]
+
+    local_scale = grid.reshape(-1)[scale_pos.long()]
+    gathered = indexed_dense_gather_group(
+        local_scale,
+        [int(local_scale.numel())],
+        [scale_pos],
+        [6],
+        dist.group.WORLD,
+    )
+    if rank != 0:
+        return True
+    assert torch.equal(gathered[0], torch.tensor([1.0, 2.0, 30.0, 40.0, 50.0, 60.0], device=dev))
+    print("[cross-block amax] communicated=2/6 dense scale cells -> PASS")
+    return True
+
+
 def main():
     dist.init_process_group("nccl")
     rank, world = dist.get_rank(), dist.get_world_size()
     torch.cuda.set_device(rank)
     dev = torch.device("cuda", rank)
     all_ok = True
+
+    all_ok = _run_cross_block_amax_case(dev, rank, world) and all_ok
 
     # 1D FSDP mesh, Shard(0) -- uneven shapes stress the offset math.
     mesh1d = init_device_mesh("cuda", (world,))
