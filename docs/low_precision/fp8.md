@@ -363,7 +363,24 @@ For vLLM, the config maps to `ModelOptMxFp8Config` (weight `fp8_e4m3fn` + `uint8
 path, and vLLM's Marlin/emulation fallbacks allow serving MXFP8 weights on pre-Blackwell
 GPUs (SM80+) — the served weight grid is still produced by TE's quantizer, so
 train-inference weight consistency is preserved regardless of the serving kernel.
-The vLLM MoE (`ModelOptMxFp8FusedMoE`) path is wired but not yet validated end-to-end.
+
+The staging cycle decides per layer whether a refit must go through stage → load → reprocess
+by comparing the live parameters with the checkpoint layout recorded at load. A kernel that
+hands back a *rewritten copy with the checkpoint's shape and dtype* is invisible to that
+comparison. FlashInfer TRT-LLM's MXFP8 MoE prep (`ModelOptMxFp8FusedMoE` on Blackwell: W13→W31
+swap, gate/up row interleave, tile shuffle of weights and scales) is such a kernel, so verl's
+patched `replace_parameter` records the rewrite when it sees it and the layer is staged on every
+refit. Measured on 1×B200 (vLLM 0.24, Qwen3-MoE tiny, TP1): the MoE expert probe read
+rel err 1.739 at the first sync before this record existed and 0.052 with it, same weights
+and inputs; the dense probe was 0.026 both times.
+
+**Known issue, bf16 MoE rollout on Blackwell (independent of MXFP8).** With
+`quantization` unset, vLLM 0.24 auto-selects the FlashInfer TRT-LLM bf16 MoE backend on SM100,
+whose BlockMajorK layout turns `w13_weight` / `w2_weight` into 4-D tensors. verl's bf16 weight
+sync feeds `model.load_weights` per-expert 2-D tensors, which the loader can no longer index
+(`shard_dim=0 is not a valid data dimension for a 3D tensor`). Until the bf16 path gets the same
+staging cycle, pin the layout-preserving backend:
+`+actor_rollout_ref.rollout.engine_kwargs.vllm.moe_backend=triton`.
 
 The weight-sync quantization deliberately uses **TransformerEngine's `MXFP8Quantizer`** —
 the same quantizer the trainer's FP8 GEMMs apply to weights — so the rollout engine serves
