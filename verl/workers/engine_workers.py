@@ -724,14 +724,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         assert "actor" in self.role, "save_checkpoint only support actor role"
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
-    def _offload_actor_after_weight_sync(self, metrics: dict | None) -> dict:
-        """Return Megatron actor parameters to CPU after checkpoint-engine weight sync."""
-        engine = self.actor.engine
-        if self.config.actor.strategy != "megatron" or not engine.is_param_offload_enabled:
-            return metrics or {}
-        engine.to("cpu", model=True, optimizer=False, grad=False)
-        return metrics or {}
-
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None, mode: str = "auto"):
         """Update weights from trainer to rollout.
@@ -764,14 +756,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if effective_mode != "naive":
-            if effective_mode == "delta_sharded":
-                # the delta engine owns the sync state machine (seed vs steady,
-                # snapshot prime), so it drives the training engine itself.
-                metrics = await self.checkpoint_engine.send_weights(self.actor.engine, global_steps=global_steps)
-                return self._offload_actor_after_weight_sync(metrics)
-            per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
-            metrics = await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
-            return self._offload_actor_after_weight_sync(metrics)
+            try:
+                if effective_mode == "delta_sharded":
+                    # the delta engine owns the sync state machine (seed vs steady,
+                    # snapshot prime), so it drives the training engine itself.
+                    metrics = await self.checkpoint_engine.send_weights(self.actor.engine, global_steps=global_steps)
+                else:
+                    per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
+                    metrics = await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
+                return metrics or {}
+            finally:
+                # Some exporters yield views into live model storage. Release the
+                # engine only after the checkpoint backend has finished consuming them.
+                self.actor.engine.finalize_weight_sync()
 
         set_expandable_segments(False)
         get_torch_device().empty_cache()
@@ -790,37 +787,42 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             await self.rollout.resume(tags=["weights"])
         log_gpu_memory_usage("After resume weights", logger=logger)
 
-        # 2. determine if we need a base weight sync (adapter path only)
-        per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
-            layered_summon=self.layered_summon, base_sync_done=True
-        )
-
-        do_lora_base_sync = False
-        if not self.peft_merge and peft_config is not None:
-            self.rollout.sleep_level = 1
-            do_lora_base_sync = not self.base_sync_done
-
-        # 3. sync weights: For SGLang, we need base first (when needed), then adapter/merged
-        if do_lora_base_sync:
-            per_tensor_param_base, _base_peft_config = self.actor.engine.get_per_tensor_param(
-                layered_summon=self.layered_summon, base_sync_done=False
+        try:
+            # 2. determine if we need a base weight sync (adapter path only)
+            per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
+                layered_summon=self.layered_summon, base_sync_done=True
             )
+
+            do_lora_base_sync = False
+            if not self.peft_merge and peft_config is not None:
+                self.rollout.sleep_level = 1
+                do_lora_base_sync = not self.base_sync_done
+
+            # 3. sync weights: For SGLang, we need base first (when needed), then adapter/merged
+            if do_lora_base_sync:
+                per_tensor_param_base, _base_peft_config = self.actor.engine.get_per_tensor_param(
+                    layered_summon=self.layered_summon, base_sync_done=False
+                )
+                await self.rollout.update_weights(
+                    per_tensor_param_base,
+                    peft_config=_base_peft_config,
+                    base_sync_done=False,
+                    global_steps=global_steps,
+                )
+
             await self.rollout.update_weights(
-                per_tensor_param_base, peft_config=_base_peft_config, base_sync_done=False, global_steps=global_steps
+                per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
             )
 
-        await self.rollout.update_weights(
-            per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
-        )
-
-        log_gpu_memory_usage("After update_weights", logger=logger)
-
-        # 3. offload model to cpu
-        if self.actor.engine.is_param_offload_enabled:
-            self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
-        get_torch_device().synchronize()
-        get_torch_device().empty_cache()
-        log_gpu_memory_usage("After offload model to cpu", logger=logger)
+            log_gpu_memory_usage("After update_weights", logger=logger)
+        finally:
+            # SGLang may retain the final bucket after the export generator ends.
+            # Offload only after both base and adapter consumers have returned.
+            if self.actor.engine.is_param_offload_enabled:
+                self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
+            get_torch_device().synchronize()
+            get_torch_device().empty_cache()
+            log_gpu_memory_usage("After offload model to cpu", logger=logger)
 
         # 4. resume kv_cache
         if self.config.rollout.free_cache_engine:

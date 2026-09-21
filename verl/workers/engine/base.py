@@ -160,6 +160,16 @@ class BaseEngine:
         """
         raise NotImplementedError
 
+    def finalize_weight_sync(self) -> None:
+        """Release engine-owned resources after a weight consumer has finished.
+
+        Exporters may yield tensors that alias live model storage, so cleanup must
+        happen after the complete rollout update or checkpoint transfer returns,
+        rather than when the export iterator is merely exhausted. Engines that
+        keep parameters resident during export can override this hook.
+        """
+        return None
+
     def get_per_tensor_param_shard(self, **kwargs) -> tuple[Generator, Optional[dict]]:
         """
         Like :meth:`get_per_tensor_param`, but yields each rank's *local* parameter shard

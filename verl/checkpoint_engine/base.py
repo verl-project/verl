@@ -204,6 +204,9 @@ class CheckpointEngine(ABC):
     ):
         """Send the weights of the model.
 
+        Implementations must consume or copy every input tensor before returning
+        and must not retain views that alias the input tensors after return.
+
         Args:
             weights: A generator that yields the name of the weight tensor and the tensor itself.
             global_steps: Optional trainer step/version associated with this weight update.

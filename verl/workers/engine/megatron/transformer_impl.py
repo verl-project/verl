@@ -1030,6 +1030,11 @@ class MegatronEngine(BaseEngine):
             self._hf_export_tasks = self.bridge.get_conversion_tasks(self.module)
         return self._hf_export_tasks
 
+    def finalize_weight_sync(self) -> None:
+        """Offload only after the weight consumer has released exported tensor views."""
+        if self._is_offload_param:
+            self.to("cpu", model=True, optimizer=False, grad=False)
+
     def get_per_tensor_param(self, base_sync_done=False, **kwargs):
         peft_config = None
         non_merge_lora_sync = self.peft_cls is not None and not self.model_config.lora.get("merge", False)
