@@ -92,6 +92,67 @@ def apply_fast_hadamard_transform_shim():
     )
 
 
+class _MissingFlashAttnCute:
+    """Meta-path finder that reports ``flash_attn.cute`` as an absent module."""
+
+    _PREFIX = "flash_attn.cute"
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == self._PREFIX or fullname.startswith(self._PREFIX + "."):
+            raise ModuleNotFoundError(f"No module named {fullname!r}", name=fullname)
+        return None
+
+
+def neutralize_broken_flash_attn_cute():
+    """Hide ``flash_attn.cute`` when importing it raises anything but ImportError.
+
+    Megatron-LM probes FA4 with ``from flash_attn.cute import flash_attn_varlen_func``
+    guarded by ``except ImportError``. flash-attn 2.8.3 ships that subpackage but
+    declares no ``nvidia-cutlass-dsl`` dependency, and the code targets the 4.5.x
+    API, so against the 4.6.x sglang pins it raises ``AttributeError`` on
+    ``cute.core.ThrMma``. That escapes the guard and aborts
+    ``import megatron.core.transformer.attention`` — i.e. every mcore entry point.
+
+    Probe once and only install the finder when the subpackage is actually broken,
+    so a build whose FA4 does import keeps it. Must run before anything imports
+    megatron's GPT layer specs.
+    """
+    import importlib
+    import importlib.util
+    import logging
+    import sys
+
+    if any(isinstance(finder, _MissingFlashAttnCute) for finder in sys.meta_path):
+        return
+    try:
+        if importlib.util.find_spec("flash_attn.cute") is None:
+            return
+    except Exception:
+        return  # flash-attn absent or unimportable; the probe already sees ImportError
+
+    try:
+        importlib.import_module("flash_attn.cute")
+    except ImportError:
+        return  # already the exception every probe expects
+    except Exception as e:
+        reason = f"{type(e).__name__}: {e}"
+    else:
+        return  # FA4 imports here; leave it usable
+
+    # A failed import can leave half-initialized submodules behind; drop them so
+    # the finder below is what every later import reaches.
+    for name in [n for n in sys.modules if n == "flash_attn.cute" or n.startswith("flash_attn.cute.")]:
+        del sys.modules[name]
+    sys.meta_path.insert(0, _MissingFlashAttnCute())
+
+    logging.getLogger(__name__).warning(
+        "flash_attn.cute (FlashAttention-4) is unusable and is being hidden so optional "
+        "FA4 probes fail with ImportError as they expect; FlashAttention-2 is unaffected. "
+        "Cause: %s",
+        reason,
+    )
+
+
 def apply_patch():
     # DeepSeek sparse-attention (DSA) needs ``fast_hadamard_transform``, which
     # cannot be built on ROCm (its setup requires nvcc). Install a pure-torch
