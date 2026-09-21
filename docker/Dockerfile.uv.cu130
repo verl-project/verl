@@ -1,12 +1,12 @@
 # Build the cu13 (CUDA 13) slice of verl's uv-managed multi-backend image.
 #
 # verl uses one universal uv.lock for the whole project; this Dockerfile
-# builds its cu13 (CUDA 13.0 / torch 2.11) slice. Backends are PEP 621
+# builds its cu13 (CUDA 13.0 / torch 2.13) slice. Backends are PEP 621
 # extras, and mutually exclusive ones are declared in pyproject.toml's
 # [tool.uv].conflicts, so a single committed uv.lock resolves them all:
 #
 #   * cu13.0 (this file, base nvidia/cuda:13.0.2): vllm, sglang, fsdp,
-#     megatron, cpu — all on torch 2.11 / cu130. The `prefetch` below is
+#     megatron, cpu — all on torch 2.13 / cu130. The `prefetch` below is
 #     scoped to `cu130 dev`.
 #   * DEFERRED in pyproject.toml (commented out, re-enable later):
 #     - the cu12.9 / torch-2.9.1 world (veomni, nemoautomodel) — its image
@@ -131,13 +131,13 @@ ARG DEBIAN_FRONTEND=noninteractive
 # cuDNN / NCCL — see https://developer.nvidia.com/cudnn-downloads
 # These ARGs control the apt deb versions installed below and MUST match
 # whatever uv resolves into uv.lock. The backend extras don't pin cuDNN /
-# NCCL — torch's wheel pins them transitively (e.g. torch 2.11.0+cu130 ->
-# nvidia-cudnn-cu13==9.19.0.56, nvidia-nccl-cu13==2.28.9). After bumping a
+# NCCL — torch's wheel pins them transitively (e.g. torch 2.13.0+cu130 ->
+# nvidia-cudnn-cu13==9.20.0.48, nvidia-nccl-cu13==2.29.7). After bumping a
 # torch pin and re-running `python manage_envs.py lock`, grep the resolved
 # versions out of the lockfile and update these ARGs:
 #
 #     grep -E 'nvidia-(cudnn|nccl)-cu13' uv.lock
-ARG NCCL_VERSION=2.28.9-1
+ARG NCCL_VERSION=2.29.7-1
 
 # Source to build from. Override VERL_REF for tags / commits.
 ARG VERL_REPO=https://github.com/verl-project/verl.git
@@ -346,7 +346,7 @@ RUN printf 'verl\n' > README.md
 # mbridge: apex / TransformerEngine / flash-attn and megatron-bridge come prebuilt
 # from the verl wheelhouse index, and vllm / sglang / sglang-kernel come prebuilt
 # from PyPI.
-# The `cu130 dev` scope keeps this image to its torch-2.11 world. (The deferred
+# The `cu130 dev` scope keeps this image to its torch-2.13 world. (The deferred
 # cu12.9 / torch-2.9.1 world is commented out in pyproject.toml.) It passes
 # --no-install-project, so only deps are cached and this
 # layer is independent of the verl source tree. NOTE: unlike every other uv

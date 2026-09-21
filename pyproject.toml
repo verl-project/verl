@@ -16,8 +16,10 @@ requires-python = ">=3.10,<3.13"
 #
 #   uv sync --extra fsdp --extra vllm     # or: python manage_envs.py sync fsdp vllm
 #
-# All backends use torch 2.11.0: vllm/sglang/fsdp/megatron on cu130, cpu on cpu
+# All backends use torch 2.13.0: vllm/sglang/fsdp/megatron on cu130, cpu on cpu
 # wheels (CI/dev). Both torch worlds coexist via [tool.uv].conflicts forks.
+# torchaudio stays at 2.11.0 — its last release, and what vllm 0.29 / sglang
+# 0.5.20 themselves pin alongside torch 2.13.
 # DEFERRED: trtllm (torch 2.10.0+cu130) — its RC sdist makes `uv lock` explode.
 # cuDNN/NCCL: torch's wheel pins them, so after `uv lock` sync CUDNN_VERSION /
 # NCCL_VERSION in docker/Dockerfile.uv.cu130 to the resolved values.
@@ -61,7 +63,7 @@ verl-core = [
     # torchcodec every video sample dies with AttributeError. It reached only
     # the sglang venv (a transitive sglang dep), leaving vllm / fsdp / megatron
     # / cpu broken — hence verl-core. Left unpinned the way sglang has it: it is
-    # ABI-coupled to torch and every extra here pins the same torch 2.11.0.
+    # ABI-coupled to torch and every extra here pins the same torch 2.13.0.
     # Decoding needs FFmpeg's shared libs (`ffmpeg`, docker/Dockerfile.uv.cu130).
     "torchcodec",
     "cachetools",
@@ -73,7 +75,7 @@ verl-core = [
 
 # Pins flash-attn once for the fsdp / megatron parents (wheelhouse-routed below).
 # Don't install alone — needs the parent extra's torch / cuDNN pins.
-flash-attn-cu130torch211 = ["flash-attn==2.8.3"]
+flash-attn-cu130torch213 = ["flash-attn==2.8.3"]
 
 # Pins cupy once for the fsdp / megatron parents. Two unrelated consumers, both
 # on the training side: `ray.util.collective`'s NCCL backend is cupy-based, so
@@ -85,38 +87,38 @@ cupy-cu130 = ["cupy-cuda13x==14.0.1"]
 # ---- inference backends ----------------------------------------------------
 vllm = [
     "verl[verl-core]",
-    "torch==2.11.0",
-    "torchvision==0.26.0",
+    "torch==2.13.0",
+    "torchvision==0.28.0",
     "torchaudio==2.11.0",
-    # PyPI's 0.24.0 wheel is already a cu130 / torch-2.11 abi3 build, so it needs
+    # PyPI's 0.29.0 wheel is already a cu130 / torch-2.13 abi3 build, so it needs
     # no wheelhouse routing and no source build.
-    "vllm==0.24.0",
-    # flashinfer is a transitive dep vllm 0.24 hard-pins to ==0.6.12 (pure-python
+    "vllm==0.29.0",
+    # flashinfer is a transitive dep vllm 0.29 hard-pins to ==0.6.18 (pure-python
     # from PyPI); the wheelhouse's 0.6.13 doesn't match, so it isn't routed.
     "mbridge",
-    # vllm 0.24 needs transformers>=5.5.3; 5.9.0 is the project-wide pin
+    # vllm 0.29 needs transformers>=5.10.4; 5.12.1 is the project-wide pin
     # (enforced in override-dependencies below).
-    "transformers==5.9.0",
+    "transformers==5.12.1",
 ]
 
 sglang = [
     "verl[verl-core]",
-    "torch==2.11.0",
-    "torchvision==0.26.0",
+    "torch==2.13.0",
+    "torchvision==0.28.0",
     "torchaudio==2.11.0",
-    # sglang + sglang-kernel come from PyPI; upstream's 0.5.12 wheels are cu130 /
-    # torch-2.11 builds already (sglang-kernel links libcudart.so.13).
-    "sglang==0.5.12",
-    # sglang pins the kernel itself (==0.4.2.post2); kept explicit so the backend
+    # sglang + sglang-kernel come from PyPI; upstream's 0.5.20 wheels are cu130 /
+    # torch-2.13 builds already (sglang-kernel links libcudart.so.13).
+    "sglang==0.5.20",
+    # sglang pins the kernel itself (==0.4.7); kept explicit so the backend
     # still installs it if a future sglang loosens that pin.
     "sglang-kernel",
     # sglang hard-deps flash-attn-4 but we EXCLUDE it (it collides with the
     # flash-attn 2.8.3 the training extras pin — see override-dependencies); it is
     # imported lazily (fa4 backend only), so the default backends work.
     "mbridge",
-    # sglang 0.5.12 hard-pins transformers==5.6.0; the project-wide override below
-    # replaces that pin with 5.9.0 (5.6.0 is excluded repo-wide, see setup.py).
-    "transformers==5.9.0",
+    # sglang 0.5.20 hard-pins transformers==5.12.1, which is also the project-wide
+    # override below.
+    "transformers==5.12.1",
 ]
 
 # DEFERRED — trtllm is a CUDA-13 backend (torch 2.10.0+cu130, conflict-gated).
@@ -136,16 +138,16 @@ sglang = [
 # ---- training backends -----------------------------------------------------
 fsdp = [
     "verl[verl-core]",
-    "verl[flash-attn-cu130torch211]",
+    "verl[flash-attn-cu130torch213]",
     "verl[cupy-cu130]",
-    "torch==2.11.0",
-    "torchvision==0.26.0",
+    "torch==2.13.0",
+    "torchvision==0.28.0",
     "torchaudio==2.11.0",
     "liger-kernel>=0.8.2",
     "trl==0.27.0",
     "flash-linear-attention==0.5.2",
     # transformers NOT pinned here: verl-core carries it and the project-wide
-    # override below settles the version (5.9.0). See override-dependencies.
+    # override below settles the version (5.12.1). See override-dependencies.
 ]
 
 # apex / TE / flash-attn / megatron-bridge come prebuilt from the wheelhouse;
@@ -153,10 +155,10 @@ fsdp = [
 # undeclared TE import.
 megatron = [
     "verl[verl-core]",
-    "verl[flash-attn-cu130torch211]",
+    "verl[flash-attn-cu130torch213]",
     "verl[cupy-cu130]",
-    "torch==2.11.0",
-    "torchvision==0.26.0",
+    "torch==2.13.0",
+    "torchvision==0.28.0",
     "torchaudio==2.11.0",
     "nvidia-mathdx",
     "apex",
@@ -201,10 +203,10 @@ veomni-sft = ["veomni==0.1.11"]
 # CI / unit tests / dev sanity. No GPU runtime.
 cpu = [
     "verl[verl-core]",
-    "torch==2.11.0",
-    "torchvision==0.26.0",
+    "torch==2.13.0",
+    "torchvision==0.28.0",
     "torchaudio==2.11.0",
-    "transformers==5.9.0",
+    "transformers==5.12.1",
     # Plain source package (torch / numpy / packaging + one pybind11 C++ ext, no
     # CUDA toolchain), and it imports without TE / apex — both are optional there
     # with pure-torch fallbacks. It is what lets the `*_on_cpu.py` tests that
@@ -324,7 +326,7 @@ verl = [
 #     "some-x86-only-pkg ; platform_machine == 'x86_64'",
 #
 # or, for more than one package, as a marker-gated sub-extra (the same
-# convention flash-attn-cu130torch211 / cupy-cu130 use to share a pin):
+# convention flash-attn-cu130torch213 / cupy-cu130 use to share a pin):
 #
 #     megatron-x86_64 = ["pkg-a", "pkg-b"]                      # in the extras
 #     "verl[megatron-x86_64] ; platform_machine == 'x86_64'",   # inside megatron
@@ -347,21 +349,21 @@ conflicts = [
 ]
 
 # Global override pins:
-#   * transformers==5.9.0 project-wide — one version for every backend, so a
+#   * transformers==5.12.1 project-wide — one version for every backend, so a
 #     venv's transformers no longer depends on which engine it was synced with.
 #     Unmarked on purpose: overrides are absolute and replace EVERY requirement
-#     on the package, so this also settles the engines' own pins (vllm 0.24 asks
-#     >=5.5.3, sglang 0.5.12 hard-pins ==5.6.0 — a release excluded repo-wide,
-#     see setup.py). Keep it inside setup.py / requirements.txt's supported
-#     window (>=5.5.3,!=5.6.0,<5.11) and bump all of them together. Do NOT add
+#     on the package, so this also settles the engines' own pins (vllm 0.29 asks
+#     >=5.10.4, sglang 0.5.20 hard-pins ==5.12.1). Keep it inside setup.py /
+#     requirements.txt's supported window (>=5.5.3,!=5.6.0,<5.13) and bump all
+#     of them together. Do NOT add
 #     an `extra` marker back unless a backend truly needs to diverge: such a
 #     marker matches only a requirement verl declares under that extra, never a
 #     transitive one, and a fork no override matches drops transformers outright.
 #   * numpy>=2.0.0 floor.
-#   * kernels>=0.12.0,<0.13 — sglang deps `kernels` unbounded; later releases
-#     broke transformers' hub_kernels.py before (huggingface/transformers#46291),
-#     so pin to transformers 5.9.0's own window (satisfies sglang too) and move
-#     it whenever the transformers pin moves.
+#   * kernels>=0.14.1,<0.15 — sglang 0.5.20's own window. transformers only
+#     bounds `kernels` under extras we don't install (<0.13 there), so without an
+#     override the two forks would drift; pinning sglang's window keeps one
+#     version project-wide. Move it whenever sglang's `kernels` pin moves.
 #   * flash-attn-4 (sglang's hard dep) is DROPPED — its marker is false in every
 #     declared environment, which removes the requirement outright. It ships the
 #     same `flash_attn/cute/` files as flash-attn 2.8.3 (the fsdp / megatron pin),
@@ -374,16 +376,16 @@ conflicts = [
 #     `pip uninstall -y flash-attn-4`; sglang itself only imports fa4 for its
 #     non-default "fa4" attention backend.
 override-dependencies = [
-    "transformers==5.9.0",
+    "transformers==5.12.1",
     "numpy>=2.0.0",
-    "kernels>=0.12.0,<0.13",
+    "kernels>=0.14.1,<0.15",
     "flash-attn-4 ; platform_machine == 'flash-attn-4-excluded'",
     # aarch64 only: nvidia-cusparselt-cu13 0.8.0/0.8.1 ship an internal WHEEL tag
     # of `manylinux2014_sbsa` while the filename says `aarch64`. uv rejects the
     # mismatch and reinstalls the package on EVERY `uv run`; 100+ concurrent Ray
     # workers then race deleting libcusparseLt.so.0 and crash torch import
     # (astral-sh/uv#17711). 0.9.1 fixed the internal tag to `manylinux2014_aarch64`
-    # and moves the lib to nvidia/cu13/lib/, which torch 2.11's _preload_cuda_deps
+    # and moves the lib to nvidia/cu13/lib/, which torch 2.13's _preload_cuda_deps
     # already searches ("nvidia/cuXX/lib since CUDA 13.0"). SONAME stays .so.0.
     # x86_64 keeps 0.8.0 (its tag is correct; no reinstall) to avoid churning a
     # working config.
@@ -434,14 +436,14 @@ requires-dist = []
 name = "TransferQueue"
 requires-dist = []
 
-# Heavy native packages come prebuilt from the verl wheelhouse (cu130 / torch 2.11
+# Heavy native packages come prebuilt from the verl wheelhouse (cu130 / torch 2.13
 # / cp312, built for x86_64 AND aarch64) — no source build here. megatron-bridge
 # rides along (pure-python wheel off the same wheelhouse, so no git clone / build
 # either), and being py3-none-any it is the one wheelhouse component with a single
 # arch-independent build.
 #
 # The inference engines are deliberately NOT routed: upstream publishes cu130 /
-# torch-2.11 wheels for the pinned vllm / sglang / sglang-kernel versions on PyPI,
+# torch-2.13 wheels for the pinned vllm / sglang / sglang-kernel versions on PyPI,
 # so the wheelhouse copies bought nothing (same builds, same download size, same
 # install time) while costing a hash-less index entry. flashinfer stays on PyPI
 # for the same reason — vllm/sglang pin their own and the wheelhouse's 0.6.13
@@ -493,11 +495,11 @@ name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
-# verl wheelhouse: prebuilt cu130 / torch-2.11 / cp312 native wheels, published
+# verl wheelhouse: prebuilt cu130 / torch-2.13 / cp312 native wheels, published
 # side by side for linux_x86_64 and linux_aarch64 (uv picks by platform tag).
 # Only the packages routed above are pulled here (explicit = true); the rest stay
 # on PyPI.
 [[tool.uv.index]]
 name = "verl-wheelhouse"
-url = "https://verl-project.github.io/verl-wheelhouse/cu130/torch2.11/simple/"
+url = "https://verl-project.github.io/verl-wheelhouse/cu130/torch2.13/simple/"
 explicit = true

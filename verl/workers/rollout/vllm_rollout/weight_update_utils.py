@@ -13,8 +13,43 @@
 # limitations under the License.
 
 import torch
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 
 WeightUpdate = tuple[str, torch.Tensor]
+
+
+def tied_embedding_aliases(model: torch.nn.Module) -> set[str]:
+    """Names of tied word-embedding parameters vLLM skips when loading.
+
+    Mirrors vLLM's own alias detection (``_get_tied_embedding_params``): only
+    ``VocabParallelEmbedding`` parameters count, and the first qualname reached
+    by traversal is the canonical one every alias defers to.
+    """
+    canonical: dict[int, str] = {}
+    aliases: set[str] = set()
+    for prefix, submodule in model.named_modules(remove_duplicate=False):
+        if not isinstance(submodule, VocabParallelEmbedding):
+            continue
+        for name, param in submodule.named_parameters(remove_duplicate=False):
+            qualname = f"{prefix}.{name}" if prefix else name
+            if canonical.setdefault(id(param), qualname) != qualname:
+                aliases.add(qualname)
+    return aliases
+
+
+def drop_tied_alias_updates(model: torch.nn.Module, weights: list[WeightUpdate]) -> list[WeightUpdate]:
+    """Drop tied-embedding aliases (e.g. ``lm_head.weight``) from ``weights``.
+
+    ``state_dict()`` on the trainer side lists every qualname of a tied
+    parameter, so a refit bucket can carry ``lm_head.weight`` without the
+    ``model.embed_tokens.weight`` it aliases. vLLM skips the alias and then
+    rejects the bucket because the canonical name never loaded in it. The alias
+    is the same storage, so dropping it loses nothing.
+    """
+    aliases = tied_embedding_aliases(model)
+    if not aliases:
+        return weights
+    return [(name, tensor) for name, tensor in weights if name not in aliases]
 
 
 def split_buffer_updates(
