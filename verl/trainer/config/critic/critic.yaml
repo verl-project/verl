@@ -90,7 +90,7 @@ profiler:
   _target_: verl.utils.profiler.ProfilerConfig
 
   # profiler tool, default same as profiler.tool in global config
-  # choices: nsys, npu, torch, torch_memory
+  # choices: nsys, npu, torch, torch_memory, memray, precision_debugger
   tool: ${oc.select:global_profiler.tool,null}
 
   # whether enable profile on Critic
@@ -207,6 +207,15 @@ profiler:
 
       # Number of profiled RL steps to retain before dumping a memory snapshot.
       memory_snapshot_num_steps: ${oc.select:global_profiler.global_tool_config.torch_memory.memory_snapshot_num_steps,1}
+
+    # Memray native allocation profiler config
+    memray:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.MemrayToolConfig
+
+      # Number of profiled RL steps to include in one Memray trace.
+      memory_snapshot_num_steps: ${oc.select:global_profiler.global_tool_config.memray.memory_snapshot_num_steps,1}
 
     # msprobe precision debugger config
     precision_debugger:

@@ -27,6 +27,7 @@ requires-python = ">=3.10,<3.13"
 test          = ["pytest", "pre-commit", "py-spy", "pytest-asyncio", "pytest-rerunfailures"]
 math          = ["math-verify"]
 mcore         = ["mbridge"]
+memray        = ["memray>=1.19"]
 
 # Shared runtime deps, included by every backend via `verl[verl-core]`.
 verl-core = [

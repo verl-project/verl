@@ -41,6 +41,7 @@ from verl.utils.import_utils import import_external_libs
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.metric.utils import Metric
 from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage
+from verl.utils.profiler.config import build_role_profiler_tool_config
 from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
@@ -485,12 +486,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             omega_profiler_config = config.ref.get("profiler", {})
 
         profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
-        if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch", "torch_memory", "precision_debugger"]:
-            tool_config = omega_conf_to_dataclass(
-                omega_profiler_config.get("tool_config", {}).get(omega_profiler_config.get("tool"))
-            )
-        else:
-            tool_config = None
+        tool_config = build_role_profiler_tool_config(omega_profiler_config)
 
         # Router replay is supported on the megatron engine and on the veomni
         # engine. Both expose `router_replay` on their per-strategy engine

@@ -52,6 +52,7 @@ PRIME_REQUIRES = []
 GEO_REQUIRES = ["mathruler", "torchvision", "qwen_vl_utils"]
 GPU_REQUIRES = ["liger-kernel>=0.8.2", "flash-attn"]
 MATH_REQUIRES = ["math-verify"]  # Add math-verify as an optional dependency
+MEMRAY_REQUIRES = ["memray>=1.19"]
 VLLM_REQUIRES = ["tensordict>=0.8.0,<=0.10.0,!=0.9.0", "vllm>=0.18.0"]
 TRTLLM_REQUIRES = ["tensorrt-llm>=1.2.0rc6"]
 SGLANG_REQUIRES = [
@@ -69,6 +70,7 @@ extras_require = {
     "geo": GEO_REQUIRES,
     "gpu": GPU_REQUIRES,
     "math": MATH_REQUIRES,
+    "memray": MEMRAY_REQUIRES,
     "vllm": VLLM_REQUIRES,
     "sglang": SGLANG_REQUIRES,
     "trl": TRL_REQUIRES,

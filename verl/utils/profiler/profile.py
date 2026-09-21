@@ -93,6 +93,7 @@ class DistProfiler:
     - npu: NPUProfiler (Ascend)
     - torch: PyTorch torch.profiler wrapper
     - torch_memory: Torch CUDA/NPU memory snapshot dump
+    - memray: native process-allocation trace
     - precision_debugger: msprobe precision debugger
     """
 
@@ -169,6 +170,10 @@ class DistProfiler:
             from .torch_memory_profile import TorchMemoryProfiler
 
             self._impl = TorchMemoryProfiler(rank=rank, config=config, tool_config=tool_config)
+        elif self._tool == "memray":
+            from .memray_profile import MemrayProfiler
+
+            self._impl = MemrayProfiler(rank=rank, config=config, tool_config=tool_config)
         elif self._tool == "precision_debugger":
             from .precision_debugger_profile import PrecisionDebuggerProfiler as _Precision
 
