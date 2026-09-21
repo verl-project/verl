@@ -45,11 +45,28 @@ def drop_tied_alias_updates(model: torch.nn.Module, weights: list[WeightUpdate])
     ``model.embed_tokens.weight`` it aliases. vLLM skips the alias and then
     rejects the bucket because the canonical name never loaded in it. The alias
     is the same storage, so dropping it loses nothing.
+
+    ``aliases`` holds vLLM qualnames, while ``weights`` arrives in checkpoint
+    naming, so names go through the model's ``hf_to_vllm_mapper`` first — the
+    same order ``AutoWeightsLoader.load_weights`` uses. Without it a wrapped
+    model never matches: Qwen3.5-VL sends ``lm_head.weight`` for what vLLM calls
+    ``language_model.lm_head.weight``.
     """
     aliases = tied_embedding_aliases(model)
     if not aliases:
         return weights
-    return [(name, tensor) for name, tensor in weights if name not in aliases]
+
+    mapper = getattr(model, "hf_to_vllm_mapper", None)
+
+    def is_alias(name: str) -> bool:
+        if mapper is not None:
+            # An empty result means the mapper drops the weight outright; leave
+            # that to vLLM rather than treating it as an alias.
+            mapped = mapper.apply_list([name])
+            name = mapped[0] if mapped else name
+        return name in aliases
+
+    return [(name, tensor) for name, tensor in weights if not is_alias(name)]
 
 
 def split_buffer_updates(

@@ -219,6 +219,11 @@ class _FakeModel:
         del remove_duplicate
         yield from self._params.items()
 
+    def named_modules(self, remove_duplicate: bool = False):
+        # Flat fake: only the root, so tied-embedding alias detection finds nothing.
+        del remove_duplicate
+        yield "", self
+
     def named_buffers(self):
         return iter(())
 
@@ -730,3 +735,77 @@ def test_update_weights_from_ipc_standard_loads_per_bucket(monkeypatch):
     worker.update_weights_from_ipc(peft_config=None, base_sync_done=False)
 
     assert loaded == ["q.weight", "k.weight"]
+
+
+class _FakeTiedModel:
+    """Two qualnames over one shared embedding parameter, as tied models expose."""
+
+    def __init__(self, shared: torch.Tensor, prefix: str = "", mapper=None):
+        from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+
+        # Bypass __init__: it needs a distributed TP group we do not have here.
+        self._embed = object.__new__(VocabParallelEmbedding)
+        self._embed.named_parameters = lambda remove_duplicate=False: iter([("weight", shared)])
+        self._other = torch.nn.Linear(1, 1)
+        self._prefix = prefix
+        if mapper is not None:
+            self.hf_to_vllm_mapper = mapper
+
+    def named_modules(self, remove_duplicate: bool = False):
+        del remove_duplicate
+        yield "", self
+        yield f"{self._prefix}model.embed_tokens", self._embed
+        yield f"{self._prefix}lm_head", self._embed
+        yield "other", self._other
+
+
+def test_tied_embedding_aliases_keeps_first_qualname_canonical():
+    """The first traversed qualname wins; later ones are reported as aliases."""
+    pytest.importorskip("vllm")
+    from verl.workers.rollout.vllm_rollout.weight_update_utils import tied_embedding_aliases
+
+    model = _FakeTiedModel(torch.zeros(2))
+
+    # model.embed_tokens is reached first, so only lm_head is an alias.
+    assert tied_embedding_aliases(model) == {"lm_head.weight"}
+
+
+def test_drop_tied_alias_updates_removes_only_the_alias():
+    """vLLM 0.29 rejects a bucket carrying just the alias, so the alias is dropped."""
+    pytest.importorskip("vllm")
+    from verl.workers.rollout.vllm_rollout.weight_update_utils import drop_tied_alias_updates
+
+    model = _FakeTiedModel(torch.zeros(2))
+    updates = [("lm_head.weight", torch.ones(2)), ("q.weight", torch.ones(1))]
+
+    assert [name for name, _ in drop_tied_alias_updates(model, updates)] == ["q.weight"]
+
+
+def test_drop_tied_alias_updates_passes_untied_models_through():
+    """No tied embedding means nothing is filtered."""
+    pytest.importorskip("vllm")
+    from verl.workers.rollout.vllm_rollout.weight_update_utils import drop_tied_alias_updates
+
+    model = _FakeModel({"q.weight": torch.empty(0)})
+    updates = [("q.weight", torch.ones(1)), ("lm_head.weight", torch.ones(2))]
+
+    assert drop_tied_alias_updates(model, updates) == updates
+
+
+def test_drop_tied_alias_updates_maps_checkpoint_names_before_matching():
+    """Wrapped models name the alias differently than the checkpoint does.
+
+    Qwen3.5-VL sends ``lm_head.weight`` for what vLLM calls
+    ``language_model.lm_head.weight``; matching raw names misses it and vLLM then
+    rejects the bucket.
+    """
+    pytest.importorskip("vllm")
+    from vllm.model_executor.models.utils import WeightsMapper
+
+    from verl.workers.rollout.vllm_rollout.weight_update_utils import drop_tied_alias_updates
+
+    mapper = WeightsMapper(orig_to_new_prefix={"lm_head.": "language_model.lm_head."})
+    model = _FakeTiedModel(torch.zeros(2), prefix="language_model.", mapper=mapper)
+    updates = [("lm_head.weight", torch.ones(2)), ("q.weight", torch.ones(1))]
+
+    assert [name for name, _ in drop_tied_alias_updates(model, updates)] == ["q.weight"]
