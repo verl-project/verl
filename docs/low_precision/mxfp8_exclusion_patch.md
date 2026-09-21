@@ -5,9 +5,11 @@ Last updated: 09/18/2026
 ## Status and scope
 
 The parser/matcher patches are registered in `build_fp8_method_patchers()` and
-installed through the existing `apply_vllm_quant_patches()` lifecycle. This does
-not add CUDA MXFP8 rollout support to `main`: the MXFP8 feature branch must still
-mark its generated configs explicitly. Without that marker behavior is unchanged.
+installed through the existing `apply_vllm_quant_patches()` lifecycle. verl marks
+the mxfp8 `quantization_config` it generates for online rollout with
+`_verl_exact_mxfp8_exclusions: true` in `vLLMHttpServer._apply_quantization`, so the
+strict matcher is active for that config. Unmarked configs (checkpoints, other
+quantization methods) keep vLLM's original matching unchanged.
 
 vLLM 0.24's `ModelOptQuantConfigBase.is_layer_excluded()` includes a legacy
 substring fallback. A router exclusion such as `model.layers.0.mlp.gate` also
@@ -23,9 +25,9 @@ base class, other quantization classes, and `get_quant_method()` are untouched.
 
 ## Integration contract for the MXFP8 feature branch
 
-1. Only when verl itself generates an online MXFP8 HF quantization config, add
-   `_verl_exact_mxfp8_exclusions: true`. Do not add this marker to loaded user or
-   checkpoint configs. Keep all real router/high-precision exclusions; this helper
+1. verl adds `_verl_exact_mxfp8_exclusions: true` only to the online MXFP8 HF
+   quantization config it generates itself (`_apply_quantization`, mxfp8 branch). Do
+   not add this marker to loaded user or checkpoint configs. Keep all real router/high-precision exclusions; this helper
    fixes matching, not router discovery across model architectures.
 2. Install the common patches BEFORE vLLM parses that raw HF config. The parser
    wrapper explicitly saves the boolean marker; upstream normalization need not

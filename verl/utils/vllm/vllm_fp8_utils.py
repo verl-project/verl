@@ -38,6 +38,8 @@ from unittest.mock import patch
 import torch
 from packaging import version
 
+from verl.utils.vllm.mxfp8_exclusion_patch import build_mxfp8_exclusion_patchers
+
 logger = logging.getLogger(__name__)
 
 
@@ -459,8 +461,6 @@ def build_fp8_method_patchers(vllm_version):
         # ModelOpt's legacy substring exclusion can mistake a router's "gate"
         # for the dense "gate_up_proj". Only explicitly marked, verl-generated
         # MXFP8 configs use strict matching; checkpoint configs keep the original.
-        from verl.utils.vllm.mxfp8_exclusion_patch import build_mxfp8_exclusion_patchers
-
         patchers.extend(build_mxfp8_exclusion_patchers())
 
         # ModelOpt MXFP8 (CUDA): kernel post-processing swizzles weight_scale

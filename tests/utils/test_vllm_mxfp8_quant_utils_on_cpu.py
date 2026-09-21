@@ -22,7 +22,9 @@ right, each checked here without a GPU or a real vLLM:
    the ModelOpt name ``<weight>_scale`` (blockwise fp8 uses ``_scale_inv``).
 3. ``build_fp8_method_patchers`` (vLLM >= 0.20) wraps the two ModelOpt MXFP8 quant methods, so a
    layer whose kernel rewrites ``weight_scale`` at load records its checkpoint layout and can be
-   staged / re-processed on refit exactly like the blockwise fp8 layers.
+   staged / re-processed on refit exactly like the blockwise fp8 layers. It also registers the two
+   opt-in exclusion patchers (``ModelOptMxFp8Config.from_config`` / ``is_layer_excluded``), so six
+   patchers in total.
 """
 
 import importlib.util
@@ -69,7 +71,16 @@ class _StubVllm:
             pass
 
         class ModelOptMxFp8Config(_FakeQuantConfig):
-            pass
+            # The exclusion patchers wrap these two methods on the class, so the stub must carry them.
+            exclude_modules: list = []
+            packed_modules_mapping: dict = {}
+
+            @classmethod
+            def from_config(cls, config):
+                return cls()
+
+            def is_layer_excluded(self, prefix):
+                return False
 
         def _noop_process(self, layer):
             pass
@@ -184,7 +195,7 @@ def test_modelopt_mxfp8_methods_are_patched_and_survive_a_refit():
     with _StubVllm() as stub:
         patchers = module.build_fp8_method_patchers(version.parse("0.24.0"))
         targets = {p.attribute for p in patchers}
-        assert len(patchers) == 4 and targets == {"process_weights_after_loading"}
+        assert len(patchers) == 6 and targets == {"process_weights_after_loading", "from_config", "is_layer_excluded"}
         for p in patchers:
             p.start()
         try:
