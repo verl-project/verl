@@ -48,6 +48,11 @@ on:
       # Entrypoints
       - ".github/workflows/reward_model_sglang.yml"
       - "tests/experimental/reward_loop/**"
+      # Dependency changes: this job runs `uv run --frozen`, so the lock IS
+      # the environment under test - a resolution change must be validated
+      # even when it touches no .py file.
+      - "pyproject.toml"
+      - "uv.lock"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
