@@ -1,7 +1,7 @@
 SkipManager: Skip everything in the RL pipeline.
-===========
+================================================
 
-Last updated: 2026-07-08
+Last updated: 2026-09-03
 
 .. contents:: :local:
    :depth: 1
@@ -16,7 +16,7 @@ debugging and experimentation.
 
 Skip behavior is centralized under the top-level Hydra key ``skip``. Modules register by **role**
 (for example ``"rollout"``, ``"rollout_tq"``, or ``"async_rollout"``) and are attached with
-@SkipManager.annotate(role=...) (or ``@SkipManager.annotate_tq(role=..., phase=...)`` for the
+``@SkipManager.annotate(role=...)`` (or ``@SkipManager.annotate_tq(role=..., phase=...)`` for the
 V1 two-phase path). Each role declares which integer **steps** in config are eligible for skip
 logic. **Today only rollout-related roles are implemented**; the same mechanism can be extended to
 other pipeline stages (see section 6).
@@ -46,11 +46,11 @@ Supported entry points today
    * - Training entry
      - Skip role / config
      - Status
-   * - ``main_ppo.py`` with trainer.use_v1=False (``RayPPOTrainer``)
+   * - ``main_ppo.py`` with ``trainer.use_v1=False`` (``RayPPOTrainer``)
      - ``skip.rollout``
      - **Supported**
-   * - main_ppo.py with trainer.use_v1=True (V1 PPOTrainer + TransferQueue)
-     - ``skip.rollout_tq
+   * - ``main_ppo.py`` with ``trainer.use_v1=True`` (V1 ``PPOTrainer`` + TransferQueue)
+     - ``skip.rollout_tq``
      - **Supported** (see section 4)
    * - ``fully_async_main`` (``FullyAsyncRollouter``)
      - ``skip.async_rollout``
@@ -58,7 +58,7 @@ Supported entry points today
 
 
 2. Configuration (``skip.rollout`` / ``skip.rollout_tq`` / ``skip.async_rollout``)
----------------------------------------------------------------------
+----------------------------------------------------------------------------------
 
 All three roles use the same Hydra field set (``RolloutSkipConfig`` /
 ``RolloutTqSkipConfig`` / ``AsyncRolloutSkipConfig`` in ``verl/utils/skip/config.py``). Defaults
@@ -73,7 +73,7 @@ Parameters
   function always runs normally.
 
   - For ``skip.rollout``: trainer **global_steps** (via ``SkipManager.set_step``).
-  - For ``skip.rollout_tq: trainer **global_steps** (via ``SkipManager.set_step``).
+  - For ``skip.rollout_tq``: trainer **global_steps** (via ``SkipManager.set_step``).
   - For ``skip.async_rollout``: the feed-order index parsed from ``sample_id`` (see section 5) —
     **not** trainer ``global_steps``.
 
@@ -211,16 +211,16 @@ mechanism runs.
 3. Rollout quick start (``rollout`` role)
 -----------------------------------------
 
-Use ``skip.rollout`` when training with main_ppo.py and trainer.use_v1=False
-(RayPPOTrainer) and the standard ``AgentLoopManager.generate_sequences`` path. Configuration
+Use ``skip.rollout`` when training with ``main_ppo.py`` and ``trainer.use_v1=False``
+(``RayPPOTrainer``) and the standard ``AgentLoopManager.generate_sequences`` path. Configuration
 fields and ``cache`` / ``repeat`` semantics are in section 2.
 
 **Wiring**
 
-- RayPPOTrainer.fit() calls SkipManager.init(self.config) and
-  SkipManager.set_step(self.global_steps) each training step.
-- AgentLoopManager.generate_sequences is decorated with
-  @SkipManager.annotate(role="rollout").
+- ``RayPPOTrainer.fit()`` calls ``SkipManager.init(self.config)`` and
+  ``SkipManager.set_step(self.global_steps)`` each training step.
+- ``AgentLoopManager.generate_sequences`` is decorated with
+  ``@SkipManager.annotate(role="rollout")``.
 
 The decorated function is a single entry point: it receives prompts, drives full-batch generation
 (chunk dispatch, concat, timing), and returns the complete DataProto. Skip logic wraps this
@@ -231,9 +231,9 @@ cache-miss it runs generation and dumps the result.
 4. Trainer V1 quick start (``rollout_tq`` role)
 ---------------------------------------------------
 
-Use skip.rollout_tq when training with main_ppo.py and trainer.use_v1=True
-(V1 PPOTrainer + TransferQueue). This covers all V1 trainer modes: sync,
-colocate_async, and separate_async.
+Use ``skip.rollout_tq`` when training with ``main_ppo.py`` and ``trainer.use_v1=True``
+(V1 ``PPOTrainer`` + TransferQueue). This covers all V1 trainer modes: ``sync``,
+``colocate_async``, and ``separate_async``.
 
 .. important::
 
@@ -241,30 +241,30 @@ colocate_async, and separate_async.
    generate_sequences entry point. Rollout is split across two methods that run at different
    points in the training step:
 
-   - **Submit phase** — PPOTrainer._add_batch_to_generate: samples a batch from the dataloader,
+   - **Submit phase** — ``PPOTrainer._add_batch_to_generate``: samples a batch from the dataloader,
      assigns uids, and dispatches prompts to the AgentLoopManager for generation.
-   - **Sample phase** — ReplayBuffer.sample: waits for trajectories to finish, then collects
-     them from TQ into a KVBatchMeta.
+   - **Sample phase** — ``ReplayBuffer.sample``: waits for trajectories to finish, then collects
+     them from TQ into a ``KVBatchMeta``.
 
    A single decorator cannot cover both because the cache-hit short-circuit must happen *inside*
    the submit phase — after uid generation (needed for key mapping) but before real rollout
    submission (which we want to skip). The solution is SkipManager.annotate_tq, a two-phase
-   decorator selected by phase="submit" or phase="sample".
+   decorator selected by ``phase="submit"`` or ``phase="sample"``.
 
 Wiring
 ~~~~~~
 
-- PPOTrainer.fit() calls SkipManager.init(self.config) and
-  SkipManager.set_step(self.global_steps) each training step.
-- PPOTrainer._add_batch_to_generate is decorated with
-  @SkipManager.annotate_tq(role="rollout_tq", phase="submit").
-- ReplayBuffer.sample is decorated with
-  @SkipManager.annotate_tq(role="rollout_tq", phase="sample").
+- ``PPOTrainer.fit()`` calls ``SkipManager.init(self.config)`` and
+  ``SkipManager.set_step(self.global_steps)`` each training step.
+- ``PPOTrainer._add_batch_to_generate`` is decorated with
+  ``@SkipManager.annotate_tq(role="rollout_tq", phase="submit")``.
+- ``ReplayBuffer.sample`` is decorated with
+  ``@SkipManager.annotate_tq(role="rollout_tq", phase="sample")``.
 
 Method splitting
 ~~~~~~~~~~~~~~~~~
 
-To give the submit-phase decorator a clean interception window, _add_batch_to_generate is
+To give the submit-phase decorator a clean interception window, ``_add_batch_to_generate`` is
 split into two sub-methods:
 
 .. code-block:: python
@@ -282,9 +282,9 @@ split into two sub-methods:
        """Register prompt tags in TransferQueue and dispatch to AgentLoopManager."""
        ...
 
-When skip is **disabled** or the current step is outside skip.rollout_tq.steps, the decorator
-passes through and the function body runs normally (_next_train_batch then
-_submit_batch_to_rollout).
+When skip is **disabled** or the current step is outside ``skip.rollout_tq.steps``, the decorator
+passes through and the function body runs normally (``_next_train_batch`` then
+``_submit_batch_to_rollout``).
 
 When skip is **enabled** and the step is eligible, the decorator takes over and the function body
 does not execute. Instead the decorator calls _next_train_batch itself (keeping the dataloader
@@ -425,7 +425,7 @@ them up on the next call and returns a KVBatchMeta whose data is the injected ca
 5. Fully async quick start (``async_rollout`` role)
 ---------------------------------------------------
 
-In :doc:`advance/fully_async`, Trainer and Rollouter run in separate processes. Rollout generation
+In :doc:`fully_async`, Trainer and Rollouter run in separate processes. Rollout generation
 happens on the Rollouter via streaming single-sample dispatch. Use ``skip.async_rollout`` (not
 ``skip.rollout``) when launching ``fully_async_main``. Shared Hydra fields and on-disk layout are
 in section 2.
@@ -463,8 +463,8 @@ SkipManager API
 
 - **``init(config)``**: Parse ``config.skip`` into ``SkipManagerConfig``, instantiate one skip module
   per registered role, and store them in ``SkipManager.skip_instances``.
-- **``set_step(step: int)``**: Set ``SkipManager.step`` for roles with ``support_online_step =
-  False`` (trainer ``global_steps`` in ``main_ppo`` and V1 ``PPOTrainer``).
+- **``set_step(step: int)``**: Set ``SkipManager.step`` for roles with
+  ``support_online_step = False`` (trainer ``global_steps`` in ``main_ppo`` and V1 ``PPOTrainer``).
 - **``annotate(role, **kwargs)``**: Decorator factory for sync or async functions (used by
   ``rollout`` and ``async_rollout``).
 - **``annotate_tq(role, phase)``**: Two-phase decorator factory for the V1 TransferQueue path
@@ -536,13 +536,13 @@ Intercepted functions
      - ``verl/experimental/agent_loop/agent_loop.py``
      - ``SkipManager.set_step`` -> trainer ``global_steps``
    * - ``rollout_tq``
-     - PPOTrainer._add_batch_to_generate (phase="submit")
-     - verl/trainer/ppo/v1/trainer_base.py
-     - SkipManager.set_step -> trainer global_steps
+     - ``PPOTrainer._add_batch_to_generate`` (``phase="submit"``)
+     - ``verl/trainer/ppo/v1/trainer_base.py``
+     - ``SkipManager.set_step`` -> trainer ``global_steps``
    * - ``rollout_tq``
-     - ReplayBuffer.sample (phase="sample")
-     - verl/trainer/ppo/v1/replay_buffer.py
-     - SkipManager.set_step -> trainer ``global_steps``
+     - ``ReplayBuffer.sample`` (``phase="sample"``)
+     - ``verl/trainer/ppo/v1/replay_buffer.py``
+     - ``SkipManager.set_step`` -> trainer ``global_steps``
    * - ``async_rollout``
      - ``FullyAsyncAgentLoopManager.generate_sequences_single``
      - ``verl/experimental/fully_async_policy/fully_async_rollouter.py``
@@ -579,5 +579,5 @@ Extending with custom skip modules
 4. Attach ``@SkipManager.annotate(role="your_role_name")``. For concurrent pipelines, prefer
    ``support_online_step = True`` and pass step identity through call arguments.
 5. For split-architecture paths (like V1's submit/sample separation), use
-   @SkipManager.annotate_tq(role=..., phase=...) and split the target method so the decorator
+   ``@SkipManager.annotate_tq(role=..., phase=...)`` and split the target method so the decorator
    can intercept between the two sub-steps.
