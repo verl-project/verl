@@ -842,6 +842,10 @@ def compute_rloo_vectorized_outcome_advantage(
     """
     Compute advantage for RLOO based on https://arxiv.org/abs/2402.14740
 
+    Vectorized equivalent of :func:`compute_rloo_outcome_advantage`, including its
+    handling of singleton groups: the leave-one-out baseline is undefined for a group
+    of one, so such a score is passed through unchanged rather than zeroed.
+
     Args:
         token_level_rewards: `(torch.Tensor)`
             shape: (bs, response_length)
@@ -858,10 +862,11 @@ def compute_rloo_vectorized_outcome_advantage(
     scores = token_level_rewards.sum(dim=-1)
 
     with torch.no_grad():
-        inv = torch.from_numpy(np.unique(index, return_inverse=True)[1]).to(scores.device)
+        inv = as_torch_index(index, device=scores.device)
 
         c = torch.bincount(inv)[inv].to(scores.dtype)
-        adv = ((c * scores - torch.bincount(inv, weights=scores)[inv]) / (c - 1).clamp_min(1)) * (c > 1)
+        leave_one_out = (c * scores - torch.bincount(inv, weights=scores)[inv]) / (c - 1).clamp_min(1)
+        adv = torch.where(c > 1, leave_one_out, scores)
 
         adv = adv.unsqueeze(-1) * response_mask
 
