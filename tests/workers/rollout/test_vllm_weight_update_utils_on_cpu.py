@@ -22,12 +22,48 @@ import torch
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
+def _vocab_parallel_embedding_stubs():
+    """Stubs standing in for vLLM's ``VocabParallelEmbedding``, or {} if vLLM is real.
+
+    ``weight_update_utils`` imports that class at module scope for tied-alias
+    detection, so loading it on CPU needs a placeholder. This file only exercises
+    the buffer helpers, which never touch it.
+    """
+    try:
+        importlib.import_module("vllm.model_executor.layers.vocab_parallel_embedding")
+    except ImportError:
+        pass
+    else:
+        return {}
+
+    names = [
+        "vllm",
+        "vllm.model_executor",
+        "vllm.model_executor.layers",
+        "vllm.model_executor.layers.vocab_parallel_embedding",
+    ]
+    stubs = {name: sys.modules.get(name) or types.ModuleType(name) for name in names}
+    stubs[names[-1]].VocabParallelEmbedding = type("VocabParallelEmbedding", (), {})
+    return stubs
+
+
 def _load_weight_update_utils():
     module_path = _REPO_ROOT / "verl/workers/rollout/vllm_rollout/weight_update_utils.py"
     spec = importlib.util.spec_from_file_location("weight_update_utils", module_path)
     module = importlib.util.module_from_spec(spec)
     assert spec is not None and spec.loader is not None
-    spec.loader.exec_module(module)
+
+    stubs = _vocab_parallel_embedding_stubs()
+    saved = {name: sys.modules.get(name) for name in stubs}
+    try:
+        sys.modules.update(stubs)
+        spec.loader.exec_module(module)
+    finally:
+        for name, prev in saved.items():
+            if prev is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = prev
     return module
 
 
