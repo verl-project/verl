@@ -272,9 +272,6 @@ TRAINER=(
 if [[ "$RESUME_MODE" = resume_path ]]; then
   TRAINER+=(trainer.resume_from_path="$RESUME_FROM_PATH")
 fi
-if [[ -n "${NVFP4_VALIDATION_DUMP_DIR:-}" ]]; then
-  TRAINER+=(+trainer.nvfp4_validation_dump_dir="$NVFP4_VALIDATION_DUMP_DIR")
-fi
 if [[ -n "$VERL_WANDB_RUN_ID" ]]; then
   TRAINER+=(
     +trainer.wandb_run_id="$VERL_WANDB_RUN_ID"

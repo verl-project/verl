@@ -613,23 +613,6 @@ class RayPPOTrainer:
         # The subsequent update_weights wakes replicas for the next update.
         self._rollout_asleep_for_reward = False
 
-    def _dump_paired_validation(self, batch):
-        directory = self.config.trainer.get("nvfp4_validation_dump_dir", None)
-        if not directory:
-            return
-        correction = self.config.algorithm.get("rollout_correction", None)
-        if correction and correction.get("bypass_mode", False):
-            raise ValueError("paired log-prob validation requires recomputed actor log-probs; bypass_mode is invalid")
-        from verl.utils.real_nvfp4.validation import dump_paired_log_probs
-
-        dump_paired_log_probs(
-            batch,
-            directory,
-            self.global_steps,
-            self.config.actor_rollout_ref.model.path,
-            actor_log_probs_source="recomputed",
-        )
-
     def _validate(self, merged: bool = False):
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
@@ -1610,14 +1593,6 @@ class RayPPOTrainer:
         self._data_batches_consumed = 0
         self._rollout_asleep_for_reward = False
 
-        correction = self.config.algorithm.get("rollout_correction", None)
-        if (
-            self.config.trainer.get("nvfp4_validation_dump_dir", None)
-            and correction
-            and correction.get("bypass_mode", False)
-        ):
-            raise ValueError("paired log-prob validation requires recomputed actor log-probs; bypass_mode is invalid")
-
         # load checkpoint and update weights before doing anything
         self._load_checkpoint()
         self.checkpoint_manager.update_weights(self.global_steps)
@@ -1904,7 +1879,6 @@ class RayPPOTrainer:
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
 
-                    self._dump_paired_validation(batch)
                     if self.use_reference_policy:
                         # compute reference log_prob
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):

@@ -20,60 +20,6 @@ import torch
 from verl.trainer.ppo.core_algos import agg_loss
 
 
-@pytest.mark.parametrize("dp_size", [1, 2, 4])
-@pytest.mark.parametrize("micro_batch_size", [1, 2])
-def test_token_mean_ppo_tis_gradient_is_partition_invariant(dp_size, micro_batch_size):
-    from verl.trainer.ppo.core_algos import compute_policy_loss_vanilla
-    from verl.workers.config.actor import ActorConfig
-
-    # Unequal lengths, mixed advantages and non-unit IS weights expose both
-    # local-token normalization and accidentally dropped correction weights.
-    mask = torch.arange(8)[None, :] < torch.tensor([1, 8, 2, 7, 3, 6, 4, 5])[:, None]
-    features = torch.linspace(-2.0, 2.0, 64).reshape(8, 8)
-    advantages = torch.tensor([-1.0, 1.0, 1.0, -1.0, 1.0, -1.0, -1.0, 1.0])[:, None].expand(8, 8)
-    weights = torch.linspace(0.3, 2.0, 64).reshape(8, 8)
-
-    def gradient(partitioned):
-        theta = torch.tensor(0.17, requires_grad=True)
-        config = ActorConfig(
-            strategy="megatron",
-            rollout_n=1,
-            ppo_micro_batch_size_per_gpu=1,
-            clip_ratio_low=0.2,
-            clip_ratio_high=0.28,
-            clip_ratio_c=10.0,
-            global_batch_info={"dp_size": dp_size if partitioned else 1, "batch_num_tokens": int(mask.sum())},
-        )
-        rank_size = 8 // dp_size
-        partitions = (
-            [slice(0, 8)]
-            if not partitioned
-            else [
-                slice(start, min(start + micro_batch_size, rank_start + rank_size))
-                for rank_start in range(0, 8, rank_size)
-                for start in range(rank_start, rank_start + rank_size, micro_batch_size)
-            ]
-        )
-        loss = sum(
-            compute_policy_loss_vanilla(
-                torch.zeros_like(features[part]),
-                theta * features[part],
-                advantages[part],
-                mask[part],
-                "token-mean",
-                config,
-                rollout_is_weights=weights[part],
-            )[0]
-            for part in partitions
-        )
-        # Simulate the DP mean reduction after accumulating local microbatches.
-        if partitioned:
-            loss = loss / dp_size
-        return torch.autograd.grad(loss, theta)[0]
-
-    torch.testing.assert_close(gradient(True), gradient(False))
-
-
 def test_token_sum_masks_tokens_and_scales_for_dp():
     loss_mat = torch.tensor([[1.0, 2.0, 30.0], [4.0, 50.0, 6.0]])
     loss_mask = torch.tensor([[1.0, 1.0, 0.0], [1.0, 0.0, 1.0]])

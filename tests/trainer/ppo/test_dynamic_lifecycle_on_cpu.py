@@ -126,15 +126,6 @@ def test_colocated_reward_lifecycle_across_refill(use_rm, separate):
     assert not trainer._rollout_asleep_for_reward
 
 
-def test_paired_validation_rejects_bypass_before_dump(tmp_path):
-    trainer = _trainer()
-    trainer.config.trainer.nvfp4_validation_dump_dir = str(tmp_path)
-    trainer.config.algorithm.rollout_correction = {"bypass_mode": True}
-    with pytest.raises(ValueError, match="bypass_mode"):
-        trainer._dump_paired_validation(None)
-    assert not list(tmp_path.iterdir())
-
-
 def test_fit_counts_refill_batches_independently_of_updates(monkeypatch):
     from verl.trainer.ppo import ray_trainer
 
