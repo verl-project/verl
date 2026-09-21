@@ -271,6 +271,8 @@ class RolloutConfig(BaseConfig):
 
     qat: Optional[dict] = None
 
+    real_nvfp4: Optional[dict] = None
+
     disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
 
     router_config_path: Optional[str] = None

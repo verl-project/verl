@@ -32,6 +32,7 @@ from .util import (
     preprocess_bshd_engine,
     preprocess_packed_seqs,
     preprocess_thd_engine,
+    use_transformer_engine_padding,
 )
 
 
@@ -55,8 +56,9 @@ def model_forward_gen(vision_model: bool = False):
         )  # vision model does not need pre_process, because we pack the input_ids to thd in the forward function
         post_process = unwrap_model(model).post_process
         sp = unwrap_model(model).config.sequence_parallel
-        fp8 = unwrap_model(model).config.fp8
-        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+        model_config = unwrap_model(model).config
+        fp8 = model_config.fp8
+        use_fp8_padding = use_transformer_engine_padding(model_config)
 
         model_kwargs = {}
         if "pixel_values" in multi_modal_inputs:
@@ -285,8 +287,8 @@ def gptmodel_forward_model_engine(
     pre_process = unwrap_model(model).pre_process
     post_process = unwrap_model(model).post_process
 
-    fp8 = unwrap_model(model).config.fp8
-    use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+    model_config = unwrap_model(model).config
+    use_fp8_padding = use_transformer_engine_padding(model_config)
 
     model_kwargs = {}
     if "pixel_values" in multi_modal_inputs:

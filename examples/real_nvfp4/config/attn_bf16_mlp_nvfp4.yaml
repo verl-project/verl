@@ -1,0 +1,32 @@
+# Routed-expert all-MLP W4A4 training contract. Attention projections remain
+# BF16; MLP fc1/fc2 use the global TE NVFP4 recipe. Parameters stay BF16.
+configs:
+  bf16:
+    transformer_engine_config_type: "TEQuantizationParams"
+    training_recipe: {}
+  nvfp4:
+    transformer_engine_config_type: "TEQuantizationParams"
+    training_recipe:
+      fp4_quantization_recipe: "nvfp4"
+
+matchers:
+  attn_qkv_bf16:
+    config: "bf16"
+    type: "glob"
+    pattern: "*.linear_qkv"
+    enabled: true
+  attn_proj_bf16:
+    config: "bf16"
+    type: "glob"
+    pattern: "*.linear_proj"
+    enabled: true
+  mlp_fc1_nvfp4:
+    config: "nvfp4"
+    type: "glob"
+    pattern: "*.linear_fc1"
+    enabled: true
+  mlp_fc2_nvfp4:
+    config: "nvfp4"
+    type: "glob"
+    pattern: "*.linear_fc2"
+    enabled: true

@@ -156,3 +156,24 @@ qat:
   activation_observer: null
   # Path to quantization config JSON for vLLM weight export
   quantization_config_path: null
+
+# Real W4A4 training and rollout. This is independent of the legacy ModelOpt
+# fake-QAT path above: routed-expert MLP training executes Transformer Engine's
+# NVFP4 recipe, while refit transports BF16 and quantizes in the vLLM worker.
+real_nvfp4:
+  _target_: verl.workers.config.RealNVFP4EngineConfig
+  enable: false
+  fp4_format: "e2m1"
+  fp4_recipe: "nvfp4"
+  # Uses the quantized forward operands, dequantized for backward. Requires a
+  # Transformer Engine build containing NVTE_BACKWARD_OVERRIDE support.
+  backward_override: "dequantized"
+  group_size: 16
+  # Keep BF16 master parameters for Adam; W4A4 refers to executed GEMMs.
+  fp4_param: false
+  # Required MCore per-module recipe: attention BF16, MLP NVFP4.
+  te_precision_config_file: null
+  # Shared trainer/rollout carve-out. vLLM consumes the same counts through
+  # rollout.real_nvfp4 and leaves those RoutedExperts containers in BF16.
+  num_layers_at_start_in_bf16: 0
+  num_layers_at_end_in_bf16: 0

@@ -1,12 +1,12 @@
 # Build the cu13 (CUDA 13) slice of verl's uv-managed multi-backend image.
 #
 # verl uses one universal uv.lock for the whole project; this Dockerfile
-# builds its cu13 (CUDA 13.0 / torch 2.11) slice. Backends are PEP 621
+# builds its CUDA 13.0 slice (vLLM: Torch 2.13; SGLang: Torch 2.11). Backends are PEP 621
 # extras, and mutually exclusive ones are declared in pyproject.toml's
 # [tool.uv].conflicts, so a single committed uv.lock resolves them all:
 #
 #   * cu13.0 (this file, base nvidia/cuda:13.0.2): vllm, sglang, fsdp,
-#     megatron, cpu — all on torch 2.11 / cu130. The `prefetch` below is
+#     megatron, cpu — separate Torch resolution forks. The `prefetch` below is
 #     scoped to `cu130 dev`.
 #   * DEFERRED in pyproject.toml (commented out, re-enable later):
 #     - the cu12.9 / torch-2.9.1 world (veomni, nemoautomodel) — its image
@@ -128,16 +128,10 @@ ARG CUDA_VERSION
 ARG TARGETARCH
 ARG DEBIAN_FRONTEND=noninteractive
 
-# cuDNN / NCCL — see https://developer.nvidia.com/cudnn-downloads
-# These ARGs control the apt deb versions installed below and MUST match
-# whatever uv resolves into uv.lock. The backend extras don't pin cuDNN /
-# NCCL — torch's wheel pins them transitively (e.g. torch 2.11.0+cu130 ->
-# nvidia-cudnn-cu13==9.19.0.56, nvidia-nccl-cu13==2.28.9). After bumping a
-# torch pin and re-running `python manage_envs.py lock`, grep the resolved
-# versions out of the lockfile and update these ARGs:
-#
-#     grep -E 'nvidia-(cudnn|nccl)-cu13' uv.lock
-ARG NCCL_VERSION=2.28.9-1
+# Apt NCCL matches the vLLM / Torch 2.13 fork. Other backends resolve their
+# own Python NCCL wheel; the selected venv's library directory takes loader
+# precedence over this system fallback (see the final-stage LD_LIBRARY_PATH).
+ARG NCCL_VERSION=2.29.7-1
 
 # Source to build from. Override VERL_REF for tags / commits.
 ARG VERL_REPO=https://github.com/verl-project/verl.git
@@ -303,6 +297,18 @@ ENV UV_HTTP_TIMEOUT=500 \
     UV_LINK_MODE=copy \
     UV_CACHE_DIR=/root/.cache/uv
 
+# Source fallback is cached by runtime Torch ABI. Limit package-level and
+# compiler-level concurrency independently; pass MAX_JOBS for the build runner's
+# CPU/RAM allocation (e.g. 16 on the validated GB200 build allocation).
+ARG MAX_JOBS=4
+ARG NVCC_THREADS=1
+ARG UV_CONCURRENT_BUILDS=1
+ENV MAX_JOBS=${MAX_JOBS} \
+    CMAKE_BUILD_PARALLEL_LEVEL=${MAX_JOBS} \
+    NVCC_THREADS=${NVCC_THREADS} \
+    NVTE_BUILD_THREADS_PER_JOB=1 \
+    UV_CONCURRENT_BUILDS=${UV_CONCURRENT_BUILDS}
+
 # megatron-core's package_info.py appends `git rev-parse --short HEAD` to
 # __version__ unless NO_VCS_VERSION=1, producing 0.18.0+<hash>. uv then sees a
 # mismatch with the locked 0.18.0 and reinstalls it on every `uv run` — racing
@@ -342,12 +348,11 @@ RUN printf 'verl\n' > README.md
 # syncs the conflict-free runtime combos (vllm+fsdp, vllm+megatron, sglang+fsdp,
 # sglang+megatron, cpu) into throwaway envs purely to fill UV_CACHE_DIR
 # (/root/.cache/uv) with every wheel & built artifact those backends need from
-# uv.lock. Nothing native is compiled here beyond the git-sourced megatron-core /
-# mbridge: apex / TransformerEngine / flash-attn and megatron-bridge come prebuilt
-# from the verl wheelhouse index, and vllm / sglang / sglang-kernel come prebuilt
-# from PyPI.
-# The `cu130 dev` scope keeps this image to its torch-2.11 world. (The deferred
-# cu12.9 / torch-2.9.1 world is commented out in pyproject.toml.) It passes
+# uv.lock. Apex and flash-attn build from official source against each fork's
+# Torch ABI; Transformer Engine builds its PyTorch extension as needed. Wheels
+# and built artifacts remain in this image's cache for later syncs.
+# The scope includes both Torch 2.13 and 2.11, so the first build pays for both
+# native ABIs. Deferred cu12.9 backends remain excluded. It passes
 # --no-install-project, so only deps are cached and this
 # layer is independent of the verl source tree. NOTE: unlike every other uv
 # step there is deliberately NO `--mount=type=cache` here, so the warmed cache
@@ -376,7 +381,8 @@ RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
 
 # ---------------------------------------------------------------------------
 # final: the runtime image. Inherits the full baked uv cache from `prefetch`,
-# adds the verl source, and bakes NO fixed .venv. The container starts in a
+# adds the verl source. By default it bakes no fixed .venv; NVFP4_RUNTIME=1
+# preinstalls the vLLM+Megatron runtime and applies its backports. It starts in a
 # shell and needs no install step: `uv run --extra ...` installs the requested
 # extras into /workspace/verl/.venv from the baked cache (fast / offline, no
 # network) and runs from it, and that venv's bin is already on PATH so it
@@ -391,7 +397,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,id=verl-uv-cache \
 #         python3 -m verl.trainer.main_ppo ...
 #
 # The cuDNN / NCCL pip wheels this installs (nvidia-cudnn-cu13 /
-# nvidia-nccl-cu13, from torch's transitive pins) must match the apt debs above.
+# nvidia-nccl-cu13) take precedence over the system fallback via the venv path.
 # ---------------------------------------------------------------------------
 FROM prefetch AS final
 
@@ -400,7 +406,7 @@ FROM prefetch AS final
 #
 # `base` pins the default compiler to gcc-10 (mirrors vllm's basic stage), which
 # is fine for the prefetch git-source builds (megatron-core / mbridge compile
-# with it; every native backend ships prebuilt). But sglang
+# with it). But sglang
 # JIT-compiles its custom kernels (e.g. custom_all_reduce_push) at RUNTIME in
 # C++20, which uses std::bit_cast — a libstdc++ feature that only exists in
 # GCC >= 11. With gcc-10 as nvcc's host compiler that JIT dies with `namespace
@@ -416,7 +422,8 @@ RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130 --slave /
 
 COPY . /workspace/verl
 ENV VIRTUAL_ENV="/workspace/verl/.venv" \
-    PATH="/workspace/verl/.venv/bin:${PATH}"
+    PATH="/workspace/verl/.venv/bin:${PATH}" \
+    LD_LIBRARY_PATH="/workspace/verl/.venv/lib/python3.12/site-packages/nvidia/nccl/lib:${LD_LIBRARY_PATH}"
 CMD ["bash"]
 
 
@@ -452,3 +459,14 @@ RUN NSIGHT_ARCH=$(if [ "$(uname -m)" = "aarch64" ]; then echo arm64; else echo a
     && ln -sf "${NSYS_BIN}" /usr/local/cuda/bin/nsys \
     && ln -sf "${NSYS_UI}" /usr/local/cuda/bin/nsys-ui \
     && nsys --version
+
+# Optional NVFP4 runtime: materialize the standard locked extras and apply the
+# existing hash-guarded backports once, at image build time. The default image
+# retains its backend-selection flow; this opt-in image carries the audited
+# vLLM+Megatron environment and must be rebuilt after changing these extras.
+ARG NVFP4_RUNTIME=0
+RUN if [ "${NVFP4_RUNTIME}" = "1" ]; then \
+        uv sync --frozen --extra megatron --extra vllm && \
+        PYTHON_BIN=/workspace/verl/.venv/bin/python \
+            bash examples/real_nvfp4/runtime_backports/apply_backports.sh; \
+    fi

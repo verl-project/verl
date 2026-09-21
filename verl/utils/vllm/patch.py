@@ -96,6 +96,23 @@ def patch_vllm_moe_model_weight_loader(model):
     if not SUPPORTED_MOE_MODELS:
         return
 
+    # vLLM >= 0.11 routes MoE loading through RoutedExperts, which assigns each
+    # expert param a correct weight_loader in create_weights and then calls it
+    # per expert (routed_experts.py: param.weight_loader(..., expert_id=...)).
+    # Overwriting that with the module-level experts.weight_loader below makes
+    # it treat the 3D expert param as a shardable 2D one and fail with
+    # "shard_dim=0 is not a valid data dimension for a 3D tensor". The original
+    # workaround exists only because vLLM 0.8.2 left these params without any
+    # loader, so it is not merely unnecessary here - it is harmful.
+    try:
+        from vllm.model_executor.layers.fused_moe.routed_experts import (  # noqa: F401
+            RoutedExperts,
+        )
+    except ImportError:
+        pass
+    else:
+        return
+
     original_model_type = type(model)
     if hasattr(model, "runnable") and "ACLGraphWrapper" in str(original_model_type):
         model = model.runnable

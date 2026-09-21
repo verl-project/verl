@@ -36,7 +36,7 @@ from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 from verl.utils.megatron_utils import unwrap_model
 from verl.utils.model import CausalLMOutputForPPO
 
-from .util import postprocess_packed_seqs_for_dict_output, postprocess_thd_engine
+from .util import postprocess_packed_seqs_for_dict_output, postprocess_thd_engine, use_transformer_engine_padding
 
 _FUSED_FORWARD_MODE_ATTR = "_verl_fused_forward_mode"
 _HOOK_MODE = "hook"
@@ -273,9 +273,8 @@ def fused_forward_model_engine(vision_model: bool = False):
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
 
-        fp8 = unwrap_model(model).config.fp8
-        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
         config = unwrap_model(model).config
+        use_fp8_padding = use_transformer_engine_padding(config)
         min_local_rows = (
             config.csa_window_size if getattr(config, "experimental_attention_variant", None) == "dsv4_hybrid" else None
         )

@@ -40,6 +40,7 @@ from verl.models.mcore.util import (
     postprocess_thd_engine,
     preprocess_packed_seqs,
     preprocess_thd_engine,
+    use_transformer_engine_padding,
 )
 from verl.utils.device import get_device_name
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction
@@ -332,8 +333,10 @@ def merge_router_topk_indices(
             .contiguous()
         )
 
-        fp8 = tf_config.fp8
-        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+        # RECORD must undo the same per-sequence padding as the model forward
+        # and REPLAY. Otherwise FP4 routes after the first sequence read padding
+        # rows as real tokens when reconstructing a multi-sequence microbatch.
+        use_fp8_padding = use_transformer_engine_padding(tf_config)
         cp_layout = _context_parallel_layout(tf_config)
         min_local_rows = (
             tf_config.csa_window_size
@@ -467,8 +470,11 @@ def set_router_replay_data(
 
     with torch.no_grad():
         vp_rank = 0 if vp_rank is None else vp_rank
-        fp8 = tf_config.fp8
-        use_fp8_padding = fp8 in ["e4m3", "hybrid"]
+        # Keep replay targets and masks on exactly the same packed-THD row layout as
+        # the model forward.  Transformer Engine requires this alignment for both
+        # FP8 and FP4; checking only ``tf_config.fp8`` leaves NVFP4 model rows padded
+        # while replay tensors contain valid rows only.
+        use_fp8_padding = use_transformer_engine_padding(tf_config)
         cp_layout = _context_parallel_layout(tf_config)
         min_local_rows = (
             tf_config.csa_window_size

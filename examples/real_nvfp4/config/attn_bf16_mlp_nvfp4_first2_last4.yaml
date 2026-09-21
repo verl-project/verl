@@ -1,0 +1,72 @@
+# Routed-expert W4A4 training contract with NeMo-RL's layer carve-out: the
+# first 2 and last 4 decoder layers stay BF16, and only the routed-expert MLP
+# fc1/fc2 of the remaining 42 layers use the TE NVFP4 recipe. Attention is BF16
+# everywhere and parameters stay BF16.
+#
+# MCore matches matchers in file order and takes the first hit (see
+# megatron/core/quantization/quant_config.py::_build_matchers), so the
+# carved-out layers must be listed before the general MLP patterns.
+#
+# Generated for num_hidden_layers=48, start=2, end=4. The
+# layer index in the module path is global only when pipeline_model_parallel_size
+# is 1, which verl asserts before accepting this recipe.
+configs:
+  bf16:
+    transformer_engine_config_type: "TEQuantizationParams"
+    training_recipe: {}
+  nvfp4:
+    transformer_engine_config_type: "TEQuantizationParams"
+    training_recipe:
+      fp4_quantization_recipe: "nvfp4"
+
+matchers:
+  layer_0_bf16:
+    config: "bf16"
+    type: "glob"
+    pattern: "*.layers.0.*"
+    enabled: true
+  layer_1_bf16:
+    config: "bf16"
+    type: "glob"
+    pattern: "*.layers.1.*"
+    enabled: true
+  layer_44_bf16:
+    config: "bf16"
+    type: "glob"
+    pattern: "*.layers.44.*"
+    enabled: true
+  layer_45_bf16:
+    config: "bf16"
+    type: "glob"
+    pattern: "*.layers.45.*"
+    enabled: true
+  layer_46_bf16:
+    config: "bf16"
+    type: "glob"
+    pattern: "*.layers.46.*"
+    enabled: true
+  layer_47_bf16:
+    config: "bf16"
+    type: "glob"
+    pattern: "*.layers.47.*"
+    enabled: true
+  attn_qkv_bf16:
+    config: "bf16"
+    type: "glob"
+    pattern: "*.linear_qkv"
+    enabled: true
+  attn_proj_bf16:
+    config: "bf16"
+    type: "glob"
+    pattern: "*.linear_proj"
+    enabled: true
+  mlp_fc1_nvfp4:
+    config: "nvfp4"
+    type: "glob"
+    pattern: "*.linear_fc1"
+    enabled: true
+  mlp_fc2_nvfp4:
+    config: "nvfp4"
+    type: "glob"
+    pattern: "*.linear_fc2"
+    enabled: true
