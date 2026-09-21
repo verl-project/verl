@@ -374,7 +374,7 @@ refit. Measured on 1×B200 (vLLM 0.24, Qwen3-MoE tiny, TP1): the MoE expert prob
 rel err 1.739 at the first sync before this record existed and 0.052 with it, same weights
 and inputs; the dense probe was 0.026 both times.
 
-**Known issue, bf16 MoE rollout on Blackwell (independent of MXFP8).** With
+**Known issue, bf16 MoE rollout on Blackwell (independent of MXFP8; tracked in verl-project/verl#7978).** With
 `quantization` unset, vLLM 0.24 auto-selects the FlashInfer TRT-LLM bf16 MoE backend on SM100,
 whose BlockMajorK layout turns `w13_weight` / `w2_weight` into 4-D tensors. verl's bf16 weight
 sync feeds `model.load_weights` per-expert 2-D tensors, which the loader can no longer index
