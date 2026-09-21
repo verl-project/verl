@@ -428,9 +428,10 @@ The reason GKD OPD is implemented only over the teacher top-$k$ logits is becaus
 
 The truncated objective above is not itself a KL between normalized
 distributions: both the teacher and student top-$k$ masses can be smaller than
-one, so an individual token loss can be negative. The legacy
-`forward_kl_topk` mode clamps those negative per-token values to zero for
-backward compatibility.
+one, so an individual token loss can be negative. The existing
+`forward_kl_topk` mode clamps those negative per-token values to zero, which
+keeps the scalar loss well behaved but discards the gradient of every token
+whose student top-$k$ mass exceeds the teacher's.
 
 `forward_kl_topk_tail` preserves the same teacher request and adds one
 aggregate category for every token outside the teacher top-$k$. Let
@@ -462,8 +463,9 @@ distillation:
       use_policy_gradient: false
 ```
 
-To use the tail-aware coarse-grained objective without changing teacher
-communication:
+To use the tail-aware coarse-grained objective without any additional overhead
+in the teacher log-probability computation (the teacher request and payload are
+unchanged):
 
 ```yaml
 distillation:
@@ -649,7 +651,7 @@ These metrics are logged for top-$k$ loss modes such as `forward_kl_topk`.
   Mean contribution of the aggregate non-top-k bucket. Emitted by
   `forward_kl_topk_tail`.
 
-- `actor/distillation/head_loss`
+- `actor/distillation/topk_loss`
   Mean contribution from the teacher top-$k$ tokens before adding the aggregate
   tail bucket. Emitted by `forward_kl_topk_tail`.
 

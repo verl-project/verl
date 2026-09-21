@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Callable, Optional
 
 import torch
@@ -143,14 +144,14 @@ def compute_topk_loss(
 
             loss_functions = {
                 "forward_kl_topk": fsdp_losses.compute_forward_kl_topk,
-                "forward_kl_topk_tail": fsdp_losses.compute_forward_kl_topk_tail,
+                "forward_kl_topk_tail": partial(fsdp_losses.compute_forward_kl_topk, include_tail=True),
             }
         case "megatron":
             import verl.trainer.distillation.megatron.losses as megatron_losses
 
             loss_functions = {
                 "forward_kl_topk": megatron_losses.compute_forward_kl_topk,
-                "forward_kl_topk_tail": megatron_losses.compute_forward_kl_topk_tail,
+                "forward_kl_topk_tail": partial(megatron_losses.compute_forward_kl_topk, include_tail=True),
             }
         case _:
             raise NotImplementedError(f"Unsupported strategy: {config.strategy=}")
@@ -334,16 +335,16 @@ def compute_forward_kl_topk(
     overlap_count = model_output.get("overlap_count")
     overlap_token_advantage = model_output.get("overlap_token_advantage")
     tail_loss = model_output.get("tail_loss")
-    loss_mode = getattr(distillation_config.distillation_loss, "loss_mode", "forward_kl_topk")
+    loss_mode = distillation_config.distillation_loss.loss_mode
     if overlap_count is not None and overlap_token_advantage is not None:
         overlap_count = no_padding_2_padding(overlap_count, data)
         overlap_token_advantage = no_padding_2_padding(overlap_token_advantage, data)
     if tail_loss is not None:
         tail_loss = no_padding_2_padding(tail_loss, data)
     elif loss_mode == "forward_kl_topk_tail":
-        # Fused engines may compute the existing top-k head in-kernel and expose
-        # differentiable mass tensors without knowing about this loss mode. Add
-        # the tail bucket here so those paths can opt in without changing the
+        # Fused engines may compute the top-k probabilities/mass in-kernel and
+        # expose differentiable mass tensors without knowing about this loss mode.
+        # Add the tail bucket here so those paths can opt in without changing the
         # teacher protocol or materializing full logits.
         if torch.is_grad_enabled() and distillation_losses.requires_grad and not student_mass.requires_grad:
             raise RuntimeError(
@@ -395,17 +396,17 @@ def compute_forward_kl_topk(
 
     if tail_loss is not None:
         valid_tail_loss = tail_loss[response_mask_bool]
-        valid_head_loss = (distillation_losses - tail_loss)[response_mask_bool]
+        valid_topk_loss = (distillation_losses - tail_loss)[response_mask_bool]
         distillation_metrics.update(
             {
-                "distillation/head_loss": valid_head_loss.mean().item(),
+                "distillation/topk_loss": valid_topk_loss.mean().item(),
                 "distillation/tail_loss": valid_tail_loss.mean().item(),
                 "distillation/teacher_tail_mass": (1.0 - teacher_mass).clamp_min(0.0).mean().item(),
                 "distillation/student_tail_mass": (1.0 - student_mass).clamp_min(0.0).mean().item(),
             }
         )
 
-    # The legacy truncated objective can be negative because its top-k masses
+    # The existing truncated objective can be negative because its top-k masses
     # are not normalized. Tail-aware KL is already a valid coarse-grained KL.
     if loss_mode == "forward_kl_topk":
         distillation_losses = distillation_losses.clamp_min(0.0)

@@ -31,6 +31,7 @@ of log-prob computation.
 """
 
 import os
+from functools import partial
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
@@ -44,9 +45,6 @@ from tensordict import TensorDict
 from verl.trainer.distillation.fsdp.losses import (
     compute_forward_kl_topk as compute_fsdp_forward_kl_topk,
 )
-from verl.trainer.distillation.fsdp.losses import (
-    compute_forward_kl_topk_tail as compute_fsdp_forward_kl_topk_tail,
-)
 from verl.trainer.distillation.fsdp.losses import tail_aware_kl_divergence
 from verl.trainer.distillation.losses import compute_forward_kl_topk as collect_forward_kl_topk_metrics
 from verl.trainer.distillation.tail_kl import compute_tail_aware_logit_gradient
@@ -54,6 +52,8 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.workers.config import DistillationLossConfig
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
+
+compute_fsdp_forward_kl_topk_tail = partial(compute_fsdp_forward_kl_topk, include_tail=True)
 
 _VOCAB_SIZE = 8
 _DISTILLATION_KEYS = (
@@ -251,7 +251,7 @@ def test_forward_kl_topk_metric_aggregation_for_overlap_outputs():
         "overlap_count": torch.tensor([2, 1, 0]),
         "overlap_token_advantage": torch.tensor([-0.2, -0.4, 0.0]),
     }
-    distillation_config = SimpleNamespace(distillation_loss=SimpleNamespace(topk=2))
+    distillation_config = SimpleNamespace(distillation_loss=SimpleNamespace(loss_mode="forward_kl_topk", topk=2))
 
     _, metrics = collect_forward_kl_topk_metrics(
         config=SimpleNamespace(),
@@ -365,11 +365,11 @@ def test_forward_kl_topk_tail_adds_tail_for_fused_mass_outputs():
         },
         batch_size=[1],
     )
-    head_loss = torch.tensor([-0.10, -0.05, 0.0], requires_grad=True)
+    topk_loss = torch.tensor([-0.10, -0.05, 0.0], requires_grad=True)
     student_mass = torch.tensor([0.80, 0.70, 0.60], requires_grad=True)
     teacher_mass = torch.tensor([0.50, 0.40, 0.30])
     model_output = {
-        "distillation_losses": head_loss,
+        "distillation_losses": topk_loss,
         "student_mass": student_mass,
         "teacher_mass": teacher_mass,
     }
@@ -389,7 +389,7 @@ def test_forward_kl_topk_tail_adds_tail_for_fused_mass_outputs():
     )
     losses[data["response_mask"]].sum().backward()
 
-    assert metrics["distillation/head_loss"] == pytest.approx(-0.075)
+    assert metrics["distillation/topk_loss"] == pytest.approx(-0.075)
     assert metrics["distillation/tail_loss"] > 0.0
     assert student_mass.grad is not None
     assert torch.count_nonzero(student_mass.grad[:2]) == 2

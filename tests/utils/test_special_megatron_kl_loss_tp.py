@@ -15,6 +15,7 @@
 
 import gc
 import os
+from functools import partial
 
 import megatron.core.parallel_state as mpu
 import torch
@@ -24,17 +25,14 @@ import torch.nn.functional as F
 from verl.trainer.distillation.fsdp.losses import (
     compute_forward_kl_topk as compute_forward_kl_topk_ref,
 )
-from verl.trainer.distillation.fsdp.losses import (
-    compute_forward_kl_topk_tail as compute_forward_kl_topk_tail_ref,
-)
 from verl.trainer.distillation.megatron.losses import (
     compute_forward_kl_topk as compute_forward_kl_topk_vp,
 )
-from verl.trainer.distillation.megatron.losses import (
-    compute_forward_kl_topk_tail as compute_forward_kl_topk_tail_vp,
-)
 from verl.utils.distributed import destroy_global_process_group, initialize_global_process_group
 from verl.workers.config import DistillationConfig, DistillationLossConfig
+
+compute_forward_kl_topk_tail_ref = partial(compute_forward_kl_topk_ref, include_tail=True)
+compute_forward_kl_topk_tail_vp = partial(compute_forward_kl_topk_vp, include_tail=True)
 
 MAX_TEST_CASES = int(os.environ.get("MAX_TEST_CASES", 4))
 

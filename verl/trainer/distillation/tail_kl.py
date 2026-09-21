@@ -27,6 +27,12 @@ def compute_tail_bucket_kl(
     to one tail category. ``tail_mass_eps`` only guards the student tail's
     logarithm; a zero teacher tail contributes zero by continuity.
     """
+    # The epsilon guard is deliberately one-sided. The student tail appears inside
+    # a logarithm, so q_tail == 0 would send the loss and its gradient to infinity;
+    # clamping it to ``tail_mass_eps`` bounds both. The teacher tail is only a
+    # multiplicative weight: p_tail -> 0 makes the whole term vanish by continuity
+    # (x log x -> 0), so it is left unclamped -- only the input of its logarithm is
+    # floored at the dtype minimum, which avoids 0 * (-inf) = nan.
     teacher_tail = (1.0 - teacher_topk_mass.float()).clamp(min=0.0, max=1.0)
     student_tail = (1.0 - student_topk_mass.float()).clamp(min=tail_mass_eps, max=1.0)
     teacher_tail_for_log = teacher_tail.clamp_min(torch.finfo(teacher_tail.dtype).tiny)
