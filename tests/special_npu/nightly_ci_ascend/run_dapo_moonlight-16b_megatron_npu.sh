@@ -26,7 +26,7 @@ infer_ppo_micro_batch_size_per_gpu=2
 
 # Paths
 MODEL_ID=${MODEL_ID:-moonshotai/Moonlight-16B-A3B-Instruct}
-MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/${MODEL_ID}}
 
 SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}" .sh)"
 LOG_DIR=/root/.cache/nightly_log/$SCRIPT_NAME
@@ -131,7 +131,7 @@ python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.ref.megatron.param_offload=True \
     ++actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=fused \
     actor_rollout_ref.actor.megatron.use_mbridge=$USE_MBRIDGE \
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=True \
+    actor_rollout_ref.actor.megatron.vanilla_mbridge=False \
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=$USE_DIST_CKPT \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${ACTOR_TP} \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${ACTOR_PP} \

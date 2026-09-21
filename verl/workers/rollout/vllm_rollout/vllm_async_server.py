@@ -17,6 +17,7 @@ import inspect
 import json
 import logging
 import os
+import time
 import uuid
 from collections.abc import Mapping
 from pprint import pprint
@@ -71,6 +72,9 @@ from verl.workers.rollout.vllm_rollout.utils import (
 )
 
 _VLLM_VERSION = version.parse(vllm.__version__)
+
+# Max wait for admissions already past the submission gate to reach the engine.
+_GATE_BARRIER_TIMEOUT_S = 60.0
 
 if os.getenv("VERL_USE_GPT_OSS", "0") == "1":
     get_encoding()
@@ -162,6 +166,15 @@ class vLLMHttpServer:
         self.global_steps = None
         self._warned_missing_spec_decode_stats = False
 
+        # vLLM's pause stops requests being scheduled but still accepts them, and a request
+        # admitted after the pause is invisible to the drain's liveness check.
+        self._submission_paused = False
+        self._admitting = 0
+        self._resume_event = asyncio.Event()
+        self._resume_event.set()
+        # Set by abort_all_requests(reject_request=True) when no resume is coming soon.
+        self._rejecting = False
+
         # used for http server
         self._server_address = ray.util.get_node_ip_address().strip("[]")
         self._server_port = None
@@ -217,6 +230,15 @@ class vLLMHttpServer:
         """Get http server address and port."""
         assert self._server_port is not None, "http server is not launched, port is None"
         return self._server_address, self._server_port
+
+    def get_rollout_config(self):
+        """Get the RolloutConfig (e.g. max_num_seqs, max_model_len).
+
+        Lets external routers fetch server-side config (vLLM doesn't expose
+        these on /metrics) via the same handler-getter pattern as
+        ``get_server_address``.
+        """
+        return self.config
 
     @property
     def lora_as_adapter(self) -> bool:
@@ -637,7 +659,14 @@ class vLLMHttpServer:
                     lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
                 )
 
-        with RLInsightLogger.trace_state("vllm_generate", state_lane_id=f"replica_{self.replica_rank}"):
+        rejected = await self._park_until_admitted(request_id)
+        if rejected is not None:
+            return rejected
+
+        with RLInsightLogger.trace_state(
+            "vllm_generate",
+            state_lane_id=ray.get_runtime_context().get_actor_name(),
+        ):
             generator = self.engine.generate(
                 prompt=prompt,
                 sampling_params=sampling_params,
@@ -648,8 +677,16 @@ class vLLMHttpServer:
 
             # Get final response
             final_res: Optional[RequestOutput] = None
-            async for output in generator:
-                final_res = output
+            admitted = False
+            try:
+                async for output in generator:
+                    if not admitted:
+                        admitted = True
+                        self._admitting -= 1
+                    final_res = output
+            finally:
+                if not admitted:
+                    self._admitting -= 1
             assert final_res is not None
 
         extra_fields = {"global_steps": self.global_steps}
@@ -894,7 +931,7 @@ class vLLMHttpServer:
     async def wait_for_requests_to_drain(self):
         await self.engine.wait_for_requests_to_drain()
 
-    async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
+    async def abort_all_requests(self, reset_prefix_cache: bool = True, reject_request: bool = False) -> dict[str, Any]:
         """Abort all ongoing generation requests.
 
         On vLLM >= 0.12.0, uses AsyncLLM.pause_generation() to abort in-flight
@@ -904,17 +941,49 @@ class vLLMHttpServer:
 
         On vLLM < 0.12.0, manually aborts each request and resets prefix cache.
 
+        Args:
+            reset_prefix_cache: Clear the prefix/mm caches along with the pause.
+            reject_request: Fail requests that arrive while the gate is closed
+                instead of parking them. Pass True when this server is leaving
+                the load balancer with no resume_generation coming soon (a hybrid
+                replica handed back to training); parked requests would otherwise
+                wait until the replica returns to rotation. The flag is re-declared
+                by every abort and cleared by the matching resume, so a subsequent
+                plain abort (e.g. the one inside a weight sync) restores parking.
+
         Returns:
             dict[str, Any]: Dictionary containing:
                 - aborted_count: Number of requests aborted
                 - request_ids: List of aborted request IDs
         """
+        # Only node rank 0 owns AsyncLLM/self.engine. The remaining actors in a
+        # multi-node replica run vLLM's headless entry point, so there is no
+        # engine object to abort through on those actors.
+        if self.node_rank != 0:
+            return {"aborted_count": 0, "request_ids": []}
+
         try:
+            # Close the gate first, then let admissions already past it land, so the pause
+            # below actually covers them. Closing the gate and declaring how late arrivals
+            # are handled happen together, so no request can observe one without the other.
+            self._submission_paused = True
+            self._rejecting = reject_request
+            self._resume_event.clear()
+            deadline = time.monotonic() + _GATE_BARRIER_TIMEOUT_S
+            while self._admitting > 0:
+                if time.monotonic() > deadline:
+                    logger.warning(
+                        "Submission gate barrier timed out with %d admission(s) in flight, proceeding",
+                        self._admitting,
+                    )
+                    break
+                await asyncio.sleep(0.01)
+
             # Snapshot request IDs before pausing for reporting
             request_ids = list(self.engine.output_processor.request_states.keys())
 
             # pause_generation with wait_for_inflight_requests=False will:
-            # 1. Set engine to paused state (blocks new generate calls)
+            # 1. Set engine to paused state (new requests are accepted but not scheduled)
             # 2. Abort all in-flight requests
             # 3. Wait for requests to drain
             # 4. Clear prefix and mm caches if clear_cache=True.
@@ -937,11 +1006,45 @@ class vLLMHttpServer:
             logger.exception("Error aborting requests")
             raise
 
+    async def resume_engine_generation(self):
+        """Resume the DP engines while request admission remains closed."""
+        if self.node_rank == 0:
+            await self.engine.resume_generation()
+
+    async def open_submission_gate(self):
+        """Admit requests after the replica has finished resuming its engines."""
+        self._rejecting = False
+        self._submission_paused = False
+        self._resume_event.set()
+
     async def resume_generation(self):
         """Resume generation after abort_all_requests (pause_generation)."""
-        if self.node_rank != 0:
-            return
-        await self.engine.resume_generation()
+        await self.resume_engine_generation()
+        await self.open_submission_gate()
+
+    async def _park_until_admitted(self, request_id: str) -> Optional[TokenOutput]:
+        """Wait out a closed gate, or fail the request when the gate rejects late arrivals.
+
+        Returns None once the request is admitted, or an aborted TokenOutput that tells the
+        client to re-route. Rejection is checked before waiting, so a rejecting gate never
+        parks anyone and the request never reaches the engine.
+        """
+        while self._submission_paused:
+            if self._rejecting:
+                logger.debug("rejecting request %s: server left rotation behind a closed gate", request_id)
+                return TokenOutput(
+                    token_ids=[],
+                    log_probs=None,
+                    routed_experts=None,
+                    stop_reason="aborted",
+                    extra_fields={"global_steps": self.global_steps},
+                )
+            logger.debug("parking request %s until weight sync completes", request_id)
+            await self._resume_event.wait()
+        # No await between the final gate check and the bump: on the actor's single event loop
+        # that keeps "gate closed and _admitting == 0" from being observed mid-admission.
+        self._admitting += 1
+        return None
 
     async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort a specific generation request.
@@ -952,6 +1055,9 @@ class vLLMHttpServer:
         Returns:
             dict[str, Any]: Dictionary containing abort result.
         """
+        if self.node_rank != 0:
+            return {"aborted": False, "request_id": request_id}
+
         try:
             request_states = self.engine.output_processor.request_states
             req_state = request_states.get(request_id)
@@ -1006,6 +1112,14 @@ class vLLMHttpServer:
                     f"max_model_len ({self.config.max_model_len}) should be less than or equal to "
                     f"max_position_embeddings ({max_position_embeddings})"
                 )
+
+        if not self.config.enable_chunked_prefill and self.config.max_num_batched_tokens < self.config.max_model_len:
+            logger.warning(
+                "enable_chunked_prefill=False requires max_num_batched_tokens >= max_model_len "
+                f"({self.config.max_model_len}); raising max_num_batched_tokens from "
+                f"{self.config.max_num_batched_tokens} to {self.config.max_model_len}."
+            )
+            self.config.max_num_batched_tokens = self.config.max_model_len
 
     def _post_init(self, cuda_visible_devices: str) -> None:
         """Called at the end of __init__. Default logs server metadata."""
@@ -1310,13 +1424,19 @@ class vLLMReplica(RolloutReplica):
         await self.servers[0].wait_for_requests_to_drain.remote()
         await asyncio.gather(*[server.sleep.remote() for server in self.servers])
 
-    async def abort_all_requests(self) -> dict[str, Any]:
+    async def abort_all_requests(self, reject_request: bool = False) -> dict[str, Any]:
         """Abort all ongoing generation requests across all servers.
+
+        Args:
+            reject_request: Fail requests arriving behind the closed gate instead of
+                parking them. See vLLMHttpServer.abort_all_requests().
 
         Returns:
             dict[str, Any]: Combined abort results from all servers.
         """
-        results = await asyncio.gather(*[server.abort_all_requests.remote() for server in self.servers])
+        results = await asyncio.gather(
+            *[server.abort_all_requests.remote(reject_request=reject_request) for server in self.servers]
+        )
 
         total_aborted = sum(r.get("aborted_count", 0) for r in results)
         all_request_ids = []
@@ -1330,8 +1450,12 @@ class vLLMReplica(RolloutReplica):
         }
 
     async def resume_generation(self):
-        """Resume generation on all servers after abort_all_requests."""
-        await asyncio.gather(*[server.resume_generation.remote() for server in self.servers])
+        """Resume the DP engines before admitting requests on any server."""
+        # KV-cache wake-up may already have resumed scheduling. Keep admission
+        # closed during this resume too: new requests could otherwise start a
+        # DP wave while only some ranks are still in the resume collective.
+        await self.servers[0].resume_engine_generation.remote()
+        await asyncio.gather(*[server.open_submission_gate.remote() for server in self.servers])
 
     async def abort_request(self, request_id: str) -> dict[str, Any]:
         """Abort a specific request. Tries all servers since we don't know which one has it.

@@ -1,7 +1,7 @@
 set -x
 
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-0.6B}
-MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/${MODEL_ID}}
 
 USE_DIST_CKPT=${USE_DIST_CKPT:-False}
 DIST_CKPT_PATH=${DIST_CKPT_PATH:-${HOME}/dist_ckpt/qwen3_06b_grpo_mindspeed}
@@ -30,7 +30,7 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.actor.ppo_mini_batch_size=8 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.strategy=megatron \
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=True \
+    actor_rollout_ref.actor.megatron.vanilla_mbridge=False \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=2 \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=2 \
     actor_rollout_ref.actor.megatron.expert_model_parallel_size=1 \

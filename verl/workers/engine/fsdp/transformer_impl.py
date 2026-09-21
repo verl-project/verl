@@ -15,7 +15,6 @@
 The concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP)
 """
 
-import gc
 import logging
 import os
 import warnings
@@ -75,13 +74,33 @@ from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig, HFModelCo
 from verl.workers.utils.padding import build_attention_mask_from_nested
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
-from ..utils import enable_full_determinism, pad_packed_inputs, postprocess_batch_func, prepare_micro_batches
+from ..utils import (
+    detach_tree,
+    enable_full_determinism,
+    pad_packed_inputs,
+    postprocess_batch_func,
+    prepare_micro_batches,
+)
 from .utils import create_device_mesh, get_sharding_strategy, unfuse_moe_params
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 device_name = get_device_name()
+
+
+def _is_scalar_unit_temperature(temperature) -> bool:
+    """Return whether a host scalar temperature makes scaling a no-op."""
+
+    return not isinstance(temperature, torch.Tensor) and float(temperature) == 1.0
+
+
+def _scale_logits_by_temperature(logits, temperature, *, is_unit_temperature: bool):
+    """Scale logits without copying the full vocabulary tensor for temperature 1."""
+
+    if is_unit_temperature:
+        return logits
+    return logits / temperature.clamp(min=1e-8).to(logits.dtype)
 
 
 class FSDPEngine(BaseEngine):
@@ -841,7 +860,6 @@ class FSDPEngine(BaseEngine):
                 load_fsdp_model_to_gpu(self.module)
             if optimizer and self.optimizer is not None:
                 load_fsdp_optimizer(self.optimizer, device)
-            gc.collect()
         elif device == "cpu":
             if model:
                 offload_fsdp_model_to_cpu(self.module)
@@ -1140,6 +1158,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
         temperature = micro_batch["temperature"]
         temperature_item = temperature
+        temperature_is_one = _is_scalar_unit_temperature(temperature)
         if use_fused_kernels:
             assert not isinstance(temperature, torch.Tensor), (
                 "use_fused_kernels does not support per sample temperature yet"
@@ -1158,7 +1177,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
         assert temperature.shape[0] == input_ids.shape[0]
 
         # args used to get outputs
-        output_args = {}
+        output_args = {"temperature_is_one": temperature_is_one}
 
         if use_remove_padding:
             # support per sample temperature
@@ -1329,6 +1348,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         model_output = {}
 
+        # Some internal callers construct output_args directly instead of going
+        # through prepare_model_inputs. Without the optimization metadata, fall
+        # back to the original out-of-place scaling path.
+        temperature_is_one = output_args.get("temperature_is_one", False)
+
         input_ids = micro_batch["input_ids"]
 
         if use_remove_padding:
@@ -1359,7 +1383,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 # With TP, logits are DTensors sharded on vocab dim; gather for log_softmax.
                 if isinstance(logits_rmpad, DTensor):
                     logits_rmpad = logits_rmpad.full_tensor()
-                logits_rmpad = logits_rmpad / temperature_rmpad.clamp(min=1e-8).unsqueeze(-1).to(logits_rmpad.dtype)
+                logits_rmpad = _scale_logits_by_temperature(
+                    logits_rmpad,
+                    temperature_rmpad.unsqueeze(-1),
+                    is_unit_temperature=temperature_is_one,
+                )
 
                 log_probs = None
 
@@ -1452,7 +1480,11 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 # With TP, logits are DTensors sharded on vocab dim; gather for log_softmax.
                 if isinstance(logits, DTensor):
                     logits = logits.full_tensor()
-                logits = logits / temperature.clamp(min=1e-8).to(logits.dtype)
+                logits = _scale_logits_by_temperature(
+                    logits,
+                    temperature,
+                    is_unit_temperature=temperature_is_one,
+                )
 
                 if calculate_entropy:
                     if not self.engine_config.entropy_checkpointing:
@@ -1549,19 +1581,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 loss = torch.tensor(1.0, device=device_name)
                 metrics = {}
 
-            # Detach model outputs before they are appended to forward_backward_batch's
-            # output_lst: they are only consumed for metrics/postprocessing after backward,
-            # and keeping their grad_fn alive retains part of every micro-batch's autograd
-            # graph until the whole batch finishes. With PEFT (enable_input_require_grads)
-            # this pins the checkpointed embedding output plus its gradient buffer per
-            # micro-batch (~2 x [total_nnz, hidden] for long sequences), which accumulates
-            # across micro-batches and OOMs the actor update.
-            model_output = {
-                key: value.detach() if torch.is_tensor(value) and value.grad_fn is not None else value
-                for key, value in model_output.items()
-            }
+            # Detach before this lands in forward_backward_batch's output_lst; see detach_tree.
             output = {
-                "model_output": model_output,
+                "model_output": detach_tree(model_output),
                 "loss": loss.detach().item(),
                 "metrics": metrics,
             }

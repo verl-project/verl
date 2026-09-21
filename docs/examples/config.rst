@@ -221,8 +221,11 @@ Actor/Rollout/Reference Policy
 
 **Common config for actor, rollout and reference model**
 
-- ``actor_rollout_ref.hybrid_engine``: Whether it's a hybrid engine,
-  currently only supports hybrid engine
+- ``actor_rollout_ref.hybrid_engine``: Whether actor and rollout colocate
+  on the same GPUs (hybrid engine). Set to ``False`` only with the V1
+  ``separate_async`` trainer: no colocated rollout replicas are created
+  on the training GPUs and rollout is served exclusively by the
+  standalone rollout pool. All other trainers require ``True``
 - ``actor_rollout_ref.model.path``: Huggingface model path. This can be
   either local path or HDFS path. For HDFS path, we provide utils to
   download it to DRAM and convert the HDFS path to local path.
@@ -248,8 +251,10 @@ Actor/Rollout/Reference Policy
   used.
 
   - ``actor_rollout_ref.model.fused_kernel_options.impl_backend``: The
-    implementation backend for fused kernels. Options: "triton" or
-    "torch". Default is "torch".
+    implementation backend for fused kernels. Options: "triton", "torch", or
+    "liger". The "torch" backend always uses verl's native output-head implementation;
+    select "liger" explicitly to use Liger's fused output-head kernel.
+    Default is "torch".
     While in megatron, we only support "triton" as the
     implementation backend, so there is no need for this option.
 

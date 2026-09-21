@@ -36,7 +36,7 @@ Also, we can easily upgrade the mcore version to the latest version. In most cas
 1. make sure the model is supported by vLLM
 2. Support the model in [mbridge](https://github.com/iseekyan/mbridge), see its currently supported models for example.
     - we will migrate to [megatron-bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) in the future.
-3. Register the model forward function in verl, see the example in `verl/verl/models/mcore/registry.py`.
+3. Register the model forward function in verl, see the example in `verl/models/mcore/registry.py`.
 
 
 
@@ -88,7 +88,7 @@ main steps:
     - b. support exporting the mcore checkpoint to huggingface format, for downstream inference.
 
 ### Modelling the huggingface model with mcore `GPTModel`
-The first step is to convert huggingface config to mcore `TransformerConfig` and init the mcore `GPTModel` with the converted config. See code in `verl/models/mcore/config_converter.py` and `verl/verl/models/mcore/models/model_initializer.py`. The corresponding model forward code is in `verl/verl/models/mcore/models/model_forward.py`.
+The first step is to convert huggingface config to mcore `TransformerConfig` and init the mcore `GPTModel` with the converted config. See code in `verl/models/mcore/config_converter.py` and `verl/models/mcore/model_initializer.py`. The corresponding model forward code is in `verl/models/mcore/model_forward.py`.
 
 There are two ways of loading the huggingface model weights to the `GPTModel`
 1. Runtime loading

@@ -13,7 +13,7 @@
 # limitations under the License.
 
 
-from verl.utils.device import get_torch_device, is_cuda_available, is_npu_available
+from verl.utils.device import get_torch_device, is_device_available
 
 
 def set_random_seed(seed):
@@ -32,7 +32,7 @@ def set_random_seed(seed):
     # torch_npu/MindSpeed patch Megatron's tracker so this call works there as well. Only
     # skip it when no real accelerator (CUDA or NPU) is present, which avoids "Torch not
     # compiled with CUDA enabled" on CPU-only environments.
-    if (is_cuda_available or is_npu_available) and get_torch_device().device_count() > 0:
+    if is_device_available and get_torch_device().device_count() > 0:
         from megatron.core import tensor_parallel
 
         tensor_parallel.model_parallel_cuda_manual_seed(seed)

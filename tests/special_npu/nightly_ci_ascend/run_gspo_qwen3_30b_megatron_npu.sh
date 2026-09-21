@@ -6,7 +6,7 @@ export VLLM_USE_V1=1
 
 # ---- user-adjustable ----
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-30B-A3B-Instruct-2507}
-MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/models/${MODEL_ID}}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/modelscope/hub/models/${MODEL_ID}}
 
 SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}" .sh)"
 LOG_DIR=/root/.cache/nightly_log/$SCRIPT_NAME
@@ -85,7 +85,7 @@ ACTOR=(
     actor_rollout_ref.actor.megatron.param_offload=True
     actor_rollout_ref.actor.megatron.optimizer_offload=True
     actor_rollout_ref.actor.megatron.use_mbridge=True
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=True
+    actor_rollout_ref.actor.megatron.vanilla_mbridge=False
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
@@ -116,7 +116,7 @@ REF=(
     actor_rollout_ref.ref.megatron.expert_tensor_parallel_size=${actor_etp}
     actor_rollout_ref.ref.megatron.param_offload=True
     actor_rollout_ref.ref.megatron.use_mbridge=True
-    actor_rollout_ref.ref.megatron.vanilla_mbridge=True
+    actor_rollout_ref.ref.megatron.vanilla_mbridge=False
 )
 
 TRAINER=(

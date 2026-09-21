@@ -24,11 +24,11 @@ The checker runs the mock trajectories in
    Note: Failures in this diagnostic are warnings, not final verdict failures.
    Continuous Token does not strictly require the model chat template to be
    globally append-only. A raw diagnostic warning means users should check
-   whether non-assistant incremental messages are still append-only under the
+   whether incremental context messages are still append-only under the
    builder's dummy context. The default dummy message construction in
    ContinuousTokenBuilder is designed for this; for example, a non-empty
    reasoning_content in synthetic assistant messages can make Qwen3-style
-   templates append-only for the incremental non-assistant extraction step even
+   templates append-only for the incremental context extraction step even
    when the original full conversation template is not globally append-only.
 
 2. Check 2: production-shaped Continuous Token builder checks at token level. This layer
@@ -36,7 +36,7 @@ The checker runs the mock trajectories in
    each point where a non-assistant run (tool/user/system) follows an assistant
    turn, it renders the prefix up to and including that assistant turn through
    the chat template, trims it to the runtime stop shape (as if generation
-   stopped at EOS), then drives the builder's merge_non_assistant_tokens over the
+   stopped at EOS), then drives the builder's merge_context_tokens over the
    appended run. The merged token IDs must match a single-pass render of the same
    messages with a trailing generation prompt. Because the prefix (including
    assistant turns) is rendered directly, assistant output tokens are never
@@ -594,7 +594,7 @@ def _run_ct_merge_checks(
     assistant turn) is rendered through the model's chat template and trimmed to
     the runtime stop shape — exactly the pretokenized prefix production would
     hold. The builder then merges the appended non-assistant run ``messages[n:m]``
-    via ``merge_non_assistant_tokens``, and the merged stream must equal a
+    via ``merge_context_tokens``, and the merged stream must equal a
     single-pass render of ``messages[:m]`` with a trailing generation prompt.
 
     Because the prefix is rendered (not reconstructed from a prompt/full diff),
@@ -619,7 +619,7 @@ def _run_ct_merge_checks(
                 chat_template_kwargs=chat_template_kwargs,
             )
             prefix_ids = _truncate_after_final_eos(tokenizer, prefix_ids, has_tool_calls=has_tool_calls)
-            merge_result = builder.merge_non_assistant_tokens(prefix_msgs, full_msgs, prefix_ids, tools=tools)
+            merge_result = builder.merge_context_tokens(prefix_msgs, full_msgs, prefix_ids, tools=tools)
             expected_ids = _render_ids(
                 tokenizer,
                 processor,

@@ -39,10 +39,10 @@ torch_npu          2.10.0.post4
 torchvision        0.25.0
 vLLM               0.23.0
 vLLM-ascend        0.23.0
-Megatron-LM        core_r0.16.0
-MindSpeed          core_r0.16.0
+Megatron-LM        core_r0.18.0
+MindSpeed          core_r0.18.0
+Megatron-Bridge    0.5.0
 triton-ascend      3.2.2
-mbridge            0.15.1
 SGLang             v0.5.10
 sgl-kernel-npu     2026.02.01
 ================= ============

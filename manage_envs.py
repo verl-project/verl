@@ -17,25 +17,32 @@
 verl uses **one** ``uv.lock`` for the whole project. Every backend is a PEP
 621 extra in ``pyproject.toml``; mutually exclusive ones are declared in
 ``[tool.uv].conflicts`` so a single ``uv lock`` resolves all of them into the
-one lockfile. At runtime you materialize exactly one conflict-free
-combination of extras into the project venv (``.venv``) and run everything —
-every Ray worker group — from it. There is no per-backend lockfile and no Ray
-``py_executable`` switching.
+one lockfile. A job materializes exactly one conflict-free combination of
+extras into the project venv (``.venv``) and runs everything — every Ray worker
+group — from it. There is no per-backend lockfile.
 
-Typical flow::
+**This driver is not on the normal path.** Ordinary runs need no install step
+and no sync: they go straight through ``uv run``, which materializes ``.venv``
+from the committed lock on first use, and Ray reaches the same environment via
+``runtime_env.py_executable`` (that is what the ``examples/`` scripts and CI
+do)::
+
+    uv run --frozen --all-packages --extra vllm --extra fsdp python3 -m verl.trainer.main_ppo ...
+
+Use this module for what ``uv run`` does not cover: regenerating ``uv.lock``,
+keeping several environments side by side (``--name``), an activated shell,
+protecting an in-house build (``VERL_UV_NO_INSTALL``), or baking a Docker
+image's cache (``prefetch``)::
 
     python manage_envs.py lock                       # (re)generate uv.lock
-    python manage_envs.py sync fsdp vllm             # build .venv for a run
+    python manage_envs.py sync fsdp vllm             # build .venv explicitly
     source .venv/bin/activate                        # or: manage_envs.py shell ...
-    python -m verl.trainer.main_ppo trainer.n_gpus_per_node=8 ...
-
-    # one-shot equivalent (uv resolves + runs from .venv):
     python manage_envs.py run fsdp vllm -- python -m verl.trainer.main_ppo ...
 
 Commands::
 
     lock                 # uv lock  -> regenerate the universal uv.lock
-    sync   <extras...>   # uv sync --extra ...  -> materialize .venv (runtime)
+    sync   <extras...>   # uv sync --extra ...  -> materialize .venv up front
     run    <extras...> -- <cmd...>   # uv run --extra ... -- <cmd>
     shell  <extras...>   # sync, then open a shell with .venv activated
     list                 # extras, conflict rules, .venv state, prefetch plan
@@ -82,8 +89,8 @@ own for this, which is why it lives here.)
 
 `sync` vs `prefetch`
 --------------------
-``sync`` is the **runtime** command: it installs one conflict-free extra
-combination into ``.venv`` so you can train/serve. ``prefetch`` is a
+``sync`` installs one conflict-free extra combination into ``.venv`` up front —
+the same thing a plain ``uv run`` does implicitly. ``prefetch`` is a
 **first-time / image-build** helper: it first resolves the universal
 ``uv.lock`` from ``pyproject.toml`` (``uv lock``), then downloads & builds
 *every* backend's dependencies into the uv cache (``$UV_CACHE_DIR``, default
@@ -91,15 +98,16 @@ combination into ``.venv`` so you can train/serve. ``prefetch`` is a
 conflict, ``prefetch`` cannot produce a single usable env — it syncs throwaway
 envs purely to populate the cache (passing ``--no-install-project`` so only
 dependencies are cached, not verl itself) and never creates or modifies
-``.venv``. The lock it produces is what every later ``sync`` consumes.
+``.venv``. The lock it produces is what every later ``uv run`` / ``sync``
+consumes.
 
 In Docker this is what makes one image serve any backend: bake ``prefetch``
 as a real layer (point ``UV_CACHE_DIR`` at an in-image path and do **not** use
 a ``--mount=type=cache``) so the cache ships *inside* the image. The container
-then picks its combination at run time — ``sync <extras...>`` builds ``.venv``
-from the baked cache, offline — instead of hard-coding one combo at build
-time. Do **not** use ``prefetch`` as a runtime sync; use ``sync <extras...>``
-for that.
+then picks its combination at run time — the first ``uv run --extra ...`` (or an
+explicit ``sync <extras...>``) builds ``.venv`` from the baked cache, offline —
+instead of hard-coding one combo at build time. Do **not** use ``prefetch`` as a
+runtime sync.
 
 This driver exposes one GPU torch "world" plus a CPU slice, all in one lock:
 the cu13.0 / torch-2.11 backends (vllm, sglang, fsdp, megatron) and the
@@ -115,6 +123,18 @@ Docker image bakes only its backends. DEFERRED (commented out in
 pyproject.toml until they support torch-2.11 / cu130): the cu12.9 /
 torch-2.9.1 world (veomni, nemoautomodel) and trtllm (a CUDA-13 RC sdist).
 
+CPU architecture
+----------------
+The same lock covers **x86_64 and aarch64** Linux (GH200 / GB200), because
+``[tool.uv].environments`` declares a marker for each. Architecture is a
+*resolution* dimension, not an extra dimension: nothing below branches on it,
+the extra names and conflict sets are identical on both, and ``uv sync`` picks
+each wheel by the host's own platform tag. So every command in this module is
+spelled the same way on either machine — ``sync sglang megatron`` there is the
+same ``sync sglang megatron`` here. See the ``environments`` comment in
+pyproject.toml for how to split a single arch-specific package if one ever
+appears.
+
 Re-locking after a dependency change
 ------------------------------------
 Edit ``pyproject.toml`` (and the matching apt deb in
@@ -129,6 +149,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -177,6 +198,13 @@ CONFLICT_SETS: list[set[str]] = [
 # Single interpreter for the whole project (matches [tool.uv].environments,
 # which pins python_full_version >= '3.12').
 PYTHON_VERSION = "3.12"
+
+# CPU architectures [tool.uv].environments resolves the lock for. Arch is NOT an
+# extra dimension: the names above mean the same thing on both, and `uv sync`
+# picks each wheel by the host's own platform tag. Anything else has no slice in
+# uv.lock, so a sync there fails inside uv with a bare "no solution found" —
+# `list` reports the host arch up front instead (see cmd_list).
+SUPPORTED_ARCHES: tuple[str, ...] = ("x86_64", "aarch64")
 
 GROUPS: dict[str, list[str]] = {
     "all": ALL_EXTRAS,
@@ -635,6 +663,19 @@ def cmd_list(args: argparse.Namespace) -> int:
     print(f"  dev       (cpu/torch-2.11)   : {', '.join(DEV_BACKENDS)}")
     print(f"  addons    (any combo)        : {', '.join(ADDON_EXTRAS)}")
     print("  cu129     (torch-2.9.1)      : DEFERRED (veomni, nemoautomodel)")
+
+    # Both halves of the environment markers, so a wrong OS is reported as
+    # plainly as a wrong arch (macOS arm64 reports "arm64", not "aarch64").
+    host = f"{platform.system()} {platform.machine()}"
+    locked = sys.platform == "linux" and platform.machine() in SUPPORTED_ARCHES
+    print(
+        f"\nhost: {host} "
+        + (
+            "(covered by uv.lock; the extras above resolve here)"
+            if locked
+            else f"— NOT covered by uv.lock (Linux {' / '.join(SUPPORTED_ARCHES)} only), so `sync` will fail"
+        )
+    )
     print("\nmutually exclusive (at most one per `sync`):")
     for cs in CONFLICT_SETS:
         print("  {" + ", ".join(sorted(cs)) + "}")
@@ -797,7 +838,8 @@ def _build_parser() -> argparse.ArgumentParser:
     extras_help = (
         "extra name(s); shortcuts: all, inference (vllm sglang), "
         "training (fsdp megatron), dev (cpu), addons (math ci veomni-sft). "
-        "x86_64 Linux + Python 3.12 only. Add-ons are conflict-free and layer "
+        "Linux + Python 3.12, x86_64 or aarch64 (same extras on both). "
+        "Add-ons are conflict-free and layer "
         "on top of a backend combo. Mutually exclusive sets (at most one each per sync): "
         "{vllm, sglang, cpu}, {fsdp, cpu}, {megatron, cpu}. DEFERRED (see "
         "pyproject.toml): the cu12.9 world (veomni, nemoautomodel) and trtllm "

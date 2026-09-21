@@ -75,23 +75,35 @@ permissions:
 jobs:
   npu_unit_tests:
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a2b3-8
+    runs-on: linux-aarch64-a3-800i-8
     timeout-minutes: 60 # Increase this timeout value as needed
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-910b-ubuntu
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
       options: >-
         --shm-size 16g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      VERL_USE_EXTERNAL_MODULES: "megatron_adaptor" # import megatron_adaptor to patch megatron-lm
+      UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+      UV_HTTP_TIMEOUT: 120
+      UV_NO_CACHE: "1"
+      UV_SYSTEM_PYTHON: "1"
+      UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
     steps:
       - name: Check npu and CANN info
         run: |
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
           npu-smi info
+      - name: Install uv
+        run: pip install uv
       - name: Check initial pip list from image
         run: |
-          pip list
+          uv pip list
       - name: Checkout verl-project/verl repo
         uses: actions/checkout@v4
         with:
@@ -99,14 +111,13 @@ jobs:
           clean: true
       - name: Install the current repository
         run: |
-          pip install --no-deps -e .[test]
-          pip install mlflow pytest-asyncio
+          uv pip install mlflow pytest-asyncio
       - name: Check final pip list
         run: |
-          pip list
+          uv pip list
       - name: Prepare weights
         run: |
-          ln -s /root/.cache/models ~/models
+          ln -s /root/.cache/modelscope/hub/models ~/models
       - name: Run all NPU unit tests
         run: |
           pytest -s -x --ignore-glob="*test_special_*.py" --ignore-glob="*on_cpu.py" --ignore-glob="*test_vllm*" --ignore-glob="*_sglang*" --ignore-glob="*_hf_rollout*" --ignore-glob="tests/models/" --ignore-glob="tests/special*" --ignore-glob="tests/experimental" --ignore-glob="tests/workers/reward_model" --ignore-glob="*test_rvdz*" --ignore-glob="*test_ray_collectives*" --ignore-glob="*test_nvtx_profile*" --ignore-glob="tests/checkpoint_engine" --ignore-glob="*test_shared_memory*" --ignore-glob="tests/workers/rollout/rollout_trtllm" --ignore-glob="*test_fsdp_lora_merge*" --ignore-glob="*test_optimizer_offload_and_load.py*" tests/ -k "not test_preprocess_bshd_engine_preserves_topk_dense_dim_on_gpu and not test_sender_accepts_strided_tensor"

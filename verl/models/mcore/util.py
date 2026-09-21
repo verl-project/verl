@@ -475,12 +475,12 @@ def preprocess_thd_engine(
             start_idx = cu_seqlens_padded_cpu[i] // cp_size
             # split to 2 chunks
             d = input_ids[i]
-            # Alignment applies to the sequence dimension. Extra trailing
-            # dimensions (for example top-k teacher logits) must not affect
-            # whether a short sequence is padded.
-            if d.shape[0] < align_size:
+            # Pad to the full per-seq padded length so every CP rank gets a
+            # full slice; align_size alone is too short for the CP split end.
+            pad_target = max(align_size, seqlen_padded_i)
+            if d.shape[0] < pad_target:
                 original_size = d.shape[0]
-                pad = torch.zeros((align_size - d.shape[0], *d.shape[1:]), dtype=d.dtype, device=d.device)
+                pad = torch.zeros((pad_target - d.shape[0], *d.shape[1:]), dtype=d.dtype, device=d.device)
                 d = torch.cat([d, pad], dim=0)
                 logger.warning_once(
                     f"Padding tensor for context parallel alignment, original_size={original_size}, "
@@ -849,8 +849,19 @@ def postprocess_bshd_engine(
 
 
 def build_vlm_attn_mask_thd(input_ids: torch.Tensor, pad_token_id: int = None):
-    input_ids_with_pad = input_ids.to_padded_tensor(pad_token_id)
     seqlens_in_batch = input_ids.offsets().diff()
+
+    # Align to TP/CP so ``combined_embeddings`` is divisible by tp_size before
+    # the SP scatter. Mirrors ``build_vlm_attn_mask_bshd``.
+    tp_size = mpu.get_tensor_model_parallel_world_size()
+    cp_size = mpu.get_context_parallel_world_size()
+    align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
+    max_seqlen = int(seqlens_in_batch.max().item())
+    if align_size > 1:
+        max_seqlen += (align_size - max_seqlen % align_size) % align_size
+
+    batch_size = input_ids.shape[0]
+    input_ids_with_pad = input_ids.to_padded_tensor(pad_token_id, output_size=(batch_size, max_seqlen))
     attention_mask = torch.zeros_like(input_ids_with_pad, dtype=torch.bool)
     for i, seqlen in enumerate(seqlens_in_batch):
         attention_mask[i, :seqlen] = True
