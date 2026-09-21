@@ -12,12 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU-only assertions, executed in a scheduled job in the audited vLLM image.
-
-These tests import the real vLLM implementation but never construct a model,
-initialize Ray, or launch a GPU kernel. The installed-backport test deliberately
-fails on an unpatched 0.26 wheel, even if that wheel advertises a patch marker.
-"""
+"""Configuration and BF16 transport checks for native NVFP4 refit."""
 
 from types import SimpleNamespace
 
@@ -28,43 +23,14 @@ from verl.utils.real_nvfp4 import vllm_runtime
 from verl.utils.real_nvfp4.bf16_transport import attest_real_nvfp4_bf16_transport
 
 
-@pytest.fixture(autouse=True)
-def clear_runtime_guard_cache():
-    vllm_runtime.require_vllm_nvfp4_backports.cache_clear()
-    yield
-    vllm_runtime.require_vllm_nvfp4_backports.cache_clear()
-
-
-def test_installed_vllm_contains_both_audited_backports():
-    # This inspects actual functions from the installed dependency, not mocks.
-    vllm_runtime.require_vllm_nvfp4_backports()
+def test_native_quantization_configuration():
     vllm_runtime.require_vllm_native_nvfp4_per_token(
         SimpleNamespace(model_config=SimpleNamespace(quantization="nvfp4_per_token"))
     )
-
-
-@pytest.mark.parametrize("target", ["_quantize_moe_weight_to_nvfp4", "_setup_kernel"])
-def test_partial_or_marker_only_backport_is_rejected(monkeypatch, target):
-    from vllm.model_executor.layers.quantization.online import nvfp4
-
-    def unpatched(*args, **kwargs):
-        # An advertised patch marker must never substitute for implementation.
-        return None
-
-    unpatched._verl_nvfp4_backports = True
-    owner = nvfp4 if target.startswith("_quantize") else nvfp4.Nvfp4OnlineMoEMethod
-    monkeypatch.setattr(owner, target, unpatched)
-    with pytest.raises(RuntimeError, match="requires audited vLLM"):
-        vllm_runtime.require_vllm_nvfp4_backports()
-
-
-def test_uninspectable_backport_is_rejected(monkeypatch):
-    def unavailable(function):
-        raise OSError("source unavailable")
-
-    monkeypatch.setattr(vllm_runtime.inspect, "getsource", unavailable)
-    with pytest.raises(RuntimeError, match="cannot verify required"):
-        vllm_runtime.require_vllm_nvfp4_backports()
+    with pytest.raises(RuntimeError, match="quantization drifted"):
+        vllm_runtime.require_vllm_native_nvfp4_per_token(
+            SimpleNamespace(model_config=SimpleNamespace(quantization="fp8"))
+        )
 
 
 def test_bf16_native_reload_refuses_mtp_before_ipc(monkeypatch):

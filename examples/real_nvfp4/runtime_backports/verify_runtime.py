@@ -14,14 +14,14 @@
 
 """Verify installed bytes and the source-validated refit lifecycle contract."""
 
+import hashlib
 import json
 from importlib import import_module
 from importlib.metadata import distribution, version
 from pathlib import Path
 
+from apply_vllm_nvfp4 import AFTER as VLLM_NVFP4_PATCH_SHA256
 from patch_megatron_fa4 import verify_patched_source
-
-from verl.utils.real_nvfp4.vllm_runtime import require_vllm_nvfp4_backports
 
 
 def main():
@@ -49,7 +49,9 @@ def main():
         name: str(import_module(name).__file__)
         for name in ("flash_attn_2_cuda", "fused_weight_gradient_mlp_cuda", "amp_C")
     }
-    require_vllm_nvfp4_backports()
+    nvfp4_source = distribution("vllm").locate_file("vllm/model_executor/layers/quantization/online/nvfp4.py")
+    if hashlib.sha256(Path(nvfp4_source).read_bytes()).hexdigest() != VLLM_NVFP4_PATCH_SHA256:
+        raise RuntimeError("Apply the vLLM NVFP4 compatibility patch before using this runtime")
     print(
         "DELIVERY_RUNTIME_GUARD_PASS",
         json.dumps(

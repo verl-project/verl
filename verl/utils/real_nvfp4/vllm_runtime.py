@@ -12,109 +12,44 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Runtime proofs for vLLM 0.27.1's native online NVFP4 MoE path."""
+"""Validate native NVFP4 configuration, weight layout and live-refit state."""
 
-import ast
-import hashlib
 import inspect
 import logging
 import re
-import textwrap
 from collections.abc import Collection
-from functools import lru_cache
-from importlib.metadata import version
 
 import torch
-from packaging.version import Version
 
 logger = logging.getLogger(__name__)
 
 NVFP4_PER_TOKEN_METHOD = "nvfp4_per_token"
 REAL_NVFP4_MOE_BACKEND = "flashinfer_trtllm"
 
-# Canonical function ASTs from vLLM v0.27.1 with upstream fixes #50029
-# (9c22668436a4d94aab87ea74a220e060415cf1d8) and #50074
-# (3ac9525507b2d0de5c1b08cbca96cc94850c7c7a). These are the exact
-# implementations installed by runtime_backports/apply_vllm_online_nvfp4_50029_50074.py,
-# including the local fresh-postprocess/retained-kernel fix: #50074 alone leaves
-# TRTLLM's derived g1_scale_c one refit behind and rebinds eager references.
-# Reciprocal activation scales are also registered for level-2 sleep/refit.
-# Converted activation scales have writable storage, not stride-zero views.
-# Unlike a version/marker check, this also rejects a partially patched wheel.
-_NVFP4_BACKPORT_AST_SHA256 = {
-    "_quantize_moe_weight_to_nvfp4": "11c7d914f31e74d425151fd3ea54b1a6e8aa92ea001aa7ddd6b9eafa30ab187a",
-    "_setup_kernel": "b5a3160ff41a3eefc246e1b80ee7d51808cd8c7e0f6524cbf4f232b60a9410a7",
-}
-
-
-def _function_ast_sha256(function) -> str:
-    tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
-    # Python 3.12 adds this empty field; normalize for the supported 3.10–3.12
-    # interpreters. ASTs already ignore whitespace, line numbers and comments.
-    canonical = ast.dump(tree, include_attributes=False).replace(", type_params=[]", "")
-    return hashlib.sha256(canonical.encode()).hexdigest()
-
-
-@lru_cache(maxsize=1)
-def require_vllm_nvfp4_backports() -> None:
-    """Reject unaudited packing/reload implementations before model creation.
-
-    This is an exact audited-implementation guard, not a general claim that
-    every semantically equivalent implementation can be recognized. A future
-    vLLM upgrade must review and update the contract together with its tests.
-    """
-    from vllm.model_executor.layers.quantization.online.nvfp4 import (
-        Nvfp4OnlineMoEMethod,
-        _quantize_moe_weight_to_nvfp4,
-    )
-
-    implementations = {
-        "_quantize_moe_weight_to_nvfp4": _quantize_moe_weight_to_nvfp4,
-        "_setup_kernel": Nvfp4OnlineMoEMethod._setup_kernel,
-    }
-    for name, function in implementations.items():
-        try:
-            actual = _function_ast_sha256(function)
-        except (OSError, TypeError, SyntaxError) as exc:
-            raise RuntimeError(f"cannot verify required vLLM NVFP4 backports for {name}") from exc
-        if actual != _NVFP4_BACKPORT_AST_SHA256[name]:
-            raise RuntimeError(
-                f"real_nvfp4 requires audited vLLM #50029/#50074 and derived-scale backports: {name} "
-                f"has unrecognized implementation {actual}. Use the validated runtime build; "
-                "the unmodified vLLM 0.27.1 wheel is not sufficient."
-            )
-
 
 def require_vllm_native_nvfp4_per_token(vllm_config) -> None:
     """Fail unless this worker was built for vLLM's native online method."""
 
-    current = Version(version("vllm"))
-    if current != Version("0.27.1"):
-        raise RuntimeError(f"real_nvfp4 requires the audited vLLM 0.27.1 native path, got {current}")
     model_config = getattr(vllm_config, "model_config", None)
     quantization = getattr(model_config, "quantization", None)
     if quantization != NVFP4_PER_TOKEN_METHOD:
         raise RuntimeError(
             f"real_nvfp4 worker quantization drifted: expected {NVFP4_PER_TOKEN_METHOD!r}, got {quantization!r}"
         )
-    require_vllm_nvfp4_backports()
 
 
 def require_vllm_native_reload_contract(model_runner) -> None:
-    """Fail before refit unless the exact native layerwise API is present."""
+    """Check that the runner accepts the native reload call used by verl."""
 
     reload_weights = getattr(model_runner, "reload_weights", None)
     if reload_weights is None:
         raise RuntimeError("vLLM model runner has no native reload_weights API")
-    parameters = inspect.signature(reload_weights).parameters
-    expected = ("weights_iterator", "weights_path", "is_checkpoint_format")
-    if tuple(parameters) != expected:
+    try:
+        inspect.signature(reload_weights).bind(weights_iterator=iter(()), is_checkpoint_format=True)
+    except (TypeError, ValueError) as exc:
         raise RuntimeError(
-            f"vLLM native reload_weights API drifted: expected parameters {expected}, got {tuple(parameters)}"
-        )
-    checkpoint_parameter = parameters["is_checkpoint_format"]
-    if checkpoint_parameter.default is not True:
-        raise RuntimeError("vLLM native reload_weights no longer defaults is_checkpoint_format=True")
+            "vLLM reload_weights must accept weights_iterator and is_checkpoint_format keyword arguments"
+        ) from exc
 
 
 @torch.no_grad()

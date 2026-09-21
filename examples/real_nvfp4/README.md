@@ -68,30 +68,36 @@ vLLM/Megatron validation.
 
 ## Run
 
-Start Ray on the allocated nodes, then provide shared model and dataset paths:
+Use preprocessed datasets in verl's standard `RLHFDataset` format. Each row
+contains a `prompt` chat-message list, a `data_source` identifier and a
+`reward_model` mapping with `style: rule` and the answer in `ground_truth`.
+The built-in reward dispatcher selects scoring from `data_source`; use
+`math_dapo` for DAPO math or an `aime`-prefixed identifier for AIME. Optional
+`extra_info` is passed through by the dataset. Dataset preprocessing belongs
+outside this example; see the existing [preprocessing scripts](../data_preprocess).
+
+Start Ray on the allocated nodes, then provide shared model and parquet paths:
 
 ```bash
 MODEL_PATH=/shared/models/Qwen3-30B-A3B-Base \
-TRAIN_FILE=/shared/data/dapo-math-17k.jsonl \
-TEST_FILE=/shared/data/aime-2024.jsonl \
+TRAIN_FILE=/shared/data/train.parquet \
+TEST_FILE=/shared/data/validation.parquet \
 CKPTS_DIR=/shared/checkpoints/my-run \
 PRECISION_MODE=real_nvfp4 EXP_NAME=my-run NNODES=8 \
   bash examples/real_nvfp4/run_qwen3_30b_megatron.sh
 ```
 
-Use `PRECISION_MODE=bf16` for a matched control. The default example uses
-8 nodes × 4 GPUs, EP=4, GRPO/PPO clipping, R3 routing replay and token-level TIS.
-It generates 64 prompt groups × 16 responses, filters/refills for up to 10
-batches and trains on 32 groups. Adam uses learning rate 1e-6 and betas
-(0.9, 0.999). Strict Minerva scoring and a 512-token overlong buffer with penalty
-factor 1.0 are enabled. `STRICT_MINERVA=0` selects the alternative reward behavior.
+Use `PRECISION_MODE=bf16` for a control with the same example settings. The
+launcher uses verl's standard PPO entry point and built-in reward manager.
+The default configuration is 8 nodes × 4 GPUs, EP=4, GRPO/PPO clipping,
+R3 routing replay and token-level TIS, training on 32 prompts × 16 responses
+per update. Adam uses learning rate 1e-6 and betas (0.9, 0.999).
 
 Rollout memory utilization defaults to 0.8, with 256 sequences and 32768 batched
-tokens. Override these for the available memory and workload. Set
-`TOTAL_TRAINING_STEPS`, `RESUME_MODE`, checkpoint paths and W&B identity for the
-run. Checkpoints include optimizer, scheduler and dataloader progress. Legacy
-dynamic-sampling checkpoints without data progress require an explicit
-zero-based `trainer.dataloader_resume_epoch`.
+tokens. Set `TOTAL_TRAINING_STEPS`, `RESUME_MODE` and checkpoint paths for the
+run. Checkpoints include optimizer, scheduler and dataloader progress.
+Logging uses verl's standard console and W&B integration; provide worker
+environment settings through `RUNTIME_ENV` when needed.
 
 R3 captures routed experts inside vLLM's fused MoE path. Runtime checks validate
 BF16 weight coverage, NVFP4 layer selection and scale values after native reload.

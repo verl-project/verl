@@ -185,25 +185,19 @@ def test_native_vllm_fingerprint_covers_derived_scale():
     assert before != vllm_native_nvfp4_fingerprint(model)
 
 
-def test_native_vllm_reload_contract_is_exact():
-    class _ValidRunner:
-        @staticmethod
-        def reload_weights(
-            weights_iterator=None,
-            weights_path=None,
-            is_checkpoint_format=True,
-        ):
-            pass
+def test_native_vllm_reload_contract_accepts_compatible_signatures():
+    for reload_weights in (
+        lambda weights_iterator=None, weights_path=None, is_checkpoint_format=True: None,
+        lambda weights_iterator=None, is_checkpoint_format=False, *, optional_new_argument=None: None,
+    ):
+        require_vllm_native_reload_contract(SimpleNamespace(reload_weights=reload_weights))
 
-    require_vllm_native_reload_contract(_ValidRunner())
-
-    class _DriftedRunner:
-        @staticmethod
-        def reload_weights(weights_iterator=None, is_checkpoint_format=True):
-            pass
-
-    with pytest.raises(RuntimeError, match="API drifted"):
-        require_vllm_native_reload_contract(_DriftedRunner())
+    for reload_weights in (
+        lambda weights_path=None: None,
+        lambda required_new_argument, weights_iterator=None, is_checkpoint_format=True: None,
+    ):
+        with pytest.raises(RuntimeError, match="must accept"):
+            require_vllm_native_reload_contract(SimpleNamespace(reload_weights=reload_weights))
 
 
 def test_online_nvfp4_ignore_is_a_model_config_argument(monkeypatch):
@@ -454,8 +448,9 @@ def test_model_contract_still_refuses_layouts_it_cannot_count():
 
 @pytest.mark.parametrize("release", ["0.26.0", "0.27.1"])
 def test_monolithic_r3_public_entry_accepts_audited_releases(monkeypatch, release):
-    from verl.utils.real_nvfp4 import r3_monolithic_capture as capture
     from vllm.model_executor.layers.fused_moe.runner import moe_runner
+
+    from verl.utils.real_nvfp4 import r3_monolithic_capture as capture
 
     class Runner(_FakeMoERunner):
         _apply_quant_method = getattr(

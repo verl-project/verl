@@ -13,7 +13,6 @@
 # limitations under the License.
 # Adapted from https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/hendrycks_math/utils.py
 
-import os
 import re
 from typing import Optional
 
@@ -236,10 +235,9 @@ def verify(
         correct, pred = is_correct_strict_box(solution_str, answer, pause_tokens_index)
         return correct == 1, pred
 
-    # Strict Minerva mode requires the Answer: format and disables the boxed-answer fallback.
-    strict_minerva = os.environ.get("VERL_MATH_DAPO_STRICT_MINERVA") == "1"
+    # Prefer Minerva (`Answer: ...`); fall back to `\boxed{}` when it fails.
     correct, pred = is_correct_minerva(solution_str, answer)
-    if strict_minerva or pred != "[INVALID]":
+    if pred != "[INVALID]":
         return correct, pred
 
     box_correct, box_pred = is_correct_strict_box(solution_str, answer, pause_tokens_index)

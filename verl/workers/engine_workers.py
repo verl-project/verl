@@ -333,9 +333,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
                             )
                     append_to_dict(metrics, output)
 
-                # Each completed train_batch calls the engine optimizer once.
-                # Report observed calls, not the configured mini-batch count.
-                metrics["optimizer_steps"] = len(output_lst)
                 output = tu.get_tensordict(tensor_dict={}, non_tensor_dict={"metrics": metrics}).cpu()
             else:
                 output = None

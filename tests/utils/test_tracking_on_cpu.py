@@ -19,47 +19,6 @@ from unittest.mock import MagicMock, call, patch
 from verl.utils.tracking import DapoFilteredRewardTableLogger, Tracking, ValidationGenerationsLogger
 
 
-def test_tracking_forwards_explicit_wandb_resume_identity():
-    mock_wandb = MagicMock()
-
-    with patch.dict(sys.modules, {"wandb": mock_wandb}):
-        tracking = Tracking(
-            project_name="project",
-            experiment_name="display-name",
-            default_backend="wandb",
-            config={"trainer": {}},
-            wandb_run_id="stable-run-id",
-            wandb_resume="must",
-        )
-
-    mock_wandb.init.assert_called_once_with(
-        project="project",
-        name="display-name",
-        entity=None,
-        config={"trainer": {}},
-        settings=None,
-        id="stable-run-id",
-        resume="must",
-    )
-    tracking.logger.clear()
-
-
-def test_tracking_does_not_override_default_wandb_identity():
-    mock_wandb = MagicMock()
-
-    with patch.dict(sys.modules, {"wandb": mock_wandb}):
-        tracking = Tracking(
-            project_name="project",
-            experiment_name="display-name",
-            default_backend="wandb",
-            config={"trainer": {}},
-        )
-
-    assert "id" not in mock_wandb.init.call_args.kwargs
-    assert "resume" not in mock_wandb.init.call_args.kwargs
-    tracking.logger.clear()
-
-
 def test_tracking_finish_finalizes_wandb_once():
     tracking = Tracking.__new__(Tracking)
     tracking.logger = {"wandb": MagicMock()}

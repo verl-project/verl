@@ -762,13 +762,13 @@ def test_real_nvfp4_update_uses_native_reload_weights(monkeypatch):
     monkeypatch.setenv("VERL_REAL_NVFP4_BF16_LAYERS_AT_START", "0")
     monkeypatch.setenv("VERL_REAL_NVFP4_BF16_LAYERS_AT_END", "0")
 
-    receiver = _FakeNativeReloadReceiver(
-        [("model.layers.0.mlp.experts.0.down_proj.weight", torch.ones(1, dtype=torch.bfloat16))]
-    )
+    names = [
+        f"model.layers.0.mlp.experts.0.{projection}.weight" for projection in ("gate_proj", "up_proj", "down_proj")
+    ]
+    receiver = _FakeNativeReloadReceiver([(name, torch.ones(1, dtype=torch.bfloat16)) for name in names])
     monkeypatch.setattr(bwt, "BucketedWeightReceiver", lambda *a, **k: receiver)
 
     attestations = []
-    monkeypatch.setattr(real_nvfp4, "real_nvfp4_expected_counts", lambda hf_config: (1, 1))
     monkeypatch.setattr(
         real_nvfp4,
         "attest_vllm_native_nvfp4_runtime",
@@ -796,7 +796,7 @@ def test_real_nvfp4_update_uses_native_reload_weights(monkeypatch):
     worker._is_real_nvfp4 = True
     worker._real_nvfp4_last_fingerprint = 1
     worker._real_nvfp4_refit_index = 0
-    worker.model_runner.vllm_config.model_config.hf_config = types.SimpleNamespace(num_hidden_layers=1)
+    worker.model_runner.vllm_config.model_config.hf_config = types.SimpleNamespace(num_hidden_layers=1, num_experts=1)
     worker._get_zmq_handle = lambda: "ipc:///tmp/test-native-nvfp4-reload.sock"
 
     worker.update_weights_from_ipc(peft_config=None, base_sync_done=False)
@@ -805,7 +805,7 @@ def test_real_nvfp4_update_uses_native_reload_weights(monkeypatch):
     assert receiver.defer_last_ack is True
     assert receiver.completed_ack is True
     assert reload_calls[0][1] is True
-    assert [name for name, _ in reload_calls[0][0]] == ["model.layers.0.mlp.experts.0.down_proj.weight"]
+    assert [name for name, _ in reload_calls[0][0]] == names
     assert attestations == [
         (
             model,

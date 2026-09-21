@@ -30,7 +30,7 @@ import hashlib
 from importlib.metadata import distribution, version
 
 BEFORE = "5e59f672e3ad3d7ed92a221adf4f7d1b7700e21c61333f8aa5bd0304ac8dbf93"
-AFTER = "e2b296b2898199b273fef3901d01ff38a6b02e530e91efe6fa83126f290e3dcf"
+AFTER = "391e1c66f2b1a20f930f72c8b030548201dcff52aafc5e25e2199686ec485f37"
 
 PACKING_COMMIT = "9c22668436a4d94aab87ea74a220e060415cf1d8"
 RELOAD_COMMIT = "3ac9525507b2d0de5c1b08cbca96cc94850c7c7a"
@@ -119,18 +119,6 @@ def main() -> None:
             layer=layer,
             per_token_activation=True,
         )"""
-    cached_reload = """        if self.moe_kernel is None:
-            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-            assert self.experts_cls is not None
-            self.moe_kernel = make_nvfp4_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                experts_cls=self.experts_cls,
-                backend=self.nvfp4_backend,
-                routing_tables=layer._expert_routing_tables(),
-                layer=layer,
-                per_token_activation=True,
-            )"""
     fresh_reload = """        # Postprocess with the freshly loaded tensors, not the retained kernel's
         # quant config (which still references the pre-refit tensor storage).
         # The native layerwise loader copies these processed parameters back
@@ -161,23 +149,7 @@ def main() -> None:
         replace_parameter(layer, "nvfp4_a2_gscale", processing_quant_config.a2_gscale)""",
     )
     postprocess = "\n        self.moe_kernel.fused_experts.process_weights_after_loading(layer)"
-    if new_reload not in text:
-        candidates = [block + postprocess for block in (old_reload, cached_reload)] + [fresh_reload]
-        matches = [block for block in candidates if block in text]
-        assert len(matches) == 1, "NVFP4 refit: expected original, #50074-only, or fresh-postprocess implementation"
-        text = replace_once(text, matches[0], new_reload, "NVFP4 fresh postprocess / retained kernel")
-
-    # FlashInfer layout conversion expands shared activation scales with stride
-    # zero. Native reload copies into the ORIGINAL parameter storage; registering
-    # the expanded view makes that copy illegal. Materialize once at setup, before
-    # kernel/graph references are retained, never by rebinding during copyback.
-    for name, value in (("w13_input_scale", "a13_scale"), ("w2_input_scale", "a2_scale")):
-        text = replace_once(
-            text,
-            f'        replace_parameter(layer, "{name}", {value})',
-            f'        replace_parameter(layer, "{name}", {value}.contiguous())',
-            f"writable {name}",
-        )
+    text = replace_once(text, old_reload + postprocess, new_reload, "NVFP4 fresh postprocess / retained kernel")
 
     if hashlib.sha256(text.encode()).hexdigest() != AFTER:
         raise RuntimeError("vLLM online NVFP4 patch output differs from audited bytes")
