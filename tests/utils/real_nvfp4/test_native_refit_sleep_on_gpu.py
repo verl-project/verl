@@ -37,7 +37,12 @@ def test_actual_sleep_wake_refit_restores_retained_activation_scales(monkeypatch
     layer = torch.nn.Module()
     layer._expert_routing_tables = lambda: None
     layer.activation = SimpleNamespace(is_gated=True)
-    layer.moe_config = SimpleNamespace(hidden_dim=128, hidden_dim_unpadded=None, intermediate_size_per_partition=128)
+    layer.moe_config = SimpleNamespace(
+        hidden_dim=128,
+        hidden_dim_unpadded=None,
+        intermediate_size_per_partition=128,
+        moe_parallel_config=SimpleNamespace(enable_eplb=False),
+    )
     processors = []
 
     def make_kernel(**kwargs):
@@ -47,7 +52,9 @@ def test_actual_sleep_wake_refit_restores_retained_activation_scales(monkeypatch
             gemm1_clamp_limit=None,
             gemm1_beta=None,
             gemm1_alpha=None,
+            is_situ=False,
         )
+        expert._compute_g1_scale_c = MethodType(TrtLlmNvFp4ExpertsMonolithic._compute_g1_scale_c, expert)
         expert.process_weights_after_loading = MethodType(
             TrtLlmNvFp4ExpertsMonolithic.process_weights_after_loading, expert
         )

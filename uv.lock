@@ -33,7 +33,7 @@ overrides = [
     { name = "numpy", specifier = ">=2.0.0" },
     { name = "nvidia-cudnn-cu13", marker = "sys_platform == 'linux'", specifier = "==9.20.0.48" },
     { name = "nvidia-cudnn-frontend", marker = "sys_platform == 'linux'", specifier = "==1.25.0" },
-    { name = "transformers", specifier = "==5.9.0" },
+    { name = "transformers", specifier = "==5.10.4" },
 ]
 
 [[manifest.dependency-metadata]]
@@ -88,13 +88,6 @@ requires-dist = ["einops", "nvdlfw-inspect", "nvidia-cudnn-frontend>=1.25.0", "o
 [[manifest.dependency-metadata]]
 name = "veomni"
 version = "0.1.11"
-
-[[manifest.dependency-metadata]]
-name = "vllm"
-version = "0.27.1"
-requires-dist = ["regex", "cachetools", "psutil", "sentencepiece", "numpy", "requests>=2.26.0", "tqdm", "blake3", "py-cpuinfo", "transformers>=5.5.3", "tokenizers>=0.21.1", "safetensors>=0.6.2", "protobuf>=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*", "fastapi[standard]>=0.133.0,<0.137.0", "starlette>=1.0.1", "aiohttp>=3.13.3", "openai>=2.0.0", "pydantic>=2.12.0", "prometheus-client>=0.18.0", "pillow", "prometheus-fastapi-instrumentator>=8.0.0", "tiktoken>=0.6.0", "lm-format-enforcer==0.11.3", "llguidance>=1.7.0,<1.8.0 ; platform_machine == 'aarch64' or platform_machine == 'arm64' or platform_machine == 'ppc64le' or platform_machine == 's390x' or platform_machine == 'x86_64'", "outlines-core==0.2.14", "lark==1.2.2", "xgrammar>=0.2.1,<1.0.0 ; platform_machine == 'aarch64' or platform_machine == 'arm64' or platform_machine == 'ppc64le' or platform_machine == 's390x' or platform_machine == 'x86_64'", "typing-extensions>=4.10", "filelock>=3.16.1", "partial-json-parser", "jsonschema>=4.23.0", "pyzmq>=25.0.0", "msgspec", "mistral-common[image]>=1.11.6", "opencv-python-headless>=4.13.0", "pyyaml", "six>=1.16.0 ; python_full_version >= '3.12'", "setuptools>=77.0.3,<81.0.0 ; python_full_version >= '3.12'", "einops", "compressed-tensors==0.17.0", "depyf==0.20.0", "cloudpickle", "watchfiles", "python-json-logger", "ninja", "pybase64", "cbor2", "ijson", "setproctitle", "openai-harmony>=0.0.3", "anthropic>=0.71.0", "model-hosting-container-standards>=0.1.14,<1.0.0", "mcp", "opentelemetry-sdk>=1.27.0", "opentelemetry-api>=1.27.0", "opentelemetry-exporter-otlp>=1.27.0", "opentelemetry-semantic-conventions-ai>=0.4.1", "numba==0.65.0", "torch==2.13.0", "torchaudio==2.11.0", "torchvision==0.28.0", "torchcodec>=0.14", "pynvvideocodec==2.0.4", "flashinfer-python==0.6.18", "apache-tvm-ffi==0.1.11", "tilelang==0.1.12", "nvidia-cudnn-frontend>=1.19.1", "nvtx==0.2.15", "fastsafetensors>=0.3.2", "nvidia-cutlass-dsl[cu13]==4.6.2", "quack-kernels==0.6.4", "tokenspeed-mla==0.1.8 ; sys_platform == 'linux'", "humming-kernels[cu13]==0.1.10", "zentorch==2.11.0.0 ; extra == 'zen'", "pandas ; extra == 'bench'", "matplotlib ; extra == 'bench'", "seaborn ; extra == 'bench'", "datasets ; extra == 'bench'", "scipy ; extra == 'bench'", "plotly ; extra == 'bench'", "tensorizer==2.10.1 ; extra == 'tensorizer'", "fastsafetensors>=0.3.2 ; extra == 'fastsafetensors'", "instanttensor>=0.1.9 ; extra == 'instanttensor'", "runai-model-streamer[azure,gcs,s3]>=0.15.7 ; extra == 'runai'", "av ; extra == 'audio'", "scipy ; extra == 'audio'", "soundfile ; extra == 'audio'", "soxr ; extra == 'audio'", "mistral-common[audio] ; extra == 'audio'", "nvidia-deepstream-videodecode-cu13>=9.0.2 ; extra == 'deepstream'", "helion==1.4.0 ; extra == 'helion'", "smg-grpc-servicer[vllm]>=0.5.2 ; extra == 'grpc'", "opentelemetry-sdk>=1.26.0 ; extra == 'otel'", "opentelemetry-api>=1.26.0 ; extra == 'otel'", "opentelemetry-exporter-otlp>=1.26.0 ; extra == 'otel'", "opentelemetry-semantic-conventions-ai>=0.4.1 ; extra == 'otel'", "vllm-gguf-plugin>=0.0.2 ; extra == 'extra-quant'"]
-requires-python = ">=3.10, <3.15"
-provides-extras = ["zen", "bench", "tensorizer", "fastsafetensors", "instanttensor", "runai", "audio", "video", "deepstream", "flashinfer", "helion", "grpc", "otel", "extra-quant"]
 
 [[package]]
 name = "absl-py"
@@ -1703,23 +1696,23 @@ wheels = [
 
 [[package]]
 name = "humming-kernels"
-version = "0.1.10"
+version = "0.1.12"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cuda-bindings" },
     { name = "jinja2" },
     { name = "numpy" },
     { name = "nvidia-ml-py" },
-    { name = "pyelftools" },
     { name = "safetensors" },
     { name = "tabulate" },
     { name = "torch", version = "2.13.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
     { name = "tqdm" },
     { name = "triton", version = "3.7.1", source = { registry = "https://pypi.org/simple" } },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/51/4f/6977a31451c3f7aa1deaa76506d6cdeb74ef418ad8bcba2e98f7510b26ec/humming_kernels-0.1.10.tar.gz", hash = "sha256:da3e46fb9fc9eba2a9327c2e8135ead68e390c955acd7449f97ee7c71666c8b1", size = 220110, upload-time = "2026-07-02T10:22:57.687Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/93/b9/53797fff4b1b31b4567453a365646d724469b1bb0d76c07f8746617d0cb6/humming_kernels-0.1.12.tar.gz", hash = "sha256:c96c37c95f74379067d2d2d0c5154d12ee9a8cfa29a7c3370a7f3e34f207ca72", size = 259323, upload-time = "2026-07-31T14:28:23.124Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/63/ba/869bc24591d2b4fb0d8da821528072971052a934af077a11f77a0f2b3e79/humming_kernels-0.1.10-py3-none-any.whl", hash = "sha256:4ded0998ff085afeddde70baf93f97c2929969ec3d4a63a52cfec5072bc972b4", size = 184889, upload-time = "2026-07-02T10:22:56.031Z" },
+    { url = "https://files.pythonhosted.org/packages/58/0f/01f871dc26f8d7e1683df9464890d48cfd5c4e46c4a264d7ee0868749197/humming_kernels-0.1.12-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:988e8b9da41e3679ae2816bdfb51acab53c05cc56254b5ca98e847f4efcf24fd", size = 318019, upload-time = "2026-07-31T14:28:19.925Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/a2/f96912ee7d68f56e61c15555657ffa057b8afbaa21241c63342b5969bb74/humming_kernels-0.1.12-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:cd3ef712a93f3a9075ea99de2c72bcd3ec89dab3759b3a248d869f5507b60331", size = 322656, upload-time = "2026-07-31T14:28:21.511Z" },
 ]
 
 [package.optional-dependencies]
@@ -1803,6 +1796,23 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/72/34/14ca021ce8e5dfedc35312d08ba8bf51fdd999c576889fc2c24cb97f4f10/iniconfig-2.3.0.tar.gz", hash = "sha256:c76315c77db068650d49c5b56314774a7804df16fee4402c1f19d6d15d8c4730", size = 20503, upload-time = "2025-10-18T21:55:43.219Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/cb/b1/3846dd7f199d53cb17f49cba7e651e9ce294d8497c8c150530ed11865bb8/iniconfig-2.3.0-py3-none-any.whl", hash = "sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12", size = 7484, upload-time = "2025-10-18T21:55:41.639Z" },
+]
+
+[[package]]
+name = "instanttensor"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "torch", version = "2.13.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/27/8e/b209471a5a73a7ef1dad7365e05adf4c95b20fadc16fc9aea10ceaba1fc8/instanttensor-0.2.0.tar.gz", hash = "sha256:acafa964f9ba6d2e342d8ffcb7e68bacc6d59d60e2fda222dc1333045cd50c9c", size = 3112592, upload-time = "2026-09-13T19:10:18.043Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7b/04/2dfe624dc0fa0551e9299610f3e0f4e3002dc8b5478632c5d1b0d91c3a59/instanttensor-0.2.0-cp310-cp310-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:f843b236ba6b46f85b3b6e777f5ba4d2f8bf10caeeeea4b3b94adf1618200d85", size = 6018388, upload-time = "2026-09-13T19:09:48.749Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/2e/95c3cbbd0230605cc811904fc6288bc543ebfbca17898a33a73eea08f784/instanttensor-0.2.0-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:39b8d36bbf3507ea0d67afb200f8de444c17094fafc4ac5e399c05a6a0a14873", size = 6059653, upload-time = "2026-09-13T19:09:51.651Z" },
+    { url = "https://files.pythonhosted.org/packages/a7/aa/23f1a6a7eb32f9c86251abfd652334460497af421cd29f43b676304174d2/instanttensor-0.2.0-cp311-cp311-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:1dcd47626c9af89b35c8ca53703c59f8aee5666445894e0d38d13a02304140c8", size = 6062188, upload-time = "2026-09-13T19:09:54.536Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/79/07331d1832f7b98b00e78665b79accf59e0b12acb867ff798dc1bdc9d7e9/instanttensor-0.2.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:17d16691399bc41fd66d2046f10ae6f5d0f84058b0f1283ed80fe8ebc804a886", size = 6118855, upload-time = "2026-09-13T19:09:57.452Z" },
+    { url = "https://files.pythonhosted.org/packages/77/10/23c738a0b3568a4dadd7604ffe1f47612969b74db1e6708b074625b83838/instanttensor-0.2.0-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:eefde9b121cd3a2699bd079a19cba5c0a74f23cc1fa2dd8e186a12910f89408e", size = 6089973, upload-time = "2026-09-13T19:10:00.355Z" },
+    { url = "https://files.pythonhosted.org/packages/f8/02/90a64c81360d473d07f36dde68eb47d043bf442a24c9c91232643f8c0928/instanttensor-0.2.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:879e8b524b391ed916b8412ef82c3ab40d933ad8d038f40b340d0bd58b7894d3", size = 6178704, upload-time = "2026-09-13T19:10:03.313Z" },
 ]
 
 [[package]]
@@ -4039,15 +4049,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pyelftools"
-version = "0.33"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/a3/11/767522582afab1b884d277de0e6e011640cb9d7292a38694b4b1a1df1ae8/pyelftools-0.33.tar.gz", hash = "sha256:660d82dcbeb8e83d1702bd97f223f761625da06111c0cc988eac6b8ab0c1b61f", size = 15068655, upload-time = "2026-05-29T12:56:22.553Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/46/2a/f9697576603dae937727827505a6126a066affb227034e77e6f9068910da/pyelftools-0.33-py3-none-any.whl", hash = "sha256:f215ad5f47d3f1373a21496a6c9e0707c622840d0622f23ff7ce08678b020036", size = 201178, upload-time = "2026-05-29T12:56:20.587Z" },
-]
-
-[[package]]
 name = "pygments"
 version = "2.21.0"
 source = { registry = "https://pypi.org/simple" }
@@ -5456,7 +5457,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/db/f9/34ad04b8e32f3d43f
 
 [[package]]
 name = "transformers"
-version = "5.9.0"
+version = "5.10.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "huggingface-hub" },
@@ -5469,9 +5470,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/51/58/7f843608f2e8421f86bb97060b54649be6239ec612b82bf9d41e65c26c00/transformers-5.9.0.tar.gz", hash = "sha256:25997cb8fa6053533171634b6162d7df54346530ec2aa9b42bb834e63668c842", size = 8642240, upload-time = "2026-05-20T14:50:49.278Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f7/5d/1df789ca27a436ce09de67c8fee6acd2a528d34c28685991f8203e5418ae/transformers-5.10.4.tar.gz", hash = "sha256:de37741509e64ccb88f7f5708beaf5b1914df447f5fe659f9c0fd95950413168", size = 8799021, upload-time = "2026-06-15T17:28:29.306Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/02/ca/2eaa5359f2ccb8c2e1656bc26305ad0cf438aa392ce4b29ae67a315c186e/transformers-5.9.0-py3-none-any.whl", hash = "sha256:1d19509bcff7028ebc6b277d71caa712e8353778463d38764237d14b42b52788", size = 10787648, upload-time = "2026-05-20T14:50:45.337Z" },
+    { url = "https://files.pythonhosted.org/packages/d7/f1/d66881f28d3e64002a21d043c7c8db306c0ad5a711c85337ff551bfbc040/transformers-5.10.4-py3-none-any.whl", hash = "sha256:8c5b99b141b53619435a76629b0284f04d27ff46d788b463fc0ecb23b8ff130e", size = 11004075, upload-time = "2026-06-15T17:28:26.21Z" },
 ]
 
 [[package]]
@@ -6059,10 +6060,10 @@ requires-dist = [
     { name = "transferqueue", marker = "extra == 'verl-core'", specifier = ">=0.1.10" },
     { name = "transformer-engine", extras = ["core-cu13", "pytorch"], marker = "extra == 'megatron'", specifier = "==2.18.0" },
     { name = "transformers", specifier = ">=5.5.3,!=5.6.0,<5.11" },
-    { name = "transformers", marker = "extra == 'cpu'", specifier = "==5.9.0" },
-    { name = "transformers", marker = "extra == 'sglang'", specifier = "==5.9.0" },
+    { name = "transformers", marker = "extra == 'cpu'", specifier = "==5.10.4" },
+    { name = "transformers", marker = "extra == 'sglang'", specifier = "==5.10.4" },
     { name = "transformers", marker = "extra == 'verl-core'" },
-    { name = "transformers", marker = "extra == 'vllm'", specifier = "==5.9.0" },
+    { name = "transformers", marker = "extra == 'vllm'", specifier = "==5.10.4" },
     { name = "triton", marker = "extra == 'cpu'" },
     { name = "trl", marker = "extra == 'fsdp'", specifier = "==0.27.0" },
     { name = "trl", marker = "extra == 'megatron'", specifier = "==0.27.0" },
@@ -6077,7 +6078,7 @@ requires-dist = [
     { name = "verl", extras = ["verl-core"], marker = "extra == 'megatron'" },
     { name = "verl", extras = ["verl-core"], marker = "extra == 'sglang'" },
     { name = "verl", extras = ["verl-core"], marker = "extra == 'vllm'" },
-    { name = "vllm", marker = "extra == 'vllm'", specifier = "==0.27.1" },
+    { name = "vllm", marker = "extra == 'vllm'", specifier = "==0.29.0" },
     { name = "wandb" },
     { name = "wandb", marker = "extra == 'verl-core'" },
     { name = "wheel", marker = "extra == 'megatron'" },
@@ -6102,7 +6103,7 @@ wheels = [
 
 [[package]]
 name = "vllm"
-version = "0.27.1"
+version = "0.29.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -6119,8 +6120,10 @@ dependencies = [
     { name = "fastsafetensors" },
     { name = "filelock" },
     { name = "flashinfer-python", version = "0.6.18", source = { registry = "https://pypi.org/simple" } },
+    { name = "huggingface-hub" },
     { name = "humming-kernels", extra = ["cu13"], marker = "(extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra != 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm') or (extra != 'extra-4-verl-fsdp' and extra != 'extra-4-verl-megatron' and extra != 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm')" },
     { name = "ijson" },
+    { name = "instanttensor" },
     { name = "jsonschema" },
     { name = "lark" },
     { name = "llguidance", version = "1.7.6", source = { registry = "https://pypi.org/simple" } },
@@ -6179,10 +6182,10 @@ dependencies = [
     { name = "watchfiles" },
     { name = "xgrammar", version = "0.2.7", source = { registry = "https://pypi.org/simple" } },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/97/fa/a3cb3a7baf9f1f1027580b0542e42f655b0f577b8a8d39878c1c0a73e6a9/vllm-0.27.1.tar.gz", hash = "sha256:eec2d54d137ac1e59cb4c39226dfee1943eefc8f4788f5821d7300d6acbdb646", size = 39257426, upload-time = "2026-08-11T10:59:48.04Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/88/fe/d87b6daf7f02a16464b50685dcf8e0ee7c6e12ad4d2b7107c41717d8566c/vllm-0.29.0.tar.gz", hash = "sha256:c03feb07943ecae9e69e7dc424d7c5569ecf8d1292513aef2a4de67af381cd97", size = 40906181, upload-time = "2026-09-09T08:59:18.353Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ff/be/6d309884d11ef02966c06d633e156d2070b986df6fccef25041c4b9510e2/vllm-0.27.1-cp38-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:74c1a04548c9016ace8f6c03592edf62517152a0e833f46282556ffbe0796254", size = 307180998, upload-time = "2026-08-11T11:00:37.201Z" },
-    { url = "https://files.pythonhosted.org/packages/8f/73/20ad0cc655a5739d95342075c9afab1a25338d4b584fc71548c0b362404b/vllm-0.27.1-cp38-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:98e9fc2a1ed8549a733c9d1b242e2002b82367da9e29e37801761438cb3a2670", size = 312887766, upload-time = "2026-08-11T11:00:11.706Z" },
+    { url = "https://files.pythonhosted.org/packages/b3/dc/de2ca88cfb6539c987bc4f6a69887deaa53eb5c4fd483e0923ca00ebd60a/vllm-0.29.0-cp38-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:e6b0dfc2b6fd307315e9b34b73cd2bfe7b6b08958eda721828e61732bba426b0", size = 310033787, upload-time = "2026-09-09T08:58:32.315Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/09/7f79450e21bd1c2a0897ab946a544816a4f7e04c54f0ca49849b14b12d6a/vllm-0.29.0-cp38-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:09d48617fc2be9c6cdcd5db480651ab0d84817b257204f2cc2e3ecbb70bbb635", size = 315961042, upload-time = "2026-09-09T08:59:00.747Z" },
 ]
 
 [[package]]

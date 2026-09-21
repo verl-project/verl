@@ -22,8 +22,9 @@ match the training recipe, including the BF16 layer selection.
 ## Installation
 
 The runtime uses PyTorch 2.13.0/CUDA 13, Transformer Engine 2.18.0,
-Megatron-Core 0.19.0, vLLM 0.27.1 and FlashInfer 0.6.18. The project lock also
-selects CUTLASS DSL 4.6.2 and QuACK 0.6.4; these override vLLM's default pins.
+Megatron-Core 0.19.0, vLLM 0.29.0, Transformers 5.10.4 and FlashInfer 0.6.18.
+The project lock selects CUTLASS DSL 4.6.2 and QuACK 0.6.4, matching vLLM's
+released dependencies.
 Keep the FlashInfer Python, cubin and CUDA JIT-cache packages aligned.
 
 Build through the official Docker entry:
@@ -44,16 +45,13 @@ Two dependency patches are required by the pinned releases:
 
 - Megatron [#6964](https://github.com/NVIDIA/Megatron-LM/pull/6964): check that
   FlashAttention 4 is installed before importing its optional module.
-- vLLM [#50029](https://github.com/vllm-project/vllm/pull/50029) and
-  [#50074](https://github.com/vllm-project/vllm/pull/50074), with refit scale
-  lifecycle corrections: avoid extra BF16 rounding during packing, preserve
-  the execution kernel, and restore current derived/reciprocal scales after
-  refit and level-2 sleep.
+- vLLM refit scale lifecycle: derive scales from freshly loaded weights and
+  restore reciprocal-scale storage after refit and level-2 sleep. The packing
+  and kernel-reuse fixes are already included in vLLM 0.29.
 
 The scripts check source hashes and reject unknown dependency implementations.
 Apply them while building the environment, before starting workers. The runtime
 verifier checks dependency versions, native extension imports and refit support.
-No TE performance patch or port-allocation patch is installed.
 
 For a non-Docker launch, use the environment's NCCL library:
 
@@ -99,7 +97,7 @@ run. Checkpoints include optimizer, scheduler and dataloader progress.
 Logging uses verl's standard console and W&B integration; provide worker
 environment settings through `RUNTIME_ENV` when needed.
 
-R3 captures routed experts inside vLLM's fused MoE path. Runtime checks validate
+R3 uses vLLM's native routing capture inside the fused MoE path. Runtime checks validate
 BF16 weight coverage, NVFP4 layer selection and scale values after native reload.
 
 ## Tests

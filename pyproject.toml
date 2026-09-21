@@ -88,8 +88,8 @@ vllm = [
     "torch==2.13.0",
     "torchvision==0.28.0",
     "torchaudio==2.11.0",
-    # 0.27 contains the CuMem allocator-aware memory-profiling fix (#49208).
-    "vllm==0.27.1",
+    # 0.29 includes native NVFP4 packing and kernel-reuse fixes.
+    "vllm==0.29.0",
     # 0.6.18 fixes the SM100 tile-192 non-finite output issue (sglang#34629).
     "flashinfer-python==0.6.18",
     "flashinfer-cubin==0.6.18",
@@ -100,7 +100,7 @@ vllm = [
     "xgrammar==0.2.7",
     "openai==3.15.0",
     "mbridge",
-    "transformers==5.9.0",
+    "transformers==5.10.4",
 ]
 
 sglang = [
@@ -119,8 +119,8 @@ sglang = [
     # imported lazily (fa4 backend only), so the default backends work.
     "mbridge",
     # sglang 0.5.12 hard-pins transformers==5.6.0; the project-wide override below
-    # replaces that pin with 5.9.0 (5.6.0 is excluded repo-wide, see setup.py).
-    "transformers==5.9.0",
+    # replaces that pin with 5.10.4 (5.6.0 is excluded repo-wide, see setup.py).
+    "transformers==5.10.4",
 ]
 
 # DEFERRED — trtllm is a CUDA-13 backend (torch 2.10.0+cu130, conflict-gated).
@@ -132,7 +132,7 @@ sglang = [
 #     "torch==2.10.0",   # route to pytorch-cu130 (CUDA 13), see [tool.uv.sources]
 #     "tensorrt-llm==1.3.0rc14 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
 #     "mbridge",
-#     "transformers==5.9.0",
+#     "transformers==5.10.4",
 #     "numpy>=2.0.0,<2.4",
 #     "ray[default]==2.54.1",
 # ]
@@ -149,7 +149,7 @@ fsdp = [
     "trl==0.27.0",
     "flash-linear-attention==0.5.2",
     # transformers NOT pinned here: verl-core carries it and the project-wide
-    # override below settles the version (5.9.0). See override-dependencies.
+    # override below settles the version (5.10.4). See override-dependencies.
 ]
 
 # Apex / flash-attn build from official source with runtime-matched Torch.
@@ -217,7 +217,7 @@ cpu = [
     "torch==2.11.0",
     "torchvision==0.26.0",
     "torchaudio==2.11.0",
-    "transformers==5.9.0",
+    "transformers==5.10.4",
     # Plain source package (torch / numpy / packaging + one pybind11 C++ ext, no
     # CUDA toolchain), and it imports without TE / apex — both are optional there
     # with pure-torch fallbacks. It is what lets the `*_on_cpu.py` tests that
@@ -368,11 +368,11 @@ conflicts = [
 ]
 
 # Global override pins:
-#   * transformers==5.9.0 project-wide — one version for every backend, so a
+#   * transformers==5.10.4 project-wide — one version for every backend, so a
 #     venv's transformers no longer depends on which engine it was synced with.
 #     Unmarked on purpose: overrides are absolute and replace EVERY requirement
-#     on the package, so this also settles the engines' own pins (vllm 0.26 asks
-#     >=5.5.3, sglang 0.5.12 hard-pins ==5.6.0 — a release excluded repo-wide,
+#     on the package, so this also settles the engines' own pins (vllm 0.29 asks
+#     >=5.10.4, sglang 0.5.12 hard-pins ==5.6.0 — a release excluded repo-wide,
 #     see setup.py). Keep it inside setup.py / requirements.txt's supported
 #     window (>=5.5.3,!=5.6.0,<5.11) and bump all of them together. Do NOT add
 #     an `extra` marker back unless a backend truly needs to diverge: such a
@@ -381,7 +381,7 @@ conflicts = [
 #   * numpy>=2.0.0 floor.
 #   * kernels>=0.12.0,<0.13 — sglang deps `kernels` unbounded; later releases
 #     broke transformers' hub_kernels.py before (huggingface/transformers#46291),
-#     so pin to transformers 5.9.0's own window (satisfies sglang too) and move
+#     so pin to transformers 5.10.4's own window (satisfies sglang too) and move
 #     it whenever the transformers pin moves.
 #   * flash-attn-4 (sglang's hard dep) is DROPPED — its marker is false in every
 #     declared environment, which removes the requirement outright. It ships the
@@ -390,18 +390,17 @@ conflicts = [
 #     imports flash_attn.cute.interface as soon as flash-attn-4's dist metadata
 #     exists, so once 2.8.3's older copy wins, `import megatron.core` dies with
 #     "No module named 'cutlass.utils.ampere_helpers'" — a module absent from
-#     newer CUTLASS DSL releases. The vLLM 0.26 fork pins FlashInfer 0.6.14 and
-#     CUTLASS DSL 4.6 explicitly above.
+#     newer CUTLASS DSL releases. vLLM 0.29 uses the FlashInfer and CUTLASS
+#     DSL versions selected explicitly above.
 #     docker/Dockerfile.stable.sglang settles the same clash with
 #     `pip uninstall -y flash-attn-4`; sglang itself only imports fa4 for its
 #     non-default "fa4" attention backend.
 override-dependencies = [
-    "transformers==5.9.0",
+    "transformers==5.10.4",
     "numpy>=2.0.0",
     "kernels>=0.12.0,<0.13",
     "flash-attn-4 ; platform_machine == 'flash-attn-4-excluded'",
-    # vLLM-specific FI/DSL/QuACK pins are overridden in its version-scoped
-    # dependency-metadata below; SGLang keeps its own declared dependency pins.
+    # vLLM uses its released FI/DSL/QuACK requirements; SGLang keeps its own pins.
     # Shared cuDNN selection is unchanged from the existing runtime.
     "nvidia-cudnn-cu13==9.20.0.48 ; sys_platform == 'linux'",
     "nvidia-cudnn-frontend==1.25.0 ; sys_platform == 'linux'",
@@ -678,110 +677,3 @@ requires-dist = ["packaging>20.6"]
 name = "flash-attn"
 version = "2.8.3"
 requires-dist = ["torch", "einops"]
-
-# Version-scoped replacement of exactly three upstream pins. All other
-# published Requires-Dist entries, including optional extras, remain intact.
-[[tool.uv.dependency-metadata]]
-name = "vllm"
-version = "0.27.1"
-provides-extra = ["zen", "bench", "tensorizer", "fastsafetensors", "instanttensor", "runai", "audio", "video", "deepstream", "flashinfer", "helion", "grpc", "otel", "extra-quant"]
-requires-python = ">=3.10,<3.15"
-requires-dist = [
-    "regex",
-    "cachetools",
-    "psutil",
-    "sentencepiece",
-    "numpy",
-    "requests>=2.26.0",
-    "tqdm",
-    "blake3",
-    "py-cpuinfo",
-    "transformers>=5.5.3",
-    "tokenizers>=0.21.1",
-    "safetensors>=0.6.2",
-    "protobuf!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*,>=5.29.6",
-    "fastapi[standard]<0.137.0,>=0.133.0",
-    "starlette>=1.0.1",
-    "aiohttp>=3.13.3",
-    "openai>=2.0.0",
-    "pydantic>=2.12.0",
-    "prometheus_client>=0.18.0",
-    "pillow",
-    "prometheus-fastapi-instrumentator>=8.0.0",
-    "tiktoken>=0.6.0",
-    "lm-format-enforcer==0.11.3",
-    "llguidance<1.8.0,>=1.7.0; platform_machine == \"x86_64\" or platform_machine == \"arm64\" or platform_machine == \"aarch64\" or platform_machine == \"ppc64le\" or platform_machine == \"s390x\"",
-    "outlines_core==0.2.14",
-    "lark==1.2.2",
-    "xgrammar<1.0.0,>=0.2.1; platform_machine == \"x86_64\" or platform_machine == \"aarch64\" or platform_machine == \"arm64\" or platform_machine == \"s390x\" or platform_machine == \"ppc64le\"",
-    "typing_extensions>=4.10",
-    "filelock>=3.16.1",
-    "partial-json-parser",
-    "jsonschema>=4.23.0",
-    "pyzmq>=25.0.0",
-    "msgspec",
-    "mistral_common[image]>=1.11.6",
-    "opencv-python-headless>=4.13.0",
-    "pyyaml",
-    "six>=1.16.0; python_version > \"3.11\"",
-    "setuptools<81.0.0,>=77.0.3; python_version > \"3.11\"",
-    "einops",
-    "compressed-tensors==0.17.0",
-    "depyf==0.20.0",
-    "cloudpickle",
-    "watchfiles",
-    "python-json-logger",
-    "ninja",
-    "pybase64",
-    "cbor2",
-    "ijson",
-    "setproctitle",
-    "openai-harmony>=0.0.3",
-    "anthropic>=0.71.0",
-    "model-hosting-container-standards<1.0.0,>=0.1.14",
-    "mcp",
-    "opentelemetry-sdk>=1.27.0",
-    "opentelemetry-api>=1.27.0",
-    "opentelemetry-exporter-otlp>=1.27.0",
-    "opentelemetry-semantic-conventions-ai>=0.4.1",
-    "numba==0.65.0",
-    "torch==2.13.0",
-    "torchaudio==2.11.0",
-    "torchvision==0.28.0",
-    "torchcodec>=0.14",
-    "PyNvVideoCodec==2.0.4",
-    "flashinfer-python==0.6.18",
-    "apache-tvm-ffi==0.1.11",
-    "tilelang==0.1.12",
-    "nvidia-cudnn-frontend>=1.19.1",
-    "nvtx==0.2.15",
-    "fastsafetensors>=0.3.2",
-    "nvidia-cutlass-dsl[cu13]==4.6.2",
-    "quack-kernels==0.6.4",
-    "tokenspeed-mla==0.1.8; platform_system == \"Linux\"",
-    "humming-kernels[cu13]==0.1.10",
-    "zentorch==2.11.0.0; extra == \"zen\"",
-    "pandas; extra == \"bench\"",
-    "matplotlib; extra == \"bench\"",
-    "seaborn; extra == \"bench\"",
-    "datasets; extra == \"bench\"",
-    "scipy; extra == \"bench\"",
-    "plotly; extra == \"bench\"",
-    "tensorizer==2.10.1; extra == \"tensorizer\"",
-    "fastsafetensors>=0.3.2; extra == \"fastsafetensors\"",
-    "instanttensor>=0.1.9; extra == \"instanttensor\"",
-    "runai-model-streamer[azure,gcs,s3]>=0.15.7; extra == \"runai\"",
-    "av; extra == \"audio\"",
-    "scipy; extra == \"audio\"",
-    "soundfile; extra == \"audio\"",
-    "soxr; extra == \"audio\"",
-    "mistral_common[audio]; extra == \"audio\"",
-    "nvidia-deepstream-videodecode-cu13>=9.0.2; extra == \"deepstream\"",
-    "helion==1.4.0; extra == \"helion\"",
-    "smg-grpc-servicer[vllm]>=0.5.2; extra == \"grpc\"",
-    "opentelemetry-sdk>=1.26.0; extra == \"otel\"",
-    "opentelemetry-api>=1.26.0; extra == \"otel\"",
-    "opentelemetry-exporter-otlp>=1.26.0; extra == \"otel\"",
-    "opentelemetry-semantic-conventions-ai>=0.4.1; extra == \"otel\"",
-    "vllm-gguf-plugin>=0.0.2; extra == \"extra-quant\"",
-]

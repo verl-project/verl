@@ -25,6 +25,35 @@ logger = logging.getLogger(__name__)
 
 NVFP4_PER_TOKEN_METHOD = "nvfp4_per_token"
 REAL_NVFP4_MOE_BACKEND = "flashinfer_trtllm"
+_route_marker_printed = False
+
+
+def attest_r3_rollout_routes(routed_experts):
+    """Reject the all-zero route payload produced by a missed capture hook."""
+
+    import numpy as np
+
+    if routed_experts is None:
+        raise RuntimeError("R3 rollout requested routed experts, but vLLM returned None")
+    route_array = np.asarray(routed_experts)
+    if route_array.ndim < 2:
+        raise RuntimeError(f"R3 rollout returned malformed routed experts with shape {route_array.shape}")
+
+    # Validate all token routes returned by the native capturer.
+    if route_array.shape[0] == 0:
+        raise RuntimeError("R3 rollout returned an empty routed-experts array")
+    if not np.any(route_array):
+        raise RuntimeError("R3 rollout routes are all zero; native routed-experts capture returned no expert IDs")
+
+    global _route_marker_printed
+    if not _route_marker_printed:
+        _route_marker_printed = True
+        logger.warning(
+            "VERL_R3_ROLLOUT_ROUTES PASS shape=%s nonzero=%d",
+            route_array.shape,
+            int(np.count_nonzero(route_array)),
+        )
+    return routed_experts
 
 
 def require_vllm_native_nvfp4_per_token(vllm_config) -> None:
@@ -108,7 +137,7 @@ def attest_vllm_native_nvfp4_runtime(
     moe_count = 0
     quantized_layer_indices = set()
     unquantized_layer_indices = set()
-    # vLLM 0.27.1's FusedMoE factory receives the quantization prefix ending in
+    # vLLM's FusedMoE factory receives the quantization prefix ending in
     # `.mlp.experts`, then returns an MoERunner whose actual RoutedExperts
     # submodule is usually named `.mlp.experts.routed_experts`.
     layer_pattern = re.compile(r"(?:^|\.)layers\.(\d+)\.mlp\.experts(?:\.routed_experts)?$")

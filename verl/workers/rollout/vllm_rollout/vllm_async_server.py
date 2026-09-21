@@ -739,7 +739,7 @@ class vLLMHttpServer:
             routed_experts = final_res.outputs[0].routed_experts
             real_nvfp4_config = getattr(self.config, "real_nvfp4", {}) or {}
             if real_nvfp4_config.get("enable", False):
-                from verl.utils.real_nvfp4.r3_monolithic_capture import (
+                from verl.utils.real_nvfp4.vllm_runtime import (
                     attest_r3_rollout_routes,
                 )
 

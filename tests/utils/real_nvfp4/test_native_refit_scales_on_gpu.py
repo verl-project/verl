@@ -54,7 +54,9 @@ def test_actual_setup_kernel_keeps_current_scales_for_eager_and_graph(monkeypatc
             gemm1_clamp_limit=None,
             gemm1_beta=None,
             gemm1_alpha=None,
+            is_situ=False,
         )
+        expert._compute_g1_scale_c = MethodType(TrtLlmNvFp4ExpertsMonolithic._compute_g1_scale_c, expert)
         expert.process_weights_after_loading = MethodType(
             TrtLlmNvFp4ExpertsMonolithic.process_weights_after_loading, expert
         )

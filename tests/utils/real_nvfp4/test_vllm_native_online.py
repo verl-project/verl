@@ -20,11 +20,8 @@ from verl.utils.real_nvfp4.config import (
     real_nvfp4_vllm_ignore_layers,
     validate_real_nvfp4_model_contract,
 )
-from verl.utils.real_nvfp4.r3_monolithic_capture import (
-    _patch_moe_runner_class,
-    attest_r3_rollout_routes,
-)
 from verl.utils.real_nvfp4.vllm_runtime import (
+    attest_r3_rollout_routes,
     attest_vllm_native_nvfp4_runtime,
     require_vllm_native_reload_contract,
     vllm_native_nvfp4_fingerprint,
@@ -252,95 +249,6 @@ def test_online_nvfp4_ignore_is_a_model_config_argument(monkeypatch):
     }
 
 
-class _FakeRouter:
-    def __init__(self, capture: bool) -> None:
-        self.capture_fn = (lambda routes: None) if capture else None
-        self.select_calls = 0
-
-    def select_experts(self, **kwargs):
-        self.select_calls += 1
-        if self.capture_fn is not None:
-            self.capture_fn(torch.tensor([[1, 2]]))
-        return torch.ones(1, 2), torch.tensor([[1, 2]])
-
-
-class _FakeRoutedExperts:
-    def __init__(self, monolithic: bool) -> None:
-        self.quant_method = SimpleNamespace(
-            is_monolithic=monolithic,
-            topk_indices_dtype=torch.int32,
-        )
-
-    def forward_monolithic(self, **kwargs):
-        return "monolithic"
-
-    def forward_modular(self, **kwargs):
-        return "modular"
-
-
-class _FakeMoERunner:
-    def __init__(self, monolithic: bool, capture: bool) -> None:
-        self.routed_experts = _FakeRoutedExperts(monolithic)
-        self.router = _FakeRouter(capture)
-
-    @property
-    def _quant_method(self):
-        return self.routed_experts.quant_method
-
-    def _apply_quant_method(
-        self,
-        hidden_states,
-        router_logits,
-        shared_experts_input,
-        input_ids=None,
-    ):
-        if self.routed_experts.quant_method.is_monolithic:
-            result = (
-                None,
-                self.routed_experts.forward_monolithic(
-                    x=hidden_states,
-                    router_logits=router_logits,
-                    input_ids=input_ids,
-                ),
-            )
-        else:
-            topk_weights, topk_ids = self.router.select_experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                topk_indices_dtype=self._quant_method.topk_indices_dtype,
-                input_ids=input_ids,
-            )
-            result = (
-                None,
-                self.routed_experts.forward_modular(
-                    x=hidden_states,
-                    topk_weights=topk_weights,
-                    topk_ids=topk_ids,
-                ),
-            )
-        return result
-
-
-def test_monolithic_r3_capture_patch_fires_only_when_needed():
-    assert _patch_moe_runner_class(_FakeMoERunner) == "verl_wrapper"
-    assert _patch_moe_runner_class(_FakeMoERunner) == "already_patched"
-
-    monolithic_capture = _FakeMoERunner(monolithic=True, capture=True)
-    assert monolithic_capture._apply_quant_method(None, None, None) == (
-        None,
-        "monolithic",
-    )
-    assert monolithic_capture.router.select_calls == 1
-
-    monolithic_no_capture = _FakeMoERunner(monolithic=True, capture=False)
-    monolithic_no_capture._apply_quant_method(None, None, None)
-    assert monolithic_no_capture.router.select_calls == 0
-
-    modular_capture = _FakeMoERunner(monolithic=False, capture=True)
-    modular_capture._apply_quant_method(None, None, None)
-    assert modular_capture.router.select_calls == 1
-
-
 def test_r3_route_attestation_rejects_missed_capture():
     with pytest.raises(RuntimeError, match="all zero"):
         attest_r3_rollout_routes(np.zeros((4, 2, 2), dtype=np.int16))
@@ -446,28 +354,32 @@ def test_model_contract_still_refuses_layouts_it_cannot_count():
         validate_real_nvfp4_model_contract(no_sparse_layer)
 
 
-@pytest.mark.parametrize("release", ["0.26.0", "0.27.1"])
-def test_monolithic_r3_public_entry_accepts_audited_releases(monkeypatch, release):
-    from vllm.model_executor.layers.fused_moe.runner import moe_runner
+def test_native_monolithic_routing_capture_binding():
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import TrtLlmNvFp4ExpertsMonolithic
+    from vllm.model_executor.layers.fused_moe.routed_experts_capturer import bind_routed_experts_capturer
+    from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
-    from verl.utils.real_nvfp4 import r3_monolithic_capture as capture
-
-    class Runner(_FakeMoERunner):
-        _apply_quant_method = getattr(
-            _FakeMoERunner._apply_quant_method, "__wrapped__", _FakeMoERunner._apply_quant_method
+    # Use installed classes and binding/dispatch methods; only model construction
+    # is omitted so this test does not require loading a complete checkpoint.
+    expert = object.__new__(TrtLlmNvFp4ExpertsMonolithic)
+    expert.moe_config = SimpleNamespace(
+        use_ep=False, dp_size=1, max_num_tokens=4, experts_per_token=2, device=torch.device("cpu")
+    )
+    runner = object.__new__(MoERunner)
+    torch.nn.Module.__init__(runner)
+    runner.layer_name = "model.layers.3.mlp.experts"
+    runner.routed_experts = SimpleNamespace(
+        quant_method=SimpleNamespace(
+            is_monolithic=True, moe_kernel=SimpleNamespace(impl=SimpleNamespace(fused_experts=expert))
         )
-
-    monkeypatch.setattr(capture, "version", lambda name: release)
-    monkeypatch.setattr(moe_runner, "MoERunner", Runner)
-    assert capture.patch_vllm_monolithic_moe_r3_capture() == "verl_wrapper"
-    runner = Runner(monolithic=True, capture=True)
-    assert runner._apply_quant_method(None, None, None) == (None, "monolithic")
-    assert runner.router.select_calls == 1
-
-
-def test_monolithic_r3_public_entry_rejects_unaudited_release(monkeypatch):
-    from verl.utils.real_nvfp4 import r3_monolithic_capture as capture
-
-    monkeypatch.setattr(capture, "version", lambda name: "0.28.0")
-    with pytest.raises(RuntimeError, match="audited vLLM"):
-        capture.patch_vllm_monolithic_moe_r3_capture()
+    )
+    calls = []
+    capturer = SimpleNamespace(capture=lambda layer_id, ids: calls.append((layer_id, ids.clone())))
+    bind_routed_experts_capturer(runner, capturer)
+    assert expert.supports_routing_replay_capture()
+    replay = expert._maybe_make_routing_replay_buffer(num_tokens=2, device=torch.device("cpu"))
+    replay[:2].copy_(torch.tensor([[1, 2], [3, 4]], dtype=torch.int16))
+    expert._maybe_dispatch_routing_replay(replay, num_tokens=2)
+    assert calls[0][0] == 3
+    torch.testing.assert_close(calls[0][1], replay[:2])
+    assert len(calls) == 1

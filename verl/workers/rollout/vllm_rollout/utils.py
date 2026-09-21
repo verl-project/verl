@@ -193,34 +193,11 @@ class vLLMColocateWorkerExtension:
 
             apply_qat_patches()
             logger.info("Applied QAT (compressed-tensors) patches in vLLM worker subprocess")
-        elif _is_real_nvfp4:
-            # vLLM's multiprocessing workers may be spawned rather than
-            # forked, so install the R3 hook in every actual model worker
-            # before its native online MoE and CUDA graphs are constructed.
-            from verl.utils.real_nvfp4.r3_monolithic_capture import (
-                patch_vllm_monolithic_moe_r3_capture,
-            )
-
-            patch_vllm_monolithic_moe_r3_capture()
         elif _is_modelopt_qat:
             from verl.utils.modelopt import apply_modelopt_nvfp4_patches
 
             apply_modelopt_nvfp4_patches()
             logger.info("Applied legacy ModelOpt QAT W4A16 patches in vLLM worker subprocess")
-
-        # R3 routing replay is precision-agnostic: the trainer replays the
-        # rollout's expert routing for every MoE layer whatever the rollout's
-        # precision is. Installing the capture hook only on the real-NVFP4
-        # branch above left a BF16 rollout replaying routing that was never
-        # captured -- coherent generations, but the actor scored them with the
-        # wrong experts (entropy 6.0 and rollout KL 13.8 versus 0.9 and 0.006).
-        # The patch is idempotent, so the NVFP4 branch may already have run it.
-        if getattr(getattr(vllm_config, "model_config", None), "enable_return_routed_experts", False):
-            from verl.utils.real_nvfp4.r3_monolithic_capture import (
-                patch_vllm_monolithic_moe_r3_capture,
-            )
-
-            patch_vllm_monolithic_moe_r3_capture()
 
         # TODO: For ascend NPU, when the corresponding vllm-ascend version is upgraded to v0.13.0,
         # please remove the VLLM_ASCEND_REQUIRED_ENV_VARS variable replacement action.
