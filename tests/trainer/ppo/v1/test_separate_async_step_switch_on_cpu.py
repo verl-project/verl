@@ -565,18 +565,29 @@ def _memory_budget_setup(monkeypatch, hybrid_enabled, standalone_memory, *, inte
     return trainer, created_configs, checkpoint_calls
 
 
-def test_setup_standalone_memory_from_hydra_override(monkeypatch):
-    trainer, created_configs, _ = _memory_budget_setup(monkeypatch, True, None)
+@pytest.mark.parametrize("model_engine", ["dp", "megatron", "veomni", "torchtitan"])
+@pytest.mark.parametrize("hybrid_enabled", [True, False])
+@pytest.mark.parametrize("standalone_memory", ["default", "null", "0.85"])
+def test_setup_standalone_memory_from_hydra_override(monkeypatch, model_engine, hybrid_enabled, standalone_memory):
+    trainer, created_configs, _ = _memory_budget_setup(monkeypatch, hybrid_enabled, None)
+    overrides = [
+        f"model_engine={model_engine}",
+        f"actor_rollout_ref.hybrid_engine={hybrid_enabled}",
+        "actor_rollout_ref.rollout.gpu_memory_utilization=0.45",
+    ]
+    if standalone_memory != "default":
+        overrides.append(f"actor_rollout_ref.rollout.standalone_gpu_memory_utilization={standalone_memory}")
     with initialize_config_module(config_module="verl.trainer.config", version_base=None):
-        trainer.config = compose(
-            config_name="ppo_trainer",
-            overrides=[
-                "actor_rollout_ref.rollout.gpu_memory_utilization=0.45",
-                "++actor_rollout_ref.rollout.standalone_gpu_memory_utilization=0.85",
-            ],
-        )
+        trainer.config = compose(config_name="ppo_trainer", overrides=overrides)
+
+    expected = 0.85 if standalone_memory == "0.85" else 0.45
+    assert trainer.config.actor_rollout_ref.rollout.standalone_gpu_memory_utilization == (
+        None if standalone_memory == "null" else expected
+    )
+    original = OmegaConf.to_container(trainer.config, resolve=False)
 
     trainer._setup()
 
-    assert created_configs[0][0].actor_rollout_ref.rollout.gpu_memory_utilization == 0.85
+    assert created_configs[0][0].actor_rollout_ref.rollout.gpu_memory_utilization == expected
     assert trainer.config.actor_rollout_ref.rollout.gpu_memory_utilization == 0.45
+    assert OmegaConf.to_container(trainer.config, resolve=False) == original

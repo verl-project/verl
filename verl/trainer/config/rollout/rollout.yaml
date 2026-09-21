@@ -45,6 +45,9 @@ dtype: bfloat16
 # Fraction of GPU memory used by vLLM/SGLang/TRTLLM for KV cache.
 gpu_memory_utilization: 0.5
 
+# Fraction of GPU memory used by standalone rollout replicas; defaults to the shared rollout budget.
+standalone_gpu_memory_utilization: ${oc.select:actor_rollout_ref.rollout.gpu_memory_utilization}
+
 # Whether to ignore EOS and continue generating after EOS is hit.
 ignore_eos: False
 
