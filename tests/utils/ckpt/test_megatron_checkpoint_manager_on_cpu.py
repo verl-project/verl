@@ -403,6 +403,25 @@ class TestSaveCheckpointDispatch:
         mock_save_dc.assert_not_called()
         mgr.bridge.save_weights.assert_not_called()
 
+    @pytest.mark.parametrize(("rank", "expected_gc_calls"), [(0, 1), (1, 0)])
+    def test_retention_gc_runs_on_global_rank_zero_only(self, rank, expected_gc_calls):
+        """Only global rank 0 owns checkpoint retention."""
+        mgr = _make_manager(save_contents=[])
+        mgr.rank = rank
+        save_path = self._save_path(step=30 + rank)
+
+        with (
+            patch.object(mgr, "ensure_checkpoint_capacity") as mock_ensure_capacity,
+            patch.object(mgr, "register_checkpoint") as mock_register_checkpoint,
+            patch.object(mgr, "_write_checkpoint_manifest"),
+            patch("verl.utils.checkpoint.megatron_checkpoint_manager.torch.distributed.barrier") as mock_barrier,
+        ):
+            mgr.save_checkpoint(save_path, global_step=30 + rank, max_ckpt_to_keep=2)
+
+        assert mock_ensure_capacity.call_count == expected_gc_calls
+        assert mock_register_checkpoint.call_count == expected_gc_calls
+        mock_barrier.assert_called_once_with()
+
 
 # ===========================================================================
 # Tests: load_checkpoint dispatch

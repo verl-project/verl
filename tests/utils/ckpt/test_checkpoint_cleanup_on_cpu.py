@@ -112,6 +112,42 @@ class TestCheckpointCleanupLogic:
         assert os.path.exists(ckpt_300)
         assert len(manager.previous_saved_paths) == 3
 
+    def test_rmtree_file_not_found_during_delete_is_ignored(self, manager, monkeypatch):
+        """A missing path during concurrent cleanup is treated as success."""
+        ckpt = self._create_checkpoint_dir(10)
+
+        def racing_rmtree(path, *args, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory", path)
+
+        monkeypatch.setattr(shutil, "rmtree", racing_rmtree)
+        manager.remove_previous_save_local_path(ckpt)
+
+    def test_pre_save_gc_removes_oldest_when_capacity_is_full(self, manager):
+        """Pre-save GC removes only enough checkpoints to leave one free slot."""
+        manager.ensure_checkpoint_capacity(2)
+        ckpt_10 = self._create_checkpoint_dir(10)
+        manager.register_checkpoint(ckpt_10, 2)
+        assert os.path.exists(ckpt_10)
+
+        manager.ensure_checkpoint_capacity(2)
+        assert os.path.exists(ckpt_10)
+        ckpt_20 = self._create_checkpoint_dir(20)
+        manager.register_checkpoint(ckpt_20, 2)
+        assert os.path.exists(ckpt_10)
+        assert os.path.exists(ckpt_20)
+        assert manager.previous_saved_paths == [ckpt_10, ckpt_20]
+
+        manager.ensure_checkpoint_capacity(2)
+        assert not os.path.exists(ckpt_10)
+        assert os.path.exists(ckpt_20)
+        assert manager.previous_saved_paths == [ckpt_20]
+
+        ckpt_30 = self._create_checkpoint_dir(30)
+        manager.register_checkpoint(ckpt_30, 2)
+        assert os.path.exists(ckpt_20)
+        assert os.path.exists(ckpt_30)
+        assert manager.previous_saved_paths == [ckpt_20, ckpt_30]
+
     def test_full_save_cycle_max_ckpt_1(self, manager):
         """Simulate multiple save cycles with max_ckpt_to_keep=1."""
         # First save

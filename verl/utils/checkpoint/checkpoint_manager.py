@@ -161,7 +161,13 @@ class BaseCheckpointManager:
             print(f"Checkpoint manager remove previous save local path: {abs_path}")
             if not os.path.exists(abs_path):
                 continue
-            shutil.rmtree(abs_path, ignore_errors=True)
+            # Concurrent cleanup can still surface FileNotFoundError from
+            # fd-based rmtree despite ignore_errors=True. A missing path means
+            # cleanup has already succeeded.
+            try:
+                shutil.rmtree(abs_path, ignore_errors=True)
+            except FileNotFoundError:
+                print(f"Checkpoint manager skip missing path during removal: {abs_path}")
 
     def ensure_checkpoint_capacity(self, max_ckpt_to_keep: int):
         """
