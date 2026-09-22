@@ -151,19 +151,29 @@ def _trainer(
     return trainer
 
 
-def _construct_trainer(monkeypatch, *, replay_buffer, enable_switch: bool = True, disaggregation: bool = False):
+def _construct_trainer(
+    monkeypatch,
+    *,
+    replay_buffer,
+    enable_switch: bool = True,
+    disaggregation: bool = False,
+    hybrid_engine: bool | None = True,
+):
+    actor_rollout_ref = {
+        "actor": {"ppo_mini_batch_size": 16},
+        "rollout": {
+            "nnodes": 1,
+            "n_gpus_per_node": 8,
+            "checkpoint_engine": {"backend": "nccl"},
+            "disaggregation": {"enabled": disaggregation},
+        },
+    }
+    if hybrid_engine is not None:
+        actor_rollout_ref["hybrid_engine"] = hybrid_engine
     config = OmegaConf.create(
         {
             "data": {"train_batch_size": 64},
-            "actor_rollout_ref": {
-                "actor": {"ppo_mini_batch_size": 16},
-                "rollout": {
-                    "nnodes": 1,
-                    "n_gpus_per_node": 8,
-                    "checkpoint_engine": {"backend": "nccl"},
-                    "disaggregation": {"enabled": disaggregation},
-                },
-            },
+            "actor_rollout_ref": actor_rollout_ref,
             "trainer": {
                 "nnodes": 1,
                 "n_gpus_per_node": 8,
@@ -424,6 +434,38 @@ def test_disabled_switching_skips_custom_replay_buffer_validation(monkeypatch):
     trainer = _construct_trainer(monkeypatch, replay_buffer=SimpleNamespace(), enable_switch=False)
 
     assert trainer.hybrid_rollout_config.enable_switch is False
+    # No colocated replicas are created on the training GPUs without switching:
+    # PPOTrainer._setup() sees this flag and builds an empty LLMServerManager.
+    assert trainer._enable_hybrid_replicas is False
+
+
+@pytest.mark.parametrize("hybrid_engine", [True, None], ids=["explicit_true", "legacy_config_without_key"])
+def test_enable_switch_creates_hybrid_replicas(monkeypatch, hybrid_engine):
+    trainer = _construct_trainer(
+        monkeypatch,
+        replay_buffer=_RecordingReplayBuffer(),
+        enable_switch=True,
+        hybrid_engine=hybrid_engine,
+    )
+
+    assert trainer._enable_hybrid_replicas is True
+
+
+def test_hybrid_engine_false_wins_over_enable_switch(monkeypatch, caplog):
+    # hybrid_engine=False (the v0 fully-async convention) keeps its "no colocated
+    # replicas on the training GPUs" meaning and wins over a conflicting
+    # enable_switch=True, which is ignored with a warning instead of failing startup.
+    with caplog.at_level("WARNING", logger=trainer_module.__name__):
+        trainer = _construct_trainer(
+            monkeypatch,
+            replay_buffer=_RecordingReplayBuffer(),
+            enable_switch=True,
+            hybrid_engine=False,
+        )
+
+    assert trainer._enable_hybrid_replicas is False
+    assert trainer.hybrid_rollout_config.enable_switch is False
+    assert "hybrid_engine" in caplog.text
 
 
 def test_adaptive_threshold_increases_after_trainer_idle():

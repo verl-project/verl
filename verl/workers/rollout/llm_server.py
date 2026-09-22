@@ -411,7 +411,7 @@ class LLMServerManager:
         load balancer starts empty.
 
         Used by trainers that serve rollout exclusively from standalone
-        resources (e.g. v1 separate_async with ``actor_rollout_ref.hybrid_engine=False``)
+        resources (e.g. v1 separate_async without ``hybrid_rollout.enable_switch``)
         so that no inference engine is initialized on the training GPUs.
         """
         instance = cls(*args, **kwargs)
