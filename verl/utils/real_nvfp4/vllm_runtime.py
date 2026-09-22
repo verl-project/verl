@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 
 NVFP4_PER_TOKEN_METHOD = "nvfp4_per_token"
 REAL_NVFP4_MOE_BACKEND = "flashinfer_trtllm"
-_route_marker_printed = False
 
 
 def attest_r3_rollout_routes(routed_experts):
@@ -45,14 +44,6 @@ def attest_r3_rollout_routes(routed_experts):
     if not np.any(route_array):
         raise RuntimeError("R3 rollout routes are all zero; native routed-experts capture returned no expert IDs")
 
-    global _route_marker_printed
-    if not _route_marker_printed:
-        _route_marker_printed = True
-        logger.warning(
-            "VERL_R3_ROLLOUT_ROUTES PASS shape=%s nonzero=%d",
-            route_array.shape,
-            int(np.count_nonzero(route_array)),
-        )
     return routed_experts
 
 
