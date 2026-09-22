@@ -1,6 +1,7 @@
 name: nightly_ci_ascend_multinode
 
 on:
+  pull_request:
   schedule:
     - cron: "0 17 * * *"
 
@@ -16,9 +17,9 @@ env:
 jobs:
   ascend-rayjob-e2e:
     if: github.repository_owner == 'verl-project'
-    name: E2E Ascend RayJob multinode PPO
+    name: E2E Ascend RayJob multinode GRPO GLM5.2 Top16 Megatron
     runs-on: linux-aarch64-a3-800i-8
-    timeout-minutes: 240
+    timeout-minutes: 360
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-vllm-a3-ubuntu
     steps:
@@ -294,8 +295,7 @@ jobs:
                   uv pip install --system --no-deps -e {WORK_REPO}
                   uv pip list --system
 
-                  python examples/data_preprocess/gsm8k.py --local_dataset_path "$HOME/.cache/datasets/openai/gsm8k"
-                  ls -lh "$HOME/data/gsm8k"
+                  test -r /root/.cache/modelscope/hub/datasets/lxb007981/GLM-5___2-top16-DAPO-17k-Tuned/dapo-math-17k-8k.verl.jsonl
                   """
               )
 
@@ -370,7 +370,7 @@ jobs:
           /root/.cache/cicd_test/submit_and_wait_rayjob.sh \
             multinode-e2e \
             /root/.cache/cicd_test/run_multinode_testing.sh \
-            '["--script-path","/verl/tests/special_npu/run_gspo_qwen3_30b_megatron_npu_multinode.sh"]' \
+            '["--script-path","/verl/tests/special_npu/nightly_ci_ascend/run_grpo_glm52_top16_megatron_npu_multinode.sh"]' \
             '{}' \
             '[
               {"op":"replace","path":"/spec/rayClusterSpec/workerGroupSpecs/0/template/spec/containers/0/resources/requests/cpu","value":"64"},
