@@ -1,7 +1,7 @@
-昇腾安装指南(A5)
+昇腾安装指南(Ascend 950 系列产品)
 =================
 
-Last updated: 08/03/2026.
+Last updated: 09/22/2026.
 
 
 目录
@@ -10,8 +10,7 @@ Last updated: 08/03/2026.
 - `框架后端支持说明 <#框架后端支持说明>`_
 - `部署指南 <#部署指南>`_
    - `Docker镜像获取、构建和使用 <#1-docker镜像获取构建和使用>`_
-   - `自定义安装-vLLM + FSDP/Megatron <#2-自定义安装-vllm--fsdpmegatron>`_
-   - `自定义安装-SGLang + FSDP/Megatron <#3-自定义安装-sglang--fsdpmegatron>`_
+   - `自定义安装 <#2-自定义安装>`_
 
 
 
@@ -39,7 +38,7 @@ Last updated: 08/03/2026.
 `昇腾镜像说明 <dockerfile_build_guidance.rst>`__\ 。
 
 
-2. 自定义安装-vLLM + FSDP/Megatron
+2. 自定义安装
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 关键版本支持与依赖
