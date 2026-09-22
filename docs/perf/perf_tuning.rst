@@ -195,6 +195,14 @@ LigerKernel provides fused Triton kernels (RMSNorm, SwiGLU, RoPE) that can impro
 
 3. ``use_liger`` is compatible with ``use_fused_kernels``. The former controls model-internal kernels, while the latter controls the output head. Set ``fused_kernel_options.impl_backend`` to ``liger`` to use Liger's fused scaled cross entropy, or keep the default ``torch`` backend to use verl's native chunked ``FusedLinearForPPOFunction``. The ``liger`` backend falls back to the native implementation when Liger is not installed.
 
+.. note::
+
+    The generic fused output-head implementation does not support models with
+    ``final_logit_softcapping`` enabled, including Gemma variants that use it.
+    Set ``actor_rollout_ref.model.use_fused_kernels=False`` for these models to
+    preserve their log-probabilities and gradients. Selecting another fused
+    backend does not remove this limitation.
+
 Forward prefetch in FSDP training backend
 ----------------------
 
