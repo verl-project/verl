@@ -324,11 +324,11 @@ def _fsdp_kwargs(param_dtype, mesh):
     }
 
 
-def _wrap_fsdp2(module, param_dtype, mesh):
+def _wrap_fsdp2(module, param_dtype, mesh, forward_prefetch=False):
     """Mirror ``FSDPEngine._build_fsdp_module``'s fsdp2 branch."""
     fsdp_kwargs = _fsdp_kwargs(param_dtype, mesh)
     full_state = module.state_dict()
-    apply_fsdp2(module, fsdp_kwargs, {})
+    apply_fsdp2(module, fsdp_kwargs, {"forward_prefetch": forward_prefetch})
     fsdp2_load_full_state_dict(module, full_state, mesh, None)
     return module
 
@@ -563,7 +563,7 @@ def case_single_wrapping(path, mesh, rank):
         print(f"[overlap] single wrapping OK, units={units}")
 
 
-def case_matches_unsharded_reference(path, mesh, rank, activation_dtype, use_autocast):
+def case_matches_unsharded_reference(path, mesh, rank, activation_dtype, use_autocast, forward_prefetch):
     """FSDP2 must reproduce plain ``from_pretrained`` in the same context.
 
     The self-casting child preserves its low-precision activation boundary, so
@@ -574,7 +574,8 @@ def case_matches_unsharded_reference(path, mesh, rank, activation_dtype, use_aut
     context_dtype = activation_dtype if use_autocast else None
     context_label = "engine-autocast" if use_autocast else "direct"
     dtype_label = str(activation_dtype).removeprefix("torch.")
-    label = f"reference/{dtype_label}/{context_label}"
+    prefetch_label = "prefetch" if forward_prefetch else "no-prefetch"
+    label = f"reference/{dtype_label}/{context_label}/{prefetch_label}"
 
     torch.manual_seed(SEED)
     input_ids = torch.randint(0, 64, (2, 8), device=get_device_id())
@@ -591,7 +592,7 @@ def case_matches_unsharded_reference(path, mesh, rank, activation_dtype, use_aut
     ref_dtypes = {name: param.dtype for name, param in reference.named_parameters()}
 
     module = _build_module(path, ToySelfCastingModel, activation_dtype, mesh, keep_fp32_aware=True)
-    module = _wrap_fsdp2(module, activation_dtype, mesh)
+    module = _wrap_fsdp2(module, activation_dtype, mesh, forward_prefetch=forward_prefetch)
     parameter_dtypes, logits = _forward_parameter_dtypes(module, input_ids, context_dtype)
     observations = _self_casting_observations(module)
     assert observations == ref_observations, (
@@ -899,10 +900,15 @@ def main():
 
     # 5. BF16/FP16 parity with the unsharded `from_pretrained` graph, both in
     #    FSDPEngine's autocast context and through a direct/no-autocast call.
+    #    Run with and without forward prefetch so upstream's prefetch chain is
+    #    exercised in the presence of the additional fp32 child units.
     for activation_dtype in (torch.bfloat16, torch.float16):
         for use_autocast in (True, False):
-            case_matches_unsharded_reference(self_cast_path, mesh, rank, activation_dtype, use_autocast)
-            get_torch_device().empty_cache()
+            for forward_prefetch in (False, True):
+                case_matches_unsharded_reference(
+                    self_cast_path, mesh, rank, activation_dtype, use_autocast, forward_prefetch
+                )
+                get_torch_device().empty_cache()
 
     # 5b. the loader must not touch the caller's state dict.
     case_loader_does_not_mutate_full_state(path, mesh, rank)
