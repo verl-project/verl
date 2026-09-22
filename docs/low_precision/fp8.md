@@ -378,9 +378,11 @@ and inputs; the dense probe was 0.026 both times.
 `quantization` unset, vLLM 0.24 auto-selects the FlashInfer TRT-LLM bf16 MoE backend on SM100,
 whose BlockMajorK layout turns `w13_weight` / `w2_weight` into 4-D tensors. verl's bf16 weight
 sync feeds `model.load_weights` per-expert 2-D tensors, which the loader can no longer index
-(`shard_dim=0 is not a valid data dimension for a 3D tensor`). Until the bf16 path gets the same
-staging cycle, pin the layout-preserving backend:
-`+actor_rollout_ref.rollout.engine_kwargs.vllm.moe_backend=triton`.
+(`shard_dim=0 is not a valid data dimension for a 3D tensor`). The fix routes the standard sync
+through vLLM's own layerwise reload lifecycle (wengeezhang/verl#4, awaiting hardware validation);
+without it, pin the layout-preserving backend:
+`+actor_rollout_ref.rollout.engine_kwargs.vllm.moe_backend=triton`. The same-shape staging fix
+described above is proposed upstream as verl-project/verl#7986.
 
 The weight-sync quantization deliberately uses **TransformerEngine's `MXFP8Quantizer`** —
 the same quantizer the trainer's FP8 GEMMs apply to weights — so the rollout engine serves
