@@ -33,12 +33,13 @@ A full list of tags that are supported with Verl on ascend.
 
 ---
 
-## Model-Specific Images
+## Model/Scene-Specific Images
 
-| Device | CANN Base Image | Inference Backend | Model | Image Tag | Dockerfile |
+| Device | CANN Base Image | Inference Backend | Model/Scene | Image Tag | Dockerfile |
 |--------|-----------------|-------------------|-------|-----------|------------|
 | 910b | 8.5.2 | vLLM | Qwen3.5 | `verl-8.5.2-910b-ubuntu22.04-py3.11-qwen3-5` | [Dockerfile.ascend_8.5.2_a2_qwen3-5](https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.2_a2_qwen3-5) |
 | A3 | 8.5.2 | vLLM | Qwen3.5 | `verl-8.5.2-a3-ubuntu22.04-py3.11-qwen3-5` | [Dockerfile.ascend_8.5.2_a3_qwen3-5](https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.2_a3_qwen3-5) |
+| 910b | 8.5.2 | vLLM | Uni-Agent | `latest-vllm-910b-ubuntu-for-uniagent` | [Dockerfile.ascend_8.5.2_a2_uni-agent](https://github.com/verl-project/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.2_a2_uni-agent) |
 
 ---
 
