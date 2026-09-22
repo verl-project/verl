@@ -283,15 +283,6 @@ case "${DEVICE}" in
             +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
             +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY"
         )
-        REF+=(
-            ++actor_rollout_ref.ref.megatron.override_transformer_config.use_fused_rmsnorm=True
-            ++actor_rollout_ref.ref.megatron.override_transformer_config.moe_grouped_gemm=True
-            ++actor_rollout_ref.ref.megatron.override_transformer_config.use_fused_swiglu=True
-            ++actor_rollout_ref.ref.megatron.override_transformer_config.moe_permute_fusion=True
-            ++actor_rollout_ref.ref.megatron.override_transformer_config.gradient_accumulation_fusion=True
-            actor_rollout_ref.ref.use_torch_compile=True
-            ++actor_rollout_ref.ref.megatron.override_transformer_config.use_ascend_mc2=True
-        )
         ;;
 esac
 
