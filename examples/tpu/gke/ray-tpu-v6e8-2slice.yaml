@@ -35,7 +35,7 @@ spec:
         serviceAccountName: ray-ksa
         containers:
           - name: ray-head
-            image: us-west2-docker.pkg.dev/tpu-pytorch/raycluster/verl-tpu:v20260918-torchtpu0905
+            image: us-west2-docker.pkg.dev/tpu-pytorch/raycluster/verl-tpu:v20260920-vllm0221-raiden
             imagePullPolicy: Always
             env:
             - name: RAY_TRAIN_V2_ENABLED
@@ -86,7 +86,7 @@ spec:
           serviceAccountName: ray-ksa
           containers:
             - name: ray-worker
-              image: us-west2-docker.pkg.dev/tpu-pytorch/raycluster/verl-tpu:v20260918-torchtpu0905
+              image: us-west2-docker.pkg.dev/tpu-pytorch/raycluster/verl-tpu:v20260920-vllm0221-raiden
               imagePullPolicy: Always
               resources:
                 limits:

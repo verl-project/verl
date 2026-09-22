@@ -8,8 +8,9 @@ RUN pip install keyrings.google-artifactregistry-auth
 RUN pip install pandas==2.3.3
 
 ARG AUTH_TOKEN
-# Set the PIP_INDEX_URL environment variable to point to the Torch TPU virtual registry
-ENV PIP_INDEX_URL="https://oauth2accesstoken:${AUTH_TOKEN}@us-python.pkg.dev/ml-oss-artifacts-transient/torch-tpu-virtual-registry/simple/"
+# Keep PyPI as primary index and point PIP_EXTRA_INDEX_URL to the Torch TPU virtual registry
+ENV PIP_INDEX_URL="https://pypi.org/simple"
+ENV PIP_EXTRA_INDEX_URL="https://oauth2accesstoken:${AUTH_TOKEN}@us-python.pkg.dev/ml-oss-artifacts-transient/torch-tpu-virtual-registry/simple/"
 
 # --- Add torchtitan setup from Dockerfile ---
 USER root
@@ -20,41 +21,29 @@ RUN pip install git+https://github.com/openxla/tokamax.git@8cba6a6a1e52e9efbb7ff
 RUN pip install torch==2.12.0 --index-url https://download.pytorch.org/whl/cpu
 RUN pip install libtpu==0.0.41 -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
-# Pinned: `--pre` alone tracks the registry HEAD (~5 nightlies/day), so the
-# installed version silently drifts with the build date. Must stay in sync with
-# the torch-tpu pin in the pyproject sed below, otherwise the editable install
-# of torchtpu-vllm resolves that pin and downgrades this one back out.
-#
-# The usable range is boxed in by three independent changes in torch_tpu. All
-# three were located by bisecting the nightly index; each one was also observed
-# as a real failure on v6e-8 before the window was narrowed:
-#
-#   * >= dev20260729090127 required. Earlier nightlies (including
-#     dev20260714090201, which torchtpu-vllm @ 88f359b3 nominally declares)
-#     ship a single unversioned libpywrap_torch_tpu_common.so built against
-#     torch 2.11. Against the torch 2.12 installed above it fails to load with
-#     `undefined symbol: torch::Library::_def(...)`. This nightly is the first
-#     with per-ABI variants (libpywrap_2_{11,12,13,15}_0_common.so) plus
-#     _versioned_so_loader.py, which resolve correctly on 2.12.
-#
-#   * <  dev20260905051045 required. That nightly makes
-#     _internal/compile/_backend.py read `node._dynamo_source` on graph
-#     placeholders. vLLM's VllmBackend splits and rewrites the FX graph before
-#     handing it to the TPU backend, so the attribute is gone by then and
-#     compilation dies with `AttributeError: 'Node' object has no attribute
-#     '_dynamo_source'`.
-#
-#   * <  dev20260910000446 required. That nightly renames the module
-#     torch_tpu._internal.profiler.profiler_api to ._api, while torchtpu-vllm's
-#     worker/tpu_worker.py imports it by name -> ImportError at engine start.
-#
-# dev20260905000939 is the newest nightly inside that window. Note this means
-# torch_tpu cannot currently be advanced to what the tpu-sync/Raiden build
-# chain wants (dev20260912075415); that needs a torchtpu-vllm change first.
-RUN pip install --pre --no-deps torch_tpu==0.1.1.dev20260905000939
+# Pinned to dev20260912075415 to match the Raiden tpu_sync C++ TensorBufferHandle symbols
+RUN pip install --pre --no-deps \
+    --extra-index-url "https://oauth2accesstoken:${AUTH_TOKEN}@us-python.pkg.dev/ml-oss-artifacts-transient/torch-tpu-virtual-registry/simple/" \
+    torch-tpu==0.1.1.dev20260912075415
 
 RUN pip install 'typeguard==2.13.3'
 RUN pip install portpicker absl-py numpy gcsfs frozendict triton fairscale tamm
+
+# Install TPU Raiden / TPU Sync wheel from tpu-pytorch Artifact Registry
+RUN for PY in /home/ray/anaconda3/bin/python3 /usr/bin/python3; do \
+      if [ -x "$PY" ]; then \
+        $PY -m pip install --no-cache-dir --no-deps --force-reinstall \
+          --extra-index-url "https://oauth2accesstoken:${AUTH_TOKEN}@us-python.pkg.dev/tpu-pytorch/torch-xla/simple/" \
+          "tpu_sync_torch==0.0.1.dev20260918055440+torch2120" && \
+        SITE_DIR=$($PY -c "import site; print(site.getsitepackages()[0])") && \
+        echo "${SITE_DIR}/torch_tpu/csrc/common/glue_2_12_0" > /etc/ld.so.conf.d/torch_tpu.conf && \
+        echo "${SITE_DIR}/torch_tpu/csrc/common" >> /etc/ld.so.conf.d/torch_tpu.conf && \
+        echo "${SITE_DIR}/torch_tpu" >> /etc/ld.so.conf.d/torch_tpu.conf && \
+        echo "${SITE_DIR}/torch/lib" >> /etc/ld.so.conf.d/torch_tpu.conf && \
+        echo "${SITE_DIR}/tpu_sync/frameworks/torch" >> /etc/ld.so.conf.d/torch_tpu.conf; \
+      fi; \
+    done && \
+    ldconfig
 
 # --- Install torchtitan, vllm and torchtpu-vllm ---
 ARG GITHUB_USER
@@ -80,7 +69,7 @@ RUN sed -i '/tpu-inference/d' vllm/requirements/tpu.txt
 WORKDIR /torchtpu-vllm
 
 # Hack pyproject.toml to pin versions
-RUN sed -i 's/torch-tpu==[0-9a-zA-Z.]*/torch-tpu==0.1.1.dev20260905000939/' pyproject.toml
+RUN sed -i 's/torch-tpu==[0-9a-zA-Z.]*/torch-tpu==0.1.1.dev20260912075415/' pyproject.toml
 RUN sed -i 's/libtpu==[0-9a-zA-Z.]*/libtpu==0.0.41/' pyproject.toml
 
 RUN pip install --upgrade pip && SETUPTOOLS_SCM_PRETEND_VERSION=0.19.0 VLLM_TARGET_DEVICE="tpu" pip install -e ../vllm
@@ -131,18 +120,10 @@ RUN cd /torchtpu-vllm && \
     git fetch origin main && \
     git checkout -f 88f359b38179a5345514358b7c9738c475e26ea0 && \
     git clean -fdx && \
+    sed -i 's/from torch_tpu._internal.profiler import profiler_api/from torch_tpu._internal.profiler import _api as profiler_api/' src/vllm_torchtpu/worker/tpu_worker.py && \
     pip install --no-build-isolation --no-deps -e /torchtpu-vllm
 
 # 3. Install vLLM 0.22.1 as a wheel with pinned extras (no dep resolution).
-#    jax/jaxlib/libtpu are pinned here rather than at the `jax[tpu]` install
-#    above, because that early pin gets silently upgraded by a later transitive
-#    dependency. The values are not arbitrary: they are exactly what
-#    torchtpu-vllm @ 88f359b3 declares in its own pyproject (jax==0.10.2,
-#    jaxlib==0.10.2, libtpu==0.0.42.1), and its env_override.py carries
-#    workarounds written against that combination. Letting jax float to >= 0.11
-#    gates Pallas TPU lowering on libtpu >= 0.0.44; vLLM's ragged paged
-#    attention lowers through Pallas, so the attention graph fails to compile
-#    and the engine never starts.
 RUN pip install --no-cache-dir --no-deps \
     --extra-index-url https://pypi.org/simple \
     "vllm==0.22.1" \

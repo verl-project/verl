@@ -29,8 +29,10 @@ from typing import Any
 import numpy as np
 import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+import torch
 
 from verl.utils.device import get_resource_name
+from verl.workers.rollout.vllm_rollout.utils import vLLMColocateWorkerExtension as _BaseWorkerExtension
 
 # --- Google TPU specific global constants ---
 TPU_WEIGHT_REGISTRY_ACTOR_NAME = "TPUWeightRegistry"
@@ -42,9 +44,9 @@ CHIPS_PER_HOST_VAL = "4"
 # -------------------------------------------
 
 try:
-    import torch_tpu
+    import tpu_sync
 except ImportError:
-    torch_tpu = None
+    pass
 
 try:
     from verl.checkpoint_engine.tpu_checkpoint_engine import load_weights_on_worker
@@ -168,8 +170,220 @@ def patch_multiprocessing_for_tpu() -> None:
     multiprocessing.process.BaseProcess._tpu_patched = True
 
 
-_orig_run_engine_core = None
+class vLLMRaidenWorkerExtension(_BaseWorkerExtension):
+    """vLLM Worker Extension for Google Cloud TPU with Raiden P2P weight synchronization.
 
+    Workloads using the 'raiden' checkpoint engine for high-speed TPU weight sync
+    must use this worker extension to bind TPU model tensors with WeightSynchronizer
+    and orchestrate dynamic zero-copy H2D DMA transfers during rollout.
+    """
+
+    def _get_vllm_model(self):
+        """Extract the underlying nn.Module from the vLLM V1 worker."""
+        worker = getattr(self, "worker", self)
+        return worker.model_runner.model
+
+    def init_raiden_sync_on_worker(self, parallelism: int = 8) -> bool:
+        """Initialize Raiden WeightSynchronizer listener and register with central RaidenController."""
+        if hasattr(self, "_raiden_ws") and self._raiden_ws is not None:
+            return True
+
+        vllm_model = self._get_vllm_model()
+        if vllm_model is None:
+            logging.getLogger(__name__).warning("Raiden Sampler: could not locate vllm_model to bind parameters.")
+            return False
+
+        from verl.checkpoint_engine.raiden_checkpoint_engine import (
+            create_torch_weight_synchronizer,
+            filter_tied_embeddings,
+            validate_and_sanitize_tensors,
+        )
+        from tpu_sync.rpc import raiden_service_pb2
+
+        bind_ip = ray.util.get_node_ip_address().strip("[]")
+        rank_val = getattr(self, "rank", 0)
+        listener_port = 12000 + rank_val
+
+        # Bind parameters via dynamic per-layer tensor lists
+        named_params = filter_tied_embeddings(vllm_model.named_parameters())
+        sorted_params = sorted(named_params, key=lambda x: x[0])
+        valid_params = validate_and_sanitize_tensors(sorted_params, device=torch.device("tpu"))
+
+        # TODO(tpu): Consider removing this synchronize. vLLM model parameters are already
+        # initialized, contiguous, and resident in TPU HBM during worker startup before this method
+        # is called, so physical allocations are already materialized before C++ DMA binding.
+        try:
+            from torch_tpu._internal import sync as torch_tpu_sync
+            torch_tpu_sync.synchronize(wait=True)
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Could not synchronize via torch_tpu: {e}")
+
+        self._sorted_vllm_params = valid_params
+
+        logging.getLogger(__name__).info(
+            f"Raiden Sampler Rank {rank_val}: binding {len(valid_params)} tensors to WeightSynchronizer "
+            f"(sample tensor: name={valid_params[0][0]}, device={valid_params[0][1].device}, dtype={valid_params[0][1].dtype}, "
+            f"total numel={sum(t.numel() for _, t in valid_params)})"
+        )
+
+        self._raiden_ws = create_torch_weight_synchronizer(
+            [[t] for _, t in valid_params],
+            local_port=0,
+            parallelism=parallelism,
+            listener_port=listener_port,
+            bind_ip=bind_ip,
+        )
+
+        # TODO(tpu): Centralize this rendezvous in CheckpointEngineManager / build_process_group
+        # instead of ad-hoc worker-side polling of TPUWeightRegistry. The manager already starts the
+        # RaidenController and can pass the controller address and tensor metadata directly during init.
+        from verl.checkpoint_engine.tpu_weight_registry import get_tpu_weight_registry
+        registry = get_tpu_weight_registry()
+
+        controller_addr, global_shapes_map = None, {}
+        for _ in range(30):
+            try:
+                addr, shapes = ray.get([
+                    registry.get_controller_address.remote(),
+                    registry.get_global_shapes.remote(),
+                ])
+                if addr and shapes:
+                    controller_addr, global_shapes_map = addr, shapes
+                    break
+            except Exception:
+                pass
+            time.sleep(0.5)
+
+        if not controller_addr:
+            raise RuntimeError(f"Raiden Sampler Rank {rank_val}: No RaidenController address found in TPUWeightRegistry after timeout")
+
+        # Determine tensor parallel size from vLLM V1 config
+        worker = getattr(self, "worker", self)
+        tp_size = getattr(getattr(getattr(worker, "vllm_config", None), "parallel_config", None), "tensor_parallel_size", None)
+        if not tp_size or tp_size <= 0:
+            raise RuntimeError(
+                f"Raiden Sampler Rank {rank_val}: Unable to determine tensor_parallel_size (tp_size) "
+                f"from worker.vllm_config.parallel_config!"
+            )
+
+        # Build variable metadata protos with global shapes, per-tensor sharding specs, and mesh shapes
+        # TODO(tpu): If multi-replica data parallelism (DP) is enabled for rollout, generalize
+        # mesh_shape from [1, tp_size] to [dp_size, tp_size] and include the DP axis in
+        # work unit coordinates / sharding specs (with DP replicated).
+        variable_protos = []
+        for idx, (name, t) in enumerate(valid_params):
+            local_shape = list(t.shape)
+            g_shape = global_shapes_map.get(name, local_shape)
+
+            # Derive sharding: check if dim 0 (Column/Vocab) or dim 1 (Row) is partitioned
+            spec_axes = [""] * len(g_shape)
+            if len(g_shape) == 2:
+                if g_shape[0] > local_shape[0]:
+                    spec_axes = ["tp", ""]
+                elif g_shape[1] > local_shape[1]:
+                    spec_axes = ["", "tp"]
+
+            sharding_mesh = [tp_size if axis == "tp" else 1 for axis in spec_axes]
+
+            variable_protos.append(
+                raiden_service_pb2.VariableMetadataProto(
+                    name=name,
+                    shape=g_shape,
+                    mesh_shape=sharding_mesh,
+                    layout=list(range(len(local_shape) - 1, -1, -1)),
+                    item_size=t.element_size(),
+                    layer_idx=idx,
+                    sharding_spec=spec_axes,
+                )
+            )
+
+        try:
+            from tpu_sync.rpc import raiden_controller
+
+            # TODO(tpu): Move register_work_unit to the central orchestration layer
+            # (e.g., CheckpointEngineManager.build_process_group) so workers only export their
+            # local ports and variable protos, avoiding distributed worker-to-controller RPCs.
+            ctrl_client = raiden_controller.RaidenControllerClientFacade(controller_addr)
+            unit_id = raiden_controller.RaidenId("sampler", str(rank_val), "weights")
+            ctrl_client.register_work_unit(
+                unit_id,
+                [f"{bind_ip}:{self._raiden_ws.local_port}"],
+                f"{bind_ip}:{self._raiden_ws.listener_port}",
+                mesh_shape=[1, tp_size],
+                variables=variable_protos,
+                mesh_axes=["fsdp", "tp"],
+            )
+            logging.getLogger(__name__).info(
+                f"Raiden Sampler Rank {rank_val} bound {len(valid_params)} dynamic tensors and registered directly with "
+                f"RaidenController ({controller_addr}): mesh_shape=[1, {tp_size}], data_port={self._raiden_ws.local_port}, listener_port={self._raiden_ws.listener_port}"
+            )
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Raiden Sampler Rank {rank_val} failed to register with RaidenController: {e}")
+            raise
+
+        return True
+
+    @torch.no_grad()
+    def install_raiden_weights(self) -> int:
+        """Install received weights from host staging buffer into TPU HBM via zero-copy H2D DMA."""
+        if not hasattr(self, "_raiden_ws") or self._raiden_ws is None:
+            logging.getLogger(__name__).warning("Raiden Sampler: install_raiden_weights called before _raiden_ws was initialized.")
+            return 0
+
+        t_start = time.perf_counter()
+        t_h2d_start = time.perf_counter()
+        self._raiden_ws.h2d()
+        t_h2d = time.perf_counter() - t_h2d_start
+
+        # Handle tied word embeddings
+        vllm_model = self._get_vllm_model()
+        if hasattr(vllm_model, "lm_head") and hasattr(vllm_model, "embed_tokens"):
+            if vllm_model.lm_head.weight.data_ptr() != vllm_model.embed_tokens.weight.data_ptr():
+                vllm_model.lm_head.weight.copy_(vllm_model.embed_tokens.weight)
+
+        t_sync_start = time.perf_counter()
+        try:
+            from torch_tpu._internal import sync as torch_tpu_sync
+            torch_tpu_sync.synchronize(wait=True)
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Could not synchronize via torch_tpu: {e}")
+        t_sync = time.perf_counter() - t_sync_start
+        t_total = time.perf_counter() - t_start
+
+        print(
+            f"[RAIDEN TELEMETRY | Sampler Worker] Sampler Rank {getattr(self, 'rank', 0)}: install_raiden_weights completed in {t_total:.4f}s "
+            f"(H2D={t_h2d:.4f}s, TPUSyncBarrier={t_sync:.4f}s)",
+            flush=True,
+        )
+        logging.getLogger(__name__).info(
+            f"[RAIDEN TELEMETRY | Sampler Worker] install_raiden_weights completed in {t_total:.4f}s "
+            f"(H2D={t_h2d:.4f}s, TPUSyncBarrier={t_sync:.4f}s)"
+        )
+        return 1
+
+    def get_model_weights_stats(self, include_shards: bool = False) -> dict:
+        """Computes deterministic parameter count, L1 norm, and L2 norm across all model parameters.
+        When include_shards=True, also returns CPU tensor bytes for each parameter to allow global re-assembly.
+        """
+        vllm_model = self._get_vllm_model()
+        if vllm_model is None:
+            return {"error": "No model found on worker"}
+
+        import torch
+
+        if not hasattr(self, "_sorted_vllm_params") or not self._sorted_vllm_params:
+            raise RuntimeError(
+                f"get_model_weights_stats is only supported for Raiden after initialization, "
+                f"but self._sorted_vllm_params is not initialized on worker rank {getattr(self, 'rank', 'unknown')}!"
+            )
+
+        rank_val = getattr(self, "rank", 0)
+
+        from verl.checkpoint_engine.raiden_checkpoint_engine import compute_tensor_stats
+        res = compute_tensor_stats(self._sorted_vllm_params)
+        res["rank"] = rank_val
+
+        return res
 
 def _patched_run_engine_core(*args, **kwargs):
     try:

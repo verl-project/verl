@@ -6,12 +6,13 @@ set -xeuo pipefail
 export RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS=1
 export VERL_PLATFORM=tpu
 export RAY_OVERRIDE_JOB_RUNTIME_ENV=1
-export VLLM_USE_V1=0
+export VLLM_USE_V1=1
 export RAY_memory_monitor_refresh_ms=0
 export RAY_memory_usage_threshold=0.99
 
-# JAX/XLA Launch Barrier Configuration
-export LIBTPU_INIT_ARGS="--xla_tpu_use_enhanced_launch_barrier=false"
+# JAX/XLA Launch Barrier & Compilation Configuration
+export LIBTPU_INIT_ARGS="--xla_tpu_use_enhanced_launch_barrier=false --xla_tpu_scoped_vmem_limit_kib=65536"
+export XLA_FLAGS="--xla_disable_hlo_passes=instruction-fusion,fusion-merger,multi-output-fusion,horizontal-fusion"
 
 # Project and Experiment details
 project_name='verl_tpu_grpo'
@@ -48,7 +49,7 @@ python3 -m verl.trainer.main_ppo \
     data.val_batch_size=4 \
     data.val_max_samples=8 \
     data.max_prompt_length=512 \
-    data.max_response_length=512 \
+    data.max_response_length=1024 \
     +data.max_length=4096 \
     +data.max_token_len_per_gpu=4096 \
     data.filter_overlong_prompts=True \
@@ -71,8 +72,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=4096 \
     actor_rollout_ref.hybrid_engine=False \
-    actor_rollout_ref.actor.torchtitan.tensor_parallel_size=2 \
-    actor_rollout_ref.actor.torchtitan.data_parallel_shard_size=4 \
+    actor_rollout_ref.actor.torchtitan.tensor_parallel_size=8 \
+    actor_rollout_ref.actor.torchtitan.data_parallel_shard_size=1 \
     actor_rollout_ref.actor.torchtitan.pipeline_parallel_size=1 \
     actor_rollout_ref.actor.torchtitan.attn_type=varlen \
     actor_rollout_ref.rollout.name=vllm \
@@ -84,17 +85,18 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=4096 \
-    actor_rollout_ref.rollout.checkpoint_engine.backend=tpu \
+    actor_rollout_ref.rollout.checkpoint_engine.backend=raiden \
+    +actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.raiden.verify_parity=True \
     actor_rollout_ref.rollout.enforce_eager=False \
-    actor_rollout_ref.rollout.max_model_len=512 \
-    trainer.val_before_train=False \
+    actor_rollout_ref.rollout.max_model_len=1024 \
+    trainer.val_before_train=True \
     trainer.logger="['console','tensorboard']" \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.save_freq=-1 \
-    trainer.test_freq=2 \
+    trainer.test_freq=1 \
     trainer.total_epochs=10 \
-    trainer.total_training_steps=5 \
+    trainer.total_training_steps=10 \
     trainer.nnodes="${NNODES_TRAINER}" \
     trainer.n_gpus_per_node="${N_CHIPS_TRAINER}" \
     actor_rollout_ref.rollout.nnodes="${NNODES_ROLLOUT}" \

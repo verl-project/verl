@@ -232,7 +232,7 @@ class vLLMHttpServer:
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ):
-        await self.engine.collective_rpc(
+        return await self.engine.collective_rpc(
             method=method,
             timeout=timeout,
             args=args,
@@ -1079,6 +1079,10 @@ class vLLMHttpServer:
 
     def _get_worker_extension_cls(self) -> str:
         """Return the fully-qualified colocate worker extension class name."""
+        backend = getattr(getattr(self.config, "checkpoint_engine", None), "backend", None)
+        # Workloads using Raiden for TPU weight sync must use the specialized Raiden worker extension
+        if get_resource_name() == "TPU" and backend == "raiden":
+            return "verl.workers.rollout.vllm_rollout.tpu_utils.vLLMRaidenWorkerExtension"
         return "verl.workers.rollout.vllm_rollout.utils.vLLMColocateWorkerExtension"
 
     def _get_cli_modules(self) -> list:

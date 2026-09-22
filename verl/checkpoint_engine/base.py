@@ -417,6 +417,16 @@ class CheckpointEngineManager:
         self.actor_wg = actor_wg
         self.replicas = replicas
 
+        self.raiden_controller = None
+        self.raiden_server = None
+        self.raiden_address = None
+        if self.backend == "raiden":
+            try:
+                from .raiden_checkpoint_engine import setup_raiden_controller
+                self.raiden_controller, self.raiden_server, self.raiden_address = setup_raiden_controller()
+            except Exception as e:
+                raise RuntimeError(f"Failed to start embedded RaidenControllerServer on Headnode: {e}") from e
+
     def build_process_group(self, rollout: RayWorkerGroup):
         """Build process group for actor worker group and rollout replicas."""
         actor_wg = self.actor_wg
@@ -500,7 +510,7 @@ class CheckpointEngineManager:
         await asyncio.gather(*[r.resume_kv_cache() for r in self.replicas])
 
     @auto_await
-    async def update_weights(self, global_steps: int = None):
+    async def update_weights(self, global_steps: int = None, **kwargs):
         """Update weights from actor worker group to rollout replicas.
 
         Args:
@@ -515,7 +525,12 @@ class CheckpointEngineManager:
         if self.backend == "tpu":
             from .tpu_checkpoint_engine import update_tpu_weights
 
-            return await update_tpu_weights(self, global_steps=global_steps)
+            return await update_tpu_weights(self, global_steps=global_steps, **kwargs)
+
+        if self.backend == "raiden":
+            from .raiden_checkpoint_engine import update_raiden_weights
+
+            return await update_raiden_weights(self, global_steps=global_steps, **kwargs)
 
         # 1. abort and save all unfinished requests for partial rollout
         await self.abort_replicas()
