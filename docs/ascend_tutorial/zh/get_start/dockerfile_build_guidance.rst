@@ -1,15 +1,15 @@
 昇腾镜像说明
 ===================================
 
-Last updated: 08/10/2026.
+Last updated: 09/22/2026.
 
 
 镜像获取与公开镜像地址
 --------------------------
 
-昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3 镜像，基于 `Dockerfile <../../../../docker/ascend>`_ 构建，具体说明见 :ref:`Dockerfile构建镜像脚本清单 <ascend-dockerfile-list>`。
+昇腾在 `quay.io/ascend/verl <https://quay.io/repository/ascend/verl?tab=tags&tag=latest>`_ 中托管每日构建的 A2/A3/950 镜像，基于 `Dockerfile <../../../../docker/ascend>`_ 构建，具体说明见 :ref:`Dockerfile构建镜像脚本清单 <ascend-dockerfile-list>`。
 
-每日构建镜像名格式：latest-{推理后端}-{适用产品信息}-{操作系统}-{其他字段}
+最新构建镜像名格式：latest-{推理后端}-{适用产品信息}-{操作系统}-{其他字段}
 
 verl release版本镜像名格式：{verl release版本号}-{CANN版本}-{TorchNPU版本}[-{适用产品信息}-{操作系统}]-{Python版本}[-{推理后端}-{其他字段}]
 
@@ -24,8 +24,10 @@ Atlas 900 A2 PODc
 
 Atlas 800T A3
 
+Ascend 950 系列产品
 
-最新镜像内各组件版本信息清单
+
+A2/A3最新镜像内各组件版本信息清单
 ----------------
 
 ================= ============
@@ -48,6 +50,27 @@ sgl-kernel-npu     2026.02.01
 ================= ============
 
 
+950 最新镜像内各组件版本信息清单
+----------------
+
+================= ============
+组件               版本
+================= ============
+基础镜像            Ubuntu 22.04
+Python             3.12
+CANN               9.1.0
+torch              2.10.0
+torch_npu          2.10.0.post4
+torchvision        0.25.0
+vLLM               0.23.0
+vLLM-ascend        0.23.0
+Megatron-LM        core_r0.12.0
+MindSpeed          0c6c0c(master)
+triton-ascend      3.2.2
+================= ============
+
+
+
 
 .. _ascend-dockerfile-list:
 
@@ -61,6 +84,7 @@ Dockerfile构建镜像脚本清单
 ============== ==================== ============== ==============================================================
 A2              9.1.0                  vLLM            `Dockerfile.ascend_9.1.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a2>`_
 A3              9.1.0                  vLLM            `Dockerfile.ascend_9.1.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a3>`_
+A5              9.1.0                  vLLM            `Dockerfile.ascend_9.1.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_9.1.0_a5>`_
 A2              8.5.0                  vLLM            `Dockerfile.ascend_8.5.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a2>`_
 A3              8.5.0                  vLLM            `Dockerfile.ascend_8.5.0_a3 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend_8.5.0_a3>`_
 A2              8.5.0                  SGLang          `Dockerfile.ascend.sglang_8.5.0_a2 <https://github.com/volcengine/verl/blob/main/docker/ascend/Dockerfile.ascend.sglang_8.5.0_a2>`_
