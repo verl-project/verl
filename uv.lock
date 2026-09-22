@@ -32,10 +32,6 @@ overrides = [
 ]
 
 [[manifest.dependency-metadata]]
-name = "mbridge"
-version = "0.15.1"
-
-[[manifest.dependency-metadata]]
 name = "megatron-bridge"
 version = "0.5.2"
 
@@ -1949,11 +1945,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/bd/c0/9f7c9a46090390368
 wheels = [
     { url = "https://files.pythonhosted.org/packages/41/09/5b161152e2d90f7b87f781c2e1267494aef9c32498df793f73ad0a0a494a/matplotlib_inline-0.2.2-py3-none-any.whl", hash = "sha256:3c821cf1c209f59fb2d2d64abbf5b23b67bcb2210d663f9918dd851c6da1fcf6", size = 9534, upload-time = "2026-05-08T17:33:32.055Z" },
 ]
-
-[[package]]
-name = "mbridge"
-version = "0.15.1"
-source = { git = "https://github.com/ISEEKYAN/mbridge.git?rev=641a5a0#641a5a01de71080b2200d10e369090e40c9a351c" }
 
 [[package]]
 name = "mcp"
@@ -5098,7 +5089,7 @@ math = [
     { name = "math-verify" },
 ]
 mcore = [
-    { name = "mbridge" },
+    { name = "megatron-bridge" },
 ]
 megatron = [
     { name = "accelerate" },
@@ -5115,7 +5106,6 @@ megatron = [
     { name = "liger-kernel" },
     { name = "mathruler" },
     { name = "matplotlib" },
-    { name = "mbridge" },
     { name = "megatron-bridge" },
     { name = "megatron-core" },
     { name = "msgspec" },
@@ -5161,7 +5151,6 @@ sglang = [
     { name = "fastapi", version = "0.137.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'x86_64' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-sglang' and extra == 'extra-4-verl-vllm') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-fsdp') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-megatron') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-sglang') or (extra == 'extra-4-verl-cpu' and extra == 'extra-4-verl-vllm')" },
     { name = "hydra-core" },
     { name = "mathruler" },
-    { name = "mbridge" },
     { name = "msgspec" },
     { name = "numpy" },
     { name = "nvtx" },
@@ -5246,7 +5235,6 @@ vllm = [
     { name = "fastapi", version = "0.136.3", source = { registry = "https://pypi.org/simple" } },
     { name = "hydra-core" },
     { name = "mathruler" },
-    { name = "mbridge" },
     { name = "msgspec" },
     { name = "numpy" },
     { name = "nvtx" },
@@ -5300,10 +5288,7 @@ requires-dist = [
     { name = "math-verify", marker = "extra == 'math'" },
     { name = "mathruler", marker = "extra == 'verl-core'" },
     { name = "matplotlib", marker = "extra == 'megatron'" },
-    { name = "mbridge", marker = "extra == 'mcore'", git = "https://github.com/ISEEKYAN/mbridge.git?rev=641a5a0" },
-    { name = "mbridge", marker = "extra == 'megatron'", git = "https://github.com/ISEEKYAN/mbridge.git?rev=641a5a0" },
-    { name = "mbridge", marker = "extra == 'sglang'", git = "https://github.com/ISEEKYAN/mbridge.git?rev=641a5a0" },
-    { name = "mbridge", marker = "extra == 'vllm'", git = "https://github.com/ISEEKYAN/mbridge.git?rev=641a5a0" },
+    { name = "megatron-bridge", marker = "extra == 'mcore'", specifier = "==0.5.2", index = "https://verl-project.github.io/verl-wheelhouse/cu130/torch2.13/simple/" },
     { name = "megatron-bridge", marker = "extra == 'megatron'", specifier = "==0.5.2", index = "https://verl-project.github.io/verl-wheelhouse/cu130/torch2.13/simple/" },
     { name = "megatron-core", marker = "extra == 'cpu'", git = "https://github.com/NVIDIA/Megatron-LM.git?tag=core_v0.18.0" },
     { name = "megatron-core", marker = "extra == 'megatron'", git = "https://github.com/NVIDIA/Megatron-LM.git?tag=core_v0.18.0" },

@@ -128,7 +128,6 @@ params=(
     actor_rollout_ref.actor.clip_ratio_c=10.0
     actor_rollout_ref.actor.use_kl_loss=False
     actor_rollout_ref.actor.kl_loss_coef=0.0
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=False
     actor_rollout_ref.actor.megatron.param_offload=False
     actor_rollout_ref.actor.megatron.optimizer_offload=False
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TRAIN_TP}

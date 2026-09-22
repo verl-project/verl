@@ -151,7 +151,6 @@ ACTOR=(
     actor_rollout_ref.actor.kl_loss_coef=0.01
     actor_rollout_ref.actor.kl_loss_type=low_var_kl
     actor_rollout_ref.actor.entropy_coeff=0
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=True
     actor_rollout_ref.actor.megatron.use_mbridge=True
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TP}
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${PP}
@@ -253,7 +252,6 @@ case "${DEVICE}" in
         ;;
     npu)
         ACTOR+=(
-            actor_rollout_ref.actor.megatron.vanilla_mbridge=False
             actor_rollout_ref.actor.checkpoint.strict=False
             ++actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=auto
             +actor_rollout_ref.actor.megatron.override_transformer_config.moe_aux_loss_coeff=0.01

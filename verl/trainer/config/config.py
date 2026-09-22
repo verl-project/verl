@@ -26,9 +26,7 @@ class CheckpointConfig(BaseConfig):
 
     The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
 
-    Backend-specific knobs (e.g. mbridge options for Megatron) live on subclasses
-    under ``verl/workers/config/checkpoint.py``. Keep this base class limited to
-    fields every backend understands.
+    This class contains checkpoint options shared by all training backends.
 
     Args:
         save_contents (list[str]): What to include in saved checkpoints.

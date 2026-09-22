@@ -74,7 +74,6 @@ actor_rollout_ref:
         attention_backend: flash
       override_mcore_model_config: {}
       use_mbridge: true
-      vanilla_mbridge: false
       use_remove_padding: true
       pad_bshd_to_minibatch_max: true
       pad_to_length: false
@@ -135,7 +134,7 @@ actor_rollout_ref:
     shuffle: false
     data_loader_seed: 42
     checkpoint:
-      _target_: verl.workers.config.McoreCheckpointConfig
+      _target_: verl.trainer.config.CheckpointConfig
       save_contents:
       - model
       - optimizer
@@ -143,7 +142,6 @@ actor_rollout_ref:
       load_contents: ${.save_contents}
       async_save: false
       strict: true
-      mbridge_config: {}
     use_fused_kernels: ${oc.select:actor_rollout_ref.model.use_fused_kernels,false}
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
@@ -277,7 +275,6 @@ actor_rollout_ref:
       override_transformer_config: ${oc.select:actor_rollout_ref.actor.megatron.override_transformer_config,{}}
       override_mcore_model_config: {}
       use_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.use_mbridge,False}
-      vanilla_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.vanilla_mbridge,False}
       use_remove_padding: ${oc.select:actor_rollout_ref.actor.megatron.use_remove_padding,True}
       pad_bshd_to_minibatch_max: true
       pad_to_length: ${oc.select:actor_rollout_ref.actor.megatron.pad_to_length,False}
@@ -617,7 +614,6 @@ critic:
       attention_backend: flash
     override_mcore_model_config: {}
     use_mbridge: true
-    vanilla_mbridge: false
     use_remove_padding: true
     pad_bshd_to_minibatch_max: true
     pad_to_length: false
@@ -657,14 +653,13 @@ critic:
   loss_agg_mode: ${oc.select:actor_rollout_ref.actor.loss_agg_mode,token-mean}
   loss_scale_factor: ${oc.select:actor_rollout_ref.actor.loss_scale_factor,null}
   checkpoint:
-    _target_: verl.workers.config.McoreCheckpointConfig
+    _target_: verl.trainer.config.CheckpointConfig
     save_contents:
     - model
     - optimizer
     - extra
     load_contents: ${.save_contents}
     async_save: false
-    mbridge_config: {}
   profiler:
     _target_: verl.utils.profiler.ProfilerConfig
     tool: ${oc.select:global_profiler.tool,null}

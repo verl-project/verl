@@ -133,7 +133,6 @@ ACTOR=(
     actor_rollout_ref.actor.kl_loss_type=low_var_kl
     actor_rollout_ref.actor.entropy_coeff=0
     actor_rollout_ref.actor.megatron.use_mbridge=True
-    actor_rollout_ref.actor.megatron.vanilla_mbridge=True
     actor_rollout_ref.actor.megatron.use_remove_padding=False
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TP}
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${PP}
@@ -212,7 +211,6 @@ case "${DEVICE}" in
         export CPU_AFFINITY_CONF=1
         ACTOR+=(
             actor_rollout_ref.actor.use_dynamic_bsz=True
-            actor_rollout_ref.actor.megatron.vanilla_mbridge=False
             actor_rollout_ref.actor.checkpoint.strict=False
             actor_rollout_ref.actor.megatron.use_remove_padding=True
             +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True

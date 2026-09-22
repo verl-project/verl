@@ -60,8 +60,7 @@ MEGATRON_ENGINE_CONFIG="\
     engine.pipeline_model_parallel_size=${PP_SIZE} \
     engine.virtual_pipeline_model_parallel_size=${VPP_SIZE} \
     engine.context_parallel_size=${CP_SIZE} \
-    engine.use_mbridge=True \
-    engine.vanilla_mbridge=True"
+    engine.use_mbridge=True"
 
 if [ "$backend" = "fsdp" ]; then
     ENGINE_CONFIG="$FSDP_ENGINE_CONFIG"
