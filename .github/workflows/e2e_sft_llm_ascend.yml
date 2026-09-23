@@ -56,8 +56,9 @@ on:
       - ".github/workflows/e2e_sft_llm_ascend.yml"
       - "examples/data_preprocess/gsm8k.py"
       - "tests/special_e2e/sft"
-      - "verl/trainer/fsdp_sft_trainer.py"
-      - "verl/trainer/config/sft_trainer.yaml"
+      - "verl/trainer/sft_trainer.py"
+      - "verl/trainer/sft_trainer_ray.py"
+      - "verl/trainer/config/sft_trainer_engine.yaml"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
