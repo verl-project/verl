@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from verl.base_config import BaseConfig
 
-__all__ = ["CheckpointConfig", "ProfileConfig", "HybridRolloutSwitchConfig", "BaseModelConfig"]
+__all__ = ["CheckpointConfig", "ProfileConfig", "HybridRolloutSwitchConfig", "BaseModelConfig", "FaultToleranceConfig"]
 
 
 @dataclass
@@ -124,3 +124,29 @@ class ModuleConfig(BaseConfig):
 
     path: Optional[str] = None
     name: Optional[str] = None
+
+
+@dataclass
+class FaultToleranceConfig(BaseConfig):
+    """Configuration for GKE/Ray fault tolerance and sub-second failover.
+
+    Default is False (off), preserving standard VeRL behavior with zero overhead.
+
+    Args:
+        enable (bool): Whether to enable fault tolerance (default: False).
+        mode (str): Failover mode, 'standby' (prewarmed VRAM standby) or 'cold' (default: 'standby').
+        standby_resource_pool (str): Resource pool name for standby workers.
+        detect_node_maintenance (bool): Whether to monitor GCE/GKE 600s maintenance notices.
+        maintenance_check_interval (int): Metadata server polling interval in seconds.
+        reverse_weight_sync (bool): Allow promoted trainer to recover weights from rollout over NCCL.
+        max_failovers (int): Maximum number of allowed failover recovery events.
+    """
+
+    enable: bool = False
+    mode: str = "standby"
+    standby_resource_pool: str = "standby_pool"
+    detect_node_maintenance: bool = True
+    maintenance_check_interval: int = 10
+    reverse_weight_sync: bool = True
+    max_failovers: int = 5
+
