@@ -235,6 +235,7 @@ def patch_forward_with_backends(
     model: PreTrainedModel,
     use_fused_kernels: bool = False,
     fused_kernels_backend: str = None,
+    lm_head_dtype: str | None = None,
 ):
     """
     Choose the forward function based on the model and backend.
@@ -242,6 +243,7 @@ def patch_forward_with_backends(
         model (PreTrainedModel): The model to apply the monkey patch.
         use_fused_kernels (bool): Whether to use fused kernels.
         fused_kernels_backend (str): The backend to use for fused kernels.
+        lm_head_dtype: Optional output projection dtype override.
     """
     if not use_fused_kernels or fused_kernels_backend not in ["triton", "torch", "liger"]:
         print(
@@ -249,6 +251,20 @@ def patch_forward_with_backends(
             f"{use_fused_kernels} or fused_kernels_backend is {fused_kernels_backend}"
         )
         return
+
+    specialized_model_types = {
+        "qwen2_5_vl",
+        "qwen2_vl",
+        "qwen3_vl",
+        "qwen3_vl_moe",
+        "glm4v",
+        "qwen3_5",
+        "qwen3_5_moe",
+    }
+    if lm_head_dtype == "float32" and model.config.model_type in specialized_model_types:
+        raise NotImplementedError(
+            f"lm_head_dtype='float32' is not supported with fused kernels for model_type={model.config.model_type!r}."
+        )
 
     forward_with_torch_backend_function = model.__class__.forward
     forward_with_triton_backend_function = model.__class__.forward
@@ -279,6 +295,7 @@ def patch_forward_with_backends(
         forward_with_triton_backend_function = forward_with_triton_backend
 
     model._verl_fused_kernels_backend = fused_kernels_backend
+    model._verl_lm_head_dtype = lm_head_dtype
     if fused_kernels_backend == "triton":
         model.__class__.forward = forward_with_triton_backend_function
         print(f"Using Triton backend for fused kernels in {model.__class__.__name__}")
@@ -297,6 +314,7 @@ def apply_monkey_patch(
     use_remove_padding: bool = True,
     use_fused_kernels: bool = False,
     fused_kernels_backend: str = None,
+    lm_head_dtype: str | None = None,
     use_prefix_grouper: bool = False,
     use_tiled_mlp: bool = False,
     tiled_mlp_shards: int = 4,
@@ -313,6 +331,7 @@ def apply_monkey_patch(
         use_remove_padding: Whether to use remove padding.
         use_fused_kernels: Whether to use fused kernels.
         fused_kernels_backend: The backend to use for fused kernels.
+        lm_head_dtype: Optional output projection dtype override.
         use_tiled_mlp: Whether to use TiledMLP for memory-efficient MLP computation.
         tiled_mlp_shards: Number of shards for TiledMLP (higher = lower memory, slightly slower).
     """
@@ -551,4 +570,9 @@ def apply_monkey_patch(
             flash_attention._flash_attention_forward = _ulysses_flash_attention_forward
             print(f"Monkey patch _flash_attention_forward in {flash_attention.__name__}")
 
-    patch_forward_with_backends(model, use_fused_kernels=use_fused_kernels, fused_kernels_backend=fused_kernels_backend)
+    patch_forward_with_backends(
+        model,
+        use_fused_kernels=use_fused_kernels,
+        fused_kernels_backend=fused_kernels_backend,
+        lm_head_dtype=lm_head_dtype,
+    )

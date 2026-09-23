@@ -103,6 +103,11 @@ class RolloutReplica(ABC):
         self.replica_rank = replica_rank
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = model_config
+        if getattr(model_config, "lm_head_dtype", None) is not None and self.config.name != "vllm":
+            raise ValueError(
+                "lm_head_dtype='float32' is supported only by the vLLM rollout backend; "
+                f"got rollout.name={self.config.name!r}."
+            )
 
         self.world_size = (
             self.config.tensor_model_parallel_size

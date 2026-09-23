@@ -69,6 +69,7 @@ from verl.workers.rollout.vllm_rollout.utils import (
     build_mtp_speculative_config,
     extract_prompt_logprobs,
     get_vllm_max_lora_rank,
+    merge_hf_overrides,
 )
 
 _VLLM_VERSION = version.parse(vllm.__version__)
@@ -303,6 +304,9 @@ class vLLMHttpServer:
             set_expandable_segments(True)
 
         quantization, hf_overrides = self._apply_quantization()
+        user_hf_overrides = engine_kwargs.pop("hf_overrides", None)
+        requested_head_dtype = self.model_config.lm_head_dtype
+        hf_overrides = merge_hf_overrides(hf_overrides, user_hf_overrides, requested_head_dtype)
 
         compilation_config = engine_kwargs.pop("compilation_config", None) or {}
         if isinstance(compilation_config, str):
@@ -483,6 +487,12 @@ class vLLMHttpServer:
         usage_context = UsageContext.OPENAI_API_SERVER
         vllm_config = engine_args.create_engine_config(usage_context=usage_context)
         vllm_config.parallel_config.data_parallel_master_port = self._dp_master_port
+        if self.model_config.lm_head_dtype is not None:
+            logger.info(
+                "vLLM lm_head resolved: weight_dtype=%s, output_dtype=%s",
+                vllm_config.model_config.dtype,
+                vllm_config.model_config.head_dtype,
+            )
 
         fn_args = set(dict(inspect.signature(AsyncLLM.from_vllm_config).parameters).keys())
         kwargs = {}

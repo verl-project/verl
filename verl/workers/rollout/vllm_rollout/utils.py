@@ -524,6 +524,31 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     return cli_args
 
 
+def merge_hf_overrides(generated: Mapping, configured: Mapping | str | None, head_dtype: str | None) -> dict:
+    """Merge veRL-generated and user-provided vLLM Hugging Face overrides."""
+    if isinstance(configured, str):
+        configured = json.loads(configured)
+    configured = configured or {}
+    if not isinstance(configured, Mapping):
+        raise TypeError(f"vLLM hf_overrides must be a mapping or JSON object, got {type(configured).__name__}.")
+
+    configured = dict(configured)
+    if head_dtype is not None:
+        existing = configured.get("head_dtype")
+        if existing not in (None, head_dtype):
+            raise ValueError(
+                f"Conflicting head dtype settings: lm_head_dtype={head_dtype!r}, hf_overrides.head_dtype={existing!r}."
+            )
+        configured["head_dtype"] = head_dtype
+
+    merged = dict(generated)
+    for key, value in configured.items():
+        if key in merged and merged[key] != value:
+            raise ValueError(f"Conflicting vLLM hf_overrides for {key!r}: {merged[key]!r} != {value!r}.")
+        merged[key] = value
+    return merged
+
+
 def build_mtp_speculative_config(
     method: str, num_speculative_tokens: int, engine_speculative_config: Any = None
 ) -> dict[str, Any]:

@@ -26,6 +26,7 @@ from verl.workers.rollout.vllm_rollout.utils import (
     _optional_bool_vllm_args,
     _resolve_vllm_weight_sync_local_rank,
     build_cli_args_from_config,
+    merge_hf_overrides,
     vLLMColocateWorkerExtension,
 )
 
@@ -185,6 +186,26 @@ class TestBuildCliArgsFromConfig:
         config = {"sizes": [42]}
         result = build_cli_args_from_config(config)
         assert result == ["--sizes", "42"]
+
+
+class TestMergeHfOverrides:
+    @pytest.mark.parametrize("configured", [{"trust_remote_code": True}, '{"trust_remote_code": true}'])
+    def test_preserves_generated_and_configured_values(self, configured):
+        assert merge_hf_overrides({"quantization_config": {"quant_method": "fp8"}}, configured, "float32") == {
+            "quantization_config": {"quant_method": "fp8"},
+            "trust_remote_code": True,
+            "head_dtype": "float32",
+        }
+
+    def test_rejects_conflicts(self):
+        with pytest.raises(ValueError, match="head dtype"):
+            merge_hf_overrides({}, {"head_dtype": "bfloat16"}, "float32")
+        with pytest.raises(ValueError, match="quantization_config"):
+            merge_hf_overrides(
+                {"quantization_config": {"quant_method": "fp8"}},
+                {"quantization_config": {"quant_method": "torchao"}},
+                None,
+            )
 
 
 class TestCliArgsVllmParserRoundTrip:
