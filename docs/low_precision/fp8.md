@@ -1,6 +1,6 @@
 # FP8 RL in verl
 
-Last updated: 08/22/2026
+Last updated: 09/23/2026
 
 verl supports two FP8 modes for accelerating RL training:
 
@@ -378,11 +378,15 @@ and inputs; the dense probe was 0.026 both times.
 `quantization` unset, vLLM 0.24 auto-selects the FlashInfer TRT-LLM bf16 MoE backend on SM100,
 whose BlockMajorK layout turns `w13_weight` / `w2_weight` into 4-D tensors. verl's bf16 weight
 sync feeds `model.load_weights` per-expert 2-D tensors, which the loader can no longer index
-(`shard_dim=0 is not a valid data dimension for a 3D tensor`). The fix routes the standard sync
-through vLLM's own layerwise reload lifecycle (wengeezhang/verl#4, awaiting hardware validation);
-without it, pin the layout-preserving backend:
+(`shard_dim=0 is not a valid data dimension for a 3D tensor`). The fix (wengeezhang/verl#4,
+upstream verl-project/verl#7987; awaiting hardware validation) stages the checkpoint layout as
+a view over the live storage -- the block layout keeps the byte count, or pads it -- so the
+buckets load straight into it, then re-derives the kernel layout layer by layer and copies it
+back into the storage the CUDA graph captured; the extra memory is one layer's temporary.
+Backends that keep the checkpoint shape (Triton, FlashInfer CUTLASS) are left alone. Without
+the fix, pin the layout-preserving backend:
 `+actor_rollout_ref.rollout.engine_kwargs.vllm.moe_backend=triton`. The same-shape staging fix
-described above is proposed upstream as verl-project/verl#7986.
+described above was merged upstream as verl-project/verl#7986.
 
 The weight-sync quantization deliberately uses **TransformerEngine's `MXFP8Quantizer`** —
 the same quantizer the trainer's FP8 GEMMs apply to weights — so the rollout engine serves

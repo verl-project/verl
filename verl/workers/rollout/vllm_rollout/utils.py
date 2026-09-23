@@ -36,29 +36,6 @@ from verl.workers.rollout.vllm_rollout.weight_update_utils import apply_buffer_u
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
-
-# vLLM's layerwise reload lifecycle (``model_executor.model_loader.reload``, vLLM >= 0.24) is what its own
-# ``reload_weights`` wraps around ``model.load_weights``: it rebuilds every layer's parameters in checkpoint
-# layout from metadata recorded at model init, holds the incoming checkpoint-format tensors until a layer is
-# complete, re-runs that layer's ``process_weights_after_loading`` and copies the kernel-layout result into
-# the storage the CUDA graph captured. Loading straight into the live parameters -- the fallback kept below --
-# only works while the kernel layout is the checkpoint layout up to a same-shape in-place transform (Triton
-# MoE, FlashInfer CUTLASS). vLLM's default bf16 MoE backend on SM100, FlashInfer TRT-LLM, repacks
-# ``w13_weight`` / ``w2_weight`` into a 4-D BlockMajorK layout, so the per-expert 2-D loads fail at the
-# first sync (verl-project/verl#7978). ``VERL_VLLM_LAYERWISE_RELOAD=0`` forces the fallback.
-def _vllm_layerwise_reload_api():
-    if os.getenv("VERL_VLLM_LAYERWISE_RELOAD", "1") == "0":
-        return None
-    try:
-        from vllm.model_executor.model_loader.reload import (
-            finalize_layerwise_processing,
-            initialize_layerwise_reload,
-        )
-    except ImportError:
-        return None
-    return initialize_layerwise_reload, finalize_layerwise_processing
-
-
 # magic numbers that ensure we are using the same LoRA adapter during the rollout and training process
 VLLM_LORA_INT_ID = 123
 VLLM_LORA_NAME = "123"
@@ -293,8 +270,7 @@ class vLLMColocateWorkerExtension:
 
         # =========================== step 1: prepare for weight loading ===========================
         quant_reload_states = None
-        self._layerwise_reload = None
-        self._deferred_buffer_updates = []
+        staged_moe_layers = []
 
         # The engine came up on dummy weights, whose init zeroes integer buffers on
         # ROCm -- including the expert-parallel routing maps, which no weight stream
@@ -331,15 +307,13 @@ class vLLMColocateWorkerExtension:
             # TODO(wuxibin): not need anymore for newer vllm version.
             for model in self._iter_all_models():
                 patch_vllm_moe_model_weight_loader(model)
-            # LoRA-wrapped layers are built after vLLM records its reload metadata, so the lifecycle is
-            # used for plain base-weight syncs only; LoRA syncs keep loading into the live parameters.
-            if peft_config is None:
-                self._layerwise_reload = _vllm_layerwise_reload_api()
-                if self._layerwise_reload is not None:
-                    initialize_layerwise_reload, _ = self._layerwise_reload
-                    for model in self._iter_all_models():
-                        initialize_layerwise_reload(model)
-                    logger.info("vLLM layerwise reload: parameters restored to checkpoint layout for this sync")
+            # A kernel prep that reshapes the expert weights (FlashInfer TRT-LLM, vLLM's default bf16 MoE
+            # backend on SM100) leaves nothing the checkpoint-layout loads fit (#7978): hand them a
+            # checkpoint-layout view over the live storage, folded back after the last bucket.
+            from verl.utils.vllm.vllm_moe_refit_utils import stage_unquantized_moe_params
+
+            for model in self._iter_all_models():
+                staged_moe_layers.extend(stage_unquantized_moe_params(model))
 
         # =========================== step 2: receive weights and update ===========================
         receiver = BucketedWeightReceiver(
@@ -393,22 +367,15 @@ class vLLMColocateWorkerExtension:
 
             for model, reload_state in quant_reload_states:
                 process_quanted_weights_after_loading(model, reload_state)
-        elif self._layerwise_reload is not None:
-            # Each layer was re-derived and copied back as its last weight arrived; this processes the
-            # layers that could not be (attention scales, padded weights) and puts the live tensors back.
-            _, finalize_layerwise_processing = self._layerwise_reload
-            for model, model_config in self._iter_all_models_with_config():
-                finalize_layerwise_processing(model, model_config)
-            loaded_buffers = self._apply_buffer_updates_all_models(self._deferred_buffer_updates, None)
-            logger.info(f"vLLM layerwise reload finalized, deferred buffers applied: {loaded_buffers}")
-            self._layerwise_reload = None
-            self._deferred_buffer_updates = []
         else:
             # Some post-load transforms are non-idempotent; run once after all buckets.
             from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
-            for model, model_config in self._iter_all_models_with_config():
-                process_weights_after_loading(model, model_config, self.device)
+            from verl.utils.vllm.vllm_moe_refit_utils import fold_unquantized_moe_params
+
+            with fold_unquantized_moe_params(staged_moe_layers):
+                for model, model_config in self._iter_all_models_with_config():
+                    process_weights_after_loading(model, model_config, self.device)
 
     def _apply_buffer_updates_all_models(self, buffer_updates, main_named_buffers):
         """Apply buffer updates to the main model and any synced MTP drafter.
@@ -457,11 +424,6 @@ class vLLMColocateWorkerExtension:
                     f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}, loaded_buffers: {loaded_buffers}"
                 )
             else:
-                layerwise = getattr(self, "_layerwise_reload", None) is not None
-                if layerwise:
-                    # The layerwise loaders hold these tensors until a layer's last weight arrives, which can
-                    # be in a later bucket, while the receiver reuses its IPC buffer per bucket: keep copies.
-                    param_updates = [(name, tensor.clone()) for name, tensor in param_updates]
                 if param_updates:
                     for model in self._iter_all_models():
                         if peft_config is None:
@@ -470,12 +432,7 @@ class vLLMColocateWorkerExtension:
                             names = {n for n, _ in model.named_parameters(remove_duplicate=False)}
                             names.update(n for n, _ in model.named_buffers())
                             model.load_weights((resolve_weight_name(model, n, names), t) for n, t in param_updates)
-                if layerwise:
-                    # Buffers sit on the meta device until finalize puts the live tensors back.
-                    self._deferred_buffer_updates.extend((name, tensor.clone()) for name, tensor in buffer_updates)
-                    loaded_buffers = 0
-                else:
-                    loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
+                loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
                 logger.info(
                     f"Loading standard weights (non-FP8, async), "
                     f"loaded_params: {len(param_updates)}, loaded_buffers: {loaded_buffers}"

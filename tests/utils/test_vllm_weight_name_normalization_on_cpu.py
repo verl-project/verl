@@ -24,6 +24,7 @@ list. Imports *only* from ``verl.workers.rollout.vllm_rollout.utils`` (deps
 stubbed) to prove the receiver is decoupled from ``megatron_peft_utils``.
 """
 
+import contextlib
 import importlib.util
 import sys
 import types
@@ -733,53 +734,55 @@ def test_update_weights_from_ipc_standard_loads_per_bucket(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Standard (non-quantized) sync goes through vLLM's layerwise reload lifecycle
-# (verl-project/verl#7978: TRT-LLM bf16 MoE keeps w13/w2 in a 4-D kernel layout).
-# These stub the receiver and vLLM's reload module, so they run without vLLM.
+# The standard (non-quantized) sync stages unquantized MoE layers whose kernel prep
+# reshaped the expert weights, and folds them back after the last bucket
+# (verl-project/verl#7978: FlashInfer TRT-LLM bf16 MoE keeps w13/w2 in a 4-D layout).
+# These stub the receiver and the staging module, so they run without vLLM.
 # ---------------------------------------------------------------------------
-
-
-class _FakeBucketReceiverModule:
-    def __init__(self, buckets):
-        self._buckets = buckets
-
-    def receive_weights(self, on_bucket_received):
-        for weights, is_last in self._buckets:
-            on_bucket_received(weights, is_last)
 
 
 def _install_fake_receiver(monkeypatch, buckets):
     fake_bwt = types.ModuleType("verl.workers.rollout.vllm_rollout.bucketed_weight_transfer")
-    fake_bwt.BucketedWeightReceiver = lambda *a, **k: _FakeBucketReceiverModule(buckets)
+    fake_bwt.BucketedWeightReceiver = lambda *a, **k: _FakeBucketReceiver(buckets)
     monkeypatch.setitem(sys.modules, "verl.workers.rollout.vllm_rollout.bucketed_weight_transfer", fake_bwt)
 
 
-def _install_fake_vllm_loader(monkeypatch, events, *, reload_available=True):
+def _install_fake_moe_staging(monkeypatch, events, staged_layers):
     fake_loader_utils = types.ModuleType("vllm.model_executor.model_loader.utils")
     fake_loader_utils.process_weights_after_loading = lambda *a, **k: events.append("process_weights_after_loading")
     monkeypatch.setitem(sys.modules, "vllm.model_executor.model_loader.utils", fake_loader_utils)
-    if reload_available:
-        fake_reload = types.ModuleType("vllm.model_executor.model_loader.reload")
-        fake_reload.initialize_layerwise_reload = lambda model: events.append("initialize")
-        fake_reload.finalize_layerwise_processing = lambda model, model_config: events.append("finalize")
-        monkeypatch.setitem(sys.modules, "vllm.model_executor.model_loader.reload", fake_reload)
-    else:
-        # ``None`` in sys.modules makes the import raise ImportError (older vLLM without the lifecycle).
-        monkeypatch.setitem(sys.modules, "vllm.model_executor.model_loader.reload", None)
+
+    def _stage(model):
+        events.append("stage")
+        return list(staged_layers)
+
+    @contextlib.contextmanager
+    def _fold(layers):
+        events.append(f"fold:{len(layers)}")
+        yield
+        events.append("fold:done")
+
+    fake_refit = types.ModuleType("verl.utils.vllm.vllm_moe_refit_utils")
+    fake_refit.stage_unquantized_moe_params = _stage
+    fake_refit.fold_unquantized_moe_params = _fold
+    monkeypatch.setitem(sys.modules, "verl.utils.vllm.vllm_moe_refit_utils", fake_refit)
 
 
-def _standard_sync_worker(model):
+def _staging_sync_worker(model):
     worker = _make_worker(model)
     worker.device = torch.device("cpu")
     worker.local_rank = 0
     worker._is_qat_model = False
     worker._is_modelopt_qat = False
-    worker._get_zmq_handle = lambda: "ipc:///tmp/test-bucketed-layerwise.sock"
+    worker._get_zmq_handle = lambda: "ipc:///tmp/test-bucketed-moe-staging.sock"
     return worker
 
 
-def _two_bucket_sync(monkeypatch, events, *, peft_config=None):
-    """Two single-tensor buckets whose tensors are views into one reused buffer, like the receiver's."""
+def test_standard_sync_stages_moe_layers_before_the_buckets_and_folds_them_after(monkeypatch):
+    """The loads stream into the staged views bucket by bucket: the tensors handed to load_weights
+    are the receiver's views into its reused buffer, with no copies held past the bucket."""
+    events = []
+    _install_fake_moe_staging(monkeypatch, events, staged_layers=["experts"])
     bucket_buffer = torch.zeros(2)
     views = [bucket_buffer[0:1], bucket_buffer[1:2]]
     _install_fake_receiver(monkeypatch, [([("q.weight", views[0])], False), ([("k.weight", views[1])], True)])
@@ -792,45 +795,27 @@ def _two_bucket_sync(monkeypatch, events, *, peft_config=None):
             loaded.append(tensor)
 
     model.load_weights = _load
-    worker = _standard_sync_worker(model)
-    worker.update_weights_from_ipc(peft_config=peft_config, base_sync_done=False)
-    return views, loaded
+    _staging_sync_worker(model).update_weights_from_ipc(peft_config=None, base_sync_done=False)
+
+    assert events == [
+        "stage",
+        "load:q.weight",
+        "load:k.weight",
+        "fold:1",
+        "process_weights_after_loading",
+        "fold:done",
+    ]
+    assert [t.data_ptr() for t in loaded] == [v.data_ptr() for v in views]
 
 
-def test_standard_sync_runs_vllm_layerwise_reload_around_the_buckets(monkeypatch):
-    """initialize before the first bucket, finalize after the last, no bare process_weights_after_loading;
-    the tensors handed to load_weights are private copies (the layerwise loaders hold them past the bucket)."""
-    monkeypatch.delenv("VERL_VLLM_LAYERWISE_RELOAD", raising=False)
+def test_lora_adapter_sync_neither_stages_nor_folds(monkeypatch):
     events = []
-    _install_fake_vllm_loader(monkeypatch, events)
-    views, loaded = _two_bucket_sync(monkeypatch, events)
-    assert events == ["initialize", "load:q.weight", "load:k.weight", "finalize"]
-    assert all(t._base is None for t in loaded), "must be copies, not views into the reused IPC bucket"
-    assert loaded[0].data_ptr() != views[0].data_ptr()
+    _install_fake_moe_staging(monkeypatch, events, staged_layers=["experts"])
+    _install_fake_receiver(monkeypatch, [([("lora.A.weight", torch.ones(1))], True)])
+    worker = _staging_sync_worker(_FakeModel({"q.base_layer.weight": torch.empty(0)}))
+    worker.add_lora = lambda request: events.append("add_lora")
+    worker.remove_lora = lambda lora_id: None
 
+    worker.update_weights_from_ipc(peft_config={"r": 1}, base_sync_done=True)
 
-def test_standard_sync_falls_back_when_the_lifecycle_is_disabled(monkeypatch):
-    monkeypatch.setenv("VERL_VLLM_LAYERWISE_RELOAD", "0")
-    events = []
-    _install_fake_vllm_loader(monkeypatch, events)
-    views, loaded = _two_bucket_sync(monkeypatch, events)
-    assert events == ["load:q.weight", "load:k.weight", "process_weights_after_loading"]
-    assert loaded[0].data_ptr() == views[0].data_ptr(), "the fallback loads the bucket views as before"
-
-
-def test_standard_sync_falls_back_on_vllm_without_the_reload_module(monkeypatch):
-    monkeypatch.delenv("VERL_VLLM_LAYERWISE_RELOAD", raising=False)
-    events = []
-    _install_fake_vllm_loader(monkeypatch, events, reload_available=False)
-    _two_bucket_sync(monkeypatch, events)
-    assert events == ["load:q.weight", "load:k.weight", "process_weights_after_loading"]
-
-
-def test_lora_base_sync_keeps_loading_into_the_live_parameters(monkeypatch):
-    """LoRA-wrapped layers post-date vLLM's reload metadata, so a LoRA base sync must not enter the lifecycle."""
-    monkeypatch.delenv("VERL_VLLM_LAYERWISE_RELOAD", raising=False)
-    events = []
-    _install_fake_vllm_loader(monkeypatch, events)
-    _two_bucket_sync(monkeypatch, events, peft_config={"r": 1})
-    assert "initialize" not in events and "finalize" not in events
-    assert events[-1] == "process_weights_after_loading"
+    assert events == ["add_lora"]
