@@ -861,7 +861,11 @@ def compute_rloo_vectorized_outcome_advantage(
         inv = torch.from_numpy(np.unique(index, return_inverse=True)[1]).to(scores.device)
 
         c = torch.bincount(inv)[inv].to(scores.dtype)
-        adv = ((c * scores - torch.bincount(inv, weights=scores)[inv]) / (c - 1).clamp_min(1)) * (c > 1)
+        # `torch.bincount(weights=...)` always accumulates in float64, so cast the group
+        # sums back to `scores.dtype`. Without it a bf16/fp16 reward tensor silently
+        # produces float64 advantages, unlike `compute_rloo_outcome_advantage`.
+        group_sum = torch.bincount(inv, weights=scores)[inv].to(scores.dtype)
+        adv = ((c * scores - group_sum) / (c - 1).clamp_min(1)) * (c > 1)
 
         adv = adv.unsqueeze(-1) * response_mask
 
