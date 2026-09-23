@@ -123,12 +123,14 @@ case "${DEVICE}" in
     npu)
         PP=${PP:-4}
         EP=${EP:-16}
-        GEN_TP=${GEN_TP:-16}
+        GEN_TP=${GEN_TP:-2}
+	    GEN_DP=${GEN_DP:-16}
+	    GEN_EP=${GEN_EP:-32}
         n_devices_per_node=${NDEVICES_PER_NODE:-16}
-        rollout_gpu_memory_utilization=${rollout_gpu_memory_utilization:-0.6}
+        rollout_gpu_memory_utilization=${rollout_gpu_memory_utilization:-0.62}
         rollout_log_prob_micro_batch_size_per_gpu=${rollout_log_prob_micro_batch_size_per_gpu:-4}
         ref_log_prob_micro_batch_size_per_gpu=${ref_log_prob_micro_batch_size_per_gpu:-4}
-        vllm_max_model_len=${vllm_max_model_len:-8192}
+        vllm_max_model_len=${vllm_max_model_len:-5120}
         ;;
 esac
 
@@ -253,7 +255,9 @@ case "${DEVICE}" in
         ;;
     npu)
         ACTOR+=(
+            actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4
             actor_rollout_ref.actor.megatron.vanilla_mbridge=False
+            actor_rollout_ref.actor.megatron.grad_offload=${ALL_OFFLOAD}
             actor_rollout_ref.actor.checkpoint.strict=False
             ++actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=auto
             +actor_rollout_ref.actor.megatron.override_transformer_config.moe_aux_loss_coeff=0.01
@@ -261,6 +265,9 @@ case "${DEVICE}" in
             +actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True
             +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=alltoall
             +actor_rollout_ref.actor.megatron.override_transformer_config.use_naive_l2norm=True
+            +actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_rmsnorm=True
+            +actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_swiglu=True
+            +actor_rollout_ref.actor.megatron.override_transformer_config.gradient_accumulation_fusion=True
         )
         if [ "${USE_MINDSPEED_BRIDGE}" = "True" ]; then
           ACTOR+=(
@@ -269,7 +276,12 @@ case "${DEVICE}" in
           )
         fi
         ROLLOUT+=(
+            actor_rollout_ref.rollout.data_parallel_size=${GEN_DP}
+            actor_rollout_ref.rollout.expert_parallel_size=${GEN_EP}
+            actor_rollout_ref.rollout.max_num_seqs=24
+            actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=5120
             +actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0
+            +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode="FULL_DECODE_ONLY"
         )
         ;;
 esac

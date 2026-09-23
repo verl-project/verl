@@ -652,7 +652,7 @@ class TRTLLMReplica(RolloutReplica):
             ),
             runtime_env={"env_vars": _server_env_vars},
             name=name,
-            max_concurrency=self.max_concurrency,
+            max_concurrency=self.config.ray_actor_max_concurrency,
         ).remote(
             config=self.config,
             model_config=self.model_config,
