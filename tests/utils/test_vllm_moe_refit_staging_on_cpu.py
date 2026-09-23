@@ -71,8 +71,13 @@ def _block_layout(raw: torch.Tensor) -> torch.Tensor:
 
 
 def _padded_block_layout(raw: torch.Tensor) -> torch.Tensor:
-    """A kernel layout that pads, so the byte count changes and the live storage cannot be reused."""
+    """Pad before the block transpose, as vLLM 0.29 pads TRT-LLM's intermediate dim to a multiple of 128."""
     return _block_layout(torch.nn.functional.pad(raw, (0, BLOCK)))
+
+
+def _halved_layout(raw: torch.Tensor) -> torch.Tensor:
+    """A kernel layout with fewer bytes than the checkpoint layout: no room to stage in place."""
+    return raw[..., ::2].contiguous()
 
 
 def _replace_parameter(layer, param_name, new_data, prefer_copy=False):
@@ -245,8 +250,28 @@ def test_layers_without_recorded_metadata_or_another_quant_method_are_not_staged
     assert refit.stage_unquantized_moe_params(model) == []
 
 
-def test_a_byte_count_change_gets_a_fresh_staging_buffer(vllm):
+def test_a_padded_kernel_layout_is_staged_in_the_live_storage(vllm):
     layer = _FakeRoutedExperts(vllm.unquantized.UnquantizedFusedMoEMethod(kernel_layout=_padded_block_layout))
+    model = _engine_init(vllm, [layer])
+    live = {name: getattr(layer, name) for name in ("w13_weight", "w2_weight")}
+    assert live["w13_weight"].numel() > 2 * INTER * HID * E
+
+    staged = refit.stage_unquantized_moe_params(model)
+
+    for name, param in live.items():
+        view = getattr(layer, name)
+        assert view.dim() == 3 and view.data_ptr() == param.data_ptr(), "the padded live storage has room"
+    weights = _new_weights(seed=2)
+    _load(layer, weights)
+    with refit.fold_unquantized_moe_params(staged):
+        layer.quant_method.process_weights_after_loading(layer)
+    for name, param in live.items():
+        assert getattr(layer, name) is param
+        assert torch.equal(param.data, _padded_block_layout(weights[name]))
+
+
+def test_a_smaller_kernel_layout_gets_a_fresh_staging_buffer(vllm):
+    layer = _FakeRoutedExperts(vllm.unquantized.UnquantizedFusedMoEMethod(kernel_layout=_halved_layout))
     model = _engine_init(vllm, [layer])
     live = layer.w13_weight
 
@@ -255,12 +280,12 @@ def test_a_byte_count_change_gets_a_fresh_staging_buffer(vllm):
     view = layer.w13_weight
     assert view.shape == (E, 2 * INTER, HID) and view.data_ptr() != live.data_ptr()
     assert torch.isnan(view.data).all(), "an unwritten staging buffer must not look like real weights"
-    weights = _new_weights(seed=2)
+    weights = _new_weights(seed=3)
     _load(layer, weights)
     with refit.fold_unquantized_moe_params(staged):
         layer.quant_method.process_weights_after_loading(layer)
     assert layer.w13_weight is live
-    assert torch.equal(live.data, _padded_block_layout(weights["w13_weight"]))
+    assert torch.equal(live.data, _halved_layout(weights["w13_weight"]))
 
 
 def test_a_staged_weight_that_was_not_re_derived_fails_loudly(vllm):

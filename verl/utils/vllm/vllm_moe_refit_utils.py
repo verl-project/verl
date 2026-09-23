@@ -21,8 +21,9 @@ layout (``[E, 2H/128, 2I, 64]`` for w13, where the checkpoint layout is
 ``[E, 2I, H]``), so the per-expert loads of a refit no longer fit the live
 parameters (verl-project/verl#7978).
 
-The block layout keeps the byte count, so the checkpoint layout is staged as a
-view over the live storage: the refit's loads stream straight into it, and
+The block layout keeps the byte count (or adds padding: vLLM 0.29 pads the
+intermediate dim to a multiple of 128 first), so the checkpoint layout is staged
+as a view over the live storage: the refit's loads stream straight into it, and
 nothing is buffered or copied while the buckets arrive. After the last bucket,
 vLLM's own ``process_weights_after_loading`` re-derives the kernel layout into a
 temporary, and ``replace_parameter`` -- patched for the duration of that call --
@@ -38,13 +39,14 @@ engine starts.
 """
 
 import logging
+import math
 import os
 from contextlib import contextmanager
 from unittest.mock import patch
 
 import torch
 
-from verl.utils.vllm.vllm_fp8_utils import _copy_param_subclass_attrs, _fold_into_live_param, _fp8_staging_data
+from verl.utils.vllm.vllm_fp8_utils import _copy_param_subclass_attrs, _fold_into_live_param
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -61,6 +63,23 @@ def _checkpoint_layouts(layer, layerwise_info) -> dict[str, tuple[tuple[int, ...
         return {}
     params, _ = info.restore_metadata
     return {name: (tuple(params[name].shape), params[name].dtype) for name in _MOE_WEIGHT_NAMES if name in params}
+
+
+def _staging_data(param, shape, dtype):
+    """Checkpoint-layout tensor for the refit's loads to write into.
+
+    A view over the live storage whenever that has room -- the kernel layout
+    keeps the checkpoint's bytes or pads them -- so staging allocates nothing.
+    Otherwise a fresh buffer, all-ones bytes (NaN in bf16/fp16/fp32), so a
+    weight the stream fails to write cannot pass for a real one.
+    """
+    nbytes = math.prod(shape) * dtype.itemsize
+    live = param.data
+    if live.is_contiguous() and live.nbytes >= nbytes:
+        return live.reshape(-1).view(torch.uint8)[:nbytes].view(dtype).view(shape)
+    staging = torch.empty(shape, dtype=dtype, device=live.device)
+    staging.view(torch.uint8).fill_(0xFF)
+    return staging
 
 
 def stage_unquantized_moe_params(model: torch.nn.Module) -> list[torch.nn.Module]:
@@ -96,7 +115,7 @@ def stage_unquantized_moe_params(model: torch.nn.Module) -> list[torch.nn.Module
             param = getattr(layer, name, None)
             if not isinstance(param, torch.nn.Parameter) or (tuple(param.shape) == shape and param.dtype == dtype):
                 continue
-            data = _fp8_staging_data(param, shape, dtype)
+            data = _staging_data(param, shape, dtype)
             if data.data_ptr() != param.data_ptr():
                 fresh_bytes += data.nbytes
             staged_param = torch.nn.Parameter(data, requires_grad=False)
@@ -112,8 +131,8 @@ def stage_unquantized_moe_params(model: torch.nn.Module) -> list[torch.nn.Module
         logger.info("Staged %d unquantized MoE layers in checkpoint layout for the refit", len(staged))
     if fresh_bytes:
         logger.warning(
-            "An unquantized MoE kernel layout changes the byte count, so %.1f MB of checkpoint-layout "
-            "staging buffers were allocated for this refit",
+            "An unquantized MoE kernel layout has no room for the checkpoint layout, so %.1f MB of "
+            "checkpoint-layout staging buffers were allocated for this refit",
             fresh_bytes / 2**20,
         )
     return staged
