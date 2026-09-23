@@ -30,9 +30,11 @@ block-FP8 layer:
 ``verl/utils/vllm/vllm_quant_utils.py`` is the entry point that drives these.
 """
 
+import contextlib
 import inspect
 import logging
 import math
+import sys
 from unittest.mock import patch
 
 import torch
@@ -96,6 +98,8 @@ def _copy_param_subclass_attrs(dst_param, src_param):
 
 _FP8_PRISTINE_ATTR = "_verl_fp8_pristine"
 _FP8_LIVE_ATTR = "_verl_fp8_live_params"
+# Names of the params a kernel handed back as a rewritten copy with the checkpoint's shape and dtype.
+_FP8_REPACKED_ATTR = "_verl_fp8_repacked"
 
 # ``Fp8LinearMethod`` owns the first group, ``Fp8MoEMethod`` the second. The MoE
 # scale is named ``w13_weight_scale_inv`` under block quant and
@@ -157,6 +161,22 @@ def replace_parameter_preserve_subclass(
         new_data = new_data.data
 
     old_param = getattr(layer, param_name, None)
+    # FlashInfer TRT-LLM's MXFP8 MoE prep (W13->W31 swap, gate/up row interleave, tile shuffle of weights and
+    # scales) returns tensors with the checkpoint's shape and dtype, so the comparison in
+    # _layer_needs_fp8_staging cannot tell the live buffer is no longer in checkpoint layout. This call is the
+    # one place the rewrite is visible: a same-shaped, same-typed tensor that is not the old storage.
+    if (
+        param_name in _FP8_REFIT_PARAM_NAMES
+        and isinstance(old_param, torch.nn.Parameter)
+        and tuple(old_param.shape) == tuple(new_data.shape)
+        and old_param.dtype == new_data.dtype
+        and old_param.data_ptr() != new_data.data_ptr()
+    ):
+        repacked = getattr(layer, _FP8_REPACKED_ATTR, None)
+        if repacked is None:
+            repacked = set()
+            setattr(layer, _FP8_REPACKED_ATTR, repacked)
+        repacked.add(param_name)
     param = torch.nn.Parameter(new_data, requires_grad=False)
     _copy_param_subclass_attrs(param, old_param)
     setattr(layer, param_name, param)
@@ -198,18 +218,20 @@ def _record_pristine_fp8_layout(layer, params):
 
 
 def _layer_needs_fp8_staging(layer, pristine) -> bool:
+    repacked = getattr(layer, _FP8_REPACKED_ATTR, None) or ()
     for name, (shape, dtype) in pristine.items():
         param = getattr(layer, name, None)
         if not isinstance(param, torch.nn.Parameter):
             continue
         if tuple(param.shape) != shape or param.dtype != dtype:
             return True
-        # ROCm's AITER MoE backend permutes the expert weights into its MFMA
-        # layout while leaving shape and dtype untouched, so the comparison
-        # above cannot see it. ``is_shuffled``, which that backend sets on the
-        # repacked parameter, is the only signal that the live buffer is no
-        # longer in checkpoint layout.
-        if getattr(param, "is_shuffled", False):
+        # Two backends permute the expert weights while leaving shape and dtype
+        # untouched, so the comparison above cannot see it. ROCm's AITER MoE
+        # sets ``is_shuffled`` on the repacked parameter; FlashInfer TRT-LLM's
+        # MXFP8 MoE sets nothing, so the patched ``replace_parameter`` records
+        # the rewrite itself (``_FP8_REPACKED_ATTR``). Either is the only signal
+        # that the live buffer is no longer in checkpoint layout.
+        if getattr(param, "is_shuffled", False) or name in repacked:
             return True
     return False
 
@@ -300,14 +322,32 @@ def process_fp8_weights_after_loading(layers):
 _VLLM_PROCESS_ONCE_FLAG = "_already_called_process_weights_after_loading"
 
 
+# Each quant module binds its own ``replace_parameter`` name at import, so the stand-in has to be
+# installed per module. ModelOpt's MXFP8 MoE rebuilds ``moe_quant_config`` / ``moe_kernel`` from the
+# layer right after its replace calls; only a fold at replace time leaves those pointing at the live params.
+_REPLACE_PARAMETER_TARGETS = (
+    "vllm.model_executor.layers.quantization.fp8.replace_parameter",
+    "vllm.model_executor.layers.quantization.modelopt.replace_parameter",
+)
+
+
+def _replace_parameter_patches():
+    stack = contextlib.ExitStack()
+    for target in _REPLACE_PARAMETER_TARGETS:
+        module_name, _, attr = target.rpartition(".")
+        module = sys.modules.get(module_name)
+        if module is None or not hasattr(module, attr):
+            continue  # not imported (older vLLM without ModelOpt MXFP8): nothing to intercept
+        stack.enter_context(patch(target, replace_parameter_preserve_subclass))
+    return stack
+
+
 def _make_process_weights_after_loading_for_vllm20(original_fn):
     def _patched_process_weights_after_loading(self, layer) -> None:
         old_params = dict(layer.named_parameters(recurse=False))
         _record_pristine_fp8_layout(layer, old_params)
         layer.__dict__.pop(_VLLM_PROCESS_ONCE_FLAG, None)
-        with patch(
-            "vllm.model_executor.layers.quantization.fp8.replace_parameter", replace_parameter_preserve_subclass
-        ):
+        with _replace_parameter_patches():
             original_fn(self, layer)
         _restore_layer_param_subclass_attrs(layer, old_params)
 
