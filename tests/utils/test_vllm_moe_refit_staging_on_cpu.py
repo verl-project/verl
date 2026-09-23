@@ -309,6 +309,62 @@ def test_a_staged_weight_that_was_not_re_derived_fails_loudly(vllm):
             layer.quant_method.process_weights_after_loading(layer)
 
 
+def _assert_record_is(layer, live):
+    stash = getattr(layer, refit._LIVE_ATTR)
+    assert list(stash) == list(live) and all(stash[name] is param for name, param in live.items())
+
+
+def _refit_restores(layer, model, live, seed):
+    """The next refit restages from the record and lands the new weights in the live storage."""
+    staged = refit.stage_unquantized_moe_params(model)
+    weights = _new_weights(seed=seed)
+    _load(layer, weights)
+    with refit.fold_unquantized_moe_params(staged):
+        layer.quant_method.process_weights_after_loading(layer)
+    for name, param in live.items():
+        assert getattr(layer, name) is param
+        assert torch.equal(param.data, _block_layout(weights[name]))
+
+
+def test_a_failed_fold_keeps_the_record_the_next_refit_restores_from(vllm):
+    layer = _FakeRoutedExperts(vllm.unquantized.UnquantizedFusedMoEMethod())
+    model = _engine_init(vllm, [layer])
+    live = {name: getattr(layer, name) for name in ("w13_weight", "w2_weight")}
+    staged = refit.stage_unquantized_moe_params(model)
+    _load(layer, _new_weights(seed=6))
+    layer.quant_method.kernel_layout = lambda raw: _block_layout(raw).flatten(1)  # re-derived in the wrong shape
+
+    with pytest.raises(RuntimeError):
+        with refit.fold_unquantized_moe_params(staged):
+            layer.quant_method.process_weights_after_loading(layer)
+
+    _assert_record_is(layer, live)
+    layer.quant_method.kernel_layout = _block_layout
+    _refit_restores(layer, model, live, seed=7)
+
+
+def test_a_staging_failure_part_way_keeps_the_record_the_next_refit_restores_from(vllm, monkeypatch):
+    layer = _FakeRoutedExperts(vllm.unquantized.UnquantizedFusedMoEMethod())
+    model = _engine_init(vllm, [layer])
+    live = {name: getattr(layer, name) for name in ("w13_weight", "w2_weight")}
+    real, calls = refit._staging_data, []
+
+    def fails_on_the_second_weight(param, shape, dtype):
+        calls.append(shape)
+        if len(calls) == 2:
+            raise RuntimeError("CUDA out of memory")
+        return real(param, shape, dtype)
+
+    monkeypatch.setattr(refit, "_staging_data", fails_on_the_second_weight)
+    with pytest.raises(RuntimeError):
+        refit.stage_unquantized_moe_params(model)
+
+    assert layer.w13_weight is not live["w13_weight"]  # already swapped for its view
+    _assert_record_is(layer, {"w13_weight": live["w13_weight"]})
+    monkeypatch.setattr(refit, "_staging_data", real)
+    _refit_restores(layer, model, live, seed=8)
+
+
 def test_a_layer_left_staged_by_a_failed_refit_is_restaged_from_its_live_params(vllm):
     layer = _FakeRoutedExperts(vllm.unquantized.UnquantizedFusedMoEMethod())
     model = _engine_init(vllm, [layer])

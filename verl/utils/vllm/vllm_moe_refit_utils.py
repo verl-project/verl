@@ -120,11 +120,13 @@ def stage_unquantized_moe_params(model: torch.nn.Module) -> list[torch.nn.Module
                 fresh_bytes += data.nbytes
             staged_param = torch.nn.Parameter(data, requires_grad=False)
             _copy_param_subclass_attrs(staged_param, param)
+            # The record goes on the layer before the parameter is swapped out, so a failure part way
+            # through still leaves the next refit what it restores from.
+            setattr(layer, _LIVE_ATTR, live)
             live[name] = param
             setattr(layer, name, staged_param)
 
         if live:
-            setattr(layer, _LIVE_ATTR, live)
             staged.append(layer)
 
     if staged:
@@ -141,11 +143,13 @@ def stage_unquantized_moe_params(model: torch.nn.Module) -> list[torch.nn.Module
 def _folding_replace_parameter(original):
     def replace_parameter(layer, param_name, new_data, *args, **kwargs):
         live = getattr(layer, _LIVE_ATTR, None)
-        param = live.pop(param_name, None) if live and new_data is not None else None
+        param = live.get(param_name) if live and new_data is not None else None
         if param is None:
             return original(layer, param_name, new_data, *args, **kwargs)
         # Into the storage the CUDA graph captured, right away: the temporary is freed before the next layer.
         _fold_into_live_param(layer, param_name, param, new_data)
+        # Dropped only once folded: a fold that raises leaves the record the next refit restores from.
+        del live[param_name]
 
     return replace_parameter
 
@@ -166,7 +170,8 @@ def fold_unquantized_moe_params(layers: list[torch.nn.Module]):
     for layer in layers:
         # Whatever the patch did not see: a backend that bypassed the module-level name still left its
         # kernel layout on the layer, but a staged view left there means nothing re-derived the weight.
-        for name, param in list((getattr(layer, _LIVE_ATTR, None) or {}).items()):
+        live = getattr(layer, _LIVE_ATTR, None) or {}
+        for name, param in list(live.items()):
             current = getattr(layer, name)
             if tuple(current.shape) != tuple(param.shape):
                 raise RuntimeError(
@@ -174,5 +179,6 @@ def fold_unquantized_moe_params(layers: list[torch.nn.Module]):
                     f"the checkpoint-layout view {tuple(current.shape)} is still on the layer"
                 )
             _fold_into_live_param(layer, name, param, current)
+            del live[name]
         if hasattr(layer, _LIVE_ATTR):
             delattr(layer, _LIVE_ATTR)
