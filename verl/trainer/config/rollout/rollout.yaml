@@ -86,6 +86,11 @@ max_model_len: null
 # max length of sequences
 max_num_seqs: 256
 
+# Ray max_concurrency of the rollout server actor. Raise it above the peak number of
+# in-flight generate requests per replica, otherwise control calls (wake_up, weight sync)
+# can be starved.
+ray_actor_max_concurrency: 1024
+
 # may get higher throughput when set to True. When activated, Please increase max_num_batched_tokens or decrease max_model_len.
 enable_chunked_prefill: True
 

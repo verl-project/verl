@@ -205,6 +205,9 @@ class RolloutConfig(BaseConfig):
     max_model_len: Optional[int] = None
     max_num_seqs: int = 1024
 
+    # Ray max_concurrency of the rollout server actor.
+    ray_actor_max_concurrency: int = 1024
+
     # note that the logprob computation should belong to the actor
     log_prob_micro_batch_size: Optional[int] = None
     log_prob_micro_batch_size_per_gpu: Optional[int] = None

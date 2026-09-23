@@ -100,6 +100,7 @@ jobs:
       options: >-
         --shm-size 16g
     env:
+      MODEL_PATH: /root/.cache/modelscope/hub/models/deepseek-ai/deepseek-coder-1___3b-instruct
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
       RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: "1"
