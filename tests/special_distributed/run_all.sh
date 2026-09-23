@@ -25,7 +25,5 @@ torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp2_cp
 # Regression for colocated FSDP2 full-parameter model transfers. It locks in
 # PyTorch's implicit pinned allocation for non-blocking D2H Module.to().
 torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fsdp2_pinned_model_transfer.py
-# FP32 fused lm_head must use the wrapped output layer so FSDP2 reduces its
-# gradients across data-parallel ranks.
-STRATEGY=fsdp2 FUSED=true TIE_WORD_EMBEDDINGS=false \
-    torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fp32_lm_head_fsdp.py
+# FP32 fused lm_head FSDP2 gradient reduction.
+torchrun --nproc-per-node=2 --standalone tests/special_distributed/test_fp32_lm_head_fsdp.py

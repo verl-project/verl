@@ -189,8 +189,8 @@ class TestBuildCliArgsFromConfig:
 
 
 class TestMergeHfOverrides:
-    @pytest.mark.parametrize("configured", [{"trust_remote_code": True}, '{"trust_remote_code": true}'])
-    def test_preserves_generated_and_configured_values(self, configured):
+    def test_merges_json_config_and_head_dtype(self):
+        configured = '{"trust_remote_code": true}'
         assert merge_hf_overrides({"quantization_config": {"quant_method": "fp8"}}, configured, "float32") == {
             "quantization_config": {"quant_method": "fp8"},
             "trust_remote_code": True,

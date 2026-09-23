@@ -252,22 +252,9 @@ def patch_forward_with_backends(
         )
         return
 
-    specialized_model_types = {
-        "qwen2_5_vl",
-        "qwen2_vl",
-        "qwen3_vl",
-        "qwen3_vl_moe",
-        "glm4v",
-        "qwen3_5",
-        "qwen3_5_moe",
-    }
-    if lm_head_dtype == "float32" and model.config.model_type in specialized_model_types:
-        raise NotImplementedError(
-            f"lm_head_dtype='float32' is not supported with fused kernels for model_type={model.config.model_type!r}."
-        )
-
     forward_with_torch_backend_function = model.__class__.forward
     forward_with_triton_backend_function = model.__class__.forward
+    supports_fp32_lm_head = False
     if model.config.model_type in ["qwen2_5_vl", "qwen2_vl"]:
         from verl.models.transformers.qwen2_vl import forward_with_torch_backend, forward_with_triton_backend
 
@@ -293,6 +280,12 @@ def patch_forward_with_backends(
 
         forward_with_torch_backend_function = forward_with_torch_backend
         forward_with_triton_backend_function = forward_with_triton_backend
+        supports_fp32_lm_head = True
+
+    if lm_head_dtype == "float32" and not supports_fp32_lm_head:
+        raise NotImplementedError(
+            f"lm_head_dtype='float32' is not supported with fused kernels for model_type={model.config.model_type!r}."
+        )
 
     model._verl_fused_kernels_backend = fused_kernels_backend
     model._verl_lm_head_dtype = lm_head_dtype

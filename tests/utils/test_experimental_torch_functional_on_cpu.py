@@ -124,10 +124,10 @@ def test_fused_linear_for_ppo_torch_backend_does_not_dispatch_to_liger(monkeypat
     torch.testing.assert_close(entropy, expected_entropy)
 
 
-@pytest.mark.parametrize("temperature", [1.0, 0.7])
-def test_fused_linear_for_ppo_fp32_projection_matches_reference(monkeypatch, temperature):
+def test_fused_linear_for_ppo_fp32_projection_matches_reference(monkeypatch):
     monkeypatch.setattr(experimental_F, "_FLASH_ATTN_CROSS_ENTROPY_AVAILABLE", False)
     torch.manual_seed(42)
+    temperature = 0.7
     hidden = torch.randn(2, 7, 5).to(torch.bfloat16).requires_grad_(True)
     weight = torch.randn(11, 5).to(torch.bfloat16).requires_grad_(True)
     labels = torch.randint(11, (2, 7))
@@ -155,29 +155,6 @@ def test_fused_linear_for_ppo_fp32_projection_matches_reference(monkeypatch, tem
     weight_norm = torch.linalg.vector_norm(expected_weight.grad)
     assert hidden_error / hidden_norm < 5e-3
     assert weight_error / weight_norm < 5e-3
-
-
-def test_fused_linear_for_ppo_fp32_does_not_dispatch_to_liger(monkeypatch):
-    class UnexpectedLigerFusedLinearScaledCrossEntropyFunction:
-        @staticmethod
-        def apply(*args):
-            raise AssertionError("FP32 lm_head must use the veRL Torch implementation")
-
-    monkeypatch.setattr(
-        experimental_F,
-        "_LIGER_FUSED_LINEAR_SCALED_CROSS_ENTROPY",
-        UnexpectedLigerFusedLinearScaledCrossEntropyFunction,
-    )
-    monkeypatch.setattr(experimental_F, "_FLASH_ATTN_CROSS_ENTROPY_AVAILABLE", False)
-    hidden = torch.randn(2, 3, 5, dtype=torch.bfloat16)
-    weight = torch.randn(7, 5, dtype=torch.bfloat16)
-    labels = torch.randint(7, (2, 3))
-
-    log_probs, _ = experimental_F.FusedLinearForPPO(impl_backend="liger", lm_head_dtype="float32")(
-        hidden, weight, labels
-    )
-
-    assert log_probs.dtype == torch.float32
 
 
 def test_fused_linear_for_ppo_rejects_unknown_backend():

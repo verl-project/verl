@@ -247,11 +247,9 @@ Actor/Rollout/Reference Policy
 - ``actor_rollout_ref.model.trust_remote_code``: Whether to enable loading
   a remote code model
 - ``actor_rollout_ref.model.lm_head_dtype``: Set to ``float32`` to keep the
-  FSDP actor/reference output projection and vLLM rollout logits in FP32 while
-  leaving the model weights and hidden states in their configured dtype. The
-  default ``null`` preserves each backend's existing behavior. This option
-  requires CUDA, FSDP/FSDP2 training, vLLM rollout, and a linear output head;
-  LoRA and architecture-specific fused forwards are not supported.
+  FSDP output projection and vLLM rollout logits in FP32. The default ``null``
+  preserves existing behavior. This requires CUDA, FSDP/FSDP2, vLLM, and a
+  linear output head; LoRA and architecture-specific fused forwards are unsupported.
 - ``actor_rollout_ref.model.use_fused_kernels``: Whether to use fused
   kernels in the model. If set to True, the following parameters will be
   used.

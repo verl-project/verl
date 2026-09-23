@@ -257,8 +257,6 @@ class FusedLinearForPPO(torch.nn.Module):
             raise ValueError(f"Unsupported FusedLinearForPPO backend: {impl_backend}. Choose 'torch' or 'liger'.")
         self.chunk_size = chunk_size
         self.impl_backend = impl_backend
-        if lm_head_dtype not in (None, "float32"):
-            raise ValueError(f"Unsupported lm_head_dtype: {lm_head_dtype!r}")
         self.lm_head_dtype = lm_head_dtype
 
     def forward(

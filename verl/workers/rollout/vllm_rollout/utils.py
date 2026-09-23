@@ -528,25 +528,19 @@ def merge_hf_overrides(generated: Mapping, configured: Mapping | str | None, hea
     """Merge veRL-generated and user-provided vLLM Hugging Face overrides."""
     if isinstance(configured, str):
         configured = json.loads(configured)
-    configured = configured or {}
-    if not isinstance(configured, Mapping):
-        raise TypeError(f"vLLM hf_overrides must be a mapping or JSON object, got {type(configured).__name__}.")
-
-    configured = dict(configured)
+    configured = dict(configured or {})
     if head_dtype is not None:
-        existing = configured.get("head_dtype")
-        if existing not in (None, head_dtype):
+        if configured.get("head_dtype", head_dtype) != head_dtype:
             raise ValueError(
-                f"Conflicting head dtype settings: lm_head_dtype={head_dtype!r}, hf_overrides.head_dtype={existing!r}."
+                f"Conflicting head dtype settings: lm_head_dtype={head_dtype!r}, "
+                f"hf_overrides.head_dtype={configured['head_dtype']!r}."
             )
         configured["head_dtype"] = head_dtype
 
-    merged = dict(generated)
-    for key, value in configured.items():
-        if key in merged and merged[key] != value:
-            raise ValueError(f"Conflicting vLLM hf_overrides for {key!r}: {merged[key]!r} != {value!r}.")
-        merged[key] = value
-    return merged
+    conflicts = {key for key in generated.keys() & configured.keys() if generated[key] != configured[key]}
+    if conflicts:
+        raise ValueError(f"Conflicting vLLM hf_overrides: {sorted(conflicts)}")
+    return {**generated, **configured}
 
 
 def build_mtp_speculative_config(

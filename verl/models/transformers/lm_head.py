@@ -35,20 +35,12 @@ def fp32_mm(
 class _Fp32LinearFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, hidden_states: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor]):
-        if hidden_states.ndim not in (2, 3):
-            raise ValueError(f"FP32 lm_head expects a 2D or 3D input, got shape {tuple(hidden_states.shape)}")
-        if weight.ndim != 2 or hidden_states.shape[-1] != weight.shape[-1]:
-            raise ValueError(
-                f"Invalid lm_head shapes: hidden_states={tuple(hidden_states.shape)}, weight={tuple(weight.shape)}"
-            )
-
         output_shape = (*hidden_states.shape[:-1], weight.shape[0])
         flat_hidden = hidden_states.reshape(-1, hidden_states.shape[-1])
-        with torch.autocast(device_type=hidden_states.device.type, enabled=False):
-            output = torch.empty(output_shape, device=hidden_states.device, dtype=torch.float32)
-            fp32_mm(flat_hidden, weight.t(), out=output.view(-1, weight.shape[0]))
-            if bias is not None:
-                output.add_(bias.float())
+        output = torch.empty(output_shape, device=hidden_states.device, dtype=torch.float32)
+        fp32_mm(flat_hidden, weight.t(), out=output.view(-1, weight.shape[0]))
+        if bias is not None:
+            output.add_(bias.float())
 
         ctx.save_for_backward(hidden_states, weight)
         ctx.has_bias = bias is not None
@@ -59,17 +51,15 @@ class _Fp32LinearFunction(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor):
         hidden_states, weight = ctx.saved_tensors
         flat_hidden = hidden_states.reshape(-1, hidden_states.shape[-1])
-        flat_grad_output = grad_output.reshape(-1, grad_output.shape[-1]).float()
+        flat_grad_output = grad_output.reshape(-1, grad_output.shape[-1])
 
         grad_hidden = grad_weight = grad_bias = None
-        with torch.autocast(device_type=hidden_states.device.type, enabled=False):
-            if ctx.needs_input_grad[0]:
-                grad_hidden = torch.mm(flat_grad_output, weight.float()).to(hidden_states.dtype)
-                grad_hidden = grad_hidden.view_as(hidden_states)
-            if ctx.needs_input_grad[1]:
-                grad_weight = torch.mm(flat_grad_output.t(), flat_hidden.float()).to(weight.dtype)
-            if ctx.has_bias and ctx.needs_input_grad[2]:
-                grad_bias = flat_grad_output.sum(dim=0).to(ctx.bias_dtype)
+        if ctx.needs_input_grad[0]:
+            grad_hidden = fp32_mm(flat_grad_output, weight).to(hidden_states.dtype).view_as(hidden_states)
+        if ctx.needs_input_grad[1]:
+            grad_weight = fp32_mm(flat_grad_output.t(), flat_hidden).to(weight.dtype)
+        if ctx.has_bias and ctx.needs_input_grad[2]:
+            grad_bias = flat_grad_output.sum(dim=0).to(ctx.bias_dtype)
 
         return grad_hidden, grad_weight, grad_bias
 
@@ -112,19 +102,11 @@ def _fp32_lm_head_forward(
 
 def install_fp32_lm_head(model: nn.Module) -> nn.Linear:
     """Patch the output layer in place without replacing parameters or state-dict keys."""
-    get_output_embeddings = getattr(model, "get_output_embeddings", None)
-    output_layer = get_output_embeddings() if callable(get_output_embeddings) else None
+    output_layer = model.get_output_embeddings()
     if not isinstance(output_layer, nn.Linear):
         raise TypeError(
             "lm_head_dtype='float32' currently requires get_output_embeddings() to return torch.nn.Linear; "
             f"got {type(output_layer).__name__}."
         )
-    if not output_layer.weight.is_floating_point():
-        raise TypeError(
-            f"lm_head_dtype='float32' requires a floating-point output weight; got {output_layer.weight.dtype}."
-        )
-
-    if not getattr(output_layer, "_verl_fp32_lm_head", False):
-        output_layer.forward = MethodType(_fp32_lm_head_forward, output_layer)
-        output_layer._verl_fp32_lm_head = True
+    output_layer.forward = MethodType(_fp32_lm_head_forward, output_layer)
     return output_layer
