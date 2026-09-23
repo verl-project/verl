@@ -38,6 +38,7 @@ engine starts.
 """
 
 import logging
+import os
 from contextlib import contextmanager
 from unittest.mock import patch
 
@@ -45,7 +46,8 @@ import torch
 
 from verl.utils.vllm.vllm_fp8_utils import _copy_param_subclass_attrs, _fold_into_live_param, _fp8_staging_data
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__file__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 _MOE_WEIGHT_NAMES = ("w13_weight", "w2_weight")
 # Live parameters a staged layer set aside, by name, until the fold puts them back.
