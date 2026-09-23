@@ -106,6 +106,7 @@ class _StubVllm:
         fp8.Fp8LinearMethod = type("Fp8LinearMethod", (), {"process_weights_after_loading": _noop_process})
         fp8.Fp8MoEMethod = type("Fp8MoEMethod", (), {"process_weights_after_loading": _noop_process})
         fp8.replace_parameter = replace_parameter
+        modelopt.replace_parameter = replace_parameter  # ModelOpt binds its own copy at import, like vLLM
         modelopt.ModelOptMxFp8Config = ModelOptMxFp8Config
         modelopt.ModelOptMxFp8LinearMethod = type(
             "ModelOptMxFp8LinearMethod", (), {"process_weights_after_loading": _swizzle_process, "apply": _apply}
@@ -403,3 +404,83 @@ def test_moe_expert_probe_is_skipped_where_it_cannot_reproduce_the_layer(monkeyp
         assert snap is not None and snap[0] == "experts" and snap[2] == 0 and tuple(snap[3].shape) == (2 * INTER, HID)
         monkeypatch.setenv("VERL_MXFP8_REFIT_CHECK", "0")
         assert module.snapshot_mxfp8_moe_for_check(model) is None
+
+
+def _trtllm_like_process(self, layer):
+    """FlashInfer TRT-LLM MXFP8 MoE prep as vLLM 0.24 does it: W13->W31 swap + shuffle returned through
+    ``replace_parameter`` as NEW tensors with the checkpoint's shape and dtype (no ``is_shuffled`` mark)."""
+    from vllm.model_executor.layers.quantization import modelopt
+
+    if getattr(layer, "_already_called_process_weights_after_loading", False):
+        return
+    layer._already_called_process_weights_after_loading = True
+    layer._process_calls = getattr(layer, "_process_calls", 0) + 1
+    for n in ("w13_weight", "w13_weight_scale"):
+        modelopt.replace_parameter(layer, n, getattr(layer, n).data.flip(1).clone())
+    # the kernel snapshot vLLM rebuilds right after the replace calls (moe_quant_config / moe_kernel)
+    layer._kernel_refs = (layer.w13_weight, layer.w13_weight_scale)
+
+
+def _identity_process(self, layer):
+    """A backend that leaves the checkpoint layout alone (Triton / vLLM-CUTLASS): replace with the same tensor."""
+    from vllm.model_executor.layers.quantization import modelopt
+
+    for n in ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"):
+        modelopt.replace_parameter(layer, n, getattr(layer, n))
+
+
+def test_layout_preserving_moe_repack_is_restaged_and_reprocessed():
+    """B200 2026-09-21: the TRT-LLM MXFP8 MoE layer kept its shape/dtype through post-processing, was never
+    staged, and the kernel read the synced canonical expert weights as shuffled (MoE probe rel err 1.739)."""
+    module, _ = _helpers._load_quant_utils(fused_moe_is_function=True)
+    with _StubVllm() as stub:
+        stub.modelopt.ModelOptMxFp8FusedMoE.process_weights_after_loading = _trtllm_like_process
+        patchers = module.build_fp8_method_patchers(version.parse("0.24.0"))
+        for p in patchers:
+            p.start()
+        try:
+            layer = _FakeRoutedExperts(stub.modelopt.ModelOptMxFp8FusedMoE())
+            canonical = layer.w13_weight.data.clone()
+            layer.quant_method.process_weights_after_loading(layer)  # initial load
+            assert torch.equal(layer.w13_weight.data, canonical.flip(1))
+            assert tuple(layer.w13_weight.shape) == (E, 2 * INTER, HID)  # shape/dtype unchanged: the blind spot
+            assert layer._verl_fp8_repacked == {"w13_weight", "w13_weight_scale"}
+            live_w, live_s = layer.w13_weight, layer.w13_weight_scale
+            model = torch.nn.Module()
+            model.experts = layer
+
+            staged = module.stage_fp8_params_for_loading(model)
+            assert staged == [layer], "a layout-preserving repack must still be staged"
+            fresh = torch.randint(-6, 7, canonical.shape).to(torch.float8_e4m3fn)
+            layer.w13_weight.data.copy_(fresh)  # what load_weights writes: checkpoint layout
+            layer.w13_weight_scale.data.fill_(129)
+            module.process_fp8_weights_after_loading(staged)
+
+            assert layer._process_calls == 2, "the once-flag must not block the refit's reprocess"
+            assert layer.w13_weight is live_w and layer.w13_weight.data_ptr() == live_w.data_ptr()
+            assert torch.equal(layer.w13_weight.data, fresh.flip(1)), "kernel layout re-derived from the new weights"
+            assert torch.equal(layer.w13_weight_scale.data, torch.full_like(live_s.data, 129))
+            # the kernel rebuilt after the replace calls points at the live params, not staging buffers
+            assert layer._kernel_refs[0] is live_w and layer._kernel_refs[1] is live_s
+        finally:
+            for p in patchers:
+                p.stop()
+
+
+def test_identity_moe_backend_is_not_restaged():
+    module, _ = _helpers._load_quant_utils(fused_moe_is_function=True)
+    with _StubVllm() as stub:
+        stub.modelopt.ModelOptMxFp8FusedMoE.process_weights_after_loading = _identity_process
+        patchers = module.build_fp8_method_patchers(version.parse("0.24.0"))
+        for p in patchers:
+            p.start()
+        try:
+            layer = _FakeRoutedExperts(stub.modelopt.ModelOptMxFp8FusedMoE())
+            layer.quant_method.process_weights_after_loading(layer)
+            assert not getattr(layer, "_verl_fp8_repacked", None)
+            model = torch.nn.Module()
+            model.experts = layer
+            assert module.stage_fp8_params_for_loading(model) == []
+        finally:
+            for p in patchers:
+                p.stop()
