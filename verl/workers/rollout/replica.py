@@ -31,11 +31,6 @@ from verl.workers.config import HFModelConfig, RolloutConfig
 logger = logging.getLogger(__file__)
 
 
-# Max number of concurrent calls to the methods of Rollout,
-# excluding calls to generate method.
-CONTROL_METHOD_CONCURRENCY = 16
-
-
 class TokenOutput(BaseModel):
     token_ids: list[int]
     """response token ids"""
@@ -252,12 +247,6 @@ class RolloutReplica(ABC):
     def server_handle(self) -> ActorHandle:
         """Get rollout server handle for Token-in-token-out generation."""
         return self._server_handle
-
-    @property
-    def max_concurrency(self) -> int:
-        # 1000 is Ray's default max_concurrency for async execution.
-        # Add some margin to account for control method call.
-        return max(1000, self.config.max_num_seqs + CONTROL_METHOD_CONCURRENCY)
 
     def rollout_worker_use_gpu(self) -> bool:
         return True

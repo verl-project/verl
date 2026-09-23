@@ -1384,7 +1384,7 @@ class vLLMReplica(RolloutReplica):
                 ),
                 runtime_env={"env_vars": env_vars},
                 name=name,
-                max_concurrency=self.max_concurrency,
+                max_concurrency=self.config.ray_actor_max_concurrency,
             ).remote(
                 config=self.config,
                 model_config=self.model_config,
