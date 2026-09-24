@@ -1,4 +1,4 @@
-昇腾安装指南(Ascend 950 系列产品)
+昇腾安装指南(Ascend 950PR&DT系列产品)
 =================
 
 Last updated: 09/22/2026.
@@ -17,7 +17,7 @@ Last updated: 09/22/2026.
 框架后端支持说明
 ----------------
 
-当前NPU在Ascend 950 系列产品上支持以下常见训推后端的部署，您可以根据我们的 `昇腾镜像说明 <dockerfile_build_guidance.rst>`__ 直接获取发布的镜像，也可以根据下文进行自定义安装。
+当前NPU在Ascend 950PR&DT系列产品上支持以下常见训推后端的部署，您可以根据我们的 `昇腾镜像说明 <dockerfile_build_guidance.rst>`__ 直接获取发布的镜像，也可以根据下文进行自定义安装。
 
 .. list-table::
    :header-rows: 1

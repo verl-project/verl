@@ -20,11 +20,11 @@ verl release版本镜像名格式：{verl release版本号}-{CANN版本}-{TorchN
 
 Atlas 200T A2 Box16
 
-Atlas 900 A2 PODc
+Atlas 900 A2 PoD
 
 Atlas 800T A3
 
-Ascend 950 系列产品
+Ascend 950PR&DT系列产品
 
 
 A2/A3 最新镜像内各组件版本信息清单
@@ -50,7 +50,7 @@ sgl-kernel-npu     2026.02.01
 ================= ============
 
 
-Ascend 950 系列产品 最新镜像内各组件版本信息清单
+Ascend 950PR&DT系列产品 最新镜像内各组件版本信息清单
 ----------------
 
 ================= ============
