@@ -292,7 +292,8 @@ class FSDPActorConfig(ActorConfig):
     The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
 
     Args:
-        strategy (str): Training strategy set to 'fsdp' for Fully Sharded Data Parallel.
+        strategy (str): FSDP training backend. Supported values are ``fsdp``, ``fsdp2``,
+            and ``fsdp_turbo``.
         grad_clip (float): Gradient clipping threshold.
         ulysses_sequence_parallel_size (int): [DEPRECATED] Ulysses sequence parallel size for long sequences.
         entropy_from_logits_with_chunking (bool): Whether to compute entropy from logits
@@ -317,7 +318,13 @@ class FSDPActorConfig(ActorConfig):
 
     def __post_init__(self):
         """Validate FSDP actor configuration parameters."""
+        supported_strategies = {"fsdp", "fsdp2", "fsdp_turbo"}
+        if self.strategy not in supported_strategies:
+            raise ValueError(
+                f"Unsupported FSDP strategy {self.strategy!r}. Expected one of {sorted(supported_strategies)}."
+            )
         super().__post_init__()
+
         self.engine = self.fsdp_config
         # Sync strategy to engine config so engine_workers can pick the right FSDP version.
         # EngineConfig.strategy defaults to None, so without this, engine_workers.py always
