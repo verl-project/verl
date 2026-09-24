@@ -632,6 +632,9 @@ class AlgoConfig(BaseConfig):
         kl_penalty (str): How to estimate KL divergence: "kl", "abs", "mse", "low_var_kl", or "full".
         kl_ctrl (KLControlConfig): KL control configuration.
         use_pf_ppo (bool): Whether to enable preference feedback PPO.
+            With adv_estimator="gae" this currently requires the v0 trainer
+            (trainer.use_v1=False). The default v1 trainer raises NotImplementedError
+            because it cannot carry resampled rows through the TransferQueue write-back.
         pf_ppo (dict[str, Any]): Preference feedback PPO settings.
         filter_groups (Optional[FilterGroupsConfig]): Filter groups configuration, used in DAPO and Entropy
         rollout_correction (Optional[RolloutCorrectionConfig]): Rollout Correction configuration.
