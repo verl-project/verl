@@ -52,6 +52,18 @@ We already pre-implemented some reward functions in `reward_score directory <htt
 - In the `MATH example <https://github.com/verl-project/verl/blob/main/verl/utils/reward_score/math_reward.py>`_, we follow
   the implementation in `lm-evaluation-harness repository <https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/hendrycks_math/utils.py>`_.
 
+Some pre-implemented reward functions accept additional keyword arguments through the
+``reward.compute_score_kwargs`` config field (only effective when ``custom_reward_function.path`` is not set).
+For example, the GSM8K scorer supports two answer extraction methods: ``strict`` (the default, which requires
+the final answer after ``####``) and ``flexible`` (which takes the last number in the response). To switch to
+the flexible extraction:
+
+.. code:: yaml
+
+  reward:
+    compute_score_kwargs:
+      method: flexible
+
 Customized
 ~~~~~~~~~~
 
