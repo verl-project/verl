@@ -99,6 +99,11 @@ def validate_config(
     """
     # number of GPUs total
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
+    if n_gpus <= 0:
+        raise ValueError(
+            f"trainer.n_gpus_per_node ({config.trainer.n_gpus_per_node}) * trainer.nnodes "
+            f"({config.trainer.nnodes}) must be > 0"
+        )
 
     if not config.actor_rollout_ref.actor.use_dynamic_bsz:
         if config.actor_rollout_ref.actor.strategy == "megatron":

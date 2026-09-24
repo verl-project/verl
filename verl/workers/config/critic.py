@@ -114,6 +114,13 @@ class CriticConfig(BaseConfig):
                         f"ppo_micro_batch_size ({self.ppo_micro_batch_size})"
                     )
 
+        for key in ("ppo_mini_batch_size", "ppo_micro_batch_size", "ppo_micro_batch_size_per_gpu"):
+            value = getattr(self, key)
+            if value is None or value == MISSING:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"[critic] {key} must be a positive integer, got {value!r}")
+
     def validate(self, n_gpus: int, train_batch_size: int):
         """Validate critic configuration with runtime parameters.
 

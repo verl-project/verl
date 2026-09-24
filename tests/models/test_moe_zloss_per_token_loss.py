@@ -134,7 +134,7 @@ def _grad_norm(model_path, calculate_per_token_loss, data_td):
         ray_cls = RayClassWithInitArgs(cls=ray.remote(TrainingWorker), config=config)
         wg = RayWorkerGroup(resource_pool=RayResourcePool(process_on_nodes=[1]), ray_cls_with_init=ray_cls)
         wg.reset()
-        actor_config = ActorConfig(strategy="megatron", rollout_n=1, ppo_micro_batch_size_per_gpu=-1)
+        actor_config = ActorConfig(strategy="megatron", rollout_n=1, ppo_micro_batch_size_per_gpu=1)
         wg.set_loss_fn(partial(ppo_loss, config=actor_config))
         metrics = tu.get(wg.train_batch(data_td).get(), "metrics")
         return float(metrics["grad_norm"])
