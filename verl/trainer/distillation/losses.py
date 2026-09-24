@@ -115,8 +115,12 @@ def compute_distillation_loss_range(
     else:
         distillation_losses_response = distillation_losses[response_mask.bool()]
     return {
-        "distillation/loss_min": Metric(AggregationType.MIN, distillation_losses_response.min()),
-        "distillation/loss_max": Metric(AggregationType.MAX, distillation_losses_response.max()),
+        "distillation/loss_min": Metric(
+            AggregationType.MIN, distillation_losses_response.min() if distillation_losses_response.numel() else None
+        ),
+        "distillation/loss_max": Metric(
+            AggregationType.MAX, distillation_losses_response.max() if distillation_losses_response.numel() else None
+        ),
     }
 
 
@@ -339,25 +343,38 @@ def compute_forward_kl_topk(
         # Diagnostics for tracking teacher/student top-k overlap in OPD, following
         # "Rethinking On-Policy Distillation of Large Language Models" (arXiv:2604.13016):
         # overlap ratio and average teacher-token KL contribution on overlapped tokens.
-        overlap_metrics["distillation/overlap_ratio"] = (valid_overlap_count.float().mean() / k).item()
+        overlap_metrics["distillation/overlap_ratio"] = (
+            (valid_overlap_count.float().mean() / k).item() if valid_overlap_count.numel() else []
+        )
         overlap_position_mask = response_mask_bool & (overlap_count > 0)
         if overlap_position_mask.any():
             overlap_metrics["distillation/overlap_token_advantage"] = (
                 overlap_token_advantage[overlap_position_mask].mean().item()
             )
         else:
-            overlap_metrics["distillation/overlap_token_advantage"] = 0.0
+            overlap_metrics["distillation/overlap_token_advantage"] = 0.0 if valid_overlap_count.numel() else []
 
+    # Empty response masks occur in synthetic padding microbatches. Empty lists
+    # and Metric instances contribute no observations when the worker combines
+    # metrics, so padding neither poisons means nor biases extrema toward zero.
     # Log amount of mass in the top-k log probabilities for both student and teacher.
     student_mass = student_mass[response_mask_bool]
     teacher_mass = teacher_mass[response_mask_bool]
     distillation_metrics = {
-        "distillation/student_mass": student_mass.mean().item(),
-        "distillation/student_mass_min": Metric(AggregationType.MIN, student_mass.min()),
-        "distillation/student_mass_max": Metric(AggregationType.MAX, student_mass.max()),
-        "distillation/teacher_mass": teacher_mass.mean().item(),
-        "distillation/teacher_mass_min": Metric(AggregationType.MIN, teacher_mass.min()),
-        "distillation/teacher_mass_max": Metric(AggregationType.MAX, teacher_mass.max()),
+        "distillation/student_mass": student_mass.mean().item() if student_mass.numel() else [],
+        "distillation/student_mass_min": Metric(
+            AggregationType.MIN, student_mass.min() if student_mass.numel() else None
+        ),
+        "distillation/student_mass_max": Metric(
+            AggregationType.MAX, student_mass.max() if student_mass.numel() else None
+        ),
+        "distillation/teacher_mass": teacher_mass.mean().item() if teacher_mass.numel() else [],
+        "distillation/teacher_mass_min": Metric(
+            AggregationType.MIN, teacher_mass.min() if teacher_mass.numel() else None
+        ),
+        "distillation/teacher_mass_max": Metric(
+            AggregationType.MAX, teacher_mass.max() if teacher_mass.numel() else None
+        ),
         **overlap_metrics,
     }
 
