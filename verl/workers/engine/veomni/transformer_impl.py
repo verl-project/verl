@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+import copy
 import logging
 from contextlib import nullcontext
 from dataclasses import dataclass, field, fields
@@ -304,7 +305,16 @@ class VeOmniEngine(FSDPEngine):
         Subclasses can override to modify the HF config before model construction
         (e.g. VeOmniEngineWithValueHead rewrites architectures to ForTokenClassification).
         """
-        return self.model_config.local_hf_config_path
+        if not self.model_config.mtp.enable:
+            return self.model_config.local_hf_config_path
+
+        config = copy.deepcopy(self.model_config.hf_config)
+        mtp_weight = self.model_config.mtp.mtp_loss_scaling_factor
+        if self.model_config.mtp.enable_train and mtp_weight <= 0:
+            raise ValueError("VeOmni MTP training requires model.mtp.mtp_loss_scaling_factor > 0.")
+        text_config = getattr(config, "text_config", config)
+        text_config.mtp_loss_weight = mtp_weight
+        return config
 
     def _maybe_apply_async_activation_offload(self, module):
         """Attach VeOmni's stream-based activation offload to the decoder layers.

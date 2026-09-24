@@ -26,6 +26,7 @@ from transfer_queue import KVBatchMeta
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.separation.engine_workers import DetachActorWorker
 from verl.trainer.config import HybridRolloutSwitchConfig
+from verl.trainer.ppo.ray_trainer import begin_spec_decode_counter_window, end_spec_decode_counter_window
 from verl.trainer.ppo.utils import Role, need_reward_model
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, register_trainer
 from verl.utils.config import omega_conf_to_dataclass
@@ -243,6 +244,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
             self.switch_to_rollout()
 
     def on_step_begin(self):
+        begin_spec_decode_counter_window(self)
         self._step_sample_wait_seconds = 0.0
         self._step_wait_samples = 0
         self._step_threshold = 0
@@ -331,6 +333,7 @@ class PPOTrainerSeparateAsync(PPOTrainer):
         )
 
     def on_step_end(self):
+        end_spec_decode_counter_window(self)
         # _stop_profiling() already moved this step's flag to prev_step_profile.
         if self.prev_step_profile:
             self._stop_rollout_profiling()
