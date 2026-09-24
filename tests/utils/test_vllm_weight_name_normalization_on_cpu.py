@@ -142,6 +142,19 @@ def _load_vllm_rollout_utils():
     fake_vllm_quant.apply_vllm_quant_patches = lambda: None
     fake_vllm_quant.is_quantized_model = lambda config: False
     fake_vllm_quant.load_quanted_weights = lambda *a, **k: []
+    fake_vllm_quant.prepare_quanted_weights_for_loading = lambda model: None
+    fake_vllm_quant.process_quanted_weights_after_loading = lambda model, state: None
+
+    # Tests swap these for recorders on the loaded module via ``monkeypatch.setattr``.
+    fake_vllm_unquant = types.ModuleType("verl.utils.vllm.vllm_unquant_utils")
+    fake_vllm_unquant.stage_unquantized_moe_params = lambda model: []
+    fake_vllm_unquant.fold_unquantized_moe_params = lambda layers: contextlib.nullcontext()
+
+    fake_rocm_expert_map = types.ModuleType("verl.utils.vllm.rocm_vllm_moe_expert_map")
+    fake_rocm_expert_map.restore_moe_expert_maps = lambda model: None
+
+    fake_bucketed_transfer = types.ModuleType("verl.workers.rollout.vllm_rollout.bucketed_weight_transfer")
+    fake_bucketed_transfer.BucketedWeightReceiver = None
 
     # NOTE: deliberately do NOT stub verl.plugin.platform. It is lightweight and
     # imports fine on CPU. verl.utils.device binds `get_platform` at import time, so
@@ -179,6 +192,9 @@ def _load_vllm_rollout_utils():
         "verl.utils.vllm": fake_vllm_utils,
         "verl.utils.vllm.patch": fake_vllm_patch,
         "verl.utils.vllm.vllm_quant_utils": fake_vllm_quant,
+        "verl.utils.vllm.vllm_unquant_utils": fake_vllm_unquant,
+        "verl.utils.vllm.rocm_vllm_moe_expert_map": fake_rocm_expert_map,
+        "verl.workers.rollout.vllm_rollout.bucketed_weight_transfer": fake_bucketed_transfer,
         "verl.workers.rollout.vllm_rollout.weight_update_utils": _weight_update_utils,
     }
 
@@ -692,15 +708,8 @@ class _FakeBucketReceiver:
 
 def test_update_weights_from_ipc_accumulates_lora_across_buckets(monkeypatch):
     """A LoRA adapter split across two buckets yields one add_lora with all tensors."""
-    # Unlike the resolver tests above (which fully stub sys.modules), this drives the
-    # real update_weights_from_ipc path and imports the actual bucketed_weight_transfer
-    # module, whose package __init__ hard-requires vllm. vllm isn't in the `cpu` extra,
-    # so this is skipped under cpu_unit_tests and run in vllm.yml (the vllm venv).
-    pytest.importorskip("vllm")
-    import verl.workers.rollout.vllm_rollout.bucketed_weight_transfer as bwt
-
     monkeypatch.setattr(
-        bwt,
+        _vllm_rollout_utils,
         "BucketedWeightReceiver",
         lambda *a, **k: _FakeBucketReceiver(
             [
@@ -738,13 +747,8 @@ def test_update_weights_from_ipc_accumulates_lora_across_buckets(monkeypatch):
 
 def test_update_weights_from_ipc_standard_loads_per_bucket(monkeypatch):
     """Standard (non-LoRA) base sync loads every bucket immediately (no accumulation)."""
-    # See the note above: needs the real bucketed_weight_transfer (vllm-backed), which
-    # the `cpu` extra can't provide, so it is skipped here and run in vllm.yml.
-    pytest.importorskip("vllm")
-    import verl.workers.rollout.vllm_rollout.bucketed_weight_transfer as bwt
-
     monkeypatch.setattr(
-        bwt,
+        _vllm_rollout_utils,
         "BucketedWeightReceiver",
         lambda *a, **k: _FakeBucketReceiver(
             [
@@ -858,9 +862,7 @@ def test_drop_tied_alias_updates_maps_checkpoint_names_before_matching():
 
 
 def _install_fake_receiver(monkeypatch, buckets):
-    fake_bwt = types.ModuleType("verl.workers.rollout.vllm_rollout.bucketed_weight_transfer")
-    fake_bwt.BucketedWeightReceiver = lambda *a, **k: _FakeBucketReceiver(buckets)
-    monkeypatch.setitem(sys.modules, "verl.workers.rollout.vllm_rollout.bucketed_weight_transfer", fake_bwt)
+    monkeypatch.setattr(_vllm_rollout_utils, "BucketedWeightReceiver", lambda *a, **k: _FakeBucketReceiver(buckets))
 
 
 def _install_fake_moe_staging(monkeypatch, events, staged_layers):
@@ -878,10 +880,8 @@ def _install_fake_moe_staging(monkeypatch, events, staged_layers):
         yield
         events.append("fold:done")
 
-    fake_refit = types.ModuleType("verl.utils.vllm.vllm_moe_refit_utils")
-    fake_refit.stage_unquantized_moe_params = _stage
-    fake_refit.fold_unquantized_moe_params = _fold
-    monkeypatch.setitem(sys.modules, "verl.utils.vllm.vllm_moe_refit_utils", fake_refit)
+    monkeypatch.setattr(_vllm_rollout_utils, "stage_unquantized_moe_params", _stage)
+    monkeypatch.setattr(_vllm_rollout_utils, "fold_unquantized_moe_params", _fold)
 
 
 def _staging_sync_worker(model):

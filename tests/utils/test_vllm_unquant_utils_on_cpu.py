@@ -16,7 +16,7 @@
 
 FlashInfer TRT-LLM -- vLLM's default bf16 MoE backend on SM100 -- keeps ``w13_weight`` /
 ``w2_weight`` in a 4-D block layout, so the refit's per-expert checkpoint-layout loads do not
-fit the live parameters (verl-project/verl#7978). ``vllm_moe_refit_utils`` stages the checkpoint
+fit the live parameters (verl-project/verl#7978). ``vllm_unquant_utils`` stages the checkpoint
 layout as a view over the live storage and folds the re-derived kernel layout back into it.
 
 The kernel prep here is a toy block transpose with the same property that matters: a new shape
@@ -48,12 +48,12 @@ def _load_by_path(name, relpath):
     return module
 
 
-def _load_refit_utils():
-    fp8_utils = _load_by_path("vllm_fp8_utils_for_moe_refit", "verl/utils/vllm/vllm_fp8_utils.py")
+def _load_unquant_utils():
+    fp8_utils = _load_by_path("vllm_fp8_utils_for_unquant_utils", "verl/utils/vllm/vllm_fp8_utils.py")
     saved = sys.modules.get("verl.utils.vllm.vllm_fp8_utils")
     sys.modules["verl.utils.vllm.vllm_fp8_utils"] = fp8_utils
     try:
-        return _load_by_path("vllm_moe_refit_utils_under_test", "verl/utils/vllm/vllm_moe_refit_utils.py")
+        return _load_by_path("vllm_unquant_utils_under_test", "verl/utils/vllm/vllm_unquant_utils.py")
     finally:
         if saved is None:
             sys.modules.pop("verl.utils.vllm.vllm_fp8_utils", None)
@@ -61,7 +61,7 @@ def _load_refit_utils():
             sys.modules["verl.utils.vllm.vllm_fp8_utils"] = saved
 
 
-refit = _load_refit_utils()
+unquant_utils = _load_unquant_utils()
 
 
 def _block_layout(raw: torch.Tensor) -> torch.Tensor:
@@ -178,7 +178,7 @@ def test_block_layout_is_staged_as_a_view_and_folded_back_into_the_same_storage(
     live = {name: getattr(layer, name) for name in ("w13_weight", "w2_weight")}
     assert live["w13_weight"].shape == (E, HID // BLOCK, 2 * INTER, BLOCK)
 
-    staged = refit.stage_unquantized_moe_params(model)
+    staged = unquant_utils.stage_unquantized_moe_params(model)
 
     assert staged == [layer]
     checkpoint, _ = vllm.layerwise_info[layer].restore_metadata
@@ -195,11 +195,11 @@ def test_block_layout_is_staged_as_a_view_and_folded_back_into_the_same_storage(
     for name, param in live.items():
         assert torch.equal(param.data.reshape(-1), weights[name].reshape(-1))
 
-    with refit.fold_unquantized_moe_params(staged):
+    with unquant_utils.fold_unquantized_moe_params(staged):
         layer.quant_method.process_weights_after_loading(layer)
 
     assert vllm.unquantized.replace_parameter is _replace_parameter
-    assert not hasattr(layer, refit._LIVE_ATTR)
+    assert not hasattr(layer, unquant_utils._LIVE_ATTR)
     for name, param in live.items():
         assert getattr(layer, name) is param, "the live parameter object must be back on the layer"
         assert torch.equal(param.data, _block_layout(weights[name]))
@@ -211,13 +211,13 @@ def test_each_layer_is_folded_before_the_next_is_processed(vllm):
     layers = [_FakeRoutedExperts(vllm.unquantized.UnquantizedFusedMoEMethod(), seed=i) for i in range(3)]
     model = _engine_init(vllm, layers)
     live = [{name: getattr(layer, name) for name in ("w13_weight", "w2_weight")} for layer in layers]
-    staged = refit.stage_unquantized_moe_params(model)
+    staged = unquant_utils.stage_unquantized_moe_params(model)
     weights = [_new_weights(seed=10 + i) for i in range(len(layers))]
     for layer, new in zip(layers, weights, strict=True):
         _load(layer, new)
 
     # vLLM's loop runs every module's post-load hook inside the one fold.
-    with refit.fold_unquantized_moe_params(staged):
+    with unquant_utils.fold_unquantized_moe_params(staged):
         for i, layer in enumerate(layers):
             layer.quant_method.process_weights_after_loading(layer)
             for name, param in live[i].items():
@@ -235,7 +235,7 @@ def test_layout_preserving_backends_are_not_staged(vllm):
     model = _engine_init(vllm, layers)
     before = [(layer.w13_weight, layer.w2_weight) for layer in layers]
 
-    assert refit.stage_unquantized_moe_params(model) == []
+    assert unquant_utils.stage_unquantized_moe_params(model) == []
     assert [(layer.w13_weight, layer.w2_weight) for layer in layers] == before
 
 
@@ -247,7 +247,7 @@ def test_layers_without_recorded_metadata_or_another_quant_method_are_not_staged
     other.quant_method = object()
     model.unrecorded = unrecorded
 
-    assert refit.stage_unquantized_moe_params(model) == []
+    assert unquant_utils.stage_unquantized_moe_params(model) == []
 
 
 def test_a_padded_kernel_layout_is_staged_in_the_live_storage(vllm):
@@ -256,14 +256,14 @@ def test_a_padded_kernel_layout_is_staged_in_the_live_storage(vllm):
     live = {name: getattr(layer, name) for name in ("w13_weight", "w2_weight")}
     assert live["w13_weight"].numel() > 2 * INTER * HID * E
 
-    staged = refit.stage_unquantized_moe_params(model)
+    staged = unquant_utils.stage_unquantized_moe_params(model)
 
     for name, param in live.items():
         view = getattr(layer, name)
         assert view.dim() == 3 and view.data_ptr() == param.data_ptr(), "the padded live storage has room"
     weights = _new_weights(seed=2)
     _load(layer, weights)
-    with refit.fold_unquantized_moe_params(staged):
+    with unquant_utils.fold_unquantized_moe_params(staged):
         layer.quant_method.process_weights_after_loading(layer)
     for name, param in live.items():
         assert getattr(layer, name) is param
@@ -275,14 +275,14 @@ def test_a_smaller_kernel_layout_gets_a_fresh_staging_buffer(vllm):
     model = _engine_init(vllm, [layer])
     live = layer.w13_weight
 
-    staged = refit.stage_unquantized_moe_params(model)
+    staged = unquant_utils.stage_unquantized_moe_params(model)
 
     view = layer.w13_weight
     assert view.shape == (E, 2 * INTER, HID) and view.data_ptr() != live.data_ptr()
     assert torch.isnan(view.data).all(), "an unwritten staging buffer must not look like real weights"
     weights = _new_weights(seed=3)
     _load(layer, weights)
-    with refit.fold_unquantized_moe_params(staged):
+    with unquant_utils.fold_unquantized_moe_params(staged):
         layer.quant_method.process_weights_after_loading(layer)
     assert layer.w13_weight is live
     assert torch.equal(live.data, _halved_layout(weights["w13_weight"]))
@@ -291,26 +291,26 @@ def test_a_smaller_kernel_layout_gets_a_fresh_staging_buffer(vllm):
 def test_a_staged_weight_that_was_not_re_derived_fails_loudly(vllm):
     layer = _FakeRoutedExperts(vllm.unquantized.UnquantizedFusedMoEMethod())
     model = _engine_init(vllm, [layer])
-    staged = refit.stage_unquantized_moe_params(model)
+    staged = unquant_utils.stage_unquantized_moe_params(model)
     _load(layer, _new_weights(seed=3))
     layer.quant_method.names = ("w13_weight",)  # the update path re-derives w13 only
 
     with pytest.raises(RuntimeError, match="w2_weight was not re-derived"):
-        with refit.fold_unquantized_moe_params(staged):
+        with unquant_utils.fold_unquantized_moe_params(staged):
             layer.quant_method.process_weights_after_loading(layer)
 
 
 def _assert_record_is(layer, live):
-    stash = getattr(layer, refit._LIVE_ATTR)
+    stash = getattr(layer, unquant_utils._LIVE_ATTR)
     assert list(stash) == list(live) and all(stash[name] is param for name, param in live.items())
 
 
 def _refit_restores(layer, model, live, seed):
     """The next refit restages from the record and lands the new weights in the live storage."""
-    staged = refit.stage_unquantized_moe_params(model)
+    staged = unquant_utils.stage_unquantized_moe_params(model)
     weights = _new_weights(seed=seed)
     _load(layer, weights)
-    with refit.fold_unquantized_moe_params(staged):
+    with unquant_utils.fold_unquantized_moe_params(staged):
         layer.quant_method.process_weights_after_loading(layer)
     for name, param in live.items():
         assert getattr(layer, name) is param
@@ -321,12 +321,12 @@ def test_a_failed_fold_keeps_the_record_the_next_refit_restores_from(vllm):
     layer = _FakeRoutedExperts(vllm.unquantized.UnquantizedFusedMoEMethod())
     model = _engine_init(vllm, [layer])
     live = {name: getattr(layer, name) for name in ("w13_weight", "w2_weight")}
-    staged = refit.stage_unquantized_moe_params(model)
+    staged = unquant_utils.stage_unquantized_moe_params(model)
     _load(layer, _new_weights(seed=6))
     layer.quant_method.kernel_layout = lambda raw: _block_layout(raw).flatten(1)  # re-derived in the wrong shape
 
     with pytest.raises(RuntimeError):
-        with refit.fold_unquantized_moe_params(staged):
+        with unquant_utils.fold_unquantized_moe_params(staged):
             layer.quant_method.process_weights_after_loading(layer)
 
     _assert_record_is(layer, live)
@@ -338,7 +338,7 @@ def test_a_staging_failure_part_way_keeps_the_record_the_next_refit_restores_fro
     layer = _FakeRoutedExperts(vllm.unquantized.UnquantizedFusedMoEMethod())
     model = _engine_init(vllm, [layer])
     live = {name: getattr(layer, name) for name in ("w13_weight", "w2_weight")}
-    real, calls = refit._staging_data, []
+    real, calls = unquant_utils._staging_data, []
 
     def fails_on_the_second_weight(param, shape, dtype):
         calls.append(shape)
@@ -346,13 +346,13 @@ def test_a_staging_failure_part_way_keeps_the_record_the_next_refit_restores_fro
             raise RuntimeError("CUDA out of memory")
         return real(param, shape, dtype)
 
-    monkeypatch.setattr(refit, "_staging_data", fails_on_the_second_weight)
+    monkeypatch.setattr(unquant_utils, "_staging_data", fails_on_the_second_weight)
     with pytest.raises(RuntimeError):
-        refit.stage_unquantized_moe_params(model)
+        unquant_utils.stage_unquantized_moe_params(model)
 
     assert layer.w13_weight is not live["w13_weight"]  # already swapped for its view
     _assert_record_is(layer, {"w13_weight": live["w13_weight"]})
-    monkeypatch.setattr(refit, "_staging_data", real)
+    monkeypatch.setattr(unquant_utils, "_staging_data", real)
     _refit_restores(layer, model, live, seed=8)
 
 
@@ -360,20 +360,20 @@ def test_a_layer_left_staged_by_a_failed_refit_is_restaged_from_its_live_params(
     layer = _FakeRoutedExperts(vllm.unquantized.UnquantizedFusedMoEMethod())
     model = _engine_init(vllm, [layer])
     live = {name: getattr(layer, name) for name in ("w13_weight", "w2_weight")}
-    refit.stage_unquantized_moe_params(model)
+    unquant_utils.stage_unquantized_moe_params(model)
     _load(layer, _new_weights(seed=4))
     # The fold got as far as w13 before the refit failed.
     layer.w13_weight = live["w13_weight"]
-    del getattr(layer, refit._LIVE_ATTR)["w13_weight"]
+    del getattr(layer, unquant_utils._LIVE_ATTR)["w13_weight"]
 
-    staged = refit.stage_unquantized_moe_params(model)  # the next refit
+    staged = unquant_utils.stage_unquantized_moe_params(model)  # the next refit
 
     assert staged == [layer]
     for name, param in live.items():
         assert getattr(layer, name).shape != param.shape and getattr(layer, name).data_ptr() == param.data_ptr()
     weights = _new_weights(seed=5)
     _load(layer, weights)
-    with refit.fold_unquantized_moe_params(staged):
+    with unquant_utils.fold_unquantized_moe_params(staged):
         layer.quant_method.process_weights_after_loading(layer)
     for name, param in live.items():
         assert getattr(layer, name) is param

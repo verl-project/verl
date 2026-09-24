@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import importlib.util
 import sys
 import types
@@ -116,6 +117,18 @@ def _load_vllm_rollout_utils():
     fake_vllm_quant.apply_vllm_quant_patches = lambda: None
     fake_vllm_quant.is_quantized_model = lambda config: False
     fake_vllm_quant.load_quanted_weights = lambda weights, runner, is_drafter=False: weights
+    fake_vllm_quant.prepare_quanted_weights_for_loading = lambda model: None
+    fake_vllm_quant.process_quanted_weights_after_loading = lambda model, state: None
+
+    fake_vllm_unquant = types.ModuleType("verl.utils.vllm.vllm_unquant_utils")
+    fake_vllm_unquant.stage_unquantized_moe_params = lambda model: []
+    fake_vllm_unquant.fold_unquantized_moe_params = lambda layers: contextlib.nullcontext()
+
+    fake_rocm_expert_map = types.ModuleType("verl.utils.vllm.rocm_vllm_moe_expert_map")
+    fake_rocm_expert_map.restore_moe_expert_maps = lambda model: None
+
+    fake_bucketed_transfer = types.ModuleType("verl.workers.rollout.vllm_rollout.bucketed_weight_transfer")
+    fake_bucketed_transfer.BucketedWeightReceiver = None
 
     # NOTE: deliberately do NOT stub verl.plugin.platform. It is lightweight and
     # imports fine on CPU. verl.utils.device binds `get_platform` at import time, so
@@ -131,6 +144,9 @@ def _load_vllm_rollout_utils():
         "verl.utils.vllm": fake_vllm_utils,
         "verl.utils.vllm.patch": fake_vllm_patch,
         "verl.utils.vllm.vllm_quant_utils": fake_vllm_quant,
+        "verl.utils.vllm.vllm_unquant_utils": fake_vllm_unquant,
+        "verl.utils.vllm.rocm_vllm_moe_expert_map": fake_rocm_expert_map,
+        "verl.workers.rollout.vllm_rollout.bucketed_weight_transfer": fake_bucketed_transfer,
         "verl.workers.rollout.vllm_rollout.weight_update_utils": _weight_update_utils,
     }
 
