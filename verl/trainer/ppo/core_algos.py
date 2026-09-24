@@ -435,6 +435,12 @@ def compute_gdpo_outcome_advantage(
         gdpo_weights = config.get("gdpo_reward_weights", None)
         if gdpo_weights is not None:
             reward_weights = list(gdpo_weights)
+            assert len(reward_weights) == len(gdpo_reward_keys), (
+                f"'algorithm.gdpo_reward_weights' has {len(reward_weights)} entries but "
+                f"'algorithm.gdpo_reward_keys' has {len(gdpo_reward_keys)} "
+                f"({gdpo_reward_keys}). They are matched by position, so extra weights are "
+                f"silently ignored and missing ones raise an unrelated IndexError."
+            )
 
     if score_list is None:
         score_list = [token_level_rewards]
