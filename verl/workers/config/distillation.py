@@ -146,6 +146,7 @@ class DistillationTeacherModelConfig(BaseConfig):
 
     key: Optional[str] = None
     model_path: Optional[str] = None
+    revision: Optional[str] = None
     inference: RolloutConfig = field(default_factory=RolloutConfig)
     num_replicas: Optional[int] = 0
 
