@@ -108,6 +108,7 @@ teacher_models:
       prompt_length: ${oc.select:actor_rollout_ref.rollout.prompt_length}
       response_length: ${oc.select:actor_rollout_ref.rollout.response_length}
       temperature: ${oc.select:actor_rollout_ref.rollout.temperature}
+      profiler: ${actor_rollout_ref.rollout.profiler}
 
 # Key to route examples to the appropriate teacher model in multi-teacher setups. Should correspond to a field in the data proto, e.g., task.
 teacher_key: data_source

@@ -34,6 +34,12 @@ from verl.utils.profiler.profile import DistProfiler, build_rollout_dist_profile
 
 
 class TestServerProfilerArgs(unittest.TestCase):
+    def setUp(self):
+        patcher = patch("ray.get_runtime_context")
+        mock_rt = patcher.start()
+        mock_rt.return_value.get_actor_name.return_value = "rollout"
+        self.addCleanup(patcher.stop)
+
     def test_build_vllm_profiler_args(self):
         # Case 1: All features enabled
         tool_config = TorchProfilerToolConfig(contents=["stack", "shapes", "memory"])
@@ -44,7 +50,7 @@ class TestServerProfilerArgs(unittest.TestCase):
             args = build_vllm_profiler_args(config, tool_config, rank=0)
 
             # Check Env vars (backward compatibility)
-            self.assertEqual(os.environ.get("VLLM_TORCH_PROFILER_DIR"), "/tmp/test/agent_loop_rollout_replica_0")
+            self.assertEqual(os.environ.get("VLLM_TORCH_PROFILER_DIR"), "/tmp/test/agent_loop_rollout")
             self.assertEqual(os.environ.get("VLLM_TORCH_PROFILER_WITH_STACK"), "1")
             self.assertEqual(os.environ.get("VLLM_TORCH_PROFILER_RECORD_SHAPES"), "1")
             self.assertEqual(os.environ.get("VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY"), "1")
@@ -52,7 +58,7 @@ class TestServerProfilerArgs(unittest.TestCase):
             # Check Args (new API)
             self.assertIn("profiler_config", args)
             profiler_config_dict = json.loads(args["profiler_config"])
-            self.assertEqual(profiler_config_dict["torch_profiler_dir"], "/tmp/test/agent_loop_rollout_replica_0")
+            self.assertEqual(profiler_config_dict["torch_profiler_dir"], "/tmp/test/agent_loop_rollout")
             self.assertTrue(profiler_config_dict["torch_profiler_with_stack"])
             self.assertTrue(profiler_config_dict["torch_profiler_record_shapes"])
             self.assertTrue(profiler_config_dict["torch_profiler_with_memory"])
@@ -77,7 +83,7 @@ class TestServerProfilerArgs(unittest.TestCase):
 
             # The argument-based config is still built.
             profiler_config_dict = json.loads(args["profiler_config"])
-            self.assertEqual(profiler_config_dict["torch_profiler_dir"], "/tmp/test/agent_loop_rollout_replica_0")
+            self.assertEqual(profiler_config_dict["torch_profiler_dir"], "/tmp/test/agent_loop_rollout")
 
     def test_build_vllm_profiler_args_with_profile_window(self):
         tool_config = TorchProfilerToolConfig(contents=["stack"], profile_token_start=12, profile_token_end=46)
@@ -100,7 +106,7 @@ class TestServerProfilerArgs(unittest.TestCase):
         """The finish hook derives its directory from this helper, so it must not drift."""
         tool_config = TorchProfilerToolConfig(contents=["cpu"])
         config = ProfilerConfig(save_path="/tmp/test", tool_config=tool_config)
-        expected = rollout_trace_dir(config, rank=2)
+        expected = rollout_trace_dir(config)
 
         self.assertEqual(build_sglang_profiler_args(config, tool_config, rank=2)["output_dir"], expected)
         with patch.dict(os.environ, {}, clear=True):
@@ -113,7 +119,7 @@ class TestServerProfilerArgs(unittest.TestCase):
         config = ProfilerConfig(save_path="/tmp/test", tool_config=tool_config)
         with self.assertWarns(UserWarning):
             args = build_sglang_profiler_args(config, tool_config, rank=0)
-        self.assertEqual(args["output_dir"], "/tmp/test/agent_loop_rollout_replica_0")
+        self.assertEqual(args["output_dir"], "/tmp/test/agent_loop_rollout")
         self.assertTrue(args["with_stack"])
         self.assertTrue(args["record_shapes"])
         self.assertIsNone(args["start_step"])
@@ -130,6 +136,17 @@ class TestServerProfilerArgs(unittest.TestCase):
 class TestRolloutTraceRelocation(unittest.TestCase):
     """Engines write into a sub-directory; relocation brings the traces to the configured path."""
 
+    def setUp(self):
+        self._patcher = patch("ray.get_runtime_context")
+        mock_rt = self._patcher.start()
+        self._mock_get_actor_name = mock_rt.return_value.get_actor_name
+        self._mock_get_actor_name.return_value = "rollout"
+        self.addCleanup(self._patcher.stop)
+
+    def _set_actor_name(self, rank: int) -> None:
+        """Simulate the unique Ray actor name each replica has (which encodes its rank)."""
+        self._mock_get_actor_name.return_value = f"rollout_replica_{rank}"
+
     def _config(self, save_path: str, **kwargs) -> ProfilerConfig:
         return ProfilerConfig(
             tool="torch",
@@ -141,7 +158,8 @@ class TestRolloutTraceRelocation(unittest.TestCase):
         )
 
     def _write_engine_traces(self, config: ProfilerConfig, rank: int, *names: str) -> str:
-        src_dir = rollout_trace_dir(config, rank)
+        self._set_actor_name(rank)
+        src_dir = rollout_trace_dir(config)
         os.makedirs(src_dir, exist_ok=True)
         for name in names:
             with open(os.path.join(src_dir, name), "w") as f:
@@ -153,9 +171,10 @@ class TestRolloutTraceRelocation(unittest.TestCase):
             config = self._config(save_path, relocate_results=True)
             src_dir = self._write_engine_traces(config, 2, "host_123.pt.trace.json.gz")
 
+            self._set_actor_name(2)
             relocated = relocate_rollout_traces(config, rank=2)
 
-            expected = os.path.join(save_path, "rollout-replica2_host_123.pt.trace.json.gz")
+            expected = os.path.join(save_path, "rollout_replica_2_host_123.pt.trace.json.gz")
             self.assertEqual(relocated, [expected])
             # The replica is in the name now that it is no longer in the path.
             self.assertTrue(os.path.exists(expected))
@@ -166,6 +185,7 @@ class TestRolloutTraceRelocation(unittest.TestCase):
             config = self._config(save_path)
             src_dir = self._write_engine_traces(config, 0, "host_123.pt.trace.json.gz")
 
+            self._set_actor_name(0)
             self.assertEqual(relocate_rollout_traces(config, rank=0), [])
 
             self.assertEqual(os.listdir(src_dir), ["host_123.pt.trace.json.gz"])
@@ -174,6 +194,7 @@ class TestRolloutTraceRelocation(unittest.TestCase):
         with tempfile.TemporaryDirectory() as save_path:
             config = self._config(save_path, relocate_results=True)
 
+            self._set_actor_name(1)
             self.assertEqual(relocate_rollout_traces(config, rank=1), [])
 
     def test_global_gpu_rank_is_added_when_the_engine_encodes_the_tp_rank(self):
@@ -184,13 +205,14 @@ class TestRolloutTraceRelocation(unittest.TestCase):
             config = self._config(save_path, relocate_results=True)
             self._write_engine_traces(config, 4, "rank0.pt.trace.json.gz", "rank1.pt.trace.json.gz")
 
+            self._set_actor_name(4)
             relocated = relocate_rollout_traces(config, rank=4, world_size=2)
 
             self.assertEqual(
                 sorted(os.path.basename(p) for p in relocated),
                 [
-                    "rollout-replica4-globalrank8_rank0.pt.trace.json.gz",
-                    "rollout-replica4-globalrank9_rank1.pt.trace.json.gz",
+                    "rollout_replica_4-globalrank8_rank0.pt.trace.json.gz",
+                    "rollout_replica_4-globalrank9_rank1.pt.trace.json.gz",
                 ],
             )
 
@@ -201,11 +223,12 @@ class TestRolloutTraceRelocation(unittest.TestCase):
             config = self._config(save_path, relocate_results=True)
             self._write_engine_traces(config, 4, "host_123.pt.trace.json.gz")
 
+            self._set_actor_name(4)
             relocated = relocate_rollout_traces(config, rank=4, world_size=2)
 
             self.assertEqual(
                 [os.path.basename(p) for p in relocated],
-                ["rollout-replica4_host_123.pt.trace.json.gz"],
+                ["rollout_replica_4_host_123.pt.trace.json.gz"],
             )
 
     def test_world_size_one_keeps_the_replica_index_which_already_is_the_global_rank(self):
@@ -214,11 +237,12 @@ class TestRolloutTraceRelocation(unittest.TestCase):
             config = self._config(save_path, relocate_results=True)
             self._write_engine_traces(config, 8, "rank0.pt.trace.json.gz")
 
+            self._set_actor_name(8)
             relocated = relocate_rollout_traces(config, rank=8, world_size=1)
 
             self.assertEqual(
                 [os.path.basename(p) for p in relocated],
-                ["rollout-replica8_rank0.pt.trace.json.gz"],
+                ["rollout_replica_8_rank0.pt.trace.json.gz"],
             )
 
     def test_ranks_0_and_8_yield_exactly_gpu_0_and_8_not_their_tp_mates(self):
@@ -230,16 +254,18 @@ class TestRolloutTraceRelocation(unittest.TestCase):
             self._write_engine_traces(config, 0, "rank0.pt.trace.json.gz", "rank1.pt.trace.json.gz")
             self._write_engine_traces(config, 4, "rank0.pt.trace.json.gz", "rank1.pt.trace.json.gz")
 
+            self._set_actor_name(0)
             kept0 = relocate_rollout_traces(config, rank=0, world_size=2, keep_global_ranks={0, 8})
+            self._set_actor_name(4)
             kept4 = relocate_rollout_traces(config, rank=4, world_size=2, keep_global_ranks={0, 8})
 
             self.assertEqual(
                 [os.path.basename(p) for p in kept0],
-                ["rollout-replica0-globalrank0_rank0.pt.trace.json.gz"],
+                ["rollout_replica_0-globalrank0_rank0.pt.trace.json.gz"],
             )
             self.assertEqual(
                 [os.path.basename(p) for p in kept4],
-                ["rollout-replica4-globalrank8_rank0.pt.trace.json.gz"],
+                ["rollout_replica_4-globalrank8_rank0.pt.trace.json.gz"],
             )
             # The flat traces in save_path (ignoring the per-replica sub-directories) are only the
             # two GPUs that were asked for.
@@ -249,13 +275,15 @@ class TestRolloutTraceRelocation(unittest.TestCase):
             self.assertEqual(
                 top_level_files,
                 [
-                    "rollout-replica0-globalrank0_rank0.pt.trace.json.gz",
-                    "rollout-replica4-globalrank8_rank0.pt.trace.json.gz",
+                    "rollout_replica_0-globalrank0_rank0.pt.trace.json.gz",
+                    "rollout_replica_4-globalrank8_rank0.pt.trace.json.gz",
                 ],
             )
             # The unrequested tp-mates are left behind in the sub-directory, not deleted.
-            self.assertEqual(os.listdir(rollout_trace_dir(config, 0)), ["rank1.pt.trace.json.gz"])
-            self.assertEqual(os.listdir(rollout_trace_dir(config, 4)), ["rank1.pt.trace.json.gz"])
+            self._set_actor_name(0)
+            self.assertEqual(os.listdir(rollout_trace_dir(config)), ["rank1.pt.trace.json.gz"])
+            self._set_actor_name(4)
+            self.assertEqual(os.listdir(rollout_trace_dir(config)), ["rank1.pt.trace.json.gz"])
 
     def test_filtering_never_drops_a_file_whose_global_rank_is_unknown(self):
         # If the tp rank cannot be read from the engine's name we cannot prove the file is unwanted,
@@ -264,11 +292,12 @@ class TestRolloutTraceRelocation(unittest.TestCase):
             config = self._config(save_path, relocate_results=True)
             self._write_engine_traces(config, 0, "host_123.pt.trace.json.gz")
 
+            self._set_actor_name(0)
             relocated = relocate_rollout_traces(config, rank=0, world_size=2, keep_global_ranks={0})
 
             self.assertEqual(
                 [os.path.basename(p) for p in relocated],
-                ["rollout-replica0_host_123.pt.trace.json.gz"],
+                ["rollout_replica_0_host_123.pt.trace.json.gz"],
             )
 
     def test_sglang_tp_named_traces_are_filtered_to_the_requested_ranks(self):
@@ -279,16 +308,18 @@ class TestRolloutTraceRelocation(unittest.TestCase):
             self._write_engine_traces(config, 0, "42-TP-0.trace.json.gz", "42-TP-1.trace.json.gz")
             self._write_engine_traces(config, 4, "42-TP-0.trace.json.gz", "42-TP-1.trace.json.gz")
 
+            self._set_actor_name(0)
             kept0 = relocate_rollout_traces(config, rank=0, world_size=2, keep_global_ranks={0, 8})
+            self._set_actor_name(4)
             kept4 = relocate_rollout_traces(config, rank=4, world_size=2, keep_global_ranks={0, 8})
 
             self.assertEqual(
                 [os.path.basename(p) for p in kept0],
-                ["rollout-replica0-globalrank0_42-TP-0.trace.json.gz"],
+                ["rollout_replica_0-globalrank0_42-TP-0.trace.json.gz"],
             )
             self.assertEqual(
                 [os.path.basename(p) for p in kept4],
-                ["rollout-replica4-globalrank8_42-TP-0.trace.json.gz"],
+                ["rollout_replica_4-globalrank8_42-TP-0.trace.json.gz"],
             )
 
     def test_vllm_instance_rank_named_traces_are_filtered_to_the_requested_ranks(self):
@@ -299,11 +330,12 @@ class TestRolloutTraceRelocation(unittest.TestCase):
                 config, 4, "inst9-rank-0.1700.pt.trace.json.gz", "inst9-rank-1.1700.pt.trace.json.gz"
             )
 
+            self._set_actor_name(4)
             kept = relocate_rollout_traces(config, rank=4, world_size=2, keep_global_ranks={0, 8})
 
             self.assertEqual(
                 [os.path.basename(p) for p in kept],
-                ["rollout-replica4-globalrank8_inst9-rank-0.1700.pt.trace.json.gz"],
+                ["rollout_replica_4-globalrank8_inst9-rank-0.1700.pt.trace.json.gz"],
             )
 
     def test_multi_dim_parallel_names_are_kept_rather_than_mismapped(self):
@@ -312,11 +344,12 @@ class TestRolloutTraceRelocation(unittest.TestCase):
             config = self._config(save_path, relocate_results=True)
             self._write_engine_traces(config, 0, "42-TP-0-DP-0.trace.json.gz", "42-TP-1-DP-1.trace.json.gz")
 
+            self._set_actor_name(0)
             relocated = relocate_rollout_traces(config, rank=0, world_size=2, keep_global_ranks={0})
 
             self.assertEqual(
                 sorted(os.path.basename(p) for p in relocated),
-                ["rollout-replica0_42-TP-0-DP-0.trace.json.gz", "rollout-replica0_42-TP-1-DP-1.trace.json.gz"],
+                ["rollout_replica_0_42-TP-0-DP-0.trace.json.gz", "rollout_replica_0_42-TP-1-DP-1.trace.json.gz"],
             )
 
 
@@ -489,6 +522,12 @@ class TestBuildRolloutDistProfiler(unittest.TestCase):
 
 
 class TestServerProfilerFunctionality(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        patcher = patch("ray.get_runtime_context")
+        mock_rt = patcher.start()
+        mock_rt.return_value.get_actor_name.return_value = "rollout"
+        self.addCleanup(patcher.stop)
+
     async def test_vllm_start_stop_profile(self):
         try:
             # Import strictly inside test to avoid import errors if dependencies missing

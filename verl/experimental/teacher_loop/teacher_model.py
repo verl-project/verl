@@ -174,6 +174,12 @@ class TeacherModelManager:
             router_config_path=self.teacher_model_config.inference.router_config_path,
         )
 
+    async def start_profile(self, **kwargs):
+        await asyncio.gather(*[replica.start_profile(**kwargs) for replica in self.rollout_replicas])
+
+    async def stop_profile(self):
+        await asyncio.gather(*[replica.stop_profile() for replica in self.rollout_replicas])
+
 
 class MultiTeacherModelManager:
     """Manages one inner `TeacherModelManager` per teacher model, keyed by each teacher's `key`."""
@@ -226,3 +232,11 @@ class MultiTeacherModelManager:
                 load_balancer_handle=manager.load_balancer_handle,
             )
         return teacher_clients
+
+    @auto_await
+    async def start_profile(self, **kwargs):
+        await asyncio.gather(*(manager.start_profile(**kwargs) for manager in self.teacher_model_managers.values()))
+
+    @auto_await
+    async def stop_profile(self):
+        await asyncio.gather(*(manager.stop_profile() for manager in self.teacher_model_managers.values()))
